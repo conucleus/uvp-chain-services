@@ -1,0 +1,543 @@
+import { chainEventKey, sortChainEvents, type ChainEvent } from "../indexer/events.js";
+import {
+  createEmptyProjectionSnapshot,
+  rebuildOrderProjections,
+  type OrderProjection,
+  type ProjectionSnapshot,
+  type StateMachineOrderProjection,
+  type StateMachineTaskProjection
+} from "../indexer/projections.js";
+import {
+  createEmptyTrustProjectionSnapshot,
+  filterPlanTrust,
+  filterSupplierTrust,
+  rebuildTrustProjections,
+  type PlanTrustProjection,
+  type PlanTrustQuery,
+  type SupplierTrustProjection,
+  type SupplierTrustQuery,
+  type TrustDomainProjection,
+  type TrustProjectionSnapshot
+} from "../indexer/trust-projections.js";
+import { normalizeAddress, type Address, type Hex } from "../shared/types.js";
+import { parseStorageJson, stringifyStorageJson } from "./json.js";
+import { runSqliteMigrations } from "./migrations.js";
+import { projectionScopeContractAddress, syncStateFromRebuildInput } from "./projection-store.js";
+import type {
+  DurableProjectionStore,
+  ProjectionRebuildInput,
+  ProjectionScope,
+  ProjectionSyncState,
+  ProjectionSnapshotKind,
+  StoredProjectionCursor,
+  StoredProjectionSnapshot
+} from "./projection-store.js";
+import {
+  openSqliteDatabase,
+  runSqliteWrite,
+  withSqliteTransaction,
+  type SqliteDatabase,
+  type SqliteValue
+} from "./sqlite.js";
+
+export interface SqliteProjectionStoreOptions {
+  readonly databaseUrl: string;
+  readonly chainId?: number;
+  readonly projectionScopeContractAddress?: Address;
+  readonly migrations?: {
+    readonly autoRun?: boolean;
+    readonly directory?: string;
+  };
+}
+
+export class SqliteProjectionStore implements DurableProjectionStore {
+  readonly driver = "sqlite" as const;
+
+  readonly #database: SqliteDatabase;
+  #snapshotScope: ProjectionScope;
+
+  constructor(options: SqliteProjectionStoreOptions) {
+    this.#database = openSqliteDatabase(options.databaseUrl);
+    this.#snapshotScope = {
+      chainId: options.chainId ?? 0,
+      contractAddress: options.projectionScopeContractAddress ?? projectionScopeContractAddress
+    };
+    if (options.migrations?.autoRun === true) {
+      runSqliteMigrations({
+        database: this.#database,
+        ...(options.migrations.directory ? { migrationsDirectory: options.migrations.directory } : {})
+      });
+    }
+  }
+
+  async close(): Promise<void> {
+    this.#database.close();
+  }
+
+  async withTransaction<T>(operation: () => Promise<T>): Promise<T> {
+    return withSqliteTransaction(this.#database, operation);
+  }
+
+  async resetFromEvents(input: ProjectionRebuildInput): Promise<ProjectionSnapshot> {
+    const events = input.events.filter((event) => event.blockNumber >= input.deploymentBlock);
+    const orderSnapshot = rebuildOrderProjections(events);
+    const trustSnapshot = rebuildTrustProjections(events);
+    const scope = input.scope ?? this.#scopeFromEvents(events);
+    const syncState = syncStateFromRebuildInput({ ...input, scope }, events);
+
+    await this.withTransaction(async () => {
+      runSqliteWrite(() => {
+        this.#database.prepare("DELETE FROM chain_event_log WHERE chain_id = ?").run(scope.chainId);
+      });
+      for (const event of events) {
+        await this.appendEvent(event);
+      }
+      await this.saveSnapshot(scope, "order", orderSnapshot);
+      await this.saveSnapshot(scope, "trust", trustSnapshot);
+      await this.saveSyncState(input.syncState ? { ...input.syncState, chainId: scope.chainId, contractAddress: scope.contractAddress } : {
+        chainId: syncState.chainId,
+        contractAddress: syncState.contractAddress,
+        syncStatus: syncState.syncStatus,
+        ...(syncState.latestIndexedBlock !== undefined ? { latestIndexedBlock: syncState.latestIndexedBlock } : {}),
+        ...(syncState.finalizedBlock !== undefined ? { finalizedBlock: syncState.finalizedBlock } : {}),
+        confirmationDepth: syncState.confirmationDepth,
+        ...(syncState.lastEventName ? { lastEventName: syncState.lastEventName } : {}),
+        eventCount: syncState.eventCount,
+        ...(syncState.rebuild ? { rebuild: syncState.rebuild } : {}),
+        ...(syncState.degradedReason ? { degradedReason: syncState.degradedReason } : {})
+      });
+    });
+
+    this.#snapshotScope = scope;
+    return orderSnapshot;
+  }
+
+  async getOrderSnapshot(): Promise<ProjectionSnapshot> {
+    return this.#currentOrderSnapshot();
+  }
+
+  async saveSyncState(state: Omit<ProjectionSyncState, "updatedAt">): Promise<ProjectionSyncState> {
+    const updatedAt = new Date().toISOString();
+    const normalizedContract = normalizeAddress(state.contractAddress, "syncState.contractAddress");
+    runSqliteWrite(() => {
+      this.#database.prepare(
+        `INSERT INTO chain_projection_sync_state (
+           chain_id, contract_address, sync_status, latest_indexed_block, finalized_block,
+           confirmation_depth, last_event_name, event_count, rebuild_json, degraded_reason, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(chain_id, contract_address)
+         DO UPDATE SET
+           sync_status = excluded.sync_status,
+           latest_indexed_block = excluded.latest_indexed_block,
+           finalized_block = excluded.finalized_block,
+           confirmation_depth = excluded.confirmation_depth,
+           last_event_name = excluded.last_event_name,
+           event_count = excluded.event_count,
+           rebuild_json = excluded.rebuild_json,
+           degraded_reason = excluded.degraded_reason,
+           updated_at = excluded.updated_at`
+      ).run(
+        state.chainId,
+        normalizedContract,
+        state.syncStatus,
+        state.latestIndexedBlock?.toString() ?? null,
+        state.finalizedBlock?.toString() ?? null,
+        state.confirmationDepth,
+        state.lastEventName ?? null,
+        state.eventCount,
+        state.rebuild ? stringifyStorageJson(state.rebuild) : null,
+        state.degradedReason ?? null,
+        updatedAt
+      );
+    });
+
+    return {
+      ...state,
+      contractAddress: normalizedContract,
+      updatedAt
+    };
+  }
+
+  async getSyncState(scope: Partial<ProjectionScope> = {}): Promise<ProjectionSyncState | undefined> {
+    const chainId = scope.chainId ?? this.#snapshotScope.chainId;
+    const contractAddress = normalizeAddress(
+      scope.contractAddress ?? this.#snapshotScope.contractAddress,
+      "syncState.contractAddress"
+    );
+    const row = this.#database.prepare(
+      `SELECT
+         chain_id AS chainId,
+         contract_address AS contractAddress,
+         sync_status AS syncStatus,
+         latest_indexed_block AS latestIndexedBlock,
+         finalized_block AS finalizedBlock,
+         confirmation_depth AS confirmationDepth,
+         last_event_name AS lastEventName,
+         event_count AS eventCount,
+         rebuild_json AS rebuildJson,
+         degraded_reason AS degradedReason,
+         updated_at AS updatedAt
+       FROM chain_projection_sync_state
+       WHERE chain_id = ? AND contract_address = ?`
+    ).get(chainId, contractAddress);
+    return row ? syncStateRow(row) : undefined;
+  }
+
+  async saveCursor(cursor: Omit<StoredProjectionCursor, "updatedAt">): Promise<StoredProjectionCursor> {
+    const updatedAt = new Date().toISOString();
+    const normalizedContract = normalizeAddress(cursor.contractAddress, "cursor.contractAddress");
+    runSqliteWrite(() => {
+      this.#database.prepare(
+        `INSERT INTO chain_index_cursor (
+           chain_id, contract_address, deployment_block, next_block, finalized_block, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(chain_id, contract_address)
+         DO UPDATE SET
+           deployment_block = excluded.deployment_block,
+           next_block = excluded.next_block,
+           finalized_block = excluded.finalized_block,
+           updated_at = excluded.updated_at`
+      ).run(
+        cursor.chainId,
+        normalizedContract,
+        cursor.deploymentBlock.toString(),
+        cursor.nextBlock.toString(),
+        cursor.finalizedBlock?.toString() ?? null,
+        updatedAt
+      );
+    });
+
+    return {
+      chainId: cursor.chainId,
+      contractAddress: normalizedContract,
+      deploymentBlock: cursor.deploymentBlock,
+      nextBlock: cursor.nextBlock,
+      ...(cursor.finalizedBlock !== undefined ? { finalizedBlock: cursor.finalizedBlock } : {}),
+      updatedAt
+    };
+  }
+
+  async getCursor(scope: ProjectionScope): Promise<StoredProjectionCursor | undefined> {
+    const row = this.#database.prepare(
+      `SELECT
+         chain_id AS chainId,
+         contract_address AS contractAddress,
+         deployment_block AS deploymentBlock,
+         next_block AS nextBlock,
+         finalized_block AS finalizedBlock,
+         updated_at AS updatedAt
+       FROM chain_index_cursor
+       WHERE chain_id = ? AND contract_address = ?`
+    ).get(scope.chainId, normalizeAddress(scope.contractAddress, "cursor.contractAddress"));
+    return row ? cursorRow(row) : undefined;
+  }
+
+  async appendEvent(event: ChainEvent): Promise<void> {
+    const normalizedContract = normalizeAddress(event.contractAddress, "event.contractAddress");
+    runSqliteWrite(() => {
+      if (event.removed === true) {
+        const eventId = chainEventKey({ ...event, contractAddress: normalizedContract });
+        const result = this.#database.prepare(
+          `UPDATE chain_event_log
+           SET removed = 1, block_hash = COALESCE(?, block_hash)
+           WHERE chain_id = ? AND contract_address = ? AND event_id = ?`
+        ).run(
+          event.blockHash?.toLowerCase() ?? null,
+          event.chainId,
+          normalizedContract,
+          eventId
+        );
+        if (result.changes > 0) {
+          return;
+        }
+      }
+      this.#database.prepare(
+        `INSERT INTO chain_event_log (
+           chain_id, contract_address, block_number, transaction_hash, log_index,
+           event_id, event_name, args_json, removed, block_hash, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        event.chainId,
+        normalizedContract,
+        event.blockNumber.toString(),
+        event.transactionHash.toLowerCase(),
+        event.logIndex,
+        chainEventKey({ ...event, contractAddress: normalizedContract }),
+        event.eventName,
+        stringifyStorageJson(event.args),
+        event.removed === true ? 1 : 0,
+        event.blockHash?.toLowerCase() ?? null,
+        new Date().toISOString()
+      );
+    });
+  }
+
+  async listEvents(scope: Partial<ProjectionScope> = {}): Promise<readonly ChainEvent[]> {
+    const clauses: string[] = [];
+    const values: SqliteValue[] = [];
+    if (scope.chainId !== undefined) {
+      clauses.push("chain_id = ?");
+      values.push(scope.chainId);
+    }
+    if (scope.contractAddress) {
+      clauses.push("contract_address = ?");
+      values.push(normalizeAddress(scope.contractAddress, "event.contractAddress"));
+    }
+
+    const rows = this.#database.prepare(
+      `SELECT
+         chain_id AS chainId,
+         contract_address AS contractAddress,
+         block_number AS blockNumber,
+         transaction_hash AS transactionHash,
+         log_index AS logIndex,
+         event_name AS eventName,
+         args_json AS argsJson,
+         removed,
+         block_hash AS blockHash
+       FROM chain_event_log
+       ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
+       ORDER BY chain_id ASC, CAST(block_number AS INTEGER) ASC, log_index ASC`
+    ).all(...values);
+
+    return sortChainEvents(rows.map((row) => eventRow(row)));
+  }
+
+  async saveSnapshot<TSnapshot>(
+    scope: ProjectionScope,
+    kind: ProjectionSnapshotKind,
+    snapshot: TSnapshot,
+    version = 1
+  ): Promise<StoredProjectionSnapshot<TSnapshot>> {
+    const updatedAt = new Date().toISOString();
+    const normalizedContract = normalizeAddress(scope.contractAddress, "snapshot.contractAddress");
+    runSqliteWrite(() => {
+      this.#database.prepare(
+        `INSERT INTO chain_projection_snapshot (
+           chain_id, contract_address, snapshot_kind, snapshot_version, snapshot_json, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(chain_id, contract_address, snapshot_kind)
+         DO UPDATE SET
+           snapshot_version = excluded.snapshot_version,
+           snapshot_json = excluded.snapshot_json,
+           updated_at = excluded.updated_at`
+      ).run(scope.chainId, normalizedContract, kind, version, stringifyStorageJson(snapshot), updatedAt);
+    });
+
+    return {
+      chainId: scope.chainId,
+      contractAddress: normalizedContract,
+      kind,
+      version,
+      snapshot,
+      updatedAt
+    };
+  }
+
+  async getSnapshot<TSnapshot>(
+    scope: ProjectionScope,
+    kind: ProjectionSnapshotKind
+  ): Promise<StoredProjectionSnapshot<TSnapshot> | undefined> {
+    const row = this.#database.prepare(
+      `SELECT
+         chain_id AS chainId,
+         contract_address AS contractAddress,
+         snapshot_kind AS kind,
+         snapshot_version AS version,
+         snapshot_json AS snapshotJson,
+         updated_at AS updatedAt
+       FROM chain_projection_snapshot
+       WHERE chain_id = ? AND contract_address = ? AND snapshot_kind = ?`
+    ).get(scope.chainId, normalizeAddress(scope.contractAddress, "snapshot.contractAddress"), kind);
+    return row ? snapshotRow<TSnapshot>(row) : undefined;
+  }
+
+  async listOrders(): Promise<readonly OrderProjection[]> {
+    return Object.values((await this.#currentOrderSnapshot()).orders);
+  }
+
+  async getOrder(orderId: string): Promise<OrderProjection | undefined> {
+    return (await this.#currentOrderSnapshot()).orders[orderId];
+  }
+
+  async listStateMachineOrders(): Promise<readonly StateMachineOrderProjection[]> {
+    return Object.values((await this.#currentOrderSnapshot()).stateMachineOrders);
+  }
+
+  async getStateMachineOrder(orderId: string): Promise<StateMachineOrderProjection | undefined> {
+    const snapshot = await this.#currentOrderSnapshot();
+    return snapshot.stateMachineOrders[orderId.toLowerCase()] ?? snapshot.stateMachineOrders[orderId] ??
+      uniqueOrderByBareId(Object.values(snapshot.stateMachineOrders), orderId);
+  }
+
+  async findStateMachineOrdersByOrderId(orderId: string): Promise<readonly StateMachineOrderProjection[]> {
+    const snapshot = await this.#currentOrderSnapshot();
+    return Object.values(snapshot.stateMachineOrders).filter((order) => order.orderId.toLowerCase() === orderId.toLowerCase());
+  }
+
+  async listStateMachineTasks(): Promise<readonly StateMachineTaskProjection[]> {
+    return Object.values((await this.#currentOrderSnapshot()).stateMachineTasks);
+  }
+
+  async getStateMachineTask(taskId: string): Promise<StateMachineTaskProjection | undefined> {
+    return (await this.#currentOrderSnapshot()).stateMachineTasks[taskId];
+  }
+
+  async listTrustDomains(): Promise<readonly TrustDomainProjection[]> {
+    return Object.values((await this.getTrustSnapshot()).domains);
+  }
+
+  async listPlanTrust(query: PlanTrustQuery): Promise<readonly PlanTrustProjection[]> {
+    return filterPlanTrust(await this.getTrustSnapshot(), query);
+  }
+
+  async listSupplierTrust(query: SupplierTrustQuery): Promise<readonly SupplierTrustProjection[]> {
+    return filterSupplierTrust(await this.getTrustSnapshot(), query);
+  }
+
+  async getTrustSnapshot(): Promise<TrustProjectionSnapshot> {
+    return (await this.getSnapshot<TrustProjectionSnapshot>(this.#snapshotScope, "trust"))?.snapshot ??
+      createEmptyTrustProjectionSnapshot();
+  }
+
+  async #currentOrderSnapshot(): Promise<ProjectionSnapshot> {
+    return (await this.getSnapshot<ProjectionSnapshot>(this.#snapshotScope, "order"))?.snapshot ??
+      createEmptyProjectionSnapshot();
+  }
+
+  #scopeFromEvents(events: readonly ChainEvent[]): ProjectionScope {
+    return {
+      chainId: events[0]?.chainId ?? this.#snapshotScope.chainId,
+      contractAddress: this.#snapshotScope.contractAddress
+    };
+  }
+}
+
+function cursorRow(row: unknown): StoredProjectionCursor {
+  const record = rowObject(row);
+  const finalizedBlock = nullableStringColumn(record, "finalizedBlock");
+  return {
+    chainId: numberColumn(record, "chainId"),
+    contractAddress: normalizeAddress(stringColumn(record, "contractAddress"), "cursor.contractAddress"),
+    deploymentBlock: BigInt(stringColumn(record, "deploymentBlock")),
+    nextBlock: BigInt(stringColumn(record, "nextBlock")),
+    ...(finalizedBlock !== null ? { finalizedBlock: BigInt(finalizedBlock) } : {}),
+    updatedAt: stringColumn(record, "updatedAt")
+  };
+}
+
+function eventRow(row: unknown): ChainEvent {
+  const record = rowObject(row);
+  const blockHash = nullableStringColumn(record, "blockHash");
+  const removed = numberColumn(record, "removed") === 1;
+  return {
+    chainId: numberColumn(record, "chainId"),
+    contractAddress: normalizeAddress(stringColumn(record, "contractAddress"), "event.contractAddress"),
+    blockNumber: BigInt(stringColumn(record, "blockNumber")),
+    transactionHash: stringColumn(record, "transactionHash") as Hex,
+    logIndex: numberColumn(record, "logIndex"),
+    eventName: stringColumn(record, "eventName"),
+    args: parseStorageJson<Record<string, unknown>>(stringColumn(record, "argsJson")),
+    ...(removed ? { removed } : {}),
+    ...(blockHash !== null ? { blockHash: blockHash as Hex } : {})
+  };
+}
+
+function snapshotRow<TSnapshot>(row: unknown): StoredProjectionSnapshot<TSnapshot> {
+  const record = rowObject(row);
+  return {
+    chainId: numberColumn(record, "chainId"),
+    contractAddress: normalizeAddress(stringColumn(record, "contractAddress"), "snapshot.contractAddress"),
+    kind: snapshotKindColumn(record, "kind"),
+    version: numberColumn(record, "version"),
+    snapshot: parseStorageJson<TSnapshot>(stringColumn(record, "snapshotJson")),
+    updatedAt: stringColumn(record, "updatedAt")
+  };
+}
+
+function syncStateRow(row: unknown): ProjectionSyncState {
+  const record = rowObject(row);
+  const latestIndexedBlock = nullableStringColumn(record, "latestIndexedBlock");
+  const finalizedBlock = nullableStringColumn(record, "finalizedBlock");
+  const lastEventName = nullableStringColumn(record, "lastEventName");
+  const rebuildJson = nullableStringColumn(record, "rebuildJson");
+  const degradedReason = nullableStringColumn(record, "degradedReason");
+  const rebuild = rebuildJson !== null ? parseStorageJson<NonNullable<ProjectionSyncState["rebuild"]>>(rebuildJson) : undefined;
+  return {
+    chainId: numberColumn(record, "chainId"),
+    contractAddress: normalizeAddress(stringColumn(record, "contractAddress"), "syncState.contractAddress"),
+    syncStatus: syncStatusColumn(record, "syncStatus"),
+    ...(latestIndexedBlock !== null ? { latestIndexedBlock: BigInt(latestIndexedBlock) } : {}),
+    ...(finalizedBlock !== null ? { finalizedBlock: BigInt(finalizedBlock) } : {}),
+    confirmationDepth: numberColumn(record, "confirmationDepth"),
+    ...(lastEventName !== null ? { lastEventName } : {}),
+    eventCount: numberColumn(record, "eventCount"),
+    ...(rebuild ? { rebuild } : {}),
+    ...(degradedReason !== null ? { degradedReason } : {}),
+    updatedAt: stringColumn(record, "updatedAt")
+  };
+}
+
+function uniqueOrderByBareId(
+  orders: readonly StateMachineOrderProjection[],
+  orderId: string
+): StateMachineOrderProjection | undefined {
+  const matches = orders.filter((order) => order.orderId.toLowerCase() === orderId.toLowerCase());
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function rowObject(row: unknown): Record<string, unknown> {
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    throw new Error("SQLite query returned a malformed row");
+  }
+  return row as Record<string, unknown>;
+}
+
+function stringColumn(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string") {
+    throw new Error(`SQLite column ${key} must be a string`);
+  }
+  return value;
+}
+
+function nullableStringColumn(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`SQLite column ${key} must be a string or null`);
+  }
+  return value;
+}
+
+function numberColumn(record: Record<string, unknown>, key: string): number {
+  const value = record[key];
+  if (typeof value !== "number") {
+    throw new Error(`SQLite column ${key} must be a number`);
+  }
+  return value;
+}
+
+function snapshotKindColumn(record: Record<string, unknown>, key: string): ProjectionSnapshotKind {
+  const value = stringColumn(record, key);
+  if (value !== "order" && value !== "trust") {
+    throw new Error(`SQLite column ${key} must be a known projection snapshot kind`);
+  }
+  return value;
+}
+
+function syncStatusColumn(record: Record<string, unknown>, key: string): ProjectionSyncState["syncStatus"] {
+  const value = stringColumn(record, key);
+  if (
+    value !== "indexed" &&
+    value !== "syncing" &&
+    value !== "stale" &&
+    value !== "rebuilding" &&
+    value !== "degraded"
+  ) {
+    throw new Error(`SQLite column ${key} must be a known projection sync status`);
+  }
+  return value;
+}

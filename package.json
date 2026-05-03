@@ -1,0 +1,13 @@
+{
+  "name": "uvp-chain-services",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "check": "pnpm --filter @uvp-eth/chain-services run check",
+    "typecheck": "pnpm --filter @uvp-eth/chain-services run typecheck",
+    "test": "pnpm --filter @uvp-eth/chain-services run test",
+    "build": "pnpm --filter @uvp-eth/chain-services run build"
+  }
+}

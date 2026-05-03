@@ -1,0 +1,206 @@
+import type { ChainServicesRuntimeEnv, ConfigDiagnostics, StoreAuthConfig } from "../config/index.js";
+import type {
+  EvidenceMetadataStore,
+  EvidenceService,
+  EvidenceStorage
+} from "../evidence/index.js";
+import type { GovernanceService, GovernanceStore } from "../governance/index.js";
+import type { ProductBffService } from "../product/bff/service.js";
+import type { ProductOrderRegistrationAdapter, ProductOrderTriggerAdapter } from "../product/bff/registration.js";
+import type { ProductBffStore } from "../product/bff/store.js";
+import type { ProductSchemaResolver, ProductService } from "../product/service.js";
+import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
+import type { AuditSink } from "../security/audit.js";
+import type { Address } from "../shared/types.js";
+import type { ProjectionStore } from "../storage/projection-store.js";
+import type {
+  ProductSubmissionDTO,
+  ProductSubmissionService,
+  ProductSubmissionStore,
+  SubmissionBroadcastAdapter
+} from "../submissions/index.js";
+import type {
+  DockedOrderLinkBroadcastAdapter,
+  ProductDockedOrderLinkService,
+  ProductStageExecutorPatchService,
+  ProductStageResourcePatchService,
+  StageExecutorPatchBroadcastAdapter,
+  StageResourcePatchBroadcastAdapter
+} from "../stage-patches/index.js";
+import type {
+  NotificationService,
+  SupplierNotificationProfileConfigService
+} from "../notifications/index.js";
+import type {
+  StoreConsoleService
+} from "../store-console/service.js";
+import type {
+  StoreAuditStore
+} from "../store-console/audit.js";
+import type {
+  StoreIdentityProvider
+} from "../store-console/access.js";
+import type {
+  StoreDockingSessionStore,
+  StoreDockingService
+} from "../store-console/docking.js";
+import type {
+  StoreRuntimeService
+} from "../store-console/runtime.js";
+import type {
+  StoreZhixuDraftStore,
+  StoreZhixuDraftWorkflowService
+} from "../store-console/zhixu-drafts.js";
+import type {
+  StoreZhixuVersionMetadataStore,
+  StoreZhixuVersionService
+} from "../store-console/version.js";
+import type {
+  StoreSupplierMetadataStore,
+  StoreSupplierService
+} from "../store-suppliers/service.js";
+import type { ProductOrderDTO, ProductTaskDTO, ZhixuDetailDTO, ZhixuSummaryDTO } from "@uvp-eth/product-dto";
+import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
+
+export interface ApiRequest {
+  readonly method: string;
+  readonly pathname: string;
+  readonly query?: Readonly<Record<string, string>>;
+  readonly headers?: Readonly<Record<string, string | undefined>>;
+  readonly body?: unknown;
+}
+
+export interface ApiResponse {
+  readonly status: number;
+  readonly body: unknown;
+}
+
+export interface ApiRouter {
+  handle(request: ApiRequest): Promise<ApiResponse>;
+}
+
+export interface CreateApiRouterOptions {
+  readonly evidenceService?: EvidenceService;
+  readonly evidenceMetadataStore?: EvidenceMetadataStore;
+  readonly governanceService?: GovernanceService;
+  readonly governanceStore?: GovernanceStore;
+  readonly submissionService?: ProductSubmissionService;
+  readonly submissionStore?: ProductSubmissionStore;
+  readonly submissionChainId?: number;
+  readonly submissionVerifyingContract?: Address;
+  readonly submissionBroadcastAdapter?: SubmissionBroadcastAdapter;
+  readonly productStageExecutorPatchService?: ProductStageExecutorPatchService;
+  readonly stageExecutorPatchBroadcastAdapter?: StageExecutorPatchBroadcastAdapter;
+  readonly stageExecutorPatchChainId?: number;
+  readonly stageExecutorPatchVerifyingContract?: Address;
+  readonly productStageResourcePatchService?: ProductStageResourcePatchService;
+  readonly stageResourcePatchBroadcastAdapter?: StageResourcePatchBroadcastAdapter;
+  readonly stageResourcePatchChainId?: number;
+  readonly stageResourcePatchVerifyingContract?: Address;
+  readonly productDockedOrderLinkService?: ProductDockedOrderLinkService;
+  readonly dockedOrderLinkBroadcastAdapter?: DockedOrderLinkBroadcastAdapter;
+  readonly dockedOrderLinkChainId?: number;
+  readonly dockedOrderLinkVerifyingContract?: Address;
+  readonly productBffStore?: ProductBffStore;
+  readonly productRegistrationAdapter?: ProductOrderRegistrationAdapter;
+  readonly productTriggerAdapter?: ProductOrderTriggerAdapter;
+  readonly productRegistrationCreatorAddress?: Address;
+  readonly productRegistrarAddress?: Address;
+  readonly productRuntimeEnvironment?: ChainServicesRuntimeEnv;
+  readonly productE2eControlsEnabled?: boolean;
+  readonly productDemoMode?: boolean;
+  readonly audit?: AuditSink;
+  readonly configDiagnostics?: ConfigDiagnostics;
+  readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
+  readonly reconcileDiagnostics?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
+  readonly evidenceStorage?: EvidenceStorage;
+  readonly evidenceRuntimeEnvironment?: ChainServicesRuntimeEnv;
+  readonly notificationService?: NotificationService;
+  readonly supplierNotificationConfigService?: SupplierNotificationProfileConfigService;
+  readonly storeZhixuDraftStore?: StoreZhixuDraftStore;
+  readonly storeZhixuDraftWorkflowService?: StoreZhixuDraftWorkflowService;
+  readonly productSchemaResolver?: ProductSchemaResolver;
+  readonly storeZhixuVersionMetadataStore?: StoreZhixuVersionMetadataStore;
+  readonly storeDockingSessionStore?: StoreDockingSessionStore;
+  readonly storeSupplierMetadataStore?: StoreSupplierMetadataStore;
+  readonly storeAuditStore?: StoreAuditStore;
+  readonly storeIdentityProvider?: StoreIdentityProvider;
+  readonly storeAuthConfig?: StoreAuthConfig;
+  readonly opsRecoveryActions?: AdminOpsRecoveryActions;
+  readonly onTxMined?: () => void;
+  readonly now?: () => Date;
+}
+
+export interface AdminOpsActionEffect {
+  readonly status?: "accepted" | "queued" | "running" | "completed";
+  readonly nextCheckAt?: string;
+  readonly summary?: unknown;
+}
+
+export interface AdminOpsRetrySubmissionInput {
+  readonly submissionId: string;
+  readonly submission?: ProductSubmissionDTO;
+}
+
+export interface AdminOpsRecoveryActions {
+  runReconcile?(): Promise<AdminOpsActionEffect | void>;
+  rebuildProjections?(): Promise<AdminOpsActionEffect | void>;
+  retrySubmission?(input: AdminOpsRetrySubmissionInput): Promise<AdminOpsActionEffect | void>;
+}
+
+export interface ProductE2EControls {
+  readonly enabled: boolean;
+  createRevokedZhixu(): ZhixuDetailDTO;
+  clearRevokedZhixu(): void;
+  setSyncing(enabled: boolean): void;
+  listZhixu(zhixus: readonly ZhixuSummaryDTO[]): readonly ZhixuSummaryDTO[];
+  getZhixu(zhixuId: string): ZhixuDetailDTO | undefined;
+  listOrders(orders: readonly ProductOrderDTO[]): readonly ProductOrderDTO[];
+  order(order: ProductOrderDTO | undefined): ProductOrderDTO | undefined;
+  listTasks(tasks: readonly ProductTaskDTO[]): readonly ProductTaskDTO[];
+  task(task: ProductTaskDTO | undefined): ProductTaskDTO | undefined;
+}
+
+export interface ApiRouteContext {
+  readonly store: ProjectionStore;
+  readonly productService: ProductService;
+  readonly productBffService: ProductBffService;
+  readonly storeConsoleService: StoreConsoleService;
+  readonly storeDockingService: StoreDockingService;
+  readonly storeRuntimeService: StoreRuntimeService;
+  readonly storeZhixuVersionService: StoreZhixuVersionService;
+  readonly storeZhixuDraftWorkflowService: StoreZhixuDraftWorkflowService;
+  readonly storeSupplierService: StoreSupplierService;
+  readonly storeAuditStore: StoreAuditStore;
+  readonly storeIdentityProvider: StoreIdentityProvider;
+  readonly governanceService: GovernanceService;
+  readonly notificationService: NotificationService;
+  readonly supplierNotificationConfigService: SupplierNotificationProfileConfigService;
+  readonly evidenceService: EvidenceService;
+  readonly submissionService: ProductSubmissionService;
+  readonly productStageExecutorPatchService: ProductStageExecutorPatchService;
+  readonly productStageResourcePatchService: ProductStageResourcePatchService;
+  readonly productDockedOrderLinkService: ProductDockedOrderLinkService;
+  readonly submissionStore?: ProductSubmissionStore;
+  readonly opsRecoveryActions?: AdminOpsRecoveryActions;
+  readonly productE2eControls: ProductE2EControls;
+  readonly productDemoMode: boolean;
+  readonly audit: AuditSink;
+  readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
+  readonly onTxMined?: () => void;
+  readonly now: () => Date;
+}
+
+export function cleanQuery<TQuery extends Readonly<Record<string, string | undefined>>>(query: TQuery): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(query).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)
+  );
+}
+
+export function readApiHeader(headers: ApiRequest["headers"], name: string): string | undefined {
+  if (!headers) {
+    return undefined;
+  }
+  return headers[name] ?? headers[name.toLowerCase()] ?? Object.entries(headers)
+    .find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+}

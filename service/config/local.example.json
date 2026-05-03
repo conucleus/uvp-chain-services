@@ -1,0 +1,28 @@
+{
+  "network": {
+    "chainId": 31337,
+    "rpcUrl": "http://127.0.0.1:8545",
+    "deploymentBlock": "0",
+    "finalityConfirmations": 1,
+    "reorgBufferBlocks": 8,
+    "contracts": {
+      "UVPStateMachine": "0x0000000000000000000000000000000000000000",
+      "ZhixuTrustRegistry": "0x0000000000000000000000000000000000000000"
+    }
+  },
+  "database": {
+    "url": "memory://projection-store",
+    "canonical": false,
+    "rebuildSource": "chain-events"
+  },
+  "relayer": {
+    "businessSigning": "forbidden",
+    "gasSignerRef": "local-keystore:relayer-gas-payer",
+    "maxRetries": 3
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "indexerPollIntervalMs": 5000
+  }
+}

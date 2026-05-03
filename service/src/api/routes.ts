@@ -1,0 +1,394 @@
+import type { ProjectionStore } from "../storage/projection-store.js";
+import { createProductService } from "../product/service.js";
+import {
+  createProductBffService,
+  type ProductBffSupplierTrustResolver
+} from "../product/bff/service.js";
+import type { ProductBffStore } from "../product/bff/store.js";
+import {
+  createEvidenceService,
+  LocalEvidenceStorage
+} from "../evidence/index.js";
+import { createGovernanceService } from "../governance/index.js";
+import {
+  createStoreZhixuDraftWorkflowService,
+  MemoryStoreZhixuDraftStore
+} from "../store-console/zhixu-drafts.js";
+import { createStoreRuntimeService } from "../store-console/runtime.js";
+import {
+  createStoreZhixuVersionService,
+  MemoryStoreZhixuVersionMetadataStore
+} from "../store-console/version.js";
+import {
+  createProductSubmissionService,
+  permissiveProductProjectionAuthorization,
+  type SubmissionAuthorizationAdapter,
+  type SubmissionAuthorizationRequest,
+  type SubmissionAuthorizationResult
+} from "../submissions/index.js";
+import {
+  createProductDockedOrderLinkService,
+  createProductStageExecutorPatchService,
+  createProductStageResourcePatchService
+} from "../stage-patches/index.js";
+import { noopAuditSink } from "../security/audit.js";
+import { buildOperationalDiagnostics } from "./diagnostics.js";
+import {
+  createNotificationService,
+  createSupplierNotificationProfileConfigService
+} from "../notifications/index.js";
+import { createStoreConsoleService } from "../store-console/service.js";
+import { MemoryStoreAuditStore } from "../store-console/audit.js";
+import { createStoreIdentityProvider } from "../store-console/access.js";
+import { createStoreDockingService, MemoryStoreDockingSessionStore } from "../store-console/docking.js";
+import { createStoreSupplierService, InMemoryStoreSupplierMetadataStore } from "../store-suppliers/service.js";
+import type {
+  ApiRouteContext,
+  ApiRouter,
+  CreateApiRouterOptions
+} from "./route-context.js";
+import type { RouteModule } from "./route-module.js";
+import { createAdminOpsRouteModule } from "./routes/admin-ops.js";
+import { createDiagnosticsRouteModule } from "./routes/diagnostics.js";
+import {
+  createProductE2EControls,
+  createProductE2EControlsRouteModule
+} from "./routes/e2e-controls.js";
+import { createEvidenceRouteModule } from "./routes/evidence.js";
+import { createGovernanceRouteModule } from "./routes/governance.js";
+import { createLegacyOrdersRouteModule } from "./routes/legacy-orders.js";
+import { createNotificationsRouteModule } from "./routes/notifications.js";
+import { createProductBffRouteModule } from "./routes/product-bff.js";
+import { createProductReadRouteModule } from "./routes/product-read.js";
+import { createStoreConsoleRouteModule } from "./routes/store-console.js";
+import { createStoreDockingRouteModule } from "./routes/store-docking.js";
+import { createStoreSuppliersRouteModule } from "./routes/store-suppliers.js";
+import { createSubmissionsRouteModule } from "./routes/submissions.js";
+import { createStagePatchRouteModule } from "./routes/stage-patches.js";
+
+export type {
+  AdminOpsActionEffect,
+  AdminOpsRecoveryActions,
+  AdminOpsRetrySubmissionInput,
+  ApiRequest,
+  ApiResponse,
+  ApiRouter,
+  CreateApiRouterOptions
+} from "./route-context.js";
+
+export function createApiRouter(store: ProjectionStore, options: CreateApiRouterOptions = {}): ApiRouter {
+  const audit = options.audit ?? noopAuditSink;
+  const productRuntimeEnvironment = options.productRuntimeEnvironment ?? options.configDiagnostics?.environment;
+  const productionRuntime = productRuntimeEnvironment === "production";
+  const requestedProductDemoMode = options.productDemoMode ?? process.env.UVP_PRODUCT_DEMO_MODE === "1";
+  const productDemoMode = productionRuntime ? false : requestedProductDemoMode;
+  const storeZhixuDraftStore = options.storeZhixuDraftStore ?? new MemoryStoreZhixuDraftStore();
+  const storeZhixuVersionMetadataStore = options.storeZhixuVersionMetadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
+  const storeSupplierMetadataStore = options.storeSupplierMetadataStore ?? new InMemoryStoreSupplierMetadataStore();
+  const storeDockingSessionStore = options.storeDockingSessionStore ?? new MemoryStoreDockingSessionStore();
+  const storeAuditStore = options.storeAuditStore ?? new MemoryStoreAuditStore();
+  const productSchemaResolver = options.productSchemaResolver ?? {
+    getProductSchemaByPlan: (planId: string, planHash: string, artifactHash?: string) =>
+      storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash, artifactHash)
+  };
+  const productService = createProductService(store, { productSchemaResolver });
+  const storeConsoleService = createStoreConsoleService({ productService, store });
+  const storeDockingService = createStoreDockingService({
+    productService,
+    sessionStore: storeDockingSessionStore,
+    ...(options.now ? { now: options.now } : {})
+  });
+  const governanceService = options.governanceService ?? createGovernanceService({
+    ...(options.governanceStore ? { store: options.governanceStore } : {}),
+    audit
+  });
+  const storeRuntimeService = createStoreRuntimeService({
+    productService,
+    store,
+    ...(options.now ? { now: options.now } : {})
+  });
+  const storeZhixuVersionService = createStoreZhixuVersionService({
+    productService,
+    projectionStore: store,
+    governanceService,
+    metadataStore: storeZhixuVersionMetadataStore,
+    ...(options.now ? { now: options.now } : {})
+  });
+  const productE2eControls = createProductE2EControls(!productionRuntime && Boolean(options.productE2eControlsEnabled));
+  const submissionAuthorization = options.productBffStore
+    ? productBffStoreSubmissionAuthorization(options.productBffStore)
+    : productDemoMode
+      ? permissiveProductProjectionAuthorization()
+      : undefined;
+  const productBffService = createProductBffService({
+    productService,
+    ...(options.productBffStore ? { store: options.productBffStore } : {}),
+    ...(options.productRegistrationAdapter ? { registrationAdapter: options.productRegistrationAdapter } : {}),
+    ...(options.productTriggerAdapter ? { triggerAdapter: options.productTriggerAdapter } : {}),
+    ...(options.productRegistrationCreatorAddress ? { registrationCreatorAddress: options.productRegistrationCreatorAddress } : {}),
+    ...(options.productRegistrarAddress ? { registrarAddress: options.productRegistrarAddress } : {}),
+    versionResolver: storeZhixuVersionService,
+    supplierTrustResolver: productBffSupplierTrustResolver(store),
+    ...(options.now ? { now: options.now } : {})
+  });
+  const defaultEvidenceStorage = options.evidenceStorage ?? (options.evidenceService ? undefined : new LocalEvidenceStorage());
+  const evidenceService = options.evidenceService ?? (
+    createEvidenceService({
+      ...(options.evidenceMetadataStore ? { metadataStore: options.evidenceMetadataStore } : {}),
+      storage: defaultEvidenceStorage ?? new LocalEvidenceStorage(),
+      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment ?? "local"
+    })
+  );
+  const storeZhixuDraftWorkflowService = options.storeZhixuDraftWorkflowService ??
+    createStoreZhixuDraftWorkflowService({
+      draftStore: storeZhixuDraftStore,
+      governanceService,
+      projectionStore: store,
+      ...(options.now ? { now: options.now } : {})
+    });
+  const storeSupplierService = createStoreSupplierService({
+    productService,
+    store,
+    governanceService,
+    metadataStore: storeSupplierMetadataStore
+  });
+  const notificationService = options.notificationService ?? createNotificationService({ store });
+  const supplierNotificationConfigService = options.supplierNotificationConfigService ??
+    createSupplierNotificationProfileConfigService();
+  const submissionService = options.submissionService ?? createProductSubmissionService({
+    productTasks: productService,
+    evidenceReader: evidenceService,
+    ...(options.submissionStore ? { store: options.submissionStore } : {}),
+    ...(options.submissionChainId !== undefined ? { chainId: options.submissionChainId } : {}),
+    ...(options.submissionVerifyingContract ? { verifyingContract: options.submissionVerifyingContract } : {}),
+    ...(options.submissionBroadcastAdapter ? { broadcastAdapter: options.submissionBroadcastAdapter } : {}),
+    ...(submissionAuthorization ? { authorization: submissionAuthorization } : {}),
+    audit
+  });
+  const stageExecutorPatchChainId = options.stageExecutorPatchChainId ?? options.submissionChainId;
+  const stageExecutorPatchVerifyingContract = options.stageExecutorPatchVerifyingContract ?? options.submissionVerifyingContract;
+  const productStageExecutorPatchService = options.productStageExecutorPatchService ?? createProductStageExecutorPatchService({
+    store,
+    productSchemaResolver,
+    ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
+    ...(stageExecutorPatchChainId !== undefined ? { chainId: stageExecutorPatchChainId } : {}),
+    ...(stageExecutorPatchVerifyingContract ? { verifyingContract: stageExecutorPatchVerifyingContract } : {}),
+    ...(options.stageExecutorPatchBroadcastAdapter ? { broadcastAdapter: options.stageExecutorPatchBroadcastAdapter } : {}),
+    ...(options.now ? { now: options.now } : {})
+  });
+  const stageResourcePatchChainId = options.stageResourcePatchChainId ?? options.submissionChainId;
+  const stageResourcePatchVerifyingContract = options.stageResourcePatchVerifyingContract ?? options.submissionVerifyingContract;
+  const productStageResourcePatchService = options.productStageResourcePatchService ?? createProductStageResourcePatchService({
+    store,
+    productSchemaResolver,
+    ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
+    ...(stageResourcePatchChainId !== undefined ? { chainId: stageResourcePatchChainId } : {}),
+    ...(stageResourcePatchVerifyingContract ? { verifyingContract: stageResourcePatchVerifyingContract } : {}),
+    ...(options.stageResourcePatchBroadcastAdapter ? { broadcastAdapter: options.stageResourcePatchBroadcastAdapter } : {}),
+    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
+    ...(options.now ? { now: options.now } : {})
+  });
+  const dockedOrderLinkChainId = options.dockedOrderLinkChainId ?? options.submissionChainId;
+  const dockedOrderLinkVerifyingContract = options.dockedOrderLinkVerifyingContract ?? options.submissionVerifyingContract;
+  const productDockedOrderLinkService = options.productDockedOrderLinkService ?? createProductDockedOrderLinkService({
+    store,
+    productSchemaResolver,
+    ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
+    ...(dockedOrderLinkChainId !== undefined ? { chainId: dockedOrderLinkChainId } : {}),
+    ...(dockedOrderLinkVerifyingContract ? { verifyingContract: dockedOrderLinkVerifyingContract } : {}),
+    ...(options.dockedOrderLinkBroadcastAdapter ? { broadcastAdapter: options.dockedOrderLinkBroadcastAdapter } : {}),
+    ...(options.now ? { now: options.now } : {})
+  });
+  const buildDiagnostics = () => buildOperationalDiagnostics({
+    store,
+    ...(options.configDiagnostics ? { configDiagnostics: options.configDiagnostics } : {}),
+    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
+    ...(options.indexerDiagnostics ? { indexer: options.indexerDiagnostics } : {}),
+    ...(options.reconcileDiagnostics ? { reconcile: options.reconcileDiagnostics } : {}),
+    ...(options.submissionStore ? { submissionStore: options.submissionStore } : {}),
+    ...(options.governanceStore ? { governanceStore: options.governanceStore } : {}),
+    storeMetadataStores: {
+      draft: storeZhixuDraftStore,
+      version: storeZhixuVersionMetadataStore,
+      supplier: storeSupplierMetadataStore,
+      docking: storeDockingSessionStore
+    },
+    ...(defaultEvidenceStorage ? { evidenceStorage: defaultEvidenceStorage } : {}),
+    ...(options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
+      ? { evidenceRuntimeEnvironment: (options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment)! }
+      : {})
+  });
+  const now = options.now ?? (() => new Date());
+  const storeIdentityProvider = options.storeIdentityProvider ?? createStoreIdentityProvider({
+    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
+    ...(options.storeAuthConfig ? { authConfig: options.storeAuthConfig } : {})
+  });
+  const context: ApiRouteContext = {
+    store,
+    productService,
+    productBffService,
+    storeConsoleService,
+    storeDockingService,
+    storeRuntimeService,
+    storeZhixuVersionService,
+    storeZhixuDraftWorkflowService,
+    storeSupplierService,
+    storeAuditStore,
+    storeIdentityProvider,
+    governanceService,
+    notificationService,
+    supplierNotificationConfigService,
+    evidenceService,
+    submissionService,
+    productStageExecutorPatchService,
+    productStageResourcePatchService,
+    productDockedOrderLinkService,
+    ...(options.submissionStore ? { submissionStore: options.submissionStore } : {}),
+    ...(options.opsRecoveryActions ? { opsRecoveryActions: options.opsRecoveryActions } : {}),
+    productE2eControls,
+    productDemoMode,
+    audit,
+    buildDiagnostics,
+    ...(options.onTxMined ? { onTxMined: options.onTxMined } : {}),
+    now
+  };
+  const modules: readonly RouteModule[] = [
+    createDiagnosticsRouteModule(),
+    createAdminOpsRouteModule(),
+    createLegacyOrdersRouteModule(),
+    createProductE2EControlsRouteModule(),
+    createStoreConsoleRouteModule(),
+    createStoreDockingRouteModule(),
+    createStoreSuppliersRouteModule(),
+    createGovernanceRouteModule(),
+    createNotificationsRouteModule(),
+    createEvidenceRouteModule(),
+    createStagePatchRouteModule(),
+    createSubmissionsRouteModule(),
+    createProductBffRouteModule(),
+    createProductReadRouteModule()
+  ];
+
+  return {
+    async handle(request) {
+      for (const module of modules) {
+        const response = await module.handle(request, context);
+        if (response) {
+          return response;
+        }
+      }
+      return {
+        status: 404,
+        body: { error: "not_found" }
+      };
+    }
+  };
+}
+
+export function productBffStoreSubmissionAuthorization(store: ProductBffStore): SubmissionAuthorizationAdapter {
+  return {
+    async authorize(request) {
+      const overlayAuthorization = productBffActiveStageExecutorAuthorization(request);
+      if (overlayAuthorization) {
+        return overlayAuthorization;
+      }
+
+      const registrations = await store.listRegistrations();
+      const registration = registrations.find((item) =>
+        equalHex(item.orderId, request.onchainOrderId) || item.orderId.toLowerCase() === request.orderId.toLowerCase()
+      );
+      if (!registration) {
+        return {
+          authorized: false,
+          source: "product_bff_registration",
+          reason: "order registration authorization was not found"
+        };
+      }
+      const authorized = registration.authorizations.some((authorization) =>
+        equalHex(authorization.sourceId, request.sourceId) &&
+        equalHex(authorization.signalId, request.signalId) &&
+        authorization.submitter.toLowerCase() === request.submitter.toLowerCase()
+      );
+      return {
+        authorized,
+        source: "product_bff_registration",
+        ...(authorized ? {} : { reason: "submitter is not present in order registration authorizations" })
+      };
+    }
+  };
+}
+
+type ProductTaskWithExecutorOverlay = {
+  readonly executorOverlay?: ProductTaskExecutorOverlay;
+  readonly stageExecutorOverlay?: ProductTaskExecutorOverlay;
+};
+
+type ProductTaskExecutorOverlay = {
+  readonly targetStageId?: string;
+  readonly activeExecutorWallet?: string;
+};
+
+function productBffActiveStageExecutorAuthorization(
+  request: SubmissionAuthorizationRequest
+): SubmissionAuthorizationResult | undefined {
+  const task = request.task as ProductTaskWithExecutorOverlay;
+  const executorOverlay = task.stageExecutorOverlay ?? task.executorOverlay;
+  if (!executorOverlay?.targetStageId || !executorOverlay.activeExecutorWallet) {
+    return undefined;
+  }
+
+  if (!equalHex(executorOverlay.targetStageId, request.sourceId)) {
+    return {
+      authorized: false,
+      source: "active_stage_executor_overlay",
+      reason: "active executor overlay does not target the submitted source"
+    };
+  }
+
+  const authorized = executorOverlay.activeExecutorWallet.toLowerCase() === request.submitter.toLowerCase();
+  return {
+    authorized,
+    source: "active_stage_executor_overlay",
+    ...(authorized ? {} : { reason: "submitter is not the active stage executor" })
+  };
+}
+
+function productBffSupplierTrustResolver(store: ProjectionStore): ProductBffSupplierTrustResolver {
+  return async (wallet) => {
+    const normalizedWallet = wallet.toLowerCase();
+    const matches = Object.values((await store.getTrustSnapshot()).suppliers)
+      .filter((supplier) => supplier.wallet.toLowerCase() === normalizedWallet)
+      .sort(compareSupplierTrustForBff);
+    const trust = matches.find((supplier) => !supplier.revoked) ?? matches[0];
+    return trust
+      ? {
+          domainId: trust.domainId,
+          supplierSubjectId: trust.supplierSubjectId,
+          wallet: trust.wallet,
+          status: trust.status,
+          revoked: trust.revoked,
+          updatedAt: trust.updatedAt
+        }
+      : undefined;
+  };
+}
+
+function compareSupplierTrustForBff(
+  left: Awaited<ReturnType<ProjectionStore["getTrustSnapshot"]>>["suppliers"][string],
+  right: Awaited<ReturnType<ProjectionStore["getTrustSnapshot"]>>["suppliers"][string]
+): number {
+  if (left.revoked !== right.revoked) {
+    return left.revoked ? 1 : -1;
+  }
+  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
+    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
+  }
+  if (left.updatedAt.logIndex !== right.updatedAt.logIndex) {
+    return right.updatedAt.logIndex - left.updatedAt.logIndex;
+  }
+  return left.supplierSubjectId.localeCompare(right.supplierSubjectId);
+}
+
+function equalHex(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}

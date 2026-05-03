@@ -1,0 +1,655 @@
+import {
+  projectionStatusLabel,
+  storeConsoleSummary,
+  toStoreZhixuConsoleDTO,
+  toStoreZhixuDetailDTO,
+  type ChainAttestationStatus,
+  type ReviewStatus,
+  type StoreConsoleSummaryDTO,
+  type StoreOrderCandidateDTO,
+  type StoreOrderCandidatesResponseDTO,
+  type StoreProjectionStatusDTO,
+  type StoreProjectionSyncStatus,
+  type StoreSearchResponseDTO,
+  type StoreSearchResultDTO,
+  type StoreSearchSourceOfTruth,
+  type StoreSearchType,
+  type StoreZhixuConsoleDTO,
+  type StoreZhixuDetailDTO,
+  type StoreZhixuLifecycleStatus,
+  type ZhixuDetailDTO,
+  type ZhixuSummaryDTO
+} from "@uvp-eth/product-dto";
+import {
+  CROSS_BORDER_ZHIXU_ID,
+  crossBorderPlanIds
+} from "@uvp-eth/product-dto/fixtures";
+import type { StateMachineOrderProjection } from "../indexer/projections.js";
+import type { SupplierTrustProjection } from "../indexer/trust-projections.js";
+import type { ProductOrderApiDTO, ProductService, ProductTaskApiDTO } from "../product/service.js";
+import type { ProjectionStore, ProjectionSyncState } from "../storage/projection-store.js";
+
+export interface StoreConsoleListQuery {
+  readonly query?: string;
+  readonly lifecycle?: StoreZhixuLifecycleStatus | "all";
+  readonly review?: ReviewStatus | "all";
+  readonly trust?: ChainAttestationStatus | "all";
+}
+
+export interface StoreSearchQuery {
+  readonly query?: string;
+  readonly type?: StoreSearchType;
+  readonly limit?: number;
+}
+
+export interface StoreConsoleListDTO {
+  readonly sourceOfTruth: "contracts-and-chain-events";
+  readonly summary: StoreConsoleSummaryDTO;
+  readonly zhixus: readonly StoreZhixuConsoleDTO[];
+  readonly projectionStatus?: StoreProjectionStatusDTO;
+}
+
+export interface StoreConsoleService {
+  listZhixus(query?: StoreConsoleListQuery): Promise<StoreConsoleListDTO>;
+  getZhixu(zhixuId: string): Promise<StoreZhixuDetailDTO | undefined>;
+  search(query: StoreSearchQuery): Promise<StoreSearchResponseDTO>;
+  listOrderCandidates(orderId: string): Promise<StoreOrderCandidatesResponseDTO>;
+}
+
+export function createStoreConsoleService(options: {
+  readonly productService: ProductService;
+  readonly store: ProjectionStore;
+}): StoreConsoleService {
+  return {
+    async listZhixus(query = {}) {
+      const [zhixus, syncState] = await Promise.all([
+        buildStoreConsoleZhixus(options),
+        options.store.getSyncState()
+      ]);
+      const filtered = filterStoreZhixus(zhixus, query);
+      const projectionStatus = projectionStatusFromSyncState(syncState);
+      return {
+        sourceOfTruth: "contracts-and-chain-events",
+        summary: storeConsoleSummary(filtered),
+        zhixus: filtered,
+        ...(projectionStatus ? { projectionStatus } : {})
+      };
+    },
+
+    async getZhixu(zhixuId) {
+      const normalized = normalizeSearchText(zhixuId);
+      const row = (await buildStoreConsoleZhixus(options)).find((candidate) =>
+        normalizeSearchText(candidate.zhixuId) === normalized
+      );
+      if (!row) {
+        return undefined;
+      }
+      const zhixu = await options.productService.getZhixu(row.zhixuId);
+      return zhixu ? toStoreZhixuDetailDTO(row, zhixu) : toStoreZhixuDetailDTO(row, detailFallbackFromRow(row));
+    },
+
+    async search(query) {
+      return searchStore(options, query);
+    },
+
+    async listOrderCandidates(orderId) {
+      return listOrderCandidates(options, orderId);
+    }
+  };
+}
+
+async function buildStoreConsoleZhixus(options: {
+  readonly productService: ProductService;
+  readonly store: ProjectionStore;
+}): Promise<readonly StoreZhixuConsoleDTO[]> {
+  const [listedZhixus, orders, tasks, trustSnapshot] = await Promise.all([
+    options.productService.listZhixu(),
+    options.productService.listOrders(),
+    options.productService.listTasks(),
+    options.store.getTrustSnapshot()
+  ]);
+  const activeSupplierCount = Object.values(trustSnapshot.suppliers).filter((supplier) => !supplier.revoked).length;
+  const rows = listedZhixus
+    .map((zhixu) => consoleRowFromSummary(zhixu, {
+      activeSupplierCount,
+      openTaskCount: tasks.filter((task) => task.zhixuId === zhixu.zhixuId && task.status === "open").length,
+      orderCount: orders.filter((order) => order.zhixuId === zhixu.zhixuId).length
+    }));
+
+  return rows.sort((left, right) =>
+    lifecycleRank(left.lifecycleStatus) - lifecycleRank(right.lifecycleStatus) ||
+    left.title.localeCompare(right.title)
+  );
+}
+
+function consoleRowFromSummary(
+  zhixu: ZhixuSummaryDTO,
+  metrics: {
+    readonly orderCount: number;
+    readonly openTaskCount: number;
+    readonly activeSupplierCount: number;
+  }
+): StoreZhixuConsoleDTO {
+  return toStoreZhixuConsoleDTO(zhixu, {
+    orderCount: metrics.orderCount,
+    openTaskCount: metrics.openTaskCount,
+    supplierCount: metrics.activeSupplierCount,
+    versionLabel: zhixu.chainAttestation.status === "attested" ? "链上当前版本" : "本地候选版本"
+  });
+}
+
+async function searchStore(
+  options: {
+    readonly productService: ProductService;
+    readonly store: ProjectionStore;
+  },
+  query: StoreSearchQuery
+): Promise<StoreSearchResponseDTO> {
+  const rawQuery = query.query ?? "";
+  const normalizedQuery = normalizeSearchText(rawQuery);
+  const type = query.type ?? "all";
+  const limit = clampLimit(query.limit);
+  const [zhixuList, orders, trustSnapshot, syncState] = await Promise.all([
+    buildStoreConsoleZhixus(options),
+    options.productService.listOrders(),
+    options.store.getTrustSnapshot(),
+    options.store.getSyncState()
+  ]);
+  const detailsById = await buildZhixuDetailsById(options.productService, zhixuList);
+  const projectionStatus = projectionStatusFromSyncState(syncState);
+  const results: StoreSearchResultDTO[] = [];
+  const seen = new Set<string>();
+  let ambiguousExactOrderId = false;
+
+  const pushResult = (result: StoreSearchResultDTO): void => {
+    const key = `${result.resultType}:${result.id}:${result.primaryHref}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      results.push(result);
+    }
+  };
+
+  if (normalizedQuery.length > 0 && searchIncludes(type, "order")) {
+    const candidates = await listOrderCandidates(options, rawQuery);
+    if (candidates.candidateCount > 1) {
+      ambiguousExactOrderId = true;
+      pushResult(ambiguousOrderSearchResult(candidates));
+    } else if (candidates.candidateCount === 1) {
+      pushResult(orderCandidateSearchResult(candidates.candidates[0]!, ["orderId"]));
+    }
+  }
+
+  if (normalizedQuery.length > 0 && searchIncludes(type, "zhixu")) {
+    const exactZhixu = zhixuList.find((zhixu) => normalizeSearchText(zhixu.zhixuId) === normalizedQuery);
+    if (exactZhixu) {
+      pushResult(zhixuSearchResult(exactZhixu, ["zhixuId"]));
+    }
+  }
+
+  const suppliers = Object.values(trustSnapshot.suppliers);
+  if (normalizedQuery.length > 0 && searchIncludes(type, "supplier")) {
+    for (const supplier of suppliers) {
+      const matchedFields = exactSupplierMatchedFields(supplier, normalizedQuery);
+      if (matchedFields.length > 0) {
+        pushResult(supplierSearchResult(supplier, matchedFields));
+      }
+    }
+  }
+
+  if (normalizedQuery.length === 0) {
+    if (searchIncludes(type, "zhixu")) {
+      for (const zhixu of zhixuList.filter((item) => item.lifecycleStatus === "active")) {
+        pushResult(zhixuSearchResult(zhixu, ["recent-active"]));
+      }
+    }
+  } else {
+    if (searchIncludes(type, "zhixu")) {
+      for (const zhixu of zhixuList) {
+        const matchedFields = zhixuMatchedFields(zhixu, detailsById.get(zhixu.zhixuId), normalizedQuery);
+        if (matchedFields.length > 0) {
+          pushResult(zhixuSearchResult(zhixu, matchedFields));
+        }
+      }
+    }
+
+    if (searchIncludes(type, "order")) {
+      for (const order of orders) {
+        if (ambiguousExactOrderId && normalizeSearchText(order.orderId) === normalizedQuery) {
+          continue;
+        }
+        const matchedFields = orderMatchedFields(order, normalizedQuery);
+        if (matchedFields.length > 0) {
+          pushResult(orderSearchResult(order, matchedFields));
+        }
+      }
+    }
+
+    if (searchIncludes(type, "supplier")) {
+      for (const supplier of suppliers) {
+        const matchedFields = supplierMatchedFields(supplier, normalizedQuery);
+        if (matchedFields.length > 0) {
+          pushResult(supplierSearchResult(supplier, matchedFields));
+        }
+      }
+    }
+  }
+
+  const limited = results.slice(0, limit);
+  return {
+    sourceOfTruth: "contracts-and-chain-events",
+    query: rawQuery,
+    normalizedQuery,
+    resultCount: limited.length,
+    results: limited,
+    ...(projectionStatus ? { projectionStatus } : {})
+  };
+}
+
+async function listOrderCandidates(
+  options: {
+    readonly productService: ProductService;
+    readonly store: ProjectionStore;
+  },
+  orderId: string
+): Promise<StoreOrderCandidatesResponseDTO> {
+  const normalizedOrderId = normalizeSearchText(orderId);
+  const [stateMachineOrders, syncState] = await Promise.all([
+    options.store.findStateMachineOrdersByOrderId(orderId),
+    options.store.getSyncState()
+  ]);
+  const candidates = [
+    ...stateMachineOrders.map(orderCandidateFromStateMachine)
+  ].sort((left, right) =>
+    (left.chainId ?? 0) - (right.chainId ?? 0) ||
+    (left.stateMachineAddress ?? "").localeCompare(right.stateMachineAddress ?? "") ||
+    left.orderId.localeCompare(right.orderId)
+  );
+  const projectionStatus = projectionStatusFromSyncState(syncState);
+
+  return {
+    sourceOfTruth: "contracts-and-chain-events",
+    orderId,
+    normalizedOrderId,
+    candidateCount: candidates.length,
+    candidates,
+    ...(projectionStatus ? { projectionStatus } : {})
+  };
+}
+
+function filterStoreZhixus(
+  zhixus: readonly StoreZhixuConsoleDTO[],
+  query: StoreConsoleListQuery
+): readonly StoreZhixuConsoleDTO[] {
+  const normalizedQuery = normalizeSearchText(query.query ?? "");
+  return zhixus.filter((zhixu) =>
+    (!query.lifecycle || query.lifecycle === "all" || zhixu.lifecycleStatus === query.lifecycle) &&
+    (!query.review || query.review === "all" || zhixu.reviewStatus === query.review) &&
+    (!query.trust || query.trust === "all" || zhixu.chainAttestation.status === query.trust) &&
+    (normalizedQuery.length === 0 || zhixuListQueryFields(zhixu).some((field) => field.includes(normalizedQuery)))
+  );
+}
+
+function zhixuListQueryFields(zhixu: StoreZhixuConsoleDTO): readonly string[] {
+  return [
+    zhixu.zhixuId,
+    zhixu.title,
+    zhixu.subtitle,
+    zhixu.maintainer,
+    zhixu.lifecycleLabel,
+    zhixu.reviewLabel,
+    zhixu.riskLevel,
+    zhixu.planId,
+    zhixu.planHash
+  ].map(normalizeSearchText);
+}
+
+async function buildZhixuDetailsById(
+  productService: ProductService,
+  zhixus: readonly StoreZhixuConsoleDTO[]
+): Promise<ReadonlyMap<string, ZhixuDetailDTO>> {
+  const entries = await Promise.all(zhixus.map(async (zhixu) => {
+    const detail = await productService.getZhixu(zhixu.zhixuId);
+    return detail ? [zhixu.zhixuId, detail] as const : undefined;
+  }));
+  return new Map(entries.filter((entry): entry is readonly [string, ZhixuDetailDTO] => entry !== undefined));
+}
+
+function zhixuMatchedFields(
+  row: StoreZhixuConsoleDTO,
+  detail: ZhixuDetailDTO | undefined,
+  normalizedQuery: string
+): readonly string[] {
+  const fields: string[] = [];
+  addMatch(fields, "zhixuId", row.zhixuId, normalizedQuery);
+  addMatch(fields, "title", row.title, normalizedQuery);
+  addMatch(fields, "subtitle", row.subtitle, normalizedQuery);
+  addMatch(fields, "maintainer", row.maintainer, normalizedQuery);
+  addMatch(fields, "lifecycle", row.lifecycleLabel, normalizedQuery);
+  addMatch(fields, "review", row.reviewLabel, normalizedQuery);
+  if (detail) {
+    if (detail.applicableBusiness.some((tag) => normalizeSearchText(tag).includes(normalizedQuery)) ||
+      detail.excludedBusiness.some((tag) => normalizeSearchText(tag).includes(normalizedQuery)) ||
+      detail.supportedPaymentMethods.some((tag) => normalizeSearchText(tag).includes(normalizedQuery))) {
+      fields.push("tags");
+    }
+    if (detail.stages.some((stage) =>
+      [stage.name, stage.ownerRole, ...stage.evidence].some((field) => normalizeSearchText(field).includes(normalizedQuery))
+    )) {
+      fields.push("stages");
+    }
+    if (detail.roleSlots.some((slot) =>
+      [slot.title, slot.label, slot.duty, ...slot.evidence].some((field) => normalizeSearchText(field).includes(normalizedQuery))
+    )) {
+      fields.push("roleSlots");
+    }
+  }
+  return [...new Set(fields)];
+}
+
+function orderMatchedFields(order: ProductOrderApiDTO, normalizedQuery: string): readonly string[] {
+  const fields: string[] = [];
+  addMatch(fields, "orderId", order.orderId, normalizedQuery);
+  addMatch(fields, "title", order.title, normalizedQuery);
+  addMatch(fields, "zhixuId", order.zhixuId, normalizedQuery);
+  addMatch(fields, "currentStage", order.currentStageName, normalizedQuery);
+  addMatch(fields, "status", order.statusLabel, normalizedQuery);
+  if (order.tasks?.some((task) => taskMatched(task, normalizedQuery))) {
+    fields.push("tasks");
+  }
+  return [...new Set(fields)];
+}
+
+function taskMatched(task: ProductTaskApiDTO, normalizedQuery: string): boolean {
+  return [
+    task.taskId,
+    task.title,
+    task.subtitle,
+    task.assigneeRole,
+    task.assigneeWallet,
+    task.supplierSubjectId,
+    task.stageName,
+    ...task.requiredEvidence
+  ].some((field) => typeof field === "string" && normalizeSearchText(field).includes(normalizedQuery));
+}
+
+function exactSupplierMatchedFields(
+  supplier: SupplierTrustProjection,
+  normalizedQuery: string
+): readonly string[] {
+  const fields: string[] = [];
+  if (normalizeSearchText(supplier.supplierSubjectId) === normalizedQuery) {
+    fields.push("supplierSubjectId");
+  }
+  if (normalizeSearchText(supplier.wallet) === normalizedQuery) {
+    fields.push("wallet");
+  }
+  return fields;
+}
+
+function supplierMatchedFields(
+  supplier: SupplierTrustProjection,
+  normalizedQuery: string
+): readonly string[] {
+  const fields = [...exactSupplierMatchedFields(supplier, normalizedQuery)];
+  addMatch(fields, "metadataURI", supplier.metadataURI, normalizedQuery);
+  addMatch(fields, "capabilityHash", supplier.capabilityHash, normalizedQuery);
+  addMatch(fields, "reputationHash", supplier.reputationHash, normalizedQuery);
+  return [...new Set(fields)];
+}
+
+function addMatch(fields: string[], fieldName: string, value: string | undefined, normalizedQuery: string): void {
+  if (value && normalizeSearchText(value).includes(normalizedQuery)) {
+    fields.push(fieldName);
+  }
+}
+
+function zhixuSearchResult(
+  zhixu: StoreZhixuConsoleDTO,
+  matchedFields: readonly string[]
+): StoreSearchResultDTO {
+  return {
+    resultType: "zhixu",
+    id: zhixu.zhixuId,
+    title: zhixu.title,
+    subtitle: zhixu.subtitle,
+    badgeLabel: zhixu.lifecycleLabel,
+    statusLabel: zhixu.chainAttestation.label,
+    matchedFields,
+    primaryHref: `/store/zhixus/${encodeURIComponent(zhixu.zhixuId)}`,
+    sourceOfTruth: zhixuSourceOfTruth(zhixu),
+    proofHint: shortHash(zhixu.planHash),
+    updatedAt: zhixu.updatedAt
+  };
+}
+
+function orderSearchResult(
+  order: ProductOrderApiDTO,
+  matchedFields: readonly string[]
+): StoreSearchResultDTO {
+  const updatedAt = order.projection?.updatedAtBlock ? `block ${order.projection.updatedAtBlock}` : undefined;
+  return {
+    resultType: "order",
+    id: order.orderId,
+    title: order.title,
+    subtitle: `${order.zhixuId} / ${order.currentStageName}`,
+    badgeLabel: "订单",
+    statusLabel: order.statusLabel,
+    matchedFields,
+    primaryHref: `/product/orders/${encodeURIComponent(order.orderId)}`,
+    sourceOfTruth: "chain",
+    ...(updatedAt ? { proofHint: updatedAt, updatedAt } : {})
+  };
+}
+
+function orderCandidateSearchResult(
+  candidate: StoreOrderCandidateDTO,
+  matchedFields: readonly string[]
+): StoreSearchResultDTO {
+  return {
+    resultType: "order",
+    id: candidate.orderId,
+    title: candidate.title,
+    subtitle: `${candidate.zhixuId}${candidate.stateMachineAddress ? ` / ${shortHash(candidate.stateMachineAddress)}` : ""}`,
+    badgeLabel: "订单",
+    statusLabel: candidate.statusLabel,
+    matchedFields,
+    primaryHref: candidate.primaryHref,
+    sourceOfTruth: "chain",
+    ...(candidate.proofHint ? { proofHint: candidate.proofHint } : {}),
+    ...(candidate.updatedAt ? { updatedAt: candidate.updatedAt } : {})
+  };
+}
+
+function ambiguousOrderSearchResult(candidates: StoreOrderCandidatesResponseDTO): StoreSearchResultDTO {
+  return {
+    resultType: "order",
+    id: candidates.orderId,
+    title: `订单 ${shortHash(candidates.orderId)}`,
+    subtitle: `发现 ${candidates.candidateCount} 个链上候选，需要选择部署上下文。`,
+    badgeLabel: "多个候选",
+    statusLabel: "需要选择候选",
+    matchedFields: ["orderId"],
+    primaryHref: `/store/orders/${encodeURIComponent(candidates.orderId)}/candidates`,
+    sourceOfTruth: "chain",
+    proofHint: "同一订单编号存在多个可见链上上下文"
+  };
+}
+
+function supplierSearchResult(
+  supplier: SupplierTrustProjection,
+  matchedFields: readonly string[]
+): StoreSearchResultDTO {
+  return {
+    resultType: "supplier",
+    id: supplier.supplierSubjectId,
+    title: supplierDisplayName(supplier),
+    subtitle: supplier.wallet,
+    badgeLabel: supplier.revoked ? "已撤销" : "已背书",
+    statusLabel: supplier.revoked ? "供应商背书已撤销" : "供应商背书有效",
+    matchedFields,
+    primaryHref: `/store/suppliers/${encodeURIComponent(supplier.supplierSubjectId)}`,
+    sourceOfTruth: "chain",
+    proofHint: shortHash(supplier.updatedAt.transactionHash),
+    updatedAt: `block ${supplier.updatedAt.blockNumber.toString()}`
+  };
+}
+
+function orderCandidateFromStateMachine(order: StateMachineOrderProjection): StoreOrderCandidateDTO {
+  return {
+    orderId: order.orderId,
+    title: `链上订单 ${shortHash(order.orderId)}`,
+    statusLabel: stateMachineOrderStatusLabel(order.status),
+    zhixuId: zhixuIdForPlan(order.planId, order.planHash),
+    primaryHref: `/product/orders/${encodeURIComponent(order.orderId)}`,
+    sourceOfTruth: "chain",
+    chainId: order.chainId,
+    stateMachineAddress: order.contractAddress,
+    ...(order.deploymentId ? { deploymentId: order.deploymentId } : {}),
+    proofHint: `${shortHash(order.updatedAt.transactionHash)} @ block ${order.updatedAt.blockNumber.toString()}`,
+    updatedAt: `block ${order.updatedAt.blockNumber.toString()}`
+  };
+}
+
+function projectionStatusFromSyncState(syncState: ProjectionSyncState | undefined): StoreProjectionStatusDTO | undefined {
+  if (!syncState) {
+    return undefined;
+  }
+  const syncStatus = storeProjectionSyncStatus(syncState);
+  return {
+    syncStatus,
+    label: projectionStatusLabel(syncStatus),
+    isCatchingUp: syncStatus !== "indexed" || syncState.rebuild?.status === "running",
+    updatedAt: syncState.updatedAt,
+    ...(syncState.latestIndexedBlock !== undefined ? { latestIndexedBlock: syncState.latestIndexedBlock.toString() } : {}),
+    ...(syncState.finalizedBlock !== undefined ? { finalizedBlock: syncState.finalizedBlock.toString() } : {}),
+    confirmationDepth: syncState.confirmationDepth,
+    eventCount: syncState.eventCount,
+    ...(syncState.rebuild?.status ? { rebuildStatus: syncState.rebuild.status } : {}),
+    ...(syncState.degradedReason ? { degradedReason: syncState.degradedReason } : {})
+  };
+}
+
+function storeProjectionSyncStatus(syncState: ProjectionSyncState): StoreProjectionSyncStatus {
+  if (syncState.rebuild?.status === "running") {
+    return "rebuilding";
+  }
+  switch (syncState.syncStatus) {
+    case "indexed":
+    case "syncing":
+    case "stale":
+    case "rebuilding":
+    case "degraded":
+      return syncState.syncStatus;
+  }
+}
+
+function detailFallbackFromRow(row: StoreZhixuConsoleDTO): ZhixuDetailDTO {
+  return {
+    zhixuId: row.zhixuId,
+    title: row.title,
+    subtitle: row.subtitle,
+    reviewStatus: row.reviewStatus,
+    reviewLabel: row.reviewLabel,
+    riskLevel: row.riskLevel,
+    applicableBusiness: [],
+    excludedBusiness: [],
+    stageCount: row.stageCount,
+    roleSlotCount: row.roleSlotCount,
+    supportedPaymentMethods: [],
+    maintainer: row.maintainer,
+    updatedAt: row.updatedAt,
+    chainAttestation: row.chainAttestation,
+    roleSlots: [],
+    dockableModules: [],
+    stages: [],
+    orderPermissionTable: [],
+    proofRows: row.proofRows,
+    createOrderHint: row.lifecycleStatus === "active"
+      ? "创建订单前需要补齐 Product UI schema。"
+      : "该秩序当前不应创建新订单。"
+  };
+}
+
+function zhixuSourceOfTruth(zhixu: StoreZhixuConsoleDTO): StoreSearchSourceOfTruth {
+  return zhixu.chainAttestation.status === "not_found" ? "store-metadata" : "chain-and-store-metadata";
+}
+
+function searchIncludes(type: StoreSearchType, resultType: Exclude<StoreSearchType, "all">): boolean {
+  return type === "all" || type === resultType;
+}
+
+function normalizeSearchText(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function clampLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) {
+    return 20;
+  }
+  return Math.max(1, Math.min(50, Math.trunc(limit)));
+}
+
+function shortHash(value: string): string {
+  if (value.length <= 18) {
+    return value;
+  }
+  return `${value.slice(0, 10)}...${value.slice(-6)}`;
+}
+
+function supplierDisplayName(supplier: SupplierTrustProjection): string {
+  if (supplier.metadataURI.length > 0) {
+    const tail = supplier.metadataURI.split(/[/?#]/).filter((part) => part.length > 0).at(-1);
+    if (tail) {
+      return `供应商 ${tail.replace(/[-_]+/g, " ")}`;
+    }
+  }
+  return `供应商 ${shortHash(supplier.supplierSubjectId)}`;
+}
+
+function zhixuIdForPlan(planId: string, planHash: string | undefined): string {
+  return planId === crossBorderPlanIds.planId || planHash === crossBorderPlanIds.planHash
+    ? CROSS_BORDER_ZHIXU_ID
+    : `plan-${shortHash(planId)}`;
+}
+
+function stateMachineOrderStatusLabel(status: StateMachineOrderProjection["status"]): string {
+  switch (status) {
+    case "registered":
+      return "已创建";
+    case "running":
+      return "进行中";
+    case "waiting":
+      return "等待时间条件";
+    case "action_required":
+      return "待处理";
+    case "completed":
+      return "已完成";
+    case "cancelled":
+      return "已取消";
+    case "unknown":
+      return "同步中";
+  }
+}
+
+function lifecycleRank(status: StoreZhixuConsoleDTO["lifecycleStatus"]): number {
+  switch (status) {
+    case "active":
+      return 0;
+    case "attested":
+      return 1;
+    case "approved_for_broadcast":
+      return 2;
+    case "submitted_for_review":
+      return 3;
+    case "compiled":
+      return 4;
+    case "draft":
+      return 5;
+    case "deprecated":
+      return 6;
+    case "rejected":
+      return 7;
+    case "revoked":
+      return 8;
+  }
+}

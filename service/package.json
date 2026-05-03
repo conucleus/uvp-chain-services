@@ -1,0 +1,41 @@
+{
+  "name": "@uvp-eth/chain-services",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Non-trusted EVM UVP indexer, relayer, proof verifier, and read API services.",
+  "license": "MPL-2.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check": "pnpm run typecheck && pnpm run test",
+    "dev:api": "tsx src/api/server.ts",
+    "dev:indexer": "tsx src/indexer/service.ts",
+    "rebuild:indexer": "tsx src/indexer/service.ts --rebuild",
+    "dev:relayer": "tsx src/relayer/service.ts",
+    "dev:proof-verifier": "tsx src/proof-verifier/service.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1038.0",
+    "@uvp-eth/compiler": "workspace:*",
+    "@uvp-eth/product-dto": "workspace:*",
+    "@uvp-eth/protocol-bindings": "workspace:*",
+    "jose": "^5.10.0",
+    "pg": "^8.20.0",
+    "viem": "^2.21.58"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}
