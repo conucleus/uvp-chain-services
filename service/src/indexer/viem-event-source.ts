@@ -126,7 +126,11 @@ export class ViemChainEventSource implements ChainEventSource {
 }
 
 export function createDefaultEventSource(config: ChainServicesConfig): ChainEventSource | undefined {
-  return indexedContracts(config).length > 0 ? new ViemChainEventSource() : undefined;
+  return hasConfiguredEvmIndexerContracts(config) ? new ViemChainEventSource() : undefined;
+}
+
+export function hasConfiguredEvmIndexerContracts(config: ChainServicesConfig): boolean {
+  return indexedContracts(config).length > 0;
 }
 
 function indexedContracts(config: ChainServicesConfig): readonly IndexedContract[] {

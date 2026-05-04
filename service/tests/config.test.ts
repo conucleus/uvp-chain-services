@@ -41,6 +41,12 @@ describe("chain-services config", () => {
     }
   });
 
+  it("defaults chain target to EVM and accepts Solana as a reserved target", () => {
+    expect(loadConfigFromEnv({}).network.chainTarget).toBe("evm");
+    expect(loadConfigFromEnv({ UVP_CHAIN_TARGET: "solana" }).network.chainTarget).toBe("solana");
+    expect(() => loadConfigFromEnv({ UVP_CHAIN_TARGET: "cosmos" })).toThrow(/UVP_CHAIN_TARGET must be evm or solana/);
+  });
+
   it("loads supported contract addresses and replay block from an address manifest", () => {
     const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-"));
     tempDirs.push(dir);

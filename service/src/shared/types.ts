@@ -1,6 +1,7 @@
 export type Hex = `0x${string}`;
 export type Address = Hex;
 export type ChainId = number;
+export type ChainTarget = "evm" | "solana";
 
 export interface ChainPointer {
   readonly chainId: ChainId;
@@ -44,6 +45,16 @@ export class ConfigError extends Error {
 
 export class ProjectionError extends Error {
   override readonly name = "ProjectionError";
+}
+
+export class UnsupportedChainTargetError extends Error {
+  override readonly name = "UnsupportedChainTargetError";
+  readonly target: string;
+
+  constructor(target: string, message = `${target} target is reserved but not implemented`) {
+    super(message);
+    this.target = target;
+  }
 }
 
 export function assertHex(value: string, fieldName: string): asserts value is Hex {

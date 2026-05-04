@@ -1,6 +1,6 @@
 import type { ChainServicesConfig } from "../config/index.js";
 import { loadConfigFromEnv } from "../config/index.js";
-import { createDefaultEventSource } from "./viem-event-source.js";
+import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import type { ChainEvent, EventCursor } from "./events.js";
 import { filterActiveChainEvents, sortChainEvents } from "./events.js";
 import type { ProjectionSnapshot } from "./projections.js";
@@ -454,7 +454,7 @@ export function createIndexerService(options: IndexerServiceOptions): IndexerSer
 async function main(): Promise<void> {
   const config = loadConfigFromEnv();
   if (process.argv.includes("--rebuild")) {
-    const eventSource = createDefaultEventSource(config);
+    const eventSource = createChainEventSourceForTarget(config);
     if (!eventSource) {
       throw new Error("no configured indexer contracts; set UVP_CONTRACTS_JSON or an address manifest");
     }

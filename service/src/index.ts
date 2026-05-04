@@ -1,5 +1,6 @@
 export * from "./api/routes.js";
 export * from "./api/server.js";
+export * from "./chain-adapters/events.js";
 export * from "./config/index.js";
 export * from "./evidence/index.js";
 export * from "./governance/index.js";

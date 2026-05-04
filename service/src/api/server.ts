@@ -10,7 +10,7 @@ import {
 } from "../evidence/index.js";
 import { createConfiguredGovernanceChainAdapter, createGovernanceService } from "../governance/index.js";
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
-import { createDefaultEventSource } from "../indexer/viem-event-source.js";
+import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import {
   AnvilProductOrderRegistrationAdapter,
   MemoryProductOrderRegistrationAdapter,
@@ -60,7 +60,7 @@ export async function startApiServer(
   const logger = createRedactingLogger(options.logger ?? consoleLogger, config.security.logRedactionEnabled);
   const audit = createLoggerAuditSink(logger);
   const configDiagnostics = await runConfigPreflight(config);
-  const eventSource = options.eventSource === undefined ? createDefaultEventSource(config) : options.eventSource;
+  const eventSource = options.eventSource === undefined ? createChainEventSourceForTarget(config) : options.eventSource;
   const indexer = eventSource ? new IndexerService({ config, eventSource, store, logger }) : undefined;
   const productBffStore = stores.productBffStore;
   const submissionStore = stores.submissionStore;

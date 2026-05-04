@@ -1,8 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
-import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
+import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type ChainTarget, type Hex } from "../shared/types.js";
 import type { StorageDriver } from "../storage/types.js";
 
 export interface NetworkConfig {
+  readonly chainTarget?: ChainTarget;
   readonly chainId: number;
   readonly rpcUrl: string;
   readonly deploymentBlock: bigint;
@@ -178,6 +179,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
 
   const config: ChainServicesConfig = {
     network: {
+      chainTarget: parseChainTarget(env),
       chainId,
       rpcUrl,
       deploymentBlock: parseBigIntValue(env, "UVP_DEPLOYMENT_BLOCK", manifest.deploymentBlock ?? 0n),
@@ -300,6 +302,14 @@ function parseBoolean(env: Env, name: string, fallback: boolean): boolean {
     default:
       throw new ConfigError(`${name} must be true or false`);
   }
+}
+
+function parseChainTarget(env: Env): ChainTarget {
+  const rawValue = optionalEnv(env, "UVP_CHAIN_TARGET") ?? "evm";
+  if (rawValue === "evm" || rawValue === "solana") {
+    return rawValue;
+  }
+  throw new ConfigError("UVP_CHAIN_TARGET must be evm or solana");
 }
 
 function parseRuntimeEnv(env: Env): ChainServicesRuntimeEnv {
