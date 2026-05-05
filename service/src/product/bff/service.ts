@@ -1,9 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  ORDER_INITIAL_TRIGGER_PERMISSION_ID,
   type StoreZhixuVersionSummaryDTO,
   type ZhixuDetailDTO
 } from "@uvp-eth/product-dto";
+import {
+  buildTriggerOrderFromOutsideTypedData,
+  recoverTriggerOrderFromOutsideSigner,
+  type TriggerOrderFromOutsideTypedData
+} from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../../shared/types.js";
 import type { SupplierTrustProjection } from "../../indexer/trust-projections.js";
 import type { TxReconcileFields } from "../../reconcile/status.js";
@@ -14,22 +18,22 @@ import {
 } from "./authorization.js";
 import {
   DEFAULT_PRODUCT_REGISTRAR_ADDRESS,
-  MemoryProductOrderTriggerAdapter,
-  MemoryProductOrderRegistrationAdapter,
+  MemoryProductOrderTriggerBroadcastAdapter,
   productSignalId,
   productSignalSourceId,
-  type ProductOrderRegistrationAdapter,
-  type ProductOrderTriggerAdapter,
-  type ProductOrderTriggerResult,
-  type ProductRegistrationAdapterResult
-} from "./registration.js";
-import { MemoryProductBffStore, type ProductBffStore, type ProductOrderStartPatch } from "./store.js";
+  type ProductOrderTriggerBroadcastAdapter,
+  type ProductOrderTriggerBroadcastResult
+} from "./trigger.js";
+import { MemoryProductBffStore, type ProductBffStore } from "./store.js";
 import type {
   AcceptProductInviteInput,
   CreateProductInviteInput,
   CreateProductOrderDraftInput,
   DraftParticipantDTO,
   ParticipantPermissionDTO,
+  PrepareProductOrderTriggerInput,
+  PrepareProductOrderTriggerResult,
+  PreparedProductOrderTriggerDTO,
   PreviewProductInviteInput,
   ProductInviteAcceptanceDTO,
   ProductInviteDTO,
@@ -38,13 +42,13 @@ import type {
   ProductInviteWalletBindingDTO,
   ProductOrderDraftDTO,
   ProductOrderDraftStatus,
-  ProductOrderRegistrationDTO,
-  ProductOrderRegistrationRecord,
-  ProductOrderStartDTO,
+  ProductOrderTriggerDTO,
+  ProductOrderTriggerRecord,
   ProductParticipantAssignmentDTO,
   RejectProductInviteInput,
-  StartProductOrderRegistrationResult,
   SubmitProductOrderDraftResult,
+  TriggerProductOrderInput,
+  TriggerProductOrderResult,
   UpdateProductOrderDraftInput
 } from "./types.js";
 
@@ -64,19 +68,20 @@ export class ProductBffError extends Error {
 export interface ProductBffServiceOptions {
   readonly productService: ProductService;
   readonly store?: ProductBffStore;
-  readonly registrationAdapter?: ProductOrderRegistrationAdapter;
-  readonly triggerAdapter?: ProductOrderTriggerAdapter;
+  readonly registrationAdapter?: ProductOrderTriggerBroadcastAdapter;
+  readonly triggerAdapter?: ProductOrderTriggerBroadcastAdapter;
   readonly authorizationBuilder?: ProductAuthorizationBuilder;
   readonly supplierTrustResolver?: ProductBffSupplierTrustResolver;
   readonly versionResolver?: ProductDraftVersionResolver;
   readonly registrationCreatorAddress?: Address;
   readonly registrarAddress?: Address;
+  readonly triggerChainId?: number;
   readonly now?: () => Date;
 }
 
 export type ProductBffSupplierTrust = Pick<
   SupplierTrustProjection,
-  "domainId" | "supplierSubjectId" | "wallet" | "status" | "revoked" | "updatedAt"
+  "registryAddress" | "supplierSubjectId" | "wallet" | "status" | "revoked" | "updatedAt"
 >;
 
 export type ProductBffSupplierTrustResolver = (wallet: Address) => Promise<ProductBffSupplierTrust | undefined>;
@@ -89,10 +94,9 @@ export interface ProductBffService {
   createDraft(input: CreateProductOrderDraftInput): Promise<DraftWithParticipants>;
   getDraft(draftId: string): Promise<DraftWithParticipants>;
   updateDraft(draftId: string, input: UpdateProductOrderDraftInput): Promise<ProductOrderDraftDTO>;
-  submitDraft(draftId: string): Promise<SubmitProductOrderDraftResult>;
-  getRegistration(registrationId: string): Promise<ProductOrderRegistrationDTO>;
-  retryRegistration(registrationId: string): Promise<SubmitProductOrderDraftResult>;
-  startRegistration(registrationId: string): Promise<StartProductOrderRegistrationResult>;
+  prepareOrderTrigger(draftId: string, input: PrepareProductOrderTriggerInput): Promise<PrepareProductOrderTriggerResult>;
+  triggerOrder(draftId: string, input: TriggerProductOrderInput): Promise<TriggerProductOrderResult>;
+  getRegistration(triggerId: string): Promise<ProductOrderTriggerDTO>;
   createInvite(draftId: string, input: CreateProductInviteInput): Promise<InviteWithDraft>;
   getInvite(inviteId: string, input?: PreviewProductInviteInput): Promise<ProductInvitePreviewResponse>;
   acceptInvite(inviteId: string, input: AcceptProductInviteInput): Promise<InviteWithDraft>;
@@ -114,18 +118,16 @@ export interface InviteWithDraft {
 
 export function createProductBffService(options: ProductBffServiceOptions): ProductBffService {
   const store = options.store ?? new MemoryProductBffStore();
-  const registrationAdapter = options.registrationAdapter ?? new MemoryProductOrderRegistrationAdapter();
+  const triggerAdapter = options.triggerAdapter ?? options.registrationAdapter ?? new MemoryProductOrderTriggerBroadcastAdapter();
   const authorizationBuilder = options.authorizationBuilder ?? new ProductAuthorizationBuilder();
   const registrarAddress = normalizeAddress(
-    options.registrarAddress ?? options.triggerAdapter?.registrarAddress ?? registrationAdapter.registrarAddress ?? DEFAULT_PRODUCT_REGISTRAR_ADDRESS,
+    options.registrarAddress ?? triggerAdapter.registrarAddress ?? DEFAULT_PRODUCT_REGISTRAR_ADDRESS,
     "registrarAddress"
   );
-  const triggerAdapter = options.triggerAdapter ??
-    matchingTriggerAdapterFromRegistrationAdapter(registrationAdapter, registrarAddress) ??
-    new MemoryProductOrderTriggerAdapter({ registrarAddress });
   const registrationCreatorAddress = options.registrationCreatorAddress
     ? normalizeAddress(options.registrationCreatorAddress, "registrationCreatorAddress")
     : undefined;
+  const triggerChainId = options.triggerChainId ?? 31337;
   const now = options.now ?? (() => new Date());
   const idScope = randomUUID().replaceAll("-", "").slice(0, 8);
   let sequence = 1;
@@ -192,26 +194,41 @@ export function createProductBffService(options: ProductBffServiceOptions): Prod
       return draft;
     },
 
-    async submitDraft(draftId) {
+    async prepareOrderTrigger(draftId, input) {
       const draft = await requireDraft(store, draftId);
       const participants = await store.listParticipants(draftId);
       const existingRegistration = await store.getRegistrationByDraft(draftId);
+      const walletAddress = normalizeAddress(input.walletAddress, "walletAddress");
+      const prepareNow = now();
       if (existingRegistration) {
-        return submitResultFromRegistration(draft, participants, existingRegistration);
+        const expiredPreparedTrigger = existingRegistration.status === "prepared" &&
+          existingRegistration.submitter === walletAddress &&
+          isPrepareExpired(existingRegistration, prepareNow);
+        if (existingRegistration.status === "prepared" && existingRegistration.submitter === walletAddress && !expiredPreparedTrigger) {
+          return prepareResultFromRegistration(draft, participants, existingRegistration);
+        }
+        if (!expiredPreparedTrigger && (existingRegistration.status !== "failed" || !existingRegistration.retryable)) {
+          throw new ProductBffError(409, "trigger_already_exists", "order draft already has a trigger record", {
+            triggerId: existingRegistration.triggerId,
+            status: existingRegistration.status
+          });
+        }
       }
 
       requireAcceptedRequiredParticipants(participants);
-      if (draft.status !== "ready_to_register") {
-        throw new ProductBffError(409, "draft_not_ready", "order draft is not ready to register", {
+      const retryingFailedTrigger = existingRegistration?.status === "failed" && existingRegistration.retryable;
+      if (draft.status !== "ready_to_trigger" && !(draft.status === "failed" && retryingFailedTrigger)) {
+        throw new ProductBffError(409, "draft_not_ready", "order draft is not ready to trigger", {
           status: draft.status
         });
       }
 
       const zhixu = await requireActiveZhixu(options.productService, draft.zhixuId, options.versionResolver);
       assertDraftUsesActiveZhixuVersion(draft, zhixu);
-      const activeDeployment = await options.productService.getActiveStateMachineDeployment();
-      const orderId = stableOrderId(draft);
+      const activeDeployment = await requireActiveStateMachineDeployment(options.productService);
+      const orderId = randomOrderId(draft, idScope, sequence);
       const creator = creatorForDraft(draft, registrationCreatorAddress ?? registrarAddress);
+      const submitter = requireTriggerSubmitter(draft, participants, walletAddress, creator);
       await rejectRevokedSupplierParticipants(participants, options.supplierTrustResolver);
       const builtAuthorization = buildAuthorizations(() =>
         authorizationBuilder.build({
@@ -222,156 +239,131 @@ export function createProductBffService(options: ProductBffServiceOptions): Prod
           registrarAddress
         })
       );
-      const createdAt = now().toISOString();
-      const registration: ProductOrderRegistrationRecord = {
-        registrationId: nextId("registration", idScope, sequence++),
+      const createOrderTrigger = requireCreateOrderTrigger(zhixu);
+      const stateMachineAddress = normalizeAddress(activeDeployment.stateMachineAddress, "activeStateMachineAddress");
+      const deploymentId = normalizeBytes32(activeDeployment.deploymentId, "activeDeploymentId");
+      const createdAt = prepareNow.toISOString();
+      const deadline = Math.floor(prepareNow.getTime() / 1000 + 3600).toString();
+      const triggerId = existingRegistration?.triggerId ?? nextId("trigger", idScope, sequence++);
+      const prepareId = nextId("prepare", idScope, sequence++);
+      const sourceId = productSignalSourceId(createOrderTrigger.source);
+      const signalId = productSignalId(createOrderTrigger.signalName);
+      const payloadHash = hashHex(`uvp:product-bff:trigger:payload:v2:${draftId}:${orderId}:${submitter}:${prepareId}`);
+      const idempotencyKey = hashHex(`uvp:product-bff:trigger:idempotency:v2:${draftId}:${orderId}:${prepareId}`);
+      const triggerHookId = normalizeBytes32(createOrderTrigger.triggerHookId, "createOrderTrigger.triggerHookId");
+      const triggerStageId = normalizeBytes32(createOrderTrigger.triggerStageId, "createOrderTrigger.triggerStageId");
+      const typedData = buildTriggerOrderFromOutsideTypedData({
+        chainId: triggerChainId,
+        verifyingContract: stateMachineAddress,
+        orderId,
+        planId: draft.planId,
+        creator,
+        triggerHookId,
+        triggerStageId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        authorizations: builtAuthorization.authorizations,
+        submitter,
+        deadline
+      });
+      const registration: ProductOrderTriggerRecord = {
+        triggerId,
+        prepareId,
         draftId,
         orderId,
-        ...(activeDeployment ? {
-          stateMachineAddress: normalizeAddress(activeDeployment.stateMachineAddress, "activeStateMachineAddress"),
-          deploymentId: normalizeBytes32(activeDeployment.deploymentId, "activeDeploymentId")
-        } : {}),
+        stateMachineAddress,
+        deploymentId,
         planId: draft.planId,
         planHash: draft.planHash,
-        status: "pending",
+        status: "prepared",
         retryable: false,
-        createdAt,
+        submitter,
+        sourceId,
+        signalId,
+        triggerHookId,
+        triggerStageId,
+        payloadHash,
+        idempotencyKey,
+        deadline,
+        typedData,
+        createdAt: existingRegistration?.createdAt ?? createdAt,
         updatedAt: createdAt,
         creator,
         authorizations: builtAuthorization.authorizations,
         permissions: builtAuthorization.permissions
       };
-      const registering: ProductOrderDraftDTO = {
+      const readyDraft: ProductOrderDraftDTO = {
         ...draft,
-        status: "registering",
+        status: "ready_to_trigger",
         updatedAt: createdAt
       };
       await withProductStoreTransaction(store, async () => {
-        await store.createRegistration(registration);
-        await store.updateDraft(registering);
+        if (existingRegistration) {
+          await store.updateRegistration(registration);
+        } else {
+          await store.createRegistration(registration);
+        }
+        await store.updateDraft(readyDraft);
       });
-      const broadcasted = await broadcastRegistration({
-        registrationAdapter,
-        store,
-        draft: registering,
-        registration,
-        now
-      });
-      return submitResultFromRegistration(broadcasted.draft, participants, broadcasted.registration);
+      return prepareResultFromRegistration(readyDraft, participants, registration);
     },
 
-    async getRegistration(registrationId) {
-      return registrationDtoFromRecord(await requireRegistration(store, registrationId));
+    async getRegistration(triggerId) {
+      return registrationDtoFromRecord(await requireRegistration(store, triggerId));
     },
 
-    async retryRegistration(registrationId) {
-      const current = await requireRegistration(store, registrationId);
-      if (current.status !== "failed" || !current.retryable) {
-        throw new ProductBffError(409, "registration_not_retryable", "registration is not retryable", {
-          status: current.status,
-          retryable: current.retryable
+    async triggerOrder(draftId, input) {
+      const draft = await requireDraft(store, draftId);
+      const participants = await store.listParticipants(draftId);
+      const registration = await requireRegistrationByDraft(store, draftId);
+      if (registration.prepareId !== input.prepareId) {
+        throw new ProductBffError(409, "prepare_id_mismatch", "trigger prepareId does not match the latest prepared trigger", {
+          expectedPrepareId: registration.prepareId
         });
       }
-      const draft = await requireDraft(store, current.draftId);
-      const participants = await store.listParticipants(current.draftId);
-      requireAcceptedRequiredParticipants(participants);
-      const zhixu = await requireActiveZhixu(options.productService, draft.zhixuId, options.versionResolver);
-      assertDraftUsesActiveZhixuVersion(draft, zhixu);
-      await rejectRevokedSupplierParticipants(participants, options.supplierTrustResolver);
-
-      const updatedAt = now().toISOString();
-      const pending: ProductOrderRegistrationRecord = {
-        registrationId: current.registrationId,
-        draftId: current.draftId,
-        orderId: current.orderId,
-        planId: current.planId,
-        planHash: current.planHash,
-        ...(current.stateMachineAddress ? { stateMachineAddress: current.stateMachineAddress } : {}),
-        ...(current.deploymentId ? { deploymentId: current.deploymentId } : {}),
-        status: "pending",
-        retryable: false,
-        createdAt: current.createdAt,
-        updatedAt,
-        creator: current.creator,
-        authorizations: current.authorizations,
-        permissions: current.permissions
-      };
-      const registering: ProductOrderDraftDTO = {
-        ...draft,
-        status: "registering",
-        updatedAt
-      };
-      await withProductStoreTransaction(store, async () => {
-        await store.updateRegistration(pending);
-        await store.updateDraft(registering);
-      });
-      const broadcasted = await broadcastRegistration({
-        registrationAdapter,
-        store,
-        draft: registering,
-        registration: pending,
-        now
-      });
-      return submitResultFromRegistration(broadcasted.draft, participants, broadcasted.registration);
-    },
-
-    async startRegistration(registrationId) {
-      const registration = await requireRegistration(store, registrationId);
-      if (registration.status !== "confirmed") {
-        throw new ProductBffError(409, "registration_not_confirmed", "order registration must be confirmed before start", {
+      if (registration.status !== "prepared" && !(registration.status === "failed" && registration.retryable)) {
+        throw new ProductBffError(409, "trigger_not_prepared", "order trigger is not in prepared state", {
           status: registration.status
         });
       }
-      if (!registration.orderId) {
-        throw new ProductBffError(409, "order_id_missing", "order registration has no orderId");
-      }
-
-      const existing = await store.getOrderStartByRegistrationId(registrationId);
-      if (existing) {
-        if (existing.status !== "failed") {
-          return {
-            registration: registrationDtoFromRecord(registration),
-            start: startDtoFromRecord(existing)
-          };
-        }
-        if (!existing.retryable) {
-          throw new ProductBffError(409, "start_not_retryable", "order start is not retryable", {
-            status: existing.status,
-            retryable: existing.retryable
-          });
-        }
-        const retried = await broadcastOrderStart({
-          triggerAdapter,
-          store,
-          start: existing,
-          registration,
-          now
+      const submitter = normalizeAddress(input.walletAddress, "walletAddress");
+      if (!registration.submitter || submitter !== registration.submitter) {
+        throw new ProductBffError(403, "wrong_wallet", "connected wallet does not match trigger submitter", {
+          submitter: registration.submitter,
+          walletAddress: submitter
         });
-        return startResultOrThrow(registration, retried);
       }
-
-      const createdAt = now().toISOString();
-      const start: ProductOrderStartDTO = {
-        startId: nextId("start", idScope, sequence++),
-        registrationId,
-        draftId: registration.draftId,
-        orderId: registration.orderId,
-        ...(registration.stateMachineAddress ? { stateMachineAddress: registration.stateMachineAddress } : {}),
-        ...(registration.deploymentId ? { deploymentId: registration.deploymentId } : {}),
-        status: "pending",
+      assertPrepareNotExpired(registration, now());
+      const recovered = await recoverTriggerSigner(registration.typedData, input.signature);
+      if (recovered !== registration.submitter) {
+        throw new ProductBffError(403, "invalid_trigger_signature", "trigger signature was not produced by the prepared submitter", {
+          recovered,
+          submitter: registration.submitter
+        });
+      }
+      const signature = normalizeHexSignature(input.signature);
+      const updatedAt = now().toISOString();
+      const submitting: ProductOrderTriggerRecord = {
+        ...registration,
+        status: "submitted",
+        signature,
         retryable: false,
-        createdAt,
-        updatedAt: createdAt
+        updatedAt
       };
-      await store.createOrderStart(start);
-      const broadcasted = await broadcastOrderStart({
+      await withProductStoreTransaction(store, async () => {
+        await store.updateRegistration(submitting);
+        await store.updateDraft({ ...draft, status: "triggering", updatedAt });
+      });
+      const broadcasted = await broadcastOutsideTrigger({
         triggerAdapter,
         store,
-        start,
-        registration,
+        draft,
+        registration: submitting,
         now
       });
-      return startResultOrThrow(registration, broadcasted);
+      return submitResultFromRegistration(broadcasted.draft, participants, broadcasted.registration);
     },
 
     async createInvite(draftId, input) {
@@ -519,7 +511,7 @@ export function createProductBffService(options: ProductBffServiceOptions): Prod
         assignments.push({
           participant,
           draft,
-          ...(registration ? { registration: registrationDtoFromRecord(registration) } : {}),
+          ...(registration ? { trigger: registrationDtoFromRecord(registration) } : {}),
           permissions
         });
       }
@@ -794,11 +786,22 @@ function participantPermissionsForWallet(
 
 async function requireRegistration(
   store: ProductBffStore,
-  registrationId: string
-): Promise<ProductOrderRegistrationRecord> {
-  const registration = await store.getRegistration(registrationId);
+  triggerId: string
+): Promise<ProductOrderTriggerRecord> {
+  const registration = await store.getRegistration(triggerId);
   if (!registration) {
-    throw new ProductBffError(404, "registration_not_found", "order registration not found");
+    throw new ProductBffError(404, "trigger_not_found", "order trigger not found");
+  }
+  return registration;
+}
+
+async function requireRegistrationByDraft(
+  store: ProductBffStore,
+  draftId: string
+): Promise<ProductOrderTriggerRecord> {
+  const registration = await store.getRegistrationByDraft(draftId);
+  if (!registration) {
+    throw new ProductBffError(404, "trigger_not_found", "order draft has no prepared trigger");
   }
   return registration;
 }
@@ -808,13 +811,13 @@ async function refreshDraftStatus(
   draft: ProductOrderDraftDTO,
   now: () => Date
 ): Promise<ProductOrderDraftDTO> {
-  if (draft.status === "registered" || draft.status === "cancelled") {
+  if (draft.status === "triggering" || draft.status === "triggered" || draft.status === "failed" || draft.status === "cancelled") {
     return draft;
   }
   const participants = await store.listParticipants(draft.draftId);
   const required = participants.filter((participant) => participant.required);
   const status: ProductOrderDraftStatus = required.length > 0 && required.every((participant) => participant.status === "accepted")
-    ? "ready_to_register"
+    ? "ready_to_trigger"
     : participants.some((participant) => participant.status !== "missing")
       ? "awaiting_participants"
       : "draft";
@@ -835,8 +838,23 @@ function hashHex(value: string): `0x${string}` {
   return `0x${createHash("sha256").update(value).digest("hex")}`;
 }
 
-function stableOrderId(draft: ProductOrderDraftDTO): Hex {
-  return hashHex(`uvp:product-bff:order:v1:${draft.draftId}:${draft.planId}`);
+function randomOrderId(draft: ProductOrderDraftDTO, idScope: string, sequence: number): Hex {
+  return hashHex(`uvp:product-bff:order:v2:${draft.draftId}:${draft.planId}:${idScope}:${sequence}:${randomUUID()}`);
+}
+
+function assertPrepareNotExpired(registration: ProductOrderTriggerRecord, currentTime: Date): void {
+  if (!isPrepareExpired(registration, currentTime)) {
+    return;
+  }
+  throw new ProductBffError(409, "trigger_prepare_expired", "prepared trigger typed data has expired", {
+    prepareId: registration.prepareId,
+    deadline: registration.deadline
+  });
+}
+
+function isPrepareExpired(registration: ProductOrderTriggerRecord, currentTime: Date): boolean {
+  const deadlineSeconds = Number.parseInt(registration.deadline, 10);
+  return !Number.isFinite(deadlineSeconds) || deadlineSeconds * 1000 <= currentTime.getTime();
 }
 
 function creatorForDraft(draft: ProductOrderDraftDTO, fallback: Address): Address {
@@ -851,6 +869,62 @@ function creatorForDraft(draft: ProductOrderDraftDTO, fallback: Address): Addres
     }
     throw error;
   }
+}
+
+async function requireActiveStateMachineDeployment(
+  productService: ProductService
+): Promise<{ readonly deploymentId: string; readonly stateMachineAddress: string }> {
+  const deployment = await productService.getActiveStateMachineDeployment();
+  if (!deployment) {
+    throw new ProductBffError(409, "state_machine_deployment_missing", "active UVPStateMachine deployment is required for trigger typed data");
+  }
+  return deployment;
+}
+
+function requireCreateOrderTrigger(zhixu: ZhixuDetailDTO): NonNullable<ZhixuDetailDTO["createOrderTrigger"]> {
+  if (!zhixu.createOrderTrigger) {
+    throw new ProductBffError(409, "create_order_trigger_missing", "zhixu Product schema must declare createOrderTrigger");
+  }
+  return zhixu.createOrderTrigger;
+}
+
+function requireTriggerSubmitter(
+  draft: ProductOrderDraftDTO,
+  participants: readonly DraftParticipantDTO[],
+  walletAddress: string,
+  creator: Address
+): Address {
+  const submitter = normalizeAddress(walletAddress, "walletAddress");
+  if (submitter === creator) {
+    return submitter;
+  }
+  const participant = participants.find((item) =>
+    item.status === "accepted" &&
+    item.walletAddress &&
+    normalizeAddress(item.walletAddress, "participant.walletAddress") === submitter
+  );
+  if (participant) {
+    return submitter;
+  }
+  throw new ProductBffError(403, "trigger_submitter_not_authorized", "trigger submitter must be the draft creator or an accepted participant", {
+    draftId: draft.draftId,
+    walletAddress: submitter
+  });
+}
+
+async function recoverTriggerSigner(typedData: unknown, signature: string): Promise<Address> {
+  try {
+    return await recoverTriggerOrderFromOutsideSigner(typedData as TriggerOrderFromOutsideTypedData, signature);
+  } catch (error) {
+    throw new ProductBffError(400, "invalid_trigger_signature", error instanceof Error ? error.message : "invalid trigger signature");
+  }
+}
+
+function normalizeHexSignature(signature: string): Hex {
+  if (!/^0x[0-9a-fA-F]+$/.test(signature)) {
+    throw new ProductBffError(400, "invalid_trigger_signature", "signature must be a hex string");
+  }
+  return signature.toLowerCase() as Hex;
 }
 
 function requireAcceptedRequiredParticipants(participants: readonly DraftParticipantDTO[]): void {
@@ -907,7 +981,7 @@ async function rejectRevokedSupplierParticipants(
         roleSlotId: participant.roleSlotId,
         walletAddress: wallet,
         supplierSubjectId: supplierTrust.supplierSubjectId,
-        domainId: supplierTrust.domainId,
+        registryAddress: supplierTrust.registryAddress,
         updatedAtBlock: supplierTrust.updatedAt.blockNumber.toString()
       }
     );
@@ -938,61 +1012,6 @@ function buildAuthorizations<T>(build: () => T): T {
   }
 }
 
-async function broadcastRegistration(input: {
-  readonly registrationAdapter: ProductOrderRegistrationAdapter;
-  readonly store: ProductBffStore;
-  readonly draft: ProductOrderDraftDTO;
-  readonly registration: ProductOrderRegistrationRecord;
-  readonly now: () => Date;
-}): Promise<{ readonly draft: ProductOrderDraftDTO; readonly registration: ProductOrderRegistrationRecord }> {
-  const broadcast = await safeRegisterOrder(input.registrationAdapter, input.registration);
-  const updatedAt = input.now().toISOString();
-  const registration: ProductOrderRegistrationRecord = {
-    registrationId: input.registration.registrationId,
-    draftId: input.registration.draftId,
-    orderId: input.registration.orderId,
-    ...(input.registration.stateMachineAddress ? { stateMachineAddress: input.registration.stateMachineAddress } : {}),
-    ...(input.registration.deploymentId ? { deploymentId: input.registration.deploymentId } : {}),
-    planId: input.registration.planId,
-    planHash: input.registration.planHash,
-    status: broadcast.status,
-    ...(broadcast.txHash ? { txHash: broadcast.txHash } : {}),
-    ...(broadcast.blockNumber ? { blockNumber: broadcast.blockNumber } : {}),
-    ...(broadcast.errorCode ? { errorCode: broadcast.errorCode } : {}),
-    ...(broadcast.errorMessage ? { errorMessage: broadcast.errorMessage } : {}),
-    retryable: broadcast.retryable,
-    createdAt: input.registration.createdAt,
-    updatedAt,
-    creator: input.registration.creator,
-    authorizations: input.registration.authorizations,
-    permissions: input.registration.permissions
-  };
-  const draft = draftFromRegistration(input.draft, registration, updatedAt);
-  await withProductStoreTransaction(input.store, async () => {
-    await input.store.updateRegistration(registration);
-    await input.store.updateDraft(draft);
-  });
-  return { draft, registration };
-}
-
-async function broadcastOrderStart(input: {
-  readonly triggerAdapter: ProductOrderTriggerAdapter;
-  readonly store: ProductBffStore;
-  readonly start: ProductOrderStartDTO;
-  readonly registration: ProductOrderRegistrationRecord;
-  readonly now: () => Date;
-}): Promise<ProductOrderStartDTO> {
-  const pending = pendingOrderStart(input.start, input.now().toISOString());
-  if (input.start.status !== "pending" || input.start.retryable || input.start.txHash || input.start.errorCode) {
-    await input.store.updateOrderStart(pending.startId, orderStartPatchFromRecord(pending));
-  }
-
-  const broadcast = await safeSubmitInitialTrigger(input.triggerAdapter, pending, input.registration);
-  const updatedAt = input.now().toISOString();
-  const start = orderStartFromTriggerResult(pending, broadcast, updatedAt);
-  return await input.store.updateOrderStart(start.startId, orderStartPatchFromRecord(start)) ?? start;
-}
-
 async function withProductStoreTransaction<T>(
   store: ProductBffStore,
   operation: () => Promise<T>
@@ -1000,131 +1019,189 @@ async function withProductStoreTransaction<T>(
   return store.withTransaction ? store.withTransaction(operation) : operation();
 }
 
-async function safeRegisterOrder(
-  registrationAdapter: ProductOrderRegistrationAdapter,
-  registration: ProductOrderRegistrationRecord
-): Promise<ProductRegistrationAdapterResult> {
+async function broadcastOutsideTrigger(input: {
+  readonly triggerAdapter: ProductOrderTriggerBroadcastAdapter;
+  readonly store: ProductBffStore;
+  readonly draft: ProductOrderDraftDTO;
+  readonly registration: ProductOrderTriggerRecord;
+  readonly now: () => Date;
+}): Promise<{ readonly draft: ProductOrderDraftDTO; readonly registration: ProductOrderTriggerRecord }> {
+  const broadcast = await safeBroadcastOutsideTrigger(input.triggerAdapter, input.registration);
+  const updatedAt = input.now().toISOString();
+  const registration: ProductOrderTriggerRecord = {
+    ...input.registration,
+    status: broadcast.status,
+    ...(broadcast.txHash ? { txHash: broadcast.txHash } : {}),
+    ...(broadcast.blockNumber ? { blockNumber: broadcast.blockNumber } : {}),
+    ...(broadcast.errorCode ? { errorCode: broadcast.errorCode } : {}),
+    ...(broadcast.errorMessage ? { errorMessage: broadcast.errorMessage } : {}),
+    retryable: broadcast.retryable,
+    updatedAt
+  };
+  const draft = draftFromTriggerBroadcast(input.draft, registration, updatedAt);
+  await withProductStoreTransaction(input.store, async () => {
+    await input.store.updateRegistration(registration);
+    await input.store.updateDraft(draft);
+  });
+  if (registration.status === "failed") {
+    throw new ProductBffError(
+      502,
+      registration.errorCode ?? "trigger_order_failed",
+      registration.errorMessage ?? "trigger order transaction failed",
+      submitResultFromRegistration(draft, await input.store.listParticipants(draft.draftId), registration)
+    );
+  }
+  return { draft, registration };
+}
+
+async function safeBroadcastOutsideTrigger(
+  triggerAdapter: ProductOrderTriggerBroadcastAdapter,
+  registration: ProductOrderTriggerRecord
+): Promise<ProductOrderTriggerBroadcastResult> {
   try {
-    return await registrationAdapter.registerOrder({
-      registrationId: registration.registrationId,
+    if (!registration.signature) {
+      throw new ProductBffError(400, "trigger_signature_missing", "business wallet signature is required");
+    }
+    if (
+      !registration.submitter ||
+      !registration.sourceId ||
+      !registration.signalId ||
+      !registration.triggerHookId ||
+      !registration.triggerStageId ||
+      !registration.payloadHash ||
+      !registration.idempotencyKey ||
+      !registration.deadline
+    ) {
+      throw new ProductBffError(409, "trigger_record_incomplete", "prepared trigger record is incomplete");
+    }
+    return await triggerAdapter.broadcastOutsideTrigger({
+      triggerId: registration.triggerId,
       draftId: registration.draftId,
       orderId: registration.orderId,
-      ...(registration.stateMachineAddress ? { stateMachineAddress: registration.stateMachineAddress } : {}),
-      ...(registration.deploymentId ? { deploymentId: registration.deploymentId } : {}),
       planId: registration.planId,
       creator: registration.creator,
+      triggerHookId: registration.triggerHookId,
+      triggerStageId: registration.triggerStageId,
+      sourceId: registration.sourceId,
+      signalId: registration.signalId,
+      payloadHash: registration.payloadHash,
+      idempotencyKey: registration.idempotencyKey,
+      submitter: registration.submitter,
+      deadline: registration.deadline,
+      signature: registration.signature,
+      ...(registration.stateMachineAddress ? { stateMachineAddress: registration.stateMachineAddress } : {}),
+      ...(registration.deploymentId ? { deploymentId: registration.deploymentId } : {}),
       authorizations: registration.authorizations
     });
   } catch (error) {
     return {
       status: "failed",
-      errorCode: "register_order_adapter_failed",
-      errorMessage: error instanceof Error ? error.message : "registerOrder adapter failed",
+      errorCode: error instanceof ProductBffError ? error.code : "trigger_order_adapter_failed",
+      errorMessage: error instanceof Error ? error.message : "trigger order adapter failed",
       retryable: true
     };
   }
 }
 
-async function safeSubmitInitialTrigger(
-  triggerAdapter: ProductOrderTriggerAdapter,
-  start: ProductOrderStartDTO,
-  registration: ProductOrderRegistrationRecord
-): Promise<ProductOrderTriggerResult> {
-  try {
-    const signal = initialTriggerSignalForRegistration(registration);
-    return await triggerAdapter.submitInitialTrigger({
-      startId: start.startId,
-      registrationId: start.registrationId,
-      orderId: start.orderId,
-      sourceId: signal.sourceId,
-      signalId: signal.signalId,
-      ...(start.stateMachineAddress ? { stateMachineAddress: start.stateMachineAddress } : {}),
-      ...(start.deploymentId ? { deploymentId: start.deploymentId } : {}),
-      ...(registration.txHash ? { registrationTxHash: registration.txHash } : {}),
-      ...(registration.blockNumber ? { registrationBlockNumber: registration.blockNumber } : {}),
-      payloadHash: initialTriggerPayloadHash(start),
-      idempotencyKey: initialTriggerIdempotencyKey(start)
-    });
-  } catch (error) {
-    return {
-      status: "failed",
-      errorCode: "submit_initial_trigger_adapter_failed",
-      errorMessage: error instanceof Error ? error.message : "submitInitialTrigger adapter failed",
-      retryable: true
-    };
-  }
-}
-
-function initialTriggerSignalForRegistration(
-  registration: ProductOrderRegistrationRecord
-): { readonly sourceId: Hex; readonly signalId: Hex } {
-  const permission = registration.permissions.find((item) => item.permissionId === ORDER_INITIAL_TRIGGER_PERMISSION_ID);
-  if (!permission) {
-    throw new Error(`registration ${registration.registrationId} is missing ${ORDER_INITIAL_TRIGGER_PERMISSION_ID}`);
-  }
-  return {
-    sourceId: productSignalSourceId(permission.source),
-    signalId: productSignalId(permission.signalName)
-  };
-}
-
-function draftFromRegistration(
+function draftFromTriggerBroadcast(
   draft: ProductOrderDraftDTO,
-  registration: ProductOrderRegistrationRecord,
+  registration: ProductOrderTriggerRecord,
   updatedAt: string
 ): ProductOrderDraftDTO {
   if (registration.status === "confirmed") {
     return {
       ...draft,
-      status: "registered",
-      registeredOrderId: registration.orderId,
-      ...(registration.txHash ? { registrationTxHash: registration.txHash } : {}),
+      status: "triggered",
+      triggeredOrderId: registration.orderId,
+      ...(registration.txHash ? { triggerTxHash: registration.txHash } : {}),
       updatedAt
     };
   }
-
+  if (registration.status === "failed") {
+    return {
+      ...draft,
+      status: "failed",
+      updatedAt
+    };
+  }
   return {
     ...draft,
-    status: registration.status === "failed" && registration.retryable ? "ready_to_register" : "registering",
+    status: "triggering",
     updatedAt
+  };
+}
+
+function prepareResultFromRegistration(
+  draft: ProductOrderDraftDTO,
+  participants: readonly DraftParticipantDTO[],
+  registration: ProductOrderTriggerRecord
+): PrepareProductOrderTriggerResult {
+  return {
+    draft,
+    participants,
+    permissions: registration.permissions,
+    trigger: registrationDtoFromRecord(registration),
+    prepared: preparedTriggerFromRegistration(registration, draft)
+  };
+}
+
+function preparedTriggerFromRegistration(
+  registration: ProductOrderTriggerRecord,
+  draft: ProductOrderDraftDTO
+): PreparedProductOrderTriggerDTO {
+  if (
+    !registration.prepareId ||
+    !registration.submitter ||
+    !registration.sourceId ||
+    !registration.signalId ||
+    !registration.triggerHookId ||
+    !registration.triggerStageId ||
+    !registration.deadline ||
+    !registration.typedData
+  ) {
+    throw new ProductBffError(409, "trigger_record_incomplete", "prepared trigger record is incomplete");
+  }
+  return {
+    prepareId: registration.prepareId,
+    triggerId: registration.triggerId,
+    draftId: registration.draftId,
+    orderId: registration.orderId,
+    expiresAt: new Date(Number.parseInt(registration.deadline, 10) * 1000).toISOString(),
+    submitter: registration.submitter,
+    typedData: registration.typedData,
+    summary: {
+      orderTitle: draft.title,
+      planId: registration.planId,
+      sourceId: registration.sourceId,
+      signalId: registration.signalId,
+      triggerHookId: registration.triggerHookId,
+      triggerStageId: registration.triggerStageId,
+      walletAddress: registration.submitter
+    }
   };
 }
 
 function submitResultFromRegistration(
   draft: ProductOrderDraftDTO,
   participants: readonly DraftParticipantDTO[],
-  registration: ProductOrderRegistrationRecord
+  registration: ProductOrderTriggerRecord
 ): SubmitProductOrderDraftResult {
   return {
     draft,
     participants,
     permissions: registration.permissions,
-    registration: registrationDtoFromRecord(registration)
+    trigger: registrationDtoFromRecord(registration)
   };
 }
 
-function startResultOrThrow(
-  registration: ProductOrderRegistrationRecord,
-  start: ProductOrderStartDTO
-): StartProductOrderRegistrationResult {
-  const result = {
-    registration: registrationDtoFromRecord(registration),
-    start: startDtoFromRecord(start)
-  };
-  if (start.status === "failed") {
-    throw new ProductBffError(
-      502,
-      start.errorCode ?? "order_start_failed",
-      start.errorMessage ?? "order start transaction failed",
-      result
-    );
-  }
-  return result;
-}
-
-function registrationDtoFromRecord(registration: ProductOrderRegistrationRecord): ProductOrderRegistrationDTO {
+function registrationDtoFromRecord(registration: ProductOrderTriggerRecord): ProductOrderTriggerDTO {
   const {
     creator: _creator,
+    payloadHash: _payloadHash,
+    idempotencyKey: _idempotencyKey,
+    deadline: _deadline,
+    typedData: _typedData,
+    signature: _signature,
     authorizations: _authorizations,
     permissions: _permissions,
     ...dto
@@ -1135,14 +1212,7 @@ function registrationDtoFromRecord(registration: ProductOrderRegistrationRecord)
   };
 }
 
-function startDtoFromRecord(start: ProductOrderStartDTO): ProductOrderStartDTO {
-  return {
-    ...defaultStartReconcileFields(start),
-    ...start
-  };
-}
-
-function defaultRegistrationReconcileFields(registration: ProductOrderRegistrationRecord): TxReconcileFields {
+function defaultRegistrationReconcileFields(registration: ProductOrderTriggerRecord): TxReconcileFields {
   if (registration.reconcileStatus || registration.receiptStatus || registration.projectionStatus) {
     return {};
   }
@@ -1167,119 +1237,15 @@ function defaultRegistrationReconcileFields(registration: ProductOrderRegistrati
       projectionStatus: "missing"
     };
   }
+  if (registration.status === "prepared" || registration.status === "expired") {
+    return {
+      receiptStatus: "not_checked",
+      projectionStatus: "not_checked"
+    };
+  }
   return {
     reconcileStatus: registration.txHash ? "submitted" : "broadcasting",
     receiptStatus: "not_checked",
     projectionStatus: "not_checked"
   };
-}
-
-function defaultStartReconcileFields(start: ProductOrderStartDTO): TxReconcileFields {
-  if (start.reconcileStatus || start.receiptStatus || start.projectionStatus) {
-    return {};
-  }
-  if (start.status === "confirmed") {
-    return {
-      reconcileStatus: "confirmed",
-      receiptStatus: start.txHash ? "success" : "not_checked",
-      projectionStatus: "present"
-    };
-  }
-  if (start.status === "failed") {
-    return {
-      reconcileStatus: "failed",
-      receiptStatus: start.txHash ? "failed" : "not_checked",
-      projectionStatus: "not_checked"
-    };
-  }
-  if (start.status === "indexing") {
-    return {
-      reconcileStatus: "indexing",
-      receiptStatus: "success",
-      projectionStatus: "missing"
-    };
-  }
-  return {
-    reconcileStatus: start.txHash ? "submitted" : "broadcasting",
-    receiptStatus: "not_checked",
-    projectionStatus: "not_checked"
-  };
-}
-
-function pendingOrderStart(start: ProductOrderStartDTO, updatedAt: string): ProductOrderStartDTO {
-  return {
-    startId: start.startId,
-    registrationId: start.registrationId,
-    draftId: start.draftId,
-    orderId: start.orderId,
-    ...(start.stateMachineAddress ? { stateMachineAddress: start.stateMachineAddress } : {}),
-    ...(start.deploymentId ? { deploymentId: start.deploymentId } : {}),
-    status: "pending",
-    retryable: false,
-    createdAt: start.createdAt,
-    updatedAt
-  };
-}
-
-function orderStartFromTriggerResult(
-  start: ProductOrderStartDTO,
-  result: ProductOrderTriggerResult,
-  updatedAt: string
-): ProductOrderStartDTO {
-  return {
-    startId: start.startId,
-    registrationId: start.registrationId,
-    draftId: start.draftId,
-    orderId: start.orderId,
-    ...(start.stateMachineAddress ? { stateMachineAddress: start.stateMachineAddress } : {}),
-    ...(start.deploymentId ? { deploymentId: start.deploymentId } : {}),
-    status: result.status,
-    ...(result.txHash ? { txHash: result.txHash } : {}),
-    ...(result.blockNumber ? { blockNumber: result.blockNumber } : {}),
-    ...(result.errorCode ? { errorCode: result.errorCode } : {}),
-    ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-    retryable: result.retryable,
-    createdAt: start.createdAt,
-    updatedAt
-  };
-}
-
-function orderStartPatchFromRecord(start: ProductOrderStartDTO): ProductOrderStartPatch {
-  return {
-    status: start.status,
-    txHash: start.txHash ?? null,
-    blockNumber: start.blockNumber ?? null,
-    errorCode: start.errorCode ?? null,
-    errorMessage: start.errorMessage ?? null,
-    retryable: start.retryable,
-    reconcileStatus: start.reconcileStatus ?? null,
-    lastCheckedAt: start.lastCheckedAt ?? null,
-    receiptStatus: start.receiptStatus ?? null,
-    projectionStatus: start.projectionStatus ?? null,
-    updatedAt: start.updatedAt
-  };
-}
-
-function initialTriggerPayloadHash(start: ProductOrderStartDTO): Hex {
-  return hashHex(`uvp:product-bff:start:payload:v1:${start.registrationId}:${start.orderId}`);
-}
-
-function initialTriggerIdempotencyKey(start: ProductOrderStartDTO): Hex {
-  return hashHex(`uvp:product-bff:start:idempotency:v1:${start.registrationId}:${start.orderId}`);
-}
-
-function matchingTriggerAdapterFromRegistrationAdapter(
-  registrationAdapter: ProductOrderRegistrationAdapter,
-  registrarAddress: Address
-): ProductOrderTriggerAdapter | undefined {
-  if (
-    "submitInitialTrigger" in registrationAdapter &&
-    typeof registrationAdapter.submitInitialTrigger === "function"
-  ) {
-    const triggerAdapter = registrationAdapter as ProductOrderRegistrationAdapter & ProductOrderTriggerAdapter;
-    if (!triggerAdapter.registrarAddress || triggerAdapter.registrarAddress === registrarAddress) {
-      return triggerAdapter;
-    }
-  }
-  return undefined;
 }

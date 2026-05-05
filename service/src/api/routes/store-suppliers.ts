@@ -1,4 +1,5 @@
 import { GovernanceServiceError } from "../../governance/index.js";
+import { SupplierNotificationConfigError } from "../../notifications/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError } from "../../shared/types.js";
 import {
@@ -66,6 +67,22 @@ export function createStoreSuppliersRouteModule(): RouteModule {
             await recordStoreCapabilityFailure(context, request, authorization.access, capability, { type: "store_supplier" }, error);
             throw error;
           }
+        }
+
+        const notificationProfileMatch = /^\/store\/suppliers\/([^/]+)\/notification-profile(?:\/(prepare))?$/.exec(request.pathname);
+        if (request.method === "POST" && notificationProfileMatch) {
+          const supplierId = decodeURIComponent(notificationProfileMatch[1] ?? "");
+          const action = notificationProfileMatch[2];
+          if (action === "prepare") {
+            return {
+              status: 200,
+              body: await context.storeSupplierService.prepareNotificationProfile(supplierId, request.body)
+            };
+          }
+          return {
+            status: 201,
+            body: await context.storeSupplierService.saveNotificationProfile(supplierId, request.body)
+          };
         }
 
         const supplierMatch = /^\/store\/suppliers\/([^/]+)(?:\/(review|request-attestation|request-revocation))?$/.exec(request.pathname);
@@ -180,6 +197,16 @@ export function createStoreSuppliersRouteModule(): RouteModule {
             }
           };
         }
+        if (error instanceof SupplierNotificationConfigError) {
+          return {
+            status: error.status,
+            body: {
+              error: error.code,
+              message: redactErrorMessage(error),
+              ...(error.details !== undefined ? { details: error.details } : {})
+            }
+          };
+        }
         if (error instanceof ConfigError) {
           return {
             status: 400,
@@ -251,14 +278,8 @@ async function supplierConfirmationError(
     if (action === "review" && !isSensitiveReviewStatus(optionalString(body, "reviewStatus"))) {
       return undefined;
     }
-    const supplier = action === "request-attestation" || action === "request-revocation"
-      ? await context.storeSupplierService.getSupplier(supplierId)
-      : undefined;
     requireStoreConfirmation(request.body, {
-      supplierId,
-      domainId: action === "request-attestation" || action === "request-revocation"
-        ? optionalString(body, "domainId") ?? supplier?.domains[0]
-        : undefined
+      supplierId
     });
     return undefined;
   } catch (error) {

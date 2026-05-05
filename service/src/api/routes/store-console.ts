@@ -591,7 +591,6 @@ async function draftAttestationConfirmationError(
     const draft = await context.storeZhixuDraftWorkflowService.getDraft(draftId);
     requireStoreConfirmation(request.body, {
       draftId,
-      domainId: optionalString(body, "domainId"),
       planId: draft?.compilePreview?.planId,
       planHash: draft?.compilePreview?.planHash
     });
@@ -618,8 +617,7 @@ async function storeVersionConfirmationError(
     requireStoreConfirmation(request.body, {
       versionId,
       planId: optionalString(body, "planId") ?? version?.planId,
-      planHash: optionalString(body, "planHash") ?? version?.planHash,
-      domainId: action === "request-revocation" ? optionalString(body, "domainId") : undefined
+      planHash: optionalString(body, "planHash") ?? version?.planHash
     });
     return undefined;
   } catch (error) {
@@ -771,12 +769,10 @@ function parseStoreVersionMutationBody(body: unknown): StoreZhixuVersionMutation
 
 function parseStoreVersionRevocationBody(body: unknown): StoreZhixuVersionRevocationInput {
   const record = optionalBodyRecord(body);
-  const domainId = optionalString(record, "domainId");
   const reason = optionalString(record, "reason");
   const publicSummary = optionalString(record, "publicSummary");
   return {
     ...parseStoreVersionMutationBody(record),
-    ...(domainId !== undefined ? { domainId } : {}),
     ...(reason !== undefined ? { reason } : {}),
     ...(publicSummary !== undefined ? { publicSummary } : {}),
     ...(Object.hasOwn(record, "metadata") ? { metadata: record.metadata } : {})

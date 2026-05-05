@@ -298,7 +298,7 @@ async function parseParticipantViewQuery(
 }
 
 function productParticipantIdentityFromAssignment(assignment: ProductParticipantAssignmentDTO): ProductParticipantIdentityDTO {
-  const orderId = assignment.registration?.orderId ?? assignment.draft.registeredOrderId;
+  const orderId = assignment.trigger?.orderId ?? assignment.draft.triggeredOrderId;
   return {
     participantId: assignment.participant.participantId,
     displayName: assignment.participant.displayName,

@@ -19,9 +19,14 @@ const stateMachineAbi = parseAbi([
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",
   "event PlanPublisherRecorded(bytes32 indexed planId,address indexed publisher)",
   "event OrderRegistered(bytes32 indexed orderId,bytes32 indexed planId)",
+  "event OrderMaterialized(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed stageId)",
   "event OrderRegistrarRecorded(bytes32 indexed orderId,address indexed registrar,address indexed creator)",
   "event SignalSubmitterAuthorized(bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 indexed signalId,address submitter,bytes32 role,bytes32 metadataHash)",
   "event SignalSubmitted(bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 indexed signalId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
+  "event StageMaterialized(bytes32 indexed orderId,bytes32 indexed stageId,bytes32 indexed triggerHookId,bytes32 sourceId,bytes32 signalId)",
+  "event SignalCapabilityRegistered(bytes32 indexed planId,bytes32 indexed stageId,bytes32 indexed targetSourceId,bytes32 signalId,uint8 targetOrderRelation)",
+  "event OrderTriggered(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed triggerStageId,bytes32 sourceId,bytes32 signalId,address submitter)",
+  "event OrderLinked(bytes32 indexed childOrderId,bytes32 indexed parentOrderId,bytes32 indexed triggerStageId,bytes32 originSourceId,bytes32 originSignalId)",
   "event StageSelectorBindingRegistered(bytes32 indexed planId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId)",
   "event StageExecutorPatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,address selector,address executor,bytes32 role,bytes32 executorMetadataHash,bytes32 mode,address previousExecutor,bytes32 approvalSourceId,bytes32 approvalSignalId,bytes32 patchHash,uint256 patchNonce,string metadataURI)",
   "event StageResourcePatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,address selector,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI)",
@@ -35,17 +40,15 @@ const stateMachineAbi = parseAbi([
 ]);
 
 const trustRegistryAbi = parseAbi([
-  "event DomainRegistered(bytes32 indexed domainId,address indexed owner,bytes32 metadataHash,string metadataURI)",
-  "event DomainUpdated(bytes32 indexed domainId,bytes32 metadataHash,string metadataURI)",
-  "event DomainOwnerTransferred(bytes32 indexed domainId,address indexed previousOwner,address indexed newOwner)",
-  "event PlanAttested(bytes32 indexed domainId,bytes32 indexed planId,bytes32 indexed planHash,bytes32 artifactHash,bytes32 policyHash,bytes32 metadataHash,string metadataURI,address attester)",
-  "event PlanRevoked(bytes32 indexed domainId,bytes32 indexed planId,bytes32 reasonHash,string reasonURI,address revoker)",
-  "event SupplierAttested(bytes32 indexed domainId,bytes32 indexed supplierSubjectId,address indexed wallet,bytes32 profileHash,bytes32 capabilityHash,bytes32 reputationHash,string metadataURI,address attester)",
-  "event SupplierRevoked(bytes32 indexed domainId,bytes32 indexed supplierSubjectId,bytes32 reasonHash,string reasonURI,address revoker)"
+  "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
+  "event PlanAttested(bytes32 indexed planId,bytes32 indexed planHash,bytes32 artifactHash,bytes32 policyHash,bytes32 metadataHash,string metadataURI,address attester)",
+  "event PlanRevoked(bytes32 indexed planId,bytes32 reasonHash,string reasonURI,address revoker)",
+  "event SupplierAttested(bytes32 indexed supplierSubjectId,address indexed wallet,bytes32 profileHash,bytes32 capabilityHash,bytes32 reputationHash,string metadataURI,address attester)",
+  "event SupplierRevoked(bytes32 indexed supplierSubjectId,bytes32 reasonHash,string reasonURI,address revoker)"
 ]);
 
 const deploymentRegistryAbi = parseAbi([
-  "event DeploymentRegistered(bytes32 indexed deploymentId,address indexed stateMachine,address indexed trustRegistry,bytes32 officialDomainId,bytes32 artifactHash,bytes32 abiHash,uint64 deploymentBlock,string metadataURI)",
+  "event DeploymentRegistered(bytes32 indexed deploymentId,address indexed stateMachine,bytes32 artifactHash,bytes32 abiHash,uint64 deploymentBlock,string metadataURI)",
   "event DeploymentCanaryMarked(bytes32 indexed deploymentId,bytes32 evidenceHash,string evidenceURI)",
   "event DeploymentActivated(bytes32 indexed previousDeploymentId,bytes32 indexed newDeploymentId,bytes32 evidenceHash,string evidenceURI)",
   "event DeploymentDeprecated(bytes32 indexed deploymentId,bytes32 reasonHash,string reasonURI)",
@@ -139,18 +142,20 @@ function indexedContracts(config: ChainServicesConfig): readonly IndexedContract
     indexedContract("UVPStateMachine", config.network.contracts, stateMachineAbi),
     indexedContract("ZhixuTrustRegistry", config.network.contracts, trustRegistryAbi),
     indexedContract("UVPDeploymentRegistry", config.network.contracts, deploymentRegistryAbi),
-    ...stateMachineDeployments.map((deployment) => ({
-      name: "UVPStateMachine" as const,
-      address: deployment.stateMachineAddress,
-      abi: stateMachineAbi
-    })),
-    ...stateMachineDeployments.flatMap((deployment) => deployment.trustRegistryAddress
-      ? [{
-          name: "ZhixuTrustRegistry" as const,
-          address: deployment.trustRegistryAddress,
-          abi: trustRegistryAbi
-        }]
-      : [])
+    ...stateMachineDeployments.flatMap((deployment) => [
+      {
+        name: "UVPStateMachine" as const,
+        address: deployment.stateMachineAddress,
+        abi: stateMachineAbi
+      },
+      ...Object.values(deployment.modules ?? {})
+        .filter((address): address is Address => Boolean(address))
+        .map((address) => ({
+          name: "UVPStateMachine" as const,
+          address,
+          abi: stateMachineAbi
+        }))
+    ])
   ].filter((contract): contract is IndexedContract => Boolean(contract));
   const seen = new Set<string>();
   return contracts.filter((contract) => {

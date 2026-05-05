@@ -1,11 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  compileZhixuHookPlan,
+  compileZhixuOnchainHookPlan,
   parseZhixuDefinition
 } from "@uvp-eth/compiler";
 import {
-  ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-  ORDER_REGISTRAR_ROLE_SLOT_ID,
   type StoreProductSchemaDTO
 } from "@uvp-eth/product-dto";
 import {
@@ -42,7 +40,6 @@ const adminHeaders = {
   "x-uvp-admin-role": "admin"
 };
 
-const domainId = "0x0000000000000000000000000000000000000000000000000000000000005201" as Hex;
 const registryAddress = "0x5555555555555555555555555555555555555555" as Address;
 const attester = "0x2222222222222222222222222222222222222222" as Address;
 const signer = "0x3333333333333333333333333333333333333333" as Address;
@@ -157,9 +154,9 @@ describe("Store Zhixu draft workflow", () => {
       roleSlotCount: 1
     });
 
-    const manifest = compileZhixuHookPlan(parseZhixuDefinition(validZhixuYaml, "store-draft.yaml"));
+    const manifest = compileZhixuOnchainHookPlan(parseZhixuDefinition(validZhixuYaml, "store-draft.yaml"));
     const manifestDraft = await importDraft(router, {
-      sourceKind: "hook_plan_manifest",
+      sourceKind: "onchain_hook_plan_manifest",
       content: JSON.stringify(manifest)
     });
     const manifestCompiled = await compileDraft(router, manifestDraft.draftId);
@@ -352,12 +349,13 @@ describe("Store Zhixu draft workflow", () => {
       phase2CustomsRoleSlotIds.buyerResourceController,
       phase2CustomsRoleSlotIds.customsExecutor
     ]);
-    expect(productSchema.roleSlots.some((slot) => slot.slotId === ORDER_REGISTRAR_ROLE_SLOT_ID)).toBe(false);
-    expect(productSchema.orderPermissionTable[0]).toMatchObject({
-      permissionId: ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-      roleSlotId: ORDER_REGISTRAR_ROLE_SLOT_ID,
+    expect(productSchema.roleSlots.some((slot) => slot.slotId.startsWith("system:"))).toBe(false);
+    expect(productSchema.orderPermissionTable.some((entry) => entry.permissionId.startsWith("system."))).toBe(false);
+    expect(productSchema.createOrderTrigger).toMatchObject({
       source: phase2CustomsInitialTriggerSource,
-      signalName: phase2CustomsSignalIds.orderRegistered
+      signalName: phase2CustomsSignalIds.orderRegistered,
+      triggerHookId: phase2CustomsStoreProductSchema.createOrderTrigger?.triggerHookId,
+      triggerStageId: phase2CustomsStoreProductSchema.createOrderTrigger?.triggerStageId
     });
     expect(productSchema.selectorBindings?.map((binding) => `${binding.selectorStageIdentifier}->${binding.targetStageIdentifier}`)).toEqual([
       `${phase2CustomsStageIds.buyerSelectCustomsExecutor}->${phase2CustomsStageIds.customsComplete}`,
@@ -521,11 +519,9 @@ describe("Store Zhixu draft workflow", () => {
       pathname: `/store/zhixu-drafts/${draft.draftId}/request-attestation`,
       headers: adminHeaders,
       body: {
-        domainId,
         metadataURI: "https://store.example/zhixu/store-draft-demo",
         confirmation: {
           draftId: draft.draftId,
-          domainId,
           planId: preview.planId,
           planHash: preview.planHash
         }
@@ -537,7 +533,6 @@ describe("Store Zhixu draft workflow", () => {
       readonly draft: StoreZhixuDraftDTO;
       readonly attestation: {
         readonly request: {
-          readonly domainId: Hex;
           readonly planId: Hex;
           readonly planHash: Hex;
           readonly artifactHash: Hex;
@@ -549,7 +544,6 @@ describe("Store Zhixu draft workflow", () => {
     };
     expect(body.draft.status).toBe("indexing");
     expect(body.attestation.request).toMatchObject({
-      domainId,
       planId: preview.planId,
       planHash: preview.planHash,
       artifactHash: preview.artifactHash,
@@ -558,7 +552,7 @@ describe("Store Zhixu draft workflow", () => {
       metadataURI: expect.any(String)
     });
     expect(adapter.attestPlan).toHaveBeenCalledOnce();
-    expect(requests[0]).toMatchObject({ kind: "attestPlan", domainId, planId: preview.planId });
+    expect(requests[0]).toMatchObject({ kind: "attestPlan", planId: preview.planId });
 
     await expect(router.handle({ method: "GET", pathname: `/store/zhixu-drafts/${draft.draftId}` }))
       .resolves.toMatchObject({ status: 200, body: { draft: { status: "indexing" } } });
@@ -586,7 +580,7 @@ describe("Store Zhixu draft workflow", () => {
     await expect(router.handle({
       method: "POST",
       pathname: `/store/zhixu-drafts/${draft.draftId}/request-attestation`,
-      body: { domainId }
+      body: {}
     })).resolves.toMatchObject({
       status: 401,
       body: { error: "store_identity_missing" }
@@ -596,7 +590,7 @@ describe("Store Zhixu draft workflow", () => {
       method: "POST",
       pathname: `/store/zhixu-drafts/${draft.draftId}/request-attestation`,
       headers: storeOperatorHeaders,
-      body: { domainId }
+      body: {}
     })).resolves.toMatchObject({
       status: 403,
       body: { error: "forbidden" }
@@ -606,7 +600,7 @@ describe("Store Zhixu draft workflow", () => {
       method: "POST",
       pathname: `/store/zhixu-drafts/${draft.draftId}/request-attestation`,
       headers: { "x-uvp-admin-id": "user-1", "x-uvp-admin-role": "participant" },
-      body: { domainId }
+      body: {}
     })).resolves.toMatchObject({
       status: 401,
       body: { error: "store_identity_missing" }
@@ -617,7 +611,7 @@ describe("Store Zhixu draft workflow", () => {
 async function importDraft(
   router: ReturnType<typeof createApiRouter>,
   overrides: Partial<{
-    readonly sourceKind: "zhixu_yaml" | "hook_plan_manifest";
+    readonly sourceKind: "zhixu_yaml" | "onchain_hook_plan_manifest";
     readonly content: string;
   }> = {}
 ): Promise<StoreZhixuDraftDTO> {
@@ -655,7 +649,7 @@ async function importPhase2CustomsDraft(
   router: ReturnType<typeof createApiRouter>
 ): Promise<StoreZhixuDraftDTO> {
   return importDraft(router, {
-    sourceKind: "hook_plan_manifest",
+    sourceKind: "onchain_hook_plan_manifest",
     content: JSON.stringify(phase2CustomsOnchainHookPlanArtifact)
   });
 }
@@ -778,7 +772,6 @@ function planAttestedEvent(input: {
     logIndex: 0,
     eventName: "PlanAttested",
     args: {
-      domainId,
       planId: input.planId,
       planHash: input.planHash,
       artifactHash: input.artifactHash,

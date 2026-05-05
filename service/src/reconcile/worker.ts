@@ -1,18 +1,11 @@
 import { createPublicClient, defineChain, http } from "viem";
-import { ORDER_INITIAL_TRIGGER_PERMISSION_ID } from "@uvp-eth/product-dto";
 import type { GovernanceStore } from "../governance/store.js";
 import type { GovernanceBroadcastStatus, GovernanceTxLogDTO, GovernanceTxLogStatus } from "../governance/types.js";
-import {
-  productSignalId,
-  productSignalSourceId
-} from "../product/bff/registration.js";
 import type { ProductBffStore } from "../product/bff/store.js";
 import type {
   ProductOrderDraftDTO,
-  ProductOrderRegistrationRecord,
-  ProductOrderRegistrationStatus,
-  ProductOrderStartDTO,
-  ProductOrderStartStatus
+  ProductOrderTriggerRecord,
+  ProductOrderTriggerStatus
 } from "../product/bff/types.js";
 import type { Logger, Hex, LifecycleService } from "../shared/types.js";
 import { noopLogger } from "../shared/types.js";
@@ -139,7 +132,6 @@ export class TxReconcileWorker implements LifecycleService {
   async runOnce(): Promise<ReconcileRunSummary> {
     const summary = {
       registrationsChecked: 0,
-      startsChecked: 0,
       submissionsChecked: 0,
       governanceLogsChecked: 0,
       updated: 0,
@@ -150,19 +142,6 @@ export class TxReconcileWorker implements LifecycleService {
       for (const registration of (await this.#productStore.listRegistrations()).filter(isReconcileableRegistration)) {
         summary.registrationsChecked += 1;
         const updated = await this.#reconcileRegistration(registration);
-        if (updated) {
-          summary.updated += 1;
-          if (updated.status === "failed") {
-            summary.failed += 1;
-          }
-        }
-      }
-
-      for (const start of (await this.#productStore.listOrderStartsForReconcile({
-        statuses: ["pending", "submitted", "indexing"]
-      })).filter(isReconcileableOrderStart)) {
-        summary.startsChecked += 1;
-        const updated = await this.#reconcileOrderStart(start);
         if (updated) {
           summary.updated += 1;
           if (updated.status === "failed") {
@@ -228,8 +207,8 @@ export class TxReconcileWorker implements LifecycleService {
   }
 
   async #reconcileRegistration(
-    registration: ProductOrderRegistrationRecord
-  ): Promise<ProductOrderRegistrationRecord | undefined> {
+    registration: ProductOrderTriggerRecord
+  ): Promise<ProductOrderTriggerRecord | undefined> {
     const outcome = await this.#resolveOutcome(registration, () => registrationProjectionConfirmation(
       this.#projectionStore,
       registration
@@ -238,7 +217,7 @@ export class TxReconcileWorker implements LifecycleService {
       return undefined;
     }
 
-    const updated: ProductOrderRegistrationRecord = {
+    const updated: ProductOrderTriggerRecord = {
       ...registration,
       status: outcome.registrationStatus,
       ...outcome.fields,
@@ -256,30 +235,6 @@ export class TxReconcileWorker implements LifecycleService {
     }
 
     return updated;
-  }
-
-  async #reconcileOrderStart(start: ProductOrderStartDTO): Promise<ProductOrderStartDTO | undefined> {
-    if (!this.#productStore) {
-      return undefined;
-    }
-    const outcome = await this.#resolveOutcome(start, () => orderStartProjectionConfirmation(
-      this.#projectionStore,
-      this.#productStore!,
-      start
-    ));
-    if (!outcome) {
-      return undefined;
-    }
-
-    return this.#productStore.updateOrderStart(start.startId, {
-      status: startStatusFromOutcome(outcome, start.status),
-      ...outcome.fields,
-      ...(outcome.blockNumber ? { blockNumber: outcome.blockNumber } : {}),
-      ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
-      ...(outcome.errorMessage ? { errorMessage: outcome.errorMessage } : {}),
-      retryable: startRetryableFromOutcome(outcome),
-      updatedAt: outcome.checkedAt
-    });
   }
 
   async #reconcileSubmission(submission: ProductSubmissionDTO): Promise<ProductSubmissionDTO | undefined> {
@@ -349,7 +304,7 @@ export class TxReconcileWorker implements LifecycleService {
       if (!timedOut(record, this.#config.txTimeoutMs, this.#now())) {
         return {
           kind: "pending",
-          registrationStatus: record.status as ProductOrderRegistrationStatus,
+          registrationStatus: record.status as ProductOrderTriggerStatus,
           checkedAt,
           fields: {
             reconcileStatus: "broadcasting",
@@ -375,7 +330,7 @@ export class TxReconcileWorker implements LifecycleService {
       }
       return {
         kind: "pending",
-        registrationStatus: record.status as ProductOrderRegistrationStatus,
+        registrationStatus: record.status as ProductOrderTriggerStatus,
         checkedAt,
         fields: {
           reconcileStatus: "submitted",
@@ -499,7 +454,7 @@ export function createViemReconcileReceiptClient(
 
 interface ResolvedReconcileOutcome {
   readonly kind: "pending" | "indexing" | "confirmed" | "failed" | "stale_pending";
-  readonly registrationStatus: ProductOrderRegistrationStatus;
+  readonly registrationStatus: ProductOrderTriggerStatus;
   readonly checkedAt: string;
   readonly fields: Required<Pick<TxReconcileFields, "reconcileStatus" | "lastCheckedAt" | "receiptStatus" | "projectionStatus">>;
   readonly blockNumber?: string;
@@ -525,12 +480,8 @@ function staleOutcome(checkedAt: string): ResolvedReconcileOutcome {
   };
 }
 
-function isReconcileableRegistration(registration: ProductOrderRegistrationRecord): boolean {
-  return registration.status === "pending" || registration.status === "indexing";
-}
-
-function isReconcileableOrderStart(start: ProductOrderStartDTO): boolean {
-  return start.status === "pending" || start.status === "submitted" || start.status === "indexing";
+function isReconcileableRegistration(registration: ProductOrderTriggerRecord): boolean {
+  return registration.status === "submitted" || registration.status === "indexing";
 }
 
 function isReconcileableSubmission(submission: ProductSubmissionDTO): boolean {
@@ -543,7 +494,7 @@ function isReconcileableGovernanceLog(log: GovernanceTxLogDTO): boolean {
 
 async function registrationProjectionConfirmation(
   projectionStore: ProjectionStore,
-  registration: ProductOrderRegistrationRecord
+  registration: ProductOrderTriggerRecord
 ): Promise<ProjectionConfirmation | undefined> {
   const order = await projectionStore.getStateMachineOrder(registration.orderId);
   if (!order?.registeredAt || order.planId.toLowerCase() !== registration.planId.toLowerCase()) {
@@ -576,64 +527,17 @@ async function submissionProjectionConfirmation(
   return matches ? projectionConfirmationFromProvenance(signal?.submittedAt, submission.txHash) : undefined;
 }
 
-async function orderStartProjectionConfirmation(
-  projectionStore: ProjectionStore,
-  productStore: ProductBffStore,
-  start: ProductOrderStartDTO
-): Promise<ProjectionConfirmation | undefined> {
-  const registration = await productStore.getRegistration(start.registrationId);
-  const expected = registration ? initialTriggerProjectionTarget(registration) : undefined;
-  if (!expected) {
-    return undefined;
-  }
-
-  const order = await projectionStore.getStateMachineOrder(start.orderId);
-  if (
-    start.stateMachineAddress &&
-    order?.contractAddress.toLowerCase() !== start.stateMachineAddress.toLowerCase()
-  ) {
-    return undefined;
-  }
-  const signal = order?.signals[`${expected.sourceId}:${expected.signalId}`];
-  const matches = Boolean(
-    signal &&
-    signal.orderId === start.orderId &&
-    signal.sourceId === expected.sourceId &&
-    signal.signalId === expected.signalId &&
-    signal.submitter === expected.submitter
-  );
-  return matches ? projectionConfirmationFromProvenance(signal?.submittedAt, start.txHash) : undefined;
-}
-
-function initialTriggerProjectionTarget(
-  registration: ProductOrderRegistrationRecord
-): { readonly sourceId: Hex; readonly signalId: Hex; readonly submitter: string } | undefined {
-  const permission = registration.permissions.find((item) => item.permissionId === ORDER_INITIAL_TRIGGER_PERMISSION_ID);
-  if (!permission) {
-    return undefined;
-  }
-  const sourceId = productSignalSourceId(permission.source);
-  const signalId = productSignalId(permission.signalName);
-  const submitter = registration.authorizations.find((authorization) =>
-    authorization.sourceId === sourceId &&
-    authorization.signalId === signalId
-  )?.submitter;
-  return submitter ? { sourceId, signalId, submitter } : undefined;
-}
-
 async function governanceProjectionConfirmation(
   projectionStore: ProjectionStore,
   log: GovernanceTxLogDTO
 ): Promise<ProjectionConfirmation | undefined> {
   if (log.action === "attest_plan" || log.action === "revoke_plan") {
     const plans = await projectionStore.listPlanTrust({
-      domainId: log.domainId,
       planId: log.planId
     });
     if (log.action === "attest_plan") {
       const plan = plans.find((plan) =>
         plan.planId === log.planId &&
-        plan.domainId === log.domainId &&
         plan.planHash === log.planHash &&
         (!log.txHash || plan.attestedAt.transactionHash === log.txHash)
       );
@@ -641,7 +545,6 @@ async function governanceProjectionConfirmation(
     }
     const plan = plans.find((plan) =>
       plan.planId === log.planId &&
-      plan.domainId === log.domainId &&
       plan.revoked &&
       (!log.txHash || plan.revokedAt?.transactionHash === log.txHash)
     );
@@ -650,12 +553,10 @@ async function governanceProjectionConfirmation(
 
   const supplierLog = log as Extract<GovernanceTxLogDTO, { readonly action: "attest_supplier" | "revoke_supplier" }>;
   const suppliers = await projectionStore.listSupplierTrust({
-    domainId: supplierLog.domainId,
     supplierSubjectId: supplierLog.supplierSubjectId
   });
   if (supplierLog.action === "attest_supplier") {
     const supplier = suppliers.find((supplier) =>
-      supplier.domainId === supplierLog.domainId &&
       supplier.supplierSubjectId === supplierLog.supplierSubjectId &&
       (!supplierLog.wallet || supplier.wallet === supplierLog.wallet) &&
       (!supplierLog.txHash || supplier.attestedAt.transactionHash === supplierLog.txHash)
@@ -663,7 +564,6 @@ async function governanceProjectionConfirmation(
     return projectionConfirmationFromProvenance(supplier?.attestedAt, supplierLog.txHash);
   }
   const supplier = suppliers.find((supplier) =>
-    supplier.domainId === supplierLog.domainId &&
     supplier.supplierSubjectId === supplierLog.supplierSubjectId &&
     supplier.revoked &&
     (!supplierLog.txHash || supplier.revokedAt?.transactionHash === supplierLog.txHash)
@@ -673,28 +573,28 @@ async function governanceProjectionConfirmation(
 
 function draftFromReconciledRegistration(
   draft: ProductOrderDraftDTO,
-  registration: ProductOrderRegistrationRecord,
+  registration: ProductOrderTriggerRecord,
   updatedAt: string
 ): ProductOrderDraftDTO {
   if (registration.status === "confirmed") {
     return {
       ...draft,
-      status: "registered",
-      registeredOrderId: registration.orderId,
-      ...(registration.txHash ? { registrationTxHash: registration.txHash } : {}),
+      status: "triggered",
+      triggeredOrderId: registration.orderId,
+      ...(registration.txHash ? { triggerTxHash: registration.txHash } : {}),
       updatedAt
     };
   }
-  if (registration.status === "failed" && registration.retryable) {
+  if (registration.status === "failed") {
     return {
       ...draft,
-      status: "ready_to_register",
+      status: "failed",
       updatedAt
     };
   }
   return {
     ...draft,
-    status: "registering",
+    status: "triggering",
     updatedAt
   };
 }
@@ -711,27 +611,6 @@ function submissionStatusFromOutcome(outcome: ResolvedReconcileOutcome): Product
     case "pending":
       return "submitted";
   }
-}
-
-function startStatusFromOutcome(
-  outcome: ResolvedReconcileOutcome,
-  current: ProductOrderStartStatus
-): ProductOrderStartStatus {
-  switch (outcome.kind) {
-    case "confirmed":
-      return "confirmed";
-    case "failed":
-    case "stale_pending":
-      return "failed";
-    case "indexing":
-      return "indexing";
-    case "pending":
-      return current === "pending" || current === "indexing" ? current : "submitted";
-  }
-}
-
-function startRetryableFromOutcome(outcome: ResolvedReconcileOutcome): boolean {
-  return outcome.kind === "failed" || outcome.retryable;
 }
 
 function governanceStatusFromOutcome(outcome: ResolvedReconcileOutcome): GovernanceTxLogStatus {

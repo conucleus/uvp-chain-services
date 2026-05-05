@@ -17,7 +17,6 @@ import {
   type PlanTrustQuery,
   type SupplierTrustProjection,
   type SupplierTrustQuery,
-  type TrustDomainProjection,
   type TrustProjectionSnapshot
 } from "../indexer/trust-projections.js";
 import type { Address } from "../shared/types.js";
@@ -90,7 +89,6 @@ export interface ProjectionStore {
   findStateMachineOrdersByOrderId(orderId: string): Promise<readonly StateMachineOrderProjection[]>;
   listStateMachineTasks(): Promise<readonly StateMachineTaskProjection[]>;
   getStateMachineTask(taskId: string): Promise<StateMachineTaskProjection | undefined>;
-  listTrustDomains(): Promise<readonly TrustDomainProjection[]>;
   listPlanTrust(query: PlanTrustQuery): Promise<readonly PlanTrustProjection[]>;
   listSupplierTrust(query: SupplierTrustQuery): Promise<readonly SupplierTrustProjection[]>;
   getTrustSnapshot(): Promise<TrustProjectionSnapshot>;
@@ -169,10 +167,6 @@ export class MemoryProjectionStore implements ProjectionStore {
 
   async getStateMachineTask(taskId: string): Promise<StateMachineTaskProjection | undefined> {
     return this.#snapshot.stateMachineTasks[taskId];
-  }
-
-  async listTrustDomains(): Promise<readonly TrustDomainProjection[]> {
-    return Object.values(this.#trustSnapshot.domains);
   }
 
   async listPlanTrust(query: PlanTrustQuery): Promise<readonly PlanTrustProjection[]> {

@@ -19,7 +19,6 @@ export interface TxReconcileFields {
 
 export interface ReconcileRunSummary {
   readonly registrationsChecked: number;
-  readonly startsChecked: number;
   readonly submissionsChecked: number;
   readonly governanceLogsChecked: number;
   readonly updated: number;

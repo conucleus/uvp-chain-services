@@ -1,0 +1,11 @@
+ALTER TABLE product_order_trigger ADD COLUMN prepare_id TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN source_id TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN signal_id TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN trigger_hook_id TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN trigger_stage_id TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN submitter TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN payload_hash TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN idempotency_key TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN deadline TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN typed_data_json TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN signature TEXT;

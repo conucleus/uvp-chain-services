@@ -1,28 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { keccak256, stringToBytes } from "viem";
-import {
-  ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-  ORDER_REGISTRAR_ROLE_SLOT_ID,
-  ORDER_SYSTEM_STAGE_ID,
-  type StoreProductSchemaDTO
-} from "@uvp-eth/product-dto";
+import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
   CROSS_BORDER_ZHIXU_ID,
   DEMO_ORDER_ID,
   DEMO_TASK_ID,
-  PHASE2_CUSTOMS_ZHIXU_ID,
   crossBorderPlanIds,
-  phase2CustomsInitialTriggerSource,
-  phase2CustomsOnchainHookPlanArtifact,
-  phase2CustomsRoleSlotIds,
-  phase2CustomsSignalIds,
-  phase2CustomsStageIds,
   phase2CustomsStoreProductSchema
 } from "@uvp-eth/product-dto/fixtures";
 import { createApiRouter } from "../src/api/routes.js";
 import { createEvidenceService, InMemoryEvidenceStorage, ObjectEvidenceStorage } from "../src/evidence/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProductOrderRegistrationAdapter } from "../src/product/bff/registration.js";
 import { MemoryProductBffStore } from "../src/product/bff/store.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { MemoryStoreZhixuDraftStore } from "../src/store-console/zhixu-drafts.js";
@@ -75,7 +63,6 @@ describe("product API routes", () => {
       deploymentBlock: 0n,
       events: [
         chainEvent(1n, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           artifactHash: crossBorderPlanIds.artifactHash,
@@ -113,7 +100,6 @@ describe("product API routes", () => {
       deploymentBlock: 0n,
       events: [
         chainEvent(1n, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           artifactHash: crossBorderPlanIds.artifactHash,
@@ -123,7 +109,6 @@ describe("product API routes", () => {
           attester
         }),
         chainEvent(2n, "PlanRevoked", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           reasonHash: metadataHash,
           reasonURI: "https://store.example/revoke/cross-border",
@@ -171,7 +156,6 @@ describe("product API routes", () => {
       deploymentBlock: 0n,
       events: [
         chainEvent(1n, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           artifactHash: crossBorderPlanIds.artifactHash,
@@ -181,7 +165,6 @@ describe("product API routes", () => {
           attester
         }),
         chainEvent(2n, "PlanRevoked", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           reasonHash: metadataHash,
           reasonURI: "https://store.example/revoke/cross-border",
@@ -196,264 +179,6 @@ describe("product API routes", () => {
       query: { fallback: "demo" }
     });
     expect((revokedFallbackResponse.body as { zhixus: unknown[] }).zhixus).toEqual([]);
-  });
-
-  it("projects Store Product Schema metadata into the Product zhixu catalog for attested plans", async () => {
-    const draftStore = new MemoryStoreZhixuDraftStore();
-    await draftStore.createDraft({
-      draftId: "phase2-customs-schema-draft",
-      sourceKind: "hook_plan_manifest",
-      content: "{}",
-      status: "compiled",
-      zhixuId: PHASE2_CUSTOMS_ZHIXU_ID,
-      title: phase2CustomsStoreProductSchema.title,
-      maintainer: phase2CustomsStoreProductSchema.maintainer,
-      tags: ["prd92"],
-      compilePreview: {
-        planId: phase2CustomsStoreProductSchema.planId,
-        planHash: phase2CustomsStoreProductSchema.planHash,
-        artifactHash: phase2CustomsStoreProductSchema.artifactHash,
-        canonicalArtifactHash: phase2CustomsStoreProductSchema.artifactHash,
-        stageCount: phase2CustomsStoreProductSchema.stages.length,
-        roleSlotCount: phase2CustomsStoreProductSchema.roleSlots.length,
-        sourceCount: 3,
-        signalCount: 3
-      },
-      productSchema: phase2CustomsStoreProductSchema,
-      errors: [],
-      createdAt: "2026-05-02T00:00:00.000Z",
-      updatedAt: "2026-05-02T00:00:00.000Z"
-    });
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        chainEvent(1n, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
-          planId: phase2CustomsStoreProductSchema.planId,
-          planHash: phase2CustomsStoreProductSchema.planHash,
-          artifactHash: phase2CustomsStoreProductSchema.artifactHash,
-          policyHash,
-          metadataHash,
-          metadataURI: "uvp-product://phase2/customs",
-          attester
-        })
-      ]
-    });
-
-    const registrationAdapter = new MemoryProductOrderRegistrationAdapter({
-      status: "confirmed",
-      blockNumber: "12",
-      retryable: false
-    });
-    const router = createApiRouter(store, {
-      storeZhixuDraftStore: draftStore,
-      productRegistrationAdapter: registrationAdapter
-    });
-    const response = await router.handle({ method: "GET", pathname: "/product/zhixus" });
-
-    expect(response.status).toBe(200);
-    const zhixus = (response.body as { zhixus: Array<{ zhixuId: string; stageCount: number; roleSlotCount: number; chainAttestation: { status: string } }> }).zhixus;
-    expect(zhixus).toContainEqual(expect.objectContaining({
-      zhixuId: PHASE2_CUSTOMS_ZHIXU_ID,
-      stageCount: phase2CustomsStoreProductSchema.stages.length,
-      roleSlotCount: phase2CustomsStoreProductSchema.roleSlots.length,
-      chainAttestation: expect.objectContaining({ status: "attested" })
-    }));
-    expect(zhixus.some((zhixu) => zhixu.zhixuId.startsWith("plan-"))).toBe(false);
-
-    const activateResponse = await router.handle({
-      method: "POST",
-      pathname: `/store/zhixu-series/${PHASE2_CUSTOMS_ZHIXU_ID}/versions/${phase2CustomsStoreProductSchema.planHash}/activate`,
-      headers: storeAdminHeaders,
-      body: {
-        planId: phase2CustomsStoreProductSchema.planId,
-        planHash: phase2CustomsStoreProductSchema.planHash,
-        artifactHash: phase2CustomsStoreProductSchema.artifactHash,
-        confirmation: {
-          versionId: phase2CustomsStoreProductSchema.planHash,
-          planId: phase2CustomsStoreProductSchema.planId,
-          planHash: phase2CustomsStoreProductSchema.planHash
-        }
-      }
-    });
-    const draftResponse = await router.handle({
-      method: "POST",
-      pathname: "/product/order-drafts",
-      body: {
-        zhixuId: PHASE2_CUSTOMS_ZHIXU_ID,
-        title: "Phase 2 customs order",
-        businessType: "phase2-customs",
-        totalAmount: "0",
-        currency: "USDC"
-      }
-    });
-
-    expect(activateResponse.status).toBe(200);
-    expect(draftResponse.status).toBe(201);
-    const draftBody = draftResponse.body as {
-      draft: { draftId: string; zhixuId: string; planHash: string };
-      participants: Array<{ roleSlotId: string; required: boolean }>;
-    };
-    expect(draftBody.draft)
-      .toMatchObject({
-        zhixuId: PHASE2_CUSTOMS_ZHIXU_ID,
-        planHash: phase2CustomsStoreProductSchema.planHash
-      });
-    expect(draftBody.participants.length)
-      .toBe(phase2CustomsStoreProductSchema.roleSlots.length);
-    expect(draftBody.participants.some((participant) => participant.roleSlotId === ORDER_REGISTRAR_ROLE_SLOT_ID)).toBe(false);
-
-    for (const [index, participant] of draftBody.participants.filter((item) => item.required).entries()) {
-      const inviteResponse = await router.handle({
-        method: "POST",
-        pathname: `/product/orders/${draftBody.draft.draftId}/invites`,
-        body: {
-          roleSlotId: participant.roleSlotId,
-          contact: `${participant.roleSlotId}@phase2.customs.local`,
-          displayName: `${participant.roleSlotId} participant`
-        }
-      });
-      expect(inviteResponse.status).toBe(201);
-      const inviteId = (inviteResponse.body as { invite: { inviteId: string } }).invite.inviteId;
-      const acceptResponse = await router.handle({
-        method: "POST",
-        pathname: `/product/invites/${inviteId}/accept`,
-        body: {
-          displayName: `${participant.roleSlotId} signer`,
-          walletAddress: routeTestWallet(index),
-          contact: `${participant.roleSlotId}@phase2.customs.local`
-        }
-      });
-      expect(acceptResponse.status).toBe(200);
-    }
-
-    const submitResponse = await router.handle({
-      method: "POST",
-      pathname: `/product/order-drafts/${draftBody.draft.draftId}/submit`
-    });
-
-    expect(submitResponse.status).toBe(200);
-    expect((submitResponse.body as { permissions: unknown[] }).permissions).toContainEqual(expect.objectContaining({
-      permissionId: ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-      participantId: ORDER_REGISTRAR_ROLE_SLOT_ID,
-      roleSlotId: ORDER_REGISTRAR_ROLE_SLOT_ID,
-      stageIdentifier: ORDER_SYSTEM_STAGE_ID,
-      source: phase2CustomsInitialTriggerSource,
-      signalName: phase2CustomsSignalIds.orderRegistered,
-      payloadPolicy: "optional",
-      requiredEvidence: []
-    }));
-
-    const submitBody = submitResponse.body as {
-      registration: { registrationId: string; orderId: Hex; txHash?: Hex; blockNumber?: string };
-      permissions: unknown[];
-    };
-    const startResponse = await router.handle({
-      method: "POST",
-      pathname: `/product/order-registrations/${submitBody.registration.registrationId}/start`,
-      body: {}
-    });
-    expect(startResponse.status).toBe(200);
-
-    const [startAttempt] = registrationAdapter.listInitialTriggerAttempts();
-    expect(startAttempt).toMatchObject({
-      registrationId: submitBody.registration.registrationId,
-      orderId: submitBody.registration.orderId,
-      sourceId: keccak256(stringToBytes(phase2CustomsInitialTriggerSource)),
-      signalId: keccak256(stringToBytes(phase2CustomsSignalIds.orderRegistered))
-    });
-
-    const [registrationAttempt] = registrationAdapter.listAttempts();
-    expect(registrationAttempt).toBeDefined();
-    const resourcePatchHook = requiredPhase2Hook(phase2CustomsStageIds.buyerPublishCustomsResources);
-    const selectorHook = requiredPhase2Hook(phase2CustomsStageIds.buyerSelectCustomsExecutor);
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        chainEvent(10n, "PlanRegistered", {
-          planId: phase2CustomsStoreProductSchema.planId,
-          planHash: phase2CustomsStoreProductSchema.planHash,
-          hookCount: BigInt(phase2CustomsOnchainHookPlanArtifact.compiledHooks.length)
-        }),
-        chainEvent(11n, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
-          planId: phase2CustomsStoreProductSchema.planId,
-          planHash: phase2CustomsStoreProductSchema.planHash,
-          artifactHash: phase2CustomsStoreProductSchema.artifactHash,
-          policyHash,
-          metadataHash,
-          metadataURI: "uvp-product://phase2/customs",
-          attester
-        }),
-        chainEvent(12n, "OrderRegistered", {
-          orderId: submitBody.registration.orderId,
-          planId: phase2CustomsStoreProductSchema.planId
-        }),
-        ...registrationAttempt!.authorizations.map((authorization, index) => chainEvent(13n + BigInt(index), "SignalSubmitterAuthorized", {
-          orderId: submitBody.registration.orderId,
-          sourceId: authorization.sourceId,
-          signalId: authorization.signalId,
-          submitter: authorization.submitter,
-          role: authorization.role,
-          metadataHash: authorization.metadataHash
-        })),
-        chainEvent(20n, "SignalSubmitted", {
-          orderId: submitBody.registration.orderId,
-          sourceId: startAttempt!.sourceId,
-          signalId: startAttempt!.signalId,
-          payloadHash: startAttempt!.payloadHash,
-          idempotencyKey: startAttempt!.idempotencyKey,
-          submitter: registrationAdapter.registrarAddress
-        }),
-        chainEvent(21n, "HookReady", {
-          orderId: submitBody.registration.orderId,
-          hookId: resourcePatchHook.hookId,
-          stageId: resourcePatchHook.stageId,
-          hookName: bytes32Text(resourcePatchHook.hookName)
-        }),
-        chainEvent(22n, "HookReady", {
-          orderId: submitBody.registration.orderId,
-          hookId: selectorHook.hookId,
-          stageId: selectorHook.stageId,
-          hookName: bytes32Text(selectorHook.hookName)
-        })
-      ]
-    });
-
-    const tasksResponse = await router.handle({
-      method: "GET",
-      pathname: "/product/tasks",
-      query: { orderId: submitBody.registration.orderId }
-    });
-    expect(tasksResponse.status).toBe(200);
-    const tasks = (tasksResponse.body as { tasks: Array<Record<string, unknown>> }).tasks;
-    expect(tasks).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        orderId: submitBody.registration.orderId,
-        status: "open",
-        stageIdentifier: phase2CustomsStageIds.buyerSelectCustomsExecutor,
-        performanceSlotId: phase2CustomsRoleSlotIds.buyerSelector,
-        addOnKind: "stage_executor_patch"
-      }),
-      expect.objectContaining({
-        orderId: submitBody.registration.orderId,
-        status: "open",
-        stageIdentifier: phase2CustomsStageIds.buyerPublishCustomsResources,
-        performanceSlotId: phase2CustomsRoleSlotIds.buyerResourceController,
-        addOnKind: "stage_resource_patch"
-      })
-    ]));
-    const selectorTask = tasks.find((task) => task.performanceSlotId === phase2CustomsRoleSlotIds.buyerSelector);
-    const resourcePatchTask = tasks.find((task) => task.performanceSlotId === phase2CustomsRoleSlotIds.buyerResourceController);
-    expect(selectorTask?.proof).toMatchObject({
-      sourceId: keccak256(stringToBytes("buyer")),
-      signalId: keccak256(stringToBytes(phase2CustomsSignalIds.executorSelected))
-    });
-    expect(resourcePatchTask?.proof).toMatchObject({
-      sourceId: keccak256(stringToBytes("buyer")),
-      signalId: keccak256(stringToBytes(phase2CustomsSignalIds.resourcesPublished))
-    });
   });
 
   it("serves a Store Console zhixu lifecycle view without enabling product demo fallback", async () => {
@@ -638,7 +363,6 @@ describe("product API routes", () => {
       events: [
         ...stateMachineProductEvents(),
         chainEvent(8n, "SupplierAttested", {
-          domainId: crossBorderPlanIds.domainId,
           supplierSubjectId,
           wallet: submitter,
           profileHash: metadataHash,
@@ -648,7 +372,6 @@ describe("product API routes", () => {
           attester
         }),
         chainEvent(9n, "SupplierRevoked", {
-          domainId: crossBorderPlanIds.domainId,
           supplierSubjectId,
           reasonHash: metadataHash,
           reasonURI: "https://store.example/supplier-revocations/customs-broker",
@@ -717,7 +440,6 @@ describe("product API routes", () => {
       deploymentBlock: 0n,
       events: [
         chainEvent(1n, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           artifactHash: crossBorderPlanIds.artifactHash,
@@ -850,7 +572,6 @@ describe("product API routes", () => {
       deploymentBlock: 0n,
       events: [
         chainEvent(1n, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           artifactHash: crossBorderPlanIds.artifactHash,
@@ -860,7 +581,6 @@ describe("product API routes", () => {
           attester
         }),
         chainEvent(2n, "PlanRevoked", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           reasonHash: metadataHash,
           reasonURI: "https://store.example/revoke/cross-border",
@@ -891,7 +611,6 @@ describe("product API routes", () => {
       deploymentBlock: 0n,
       events: [
         chainEvent(1n, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           artifactHash: crossBorderPlanIds.artifactHash,
@@ -956,7 +675,7 @@ describe("product API routes", () => {
     });
   });
 
-  it("lists only active official plan projections as zhixus", async () => {
+  it("lists active registry plan projections as zhixus", async () => {
     const store = new MemoryProjectionStore();
     const unknownOfficialPlanId = bytes32Hex("0a01");
     const unknownOfficialPlanHash = bytes32Hex("0b01");
@@ -964,7 +683,6 @@ describe("product API routes", () => {
       deploymentBlock: 0n,
       events: [
         chainEvent(1n, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
           planId: unknownOfficialPlanId,
           planHash: unknownOfficialPlanHash,
           artifactHash: crossBorderPlanIds.artifactHash,
@@ -974,7 +692,6 @@ describe("product API routes", () => {
           attester
         }),
         chainEvent(2n, "PlanAttested", {
-          domainId: nonOfficialDomainId,
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           artifactHash: crossBorderPlanIds.artifactHash,
@@ -989,11 +706,11 @@ describe("product API routes", () => {
     const response = await createApiRouter(store).handle({ method: "GET", pathname: "/product/zhixus" });
 
     const zhixus = (response.body as { zhixus: Array<{ zhixuId: string; title: string; chainAttestation: { status: string } }> }).zhixus;
-    expect(zhixus).toHaveLength(1);
-    expect(zhixus[0]).toMatchObject({
+    expect(zhixus).toHaveLength(2);
+    expect(zhixus).toContainEqual(expect.objectContaining({
       title: expect.stringContaining("链上秩序"),
       chainAttestation: expect.objectContaining({ status: "attested" })
-    });
+    }));
   });
 
   it("serves chain-backed product order, task, timeline, proof, and replays consistently", async () => {
@@ -1082,7 +799,6 @@ describe("product API routes", () => {
       events: [
         ...stateMachineProductEvents(),
         chainEvent(9n, "PlanRevoked", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           reasonHash: metadataHash,
           reasonURI: "https://store.example/revoke/cross-border",
@@ -1592,7 +1308,6 @@ describe("product API routes", () => {
           metadataHash
         }),
         chainEvent(9n, "SupplierAttested", {
-          domainId: crossBorderPlanIds.domainId,
           supplierSubjectId,
           wallet: submitter,
           profileHash: metadataHash,
@@ -1644,7 +1359,6 @@ describe("product API routes", () => {
           metadataHash
         }),
         chainEvent(9n, "SupplierAttested", {
-          domainId: crossBorderPlanIds.domainId,
           supplierSubjectId,
           wallet: submitter,
           profileHash: metadataHash,
@@ -1654,7 +1368,6 @@ describe("product API routes", () => {
           attester
         }),
         chainEvent(10n, "SupplierRevoked", {
-          domainId: crossBorderPlanIds.domainId,
           supplierSubjectId,
           reasonHash: metadataHash,
           reasonURI: "https://store.example/supplier-revocations/customs-broker",
@@ -1691,7 +1404,6 @@ describe("product API routes", () => {
       events: [
         ...stateMachineProductEvents(),
         chainEvent(8n, "SupplierAttested", {
-          domainId: crossBorderPlanIds.domainId,
           supplierSubjectId,
           wallet: submitter,
           profileHash: metadataHash,
@@ -1946,7 +1658,6 @@ describe("product API routes", () => {
       deploymentBlock: 0n,
       events: [
         chainEvent(1n, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           artifactHash: crossBorderPlanIds.artifactHash,
@@ -2029,19 +1740,29 @@ describe("product API routes", () => {
     expect(afterResponse.body).toEqual(beforeResponse.body);
   });
 
-  it("uses Product BFF registration authorizations to reject unauthorized task prepares", async () => {
+  it("uses Product BFF trigger authorizations to reject unauthorized task prepares", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
     const productBffStore = new MemoryProductBffStore();
     const createdAt = "2026-04-29T00:00:00.000Z";
     await productBffStore.createRegistration({
-      registrationId: "registration-auth-route",
+      triggerId: "registration-auth-route",
+      prepareId: "prepare-auth-route",
       draftId: "draft-auth-route",
       orderId: stateMachineOrderId as Hex,
       planId: crossBorderPlanIds.planId as Hex,
       planHash: crossBorderPlanIds.planHash as Hex,
       status: "confirmed",
       txHash: txHash(20n),
+      sourceId: sourceId as Hex,
+      signalId: signalId as Hex,
+      triggerHookId: hookId as Hex,
+      triggerStageId: stageId as Hex,
+      submitter: submitter as Address,
+      payloadHash,
+      idempotencyKey,
+      deadline: "1770000000",
+      typedData: {},
       retryable: false,
       createdAt,
       updatedAt: createdAt,
@@ -2106,7 +1827,7 @@ describe("product API routes", () => {
       status: 201,
       body: {
         authorization: {
-          source: "product_bff_registration"
+          source: "product_bff_trigger"
         }
       }
     });
@@ -2187,7 +1908,6 @@ function stateMachineProductEvents(options: {
       hookCount: 1n
     }),
     chainEvent(2n, "PlanAttested", {
-      domainId: crossBorderPlanIds.domainId,
       planId: eventPlanId,
       planHash: eventPlanHash,
       artifactHash: crossBorderPlanIds.artifactHash,
@@ -2245,14 +1965,6 @@ function stateMachineProductEvents(options: {
 
 function bytes32Text(value: string): string {
   return `0x${Buffer.from(value, "utf8").toString("hex").padEnd(64, "0")}`;
-}
-
-function requiredPhase2Hook(stageIdentifier: string): (typeof phase2CustomsOnchainHookPlanArtifact.compiledHooks)[number] {
-  const hook = phase2CustomsOnchainHookPlanArtifact.compiledHooks.find((item) => item.stageIdentifier === stageIdentifier);
-  if (!hook) {
-    throw new Error(`missing Phase 2 hook for ${stageIdentifier}`);
-  }
-  return hook;
 }
 
 function objectStorageWithUri(storageURI: string): ObjectEvidenceStorage {

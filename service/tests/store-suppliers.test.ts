@@ -12,7 +12,7 @@ import {
   type StoreSupplierMetadataRecord
 } from "../src/store-suppliers/index.js";
 import type { ProductService, ProductTaskApiDTO } from "../src/product/service.js";
-import type { Hex } from "../src/shared/types.js";
+import type { Address, Hex } from "../src/shared/types.js";
 import type { ProductOrderDraftDTO } from "../src/product/bff/types.js";
 
 const storeHeaders = {
@@ -26,10 +26,12 @@ const adminHeaders = {
 };
 
 const contractAddress = "0x1111111111111111111111111111111111111111";
+const registryAddress = contractAddress as Address;
+const deploymentRegistryAddress = "0x9999999999999999999999999999999999999999";
+const activeDeploymentId = "0x0000000000000000000000000000000000000000000000000000000000000d02";
 const attester = "0x2222222222222222222222222222222222222222";
 const supplierWallet = "0x4444444444444444444444444444444444444444";
 const revokedWallet = "0x0000000000000000000000000000000000000001";
-const domainId = "0x0000000000000000000000000000000000000000000000000000000000001001" as Hex;
 const supplierSubjectId = "0x0000000000000000000000000000000000000000000000000000000000003001" as Hex;
 const revokedSupplierSubjectId = "0x0000000000000000000000000000000000000000000000000000000000003002" as Hex;
 const metadataOnlySupplierSubjectId = "0x0000000000000000000000000000000000000000000000000000000000003003" as Hex;
@@ -155,10 +157,8 @@ describe("Store supplier registry API", () => {
       pathname: "/store/suppliers/supplier-shenzhen-logistics/request-attestation",
       headers: adminHeaders,
       body: {
-        domainId,
         confirmation: {
-          supplierId: "supplier-shenzhen-logistics",
-          domainId
+          supplierId: "supplier-shenzhen-logistics"
         }
       }
     });
@@ -170,7 +170,6 @@ describe("Store supplier registry API", () => {
       governance: {
         request: {
           kind: "attestSupplier",
-          domainId,
           supplierSubjectId,
           wallet: supplierWallet.toLowerCase()
         }
@@ -182,11 +181,9 @@ describe("Store supplier registry API", () => {
       pathname: "/store/suppliers/supplier-shenzhen-logistics/request-revocation",
       headers: adminHeaders,
       body: {
-        domainId,
         reason: "Operator review requested revocation.",
         confirmation: {
-          supplierId: "supplier-shenzhen-logistics",
-          domainId
+          supplierId: "supplier-shenzhen-logistics"
         }
       }
     });
@@ -211,7 +208,8 @@ describe("Store supplier registry API", () => {
     const draft = await createDraft(router);
     const submitWithoutParticipants = await router.handle({
       method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/submit`
+      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+      body: { walletAddress: revokedWallet }
     });
 
     expect(submitWithoutParticipants.status).toBe(409);
@@ -316,6 +314,7 @@ describe("Store supplier registry API", () => {
 
   it("refuses revoked supplier wallets for future Product BFF authorization", async () => {
     const { router } = await createRouter([
+      ...activeDeploymentEvents(),
       planAttestedEvent(1n),
       supplierAttestedEvent(2n, revokedSupplierSubjectId, revokedWallet),
       supplierRevokedEvent(3n, revokedSupplierSubjectId)
@@ -324,7 +323,8 @@ describe("Store supplier registry API", () => {
 
     const response = await router.handle({
       method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/submit`
+      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+      body: { walletAddress: revokedWallet }
     });
 
     expect(response.status).toBe(409);
@@ -376,7 +376,7 @@ function supplierBody(overrides: Record<string, unknown> = {}): Record<string, u
     capabilityTags: ["logistics", "customs"],
     supportedRoleSlotIds: ["delivery"],
     supportedStageIds: ["customs-complete", "shipping"],
-    domains: [domainId],
+    registryAddresses: [registryAddress],
     ...overrides
   };
 }
@@ -394,7 +394,7 @@ function metadataRecord(input: {
     capabilityTags: [],
     supportedRoleSlotIds: [],
     supportedStageIds: [],
-    domains: [domainId],
+    registryAddresses: [registryAddress],
     reviewStatus: "draft",
     createdAt: "2026-05-01T00:00:00.000Z",
     updatedAt: "2026-05-01T00:00:00.000Z"
@@ -515,13 +515,12 @@ async function createReadyDraft(router: ApiRouter): Promise<ProductOrderDraftDTO
     method: "GET",
     pathname: `/product/order-drafts/${draft.draftId}`
   });
-  expect((readyResponse.body as { draft: ProductOrderDraftDTO }).draft.status).toBe("ready_to_register");
+  expect((readyResponse.body as { draft: ProductOrderDraftDTO }).draft.status).toBe("ready_to_trigger");
   return (readyResponse.body as { draft: ProductOrderDraftDTO }).draft;
 }
 
 function planAttestedEvent(blockNumber: bigint): ChainEvent {
   return chainEvent(blockNumber, 0, "PlanAttested", {
-    domainId: crossBorderPlanIds.domainId,
     planId: crossBorderPlanIds.planId,
     planHash: crossBorderPlanIds.planHash,
     artifactHash,
@@ -538,6 +537,31 @@ function planRegisteredEvent(blockNumber: bigint): ChainEvent {
     planHash: crossBorderPlanIds.planHash,
     hookCount: 1n
   });
+}
+
+function activeDeploymentEvents(): readonly ChainEvent[] {
+  return [
+    chainEvent(1n, 0, "DeploymentRegistered", {
+      deploymentId: activeDeploymentId,
+      stateMachine: contractAddress,
+      trustRegistry: registryAddress,
+      artifactHash,
+      abiHash: metadataHash,
+      deploymentBlock: 1n,
+      metadataURI: "uvp-eth://deployments/store-suppliers"
+    }, deploymentRegistryAddress),
+    chainEvent(2n, 0, "DeploymentCanaryMarked", {
+      deploymentId: activeDeploymentId,
+      evidenceHash: metadataHash,
+      evidenceURI: "uvp-eth://evidence/store-suppliers"
+    }, deploymentRegistryAddress),
+    chainEvent(3n, 0, "DeploymentActivated", {
+      previousDeploymentId: "0x0000000000000000000000000000000000000000000000000000000000000000",
+      newDeploymentId: activeDeploymentId,
+      evidenceHash: metadataHash,
+      evidenceURI: "uvp-eth://evidence/store-suppliers"
+    }, deploymentRegistryAddress)
+  ];
 }
 
 function stateMachineTaskEvents(input: {
@@ -574,7 +598,6 @@ function supplierAttestedEvent(
   wallet = supplierWallet
 ): ChainEvent {
   return chainEvent(blockNumber, 0, "SupplierAttested", {
-    domainId,
     supplierSubjectId: subjectId,
     wallet,
     profileHash,
@@ -587,7 +610,6 @@ function supplierAttestedEvent(
 
 function supplierRevokedEvent(blockNumber: bigint, subjectId: Hex = supplierSubjectId): ChainEvent {
   return chainEvent(blockNumber, 1, "SupplierRevoked", {
-    domainId,
     supplierSubjectId: subjectId,
     reasonHash,
     reasonURI: "https://store.example/supplier-revocations/1",
@@ -599,13 +621,14 @@ function chainEvent(
   blockNumber: bigint,
   logIndex: number,
   eventName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  eventContractAddress: Address = contractAddress as Address
 ): ChainEvent {
   return {
     chainId: 31337,
-    contractAddress,
+    contractAddress: eventContractAddress,
     blockNumber,
-    transactionHash: `0x${blockNumber.toString(16).padStart(64, "0")}`,
+    transactionHash: `0x${blockNumber.toString(16).padStart(64, "0")}` as Hex,
     logIndex,
     eventName,
     args

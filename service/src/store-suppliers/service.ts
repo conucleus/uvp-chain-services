@@ -1,11 +1,17 @@
 import {
-  DEFAULT_OFFICIAL_DOMAIN_ID,
   STORE_SUPPLIER_CAPABILITY_TAGS,
   type StoreSupplierDTO,
   type StoreSupplierReviewStatus
 } from "@uvp-eth/product-dto";
 import type { GovernancePrincipal, GovernanceReviewStatus, GovernanceService } from "../governance/index.js";
 import type { SupplierTrustProjection } from "../indexer/trust-projections.js";
+import {
+  buildSupplierNotificationProfileConfigRequest,
+  verifySupplierNotificationWalletProof,
+  type SupplierNotificationProfile,
+  type SupplierNotificationProfileConfigRequest,
+  type SupplierNotificationWalletProof
+} from "../notifications/index.js";
 import type { ProductService, ProductTaskApiDTO } from "../product/service.js";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
@@ -36,10 +42,13 @@ export interface StoreSupplierMetadataRecord {
   readonly supplierSubjectId: Hex;
   readonly displayName: string;
   readonly wallet?: Address;
+  readonly notificationProfile?: SupplierNotificationProfile;
+  readonly notificationProfileHash?: Hex;
+  readonly notificationUpdatedAt?: string;
   readonly capabilityTags: readonly string[];
   readonly supportedRoleSlotIds: readonly string[];
   readonly supportedStageIds: readonly string[];
-  readonly domains: readonly Hex[];
+  readonly registryAddresses: readonly Address[];
   readonly reviewStatus: StoreSupplierReviewStatus;
   readonly metadataURI?: string;
   readonly createdAt: string;
@@ -50,6 +59,7 @@ export type StoreSupplierAuditAction =
   | "create"
   | "review"
   | "tags_updated"
+  | "notification_profile_updated"
   | "request_attestation"
   | "request_revocation";
 
@@ -124,11 +134,21 @@ export interface StoreSupplierGovernanceResult extends StoreSupplierMutationResu
   readonly governance: unknown;
 }
 
+export interface StoreSupplierNotificationProfilePrepareResult {
+  readonly profileConfig: SupplierNotificationProfileConfigRequest;
+}
+
+export interface StoreSupplierNotificationProfileResult extends StoreSupplierMutationResult {
+  readonly profileConfig: SupplierNotificationProfileConfigRequest;
+}
+
 export interface StoreSupplierService {
   listSuppliers(query?: StoreSupplierListQuery): Promise<StoreSupplierListDTO>;
   getSupplier(supplierId: string): Promise<StoreSupplierDTO | undefined>;
   createSupplier(input: unknown, principal: StoreOperatorPrincipal): Promise<StoreSupplierMutationResult>;
   reviewSupplier(supplierId: string, input: unknown, principal: StoreOperatorPrincipal): Promise<StoreSupplierGovernanceResult>;
+  prepareNotificationProfile(supplierId: string, input: unknown): Promise<StoreSupplierNotificationProfilePrepareResult>;
+  saveNotificationProfile(supplierId: string, input: unknown): Promise<StoreSupplierNotificationProfileResult>;
   requestAttestation(supplierId: string, input: unknown, principal: StoreOperatorPrincipal): Promise<StoreSupplierGovernanceResult>;
   requestRevocation(supplierId: string, input: unknown, principal: StoreOperatorPrincipal): Promise<StoreSupplierGovernanceResult>;
 }
@@ -224,41 +244,67 @@ export function createStoreSupplierService(options: StoreSupplierServiceOptions)
         );
       }
       const record = mergeRequestMetadata(current, input, now().toISOString());
-      const domainId = requestDomainId(input, record.domains[0] ?? DEFAULT_OFFICIAL_DOMAIN_ID);
       const wallet = requestWallet(input, record.wallet);
       const governance = await options.governanceService.attestSupplier(
-        supplierAttestationInput(record, input, domainId, wallet),
+        supplierAttestationInput(record, input, wallet),
         governancePrincipal(principal)
       );
-      const withDomain = ensureDomain(record, domainId);
-      await metadataStore.putSupplier(withDomain);
-      await metadataStore.appendAudit(auditRecord("audit", sequence++, withDomain, "request_attestation", principal, now));
+      await metadataStore.putSupplier(record);
+      await metadataStore.appendAudit(auditRecord("audit", sequence++, record, "request_attestation", principal, now));
       return {
-        supplier: await requireBuiltSupplier(withDomain.supplierId, metadataStore, options.store, options.productService),
+        supplier: await requireBuiltSupplier(record.supplierId, metadataStore, options.store, options.productService),
         governance
+      };
+    },
+
+    async prepareNotificationProfile(supplierId, input) {
+      const current = await requireMetadata(metadataStore, supplierId);
+      return {
+        profileConfig: supplierNotificationProfileConfigInput(current, input)
+      };
+    },
+
+    async saveNotificationProfile(supplierId, input) {
+      const current = await requireMetadata(metadataStore, supplierId);
+      const profileConfig = supplierNotificationProfileConfigInput(current, input);
+      await verifySupplierNotificationWalletProof(profileConfig, requiredWalletProof(input));
+      const timestamp = now().toISOString();
+      const updated: StoreSupplierMetadataRecord = {
+        ...current,
+        wallet: profileConfig.wallet,
+        notificationProfile: profileConfig.notification,
+        notificationProfileHash: profileConfig.notificationHash,
+        notificationUpdatedAt: timestamp,
+        updatedAt: timestamp
+      };
+      await metadataStore.putSupplier(updated);
+      await metadataStore.appendAudit(auditRecord("audit", sequence++, updated, "notification_profile_updated", {
+        operatorId: `wallet:${profileConfig.wallet}`,
+        role: "supplier"
+      }, now));
+      return {
+        supplier: await requireBuiltSupplier(updated.supplierId, metadataStore, options.store, options.productService),
+        profileConfig
       };
     },
 
     async requestRevocation(supplierId, input, principal) {
       const current = await requireMetadata(metadataStore, supplierId);
-      const trust = await selectedTrustForSubject(options.store, current.supplierSubjectId);
-      const domainId = requestDomainId(input, trust?.domainId ?? current.domains[0] ?? DEFAULT_OFFICIAL_DOMAIN_ID);
       const updated: StoreSupplierMetadataRecord = {
         ...current,
         reviewStatus: "revoked",
         updatedAt: now().toISOString()
       };
-      const withDomain = ensureDomain(updated, domainId);
       const governance = await options.governanceService.revokeSupplier(
-        supplierRevocationInput(withDomain, input, domainId),
+        supplierRevocationInput(updated, input),
         governancePrincipal(principal)
       );
-      await metadataStore.putSupplier(withDomain);
-      await metadataStore.appendAudit(auditRecord("audit", sequence++, withDomain, "request_revocation", principal, now, {
+      await metadataStore.putSupplier(updated);
+      await metadataStore.appendAudit(auditRecord("audit", sequence++, updated, "request_revocation", principal, now, {
         reviewStatus: "revoked"
       }));
       return {
-        supplier: await requireBuiltSupplier(withDomain.supplierId, metadataStore, options.store, options.productService),
+        supplier: await requireBuiltSupplier(updated.supplierId, metadataStore, options.store, options.productService),
         governance
       };
     }
@@ -322,9 +368,9 @@ function supplierDtoFromSources(input: {
 }): StoreSupplierDTO {
   const selectedTrust = selectSupplierTrust(input.trusts);
   const wallet = selectedTrust?.wallet ?? input.metadata?.wallet;
-  const domains = uniqueSorted([
-    ...(input.metadata?.domains ?? []),
-    ...input.trusts.map((trust) => trust.domainId)
+  const registryAddresses = uniqueSorted([
+    ...(input.metadata?.registryAddresses ?? []),
+    ...input.trusts.map((trust) => trust.registryAddress)
   ]);
   const matchingTasks = input.tasks.filter((task) => taskMatchesSupplier(task, input.subjectId, wallet));
   const recentOrderIds = new Set(matchingTasks.map((task) => task.orderId));
@@ -339,12 +385,15 @@ function supplierDtoFromSources(input: {
     supplierSubjectId: input.subjectId,
     displayName: input.metadata?.displayName ?? `供应商 ${shortHex(input.subjectId)}`,
     ...(wallet ? { wallet } : {}),
+    ...(input.metadata?.notificationProfile ? { notificationProfile: input.metadata.notificationProfile } : {}),
+    ...(input.metadata?.notificationProfileHash ? { notificationProfileHash: input.metadata.notificationProfileHash } : {}),
+    ...(input.metadata?.notificationUpdatedAt ? { notificationUpdatedAt: input.metadata.notificationUpdatedAt } : {}),
     trustStatus,
     trustLabel: supplierTrustLabel(trustStatus),
     capabilityTags: input.metadata?.capabilityTags ?? [],
     supportedRoleSlotIds: input.metadata?.supportedRoleSlotIds ?? [],
     supportedStageIds: input.metadata?.supportedStageIds ?? [],
-    domains,
+    registryAddresses,
     recentOrderCount: recentOrderIds.size,
     openTaskCount: matchingTasks.filter((task) => task.status === "open").length,
     reviewStatus,
@@ -367,7 +416,7 @@ function matchesSupplierQuery(supplier: StoreSupplierDTO, query: StoreSupplierLi
       supplier.supplierSubjectId.toLowerCase().includes(needle) ||
       supplier.wallet?.toLowerCase().includes(needle) ||
       supplier.capabilityTags.some((item) => item.includes(needle)) ||
-      supplier.domains.some((domain) => domain.toLowerCase().includes(needle)));
+      supplier.registryAddresses.some((registryAddress) => registryAddress.toLowerCase().includes(needle)));
 }
 
 async function requireBuiltSupplier(
@@ -421,7 +470,7 @@ function createMetadataRecord(input: unknown, timestamp: string): StoreSupplierM
     capabilityTags: normalizeCapabilityTags(optionalStringArray(record, "capabilityTags") ?? []),
     supportedRoleSlotIds: normalizeStringArray(optionalStringArray(record, "supportedRoleSlotIds") ?? []),
     supportedStageIds: normalizeStringArray(optionalStringArray(record, "supportedStageIds") ?? []),
-    domains: normalizeDomains(optionalStringArray(record, "domains") ?? optionalSingleton(record, "domainId")),
+    registryAddresses: normalizeRegistryAddresses(optionalStringArray(record, "registryAddresses")),
     reviewStatus: optionalStoreReviewStatus(record, "reviewStatus") ?? "draft",
     ...optionalMetadataURI(record),
     createdAt: timestamp,
@@ -439,7 +488,7 @@ function mergeReviewMetadata(
   const capabilityTags = optionalStringArray(record, "capabilityTags");
   const supportedRoleSlotIds = optionalStringArray(record, "supportedRoleSlotIds");
   const supportedStageIds = optionalStringArray(record, "supportedStageIds");
-  const domains = optionalStringArray(record, "domains") ?? optionalSingleton(record, "domainId");
+  const registryAddresses = optionalStringArray(record, "registryAddresses");
   return {
     ...current,
     ...(displayName !== undefined ? { displayName } : {}),
@@ -447,7 +496,7 @@ function mergeReviewMetadata(
     ...(capabilityTags !== undefined ? { capabilityTags: normalizeCapabilityTags(capabilityTags) } : {}),
     ...(supportedRoleSlotIds !== undefined ? { supportedRoleSlotIds: normalizeStringArray(supportedRoleSlotIds) } : {}),
     ...(supportedStageIds !== undefined ? { supportedStageIds: normalizeStringArray(supportedStageIds) } : {}),
-    ...(domains !== undefined ? { domains: normalizeDomains(domains) } : {}),
+    ...(registryAddresses !== undefined ? { registryAddresses: normalizeRegistryAddresses(registryAddresses) } : {}),
     reviewStatus: requiredStoreReviewStatus(record, "reviewStatus"),
     ...optionalMetadataURI(record, current.metadataURI),
     updatedAt: timestamp
@@ -497,12 +546,10 @@ function governanceReviewInput(record: StoreSupplierMetadataRecord, input: unkno
 function supplierAttestationInput(
   record: StoreSupplierMetadataRecord,
   input: unknown,
-  domainId: Hex,
   wallet: Address
 ): Record<string, unknown> {
   const body = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
   return {
-    domainId,
     supplierSubjectId: record.supplierSubjectId,
     wallet,
     subjectId: record.supplierSubjectId,
@@ -524,14 +571,55 @@ function supplierAttestationInput(
   };
 }
 
+function supplierNotificationProfileConfigInput(
+  supplier: StoreSupplierMetadataRecord,
+  input: unknown
+): SupplierNotificationProfileConfigRequest {
+  const body = requireBodyRecord(input);
+  const wallet = optionalString(body, "wallet") ?? supplier.wallet;
+  if (!wallet) {
+    throw new StoreSupplierServiceError(400, "wallet_required", "supplier wallet is required before saving notification profile");
+  }
+  return buildSupplierNotificationProfileConfigRequest({
+    ...body,
+    supplierSubjectId: supplier.supplierSubjectId,
+    wallet,
+    profile: optionalUnknown(body, "profile") ?? {
+      storeSupplierId: supplier.supplierId,
+      displayName: supplier.displayName,
+      wallet
+    },
+    capability: optionalUnknown(body, "capability") ?? {
+      tags: supplier.capabilityTags,
+      supportedRoleSlotIds: supplier.supportedRoleSlotIds,
+      supportedStageIds: supplier.supportedStageIds,
+      notificationProfileOwner: "store_supplier"
+    },
+    metadata: optionalUnknown(body, "metadata") ?? {
+      storeSupplierId: supplier.supplierId,
+      metadataURI: supplier.metadataURI ?? null
+    }
+  });
+}
+
+function requiredWalletProof(input: unknown): SupplierNotificationWalletProof {
+  const body = requireBodyRecord(input);
+  const proof = optionalRecord(body, "walletProof");
+  if (!proof) {
+    throw new StoreSupplierServiceError(400, "wallet_proof_required", "walletProof is required");
+  }
+  return {
+    message: requiredString(proof, "message"),
+    signature: requiredString(proof, "signature") as Hex
+  };
+}
+
 function supplierRevocationInput(
   record: StoreSupplierMetadataRecord,
-  input: unknown,
-  domainId: Hex
+  input: unknown
 ): Record<string, unknown> {
   const body = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
   return {
-    domainId,
     supplierSubjectId: record.supplierSubjectId,
     subjectId: record.supplierSubjectId,
     reason: optionalString(body, "reason") ?? optionalString(body, "publicSummary") ?? "Store supplier revocation requested",
@@ -602,7 +690,7 @@ function supplierProofRows(subjectId: Hex, trust: SupplierTrustProjection | unde
   return [
     { label: "Supplier Subject", value: trust.supplierSubjectId },
     { label: "背书状态", value: supplierTrustLabel(trust.status) },
-    { label: "背书域", value: trust.domainId },
+    { label: "Registry", value: trust.registryAddress },
     { label: "钱包", value: trust.wallet },
     { label: "链上事件", value: trust.revoked ? "SupplierRevoked" : "SupplierAttested" },
     { label: "交易编号", value: shortHex(provenance.transactionHash) },
@@ -644,12 +732,6 @@ function supplierNextAction(
   }
 }
 
-function requestDomainId(input: unknown, fallback: string): Hex {
-  const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
-  const value = optionalString(record, "domainId") ?? fallback;
-  return normalizeBytes32(value, "domainId");
-}
-
 function requestWallet(input: unknown, fallback: Address | undefined): Address {
   const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
   const value = optionalString(record, "wallet") ?? fallback;
@@ -657,16 +739,6 @@ function requestWallet(input: unknown, fallback: Address | undefined): Address {
     throw new StoreSupplierServiceError(400, "wallet_required", "supplier wallet is required for attestation request");
   }
   return normalizeAddress(value, "wallet");
-}
-
-function ensureDomain(record: StoreSupplierMetadataRecord, domainId: Hex): StoreSupplierMetadataRecord {
-  if (record.domains.includes(domainId)) {
-    return record;
-  }
-  return {
-    ...record,
-    domains: uniqueSorted([...record.domains, domainId])
-  };
 }
 
 function requireBodyRecord(input: unknown): Record<string, unknown> {
@@ -697,6 +769,17 @@ function optionalString(record: Record<string, unknown>, field: string): string 
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function optionalRecord(record: Record<string, unknown>, field: string): Record<string, unknown> | undefined {
+  if (!Object.hasOwn(record, field) || record[field] === null) {
+    return undefined;
+  }
+  const value = record[field];
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  throw new StoreSupplierServiceError(400, "invalid_body", `${field} must be a JSON object`);
 }
 
 function requiredBytes32(record: Record<string, unknown>, field: string): Hex {
@@ -786,8 +869,8 @@ function normalizeStringArray(values: readonly string[]): readonly string[] {
   return uniqueSorted(values.map((value) => value.trim()).filter((value) => value.length > 0));
 }
 
-function normalizeDomains(values: readonly string[] | undefined): readonly Hex[] {
-  return values ? uniqueSorted(values.map((value) => normalizeBytes32(value, "domainId"))) as readonly Hex[] : [];
+function normalizeRegistryAddresses(values: readonly string[] | undefined): readonly Address[] {
+  return values ? uniqueSorted(values.map((value) => normalizeAddress(value, "registryAddress"))) as readonly Address[] : [];
 }
 
 function normalizeSupplierId(value: string): string {
@@ -838,7 +921,7 @@ function compareTrustUpdatedDesc(left: SupplierTrustProjection, right: SupplierT
   if (left.updatedAt.logIndex !== right.updatedAt.logIndex) {
     return right.updatedAt.logIndex - left.updatedAt.logIndex;
   }
-  return left.domainId.localeCompare(right.domainId);
+  return left.registryAddress.localeCompare(right.registryAddress);
 }
 
 function compareMetadataUpdatedDesc(left: StoreSupplierMetadataRecord, right: StoreSupplierMetadataRecord): number {

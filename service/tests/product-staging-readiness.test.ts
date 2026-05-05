@@ -391,8 +391,7 @@ function stagingEnv(tempDirs: string[]): Record<string, string | undefined> {
     UVP_PLAN_PUBLISHER_ADDRESS: "0x4444444444444444444444444444444444444444",
     UVP_REHEARSAL_PARTICIPANT_WALLETS: "0x7777777777777777777777777777777777777777",
     GOVERNANCE_BROADCAST_ENABLED: "true",
-    GOVERNANCE_DOMAIN_ID: "0x0000000000000000000000000000000000000000000000000000000000001001",
-    GOVERNANCE_DOMAIN_OWNER_ADDRESS: stagingGovernanceAddress,
+    GOVERNANCE_REGISTRY_OWNER_ADDRESS: stagingGovernanceAddress,
     GOVERNANCE_SIGNER_ADDRESS: stagingGovernanceAddress,
     GOVERNANCE_SIGNER_PRIVATE_KEY: stagingGovernancePrivateKey,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
@@ -410,7 +409,7 @@ function stagingManifestPath(tempDirs: string[]): string {
   tempDirs.push(dir);
   const manifestPath = join(dir, "staging.addresses.json");
   writeFileSync(manifestPath, JSON.stringify({
-    schemaVersion: "uvp-eth.addresses.v2",
+    schemaVersion: "uvp-eth.addresses.v5",
     network: {
       chainId,
       rpcUrlEnv: "UVP_RPC_URL"
@@ -449,7 +448,6 @@ function readinessEvents(options: {
       hookCount: 1n
     }),
     chainEvent(5n, 0, "PlanAttested", {
-      domainId: crossBorderPlanIds.domainId,
       planId: crossBorderPlanIds.planId,
       planHash: crossBorderPlanIds.planHash,
       artifactHash: crossBorderPlanIds.artifactHash,
@@ -486,7 +484,6 @@ function readinessEvents(options: {
     }),
     ...(options.includeSupplierAttestation === false ? [] : [
       chainEvent(9n, 0, "SupplierAttested", {
-        domainId: crossBorderPlanIds.domainId,
         supplierSubjectId,
         wallet: submitter,
         profileHash: metadataHash,
@@ -499,7 +496,6 @@ function readinessEvents(options: {
     ...(options.supplierRevoked
       ? [
           chainEvent(10n, 0, "SupplierRevoked", {
-            domainId: crossBorderPlanIds.domainId,
             supplierSubjectId,
             reasonHash: metadataHash,
             reasonURI: "https://store.example/supplier-revocations/customs-broker",
@@ -515,8 +511,6 @@ function activeDeploymentEvents(): readonly ChainEvent[] {
     chainEvent(1n, 0, "DeploymentRegistered", {
       deploymentId: activeDeploymentId,
       stateMachine: stateMachineAddress,
-      trustRegistry: trustRegistryAddress,
-      officialDomainId: crossBorderPlanIds.domainId,
       artifactHash: crossBorderPlanIds.artifactHash,
       abiHash,
       deploymentBlock: 4n,

@@ -89,6 +89,8 @@ export interface ProductStagePatchServiceOptions {
   readonly productBffStore?: ProductBffStore;
   readonly chainId?: number;
   readonly verifyingContract?: Address;
+  readonly stagePatchModuleAddress?: Address;
+  readonly dockingModuleAddress?: Address;
   readonly now?: () => Date;
   readonly prepareTtlSeconds?: number;
   readonly prepareIdFactory?: () => string;
@@ -202,9 +204,10 @@ export function createProductStageExecutorPatchService(
       const deadlineSeconds = Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
       const stateMachineAddress = stateMachineAddressFor(context, options);
+      const stagePatchModuleAddress = stagePatchModuleAddressFor(context, options);
       const typedData = buildStageExecutorPatchTypedData({
         chainId,
-        verifyingContract: stateMachineAddress,
+        verifyingContract: stagePatchModuleAddress,
         orderId: context.order.orderId,
         selectorStageId: context.task.stageIdentifier,
         targetStageId: context.targetStageId,
@@ -266,7 +269,7 @@ export function createProductStageExecutorPatchService(
           previousExecutorSignatureStatus: governance.mode === "handoff" ? "required" : "not_required",
           validUntil: new Date(deadlineSeconds * 1000).toISOString(),
           chainId,
-          verifyingContract: stateMachineAddress
+          verifyingContract: stagePatchModuleAddress
         },
         nonceKey: stagePatchNonceKey({
           kind: "executor",
@@ -393,9 +396,10 @@ export function createProductStageResourcePatchService(
       const deadlineSeconds = Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
       const stateMachineAddress = stateMachineAddressFor(context, options);
+      const stagePatchModuleAddress = stagePatchModuleAddressFor(context, options);
       const typedData = buildStageResourcePatchTypedData({
         chainId,
-        verifyingContract: stateMachineAddress,
+        verifyingContract: stagePatchModuleAddress,
         orderId: context.order.orderId,
         selectorStageId: context.task.stageIdentifier,
         targetStageId: context.targetStageId,
@@ -443,7 +447,7 @@ export function createProductStageResourcePatchService(
           selectorWallet: context.selectorWallet,
           validUntil: new Date(deadlineSeconds * 1000).toISOString(),
           chainId,
-          verifyingContract: stateMachineAddress
+          verifyingContract: stagePatchModuleAddress
         },
         nonceKey: stagePatchNonceKey({
           kind: "resource",
@@ -556,9 +560,10 @@ export function createProductDockedOrderLinkService(
       const deadlineSeconds = Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
       const stateMachineAddress = stateMachineAddressFor(context, options);
+      const dockingModuleAddress = dockingModuleAddressFor(context, options);
       const typedData = buildDockedOrderLinkTypedData({
         chainId,
-        verifyingContract: stateMachineAddress,
+        verifyingContract: dockingModuleAddress,
         localOrderId: context.order.orderId,
         selectorStageId: context.task.stageIdentifier,
         localSourceId: context.targetStageId,
@@ -606,7 +611,7 @@ export function createProductDockedOrderLinkService(
           signalBindings,
           validUntil: new Date(deadlineSeconds * 1000).toISOString(),
           chainId,
-          verifyingContract: stateMachineAddress
+          verifyingContract: dockingModuleAddress
         },
         nonceKey: stagePatchNonceKey({
           kind: "docked_order_link",
@@ -1295,6 +1300,27 @@ function stateMachineAddressFor(context: SelectorTaskContext, options: ProductSt
     throw new ProductStagePatchError(409, "state_machine_address_missing", "state machine address is required for stage patch typed data");
   }
   return stateMachineAddress;
+}
+
+function stagePatchModuleAddressFor(context: SelectorTaskContext, options: ProductStagePatchServiceOptions): Address {
+  return moduleAddressFor(context, options, options.stagePatchModuleAddress, "stagePatchModuleAddress");
+}
+
+function dockingModuleAddressFor(context: SelectorTaskContext, options: ProductStagePatchServiceOptions): Address {
+  return moduleAddressFor(context, options, options.dockingModuleAddress, "dockingModuleAddress");
+}
+
+function moduleAddressFor(
+  context: SelectorTaskContext,
+  options: ProductStagePatchServiceOptions,
+  configured: Address | undefined,
+  label: string
+): Address {
+  const moduleAddress = normalizeAddress(configured ?? options.verifyingContract ?? stateMachineAddressFor(context, options), label);
+  if (moduleAddress === ZERO_ADDRESS) {
+    throw new ProductStagePatchError(409, "module_address_missing", `${label} is required for stage patch typed data`);
+  }
+  return moduleAddress;
 }
 
 function stagePatchNonceKey(input: {

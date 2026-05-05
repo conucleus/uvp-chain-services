@@ -16,17 +16,8 @@ export interface TrustProjectionProvenance {
   readonly logIndex: number;
 }
 
-export interface TrustDomainProjection {
-  readonly domainId: Hex;
-  readonly owner: Address;
-  readonly metadataHash: Hex;
-  readonly metadataURI: string;
-  readonly registeredAt: TrustProjectionProvenance;
-  readonly updatedAt: TrustProjectionProvenance;
-}
-
 export interface PlanTrustProjection {
-  readonly domainId: Hex;
+  readonly registryAddress: Address;
   readonly planId: Hex;
   readonly planHash: Hex;
   readonly artifactHash: Hex;
@@ -44,7 +35,7 @@ export interface PlanTrustProjection {
 }
 
 export interface SupplierTrustProjection {
-  readonly domainId: Hex;
+  readonly registryAddress: Address;
   readonly supplierSubjectId: Hex;
   readonly wallet: Address;
   readonly profileHash: Hex;
@@ -64,20 +55,19 @@ export interface SupplierTrustProjection {
 export interface TrustProjectionSnapshot {
   readonly rebuildable: true;
   readonly eventCount: number;
-  readonly domains: Readonly<Record<string, TrustDomainProjection>>;
   readonly plans: Readonly<Record<string, PlanTrustProjection>>;
   readonly suppliers: Readonly<Record<string, SupplierTrustProjection>>;
   readonly lastEvent?: TrustProjectionProvenance;
 }
 
 export interface PlanTrustQuery {
-  readonly domainId?: string;
+  readonly registryAddress?: string;
   readonly planId?: string;
   readonly planHash?: string;
 }
 
 export interface SupplierTrustQuery {
-  readonly domainId?: string;
+  readonly registryAddress?: string;
   readonly supplierSubjectId?: string;
   readonly wallet?: string;
 }
@@ -90,21 +80,19 @@ export function createEmptyTrustProjectionSnapshot(): TrustProjectionSnapshot {
   return {
     rebuildable: true,
     eventCount: 0,
-    domains: {},
     plans: {},
     suppliers: {}
   };
 }
 
 export function rebuildTrustProjections(events: readonly ChainEvent[]): TrustProjectionSnapshot {
-  const domains = new Map<string, Mutable<TrustDomainProjection>>();
   const plans = new Map<string, Mutable<PlanTrustProjection>>();
   const suppliers = new Map<string, Mutable<SupplierTrustProjection>>();
   let eventCount = 0;
   let lastEvent: TrustProjectionProvenance | undefined;
 
   for (const event of filterActiveChainEvents(events)) {
-    const applied = applyTrustEvent({ domains, plans, suppliers }, event);
+    const applied = applyTrustEvent({ plans, suppliers }, event);
     if (applied) {
       eventCount += 1;
       lastEvent = provenanceOf(event);
@@ -114,7 +102,6 @@ export function rebuildTrustProjections(events: readonly ChainEvent[]): TrustPro
   return {
     rebuildable: true,
     eventCount,
-    domains: Object.fromEntries(domains),
     plans: Object.fromEntries(plans),
     suppliers: Object.fromEntries(suppliers),
     ...(lastEvent ? { lastEvent } : {})
@@ -125,12 +112,12 @@ export function filterPlanTrust(
   snapshot: TrustProjectionSnapshot,
   query: PlanTrustQuery
 ): readonly PlanTrustProjection[] {
-  const domainId = query.domainId ? normalizeBytes32(query.domainId, "domainId") : undefined;
+  const registryAddress = query.registryAddress ? normalizeAddress(query.registryAddress, "registryAddress") : undefined;
   const planId = query.planId ? normalizeBytes32(query.planId, "planId") : undefined;
   const planHash = query.planHash ? normalizeBytes32(query.planHash, "planHash") : undefined;
 
   return Object.values(snapshot.plans).filter((item) =>
-    (!domainId || item.domainId === domainId) &&
+    (!registryAddress || item.registryAddress === registryAddress) &&
     (!planId || item.planId === planId) &&
     (!planHash || item.planHash === planHash)
   );
@@ -140,14 +127,14 @@ export function filterSupplierTrust(
   snapshot: TrustProjectionSnapshot,
   query: SupplierTrustQuery
 ): readonly SupplierTrustProjection[] {
-  const domainId = query.domainId ? normalizeBytes32(query.domainId, "domainId") : undefined;
+  const registryAddress = query.registryAddress ? normalizeAddress(query.registryAddress, "registryAddress") : undefined;
   const supplierSubjectId = query.supplierSubjectId
     ? normalizeBytes32(query.supplierSubjectId, "supplierSubjectId")
     : undefined;
   const wallet = query.wallet ? normalizeAddress(query.wallet, "wallet") : undefined;
 
   return Object.values(snapshot.suppliers).filter((item) =>
-    (!domainId || item.domainId === domainId) &&
+    (!registryAddress || item.registryAddress === registryAddress) &&
     (!supplierSubjectId || item.supplierSubjectId === supplierSubjectId) &&
     (!wallet || item.wallet === wallet)
   );
@@ -155,22 +142,12 @@ export function filterSupplierTrust(
 
 function applyTrustEvent(
   state: {
-    domains: Map<string, Mutable<TrustDomainProjection>>;
     plans: Map<string, Mutable<PlanTrustProjection>>;
     suppliers: Map<string, Mutable<SupplierTrustProjection>>;
   },
   event: ChainEvent
 ): boolean {
   switch (event.eventName) {
-    case "DomainRegistered":
-      applyDomainRegistered(state.domains, event);
-      return true;
-    case "DomainUpdated":
-      applyDomainUpdated(state.domains, event);
-      return true;
-    case "DomainOwnerTransferred":
-      applyDomainOwnerTransferred(state.domains, event);
-      return true;
     case "PlanAttested":
       applyPlanAttested(state.plans, event);
       return true;
@@ -188,45 +165,12 @@ function applyTrustEvent(
   }
 }
 
-function applyDomainRegistered(domains: Map<string, Mutable<TrustDomainProjection>>, event: ChainEvent): void {
-  const domainId = requiredBytes32Arg(event, "domainId");
-  domains.set(domainId, {
-    domainId,
-    owner: requiredAddressArg(event, "owner"),
-    metadataHash: requiredBytes32Arg(event, "metadataHash"),
-    metadataURI: optionalStringArg(event, "metadataURI") ?? "",
-    registeredAt: provenanceOf(event),
-    updatedAt: provenanceOf(event)
-  });
-}
-
-function applyDomainUpdated(domains: Map<string, Mutable<TrustDomainProjection>>, event: ChainEvent): void {
-  const domainId = requiredBytes32Arg(event, "domainId");
-  const domain = domains.get(domainId);
-  if (!domain) {
-    return;
-  }
-  domain.metadataHash = requiredBytes32Arg(event, "metadataHash");
-  domain.metadataURI = optionalStringArg(event, "metadataURI") ?? "";
-  domain.updatedAt = provenanceOf(event);
-}
-
-function applyDomainOwnerTransferred(domains: Map<string, Mutable<TrustDomainProjection>>, event: ChainEvent): void {
-  const domainId = requiredBytes32Arg(event, "domainId");
-  const domain = domains.get(domainId);
-  if (!domain) {
-    return;
-  }
-  domain.owner = requiredAddressArg(event, "newOwner");
-  domain.updatedAt = provenanceOf(event);
-}
-
 function applyPlanAttested(plans: Map<string, Mutable<PlanTrustProjection>>, event: ChainEvent): void {
-  const domainId = requiredBytes32Arg(event, "domainId");
   const planId = requiredBytes32Arg(event, "planId");
-  const key = trustKey(domainId, planId);
+  const registryAddress = normalizeAddress(event.contractAddress, "PlanAttested.contractAddress");
+  const key = trustKey(event.chainId, registryAddress, planId);
   plans.set(key, {
-    domainId,
+    registryAddress,
     planId,
     planHash: requiredBytes32Arg(event, "planHash"),
     artifactHash: requiredBytes32Arg(event, "artifactHash"),
@@ -242,9 +186,9 @@ function applyPlanAttested(plans: Map<string, Mutable<PlanTrustProjection>>, eve
 }
 
 function applyPlanRevoked(plans: Map<string, Mutable<PlanTrustProjection>>, event: ChainEvent): void {
-  const domainId = requiredBytes32Arg(event, "domainId");
   const planId = requiredBytes32Arg(event, "planId");
-  const plan = plans.get(trustKey(domainId, planId));
+  const registryAddress = normalizeAddress(event.contractAddress, "PlanRevoked.contractAddress");
+  const plan = plans.get(trustKey(event.chainId, registryAddress, planId));
   if (!plan) {
     return;
   }
@@ -257,10 +201,10 @@ function applyPlanRevoked(plans: Map<string, Mutable<PlanTrustProjection>>, even
 }
 
 function applySupplierAttested(suppliers: Map<string, Mutable<SupplierTrustProjection>>, event: ChainEvent): void {
-  const domainId = requiredBytes32Arg(event, "domainId");
   const supplierSubjectId = requiredBytes32Arg(event, "supplierSubjectId");
-  suppliers.set(trustKey(domainId, supplierSubjectId), {
-    domainId,
+  const registryAddress = normalizeAddress(event.contractAddress, "SupplierAttested.contractAddress");
+  suppliers.set(trustKey(event.chainId, registryAddress, supplierSubjectId), {
+    registryAddress,
     supplierSubjectId,
     wallet: requiredAddressArg(event, "wallet"),
     profileHash: requiredBytes32Arg(event, "profileHash"),
@@ -276,9 +220,9 @@ function applySupplierAttested(suppliers: Map<string, Mutable<SupplierTrustProje
 }
 
 function applySupplierRevoked(suppliers: Map<string, Mutable<SupplierTrustProjection>>, event: ChainEvent): void {
-  const domainId = requiredBytes32Arg(event, "domainId");
   const supplierSubjectId = requiredBytes32Arg(event, "supplierSubjectId");
-  const supplier = suppliers.get(trustKey(domainId, supplierSubjectId));
+  const registryAddress = normalizeAddress(event.contractAddress, "SupplierRevoked.contractAddress");
+  const supplier = suppliers.get(trustKey(event.chainId, registryAddress, supplierSubjectId));
   if (!supplier) {
     return;
   }
@@ -290,8 +234,8 @@ function applySupplierRevoked(suppliers: Map<string, Mutable<SupplierTrustProjec
   supplier.updatedAt = provenanceOf(event);
 }
 
-function trustKey(domainId: Hex, subjectId: Hex): string {
-  return `${domainId}:${subjectId}`;
+function trustKey(chainId: number, registryAddress: Address, subjectId: Hex): string {
+  return `${chainId}:${registryAddress.toLowerCase()}:${subjectId}`;
 }
 
 function provenanceOf(pointer: ChainPointer): TrustProjectionProvenance {

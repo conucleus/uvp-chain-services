@@ -1,9 +1,5 @@
 import { adminPrincipalFromHeaders } from "../../governance/index.js";
-import {
-  SupplierNotificationConfigError,
-  type NotificationDeliveryStatus
-} from "../../notifications/index.js";
-import { redactErrorMessage } from "../../security/redaction.js";
+import type { NotificationDeliveryStatus } from "../../notifications/index.js";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address } from "../../shared/types.js";
 import { cleanQuery, readApiHeader, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
@@ -19,10 +15,6 @@ export function createNotificationsRouteModule(): RouteModule {
       if (participantNotificationResponse) {
         return participantNotificationResponse;
       }
-      const supplierConfigResponse = await handleSupplierNotificationConfigRequest(request, context);
-      if (supplierConfigResponse) {
-        return supplierConfigResponse;
-      }
       return handleNotificationRequest(request, context);
     }
   };
@@ -32,7 +24,7 @@ async function handleParticipantNotificationRequest(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1]
 ): Promise<ApiResponse | undefined> {
-  if (!request.pathname.startsWith("/product/me/notifications")) {
+  if (!request.pathname.startsWith("/product/me/activity-feed")) {
     return undefined;
   }
 
@@ -41,7 +33,7 @@ async function handleParticipantNotificationRequest(
     return wallet.response;
   }
 
-  if (request.method === "GET" && request.pathname === "/product/me/notifications") {
+  if (request.method === "GET" && request.pathname === "/product/me/activity-feed") {
     const notifications = await context.notificationService.listParticipantNotifications({
       ...(wallet.walletAddress ? { walletAddress: wallet.walletAddress } : {})
     });
@@ -56,7 +48,7 @@ async function handleParticipantNotificationRequest(
     };
   }
 
-  const readMatch = /^\/product\/me\/notifications\/([^/]+)\/read$/.exec(request.pathname);
+  const readMatch = /^\/product\/me\/activity-feed\/([^/]+)\/read$/.exec(request.pathname);
   if (request.method === "POST" && readMatch) {
     const notificationId = parseDeliveryId(readMatch[1] ?? "");
     if (!notificationId.ok) {
@@ -72,77 +64,13 @@ async function handleParticipantNotificationRequest(
     if (!notification) {
       return {
         status: 404,
-        body: { error: "participant_notification_not_found" }
+        body: { error: "activity_feed_item_not_found" }
       };
     }
     return {
       status: 200,
       body: { notification }
     };
-  }
-
-  return {
-    status: 404,
-    body: { error: "not_found" }
-  };
-}
-
-async function handleSupplierNotificationConfigRequest(
-  request: ApiRequest,
-  context: Parameters<RouteModule["handle"]>[1]
-): Promise<ApiResponse | undefined> {
-  if (!request.pathname.startsWith("/supplier/notifications/profile")) {
-    return undefined;
-  }
-
-  try {
-    if (request.method === "POST" && request.pathname === "/supplier/notifications/profile/prepare") {
-      return {
-        status: 200,
-        body: { profileConfig: context.supplierNotificationConfigService.prepare(request.body) }
-      };
-    }
-
-    if (request.method === "POST" && request.pathname === "/supplier/notifications/profile") {
-      return {
-        status: 201,
-        body: { profileConfig: await context.supplierNotificationConfigService.save(request.body) }
-      };
-    }
-
-    if (request.method === "GET" && request.pathname === "/supplier/notifications/profile") {
-      const query = cleanQuery({
-        wallet: request.query?.wallet,
-        supplierSubjectId: request.query?.supplierSubjectId
-      });
-      return {
-        status: 200,
-        body: {
-          profileConfigs: await context.supplierNotificationConfigService.list(query)
-        }
-      };
-    }
-  } catch (error) {
-    if (error instanceof SupplierNotificationConfigError) {
-      return {
-        status: error.status,
-        body: {
-          error: error.code,
-          message: redactErrorMessage(error),
-          ...(error.details !== undefined ? { details: error.details } : {})
-        }
-      };
-    }
-    if (error instanceof ConfigError) {
-      return {
-        status: 400,
-        body: {
-          error: "invalid_body",
-          message: redactErrorMessage(error)
-        }
-      };
-    }
-    throw error;
   }
 
   return {
@@ -200,13 +128,6 @@ async function handleNotificationRequest(
     return {
       status: 403,
       body: { error: "forbidden" }
-    };
-  }
-
-  if (request.method === "POST" && request.pathname === "/admin/notifications/run-once") {
-    return {
-      status: 200,
-      body: { summary: await context.notificationService.runOnce() }
     };
   }
 

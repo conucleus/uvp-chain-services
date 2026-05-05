@@ -11,11 +11,12 @@ import {
 import { createConfiguredGovernanceChainAdapter, createGovernanceService } from "../governance/index.js";
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
+import { createNotificationService } from "../notifications/index.js";
 import {
-  AnvilProductOrderRegistrationAdapter,
-  MemoryProductOrderRegistrationAdapter,
-  type ProductOrderRegistrationAdapter
-} from "../product/bff/registration.js";
+  AnvilProductOrderTriggerBroadcastAdapter,
+  MemoryProductOrderTriggerBroadcastAdapter,
+  type ProductOrderTriggerBroadcastAdapter
+} from "../product/bff/trigger.js";
 import { createViemReconcileReceiptClient, TxReconcileWorker } from "../reconcile/index.js";
 import { createChainServicesStores } from "../storage/factory.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
@@ -61,20 +62,33 @@ export async function startApiServer(
   const audit = createLoggerAuditSink(logger);
   const configDiagnostics = await runConfigPreflight(config);
   const eventSource = options.eventSource === undefined ? createChainEventSourceForTarget(config) : options.eventSource;
-  const indexer = eventSource ? new IndexerService({ config, eventSource, store, logger }) : undefined;
   const productBffStore = stores.productBffStore;
   const submissionStore = stores.submissionStore;
   const governanceStore = stores.governanceStore;
+  const productSchemaResolver = {
+    getProductSchemaByPlan: (planId: string, planHash: string, artifactHash?: string) =>
+      stores.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash, artifactHash)
+  };
+  const notificationService = createNotificationService({
+    store,
+    supplierMetadataStore: stores.storeSupplierMetadataStore,
+    productSchemaResolver
+  });
+  const indexer = eventSource
+    ? new IndexerService({ config, eventSource, store, notificationProcessor: notificationService, logger })
+    : undefined;
 
   if (indexer) {
     await indexer.rebuildFromDeploymentBlock();
   }
 
   const submissionVerifyingContract = stateMachineAddress(config.network.contracts);
+  const stagePatchVerifyingContract = stagePatchModuleAddress(config) ?? submissionVerifyingContract;
+  const dockingVerifyingContract = dockingModuleAddress(config) ?? submissionVerifyingContract;
   const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(config, submissionVerifyingContract, audit);
-  const stageExecutorPatchBroadcastAdapter = createConfiguredStageExecutorPatchBroadcastAdapter(config, submissionVerifyingContract);
-  const stageResourcePatchBroadcastAdapter = createConfiguredStageResourcePatchBroadcastAdapter(config, submissionVerifyingContract);
-  const dockedOrderLinkBroadcastAdapter = createConfiguredDockedOrderLinkBroadcastAdapter(config, submissionVerifyingContract);
+  const stageExecutorPatchBroadcastAdapter = createConfiguredStageExecutorPatchBroadcastAdapter(config, stagePatchVerifyingContract);
+  const stageResourcePatchBroadcastAdapter = createConfiguredStageResourcePatchBroadcastAdapter(config, stagePatchVerifyingContract);
+  const dockedOrderLinkBroadcastAdapter = createConfiguredDockedOrderLinkBroadcastAdapter(config, dockingVerifyingContract);
   const productRegistrationAdapter = productRegistrationAdapterFromConfig(config);
   const evidenceStorage = createConfiguredEvidenceStorage(config);
   const governanceService = createGovernanceService({
@@ -101,18 +115,24 @@ export async function startApiServer(
     submissionStore,
     governanceStore,
     governanceService,
+    productSchemaResolver,
     storeZhixuDraftStore: stores.storeZhixuDraftStore,
     storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
     storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
     storeDockingSessionStore: stores.storeDockingSessionStore,
     storeAuditStore: stores.storeAuditStore,
+    notificationService,
     submissionChainId: config.network.chainId,
     ...(submissionVerifyingContract ? { submissionVerifyingContract } : {}),
+    ...(stagePatchVerifyingContract ? { stageExecutorPatchVerifyingContract: stagePatchVerifyingContract } : {}),
+    ...(stagePatchVerifyingContract ? { stageResourcePatchVerifyingContract: stagePatchVerifyingContract } : {}),
+    ...(dockingVerifyingContract ? { dockedOrderLinkVerifyingContract: dockingVerifyingContract } : {}),
     ...(submissionBroadcastAdapter ? { submissionBroadcastAdapter } : {}),
     ...(stageExecutorPatchBroadcastAdapter ? { stageExecutorPatchBroadcastAdapter } : {}),
     ...(stageResourcePatchBroadcastAdapter ? { stageResourcePatchBroadcastAdapter } : {}),
     ...(dockedOrderLinkBroadcastAdapter ? { dockedOrderLinkBroadcastAdapter } : {}),
     productRegistrationAdapter,
+    productTriggerChainId: config.network.chainId,
     ...(config.productBff.registrationCreatorAddress
       ? { productRegistrationCreatorAddress: config.productBff.registrationCreatorAddress }
       : {}),
@@ -319,9 +339,45 @@ function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Addr
   return contracts.UVPStateMachine ?? contracts.StateMachine ?? contracts.stateMachine ?? contracts.uvpStateMachine;
 }
 
-function productRegistrationAdapterFromConfig(config: ChainServicesConfig): ProductOrderRegistrationAdapter {
+function stagePatchModuleAddress(config: ChainServicesConfig): Address | undefined {
+  return moduleAddress(config, "stagePatch", [
+    "UVPStagePatchModule",
+    "StagePatchModule",
+    "stagePatchModule",
+    "stagePatch"
+  ]);
+}
+
+function dockingModuleAddress(config: ChainServicesConfig): Address | undefined {
+  return moduleAddress(config, "docking", [
+    "UVPDockingModule",
+    "DockingModule",
+    "dockingModule",
+    "docking"
+  ]);
+}
+
+function moduleAddress(
+  config: ChainServicesConfig,
+  key: "stagePatch" | "derivedSignal" | "docking" | "planMetadata" | "orderLink" | "lens",
+  contractAliases: readonly string[]
+): Address | undefined {
+  for (const alias of contractAliases) {
+    const address = config.network.contracts[alias];
+    if (address) {
+      return address;
+    }
+  }
+  const activeDeployment = config.network.stateMachineDeployments?.find((deployment) =>
+    (config.network.activeDeploymentId && deployment.deploymentId === config.network.activeDeploymentId) ||
+    deployment.status === "active"
+  );
+  return activeDeployment?.modules?.[key];
+}
+
+function productRegistrationAdapterFromConfig(config: ChainServicesConfig): ProductOrderTriggerBroadcastAdapter {
   if (config.productBff.registrationAdapter === "memory") {
-    return new MemoryProductOrderRegistrationAdapter();
+    return new MemoryProductOrderTriggerBroadcastAdapter();
   }
 
   const stateMachine = stateMachineAddress(config.network.contracts);
@@ -332,7 +388,7 @@ function productRegistrationAdapterFromConfig(config: ChainServicesConfig): Prod
   if (!privateKey?.trim()) {
     throw new ConfigError(`${config.productBff.registrarPrivateKeyEnv} is required when Product BFF registration adapter is anvil`);
   }
-  return new AnvilProductOrderRegistrationAdapter({
+  return new AnvilProductOrderTriggerBroadcastAdapter({
     stateMachineAddress: stateMachine,
     rpcUrl: config.network.rpcUrl,
     chainId: config.network.chainId,

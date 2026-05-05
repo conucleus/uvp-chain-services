@@ -114,7 +114,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
 
     async attestZhixu(input, principal) {
       const record = requireBodyRecord(input);
-      const domainId = requiredBytes32(record, "domainId");
       const planId = requiredBytes32(record, "planId");
       const planHash = requiredBytes32(record, "planHash");
       const artifactHash = requiredBytes32(record, "artifactHash");
@@ -123,7 +122,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const reviewHash = review ? reviewHashInput(review) : reviewHashInputFromRecord(record, "zhixu", subjectId, "approved_for_broadcast");
       assertReviewAllowsAttestation(reviewHash.status);
       const hashInput = {
-        domainId,
         planId,
         planHash,
         artifactHash,
@@ -135,7 +133,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const metadataURI = review?.metadataURI ?? defaultMetadataURI(metadataHash);
       const request: PlanAttestationRequestDTO = {
         kind: "attestPlan",
-        domainId,
         planId,
         planHash,
         artifactHash,
@@ -159,14 +156,12 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
 
     async revokeZhixu(input, principal) {
       const record = requireBodyRecord(input);
-      const domainId = requiredBytes32(record, "domainId");
       const planId = requiredBytes32(record, "planId");
       const subjectId = optionalString(record, "subjectId") ?? optionalString(record, "zhixuId") ?? planId;
       const review = await markReviewRevoked(store, record, "zhixu", subjectId, principal, now);
       const reason = optionalString(record, "reason") ?? optionalString(record, "publicSummary") ?? "governance revocation";
       const reasonHash = hashRevocationReason({
         subjectType: "zhixu",
-        domainId,
         subjectId: planId,
         reason,
         ...(optionalUnknown(record, "metadata") !== undefined ? { metadata: record.metadata } : {}),
@@ -175,7 +170,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const reasonURI = defaultMetadataURI(reasonHash);
       const request: PlanRevocationRequestDTO = {
         kind: "revokePlan",
-        domainId,
         planId,
         reasonHash,
         reasonURI,
@@ -196,7 +190,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
 
     async attestSupplier(input, principal) {
       const record = requireBodyRecord(input);
-      const domainId = requiredBytes32(record, "domainId");
       const supplierSubjectId = requiredBytes32(record, "supplierSubjectId");
       const wallet = requiredAddress(record, "wallet");
       const subjectId = optionalString(record, "subjectId") ?? supplierSubjectId;
@@ -204,7 +197,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const reviewHash = review ? reviewHashInput(review) : reviewHashInputFromRecord(record, "supplier", subjectId, "approved_for_broadcast");
       assertReviewAllowsAttestation(reviewHash.status);
       const hashInput = {
-        domainId,
         supplierSubjectId,
         wallet,
         review: reviewHash,
@@ -217,7 +209,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const metadataURI = review?.metadataURI ?? defaultMetadataURI(metadataHash);
       const request: SupplierAttestationRequestDTO = {
         kind: "attestSupplier",
-        domainId,
         supplierSubjectId,
         wallet,
         profileHash,
@@ -242,14 +233,12 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
 
     async revokeSupplier(input, principal) {
       const record = requireBodyRecord(input);
-      const domainId = requiredBytes32(record, "domainId");
       const supplierSubjectId = requiredBytes32(record, "supplierSubjectId");
       const subjectId = optionalString(record, "subjectId") ?? supplierSubjectId;
       const review = await markReviewRevoked(store, record, "supplier", subjectId, principal, now);
       const reason = optionalString(record, "reason") ?? optionalString(record, "publicSummary") ?? "governance revocation";
       const reasonHash = hashRevocationReason({
         subjectType: "supplier",
-        domainId,
         subjectId: supplierSubjectId,
         reason,
         ...(optionalUnknown(record, "metadata") !== undefined ? { metadata: record.metadata } : {}),
@@ -258,7 +247,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const reasonURI = defaultMetadataURI(reasonHash);
       const request: SupplierRevocationRequestDTO = {
         kind: "revokeSupplier",
-        domainId,
         supplierSubjectId,
         reasonHash,
         reasonURI,
@@ -538,7 +526,6 @@ function planLog(
     logId,
     txLogId: logId,
     action,
-    domainId: request.domainId,
     subjectId: request.planId,
     planId: request.planId,
     ...(request.kind === "attestPlan" ? {
@@ -579,7 +566,6 @@ function supplierLog(
     logId,
     txLogId: logId,
     action,
-    domainId: request.domainId,
     subjectId: request.supplierSubjectId,
     supplierSubjectId: request.supplierSubjectId,
     ...(request.kind === "attestSupplier" ? {
@@ -668,7 +654,6 @@ async function auditGovernanceLog(
     outcome,
     actor: log.requester,
     subject: {
-      domainId: log.domainId,
       subjectId: log.subjectId,
       txLogId: log.txLogId,
       broadcastStatus: log.broadcastStatus

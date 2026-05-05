@@ -1,22 +1,10 @@
 import { describe, expect, it } from "vitest";
-import {
-  ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-  ORDER_INITIAL_TRIGGER_SIGNAL_NAME,
-  ORDER_INITIAL_TRIGGER_SOURCE,
-  ORDER_REGISTRAR_ROLE_SLOT_ID,
-  ORDER_SYSTEM_STAGE_ID
-} from "@uvp-eth/product-dto";
 import { InMemoryGovernanceStore, type PlanAttestationLogDTO } from "../src/governance/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import {
-  PRODUCT_INITIAL_TRIGGER_SIGNAL_ID,
-  PRODUCT_INITIAL_TRIGGER_SOURCE_ID
-} from "../src/product/bff/registration.js";
 import { MemoryProductBffStore } from "../src/product/bff/store.js";
 import type {
   ProductOrderDraftDTO,
-  ProductOrderRegistrationRecord,
-  ProductOrderStartDTO
+  ProductOrderTriggerRecord
 } from "../src/product/bff/types.js";
 import { TxReconcileWorker, type ReconcileReceipt, type ReconcileReceiptClient } from "../src/reconcile/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
@@ -39,7 +27,6 @@ const sourceId = bytes32("3001");
 const signalId = bytes32("3002");
 const payloadHash = bytes32("3003");
 const idempotencyKey = bytes32("3004");
-const domainId = bytes32("4001");
 
 describe("tx/indexer reconcile worker", () => {
   it("keeps receipt-missing registrations pending, then confirms after OrderRegistered projection appears", async () => {
@@ -53,7 +40,7 @@ describe("tx/indexer reconcile worker", () => {
 
     await worker.runOnce();
     await expect(productStore.getRegistration("registration_1")).resolves.toMatchObject({
-      status: "pending",
+      status: "submitted",
       reconcileStatus: "submitted",
       receiptStatus: "missing",
       projectionStatus: "not_checked"
@@ -82,9 +69,7 @@ describe("tx/indexer reconcile worker", () => {
       projectionStatus: "present"
     });
     await expect(productStore.getDraft("draft_1")).resolves.toMatchObject({
-      status: "registered",
-      registeredOrderId: orderId,
-      registrationTxHash: txHash
+      status: "triggered"
     });
   });
 
@@ -96,7 +81,7 @@ describe("tx/indexer reconcile worker", () => {
     await productStore.createDraft(draftFixture(), []);
     await productStore.createRegistration(registrationFixture({ txHash }));
     await productStore.createRegistration(registrationFixture({
-      registrationId: "registration_mismatch",
+      triggerId: "registration_mismatch",
       txHash: mismatchedTxHash
     }));
     await projectionStore.resetFromEvents({
@@ -116,7 +101,7 @@ describe("tx/indexer reconcile worker", () => {
       projectionStatus: "present"
     });
     await expect(productStore.getRegistration("registration_mismatch")).resolves.toMatchObject({
-      status: "pending",
+      status: "submitted",
       reconcileStatus: "submitted",
       receiptStatus: "missing",
       projectionStatus: "not_checked"
@@ -173,51 +158,6 @@ describe("tx/indexer reconcile worker", () => {
     });
   });
 
-  it("confirms product order starts after OUTSIDE SignalSubmitted projection appears", async () => {
-    const projectionStore = new MemoryProjectionStore();
-    const productStore = new MemoryProductBffStore();
-    const txHash = bytes32("b0b0");
-    const receipts = new Map<Hex, ReconcileReceipt | undefined>([
-      [txHash, { status: "success", blockNumber: 40n }]
-    ]);
-    await productStore.createRegistration(registrationFixture({
-      authorizations: [initialTriggerAuthorization()]
-    }));
-    await productStore.createOrderStart(orderStartFixture({ txHash }));
-    const worker = workerFixture({ projectionStore, productStore, receipts });
-
-    await worker.runOnce();
-    await expect(productStore.getOrderStartByRegistrationId("registration_1")).resolves.toMatchObject({
-      status: "indexing",
-      blockNumber: "40",
-      reconcileStatus: "indexing",
-      receiptStatus: "success",
-      projectionStatus: "missing"
-    });
-
-    await projectionStore.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [chainEvent(40n, txHash, 0, "SignalSubmitted", {
-        orderId,
-        sourceId: PRODUCT_INITIAL_TRIGGER_SOURCE_ID,
-        signalId: PRODUCT_INITIAL_TRIGGER_SIGNAL_ID,
-        payloadHash,
-        idempotencyKey,
-        submitter
-      })]
-    });
-    const summary = await worker.runOnce();
-
-    expect(summary.startsChecked).toBe(1);
-    await expect(productStore.getOrderStartByRegistrationId("registration_1")).resolves.toMatchObject({
-      status: "confirmed",
-      reconcileStatus: "confirmed",
-      receiptStatus: "success",
-      projectionStatus: "present",
-      blockNumber: "40"
-    });
-  });
-
   it("confirms governance tx logs only after the trust projection contains the expected event", async () => {
     const projectionStore = new MemoryProjectionStore();
     const governanceStore = new InMemoryGovernanceStore();
@@ -238,7 +178,6 @@ describe("tx/indexer reconcile worker", () => {
     await projectionStore.resetFromEvents({
       deploymentBlock: 0n,
       events: [chainEvent(30n, txHash, 0, "PlanAttested", {
-        domainId,
         planId,
         planHash,
         artifactHash,
@@ -264,7 +203,7 @@ describe("tx/indexer reconcile worker", () => {
     const productStore = new MemoryProductBffStore();
     const projectionStore = new MemoryProjectionStore();
     await productStore.createRegistration(registrationFixture({
-      registrationId: "registration_stale",
+      triggerId: "registration_stale",
       txHash: bytes32("eeee"),
       createdAt: "2026-04-27T23:00:00Z"
     }));
@@ -324,7 +263,7 @@ function draftFixture(): ProductOrderDraftDTO {
     goods: [],
     totalAmount: "1",
     currency: "USDC",
-    status: "registering",
+    status: "triggering",
     createdBy: creator,
     createdAt: baseNow.toISOString(),
     updatedAt: baseNow.toISOString()
@@ -332,75 +271,39 @@ function draftFixture(): ProductOrderDraftDTO {
 }
 
 function registrationFixture(input: {
-  readonly registrationId?: string;
+  readonly triggerId?: string;
   readonly txHash?: Hex;
   readonly createdAt?: string;
-  readonly authorizations?: ProductOrderRegistrationRecord["authorizations"];
-  readonly permissions?: ProductOrderRegistrationRecord["permissions"];
-} = {}): ProductOrderRegistrationRecord {
+  readonly authorizations?: ProductOrderTriggerRecord["authorizations"];
+  readonly permissions?: ProductOrderTriggerRecord["permissions"];
+} = {}): ProductOrderTriggerRecord {
   const createdAt = input.createdAt ?? baseNow.toISOString();
   const authorizations = input.authorizations ?? [];
-  const permissions = input.permissions ?? (
-    authorizations.some((authorization) =>
-      authorization.sourceId === PRODUCT_INITIAL_TRIGGER_SOURCE_ID &&
-      authorization.signalId === PRODUCT_INITIAL_TRIGGER_SIGNAL_ID
-    )
-      ? [initialTriggerPermission()]
-      : []
-  );
+  const permissions = input.permissions ?? [];
   return {
-    registrationId: input.registrationId ?? "registration_1",
+    triggerId: input.triggerId ?? "registration_1",
+    prepareId: "prepare_1",
     draftId: "draft_1",
     orderId,
     planId,
     planHash,
-    status: "pending",
+    status: "submitted",
     ...(input.txHash ? { txHash: input.txHash } : {}),
+    submitter,
+    sourceId,
+    signalId,
+    triggerHookId: bytes32("4001"),
+    triggerStageId: bytes32("4002"),
+    payloadHash,
+    idempotencyKey,
+    deadline: "1770000000",
+    typedData: {},
     retryable: false,
     createdAt,
     updatedAt: createdAt,
     creator,
     authorizations,
     permissions
-  };
-}
-
-function orderStartFixture(input: { readonly txHash: Hex }): ProductOrderStartDTO {
-  return {
-    startId: "start_1",
-    registrationId: "registration_1",
-    draftId: "draft_1",
-    orderId,
-    status: "submitted",
-    txHash: input.txHash,
-    retryable: false,
-    createdAt: baseNow.toISOString(),
-    updatedAt: baseNow.toISOString()
-  };
-}
-
-function initialTriggerAuthorization(): ProductOrderRegistrationRecord["authorizations"][number] {
-  return {
-    sourceId: PRODUCT_INITIAL_TRIGGER_SOURCE_ID,
-    signalId: PRODUCT_INITIAL_TRIGGER_SIGNAL_ID,
-    submitter,
-    role: bytes32("6001"),
-    metadataHash: metadataHash
-  };
-}
-
-function initialTriggerPermission(): ProductOrderRegistrationRecord["permissions"][number] {
-  return {
-    permissionId: ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-    draftId: "draft_1",
-    participantId: ORDER_REGISTRAR_ROLE_SLOT_ID,
-    roleSlotId: ORDER_REGISTRAR_ROLE_SLOT_ID,
-    stageIdentifier: ORDER_SYSTEM_STAGE_ID,
-    source: ORDER_INITIAL_TRIGGER_SOURCE,
-    signalName: ORDER_INITIAL_TRIGGER_SIGNAL_NAME,
-    submitterAddress: submitter,
-    payloadPolicy: "optional",
-    requiredEvidence: []
   };
 }
 
@@ -463,7 +366,6 @@ function planLogFixture(input: { readonly txHash: Hex }): PlanAttestationLogDTO 
     logId: "plan_log_1",
     txLogId: "plan_log_1",
     action: "attest_plan",
-    domainId,
     subjectId: planId,
     planId,
     planHash,
@@ -479,7 +381,6 @@ function planLogFixture(input: { readonly txHash: Hex }): PlanAttestationLogDTO 
     retryable: false,
     request: {
       kind: "attestPlan",
-      domainId,
       planId,
       planHash,
       artifactHash,

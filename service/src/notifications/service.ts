@@ -1,10 +1,19 @@
 import { keccak256, stringToBytes } from "viem";
 import {
+  assertOnchainHookPlanArtifact,
+  onchainSignalId,
+  onchainSignalKey,
+  type OnchainCompiledHook,
+  type OnchainHookPlanArtifact
+} from "@uvp-eth/compiler";
+import {
   signalAuthorizationMatchesHook,
   type StateMachineOrderProjection,
   type StateMachineSignalAuthorizationProjection,
+  type StateMachineSignalProjection,
   type StateMachineTaskProjection
 } from "../indexer/projections.js";
+import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "../indexer/events.js";
 import type {
   PlanTrustProjection,
   SupplierTrustProjection,
@@ -12,8 +21,9 @@ import type {
 } from "../indexer/trust-projections.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { Address, Hex } from "../shared/types.js";
+import type { ProductSchemaResolver } from "../product/service.js";
+import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store-suppliers/service.js";
 import {
-  resolveSupplierNotificationProfileFromUri,
   type SupplierNotificationProfile,
   type SupplierNotificationTransport
 } from "./profile.js";
@@ -24,8 +34,12 @@ export type NotificationActivationStatus = "accepted" | "started" | "rejected";
 export type NotificationSkippedReason =
   | "not_finalized"
   | "order_projection_missing"
-  | "authorization_not_found"
+  | "signal_projection_missing"
   | "artifact_mapping_missing"
+  | "receiver_not_found"
+  | "receiver_ambiguous"
+  | "store_supplier_not_found"
+  | "store_supplier_ambiguous"
   | "supplier_trust_not_found"
   | "supplier_revoked"
   | "notification_profile_missing"
@@ -33,20 +47,25 @@ export type NotificationSkippedReason =
   | "executor_watch_self_managed"
   | "transport_adapter_missing";
 
-export interface HookReadyNotificationPayload {
-  readonly version: "uvp.hookReadyNotification.v1";
+export interface SignalNotificationPayload {
+  readonly version: "uvp.signalReceivedNotification.v1";
   readonly chainId: number;
   readonly stateMachineAddress: Address;
   readonly orderId: Hex;
-  readonly hookId: Hex;
-  readonly stageId: Hex;
-  readonly taskId: string;
-  readonly productTaskUrl?: string;
-  readonly proof: HookReadyNotificationProof;
+  readonly sourceId: Hex;
+  readonly signalId: Hex;
+  readonly payloadHash: Hex;
+  readonly idempotencyKey: Hex;
+  readonly signalSubmitter: Address;
+  readonly receiverHookId: Hex;
+  readonly receiverStageId: Hex;
+  readonly receiverSupplierSubjectId: Hex;
+  readonly receiverWallet: Address;
+  readonly proof: SignalNotificationProof;
 }
 
-export interface HookReadyNotificationProof {
-  readonly eventName: "HookReady";
+export interface SignalNotificationProof {
+  readonly eventName: "SignalSubmitted";
   readonly chainId: number;
   readonly contractAddress: Address;
   readonly blockNumber: string;
@@ -55,13 +74,21 @@ export interface HookReadyNotificationProof {
   readonly blockHash?: Hex;
 }
 
+export type NotificationPayload = SignalNotificationPayload;
+export type NotificationDeliveryKind = "signal_received";
+
 export interface NotificationDeliveryRecord {
   readonly deliveryId: Hex;
+  readonly kind: NotificationDeliveryKind;
   readonly status: NotificationDeliveryStatus;
-  readonly taskId: string;
+  readonly taskId?: string;
   readonly orderId: Hex;
-  readonly hookId: Hex;
-  readonly stageId: Hex;
+  readonly receiverHookId?: Hex;
+  readonly receiverStageId?: Hex;
+  readonly sourceId?: Hex;
+  readonly signalId?: Hex;
+  readonly payloadHash?: Hex;
+  readonly idempotencyKey?: Hex;
   readonly chainId: number;
   readonly stateMachineAddress: Address;
   readonly submitter?: Address;
@@ -71,7 +98,7 @@ export interface NotificationDeliveryRecord {
   readonly activationStatus?: NotificationActivationStatus;
   readonly externalReceiptRef?: string;
   readonly reason?: NotificationSkippedReason | string;
-  readonly payload: HookReadyNotificationPayload;
+  readonly payload: NotificationPayload;
   readonly attempts: number;
   readonly lastError?: string;
   readonly createdAt: string;
@@ -89,6 +116,7 @@ export type ParticipantNotificationKind =
   | "task_ready"
   | "task_near_deadline"
   | "task_overdue"
+  | "signal_submitted"
   | "submission_confirmed"
   | "submission_failed"
   | "task_revoked"
@@ -187,18 +215,19 @@ export interface NotificationProfileResolution {
 }
 
 export interface NotificationRunSummary {
-  readonly tasksScanned: number;
-  readonly finalizedTasks: number;
+  readonly signalsProcessed: number;
+  readonly receiverHooksMatched: number;
   readonly deliveryIntents: number;
   readonly sent: number;
   readonly failed: number;
   readonly skipped: number;
   readonly existing: number;
-  readonly notFinalized: number;
 }
 
+export type NotificationProcessSummary = NotificationRunSummary;
+
 export interface NotificationService {
-  runOnce(): Promise<NotificationRunSummary>;
+  processSignalSubmittedEvents(events: readonly ChainEvent[]): Promise<NotificationProcessSummary>;
   listProfiles(): Promise<readonly NotificationProfileResolution[]>;
   listDeliveries(query?: NotificationDeliveryQuery): Promise<readonly NotificationDeliveryRecord[]>;
   retryDelivery(deliveryId: Hex): Promise<NotificationDeliveryRecord | undefined>;
@@ -209,10 +238,12 @@ export interface NotificationService {
 
 export interface CreateNotificationServiceOptions {
   readonly store: ProjectionStore;
+  readonly supplierMetadataStore?: StoreSupplierMetadataStore;
+  readonly productSchemaResolver?: ProductSchemaResolver;
+  readonly planArtifactResolver?: (order: StateMachineOrderProjection, trustSnapshot: TrustProjectionSnapshot) => Promise<OnchainHookPlanArtifact | undefined>;
   readonly deliveryStore?: NotificationDeliveryStore;
   readonly participantReadStateStore?: ParticipantNotificationReadStateStore;
   readonly dispatcher?: NotificationDispatcher;
-  readonly profileResolver?: (metadataURI: string, supplier: SupplierTrustProjection) => Promise<SupplierNotificationProfile | undefined>;
   readonly productTaskBaseUrl?: string;
   readonly now?: () => Date;
 }
@@ -260,189 +291,171 @@ export class MemoryParticipantNotificationReadStateStore implements ParticipantN
 export function createNotificationService(options: CreateNotificationServiceOptions): NotificationService {
   const deliveryStore = options.deliveryStore ?? new MemoryNotificationDeliveryStore();
   const participantReadStateStore = options.participantReadStateStore ?? new MemoryParticipantNotificationReadStateStore();
-  const resolveProfile = options.profileResolver ?? ((metadataURI: string) => resolveSupplierNotificationProfileFromUri(metadataURI));
   const now = () => (options.now ?? (() => new Date()))().toISOString();
 
   return {
-    async runOnce() {
+    async processSignalSubmittedEvents(events) {
       const syncState = await options.store.getSyncState();
       const finalizedBlock = syncState?.finalizedBlock;
-      const tasks = await options.store.listStateMachineTasks();
-      const orders = await options.store.listStateMachineOrders();
-      const suppliers = Object.values((await options.store.getTrustSnapshot()).suppliers);
       const summary: MutableNotificationRunSummary = {
-        tasksScanned: tasks.length,
-        finalizedTasks: 0,
+        signalsProcessed: 0,
+        receiverHooksMatched: 0,
         deliveryIntents: 0,
         sent: 0,
         failed: 0,
         skipped: 0,
-        existing: 0,
-        notFinalized: 0
+        existing: 0
       };
 
-      for (const task of tasks) {
-        if (finalizedBlock === undefined || task.createdAt.blockNumber > finalizedBlock) {
-          summary.notFinalized += 1;
-          continue;
-        }
-        summary.finalizedTasks += 1;
-
-        const order = findOrderForTask(orders, task);
+      const signalEvents = finalizedSignalSubmittedEvents(events, finalizedBlock);
+      for (const event of signalEvents) {
+        const orderId = bytes32Arg(event, "orderId");
+        const sourceId = bytes32Arg(event, "sourceId");
+        const signalId = bytes32Arg(event, "signalId");
+        const order = orderId ? await options.store.getStateMachineOrder(orderId) : undefined;
         if (!order) {
-          await saveSkippedDelivery(
+          updateIntentSummary(summary, await saveSkippedSignalDelivery({
             deliveryStore,
-            task,
-            undefined,
-            undefined,
-            "order_projection_missing",
-            undefined,
-            options.productTaskBaseUrl,
+            event,
+            order: undefined,
+            signal: undefined,
+            receiverHook: undefined,
+            supplier: undefined,
+            supplierMetadata: undefined,
+            reason: "order_projection_missing",
+            transportType: undefined,
             now
-          );
-          summary.deliveryIntents += 1;
-          summary.skipped += 1;
+          }));
+          continue;
+        }
+        const signal = sourceId && signalId ? order.signals[`${sourceId}:${signalId}`] : undefined;
+        if (!signal) {
+          updateIntentSummary(summary, await saveSkippedSignalDelivery({
+            deliveryStore,
+            event,
+            order,
+            signal: undefined,
+            receiverHook: undefined,
+            supplier: undefined,
+            supplierMetadata: undefined,
+            reason: "signal_projection_missing",
+            transportType: undefined,
+            now
+          }));
+          continue;
+        }
+        summary.signalsProcessed += 1;
+        const trustSnapshot = await options.store.getTrustSnapshot();
+        const supplierRows = await options.supplierMetadataStore?.listSuppliers() ?? [];
+        const artifact = await resolvePlanArtifact(options, order, trustSnapshot);
+        if (!artifact) {
+          updateIntentSummary(summary, await saveSkippedSignalDelivery({
+            deliveryStore,
+            event,
+            order,
+            signal,
+            receiverHook: undefined,
+            supplier: undefined,
+            supplierMetadata: undefined,
+            reason: "artifact_mapping_missing",
+            transportType: undefined,
+            now
+          }));
           continue;
         }
 
-        const authorizations = Object.values(order.authorizations);
-        const matchingAuthorizations = authorizations.filter((authorization) => signalAuthorizationMatchesHook(authorization, task));
-        if (matchingAuthorizations.length === 0) {
-          const reason: NotificationSkippedReason = authorizations.length === 0
-            ? "authorization_not_found"
-            : "artifact_mapping_missing";
-          const record = await saveSkippedDelivery(
-            deliveryStore,
-            task,
-            undefined,
-            undefined,
-            reason,
-            undefined,
-            options.productTaskBaseUrl,
-            now
-          );
-          updateIntentSummary(summary, record);
-          continue;
-        }
-
-        for (const authorization of matchingAuthorizations.sort(compareAuthorizations)) {
-          const supplierResolution = resolveSupplierForSubmitter(suppliers, authorization.submitter);
-          if (supplierResolution.status === "not_found") {
-            const record = await saveSkippedDelivery(
+        const receiverHooks = [...receiverHooksForSignal(artifact, signal)].sort(compareReceiverHooks);
+        summary.receiverHooksMatched += receiverHooks.length;
+        for (const receiverHook of receiverHooks) {
+          const resolution = resolveReceiverSupplier(order, receiverHook, supplierRows, trustSnapshot);
+          if (resolution.status !== "ok") {
+            updateIntentSummary(summary, await saveSkippedSignalDelivery({
               deliveryStore,
-              task,
-              authorization,
-              undefined,
-              "supplier_trust_not_found",
-              undefined,
-              options.productTaskBaseUrl,
+              event,
+              order,
+              signal,
+              receiverHook,
+              supplier: resolution.supplier,
+              supplierMetadata: resolution.supplierMetadata,
+              reason: resolution.reason,
+              transportType: undefined,
               now
-            );
-            updateIntentSummary(summary, record);
+            }));
             continue;
           }
-          if (supplierResolution.status === "revoked") {
-            const record = await saveSkippedDelivery(
-              deliveryStore,
-              task,
-              authorization,
-              supplierResolution.supplier,
-              "supplier_revoked",
-              undefined,
-              options.productTaskBaseUrl,
-              now
-            );
-            updateIntentSummary(summary, record);
-            continue;
-          }
-
-          const supplier = supplierResolution.supplier;
-          const profile = await resolveProfile(supplier.metadataURI, supplier);
+          const profile = resolution.supplierMetadata.notificationProfile;
           if (!profile) {
-            const record = await saveSkippedDelivery(
+            updateIntentSummary(summary, await saveSkippedSignalDelivery({
               deliveryStore,
-              task,
-              authorization,
-              supplier,
-              "notification_profile_missing",
-              undefined,
-              options.productTaskBaseUrl,
+              event,
+              order,
+              signal,
+              receiverHook,
+              supplier: resolution.supplier,
+              supplierMetadata: resolution.supplierMetadata,
+              reason: "notification_profile_missing",
+              transportType: undefined,
               now
-            );
-            updateIntentSummary(summary, record);
+            }));
             continue;
           }
-
           const transport = chooseTransport(profile);
           if (!transport) {
-            const record = await saveSkippedDelivery(
+            updateIntentSummary(summary, await saveSkippedSignalDelivery({
               deliveryStore,
-              task,
-              authorization,
-              supplier,
-              "transport_not_supported",
-              undefined,
-              options.productTaskBaseUrl,
+              event,
+              order,
+              signal,
+              receiverHook,
+              supplier: resolution.supplier,
+              supplierMetadata: resolution.supplierMetadata,
+              reason: "transport_not_supported",
+              transportType: undefined,
               now
-            );
-            updateIntentSummary(summary, record);
+            }));
             continue;
           }
-
           if (transport.type === "executor-watch") {
-            const record = await saveSkippedDelivery(
+            updateIntentSummary(summary, await saveSkippedSignalDelivery({
               deliveryStore,
-              task,
-              authorization,
-              supplier,
-              "executor_watch_self_managed",
-              transport.type,
-              options.productTaskBaseUrl,
+              event,
+              order,
+              signal,
+              receiverHook,
+              supplier: resolution.supplier,
+              supplierMetadata: resolution.supplierMetadata,
+              reason: "executor_watch_self_managed",
+              transportType: transport.type,
               now
-            );
-            updateIntentSummary(summary, record);
+            }));
             continue;
           }
-
           if (!isPushTransport(transport)) {
-            const record = await saveSkippedDelivery(
+            updateIntentSummary(summary, await saveSkippedSignalDelivery({
               deliveryStore,
-              task,
-              authorization,
-              supplier,
-              "transport_not_supported",
-              transport.type,
-              options.productTaskBaseUrl,
+              event,
+              order,
+              signal,
+              receiverHook,
+              supplier: resolution.supplier,
+              supplierMetadata: resolution.supplierMetadata,
+              reason: "transport_not_supported",
+              transportType: transport.type,
               now
-            );
-            updateIntentSummary(summary, record);
+            }));
             continue;
           }
-
-          if (!options.dispatcher) {
-            const record = await saveSkippedDelivery(
-              deliveryStore,
-              task,
-              authorization,
-              supplier,
-              "transport_adapter_missing",
-              transport.type,
-              options.productTaskBaseUrl,
-              now
-            );
-            updateIntentSummary(summary, record);
-            continue;
-          }
-
-          const record = await dispatchTransportDelivery({
+          const record = await dispatchSignalTransportDelivery({
             deliveryStore,
-            dispatcher: options.dispatcher,
-            task,
-            authorization,
-            supplier,
+            ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+            event,
+            order,
+            signal,
+            receiverHook,
+            supplier: resolution.supplier,
+            supplierMetadata: resolution.supplierMetadata,
             profile,
             transport,
-            ...(options.productTaskBaseUrl ? { productTaskBaseUrl: options.productTaskBaseUrl } : {}),
             now
           });
           updateIntentSummary(summary, record);
@@ -453,9 +466,14 @@ export function createNotificationService(options: CreateNotificationServiceOpti
     },
 
     async listProfiles() {
-      const suppliers = Object.values((await options.store.getTrustSnapshot()).suppliers);
-      return Promise.all(suppliers.map(async (supplier) => {
-        const profile = await resolveProfile(supplier.metadataURI, supplier);
+      const trustSnapshot = await options.store.getTrustSnapshot();
+      const supplierRows = await options.supplierMetadataStore?.listSuppliers() ?? [];
+      return Promise.all(Object.values(trustSnapshot.suppliers).map(async (supplier) => {
+        const metadata = supplierRows.find((row) =>
+          row.supplierSubjectId === supplier.supplierSubjectId &&
+          row.wallet?.toLowerCase() === supplier.wallet.toLowerCase()
+        );
+        const profile = metadata?.notificationProfile;
         return {
           supplier,
           ...(profile ? { profile } : {}),
@@ -475,10 +493,27 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         return existing;
       }
       const { reason: _reason, lastError: _lastError, ...rest } = existing;
-      return deliveryStore.saveDelivery({
+      const pending = await deliveryStore.saveDelivery({
         ...rest,
         status: "pending",
         updatedAt: now()
+      });
+      const resolved = await resolveRetryTransport(options, pending);
+      if (resolved.status !== "ok") {
+        return deliveryStore.saveDelivery({
+          ...pending,
+          status: "skipped",
+          reason: resolved.reason,
+          updatedAt: now()
+        });
+      }
+      return dispatchPreparedDelivery({
+        deliveryStore,
+        ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+        pending,
+        profile: resolved.profile,
+        transport: resolved.transport,
+        now
       });
     },
 
@@ -570,6 +605,13 @@ async function buildParticipantNotificationList(input: {
     if (supplierTrust) {
       const supplierNotification = participantSupplierRevokedNotification(task, order, supplierTrust);
       notifications.set(supplierNotification.notificationId, supplierNotification);
+    }
+  }
+
+  for (const order of orders.filter((item) => participantCanSeeOrderSignals(item, participantKey))) {
+    for (const signal of Object.values(order.signals)) {
+      const signalNotification = participantSignalNotification(signal, order);
+      notifications.set(signalNotification.notificationId, signalNotification);
     }
   }
 
@@ -688,6 +730,38 @@ function participantTaskNotification(
   };
 }
 
+function participantSignalNotification(
+  signal: StateMachineSignalProjection,
+  order: StateMachineOrderProjection
+): ParticipantNotificationRecord {
+  const sourceLabel = displayBytes32(signal.sourceId, "来源");
+  const signalLabel = displayBytes32(signal.signalId, "链上信号");
+  return {
+    readStatus: "unread",
+    notificationId: participantNotificationId(
+      "signal_submitted",
+      signal.orderId,
+      signal.sourceId,
+      signal.signalId,
+      signal.proof.eventId
+    ),
+    kind: "signal_submitted",
+    severity: "info",
+    orderId: signal.orderId,
+    orderTitle: orderTitle(order),
+    stageId: signal.sourceId,
+    stageLabel: sourceLabel,
+    eventLabel: "链上信号已提交",
+    message: `${sourceLabel} 的 ${signalLabel} 已写入链上索引。`,
+    actionHref: `/product/orders/${encodeURIComponent(signal.orderId)}`,
+    proofHref: `/product/orders/${encodeURIComponent(signal.orderId)}/proof`,
+    proof: signalNotificationProof(signal.proof),
+    createdAt: provenanceTime(signal.submittedAt),
+    source: "chain_projection",
+    privacy: "participant_only"
+  };
+}
+
 function participantPlanRevokedNotification(
   task: StateMachineTaskProjection,
   order: StateMachineOrderProjection | undefined,
@@ -781,15 +855,18 @@ function participantNotificationBaseFromDelivery(
   delivery: NotificationDeliveryRecord,
   order: StateMachineOrderProjection | undefined
 ): Omit<ParticipantNotificationRecord, "notificationId" | "kind" | "severity" | "eventLabel" | "message" | "createdAt"> {
+  const stageId = delivery.receiverStageId ?? delivery.sourceId;
   return {
     readStatus: "unread",
     orderId: delivery.orderId,
     orderTitle: orderTitle(order ?? delivery),
-    taskId: delivery.taskId,
-    taskTitle: "处理链上待办",
-    stageId: displayBytes32(delivery.stageId, delivery.stageId),
-    stageLabel: displayBytes32(delivery.stageId, "当前阶段"),
-    actionHref: `/product/orders/${encodeURIComponent(delivery.orderId)}#task=${encodeURIComponent(delivery.taskId)}`,
+    ...(delivery.taskId ? { taskId: delivery.taskId } : {}),
+    taskTitle: delivery.kind === "signal_received" ? "链上信号触达" : "处理链上待办",
+    ...(stageId ? { stageId: displayBytes32(stageId, stageId) } : {}),
+    stageLabel: displayBytes32(stageId, "当前阶段"),
+    actionHref: delivery.taskId
+      ? `/product/orders/${encodeURIComponent(delivery.orderId)}#task=${encodeURIComponent(delivery.taskId)}`
+      : `/product/orders/${encodeURIComponent(delivery.orderId)}`,
     proofHref: `/product/orders/${encodeURIComponent(delivery.orderId)}/proof`,
     source: "notification_delivery",
     privacy: "participant_only"
@@ -834,6 +911,29 @@ function notificationProof(proof: StateMachineTaskProjection["proof"]): Particip
     transactionHash: proof.transactionHash,
     logIndex: proof.logIndex
   };
+}
+
+function signalNotificationProof(proof: StateMachineSignalProjection["proof"]): ParticipantNotificationProof {
+  return {
+    eventName: proof.eventName,
+    chainId: proof.chainId,
+    contractAddress: proof.contractAddress,
+    blockNumber: proof.blockNumber.toString(),
+    transactionHash: proof.transactionHash,
+    logIndex: proof.logIndex
+  };
+}
+
+function participantCanSeeOrderSignals(order: StateMachineOrderProjection, participantKey: string): boolean {
+  return Object.values(order.authorizations).some((authorization) =>
+    authorization.submitter.toLowerCase() === participantKey
+  ) ||
+    Object.values(order.signals).some((signal) => signal.submitter.toLowerCase() === participantKey) ||
+    Object.values(order.tasks).some((task) => task.assigneeWallet?.toLowerCase() === participantKey) ||
+    Object.values(order.stageExecutorOverlays).some((overlay) =>
+      overlay.selectorWallet.toLowerCase() === participantKey ||
+      overlay.activeExecutorWallet.toLowerCase() === participantKey
+    );
 }
 
 function revokedPlanTrustForOrder(
@@ -952,51 +1052,307 @@ type MutableNotificationRunSummary = {
   -readonly [TKey in keyof NotificationRunSummary]: NotificationRunSummary[TKey];
 };
 
-type SupplierResolution =
-  | { readonly status: "attested" | "revoked"; readonly supplier: SupplierTrustProjection }
-  | { readonly status: "not_found" };
+type ReceiverResolution =
+  | {
+      readonly status: "ok";
+      readonly supplier: SupplierTrustProjection;
+      readonly supplierMetadata: StoreSupplierMetadataRecord;
+    }
+  | {
+      readonly status: "skipped";
+      readonly reason: NotificationSkippedReason;
+      readonly supplier?: SupplierTrustProjection;
+      readonly supplierMetadata?: StoreSupplierMetadataRecord;
+    };
 
-async function dispatchTransportDelivery(input: {
+type SupplierMetadataResolution =
+  | {
+      readonly status: "ok";
+      readonly supplierMetadata: StoreSupplierMetadataRecord;
+    }
+  | {
+      readonly status: "skipped";
+      readonly reason: NotificationSkippedReason;
+      readonly supplierMetadata?: StoreSupplierMetadataRecord;
+    };
+
+function finalizedSignalSubmittedEvents(
+  events: readonly ChainEvent[],
+  finalizedBlock: bigint | undefined
+): readonly ChainEvent[] {
+  return filterActiveChainEvents(events).filter((event) =>
+    event.eventName === "SignalSubmitted" &&
+    (finalizedBlock === undefined || event.blockNumber <= finalizedBlock)
+  );
+}
+
+async function resolvePlanArtifact(
+  options: CreateNotificationServiceOptions,
+  order: StateMachineOrderProjection,
+  trustSnapshot: TrustProjectionSnapshot
+): Promise<OnchainHookPlanArtifact | undefined> {
+  const customArtifact = await options.planArtifactResolver?.(order, trustSnapshot);
+  if (customArtifact) {
+    return customArtifact;
+  }
+  if (!options.productSchemaResolver || !order.planHash) {
+    return undefined;
+  }
+  const trust = matchingPlanTrust(order, trustSnapshot);
+  const schema = await options.productSchemaResolver.getProductSchemaByPlan(
+    order.planId,
+    order.planHash,
+    trust?.artifactHash
+  );
+  const artifact = (schema as { readonly onchainHookPlanArtifact?: unknown } | undefined)?.onchainHookPlanArtifact;
+  if (!artifact) {
+    return undefined;
+  }
+  try {
+    assertOnchainHookPlanArtifact(artifact);
+    return artifact as OnchainHookPlanArtifact;
+  } catch {
+    return undefined;
+  }
+}
+
+function matchingPlanTrust(
+  order: StateMachineOrderProjection,
+  trustSnapshot: TrustProjectionSnapshot
+): PlanTrustProjection | undefined {
+  const matches = Object.values(trustSnapshot.plans)
+    .filter((trust) =>
+      trust.planId === order.planId &&
+      (!order.planHash || trust.planHash === order.planHash)
+    )
+    .sort(comparePlansForArtifactResolution);
+  return matches.find((trust) => !trust.revoked) ?? matches[0];
+}
+
+function receiverHooksForSignal(
+  artifact: OnchainHookPlanArtifact,
+  signal: StateMachineSignalProjection
+): readonly OnchainCompiledHook[] {
+  const signalKey = onchainSignalKey(signal.sourceId, signal.signalId);
+  const indexedHookIds = new Set((artifact.dependencyIndex[signalKey] ?? []).map((hookId) => hookId.toLowerCase()));
+  const candidates = indexedHookIds.size > 0
+    ? artifact.compiledHooks.filter((hook) => indexedHookIds.has(hook.hookId.toLowerCase()))
+    : artifact.compiledHooks;
+  return candidates.filter((hook) =>
+    hook.kind === "receive" &&
+    hook.dependencies.some((dependency) =>
+      dependency.sourceId.toLowerCase() === signal.sourceId.toLowerCase() &&
+      dependency.signalId.toLowerCase() === signal.signalId.toLowerCase()
+    )
+  );
+}
+
+function compareReceiverHooks(left: OnchainCompiledHook, right: OnchainCompiledHook): number {
+  const stageCompare = left.stageId.localeCompare(right.stageId);
+  if (stageCompare !== 0) {
+    return stageCompare;
+  }
+  return left.hookId.localeCompare(right.hookId);
+}
+
+function resolveReceiverSupplier(
+  order: StateMachineOrderProjection,
+  receiverHook: OnchainCompiledHook,
+  supplierRows: readonly StoreSupplierMetadataRecord[],
+  trustSnapshot: TrustProjectionSnapshot
+): ReceiverResolution {
+  const overlay = order.stageExecutorOverlays[receiverHook.stageId.toLowerCase()];
+  const receiverWallet = overlay?.activeExecutorWallet ?? receiverAuthorizationWallet(order, receiverHook);
+  const metadataResolution = receiverWallet
+    ? supplierMetadataByWallet(supplierRows, receiverWallet)
+    : supplierMetadataByStage(supplierRows, receiverHook.stageId);
+
+  if (metadataResolution.status !== "ok") {
+    return metadataResolution;
+  }
+
+  const supplierResolution = activeSupplierTrustForMetadata(metadataResolution.supplierMetadata, trustSnapshot);
+  if (supplierResolution.status !== "ok") {
+    return {
+      status: "skipped",
+      reason: supplierResolution.reason,
+      ...(supplierResolution.supplier ? { supplier: supplierResolution.supplier } : {}),
+      supplierMetadata: metadataResolution.supplierMetadata
+    };
+  }
+
+  return {
+    status: "ok",
+    supplier: supplierResolution.supplier,
+    supplierMetadata: metadataResolution.supplierMetadata
+  };
+}
+
+function supplierMetadataByWallet(
+  supplierRows: readonly StoreSupplierMetadataRecord[],
+  wallet: Address
+): SupplierMetadataResolution {
+  const matches = supplierRows
+    .filter((supplier) => supplier.wallet?.toLowerCase() === wallet.toLowerCase())
+    .sort(compareSupplierMetadataForDelivery);
+  if (matches.length === 0) {
+    return { status: "skipped", reason: "store_supplier_not_found" };
+  }
+  const first = matches[0];
+  if (matches.length > 1) {
+    return first
+      ? { status: "skipped", reason: "store_supplier_ambiguous", supplierMetadata: first }
+      : { status: "skipped", reason: "store_supplier_ambiguous" };
+  }
+  return first
+    ? { status: "ok", supplierMetadata: first }
+    : { status: "skipped", reason: "store_supplier_not_found" };
+}
+
+function supplierMetadataByStage(
+  supplierRows: readonly StoreSupplierMetadataRecord[],
+  stageId: string
+): SupplierMetadataResolution {
+  const normalizedStageId = stageId.toLowerCase();
+  const matches = supplierRows
+    .filter((supplier) =>
+      supplier.supportedStageIds.some((supportedStageId) => supportedStageId.toLowerCase() === normalizedStageId)
+    )
+    .sort(compareSupplierMetadataForDelivery);
+  if (matches.length === 0) {
+    return { status: "skipped", reason: "receiver_not_found" };
+  }
+  const first = matches[0];
+  if (matches.length > 1) {
+    return first
+      ? { status: "skipped", reason: "receiver_ambiguous", supplierMetadata: first }
+      : { status: "skipped", reason: "receiver_ambiguous" };
+  }
+  return first
+    ? { status: "ok", supplierMetadata: first }
+    : { status: "skipped", reason: "receiver_not_found" };
+}
+
+function activeSupplierTrustForMetadata(
+  supplierMetadata: StoreSupplierMetadataRecord,
+  trustSnapshot: TrustProjectionSnapshot
+): ReceiverResolution {
+  const matches = Object.values(trustSnapshot.suppliers)
+    .filter((supplier) =>
+      supplier.supplierSubjectId === supplierMetadata.supplierSubjectId &&
+      (!supplierMetadata.wallet || supplier.wallet.toLowerCase() === supplierMetadata.wallet.toLowerCase())
+    )
+    .sort(compareSuppliersForDelivery);
+  const active = matches.find((supplier) => !supplier.revoked);
+  if (active) {
+    return { status: "ok", supplier: active, supplierMetadata };
+  }
+  const revoked = matches.find((supplier) => supplier.revoked);
+  if (revoked) {
+    return { status: "skipped", reason: "supplier_revoked", supplier: revoked, supplierMetadata };
+  }
+  return { status: "skipped", reason: "supplier_trust_not_found", supplierMetadata };
+}
+
+function receiverAuthorizationWallet(
+  order: StateMachineOrderProjection,
+  receiverHook: OnchainCompiledHook
+): Address | undefined {
+  const hookName = onchainSignalId(receiverHook.hookName) as Hex;
+  return Object.values(order.authorizations)
+    .sort(compareSignalAuthorizationsForDelivery)
+    .find((authorization) => signalAuthorizationMatchesHook(authorization, {
+      stageIdentifier: receiverHook.stageId as Hex,
+      hookId: receiverHook.hookId as Hex,
+      hookName
+    }))?.submitter;
+}
+
+function bytes32Arg(event: ChainEvent, name: string): Hex | undefined {
+  const value = event.args[name];
+  return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/u.test(value)
+    ? value.toLowerCase() as Hex
+    : undefined;
+}
+
+function addressArg(event: ChainEvent, name: string): Address | undefined {
+  const value = event.args[name];
+  return typeof value === "string" && /^0x[0-9a-fA-F]{40}$/u.test(value)
+    ? value.toLowerCase() as Address
+    : undefined;
+}
+
+async function dispatchSignalTransportDelivery(input: {
   readonly deliveryStore: NotificationDeliveryStore;
-  readonly dispatcher: NotificationDispatcher;
-  readonly task: StateMachineTaskProjection;
-  readonly authorization: StateMachineSignalAuthorizationProjection;
+  readonly dispatcher?: NotificationDispatcher;
+  readonly event: ChainEvent;
+  readonly order: StateMachineOrderProjection;
+  readonly signal: StateMachineSignalProjection;
+  readonly receiverHook: OnchainCompiledHook;
   readonly supplier: SupplierTrustProjection;
+  readonly supplierMetadata: StoreSupplierMetadataRecord;
   readonly profile: SupplierNotificationProfile;
   readonly transport: SupplierNotificationTransport;
-  readonly productTaskBaseUrl?: string;
   readonly now: () => string;
 }): Promise<NotificationDeliveryRecord> {
-  const deliveryId = deliveryIdFor(input.task, input.authorization);
+  const deliveryId = signalDeliveryIdFor(input.event, input.order, input.signal, input.receiverHook, input.supplierMetadata);
   const existing = await input.deliveryStore.getDelivery(deliveryId);
   if (existing && existing.status !== "pending" && existing.status !== "failed") {
     return existing;
   }
 
   const pending = await input.deliveryStore.saveDelivery({
-    ...(existing ?? baseDeliveryRecord(
-      input.task,
-      input.authorization,
+    ...(existing ?? baseSignalDeliveryRecord(
+      input.event,
+      input.order,
+      input.signal,
+      input.receiverHook,
       input.supplier,
+      input.supplierMetadata,
       input.transport.type,
-      input.productTaskBaseUrl,
-      input.profile,
       input.now
     )),
     status: "pending",
     updatedAt: input.now()
   });
 
+  return dispatchPreparedDelivery({
+    deliveryStore: input.deliveryStore,
+    ...(input.dispatcher ? { dispatcher: input.dispatcher } : {}),
+    pending,
+    profile: input.profile,
+    transport: input.transport,
+    now: input.now
+  });
+}
+
+async function dispatchPreparedDelivery(input: {
+  readonly deliveryStore: NotificationDeliveryStore;
+  readonly dispatcher?: NotificationDispatcher;
+  readonly pending: NotificationDeliveryRecord;
+  readonly profile: SupplierNotificationProfile;
+  readonly transport: SupplierNotificationTransport;
+  readonly now: () => string;
+}): Promise<NotificationDeliveryRecord> {
+  if (!input.dispatcher) {
+    return input.deliveryStore.saveDelivery({
+      ...input.pending,
+      status: "failed",
+      reason: "transport_adapter_missing",
+      updatedAt: input.now()
+    });
+  }
+
   try {
     const result = await input.dispatcher.send({
-      record: pending,
+      record: input.pending,
       profile: input.profile,
       transport: input.transport
     });
     return input.deliveryStore.saveDelivery({
-      ...pending,
+      ...input.pending,
       status: result.ok ? "sent" : "failed",
-      attempts: pending.attempts + 1,
+      attempts: input.pending.attempts + 1,
       ...activationStatusForResult(input.transport, result),
       ...(result.externalReceiptRef ? { externalReceiptRef: result.externalReceiptRef } : {}),
       ...(result.error ? { lastError: result.error } : {}),
@@ -1004,109 +1360,181 @@ async function dispatchTransportDelivery(input: {
     });
   } catch (error) {
     return input.deliveryStore.saveDelivery({
-      ...pending,
+      ...input.pending,
       status: "failed",
-      attempts: pending.attempts + 1,
+      attempts: input.pending.attempts + 1,
       lastError: error instanceof Error ? error.message : "notification dispatch failed",
       updatedAt: input.now()
     });
   }
 }
 
-async function saveSkippedDelivery(
-  deliveryStore: NotificationDeliveryStore,
-  task: StateMachineTaskProjection,
-  authorization: StateMachineSignalAuthorizationProjection | undefined,
-  supplier: SupplierTrustProjection | undefined,
-  reason: NotificationSkippedReason,
-  transportType: string | undefined,
-  productTaskBaseUrl: string | undefined,
-  now: () => string
-): Promise<NotificationDeliveryRecord> {
-  const deliveryId = deliveryIdFor(task, authorization);
-  const existing = await deliveryStore.getDelivery(deliveryId);
+type RetryTransportResolution =
+  | {
+      readonly status: "ok";
+      readonly profile: SupplierNotificationProfile;
+      readonly transport: SupplierNotificationTransport;
+    }
+  | {
+      readonly status: "skipped";
+      readonly reason: NotificationSkippedReason;
+    };
+
+async function resolveRetryTransport(
+  options: CreateNotificationServiceOptions,
+  delivery: NotificationDeliveryRecord
+): Promise<RetryTransportResolution> {
+  const supplierRows = await options.supplierMetadataStore?.listSuppliers() ?? [];
+  const matches = supplierRows.filter((supplier) =>
+    (!delivery.supplierSubjectId || supplier.supplierSubjectId === delivery.supplierSubjectId) &&
+    (!delivery.supplierWallet || supplier.wallet?.toLowerCase() === delivery.supplierWallet.toLowerCase())
+  ).sort(compareSupplierMetadataForDelivery);
+  if (matches.length === 0) {
+    return { status: "skipped", reason: "store_supplier_not_found" };
+  }
+  if (matches.length > 1) {
+    return { status: "skipped", reason: "store_supplier_ambiguous" };
+  }
+  const supplierMetadata = matches[0];
+  if (!supplierMetadata) {
+    return { status: "skipped", reason: "store_supplier_not_found" };
+  }
+  const trustResolution = activeSupplierTrustForMetadata(supplierMetadata, await options.store.getTrustSnapshot());
+  if (trustResolution.status !== "ok") {
+    return { status: "skipped", reason: trustResolution.reason };
+  }
+  const profile = supplierMetadata.notificationProfile;
+  if (!profile) {
+    return { status: "skipped", reason: "notification_profile_missing" };
+  }
+  const transport = chooseTransportForRetry(profile, delivery.transportType);
+  if (!transport) {
+    return { status: "skipped", reason: "transport_not_supported" };
+  }
+  if (transport.type === "executor-watch") {
+    return { status: "skipped", reason: "executor_watch_self_managed" };
+  }
+  if (!isPushTransport(transport)) {
+    return { status: "skipped", reason: "transport_not_supported" };
+  }
+  return { status: "ok", profile, transport };
+}
+
+async function saveSkippedSignalDelivery(input: {
+  readonly deliveryStore: NotificationDeliveryStore;
+  readonly event: ChainEvent;
+  readonly order: StateMachineOrderProjection | undefined;
+  readonly signal: StateMachineSignalProjection | undefined;
+  readonly receiverHook: OnchainCompiledHook | undefined;
+  readonly supplier: SupplierTrustProjection | undefined;
+  readonly supplierMetadata: StoreSupplierMetadataRecord | undefined;
+  readonly reason: NotificationSkippedReason;
+  readonly transportType: string | undefined;
+  readonly now: () => string;
+}): Promise<NotificationDeliveryRecord> {
+  const deliveryId = signalDeliveryIdFor(input.event, input.order, input.signal, input.receiverHook, input.supplierMetadata);
+  const existing = await input.deliveryStore.getDelivery(deliveryId);
   if (existing && existing.status !== "pending") {
     return existing;
   }
-  return deliveryStore.saveDelivery({
-    ...baseDeliveryRecord(task, authorization, supplier, transportType, productTaskBaseUrl, undefined, now),
+  return input.deliveryStore.saveDelivery({
+    ...baseSignalDeliveryRecord(
+      input.event,
+      input.order,
+      input.signal,
+      input.receiverHook,
+      input.supplier,
+      input.supplierMetadata,
+      input.transportType,
+      input.now
+    ),
     status: "skipped",
-    reason,
-    updatedAt: now()
+    reason: input.reason,
+    updatedAt: input.now()
   });
 }
 
-function baseDeliveryRecord(
-  task: StateMachineTaskProjection,
-  authorization: StateMachineSignalAuthorizationProjection | undefined,
+function baseSignalDeliveryRecord(
+  event: ChainEvent,
+  order: StateMachineOrderProjection | undefined,
+  signal: StateMachineSignalProjection | undefined,
+  receiverHook: OnchainCompiledHook | undefined,
   supplier: SupplierTrustProjection | undefined,
+  supplierMetadata: StoreSupplierMetadataRecord | undefined,
   transportType: string | undefined,
-  productTaskBaseUrl: string | undefined,
-  profile: SupplierNotificationProfile | undefined,
   now: () => string
 ): NotificationDeliveryRecord {
   const createdAt = now();
+  const orderId = signal?.orderId ?? bytes32Arg(event, "orderId") ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+  const sourceId = signal?.sourceId ?? bytes32Arg(event, "sourceId");
+  const signalId = signal?.signalId ?? bytes32Arg(event, "signalId");
+  const payloadHash = signal?.payloadHash ?? bytes32Arg(event, "payloadHash");
+  const idempotencyKey = signal?.idempotencyKey ?? bytes32Arg(event, "idempotencyKey");
+  const signalSubmitter = signal?.submitter ?? addressArg(event, "submitter");
   return {
-    deliveryId: deliveryIdFor(task, authorization),
+    deliveryId: signalDeliveryIdFor(event, order, signal, receiverHook, supplierMetadata),
+    kind: "signal_received",
     status: "pending",
-    taskId: task.taskId,
-    orderId: task.orderId,
-    hookId: task.hookId,
-    stageId: task.stageIdentifier,
-    chainId: task.proof.chainId,
-    stateMachineAddress: task.stateMachineAddress,
-    ...(authorization ? { submitter: authorization.submitter } : {}),
+    orderId,
+    ...(receiverHook ? { receiverHookId: receiverHook.hookId as Hex, receiverStageId: receiverHook.stageId as Hex } : {}),
+    ...(sourceId ? { sourceId } : {}),
+    ...(signalId ? { signalId } : {}),
+    ...(payloadHash ? { payloadHash } : {}),
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+    chainId: event.chainId,
+    stateMachineAddress: order?.contractAddress ?? event.contractAddress,
+    ...(signalSubmitter ? { submitter: signalSubmitter } : {}),
     ...(supplier ? { supplierSubjectId: supplier.supplierSubjectId, supplierWallet: supplier.wallet } : {}),
     ...(transportType ? { transportType } : {}),
-    payload: payloadForTask(task, productTaskBaseUrl, profile),
+    payload: payloadForSignal(event, order, signal, receiverHook, supplier, supplierMetadata),
     attempts: 0,
     createdAt,
     updatedAt: createdAt
   };
 }
 
-function payloadForTask(
-  task: StateMachineTaskProjection,
-  productTaskBaseUrl: string | undefined,
-  profile: SupplierNotificationProfile | undefined
-): HookReadyNotificationPayload {
-  const productTaskUrl = productTaskUrlForTask(task, productTaskBaseUrl, profile);
+function payloadForSignal(
+  event: ChainEvent,
+  order: StateMachineOrderProjection | undefined,
+  signal: StateMachineSignalProjection | undefined,
+  receiverHook: OnchainCompiledHook | undefined,
+  supplier: SupplierTrustProjection | undefined,
+  supplierMetadata: StoreSupplierMetadataRecord | undefined
+): SignalNotificationPayload {
+  const orderId = signal?.orderId ?? bytes32Arg(event, "orderId") ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+  const sourceId = signal?.sourceId ?? bytes32Arg(event, "sourceId") ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+  const signalId = signal?.signalId ?? bytes32Arg(event, "signalId") ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+  const payloadHash = signal?.payloadHash ?? bytes32Arg(event, "payloadHash") ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+  const idempotencyKey = signal?.idempotencyKey ?? bytes32Arg(event, "idempotencyKey") ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+  const signalSubmitter = signal?.submitter ?? addressArg(event, "submitter") ?? "0x0000000000000000000000000000000000000000" as Address;
+  const receiverHookId = receiverHook?.hookId as Hex | undefined ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+  const receiverStageId = receiverHook?.stageId as Hex | undefined ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+  const receiverSupplierSubjectId = supplier?.supplierSubjectId ?? supplierMetadata?.supplierSubjectId ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+  const receiverWallet = supplier?.wallet ?? supplierMetadata?.wallet ?? "0x0000000000000000000000000000000000000000" as Address;
   return {
-    version: "uvp.hookReadyNotification.v1",
-    chainId: task.proof.chainId,
-    stateMachineAddress: task.stateMachineAddress,
-    orderId: task.orderId,
-    hookId: task.hookId,
-    stageId: task.stageIdentifier,
-    taskId: task.taskId,
-    ...(productTaskUrl ? { productTaskUrl } : {}),
+    version: "uvp.signalReceivedNotification.v1",
+    chainId: event.chainId,
+    stateMachineAddress: order?.contractAddress ?? event.contractAddress,
+    orderId,
+    sourceId,
+    signalId,
+    payloadHash,
+    idempotencyKey,
+    signalSubmitter,
+    receiverHookId,
+    receiverStageId,
+    receiverSupplierSubjectId,
+    receiverWallet,
     proof: {
-      eventName: "HookReady",
-      chainId: task.proof.chainId,
-      contractAddress: task.proof.contractAddress,
-      blockNumber: task.proof.blockNumber.toString(),
-      transactionHash: task.proof.transactionHash,
-      logIndex: task.proof.logIndex,
-      ...(task.proof.blockHash ? { blockHash: task.proof.blockHash } : {})
+      eventName: "SignalSubmitted",
+      chainId: event.chainId,
+      contractAddress: event.contractAddress,
+      blockNumber: event.blockNumber.toString(),
+      transactionHash: event.transactionHash,
+      logIndex: event.logIndex,
+      ...(event.blockHash ? { blockHash: event.blockHash } : {})
     }
   };
-}
-
-function productTaskUrlForTask(
-  task: StateMachineTaskProjection,
-  productTaskBaseUrl: string | undefined,
-  profile: SupplierNotificationProfile | undefined
-): string | undefined {
-  if (profile?.productTaskUrlTemplate) {
-    return profile.productTaskUrlTemplate
-      .replaceAll("{taskId}", encodeURIComponent(task.taskId))
-      .replaceAll("{orderId}", encodeURIComponent(task.orderId))
-      .replaceAll(":taskId", encodeURIComponent(task.taskId))
-      .replaceAll(":orderId", encodeURIComponent(task.orderId));
-  }
-  return productTaskBaseUrl
-    ? `${productTaskBaseUrl.replace(/\/$/u, "")}/product/tasks/${encodeURIComponent(task.taskId)}`
-    : undefined;
 }
 
 function chooseTransport(profile: SupplierNotificationProfile): SupplierNotificationTransport | undefined {
@@ -1116,6 +1544,16 @@ function chooseTransport(profile: SupplierNotificationProfile): SupplierNotifica
     .sort(compareTransportPreference);
   return enabled.find(({ transport }) => isPushTransport(transport) || transport.type === "executor-watch")?.transport ??
     enabled[0]?.transport;
+}
+
+function chooseTransportForRetry(
+  profile: SupplierNotificationProfile,
+  transportType: string | undefined
+): SupplierNotificationTransport | undefined {
+  const enabled = profile.transports
+    .filter((transport) => transport.enabled !== false);
+  return (transportType ? enabled.find((transport) => transport.type === transportType) : undefined) ??
+    chooseTransport(profile);
 }
 
 function isPushTransport(transport: SupplierNotificationTransport): boolean {
@@ -1150,21 +1588,6 @@ function compareTransportPreference(
   return leftPriority === rightPriority ? left.index - right.index : leftPriority - rightPriority;
 }
 
-function resolveSupplierForSubmitter(
-  suppliers: readonly SupplierTrustProjection[],
-  submitter: Address
-): SupplierResolution {
-  const matches = suppliers
-    .filter((supplier) => supplier.wallet.toLowerCase() === submitter.toLowerCase())
-    .sort(compareSuppliersForDelivery);
-  const active = matches.find((supplier) => !supplier.revoked);
-  if (active) {
-    return { status: "attested", supplier: active };
-  }
-  const revoked = matches[0];
-  return revoked ? { status: "revoked", supplier: revoked } : { status: "not_found" };
-}
-
 function findOrderForTask(
   orders: readonly StateMachineOrderProjection[],
   task: StateMachineTaskProjection
@@ -1176,16 +1599,24 @@ function findOrderForTask(
   );
 }
 
-function deliveryIdFor(
-  task: StateMachineTaskProjection,
-  authorization: StateMachineSignalAuthorizationProjection | undefined
+function signalDeliveryIdFor(
+  event: ChainEvent,
+  order: StateMachineOrderProjection | undefined,
+  signal: StateMachineSignalProjection | undefined,
+  receiverHook: OnchainCompiledHook | undefined,
+  supplierMetadata: StoreSupplierMetadataRecord | undefined
 ): Hex {
   return keccak256(stringToBytes([
-    "uvp:notification-delivery:v1",
-    task.proof.chainId.toString(),
-    task.stateMachineAddress.toLowerCase(),
-    task.taskId,
-    authorization?.submitter.toLowerCase() ?? "unroutable"
+    "uvp:signal-received-notification-delivery:v1",
+    event.chainId.toString(),
+    (order?.contractAddress ?? event.contractAddress).toLowerCase(),
+    signal?.orderId ?? bytes32Arg(event, "orderId") ?? "unknown-order",
+    signal?.sourceId ?? bytes32Arg(event, "sourceId") ?? "unknown-source",
+    signal?.signalId ?? bytes32Arg(event, "signalId") ?? "unknown-signal",
+    chainEventId(event),
+    receiverHook?.hookId ?? "unresolved-hook",
+    supplierMetadata?.supplierSubjectId ?? "unresolved-supplier",
+    supplierMetadata?.wallet?.toLowerCase() ?? "unresolved-wallet"
   ].join("|"))) as Hex;
 }
 
@@ -1219,7 +1650,37 @@ function compareDeliveryRecords(left: NotificationDeliveryRecord, right: Notific
   return left.deliveryId.localeCompare(right.deliveryId);
 }
 
-function compareAuthorizations(
+function compareSuppliersForDelivery(left: SupplierTrustProjection, right: SupplierTrustProjection): number {
+  if (left.revoked !== right.revoked) {
+    return left.revoked ? 1 : -1;
+  }
+  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
+    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
+  }
+  return left.supplierSubjectId.localeCompare(right.supplierSubjectId);
+}
+
+function comparePlansForArtifactResolution(left: PlanTrustProjection, right: PlanTrustProjection): number {
+  if (left.revoked !== right.revoked) {
+    return left.revoked ? 1 : -1;
+  }
+  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
+    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
+  }
+  return left.planHash.localeCompare(right.planHash);
+}
+
+function compareSupplierMetadataForDelivery(
+  left: StoreSupplierMetadataRecord,
+  right: StoreSupplierMetadataRecord
+): number {
+  if (left.updatedAt !== right.updatedAt) {
+    return right.updatedAt.localeCompare(left.updatedAt);
+  }
+  return left.supplierId.localeCompare(right.supplierId);
+}
+
+function compareSignalAuthorizationsForDelivery(
   left: StateMachineSignalAuthorizationProjection,
   right: StateMachineSignalAuthorizationProjection
 ): number {
@@ -1232,12 +1693,6 @@ function compareAuthorizations(
   return left.submitter.localeCompare(right.submitter);
 }
 
-function compareSuppliersForDelivery(left: SupplierTrustProjection, right: SupplierTrustProjection): number {
-  if (left.revoked !== right.revoked) {
-    return left.revoked ? 1 : -1;
-  }
-  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
-    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
-  }
-  return left.supplierSubjectId.localeCompare(right.supplierSubjectId);
+function chainEventId(event: ChainEvent): string {
+  return chainEventKey(event);
 }

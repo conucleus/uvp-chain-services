@@ -1,0 +1,11 @@
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS prepare_id TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS source_id TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS signal_id TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS trigger_hook_id TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS trigger_stage_id TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS submitter TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS payload_hash TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS deadline TEXT;
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS typed_data_json JSONB;
+ALTER TABLE product_order_trigger ADD COLUMN IF NOT EXISTS signature TEXT;

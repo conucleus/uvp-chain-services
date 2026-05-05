@@ -19,7 +19,7 @@ const governanceAdminHeaders = {
   "x-uvp-admin-role": "admin"
 };
 
-const domainId = "0x0000000000000000000000000000000000000000000000000000000000005201" as Hex;
+const registryAddress = "0x5555555555555555555555555555555555555555" as Address;
 const supplierSubjectId = "0x0000000000000000000000000000000000000000000000000000000000003001" as Hex;
 const supplierWallet = "0x4444444444444444444444444444444444444444";
 const txHash = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" as Hex;
@@ -144,10 +144,8 @@ describe("Store operator audit events", () => {
         "x-request-id": "req-supplier-attest-1"
       },
       body: {
-        domainId,
         confirmation: {
-          supplierId: "supplier-audit",
-          domainId
+          supplierId: "supplier-audit"
         }
       }
     })).resolves.toMatchObject({ status: 202 });
@@ -179,6 +177,6 @@ function supplierBody(): Record<string, unknown> {
     capabilityTags: ["logistics"],
     supportedRoleSlotIds: ["delivery"],
     supportedStageIds: ["shipping"],
-    domains: [domainId]
+    registryAddresses: [registryAddress]
   };
 }

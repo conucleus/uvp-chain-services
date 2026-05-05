@@ -24,7 +24,6 @@ const adminHeaders = {
   "x-uvp-admin-role": "admin"
 };
 
-const domainId = "0x0000000000000000000000000000000000000000000000000000000000001001" as Hex;
 const planId = "0x0000000000000000000000000000000000000000000000000000000000002001" as Hex;
 const supplierSubjectId = "0x0000000000000000000000000000000000000000000000000000000000003001" as Hex;
 const planHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Hex;
@@ -130,7 +129,6 @@ describe("governance admin API", () => {
       publicSummary: "Approved"
     };
     const first = {
-      domainId,
       planId,
       planHash,
       artifactHash,
@@ -139,7 +137,6 @@ describe("governance admin API", () => {
       policy: { regions: ["CN", "US"], threshold: 2 }
     };
     const second = {
-      domainId,
       planId,
       planHash,
       artifactHash,
@@ -151,12 +148,10 @@ describe("governance admin API", () => {
     expect(hashPlanMetadata(first)).toBe(hashPlanMetadata(second));
     expect(hashPlanPolicy(first)).toBe(hashPlanPolicy(second));
     expect(hashSupplierCapability({
-      domainId,
       supplierSubjectId,
       wallet,
       capability: { licenses: ["iso"], regions: ["CN"] }
     })).toBe(hashSupplierCapability({
-      domainId,
       supplierSubjectId,
       wallet: wallet.toUpperCase(),
       capability: { regions: ["CN"], licenses: ["iso"] }
@@ -188,12 +183,10 @@ describe("governance admin API", () => {
       }
     };
     expect(hashSupplierCapability({
-      domainId,
       supplierSubjectId,
       wallet,
       capability: webhookCapability
     })).toBe(hashSupplierCapability({
-      domainId,
       supplierSubjectId,
       wallet,
       capability: {
@@ -224,12 +217,10 @@ describe("governance admin API", () => {
       }
     }));
     expect(hashSupplierCapability({
-      domainId,
       supplierSubjectId,
       wallet,
       capability: webhookCapability
     })).not.toBe(hashSupplierCapability({
-      domainId,
       supplierSubjectId,
       wallet,
       capability: {
@@ -304,13 +295,12 @@ describe("governance admin API", () => {
       method: "POST",
       pathname: "/admin/governance/attest-zhixu",
       headers: adminHeaders,
-      body: { domainId, planId, planHash, artifactHash }
+      body: { planId, planHash, artifactHash }
     });
     expect(attestPlanResponse.status).toBe(202);
     expect(attestPlanResponse.body).toMatchObject({
       request: {
         kind: "attestPlan",
-        domainId,
         planId,
         planHash,
         artifactHash
@@ -335,11 +325,11 @@ describe("governance admin API", () => {
       method: "POST",
       pathname: "/admin/governance/revoke-zhixu",
       headers: adminHeaders,
-      body: { domainId, planId, reason: "Evidence became stale." }
+      body: { planId, reason: "Evidence became stale." }
     })).resolves.toMatchObject({
       status: 202,
       body: {
-        request: { kind: "revokePlan", domainId, planId },
+        request: { kind: "revokePlan", planId },
         log: { action: "revoke_plan", status: "pending" }
       }
     });
@@ -359,7 +349,6 @@ describe("governance admin API", () => {
       pathname: "/admin/governance/attest-supplier",
       headers: adminHeaders,
       body: {
-        domainId,
         supplierSubjectId,
         wallet,
         profile: { name: "Supplier A" },
@@ -381,7 +370,6 @@ describe("governance admin API", () => {
       }
     });
     const expectedSupplierCapabilityHash = hashSupplierCapability({
-      domainId,
       supplierSubjectId,
       wallet,
       capability: {
@@ -401,7 +389,6 @@ describe("governance admin API", () => {
     expect(supplierResponse.body).toMatchObject({
       request: {
         kind: "attestSupplier",
-        domainId,
         supplierSubjectId,
         wallet,
         capabilityHash: expectedSupplierCapabilityHash
@@ -417,7 +404,7 @@ describe("governance admin API", () => {
       method: "POST",
       pathname: "/admin/governance/revoke-supplier",
       headers: adminHeaders,
-      body: { domainId, supplierSubjectId, reason: "Supplier authorization revoked." }
+      body: { supplierSubjectId, reason: "Supplier authorization revoked." }
     });
 
     expect(requests.map((request) => request.kind)).toEqual([
@@ -472,7 +459,6 @@ describe("governance admin API", () => {
       pathname: "/admin/governance/attest-zhixu",
       headers: adminHeaders,
       body: {
-        domainId,
         planId,
         planHash,
         artifactHash,
@@ -551,7 +537,7 @@ describe("governance admin API", () => {
       method: "POST",
       pathname: "/admin/governance/attest-zhixu",
       headers: adminHeaders,
-      body: { domainId, planId, planHash, artifactHash }
+      body: { planId, planHash, artifactHash }
     });
 
     expect(response.status).toBe(202);
@@ -605,7 +591,7 @@ describe("governance admin API", () => {
       }
     });
 
-    const body = { domainId, planId, planHash, artifactHash };
+    const body = { planId, planHash, artifactHash };
     const first = await router.handle({
       method: "POST",
       pathname: "/admin/governance/attest-zhixu",
@@ -649,7 +635,6 @@ describe("governance admin API", () => {
       rpcUrl: "http://127.0.0.1:8545",
       chainId: 31337,
       contractAddress: registryAddress,
-      domainId,
       privateKey: signerPrivateKey,
       txConfirmations: 1,
       publicClient,
@@ -664,7 +649,6 @@ describe("governance admin API", () => {
 
     await expect(adapter.attestPlan({
       kind: "attestPlan",
-      domainId,
       planId,
       planHash,
       artifactHash,
@@ -680,14 +664,12 @@ describe("governance admin API", () => {
     });
     await adapter.revokePlan({
       kind: "revokePlan",
-      domainId,
       planId,
       reasonHash,
       reasonURI: "uvp-governance://metadata/revoke-plan"
     });
     await adapter.attestSupplier({
       kind: "attestSupplier",
-      domainId,
       supplierSubjectId,
       wallet,
       profileHash,
@@ -698,7 +680,6 @@ describe("governance admin API", () => {
     });
     await adapter.revokeSupplier({
       kind: "revokeSupplier",
-      domainId,
       supplierSubjectId,
       reasonHash,
       reasonURI: "uvp-governance://metadata/revoke-supplier"
@@ -713,11 +694,11 @@ describe("governance admin API", () => {
     expect(writeContract.mock.calls[0]?.[0]).toMatchObject({
       address: registryAddress,
       functionName: "attestPlan",
-      args: [domainId, planId, planHash, artifactHash, policyHash, metadataHash, "uvp-governance://metadata/plan"]
+      args: [planId, planHash, artifactHash, policyHash, metadataHash, "uvp-governance://metadata/plan"]
     });
     expect(writeContract.mock.calls[2]?.[0]).toMatchObject({
       functionName: "attestSupplier",
-      args: [domainId, supplierSubjectId, wallet, profileHash, capabilityHash, reputationHash, "uvp-governance://metadata/supplier"]
+      args: [supplierSubjectId, wallet, profileHash, capabilityHash, reputationHash, "uvp-governance://metadata/supplier"]
     });
     expect(JSON.stringify(writeContract.mock.calls)).not.toContain(signerPrivateKey.slice(2));
   });
@@ -737,7 +718,6 @@ describe("governance admin API", () => {
       rpcUrl: "http://127.0.0.1:8545",
       chainId: 31337,
       contractAddress: registryAddress,
-      domainId,
       privateKey: signerPrivateKey,
       txConfirmations: 0,
       publicClient,
@@ -746,7 +726,6 @@ describe("governance admin API", () => {
 
     await expect(unauthorized.revokePlan({
       kind: "revokePlan",
-      domainId,
       planId,
       reasonHash: planHash,
       reasonURI: "uvp-governance://metadata/revoke"
@@ -762,7 +741,6 @@ describe("governance admin API", () => {
       rpcUrl: "http://127.0.0.1:8545",
       chainId: 31337,
       contractAddress: registryAddress,
-      domainId,
       privateKey: signerPrivateKey,
       txConfirmations: 0,
       allowedOperators: [signer],
@@ -771,7 +749,6 @@ describe("governance admin API", () => {
     });
     await expect(allowed.revokePlan({
       kind: "revokePlan",
-      domainId,
       planId,
       reasonHash: planHash,
       reasonURI: "uvp-governance://metadata/revoke"
@@ -817,7 +794,6 @@ describe("governance admin API", () => {
       pathname: "/admin/governance/attest-zhixu",
       headers: adminHeaders,
       body: {
-        domainId: crossBorderPlanIds.domainId,
         planId: crossBorderPlanIds.planId,
         planHash: crossBorderPlanIds.planHash,
         artifactHash: crossBorderPlanIds.artifactHash
@@ -886,7 +862,6 @@ function createProductDraft(router: ReturnType<typeof createApiRouter>) {
 
 function planAttestedEvent(blockNumber: bigint): ChainEvent {
   return chainEvent(blockNumber, 0, "PlanAttested", {
-    domainId: crossBorderPlanIds.domainId,
     planId: crossBorderPlanIds.planId,
     planHash: crossBorderPlanIds.planHash,
     artifactHash: crossBorderPlanIds.artifactHash,
@@ -899,7 +874,6 @@ function planAttestedEvent(blockNumber: bigint): ChainEvent {
 
 function planRevokedEvent(blockNumber: bigint): ChainEvent {
   return chainEvent(blockNumber, 1, "PlanRevoked", {
-    domainId: crossBorderPlanIds.domainId,
     planId: crossBorderPlanIds.planId,
     reasonHash: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     reasonURI: "uvp-governance://metadata/cross-border-revoked",

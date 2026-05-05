@@ -11,16 +11,12 @@ import type {
   ParticipantPermissionDTO,
   ProductInviteDTO,
   ProductOrderDraftDTO,
-  ProductOrderRegistrationRecord,
-  ProductOrderStartDTO,
+  ProductOrderTriggerRecord,
   SignalAuthorizationDTO
 } from "./types.js";
-import {
-  applyOrderStartPatch,
-  type ProductBffStore,
-  type ProductOrderStartListOptions,
-  type ProductOrderStartPatch
-} from "./store.js";
+import type { ProductBffStore } from "./store.js";
+
+const zeroBytes32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 export interface PostgresProductBffStoreOptions {
   readonly databaseUrl?: string;
@@ -147,96 +143,50 @@ export class PostgresProductBffStore implements ProductBffStore {
     return result.rows.map((row) => inviteRow(row));
   }
 
-  async createRegistration(registration: ProductOrderRegistrationRecord): Promise<void> {
+  async createRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
     await this.#insertRegistration(registration);
   }
 
-  async getRegistration(registrationId: string): Promise<ProductOrderRegistrationRecord | undefined> {
+  async getRegistration(triggerId: string): Promise<ProductOrderTriggerRecord | undefined> {
     const result = await this.#database.query(
       `SELECT
          *,
          authorizations_json::text AS authorizations_json,
          permissions_json::text AS permissions_json
-       FROM product_order_registration
-       WHERE registration_id = $1`,
-      [registrationId]
+       FROM product_order_trigger
+       WHERE trigger_id = $1`,
+      [triggerId]
     );
     return result.rows[0] ? registrationRow(result.rows[0]) : undefined;
   }
 
-  async getRegistrationByDraft(draftId: string): Promise<ProductOrderRegistrationRecord | undefined> {
+  async getRegistrationByDraft(draftId: string): Promise<ProductOrderTriggerRecord | undefined> {
     const result = await this.#database.query(
       `SELECT
          *,
          authorizations_json::text AS authorizations_json,
          permissions_json::text AS permissions_json
-       FROM product_order_registration
+       FROM product_order_trigger
        WHERE draft_id = $1`,
       [draftId]
     );
     return result.rows[0] ? registrationRow(result.rows[0]) : undefined;
   }
 
-  async listRegistrations(): Promise<readonly ProductOrderRegistrationRecord[]> {
+  async listRegistrations(): Promise<readonly ProductOrderTriggerRecord[]> {
     const result = await this.#database.query(
       `SELECT
          *,
          authorizations_json::text AS authorizations_json,
          permissions_json::text AS permissions_json
-       FROM product_order_registration
-       ORDER BY created_at ASC, registration_id ASC`
+       FROM product_order_trigger
+       ORDER BY created_at ASC, trigger_id ASC`
     );
     return result.rows.map((row) => registrationRow(row));
   }
 
-  async updateRegistration(registration: ProductOrderRegistrationRecord): Promise<void> {
+  async updateRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
     await this.#upsertRegistration(registration);
-  }
-
-  async createOrderStart(record: ProductOrderStartDTO): Promise<void> {
-    await this.#insertOrderStart(record);
-  }
-
-  async getOrderStartByRegistrationId(registrationId: string): Promise<ProductOrderStartDTO | undefined> {
-    const result = await this.#database.query(
-      `SELECT *
-       FROM product_order_start
-       WHERE registration_id = $1`,
-      [registrationId]
-    );
-    return result.rows[0] ? orderStartRow(result.rows[0]) : undefined;
-  }
-
-  async updateOrderStart(startId: string, patch: ProductOrderStartPatch): Promise<ProductOrderStartDTO | undefined> {
-    const current = await this.#database.query(
-      `SELECT *
-       FROM product_order_start
-       WHERE start_id = $1`,
-      [startId]
-    );
-    if (!current.rows[0]) {
-      return undefined;
-    }
-    const updated = applyOrderStartPatch(orderStartRow(current.rows[0]), patch);
-    await this.#upsertOrderStart(updated);
-    return updated;
-  }
-
-  async listOrderStartsForReconcile(options: ProductOrderStartListOptions = {}): Promise<readonly ProductOrderStartDTO[]> {
-    const result = options.statuses && options.statuses.length > 0
-      ? await this.#database.query(
-          `SELECT *
-           FROM product_order_start
-           WHERE status = ANY($1::text[])
-           ORDER BY created_at ASC, start_id ASC`,
-          [options.statuses]
-        )
-      : await this.#database.query(
-          `SELECT *
-           FROM product_order_start
-           ORDER BY created_at ASC, start_id ASC`
-        );
-    return result.rows.map((row) => orderStartRow(row));
   }
 
   async #insertDraft(draft: ProductOrderDraftDTO): Promise<void> {
@@ -244,7 +194,7 @@ export class PostgresProductBffStore implements ProductBffStore {
       `INSERT INTO product_order_draft (
          draft_id, zhixu_id, plan_id, plan_hash, title, business_type, goods_json,
          total_amount, currency, export_region, destination_region, expected_completion_date,
-         notes, status, created_by, created_at, updated_at, registered_order_id, registration_tx_hash
+         notes, status, created_by, created_at, updated_at, triggered_order_id, trigger_tx_hash
        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
       draftValues(draft)
     );
@@ -255,7 +205,7 @@ export class PostgresProductBffStore implements ProductBffStore {
       `INSERT INTO product_order_draft (
          draft_id, zhixu_id, plan_id, plan_hash, title, business_type, goods_json,
          total_amount, currency, export_region, destination_region, expected_completion_date,
-         notes, status, created_by, created_at, updated_at, registered_order_id, registration_tx_hash
+         notes, status, created_by, created_at, updated_at, triggered_order_id, trigger_tx_hash
        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
        ON CONFLICT(draft_id)
        DO UPDATE SET
@@ -275,8 +225,8 @@ export class PostgresProductBffStore implements ProductBffStore {
          created_by = excluded.created_by,
          created_at = excluded.created_at,
          updated_at = excluded.updated_at,
-         registered_order_id = excluded.registered_order_id,
-         registration_tx_hash = excluded.registration_tx_hash`,
+         triggered_order_id = excluded.triggered_order_id,
+         trigger_tx_hash = excluded.trigger_tx_hash`,
       draftValues(draft)
     );
   }
@@ -345,28 +295,33 @@ export class PostgresProductBffStore implements ProductBffStore {
     );
   }
 
-  async #insertRegistration(registration: ProductOrderRegistrationRecord): Promise<void> {
+  async #insertRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
     await this.#database.query(
-      `INSERT INTO product_order_registration (
-         registration_id, draft_id, order_id, state_machine_address, deployment_id,
-         plan_id, plan_hash, status, tx_hash, block_number, error_code, error_message,
-         retryable, creator, authorizations_json, permissions_json, reconcile_status,
-         last_checked_at, receipt_status, projection_status, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, $18, $19, $20, $21, $22)`,
+      `INSERT INTO product_order_trigger (
+         trigger_id, prepare_id, draft_id, order_id, state_machine_address, deployment_id,
+         plan_id, plan_hash, status, tx_hash, block_number, source_id, signal_id,
+         trigger_hook_id, trigger_stage_id, submitter, payload_hash, idempotency_key,
+         deadline, typed_data_json, signature, error_code, error_message, retryable,
+         creator, authorizations_json, permissions_json, reconcile_status, last_checked_at,
+         receipt_status, projection_status, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33)`,
       registrationValues(registration)
     );
   }
 
-  async #upsertRegistration(registration: ProductOrderRegistrationRecord): Promise<void> {
+  async #upsertRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
     await this.#database.query(
-      `INSERT INTO product_order_registration (
-         registration_id, draft_id, order_id, state_machine_address, deployment_id,
-         plan_id, plan_hash, status, tx_hash, block_number, error_code, error_message,
-         retryable, creator, authorizations_json, permissions_json, reconcile_status,
-         last_checked_at, receipt_status, projection_status, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, $18, $19, $20, $21, $22)
-       ON CONFLICT(registration_id)
+      `INSERT INTO product_order_trigger (
+         trigger_id, prepare_id, draft_id, order_id, state_machine_address, deployment_id,
+         plan_id, plan_hash, status, tx_hash, block_number, source_id, signal_id,
+         trigger_hook_id, trigger_stage_id, submitter, payload_hash, idempotency_key,
+         deadline, typed_data_json, signature, error_code, error_message, retryable,
+         creator, authorizations_json, permissions_json, reconcile_status, last_checked_at,
+         receipt_status, projection_status, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33)
+       ON CONFLICT(trigger_id)
        DO UPDATE SET
+         prepare_id = excluded.prepare_id,
          draft_id = excluded.draft_id,
          order_id = excluded.order_id,
          state_machine_address = excluded.state_machine_address,
@@ -376,6 +331,16 @@ export class PostgresProductBffStore implements ProductBffStore {
          status = excluded.status,
          tx_hash = excluded.tx_hash,
          block_number = excluded.block_number,
+         source_id = excluded.source_id,
+         signal_id = excluded.signal_id,
+         trigger_hook_id = excluded.trigger_hook_id,
+         trigger_stage_id = excluded.trigger_stage_id,
+         submitter = excluded.submitter,
+         payload_hash = excluded.payload_hash,
+         idempotency_key = excluded.idempotency_key,
+         deadline = excluded.deadline,
+         typed_data_json = excluded.typed_data_json,
+         signature = excluded.signature,
          error_code = excluded.error_code,
          error_message = excluded.error_message,
          retryable = excluded.retryable,
@@ -392,46 +357,6 @@ export class PostgresProductBffStore implements ProductBffStore {
     );
   }
 
-  async #insertOrderStart(start: ProductOrderStartDTO): Promise<void> {
-    await this.#database.query(
-      `INSERT INTO product_order_start (
-         start_id, registration_id, draft_id, order_id, state_machine_address, deployment_id,
-         status, tx_hash, block_number, error_code, error_message, retryable, reconcile_status,
-         last_checked_at, receipt_status, projection_status, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
-      orderStartValues(start)
-    );
-  }
-
-  async #upsertOrderStart(start: ProductOrderStartDTO): Promise<void> {
-    await this.#database.query(
-      `INSERT INTO product_order_start (
-         start_id, registration_id, draft_id, order_id, state_machine_address, deployment_id,
-         status, tx_hash, block_number, error_code, error_message, retryable, reconcile_status,
-         last_checked_at, receipt_status, projection_status, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-       ON CONFLICT(start_id)
-       DO UPDATE SET
-         registration_id = excluded.registration_id,
-         draft_id = excluded.draft_id,
-         order_id = excluded.order_id,
-         state_machine_address = excluded.state_machine_address,
-         deployment_id = excluded.deployment_id,
-         status = excluded.status,
-         tx_hash = excluded.tx_hash,
-         block_number = excluded.block_number,
-         error_code = excluded.error_code,
-         error_message = excluded.error_message,
-         retryable = excluded.retryable,
-         reconcile_status = excluded.reconcile_status,
-         last_checked_at = excluded.last_checked_at,
-         receipt_status = excluded.receipt_status,
-         projection_status = excluded.projection_status,
-         created_at = excluded.created_at,
-         updated_at = excluded.updated_at`,
-      orderStartValues(start)
-    );
-  }
 }
 
 function draftValues(draft: ProductOrderDraftDTO) {
@@ -453,8 +378,8 @@ function draftValues(draft: ProductOrderDraftDTO) {
     draft.createdBy ?? null,
     draft.createdAt,
     draft.updatedAt,
-    draft.registeredOrderId ?? null,
-    draft.registrationTxHash ?? null
+    draft.triggeredOrderId ?? null,
+    draft.triggerTxHash ?? null
   ] as const;
 }
 
@@ -472,9 +397,10 @@ function inviteValues(invite: ProductInviteDTO) {
   ] as const;
 }
 
-function registrationValues(registration: ProductOrderRegistrationRecord) {
+function registrationValues(registration: ProductOrderTriggerRecord) {
   return [
-    registration.registrationId,
+    registration.triggerId,
+    registration.prepareId ?? null,
     registration.draftId,
     registration.orderId,
     registration.stateMachineAddress ?? null,
@@ -484,6 +410,16 @@ function registrationValues(registration: ProductOrderRegistrationRecord) {
     registration.status,
     registration.txHash ?? null,
     registration.blockNumber ?? null,
+    registration.sourceId ?? null,
+    registration.signalId ?? null,
+    registration.triggerHookId ?? null,
+    registration.triggerStageId ?? null,
+    registration.submitter ?? null,
+    registration.payloadHash ?? null,
+    registration.idempotencyKey ?? null,
+    registration.deadline ?? null,
+    stringifyStorageJson(registration.typedData ?? {}),
+    registration.signature ?? null,
     registration.errorCode ?? null,
     registration.errorMessage ?? null,
     registration.retryable,
@@ -499,29 +435,6 @@ function registrationValues(registration: ProductOrderRegistrationRecord) {
   ] as const;
 }
 
-function orderStartValues(start: ProductOrderStartDTO) {
-  return [
-    start.startId,
-    start.registrationId,
-    start.draftId,
-    start.orderId,
-    start.stateMachineAddress ?? null,
-    start.deploymentId ?? null,
-    start.status,
-    start.txHash ?? null,
-    start.blockNumber ?? null,
-    start.errorCode ?? null,
-    start.errorMessage ?? null,
-    start.retryable,
-    start.reconcileStatus ?? null,
-    start.lastCheckedAt ?? null,
-    start.receiptStatus ?? null,
-    start.projectionStatus ?? null,
-    start.createdAt,
-    start.updatedAt
-  ] as const;
-}
-
 function draftRow(row: unknown): ProductOrderDraftDTO {
   const record = rowObject(row, "product_order_draft query");
   const exportRegion = optionalStringColumn(record, "export_region");
@@ -529,8 +442,8 @@ function draftRow(row: unknown): ProductOrderDraftDTO {
   const expectedCompletionDate = optionalStringColumn(record, "expected_completion_date");
   const notes = optionalStringColumn(record, "notes");
   const createdBy = optionalStringColumn(record, "created_by");
-  const registeredOrderId = optionalStringColumn(record, "registered_order_id");
-  const registrationTxHash = optionalStringColumn(record, "registration_tx_hash");
+  const triggeredOrderId = optionalStringColumn(record, "triggered_order_id");
+  const triggerTxHash = optionalStringColumn(record, "trigger_tx_hash");
   return {
     draftId: stringColumn(record, "draft_id"),
     zhixuId: stringColumn(record, "zhixu_id"),
@@ -549,9 +462,9 @@ function draftRow(row: unknown): ProductOrderDraftDTO {
     ...(createdBy !== undefined ? { createdBy } : {}),
     createdAt: stringColumn(record, "created_at"),
     updatedAt: stringColumn(record, "updated_at"),
-    ...(registeredOrderId !== undefined ? { registeredOrderId } : {}),
-    ...(registrationTxHash !== undefined
-      ? { registrationTxHash: registrationTxHash as NonNullable<ProductOrderDraftDTO["registrationTxHash"]> }
+    ...(triggeredOrderId !== undefined ? { triggeredOrderId } : {}),
+    ...(triggerTxHash !== undefined
+      ? { triggerTxHash: triggerTxHash as NonNullable<ProductOrderDraftDTO["triggerTxHash"]> }
       : {})
   };
 }
@@ -594,12 +507,24 @@ function inviteRow(row: unknown): ProductInviteDTO {
   };
 }
 
-function registrationRow(row: unknown): ProductOrderRegistrationRecord {
-  const record = rowObject(row, "product_order_registration query");
+function registrationRow(row: unknown): ProductOrderTriggerRecord {
+  const record = rowObject(row, "product_order_trigger query");
+  const triggerId = stringColumn(record, "trigger_id");
+  const prepareId = optionalStringColumn(record, "prepare_id");
   const stateMachineAddress = optionalStringColumn(record, "state_machine_address");
   const deploymentId = optionalStringColumn(record, "deployment_id");
   const txHash = optionalStringColumn(record, "tx_hash");
   const blockNumber = optionalStringColumn(record, "block_number");
+  const sourceId = optionalStringColumn(record, "source_id");
+  const signalId = optionalStringColumn(record, "signal_id");
+  const triggerHookId = optionalStringColumn(record, "trigger_hook_id");
+  const triggerStageId = optionalStringColumn(record, "trigger_stage_id");
+  const submitter = optionalStringColumn(record, "submitter");
+  const payloadHash = optionalStringColumn(record, "payload_hash");
+  const idempotencyKey = optionalStringColumn(record, "idempotency_key");
+  const deadline = optionalStringColumn(record, "deadline");
+  const typedDataJson = optionalStringColumn(record, "typed_data_json");
+  const signature = optionalStringColumn(record, "signature");
   const errorCode = optionalStringColumn(record, "error_code");
   const errorMessage = optionalStringColumn(record, "error_message");
   const reconcileStatus = optionalStringColumn(record, "reconcile_status");
@@ -609,81 +534,52 @@ function registrationRow(row: unknown): ProductOrderRegistrationRecord {
   const authorizations = parseStorageJson<readonly SignalAuthorizationDTO[]>(stringColumn(record, "authorizations_json"));
   const permissions = parseStorageJson<readonly ParticipantPermissionDTO[]>(stringColumn(record, "permissions_json"));
   return {
-    registrationId: stringColumn(record, "registration_id"),
+    triggerId,
+    prepareId: prepareId ?? triggerId,
     draftId: stringColumn(record, "draft_id"),
-    orderId: stringColumn(record, "order_id") as ProductOrderRegistrationRecord["orderId"],
+    orderId: stringColumn(record, "order_id") as ProductOrderTriggerRecord["orderId"],
     ...(stateMachineAddress !== undefined
-      ? { stateMachineAddress: stateMachineAddress as NonNullable<ProductOrderRegistrationRecord["stateMachineAddress"]> }
+      ? { stateMachineAddress: stateMachineAddress as NonNullable<ProductOrderTriggerRecord["stateMachineAddress"]> }
       : {}),
     ...(deploymentId !== undefined
-      ? { deploymentId: deploymentId as NonNullable<ProductOrderRegistrationRecord["deploymentId"]> }
+      ? { deploymentId: deploymentId as NonNullable<ProductOrderTriggerRecord["deploymentId"]> }
       : {}),
-    planId: stringColumn(record, "plan_id") as ProductOrderRegistrationRecord["planId"],
-    planHash: stringColumn(record, "plan_hash") as ProductOrderRegistrationRecord["planHash"],
-    status: stringColumn(record, "status") as ProductOrderRegistrationRecord["status"],
-    ...(txHash !== undefined ? { txHash: txHash as NonNullable<ProductOrderRegistrationRecord["txHash"]> } : {}),
+    planId: stringColumn(record, "plan_id") as ProductOrderTriggerRecord["planId"],
+    planHash: stringColumn(record, "plan_hash") as ProductOrderTriggerRecord["planHash"],
+    status: stringColumn(record, "status") as ProductOrderTriggerRecord["status"],
+    ...(txHash !== undefined ? { txHash: txHash as NonNullable<ProductOrderTriggerRecord["txHash"]> } : {}),
     ...(blockNumber !== undefined ? { blockNumber } : {}),
+    ...(sourceId !== undefined ? { sourceId: sourceId as NonNullable<ProductOrderTriggerRecord["sourceId"]> } : {}),
+    ...(signalId !== undefined ? { signalId: signalId as NonNullable<ProductOrderTriggerRecord["signalId"]> } : {}),
+    ...(triggerHookId !== undefined
+      ? { triggerHookId: triggerHookId as NonNullable<ProductOrderTriggerRecord["triggerHookId"]> }
+      : {}),
+    ...(triggerStageId !== undefined
+      ? { triggerStageId: triggerStageId as NonNullable<ProductOrderTriggerRecord["triggerStageId"]> }
+      : {}),
+    ...(submitter !== undefined ? { submitter: submitter as NonNullable<ProductOrderTriggerRecord["submitter"]> } : {}),
+    payloadHash: (payloadHash ?? zeroBytes32) as ProductOrderTriggerRecord["orderId"],
+    idempotencyKey: (idempotencyKey ?? zeroBytes32) as ProductOrderTriggerRecord["orderId"],
+    deadline: deadline ?? "0",
+    typedData: typedDataJson ? parseStorageJson<unknown>(typedDataJson) : {},
+    ...(signature !== undefined ? { signature: signature as NonNullable<ProductOrderTriggerRecord["signature"]> } : {}),
     ...(errorCode !== undefined ? { errorCode } : {}),
     ...(errorMessage !== undefined ? { errorMessage } : {}),
     retryable: booleanColumn(record, "retryable"),
     createdAt: stringColumn(record, "created_at"),
     updatedAt: stringColumn(record, "updated_at"),
-    creator: stringColumn(record, "creator") as ProductOrderRegistrationRecord["creator"],
+    creator: stringColumn(record, "creator") as ProductOrderTriggerRecord["creator"],
     authorizations,
     permissions,
     ...(reconcileStatus !== undefined
-      ? { reconcileStatus: reconcileStatus as NonNullable<ProductOrderRegistrationRecord["reconcileStatus"]> }
+      ? { reconcileStatus: reconcileStatus as NonNullable<ProductOrderTriggerRecord["reconcileStatus"]> }
       : {}),
     ...(lastCheckedAt !== undefined ? { lastCheckedAt } : {}),
     ...(receiptStatus !== undefined
-      ? { receiptStatus: receiptStatus as NonNullable<ProductOrderRegistrationRecord["receiptStatus"]> }
+      ? { receiptStatus: receiptStatus as NonNullable<ProductOrderTriggerRecord["receiptStatus"]> }
       : {}),
     ...(projectionStatus !== undefined
-      ? { projectionStatus: projectionStatus as NonNullable<ProductOrderRegistrationRecord["projectionStatus"]> }
-      : {})
-  };
-}
-
-function orderStartRow(row: unknown): ProductOrderStartDTO {
-  const record = rowObject(row, "product_order_start query");
-  const stateMachineAddress = optionalStringColumn(record, "state_machine_address");
-  const deploymentId = optionalStringColumn(record, "deployment_id");
-  const txHash = optionalStringColumn(record, "tx_hash");
-  const blockNumber = optionalStringColumn(record, "block_number");
-  const errorCode = optionalStringColumn(record, "error_code");
-  const errorMessage = optionalStringColumn(record, "error_message");
-  const reconcileStatus = optionalStringColumn(record, "reconcile_status");
-  const lastCheckedAt = optionalStringColumn(record, "last_checked_at");
-  const receiptStatus = optionalStringColumn(record, "receipt_status");
-  const projectionStatus = optionalStringColumn(record, "projection_status");
-  return {
-    startId: stringColumn(record, "start_id"),
-    registrationId: stringColumn(record, "registration_id"),
-    draftId: stringColumn(record, "draft_id"),
-    orderId: stringColumn(record, "order_id") as ProductOrderStartDTO["orderId"],
-    ...(stateMachineAddress !== undefined
-      ? { stateMachineAddress: stateMachineAddress as NonNullable<ProductOrderStartDTO["stateMachineAddress"]> }
-      : {}),
-    ...(deploymentId !== undefined
-      ? { deploymentId: deploymentId as NonNullable<ProductOrderStartDTO["deploymentId"]> }
-      : {}),
-    status: stringColumn(record, "status") as ProductOrderStartDTO["status"],
-    ...(txHash !== undefined ? { txHash: txHash as NonNullable<ProductOrderStartDTO["txHash"]> } : {}),
-    ...(blockNumber !== undefined ? { blockNumber } : {}),
-    ...(errorCode !== undefined ? { errorCode } : {}),
-    ...(errorMessage !== undefined ? { errorMessage } : {}),
-    retryable: booleanColumn(record, "retryable"),
-    createdAt: stringColumn(record, "created_at"),
-    updatedAt: stringColumn(record, "updated_at"),
-    ...(reconcileStatus !== undefined
-      ? { reconcileStatus: reconcileStatus as NonNullable<ProductOrderStartDTO["reconcileStatus"]> }
-      : {}),
-    ...(lastCheckedAt !== undefined ? { lastCheckedAt } : {}),
-    ...(receiptStatus !== undefined
-      ? { receiptStatus: receiptStatus as NonNullable<ProductOrderStartDTO["receiptStatus"]> }
-      : {}),
-    ...(projectionStatus !== undefined
-      ? { projectionStatus: projectionStatus as NonNullable<ProductOrderStartDTO["projectionStatus"]> }
+      ? { projectionStatus: projectionStatus as NonNullable<ProductOrderTriggerRecord["projectionStatus"]> }
       : {})
   };
 }

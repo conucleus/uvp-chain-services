@@ -1,5 +1,14 @@
 import { encodeAbiParameters, keccak256, recoverTypedDataAddress, stringToHex } from "viem";
 import {
+  DOCKED_ORDER_LINK_DOMAIN_NAME,
+  DOCKED_ORDER_LINK_DOMAIN_VERSION,
+  DOCKED_ORDER_LINK_PRIMARY_TYPE,
+  STAGE_EXECUTOR_PATCH_DOMAIN_NAME,
+  STAGE_EXECUTOR_PATCH_DOMAIN_VERSION,
+  STAGE_EXECUTOR_PATCH_PRIMARY_TYPE,
+  STAGE_RESOURCE_PATCH_DOMAIN_NAME,
+  STAGE_RESOURCE_PATCH_DOMAIN_VERSION,
+  STAGE_RESOURCE_PATCH_PRIMARY_TYPE,
   buildDockedOrderLinkTypedData as buildProtocolDockedOrderLinkTypedData,
   hashDockedOrderLinkPayload as hashProtocolDockedOrderLinkPayload,
   recoverDockedOrderLinkSigner as recoverProtocolDockedOrderLinkSigner
@@ -14,11 +23,8 @@ import type {
   StageResourcePatchTypedData
 } from "./types.js";
 
-export const STAGE_PATCH_DOMAIN_NAME = "UVPStateMachine";
-export const STAGE_PATCH_DOMAIN_VERSION = "0.2";
-export const STAGE_EXECUTOR_PATCH_PRIMARY_TYPE = "UVPStateMachineStageExecutorPatch";
-export const STAGE_RESOURCE_PATCH_PRIMARY_TYPE = "UVPStateMachineStageResourcePatch";
-export const DOCKED_ORDER_LINK_PRIMARY_TYPE = "UVPStateMachineDockedOrderLink";
+export const STAGE_PATCH_DOMAIN_NAME = STAGE_EXECUTOR_PATCH_DOMAIN_NAME;
+export const STAGE_PATCH_DOMAIN_VERSION = STAGE_EXECUTOR_PATCH_DOMAIN_VERSION;
 export const EXECUTOR_PATCH_MODE_ASSIGN = stringToHex("assign", { size: 32 }) as Hex;
 export const EXECUTOR_PATCH_MODE_HANDOFF = stringToHex("handoff", { size: 32 }) as Hex;
 export const EXECUTOR_PATCH_MODE_REPLACEMENT = stringToHex("replacement", { size: 32 }) as Hex;
@@ -229,7 +235,7 @@ export function buildStageExecutorPatchTypedData(input: BuildStageExecutorPatchT
         verifyingContract: input.verifyingContract.toLowerCase() as Address
       },
       types: {
-        UVPStateMachineStageExecutorPatch: STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS
+        UVPStagePatchModuleStageExecutorPatch: STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS
       },
       primaryType: STAGE_EXECUTOR_PATCH_PRIMARY_TYPE,
       message: {
@@ -265,7 +271,7 @@ export function buildStageResourcePatchTypedData(input: BuildStageResourcePatchT
         verifyingContract: input.verifyingContract.toLowerCase() as Address
       },
       types: {
-        UVPStateMachineStageResourcePatch: STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS
+        UVPStagePatchModuleStageResourcePatch: STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS
       },
       primaryType: STAGE_RESOURCE_PATCH_PRIMARY_TYPE,
       message: {

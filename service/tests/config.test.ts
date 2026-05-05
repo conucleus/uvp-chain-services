@@ -114,19 +114,26 @@ describe("chain-services config", () => {
     expect(config.network.contracts.UVPStateMachine).toBe("0xaaaa111111111111111111111111111111111111");
   });
 
-  it("loads v2 deployment registry manifests with legacy contract fallbacks", () => {
+  it("loads v5 deployment registry manifests with contract fallbacks and modules", () => {
     const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-"));
     tempDirs.push(dir);
-    const manifestPath = join(dir, "addresses.v2.json");
+    const manifestPath = join(dir, "addresses.v5.json");
     const deploymentId = `0x${"01".repeat(32)}`;
     writeFileSync(manifestPath, JSON.stringify({
-      schemaVersion: "uvp-eth.addresses.v2",
+      schemaVersion: "uvp-eth.addresses.v5",
       activeDeploymentId: deploymentId,
       stateMachineDeployments: [
         {
           deploymentId,
           stateMachineAddress: "0x1111111111111111111111111111111111111111",
-          trustRegistryAddress: "0x2222222222222222222222222222222222222222",
+          modules: {
+            stagePatch: "0x4444444444444444444444444444444444444444",
+            derivedSignal: "0x5555555555555555555555555555555555555555",
+            docking: "0x6666666666666666666666666666666666666666",
+            planMetadata: "0x8888888888888888888888888888888888888888",
+            orderLink: "0x9999999999999999999999999999999999999999",
+            lens: "0x7777777777777777777777777777777777777777"
+          },
           status: "active",
           deploymentBlock: "20"
         }
@@ -157,7 +164,14 @@ describe("chain-services config", () => {
       {
         deploymentId,
         stateMachineAddress: "0x1111111111111111111111111111111111111111",
-        trustRegistryAddress: "0x2222222222222222222222222222222222222222",
+          modules: {
+            stagePatch: "0x4444444444444444444444444444444444444444",
+            derivedSignal: "0x5555555555555555555555555555555555555555",
+            docking: "0x6666666666666666666666666666666666666666",
+            planMetadata: "0x8888888888888888888888888888888888888888",
+            orderLink: "0x9999999999999999999999999999999999999999",
+            lens: "0x7777777777777777777777777777777777777777"
+          },
         status: "active",
         deploymentBlock: 20n
       }
@@ -685,7 +699,7 @@ describe("chain-services config", () => {
         broadcastEnabled: true,
         signerAddress: stagingGovernanceAddress,
         expectedSignerAddress: stagingGovernanceAddress,
-        expectedDomainOwnerAddress: stagingGovernanceAddress
+        expectedRegistryOwnerAddress: stagingGovernanceAddress
       },
       operatorRoles: {
         deployer: {
@@ -791,7 +805,7 @@ describe("chain-services config", () => {
           readContract: async () => "0x9999999999999999999999999999999999999999"
         }
       }
-    })).rejects.toThrow(/on-chain governance domain owner does not match GOVERNANCE_DOMAIN_OWNER_ADDRESS/);
+    })).rejects.toThrow(/on-chain governance registry owner does not match GOVERNANCE_REGISTRY_OWNER_ADDRESS/);
   });
 
   it("rejects production non-Postgres storage, unsafe migrations, and Anvil default private keys", () => {
@@ -850,7 +864,6 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(productionEnv({
       GOVERNANCE_BROADCAST_ENABLED: "true",
-      GOVERNANCE_DOMAIN_ID: "0x0000000000000000000000000000000000000000000000000000000000001001",
       GOVERNANCE_SIGNER_PRIVATE_KEY: productionRelayerPrivateKey
     }))).toThrow(/env private-key governance and is forbidden in production/);
   });
@@ -955,12 +968,11 @@ describe("chain-services config", () => {
     expect(() => loadConfigFromEnv(keyEnv)).toThrow(/Anvil default private key/);
   });
 
-  it("fails strict governance preflight when signer or domain owner does not match chain state", async () => {
+  it("fails strict governance preflight when signer or registry owner does not match chain state", async () => {
     const env = testnetEnv(testnetPostgresConfigUrl(), {
       GOVERNANCE_BROADCAST_ENABLED: "true",
-      GOVERNANCE_DOMAIN_ID: "0x0000000000000000000000000000000000000000000000000000000000001001",
       GOVERNANCE_SIGNER_PRIVATE_KEY: productionRelayerPrivateKey,
-      GOVERNANCE_DOMAIN_OWNER_ADDRESS: "0x8888888888888888888888888888888888888888"
+      GOVERNANCE_REGISTRY_OWNER_ADDRESS: "0x8888888888888888888888888888888888888888"
     });
     const config = loadConfigFromEnv(env);
 
@@ -976,7 +988,7 @@ describe("chain-services config", () => {
           readContract: async () => "0x9999999999999999999999999999999999999999"
         }
       }
-    })).rejects.toThrow(/on-chain governance domain owner does not match GOVERNANCE_DOMAIN_OWNER_ADDRESS/);
+    })).rejects.toThrow(/on-chain governance registry owner does not match GOVERNANCE_REGISTRY_OWNER_ADDRESS/);
   });
 
   it("redacts secrets and exposes safe health diagnostics", async () => {
@@ -1189,8 +1201,7 @@ function stagingEnv(tempDirs: string[], overrides: Record<string, string | undef
     UVP_PLAN_PUBLISHER_ADDRESS: "0x4444444444444444444444444444444444444444",
     UVP_REHEARSAL_PARTICIPANT_WALLETS: "0x7777777777777777777777777777777777777777",
     GOVERNANCE_BROADCAST_ENABLED: "true",
-    GOVERNANCE_DOMAIN_ID: "0x0000000000000000000000000000000000000000000000000000000000001001",
-    GOVERNANCE_DOMAIN_OWNER_ADDRESS: stagingGovernanceAddress,
+    GOVERNANCE_REGISTRY_OWNER_ADDRESS: stagingGovernanceAddress,
     GOVERNANCE_SIGNER_ADDRESS: stagingGovernanceAddress,
     GOVERNANCE_SIGNER_PRIVATE_KEY: testnetRegistrarPrivateKey,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
@@ -1210,7 +1221,7 @@ function stagingManifestPath(tempDirs: string[], filename = "staging.addresses.j
   tempDirs.push(dir);
   const manifestPath = join(dir, filename);
   writeFileSync(manifestPath, JSON.stringify({
-    schemaVersion: "uvp-eth.addresses.v2",
+    schemaVersion: "uvp-eth.addresses.v5",
     network: {
       chainId: 84532,
       rpcUrlEnv: "UVP_RPC_URL"

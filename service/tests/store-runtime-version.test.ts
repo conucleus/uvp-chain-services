@@ -251,7 +251,6 @@ describe("Store runtime observation and version cutover", () => {
     const revokeZhixu = vi.fn(async (input: unknown) => ({
       request: {
         kind: "revokePlan" as const,
-        domainId: crossBorderPlanIds.domainId,
         planId: planIdV2,
         reasonHash,
         reasonURI: "uvp-governance://metadata/revocation"
@@ -266,7 +265,6 @@ describe("Store runtime observation and version cutover", () => {
         logId: "plan_log_store",
         txLogId: "tx_store",
         action: "revoke_plan" as const,
-        domainId: crossBorderPlanIds.domainId,
         subjectId: planIdV2,
         planId: planIdV2,
         reasonHash,
@@ -311,15 +309,13 @@ describe("Store runtime observation and version cutover", () => {
         confirmation: {
           versionId: "v2",
           planId: planIdV2,
-          planHash: planHashV2,
-          domainId: crossBorderPlanIds.domainId
+          planHash: planHashV2
         }
       }
     });
 
     expect(response.status).toBe(202);
     expect(revokeZhixu).toHaveBeenCalledWith(expect.objectContaining({
-      domainId: crossBorderPlanIds.domainId,
       planId: planIdV2,
       reason: "unsafe artifact"
     }), expect.objectContaining({ adminId: "store-admin" }));
@@ -396,7 +392,6 @@ function stateMachineOrderEvents(input: { readonly includeAuthorization: boolean
 
 function planAttestedEvent(blockNumber: bigint, planId: string, planHash: string, artifactHash: string): ChainEvent {
   return chainEvent(blockNumber, "PlanAttested", {
-    domainId: crossBorderPlanIds.domainId,
     planId,
     planHash,
     artifactHash,
@@ -409,7 +404,6 @@ function planAttestedEvent(blockNumber: bigint, planId: string, planHash: string
 
 function planRevokedEvent(blockNumber: bigint, planId: string): ChainEvent {
   return chainEvent(blockNumber, "PlanRevoked", {
-    domainId: crossBorderPlanIds.domainId,
     planId,
     reasonHash,
     reasonURI: "https://store.example/revoke/version",
@@ -419,7 +413,6 @@ function planRevokedEvent(blockNumber: bigint, planId: string): ChainEvent {
 
 function supplierAttestedEvent(blockNumber: bigint): ChainEvent {
   return chainEvent(blockNumber, "SupplierAttested", {
-    domainId: crossBorderPlanIds.domainId,
     supplierSubjectId,
     wallet: submitter,
     profileHash: metadataHash,
@@ -432,7 +425,6 @@ function supplierAttestedEvent(blockNumber: bigint): ChainEvent {
 
 function supplierRevokedEvent(blockNumber: bigint): ChainEvent {
   return chainEvent(blockNumber, "SupplierRevoked", {
-    domainId: crossBorderPlanIds.domainId,
     supplierSubjectId,
     reasonHash,
     reasonURI: "https://store.example/suppliers/customs/revoke",

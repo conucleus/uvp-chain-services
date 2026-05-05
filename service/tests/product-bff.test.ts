@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-  ORDER_INITIAL_TRIGGER_SIGNAL_NAME,
-  ORDER_INITIAL_TRIGGER_SOURCE,
-  ORDER_REGISTRAR_ROLE_SLOT_ID,
-  ORDER_SYSTEM_STAGE_ID
-} from "@uvp-eth/product-dto";
+import { privateKeyToAccount } from "viem/accounts";
 import {
   CROSS_BORDER_ZHIXU_ID,
   crossBorderPlanIds,
@@ -21,26 +15,20 @@ import {
   ProductAuthorizationBuilder,
   ProductAuthorizationBuilderError
 } from "../src/product/bff/authorization.js";
-import {
-  MemoryProductOrderRegistrationAdapter,
-  PRODUCT_INITIAL_TRIGGER_SIGNAL_ID,
-  PRODUCT_INITIAL_TRIGGER_SOURCE_ID
-} from "../src/product/bff/registration.js";
+import { MemoryProductOrderTriggerBroadcastAdapter } from "../src/product/bff/trigger.js";
 import { MemoryStoreZhixuVersionMetadataStore } from "../src/store-console/version.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { MemoryProductBffStore } from "../src/product/bff/store.js";
-import { TxReconcileWorker } from "../src/reconcile/index.js";
 import {
   STAGE_EXECUTOR_PATCH_SIGNAL_ID,
   STAGE_RESOURCE_PATCH_SIGNAL_ID
 } from "../src/stage-patches/index.js";
 import type {
   DraftParticipantDTO,
-  ProductOrderRegistrationDTO,
+  ProductOrderTriggerDTO,
   ProductInviteDTO,
   ProductOrderDraftDTO,
   SignalAuthorizationDTO,
-  StartProductOrderRegistrationResult,
   SubmitProductOrderDraftResult
 } from "../src/product/bff/types.js";
 import type { Hex } from "../src/shared/types.js";
@@ -269,8 +257,11 @@ describe("product BFF order drafts and invites", () => {
     });
   });
 
-  it("requires all required participants before submitting order registration", async () => {
-    const { router, registrationAdapter } = await createRouterWithTrust([planAttestedEvent(1n)]);
+  it("prepares signed trigger typed data after required participants accept", async () => {
+    const { router, triggerAdapter } = await createRouterWithTrust([
+      ...activeDeploymentEvents(),
+      planAttestedEvent(11n)
+    ]);
     const draft = (await createDraft(router).then((response) => response.body as DraftResponse)).draft;
     const participants = await listParticipants(router, draft.draftId);
     const requiredParticipants = participants.filter((participant) => participant.required);
@@ -281,7 +272,8 @@ describe("product BFF order drafts and invites", () => {
 
     const blockedSubmit = await router.handle({
       method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/submit`
+      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+      body: { walletAddress: testWallet(0) }
     });
     expect(blockedSubmit.status).toBe(409);
     expect(blockedSubmit.body).toMatchObject({ error: "required_participant_missing" });
@@ -294,76 +286,147 @@ describe("product BFF order drafts and invites", () => {
       method: "GET",
       pathname: `/product/order-drafts/${draft.draftId}`
     });
-    expect((readyDraft.body as DraftResponse).draft.status).toBe("ready_to_register");
+    expect((readyDraft.body as DraftResponse).draft.status).toBe("ready_to_trigger");
 
-    const submitResponse = await router.handle({
+    const prepareResponse = await router.handle({
       method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/submit`
+      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+      body: { walletAddress: testWallet(0) }
     });
-    expect(submitResponse.status).toBe(200);
-    const submit = submitResponse.body as SubmitProductOrderDraftResult;
-    expect(submit.draft.status).toBe("registering");
-    expect(submit.draft.registeredOrderId).toBeUndefined();
-    expect(submit.registration).toMatchObject({
+    expect(prepareResponse.status).toBe(200);
+    const prepared = prepareResponse.body as SubmitProductOrderDraftResult & {
+      readonly prepared: { readonly prepareId: string; readonly typedData: Record<string, unknown>; readonly submitter: string };
+    };
+    expect(prepared.draft.status).toBe("ready_to_trigger");
+    expect(prepared.trigger).toMatchObject({
       draftId: draft.draftId,
       planId: crossBorderPlanIds.planId,
       planHash: crossBorderPlanIds.planHash,
-      status: "pending",
+      status: "prepared",
       retryable: false
     });
-    expect(submit.registration.registrationId).toMatch(/^registration_/);
-    expect(submit.registration.orderId).toMatch(/^0x[0-9a-f]{64}$/);
-    expect(submit.registration.txHash).toBeUndefined();
-    expect(submit.permissions.length).toBeGreaterThan(0);
-    expect(registrationAdapter.listAttempts()).toHaveLength(1);
-    const [attempt] = registrationAdapter.listAttempts();
-    expect(attempt).toMatchObject({
-      draftId: draft.draftId,
-      orderId: submit.registration.orderId,
-      planId: crossBorderPlanIds.planId
+    expect(prepared.trigger.triggerId).toMatch(/^trigger_/);
+    expect(prepared.trigger.orderId).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(prepared.trigger.txHash).toBeUndefined();
+    expect(prepared.permissions.length).toBeGreaterThan(0);
+    expect(prepared.prepared.prepareId).toMatch(/^prepare_/);
+    expect(prepared.prepared.submitter).toBe(testWallet(0));
+    expect(prepared.prepared.typedData).toMatchObject({
+      domain: expect.objectContaining({ verifyingContract: activeStateMachineAddress }),
+      primaryType: "UVPStateMachineTriggerOrderFromOutside"
     });
-    expect(attempt!.authorizations).toHaveLength(submit.permissions.length);
-    expect(submit.permissions).toContainEqual(expect.objectContaining({
-      permissionId: ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-      participantId: ORDER_REGISTRAR_ROLE_SLOT_ID,
-      roleSlotId: ORDER_REGISTRAR_ROLE_SLOT_ID,
-      stageIdentifier: ORDER_SYSTEM_STAGE_ID,
-      source: ORDER_INITIAL_TRIGGER_SOURCE,
-      signalName: ORDER_INITIAL_TRIGGER_SIGNAL_NAME,
-      payloadPolicy: "optional",
-      requiredEvidence: []
-    }));
-
+    expect(triggerAdapter.listAttempts()).toHaveLength(0);
     const registrationResponse = await router.handle({
       method: "GET",
-      pathname: `/product/order-registrations/${submit.registration.registrationId}`
+      pathname: `/product/order-triggers/${prepared.trigger.triggerId}`
     });
     expect(registrationResponse.status).toBe(200);
-    expect((registrationResponse.body as { registration: ProductOrderRegistrationDTO }).registration).toEqual(submit.registration);
+    expect((registrationResponse.body as { trigger: ProductOrderTriggerDTO }).trigger).toEqual(prepared.trigger);
   });
 
-  it("submits new drafts to the active deployment from the on-chain registry projection", async () => {
-    const registrationAdapter = new MemoryProductOrderRegistrationAdapter();
+  it("broadcasts trigger only with a valid prepared wallet signature", async () => {
+    const { router, triggerAdapter } = await createRouterWithTrust([
+      ...activeDeploymentEvents(),
+      planAttestedEvent(11n)
+    ]);
+    const draft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+
+    const noSignature = await router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/trigger`,
+      body: {
+        prepareId: prepared.prepared.prepareId,
+        walletAddress: testWallet(0)
+      }
+    });
+    expect(noSignature.status).toBe(400);
+
+    const wrongSignature = await router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/trigger`,
+      body: {
+        prepareId: prepared.prepared.prepareId,
+        walletAddress: testWallet(0),
+        signature: "0x1234"
+      }
+    });
+    expect(wrongSignature.status).toBe(400);
+    expect(triggerAdapter.listAttempts()).toHaveLength(0);
+  });
+
+  it("triggers the order atomically from signed outside trigger data", async () => {
+    const triggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter({
+      status: "confirmed",
+      blockNumber: "42",
+      retryable: false
+    });
     const { router } = await createRouterWithTrust([
       ...activeDeploymentEvents(),
       planAttestedEvent(11n)
-    ], registrationAdapter);
+    ], triggerAdapter);
     const draft = await createReadyDraft(router);
 
-    const submit = await submitDraft(router, draft.draftId);
-    const [attempt] = registrationAdapter.listAttempts();
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    const trigger = await triggerPreparedDraft(router, draft.draftId, prepared, testWallet(0));
+    const [attempt] = triggerAdapter.listAttempts();
 
-    expect(submit.registration).toMatchObject({
+    expect(trigger.trigger).toMatchObject({
       deploymentId: activeDeploymentId,
-      stateMachineAddress: activeStateMachineAddress
+      stateMachineAddress: activeStateMachineAddress,
+      status: "confirmed",
+      blockNumber: "42"
+    });
+    expect(trigger.draft).toMatchObject({
+      status: "triggered",
+      triggeredOrderId: trigger.trigger.orderId,
+      triggerTxHash: trigger.trigger.txHash
     });
     expect(attempt).toMatchObject({
       deploymentId: activeDeploymentId,
-      stateMachineAddress: activeStateMachineAddress
+      stateMachineAddress: activeStateMachineAddress,
+      orderId: prepared.trigger.orderId,
+      planId: prepared.trigger.planId,
+      submitter: testWallet(0),
+      signature: expect.stringMatching(/^0x[0-9a-f]+$/)
     });
+    expect(attempt!.authorizations).toHaveLength(trigger.permissions.length);
   });
 
-  it("blocks unattested and revoked plans for create and submit", async () => {
+  it("rejects client-supplied authorization tables in prepare and trigger", async () => {
+    const { router, triggerAdapter } = await createRouterWithTrust([
+      ...activeDeploymentEvents(),
+      planAttestedEvent(11n)
+    ]);
+    const draft = await createReadyDraft(router);
+
+    const prepareResponse = await router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+      body: {
+        walletAddress: testWallet(0),
+        authorizations: []
+      }
+    });
+    expect(prepareResponse.status).toBe(400);
+    expect(prepareResponse.body).toMatchObject({ error: "client_authorizations_not_allowed" });
+
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    const triggerResponse = await router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/trigger`,
+      body: {
+        prepareId: prepared.prepared.prepareId,
+        walletAddress: testWallet(0),
+        signature: "0x1234",
+        permissions: []
+      }
+    });
+    expect(triggerResponse.status).toBe(400);
+    expect(triggerAdapter.listAttempts()).toHaveLength(0);
+  });
+
+  it("blocks unattested and revoked plans for create and prepare", async () => {
     const { router: unattestedRouter } = await createRouterWithTrust([]);
     const unattestedResponse = await createDraft(unattestedRouter);
     expect(unattestedResponse.status).toBe(403);
@@ -391,7 +454,8 @@ describe("product BFF order drafts and invites", () => {
     });
     const submitAfterRevoke = await router.handle({
       method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/submit`
+      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+      body: { walletAddress: testWallet(0) }
     });
     expect(submitAfterRevoke.status).toBe(409);
     expect(submitAfterRevoke.body).toMatchObject({ error: "plan_revoked" });
@@ -425,7 +489,7 @@ describe("product BFF order drafts and invites", () => {
       ]
     });
     const router = createApiRouter(store, {
-      productRegistrationAdapter: new MemoryProductOrderRegistrationAdapter(),
+      productRegistrationAdapter: new MemoryProductOrderTriggerBroadcastAdapter(),
       storeZhixuVersionMetadataStore: versionStore
     });
 
@@ -555,15 +619,6 @@ describe("product BFF order drafts and invites", () => {
       ...input,
       zhixu: {
         ...input.zhixu,
-        orderPermissionTable: input.zhixu.orderPermissionTable.filter((entry) =>
-          entry.permissionId !== ORDER_INITIAL_TRIGGER_PERMISSION_ID
-        )
-      }
-    }, "initial_trigger_permission_missing");
-    expectAuthorizationError({
-      ...input,
-      zhixu: {
-        ...input.zhixu,
         orderPermissionTable: input.zhixu.orderPermissionTable.map((entry) =>
           entry.permissionId === "stage.order-confirmed.confirm_stage"
             ? { ...entry, roleSlotId: "missing-role" }
@@ -601,369 +656,6 @@ describe("product BFF order drafts and invites", () => {
     }, "permission_authorization_duplicate");
   });
 
-  it("keeps duplicate submit idempotent while registration is pending", async () => {
-    const { router, registrationAdapter } = await createRouterWithTrust([planAttestedEvent(1n)]);
-    const draft = await createReadyDraft(router);
-
-    const firstResponse = await router.handle({
-      method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/submit`
-    });
-    const secondResponse = await router.handle({
-      method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/submit`
-    });
-
-    expect(firstResponse.status).toBe(200);
-    expect(secondResponse.status).toBe(200);
-    const first = firstResponse.body as SubmitProductOrderDraftResult;
-    const second = secondResponse.body as SubmitProductOrderDraftResult;
-    expect(second.registration).toEqual(first.registration);
-    expect(second.draft.status).toBe("registering");
-    expect(registrationAdapter.listAttempts()).toHaveLength(1);
-  });
-
-  it("rejects client-supplied authorization tables", async () => {
-    const { router, registrationAdapter } = await createRouterWithTrust([planAttestedEvent(1n)]);
-    const draft = await createReadyDraft(router);
-
-    const response = await router.handle({
-      method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/submit`,
-      body: { authorizations: [] }
-    });
-
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({ error: "client_authorizations_not_allowed" });
-    expect(registrationAdapter.listAttempts()).toHaveLength(0);
-  });
-
-  it("marks draft registered only after registration is confirmed", async () => {
-    const registrationAdapter = new MemoryProductOrderRegistrationAdapter({
-      status: "confirmed",
-      blockNumber: "42",
-      retryable: false
-    });
-    const { router } = await createRouterWithTrust([planAttestedEvent(1n)], registrationAdapter);
-    const draft = await createReadyDraft(router);
-
-    const response = await router.handle({
-      method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/submit`
-    });
-
-    expect(response.status).toBe(200);
-    const submit = response.body as SubmitProductOrderDraftResult;
-    expect(submit.registration.status).toBe("confirmed");
-    expect(submit.registration.txHash).toMatch(/^0x[0-9a-f]{64}$/);
-    expect(submit.registration.blockNumber).toBe("42");
-    expect(submit.draft.status).toBe("registered");
-    expect(submit.draft.registeredOrderId).toBe(submit.registration.orderId);
-    expect(submit.draft.registrationTxHash).toBe(submit.registration.txHash);
-  });
-
-  it("starts a confirmed registration and keeps duplicate start idempotent", async () => {
-    const registrationAdapter = new MemoryProductOrderRegistrationAdapter({
-      status: "confirmed",
-      blockNumber: "42",
-      retryable: false
-    });
-    const { router } = await createRouterWithTrust([planAttestedEvent(1n)], registrationAdapter);
-    const draft = await createReadyDraft(router);
-    const submit = await submitDraft(router, draft.draftId);
-
-    const first = await startRegistration(router, submit.registration.registrationId);
-    const second = await startRegistration(router, submit.registration.registrationId);
-
-    expect(first.registration).toEqual(submit.registration);
-    expect(first.start).toMatchObject({
-      registrationId: submit.registration.registrationId,
-      draftId: draft.draftId,
-      orderId: submit.registration.orderId,
-      status: "confirmed",
-      retryable: false,
-      reconcileStatus: "confirmed",
-      receiptStatus: "success",
-      projectionStatus: "present"
-    });
-    expect(first.start.startId).toMatch(/^start_/);
-    expect(first.start.txHash).toMatch(/^0x[0-9a-f]{64}$/);
-    expect(second.start).toEqual(first.start);
-    expect(registrationAdapter.listInitialTriggerAttempts()).toHaveLength(1);
-
-    const [registrationAttempt] = registrationAdapter.listAttempts();
-    expect(registrationAttempt?.authorizations).toContainEqual(expect.objectContaining({
-      sourceId: PRODUCT_INITIAL_TRIGGER_SOURCE_ID,
-      signalId: PRODUCT_INITIAL_TRIGGER_SIGNAL_ID,
-      submitter: registrationAdapter.registrarAddress
-    }));
-    expect(registrationAdapter.listInitialTriggerAttempts()[0]).toMatchObject({
-      registrationId: submit.registration.registrationId,
-      orderId: submit.registration.orderId,
-      sourceId: PRODUCT_INITIAL_TRIGGER_SOURCE_ID,
-      signalId: PRODUCT_INITIAL_TRIGGER_SIGNAL_ID,
-      registrationTxHash: submit.registration.txHash,
-      registrationBlockNumber: submit.registration.blockNumber,
-      payloadHash: expect.stringMatching(/^0x[0-9a-f]{64}$/),
-      idempotencyKey: expect.stringMatching(/^0x[0-9a-f]{64}$/)
-    });
-  });
-
-  it("rejects start until registration is confirmed", async () => {
-    const { router, registrationAdapter } = await createRouterWithTrust([planAttestedEvent(1n)]);
-    const draft = await createReadyDraft(router);
-    const submit = await submitDraft(router, draft.draftId);
-
-    const response = await router.handle({
-      method: "POST",
-      pathname: `/product/order-registrations/${submit.registration.registrationId}/start`,
-      body: {}
-    });
-
-    expect(response.status).toBe(409);
-    expect(response.body).toMatchObject({ error: "registration_not_confirmed" });
-    expect(registrationAdapter.listInitialTriggerAttempts()).toHaveLength(0);
-  });
-
-  it("retries failed retryable start with the same start id", async () => {
-    const registrationAdapter = new MemoryProductOrderRegistrationAdapter({
-      status: "confirmed",
-      retryable: false
-    });
-    registrationAdapter.setTriggerResult({
-      status: "failed",
-      errorCode: "temporary_rpc_error",
-      errorMessage: "temporary rpc error",
-      retryable: true
-    });
-    const { router } = await createRouterWithTrust([planAttestedEvent(1n)], registrationAdapter);
-    const draft = await createReadyDraft(router);
-    const submit = await submitDraft(router, draft.draftId);
-
-    const failedResponse = await router.handle({
-      method: "POST",
-      pathname: `/product/order-registrations/${submit.registration.registrationId}/start`,
-      body: {}
-    });
-    expect(failedResponse.status).toBe(502);
-    expect(failedResponse.body).toMatchObject({
-      error: "temporary_rpc_error",
-      details: {
-        start: {
-          status: "failed",
-          retryable: true,
-          errorCode: "temporary_rpc_error"
-        }
-      }
-    });
-    const failedStart = (failedResponse.body as { details: StartProductOrderRegistrationResult }).details.start;
-
-    registrationAdapter.setTriggerResult({ status: "confirmed", retryable: false });
-    const retry = await startRegistration(router, submit.registration.registrationId);
-
-    expect(retry.start.startId).toBe(failedStart.startId);
-    expect(retry.start.status).toBe("confirmed");
-    expect(retry.start.errorCode).toBeUndefined();
-    expect(registrationAdapter.listInitialTriggerAttempts()).toHaveLength(2);
-  });
-
-  it("retries failed retryable registration with the same order id", async () => {
-    const registrationAdapter = new MemoryProductOrderRegistrationAdapter({
-      status: "failed",
-      errorCode: "temporary_rpc_error",
-      errorMessage: "temporary rpc error",
-      retryable: true
-    });
-    const { router } = await createRouterWithTrust([planAttestedEvent(1n)], registrationAdapter);
-    const draft = await createReadyDraft(router);
-
-    const failedResponse = await router.handle({
-      method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/submit`
-    });
-    expect(failedResponse.status).toBe(200);
-    const failed = failedResponse.body as SubmitProductOrderDraftResult;
-    expect(failed.registration).toMatchObject({
-      status: "failed",
-      errorCode: "temporary_rpc_error",
-      retryable: true
-    });
-    expect(failed.draft.status).toBe("ready_to_register");
-
-    registrationAdapter.setResult({ status: "pending", retryable: false });
-    const retryResponse = await router.handle({
-      method: "POST",
-      pathname: `/product/order-registrations/${failed.registration.registrationId}/retry`
-    });
-    expect(retryResponse.status).toBe(200);
-    const retried = retryResponse.body as SubmitProductOrderDraftResult;
-    expect(retried.registration.registrationId).toBe(failed.registration.registrationId);
-    expect(retried.registration.orderId).toBe(failed.registration.orderId);
-    expect(retried.registration.status).toBe("pending");
-    expect(retried.draft.status).toBe("registering");
-    expect(registrationAdapter.listAttempts()).toHaveLength(2);
-  });
-
-  it("recovers tx-backed pending registration to startable after OrderRegistered is indexed", async () => {
-    const registrationAdapter = new MemoryProductOrderRegistrationAdapter({
-      status: "pending",
-      txHash: "0xaef8a9941d19ffe10a337568620797c6a770ebb4220cf742a25b3f66ebb6d22b" as Hex,
-      blockNumber: "40958055",
-      retryable: false
-    });
-    const store = new MemoryProductBffStore();
-    const versionStore = new MemoryStoreZhixuVersionMetadataStore();
-    const projectionStore = new MemoryProjectionStore();
-    await projectionStore.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [planAttestedEvent(1n)]
-    });
-    const router = createApiRouter(projectionStore, {
-      productRegistrationAdapter: registrationAdapter,
-      productBffStore: store,
-      storeZhixuVersionMetadataStore: versionStore
-    });
-
-    const draft = await createReadyDraft(router);
-    const submit = await submitDraft(router, draft.draftId);
-    expect(submit.registration.status).toBe("pending");
-    expect(submit.registration.txHash).toBe("0xaef8a9941d19ffe10a337568620797c6a770ebb4220cf742a25b3f66ebb6d22b");
-    expect(submit.registration.blockNumber).toBe("40958055");
-
-    // Start API blocked by pending status (staging failure shape)
-    const blocked = await router.handle({
-      method: "POST",
-      pathname: `/product/order-registrations/${submit.registration.registrationId}/start`,
-      body: {}
-    });
-    expect(blocked.status).toBe(409);
-    expect(blocked.body).toMatchObject({ error: "registration_not_confirmed" });
-    expect((blocked.body as { details?: { status?: string } }).details?.status).toBe("pending");
-
-    await projectionStore.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        planAttestedEvent(1n),
-        {
-          ...chainEvent(2n, 0, "OrderRegistered", {
-            orderId: submit.registration.orderId,
-            planId: submit.registration.planId
-          }),
-          transactionHash: submit.registration.txHash!
-        }
-      ]
-    });
-    const worker = new TxReconcileWorker({
-      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000 },
-      receiptClient: { getTransactionReceipt: async () => undefined },
-      projectionStore,
-      productStore: store,
-      now: () => new Date("2026-04-28T00:00:00Z")
-    });
-    await worker.runOnce();
-    await expect(store.getRegistration(submit.registration.registrationId)).resolves.toMatchObject({
-      status: "confirmed",
-      reconcileStatus: "confirmed",
-      receiptStatus: "success",
-      projectionStatus: "present"
-    });
-
-    const started = await router.handle({
-      method: "POST",
-      pathname: `/product/order-registrations/${submit.registration.registrationId}/start`,
-      body: {}
-    });
-    expect(started.status).toBe(200);
-    const body = started.body as StartProductOrderRegistrationResult;
-    expect(body.registration.status).toBe("confirmed");
-    expect(body.start).toMatchObject({
-      registrationId: submit.registration.registrationId,
-      draftId: draft.draftId,
-      orderId: submit.registration.orderId,
-      status: "confirmed",
-      retryable: false,
-      reconcileStatus: "confirmed",
-      receiptStatus: "success",
-      projectionStatus: "present"
-    });
-    expect(body.start.txHash).toMatch(/^0x[0-9a-f]{64}$/);
-  });
-
-  it("fires onTxMined callback after draft submit so projection can refresh promptly", async () => {
-    let fired = 0;
-    const registrationAdapter = new MemoryProductOrderRegistrationAdapter({
-      status: "confirmed"
-    });
-    const store = new MemoryProductBffStore();
-    const versionStore = new MemoryStoreZhixuVersionMetadataStore();
-    const projectionStore = new MemoryProjectionStore();
-    await projectionStore.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [planAttestedEvent(1n)]
-    });
-    const router = createApiRouter(projectionStore, {
-      productRegistrationAdapter: registrationAdapter,
-      productBffStore: store,
-      storeZhixuVersionMetadataStore: versionStore,
-      onTxMined: () => { fired++; }
-    });
-
-    const draft = await createReadyDraft(router);
-    await submitDraft(router, draft.draftId);
-    expect(fired).toBe(1);
-
-    const submit2 = await submitDraft(router, (await createReadyDraft(router)).draftId);
-    expect(fired).toBe(2);
-
-    await startRegistration(router, submit2.registration.registrationId);
-    expect(fired).toBe(3);
-  });
-
-  it("consecutive orders both become startable without the second order blocking", async () => {
-    const registrationAdapter = new MemoryProductOrderRegistrationAdapter({
-      status: "confirmed"
-    });
-    const store = new MemoryProductBffStore();
-    const versionStore = new MemoryStoreZhixuVersionMetadataStore();
-    const projectionStore = new MemoryProjectionStore();
-
-    await projectionStore.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [planAttestedEvent(1n)]
-    });
-    const router = createApiRouter(projectionStore, {
-      productRegistrationAdapter: registrationAdapter,
-      productBffStore: store,
-      storeZhixuVersionMetadataStore: versionStore
-    });
-
-    // First order
-    const draft1 = await createReadyDraft(router);
-    const submit1 = await submitDraft(router, draft1.draftId);
-    expect(submit1.registration.status).toBe("confirmed");
-    expect(submit1.registration.orderId).toBeTruthy();
-
-    const start1 = await startRegistration(router, submit1.registration.registrationId);
-    expect(start1.start.status).toBe("confirmed");
-    expect(start1.start.orderId).toBe(submit1.registration.orderId);
-
-    // Second order — must succeed back-to-back without registration_not_confirmed
-    const draft2 = await createReadyDraft(router);
-    const submit2 = await submitDraft(router, draft2.draftId);
-    expect(submit2.registration.status).toBe("confirmed");
-    expect(submit2.registration.orderId).toBeTruthy();
-    expect(submit2.registration.orderId).not.toBe(submit1.registration.orderId);
-
-    const start2 = await startRegistration(router, submit2.registration.registrationId);
-    expect(start2.start.status).toBe("confirmed");
-    expect(start2.start.orderId).toBe(submit2.registration.orderId);
-
-    // Both registrations are independently retrievable
-    const reg1 = await store.getRegistration(submit1.registration.registrationId);
-    expect(reg1?.status).toBe("confirmed");
-    const reg2 = await store.getRegistration(submit2.registration.registrationId);
-    expect(reg2?.status).toBe("confirmed");
-  });
 });
 
 interface DraftResponse {
@@ -980,32 +672,40 @@ interface InviteResponse {
 function createRouterWithTrust(events: readonly ChainEvent[]): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
-  readonly registrationAdapter: MemoryProductOrderRegistrationAdapter;
+  readonly productStore: MemoryProductBffStore;
+  readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
 }>;
 
 function createRouterWithTrust(
   events: readonly ChainEvent[],
-  registrationAdapter: MemoryProductOrderRegistrationAdapter
+  triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter
 ): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
-  readonly registrationAdapter: MemoryProductOrderRegistrationAdapter;
+  readonly productStore: MemoryProductBffStore;
+  readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
 }>;
 
 async function createRouterWithTrust(
   events: readonly ChainEvent[],
-  registrationAdapter = new MemoryProductOrderRegistrationAdapter()
+  triggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter()
 ): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
-  readonly registrationAdapter: MemoryProductOrderRegistrationAdapter;
+  readonly productStore: MemoryProductBffStore;
+  readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
 }> {
   const store = new MemoryProjectionStore();
+  const productStore = new MemoryProductBffStore();
   await store.resetFromEvents({ deploymentBlock: 0n, events });
   return {
-    router: createApiRouter(store, { productRegistrationAdapter: registrationAdapter }),
+    router: createApiRouter(store, {
+      productRegistrationAdapter: triggerAdapter,
+      productBffStore: productStore
+    }),
     store,
-    registrationAdapter
+    productStore,
+    triggerAdapter
   };
 }
 
@@ -1019,7 +719,7 @@ async function createDraft(router: ApiRouter) {
       businessType: "parallel-export",
       totalAmount: "10000",
       currency: "USDC",
-      createdBy: "creator-wallet"
+      createdBy: testWallet(0)
     }
   });
 }
@@ -1036,7 +736,7 @@ async function createReadyDraft(router: ApiRouter): Promise<ProductOrderDraftDTO
     pathname: `/product/order-drafts/${draft.draftId}`
   });
   expect(readyResponse.status).toBe(200);
-  expect((readyResponse.body as DraftResponse).draft.status).toBe("ready_to_register");
+  expect((readyResponse.body as DraftResponse).draft.status).toBe("ready_to_trigger");
   return (readyResponse.body as DraftResponse).draft;
 }
 
@@ -1044,17 +744,15 @@ async function submitReadyDraft(): Promise<{
   readonly authorizations: readonly SignalAuthorizationDTO[];
   readonly permissions: SubmitProductOrderDraftResult["permissions"];
 }> {
-  const { router, registrationAdapter } = await createRouterWithTrust([planAttestedEvent(1n)]);
+  const { router, productStore } = await createRouterWithTrust([
+    ...activeDeploymentEvents(),
+    planAttestedEvent(11n)
+  ]);
   const draft = await createReadyDraft(router);
-  const response = await router.handle({
-    method: "POST",
-    pathname: `/product/order-drafts/${draft.draftId}/submit`
-  });
-  expect(response.status).toBe(200);
-  const submit = response.body as SubmitProductOrderDraftResult;
-  const [attempt] = registrationAdapter.listAttempts();
-  expect(attempt).toBeDefined();
-  return { authorizations: attempt!.authorizations, permissions: submit.permissions };
+  const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+  const registration = await productStore.getRegistration(prepared.trigger.triggerId);
+  expect(registration).toBeDefined();
+  return { authorizations: registration!.authorizations, permissions: prepared.permissions };
 }
 
 function stablePermissionShape(permissions: SubmitProductOrderDraftResult["permissions"]) {
@@ -1070,26 +768,47 @@ function stablePermissionShape(permissions: SubmitProductOrderDraftResult["permi
   }));
 }
 
-async function submitDraft(router: ApiRouter, draftId: string): Promise<SubmitProductOrderDraftResult> {
+interface PreparedTriggerResponse extends SubmitProductOrderDraftResult {
+  readonly prepared: {
+    readonly prepareId: string;
+    readonly typedData: Record<string, unknown>;
+    readonly submitter: string;
+  };
+}
+
+async function prepareDraftTrigger(
+  router: ApiRouter,
+  draftId: string,
+  walletAddress: string
+): Promise<PreparedTriggerResponse> {
   const response = await router.handle({
     method: "POST",
-    pathname: `/product/order-drafts/${draftId}/submit`
+    pathname: `/product/order-drafts/${draftId}/prepare-trigger`,
+    body: { walletAddress }
+  });
+  expect(response.status).toBe(200);
+  return response.body as PreparedTriggerResponse;
+}
+
+async function triggerPreparedDraft(
+  router: ApiRouter,
+  draftId: string,
+  prepared: PreparedTriggerResponse,
+  walletAddress: string
+): Promise<SubmitProductOrderDraftResult> {
+  const account = privateKeyToAccount(testPrivateKey(walletAddressIndex(walletAddress)));
+  const signature = await account.signTypedData(prepared.prepared.typedData as Parameters<typeof account.signTypedData>[0]);
+  const response = await router.handle({
+    method: "POST",
+    pathname: `/product/order-drafts/${draftId}/trigger`,
+    body: {
+      prepareId: prepared.prepared.prepareId,
+      walletAddress,
+      signature
+    }
   });
   expect(response.status).toBe(200);
   return response.body as SubmitProductOrderDraftResult;
-}
-
-async function startRegistration(
-  router: ApiRouter,
-  registrationId: string
-): Promise<StartProductOrderRegistrationResult> {
-  const response = await router.handle({
-    method: "POST",
-    pathname: `/product/order-registrations/${registrationId}/start`,
-    body: {}
-  });
-  expect(response.status).toBe(200);
-  return response.body as StartProductOrderRegistrationResult;
 }
 
 async function createInvite(
@@ -1142,7 +861,20 @@ async function listParticipants(router: ApiRouter, draftId: string): Promise<rea
 }
 
 function testWallet(index: number): string {
-  return `0x${(index + 1).toString(16).padStart(40, "0")}`;
+  return privateKeyToAccount(testPrivateKey(index)).address.toLowerCase();
+}
+
+function testPrivateKey(index: number): Hex {
+  return `0x${(index + 1).toString(16).padStart(64, "0")}` as Hex;
+}
+
+function walletAddressIndex(walletAddress: string): number {
+  for (let index = 0; index < 10; index++) {
+    if (testWallet(index) === walletAddress.toLowerCase()) {
+      return index;
+    }
+  }
+  throw new Error(`unknown test wallet ${walletAddress}`);
 }
 
 function authorizationBuildInput() {
@@ -1156,7 +888,7 @@ function authorizationBuildInput() {
     goods: [],
     totalAmount: "10000",
     currency: "USDC",
-    status: "ready_to_register",
+    status: "ready_to_trigger",
     createdAt: "2026-04-29T00:00:00.000Z",
     updatedAt: "2026-04-29T00:00:00.000Z"
   };
@@ -1194,7 +926,7 @@ function phase2AuthorizationBuildInput(options: {
     goods: [],
     totalAmount: "0",
     currency: "USDC",
-    status: "ready_to_register",
+    status: "ready_to_trigger",
     createdAt: "2026-05-02T00:00:00.000Z",
     updatedAt: "2026-05-02T00:00:00.000Z"
   };
@@ -1270,7 +1002,6 @@ function planAttestedEventFor(
   artifactHash: string
 ): ChainEvent {
   return chainEvent(blockNumber, logIndex, "PlanAttested", {
-    domainId: crossBorderPlanIds.domainId,
     planId,
     planHash,
     artifactHash,
@@ -1283,7 +1014,6 @@ function planAttestedEventFor(
 
 function planRevokedEvent(blockNumber: bigint): ChainEvent {
   return chainEvent(blockNumber, 1, "PlanRevoked", {
-    domainId: crossBorderPlanIds.domainId,
     planId: crossBorderPlanIds.planId,
     reasonHash,
     reasonURI: "https://store.example/revocations/cross-border",
@@ -1297,7 +1027,6 @@ function activeDeploymentEvents(): readonly ChainEvent[] {
       deploymentId: activeDeploymentId,
       stateMachine: activeStateMachineAddress,
       trustRegistry: trustRegistryAddress,
-      officialDomainId: crossBorderPlanIds.domainId,
       artifactHash: crossBorderPlanIds.artifactHash,
       abiHash: metadataHash,
       deploymentBlock: 1n,

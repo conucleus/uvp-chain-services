@@ -17,7 +17,14 @@ export interface NetworkConfig {
 export interface StateMachineDeploymentConfig {
   readonly deploymentId: Hex;
   readonly stateMachineAddress: Address;
-  readonly trustRegistryAddress?: Address;
+  readonly modules?: {
+    readonly stagePatch?: Address;
+    readonly derivedSignal?: Address;
+    readonly docking?: Address;
+    readonly planMetadata?: Address;
+    readonly orderLink?: Address;
+    readonly lens?: Address;
+  };
   readonly status?: "candidate" | "canary" | "active" | "deprecated" | "retired";
   readonly deploymentBlock?: bigint;
 }
@@ -45,10 +52,9 @@ export interface RelayerConfig {
 
 export interface GovernanceConfig {
   readonly broadcastEnabled: boolean;
-  readonly domainId?: Hex;
   readonly signerPrivateKey?: Hex;
   readonly signerAddress?: Address;
-  readonly domainOwnerAddress?: Address;
+  readonly registryOwnerAddress?: Address;
   readonly rpcUrl: string;
   readonly chainId: number;
   readonly txConfirmations: number;
@@ -71,7 +77,7 @@ export interface OperatorRoleConfig {
   readonly orderRegistrarAddress?: Address;
   readonly relayerGasPayerAddress?: Address;
   readonly participantWallets: readonly Address[];
-  readonly governanceDomainOwnerAddress?: Address;
+  readonly governanceRegistryOwnerAddress?: Address;
   readonly governanceSignerAddress?: Address;
   readonly adminReviewers: readonly string[];
   readonly opsConsoleAdmins?: readonly string[];
@@ -518,24 +524,19 @@ function parseBigIntValue(env: Env, name: string, fallback: bigint): bigint {
 
 function parseGovernanceConfig(env: Env, defaults: { readonly chainId: number; readonly rpcUrl: string }): GovernanceConfig {
   const broadcastEnabled = parseBoolean(env, "GOVERNANCE_BROADCAST_ENABLED", false);
-  const domainId = optionalBytes32Env(env, "GOVERNANCE_DOMAIN_ID");
   const signerPrivateKey = optionalPrivateKeyEnv(env, "GOVERNANCE_SIGNER_PRIVATE_KEY");
   const signerAddress = optionalAddressEnv(env, "GOVERNANCE_SIGNER_ADDRESS");
-  const domainOwnerAddress = optionalAddressEnv(env, "GOVERNANCE_DOMAIN_OWNER_ADDRESS");
+  const registryOwnerAddress = optionalAddressEnv(env, "GOVERNANCE_REGISTRY_OWNER_ADDRESS");
 
-  if (broadcastEnabled && !domainId) {
-    throw new ConfigError("GOVERNANCE_DOMAIN_ID is required when GOVERNANCE_BROADCAST_ENABLED=true");
-  }
   if (broadcastEnabled && !signerPrivateKey) {
     throw new ConfigError("GOVERNANCE_SIGNER_PRIVATE_KEY is required when GOVERNANCE_BROADCAST_ENABLED=true");
   }
 
   return {
     broadcastEnabled,
-    ...(domainId ? { domainId } : {}),
     ...(signerPrivateKey ? { signerPrivateKey } : {}),
     ...(signerAddress ? { signerAddress } : {}),
-    ...(domainOwnerAddress ? { domainOwnerAddress } : {}),
+    ...(registryOwnerAddress ? { registryOwnerAddress } : {}),
     rpcUrl: optionalEnv(env, "GOVERNANCE_RPC_URL") ?? defaults.rpcUrl,
     chainId: parseInteger(env, "GOVERNANCE_CHAIN_ID", defaults.chainId),
     txConfirmations: parseInteger(env, "GOVERNANCE_TX_CONFIRMATIONS", 1),
@@ -556,7 +557,7 @@ function parseOperatorRoleConfig(env: Env): OperatorRoleConfig {
     "UVP_RELAYER_GAS_PAYER_ADDRESS",
     "UVP_STATE_MACHINE_RELAYER_ADDRESS"
   ]);
-  const governanceDomainOwnerAddress = optionalAddressEnv(env, "GOVERNANCE_DOMAIN_OWNER_ADDRESS");
+  const governanceRegistryOwnerAddress = optionalAddressEnv(env, "GOVERNANCE_REGISTRY_OWNER_ADDRESS");
   const governanceSignerAddress = optionalAddressEnv(env, "GOVERNANCE_SIGNER_ADDRESS");
 
   return {
@@ -567,7 +568,7 @@ function parseOperatorRoleConfig(env: Env): OperatorRoleConfig {
     ...(orderRegistrarAddress ? { orderRegistrarAddress } : {}),
     ...(relayerGasPayerAddress ? { relayerGasPayerAddress } : {}),
     participantWallets: parseAddressList(env, "UVP_REHEARSAL_PARTICIPANT_WALLETS"),
-    ...(governanceDomainOwnerAddress ? { governanceDomainOwnerAddress } : {}),
+    ...(governanceRegistryOwnerAddress ? { governanceRegistryOwnerAddress } : {}),
     ...(governanceSignerAddress ? { governanceSignerAddress } : {}),
     adminReviewers: parseStringList(env, "GOVERNANCE_ADMIN_REVIEWER_IDS"),
     opsConsoleAdmins: parseStringList(env, "OPS_CONSOLE_ADMIN_IDS")
@@ -742,7 +743,6 @@ function parseManifestStateMachineDeployments(value: unknown): readonly StateMac
     if (!deploymentId || !stateMachineAddress) {
       throw new ConfigError(`manifest stateMachineDeployments[${index}] must include deploymentId and stateMachineAddress`);
     }
-    const trustRegistryAddress = stringValue(record.trustRegistryAddress);
     const deploymentBlock = bigintLikeValue(record.deploymentBlock);
     const status = stringValue(record.status);
     if (status && !["candidate", "canary", "active", "deprecated", "retired"].includes(status)) {
@@ -752,9 +752,9 @@ function parseManifestStateMachineDeployments(value: unknown): readonly StateMac
       deploymentId: normalizeBytes32(deploymentId, `manifest stateMachineDeployments[${index}].deploymentId`),
       stateMachineAddress: normalizeAddress(stateMachineAddress, `manifest stateMachineDeployments[${index}].stateMachineAddress`)
     };
-    if (trustRegistryAddress) {
-      (deployment as { trustRegistryAddress?: Address }).trustRegistryAddress =
-        normalizeAddress(trustRegistryAddress, `manifest stateMachineDeployments[${index}].trustRegistryAddress`);
+    const modules = parseStateMachineDeploymentModules(record.modules, index);
+    if (modules) {
+      (deployment as { modules?: StateMachineDeploymentConfig["modules"] }).modules = modules;
     }
     if (status) {
       (deployment as { status?: StateMachineDeploymentConfig["status"] }).status =
@@ -765,6 +765,24 @@ function parseManifestStateMachineDeployments(value: unknown): readonly StateMac
     }
     return [deployment];
   });
+}
+
+function parseStateMachineDeploymentModules(
+  value: unknown,
+  deploymentIndex: number
+): StateMachineDeploymentConfig["modules"] | undefined {
+  const record = objectValue(value);
+  if (!record) {
+    return undefined;
+  }
+  const modules: Record<string, Address> = {};
+  for (const key of ["stagePatch", "derivedSignal", "docking", "planMetadata", "orderLink", "lens"] as const) {
+    const raw = stringValue(record[key]);
+    if (raw) {
+      modules[key] = normalizeAddress(raw, `manifest stateMachineDeployments[${deploymentIndex}].modules.${key}`);
+    }
+  }
+  return Object.keys(modules).length > 0 ? modules : undefined;
 }
 
 function mergeStateMachineDeployments(
@@ -785,7 +803,6 @@ function mergeStateMachineDeployments(
       "legacy deploymentId"
     ),
     stateMachineAddress: stateMachine,
-    ...(trustRegistryAddress(contracts) ? { trustRegistryAddress: trustRegistryAddress(contracts)! } : {}),
     status: "active",
     ...(manifestDeploymentBlock !== undefined ? { deploymentBlock: manifestDeploymentBlock } : {})
   }];
@@ -1038,11 +1055,8 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   if (config.operatorRoles.participantWallets.length === 0) {
     throw new ConfigError("UVP_REHEARSAL_PARTICIPANT_WALLETS is required in staging");
   }
-  if (!config.governance.domainId) {
-    throw new ConfigError("GOVERNANCE_DOMAIN_ID is required in staging");
-  }
-  if (!config.governance.domainOwnerAddress) {
-    throw new ConfigError("GOVERNANCE_DOMAIN_OWNER_ADDRESS is required in staging");
+  if (!config.governance.registryOwnerAddress) {
+    throw new ConfigError("GOVERNANCE_REGISTRY_OWNER_ADDRESS is required in staging");
   }
   if (!config.governance.signerAddress) {
     throw new ConfigError("GOVERNANCE_SIGNER_ADDRESS is required in staging");

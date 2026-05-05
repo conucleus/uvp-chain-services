@@ -50,7 +50,8 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
          capability_tags_json::text AS capability_tags_json,
          supported_role_slot_ids_json::text AS supported_role_slot_ids_json,
          supported_stage_ids_json::text AS supported_stage_ids_json,
-         domains_json::text AS domains_json
+         registry_addresses_json::text AS registry_addresses_json,
+         notification_profile_json::text AS notification_profile_json
        FROM store_supplier_metadata
        WHERE supplier_id = $1`,
       [supplierId]
@@ -65,7 +66,8 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
          capability_tags_json::text AS capability_tags_json,
          supported_role_slot_ids_json::text AS supported_role_slot_ids_json,
          supported_stage_ids_json::text AS supported_stage_ids_json,
-         domains_json::text AS domains_json
+         registry_addresses_json::text AS registry_addresses_json,
+         notification_profile_json::text AS notification_profile_json
        FROM store_supplier_metadata
        WHERE supplier_subject_id = $1`,
       [supplierSubjectId]
@@ -80,7 +82,8 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
          capability_tags_json::text AS capability_tags_json,
          supported_role_slot_ids_json::text AS supported_role_slot_ids_json,
          supported_stage_ids_json::text AS supported_stage_ids_json,
-         domains_json::text AS domains_json
+         registry_addresses_json::text AS registry_addresses_json,
+         notification_profile_json::text AS notification_profile_json
        FROM store_supplier_metadata
        ORDER BY updated_at DESC, supplier_id ASC`
     );
@@ -92,9 +95,10 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
       `INSERT INTO store_supplier_metadata (
          supplier_id, supplier_subject_id, display_name, wallet,
          capability_tags_json, supported_role_slot_ids_json,
-         supported_stage_ids_json, domains_json, review_status, metadata_uri,
+         supported_stage_ids_json, registry_addresses_json, review_status, metadata_uri,
+         notification_profile_json, notification_profile_hash, notification_updated_at,
          created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11, $12)
+       ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11::jsonb, $12, $13, $14, $15)
        ON CONFLICT(supplier_id)
        DO UPDATE SET
          supplier_subject_id = excluded.supplier_subject_id,
@@ -103,9 +107,12 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
          capability_tags_json = excluded.capability_tags_json,
          supported_role_slot_ids_json = excluded.supported_role_slot_ids_json,
          supported_stage_ids_json = excluded.supported_stage_ids_json,
-         domains_json = excluded.domains_json,
+         registry_addresses_json = excluded.registry_addresses_json,
          review_status = excluded.review_status,
          metadata_uri = excluded.metadata_uri,
+         notification_profile_json = excluded.notification_profile_json,
+         notification_profile_hash = excluded.notification_profile_hash,
+         notification_updated_at = excluded.notification_updated_at,
          created_at = excluded.created_at,
          updated_at = excluded.updated_at`,
       supplierValues(record)
@@ -155,9 +162,12 @@ function supplierValues(record: StoreSupplierMetadataRecord): readonly unknown[]
     stringifyStorageJson(record.capabilityTags),
     stringifyStorageJson(record.supportedRoleSlotIds),
     stringifyStorageJson(record.supportedStageIds),
-    stringifyStorageJson(record.domains),
+    stringifyStorageJson(record.registryAddresses),
     record.reviewStatus,
     record.metadataURI ?? null,
+    record.notificationProfile ? stringifyStorageJson(record.notificationProfile) : null,
+    record.notificationProfileHash ?? null,
+    record.notificationUpdatedAt ?? null,
     record.createdAt,
     record.updatedAt
   ];
@@ -167,15 +177,21 @@ function supplierRow(row: unknown): StoreSupplierMetadataRecord {
   const record = rowObject(row, "store_supplier_metadata query");
   const wallet = optionalString(record, "wallet") as StoreSupplierMetadataRecord["wallet"];
   const metadataURI = optionalString(record, "metadata_uri");
+  const notificationProfile = optionalJson<StoreSupplierMetadataRecord["notificationProfile"]>(record, "notification_profile_json");
+  const notificationProfileHash = optionalString(record, "notification_profile_hash") as StoreSupplierMetadataRecord["notificationProfileHash"];
+  const notificationUpdatedAt = optionalString(record, "notification_updated_at");
   return {
     supplierId: stringColumn(record, "supplier_id"),
     supplierSubjectId: stringColumn(record, "supplier_subject_id") as StoreSupplierMetadataRecord["supplierSubjectId"],
     displayName: stringColumn(record, "display_name"),
     ...(wallet !== undefined ? { wallet } : {}),
+    ...(notificationProfile !== undefined ? { notificationProfile } : {}),
+    ...(notificationProfileHash !== undefined ? { notificationProfileHash } : {}),
+    ...(notificationUpdatedAt !== undefined ? { notificationUpdatedAt } : {}),
     capabilityTags: parseStorageJson<readonly string[]>(stringColumn(record, "capability_tags_json")),
     supportedRoleSlotIds: parseStorageJson<readonly string[]>(stringColumn(record, "supported_role_slot_ids_json")),
     supportedStageIds: parseStorageJson<readonly string[]>(stringColumn(record, "supported_stage_ids_json")),
-    domains: parseStorageJson<StoreSupplierMetadataRecord["domains"]>(stringColumn(record, "domains_json")),
+    registryAddresses: parseStorageJson<StoreSupplierMetadataRecord["registryAddresses"]>(stringColumn(record, "registry_addresses_json")),
     reviewStatus: stringColumn(record, "review_status") as StoreSupplierMetadataRecord["reviewStatus"],
     ...(metadataURI !== undefined ? { metadataURI } : {}),
     createdAt: stringColumn(record, "created_at"),
