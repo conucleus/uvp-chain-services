@@ -158,6 +158,25 @@ describe("Store JWT/JWKS operator identity", () => {
       roles: ["store_admin"]
     });
   });
+
+  it("discovers the JWKS URI from vendor-neutral OIDC metadata", async () => {
+    const fixture = await createJwksFixture(servers);
+    const router = createJwtRouter(fixture, {
+      jwksUrl: null,
+      oidcDiscoveryUrl: fixture.oidcDiscoveryUrl
+    });
+    const token = await signStoreToken(fixture, {
+      sub: "oidc-operator-1",
+      roles: ["store_operator"]
+    });
+
+    await expect(storeSession(router, token)).resolves.toMatchObject({
+      authenticated: true,
+      principalId: "oidc-operator-1",
+      accessLevel: "store_operator",
+      authMode: "jwt"
+    });
+  });
 });
 
 type JwksFixture = Awaited<ReturnType<typeof createJwksFixture>>;
@@ -171,6 +190,15 @@ async function createJwksFixture(servers: Server[]) {
   jwk.use = "sig";
 
   const server = createServer((request, response) => {
+    if (request.url === "/.well-known/openid-configuration") {
+      response.statusCode = 200;
+      response.setHeader("content-type", "application/json; charset=utf-8");
+      response.end(JSON.stringify({
+        issuer,
+        jwks_uri: `http://${request.headers.host}/.well-known/jwks.json`
+      }));
+      return;
+    }
     if (request.url !== "/.well-known/jwks.json") {
       response.statusCode = 404;
       response.end();
@@ -190,20 +218,26 @@ async function createJwksFixture(servers: Server[]) {
 
   return {
     privateKey: keyPair.privateKey,
-    jwksUrl: `http://127.0.0.1:${(address as AddressInfo).port}/.well-known/jwks.json`
+    jwksUrl: `http://127.0.0.1:${(address as AddressInfo).port}/.well-known/jwks.json`,
+    oidcDiscoveryUrl: `http://127.0.0.1:${(address as AddressInfo).port}/.well-known/openid-configuration`
   };
 }
 
+type JwtRouterOverrides = Partial<Pick<StoreAuthConfig, "roleClaim" | "principalClaim" | "displayNameClaim" | "oidcDiscoveryUrl">> & {
+  readonly jwksUrl?: string | null;
+};
+
 function createJwtRouter(
   fixture: JwksFixture,
-  overrides: Partial<Pick<StoreAuthConfig, "roleClaim" | "principalClaim" | "displayNameClaim">> = {}
+  overrides: JwtRouterOverrides = {}
 ): ReturnType<typeof createApiRouter> {
   return createApiRouter(new MemoryProjectionStore(), {
     productRuntimeEnvironment: "staging",
     evidenceRuntimeEnvironment: "local",
     storeAuthConfig: {
       mode: "jwt",
-      jwksUrl: fixture.jwksUrl,
+      ...(overrides.jwksUrl === null ? {} : { jwksUrl: overrides.jwksUrl ?? fixture.jwksUrl }),
+      ...(overrides.oidcDiscoveryUrl ? { oidcDiscoveryUrl: overrides.oidcDiscoveryUrl } : {}),
       issuer,
       audience,
       roleClaim: overrides.roleClaim ?? "roles",

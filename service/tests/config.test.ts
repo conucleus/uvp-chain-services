@@ -574,8 +574,9 @@ describe("chain-services config", () => {
       STORE_AUTH_MODE: "dev_headers"
     }))).toThrow(/STORE_AUTH_MODE=jwt/);
 
-    const { STORE_AUTH_JWKS_URL: _jwksUrl, ...missingJwksUrl } = stagingEnv(tempDirs);
-    expect(() => loadConfigFromEnv(missingJwksUrl)).toThrow(/STORE_AUTH_JWKS_URL/);
+    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+      STORE_AUTH_JWKS_URL: "http://127.0.0.1:8789/.well-known/jwks.json"
+    }))).toThrow(/STORE_AUTH_JWKS_URL must be HTTPS/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       STORE_AUTH_CLOCK_TOLERANCE_SECONDS: "1.5"
@@ -855,6 +856,10 @@ describe("chain-services config", () => {
       STORE_AUTH_MODE: "dev_headers"
     }))).toThrow(/STORE_AUTH_MODE=jwt/);
 
+    expect(() => loadConfigFromEnv(productionEnv({
+      STORE_AUTH_ISSUER: "http://localhost:8789/"
+    }))).toThrow(/STORE_AUTH_ISSUER must be HTTPS/);
+
     const { STORE_AUTH_AUDIENCE: _audience, ...missingAudience } = productionEnv();
     expect(() => loadConfigFromEnv(missingAudience)).toThrow(/STORE_AUTH_AUDIENCE/);
 
@@ -866,6 +871,21 @@ describe("chain-services config", () => {
       GOVERNANCE_BROADCAST_ENABLED: "true",
       GOVERNANCE_SIGNER_PRIVATE_KEY: productionRelayerPrivateKey
     }))).toThrow(/env private-key governance and is forbidden in production/);
+  });
+
+  it("accepts vendor-neutral OIDC discovery as the Store JWT key source", () => {
+    const config = loadConfigFromEnv(stagingEnv(tempDirs, {
+      STORE_AUTH_JWKS_URL: undefined,
+      STORE_AUTH_OIDC_DISCOVERY_URL: "https://identity.example/.well-known/openid-configuration"
+    }));
+
+    expect(config.storeAuth).toMatchObject({
+      mode: "jwt",
+      oidcDiscoveryUrl: "https://identity.example/.well-known/openid-configuration",
+      issuer: "https://identity.example/",
+      audience: "uvp-store"
+    });
+    expect(config.storeAuth?.jwksUrl).toBeUndefined();
   });
 
   it("requires production chain contracts and relay signer configuration", () => {

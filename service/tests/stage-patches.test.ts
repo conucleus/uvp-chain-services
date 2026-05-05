@@ -72,6 +72,28 @@ describe("stage executor/resource patch Product API", () => {
     expect(left).toBe(right);
   });
 
+  it("accepts reordered prepared envelopes when comparing canonical typed data", async () => {
+    const { router } = await routerFixture();
+    const prepared = await prepareStageExecutorPatch(router);
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: {
+        prepareId: prepared.prepareId,
+        selectorWallet,
+        typedData: reverseObjectKeys(prepared.typedData),
+        patch: reverseObjectKeys(prepared),
+        signature: await signExecutorPrepared(prepared)
+      }
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      signatureStatus: "signature_verified",
+      recoveredSelector: selectorWallet
+    });
+  });
+
   it("prepares and submits a selector-signed stage executor patch through the broadcast adapter", async () => {
     const broadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: vi.fn(async (request): Promise<StagePatchBroadcastResult> => {
@@ -776,6 +798,20 @@ interface ParticipantFixture {
 
 function participantFixture(roleSlotId: string, walletAddress: Address): ParticipantFixture {
   return { roleSlotId, walletAddress };
+}
+
+function reverseObjectKeys(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => reverseObjectKeys(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .reverse()
+        .map(([key, nested]) => [key, reverseObjectKeys(nested)])
+    );
+  }
+  return value;
 }
 
 async function productStoreFixture(participants: readonly ParticipantFixture[]): Promise<ProductBffStore> {

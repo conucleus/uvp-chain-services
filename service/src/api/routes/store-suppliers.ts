@@ -117,7 +117,7 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
-          if (action === "review" && bodyHasField(request.body, "capabilityTags")) {
+          if (action === "review" && bodyHasSupplierCapabilityEditField(request.body)) {
             const tagAuthorization = await authorizeStoreCapability(context, request, "store.supplier.tags.update", resource);
             if (!isStoreAuthorizationResult(tagAuthorization)) {
               return tagAuthorization;
@@ -137,7 +137,7 @@ export function createStoreSuppliersRouteModule(): RouteModule {
                   storeOperatorPrincipalFromAccess(authorization.access)
                 );
                 await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
-                if (bodyHasField(request.body, "capabilityTags")) {
+                if (bodyHasSupplierCapabilityEditField(request.body)) {
                   await recordStoreCapabilitySuccess(context, request, authorization.access, "store.supplier.tags.update", resource);
                 }
                 return { status: 200, body };
@@ -303,6 +303,12 @@ function storeOperatorPrincipalFromAccess(access: StoreAccessState): StoreOperat
 
 function bodyHasField(body: unknown, field: string): boolean {
   return Boolean(body && typeof body === "object" && !Array.isArray(body) && Object.hasOwn(body, field));
+}
+
+function bodyHasSupplierCapabilityEditField(body: unknown): boolean {
+  return bodyHasField(body, "capabilityTags") ||
+    bodyHasField(body, "supportedRoleSlotIds") ||
+    bodyHasField(body, "supportedStageIds");
 }
 
 function bodyRecord(body: unknown): Record<string, unknown> {

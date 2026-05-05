@@ -15,7 +15,7 @@ import type {
   StoreSupplierAuditRecord,
   StoreSupplierMetadataRecord,
   StoreSupplierMetadataStore
-} from "./service.js";
+} from "./types.js";
 
 export interface SqliteStoreSupplierMetadataStoreOptions {
   readonly databaseUrl?: string;

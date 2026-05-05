@@ -1,3 +1,5 @@
+// Compatibility re-export for callers that import submission typed-data helpers
+// through chain-services. Internal code should prefer @uvp-eth/protocol-bindings.
 export {
   PRODUCT_SUBMIT_DOMAIN_NAME,
   PRODUCT_SUBMIT_DOMAIN_VERSION,

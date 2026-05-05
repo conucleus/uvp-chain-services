@@ -1,4 +1,5 @@
-import { canonicalStringify, keccak256Hex } from "@uvp-eth/compiler";
+import { keccak256Hex } from "@uvp-eth/compiler";
+import { canonicalJson, hashCanonicalJson as hashSharedCanonicalJson } from "../shared/canonical-json.js";
 import { normalizeBytes32, type Hex } from "../shared/types.js";
 
 export interface EvidencePayloadHashInput {
@@ -17,16 +18,14 @@ export interface EvidencePayloadHashDocument {
   readonly stageIdentifier: string;
 }
 
-export function canonicalJson(value: unknown): string {
-  return canonicalStringify(value);
-}
+export { canonicalJson };
 
 export function hashEvidenceBytes(bytes: Uint8Array, fieldName = "contentHash"): Hex {
   return normalizeBytes32(keccak256Hex(bytes), fieldName);
 }
 
 export function hashCanonicalJson(value: unknown, fieldName: string): Hex {
-  return normalizeBytes32(keccak256Hex(canonicalStringify(value)), fieldName);
+  return hashSharedCanonicalJson(value, fieldName);
 }
 
 export function buildPayloadHashDocument(input: EvidencePayloadHashInput): EvidencePayloadHashDocument {

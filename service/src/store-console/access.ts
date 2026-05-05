@@ -250,11 +250,11 @@ function resolveStoreAccessFromHeaders(
 
 interface JwtVerifier {
   readonly config: RequiredJwtStoreAuthConfig;
-  readonly jwks: ReturnType<typeof createRemoteJWKSet>;
+  jwks?: ReturnType<typeof createRemoteJWKSet>;
+  jwksPromise?: Promise<ReturnType<typeof createRemoteJWKSet>>;
 }
 
 interface RequiredJwtStoreAuthConfig extends StoreAuthConfig {
-  readonly jwksUrl: string;
   readonly issuer: string;
   readonly audience: string;
 }
@@ -263,13 +263,13 @@ function createJwtVerifier(config: StoreAuthConfig): JwtVerifier {
   const jwtConfig = requireJwtStoreAuthConfig(config);
   return {
     config: jwtConfig,
-    jwks: createRemoteJWKSet(new URL(jwtConfig.jwksUrl))
+    ...(jwtConfig.jwksUrl ? { jwks: createRemoteJWKSet(new URL(jwtConfig.jwksUrl)) } : {})
   };
 }
 
 function requireJwtStoreAuthConfig(config: StoreAuthConfig): RequiredJwtStoreAuthConfig {
-  if (!config.jwksUrl || !config.issuer || !config.audience) {
-    throw new Error("STORE_AUTH_JWKS_URL, STORE_AUTH_ISSUER, and STORE_AUTH_AUDIENCE are required when STORE_AUTH_MODE=jwt");
+  if (!config.issuer || !config.audience) {
+    throw new Error("STORE_AUTH_ISSUER and STORE_AUTH_AUDIENCE are required when STORE_AUTH_MODE=jwt");
   }
   return config as RequiredJwtStoreAuthConfig;
 }
@@ -287,7 +287,7 @@ async function resolveStoreAccessFromJwt(
   }
 
   try {
-    const result = await jwtVerify(token, verifier.jwks, {
+    const result = await jwtVerify(token, await jwksForVerifier(verifier), {
       issuer: verifier.config.issuer,
       audience: verifier.config.audience,
       clockTolerance: verifier.config.clockToleranceSeconds
@@ -299,6 +299,37 @@ async function resolveStoreAccessFromJwt(
       message: "Authorization Bearer token is invalid"
     });
   }
+}
+
+async function jwksForVerifier(verifier: JwtVerifier): Promise<ReturnType<typeof createRemoteJWKSet>> {
+  if (verifier.jwks) {
+    return verifier.jwks;
+  }
+  verifier.jwksPromise ??= discoverStoreAuthJwks(verifier.config);
+  verifier.jwks = await verifier.jwksPromise;
+  return verifier.jwks;
+}
+
+async function discoverStoreAuthJwks(config: RequiredJwtStoreAuthConfig): Promise<ReturnType<typeof createRemoteJWKSet>> {
+  const discoveryUrl = config.oidcDiscoveryUrl ?? `${config.issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
+  const response = await fetch(discoveryUrl, {
+    headers: { accept: "application/json" }
+  });
+  if (!response.ok) {
+    throw new Error("OIDC discovery request failed");
+  }
+  const metadata = await response.json() as unknown;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error("OIDC discovery response must be a JSON object");
+  }
+  const record = metadata as Record<string, unknown>;
+  if (typeof record.issuer === "string" && record.issuer !== config.issuer) {
+    throw new Error("OIDC discovery issuer does not match STORE_AUTH_ISSUER");
+  }
+  if (typeof record.jwks_uri !== "string" || record.jwks_uri.trim().length === 0) {
+    throw new Error("OIDC discovery response is missing jwks_uri");
+  }
+  return createRemoteJWKSet(new URL(record.jwks_uri));
 }
 
 function storeAccessFromJwtPayload(payload: JWTPayload, config: RequiredJwtStoreAuthConfig): StoreAccessState {

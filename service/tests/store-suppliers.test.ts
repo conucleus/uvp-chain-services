@@ -11,6 +11,7 @@ import {
   type StoreSupplierAuditRecord,
   type StoreSupplierMetadataRecord
 } from "../src/store-suppliers/index.js";
+import type { StoreIdentityProvider } from "../src/store-console/access.js";
 import type { ProductService, ProductTaskApiDTO } from "../src/product/service.js";
 import type { Address, Hex } from "../src/shared/types.js";
 import type { ProductOrderDraftDTO } from "../src/product/bff/types.js";
@@ -353,6 +354,34 @@ describe("Store supplier registry API", () => {
       body: { reviewStatus: "submitted" }
     })).resolves.toMatchObject({ status: 401 });
   });
+
+  it("requires store.supplier.tags.update for role-slot and stage support edits", async () => {
+    const metadataStore = new InMemoryStoreSupplierMetadataStore();
+    const store = new MemoryProjectionStore();
+    const router = createApiRouter(store, { storeSupplierMetadataStore: metadataStore });
+    await createSupplier(router);
+
+    const reviewOnlyRouter = createApiRouter(store, {
+      storeSupplierMetadataStore: metadataStore,
+      storeIdentityProvider: reviewOnlyStoreIdentityProvider()
+    });
+
+    await expect(reviewOnlyRouter.handle({
+      method: "POST",
+      pathname: "/store/suppliers/supplier-shenzhen-logistics/review",
+      body: {
+        reviewStatus: "submitted",
+        supportedRoleSlotIds: ["customs-broker"],
+        supportedStageIds: ["export.customs"]
+      }
+    })).resolves.toMatchObject({
+      status: 403,
+      body: {
+        error: "forbidden",
+        requiredCapability: "store.supplier.tags.update"
+      }
+    });
+  });
 });
 
 async function createRouter(events: readonly ChainEvent[]): Promise<{
@@ -378,6 +407,22 @@ function supplierBody(overrides: Record<string, unknown> = {}): Record<string, u
     supportedStageIds: ["customs-complete", "shipping"],
     registryAddresses: [registryAddress],
     ...overrides
+  };
+}
+
+function reviewOnlyStoreIdentityProvider(): StoreIdentityProvider {
+  return {
+    async resolve() {
+      return {
+        level: "store_operator",
+        principalId: "review-only-operator",
+        roles: ["store_operator"],
+        capabilities: ["store.read", "store.audit.read", "store.supplier.review"],
+        authMode: "jwt",
+        canWrite: true,
+        canAdmin: false
+      };
+    }
   };
 }
 

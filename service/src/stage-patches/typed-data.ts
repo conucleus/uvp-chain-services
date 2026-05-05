@@ -13,6 +13,11 @@ import {
   hashDockedOrderLinkPayload as hashProtocolDockedOrderLinkPayload,
   recoverDockedOrderLinkSigner as recoverProtocolDockedOrderLinkSigner
 } from "@uvp-eth/protocol-bindings";
+import {
+  EXECUTOR_PATCH_MODE_ASSIGN,
+  EXECUTOR_PATCH_MODE_HANDOFF,
+  EXECUTOR_PATCH_MODE_REPLACEMENT
+} from "../shared/protocol-constants.js";
 import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import type {
   DockedOrderLinkTypedData,
@@ -25,9 +30,11 @@ import type {
 
 export const STAGE_PATCH_DOMAIN_NAME = STAGE_EXECUTOR_PATCH_DOMAIN_NAME;
 export const STAGE_PATCH_DOMAIN_VERSION = STAGE_EXECUTOR_PATCH_DOMAIN_VERSION;
-export const EXECUTOR_PATCH_MODE_ASSIGN = stringToHex("assign", { size: 32 }) as Hex;
-export const EXECUTOR_PATCH_MODE_HANDOFF = stringToHex("handoff", { size: 32 }) as Hex;
-export const EXECUTOR_PATCH_MODE_REPLACEMENT = stringToHex("replacement", { size: 32 }) as Hex;
+export {
+  EXECUTOR_PATCH_MODE_ASSIGN,
+  EXECUTOR_PATCH_MODE_HANDOFF,
+  EXECUTOR_PATCH_MODE_REPLACEMENT
+} from "../shared/protocol-constants.js";
 
 export const STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS = [
   { name: "orderId", type: "bytes32" },

@@ -10,7 +10,7 @@ import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../.
 import {
   STAGE_EXECUTOR_PATCH_SIGNAL_ID,
   STAGE_RESOURCE_PATCH_SIGNAL_ID
-} from "../../stage-patches/service.js";
+} from "../../shared/protocol-constants.js";
 import type {
   DraftParticipantDTO,
   ParticipantPermissionDTO,
