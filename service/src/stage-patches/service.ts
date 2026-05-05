@@ -2,16 +2,21 @@ import { randomUUID } from "node:crypto";
 import { onchainStageId } from "@uvp-eth/compiler";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import type { ChainServicesRuntimeEnv } from "../config/index.js";
+import { canonicalJson } from "../shared/canonical-json.js";
+import {
+  DOCKED_ORDER_LINK_SIGNAL_ID,
+  STAGE_EXECUTOR_PATCH_SIGNAL_ID,
+  STAGE_RESOURCE_PATCH_SIGNAL_ID
+} from "../shared/protocol-constants.js";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import type {
   StateMachineOrderProjection,
   StateMachinePlanProjection,
   StateMachineStageSelectorBindingProjection,
   StateMachineTaskProjection
-} from "../indexer/projections.js";
+} from "../indexer/projection-types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { ProductSchemaResolver } from "../product/service.js";
-import type { ProductBffStore } from "../product/bff/store.js";
 import { InMemoryProductStagePatchStore } from "./store.js";
 import {
   buildDockedOrderLinkTypedData,
@@ -64,11 +69,14 @@ import type {
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
-export const STAGE_EXECUTOR_PATCH_SIGNAL_ID = "0xbbb1770c9313f4029a89e03f4719037cdad52864ab4da5f623bc7c8a0c489e97" as const;
-export const STAGE_RESOURCE_PATCH_SIGNAL_ID = "0x6dff331f2bb7b785cbcd99a911e6d30dc8714f43b3b9ba80c658215445ddd0ba" as const;
-export const DOCKED_ORDER_LINK_SIGNAL_ID = "0x52b1d5b596f048e1b5e95de9dbd94755a086b00efb351fbd7810a9afc9ce1e83" as const;
 const EXECUTOR_PATCH_SIGNAL_ID = STAGE_EXECUTOR_PATCH_SIGNAL_ID;
 const RESOURCE_PATCH_SIGNAL_ID = STAGE_RESOURCE_PATCH_SIGNAL_ID;
+
+export {
+  DOCKED_ORDER_LINK_SIGNAL_ID,
+  STAGE_EXECUTOR_PATCH_SIGNAL_ID,
+  STAGE_RESOURCE_PATCH_SIGNAL_ID
+} from "../shared/protocol-constants.js";
 
 export class ProductStagePatchError extends Error {
   override readonly name = "ProductStagePatchError";
@@ -86,7 +94,7 @@ export class ProductStagePatchError extends Error {
 export interface ProductStagePatchServiceOptions {
   readonly store: ProjectionStore;
   readonly productSchemaResolver?: ProductSchemaResolver;
-  readonly productBffStore?: ProductBffStore;
+  readonly productBffStore?: StagePatchProductBffPort;
   readonly chainId?: number;
   readonly verifyingContract?: Address;
   readonly stagePatchModuleAddress?: Address;
@@ -111,6 +119,20 @@ export interface ProductStageResourcePatchServiceOptions extends ProductStagePat
 export interface ProductDockedOrderLinkServiceOptions extends ProductStagePatchServiceOptions {
   readonly dockedOrderLinkStore?: ProductDockedOrderLinkStore;
   readonly broadcastAdapter?: DockedOrderLinkBroadcastAdapter;
+}
+
+export interface StagePatchProductBffPort {
+  listRegistrations(): Promise<readonly {
+    readonly orderId: string;
+    readonly planId: string;
+    readonly stateMachineAddress?: string;
+    readonly draftId: string;
+  }[]>;
+  listParticipants(draftId: string): Promise<readonly {
+    readonly status: string;
+    readonly roleSlotId: string;
+    readonly walletAddress?: string;
+  }[]>;
 }
 
 export interface ProductStageExecutorPatchService {
@@ -1412,24 +1434,6 @@ function validateSubmittedPreparedEnvelope<
   if (input.typedData !== undefined && canonicalJson(input.typedData) !== canonicalJson(prepared.typedData)) {
     throw new ProductStagePatchError(400, "typed_data_mismatch", `submitted typedData does not match the prepared ${patchLabel}`);
   }
-}
-
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalValue(value));
-}
-
-function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => canonicalValue(item));
-  }
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, nested]) => [key, canonicalValue(nested)])
-    );
-  }
-  return value;
 }
 
 async function recoverExecutorSelector(prepared: PreparedStageExecutorPatchRecord, signature: Hex): Promise<Address> {

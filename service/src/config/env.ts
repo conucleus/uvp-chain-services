@@ -113,6 +113,7 @@ export type StoreAuthConfigMode = "dev_headers" | "jwt";
 export interface StoreAuthConfig {
   readonly mode: StoreAuthConfigMode;
   readonly jwksUrl?: string;
+  readonly oidcDiscoveryUrl?: string;
   readonly issuer?: string;
   readonly audience?: string;
   readonly roleClaim: string;
@@ -400,6 +401,7 @@ function parseEvidenceObjectNamespace(env: Env): string {
 function parseStoreAuthConfig(env: Env, environment: ChainServicesRuntimeEnv): StoreAuthConfig {
   const mode = parseStoreAuthMode(env, environment);
   const jwksUrl = optionalEnv(env, "STORE_AUTH_JWKS_URL");
+  const configuredOidcDiscoveryUrl = optionalEnv(env, "STORE_AUTH_OIDC_DISCOVERY_URL");
   const issuer = optionalEnv(env, "STORE_AUTH_ISSUER");
   const audience = optionalEnv(env, "STORE_AUTH_AUDIENCE");
   const roleClaim = optionalEnv(env, "STORE_AUTH_ROLE_CLAIM") ?? "roles";
@@ -411,12 +413,19 @@ function parseStoreAuthConfig(env: Env, environment: ChainServicesRuntimeEnv): S
     throw new ConfigError("STORE_AUTH_MODE=jwt is required in staging and production");
   }
   if (mode === "jwt") {
-    if (!jwksUrl) {
-      throw new ConfigError("STORE_AUTH_JWKS_URL is required when STORE_AUTH_MODE=jwt");
-    }
-    validateStoreAuthUrl(jwksUrl);
     if (!issuer) {
       throw new ConfigError("STORE_AUTH_ISSUER is required when STORE_AUTH_MODE=jwt");
+    }
+    validateStoreAuthUrl(issuer, "STORE_AUTH_ISSUER");
+    const oidcDiscoveryUrl = configuredOidcDiscoveryUrl ?? (!jwksUrl ? discoveryUrlFromIssuer(issuer) : undefined);
+    if (!jwksUrl && !oidcDiscoveryUrl) {
+      throw new ConfigError("STORE_AUTH_JWKS_URL or STORE_AUTH_OIDC_DISCOVERY_URL is required when STORE_AUTH_MODE=jwt");
+    }
+    if (jwksUrl) {
+      validateStoreAuthUrl(jwksUrl, "STORE_AUTH_JWKS_URL");
+    }
+    if (oidcDiscoveryUrl) {
+      validateStoreAuthUrl(oidcDiscoveryUrl, "STORE_AUTH_OIDC_DISCOVERY_URL");
     }
     if (!audience) {
       throw new ConfigError("STORE_AUTH_AUDIENCE is required when STORE_AUTH_MODE=jwt");
@@ -427,11 +436,19 @@ function parseStoreAuthConfig(env: Env, environment: ChainServicesRuntimeEnv): S
     if (!principalClaim) {
       throw new ConfigError("STORE_AUTH_PRINCIPAL_CLAIM is required when STORE_AUTH_MODE=jwt");
     }
+    if (environment === "staging" || environment === "production") {
+      validateNonLocalHttpsStoreAuthUrl(issuer, "STORE_AUTH_ISSUER");
+      validateNonLocalHttpsStoreAuthUrl(jwksUrl ?? oidcDiscoveryUrl!, jwksUrl ? "STORE_AUTH_JWKS_URL" : "STORE_AUTH_OIDC_DISCOVERY_URL");
+    }
   }
+  const oidcDiscoveryUrl = mode === "jwt" && issuer
+    ? configuredOidcDiscoveryUrl ?? (!jwksUrl ? discoveryUrlFromIssuer(issuer) : undefined)
+    : configuredOidcDiscoveryUrl;
 
   return {
     mode,
     ...(jwksUrl ? { jwksUrl } : {}),
+    ...(oidcDiscoveryUrl ? { oidcDiscoveryUrl } : {}),
     ...(issuer ? { issuer } : {}),
     ...(audience ? { audience } : {}),
     roleClaim,
@@ -451,18 +468,46 @@ function parseStoreAuthMode(env: Env, environment: ChainServicesRuntimeEnv): Sto
   throw new ConfigError("STORE_AUTH_MODE must be dev_headers or jwt");
 }
 
-function validateStoreAuthUrl(value: string): void {
+function validateStoreAuthUrl(value: string, envName: string): void {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" && url.protocol !== "http:") {
-      throw new ConfigError("STORE_AUTH_JWKS_URL must be an HTTP(S) URL");
+      throw new ConfigError(`${envName} must be an HTTP(S) URL`);
     }
   } catch (error) {
     if (error instanceof ConfigError) {
       throw error;
     }
-    throw new ConfigError("STORE_AUTH_JWKS_URL must be a valid URL");
+    throw new ConfigError(`${envName} must be a valid URL`);
   }
+}
+
+function validateNonLocalHttpsStoreAuthUrl(value: string, envName: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ConfigError(`${envName} must be a valid URL`);
+  }
+  if (url.protocol !== "https:") {
+    throw new ConfigError(`${envName} must be HTTPS in staging and production`);
+  }
+  if (isLocalHostname(url.hostname)) {
+    throw new ConfigError(`${envName} must not use localhost in staging and production`);
+  }
+}
+
+function discoveryUrlFromIssuer(issuer: string): string {
+  return `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
+}
+
+function isLocalHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  return normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized === "[::1]" ||
+    normalized.endsWith(".localhost");
 }
 
 function parseStorageDriver(rawDriver: string | undefined, databaseUrl: string | undefined): StorageDriver {

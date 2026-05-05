@@ -11,7 +11,7 @@ import {
   EXECUTOR_PATCH_MODE_ASSIGN,
   EXECUTOR_PATCH_MODE_HANDOFF,
   EXECUTOR_PATCH_MODE_REPLACEMENT
-} from "../stage-patches/typed-data.js";
+} from "../shared/protocol-constants.js";
 
 export type OrderStatus = "created" | "funded" | "active" | "in_dispute" | "settled";
 export type StageStatus = "approved" | "released" | "refunded" | "disputed" | "resolved";

@@ -22,7 +22,7 @@ import type {
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { Address, Hex } from "../shared/types.js";
 import type { ProductSchemaResolver } from "../product/service.js";
-import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store-suppliers/service.js";
+import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store-suppliers/types.js";
 import {
   type SupplierNotificationProfile,
   type SupplierNotificationTransport

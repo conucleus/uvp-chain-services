@@ -8,13 +8,27 @@ import type { SupplierTrustProjection } from "../indexer/trust-projections.js";
 import {
   buildSupplierNotificationProfileConfigRequest,
   verifySupplierNotificationWalletProof,
-  type SupplierNotificationProfile,
   type SupplierNotificationProfileConfigRequest,
   type SupplierNotificationWalletProof
-} from "../notifications/index.js";
+} from "../notifications/config.js";
 import type { ProductService, ProductTaskApiDTO } from "../product/service.js";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
+import type {
+  StoreOperatorPrincipal,
+  StoreSupplierAuditAction,
+  StoreSupplierAuditRecord,
+  StoreSupplierMetadataRecord,
+  StoreSupplierMetadataStore
+} from "./types.js";
+
+export type {
+  StoreOperatorPrincipal,
+  StoreSupplierAuditAction,
+  StoreSupplierAuditRecord,
+  StoreSupplierMetadataRecord,
+  StoreSupplierMetadataStore
+} from "./types.js";
 
 const STORE_OPERATOR_ROLES = new Set(["admin", "store_admin", "store_operator", "governance_admin", "governance"]);
 const CAPABILITY_TAGS = new Set<string>(STORE_SUPPLIER_CAPABILITY_TAGS);
@@ -30,58 +44,6 @@ export class StoreSupplierServiceError extends Error {
   ) {
     super(message);
   }
-}
-
-export interface StoreOperatorPrincipal {
-  readonly operatorId: string;
-  readonly role: string;
-}
-
-export interface StoreSupplierMetadataRecord {
-  readonly supplierId: string;
-  readonly supplierSubjectId: Hex;
-  readonly displayName: string;
-  readonly wallet?: Address;
-  readonly notificationProfile?: SupplierNotificationProfile;
-  readonly notificationProfileHash?: Hex;
-  readonly notificationUpdatedAt?: string;
-  readonly capabilityTags: readonly string[];
-  readonly supportedRoleSlotIds: readonly string[];
-  readonly supportedStageIds: readonly string[];
-  readonly registryAddresses: readonly Address[];
-  readonly reviewStatus: StoreSupplierReviewStatus;
-  readonly metadataURI?: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-export type StoreSupplierAuditAction =
-  | "create"
-  | "review"
-  | "tags_updated"
-  | "notification_profile_updated"
-  | "request_attestation"
-  | "request_revocation";
-
-export interface StoreSupplierAuditRecord {
-  readonly auditId: string;
-  readonly supplierId: string;
-  readonly supplierSubjectId: Hex;
-  readonly action: StoreSupplierAuditAction;
-  readonly actor: string;
-  readonly beforeTags?: readonly string[];
-  readonly afterTags?: readonly string[];
-  readonly reviewStatus?: StoreSupplierReviewStatus;
-  readonly createdAt: string;
-}
-
-export interface StoreSupplierMetadataStore {
-  getSupplier(supplierId: string): Promise<StoreSupplierMetadataRecord | undefined>;
-  findSupplierBySubjectId(supplierSubjectId: Hex): Promise<StoreSupplierMetadataRecord | undefined>;
-  listSuppliers(): Promise<readonly StoreSupplierMetadataRecord[]>;
-  putSupplier(record: StoreSupplierMetadataRecord): Promise<void>;
-  appendAudit(record: StoreSupplierAuditRecord): Promise<void>;
-  listAudits(supplierId?: string): Promise<readonly StoreSupplierAuditRecord[]>;
 }
 
 export class InMemoryStoreSupplierMetadataStore implements StoreSupplierMetadataStore {

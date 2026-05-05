@@ -99,6 +99,7 @@ export interface ConfigDiagnostics {
     readonly mode: NonNullable<ChainServicesConfig["storeAuth"]>["mode"];
     readonly jwtConfigured: boolean;
     readonly jwksUrlConfigured: boolean;
+    readonly oidcDiscoveryUrlConfigured: boolean;
     readonly issuerConfigured: boolean;
     readonly audienceConfigured: boolean;
     readonly roleClaim: string;
@@ -307,6 +308,7 @@ export function buildConfigDiagnostics(
       mode: storeAuth.mode,
       jwtConfigured: storeAuthJwtConfigured(config),
       jwksUrlConfigured: Boolean(storeAuth.jwksUrl),
+      oidcDiscoveryUrlConfigured: Boolean(storeAuth.oidcDiscoveryUrl),
       issuerConfigured: Boolean(storeAuth.issuer),
       audienceConfigured: Boolean(storeAuth.audience),
       roleClaim: storeAuth.roleClaim,
@@ -423,14 +425,14 @@ function runStoreAuthPreflight(
   if (storeAuthJwtConfigured(config)) {
     pass(checks, "store_auth.jwt_configured");
   } else {
-    fail(checks, errors, "store_auth.jwt_configured", "STORE_AUTH_JWKS_URL, STORE_AUTH_ISSUER, and STORE_AUTH_AUDIENCE are required when STORE_AUTH_MODE=jwt");
+    fail(checks, errors, "store_auth.jwt_configured", "STORE_AUTH_JWKS_URL or STORE_AUTH_OIDC_DISCOVERY_URL, plus STORE_AUTH_ISSUER and STORE_AUTH_AUDIENCE are required when STORE_AUTH_MODE=jwt");
   }
 }
 
 function storeAuthJwtConfigured(config: ChainServicesConfig): boolean {
   const storeAuth = effectiveStoreAuthConfig(config);
   return Boolean(
-    storeAuth.jwksUrl &&
+    (storeAuth.jwksUrl || storeAuth.oidcDiscoveryUrl) &&
     storeAuth.issuer &&
     storeAuth.audience &&
     storeAuth.roleClaim &&
