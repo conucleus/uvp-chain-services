@@ -28,7 +28,6 @@ const payloadHash = bytes32("3001");
 const idempotencyKey = bytes32("3002");
 const submitter = "0x3333333333333333333333333333333333333333" as Address;
 const txHash = bytes32("aaaa");
-const domainId = bytes32("4001");
 const planId = bytes32("4002");
 const planHash = bytes32("4003");
 const artifactHash = bytes32("4004");
@@ -83,7 +82,6 @@ describe("ops health diagnostics", () => {
         lastRunAt: now,
         lastSummary: {
           registrationsChecked: 0,
-          startsChecked: 0,
           submissionsChecked: 1,
           governanceLogsChecked: 1,
           updated: 0,
@@ -597,7 +595,6 @@ function pendingGovernanceLog(): PlanAttestationLogDTO {
     logId: "gov_log_1",
     txLogId: "gov_tx_1",
     action: "attest_plan",
-    domainId,
     subjectId: planId,
     planId,
     planHash,
@@ -613,7 +610,6 @@ function pendingGovernanceLog(): PlanAttestationLogDTO {
     retryable: false,
     request: {
       kind: "attestPlan",
-      domainId,
       planId,
       planHash,
       artifactHash,

@@ -1,9 +1,6 @@
 import { keccak256, stringToBytes } from "viem";
 import { onchainStageId } from "@uvp-eth/compiler";
 import {
-  ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-  ORDER_REGISTRAR_ROLE_SLOT_ID,
-  ORDER_SYSTEM_STAGE_ID,
   type ParticipantAddOnManifestActionDTO,
   type OrderPermissionTableEntryDTO,
   type RoleSlotDTO,
@@ -114,7 +111,6 @@ function resolvePermissions(
   const participants = new Map(input.participants.map((participant) => [participant.roleSlotId, participant]));
   const permissionIds = new Set<string>();
   const resolved: ResolvedPermission[] = [];
-  let hasInitialTrigger = false;
 
   validateRequiredRoleParticipants(input.zhixu.roleSlots, participants);
 
@@ -126,18 +122,6 @@ function resolvePermissions(
       });
     }
     permissionIds.add(entry.permissionId);
-
-    if (isInitialTriggerPermission(entry)) {
-      hasInitialTrigger = true;
-      resolved.push({
-        entry,
-        submitter: registrarAddress,
-        participantId: entry.roleSlotId,
-        stageIndex: -1,
-        system: true
-      });
-      continue;
-    }
 
     if (isSystemPermission(entry)) {
       throw new ProductAuthorizationBuilderError(409, "system_permission_not_allowed", "unknown system permission row", {
@@ -191,12 +175,6 @@ function resolvePermissions(
     });
   }
 
-  if (!hasInitialTrigger) {
-    throw new ProductAuthorizationBuilderError(409, "initial_trigger_permission_missing", "registrar initial trigger permission is required", {
-      permissionId: ORDER_INITIAL_TRIGGER_PERMISSION_ID
-    });
-  }
-
   return resolved.sort(compareResolvedPermission);
 }
 
@@ -232,15 +210,6 @@ function validatePermissionShape(entry: OrderPermissionTableEntryDTO): void {
       signalName: entry.signalName
     });
   }
-}
-
-function isInitialTriggerPermission(entry: OrderPermissionTableEntryDTO): boolean {
-  return entry.permissionId === ORDER_INITIAL_TRIGGER_PERMISSION_ID &&
-    entry.roleSlotId === ORDER_REGISTRAR_ROLE_SLOT_ID &&
-    entry.stageId === ORDER_SYSTEM_STAGE_ID &&
-    entry.signalName.length > 0 &&
-    entry.payloadPolicy === "optional" &&
-    entry.requiredEvidence.length === 0;
 }
 
 function isSystemPermission(entry: OrderPermissionTableEntryDTO): boolean {

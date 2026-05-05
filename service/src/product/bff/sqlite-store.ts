@@ -19,16 +19,12 @@ import type {
   ParticipantPermissionDTO,
   ProductInviteDTO,
   ProductOrderDraftDTO,
-  ProductOrderStartDTO,
-  ProductOrderRegistrationRecord,
+  ProductOrderTriggerRecord,
   SignalAuthorizationDTO
 } from "./types.js";
-import {
-  applyOrderStartPatch,
-  type ProductBffStore,
-  type ProductOrderStartListOptions,
-  type ProductOrderStartPatch
-} from "./store.js";
+import type { ProductBffStore } from "./store.js";
+
+const zeroBytes32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 export interface SqliteProductBffStoreOptions {
   readonly databaseUrl?: string;
@@ -149,76 +145,38 @@ export class SqliteProductBffStore implements ProductBffStore {
     ).all(draftId).map((row) => inviteRow(row));
   }
 
-  async createRegistration(registration: ProductOrderRegistrationRecord): Promise<void> {
+  async createRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
     runSqliteWrite(() => this.#insertRegistration(registration));
   }
 
-  async getRegistration(registrationId: string): Promise<ProductOrderRegistrationRecord | undefined> {
+  async getRegistration(triggerId: string): Promise<ProductOrderTriggerRecord | undefined> {
     const row = this.#database.prepare(
       `SELECT *
-       FROM product_order_registration
-       WHERE registration_id = ?`
-    ).get(registrationId);
+       FROM product_order_trigger
+       WHERE trigger_id = ?`
+    ).get(triggerId);
     return row ? registrationRow(row) : undefined;
   }
 
-  async getRegistrationByDraft(draftId: string): Promise<ProductOrderRegistrationRecord | undefined> {
+  async getRegistrationByDraft(draftId: string): Promise<ProductOrderTriggerRecord | undefined> {
     const row = this.#database.prepare(
       `SELECT *
-       FROM product_order_registration
+       FROM product_order_trigger
        WHERE draft_id = ?`
     ).get(draftId);
     return row ? registrationRow(row) : undefined;
   }
 
-  async listRegistrations(): Promise<readonly ProductOrderRegistrationRecord[]> {
+  async listRegistrations(): Promise<readonly ProductOrderTriggerRecord[]> {
     return this.#database.prepare(
       `SELECT *
-       FROM product_order_registration
-       ORDER BY created_at ASC, registration_id ASC`
+       FROM product_order_trigger
+       ORDER BY created_at ASC, trigger_id ASC`
     ).all().map((row) => registrationRow(row));
   }
 
-  async updateRegistration(registration: ProductOrderRegistrationRecord): Promise<void> {
+  async updateRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
     runSqliteWrite(() => this.#upsertRegistration(registration));
-  }
-
-  async createOrderStart(record: ProductOrderStartDTO): Promise<void> {
-    runSqliteWrite(() => this.#insertOrderStart(record));
-  }
-
-  async getOrderStartByRegistrationId(registrationId: string): Promise<ProductOrderStartDTO | undefined> {
-    const row = this.#database.prepare(
-      `SELECT *
-       FROM product_order_start
-       WHERE registration_id = ?`
-    ).get(registrationId);
-    return row ? orderStartRow(row) : undefined;
-  }
-
-  async updateOrderStart(startId: string, patch: ProductOrderStartPatch): Promise<ProductOrderStartDTO | undefined> {
-    const currentRow = this.#database.prepare(
-      `SELECT *
-       FROM product_order_start
-       WHERE start_id = ?`
-    ).get(startId);
-    if (!currentRow) {
-      return undefined;
-    }
-    const updated = applyOrderStartPatch(orderStartRow(currentRow), patch);
-    runSqliteWrite(() => this.#upsertOrderStart(updated));
-    return updated;
-  }
-
-  async listOrderStartsForReconcile(options: ProductOrderStartListOptions = {}): Promise<readonly ProductOrderStartDTO[]> {
-    const statuses = options.statuses ? new Set(options.statuses) : undefined;
-    return this.#database.prepare(
-      `SELECT *
-       FROM product_order_start
-       ORDER BY created_at ASC, start_id ASC`
-    ).all()
-      .map((row) => orderStartRow(row))
-      .filter((start) => !statuses || statuses.has(start.status));
   }
 
   #insertDraft(draft: ProductOrderDraftDTO): void {
@@ -226,7 +184,7 @@ export class SqliteProductBffStore implements ProductBffStore {
       `INSERT INTO product_order_draft (
          draft_id, zhixu_id, plan_id, plan_hash, title, business_type, goods_json,
          total_amount, currency, export_region, destination_region, expected_completion_date,
-         notes, status, created_by, created_at, updated_at, registered_order_id, registration_tx_hash
+         notes, status, created_by, created_at, updated_at, triggered_order_id, trigger_tx_hash
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(...draftValues(draft));
   }
@@ -236,7 +194,7 @@ export class SqliteProductBffStore implements ProductBffStore {
       `INSERT INTO product_order_draft (
          draft_id, zhixu_id, plan_id, plan_hash, title, business_type, goods_json,
          total_amount, currency, export_region, destination_region, expected_completion_date,
-         notes, status, created_by, created_at, updated_at, registered_order_id, registration_tx_hash
+         notes, status, created_by, created_at, updated_at, triggered_order_id, trigger_tx_hash
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(draft_id)
        DO UPDATE SET
@@ -256,8 +214,8 @@ export class SqliteProductBffStore implements ProductBffStore {
          created_by = excluded.created_by,
          created_at = excluded.created_at,
          updated_at = excluded.updated_at,
-         registered_order_id = excluded.registered_order_id,
-         registration_tx_hash = excluded.registration_tx_hash`
+         triggered_order_id = excluded.triggered_order_id,
+         trigger_tx_hash = excluded.trigger_tx_hash`
     ).run(...draftValues(draft));
   }
 
@@ -322,27 +280,30 @@ export class SqliteProductBffStore implements ProductBffStore {
     ).run(...inviteValues(invite));
   }
 
-  #insertRegistration(registration: ProductOrderRegistrationRecord): void {
+  #insertRegistration(registration: ProductOrderTriggerRecord): void {
     this.#database.prepare(
-      `INSERT INTO product_order_registration (
-         registration_id, draft_id, order_id, plan_id, plan_hash, status, tx_hash,
-         block_number, error_code, error_message, retryable, creator,
-         authorizations_json, permissions_json, reconcile_status, last_checked_at,
-         receipt_status, projection_status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO product_order_trigger (
+         trigger_id, prepare_id, draft_id, order_id, plan_id, plan_hash, status, tx_hash,
+         block_number, source_id, signal_id, trigger_hook_id, trigger_stage_id, submitter,
+         payload_hash, idempotency_key, deadline, typed_data_json, signature,
+         error_code, error_message, retryable, creator, authorizations_json, permissions_json,
+         reconcile_status, last_checked_at, receipt_status, projection_status, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(...registrationValues(registration));
   }
 
-  #upsertRegistration(registration: ProductOrderRegistrationRecord): void {
+  #upsertRegistration(registration: ProductOrderTriggerRecord): void {
     this.#database.prepare(
-      `INSERT INTO product_order_registration (
-         registration_id, draft_id, order_id, plan_id, plan_hash, status, tx_hash,
-         block_number, error_code, error_message, retryable, creator,
-         authorizations_json, permissions_json, reconcile_status, last_checked_at,
-         receipt_status, projection_status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(registration_id)
+      `INSERT INTO product_order_trigger (
+         trigger_id, prepare_id, draft_id, order_id, plan_id, plan_hash, status, tx_hash,
+         block_number, source_id, signal_id, trigger_hook_id, trigger_stage_id, submitter,
+         payload_hash, idempotency_key, deadline, typed_data_json, signature,
+         error_code, error_message, retryable, creator, authorizations_json, permissions_json,
+         reconcile_status, last_checked_at, receipt_status, projection_status, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(trigger_id)
        DO UPDATE SET
+         prepare_id = excluded.prepare_id,
          draft_id = excluded.draft_id,
          order_id = excluded.order_id,
          plan_id = excluded.plan_id,
@@ -350,6 +311,16 @@ export class SqliteProductBffStore implements ProductBffStore {
          status = excluded.status,
          tx_hash = excluded.tx_hash,
          block_number = excluded.block_number,
+         source_id = excluded.source_id,
+         signal_id = excluded.signal_id,
+         trigger_hook_id = excluded.trigger_hook_id,
+         trigger_stage_id = excluded.trigger_stage_id,
+         submitter = excluded.submitter,
+         payload_hash = excluded.payload_hash,
+         idempotency_key = excluded.idempotency_key,
+         deadline = excluded.deadline,
+         typed_data_json = excluded.typed_data_json,
+         signature = excluded.signature,
          error_code = excluded.error_code,
          error_message = excluded.error_message,
          retryable = excluded.retryable,
@@ -365,42 +336,6 @@ export class SqliteProductBffStore implements ProductBffStore {
     ).run(...registrationValues(registration));
   }
 
-  #insertOrderStart(start: ProductOrderStartDTO): void {
-    this.#database.prepare(
-      `INSERT INTO product_order_start (
-         start_id, registration_id, draft_id, order_id, status, tx_hash,
-         block_number, error_code, error_message, retryable, reconcile_status,
-         last_checked_at, receipt_status, projection_status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(...orderStartValues(start));
-  }
-
-  #upsertOrderStart(start: ProductOrderStartDTO): void {
-    this.#database.prepare(
-      `INSERT INTO product_order_start (
-         start_id, registration_id, draft_id, order_id, status, tx_hash,
-         block_number, error_code, error_message, retryable, reconcile_status,
-         last_checked_at, receipt_status, projection_status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(start_id)
-       DO UPDATE SET
-         registration_id = excluded.registration_id,
-         draft_id = excluded.draft_id,
-         order_id = excluded.order_id,
-         status = excluded.status,
-         tx_hash = excluded.tx_hash,
-         block_number = excluded.block_number,
-         error_code = excluded.error_code,
-         error_message = excluded.error_message,
-         retryable = excluded.retryable,
-         reconcile_status = excluded.reconcile_status,
-         last_checked_at = excluded.last_checked_at,
-         receipt_status = excluded.receipt_status,
-         projection_status = excluded.projection_status,
-         created_at = excluded.created_at,
-         updated_at = excluded.updated_at`
-    ).run(...orderStartValues(start));
-  }
 }
 
 function draftValues(draft: ProductOrderDraftDTO) {
@@ -422,8 +357,8 @@ function draftValues(draft: ProductOrderDraftDTO) {
     draft.createdBy ?? null,
     draft.createdAt,
     draft.updatedAt,
-    draft.registeredOrderId ?? null,
-    draft.registrationTxHash ?? null
+    draft.triggeredOrderId ?? null,
+    draft.triggerTxHash ?? null
   ] as const;
 }
 
@@ -441,9 +376,10 @@ function inviteValues(invite: ProductInviteDTO) {
   ] as const;
 }
 
-function registrationValues(registration: ProductOrderRegistrationRecord) {
+function registrationValues(registration: ProductOrderTriggerRecord) {
   return [
-    registration.registrationId,
+    registration.triggerId,
+    registration.prepareId ?? null,
     registration.draftId,
     registration.orderId,
     registration.planId,
@@ -451,6 +387,16 @@ function registrationValues(registration: ProductOrderRegistrationRecord) {
     registration.status,
     registration.txHash ?? null,
     registration.blockNumber ?? null,
+    registration.sourceId ?? null,
+    registration.signalId ?? null,
+    registration.triggerHookId ?? null,
+    registration.triggerStageId ?? null,
+    registration.submitter ?? null,
+    registration.payloadHash ?? null,
+    registration.idempotencyKey ?? null,
+    registration.deadline ?? null,
+    stringifyStorageJson(registration.typedData ?? {}),
+    registration.signature ?? null,
     registration.errorCode ?? null,
     registration.errorMessage ?? null,
     registration.retryable ? 1 : 0,
@@ -466,27 +412,6 @@ function registrationValues(registration: ProductOrderRegistrationRecord) {
   ] as const;
 }
 
-function orderStartValues(start: ProductOrderStartDTO) {
-  return [
-    start.startId,
-    start.registrationId,
-    start.draftId,
-    start.orderId,
-    start.status,
-    start.txHash ?? null,
-    start.blockNumber ?? null,
-    start.errorCode ?? null,
-    start.errorMessage ?? null,
-    start.retryable ? 1 : 0,
-    start.reconcileStatus ?? null,
-    start.lastCheckedAt ?? null,
-    start.receiptStatus ?? null,
-    start.projectionStatus ?? null,
-    start.createdAt,
-    start.updatedAt
-  ] as const;
-}
-
 function draftRow(row: unknown): ProductOrderDraftDTO {
   const record = rowObject(row, "product_order_draft query");
   const exportRegion = optionalStringColumn(record, "export_region");
@@ -494,8 +419,8 @@ function draftRow(row: unknown): ProductOrderDraftDTO {
   const expectedCompletionDate = optionalStringColumn(record, "expected_completion_date");
   const notes = optionalStringColumn(record, "notes");
   const createdBy = optionalStringColumn(record, "created_by");
-  const registeredOrderId = optionalStringColumn(record, "registered_order_id");
-  const registrationTxHash = optionalStringColumn(record, "registration_tx_hash");
+  const triggeredOrderId = optionalStringColumn(record, "triggered_order_id");
+  const triggerTxHash = optionalStringColumn(record, "trigger_tx_hash");
   return {
     draftId: stringColumn(record, "draft_id"),
     zhixuId: stringColumn(record, "zhixu_id"),
@@ -514,9 +439,9 @@ function draftRow(row: unknown): ProductOrderDraftDTO {
     ...(createdBy !== undefined ? { createdBy } : {}),
     createdAt: stringColumn(record, "created_at"),
     updatedAt: stringColumn(record, "updated_at"),
-    ...(registeredOrderId !== undefined ? { registeredOrderId } : {}),
-    ...(registrationTxHash !== undefined
-      ? { registrationTxHash: registrationTxHash as NonNullable<ProductOrderDraftDTO["registrationTxHash"]> }
+    ...(triggeredOrderId !== undefined ? { triggeredOrderId } : {}),
+    ...(triggerTxHash !== undefined
+      ? { triggerTxHash: triggerTxHash as NonNullable<ProductOrderDraftDTO["triggerTxHash"]> }
       : {})
   };
 }
@@ -559,10 +484,22 @@ function inviteRow(row: unknown): ProductInviteDTO {
   };
 }
 
-function registrationRow(row: unknown): ProductOrderRegistrationRecord {
-  const record = rowObject(row, "product_order_registration query");
+function registrationRow(row: unknown): ProductOrderTriggerRecord {
+  const record = rowObject(row, "product_order_trigger query");
+  const triggerId = stringColumn(record, "trigger_id");
+  const prepareId = optionalStringColumn(record, "prepare_id");
   const txHash = optionalStringColumn(record, "tx_hash");
   const blockNumber = optionalStringColumn(record, "block_number");
+  const sourceId = optionalStringColumn(record, "source_id");
+  const signalId = optionalStringColumn(record, "signal_id");
+  const triggerHookId = optionalStringColumn(record, "trigger_hook_id");
+  const triggerStageId = optionalStringColumn(record, "trigger_stage_id");
+  const submitter = optionalStringColumn(record, "submitter");
+  const payloadHash = optionalStringColumn(record, "payload_hash");
+  const idempotencyKey = optionalStringColumn(record, "idempotency_key");
+  const deadline = optionalStringColumn(record, "deadline");
+  const typedDataJson = optionalStringColumn(record, "typed_data_json");
+  const signature = optionalStringColumn(record, "signature");
   const errorCode = optionalStringColumn(record, "error_code");
   const errorMessage = optionalStringColumn(record, "error_message");
   const reconcileStatus = optionalStringColumn(record, "reconcile_status");
@@ -572,67 +509,46 @@ function registrationRow(row: unknown): ProductOrderRegistrationRecord {
   const authorizations = parseStorageJson<readonly SignalAuthorizationDTO[]>(stringColumn(record, "authorizations_json"));
   const permissions = parseStorageJson<readonly ParticipantPermissionDTO[]>(stringColumn(record, "permissions_json"));
   return {
-    registrationId: stringColumn(record, "registration_id"),
+    triggerId,
+    prepareId: prepareId ?? triggerId,
     draftId: stringColumn(record, "draft_id"),
-    orderId: stringColumn(record, "order_id") as ProductOrderRegistrationRecord["orderId"],
-    planId: stringColumn(record, "plan_id") as ProductOrderRegistrationRecord["planId"],
-    planHash: stringColumn(record, "plan_hash") as ProductOrderRegistrationRecord["planHash"],
-    status: stringColumn(record, "status") as ProductOrderRegistrationRecord["status"],
-    ...(txHash !== undefined ? { txHash: txHash as NonNullable<ProductOrderRegistrationRecord["txHash"]> } : {}),
+    orderId: stringColumn(record, "order_id") as ProductOrderTriggerRecord["orderId"],
+    planId: stringColumn(record, "plan_id") as ProductOrderTriggerRecord["planId"],
+    planHash: stringColumn(record, "plan_hash") as ProductOrderTriggerRecord["planHash"],
+    status: stringColumn(record, "status") as ProductOrderTriggerRecord["status"],
+    ...(txHash !== undefined ? { txHash: txHash as NonNullable<ProductOrderTriggerRecord["txHash"]> } : {}),
     ...(blockNumber !== undefined ? { blockNumber } : {}),
+    ...(sourceId !== undefined ? { sourceId: sourceId as NonNullable<ProductOrderTriggerRecord["sourceId"]> } : {}),
+    ...(signalId !== undefined ? { signalId: signalId as NonNullable<ProductOrderTriggerRecord["signalId"]> } : {}),
+    ...(triggerHookId !== undefined
+      ? { triggerHookId: triggerHookId as NonNullable<ProductOrderTriggerRecord["triggerHookId"]> }
+      : {}),
+    ...(triggerStageId !== undefined
+      ? { triggerStageId: triggerStageId as NonNullable<ProductOrderTriggerRecord["triggerStageId"]> }
+      : {}),
+    ...(submitter !== undefined ? { submitter: submitter as NonNullable<ProductOrderTriggerRecord["submitter"]> } : {}),
+    payloadHash: (payloadHash ?? zeroBytes32) as ProductOrderTriggerRecord["orderId"],
+    idempotencyKey: (idempotencyKey ?? zeroBytes32) as ProductOrderTriggerRecord["orderId"],
+    deadline: deadline ?? "0",
+    typedData: typedDataJson ? parseStorageJson<unknown>(typedDataJson) : {},
+    ...(signature !== undefined ? { signature: signature as NonNullable<ProductOrderTriggerRecord["signature"]> } : {}),
     ...(errorCode !== undefined ? { errorCode } : {}),
     ...(errorMessage !== undefined ? { errorMessage } : {}),
     retryable: booleanColumn(record, "retryable"),
     createdAt: stringColumn(record, "created_at"),
     updatedAt: stringColumn(record, "updated_at"),
-    creator: stringColumn(record, "creator") as ProductOrderRegistrationRecord["creator"],
+    creator: stringColumn(record, "creator") as ProductOrderTriggerRecord["creator"],
     authorizations,
     permissions,
     ...(reconcileStatus !== undefined
-      ? { reconcileStatus: reconcileStatus as NonNullable<ProductOrderRegistrationRecord["reconcileStatus"]> }
+      ? { reconcileStatus: reconcileStatus as NonNullable<ProductOrderTriggerRecord["reconcileStatus"]> }
       : {}),
     ...(lastCheckedAt !== undefined ? { lastCheckedAt } : {}),
     ...(receiptStatus !== undefined
-      ? { receiptStatus: receiptStatus as NonNullable<ProductOrderRegistrationRecord["receiptStatus"]> }
+      ? { receiptStatus: receiptStatus as NonNullable<ProductOrderTriggerRecord["receiptStatus"]> }
       : {}),
     ...(projectionStatus !== undefined
-      ? { projectionStatus: projectionStatus as NonNullable<ProductOrderRegistrationRecord["projectionStatus"]> }
-      : {})
-  };
-}
-
-function orderStartRow(row: unknown): ProductOrderStartDTO {
-  const record = rowObject(row, "product_order_start query");
-  const txHash = optionalStringColumn(record, "tx_hash");
-  const blockNumber = optionalStringColumn(record, "block_number");
-  const errorCode = optionalStringColumn(record, "error_code");
-  const errorMessage = optionalStringColumn(record, "error_message");
-  const reconcileStatus = optionalStringColumn(record, "reconcile_status");
-  const lastCheckedAt = optionalStringColumn(record, "last_checked_at");
-  const receiptStatus = optionalStringColumn(record, "receipt_status");
-  const projectionStatus = optionalStringColumn(record, "projection_status");
-  return {
-    startId: stringColumn(record, "start_id"),
-    registrationId: stringColumn(record, "registration_id"),
-    draftId: stringColumn(record, "draft_id"),
-    orderId: stringColumn(record, "order_id") as ProductOrderStartDTO["orderId"],
-    status: stringColumn(record, "status") as ProductOrderStartDTO["status"],
-    ...(txHash !== undefined ? { txHash: txHash as NonNullable<ProductOrderStartDTO["txHash"]> } : {}),
-    ...(blockNumber !== undefined ? { blockNumber } : {}),
-    ...(errorCode !== undefined ? { errorCode } : {}),
-    ...(errorMessage !== undefined ? { errorMessage } : {}),
-    retryable: booleanColumn(record, "retryable"),
-    createdAt: stringColumn(record, "created_at"),
-    updatedAt: stringColumn(record, "updated_at"),
-    ...(reconcileStatus !== undefined
-      ? { reconcileStatus: reconcileStatus as NonNullable<ProductOrderStartDTO["reconcileStatus"]> }
-      : {}),
-    ...(lastCheckedAt !== undefined ? { lastCheckedAt } : {}),
-    ...(receiptStatus !== undefined
-      ? { receiptStatus: receiptStatus as NonNullable<ProductOrderStartDTO["receiptStatus"]> }
-      : {}),
-    ...(projectionStatus !== undefined
-      ? { projectionStatus: projectionStatus as NonNullable<ProductOrderStartDTO["projectionStatus"]> }
+      ? { projectionStatus: projectionStatus as NonNullable<ProductOrderTriggerRecord["projectionStatus"]> }
       : {})
   };
 }

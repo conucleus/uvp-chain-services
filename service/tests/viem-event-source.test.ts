@@ -1,8 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { ViemChainEventSource } from "../src/indexer/viem-event-source.js";
+import { createChainEventSourceForTarget } from "../src/chain-adapters/events.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
+import { UnsupportedChainTargetError } from "../src/shared/types.js";
 
 describe("ViemChainEventSource", () => {
+  it("routes the default chain event source through the EVM adapter boundary", () => {
+    expect(createChainEventSourceForTarget(chainServicesConfig())).toBeInstanceOf(ViemChainEventSource);
+    expect(() =>
+      createChainEventSourceForTarget({
+        ...chainServicesConfig(),
+        network: {
+          ...chainServicesConfig().network,
+          chainTarget: "solana"
+        }
+      })
+    ).toThrow(UnsupportedChainTargetError);
+  });
+
   it("chunks getLogs requests under public RPC range limits", async () => {
     const calls: Array<{ address: string; fromBlock: bigint; toBlock: bigint }> = [];
     const eventSource = new ViemChainEventSource({

@@ -1,5 +1,6 @@
 export * from "./api/routes.js";
 export * from "./api/server.js";
+export * from "./chain-adapters/events.js";
 export * from "./config/index.js";
 export * from "./evidence/index.js";
 export * from "./governance/index.js";
@@ -10,7 +11,8 @@ export * from "./indexer/trust-projections.js";
 export * from "./indexer/viem-event-source.js";
 export * from "./notifications/index.js";
 export * from "./product/service.js";
-export * from "./product/bff/registration.js";
+export * from "./product/bff/authorization.js";
+export * from "./product/bff/trigger.js";
 export * from "./proof-verifier/service.js";
 export * from "./relayer/service.js";
 export * from "./relayer/types.js";

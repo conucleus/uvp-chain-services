@@ -417,7 +417,7 @@ function roleInputSummary(diagnostics: JsonRecord): JsonRecord {
   const orderRegistrar = recordOf(operatorRoles?.orderRegistrar);
   const relayerGasPayer = recordOf(operatorRoles?.relayerGasPayer);
   const participantWallet = recordOf(operatorRoles?.participantWallet);
-  const governanceDomainOwner = recordOf(operatorRoles?.governanceDomainOwner);
+  const governanceRegistryOwner = recordOf(operatorRoles?.governanceRegistryOwner);
   const governanceSigner = recordOf(operatorRoles?.governanceSigner);
   const governanceAdminReviewer = recordOf(operatorRoles?.governanceAdminReviewer);
   const opsConsoleAdmin = recordOf(operatorRoles?.opsConsoleAdmin);
@@ -429,7 +429,7 @@ function roleInputSummary(diagnostics: JsonRecord): JsonRecord {
     privateKeyRoleReady(orderRegistrar) &&
     privateKeyRoleReady(relayerGasPayer) &&
     numberOf(participantWallet?.configuredCount) > 0 &&
-    addressRoleReady(governanceDomainOwner) &&
+    addressRoleReady(governanceRegistryOwner) &&
     privateKeyRoleReady(governanceSigner) &&
     numberOf(governanceAdminReviewer?.configuredCount) > 0 &&
     numberOf(opsConsoleAdmin?.configuredCount) > 0;
@@ -444,7 +444,7 @@ function roleInputSummary(diagnostics: JsonRecord): JsonRecord {
     orderRegistrarConfigured: privateKeyRoleReady(orderRegistrar),
     relayerGasPayerConfigured: privateKeyRoleReady(relayerGasPayer),
     participantWalletCount: numberOf(participantWallet?.configuredCount),
-    governanceDomainOwnerConfigured: addressRoleReady(governanceDomainOwner),
+    governanceRegistryOwnerConfigured: addressRoleReady(governanceRegistryOwner),
     governanceSignerConfigured: privateKeyRoleReady(governanceSigner),
     governanceAdminReviewerCount: numberOf(governanceAdminReviewer?.configuredCount),
     opsConsoleAdminCount: numberOf(opsConsoleAdmin?.configuredCount),

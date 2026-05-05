@@ -1,5 +1,4 @@
 import {
-  DEFAULT_OFFICIAL_DOMAIN_ID,
   summarizeZhixu,
   type ChainAttestationDTO,
   type ChainProofRowDTO,
@@ -882,7 +881,7 @@ async function resolveProjectedZhixuById(
   productSchemaResolver?: ProductSchemaResolver
 ): Promise<ZhixuDetailDTO | undefined> {
   const officialPlans = Object.values(trustSnapshot.plans)
-    .filter((trust) => trust.domainId === DEFAULT_OFFICIAL_DOMAIN_ID);
+    .filter(isActiveOfficialPlanTrust);
   for (const trust of officialPlans) {
     const detail = await zhixuDetailFromPlanTrustOrSchema(trust, productSchemaResolver);
     if (detail.zhixuId === zhixuId || zhixuIdFromPlanTrust(trust) === zhixuId) {
@@ -954,6 +953,7 @@ function zhixuDetailFromProductSchema(
     dockableModules: [],
     stages: schema.stages,
     orderPermissionTable: schema.orderPermissionTable,
+    ...(schema.createOrderTrigger ? { createOrderTrigger: schema.createOrderTrigger } : {}),
     proofRows: [
       { label: "秩序编号", value: zhixuId },
       { label: "Plan ID", value: schema.planId },
@@ -1550,7 +1550,7 @@ function proofFromPlanTrust(trust: PlanTrustProjection): ProductChainProofDTO {
     eventName: trust.revoked ? "PlanRevoked" : "PlanAttested",
     proofKind: trust.revoked ? "PlanRevoked" : "PlanAttested",
     args: {
-      domainId: trust.domainId,
+      registryAddress: trust.registryAddress,
       planId: trust.planId,
       planHash: trust.planHash,
       artifactHash: trust.artifactHash,
@@ -1641,7 +1641,7 @@ function supplierProofRowsForTask(
   return [
     { label: "Supplier trust", value: supplierTrust.status },
     { label: "Supplier subject", value: supplierTrust.supplierSubjectId },
-    { label: "Supplier domain", value: supplierTrust.domainId },
+    { label: "Trust registry", value: supplierTrust.registryAddress },
     { label: "Supplier wallet", value: supplierTrust.wallet },
     { label: "Supplier trust event", value: supplierTrust.revoked ? "SupplierRevoked" : "SupplierAttested" },
     { label: "Supplier trust tx", value: provenance.transactionHash },
@@ -1714,7 +1714,7 @@ function planKey(planId: string, planHash: string): string {
 }
 
 function isActiveOfficialPlanTrust(trust: PlanTrustProjection): boolean {
-  return trust.domainId === DEFAULT_OFFICIAL_DOMAIN_ID && trust.status === "attested" && !trust.revoked;
+  return trust.status === "attested" && !trust.revoked;
 }
 
 function matchesTaskQuery(task: ProductTaskDTO, query: ProductTaskQuery): boolean {
@@ -1967,7 +1967,6 @@ function findPlanTrust(
   attestation: ChainAttestationDTO
 ): PlanTrustProjection | undefined {
   return Object.values(trustSnapshot.plans).find((plan) =>
-    plan.domainId === DEFAULT_OFFICIAL_DOMAIN_ID &&
     plan.planId === attestation.planId &&
     plan.planHash === attestation.planHash
   );

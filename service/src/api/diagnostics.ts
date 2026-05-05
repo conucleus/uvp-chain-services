@@ -529,7 +529,6 @@ function safeGovernanceTx(log: GovernanceTxLogDTO): Record<string, unknown> {
   return {
     txLogId: log.txLogId,
     action: log.action,
-    domainId: log.domainId,
     subjectId: log.subjectId,
     status: log.status,
     broadcastStatus: log.broadcastStatus,

@@ -272,8 +272,12 @@ function createStagePatchBroadcastAdapter<TPrepared extends PreparedPatchForBroa
 
       let txHash: Hex;
       try {
+        const broadcastAddress = normalizeAddress(
+          request.prepared.typedData.domain.verifyingContract ?? request.prepared.stateMachineAddress ?? stateMachineAddress,
+          "prepared.typedData.domain.verifyingContract"
+        );
         txHash = await walletClient.writeContract(labels.buildCall({
-          stateMachineAddress: request.prepared.stateMachineAddress ?? stateMachineAddress,
+          stateMachineAddress: broadcastAddress,
           chainId: options.chainId
         }, request.prepared, request));
       } catch (error) {

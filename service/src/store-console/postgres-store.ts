@@ -114,9 +114,9 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
       `INSERT INTO store_zhixu_draft (
          draft_id, source_kind, content, status, zhixu_id, title, maintainer,
          public_summary, tags_json, compile_preview_json, product_schema_json, review_id,
-         governance_tx_log_id, errors_json, review_status, attestation_domain_id,
+         governance_tx_log_id, errors_json, review_status,
          created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14::jsonb, $15, $16, $17, $18)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14::jsonb, $15, $16, $17)`,
       draftValues(draft)
     );
   }
@@ -155,9 +155,9 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
       `INSERT INTO store_zhixu_draft (
          draft_id, source_kind, content, status, zhixu_id, title, maintainer,
          public_summary, tags_json, compile_preview_json, product_schema_json, review_id,
-         governance_tx_log_id, errors_json, review_status, attestation_domain_id,
+         governance_tx_log_id, errors_json, review_status,
          created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14::jsonb, $15, $16, $17, $18)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14::jsonb, $15, $16, $17)
        ON CONFLICT(draft_id)
        DO UPDATE SET
          source_kind = excluded.source_kind,
@@ -174,7 +174,6 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
          governance_tx_log_id = excluded.governance_tx_log_id,
          errors_json = excluded.errors_json,
          review_status = excluded.review_status,
-         attestation_domain_id = excluded.attestation_domain_id,
          created_at = excluded.created_at,
          updated_at = excluded.updated_at`,
       draftValues(draft)
@@ -391,7 +390,6 @@ function draftValues(draft: StoreZhixuDraftRecord): readonly unknown[] {
     draft.governanceTxLogId ?? null,
     stringifyStorageJson(draft.errors),
     draft.reviewStatus ?? null,
-    draft.attestationDomainId ?? null,
     draft.createdAt,
     draft.updatedAt
   ];
@@ -406,7 +404,6 @@ function draftRow(row: unknown): StoreZhixuDraftRecord {
   const reviewId = optionalString(record, "review_id");
   const governanceTxLogId = optionalString(record, "governance_tx_log_id");
   const reviewStatus = optionalString(record, "review_status") as StoreZhixuDraftRecord["reviewStatus"];
-  const attestationDomainId = optionalString(record, "attestation_domain_id");
   return {
     draftId: stringColumn(record, "draft_id"),
     sourceKind: stringColumn(record, "source_kind") as StoreZhixuDraftSourceKind,
@@ -423,7 +420,6 @@ function draftRow(row: unknown): StoreZhixuDraftRecord {
     ...(governanceTxLogId !== undefined ? { governanceTxLogId } : {}),
     errors: parseStorageJson<readonly StoreDraftErrorDTO[]>(stringColumn(record, "errors_json")),
     ...(reviewStatus !== undefined ? { reviewStatus } : {}),
-    ...(attestationDomainId !== undefined ? { attestationDomainId } : {}),
     createdAt: stringColumn(record, "created_at"),
     updatedAt: stringColumn(record, "updated_at")
   };

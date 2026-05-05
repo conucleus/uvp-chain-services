@@ -14,7 +14,7 @@ const adminHeaders = {
   "x-uvp-admin-role": "admin"
 };
 
-const domainId = "0x0000000000000000000000000000000000000000000000000000000000005201" as Hex;
+const registryAddress = "0x5555555555555555555555555555555555555555" as Address;
 const supplierSubjectId = "0x0000000000000000000000000000000000000000000000000000000000007001" as Hex;
 const supplierWallet = "0x4444444444444444444444444444444444444444" as Address;
 
@@ -89,7 +89,7 @@ describe("Store sensitive action confirmation", () => {
       method: "POST",
       pathname: "/store/suppliers/supplier-confirm/request-attestation",
       headers: adminHeaders,
-      body: { domainId }
+      body: {}
     })).resolves.toMatchObject({
       status: 400,
       body: { error: "store_confirmation_required" }
@@ -112,7 +112,7 @@ describe("Store sensitive action confirmation", () => {
       method: "POST",
       pathname: "/store/zhixu-drafts/missing-draft/request-attestation",
       headers: adminHeaders,
-      body: { domainId }
+      body: {}
     })).resolves.toMatchObject({
       status: 400,
       body: { error: "store_confirmation_required" }
@@ -130,6 +130,6 @@ function supplierBody(): Record<string, unknown> {
     capabilityTags: ["logistics"],
     supportedRoleSlotIds: ["delivery"],
     supportedStageIds: ["shipping"],
-    domains: [domainId]
+    registryAddresses: [registryAddress]
   };
 }

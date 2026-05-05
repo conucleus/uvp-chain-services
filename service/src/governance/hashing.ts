@@ -14,7 +14,6 @@ export interface GovernanceReviewHashInput {
 }
 
 export interface PlanAttestationHashInput {
-  readonly domainId: Hex;
   readonly planId: Hex;
   readonly planHash: Hex;
   readonly artifactHash: Hex;
@@ -24,7 +23,6 @@ export interface PlanAttestationHashInput {
 }
 
 export interface SupplierAttestationHashInput {
-  readonly domainId: Hex;
   readonly supplierSubjectId: Hex;
   readonly wallet: string;
   readonly review?: GovernanceReviewHashInput;
@@ -46,7 +44,6 @@ export function hashPlanMetadata(input: PlanAttestationHashInput): Hex {
   return hashGovernanceCanonicalJson({
     version: 1,
     kind: "planAttestationMetadata",
-    domainId: input.domainId,
     planId: input.planId,
     planHash: input.planHash,
     artifactHash: input.artifactHash,
@@ -59,7 +56,6 @@ export function hashPlanPolicy(input: PlanAttestationHashInput): Hex {
   return hashGovernanceCanonicalJson({
     version: 1,
     kind: "planAttestationPolicy",
-    domainId: input.domainId,
     planId: input.planId,
     planHash: input.planHash,
     artifactHash: input.artifactHash,
@@ -72,7 +68,6 @@ export function hashSupplierMetadata(input: SupplierAttestationHashInput): Hex {
   return hashGovernanceCanonicalJson({
     version: 1,
     kind: "supplierAttestationMetadata",
-    domainId: input.domainId,
     supplierSubjectId: input.supplierSubjectId,
     wallet: input.wallet.toLowerCase(),
     review: input.review ? buildGovernanceReviewMetadataDocument(input.review) : null,
@@ -84,7 +79,6 @@ export function hashSupplierProfile(input: SupplierAttestationHashInput): Hex {
   return hashGovernanceCanonicalJson({
     version: 1,
     kind: "supplierProfile",
-    domainId: input.domainId,
     supplierSubjectId: input.supplierSubjectId,
     wallet: input.wallet.toLowerCase(),
     profile: input.profile ?? input.metadata ?? null,
@@ -96,7 +90,6 @@ export function hashSupplierCapability(input: SupplierAttestationHashInput): Hex
   return hashGovernanceCanonicalJson({
     version: 1,
     kind: "supplierCapability",
-    domainId: input.domainId,
     supplierSubjectId: input.supplierSubjectId,
     wallet: input.wallet.toLowerCase(),
     capability: input.capability ?? null
@@ -107,7 +100,6 @@ export function hashSupplierReputation(input: SupplierAttestationHashInput): Hex
   return hashGovernanceCanonicalJson({
     version: 1,
     kind: "supplierReputation",
-    domainId: input.domainId,
     supplierSubjectId: input.supplierSubjectId,
     wallet: input.wallet.toLowerCase(),
     reputation: input.reputation ?? null,
@@ -117,7 +109,6 @@ export function hashSupplierReputation(input: SupplierAttestationHashInput): Hex
 
 export function hashRevocationReason(input: {
   readonly subjectType: GovernanceSubjectType;
-  readonly domainId: Hex;
   readonly subjectId: Hex;
   readonly reason?: string;
   readonly metadata?: unknown;
@@ -127,7 +118,6 @@ export function hashRevocationReason(input: {
     version: 1,
     kind: "revocationReason",
     subjectType: input.subjectType,
-    domainId: input.domainId,
     subjectId: input.subjectId,
     reason: input.reason ?? "",
     metadata: input.metadata ?? null,

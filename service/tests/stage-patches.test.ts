@@ -117,12 +117,12 @@ describe("stage executor/resource patch Product API", () => {
       status: "prepared",
       typedData: {
         domain: {
-          name: "UVPStateMachine",
-          version: "0.2",
+          name: "UVPStagePatchModule",
+          version: "0.1",
           chainId,
           verifyingContract: contractAddress
         },
-        primaryType: "UVPStateMachineStageExecutorPatch"
+        primaryType: "UVPStagePatchModuleStageExecutorPatch"
       }
     });
     expect(prepared.typedData.message).toMatchObject({
@@ -372,7 +372,7 @@ describe("stage executor/resource patch Product API", () => {
       manifestURI: "ipfs://resource-manifests/invoice-v1",
       status: "prepared",
       typedData: {
-        primaryType: "UVPStateMachineStageResourcePatch"
+        primaryType: "UVPStagePatchModuleStageResourcePatch"
       }
     });
     expect(prepared.resourceKey).toMatch(/^0x[0-9a-f]{64}$/);
@@ -790,10 +790,10 @@ async function productStoreFixture(participants: readonly ParticipantFixture[]):
     goods: [],
     totalAmount: "0",
     currency: "USDC",
-    status: "registered",
+    status: "triggered",
     createdAt: baseNow.toISOString(),
     updatedAt: baseNow.toISOString(),
-    registeredOrderId: orderId
+    triggeredOrderId: orderId
   }, participants.map((participant, index) => ({
     participantId: `participant_${index + 1}`,
     draftId: "draft_stage_patch_1",
@@ -807,7 +807,8 @@ async function productStoreFixture(participants: readonly ParticipantFixture[]):
     acceptedAt: baseNow.toISOString()
   })));
   await store.createRegistration({
-    registrationId: "registration_stage_patch_1",
+    triggerId: "registration_stage_patch_1",
+    prepareId: "prepare_stage_patch_1",
     draftId: "draft_stage_patch_1",
     orderId,
     stateMachineAddress: contractAddress,
@@ -815,6 +816,15 @@ async function productStoreFixture(participants: readonly ParticipantFixture[]):
     planHash,
     status: "confirmed",
     blockNumber: "2",
+    sourceId: bytes32Text("product"),
+    signalId: bytes32Text("created"),
+    triggerHookId: bytes32Text("create-hook"),
+    triggerStageId: bytes32Text("create-stage"),
+    submitter: selectorWallet,
+    payloadHash: bytes32Hex("aaa"),
+    idempotencyKey: bytes32Hex("bbb"),
+    deadline: "1770000000",
+    typedData: {},
     retryable: false,
     createdAt: baseNow.toISOString(),
     updatedAt: baseNow.toISOString(),

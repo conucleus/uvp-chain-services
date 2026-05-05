@@ -15,7 +15,6 @@ import { EXECUTOR_PATCH_MODE_ASSIGN } from "../src/stage-patches/typed-data.js";
 const contractAddress = "0x1111111111111111111111111111111111111111";
 const contractAddressV2 = "0x9999999999999999999999999999999999999999";
 const deploymentRegistryAddress = "0x8888888888888888888888888888888888888888";
-const trustRegistryAddress = "0x7777777777777777777777777777777777777777";
 const buyer = "0x2222222222222222222222222222222222222222";
 const seller = "0x3333333333333333333333333333333333333333";
 const signer = "0x4444444444444444444444444444444444444444";
@@ -105,6 +104,14 @@ describe("indexer projection replay", () => {
     expect(order?.hooks[hookId]?.status).toBe("ready");
     expect(order?.tasks[taskId]?.status).toBe("ready");
     expect(order?.timeline.map((event) => event.eventName)).toContain("SignalSubmitted");
+    expect(order?.timeline.map((event) => event.eventName)).toEqual(expect.arrayContaining([
+      "OrderMaterialized",
+      "StageMaterialized"
+    ]));
+    expect(order?.proof.map((proof) => proof.eventName)).toEqual(expect.arrayContaining([
+      "OrderMaterialized",
+      "StageMaterialized"
+    ]));
     expect(order?.proof.some((proof) => proof.eventName === "HookReady" && proof.transactionHash)).toBe(true);
   });
 
@@ -357,7 +364,7 @@ describe("indexer projection replay", () => {
       chainId: 31337,
       fromBlock: "0",
       toBlock: "9",
-      eventCount: 7,
+      eventCount: 9,
       stateMachineOrderCount: 1,
       trustPlanCount: 0,
       mismatchCount: 0,
@@ -371,7 +378,7 @@ describe("indexer projection replay", () => {
       latestIndexedBlock: 7n,
       finalizedBlock: 9n,
       confirmationDepth: 2,
-      eventCount: 7,
+      eventCount: 9,
       rebuild: expect.objectContaining({ status: "completed" })
     });
   });
@@ -416,12 +423,12 @@ describe("indexer projection replay", () => {
       expect(result.summary).toMatchObject({
         fromBlock: "4",
         toBlock: "7",
-        eventCount: 7,
+        eventCount: 9,
         stateMachineOrderCount: 1,
         syncStatus: "indexed",
         finalizedBlock: "7"
       });
-      await expect(store.listEvents({ chainId: 31337 })).resolves.toHaveLength(7);
+      await expect(store.listEvents({ chainId: 31337 })).resolves.toHaveLength(9);
       await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
         .resolves.toMatchObject({ nextBlock: 8n, finalizedBlock: 7n });
     } finally {
@@ -463,7 +470,7 @@ describe("indexer projection replay", () => {
         chainStatus: "action_required",
         projection: expect.objectContaining({
           syncStatus: "indexed",
-          eventCount: 7,
+          eventCount: 9,
           lastEventName: "HookReady"
         })
       });
@@ -568,6 +575,39 @@ describe("indexer projection replay", () => {
       }));
   });
 
+  it("passes finalized SignalSubmitted events to the notification processor after projection commit", async () => {
+    const store = new MemoryProjectionStore();
+    const events = stateMachineEvents();
+    const processedEvents: Array<readonly ChainEvent[]> = [];
+    const eventSource: ChainEventSource = {
+      async getFinalizedBlock() {
+        return 10n;
+      },
+      async readEvents() {
+        return events;
+      }
+    };
+    const indexer = new IndexerService({
+      config: testConfig(),
+      eventSource,
+      store,
+      notificationProcessor: {
+        async processSignalSubmittedEvents(input) {
+          processedEvents.push(input);
+        }
+      }
+    });
+
+    await indexer.rebuildFromDeploymentBlockWithSummary();
+
+    expect(await store.getStateMachineOrder(stateMachineOrderId)).toMatchObject({ orderId: stateMachineOrderId });
+    expect(processedEvents).toHaveLength(1);
+    expect(processedEvents[0]).toContainEqual(expect.objectContaining({
+      eventName: "SignalSubmitted",
+      args: expect.objectContaining({ orderId: stateMachineOrderId })
+    }));
+  });
+
   it("queued projection refresh includes a tx-backed OrderRegistered proof", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: [] });
@@ -663,8 +703,6 @@ function deploymentRegistryEvents(): readonly ChainEvent[] {
     chainEvent(1n, 0, "DeploymentRegistered", {
       deploymentId: deploymentIdV1,
       stateMachine: contractAddress,
-      trustRegistry: trustRegistryAddress,
-      officialDomainId: emptyHash,
       artifactHash: planHash,
       abiHash,
       deploymentBlock: 1n,
@@ -684,8 +722,6 @@ function deploymentRegistryEvents(): readonly ChainEvent[] {
     chainEvent(8n, 0, "DeploymentRegistered", {
       deploymentId: deploymentIdV2,
       stateMachine: contractAddressV2,
-      trustRegistry: trustRegistryAddress,
-      officialDomainId: emptyHash,
       artifactHash: planHash,
       abiHash,
       deploymentBlock: 8n,
@@ -727,6 +763,18 @@ function stateMachineEvents(
       payloadHash,
       idempotencyKey,
       submitter: signer
+    }, stateMachineAddress),
+    chainEvent(blockOffset + 3n, 1, "OrderMaterialized", {
+      orderId,
+      planId,
+      stageId
+    }, stateMachineAddress),
+    chainEvent(blockOffset + 3n, 2, "StageMaterialized", {
+      orderId,
+      stageId,
+      triggerHookId: hookId,
+      sourceId,
+      signalId
     }, stateMachineAddress),
     chainEvent(blockOffset + 4n, 0, "HookStatusChanged", {
       orderId,

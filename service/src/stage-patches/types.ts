@@ -13,15 +13,15 @@ export type PreviousExecutorSignatureStatus = "not_required" | "not_verified" | 
 
 export interface StageExecutorPatchTypedData {
   readonly domain: {
-    readonly name: "UVPStateMachine";
-    readonly version: "0.2";
+    readonly name: "UVPStagePatchModule";
+    readonly version: "0.1";
     readonly chainId: number;
     readonly verifyingContract: Address;
   };
   readonly types: {
-    readonly UVPStateMachineStageExecutorPatch: readonly StagePatchTypedDataField[];
+    readonly UVPStagePatchModuleStageExecutorPatch: readonly StagePatchTypedDataField[];
   };
-  readonly primaryType: "UVPStateMachineStageExecutorPatch";
+  readonly primaryType: "UVPStagePatchModuleStageExecutorPatch";
   readonly message: {
     readonly orderId: Hex;
     readonly selectorStageId: Hex;
@@ -43,15 +43,15 @@ export interface StageExecutorPatchTypedData {
 
 export interface StageResourcePatchTypedData {
   readonly domain: {
-    readonly name: "UVPStateMachine";
-    readonly version: "0.2";
+    readonly name: "UVPStagePatchModule";
+    readonly version: "0.1";
     readonly chainId: number;
     readonly verifyingContract: Address;
   };
   readonly types: {
-    readonly UVPStateMachineStageResourcePatch: readonly StagePatchTypedDataField[];
+    readonly UVPStagePatchModuleStageResourcePatch: readonly StagePatchTypedDataField[];
   };
-  readonly primaryType: "UVPStateMachineStageResourcePatch";
+  readonly primaryType: "UVPStagePatchModuleStageResourcePatch";
   readonly message: {
     readonly orderId: Hex;
     readonly selectorStageId: Hex;
@@ -69,15 +69,15 @@ export interface StageResourcePatchTypedData {
 
 export interface DockedOrderLinkTypedData {
   readonly domain: {
-    readonly name: "UVPStateMachine";
-    readonly version: "0.2";
+    readonly name: "UVPDockingModule";
+    readonly version: "0.1";
     readonly chainId: number;
     readonly verifyingContract: Address;
   };
   readonly types: {
-    readonly UVPStateMachineDockedOrderLink: readonly StagePatchTypedDataField[];
+    readonly UVPDockingModuleDockedOrderLink: readonly StagePatchTypedDataField[];
   };
-  readonly primaryType: "UVPStateMachineDockedOrderLink";
+  readonly primaryType: "UVPDockingModuleDockedOrderLink";
   readonly message: {
     readonly localOrderId: Hex;
     readonly selectorStageId: Hex;

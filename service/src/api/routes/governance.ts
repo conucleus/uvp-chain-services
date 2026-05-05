@@ -128,25 +128,12 @@ async function handleTrustProjectionRequest(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1]
 ): Promise<ApiResponse | undefined> {
-  if (request.method === "GET" && request.pathname === "/trust/domains") {
-    return {
-      status: 200,
-      body: { domains: await context.store.listTrustDomains() }
-    };
-  }
-
   if (request.method === "GET" && request.pathname === "/trust/plans") {
     const parsedQuery = parsePlanTrustQuery(request.query);
     if (!parsedQuery.ok) {
       return parsedQuery.response;
     }
     const query = parsedQuery.query;
-    if (!query.domainId) {
-      return {
-        status: 400,
-        body: { error: "domain_id_required" }
-      };
-    }
     return {
       status: 200,
       body: {
@@ -161,12 +148,6 @@ async function handleTrustProjectionRequest(
       return parsedQuery.response;
     }
     const query = parsedQuery.query;
-    if (!query.domainId) {
-      return {
-        status: 400,
-        body: { error: "domain_id_required" }
-      };
-    }
     return {
       status: 200,
       body: {
@@ -181,12 +162,12 @@ async function handleTrustProjectionRequest(
 function parsePlanTrustQuery(query: ApiRequest["query"]): ParsedTrustQuery {
   return validateTrustQuery(
     cleanQuery({
-      domainId: query?.domainId,
+      registryAddress: query?.registryAddress,
       planId: query?.planId,
       planHash: query?.planHash
     }),
     {
-      domainId: "bytes32",
+      registryAddress: "address",
       planId: "bytes32",
       planHash: "bytes32"
     }
@@ -196,12 +177,12 @@ function parsePlanTrustQuery(query: ApiRequest["query"]): ParsedTrustQuery {
 function parseSupplierTrustQuery(query: ApiRequest["query"]): ParsedTrustQuery {
   return validateTrustQuery(
     cleanQuery({
-      domainId: query?.domainId,
+      registryAddress: query?.registryAddress,
       supplierSubjectId: query?.supplierSubjectId,
       wallet: query?.wallet
     }),
     {
-      domainId: "bytes32",
+      registryAddress: "address",
       supplierSubjectId: "bytes32",
       wallet: "address"
     }

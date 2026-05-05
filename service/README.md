@@ -586,17 +586,17 @@ POST /product/invites/:inviteId/accept
 POST /product/invites/:inviteId/reject
 GET /product/orders/:draftId/participants
 POST /product/order-drafts/:draftId/submit
-GET /product/order-registrations/:registrationId
-POST /product/order-registrations/:registrationId/retry
+GET /product/order-triggers/:registrationId
+POST /product/order-triggers/:registrationId/retry
 ```
 
 Draft creation and submit re-check the existing product/trust projection. A
 plan must be attested and not revoked unless a caller explicitly opts into the
 demo fallback for draft creation; submit still requires real attestation.
 Submit validates required participants and wallets, builds server-side
-`SignalAuthorization[]`, creates a stable `orderId`, and calls the configured
-registration adapter for `UVPStateMachine.registerOrder(orderId, planId,
-creator, authorizations)`.
+`SignalAuthorization[]`, creates a stable `orderId`, prepares signed trigger
+typed data, and calls the configured registration adapter for
+`UVPStateMachine.triggerOrderFromOutsideFor(trigger, authorizations, signature)`.
 
 The default registration adapter is an in-memory fake that leaves registration
 `status = pending`; it does not mark the draft as chain-registered. Use the
@@ -612,7 +612,7 @@ UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT
 UVP_PRODUCT_BFF_CREATOR_ADDRESS
 ```
 
-`GET /product/order-registrations/:registrationId` returns `pending`,
+`GET /product/order-triggers/:registrationId` returns `pending`,
 `confirmed`, or `failed` plus `txHash?`, `blockNumber?`, `errorCode?`, and
 `retryable`. Retry reuses the same `orderId` and only works for
 `failed && retryable` registrations.
@@ -654,13 +654,13 @@ reviews remain direct-viewable but are not recommended.
 
 Attest endpoints generate the request DTOs expected by `ZhixuTrustRegistry`:
 
-- plan attest: `domainId`, `planId`, `planHash`, `artifactHash`,
+- plan attest: `planId`, `planHash`, `artifactHash`,
   generated `policyHash`, generated `metadataHash`, `metadataURI`;
-- plan revoke: `domainId`, `planId`, generated `reasonHash`, `reasonURI`;
-- supplier attest: `domainId`, `supplierSubjectId`, `wallet`, generated
+- plan revoke: `planId`, generated `reasonHash`, `reasonURI`;
+- supplier attest: `supplierSubjectId`, `wallet`, generated
   `profileHash`, `capabilityHash`, `reputationHash`, generated
   `metadataHash`, `metadataURI`;
-- supplier revoke: `domainId`, `supplierSubjectId`, generated `reasonHash`,
+- supplier revoke: `supplierSubjectId`, generated `reasonHash`,
   `reasonURI`.
 
 All hash inputs use canonical JSON snapshots and exclude `internalNotes` from
@@ -672,21 +672,18 @@ Real governance broadcast uses:
 
 ```text
 GOVERNANCE_BROADCAST_ENABLED
-GOVERNANCE_DOMAIN_ID
 GOVERNANCE_SIGNER_PRIVATE_KEY
 GOVERNANCE_SIGNER_ADDRESS
-GOVERNANCE_DOMAIN_OWNER_ADDRESS
+GOVERNANCE_REGISTRY_OWNER_ADDRESS
 GOVERNANCE_RPC_URL
 GOVERNANCE_CHAIN_ID
 GOVERNANCE_TX_CONFIRMATIONS
 GOVERNANCE_ALLOWED_OPERATORS
 ```
 
-The broadcaster verifies the RPC chain id, requires the request `domainId` to
-match `GOVERNANCE_DOMAIN_ID`, and checks that the signer is the registry domain
-owner unless the signer is explicitly present in `GOVERNANCE_ALLOWED_OPERATORS`.
-The allowed-operator setting is only a seam for future operator support; the
-current contract still enforces `onlyDomainOwner`.
+The broadcaster verifies the RPC chain id and checks `ZhixuTrustRegistry.owner()`.
+For the v0.2 registry, the governance signer must be the registry owner; broader
+operator policy belongs in a future registry contract or product-layer policy.
 
 Tx logs expose `pending`, `broadcasting`, `indexing`, `confirmed`, or `failed`
 state plus `retryable`. A submitted transaction that is waiting for receipt or
@@ -815,8 +812,7 @@ UVP_RELAYER_GAS_PAYER_ADDRESS
 UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY_ENV
 UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY
 UVP_REHEARSAL_PARTICIPANT_WALLETS
-GOVERNANCE_DOMAIN_ID
-GOVERNANCE_DOMAIN_OWNER_ADDRESS
+GOVERNANCE_REGISTRY_OWNER_ADDRESS
 GOVERNANCE_SIGNER_ADDRESS
 GOVERNANCE_SIGNER_PRIVATE_KEY
 GOVERNANCE_ADMIN_REVIEWER_IDS

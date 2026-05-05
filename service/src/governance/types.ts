@@ -63,7 +63,6 @@ export interface ReviewInput {
 
 export interface PlanAttestationRequestDTO {
   readonly kind: "attestPlan";
-  readonly domainId: Hex;
   readonly planId: Hex;
   readonly planHash: Hex;
   readonly artifactHash: Hex;
@@ -75,7 +74,6 @@ export interface PlanAttestationRequestDTO {
 
 export interface PlanRevocationRequestDTO {
   readonly kind: "revokePlan";
-  readonly domainId: Hex;
   readonly planId: Hex;
   readonly reasonHash: Hex;
   readonly reasonURI: string;
@@ -84,7 +82,6 @@ export interface PlanRevocationRequestDTO {
 
 export interface SupplierAttestationRequestDTO {
   readonly kind: "attestSupplier";
-  readonly domainId: Hex;
   readonly supplierSubjectId: Hex;
   readonly wallet: Address;
   readonly profileHash: Hex;
@@ -97,7 +94,6 @@ export interface SupplierAttestationRequestDTO {
 
 export interface SupplierRevocationRequestDTO {
   readonly kind: "revokeSupplier";
-  readonly domainId: Hex;
   readonly supplierSubjectId: Hex;
   readonly reasonHash: Hex;
   readonly reasonURI: string;
@@ -125,7 +121,6 @@ export interface PlanAttestationLogDTO extends TxReconcileFields {
   readonly logId: string;
   readonly txLogId: string;
   readonly action: "attest_plan" | "revoke_plan";
-  readonly domainId: Hex;
   readonly subjectId: Hex;
   readonly planId: Hex;
   readonly planHash?: Hex;
@@ -153,7 +148,6 @@ export interface SupplierAttestationLogDTO extends TxReconcileFields {
   readonly logId: string;
   readonly txLogId: string;
   readonly action: "attest_supplier" | "revoke_supplier";
-  readonly domainId: Hex;
   readonly subjectId: Hex;
   readonly supplierSubjectId: Hex;
   readonly wallet?: Address;

@@ -1,6 +1,6 @@
 import type { ChainServicesConfig } from "../config/index.js";
 import { loadConfigFromEnv } from "../config/index.js";
-import { createDefaultEventSource } from "./viem-event-source.js";
+import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import type { ChainEvent, EventCursor } from "./events.js";
 import { filterActiveChainEvents, sortChainEvents } from "./events.js";
 import type { ProjectionSnapshot } from "./projections.js";
@@ -27,6 +27,10 @@ export interface ChainEventRange {
 export interface ChainEventSource {
   getFinalizedBlock(config: ChainServicesConfig): Promise<bigint>;
   readEvents(range: ChainEventRange, config: ChainServicesConfig): Promise<readonly ChainEvent[]>;
+}
+
+export interface ChainEventNotificationProcessor {
+  processSignalSubmittedEvents(events: readonly ChainEvent[]): Promise<unknown>;
 }
 
 export interface IndexerRebuildSummary {
@@ -56,6 +60,7 @@ export interface IndexerServiceOptions {
   readonly config: ChainServicesConfig;
   readonly eventSource: ChainEventSource;
   readonly store: ProjectionStore;
+  readonly notificationProcessor?: ChainEventNotificationProcessor;
   readonly logger?: Logger;
 }
 
@@ -69,6 +74,7 @@ export class IndexerService implements LifecycleService {
   readonly #config: ChainServicesConfig;
   readonly #eventSource: ChainEventSource;
   readonly #store: ProjectionStore;
+  readonly #notificationProcessor: ChainEventNotificationProcessor | undefined;
   readonly #logger: Logger;
   readonly #scope: ProjectionScope;
 
@@ -76,6 +82,7 @@ export class IndexerService implements LifecycleService {
     this.#config = options.config;
     this.#eventSource = options.eventSource;
     this.#store = options.store;
+    this.#notificationProcessor = options.notificationProcessor;
     this.#logger = options.logger ?? noopLogger;
     this.#scope = defaultProjectionScope(options.config.network.chainId);
   }
@@ -199,6 +206,7 @@ export class IndexerService implements LifecycleService {
         scope: this.#scope,
         syncState: syncStateInput
       });
+      await this.#processSignalNotifications(activeEvents);
 
       this.#cursor = {
         chainId: this.#config.network.chainId,
@@ -329,6 +337,7 @@ export class IndexerService implements LifecycleService {
       finalizedBlock
     };
     await this.#saveCursor();
+    await this.#processSignalNotifications(activeNewEvents);
 
     this.#logger.info("indexer incrementally refreshed projections from chain events", {
       fromBlock: fromBlock.toString(),
@@ -423,6 +432,19 @@ export class IndexerService implements LifecycleService {
     };
   }
 
+  async #processSignalNotifications(events: readonly ChainEvent[]): Promise<void> {
+    if (!this.#notificationProcessor || events.length === 0) {
+      return;
+    }
+    try {
+      await this.#notificationProcessor.processSignalSubmittedEvents(events);
+    } catch (error) {
+      this.#logger.warn("notification processor failed after indexer projection commit", {
+        message: error instanceof Error ? redactErrorMessage(error) : "unknown notification processor error"
+      });
+    }
+  }
+
   async #markDegraded(finalizedBlock: bigint, error: unknown): Promise<void> {
     const existing = await this.#store.getSyncState(this.#scope).catch(() => undefined);
     await this.#store.saveSyncState({
@@ -454,7 +476,7 @@ export function createIndexerService(options: IndexerServiceOptions): IndexerSer
 async function main(): Promise<void> {
   const config = loadConfigFromEnv();
   if (process.argv.includes("--rebuild")) {
-    const eventSource = createDefaultEventSource(config);
+    const eventSource = createChainEventSourceForTarget(config);
     if (!eventSource) {
       throw new Error("no configured indexer contracts; set UVP_CONTRACTS_JSON or an address manifest");
     }

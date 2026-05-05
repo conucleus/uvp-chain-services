@@ -47,9 +47,12 @@ CREATE TABLE IF NOT EXISTS store_supplier_metadata (
   capability_tags_json JSONB NOT NULL,
   supported_role_slot_ids_json JSONB NOT NULL,
   supported_stage_ids_json JSONB NOT NULL,
-  domains_json JSONB NOT NULL,
+  registry_addresses_json JSONB NOT NULL,
   review_status TEXT NOT NULL,
   metadata_uri TEXT,
+  notification_profile_json JSONB,
+  notification_profile_hash TEXT,
+  notification_updated_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

@@ -1,21 +1,13 @@
 import { randomUUID } from "node:crypto";
 import {
-  assertHookPlanArtifact,
   assertOnchainHookPlanArtifact,
-  compileOnchainHookPlan,
-  compileZhixuHookPlan,
+  compileZhixuOnchainHookPlan,
   hashCanonical,
   parseZhixuDefinition,
-  type HookPlanArtifact,
   type OnchainHookPlanArtifact,
   type OnchainSignalInstruction
 } from "@uvp-eth/compiler";
 import {
-  ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-  ORDER_INITIAL_TRIGGER_SIGNAL_NAME,
-  ORDER_INITIAL_TRIGGER_SOURCE,
-  ORDER_REGISTRAR_ROLE_SLOT_ID,
-  ORDER_SYSTEM_STAGE_ID,
   type FulfillmentPluginKind,
   type OrderPermissionTableEntryDTO,
   type ParticipantAddOnKind,
@@ -40,7 +32,7 @@ import type {
 import type { PlanTrustProjection } from "../indexer/trust-projections.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 
-export type StoreZhixuDraftSourceKind = "zhixu_yaml" | "hook_plan_manifest";
+export type StoreZhixuDraftSourceKind = "zhixu_yaml" | "onchain_hook_plan_manifest";
 
 export type StoreZhixuDraftStatus =
   | "imported"
@@ -101,7 +93,6 @@ export interface StoreZhixuDraftRecord extends StoreZhixuDraftDTO {
   readonly publicSummary?: string;
   readonly tags: readonly string[];
   readonly reviewStatus?: GovernanceReviewStatus;
-  readonly attestationDomainId?: string;
 }
 
 export interface SubmitStoreZhixuReviewInput {
@@ -116,7 +107,6 @@ export interface SubmitStoreZhixuReviewInput {
 }
 
 export interface RequestStoreZhixuAttestationInput {
-  readonly domainId: string;
   readonly metadataURI?: string;
   readonly metadata?: unknown;
   readonly policy?: unknown;
@@ -362,7 +352,6 @@ export function createStoreZhixuDraftWorkflowService(options: {
       assertDraftReadyForAttestation(draft);
       const body = parseRequestAttestationInput(input);
       const result = await options.governanceService.attestZhixu({
-        domainId: body.domainId,
         subjectId: draft.compilePreview.planId,
         reviewId: draft.reviewId,
         planId: draft.compilePreview.planId,
@@ -377,7 +366,6 @@ export function createStoreZhixuDraftWorkflowService(options: {
         ...draft,
         status: statusFromGovernanceTxLog(result.log.status),
         governanceTxLogId: result.log.txLogId,
-        attestationDomainId: result.request.domainId,
         updatedAt: timestamp
       };
       await draftStore.updateDraft(updated);
@@ -454,8 +442,8 @@ function assertDraftSchemaMutable(draft: StoreZhixuDraftRecord): void {
 function parseImportRequest(input: unknown): StoreZhixuImportRequestDTO {
   const record = requireRecord(input, "import request");
   const sourceKind = requiredString(record, "sourceKind");
-  if (sourceKind !== "zhixu_yaml" && sourceKind !== "hook_plan_manifest") {
-    throw new StoreZhixuDraftWorkflowError(400, "invalid_source_kind", "sourceKind must be zhixu_yaml or hook_plan_manifest");
+  if (sourceKind !== "zhixu_yaml" && sourceKind !== "onchain_hook_plan_manifest") {
+    throw new StoreZhixuDraftWorkflowError(400, "invalid_source_kind", "sourceKind must be zhixu_yaml or onchain_hook_plan_manifest");
   }
   const content = requiredString(record, "content");
   if (content.trim().length === 0) {
@@ -495,7 +483,6 @@ function parseSubmitReviewInput(input: unknown): SubmitStoreZhixuReviewInput {
 function parseRequestAttestationInput(input: unknown): RequestStoreZhixuAttestationInput {
   const record = requireRecord(input, "request-attestation request");
   return {
-    domainId: requiredString(record, "domainId"),
     ...(optionalString(record, "metadataURI") ? { metadataURI: optionalString(record, "metadataURI")! } : {}),
     ...(Object.hasOwn(record, "metadata") ? { metadata: record.metadata } : {}),
     ...(Object.hasOwn(record, "policy") ? { policy: record.policy } : {})
@@ -514,7 +501,7 @@ function compileDraftContent(
   { readonly ok: false; readonly errors: readonly StoreDraftErrorDTO[] } {
   try {
     const onchain = draft.sourceKind === "zhixu_yaml"
-      ? compileOnchainHookPlan(compileZhixuHookPlan(parseZhixuDefinition(draft.content, "store-zhixu-draft.yaml")))
+      ? compileZhixuOnchainHookPlan(parseZhixuDefinition(draft.content, "store-zhixu-draft.yaml"))
       : compileManifest(draft.content);
     return {
       ok: true,
@@ -539,13 +526,8 @@ function compileManifest(raw: string): OnchainHookPlanArtifact {
     throw new Error(`manifest content must be valid JSON: ${errorMessage(error)}`);
   }
 
-  if (isRecord(parsed) && parsed.schemaVersion === "uvp.onchainHookPlan.v1") {
-    assertOnchainHookPlanArtifact(parsed);
-    return parsed;
-  }
-
-  assertHookPlanArtifact(parsed);
-  return compileOnchainHookPlan(parsed as HookPlanArtifact);
+  assertOnchainHookPlanArtifact(parsed);
+  return parsed as OnchainHookPlanArtifact;
 }
 
 function previewFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreCompilePreviewDTO {
@@ -612,6 +594,7 @@ function buildSuggestedProductSchema(
   const orderPermissionTable = permissionTableFromOnchainArtifact(artifact, stageIds);
   const capabilityPlugins = roleSlots.flatMap((slot) => slot.capabilityPlugins ?? []);
   const selectorBindings = selectorBindingsFromOnchainArtifact(artifact);
+  const createOrderTrigger = createOrderTriggerFromOnchainArtifact(artifact);
   const schemaWithoutHash: Omit<StoreProductSchemaDTO, "schemaHash" | "validation"> & {
     readonly schemaHash?: string;
     readonly validation?: StoreProductSchemaValidationDTO;
@@ -624,6 +607,8 @@ function buildSuggestedProductSchema(
     planId: artifact.planId,
     planHash: artifact.planHash,
     artifactHash: preview.artifactHash,
+    onchainHookPlanArtifact: artifact,
+    ...(createOrderTrigger ? { createOrderTrigger } : {}),
     roleSlots,
     orderPermissionTable,
     capabilityPlugins,
@@ -665,37 +650,33 @@ function permissionTableFromOnchainArtifact(
   artifact: OnchainHookPlanArtifact,
   stageIds: ReadonlySet<string>
 ): readonly OrderPermissionTableEntryDTO[] {
-  return [
-    initialTriggerPermissionFromArtifact(artifact),
-    ...artifact.compiledHooks
-      .filter((hook) => stageIds.has(hook.stageIdentifier))
-      .map((hook): OrderPermissionTableEntryDTO => ({
-        permissionId: `${hook.stageIdentifier}#${hook.hookName}`,
-        roleSlotId: hook.stageIdentifier,
-        stageId: hook.stageIdentifier,
-        source: hook.dependencies[0]?.source ?? hook.kind,
-        signalName: hook.hookName,
-        payloadPolicy: "required",
-        requiredEvidence: [defaultEvidenceLabel(hook.stageIdentifier)]
-      }))
-  ];
+  return artifact.compiledHooks
+    .filter((hook) => stageIds.has(hook.stageIdentifier))
+    .map((hook): OrderPermissionTableEntryDTO => ({
+      permissionId: `${hook.stageIdentifier}#${hook.hookName}`,
+      roleSlotId: hook.stageIdentifier,
+      stageId: hook.stageIdentifier,
+      source: hook.dependencies[0]?.source ?? hook.kind,
+      signalName: hook.hookName,
+      payloadPolicy: "required",
+      requiredEvidence: [defaultEvidenceLabel(hook.stageIdentifier)]
+    }));
 }
 
-function initialTriggerPermissionFromArtifact(artifact: OnchainHookPlanArtifact): OrderPermissionTableEntryDTO {
-  const dependency = artifact.compiledHooks
-    .flatMap((hook) => hook.dependencies)
-    .find((item) => item.source === "order" && item.signalName === "registered") ??
-    artifact.compiledHooks
-      .flatMap((hook) => hook.dependencies)
-      .find((item) => item.signalName === ORDER_INITIAL_TRIGGER_SIGNAL_NAME);
+function createOrderTriggerFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreProductSchemaDTO["createOrderTrigger"] {
+  const hook = artifact.compiledHooks.find((item) =>
+    item.isTrigger &&
+    item.dependencies.some((dependency) => dependency.source === "order" && dependency.signalName === "registered")
+  ) ?? artifact.compiledHooks.find((item) => item.isTrigger && item.dependencies.length > 0);
+  const dependency = hook?.dependencies[0];
+  if (!hook || !dependency) {
+    return undefined;
+  }
   return {
-    permissionId: ORDER_INITIAL_TRIGGER_PERMISSION_ID,
-    roleSlotId: ORDER_REGISTRAR_ROLE_SLOT_ID,
-    stageId: ORDER_SYSTEM_STAGE_ID,
-    source: dependency?.source ?? ORDER_INITIAL_TRIGGER_SOURCE,
-    signalName: dependency?.signalName ?? ORDER_INITIAL_TRIGGER_SIGNAL_NAME,
-    payloadPolicy: "optional",
-    requiredEvidence: []
+    source: dependency.source,
+    signalName: dependency.signalName,
+    triggerHookId: hook.hookId,
+    triggerStageId: hook.stageId
   };
 }
 
@@ -826,6 +807,7 @@ function normalizeProductSchemaInput(
   const selectorBindings = arrayField<StoreProductSchemaSelectorBindingDTO>(schemaRecord, "selectorBindings", () =>
     draft.productSchema?.selectorBindings ?? []
   );
+  const createOrderTrigger = optionalCreateOrderTrigger(schemaRecord, draft.productSchema?.createOrderTrigger);
   const schemaWithoutHash = {
     schemaVersion: "store-product-schema.v1" as const,
     version: numberField(schemaRecord, "version") ?? draft.productSchema?.version ?? 1,
@@ -835,6 +817,12 @@ function normalizeProductSchemaInput(
     planId: optionalRecordString(schemaRecord, "planId") ?? preview.planId,
     planHash: optionalRecordString(schemaRecord, "planHash") ?? preview.planHash,
     artifactHash: optionalRecordString(schemaRecord, "artifactHash") ?? preview.artifactHash,
+    ...(Object.hasOwn(schemaRecord, "onchainHookPlanArtifact")
+      ? { onchainHookPlanArtifact: schemaRecord.onchainHookPlanArtifact }
+      : draft.productSchema?.onchainHookPlanArtifact
+        ? { onchainHookPlanArtifact: draft.productSchema.onchainHookPlanArtifact }
+        : {}),
+    ...(createOrderTrigger ? { createOrderTrigger } : {}),
     roleSlots,
     orderPermissionTable,
     capabilityPlugins: arrayField<SlotCapabilityPluginDTO>(schemaRecord, "capabilityPlugins", () =>
@@ -889,6 +877,7 @@ function productSchemaHashPayload(
     planId: schema.planId,
     planHash: schema.planHash,
     artifactHash: schema.artifactHash,
+    createOrderTrigger: schema.createOrderTrigger ?? null,
     roleSlots: schema.roleSlots,
     orderPermissionTable: schema.orderPermissionTable,
     capabilityPlugins: schema.capabilityPlugins,
@@ -1000,14 +989,11 @@ function validateProductSchemaBundle(
   issues.push(...validateStageExecutorSelection(schema, stages));
 
   for (const entry of schema.orderPermissionTable) {
-    if (isInitialTriggerPermission(entry)) {
-      continue;
-    }
     if (isSystemPermission(entry)) {
       issues.push({
         code: "unsupported_system_permission",
         severity: "error",
-        message: "only the registrar initial trigger system permission is supported",
+        message: "system permission rows are not supported in Product orderPermissionTable",
         path: `orderPermissionTable.${entry.permissionId}`,
         stageId: entry.stageId,
         roleSlotId: entry.roleSlotId
@@ -1049,15 +1035,6 @@ function validateProductSchemaBundle(
   }
 
   return validationForIssues(issues, checkedAt);
-}
-
-function isInitialTriggerPermission(entry: OrderPermissionTableEntryDTO): boolean {
-  return entry.permissionId === ORDER_INITIAL_TRIGGER_PERMISSION_ID &&
-    entry.roleSlotId === ORDER_REGISTRAR_ROLE_SLOT_ID &&
-    entry.stageId === ORDER_SYSTEM_STAGE_ID &&
-    entry.signalName.length > 0 &&
-    entry.payloadPolicy === "optional" &&
-    entry.requiredEvidence.length === 0;
 }
 
 function isSystemPermission(entry: OrderPermissionTableEntryDTO): boolean {
@@ -1464,7 +1441,6 @@ async function matchingTrustProjection(
     return undefined;
   }
   const plans = await projectionStore.listPlanTrust({
-    ...(draft.attestationDomainId ? { domainId: draft.attestationDomainId } : {}),
     planId: draft.compilePreview.planId,
     planHash: draft.compilePreview.planHash
   });
@@ -1602,6 +1578,34 @@ function optionalStringArray(record: Record<string, unknown>, key: string): read
 function optionalRecordString(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function optionalCreateOrderTrigger(
+  record: Record<string, unknown>,
+  fallback?: StoreProductSchemaDTO["createOrderTrigger"]
+): StoreProductSchemaDTO["createOrderTrigger"] {
+  if (!Object.hasOwn(record, "createOrderTrigger")) {
+    return fallback;
+  }
+  const value = record.createOrderTrigger;
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const trigger = requireRecord(value, "createOrderTrigger");
+  return {
+    source: stringField(trigger, "source"),
+    signalName: requiredString(trigger, "signalName"),
+    triggerHookId: requiredString(trigger, "triggerHookId"),
+    triggerStageId: requiredString(trigger, "triggerStageId")
+  };
+}
+
+function stringField(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string") {
+    throw new StoreZhixuDraftWorkflowError(400, "invalid_request_body", `${key} must be a string`);
+  }
+  return value.trim();
 }
 
 function arrayField<TValue>(

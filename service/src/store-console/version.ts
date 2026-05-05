@@ -1,5 +1,4 @@
 import {
-  DEFAULT_OFFICIAL_DOMAIN_ID,
   type ChainAttestationStatus,
   type StoreZhixuVersionStatus,
   type StoreZhixuVersionSummaryDTO
@@ -57,7 +56,6 @@ export interface StoreZhixuVersionMutationInput {
 }
 
 export interface StoreZhixuVersionRevocationInput extends StoreZhixuVersionMutationInput {
-  readonly domainId?: string;
   readonly reason?: string;
   readonly publicSummary?: string;
   readonly metadata?: unknown;
@@ -215,9 +213,7 @@ export function createStoreZhixuVersionService(options: {
         input,
         now
       });
-      const domainId = normalizeBytes32(input.domainId ?? DEFAULT_OFFICIAL_DOMAIN_ID, "domainId");
       const revocation = await options.governanceService.revokeZhixu({
-        domainId,
         planId: record.planId,
         subjectId: record.zhixuId,
         reason: input.reason ?? input.publicSummary ?? "Store operator requested plan revocation.",
@@ -433,7 +429,6 @@ function planTrustForRecord(
   record: StoreZhixuVersionRecord
 ): PlanTrustProjection | undefined {
   return Object.values(snapshot.plans).find((plan) =>
-    plan.domainId === DEFAULT_OFFICIAL_DOMAIN_ID &&
     plan.planId === record.planId &&
     plan.planHash === record.planHash
   );

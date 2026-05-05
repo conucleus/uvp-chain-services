@@ -4,16 +4,22 @@ import type { TxReconcileFields } from "../../reconcile/status.js";
 export type ProductOrderDraftStatus =
   | "draft"
   | "awaiting_participants"
-  | "ready_to_register"
-  | "registering"
-  | "registered"
+  | "ready_to_trigger"
+  | "triggering"
+  | "triggered"
+  | "failed"
   | "cancelled";
 
 export type DraftParticipantStatus = "missing" | "invited" | "accepted" | "rejected" | "replaced";
 export type ProductInviteStatus = "active" | "accepted" | "rejected" | "expired" | "revoked";
 export type PermissionPayloadPolicy = "required" | "optional";
-export type ProductOrderRegistrationStatus = "pending" | "indexing" | "confirmed" | "failed";
-export type ProductOrderStartStatus = "pending" | "submitted" | "indexing" | "confirmed" | "failed";
+export type ProductOrderTriggerStatus =
+  | "prepared"
+  | "submitted"
+  | "indexing"
+  | "confirmed"
+  | "failed"
+  | "expired";
 
 export interface ProductOrderDraftDTO {
   readonly draftId: string;
@@ -33,8 +39,8 @@ export interface ProductOrderDraftDTO {
   readonly createdBy?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
-  readonly registeredOrderId?: string;
-  readonly registrationTxHash?: Hex;
+  readonly triggeredOrderId?: string;
+  readonly triggerTxHash?: Hex;
 }
 
 export interface DraftParticipantDTO {
@@ -86,17 +92,23 @@ export interface SignalAuthorizationDTO {
   readonly metadataHash: Hex;
 }
 
-export interface ProductOrderRegistrationDTO extends TxReconcileFields {
-  readonly registrationId: string;
+export interface ProductOrderTriggerDTO extends TxReconcileFields {
+  readonly triggerId: string;
+  readonly prepareId?: string;
   readonly draftId: string;
   readonly orderId: Hex;
   readonly stateMachineAddress?: Address;
   readonly deploymentId?: Hex;
   readonly planId: Hex;
   readonly planHash: Hex;
-  readonly status: ProductOrderRegistrationStatus;
+  readonly status: ProductOrderTriggerStatus;
   readonly txHash?: Hex;
   readonly blockNumber?: string;
+  readonly submitter?: Address;
+  readonly sourceId?: Hex;
+  readonly signalId?: Hex;
+  readonly triggerHookId?: Hex;
+  readonly triggerStageId?: Hex;
   readonly errorCode?: string;
   readonly errorMessage?: string;
   readonly retryable: boolean;
@@ -104,27 +116,15 @@ export interface ProductOrderRegistrationDTO extends TxReconcileFields {
   readonly updatedAt: string;
 }
 
-export interface ProductOrderRegistrationRecord extends ProductOrderRegistrationDTO {
+export interface ProductOrderTriggerRecord extends ProductOrderTriggerDTO {
   readonly creator: Address;
+  readonly payloadHash: Hex;
+  readonly idempotencyKey: Hex;
+  readonly deadline: string;
+  readonly typedData: unknown;
+  readonly signature?: Hex;
   readonly authorizations: readonly SignalAuthorizationDTO[];
   readonly permissions: readonly ParticipantPermissionDTO[];
-}
-
-export interface ProductOrderStartDTO extends TxReconcileFields {
-  readonly startId: string;
-  readonly registrationId: string;
-  readonly draftId: string;
-  readonly orderId: Hex;
-  readonly stateMachineAddress?: Address;
-  readonly deploymentId?: Hex;
-  readonly status: ProductOrderStartStatus;
-  readonly txHash?: Hex;
-  readonly blockNumber?: string;
-  readonly errorCode?: string;
-  readonly errorMessage?: string;
-  readonly retryable: boolean;
-  readonly createdAt: string;
-  readonly updatedAt: string;
 }
 
 export interface CreateProductOrderDraftInput {
@@ -177,6 +177,16 @@ export interface PreviewProductInviteInput {
   readonly walletAddress?: string;
 }
 
+export interface PrepareProductOrderTriggerInput {
+  readonly walletAddress: string;
+}
+
+export interface TriggerProductOrderInput {
+  readonly prepareId: string;
+  readonly signature: string;
+  readonly walletAddress: string;
+}
+
 export interface ProductOrderDraftResponse {
   readonly draft: ProductOrderDraftDTO;
   readonly participants: readonly DraftParticipantDTO[];
@@ -225,7 +235,7 @@ export interface ProductInvitePreviewResponse extends ProductInviteResponse {
 export interface ProductParticipantAssignmentDTO {
   readonly participant: DraftParticipantDTO;
   readonly draft: ProductOrderDraftDTO;
-  readonly registration?: ProductOrderRegistrationDTO;
+  readonly trigger?: ProductOrderTriggerDTO;
   readonly permissions: readonly ParticipantPermissionDTO[];
 }
 
@@ -233,10 +243,34 @@ export interface SubmitProductOrderDraftResult {
   readonly draft: ProductOrderDraftDTO;
   readonly participants: readonly DraftParticipantDTO[];
   readonly permissions: readonly ParticipantPermissionDTO[];
-  readonly registration: ProductOrderRegistrationDTO;
+  readonly trigger: ProductOrderTriggerDTO;
 }
 
-export interface StartProductOrderRegistrationResult {
-  readonly registration: ProductOrderRegistrationDTO;
-  readonly start: ProductOrderStartDTO;
+export interface PreparedProductOrderTriggerDTO {
+  readonly prepareId: string;
+  readonly triggerId: string;
+  readonly draftId: string;
+  readonly orderId: Hex;
+  readonly expiresAt: string;
+  readonly submitter: Address;
+  readonly typedData: unknown;
+  readonly summary: {
+    readonly orderTitle: string;
+    readonly planId: Hex;
+    readonly sourceId: Hex;
+    readonly signalId: Hex;
+    readonly triggerHookId: Hex;
+    readonly triggerStageId: Hex;
+    readonly walletAddress: Address;
+  };
 }
+
+export interface PrepareProductOrderTriggerResult {
+  readonly draft: ProductOrderDraftDTO;
+  readonly participants: readonly DraftParticipantDTO[];
+  readonly permissions: readonly ParticipantPermissionDTO[];
+  readonly trigger: ProductOrderTriggerDTO;
+  readonly prepared: PreparedProductOrderTriggerDTO;
+}
+
+export type TriggerProductOrderResult = SubmitProductOrderDraftResult;

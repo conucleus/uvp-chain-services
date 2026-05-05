@@ -48,11 +48,10 @@ export interface ConfigDiagnostics {
     readonly broadcastEnabled: boolean;
     readonly configured: boolean;
     readonly contractConfigured: boolean;
-    readonly domainConfigured: boolean;
     readonly signerConfigured: boolean;
     readonly signerAddress?: Address;
     readonly expectedSignerAddress?: Address;
-    readonly expectedDomainOwnerAddress?: Address;
+    readonly expectedRegistryOwnerAddress?: Address;
     readonly allowedOperatorCount: number;
   };
   readonly operatorRoles: {
@@ -65,7 +64,7 @@ export interface ConfigDiagnostics {
       readonly configuredCount: number;
       readonly backendBusinessSigning: "forbidden";
     };
-    readonly governanceDomainOwner: AddressRoleDiagnostics;
+    readonly governanceRegistryOwner: AddressRoleDiagnostics;
     readonly governanceSigner: PrivateKeyRoleDiagnostics;
     readonly governanceAdminReviewer: {
       readonly configuredCount: number;
@@ -125,8 +124,8 @@ export interface PreflightPublicClient {
   readContract?(parameters: {
     readonly address: ViemAddress;
     readonly abi: unknown;
-    readonly functionName: "domainOwner";
-    readonly args: readonly unknown[];
+    readonly functionName: string;
+    readonly args?: readonly unknown[];
   }): Promise<unknown>;
 }
 
@@ -152,7 +151,15 @@ export interface RunConfigPreflightOptions {
 }
 
 const trustRegistryOwnerAbi = parseAbi([
-  "function domainOwner(bytes32 domainId) view returns (address)"
+  "function owner() view returns (address)"
+]);
+const stateMachineModuleAbi = parseAbi([
+  "function stagePatchModule() view returns (address)",
+  "function derivedSignalModule() view returns (address)",
+  "function dockingModule() view returns (address)",
+  "function planMetadataModule() view returns (address)",
+  "function orderLinkModule() view returns (address)",
+  "function lens() view returns (address)"
 ]);
 
 const zeroAddress = "0x0000000000000000000000000000000000000000";
@@ -209,7 +216,6 @@ export function buildConfigDiagnostics(
   const governanceSignerAddress = config.governance.signerPrivateKey
     ? privateKeyAddress(config.governance.signerPrivateKey, "governance signer")
     : undefined;
-  const governanceDomainConfigured = Boolean(config.governance.domainId);
   const governanceContractConfigured = Boolean(trustRegistry);
   const demoMode = enabledEnv(env, "UVP_PRODUCT_DEMO_MODE");
   const e2eControls = enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES");
@@ -261,14 +267,12 @@ export function buildConfigDiagnostics(
       broadcastEnabled: config.governance.broadcastEnabled,
       configured: config.governance.broadcastEnabled &&
         governanceContractConfigured &&
-        governanceDomainConfigured &&
         governanceSignerConfigured,
       contractConfigured: governanceContractConfigured,
-      domainConfigured: governanceDomainConfigured,
       signerConfigured: governanceSignerConfigured,
       ...(governanceSignerAddress ? { signerAddress: governanceSignerAddress } : {}),
       ...(config.governance.signerAddress ? { expectedSignerAddress: config.governance.signerAddress } : {}),
-      ...(config.governance.domainOwnerAddress ? { expectedDomainOwnerAddress: config.governance.domainOwnerAddress } : {}),
+      ...(config.governance.registryOwnerAddress ? { expectedRegistryOwnerAddress: config.governance.registryOwnerAddress } : {}),
       allowedOperatorCount: config.governance.allowedOperators.length
     },
     operatorRoles: operatorRoleDiagnostics(config, env),
@@ -378,11 +382,6 @@ function runStaticPreflight(
       fail(checks, errors, "governance.contract", "ZhixuTrustRegistry contract address is required when governance broadcast is enabled");
     } else {
       pass(checks, "governance.contract");
-    }
-    if (!config.governance.domainId) {
-      fail(checks, errors, "governance.domain", "GOVERNANCE_DOMAIN_ID is required when governance broadcast is enabled");
-    } else {
-      pass(checks, "governance.domain");
     }
     if (!config.governance.signerPrivateKey) {
       fail(checks, errors, "governance.signer", "GOVERNANCE_SIGNER_PRIVATE_KEY is required when governance broadcast is enabled");
@@ -863,15 +862,10 @@ function runStagingRolePreflight(
     missingMessage: "GOVERNANCE_SIGNER_PRIVATE_KEY is required in staging",
     mismatchMessage: "GOVERNANCE_SIGNER_PRIVATE_KEY does not match GOVERNANCE_SIGNER_ADDRESS"
   });
-  if (config.governance.domainId) {
-    pass(checks, "operator.governance_domain");
+  if (config.governance.registryOwnerAddress) {
+    pass(checks, "operator.governance_registry_owner");
   } else {
-    fail(checks, errors, "operator.governance_domain", "GOVERNANCE_DOMAIN_ID is required in staging");
-  }
-  if (config.governance.domainOwnerAddress) {
-    pass(checks, "operator.governance_domain_owner");
-  } else {
-    fail(checks, errors, "operator.governance_domain_owner", "GOVERNANCE_DOMAIN_OWNER_ADDRESS is required in staging");
+    fail(checks, errors, "operator.governance_registry_owner", "GOVERNANCE_REGISTRY_OWNER_ADDRESS is required in staging");
   }
   if (config.operatorRoles.adminReviewers.length > 0) {
     pass(checks, "operator.governance_admin_reviewer");
@@ -988,10 +982,16 @@ async function runRpcPreflight(
     checks,
     errors
   });
+  await checkStateMachineModules({
+    config,
+    client: networkClient,
+    checks,
+    errors
+  });
 
   const shouldCheckGovernanceOwner = config.governance.broadcastEnabled ||
-    (config.security.environment === "staging" && Boolean(config.governance.domainId && config.governance.signerPrivateKey));
-  if (!shouldCheckGovernanceOwner || !config.governance.domainId || !config.governance.signerPrivateKey) {
+    (config.security.environment === "staging" && Boolean(config.governance.signerPrivateKey));
+  if (!shouldCheckGovernanceOwner || !config.governance.signerPrivateKey) {
     return;
   }
 
@@ -1011,10 +1011,10 @@ async function runRpcPreflight(
 
   if (!governanceClient.readContract) {
     if (config.security.environment === "staging" || config.security.environment === "production") {
-      fail(checks, errors, "governance.owner", "governance preflight client must read domain owner in staging and production");
+      fail(checks, errors, "governance.owner", "governance preflight client must read registry owner in staging and production");
       return;
     }
-    skip(checks, "governance.owner", "governance preflight client cannot read domain owner");
+    skip(checks, "governance.owner", "governance preflight client cannot read registry owner");
     return;
   }
 
@@ -1023,21 +1023,76 @@ async function runRpcPreflight(
     const owner = normalizeAddress(String(await governanceClient.readContract({
       address: trustRegistry as ViemAddress,
       abi: trustRegistryOwnerAbi,
-      functionName: "domainOwner",
-      args: [config.governance.domainId]
-    })), "governance domain owner");
-    if (config.governance.domainOwnerAddress && owner !== config.governance.domainOwnerAddress) {
-      fail(checks, errors, "governance.owner", "on-chain governance domain owner does not match GOVERNANCE_DOMAIN_OWNER_ADDRESS");
+      functionName: "owner"
+    })), "governance registry owner");
+    if (config.governance.registryOwnerAddress && owner !== config.governance.registryOwnerAddress) {
+      fail(checks, errors, "governance.owner", "on-chain governance registry owner does not match GOVERNANCE_REGISTRY_OWNER_ADDRESS");
       return;
     }
     const allowedOperators = new Set(config.governance.allowedOperators.map((address) => normalizeAddress(address, "governance allowed operator")));
     if (owner !== signer && !allowedOperators.has(signer)) {
-      fail(checks, errors, "governance.owner", "governance signer is not the domain owner or an allowed operator");
+      fail(checks, errors, "governance.owner", "governance signer is not the registry owner or an allowed operator");
       return;
     }
     pass(checks, "governance.owner");
   } catch (error) {
     fail(checks, errors, "governance.owner", redactErrorMessage(error));
+  }
+}
+
+async function checkStateMachineModules(input: {
+  readonly config: ChainServicesConfig;
+  readonly client: PreflightPublicClient;
+  readonly checks: ConfigDiagnosticCheck[];
+  readonly errors: string[];
+}): Promise<void> {
+  const deployment = activeStateMachineDeployment(input.config);
+  if (!deployment?.modules) {
+    skip(input.checks, "contracts.state_machine_modules", "no state-machine module manifest entries configured");
+    return;
+  }
+  if (!input.client.readContract) {
+    if (input.config.security.environment === "staging" || input.config.security.environment === "production") {
+      fail(input.checks, input.errors, "contracts.state_machine_modules", "preflight client must read state-machine module getters in staging and production");
+      return;
+    }
+    skip(input.checks, "contracts.state_machine_modules", "preflight client cannot read state-machine module getters");
+    return;
+  }
+
+  const getterByKey = {
+    stagePatch: "stagePatchModule",
+    derivedSignal: "derivedSignalModule",
+    docking: "dockingModule",
+    planMetadata: "planMetadataModule",
+    orderLink: "orderLinkModule",
+    lens: "lens"
+  } as const;
+
+  try {
+    for (const key of Object.keys(getterByKey) as Array<keyof typeof getterByKey>) {
+      const expected = deployment.modules[key];
+      if (!expected) {
+        continue;
+      }
+      const actual = normalizeAddress(String(await input.client.readContract({
+        address: deployment.stateMachineAddress as ViemAddress,
+        abi: stateMachineModuleAbi,
+        functionName: getterByKey[key]
+      })), `state-machine ${getterByKey[key]}`);
+      if (actual !== expected) {
+        fail(
+          input.checks,
+          input.errors,
+          "contracts.state_machine_modules",
+          `manifest module ${key} does not match on-chain ${getterByKey[key]}`
+        );
+        return;
+      }
+    }
+    pass(input.checks, "contracts.state_machine_modules");
+  } catch (error) {
+    fail(input.checks, input.errors, "contracts.state_machine_modules", redactErrorMessage(error));
   }
 }
 
@@ -1105,6 +1160,17 @@ function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Addr
     }
   }
   return undefined;
+}
+
+function activeStateMachineDeployment(config: ChainServicesConfig): NonNullable<ChainServicesConfig["network"]["stateMachineDeployments"]>[number] | undefined {
+  const deployments = config.network.stateMachineDeployments ?? [];
+  if (config.network.activeDeploymentId) {
+    const active = deployments.find((deployment) => deployment.deploymentId === config.network.activeDeploymentId);
+    if (active) {
+      return active;
+    }
+  }
+  return deployments.find((deployment) => deployment.status === "active") ?? deployments[0];
 }
 
 function trustRegistryAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
@@ -1191,7 +1257,9 @@ function operatorRoleDiagnostics(config: ChainServicesConfig, env: Env): ConfigD
       configuredCount: config.operatorRoles.participantWallets.length,
       backendBusinessSigning: "forbidden"
     },
-    governanceDomainOwner: addressRoleDiagnostics(config.operatorRoles.governanceDomainOwnerAddress ?? config.governance.domainOwnerAddress),
+    governanceRegistryOwner: addressRoleDiagnostics(
+      config.operatorRoles.governanceRegistryOwnerAddress ?? config.governance.registryOwnerAddress
+    ),
     governanceSigner: privateKeyRoleDiagnostics(
       "GOVERNANCE_SIGNER_PRIVATE_KEY",
       env,

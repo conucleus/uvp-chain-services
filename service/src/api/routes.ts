@@ -126,7 +126,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.productRegistrationAdapter ? { registrationAdapter: options.productRegistrationAdapter } : {}),
     ...(options.productTriggerAdapter ? { triggerAdapter: options.productTriggerAdapter } : {}),
     ...(options.productRegistrationCreatorAddress ? { registrationCreatorAddress: options.productRegistrationCreatorAddress } : {}),
-    ...(options.productRegistrarAddress ? { registrarAddress: options.productRegistrarAddress } : {}),
+    ...(options.productRegistrarAddress ? { registrarAddress: options.productRegistrarAddress } : {}), triggerChainId: options.productTriggerChainId ?? options.submissionChainId ?? 31337,
     versionResolver: storeZhixuVersionService,
     supplierTrustResolver: productBffSupplierTrustResolver(store),
     ...(options.now ? { now: options.now } : {})
@@ -152,7 +152,11 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     governanceService,
     metadataStore: storeSupplierMetadataStore
   });
-  const notificationService = options.notificationService ?? createNotificationService({ store });
+  const notificationService = options.notificationService ?? createNotificationService({
+    store,
+    supplierMetadataStore: storeSupplierMetadataStore,
+    productSchemaResolver
+  });
   const supplierNotificationConfigService = options.supplierNotificationConfigService ??
     createSupplierNotificationProfileConfigService();
   const submissionService = options.submissionService ?? createProductSubmissionService({
@@ -300,8 +304,8 @@ export function productBffStoreSubmissionAuthorization(store: ProductBffStore): 
       if (!registration) {
         return {
           authorized: false,
-          source: "product_bff_registration",
-          reason: "order registration authorization was not found"
+          source: "product_bff_trigger",
+          reason: "order trigger authorization was not found"
         };
       }
       const authorized = registration.authorizations.some((authorization) =>
@@ -311,8 +315,8 @@ export function productBffStoreSubmissionAuthorization(store: ProductBffStore): 
       );
       return {
         authorized,
-        source: "product_bff_registration",
-        ...(authorized ? {} : { reason: "submitter is not present in order registration authorizations" })
+        source: "product_bff_trigger",
+        ...(authorized ? {} : { reason: "submitter is not present in order trigger authorizations" })
       };
     }
   };
@@ -362,7 +366,7 @@ function productBffSupplierTrustResolver(store: ProjectionStore): ProductBffSupp
     const trust = matches.find((supplier) => !supplier.revoked) ?? matches[0];
     return trust
       ? {
-          domainId: trust.domainId,
+          registryAddress: trust.registryAddress,
           supplierSubjectId: trust.supplierSubjectId,
           wallet: trust.wallet,
           status: trust.status,

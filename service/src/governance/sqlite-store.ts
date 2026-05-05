@@ -186,18 +186,17 @@ export class SqliteGovernanceStore implements GovernanceStore {
     const supplierLog = kind === "supplier" ? log as SupplierAttestationLogDTO : undefined;
     this.#database.prepare(
       `INSERT INTO governance_tx_log (
-         log_id, tx_log_id, log_kind, action, domain_id, subject_id, plan_id,
+         log_id, tx_log_id, log_kind, action, subject_id, plan_id,
          supplier_subject_id, wallet, plan_hash, artifact_hash, policy_hash,
          metadata_hash, metadata_uri, reason_hash, reason_uri, tx_hash,
          block_number, signer, requester, status, broadcast_status, error_code,
          error_message, retryable, request_json, log_json, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(log_id)
        DO UPDATE SET
          tx_log_id = excluded.tx_log_id,
          log_kind = excluded.log_kind,
          action = excluded.action,
-         domain_id = excluded.domain_id,
          subject_id = excluded.subject_id,
          plan_id = excluded.plan_id,
          supplier_subject_id = excluded.supplier_subject_id,
@@ -227,7 +226,6 @@ export class SqliteGovernanceStore implements GovernanceStore {
       log.txLogId,
       kind,
       log.action,
-      log.domainId,
       log.subjectId,
       planLog?.planId ?? null,
       supplierLog?.supplierSubjectId ?? null,

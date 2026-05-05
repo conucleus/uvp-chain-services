@@ -19,8 +19,7 @@ import type {
   DraftParticipantDTO,
   ProductInviteDTO,
   ProductOrderDraftDTO,
-  ProductOrderStartDTO,
-  ProductOrderRegistrationRecord
+  ProductOrderTriggerRecord
 } from "../src/product/bff/types.js";
 import type { Address, Hex } from "../src/shared/types.js";
 import { StorageConstraintError } from "../src/storage/errors.js";
@@ -40,6 +39,7 @@ import type { PreparedSubmissionRecord, ProductSubmissionDTO } from "../src/subm
 
 const chainId = 31337;
 const contractAddress = "0x1111111111111111111111111111111111111111";
+const registryAddress = contractAddress as Address;
 const buyer = "0x2222222222222222222222222222222222222222";
 const seller = "0x3333333333333333333333333333333333333333";
 const adminHeaders = {
@@ -54,12 +54,12 @@ const snapshotScopeContract = "0x0000000000000000000000000000000000000000";
 const expectedMigrationVersions = [
   "0001_projection_storage",
   "0002_business_storage",
-  "0003_product_order_start",
   "0004_submission_attempt_operations",
   "0005_projection_sync_state",
   "0006_store_metadata",
   "0007_store_product_schema",
-  "0008_store_audit"
+  "0008_store_audit",
+  "0009_product_trigger_prepare"
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -321,14 +321,10 @@ describe("durable storage", () => {
     const participant = productParticipant(draft.draftId);
     const invite = productInvite(draft.draftId, participant.participantId);
     const registration = productRegistration(draft.draftId);
-    const start = productOrderStart(registration);
 
     await store.createDraft(draft, [participant]);
     await store.createInvite(invite);
     await store.createRegistration(registration);
-    await store.createOrderStart(start);
-    await expect(store.createOrderStart({ ...start, startId: `${start.startId}_duplicate` }))
-      .rejects.toBeInstanceOf(StorageConstraintError);
     await store.close();
     stores.splice(stores.indexOf(store), 1);
 
@@ -338,10 +334,8 @@ describe("durable storage", () => {
     await expect(reopened.getDraft(draft.draftId)).resolves.toMatchObject({ draftId: draft.draftId });
     await expect(reopened.listParticipants(draft.draftId)).resolves.toMatchObject([participant]);
     await expect(reopened.getInvite(invite.inviteId)).resolves.toMatchObject(invite);
-    await expect(reopened.getRegistration(registration.registrationId)).resolves.toMatchObject(registration);
+    await expect(reopened.getRegistration(registration.triggerId)).resolves.toMatchObject(registration);
     await expect(reopened.listRegistrations()).resolves.toHaveLength(1);
-    await expect(reopened.getOrderStartByRegistrationId(registration.registrationId)).resolves.toMatchObject(start);
-    await expect(reopened.listOrderStartsForReconcile({ statuses: ["submitted"] })).resolves.toMatchObject([start]);
   });
 
   it("rolls back SQLite product business writes in a transaction", async () => {
@@ -571,7 +565,6 @@ describe("durable storage", () => {
     await first.projectionStore.resetFromEvents({
       deploymentBlock: 0n,
       events: [chainEvent(6n, 0, "PlanAttested", {
-        domainId: crossBorderPlanIds.domainId,
         planId: crossBorderPlanIds.planId,
         planHash: crossBorderPlanIds.planHash,
         artifactHash: crossBorderPlanIds.artifactHash,
@@ -630,7 +623,7 @@ describe("durable storage", () => {
         capabilityTags: ["logistics"],
         supportedRoleSlotIds: ["customs"],
         supportedStageIds: ["export.customs"],
-        domains: [crossBorderPlanIds.domainId],
+        registryAddresses: [registryAddress],
         metadataURI: "https://store.example/suppliers/route-durable"
       }
     });
@@ -818,7 +811,6 @@ describePostgres(
         stateMachineAddress: contractAddress as Address,
         deploymentId: planId as Hex
       };
-      const start = productOrderStart(registration);
       const evidence = evidenceRecord();
       const prepared = preparedSubmission();
       const submission = productSubmission(prepared);
@@ -843,7 +835,6 @@ describePostgres(
       await first.productBffStore.createDraft(draft, [participant]);
       await first.productBffStore.createInvite(productInvite(draft.draftId, participant.participantId));
       await first.productBffStore.createRegistration(registration);
-      await first.productBffStore.createOrderStart(start);
       await first.evidenceMetadataStore.put(evidence);
       await first.evidenceMetadataStore.markBound?.({
         evidenceId: evidence.evidence.evidenceId,
@@ -882,13 +873,8 @@ describePostgres(
         orderId: stateMachineOrderId,
         planId
       });
-      await expect(reopened.productBffStore.getRegistration(registration.registrationId)).resolves.toMatchObject({
-        registrationId: registration.registrationId,
-        stateMachineAddress: contractAddress,
-        deploymentId: planId
-      });
-      await expect(reopened.productBffStore.getOrderStartByRegistrationId(registration.registrationId)).resolves.toMatchObject({
-        startId: start.startId,
+      await expect(reopened.productBffStore.getRegistration(registration.triggerId)).resolves.toMatchObject({
+        triggerId: registration.triggerId,
         stateMachineAddress: contractAddress,
         deploymentId: planId
       });
@@ -951,7 +937,6 @@ describePostgres(
       await first.projectionStore.resetFromEvents({
         deploymentBlock: 0n,
         events: [chainEvent(6n, 0, "PlanAttested", {
-          domainId: crossBorderPlanIds.domainId,
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           artifactHash: crossBorderPlanIds.artifactHash,
@@ -998,7 +983,7 @@ describePostgres(
           capabilityTags: ["logistics"],
           supportedRoleSlotIds: ["customs"],
           supportedStageIds: ["export.customs"],
-          domains: [crossBorderPlanIds.domainId],
+          registryAddresses: [registryAddress],
           metadataURI: "https://store.example/suppliers/postgres-route-durable"
         }
       });
@@ -1260,15 +1245,25 @@ function productInvite(draftId: string, participantId: string): ProductInviteDTO
   };
 }
 
-function productRegistration(draftId: string): ProductOrderRegistrationRecord {
+function productRegistration(draftId: string): ProductOrderTriggerRecord {
   return {
-    registrationId: `${draftId}_registration`,
+    triggerId: `${draftId}_registration`,
+    prepareId: `${draftId}_prepare`,
     draftId,
     orderId: stateMachineOrderId,
     planId: planId as Hex,
     planHash: planHash as Hex,
-    status: "pending",
+    status: "submitted",
     txHash: "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    sourceId: "0x1111111111111111111111111111111111111111111111111111111111111111",
+    signalId: "0x2222222222222222222222222222222222222222222222222222222222222222",
+    triggerHookId: "0x5555555555555555555555555555555555555555555555555555555555555555",
+    triggerStageId: "0x6666666666666666666666666666666666666666666666666666666666666666",
+    submitter: buyer as Address,
+    payloadHash: "0x7777777777777777777777777777777777777777777777777777777777777777",
+    idempotencyKey: "0x8888888888888888888888888888888888888888888888888888888888888888",
+    deadline: "1770000000",
+    typedData: {},
     retryable: false,
     reconcileStatus: "submitted",
     receiptStatus: "not_checked",
@@ -1294,25 +1289,6 @@ function productRegistration(draftId: string): ProductOrderRegistrationRecord {
       payloadPolicy: "required",
       requiredEvidence: []
     }],
-    createdAt: "2026-04-28T00:00:00.000Z",
-    updatedAt: "2026-04-28T00:00:00.000Z"
-  };
-}
-
-function productOrderStart(registration: ProductOrderRegistrationRecord): ProductOrderStartDTO {
-  return {
-    startId: `${registration.draftId}_start`,
-    registrationId: registration.registrationId,
-    draftId: registration.draftId,
-    orderId: registration.orderId,
-    ...(registration.stateMachineAddress ? { stateMachineAddress: registration.stateMachineAddress } : {}),
-    ...(registration.deploymentId ? { deploymentId: registration.deploymentId } : {}),
-    status: "submitted",
-    txHash: "0xabababababababababababababababababababababababababababababababab",
-    retryable: false,
-    reconcileStatus: "submitted",
-    receiptStatus: "not_checked",
-    projectionStatus: "not_checked",
     createdAt: "2026-04-28T00:00:00.000Z",
     updatedAt: "2026-04-28T00:00:00.000Z"
   };
@@ -1395,7 +1371,7 @@ function preparedSubmission(): PreparedSubmissionRecord {
     typedData: {
       domain: {
         name: "UVPStateMachine",
-        version: "0.2",
+        version: "0.7",
         chainId,
         verifyingContract: contractAddress as Address
       },
@@ -1514,7 +1490,6 @@ function planAttestationLog(): PlanAttestationLogDTO {
     logId: "plan_log_sqlite",
     txLogId: "plan_log_sqlite",
     action: "attest_plan",
-    domainId: "0x6767676767676767676767676767676767676767676767676767676767676767",
     subjectId: planId as Hex,
     planId: planId as Hex,
     planHash: planHash as Hex,
@@ -1533,7 +1508,6 @@ function planAttestationLog(): PlanAttestationLogDTO {
     projectionStatus: "not_checked",
     request: {
       kind: "attestPlan",
-      domainId: "0x6767676767676767676767676767676767676767676767676767676767676767",
       planId: planId as Hex,
       planHash: planHash as Hex,
       artifactHash: "0x7878787878787878787878787878787878787878787878787878787878787878",
@@ -1645,7 +1619,6 @@ function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
     governanceTxLogId: "txlog_store_draft",
     errors: [],
     reviewStatus: "approved_for_broadcast",
-    attestationDomainId: "0x0000000000000000000000000000000000000000000000000000000000007777",
     createdAt: "2026-04-28T00:00:00.000Z",
     updatedAt: "2026-04-28T00:00:01.000Z"
   };
@@ -1679,7 +1652,7 @@ function storeSupplierMetadataRecord(): StoreSupplierMetadataRecord {
     capabilityTags: ["customs", "logistics"],
     supportedRoleSlotIds: ["seller", "logistics"],
     supportedStageIds: ["shipment", "customs"],
-    domains: ["0x0000000000000000000000000000000000000000000000000000000000007777"],
+    registryAddresses: [registryAddress],
     reviewStatus: "approved_for_broadcast",
     metadataURI: "https://store.example/suppliers/durable",
     createdAt: "2026-04-28T00:00:00.000Z",

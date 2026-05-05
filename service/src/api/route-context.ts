@@ -6,7 +6,7 @@ import type {
 } from "../evidence/index.js";
 import type { GovernanceService, GovernanceStore } from "../governance/index.js";
 import type { ProductBffService } from "../product/bff/service.js";
-import type { ProductOrderRegistrationAdapter, ProductOrderTriggerAdapter } from "../product/bff/registration.js";
+import type { ProductOrderTriggerBroadcastAdapter } from "../product/bff/trigger.js";
 import type { ProductBffStore } from "../product/bff/store.js";
 import type { ProductSchemaResolver, ProductService } from "../product/service.js";
 import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
@@ -102,8 +102,9 @@ export interface CreateApiRouterOptions {
   readonly dockedOrderLinkChainId?: number;
   readonly dockedOrderLinkVerifyingContract?: Address;
   readonly productBffStore?: ProductBffStore;
-  readonly productRegistrationAdapter?: ProductOrderRegistrationAdapter;
-  readonly productTriggerAdapter?: ProductOrderTriggerAdapter;
+  readonly productRegistrationAdapter?: ProductOrderTriggerBroadcastAdapter;
+  readonly productTriggerAdapter?: ProductOrderTriggerBroadcastAdapter;
+  readonly productTriggerChainId?: number;
   readonly productRegistrationCreatorAddress?: Address;
   readonly productRegistrarAddress?: Address;
   readonly productRuntimeEnvironment?: ChainServicesRuntimeEnv;

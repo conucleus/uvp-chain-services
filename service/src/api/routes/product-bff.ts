@@ -6,10 +6,12 @@ import type {
   AcceptProductInviteInput,
   CreateProductInviteInput,
   CreateProductOrderDraftInput,
+  PrepareProductOrderTriggerInput,
   ProductInviteDTO,
   ProductInvitePreviewResponse,
   ProductInviteResponse,
   RejectProductInviteInput,
+  TriggerProductOrderInput,
   UpdateProductOrderDraftInput
 } from "../../product/bff/types.js";
 import type { AuditSink } from "../../security/audit.js";
@@ -47,12 +49,23 @@ export function createProductBffRouteModule(): RouteModule {
         });
       }
 
-      const productOrderDraftSubmitMatch = /^\/product\/order-drafts\/([^/]+)\/submit$/.exec(request.pathname);
-      if (request.method === "POST" && productOrderDraftSubmitMatch) {
+      const productOrderDraftPrepareTriggerMatch = /^\/product\/order-drafts\/([^/]+)\/prepare-trigger$/.exec(request.pathname);
+      if (request.method === "POST" && productOrderDraftPrepareTriggerMatch) {
         return handleProductBffRequest(async () => {
-          parseSubmitDraftBody(request.body);
-          const draftId = decodeURIComponent(productOrderDraftSubmitMatch[1] ?? "");
-          const body = await context.productBffService.submitDraft(draftId);
+          const draftId = decodeURIComponent(productOrderDraftPrepareTriggerMatch[1] ?? "");
+          const body = await context.productBffService.prepareOrderTrigger(draftId, parsePrepareTriggerBody(request.body));
+          return {
+            status: 200,
+            body
+          };
+        }, { audit: context.audit });
+      }
+
+      const productOrderDraftTriggerMatch = /^\/product\/order-drafts\/([^/]+)\/trigger$/.exec(request.pathname);
+      if (request.method === "POST" && productOrderDraftTriggerMatch) {
+        return handleProductBffRequest(async () => {
+          const draftId = decodeURIComponent(productOrderDraftTriggerMatch[1] ?? "");
+          const body = await context.productBffService.triggerOrder(draftId, parseTriggerBody(request.body));
           context.onTxMined?.();
           return {
             status: 200,
@@ -61,41 +74,13 @@ export function createProductBffRouteModule(): RouteModule {
         }, { audit: context.audit });
       }
 
-      const productOrderRegistrationRetryMatch = /^\/product\/order-registrations\/([^/]+)\/retry$/.exec(request.pathname);
-      if (request.method === "POST" && productOrderRegistrationRetryMatch) {
-        return handleProductBffRequest(async () => {
-          parseSubmitDraftBody(request.body);
-          const registrationId = decodeURIComponent(productOrderRegistrationRetryMatch[1] ?? "");
-          const body = await context.productBffService.retryRegistration(registrationId);
-          context.onTxMined?.();
-          return {
-            status: 200,
-            body
-          };
-        }, { audit: context.audit });
-      }
-
-      const productOrderRegistrationStartMatch = /^\/product\/order-registrations\/([^/]+)\/start$/.exec(request.pathname);
-      if (request.method === "POST" && productOrderRegistrationStartMatch) {
-        return handleProductBffRequest(async () => {
-          parseStartOrderBody(request.body);
-          const registrationId = decodeURIComponent(productOrderRegistrationStartMatch[1] ?? "");
-          const body = await context.productBffService.startRegistration(registrationId);
-          context.onTxMined?.();
-          return {
-            status: 200,
-            body
-          };
-        }, { audit: context.audit });
-      }
-
-      const productOrderRegistrationMatch = /^\/product\/order-registrations\/([^/]+)$/.exec(request.pathname);
+      const productOrderRegistrationMatch = /^\/product\/order-triggers\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productOrderRegistrationMatch) {
         return handleProductBffRequest(async () => {
-          const registrationId = decodeURIComponent(productOrderRegistrationMatch[1] ?? "");
+          const triggerId = decodeURIComponent(productOrderRegistrationMatch[1] ?? "");
           return {
             status: 200,
-            body: { registration: await context.productBffService.getRegistration(registrationId) }
+            body: { trigger: await context.productBffService.getRegistration(triggerId) }
           };
         }, { audit: context.audit });
       }
@@ -274,7 +259,7 @@ function parseCreateDraftBody(body: unknown): CreateProductOrderDraftInput {
 
 function parseUpdateDraftBody(body: unknown): UpdateProductOrderDraftInput {
   const record = requireBodyRecord(body);
-  for (const field of ["draftId", "zhixuId", "planId", "planHash", "createdBy", "createdAt", "registeredOrderId", "registrationTxHash"]) {
+  for (const field of ["draftId", "zhixuId", "planId", "planHash", "createdBy", "createdAt", "triggeredOrderId", "triggerTxHash"]) {
     if (Object.hasOwn(record, field)) {
       throw new ProductBffError(400, "immutable_field", `${field} cannot be updated by clients`);
     }
@@ -326,26 +311,30 @@ function parseAcceptInviteBody(request: ApiRequest): AcceptProductInviteInput {
   };
 }
 
-function parseSubmitDraftBody(body: unknown): void {
-  if (body === undefined || body === null) {
-    return;
-  }
+function parsePrepareTriggerBody(body: unknown): PrepareProductOrderTriggerInput {
   const record = requireBodyRecord(body);
   for (const field of ["authorizations", "authorization", "permissions", "signalAuthorizations"]) {
     if (Object.hasOwn(record, field)) {
       throw new ProductBffError(400, "client_authorizations_not_allowed", "SignalAuthorization[] is generated by the server");
     }
   }
+  return {
+    walletAddress: requiredString(record, "walletAddress")
+  };
 }
 
-function parseStartOrderBody(body: unknown): void {
-  if (body === undefined || body === null) {
-    return;
-  }
+function parseTriggerBody(body: unknown): TriggerProductOrderInput {
   const record = requireBodyRecord(body);
-  if (Object.keys(record).length > 0) {
-    throw new ProductBffError(400, "invalid_body", "order start request body must be an empty JSON object");
+  for (const field of ["authorizations", "authorization", "permissions", "signalAuthorizations"]) {
+    if (Object.hasOwn(record, field)) {
+      throw new ProductBffError(400, "client_authorizations_not_allowed", "SignalAuthorization[] is generated by the server");
+    }
   }
+  return {
+    prepareId: requiredString(record, "prepareId"),
+    signature: requiredString(record, "signature"),
+    walletAddress: requiredString(record, "walletAddress")
+  };
 }
 
 function parseRejectInviteBody(body: unknown): RejectProductInviteInput {

@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS product_order_draft (
   created_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  registered_order_id TEXT UNIQUE,
-  registration_tx_hash TEXT
+  triggered_order_id TEXT UNIQUE,
+  trigger_tx_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS product_participant (
@@ -56,8 +56,8 @@ CREATE TABLE IF NOT EXISTS product_invite (
 CREATE INDEX IF NOT EXISTS product_invite_draft_idx
   ON product_invite (draft_id, created_at);
 
-CREATE TABLE IF NOT EXISTS product_order_registration (
-  registration_id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS product_order_trigger (
+  trigger_id TEXT PRIMARY KEY,
   draft_id TEXT NOT NULL UNIQUE,
   order_id TEXT NOT NULL UNIQUE,
   plan_id TEXT NOT NULL,
@@ -210,7 +210,6 @@ CREATE TABLE IF NOT EXISTS governance_tx_log (
   tx_log_id TEXT NOT NULL UNIQUE,
   log_kind TEXT NOT NULL,
   action TEXT NOT NULL,
-  domain_id TEXT NOT NULL,
   subject_id TEXT NOT NULL,
   plan_id TEXT,
   supplier_subject_id TEXT,

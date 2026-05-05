@@ -185,6 +185,16 @@ export interface StateMachineDockedOrderLinkProjection {
   readonly proof: StateMachineProofProjection;
 }
 
+export interface StateMachineOrderTriggerLinkProjection {
+  readonly childOrderId: Hex;
+  readonly parentOrderId: Hex;
+  readonly triggerStageId: Hex;
+  readonly originSourceId: Hex;
+  readonly originSignalId: Hex;
+  readonly linkedAt: ProjectionProvenance;
+  readonly proof: StateMachineProofProjection;
+}
+
 export interface StateMachineHookProjection {
   readonly orderId: Hex;
   readonly hookId: Hex;
@@ -239,6 +249,7 @@ export interface StateMachineOrderProjection {
   readonly stageExecutorOverlays: Readonly<Record<string, StateMachineStageExecutorOverlayProjection>>;
   readonly stageResourceOverlays: Readonly<Record<string, StateMachineStageResourceOverlayProjection>>;
   readonly dockedOrderLinks: Readonly<Record<string, StateMachineDockedOrderLinkProjection>>;
+  readonly triggerLink?: StateMachineOrderTriggerLinkProjection;
   readonly hooks: Readonly<Record<string, StateMachineHookProjection>>;
   readonly tasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly timeline: readonly StateMachineTimelineEventProjection[];
@@ -250,8 +261,6 @@ export interface StateMachineOrderProjection {
 export interface StateMachineDeploymentProjection {
   readonly deploymentId: Hex;
   readonly stateMachineAddress: Address;
-  readonly trustRegistryAddress: Address;
-  readonly officialDomainId: Hex;
   readonly artifactHash: Hex;
   readonly abiHash: Hex;
   readonly deploymentBlock: string;
@@ -290,6 +299,7 @@ type MutableStateMachineOrderProjection = Writable<
     | "stageExecutorOverlays"
     | "stageResourceOverlays"
     | "dockedOrderLinks"
+    | "triggerLink"
     | "hooks"
     | "tasks"
     | "timeline"
@@ -303,6 +313,7 @@ type MutableStateMachineOrderProjection = Writable<
   dockedOrderLinks: Record<string, Writable<Omit<StateMachineDockedOrderLinkProjection, "signalBindings">> & {
     signalBindings: Record<string, StateMachineDockedSignalBindingProjection>;
   }>;
+  triggerLink?: StateMachineOrderTriggerLinkProjection;
   hooks: Record<string, MutableStateMachineHookProjection>;
   tasks: Record<string, MutableStateMachineTaskProjection>;
   timeline: StateMachineTimelineEventProjection[];
@@ -372,6 +383,7 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
       stageExecutorOverlays: { ...order.stageExecutorOverlays },
       stageResourceOverlays: { ...order.stageResourceOverlays },
       dockedOrderLinks: readonlyDockedLinks,
+      ...(order.triggerLink ? { triggerLink: order.triggerLink } : {}),
       hooks: Object.fromEntries(Object.entries(order.hooks).map(([hookId, hook]) => [hookId, { ...hook }])),
       tasks: readonlyTasks,
       timeline: [...order.timeline].sort(compareTimelineEvents),
@@ -407,11 +419,25 @@ function applyStateMachineEvent(
     case "OrderRegistered":
       applyOrderRegistered(state, event);
       return;
+    case "OrderMaterialized":
+      applyOrderMaterialized(state, event);
+      return;
     case "SignalSubmitterAuthorized":
       applySignalSubmitterAuthorized(state, event);
       return;
     case "SignalSubmitted":
       applySignalSubmitted(state, event);
+      return;
+    case "StageMaterialized":
+      applyStageMaterialized(state, event);
+      return;
+    case "OrderTriggered":
+      applyOrderTriggered(state, event);
+      return;
+    case "OrderLinked":
+      applyOrderLinked(state, event);
+      return;
+    case "SignalCapabilityRegistered":
       return;
     case "StageSelectorBindingRegistered":
       applyStageSelectorBindingRegistered(state, event);
@@ -460,8 +486,6 @@ function applyDeploymentRegistryEvent(
       deployments.set(deploymentProjectionKey(event.chainId, event.contractAddress, deploymentId), {
         deploymentId,
         stateMachineAddress: requiredAddressArg(event, "stateMachine"),
-        trustRegistryAddress: requiredAddressArg(event, "trustRegistry"),
-        officialDomainId: requiredBytes32Arg(event, "officialDomainId"),
         artifactHash: requiredBytes32Arg(event, "artifactHash"),
         abiHash: requiredBytes32Arg(event, "abiHash"),
         deploymentBlock: uintArgAsString(event, "deploymentBlock"),
@@ -590,6 +614,37 @@ function applyOrderRegistered(
   appendOrderTimeline(order, timelineOf(event, "订单已创建", proof, { orderId, planId }));
 }
 
+function applyOrderMaterialized(
+  state: {
+    deployments: Map<string, MutableStateMachineDeploymentProjection>;
+    plans: Map<string, MutableStateMachinePlanProjection>;
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent
+): void {
+  const orderId = requiredBytes32Arg(event, "orderId");
+  const planId = requiredBytes32Arg(event, "planId");
+  const stageId = requiredBytes32Arg(event, "stageId");
+  const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
+  const order = ensureStateMachineOrder(
+    state.orders,
+    event,
+    orderId,
+    planId,
+    findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress)?.deploymentId
+  );
+  const proof = proofOf(event, { orderId, planId, planHash: order.planHash ?? plan?.planHash });
+  order.status = order.status === "action_required" ? order.status : "running";
+  order.currentStage = stageId;
+  order.planId = planId;
+  if (plan && !order.planHash) {
+    order.planHash = plan.planHash;
+  }
+  order.updatedAt = provenanceOf(event);
+  appendOrderProof(order, proof);
+  appendOrderTimeline(order, timelineOf(event, "订单已实体化", proof, { orderId, planId }));
+}
+
 function applyStageSelectorBindingRegistered(
   state: {
     plans: Map<string, MutableStateMachinePlanProjection>;
@@ -670,6 +725,101 @@ function applySignalSubmitted(
   markMatchingTasksSubmitted(order, sourceId, signalId, proof);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "确认动作已写入链上", proof, { orderId, planId: order.planId }));
+}
+
+function applyStageMaterialized(
+  state: {
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent
+): void {
+  const orderId = requiredBytes32Arg(event, "orderId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const stageId = requiredBytes32Arg(event, "stageId");
+  const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash });
+  order.currentStage = stageId;
+  order.status = order.status === "action_required" ? order.status : "running";
+  order.updatedAt = provenanceOf(event);
+  appendOrderProof(order, proof);
+  appendOrderTimeline(order, timelineOf(event, "环节已启动", proof, { orderId, planId: order.planId }));
+}
+
+function applyOrderTriggered(
+  state: {
+    deployments: Map<string, MutableStateMachineDeploymentProjection>;
+    plans: Map<string, MutableStateMachinePlanProjection>;
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent
+): void {
+  const orderId = requiredBytes32Arg(event, "orderId");
+  const planId = requiredBytes32Arg(event, "planId");
+  const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
+  const sourceId = requiredBytes32Arg(event, "sourceId");
+  const signalId = requiredBytes32Arg(event, "signalId");
+  const submitter = requiredAddressArg(event, "submitter");
+  const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
+  const order = ensureStateMachineOrder(
+    state.orders,
+    event,
+    orderId,
+    planId,
+    findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress)?.deploymentId
+  );
+  if (plan && !order.planHash) {
+    order.planHash = plan.planHash;
+  }
+  const proof = proofOf(event, { orderId, planId, planHash: order.planHash ?? plan?.planHash, submitter });
+  order.currentStage = triggerStageId;
+  order.status = order.status === "unknown" ? "registered" : order.status;
+  order.updatedAt = provenanceOf(event);
+  appendOrderProof(order, proof);
+  appendOrderTimeline(order, timelineOf(event, "触发信号已启动订单", proof, { orderId, planId, sourceId, signalId }));
+}
+
+function applyOrderLinked(
+  state: {
+    deployments: Map<string, MutableStateMachineDeploymentProjection>;
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent
+): void {
+  const childOrderId = requiredBytes32Arg(event, "childOrderId");
+  const parentOrderId = requiredBytes32Arg(event, "parentOrderId");
+  const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
+  const originSourceId = requiredBytes32Arg(event, "originSourceId");
+  const originSignalId = requiredBytes32Arg(event, "originSignalId");
+  const childOrder = ensureStateMachineOrder(
+    state.orders,
+    event,
+    childOrderId,
+    undefined,
+    findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress)?.deploymentId
+  );
+  const proof = proofOf(event, {
+    orderId: childOrderId,
+    parentOrderId,
+    planId: childOrder.planId,
+    planHash: childOrder.planHash
+  });
+  childOrder.triggerLink = {
+    childOrderId,
+    parentOrderId,
+    triggerStageId,
+    originSourceId,
+    originSignalId,
+    linkedAt: provenanceOf(event),
+    proof
+  };
+  childOrder.currentStage = triggerStageId;
+  childOrder.updatedAt = provenanceOf(event);
+  appendOrderProof(childOrder, proof);
+  appendOrderTimeline(childOrder, timelineOf(event, "订单已连接到触发来源", proof, {
+    orderId: childOrderId,
+    parentOrderId,
+    originSourceId,
+    originSignalId
+  }));
 }
 
 function applyStageExecutorPatchApplied(
@@ -1192,8 +1342,13 @@ function proofOf(event: ChainEvent, metadata: StateMachineProofMetadata = {}): S
 
 interface StateMachineProofMetadata {
   readonly orderId?: Hex | undefined;
+  readonly parentOrderId?: Hex | undefined;
+  readonly originSourceId?: Hex | undefined;
+  readonly originSignalId?: Hex | undefined;
   readonly planId?: Hex | undefined;
   readonly planHash?: Hex | undefined;
+  readonly sourceId?: Hex | undefined;
+  readonly signalId?: Hex | undefined;
   readonly submitter?: Address | undefined;
 }
 

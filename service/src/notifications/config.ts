@@ -31,7 +31,6 @@ export interface SupplierNotificationWalletProof {
 }
 
 export interface SupplierNotificationProfileConfigRequest {
-  readonly domainId: Hex;
   readonly supplierSubjectId: Hex;
   readonly wallet: Address;
   readonly notification: SupplierNotificationProfile;
@@ -49,7 +48,6 @@ export interface SupplierNotificationProfileConfigRequest {
 }
 
 export interface SupplierNotificationAttestSupplierInput {
-  readonly domainId: Hex;
   readonly supplierSubjectId: Hex;
   readonly wallet: Address;
   readonly metadata: unknown;
@@ -147,7 +145,6 @@ export function createSupplierNotificationProfileConfigService(
 
 export function buildSupplierNotificationProfileConfigRequest(input: unknown): SupplierNotificationProfileConfigRequest {
   const record = requireRecord(input);
-  const domainId = normalizeBytes32(requiredString(record, "domainId"), "domainId");
   const supplierSubjectId = normalizeBytes32(requiredString(record, "supplierSubjectId"), "supplierSubjectId");
   const wallet = normalizeAddress(requiredString(record, "wallet"), "wallet");
   const notification = parseSupplierNotificationProfile(requiredUnknown(record, "notification"));
@@ -168,7 +165,6 @@ export function buildSupplierNotificationProfileConfigRequest(input: unknown): S
   const profile = optionalUnknown(record, "profile");
   const reputation = optionalUnknown(record, "reputation");
   const hashInput = {
-    domainId,
     supplierSubjectId,
     wallet,
     metadata,
@@ -182,7 +178,6 @@ export function buildSupplierNotificationProfileConfigRequest(input: unknown): S
   const capabilityHash = hashSupplierCapability(hashInput);
   const reputationHash = hashSupplierReputation(hashInput);
   const attestSupplierInput = {
-    domainId,
     supplierSubjectId,
     wallet,
     metadata,
@@ -192,7 +187,6 @@ export function buildSupplierNotificationProfileConfigRequest(input: unknown): S
   };
 
   return {
-    domainId,
     supplierSubjectId,
     wallet,
     notification,
@@ -206,7 +200,6 @@ export function buildSupplierNotificationProfileConfigRequest(input: unknown): S
     capabilityHash,
     reputationHash,
     expectedMessage: supplierNotificationProfileConfigMessage({
-      domainId,
       supplierSubjectId,
       wallet,
       notificationHash
@@ -216,21 +209,19 @@ export function buildSupplierNotificationProfileConfigRequest(input: unknown): S
 }
 
 export function supplierNotificationProfileConfigMessage(input: {
-  readonly domainId: Hex;
   readonly supplierSubjectId: Hex;
   readonly wallet: Address;
   readonly notificationHash: Hex;
 }): string {
   return [
     "uvp:supplier-notification-profile:v1",
-    `domainId=${input.domainId}`,
     `supplierSubjectId=${input.supplierSubjectId}`,
     `wallet=${input.wallet}`,
     `notificationHash=${input.notificationHash}`
   ].join("\n");
 }
 
-async function verifySupplierWalletProof(
+export async function verifySupplierNotificationWalletProof(
   request: SupplierNotificationProfileConfigRequest,
   proof: SupplierNotificationWalletProof
 ): Promise<void> {
@@ -253,8 +244,15 @@ async function verifySupplierWalletProof(
   }
 }
 
+async function verifySupplierWalletProof(
+  request: SupplierNotificationProfileConfigRequest,
+  proof: SupplierNotificationWalletProof
+): Promise<void> {
+  return verifySupplierNotificationWalletProof(request, proof);
+}
+
 function configIdFor(request: SupplierNotificationProfileConfigRequest): string {
-  return `${request.domainId}:${request.supplierSubjectId}:${request.wallet}`;
+  return `${request.supplierSubjectId}:${request.wallet}`;
 }
 
 function requiredWalletProof(record: Record<string, unknown>): SupplierNotificationWalletProof {

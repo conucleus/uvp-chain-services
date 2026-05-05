@@ -16,7 +16,6 @@ import {
   type PlanTrustQuery,
   type SupplierTrustProjection,
   type SupplierTrustQuery,
-  type TrustDomainProjection,
   type TrustProjectionSnapshot
 } from "../indexer/trust-projections.js";
 import { normalizeAddress, type Address, type Hex } from "../shared/types.js";
@@ -394,10 +393,6 @@ export class PostgresProjectionStore implements DurableProjectionStore {
 
   async getStateMachineTask(taskId: string): Promise<StateMachineTaskProjection | undefined> {
     return (await this.#currentOrderSnapshot()).stateMachineTasks[taskId];
-  }
-
-  async listTrustDomains(): Promise<readonly TrustDomainProjection[]> {
-    return Object.values((await this.getTrustSnapshot()).domains);
   }
 
   async listPlanTrust(query: PlanTrustQuery): Promise<readonly PlanTrustProjection[]> {

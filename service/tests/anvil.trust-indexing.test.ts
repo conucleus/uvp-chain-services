@@ -73,7 +73,6 @@ describe("anvil trust registry indexing", () => {
     const deployReceipt = await publicClient.waitForTransactionReceipt({ hash: deployHash });
     const registry = getAddress(deployReceipt.contractAddress as Address);
 
-    const domainId = hashText("chain-services:test-domain");
     const planId = hashText("chain-services:test-plan");
     const planHash = hashText("plan-hash");
     const artifactHash = hashText("artifact-hash");
@@ -89,20 +88,14 @@ describe("anvil trust registry indexing", () => {
     await writeAndWait(publicClient, await wallet.writeContract({
       address: registry,
       abi: artifact.abi,
-      functionName: "registerDomain",
-      args: [domainId, metadataHash, "uvp-eth://domains/test"]
-    }));
-    await writeAndWait(publicClient, await wallet.writeContract({
-      address: registry,
-      abi: artifact.abi,
       functionName: "attestPlan",
-      args: [domainId, planId, planHash, artifactHash, policyHash, metadataHash, "uvp-eth://plans/test"]
+      args: [planId, planHash, artifactHash, policyHash, metadataHash, "uvp-eth://plans/test"]
     }));
     await writeAndWait(publicClient, await wallet.writeContract({
       address: registry,
       abi: artifact.abi,
       functionName: "revokePlan",
-      args: [domainId, planId, reasonHash, "uvp-eth://revocations/test"]
+      args: [planId, reasonHash, "uvp-eth://revocations/test"]
     }));
 
     apiServer = await startApiServer(testConfig({
@@ -113,7 +106,7 @@ describe("anvil trust registry indexing", () => {
     }), new MemoryProjectionStore());
 
     const apiBase = httpServerBaseUrl(apiServer);
-    const response = await fetch(`${apiBase}/trust/plans?domainId=${domainId}&planId=${planId}`);
+    const response = await fetch(`${apiBase}/trust/plans?registryAddress=${registry}&planId=${planId}`);
     const body = await response.json() as { readonly plans?: Array<{ readonly revoked?: boolean; readonly revokeReasonHash?: string }> };
 
     expect(response.status).toBe(200);
@@ -126,7 +119,6 @@ describe("anvil trust registry indexing", () => {
       abi: artifact.abi,
       functionName: "attestSupplier",
       args: [
-        domainId,
         supplierSubjectId,
         supplierWallet,
         profileHash,
@@ -139,14 +131,14 @@ describe("anvil trust registry indexing", () => {
       address: registry,
       abi: artifact.abi,
       functionName: "revokeSupplier",
-      args: [domainId, supplierSubjectId, reasonHash, "uvp-eth://supplier-revocations/test"]
+      args: [supplierSubjectId, reasonHash, "uvp-eth://supplier-revocations/test"]
     }));
 
-    const supplier = await waitForSupplierTrust(apiBase, domainId, supplierSubjectId);
+    const supplier = await waitForSupplierTrust(apiBase, registry, supplierSubjectId);
     expect(supplier.revoked).toBe(true);
     expect(supplier.revokeReasonHash).toBe(reasonHash);
 
-    const optionsResponse = await fetch(`${apiBase}/trust/plans?domainId=${domainId}&planId=${planId}`, {
+    const optionsResponse = await fetch(`${apiBase}/trust/plans?registryAddress=${registry}&planId=${planId}`, {
       method: "OPTIONS"
     });
     expect(optionsResponse.status).toBe(204);
@@ -295,11 +287,11 @@ function httpServerBaseUrl(server: Server): string {
 
 async function waitForSupplierTrust(
   apiBase: string,
-  domainId: Hex,
+  registryAddress: Address,
   supplierSubjectId: Hex
 ): Promise<{ readonly revoked?: boolean; readonly revokeReasonHash?: string }> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    const response = await fetch(`${apiBase}/trust/suppliers?domainId=${domainId}&supplierSubjectId=${supplierSubjectId}`);
+    const response = await fetch(`${apiBase}/trust/suppliers?registryAddress=${registryAddress}&supplierSubjectId=${supplierSubjectId}`);
     const body = await response.json() as {
       readonly suppliers?: Array<{ readonly revoked?: boolean; readonly revokeReasonHash?: string }>;
     };

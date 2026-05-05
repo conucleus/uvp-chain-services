@@ -20,11 +20,11 @@ import type {
 } from "./types.js";
 
 const zhixuTrustRegistryAbi = parseAbi([
-  "function domainOwner(bytes32 domainId) view returns (address)",
-  "function attestPlan(bytes32 domainId,bytes32 planId,bytes32 planHash,bytes32 artifactHash,bytes32 policyHash,bytes32 metadataHash,string metadataURI)",
-  "function revokePlan(bytes32 domainId,bytes32 planId,bytes32 reasonHash,string reasonURI)",
-  "function attestSupplier(bytes32 domainId,bytes32 supplierSubjectId,address wallet,bytes32 profileHash,bytes32 capabilityHash,bytes32 reputationHash,string metadataURI)",
-  "function revokeSupplier(bytes32 domainId,bytes32 supplierSubjectId,bytes32 reasonHash,string reasonURI)"
+  "function owner() view returns (address)",
+  "function attestPlan(bytes32 planId,bytes32 planHash,bytes32 artifactHash,bytes32 policyHash,bytes32 metadataHash,string metadataURI)",
+  "function revokePlan(bytes32 planId,bytes32 reasonHash,string reasonURI)",
+  "function attestSupplier(bytes32 supplierSubjectId,address wallet,bytes32 profileHash,bytes32 capabilityHash,bytes32 reputationHash,string metadataURI)",
+  "function revokeSupplier(bytes32 supplierSubjectId,bytes32 reasonHash,string reasonURI)"
 ]);
 
 export type GovernanceWriteFunctionName = "attestPlan" | "revokePlan" | "attestSupplier" | "revokeSupplier";
@@ -34,8 +34,8 @@ export interface GovernancePublicClient {
   readContract(parameters: {
     readonly address: ViemAddress;
     readonly abi: unknown;
-    readonly functionName: "domainOwner";
-    readonly args: readonly unknown[];
+    readonly functionName: "owner";
+    readonly args?: readonly unknown[];
   }): Promise<unknown>;
   waitForTransactionReceipt(parameters: {
     readonly hash: Hex;
@@ -61,7 +61,6 @@ export interface GovernanceBroadcasterAdapterOptions {
   readonly rpcUrl: string;
   readonly chainId: number;
   readonly contractAddress: Address;
-  readonly domainId: Hex;
   readonly privateKey: Hex;
   readonly txConfirmations: number;
   readonly allowedOperators?: readonly Address[];
@@ -115,9 +114,6 @@ export function createConfiguredGovernanceChainAdapter(config: ChainServicesConf
   if (!contractAddress) {
     throw new ConfigError("ZhixuTrustRegistry contract address is required when governance broadcast is enabled");
   }
-  if (!config.governance.domainId) {
-    throw new ConfigError("GOVERNANCE_DOMAIN_ID is required when governance broadcast is enabled");
-  }
   if (!config.governance.signerPrivateKey) {
     throw new ConfigError("GOVERNANCE_SIGNER_PRIVATE_KEY is required when governance broadcast is enabled");
   }
@@ -126,7 +122,6 @@ export function createConfiguredGovernanceChainAdapter(config: ChainServicesConf
     rpcUrl: config.governance.rpcUrl,
     chainId: config.governance.chainId,
     contractAddress,
-    domainId: config.governance.domainId,
     privateKey: config.governance.signerPrivateKey,
     txConfirmations: config.governance.txConfirmations,
     allowedOperators: config.governance.allowedOperators
@@ -162,8 +157,6 @@ export function createGovernanceBroadcasterAdapter(
     args: readonly unknown[]
   ): Promise<GovernanceBroadcastResultDTO> {
     const preflight = await preflightBroadcast({
-      requestDomainId: request.domainId,
-      configuredDomainId: options.domainId,
       chainId: options.chainId,
       signer,
       allowedOperators,
@@ -234,7 +227,6 @@ export function createGovernanceBroadcasterAdapter(
   return {
     attestPlan(request) {
       return broadcast(request, "attestPlan", [
-        request.domainId,
         request.planId,
         request.planHash,
         request.artifactHash,
@@ -245,7 +237,6 @@ export function createGovernanceBroadcasterAdapter(
     },
     revokePlan(request) {
       return broadcast(request, "revokePlan", [
-        request.domainId,
         request.planId,
         request.reasonHash,
         request.reasonURI
@@ -253,7 +244,6 @@ export function createGovernanceBroadcasterAdapter(
     },
     attestSupplier(request) {
       return broadcast(request, "attestSupplier", [
-        request.domainId,
         request.supplierSubjectId,
         request.wallet,
         request.profileHash,
@@ -264,7 +254,6 @@ export function createGovernanceBroadcasterAdapter(
     },
     revokeSupplier(request) {
       return broadcast(request, "revokeSupplier", [
-        request.domainId,
         request.supplierSubjectId,
         request.reasonHash,
         request.reasonURI
@@ -274,8 +263,6 @@ export function createGovernanceBroadcasterAdapter(
 }
 
 async function preflightBroadcast(input: {
-  readonly requestDomainId: Hex;
-  readonly configuredDomainId: Hex;
   readonly chainId: number;
   readonly signer: Address;
   readonly allowedOperators: ReadonlySet<Address>;
@@ -283,15 +270,6 @@ async function preflightBroadcast(input: {
   readonly publicClient: GovernancePublicClient;
   readonly privateKey: Hex;
 }): Promise<GovernanceBroadcastResultDTO | undefined> {
-  if (input.requestDomainId !== input.configuredDomainId) {
-    return failedBroadcast({
-      errorCode: "governance_domain_mismatch",
-      message: "request domainId does not match configured governance domain",
-      retryable: false,
-      signer: input.signer
-    });
-  }
-
   try {
     const chainId = await input.publicClient.getChainId();
     if (chainId !== input.chainId) {
@@ -316,12 +294,11 @@ async function preflightBroadcast(input: {
     owner = normalizeAddress(String(await input.publicClient.readContract({
       address: input.contractAddress as ViemAddress,
       abi: zhixuTrustRegistryAbi,
-      functionName: "domainOwner",
-      args: [input.requestDomainId]
-    })), "governance domain owner");
+      functionName: "owner"
+    })), "governance registry owner");
   } catch (error) {
     return failedBroadcast({
-      errorCode: "governance_domain_owner_unavailable",
+      errorCode: "governance_registry_owner_unavailable",
       message: sanitizedErrorMessage(error, input.privateKey),
       retryable: isRetryableBroadcastError(error),
       signer: input.signer
@@ -331,7 +308,7 @@ async function preflightBroadcast(input: {
   if (owner !== input.signer && !input.allowedOperators.has(input.signer)) {
     return failedBroadcast({
       errorCode: "governance_signer_not_authorized",
-      message: "governance signer is not the domain owner or an allowed operator",
+      message: "governance signer is not the registry owner or an allowed operator",
       retryable: false,
       signer: input.signer
     });
@@ -388,7 +365,7 @@ function sanitizedErrorMessage(error: unknown, privateKey: Hex): string {
 
 function isRetryableBroadcastError(error: unknown): boolean {
   const message = error instanceof Error ? error.message.toLowerCase() : "";
-  if (message.includes("revert") || message.includes("notdomainowner") || message.includes("unknown")) {
+  if (message.includes("revert") || message.includes("notowner") || message.includes("unknown")) {
     return false;
   }
   return true;
