@@ -59,7 +59,8 @@ const expectedMigrationVersions = [
   "0006_store_metadata",
   "0007_store_product_schema",
   "0008_store_audit",
-  "0009_product_trigger_prepare"
+  "0009_product_trigger_prepare",
+  "0010_store_supplier_capability_audit"
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -545,7 +546,16 @@ describe("durable storage", () => {
       capabilityTags: ["customs", "logistics"]
     });
     await expect(reopened.storeSupplierMetadataStore.listAudits(supplier.supplierId)).resolves.toMatchObject([
-      { auditId: audit.auditId, action: "tags_updated", beforeTags: ["logistics"], afterTags: ["customs", "logistics"] }
+      {
+        auditId: audit.auditId,
+        action: "tags_updated",
+        beforeTags: ["logistics"],
+        afterTags: ["customs", "logistics"],
+        beforeSupportedRoleSlotIds: ["logistics"],
+        afterSupportedRoleSlotIds: ["logistics", "seller"],
+        beforeSupportedStageIds: ["shipment"],
+        afterSupportedStageIds: ["customs", "shipment"]
+      }
     ]);
     await expect(reopened.storeDockingSessionStore.getSession(docking.sessionId)).resolves.toMatchObject({
       sessionId: docking.sessionId,
@@ -981,8 +991,8 @@ describePostgres(
           displayName: "Postgres Route Durable Supplier",
           wallet: seller,
           capabilityTags: ["logistics"],
-          supportedRoleSlotIds: ["customs"],
-          supportedStageIds: ["export.customs"],
+          supportedRoleSlotIds: ["delivery"],
+          supportedStageIds: ["shipping"],
           registryAddresses: [registryAddress],
           metadataURI: "https://store.example/suppliers/postgres-route-durable"
         }
@@ -995,6 +1005,8 @@ describePostgres(
         body: {
           reviewStatus: "approved_for_broadcast",
           capabilityTags: ["inspection", "logistics"],
+          supportedRoleSlotIds: ["customs-broker"],
+          supportedStageIds: ["export.customs"],
           publicSummary: "Approved for Postgres route durable smoke.",
           confirmation: {
             supplierId: "supplier-postgres-route-durable"
@@ -1079,7 +1091,11 @@ describePostgres(
           expect.objectContaining({
             action: "tags_updated",
             beforeTags: ["logistics"],
-            afterTags: ["inspection", "logistics"]
+            afterTags: ["inspection", "logistics"],
+            beforeSupportedRoleSlotIds: ["delivery"],
+            afterSupportedRoleSlotIds: ["customs-broker"],
+            beforeSupportedStageIds: ["shipping"],
+            afterSupportedStageIds: ["export.customs"]
           })
         ]));
       await expect(reopenedRouter.handle({ method: "GET", pathname: `/store/docking-sessions/${dockingSessionId}` }))
@@ -1669,6 +1685,10 @@ function storeSupplierAuditRecord(supplier: StoreSupplierMetadataRecord): StoreS
     actor: "operator-1",
     beforeTags: ["logistics"],
     afterTags: ["customs", "logistics"],
+    beforeSupportedRoleSlotIds: ["logistics"],
+    afterSupportedRoleSlotIds: ["logistics", "seller"],
+    beforeSupportedStageIds: ["shipment"],
+    afterSupportedStageIds: ["customs", "shipment"],
     reviewStatus: "approved_for_broadcast",
     createdAt: "2026-04-28T00:00:05.000Z"
   };

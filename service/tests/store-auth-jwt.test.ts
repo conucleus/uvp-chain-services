@@ -133,6 +133,23 @@ describe("Store JWT/JWKS operator identity", () => {
     }
   });
 
+  it("does not accept a local pilot JWKS as staging Store identity evidence", async () => {
+    const fixture = await createJwksFixture(servers);
+    const router = createJwtRouter(fixture, { runtimeEnvironment: "staging" });
+    const token = await signStoreToken(fixture, {
+      sub: "operator-1",
+      roles: ["store_operator"]
+    });
+
+    await expect(importDraft(router, token)).resolves.toMatchObject({
+      status: 401,
+      body: {
+        error: "store_identity_invalid",
+        authMode: "jwt"
+      }
+    });
+  });
+
   it("supports configured nested role, principal, and display-name claims", async () => {
     const fixture = await createJwksFixture(servers);
     const router = createJwtRouter(fixture, {
@@ -225,6 +242,7 @@ async function createJwksFixture(servers: Server[]) {
 
 type JwtRouterOverrides = Partial<Pick<StoreAuthConfig, "roleClaim" | "principalClaim" | "displayNameClaim" | "oidcDiscoveryUrl">> & {
   readonly jwksUrl?: string | null;
+  readonly runtimeEnvironment?: "local" | "testnet" | "staging" | "production";
 };
 
 function createJwtRouter(
@@ -232,7 +250,7 @@ function createJwtRouter(
   overrides: JwtRouterOverrides = {}
 ): ReturnType<typeof createApiRouter> {
   return createApiRouter(new MemoryProjectionStore(), {
-    productRuntimeEnvironment: "staging",
+    productRuntimeEnvironment: overrides.runtimeEnvironment ?? "local",
     evidenceRuntimeEnvironment: "local",
     storeAuthConfig: {
       mode: "jwt",

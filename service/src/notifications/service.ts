@@ -173,6 +173,53 @@ export interface ParticipantNotificationList {
   readonly sourceOfTruth: "product-projection-and-notification-read-state";
 }
 
+export type NotificationRedactedEvidenceStatus = "verified" | "not-verified";
+export type NotificationRecipientClassificationKind = "ready_task" | "submission" | "blocked" | "dead_letter";
+export type NotificationRecipientClassificationSource =
+  | "product_task_projection"
+  | "notification_delivery_with_product_task_projection";
+
+export interface NotificationRedactedEvidenceQuery {
+  readonly orderId?: string;
+  readonly taskId?: string;
+  readonly walletAddress?: Address | string;
+}
+
+export interface NotificationRecipientClassification {
+  readonly kind: NotificationRecipientClassificationKind;
+  readonly source: NotificationRecipientClassificationSource;
+  readonly orderId: Hex;
+  readonly taskId: string;
+  readonly taskStatus: StateMachineTaskProjection["status"];
+  readonly recipientRole: string;
+  readonly recipientWallet?: Address;
+  readonly stageId: Hex;
+  readonly hookId: Hex;
+  readonly proof: ParticipantNotificationProof;
+  readonly deliveryId?: Hex;
+  readonly deliveryStatus?: NotificationDeliveryStatus;
+  readonly deliveryReasonCode?: string;
+  readonly deliveryProof?: ParticipantNotificationProof;
+}
+
+export interface NotificationRedactedEvidence {
+  readonly schemaVersion: "uvp.notification-redacted-evidence.v1";
+  readonly generatedAt: string;
+  readonly status: NotificationRedactedEvidenceStatus;
+  readonly sourceOfTruth: "chain-product-task-projection-and-notification-delivery-workflow";
+  readonly query: NotificationRedactedEvidenceQuery;
+  readonly counts: {
+    readonly totalClassifications: number;
+    readonly readyTaskRecipients: number;
+    readonly submissionRecipients: number;
+    readonly blockedRecipients: number;
+    readonly deadLetterRecipients: number;
+    readonly deliveryRowsWithoutTaskProjection: number;
+  };
+  readonly classifications: readonly NotificationRecipientClassification[];
+  readonly notes: readonly string[];
+}
+
 export interface ParticipantNotificationReadState {
   readonly participantKey: string;
   readonly notificationId: Hex;
@@ -234,6 +281,7 @@ export interface NotificationService {
   deadLetterDelivery(deliveryId: Hex, reason?: string): Promise<NotificationDeliveryRecord | undefined>;
   listParticipantNotifications(query?: ParticipantNotificationQuery): Promise<ParticipantNotificationList>;
   markParticipantNotificationRead(input: ParticipantNotificationReadInput): Promise<ParticipantNotificationRecord | undefined>;
+  buildRedactedEvidence(query?: NotificationRedactedEvidenceQuery): Promise<NotificationRedactedEvidence>;
 }
 
 export interface CreateNotificationServiceOptions {
@@ -561,8 +609,179 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         now: options.now ?? (() => new Date())
       });
       return list.notifications.find((notification) => notification.notificationId === input.notificationId);
+    },
+
+    async buildRedactedEvidence(query = {}) {
+      return buildNotificationRedactedEvidence({
+        store: options.store,
+        deliveryStore,
+        query,
+        now: options.now ?? (() => new Date())
+      });
     }
   };
+}
+
+async function buildNotificationRedactedEvidence(input: {
+  readonly store: ProjectionStore;
+  readonly deliveryStore: NotificationDeliveryStore;
+  readonly query: NotificationRedactedEvidenceQuery;
+  readonly now: () => Date;
+}): Promise<NotificationRedactedEvidence> {
+  const participantKey = participantKeyFromWallet(input.query.walletAddress);
+  const [tasks, deliveries] = await Promise.all([
+    input.store.listStateMachineTasks(),
+    input.deliveryStore.listDeliveries()
+  ]);
+  const taskById = new Map(tasks.map((task) => [task.taskId, task]));
+  const matchingTasks = tasks
+    .filter((task) => taskMatchesNotificationEvidenceQuery(task, input.query, participantKey))
+    .sort(compareTasksForParticipantNotifications);
+  const classifications: NotificationRecipientClassification[] = [];
+
+  for (const task of matchingTasks) {
+    if (task.status === "ready") {
+      classifications.push(taskRecipientClassification("ready_task", task));
+    } else if (task.status === "submitted") {
+      classifications.push(taskRecipientClassification("submission", task));
+    }
+  }
+
+  let deliveryRowsWithoutTaskProjection = 0;
+  for (const delivery of [...deliveries].sort(compareDeliveryRecords)) {
+    if (!deliveryStatusRequiresRecipientEvidence(delivery.status)) {
+      continue;
+    }
+    if (!deliveryMatchesNotificationEvidenceQuery(delivery, input.query, participantKey)) {
+      continue;
+    }
+    const task = delivery.taskId ? taskById.get(delivery.taskId) : undefined;
+    if (!task || !taskMatchesNotificationEvidenceQuery(task, input.query, participantKey)) {
+      deliveryRowsWithoutTaskProjection += 1;
+      continue;
+    }
+    classifications.push(deliveryRecipientClassification(delivery, task));
+  }
+
+  const counts = {
+    totalClassifications: classifications.length,
+    readyTaskRecipients: classifications.filter((item) => item.kind === "ready_task").length,
+    submissionRecipients: classifications.filter((item) => item.kind === "submission").length,
+    blockedRecipients: classifications.filter((item) => item.kind === "blocked").length,
+    deadLetterRecipients: classifications.filter((item) => item.kind === "dead_letter").length,
+    deliveryRowsWithoutTaskProjection
+  };
+  return {
+    schemaVersion: "uvp.notification-redacted-evidence.v1",
+    generatedAt: input.now().toISOString(),
+    status: classifications.length > 0 && deliveryRowsWithoutTaskProjection === 0 ? "verified" : "not-verified",
+    sourceOfTruth: "chain-product-task-projection-and-notification-delivery-workflow",
+    query: redactedEvidenceQuery(input.query),
+    counts,
+    classifications,
+    notes: [
+      "Recipient classification is derived from chain-rebuilt Product task projections.",
+      "Notification delivery rows only contribute blocked/dead-letter workflow status when they resolve to a projected task.",
+      "This evidence omits notification payloads, transport endpoints, external receipts, raw errors, signatures, bearer tokens, and plaintext evidence."
+    ]
+  };
+}
+
+function taskRecipientClassification(
+  kind: "ready_task" | "submission",
+  task: StateMachineTaskProjection
+): NotificationRecipientClassification {
+  return {
+    kind,
+    source: "product_task_projection",
+    orderId: task.orderId,
+    taskId: task.taskId,
+    taskStatus: task.status,
+    recipientRole: task.assigneeRole,
+    ...(task.assigneeWallet ? { recipientWallet: task.assigneeWallet } : {}),
+    stageId: task.stageIdentifier,
+    hookId: task.hookId,
+    proof: notificationProof(task.proof)
+  };
+}
+
+function deliveryRecipientClassification(
+  delivery: NotificationDeliveryRecord,
+  task: StateMachineTaskProjection
+): NotificationRecipientClassification {
+  return {
+    kind: delivery.status === "dead_letter" ? "dead_letter" : "blocked",
+    source: "notification_delivery_with_product_task_projection",
+    orderId: task.orderId,
+    taskId: task.taskId,
+    taskStatus: task.status,
+    recipientRole: task.assigneeRole,
+    ...(task.assigneeWallet ? { recipientWallet: task.assigneeWallet } : {}),
+    stageId: task.stageIdentifier,
+    hookId: task.hookId,
+    proof: notificationProof(task.proof),
+    deliveryId: delivery.deliveryId,
+    deliveryStatus: delivery.status,
+    ...(delivery.reason ? { deliveryReasonCode: redactedDeliveryReasonCode(delivery.reason) } : {}),
+    deliveryProof: signalPayloadNotificationProof(delivery.payload.proof)
+  };
+}
+
+function redactedEvidenceQuery(query: NotificationRedactedEvidenceQuery): NotificationRedactedEvidenceQuery {
+  return {
+    ...(query.orderId ? { orderId: query.orderId } : {}),
+    ...(query.taskId ? { taskId: query.taskId } : {}),
+    ...(query.walletAddress ? { walletAddress: query.walletAddress } : {})
+  };
+}
+
+function taskMatchesNotificationEvidenceQuery(
+  task: StateMachineTaskProjection,
+  query: NotificationRedactedEvidenceQuery,
+  participantKey: string | undefined
+): boolean {
+  return (!query.orderId || task.orderId.toLowerCase() === query.orderId.toLowerCase()) &&
+    (!query.taskId || task.taskId === query.taskId) &&
+    (!participantKey || task.assigneeWallet?.toLowerCase() === participantKey);
+}
+
+function deliveryMatchesNotificationEvidenceQuery(
+  delivery: NotificationDeliveryRecord,
+  query: NotificationRedactedEvidenceQuery,
+  participantKey: string | undefined
+): boolean {
+  return (!query.orderId || delivery.orderId.toLowerCase() === query.orderId.toLowerCase()) &&
+    (!query.taskId || delivery.taskId === query.taskId) &&
+    (!participantKey ||
+      delivery.supplierWallet?.toLowerCase() === participantKey ||
+      delivery.submitter?.toLowerCase() === participantKey);
+}
+
+function deliveryStatusRequiresRecipientEvidence(status: NotificationDeliveryStatus): boolean {
+  return status === "failed" || status === "skipped" || status === "dead_letter";
+}
+
+function redactedDeliveryReasonCode(reason: string): string {
+  return isNotificationSkippedReason(reason) ? reason : "redacted_operator_reason";
+}
+
+function isNotificationSkippedReason(reason: string): reason is NotificationSkippedReason {
+  return [
+    "not_finalized",
+    "order_projection_missing",
+    "signal_projection_missing",
+    "artifact_mapping_missing",
+    "receiver_not_found",
+    "receiver_ambiguous",
+    "store_supplier_not_found",
+    "store_supplier_ambiguous",
+    "supplier_trust_not_found",
+    "supplier_revoked",
+    "notification_profile_missing",
+    "transport_not_supported",
+    "executor_watch_self_managed",
+    "transport_adapter_missing"
+  ].includes(reason);
 }
 
 async function buildParticipantNotificationList(input: {
@@ -919,6 +1138,17 @@ function signalNotificationProof(proof: StateMachineSignalProjection["proof"]): 
     chainId: proof.chainId,
     contractAddress: proof.contractAddress,
     blockNumber: proof.blockNumber.toString(),
+    transactionHash: proof.transactionHash,
+    logIndex: proof.logIndex
+  };
+}
+
+function signalPayloadNotificationProof(proof: SignalNotificationProof): ParticipantNotificationProof {
+  return {
+    eventName: proof.eventName,
+    chainId: proof.chainId,
+    contractAddress: proof.contractAddress,
+    blockNumber: proof.blockNumber,
     transactionHash: proof.transactionHash,
     logIndex: proof.logIndex
   };
@@ -1471,10 +1701,12 @@ function baseSignalDeliveryRecord(
   const payloadHash = signal?.payloadHash ?? bytes32Arg(event, "payloadHash");
   const idempotencyKey = signal?.idempotencyKey ?? bytes32Arg(event, "idempotencyKey");
   const signalSubmitter = signal?.submitter ?? addressArg(event, "submitter");
+  const receiverTask = taskForReceiverHook(order, receiverHook);
   return {
     deliveryId: signalDeliveryIdFor(event, order, signal, receiverHook, supplierMetadata),
     kind: "signal_received",
     status: "pending",
+    ...(receiverTask ? { taskId: receiverTask.taskId } : {}),
     orderId,
     ...(receiverHook ? { receiverHookId: receiverHook.hookId as Hex, receiverStageId: receiverHook.stageId as Hex } : {}),
     ...(sourceId ? { sourceId } : {}),
@@ -1597,6 +1829,21 @@ function findOrderForTask(
     order.contractAddress === task.stateMachineAddress &&
     Object.hasOwn(order.tasks, task.taskId)
   );
+}
+
+function taskForReceiverHook(
+  order: StateMachineOrderProjection | undefined,
+  receiverHook: OnchainCompiledHook | undefined
+): StateMachineTaskProjection | undefined {
+  if (!order || !receiverHook) {
+    return undefined;
+  }
+  return Object.values(order.tasks)
+    .sort(compareTasksForParticipantNotifications)
+    .find((task) =>
+      task.hookId.toLowerCase() === receiverHook.hookId.toLowerCase() &&
+      task.stageIdentifier.toLowerCase() === receiverHook.stageId.toLowerCase()
+    );
 }
 
 function signalDeliveryIdFor(

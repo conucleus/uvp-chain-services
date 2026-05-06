@@ -136,6 +136,7 @@ export interface ProductSubmissionDTO extends TxReconcileFields {
   readonly nonce: string;
   readonly deadline: string;
   readonly status: ProductSubmissionStatus;
+  readonly statusLabel?: string;
   readonly signatureStatus: "not_verified" | "signature_verified";
   readonly signatureHash?: Hex;
   readonly recoveredSubmitter?: Address;

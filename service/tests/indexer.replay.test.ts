@@ -9,7 +9,7 @@ import { IndexerService, type ChainEventSource } from "../src/indexer/service.js
 import { rebuildOrderProjections, stateMachineScopedKey } from "../src/indexer/projections.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { SqliteProjectionStore } from "../src/storage/sqlite-projection-store.js";
-import type { ChainEvent } from "../src/indexer/events.js";
+import { buildActiveChainEventReplaySummary, type ChainEvent } from "../src/indexer/events.js";
 import { EXECUTOR_PATCH_MODE_ASSIGN } from "../src/stage-patches/typed-data.js";
 
 const contractAddress = "0x1111111111111111111111111111111111111111";
@@ -301,6 +301,30 @@ describe("indexer projection replay", () => {
     expect(snapshot.eventCount).toBe(1);
   });
 
+  it("summarizes active-chain replay and tombstones removed logs before projection", () => {
+    const registered = chainEvent(2n, 0, "OrderRegistered", {
+      orderId: stateMachineOrderId,
+      planId
+    });
+
+    const summary = buildActiveChainEventReplaySummary([
+      { ...registered, removed: true },
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      registered
+    ]);
+
+    expect(summary).toMatchObject({
+      activeEventCount: 1,
+      removedEventCount: 1,
+      removedLogsFiltered: true
+    });
+    expect(summary.activeEvents.map((event) => event.eventName)).toEqual(["PlanRegistered"]);
+  });
+
   it("projects registry deployments and scopes identical order ids by state machine", async () => {
     const events = [
       ...deploymentRegistryEvents(),
@@ -362,9 +386,14 @@ describe("indexer projection replay", () => {
 
     expect(result.summary).toMatchObject({
       chainId: 31337,
+      deploymentBlock: "0",
       fromBlock: "0",
       toBlock: "9",
       eventCount: 9,
+      activeEventCount: 9,
+      removedEventCount: 0,
+      removedLogsFiltered: true,
+      projectionRebuilt: true,
       stateMachineOrderCount: 1,
       trustPlanCount: 0,
       mismatchCount: 0,
@@ -379,7 +408,72 @@ describe("indexer projection replay", () => {
       finalizedBlock: 9n,
       confirmationDepth: 2,
       eventCount: 9,
-      rebuild: expect.objectContaining({ status: "completed" })
+      rebuild: expect.objectContaining({
+        status: "completed",
+        deploymentBlock: 0n,
+        activeEventCount: 9,
+        removedEventCount: 0,
+        removedLogsFiltered: true,
+        projectionRebuilt: true
+      })
+    });
+  });
+
+  it("reports removed-log filtering evidence in rebuild summaries", async () => {
+    const store = new MemoryProjectionStore();
+    const registered = chainEvent(2n, 0, "OrderRegistered", {
+      orderId: stateMachineOrderId,
+      planId
+    });
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      registered,
+      { ...registered, removed: true }
+    ];
+    const eventSource: ChainEventSource = {
+      async getFinalizedBlock() {
+        return 5n;
+      },
+      async readEvents() {
+        return events;
+      }
+    };
+    const indexer = new IndexerService({
+      config: testConfig(),
+      eventSource,
+      store
+    });
+
+    const result = await indexer.rebuildFromDeploymentBlockWithSummary();
+    const syncState = await store.getSyncState();
+
+    expect(result.summary).toMatchObject({
+      deploymentBlock: "0",
+      fromBlock: "0",
+      toBlock: "5",
+      eventCount: 1,
+      activeEventCount: 1,
+      removedEventCount: 1,
+      removedLogsFiltered: true,
+      projectionRebuilt: true,
+      stateMachineOrderCount: 0
+    });
+    expect(result.snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)])
+      .toBeUndefined();
+    expect(syncState?.rebuild).toMatchObject({
+      status: "completed",
+      deploymentBlock: 0n,
+      fromBlock: 0n,
+      toBlock: 5n,
+      eventCount: 1,
+      activeEventCount: 1,
+      removedEventCount: 1,
+      removedLogsFiltered: true,
+      projectionRebuilt: true
     });
   });
 

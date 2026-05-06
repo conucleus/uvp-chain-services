@@ -6,6 +6,7 @@ import type { AuditOutcome } from "../../security/audit.js";
 import { ConfigError } from "../../shared/types.js";
 import { storeSessionFromAccess, type StoreAccessState, type StoreCapability } from "../../store-console/access.js";
 import type { StoreAuditQuery } from "../../store-console/audit.js";
+import { buildStoreClosureDryRunSummary } from "../../store-console/closure.js";
 import {
   StoreRuntimeError
 } from "../../store-console/runtime.js";
@@ -76,6 +77,38 @@ export function createStoreConsoleRouteModule(): RouteModule {
           status: 200,
           body: { records }
         };
+      }
+
+      if (request.method === "GET" && request.pathname === "/store/closure/dry-run") {
+        const capability = "store.audit.read";
+        const resource = { type: "store_closure_dry_run" };
+        const authorization = await authorizeStoreCapability(context, request, capability, resource);
+        if (!isStoreAuthorizationResult(authorization)) {
+          return authorization;
+        }
+        try {
+          const summary = await buildStoreClosureDryRunSummary({
+            access: authorization.access,
+            productService: context.productService,
+            projectionStore: context.store,
+            storeConsoleService: context.storeConsoleService,
+            storeRuntimeService: context.storeRuntimeService,
+            storeAuditStore: context.storeAuditStore,
+            buildDiagnostics: context.buildDiagnostics,
+            now: context.now
+          });
+          await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource, {
+            releaseClassification: summary.releaseClassification,
+            checkCount: summary.checks.length
+          });
+          return {
+            status: 200,
+            body: { summary }
+          };
+        } catch (error) {
+          await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+          throw error;
+        }
       }
 
       if (request.method === "GET" && request.pathname === "/store/zhixus") {

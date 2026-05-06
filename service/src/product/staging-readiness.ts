@@ -129,6 +129,8 @@ function readinessReasons(input: {
   }
   if (input.profile.storeAuthMode !== "jwt" || input.profile.storeAuthJwtConfigured !== true) {
     reasons.push("store_auth_jwt_missing");
+  } else if (input.profile.storeAuthExternalIdentityEvidence !== true) {
+    reasons.push("store_auth_external_oidc_missing");
   }
   if (input.evidenceStorage.readiness !== "ready" || input.evidenceStorage.adapterKind !== "object") {
     reasons.push("evidence_storage_not_ready");
@@ -189,6 +191,9 @@ function profileSummary(diagnostics: JsonRecord): JsonRecord {
     storageDurable: storage?.durable === true,
     storeAuthMode: stringOf(storeAuth?.mode) ?? "unknown",
     storeAuthJwtConfigured: storeAuth?.jwtConfigured === true,
+    storeAuthExternalIdentityEvidence: storeAuth?.externalIdentityEvidence === true,
+    storeAuthEvidenceClassification: stringOf(storeAuth?.evidenceClassification) ?? "not_verified",
+    storeAuthKeySource: stringOf(storeAuth?.keySource) ?? "missing",
     sourceOfTruth: "contracts-and-chain-events",
     backendAuthority: false
   };
@@ -233,6 +238,26 @@ function indexerSummary(diagnostics: JsonRecord): JsonRecord {
     lastEventName: stringOrNull(indexer?.lastEventName),
     rebuildStatus,
     rebuildReady: rebuildStatus === "completed" || rebuildStatus === "idle" || rebuildStatus === "unknown",
+    rebuild: {
+      status: rebuildStatus,
+      deploymentBlock: stringOrNull(rebuild?.deploymentBlock),
+      fromBlock: stringOrNull(rebuild?.fromBlock),
+      toBlock: stringOrNull(rebuild?.toBlock),
+      eventCount: numberOf(rebuild?.eventCount),
+      activeEventCount: numberOf(rebuild?.activeEventCount),
+      removedEventCount: numberOf(rebuild?.removedEventCount),
+      removedLogsFiltered: rebuild?.removedLogsFiltered === true,
+      projectionRebuilt: rebuild?.projectionRebuilt === true,
+      mismatchCount: numberOf(rebuild?.mismatchCount)
+    },
+    deploymentBlock: stringOrNull(rebuild?.deploymentBlock),
+    fromBlock: stringOrNull(rebuild?.fromBlock),
+    toBlock: stringOrNull(rebuild?.toBlock),
+    activeEventCount: numberOf(rebuild?.activeEventCount),
+    removedEventCount: numberOf(rebuild?.removedEventCount),
+    removedLogsFiltered: rebuild?.removedLogsFiltered === true,
+    projectionRebuilt: rebuild?.projectionRebuilt === true,
+    eventRowsReplayed: numberOf(rebuild?.activeEventCount),
     degradedReason: stringOrNull(indexer?.degradedReason)
   };
 }

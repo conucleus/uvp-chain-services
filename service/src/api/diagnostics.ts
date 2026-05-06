@@ -248,9 +248,14 @@ function formatRebuild(rebuild: ProjectionRebuildMetadata | undefined): Record<s
     status: rebuild.status,
     startedAt: rebuild.startedAt ?? null,
     completedAt: rebuild.completedAt ?? null,
+    deploymentBlock: bigintToString(rebuild.deploymentBlock),
     fromBlock: bigintToString(rebuild.fromBlock),
     toBlock: bigintToString(rebuild.toBlock),
     eventCount: rebuild.eventCount ?? null,
+    activeEventCount: rebuild.activeEventCount ?? null,
+    removedEventCount: rebuild.removedEventCount ?? null,
+    removedLogsFiltered: rebuild.removedLogsFiltered ?? null,
+    projectionRebuilt: rebuild.projectionRebuilt ?? null,
     mismatchCount: rebuild.mismatchCount ?? null
   };
 }

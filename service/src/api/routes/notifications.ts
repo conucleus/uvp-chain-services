@@ -1,5 +1,5 @@
 import { adminPrincipalFromHeaders } from "../../governance/index.js";
-import type { NotificationDeliveryStatus } from "../../notifications/index.js";
+import type { NotificationDeliveryStatus, NotificationRedactedEvidenceQuery } from "../../notifications/index.js";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address } from "../../shared/types.js";
 import { cleanQuery, readApiHeader, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
@@ -149,6 +149,17 @@ async function handleNotificationRequest(
     };
   }
 
+  if (request.method === "GET" && request.pathname === "/admin/notifications/redacted-evidence") {
+    const query = parseNotificationEvidenceQuery(request.query);
+    if ("response" in query) {
+      return query.response;
+    }
+    return {
+      status: 200,
+      body: { notificationEvidence: await context.notificationService.buildRedactedEvidence(query.query) }
+    };
+  }
+
   const retryMatch = /^\/admin\/notifications\/deliveries\/([^/]+)\/retry$/.exec(request.pathname);
   if (request.method === "POST" && retryMatch) {
     const deliveryId = parseDeliveryId(retryMatch[1] ?? "");
@@ -191,6 +202,37 @@ async function handleNotificationRequest(
     status: 404,
     body: { error: "not_found" }
   };
+}
+
+function parseNotificationEvidenceQuery(query: ApiRequest["query"]):
+  | { readonly query: NotificationRedactedEvidenceQuery }
+  | { readonly response: ApiResponse } {
+  const parsed: NotificationRedactedEvidenceQuery = {
+    ...(query?.orderId ? { orderId: query.orderId } : {}),
+    ...(query?.taskId ? { taskId: query.taskId } : {})
+  };
+  const rawWallet = query?.walletAddress ?? query?.wallet;
+  if (!rawWallet) {
+    return { query: parsed };
+  }
+  try {
+    return {
+      query: {
+        ...parsed,
+        walletAddress: normalizeAddress(rawWallet, "walletAddress")
+      }
+    };
+  } catch (error) {
+    return {
+      response: {
+        status: 400,
+        body: {
+          error: "invalid_wallet",
+          message: error instanceof Error ? error.message : "walletAddress must be a valid EVM address"
+        }
+      }
+    };
+  }
 }
 
 function parseNotificationDeliveryQuery(query: ApiRequest["query"]): ParsedNotificationDeliveryQuery {

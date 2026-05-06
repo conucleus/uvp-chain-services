@@ -96,6 +96,12 @@ export interface StoreSupplierGovernanceResult extends StoreSupplierMutationResu
   readonly governance: unknown;
 }
 
+export interface StoreSupplierAuditListDTO {
+  readonly nonAuthoritative: true;
+  readonly trustSourceOfTruth: "SupplierAttested/SupplierRevoked projection";
+  readonly records: readonly StoreSupplierAuditRecord[];
+}
+
 export interface StoreSupplierNotificationProfilePrepareResult {
   readonly profileConfig: SupplierNotificationProfileConfigRequest;
 }
@@ -107,6 +113,7 @@ export interface StoreSupplierNotificationProfileResult extends StoreSupplierMut
 export interface StoreSupplierService {
   listSuppliers(query?: StoreSupplierListQuery): Promise<StoreSupplierListDTO>;
   getSupplier(supplierId: string): Promise<StoreSupplierDTO | undefined>;
+  listSupplierAudits(supplierId: string): Promise<StoreSupplierAuditListDTO>;
   createSupplier(input: unknown, principal: StoreOperatorPrincipal): Promise<StoreSupplierMutationResult>;
   reviewSupplier(supplierId: string, input: unknown, principal: StoreOperatorPrincipal): Promise<StoreSupplierGovernanceResult>;
   prepareNotificationProfile(supplierId: string, input: unknown): Promise<StoreSupplierNotificationProfilePrepareResult>;
@@ -153,6 +160,15 @@ export function createStoreSupplierService(options: StoreSupplierServiceOptions)
       );
     },
 
+    async listSupplierAudits(supplierId) {
+      const current = await requireMetadata(metadataStore, supplierId);
+      return {
+        nonAuthoritative: true,
+        trustSourceOfTruth: "SupplierAttested/SupplierRevoked projection",
+        records: await metadataStore.listAudits(current.supplierId)
+      };
+    },
+
     async createSupplier(input, principal) {
       const record = createMetadataRecord(input, now().toISOString());
       const supplierIdExists = await metadataStore.getSupplier(record.supplierId);
@@ -179,10 +195,14 @@ export function createStoreSupplierService(options: StoreSupplierServiceOptions)
       await metadataStore.appendAudit(auditRecord("audit", sequence++, record, "review", principal, now, {
         reviewStatus: record.reviewStatus
       }));
-      if (!sameStringArray(current.capabilityTags, record.capabilityTags)) {
+      if (supplierCapabilitiesChanged(current, record)) {
         await metadataStore.appendAudit(auditRecord("audit", sequence++, record, "tags_updated", principal, now, {
           beforeTags: current.capabilityTags,
-          afterTags: record.capabilityTags
+          afterTags: record.capabilityTags,
+          beforeSupportedRoleSlotIds: current.supportedRoleSlotIds,
+          afterSupportedRoleSlotIds: record.supportedRoleSlotIds,
+          beforeSupportedStageIds: current.supportedStageIds,
+          afterSupportedStageIds: record.supportedStageIds
         }));
       }
       const governance = await options.governanceService.reviewSupplier(
@@ -857,6 +877,15 @@ function uniqueSorted<TValue extends string>(values: readonly TValue[]): readonl
 
 function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function supplierCapabilitiesChanged(
+  left: StoreSupplierMetadataRecord,
+  right: StoreSupplierMetadataRecord
+): boolean {
+  return !sameStringArray(left.capabilityTags, right.capabilityTags) ||
+    !sameStringArray(left.supportedRoleSlotIds, right.supportedRoleSlotIds) ||
+    !sameStringArray(left.supportedStageIds, right.supportedStageIds);
 }
 
 function compareSupplierRows(left: StoreSupplierDTO, right: StoreSupplierDTO): number {
