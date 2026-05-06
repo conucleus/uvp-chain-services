@@ -8,6 +8,13 @@ export interface ChainEvent<TArgs extends EventArgs = EventArgs> extends ChainPo
   readonly removed?: boolean;
 }
 
+export interface ActiveChainEventReplaySummary<TEvent extends ChainEvent = ChainEvent> {
+  readonly activeEvents: readonly TEvent[];
+  readonly activeEventCount: number;
+  readonly removedEventCount: number;
+  readonly removedLogsFiltered: boolean;
+}
+
 export interface EventCursor {
   readonly chainId: number;
   readonly deploymentBlock: bigint;
@@ -47,16 +54,35 @@ export function sortChainEvents<TEvent extends ChainEvent>(events: readonly TEve
 }
 
 export function filterActiveChainEvents<TEvent extends ChainEvent>(events: readonly TEvent[]): TEvent[] {
+  return [...buildActiveChainEventReplaySummary(events).activeEvents];
+}
+
+export function buildActiveChainEventReplaySummary<TEvent extends ChainEvent>(
+  events: readonly TEvent[]
+): ActiveChainEventReplaySummary<TEvent> {
   const activeByEventId = new Map<string, TEvent>();
+  const removedEventIds = new Set<string>();
+  let removedEventCount = 0;
 
   for (const event of sortChainEvents(events)) {
     const eventId = chainEventKey(event);
     if (event.removed === true) {
+      removedEventIds.add(eventId);
+      removedEventCount += 1;
       activeByEventId.delete(eventId);
+      continue;
+    }
+    if (removedEventIds.has(eventId)) {
       continue;
     }
     activeByEventId.set(eventId, event);
   }
 
-  return sortChainEvents([...activeByEventId.values()]);
+  const activeEvents = sortChainEvents([...activeByEventId.values()]);
+  return {
+    activeEvents,
+    activeEventCount: activeEvents.length,
+    removedEventCount,
+    removedLogsFiltered: [...removedEventIds].every((eventId) => !activeByEventId.has(eventId))
+  };
 }

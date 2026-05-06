@@ -2,7 +2,10 @@ import type { ChainServicesConfig } from "../config/index.js";
 import { loadConfigFromEnv } from "../config/index.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import type { ChainEvent, EventCursor } from "./events.js";
-import { filterActiveChainEvents, sortChainEvents } from "./events.js";
+import {
+  buildActiveChainEventReplaySummary,
+  sortChainEvents
+} from "./events.js";
 import type { ProjectionSnapshot } from "./projections.js";
 import { createEmptyProjectionSnapshot, rebuildOrderProjections } from "./projections.js";
 import { rebuildTrustProjections } from "./trust-projections.js";
@@ -35,9 +38,14 @@ export interface ChainEventNotificationProcessor {
 
 export interface IndexerRebuildSummary {
   readonly chainId: number;
+  readonly deploymentBlock: string;
   readonly fromBlock: string;
   readonly toBlock: string;
   readonly eventCount: number;
+  readonly activeEventCount: number;
+  readonly removedEventCount: number;
+  readonly removedLogsFiltered: boolean;
+  readonly projectionRebuilt: boolean;
   readonly stateMachineOrderCount: number;
   readonly trustPlanCount: number;
   readonly mismatchCount: number;
@@ -131,9 +139,14 @@ export class IndexerService implements LifecycleService {
         eventCount: 0,
         rebuild: {
           status: "idle",
+          deploymentBlock,
           fromBlock: deploymentBlock,
           toBlock: finalizedBlock,
           eventCount: 0,
+          activeEventCount: 0,
+          removedEventCount: 0,
+          removedLogsFiltered: true,
+          projectionRebuilt: true,
           mismatchCount: 0
         }
       });
@@ -141,11 +154,15 @@ export class IndexerService implements LifecycleService {
         snapshot: createEmptyProjectionSnapshot(),
         summary: summaryFromSnapshot({
           chainId: this.#config.network.chainId,
+          deploymentBlock,
           fromBlock: deploymentBlock,
           toBlock: finalizedBlock,
           snapshot: createEmptyProjectionSnapshot(),
           trustPlanCount: 0,
           eventCount: 0,
+          activeEventCount: 0,
+          removedEventCount: 0,
+          removedLogsFiltered: true,
           syncState,
           mismatchCount: 0
         })
@@ -163,6 +180,7 @@ export class IndexerService implements LifecycleService {
       rebuild: {
         status: "running",
         startedAt,
+        deploymentBlock,
         fromBlock: deploymentBlock,
         toBlock: finalizedBlock,
         mismatchCount: 0
@@ -178,7 +196,8 @@ export class IndexerService implements LifecycleService {
         },
         this.#config
       );
-      const activeEvents = filterActiveChainEvents(events);
+      const replaySummary = buildActiveChainEventReplaySummary(events);
+      const activeEvents = [...replaySummary.activeEvents];
       const lastEvent = sortChainEvents(activeEvents).at(-1);
       const trustSnapshot = rebuildTrustProjections(events);
 
@@ -194,9 +213,14 @@ export class IndexerService implements LifecycleService {
           status: "completed",
           startedAt,
           completedAt: new Date().toISOString(),
+          deploymentBlock,
           fromBlock: deploymentBlock,
           toBlock: finalizedBlock,
           eventCount: activeEvents.length,
+          activeEventCount: replaySummary.activeEventCount,
+          removedEventCount: replaySummary.removedEventCount,
+          removedLogsFiltered: replaySummary.removedLogsFiltered,
+          projectionRebuilt: true,
           mismatchCount: 0
         }
       };
@@ -219,11 +243,15 @@ export class IndexerService implements LifecycleService {
       const syncState = await this.#store.getSyncState(this.#scope) ?? await this.#store.saveSyncState(syncStateInput);
       const summary = summaryFromSnapshot({
         chainId: this.#config.network.chainId,
+        deploymentBlock,
         fromBlock: deploymentBlock,
         toBlock: finalizedBlock,
         snapshot,
         trustPlanCount: Object.keys(trustSnapshot.plans).length,
         eventCount: activeEvents.length,
+        activeEventCount: replaySummary.activeEventCount,
+        removedEventCount: replaySummary.removedEventCount,
+        removedLogsFiltered: replaySummary.removedLogsFiltered,
         syncState,
         mismatchCount: 0
       });
@@ -286,14 +314,16 @@ export class IndexerService implements LifecycleService {
       },
       this.#config
     );
-    const activeNewEvents = filterActiveChainEvents(events);
+    const newReplaySummary = buildActiveChainEventReplaySummary(events);
+    const activeNewEvents = [...newReplaySummary.activeEvents];
 
     const result = await durableStore.withTransaction(async () => {
       for (const event of events) {
         await durableStore.appendEvent(event);
       }
       const allEvents = await durableStore.listEvents({ chainId: this.#scope.chainId });
-      const activeEvents = filterActiveChainEvents(allEvents);
+      const replaySummary = buildActiveChainEventReplaySummary(allEvents);
+      const activeEvents = [...replaySummary.activeEvents];
       const lastEvent = sortChainEvents(activeEvents).at(-1);
       const snapshot = rebuildOrderProjections(allEvents);
       const trustSnapshot = rebuildTrustProjections(allEvents);
@@ -309,9 +339,14 @@ export class IndexerService implements LifecycleService {
         eventCount: activeEvents.length,
         rebuild: {
           status: "idle",
+          deploymentBlock,
           fromBlock,
           toBlock: finalizedBlock,
           eventCount: activeNewEvents.length,
+          activeEventCount: replaySummary.activeEventCount,
+          removedEventCount: replaySummary.removedEventCount,
+          removedLogsFiltered: replaySummary.removedLogsFiltered,
+          projectionRebuilt: true,
           mismatchCount: 0
         }
       });
@@ -319,11 +354,15 @@ export class IndexerService implements LifecycleService {
         snapshot,
         summary: summaryFromSnapshot({
           chainId: this.#config.network.chainId,
+          deploymentBlock,
           fromBlock,
           toBlock: finalizedBlock,
           snapshot,
           trustPlanCount: Object.keys(trustSnapshot.plans).length,
           eventCount: activeEvents.length,
+          activeEventCount: replaySummary.activeEventCount,
+          removedEventCount: replaySummary.removedEventCount,
+          removedLogsFiltered: replaySummary.removedLogsFiltered,
           syncState,
           mismatchCount: 0
         })
@@ -411,9 +450,14 @@ export class IndexerService implements LifecycleService {
       eventCount: existing?.eventCount ?? 0,
       rebuild: {
         status: "idle",
+        deploymentBlock: this.#config.network.deploymentBlock,
         fromBlock: input.fromBlock,
         toBlock: input.toBlock,
         eventCount: input.newEventCount,
+        activeEventCount: existing?.eventCount ?? 0,
+        removedEventCount: 0,
+        removedLogsFiltered: true,
+        projectionRebuilt: snapshot.rebuildable,
         mismatchCount: 0
       }
     });
@@ -421,11 +465,15 @@ export class IndexerService implements LifecycleService {
       snapshot,
       summary: summaryFromSnapshot({
         chainId: this.#config.network.chainId,
+        deploymentBlock: this.#config.network.deploymentBlock,
         fromBlock: input.fromBlock,
         toBlock: input.toBlock,
         snapshot,
         trustPlanCount: Object.keys(trustSnapshot.plans).length,
         eventCount: syncState.eventCount,
+        activeEventCount: syncState.eventCount,
+        removedEventCount: 0,
+        removedLogsFiltered: true,
         syncState,
         mismatchCount: 0
       })
@@ -459,9 +507,14 @@ export class IndexerService implements LifecycleService {
         status: "failed",
         ...(existing?.rebuild?.startedAt ? { startedAt: existing.rebuild.startedAt } : {}),
         completedAt: new Date().toISOString(),
+        deploymentBlock: this.#config.network.deploymentBlock,
         fromBlock: this.#config.network.deploymentBlock,
         toBlock: finalizedBlock,
         eventCount: existing?.eventCount ?? 0,
+        activeEventCount: existing?.eventCount ?? 0,
+        removedEventCount: existing?.rebuild?.removedEventCount ?? 0,
+        removedLogsFiltered: existing?.rebuild?.removedLogsFiltered ?? true,
+        projectionRebuilt: false,
         mismatchCount: existing?.rebuild?.mismatchCount ?? 0
       },
       degradedReason: error instanceof Error ? error.message : "unknown indexer rebuild error"
@@ -515,19 +568,28 @@ function minBlock(left: bigint, right: bigint | undefined): bigint {
 
 function summaryFromSnapshot(input: {
   readonly chainId: number;
+  readonly deploymentBlock: bigint;
   readonly fromBlock: bigint;
   readonly toBlock: bigint;
   readonly snapshot: ProjectionSnapshot;
   readonly trustPlanCount: number;
   readonly eventCount: number;
+  readonly activeEventCount: number;
+  readonly removedEventCount: number;
+  readonly removedLogsFiltered: boolean;
   readonly syncState: ProjectionSyncState;
   readonly mismatchCount: number;
 }): IndexerRebuildSummary {
   return {
     chainId: input.chainId,
+    deploymentBlock: input.deploymentBlock.toString(),
     fromBlock: input.fromBlock.toString(),
     toBlock: input.toBlock.toString(),
     eventCount: input.eventCount,
+    activeEventCount: input.activeEventCount,
+    removedEventCount: input.removedEventCount,
+    removedLogsFiltered: input.removedLogsFiltered,
+    projectionRebuilt: input.snapshot.rebuildable,
     stateMachineOrderCount: Object.keys(input.snapshot.stateMachineOrders).length,
     trustPlanCount: input.trustPlanCount,
     mismatchCount: input.mismatchCount,

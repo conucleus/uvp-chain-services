@@ -33,6 +33,7 @@ const capabilityHash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccc
 const reputationHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" as Hex;
 const reasonHash = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as Hex;
 const registeredDependency = phase2CustomsOnchainHookPlanArtifact.compiledHooks[0]?.dependencies[0];
+const resourceHook = phase2CustomsOnchainHookPlanArtifact.compiledHooks[0];
 const customsHook = phase2CustomsOnchainHookPlanArtifact.compiledHooks.find((hook) => hook.hookName === "customs_ready");
 const customsDependencyA = customsHook?.dependencies[0];
 const customsDependencyB = customsHook?.dependencies[1];
@@ -164,6 +165,133 @@ describe("signal-routed notifications", () => {
     await expect(noStoreSupplierService.listDeliveries()).resolves.toEqual([
       expect.objectContaining({ status: "skipped", reason: "receiver_not_found" })
     ]);
+  });
+
+  it("builds redacted ready-task and submission recipient evidence only from task projections", async () => {
+    const readyHook = requiredHook(resourceHook);
+    const submittedHook = requiredHook(customsHook);
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [readyHook.stageId, submittedHook.stageId],
+      events: [
+        authorizationEvent(4n, readyHook, supplierWallet),
+        hookReadyEvent(5n, readyHook),
+        authorizationEvent(6n, submittedHook, supplierWallet),
+        hookReadyEvent(7n, submittedHook),
+        signalEvent(8n, { sourceId: submittedHook.hookId, signalId: submittedHook.hookId }, bytes32Hex("6003"))
+      ],
+      finalizedBlock: 8n
+    });
+    const service = serviceFor(store, supplierStore);
+
+    const evidence = await service.buildRedactedEvidence({ walletAddress: supplierWallet, orderId });
+    const serialized = JSON.stringify(evidence);
+
+    expect(evidence).toMatchObject({
+      schemaVersion: "uvp.notification-redacted-evidence.v1",
+      status: "verified",
+      sourceOfTruth: "chain-product-task-projection-and-notification-delivery-workflow",
+      counts: {
+        readyTaskRecipients: 1,
+        submissionRecipients: 1,
+        blockedRecipients: 0,
+        deadLetterRecipients: 0,
+        deliveryRowsWithoutTaskProjection: 0
+      }
+    });
+    expect(evidence.classifications.map((item) => item.kind).sort()).toEqual(["ready_task", "submission"]);
+    expect(evidence.classifications.every((item) =>
+      item.source === "product_task_projection" &&
+      item.recipientWallet === supplierWallet &&
+      item.proof.transactionHash.match(/^0x[0-9a-f]{64}$/u)
+    )).toBe(true);
+    expect(serialized).not.toContain("secret://supplier-a/webhook");
+    expect(serialized).not.toMatch(/"payload"\s*:/u);
+    expect(serialized).not.toMatch(/"signature"\s*:/u);
+    expect(serialized).not.toContain("Bearer ");
+  });
+
+  it("classifies blocked and dead-letter delivery evidence only when delivery rows resolve to a projected task", async () => {
+    const deliveryStore = new MemoryNotificationDeliveryStore();
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [
+        authorizationEvent(4n, requiredHook(customsHook), supplierWallet),
+        hookReadyEvent(5n, requiredHook(customsHook)),
+        signalEvent(6n, requiredDependency(customsDependencyA))
+      ]
+    });
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return phase2CustomsStoreProductSchema;
+        }
+      },
+      deliveryStore
+    });
+
+    await service.processSignalSubmittedEvents([signalEvent(6n, requiredDependency(customsDependencyA))]);
+    const [delivery] = await service.listDeliveries();
+    expect(delivery).toMatchObject({
+      status: "failed",
+      reason: "transport_adapter_missing",
+      taskId: expect.stringContaining(orderId)
+    });
+
+    const blocked = await service.buildRedactedEvidence({ walletAddress: supplierWallet, orderId });
+    expect(blocked).toMatchObject({
+      status: "verified",
+      counts: {
+        readyTaskRecipients: 1,
+        blockedRecipients: 1,
+        deadLetterRecipients: 0,
+        deliveryRowsWithoutTaskProjection: 0
+      }
+    });
+    expect(blocked.classifications).toContainEqual(expect.objectContaining({
+      kind: "blocked",
+      source: "notification_delivery_with_product_task_projection",
+      deliveryStatus: "failed",
+      deliveryReasonCode: "transport_adapter_missing"
+    }));
+
+    const router = createApiRouter(store, { notificationService: service, storeSupplierMetadataStore: supplierStore });
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/notifications/redacted-evidence",
+      headers: adminHeaders,
+      query: { orderId, walletAddress: supplierWallet }
+    })).resolves.toMatchObject({
+      status: 200,
+      body: {
+        notificationEvidence: expect.objectContaining({
+          schemaVersion: "uvp.notification-redacted-evidence.v1",
+          status: "verified",
+          counts: expect.objectContaining({ blockedRecipients: 1 })
+        })
+      }
+    });
+
+    await service.deadLetterDelivery(delivery!.deliveryId, "operator pasted sensitive review details");
+    const deadLetter = await service.buildRedactedEvidence({ walletAddress: supplierWallet, orderId });
+    const serialized = JSON.stringify(deadLetter);
+
+    expect(deadLetter).toMatchObject({
+      status: "verified",
+      counts: {
+        deadLetterRecipients: 1,
+        deliveryRowsWithoutTaskProjection: 0
+      }
+    });
+    expect(deadLetter.classifications).toContainEqual(expect.objectContaining({
+      kind: "dead_letter",
+      deliveryStatus: "dead_letter",
+      deliveryReasonCode: "redacted_operator_reason"
+    }));
+    expect(serialized).not.toContain("operator pasted sensitive review details");
+    expect(serialized).not.toContain("secret://supplier-a/webhook");
+    expect(serialized).not.toContain("externalReceiptRef");
   });
 
   it("keeps admin delivery controls but removes run-once scanning", async () => {
@@ -479,6 +607,33 @@ function signalEvent(
     payloadHash,
     idempotencyKey: key,
     submitter: signalSubmitter
+  });
+}
+
+function authorizationEvent(
+  blockNumber: bigint,
+  hook: { readonly hookId: string },
+  submitter: Address
+): ChainEvent {
+  return chainEvent(blockNumber, "SignalSubmitterAuthorized", {
+    orderId,
+    sourceId: hook.hookId,
+    signalId: hook.hookId,
+    submitter,
+    role: bytes32Text("executor"),
+    metadataHash
+  });
+}
+
+function hookReadyEvent(
+  blockNumber: bigint,
+  hook: { readonly hookId: string; readonly stageId: string; readonly hookName: string }
+): ChainEvent {
+  return chainEvent(blockNumber, "HookReady", {
+    orderId,
+    hookId: hook.hookId,
+    stageId: hook.stageId,
+    hookName: bytes32Text(hook.hookName)
   });
 }
 

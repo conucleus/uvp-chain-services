@@ -31,9 +31,14 @@ export interface ProjectionRebuildMetadata {
   readonly status: ProjectionRebuildStatus;
   readonly startedAt?: string;
   readonly completedAt?: string;
+  readonly deploymentBlock?: bigint;
   readonly fromBlock?: bigint;
   readonly toBlock?: bigint;
   readonly eventCount?: number;
+  readonly activeEventCount?: number;
+  readonly removedEventCount?: number;
+  readonly removedLogsFiltered?: boolean;
+  readonly projectionRebuilt?: boolean;
   readonly mismatchCount?: number;
 }
 

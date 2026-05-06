@@ -220,6 +220,7 @@ function decodeChainEventLog(log: Log, chainId: number, contract: IndexedContrac
         transactionHash: log.transactionHash.toLowerCase() as Hex,
         logIndex: Number(log.logIndex),
         ...(log.blockHash ? { blockHash: log.blockHash.toLowerCase() as Hex } : {}),
+        ...(logRemoved(log) ? { removed: true } : {}),
         eventName,
         args: normalizeEventArgs(decoded.args)
       }
@@ -237,6 +238,10 @@ function normalizeEventArgs(args: unknown): EventArgs {
   return Object.fromEntries(
     Object.entries(args as Record<string, unknown>).map(([key, value]) => [key, normalizeEventArg(value)])
   );
+}
+
+function logRemoved(log: Log): boolean {
+  return (log as { readonly removed?: boolean }).removed === true;
 }
 
 function normalizeEventArg(value: unknown): unknown {

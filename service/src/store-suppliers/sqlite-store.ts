@@ -111,8 +111,11 @@ export class SqliteStoreSupplierMetadataStore implements StoreSupplierMetadataSt
       this.#database.prepare(
         `INSERT INTO store_supplier_audit (
            audit_id, supplier_id, supplier_subject_id, action, actor,
-           before_tags_json, after_tags_json, review_status, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           before_tags_json, after_tags_json,
+           before_supported_role_slot_ids_json, after_supported_role_slot_ids_json,
+           before_supported_stage_ids_json, after_supported_stage_ids_json,
+           review_status, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(...auditValues(record));
     });
   }
@@ -189,6 +192,10 @@ function auditValues(record: StoreSupplierAuditRecord): readonly SqliteValue[] {
     record.actor,
     record.beforeTags ? stringifyStorageJson(record.beforeTags) : null,
     record.afterTags ? stringifyStorageJson(record.afterTags) : null,
+    record.beforeSupportedRoleSlotIds ? stringifyStorageJson(record.beforeSupportedRoleSlotIds) : null,
+    record.afterSupportedRoleSlotIds ? stringifyStorageJson(record.afterSupportedRoleSlotIds) : null,
+    record.beforeSupportedStageIds ? stringifyStorageJson(record.beforeSupportedStageIds) : null,
+    record.afterSupportedStageIds ? stringifyStorageJson(record.afterSupportedStageIds) : null,
     record.reviewStatus ?? null,
     record.createdAt
   ];
@@ -198,6 +205,10 @@ function auditRow(row: unknown): StoreSupplierAuditRecord {
   const record = rowObject(row, "store_supplier_audit query");
   const beforeTags = optionalJson<readonly string[]>(record, "before_tags_json");
   const afterTags = optionalJson<readonly string[]>(record, "after_tags_json");
+  const beforeSupportedRoleSlotIds = optionalJson<readonly string[]>(record, "before_supported_role_slot_ids_json");
+  const afterSupportedRoleSlotIds = optionalJson<readonly string[]>(record, "after_supported_role_slot_ids_json");
+  const beforeSupportedStageIds = optionalJson<readonly string[]>(record, "before_supported_stage_ids_json");
+  const afterSupportedStageIds = optionalJson<readonly string[]>(record, "after_supported_stage_ids_json");
   const reviewStatus = optionalString(record, "review_status") as StoreSupplierAuditRecord["reviewStatus"];
   return {
     auditId: stringColumn(record, "audit_id"),
@@ -207,6 +218,10 @@ function auditRow(row: unknown): StoreSupplierAuditRecord {
     actor: stringColumn(record, "actor"),
     ...(beforeTags !== undefined ? { beforeTags } : {}),
     ...(afterTags !== undefined ? { afterTags } : {}),
+    ...(beforeSupportedRoleSlotIds !== undefined ? { beforeSupportedRoleSlotIds } : {}),
+    ...(afterSupportedRoleSlotIds !== undefined ? { afterSupportedRoleSlotIds } : {}),
+    ...(beforeSupportedStageIds !== undefined ? { beforeSupportedStageIds } : {}),
+    ...(afterSupportedStageIds !== undefined ? { afterSupportedStageIds } : {}),
     ...(reviewStatus !== undefined ? { reviewStatus } : {}),
     createdAt: stringColumn(record, "created_at")
   };

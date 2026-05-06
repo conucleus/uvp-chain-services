@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { createRelayerService, MemoryRelayNonceStore, RelayRejection } from "../src/relayer/service.js";
+import {
+  classifyRelaySubmitterError,
+  createRelayerService,
+  MemoryRelayNonceStore,
+  RelayRejection
+} from "../src/relayer/service.js";
 import type {
   BusinessSignatureVerifier,
   RelayRequest,
@@ -33,6 +38,8 @@ describe("relayer non-signing boundary", () => {
 
     expect(submission.status).toBe("submitted");
     expect(submission.txHash).toBe(txHash);
+    expect(submission.retryState).toBe("not_applicable");
+    expect(submission.deadLetter).toBe(false);
     expect(verifier.verify).toHaveBeenCalledOnce();
     expect(submitter.submit).toHaveBeenCalledOnce();
     expect("signBusinessPayload" in relayer).toBe(false);
@@ -55,7 +62,7 @@ describe("relayer non-signing boundary", () => {
     await expect(relayer.relay(request("nonce-2"))).rejects.toThrow(RelayRejection);
   });
 
-  it("keeps failed submissions observable and retryable", async () => {
+  it("keeps retryable failed submissions observable and reusable without leaking raw errors", async () => {
     const recorded: unknown[] = [];
     const submissionStore: RelaySubmissionStore = {
       record: async (submission) => {
@@ -80,11 +87,179 @@ describe("relayer non-signing boundary", () => {
     const first = await relayer.relay(request("nonce-3"));
     const second = await relayer.relay(request("nonce-3"));
 
-    expect(first.status).toBe("failed");
-    expect(second.status).toBe("failed");
+    expect(first).toMatchObject({
+      status: "failed",
+      errorCode: "rpc_unavailable",
+      failureCategory: "retryable",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false
+    });
+    expect(second).toMatchObject({
+      status: "failed",
+      errorCode: "rpc_unavailable",
+      retryable: true
+    });
     expect(recorded).toHaveLength(2);
   });
+
+  it("dead-letters permanent authorization failures with redacted diagnostics", async () => {
+    const privateKey = `0x${"1".repeat(64)}`;
+    const rawSignature = `0x${"2".repeat(130)}`;
+    const recorded: unknown[] = [];
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => {
+          throw new Error(`UnauthorizedSignalSubmitter privateKey ${privateKey} signature ${rawSignature}`);
+        }
+      },
+      nonceStore: new MemoryRelayNonceStore(),
+      submissionStore: {
+        record: async (submission) => {
+          recorded.push(submission);
+        }
+      },
+      now: () => new Date("2026-01-01T00:00:00Z")
+    });
+
+    const submission = await relayer.relay(request("nonce-dead-letter"));
+
+    expect(submission).toMatchObject({
+      status: "failed",
+      errorCode: "unauthorized_signal_submitter",
+      failureCategory: "authorization",
+      retryable: false,
+      retryState: "dead_letter",
+      deadLetter: true
+    });
+    expect(JSON.stringify(submission)).not.toContain(privateKey.slice(2));
+    expect(JSON.stringify(recorded)).not.toContain(rawSignature.slice(2));
+  });
+
+  it("serializes in-flight submissions per order while allowing the first transaction to finish", async () => {
+    const submitStarted = deferred<void>();
+    const submitRelease = deferred<void>();
+    const submitter: TransactionSubmitter = {
+      submit: vi.fn(async () => {
+        submitStarted.resolve();
+        await submitRelease.promise;
+        return { txHash };
+      })
+    };
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter,
+      nonceStore: new MemoryRelayNonceStore(),
+      now: () => new Date("2026-01-01T00:00:00Z")
+    });
+
+    const first = relayer.relay(request("nonce-order-1"));
+    await submitStarted.promise;
+    const second = await relayer.relay(request("nonce-order-2"));
+    submitRelease.resolve();
+
+    await expect(first).resolves.toMatchObject({
+      status: "submitted",
+      txHash
+    });
+    expect(second).toMatchObject({
+      status: "failed",
+      errorCode: "order_relay_in_flight",
+      failureCategory: "retryable",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false
+    });
+    expect(submitter.submit).toHaveBeenCalledOnce();
+  });
+
+  it("records duplicate signer nonce attempts as dead-letter duplicate failures", async () => {
+    const submitStarted = deferred<void>();
+    const submitRelease = deferred<void>();
+    const recorded: unknown[] = [];
+    const submitter: TransactionSubmitter = {
+      submit: vi.fn(async () => {
+        submitStarted.resolve();
+        await submitRelease.promise;
+        return { txHash };
+      })
+    };
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter,
+      nonceStore: new MemoryRelayNonceStore(),
+      submissionStore: {
+        record: async (submission) => {
+          recorded.push(submission);
+        }
+      },
+      now: () => new Date("2026-01-01T00:00:00Z")
+    });
+
+    const first = relayer.relay(request("nonce-duplicate"));
+    await submitStarted.promise;
+    const duplicate = await relayer.relay(request("nonce-duplicate"));
+    submitRelease.resolve();
+
+    await expect(first).resolves.toMatchObject({ status: "submitted" });
+    expect(duplicate).toMatchObject({
+      status: "failed",
+      errorCode: "duplicate_signer_nonce",
+      failureCategory: "duplicate",
+      retryable: false,
+      retryState: "dead_letter",
+      deadLetter: true
+    });
+    expect(recorded).toEqual(expect.arrayContaining([
+      expect.objectContaining({ errorCode: "duplicate_signer_nonce" })
+    ]));
+  });
+
+  it("classifies relayer submitter failures for release diagnostics", () => {
+    expect(classifyRelaySubmitterError(new Error("UnknownOrder"))).toMatchObject({
+      errorCode: "unknown_order",
+      failureCategory: "retryable",
+      retryable: true,
+      deadLetter: false
+    });
+    expect(classifyRelaySubmitterError(new Error("execution reverted"))).toMatchObject({
+      errorCode: "transaction_reverted",
+      failureCategory: "permanent",
+      retryable: false,
+      deadLetter: true
+    });
+    expect(classifyRelaySubmitterError(new Error("insufficient funds for gas"))).toMatchObject({
+      errorCode: "relayer_insufficient_funds",
+      failureCategory: "broadcaster",
+      retryable: false,
+      deadLetter: true
+    });
+    expect(classifyRelaySubmitterError(new Error("SignalAlreadyExists"))).toMatchObject({
+      errorCode: "signal_already_exists",
+      failureCategory: "duplicate",
+      retryable: false,
+      deadLetter: true
+    });
+  });
 });
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((innerResolve) => {
+    resolve = innerResolve;
+  });
+  return { promise, resolve };
+}
 
 function request(nonce: string): RelayRequest {
   return {

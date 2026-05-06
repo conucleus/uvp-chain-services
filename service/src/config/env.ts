@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type ChainTarget, type Hex } from "../shared/types.js";
 import type { StorageDriver } from "../storage/types.js";
+import { storeAuthUrlEvidenceFailure } from "./store-auth-evidence.js";
 
 export interface NetworkConfig {
   readonly chainTarget?: ChainTarget;
@@ -483,31 +484,23 @@ function validateStoreAuthUrl(value: string, envName: string): void {
 }
 
 function validateNonLocalHttpsStoreAuthUrl(value: string, envName: string): void {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
+  const failure = storeAuthUrlEvidenceFailure(value);
+  if (failure === "invalid") {
     throw new ConfigError(`${envName} must be a valid URL`);
   }
-  if (url.protocol !== "https:") {
+  if (failure === "not_https") {
     throw new ConfigError(`${envName} must be HTTPS in staging and production`);
   }
-  if (isLocalHostname(url.hostname)) {
-    throw new ConfigError(`${envName} must not use localhost in staging and production`);
+  if (failure === "local_or_private") {
+    throw new ConfigError(`${envName} must not use localhost or private network hosts in staging and production`);
+  }
+  if (failure === "missing") {
+    throw new ConfigError(`${envName} is required in staging and production`);
   }
 }
 
 function discoveryUrlFromIssuer(issuer: string): string {
   return `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
-}
-
-function isLocalHostname(hostname: string): boolean {
-  const normalized = hostname.trim().toLowerCase();
-  return normalized === "localhost" ||
-    normalized === "127.0.0.1" ||
-    normalized === "::1" ||
-    normalized === "[::1]" ||
-    normalized.endsWith(".localhost");
 }
 
 function parseStorageDriver(rawDriver: string | undefined, databaseUrl: string | undefined): StorageDriver {

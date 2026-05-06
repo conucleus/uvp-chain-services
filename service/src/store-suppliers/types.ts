@@ -41,6 +41,10 @@ export interface StoreSupplierAuditRecord {
   readonly actor: string;
   readonly beforeTags?: readonly string[];
   readonly afterTags?: readonly string[];
+  readonly beforeSupportedRoleSlotIds?: readonly string[];
+  readonly afterSupportedRoleSlotIds?: readonly string[];
+  readonly beforeSupportedStageIds?: readonly string[];
+  readonly afterSupportedStageIds?: readonly string[];
   readonly reviewStatus?: StoreSupplierReviewStatus;
   readonly createdAt: string;
 }

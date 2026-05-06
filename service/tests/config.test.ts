@@ -431,6 +431,10 @@ describe("chain-services config", () => {
       storeAuth: {
         mode: "dev_headers",
         jwtConfigured: false,
+        externalIdentityEvidence: false,
+        evidenceClassification: "prototype",
+        evidenceReasons: ["store_auth_dev_headers"],
+        keySource: "missing",
         jwksUrlConfigured: false,
         issuerConfigured: false,
         audienceConfigured: false,
@@ -577,6 +581,15 @@ describe("chain-services config", () => {
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       STORE_AUTH_JWKS_URL: "http://127.0.0.1:8789/.well-known/jwks.json"
     }))).toThrow(/STORE_AUTH_JWKS_URL must be HTTPS/);
+
+    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+      STORE_AUTH_JWKS_URL: "https://127.0.0.1:8789/.well-known/jwks.json"
+    }))).toThrow(/STORE_AUTH_JWKS_URL must not use localhost or private network hosts/);
+
+    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+      STORE_AUTH_JWKS_URL: undefined,
+      STORE_AUTH_OIDC_DISCOVERY_URL: "https://10.0.0.5/.well-known/openid-configuration"
+    }))).toThrow(/STORE_AUTH_OIDC_DISCOVERY_URL must not use localhost or private network hosts/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       STORE_AUTH_CLOCK_TOLERANCE_SECONDS: "1.5"
@@ -739,6 +752,10 @@ describe("chain-services config", () => {
       storeAuth: {
         mode: "jwt",
         jwtConfigured: true,
+        externalIdentityEvidence: true,
+        evidenceClassification: "external_oidc",
+        evidenceReasons: [],
+        keySource: "jwks_url",
         jwksUrlConfigured: true,
         issuerConfigured: true,
         audienceConfigured: true,
@@ -751,6 +768,10 @@ describe("chain-services config", () => {
     });
     expect(diagnostics.preflight.checks).toContainEqual({
       name: "store_metadata.durable",
+      status: "passed"
+    });
+    expect(diagnostics.preflight.checks).toContainEqual({
+      name: "store_auth.external_oidc",
       status: "passed"
     });
 

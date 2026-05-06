@@ -69,6 +69,25 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           }
         }
 
+        const supplierAuditMatch = /^\/store\/suppliers\/([^/]+)\/audits$/.exec(request.pathname);
+        if (request.method === "GET" && supplierAuditMatch) {
+          const supplierId = decodeURIComponent(supplierAuditMatch[1] ?? "");
+          const capability = "store.audit.read";
+          const resource = { type: "store_supplier", id: supplierId };
+          const authorization = await authorizeStoreCapability(context, request, capability, resource);
+          if (!isStoreAuthorizationResult(authorization)) {
+            return authorization;
+          }
+          const body = await context.storeSupplierService.listSupplierAudits(supplierId);
+          await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource, {
+            resultCount: body.records.length
+          });
+          return {
+            status: 200,
+            body
+          };
+        }
+
         const notificationProfileMatch = /^\/store\/suppliers\/([^/]+)\/notification-profile(?:\/(prepare))?$/.exec(request.pathname);
         if (request.method === "POST" && notificationProfileMatch) {
           const supplierId = decodeURIComponent(notificationProfileMatch[1] ?? "");

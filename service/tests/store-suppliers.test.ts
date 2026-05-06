@@ -144,6 +144,8 @@ describe("Store supplier registry API", () => {
       body: {
         reviewStatus: "approved_for_broadcast",
         capabilityTags: ["inspection", "logistics"],
+        supportedRoleSlotIds: ["customs-broker", "logistics-operator"],
+        supportedStageIds: ["export.customs"],
         publicSummary: "Approved for Store broadcast.",
         confirmation: {
           supplierId: "supplier-shenzhen-logistics"
@@ -151,7 +153,11 @@ describe("Store supplier registry API", () => {
       }
     });
     expect(review.status).toBe(200);
-    expect((review.body as { supplier: StoreSupplierDTO }).supplier.capabilityTags).toEqual(["inspection", "logistics"]);
+    expect((review.body as { supplier: StoreSupplierDTO }).supplier).toMatchObject({
+      capabilityTags: ["inspection", "logistics"],
+      supportedRoleSlotIds: ["customs-broker", "logistics-operator"],
+      supportedStageIds: ["export.customs"]
+    });
 
     const attest = await router.handle({
       method: "POST",
@@ -195,7 +201,34 @@ describe("Store supplier registry API", () => {
       .find((audit): audit is StoreSupplierAuditRecord => audit.action === "tags_updated");
     expect(tagAudit).toMatchObject({
       beforeTags: ["customs", "logistics"],
-      afterTags: ["inspection", "logistics"]
+      afterTags: ["inspection", "logistics"],
+      beforeSupportedRoleSlotIds: ["delivery"],
+      afterSupportedRoleSlotIds: ["customs-broker", "logistics-operator"],
+      beforeSupportedStageIds: ["customs-complete", "shipping"],
+      afterSupportedStageIds: ["export.customs"]
+    });
+
+    const auditReadback = await router.handle({
+      method: "GET",
+      pathname: "/store/suppliers/supplier-shenzhen-logistics/audits",
+      headers: storeHeaders
+    });
+    expect(auditReadback.status).toBe(200);
+    expect(auditReadback.body).toMatchObject({
+      nonAuthoritative: true,
+      trustSourceOfTruth: "SupplierAttested/SupplierRevoked projection",
+      records: expect.arrayContaining([
+        expect.objectContaining({
+          action: "tags_updated",
+          actor: "store-operator-1",
+          beforeTags: ["customs", "logistics"],
+          afterTags: ["inspection", "logistics"],
+          beforeSupportedRoleSlotIds: ["delivery"],
+          afterSupportedRoleSlotIds: ["customs-broker", "logistics-operator"],
+          beforeSupportedStageIds: ["customs-complete", "shipping"],
+          afterSupportedStageIds: ["export.customs"]
+        })
+      ])
     });
   });
 
@@ -352,6 +385,10 @@ describe("Store supplier registry API", () => {
       method: "POST",
       pathname: "/store/suppliers/supplier-shenzhen-logistics/review",
       body: { reviewStatus: "submitted" }
+    })).resolves.toMatchObject({ status: 401 });
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/store/suppliers/supplier-shenzhen-logistics/audits"
     })).resolves.toMatchObject({ status: 401 });
   });
 

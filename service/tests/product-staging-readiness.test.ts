@@ -51,6 +51,28 @@ describe("Product API staging readiness", () => {
   it("serves a no-secret ready summary from non-demo chain projections", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents() });
+    await store.saveSyncState({
+      chainId,
+      contractAddress: stateMachineAddress,
+      syncStatus: "indexed",
+      latestIndexedBlock: 9n,
+      finalizedBlock: 9n,
+      confirmationDepth: 12,
+      lastEventName: "SupplierAttested",
+      eventCount: 9,
+      rebuild: {
+        status: "completed",
+        deploymentBlock: 1n,
+        fromBlock: 1n,
+        toBlock: 9n,
+        eventCount: 9,
+        activeEventCount: 8,
+        removedEventCount: 1,
+        removedLogsFiltered: true,
+        projectionRebuilt: true,
+        mismatchCount: 0
+      }
+    });
     const router = createApiRouter(store, {
       configDiagnostics: stagingDiagnostics(tempDirs),
       productRuntimeEnvironment: "staging",
@@ -79,7 +101,10 @@ describe("Product API staging readiness", () => {
         storageDriver: "postgres",
         storageDurable: true,
         storeAuthMode: "jwt",
-        storeAuthJwtConfigured: true
+        storeAuthJwtConfigured: true,
+        storeAuthExternalIdentityEvidence: true,
+        storeAuthEvidenceClassification: "external_oidc",
+        storeAuthKeySource: "jwks_url"
       },
       deployment: {
         ready: true,
@@ -91,7 +116,23 @@ describe("Product API staging readiness", () => {
       indexer: {
         ready: true,
         syncStatus: "indexed",
-        latestIndexedBlock: "9"
+        latestIndexedBlock: "9",
+        rebuild: {
+          status: "completed",
+          deploymentBlock: "1",
+          fromBlock: "1",
+          toBlock: "9",
+          activeEventCount: 8,
+          removedEventCount: 1,
+          removedLogsFiltered: true,
+          projectionRebuilt: true,
+          mismatchCount: 0
+        },
+        activeEventCount: 8,
+        removedEventCount: 1,
+        removedLogsFiltered: true,
+        projectionRebuilt: true,
+        eventRowsReplayed: 8
       },
       planTrust: {
         productFacingAttestedPlanCount: 1,
@@ -245,6 +286,45 @@ describe("Product API staging readiness", () => {
       ])
     });
     expect(JSON.stringify(response.body)).not.toContain("rpc-secret");
+  });
+
+  it("fails closed when JWT config evidence is not external OIDC/JWKS", async () => {
+    const baseDiagnostics = stagingDiagnostics(tempDirs);
+    const unsafeDiagnostics: ConfigDiagnostics = {
+      ...baseDiagnostics,
+      storeAuth: {
+        ...baseDiagnostics.storeAuth,
+        mode: "jwt",
+        jwtConfigured: true,
+        externalIdentityEvidence: false,
+        evidenceClassification: "not_verified",
+        evidenceReasons: ["store_auth_key_source_local_or_private"],
+        keySource: "jwks_url"
+      }
+    };
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents() });
+    const router = createApiRouter(store, {
+      configDiagnostics: unsafeDiagnostics,
+      productRuntimeEnvironment: "staging",
+      evidenceStorage: productionSafeEvidenceStorage(),
+      now: () => new Date(generatedAt)
+    });
+
+    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness" });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({
+      ok: false,
+      ready: false,
+      reasons: expect.arrayContaining(["store_auth_external_oidc_missing"]),
+      profile: {
+        storeAuthMode: "jwt",
+        storeAuthJwtConfigured: true,
+        storeAuthExternalIdentityEvidence: false,
+        storeAuthEvidenceClassification: "not_verified"
+      }
+    });
   });
 
   it("fails closed when a submitter task has revoked supplier trust", async () => {

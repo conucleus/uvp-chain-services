@@ -674,6 +674,7 @@ function submissionFromBroadcast(
     return {
       ...common,
       status: "broadcasting",
+      statusLabel: submissionStatusLabel("broadcasting"),
       broadcastStatus: "broadcasting",
       ...(input.broadcast.txHash ? { txHash: input.broadcast.txHash } : {}),
       retryable: false,
@@ -702,6 +703,7 @@ function submissionFromBroadcast(
     return {
       ...common,
       status: input.broadcast.status,
+      statusLabel: submissionStatusLabel(input.broadcast.status),
       broadcastStatus: input.broadcast.status,
       txHash: input.broadcast.txHash,
       ...(input.broadcast.blockNumber ? { blockNumber: input.broadcast.blockNumber } : {}),
@@ -748,6 +750,7 @@ function submissionFromBroadcast(
     return {
       ...common,
       status: "failed",
+      statusLabel: submissionStatusLabel("failed"),
       broadcastStatus: "failed",
       ...(txHash ? { txHash } : {}),
       ...(blockNumber ? { blockNumber } : {}),
@@ -773,6 +776,7 @@ function submissionFromBroadcast(
   return {
     ...common,
     status: "signature_received",
+    statusLabel: submissionStatusLabel("signature_received"),
     broadcastStatus: "not_attempted",
     errorCode: input.broadcast.errorCode,
     errorMessage: input.broadcast.reason,
@@ -794,6 +798,7 @@ function buildExpiredSubmission(prepared: PreparedSubmissionRecord, submissionId
   return {
     ...submissionCommon(prepared, { submissionId, createdAt: timestamp }),
     status: "expired",
+    statusLabel: submissionStatusLabel("expired"),
     broadcastStatus: "not_attempted",
     errorCode: "submission_expired",
     errorLabel: errorLabelFor("expired_signal_signature"),
@@ -812,8 +817,32 @@ function buildExpiredSubmission(prepared: PreparedSubmissionRecord, submissionId
   };
 }
 
+function submissionStatusLabel(status: ProductSubmissionStatus): string {
+  switch (status) {
+    case "prepared":
+      return "已准备";
+    case "signature_received":
+      return "签名已接收";
+    case "broadcasting":
+      return "广播中";
+    case "submitted":
+      return "已提交";
+    case "indexing":
+      return "同步中";
+    case "confirmed":
+      return "已确认";
+    case "failed":
+      return "提交失败";
+    case "expired":
+      return "已过期";
+    case "replaced":
+      return "已替换";
+  }
+}
+
 function withSubmissionReconcileDefaults(submission: ProductSubmissionDTO): ProductSubmissionDTO {
   const stored = submission as ProductSubmissionDTO & {
+    readonly statusLabel?: string;
     readonly retryState?: ProductSubmissionRetryState;
     readonly deadLetter?: boolean;
     readonly retryable?: boolean;
@@ -823,6 +852,7 @@ function withSubmissionReconcileDefaults(submission: ProductSubmissionDTO): Prod
   return {
     ...defaultSubmissionReconcileFields(submission),
     ...submission,
+    statusLabel: stored.statusLabel ?? submissionStatusLabel(submission.status),
     retryState: stored.retryState ?? retryStateFor({
       status: submission.status,
       retryable,
@@ -878,7 +908,7 @@ function submissionCommon(
   }
 ): Omit<
   ProductSubmissionDTO,
-  "status" | "broadcastStatus" | "retryable" | "retryState" | "deadLetter" | "attempts" | "attemptCount" | "proofRows"
+  "status" | "statusLabel" | "broadcastStatus" | "retryable" | "retryState" | "deadLetter" | "attempts" | "attemptCount" | "proofRows"
 > {
   return {
     submissionId: input.submissionId,

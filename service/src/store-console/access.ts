@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { adminPrincipalFromHeaders } from "../governance/index.js";
 import type { ChainServicesRuntimeEnv, StoreAuthConfig } from "../config/index.js";
+import { assessStoreAuthEvidence } from "../config/index.js";
 import type { GovernancePrincipal } from "../governance/index.js";
 
 export type StoreAccessLevel = "anonymous_read" | "store_read" | "store_operator" | "store_admin";
@@ -122,12 +123,20 @@ export async function storeAccessFromHeaders(
 export function createStoreIdentityProvider(options: StoreIdentityProviderOptions = {}): StoreIdentityProvider {
   const runtimeEnvironment = options.runtimeEnvironment ?? "local";
   const authConfig = options.authConfig ?? defaultStoreAuthConfig();
+  const strictRuntime = runtimeEnvironment === "staging" || runtimeEnvironment === "production";
+  const authEvidence = assessStoreAuthEvidence(authConfig, runtimeEnvironment);
+  const jwtConfigBlocked = authConfig.mode === "jwt" && strictRuntime && !authEvidence.externalIdentityEvidence;
   const devHeaderAuthEnabled = authConfig.mode === "dev_headers" &&
-    runtimeEnvironment !== "staging" &&
-    runtimeEnvironment !== "production";
-  const jwtVerifier = authConfig.mode === "jwt" ? createJwtVerifier(authConfig) : undefined;
+    !strictRuntime;
+  const jwtVerifier = authConfig.mode === "jwt" && !jwtConfigBlocked ? createJwtVerifier(authConfig) : undefined;
   return {
     async resolve(headers) {
+      if (jwtConfigBlocked) {
+        return anonymousAccess("jwt", {
+          code: "store_identity_invalid",
+          message: "External HTTPS OIDC/JWKS Store identity configuration is required in staging and production"
+        });
+      }
       if (jwtVerifier) {
         return resolveStoreAccessFromJwt(headers, jwtVerifier);
       }

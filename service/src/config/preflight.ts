@@ -3,6 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import type { ChainServicesConfig } from "./env.js";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
+import { assessStoreAuthEvidence, type StoreAuthEvidenceClassification, type StoreAuthKeySource } from "./store-auth-evidence.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -98,6 +99,10 @@ export interface ConfigDiagnostics {
   readonly storeAuth: {
     readonly mode: NonNullable<ChainServicesConfig["storeAuth"]>["mode"];
     readonly jwtConfigured: boolean;
+    readonly externalIdentityEvidence: boolean;
+    readonly evidenceClassification: StoreAuthEvidenceClassification;
+    readonly evidenceReasons: readonly string[];
+    readonly keySource: StoreAuthKeySource;
     readonly jwksUrlConfigured: boolean;
     readonly oidcDiscoveryUrlConfigured: boolean;
     readonly issuerConfigured: boolean;
@@ -223,6 +228,7 @@ export function buildConfigDiagnostics(
   const permissiveAuthorizationRequested = enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") ||
     isPermissiveAuthorizationRequested(env);
   const storeAuth = effectiveStoreAuthConfig(config);
+  const storeAuthEvidence = assessStoreAuthEvidence(storeAuth, config.security.environment);
   const preflight = options.preflight ?? {
     status: config.security.preflightStrict ? "skipped" : "skipped",
     checks: []
@@ -307,6 +313,10 @@ export function buildConfigDiagnostics(
     storeAuth: {
       mode: storeAuth.mode,
       jwtConfigured: storeAuthJwtConfigured(config),
+      externalIdentityEvidence: storeAuthEvidence.externalIdentityEvidence,
+      evidenceClassification: storeAuthEvidence.evidenceClassification,
+      evidenceReasons: storeAuthEvidence.reasons,
+      keySource: storeAuthEvidence.keySource,
       jwksUrlConfigured: Boolean(storeAuth.jwksUrl),
       oidcDiscoveryUrlConfigured: Boolean(storeAuth.oidcDiscoveryUrl),
       issuerConfigured: Boolean(storeAuth.issuer),
@@ -407,8 +417,10 @@ function runStoreAuthPreflight(
   errors: string[]
 ): void {
   const envMode = env.STORE_AUTH_MODE?.trim();
-  const mode = envMode === "dev_headers" || envMode === "jwt" ? envMode : effectiveStoreAuthConfig(config).mode;
+  const storeAuth = effectiveStoreAuthConfig(config);
+  const mode = envMode === "dev_headers" || envMode === "jwt" ? envMode : storeAuth.mode;
   const strictRuntime = config.security.environment === "staging" || config.security.environment === "production";
+  const evidence = assessStoreAuthEvidence(storeAuth, config.security.environment);
 
   if (strictRuntime && mode !== "jwt") {
     fail(checks, errors, "store_auth.mode", "STORE_AUTH_MODE=jwt is required in staging and production");
@@ -426,6 +438,14 @@ function runStoreAuthPreflight(
     pass(checks, "store_auth.jwt_configured");
   } else {
     fail(checks, errors, "store_auth.jwt_configured", "STORE_AUTH_JWKS_URL or STORE_AUTH_OIDC_DISCOVERY_URL, plus STORE_AUTH_ISSUER and STORE_AUTH_AUDIENCE are required when STORE_AUTH_MODE=jwt");
+  }
+
+  if (evidence.externalIdentityEvidence) {
+    pass(checks, "store_auth.external_oidc");
+  } else if (strictRuntime) {
+    fail(checks, errors, "store_auth.external_oidc", `Store staging identity must use external HTTPS OIDC/JWKS evidence; rejected reasons: ${evidence.reasons.join(", ")}`);
+  } else {
+    skip(checks, "store_auth.external_oidc", "external Store OIDC/JWKS evidence is not required outside staging and production");
   }
 }
 

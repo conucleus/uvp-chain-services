@@ -2,6 +2,8 @@ import type { Address, Hex } from "../shared/types.js";
 
 export type RelayAction = "approveStage" | "requestRelease" | "openDispute" | "resolveDispute";
 export type RelaySubmissionStatus = "submitted" | "confirmed" | "failed";
+export type RelayFailureCategory = "retryable" | "permanent" | "duplicate" | "authorization" | "broadcaster";
+export type RelayRetryState = "not_applicable" | "retryable" | "not_retryable" | "dead_letter";
 
 export interface RelayBusinessFields {
   readonly action: RelayAction;
@@ -69,5 +71,12 @@ export interface RelaySubmission {
   readonly nonce: string;
   readonly status: RelaySubmissionStatus;
   readonly txHash?: Hex;
+  readonly errorCode?: string;
+  readonly errorLabel?: string;
   readonly error?: string;
+  readonly failureCategory?: RelayFailureCategory;
+  readonly retryable?: boolean;
+  readonly retryState?: RelayRetryState;
+  readonly deadLetter?: boolean;
+  readonly nextRetryAt?: string;
 }
