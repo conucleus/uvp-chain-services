@@ -1,6 +1,7 @@
 export * from "./api/routes.js";
 export * from "./api/server.js";
 export * from "./chain-adapters/events.js";
+export * from "./compliance/index.js";
 export * from "./config/index.js";
 export * from "./evidence/index.js";
 export * from "./governance/index.js";
@@ -16,6 +17,7 @@ export * from "./product/bff/trigger.js";
 export * from "./proof-verifier/service.js";
 export * from "./relayer/service.js";
 export * from "./relayer/types.js";
+export * from "./risk/index.js";
 export * from "./security/index.js";
 export * from "./storage/factory.js";
 export * from "./storage/projection-store.js";

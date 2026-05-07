@@ -90,6 +90,14 @@ export interface ReconcileConfig {
   readonly txTimeoutMs: number;
 }
 
+export interface DockedSignalAutomationConfig {
+  readonly enabled: boolean;
+  readonly maxCandidatesPerRun: number;
+  readonly requireTrustedPlans: boolean;
+  readonly maxGasPerTx?: bigint;
+  readonly waitForReceipt: boolean;
+}
+
 export interface EvidenceStorageConfig {
   readonly adapter: "local" | "rehearsal-object" | "s3";
   readonly localDir?: string;
@@ -143,6 +151,7 @@ export interface ChainServicesConfig {
   readonly productBff: ProductBffConfig;
   readonly operatorRoles: OperatorRoleConfig;
   readonly reconcile: ReconcileConfig;
+  readonly dockedSignalAutomation: DockedSignalAutomationConfig;
   readonly evidenceStorage: EvidenceStorageConfig;
   readonly storeAuth?: StoreAuthConfig;
   readonly security: SecurityConfig;
@@ -240,6 +249,13 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
       enabled: parseBoolean(env, "RECONCILE_WORKER_ENABLED", false),
       pollIntervalMs: parseInteger(env, "RECONCILE_POLL_INTERVAL_MS", 5_000),
       txTimeoutMs: parseInteger(env, "RECONCILE_TX_TIMEOUT_MS", 30 * 60 * 1000)
+    },
+    dockedSignalAutomation: {
+      enabled: parseBoolean(env, "UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED", environment === "local"),
+      maxCandidatesPerRun: parseInteger(env, "UVP_DOCKED_SIGNAL_MAX_CANDIDATES_PER_RUN", 4),
+      requireTrustedPlans: parseBoolean(env, "UVP_DOCKED_SIGNAL_REQUIRE_TRUSTED_PLANS", environment !== "local"),
+      ...optionalGasCap(env, "UVP_DOCKED_SIGNAL_MAX_GAS_PER_TX", 500_000n),
+      waitForReceipt: parseBoolean(env, "UVP_DOCKED_SIGNAL_WAIT_FOR_RECEIPT", true)
     },
     evidenceStorage: parseEvidenceStorageConfig(env),
     storeAuth: parseStoreAuthConfig(env, environment),
@@ -558,6 +574,11 @@ function parseBigIntValue(env: Env, name: string, fallback: bigint): bigint {
     }
     throw new ConfigError(`${name} must be parseable as bigint`);
   }
+}
+
+function optionalGasCap(env: Env, name: string, fallback: bigint): { readonly maxGasPerTx?: bigint } {
+  const value = parseBigIntValue(env, name, fallback);
+  return value > 0n ? { maxGasPerTx: value } : {};
 }
 
 function parseGovernanceConfig(env: Env, defaults: { readonly chainId: number; readonly rpcUrl: string }): GovernanceConfig {
@@ -952,6 +973,7 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   if (!trustRegistryAddress(config.network.contracts)) {
     throw new ConfigError("ZhixuTrustRegistry contract address is required in production");
   }
+  validateDockedSignalAutomationTrustPolicy(config, "production");
   if (!optionalEnv(env, config.relayer.stateMachinePrivateKeyEnv)) {
     throw new ConfigError(`${config.relayer.stateMachinePrivateKeyEnv} is required in production`);
   }
@@ -1010,6 +1032,7 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   if (!trustRegistryAddress(config.network.contracts)) {
     throw new ConfigError("ZhixuTrustRegistry contract address is required in staging");
   }
+  validateDockedSignalAutomationTrustPolicy(config, "staging");
 
   if (parseBoolean(env, "UVP_PRODUCT_DEMO_MODE", false)) {
     throw new ConfigError("UVP_PRODUCT_DEMO_MODE=1 is forbidden in staging");
@@ -1164,6 +1187,7 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
   if (!trustRegistryAddress(config.network.contracts)) {
     throw new ConfigError("ZhixuTrustRegistry contract address is required in testnet");
   }
+  validateDockedSignalAutomationTrustPolicy(config, "testnet");
 
   if (!config.security.preflightStrict) {
     throw new ConfigError("SECURITY_PREFLIGHT_STRICT=false is forbidden in testnet");
@@ -1236,6 +1260,15 @@ function validateManagedDatabaseCostSafety(
     throw new ConfigError(
       `RECONCILE_POLL_INTERVAL_MS must be 0 or at least 30000 when CHAIN_SERVICES_DATABASE_URL points to ${host} in ${environment}`
     );
+  }
+}
+
+function validateDockedSignalAutomationTrustPolicy(
+  config: ChainServicesConfig,
+  environment: "production" | "staging" | "testnet"
+): void {
+  if (config.dockedSignalAutomation.enabled && !config.dockedSignalAutomation.requireTrustedPlans) {
+    throw new ConfigError(`UVP_DOCKED_SIGNAL_REQUIRE_TRUSTED_PLANS=false is forbidden when docked signal automation is enabled in ${environment}`);
   }
 }
 

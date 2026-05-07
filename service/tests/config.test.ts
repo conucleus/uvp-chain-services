@@ -238,6 +238,31 @@ describe("chain-services config", () => {
     });
   });
 
+  it("loads docked signal automation config and gas cap", () => {
+    const config = loadConfigFromEnv({
+      UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED: "true",
+      UVP_DOCKED_SIGNAL_REQUIRE_TRUSTED_PLANS: "true",
+      UVP_DOCKED_SIGNAL_MAX_CANDIDATES_PER_RUN: "2",
+      UVP_DOCKED_SIGNAL_MAX_GAS_PER_TX: "250000",
+      UVP_DOCKED_SIGNAL_WAIT_FOR_RECEIPT: "false"
+    });
+
+    expect(config.dockedSignalAutomation).toEqual({
+      enabled: true,
+      requireTrustedPlans: true,
+      maxCandidatesPerRun: 2,
+      maxGasPerTx: 250_000n,
+      waitForReceipt: false
+    });
+  });
+
+  it("rejects non-local docked signal automation without trusted-plan gating", () => {
+    expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
+      UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED: "true",
+      UVP_DOCKED_SIGNAL_REQUIRE_TRUSTED_PLANS: "false"
+    }))).toThrow(/UVP_DOCKED_SIGNAL_REQUIRE_TRUSTED_PLANS=false/);
+  });
+
   it("infers postgres driver from database URL", () => {
     const config = loadConfigFromEnv({
       CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:uvp@127.0.0.1:5432/uvp"

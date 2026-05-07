@@ -220,6 +220,13 @@ function testConfig(input: {
       pollIntervalMs: 50,
       txTimeoutMs: 60_000
     },
+    dockedSignalAutomation: {
+      enabled: false,
+      maxCandidatesPerRun: 4,
+      requireTrustedPlans: true,
+      maxGasPerTx: 500_000n,
+      waitForReceipt: true
+    },
     evidenceStorage: {
       adapter: "local",
       objectNamespace: "uvp-rehearsal"

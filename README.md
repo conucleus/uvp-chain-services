@@ -1,3 +1,7 @@
+<p align="right">
+  <strong>English</strong> | <a href="./README.zh.md">简体中文</a>
+</p>
+
 # uvp-chain-services
 
 Non-trusted service boundary for the EVM-native UVP track.

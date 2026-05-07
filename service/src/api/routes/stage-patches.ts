@@ -178,19 +178,19 @@ function parsePrepareDockedBody(body: unknown): PrepareProductDockedOrderLinkInp
   }
   return {
     selectorWallet: requiredString(record, "selectorWallet"),
-    localSourceId: requiredStringAlias(record, "localSourceId", "parentSourceId"),
-    linkedOrderId: requiredStringAlias(record, "linkedOrderId", "childOrderId"),
-    linkedPlanId: requiredStringAlias(record, "linkedPlanId", "childPlanId"),
+    localSourceId: requiredString(record, "localSourceId"),
+    linkedOrderId: requiredString(record, "linkedOrderId"),
+    linkedPlanId: requiredString(record, "linkedPlanId"),
     signalBindings: rawBindings.map((binding, index) => {
       if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
         throw new ProductStagePatchError(400, "invalid_body", `signalBindings.${index} must be an object`);
       }
       const bindingRecord = binding as Record<string, unknown>;
       return {
-        localSourceId: requiredStringAlias(bindingRecord, "localSourceId", "parentSourceId"),
-        localSignalId: requiredStringAlias(bindingRecord, "localSignalId", "parentSignalId"),
-        linkedSourceId: requiredStringAlias(bindingRecord, "linkedSourceId", "childSourceId"),
-        linkedSignalId: requiredStringAlias(bindingRecord, "linkedSignalId", "childSignalId")
+        localSourceId: requiredString(bindingRecord, "localSourceId"),
+        localSignalId: requiredString(bindingRecord, "localSignalId"),
+        linkedSourceId: requiredString(bindingRecord, "linkedSourceId"),
+        linkedSignalId: requiredString(bindingRecord, "linkedSignalId")
       };
     }),
     metadataURI: requiredString(record, "metadataURI")

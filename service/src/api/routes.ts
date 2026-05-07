@@ -1,14 +1,13 @@
 import type { ProjectionStore } from "../storage/projection-store.js";
+import { createNoopComplianceService } from "../compliance/index.js";
+import { createNoopRiskGraphService } from "../risk/index.js";
 import { createProductService } from "../product/service.js";
 import {
   createProductBffService,
   type ProductBffSupplierTrustResolver
 } from "../product/bff/service.js";
 import type { ProductBffStore } from "../product/bff/store.js";
-import {
-  createEvidenceService,
-  LocalEvidenceStorage
-} from "../evidence/index.js";
+import { createEvidenceService, LocalEvidenceStorage } from "../evidence/index.js";
 import { createGovernanceService } from "../governance/index.js";
 import {
   createStoreZhixuDraftWorkflowService,
@@ -42,18 +41,11 @@ import { MemoryStoreAuditStore } from "../store-console/audit.js";
 import { createStoreIdentityProvider } from "../store-console/access.js";
 import { createStoreDockingService, MemoryStoreDockingSessionStore } from "../store-console/docking.js";
 import { createStoreSupplierService, InMemoryStoreSupplierMetadataStore } from "../store-suppliers/service.js";
-import type {
-  ApiRouteContext,
-  ApiRouter,
-  CreateApiRouterOptions
-} from "./route-context.js";
+import type { ApiRouteContext, ApiRouter, CreateApiRouterOptions } from "./route-context.js";
 import type { RouteModule } from "./route-module.js";
 import { createAdminOpsRouteModule } from "./routes/admin-ops.js";
 import { createDiagnosticsRouteModule } from "./routes/diagnostics.js";
-import {
-  createProductE2EControls,
-  createProductE2EControlsRouteModule
-} from "./routes/e2e-controls.js";
+import { createProductE2EControls, createProductE2EControlsRouteModule } from "./routes/e2e-controls.js";
 import { createEvidenceRouteModule } from "./routes/evidence.js";
 import { createGovernanceRouteModule } from "./routes/governance.js";
 import { createLegacyOrdersRouteModule } from "./routes/legacy-orders.js";
@@ -61,7 +53,9 @@ import { createNotificationsRouteModule } from "./routes/notifications.js";
 import { createProductBffRouteModule } from "./routes/product-bff.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
 import { createStoreConsoleRouteModule } from "./routes/store-console.js";
+import { createStoreComplianceRouteModule } from "./routes/store-compliance.js";
 import { createStoreDockingRouteModule } from "./routes/store-docking.js";
+import { createStoreRiskRouteModule } from "./routes/store-risk.js";
 import { createStoreSuppliersRouteModule } from "./routes/store-suppliers.js";
 import { createSubmissionsRouteModule } from "./routes/submissions.js";
 import { createStagePatchRouteModule } from "./routes/stage-patches.js";
@@ -102,6 +96,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.governanceStore ? { store: options.governanceStore } : {}),
     audit
   });
+  const complianceService = options.complianceService ?? createNoopComplianceService();
+  const riskGraphService = options.riskGraphService ?? createNoopRiskGraphService();
   const storeRuntimeService = createStoreRuntimeService({
     productService,
     store,
@@ -240,6 +236,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     storeAuditStore,
     storeIdentityProvider,
     governanceService,
+    complianceService,
+    riskGraphService,
     notificationService,
     supplierNotificationConfigService,
     evidenceService,
@@ -262,7 +260,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createLegacyOrdersRouteModule(),
     createProductE2EControlsRouteModule(),
     createStoreConsoleRouteModule(),
+    createStoreComplianceRouteModule(),
     createStoreDockingRouteModule(),
+    createStoreRiskRouteModule(),
     createStoreSuppliersRouteModule(),
     createGovernanceRouteModule(),
     createNotificationsRouteModule(),
