@@ -8,7 +8,7 @@ import {
 } from "./events.js";
 import type { ProjectionSnapshot } from "./projections.js";
 import { createEmptyProjectionSnapshot, rebuildOrderProjections } from "./projections.js";
-import { rebuildTrustProjections } from "./trust-projections.js";
+import { rebuildTrustProjections, type TrustProjectionSnapshot } from "./trust-projections.js";
 import { createProjectionStore } from "../storage/factory.js";
 import {
   defaultProjectionScope,
@@ -34,6 +34,10 @@ export interface ChainEventSource {
 
 export interface ChainEventNotificationProcessor {
   processSignalSubmittedEvents(events: readonly ChainEvent[]): Promise<unknown>;
+}
+
+export interface ProjectionAutomationProcessor {
+  processProjection(snapshot: ProjectionSnapshot, trustSnapshot?: TrustProjectionSnapshot): Promise<unknown>;
 }
 
 export interface IndexerRebuildSummary {
@@ -69,6 +73,7 @@ export interface IndexerServiceOptions {
   readonly eventSource: ChainEventSource;
   readonly store: ProjectionStore;
   readonly notificationProcessor?: ChainEventNotificationProcessor;
+  readonly projectionAutomationProcessor?: ProjectionAutomationProcessor;
   readonly logger?: Logger;
 }
 
@@ -83,6 +88,7 @@ export class IndexerService implements LifecycleService {
   readonly #eventSource: ChainEventSource;
   readonly #store: ProjectionStore;
   readonly #notificationProcessor: ChainEventNotificationProcessor | undefined;
+  readonly #projectionAutomationProcessor: ProjectionAutomationProcessor | undefined;
   readonly #logger: Logger;
   readonly #scope: ProjectionScope;
 
@@ -91,6 +97,7 @@ export class IndexerService implements LifecycleService {
     this.#eventSource = options.eventSource;
     this.#store = options.store;
     this.#notificationProcessor = options.notificationProcessor;
+    this.#projectionAutomationProcessor = options.projectionAutomationProcessor;
     this.#logger = options.logger ?? noopLogger;
     this.#scope = defaultProjectionScope(options.config.network.chainId);
   }
@@ -231,6 +238,7 @@ export class IndexerService implements LifecycleService {
         syncState: syncStateInput
       });
       await this.#processSignalNotifications(activeEvents);
+      await this.#processProjectionAutomation(snapshot, trustSnapshot);
 
       this.#cursor = {
         chainId: this.#config.network.chainId,
@@ -299,11 +307,14 @@ export class IndexerService implements LifecycleService {
         finalizedBlock
       };
       await this.#saveCursor();
-      return this.#summarizeStoredProjection({
+      const result = await this.#summarizeStoredProjection({
         fromBlock,
         toBlock: finalizedBlock,
         newEventCount: 0
       });
+      const trustSnapshot = await durableStore.getTrustSnapshot();
+      await this.#processProjectionAutomation(result.snapshot, trustSnapshot);
+      return result;
     }
 
     const events = await this.#eventSource.readEvents(
@@ -352,6 +363,7 @@ export class IndexerService implements LifecycleService {
       });
       return {
         snapshot,
+        trustSnapshot,
         summary: summaryFromSnapshot({
           chainId: this.#config.network.chainId,
           deploymentBlock,
@@ -377,6 +389,7 @@ export class IndexerService implements LifecycleService {
     };
     await this.#saveCursor();
     await this.#processSignalNotifications(activeNewEvents);
+    await this.#processProjectionAutomation(result.snapshot, result.trustSnapshot);
 
     this.#logger.info("indexer incrementally refreshed projections from chain events", {
       fromBlock: fromBlock.toString(),
@@ -388,7 +401,7 @@ export class IndexerService implements LifecycleService {
       syncStatus: result.summary.syncStatus
     });
 
-    return result;
+    return { snapshot: result.snapshot, summary: result.summary };
   }
 
   get running(): boolean {
@@ -489,6 +502,22 @@ export class IndexerService implements LifecycleService {
     } catch (error) {
       this.#logger.warn("notification processor failed after indexer projection commit", {
         message: error instanceof Error ? redactErrorMessage(error) : "unknown notification processor error"
+      });
+    }
+  }
+
+  async #processProjectionAutomation(
+    snapshot: ProjectionSnapshot,
+    trustSnapshot?: TrustProjectionSnapshot
+  ): Promise<void> {
+    if (!this.#projectionAutomationProcessor) {
+      return;
+    }
+    try {
+      await this.#projectionAutomationProcessor.processProjection(snapshot, trustSnapshot);
+    } catch (error) {
+      this.#logger.warn("projection automation processor failed after indexer projection commit", {
+        message: error instanceof Error ? redactErrorMessage(error) : "unknown projection automation error"
       });
     }
   }

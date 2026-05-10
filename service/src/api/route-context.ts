@@ -1,4 +1,5 @@
 import type { ChainServicesRuntimeEnv, ConfigDiagnostics, StoreAuthConfig } from "../config/index.js";
+import type { ComplianceService } from "../compliance/index.js";
 import type {
   EvidenceMetadataStore,
   EvidenceService,
@@ -10,6 +11,7 @@ import type { ProductOrderTriggerBroadcastAdapter } from "../product/bff/trigger
 import type { ProductBffStore } from "../product/bff/store.js";
 import type { ProductSchemaResolver, ProductService } from "../product/service.js";
 import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
+import type { RiskGraphService } from "../risk/index.js";
 import type { AuditSink } from "../security/audit.js";
 import type { Address } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
@@ -83,6 +85,8 @@ export interface CreateApiRouterOptions {
   readonly evidenceService?: EvidenceService;
   readonly evidenceMetadataStore?: EvidenceMetadataStore;
   readonly governanceService?: GovernanceService;
+  readonly complianceService?: ComplianceService;
+  readonly riskGraphService?: RiskGraphService;
   readonly governanceStore?: GovernanceStore;
   readonly submissionService?: ProductSubmissionService;
   readonly submissionStore?: ProductSubmissionStore;
@@ -175,6 +179,8 @@ export interface ApiRouteContext {
   readonly storeAuditStore: StoreAuditStore;
   readonly storeIdentityProvider: StoreIdentityProvider;
   readonly governanceService: GovernanceService;
+  readonly complianceService: ComplianceService;
+  readonly riskGraphService: RiskGraphService;
   readonly notificationService: NotificationService;
   readonly supplierNotificationConfigService: SupplierNotificationProfileConfigService;
   readonly evidenceService: EvidenceService;

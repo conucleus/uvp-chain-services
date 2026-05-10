@@ -531,6 +531,30 @@ broadcast adapter is enabled, `txHash` is absent and the submission is proof
 that the wallet signature was verified, not that a state-machine signal was
 submitted on-chain.
 
+### Docked Signal Automation
+
+The docked-signal keeper is an indexer-side automation that watches projected
+`DockedOrderLinked`, `DockedSignalMapped`, and linked `SignalSubmitted` events.
+When enabled, it pays relayer gas to call the docking module
+`submitDockedSignal`; it does not create business signatures or canonical
+state.
+
+Configure it with:
+
+```text
+UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED
+UVP_DOCKED_SIGNAL_REQUIRE_TRUSTED_PLANS
+UVP_DOCKED_SIGNAL_MAX_CANDIDATES_PER_RUN
+UVP_DOCKED_SIGNAL_MAX_GAS_PER_TX
+UVP_DOCKED_SIGNAL_WAIT_FOR_RECEIPT
+```
+
+`UVP_DOCKED_SIGNAL_REQUIRE_TRUSTED_PLANS=true` requires both the local order
+plan and linked order plan to have active, non-revoked `ZhixuTrustRegistry`
+plan attestations before relayer gas is spent. This is mandatory when docked
+signal automation is enabled in staging, testnet, or production. Local runs may
+disable it for fixture rehearsals.
+
 ### Relayer Operations Runbook
 
 Relayer boundary:

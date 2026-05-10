@@ -14,6 +14,7 @@ import type { ChainEventRange, ChainEventSource } from "./service.js";
 
 const stateMachineAbi = parseAbi([
   "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
+  "event StateMachineModuleSet(bytes32 indexed moduleId,address indexed previousModule,address indexed newModule)",
   "event PlanPublisherSet(address indexed publisher,bool allowed)",
   "event OrderRegistrarSet(address indexed registrar,bool allowed)",
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",
@@ -26,7 +27,7 @@ const stateMachineAbi = parseAbi([
   "event StageMaterialized(bytes32 indexed orderId,bytes32 indexed stageId,bytes32 indexed triggerHookId,bytes32 sourceId,bytes32 signalId)",
   "event SignalCapabilityRegistered(bytes32 indexed planId,bytes32 indexed stageId,bytes32 indexed targetSourceId,bytes32 signalId,uint8 targetOrderRelation)",
   "event OrderTriggered(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed triggerStageId,bytes32 sourceId,bytes32 signalId,address submitter)",
-  "event OrderLinked(bytes32 indexed childOrderId,bytes32 indexed parentOrderId,bytes32 indexed triggerStageId,bytes32 originSourceId,bytes32 originSignalId)",
+  "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 originSourceId,bytes32 originSignalId)",
   "event StageSelectorBindingRegistered(bytes32 indexed planId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId)",
   "event StageExecutorPatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,address selector,address executor,bytes32 role,bytes32 executorMetadataHash,bytes32 mode,address previousExecutor,bytes32 approvalSourceId,bytes32 approvalSignalId,bytes32 patchHash,uint256 patchNonce,string metadataURI)",
   "event StageResourcePatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,address selector,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI)",

@@ -532,7 +532,7 @@ async function productTaskFromStateMachineTask(
   const stageName = displayBytes32(task.stageIdentifier, "阶段");
   const hookLabel = displayBytes32(task.hookName, "链上待办");
   const orderTitle = order ? `链上订单 ${shortId(order.orderId)}` : `链上订单 ${shortId(task.orderId)}`;
-  const baseProof = proofFromStateMachineProof(task.proof);
+  const baseProof = proofWithTaskSubmitSignal(proofFromStateMachineProof(task.proof), task);
   const capabilityResolution = await resolveTaskCapabilityPlugin(task, order, trustSnapshot, productSchemaResolver);
   const proof = proofWithCapabilitySubmitSignal(baseProof, capabilityResolution);
   const productStage = await resolveProductStageForTask(task, order, trustSnapshot, productSchemaResolver);
@@ -772,6 +772,21 @@ function proofWithCapabilitySubmitSignal(
   capabilityResolution?: TaskCapabilityResolution
 ): ProductChainProofDTO {
   const submitSignal = capabilityResolution?.submitSignal;
+  if (!submitSignal || (proof.sourceId && proof.signalId)) {
+    return proof;
+  }
+  return {
+    ...proof,
+    ...(proof.sourceId ? {} : { sourceId: submitSignal.sourceId }),
+    ...(proof.signalId ? {} : { signalId: submitSignal.signalId })
+  };
+}
+
+function proofWithTaskSubmitSignal(
+  proof: ProductChainProofDTO,
+  task: StateMachineTaskProjection
+): ProductChainProofDTO {
+  const submitSignal = task.submitSignals?.[0];
   if (!submitSignal || (proof.sourceId && proof.signalId)) {
     return proof;
   }

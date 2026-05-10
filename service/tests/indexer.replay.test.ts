@@ -163,6 +163,157 @@ describe("indexer projection replay", () => {
     });
   });
 
+  it("marks HookReady tasks submitted from explicit plan signal capabilities", () => {
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(2n, 0, "SignalCapabilityRegistered", {
+        planId,
+        stageId,
+        targetSourceId: sourceId,
+        signalId,
+        targetOrderRelation: 0
+      }),
+      chainEvent(3n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      chainEvent(4n, 0, "HookReady", {
+        orderId: stateMachineOrderId,
+        hookId,
+        stageId,
+        hookName
+      }),
+      chainEvent(5n, 0, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signer
+      })
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const task = snapshot.stateMachineTasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`];
+
+    expect(task).toMatchObject({
+      status: "submitted",
+      submitSignals: [
+        {
+          sourceId,
+          signalId,
+          source: "plan_capability"
+        }
+      ],
+      proof: expect.objectContaining({
+        eventName: "SignalSubmitted",
+        transactionHash: chainEvent(5n, 0, "SignalSubmitted", {}).transactionHash
+      })
+    });
+  });
+
+  it("backfills submitted status when a matching signal is projected before HookReady creates the task", () => {
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(2n, 0, "SignalCapabilityRegistered", {
+        planId,
+        stageId,
+        targetSourceId: sourceId,
+        signalId,
+        targetOrderRelation: 0
+      }),
+      chainEvent(3n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      chainEvent(4n, 0, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signer
+      }),
+      chainEvent(5n, 0, "HookReady", {
+        orderId: stateMachineOrderId,
+        hookId,
+        stageId,
+        hookName
+      })
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
+    const task = snapshot.stateMachineTasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`];
+
+    expect(order?.status).toBe("running");
+    expect(task).toMatchObject({
+      status: "submitted",
+      proof: expect.objectContaining({
+        eventName: "SignalSubmitted",
+        transactionHash: chainEvent(4n, 0, "SignalSubmitted", {}).transactionHash
+      })
+    });
+  });
+
+  it("prefers explicit submit-signal authorizations over legacy hook-name matches", () => {
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(2n, 0, "SignalCapabilityRegistered", {
+        planId,
+        stageId,
+        targetSourceId: sourceId,
+        signalId,
+        targetOrderRelation: 0
+      }),
+      chainEvent(3n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      chainEvent(4n, 0, "SignalSubmitterAuthorized", {
+        orderId: stateMachineOrderId,
+        sourceId: stageId,
+        signalId: hookName,
+        submitter: signer,
+        role: bytes32Text("legacy"),
+        metadataHash: emptyHash
+      }),
+      chainEvent(5n, 0, "HookReady", {
+        orderId: stateMachineOrderId,
+        hookId,
+        stageId,
+        hookName
+      })
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const task = snapshot.stateMachineTasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`];
+
+    expect(task).toMatchObject({
+      assigneeRole: "unknown",
+      submitSignals: [
+        {
+          sourceId,
+          signalId,
+          source: "plan_capability"
+        }
+      ]
+    });
+    expect(task?.assigneeWallet).toBeUndefined();
+  });
+
   it("rebuilds stage overlays from patch events and prefers the active overlay executor for target tasks", () => {
     const selectorHookId = "0x0000000000000000000000000000000000000000000000000000000000000606";
     const events: readonly ChainEvent[] = [
@@ -360,6 +511,111 @@ describe("indexer projection replay", () => {
         ])
       }
     });
+  });
+
+  it("projects state-machine module, plan publisher, and order registrar provenance", () => {
+    const moduleId = bytes32Text("uvp.module.docking.v1") as `0x${string}`;
+    const moduleAddress = "0x6666666666666666666666666666666666666666";
+    const previousModule = "0x7777777777777777777777777777777777777777";
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(1n, 1, "PlanPublisherRecorded", {
+        planId,
+        publisher: signer
+      }),
+      chainEvent(2n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      chainEvent(2n, 1, "OrderRegistrarRecorded", {
+        orderId: stateMachineOrderId,
+        registrar: buyer,
+        creator: seller
+      }),
+      chainEvent(3n, 0, "StateMachineModuleSet", {
+        moduleId,
+        previousModule,
+        newModule: moduleAddress
+      })
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const plan = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
+    const module = snapshot.stateMachineModules[stateMachineScopedKey(31337, contractAddress, moduleId)];
+
+    expect(plan).toMatchObject({
+      publisher: signer,
+      publisherProof: expect.objectContaining({ eventName: "PlanPublisherRecorded" })
+    });
+    expect(order).toMatchObject({
+      registrar: buyer,
+      creator: seller,
+      registrarProof: expect.objectContaining({ eventName: "OrderRegistrarRecorded" }),
+      proof: expect.arrayContaining([expect.objectContaining({ eventName: "OrderRegistrarRecorded" })])
+    });
+    expect(module).toMatchObject({
+      stateMachineAddress: contractAddress,
+      moduleId,
+      previousModule,
+      moduleAddress,
+      proof: expect.objectContaining({ eventName: "StateMachineModuleSet" })
+    });
+  });
+
+  it("binds plans and orders to the active deployment for reused state-machine addresses", () => {
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "DeploymentRegistered", {
+        deploymentId: deploymentIdV1,
+        stateMachine: contractAddress,
+        artifactHash: planHash,
+        abiHash,
+        deploymentBlock: 1n,
+        metadataURI: "uvp-eth://deployments/reused-v1"
+      }, deploymentRegistryAddress),
+      chainEvent(2n, 0, "DeploymentActivated", {
+        previousDeploymentId: emptyHash,
+        newDeploymentId: deploymentIdV1,
+        evidenceHash,
+        evidenceURI: "uvp-eth://evidence/reused-v1"
+      }, deploymentRegistryAddress),
+      chainEvent(3n, 0, "DeploymentRegistered", {
+        deploymentId: deploymentIdV2,
+        stateMachine: contractAddress,
+        artifactHash: planHash,
+        abiHash,
+        deploymentBlock: 3n,
+        metadataURI: "uvp-eth://deployments/reused-v2"
+      }, deploymentRegistryAddress),
+      chainEvent(4n, 0, "DeploymentActivated", {
+        previousDeploymentId: deploymentIdV1,
+        newDeploymentId: deploymentIdV2,
+        evidenceHash,
+        evidenceURI: "uvp-eth://evidence/reused-v2"
+      }, deploymentRegistryAddress),
+      chainEvent(5n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(6n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      })
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const plan = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
+
+    expect(snapshot.stateMachineDeployments[`${31337}:${deploymentRegistryAddress}:${deploymentIdV1}`]?.status).toBe("deprecated");
+    expect(snapshot.stateMachineDeployments[`${31337}:${deploymentRegistryAddress}:${deploymentIdV2}`]?.status).toBe("active");
+    expect(plan?.deploymentId).toBe(deploymentIdV2);
+    expect(order?.deploymentId).toBe(deploymentIdV2);
   });
 
   it("writes finality and rebuild sync metadata during indexer rebuild", async () => {
@@ -945,6 +1201,13 @@ function testConfig(): ChainServicesConfig {
       enabled: false,
       pollIntervalMs: 50,
       txTimeoutMs: 60_000
+    },
+    dockedSignalAutomation: {
+      enabled: false,
+      maxCandidatesPerRun: 4,
+      requireTrustedPlans: true,
+      maxGasPerTx: 500_000n,
+      waitForReceipt: true
     },
     evidenceStorage: {
       adapter: "local",

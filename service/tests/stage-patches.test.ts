@@ -6,9 +6,12 @@ import type { ChainServicesRuntimeEnv } from "../src/config/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProductBffStore, type ProductBffStore } from "../src/product/bff/store.js";
 import {
+  createProductDockedOrderLinkService,
   createProductStageExecutorPatchService,
   createProductStageResourcePatchService,
+  DOCKED_ORDER_LINK_SIGNAL_ID,
   hashResourceManifest,
+  type PreparedDockedOrderLinkDTO,
   type PreparedStageExecutorPatchDTO,
   type PreparedStageResourcePatchDTO,
   type StageExecutorPatchBroadcastAdapter,
@@ -20,10 +23,14 @@ import { normalizeAddress, type Address, type Hex } from "../src/shared/types.js
 
 const chainId = 31337;
 const contractAddress = "0x1111111111111111111111111111111111111111" as Address;
+const trustRegistryAddress = "0x4444444444444444444444444444444444444444" as Address;
 const planId = bytes32Hex("101");
 const planHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Hex;
+const linkedPlanId = bytes32Hex("102");
+const linkedPlanHash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" as Hex;
 const artifactHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Hex;
 const orderId = bytes32Hex("202");
+const linkedOrderId = bytes32Hex("203");
 const selectorStageId = bytes32Text("selector.stage");
 const selectorStageOnchainId = "0x31ca11fdde4f72e7368e356f13c363594453a94adc6f834b1a29a03a67319af0" as Hex;
 const targetStageId = bytes32Text("target.stage");
@@ -678,6 +685,54 @@ describe("stage executor/resource patch Product API", () => {
       }
     });
   });
+
+  it("rejects docked order links when the linked plan lacks official trust", async () => {
+    const { router } = await routerFixture({
+      events: [
+        ...baseEvents(),
+        planAttestedEvent(5n, planId, planHash),
+        ...linkedOrderEvents(6n)
+      ]
+    });
+
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-docked-order-link`,
+      body: prepareDockedBody()
+    });
+
+    expect(response).toMatchObject({
+      status: 403,
+      body: { error: "linked_plan_not_attested" }
+    });
+  });
+
+  it("prepares docked order links only after both plans are officially trusted", async () => {
+    const { router } = await routerFixture({
+      events: [
+        ...baseEvents(),
+        planAttestedEvent(5n, planId, planHash),
+        ...linkedOrderEvents(6n),
+        planAttestedEvent(8n, linkedPlanId, linkedPlanHash)
+      ]
+    });
+
+    const prepared = await prepareDockedOrderLink(router);
+
+    expect(prepared).toMatchObject({
+      prepareId: "prep_1",
+      taskId: selectorTaskId(),
+      localOrderId: orderId,
+      linkedOrderId,
+      linkedPlanId,
+      selectorWallet,
+      localSourceId: targetStageId,
+      status: "prepared",
+      typedData: {
+        primaryType: "UVPDockingModuleDockedOrderLink"
+      }
+    });
+  });
 });
 
 async function routerFixture(options: {
@@ -719,11 +774,15 @@ async function routerFixture(options: {
     ...(options.resourceBroadcastAdapter ? { broadcastAdapter: options.resourceBroadcastAdapter } : {}),
     ...(options.runtimeEnvironment ? { runtimeEnvironment: options.runtimeEnvironment } : {})
   });
+  const dockedOrderLinkService = createProductDockedOrderLinkService({
+    ...commonOptions
+  });
   return {
     store,
     router: createApiRouter(store, {
       productStageExecutorPatchService: executorService,
-      productStageResourcePatchService: resourceService
+      productStageResourcePatchService: resourceService,
+      productDockedOrderLinkService: dockedOrderLinkService
     })
   };
 }
@@ -751,6 +810,16 @@ async function prepareStageResourcePatch(router: ApiRouter): Promise<PreparedSta
   return response.body as PreparedStageResourcePatchDTO;
 }
 
+async function prepareDockedOrderLink(router: ApiRouter): Promise<PreparedDockedOrderLinkDTO> {
+  const response = await router.handle({
+    method: "POST",
+    pathname: `/product/tasks/${selectorTaskId()}/prepare-docked-order-link`,
+    body: prepareDockedBody()
+  });
+  expect(response.status).toBe(201);
+  return response.body as PreparedDockedOrderLinkDTO;
+}
+
 function prepareExecutorBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     selectorWallet,
@@ -772,6 +841,23 @@ function prepareResourceBody(overrides: Record<string, unknown> = {}): Record<st
     manifestHash,
     policyHash,
     manifestURI: "ipfs://resource-manifests/invoice-v1",
+    ...overrides
+  };
+}
+
+function prepareDockedBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    selectorWallet,
+    localSourceId: targetStageId,
+    linkedOrderId,
+    linkedPlanId,
+    signalBindings: [{
+      localSourceId: targetStageId,
+      localSignalId: bytes32Text("local.done"),
+      linkedSourceId: targetStageId,
+      linkedSignalId: bytes32Text("linked.done")
+    }],
+    metadataURI: "ipfs://docked-order-links/1",
     ...overrides
   };
 }
@@ -1029,7 +1115,15 @@ function baseEvents(options: {
             submitter: selectorWallet,
             role: bytes32Text("selector"),
             metadataHash: bytes32Hex("90b")
-          }, 2)
+          }, 2),
+          chainEvent(3n, "SignalSubmitterAuthorized", {
+            orderId,
+            sourceId: eventSelectorStageId,
+            signalId: DOCKED_ORDER_LINK_SIGNAL_ID,
+            submitter: selectorWallet,
+            role: bytes32Text("selector"),
+            metadataHash: bytes32Hex("90c")
+          }, 3)
         ]
       : []),
     chainEvent(4n, "HookReady", {
@@ -1039,6 +1133,41 @@ function baseEvents(options: {
       hookName: selectorHookName
     })
   ];
+}
+
+function linkedOrderEvents(blockNumber: bigint): readonly ChainEvent[] {
+  return [
+    chainEvent(blockNumber, "PlanRegistered", {
+      planId: linkedPlanId,
+      planHash: linkedPlanHash,
+      hookCount: 1n,
+      selectorBindings: []
+    }),
+    chainEvent(blockNumber + 1n, "OrderRegistered", {
+      orderId: linkedOrderId,
+      planId: linkedPlanId
+    })
+  ];
+}
+
+function planAttestedEvent(blockNumber: bigint, trustedPlanId: Hex, trustedPlanHash: Hex): ChainEvent {
+  return {
+    chainId,
+    contractAddress: trustRegistryAddress,
+    blockNumber,
+    transactionHash: bytes32Hex(`a${blockNumber.toString(16)}`) as Hex,
+    logIndex: 0,
+    eventName: "PlanAttested",
+    args: {
+      planId: trustedPlanId,
+      planHash: trustedPlanHash,
+      artifactHash,
+      policyHash,
+      metadataHash: bytes32Hex("d00d"),
+      metadataURI: "ipfs://plan-attestation",
+      attester: selectorWallet
+    }
+  };
 }
 
 function stageExecutorPatchAppliedEvent(blockNumber: bigint, patchNonce: bigint): ChainEvent {

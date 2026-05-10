@@ -564,7 +564,8 @@ export function createProductDockedOrderLinkService(
       });
       const linkedOrderId = normalizeNonZeroBytes32(input.linkedOrderId, "linkedOrderId");
       const linkedPlanId = normalizeNonZeroBytes32(input.linkedPlanId, "linkedPlanId");
-      await ensureLinkedOrderExists(options.store, linkedOrderId, linkedPlanId);
+      const linkedOrder = await ensureLinkedOrderExists(options.store, context.order, linkedOrderId, linkedPlanId);
+      await ensureDockedOrderPlansTrusted(options.store, context.order, linkedOrder);
       const signalBindings = normalizeDockedSignalBindings(input.signalBindings);
       const metadataURI = normalizedMetadataURI(input.metadataURI);
       const linkNonce = nextDockedOrderLinkNonce(context.order, linkedOrderId);
@@ -668,6 +669,8 @@ export function createProductDockedOrderLinkService(
 
       const context = await resolveSelectorTaskContext(options.store, taskId);
       ensureDockedPreparedStillCurrent(context.order, prepared);
+      const linkedOrder = await ensureLinkedOrderExists(options.store, context.order, prepared.linkedOrderId, prepared.linkedPlanId);
+      await ensureDockedOrderPlansTrusted(options.store, context.order, linkedOrder);
 
       const signature = normalizeSignature(input.signature);
       const recoveredSelector = await recoverDockedSelector(prepared, signature);
@@ -849,9 +852,18 @@ async function resolveSelectorTaskContext(store: ProjectionStore, taskId: string
   return { task, order };
 }
 
-async function ensureLinkedOrderExists(store: ProjectionStore, linkedOrderId: Hex, linkedPlanId: Hex): Promise<void> {
+async function ensureLinkedOrderExists(
+  store: ProjectionStore,
+  localOrder: StateMachineOrderProjection,
+  linkedOrderId: Hex,
+  linkedPlanId: Hex
+): Promise<StateMachineOrderProjection> {
   const orders = await store.listStateMachineOrders();
-  const linkedOrder = orders.find((order) => order.orderId.toLowerCase() === linkedOrderId.toLowerCase());
+  const linkedOrder = orders.find((order) =>
+    order.orderId.toLowerCase() === linkedOrderId.toLowerCase() &&
+    order.chainId === localOrder.chainId &&
+    order.contractAddress.toLowerCase() === localOrder.contractAddress.toLowerCase()
+  );
   if (!linkedOrder) {
     throw new ProductStagePatchError(404, "linked_order_not_found", "linked order for docked zhixu link was not found", {
       linkedOrderId
@@ -862,6 +874,38 @@ async function ensureLinkedOrderExists(store: ProjectionStore, linkedOrderId: He
       linkedOrderId,
       expectedPlanId: linkedOrder.planId,
       linkedPlanId
+    });
+  }
+  return linkedOrder;
+}
+
+async function ensureDockedOrderPlansTrusted(
+  store: ProjectionStore,
+  localOrder: StateMachineOrderProjection,
+  linkedOrder: StateMachineOrderProjection
+): Promise<void> {
+  await ensureOrderPlanTrusted(store, localOrder, "local");
+  await ensureOrderPlanTrusted(store, linkedOrder, "linked");
+}
+
+async function ensureOrderPlanTrusted(
+  store: ProjectionStore,
+  order: StateMachineOrderProjection,
+  side: "local" | "linked"
+): Promise<void> {
+  if (!order.planHash) {
+    throw new ProductStagePatchError(403, `${side}_plan_not_attested`, "docked order link requires indexed plan trust", {
+      orderId: order.orderId,
+      planId: order.planId
+    });
+  }
+
+  const trust = await store.listPlanTrust({ planId: order.planId, planHash: order.planHash });
+  if (!trust.some((item) => item.status === "attested" && !item.revoked)) {
+    throw new ProductStagePatchError(403, `${side}_plan_not_attested`, "docked order link requires active Store plan trust", {
+      orderId: order.orderId,
+      planId: order.planId,
+      planHash: order.planHash
     });
   }
 }

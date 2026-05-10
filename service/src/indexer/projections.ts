@@ -86,10 +86,14 @@ export interface StateMachinePlanProjection {
   readonly stateMachineAddress: Address;
   readonly planHash: Hex;
   readonly hookCount: string;
+  readonly publisher?: Address;
   readonly selectorBindings: readonly StateMachineStageSelectorBindingProjection[];
+  readonly signalCapabilities: readonly StateMachineSignalCapabilityProjection[];
   readonly registeredAt: ProjectionProvenance;
+  readonly publisherRecordedAt?: ProjectionProvenance;
   readonly updatedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
+  readonly publisherProof?: StateMachineProofProjection;
 }
 
 export interface StateMachineStageSelectorBindingProjection {
@@ -98,6 +102,17 @@ export interface StateMachineStageSelectorBindingProjection {
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
   readonly bindingHash?: Hex;
+}
+
+export type StateMachineSignalTargetRelation = "current" | "triggerOrigin" | "unknown";
+
+export interface StateMachineSignalCapabilityProjection {
+  readonly stageId: Hex;
+  readonly targetSourceId: Hex;
+  readonly signalId: Hex;
+  readonly targetOrderRelation: StateMachineSignalTargetRelation;
+  readonly registeredAt: ProjectionProvenance;
+  readonly proof: StateMachineProofProjection;
 }
 
 export interface StateMachineSignalProjection {
@@ -186,8 +201,8 @@ export interface StateMachineDockedOrderLinkProjection {
 }
 
 export interface StateMachineOrderTriggerLinkProjection {
-  readonly childOrderId: Hex;
-  readonly parentOrderId: Hex;
+  readonly triggeredOrderId: Hex;
+  readonly triggerOriginOrderId: Hex;
   readonly triggerStageId: Hex;
   readonly originSourceId: Hex;
   readonly originSignalId: Hex;
@@ -220,9 +235,16 @@ export interface StateMachineTaskProjection {
   readonly assigneeRoleHash?: Hex;
   readonly authorizationMetadataHash?: Hex;
   readonly status: StateMachineTaskStatus;
+  readonly submitSignals?: readonly StateMachineTaskSubmitSignalProjection[];
   readonly createdAt: ProjectionProvenance;
   readonly updatedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
+}
+
+export interface StateMachineTaskSubmitSignalProjection {
+  readonly sourceId: Hex;
+  readonly signalId: Hex;
+  readonly source: "plan_capability" | "authorization";
 }
 
 export interface StateMachineTimelineEventProjection {
@@ -242,6 +264,8 @@ export interface StateMachineOrderProjection {
   readonly deploymentId?: Hex;
   readonly planId: Hex;
   readonly planHash?: Hex;
+  readonly registrar?: Address;
+  readonly creator?: Address;
   readonly status: StateMachineOrderStatus;
   readonly currentStage?: Hex;
   readonly authorizations: Readonly<Record<string, StateMachineSignalAuthorizationProjection>>;
@@ -255,7 +279,19 @@ export interface StateMachineOrderProjection {
   readonly timeline: readonly StateMachineTimelineEventProjection[];
   readonly proof: readonly StateMachineProofProjection[];
   readonly registeredAt?: ProjectionProvenance;
+  readonly registrarRecordedAt?: ProjectionProvenance;
   readonly updatedAt: ProjectionProvenance;
+  readonly registrarProof?: StateMachineProofProjection;
+}
+
+export interface StateMachineModuleProjection {
+  readonly chainId: number;
+  readonly stateMachineAddress: Address;
+  readonly moduleId: Hex;
+  readonly previousModule: Address;
+  readonly moduleAddress: Address;
+  readonly updatedAt: ProjectionProvenance;
+  readonly proof: StateMachineProofProjection;
 }
 
 export interface StateMachineDeploymentProjection {
@@ -279,6 +315,7 @@ export interface ProjectionSnapshot {
   readonly orders: Readonly<Record<string, OrderProjection>>;
   readonly activeStateMachineDeploymentId?: Hex;
   readonly stateMachineDeployments: Readonly<Record<string, StateMachineDeploymentProjection>>;
+  readonly stateMachineModules: Readonly<Record<string, StateMachineModuleProjection>>;
   readonly stateMachinePlans: Readonly<Record<string, StateMachinePlanProjection>>;
   readonly stateMachineOrders: Readonly<Record<string, StateMachineOrderProjection>>;
   readonly stateMachineTasks: Readonly<Record<string, StateMachineTaskProjection>>;
@@ -291,6 +328,7 @@ type Writable<TValue> = {
 
 type MutableStateMachineHookProjection = Writable<StateMachineHookProjection>;
 type MutableStateMachineTaskProjection = Writable<StateMachineTaskProjection>;
+type MutableStateMachineModuleProjection = Writable<StateMachineModuleProjection>;
 type MutableStateMachineOrderProjection = Writable<
   Omit<
     StateMachineOrderProjection,
@@ -336,6 +374,7 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     eventCount: 0,
     orders: {},
     stateMachineDeployments: {},
+    stateMachineModules: {},
     stateMachinePlans: {},
     stateMachineOrders: {},
     stateMachineTasks: {}
@@ -344,6 +383,7 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
 
 export function rebuildOrderProjections(events: readonly ChainEvent[]): ProjectionSnapshot {
   const stateMachineDeployments = new Map<string, MutableStateMachineDeploymentProjection>();
+  const stateMachineModules = new Map<string, MutableStateMachineModuleProjection>();
   const stateMachinePlans = new Map<string, MutableStateMachinePlanProjection>();
   const stateMachineOrders = new Map<string, MutableStateMachineOrderProjection>();
   let activeStateMachineDeploymentId: Hex | undefined;
@@ -354,6 +394,7 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
     activeStateMachineDeploymentId = applyDeploymentRegistryEvent(stateMachineDeployments, activeStateMachineDeploymentId, event);
     applyStateMachineEvent({
       deployments: stateMachineDeployments,
+      modules: stateMachineModules,
       plans: stateMachinePlans,
       orders: stateMachineOrders
     }, event);
@@ -366,8 +407,12 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
   for (const [orderId, order] of stateMachineOrders) {
     const readonlyTasks: Record<string, StateMachineTaskProjection> = {};
     for (const [taskId, task] of Object.entries(order.tasks)) {
-      readonlyTasks[taskId] = { ...task };
-      stateMachineTaskRecord[taskId] = { ...task };
+      const readonlyTask = {
+        ...task,
+        ...(task.submitSignals ? { submitSignals: [...task.submitSignals] } : {})
+      };
+      readonlyTasks[taskId] = readonlyTask;
+      stateMachineTaskRecord[taskId] = readonlyTask;
     }
     const readonlyDockedLinks: Record<string, StateMachineDockedOrderLinkProjection> = {};
     for (const [linkedOrderId, link] of Object.entries(order.dockedOrderLinks)) {
@@ -397,6 +442,7 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
     orders: {},
     ...(activeStateMachineDeploymentId ? { activeStateMachineDeploymentId } : {}),
     stateMachineDeployments: Object.fromEntries(stateMachineDeployments),
+    stateMachineModules: Object.fromEntries(stateMachineModules),
     stateMachinePlans: Object.fromEntries(stateMachinePlans),
     stateMachineOrders: stateMachineOrderRecord,
     stateMachineTasks: stateMachineTaskRecord,
@@ -407,17 +453,27 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
 function applyStateMachineEvent(
   state: {
     deployments: Map<string, MutableStateMachineDeploymentProjection>;
+    modules: Map<string, MutableStateMachineModuleProjection>;
     plans: Map<string, MutableStateMachinePlanProjection>;
     orders: Map<string, MutableStateMachineOrderProjection>;
   },
   event: ChainEvent
 ): void {
   switch (event.eventName) {
+    case "StateMachineModuleSet":
+      applyStateMachineModuleSet(state.modules, event);
+      return;
     case "PlanRegistered":
       applyPlanRegistered(state, event);
       return;
+    case "PlanPublisherRecorded":
+      applyPlanPublisherRecorded(state, event);
+      return;
     case "OrderRegistered":
       applyOrderRegistered(state, event);
+      return;
+    case "OrderRegistrarRecorded":
+      applyOrderRegistrarRecorded(state, event);
       return;
     case "OrderMaterialized":
       applyOrderMaterialized(state, event);
@@ -438,6 +494,7 @@ function applyStateMachineEvent(
       applyOrderLinked(state, event);
       return;
     case "SignalCapabilityRegistered":
+      applySignalCapabilityRegistered(state, event);
       return;
     case "StageSelectorBindingRegistered":
       applyStageSelectorBindingRegistered(state, event);
@@ -552,6 +609,24 @@ function applyDeploymentRegistryEvent(
   }
 }
 
+function applyStateMachineModuleSet(
+  modules: Map<string, MutableStateMachineModuleProjection>,
+  event: ChainEvent
+): void {
+  const moduleId = requiredBytes32Arg(event, "moduleId");
+  const previousModule = requiredAddressArg(event, "previousModule");
+  const moduleAddress = requiredAddressArg(event, "newModule");
+  modules.set(stateMachineScopedKey(event.chainId, event.contractAddress, moduleId), {
+    chainId: event.chainId,
+    stateMachineAddress: event.contractAddress,
+    moduleId,
+    previousModule,
+    moduleAddress,
+    updatedAt: provenanceOf(event),
+    proof: proofOf(event)
+  });
+}
+
 function applyPlanRegistered(
   state: {
     deployments: Map<string, MutableStateMachineDeploymentProjection>;
@@ -571,6 +646,7 @@ function applyPlanRegistered(
     planHash,
     hookCount: uintArgAsString(event, "hookCount"),
     selectorBindings: selectorBindingsArg(event),
+    signalCapabilities: signalCapabilitiesArg(event),
     registeredAt: provenanceOf(event),
     updatedAt: provenanceOf(event),
     proof
@@ -582,10 +658,32 @@ function applyPlanRegistered(
       continue;
     }
     order.planHash = planHash;
+    if (deployment && !order.deploymentId) {
+      order.deploymentId = deployment.deploymentId;
+    }
     order.updatedAt = provenanceOf(event);
     appendOrderProof(order, proof);
     appendOrderTimeline(order, timelineOf(event, "秩序版本已注册", proof, { orderId: order.orderId, planId }));
   }
+}
+
+function applyPlanPublisherRecorded(
+  state: {
+    plans: Map<string, MutableStateMachinePlanProjection>;
+  },
+  event: ChainEvent
+): void {
+  const planId = requiredBytes32Arg(event, "planId");
+  const plan = findPlanForEvent(state.plans, event, planId);
+  if (!plan) {
+    throw new ProjectionError(`${event.eventName} references unknown plan ${planId}`);
+  }
+  const publisher = requiredAddressArg(event, "publisher");
+  const proof = proofOf(event, { planId, submitter: publisher });
+  plan.publisher = publisher;
+  plan.publisherRecordedAt = provenanceOf(event);
+  plan.publisherProof = proof;
+  plan.updatedAt = provenanceOf(event);
 }
 
 function applyOrderRegistered(
@@ -600,7 +698,8 @@ function applyOrderRegistered(
   const planId = requiredBytes32Arg(event, "planId");
   const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
   const proof = proofOf(event, { orderId, planId, planHash: plan?.planHash });
-  const order = ensureStateMachineOrder(state.orders, event, orderId, planId, findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress)?.deploymentId);
+  const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId, deploymentId);
   order.status = "registered";
   order.planId = planId;
   if (plan) {
@@ -612,6 +711,31 @@ function applyOrderRegistered(
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "订单已创建", proof, { orderId, planId }));
+}
+
+function applyOrderRegistrarRecorded(
+  state: {
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent
+): void {
+  const orderId = requiredBytes32Arg(event, "orderId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const registrar = requiredAddressArg(event, "registrar");
+  const creator = requiredAddressArg(event, "creator");
+  const proof = proofOf(event, {
+    orderId,
+    planId: order.planId,
+    planHash: order.planHash,
+    submitter: registrar
+  });
+  order.registrar = registrar;
+  order.creator = creator;
+  order.registrarRecordedAt = provenanceOf(event);
+  order.registrarProof = proof;
+  order.updatedAt = provenanceOf(event);
+  appendOrderProof(order, proof);
+  appendOrderTimeline(order, timelineOf(event, "订单注册来源已记录", proof, { orderId, planId: order.planId }));
 }
 
 function applyOrderMaterialized(
@@ -626,12 +750,13 @@ function applyOrderMaterialized(
   const planId = requiredBytes32Arg(event, "planId");
   const stageId = requiredBytes32Arg(event, "stageId");
   const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
+  const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
   const order = ensureStateMachineOrder(
     state.orders,
     event,
     orderId,
     planId,
-    findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress)?.deploymentId
+    deploymentId
   );
   const proof = proofOf(event, { orderId, planId, planHash: order.planHash ?? plan?.planHash });
   order.status = order.status === "action_required" ? order.status : "running";
@@ -654,7 +779,7 @@ function applyStageSelectorBindingRegistered(
   const planId = requiredBytes32Arg(event, "planId");
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
-  const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
+  const plan = findPlanForEvent(state.plans, event, planId);
   if (!plan) {
     throw new ProjectionError(`${event.eventName} references unknown plan ${planId}`);
   }
@@ -665,6 +790,42 @@ function applyStageSelectorBindingRegistered(
     plan.selectorBindings = [...plan.selectorBindings, { selectorStageId, targetStageId }];
   }
   plan.updatedAt = provenanceOf(event);
+}
+
+function applySignalCapabilityRegistered(
+  state: {
+    plans: Map<string, MutableStateMachinePlanProjection>;
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent
+): void {
+  const planId = requiredBytes32Arg(event, "planId");
+  const capability = signalCapabilityFromEvent(event);
+  const plan = findPlanForEvent(state.plans, event, planId);
+  if (!plan) {
+    throw new ProjectionError(`${event.eventName} references unknown plan ${planId}`);
+  }
+  if (!plan.signalCapabilities.some((item) => signalCapabilityEquals(item, capability))) {
+    plan.signalCapabilities = [...plan.signalCapabilities, capability].sort(compareSignalCapabilities);
+  }
+  plan.updatedAt = provenanceOf(event);
+
+  for (const order of state.orders.values()) {
+    if (order.planId !== planId || order.chainId !== event.chainId || order.contractAddress !== plan.stateMachineAddress) {
+      continue;
+    }
+    let changed = false;
+    for (const task of Object.values(order.tasks)) {
+      if (task.stageIdentifier !== capability.stageId) {
+        continue;
+      }
+      refreshTaskSubmitSignals(order, task, plan);
+      changed = markTaskSubmittedFromExistingSignals(order, task) || changed;
+    }
+    if (changed && Object.values(order.tasks).every((task) => task.status !== "ready")) {
+      order.status = "running";
+    }
+  }
 }
 
 function applySignalSubmitterAuthorized(
@@ -759,12 +920,13 @@ function applyOrderTriggered(
   const signalId = requiredBytes32Arg(event, "signalId");
   const submitter = requiredAddressArg(event, "submitter");
   const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
+  const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
   const order = ensureStateMachineOrder(
     state.orders,
     event,
     orderId,
     planId,
-    findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress)?.deploymentId
+    deploymentId
   );
   if (plan && !order.planHash) {
     order.planHash = plan.planHash;
@@ -784,27 +946,27 @@ function applyOrderLinked(
   },
   event: ChainEvent
 ): void {
-  const childOrderId = requiredBytes32Arg(event, "childOrderId");
-  const parentOrderId = requiredBytes32Arg(event, "parentOrderId");
+  const triggeredOrderId = requiredBytes32Arg(event, "triggeredOrderId");
+  const triggerOriginOrderId = requiredBytes32Arg(event, "triggerOriginOrderId");
   const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
   const originSourceId = requiredBytes32Arg(event, "originSourceId");
   const originSignalId = requiredBytes32Arg(event, "originSignalId");
   const childOrder = ensureStateMachineOrder(
     state.orders,
     event,
-    childOrderId,
+    triggeredOrderId,
     undefined,
     findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress)?.deploymentId
   );
   const proof = proofOf(event, {
-    orderId: childOrderId,
-    parentOrderId,
+    orderId: triggeredOrderId,
+    triggerOriginOrderId,
     planId: childOrder.planId,
     planHash: childOrder.planHash
   });
   childOrder.triggerLink = {
-    childOrderId,
-    parentOrderId,
+    triggeredOrderId,
+    triggerOriginOrderId,
     triggerStageId,
     originSourceId,
     originSignalId,
@@ -815,8 +977,8 @@ function applyOrderLinked(
   childOrder.updatedAt = provenanceOf(event);
   appendOrderProof(childOrder, proof);
   appendOrderTimeline(childOrder, timelineOf(event, "订单已连接到触发来源", proof, {
-    orderId: childOrderId,
-    parentOrderId,
+    orderId: triggeredOrderId,
+    triggerOriginOrderId,
     originSourceId,
     originSignalId
   }));
@@ -1109,6 +1271,8 @@ function applyHookReady(
   hook.updatedAt = provenanceOf(event);
   hook.proof = proof;
 
+  const plan = findPlanForOrder(state.plans, order);
+  const planSubmitSignals = planSubmitSignalsForStage(plan, stageIdentifier);
   const overlay = findActiveStageOverlayForHook(order, {
     stageIdentifier,
     hookId,
@@ -1117,11 +1281,12 @@ function applyHookReady(
   const authorization = findSignalAuthorizationForHook(order, {
     stageIdentifier,
     hookId,
-    hookName
+    hookName,
+    submitSignals: planSubmitSignals
   });
   const overlayAssignment = overlay ? stageOverlayTaskAssignment(overlay) : undefined;
   const taskId = taskProjectionId(orderId, hookId, order.contractAddress);
-  order.tasks[taskId] = {
+  const task: MutableStateMachineTaskProjection = {
     taskId,
     orderId,
     stateMachineAddress: order.contractAddress,
@@ -1144,8 +1309,13 @@ function applyHookReady(
     updatedAt: provenanceOf(event),
     proof
   };
+  refreshTaskSubmitSignals(order, task, plan);
+  markTaskSubmittedFromExistingSignals(order, task);
+  order.tasks[taskId] = task;
   order.currentStage = stageIdentifier;
-  order.status = "action_required";
+  order.status = task.status === "ready" || Object.values(order.tasks).some((item) => item.status === "ready")
+    ? "action_required"
+    : "running";
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "待办已生成", proof, { orderId, planId: order.planId }));
@@ -1263,13 +1433,10 @@ function markMatchingTasksSubmitted(
 ): void {
   let changed = false;
   for (const task of Object.values(order.tasks)) {
-    if (task.hookId !== sourceId && task.hookId !== signalId) {
+    if (!taskMatchesSubmittedSignal(task, sourceId, signalId)) {
       continue;
     }
-    task.status = "submitted";
-    task.updatedAt = proof;
-    task.proof = proof;
-    changed = true;
+    changed = markTaskSubmitted(task, proof) || changed;
   }
 
   if (changed && Object.values(order.tasks).every((task) => task.status !== "ready")) {
@@ -1277,10 +1444,114 @@ function markMatchingTasksSubmitted(
   }
 }
 
+function refreshTaskSubmitSignals(
+  order: MutableStateMachineOrderProjection,
+  task: MutableStateMachineTaskProjection,
+  plan?: MutableStateMachinePlanProjection
+): void {
+  const signals: StateMachineTaskSubmitSignalProjection[] = [...planSubmitSignalsForStage(plan, task.stageIdentifier)];
+  for (const authorization of Object.values(order.authorizations)) {
+    if (!signalAuthorizationMatchesHook(authorization, { ...task, submitSignals: signals })) {
+      continue;
+    }
+    signals.push({
+      sourceId: authorization.sourceId,
+      signalId: authorization.signalId,
+      source: "authorization"
+    });
+  }
+  task.submitSignals = dedupeTaskSubmitSignals(signals);
+  if (task.submitSignals.length === 0) {
+    delete task.submitSignals;
+  }
+}
+
+function planSubmitSignalsForStage(
+  plan: MutableStateMachinePlanProjection | undefined,
+  stageId: Hex
+): readonly StateMachineTaskSubmitSignalProjection[] {
+  return (plan?.signalCapabilities ?? [])
+    .filter((capability) => capability.stageId === stageId && capability.targetOrderRelation === "current")
+    .map((capability) => ({
+      sourceId: capability.targetSourceId,
+      signalId: capability.signalId,
+      source: "plan_capability" as const
+    }));
+}
+
+function addTaskSubmitSignal(
+  task: MutableStateMachineTaskProjection,
+  signal: StateMachineTaskSubmitSignalProjection
+): void {
+  task.submitSignals = dedupeTaskSubmitSignals([...(task.submitSignals ?? []), signal]);
+}
+
+function dedupeTaskSubmitSignals(
+  signals: readonly StateMachineTaskSubmitSignalProjection[]
+): readonly StateMachineTaskSubmitSignalProjection[] {
+  const byKey = new Map<string, StateMachineTaskSubmitSignalProjection>();
+  for (const signal of signals) {
+    const key = signalProjectionKey(signal.sourceId, signal.signalId);
+    const existing = byKey.get(key);
+    if (!existing || existing.source !== "plan_capability") {
+      byKey.set(key, signal);
+    }
+  }
+  return [...byKey.values()].sort(compareTaskSubmitSignals);
+}
+
+function compareTaskSubmitSignals(
+  left: StateMachineTaskSubmitSignalProjection,
+  right: StateMachineTaskSubmitSignalProjection
+): number {
+  const sourcePriority = taskSubmitSignalSourcePriority(left.source) - taskSubmitSignalSourcePriority(right.source);
+  return sourcePriority || left.sourceId.localeCompare(right.sourceId) || left.signalId.localeCompare(right.signalId);
+}
+
+function taskSubmitSignalSourcePriority(source: StateMachineTaskSubmitSignalProjection["source"]): number {
+  return source === "plan_capability" ? 0 : 1;
+}
+
+function taskMatchesSubmittedSignal(
+  task: StateMachineTaskProjection,
+  sourceId: Hex,
+  signalId: Hex
+): boolean {
+  if ((task.submitSignals ?? []).some((signal) => signal.sourceId === sourceId && signal.signalId === signalId)) {
+    return true;
+  }
+  return task.hookId === sourceId || task.hookId === signalId;
+}
+
+function markTaskSubmittedFromExistingSignals(
+  order: MutableStateMachineOrderProjection,
+  task: MutableStateMachineTaskProjection
+): boolean {
+  const matchingProof = Object.values(order.signals)
+    .filter((signal) => taskMatchesSubmittedSignal(task, signal.sourceId, signal.signalId))
+    .map((signal) => signal.proof)
+    .sort(compareProofEvents)[0];
+  return matchingProof ? markTaskSubmitted(task, matchingProof) : false;
+}
+
+function markTaskSubmitted(
+  task: MutableStateMachineTaskProjection,
+  proof: StateMachineProofProjection
+): boolean {
+  if (task.status === "submitted" && task.proof.eventId === proof.eventId) {
+    return false;
+  }
+  task.status = "submitted";
+  task.updatedAt = proof;
+  task.proof = proof;
+  return true;
+}
+
 function markMatchingTasksAssigned(
   order: MutableStateMachineOrderProjection,
   authorization: StateMachineSignalAuthorizationProjection
 ): void {
+  let changed = false;
   for (const task of Object.values(order.tasks)) {
     if (findActiveStageOverlayForHook(order, task)) {
       continue;
@@ -1293,6 +1564,15 @@ function markMatchingTasksAssigned(
     task.assigneeRoleHash = authorization.role;
     task.authorizationMetadataHash = authorization.metadataHash;
     task.updatedAt = authorization.authorizedAt;
+    addTaskSubmitSignal(task, {
+      sourceId: authorization.sourceId,
+      signalId: authorization.signalId,
+      source: "authorization"
+    });
+    changed = markTaskSubmittedFromExistingSignals(order, task) || changed;
+  }
+  if (changed && Object.values(order.tasks).every((task) => task.status !== "ready")) {
+    order.status = "running";
   }
 }
 
@@ -1342,7 +1622,7 @@ function proofOf(event: ChainEvent, metadata: StateMachineProofMetadata = {}): S
 
 interface StateMachineProofMetadata {
   readonly orderId?: Hex | undefined;
-  readonly parentOrderId?: Hex | undefined;
+  readonly triggerOriginOrderId?: Hex | undefined;
   readonly originSourceId?: Hex | undefined;
   readonly originSignalId?: Hex | undefined;
   readonly planId?: Hex | undefined;
@@ -1451,9 +1731,29 @@ export interface SignalAuthorizationHookMatchInput {
   readonly stageIdentifier: Hex;
   readonly hookId: Hex;
   readonly hookName: Hex;
+  readonly submitSignals?: readonly StateMachineTaskSubmitSignalProjection[];
 }
 
 export function signalAuthorizationMatchesHook(
+  authorization: StateMachineSignalAuthorizationProjection,
+  hook: SignalAuthorizationHookMatchInput
+): boolean {
+  if ((hook.submitSignals ?? []).length > 0) {
+    return authorizationMatchesSubmitSignals(authorization, hook.submitSignals ?? []);
+  }
+  return legacySignalAuthorizationMatchesHook(authorization, hook);
+}
+
+function authorizationMatchesSubmitSignals(
+  authorization: StateMachineSignalAuthorizationProjection,
+  submitSignals: readonly StateMachineTaskSubmitSignalProjection[]
+): boolean {
+  return submitSignals.some((signal) =>
+    signal.sourceId === authorization.sourceId && signal.signalId === authorization.signalId
+  );
+}
+
+function legacySignalAuthorizationMatchesHook(
   authorization: StateMachineSignalAuthorizationProjection,
   hook: SignalAuthorizationHookMatchInput
 ): boolean {
@@ -1485,9 +1785,76 @@ function findDeploymentByStateMachine(
   stateMachineAddress: Address
 ): MutableStateMachineDeploymentProjection | undefined {
   const normalizedStateMachine = stateMachineAddress.toLowerCase();
-  return [...deployments.values()].find((deployment) =>
-    deployment.registeredAt.chainId === chainId && deployment.stateMachineAddress.toLowerCase() === normalizedStateMachine
+  return [...deployments.values()]
+    .filter((deployment) =>
+      deployment.registeredAt.chainId === chainId && deployment.stateMachineAddress.toLowerCase() === normalizedStateMachine
+    )
+    .sort(compareDeploymentSelection)[0];
+}
+
+function orderDeploymentIdFromPlanOrStateMachine(
+  plan: MutableStateMachinePlanProjection | undefined,
+  deployments: Map<string, MutableStateMachineDeploymentProjection>,
+  chainId: number,
+  stateMachineAddress: Address
+): Hex | undefined {
+  return plan?.deploymentId ?? findDeploymentByStateMachine(deployments, chainId, stateMachineAddress)?.deploymentId;
+}
+
+function compareDeploymentSelection(
+  left: StateMachineDeploymentProjection,
+  right: StateMachineDeploymentProjection
+): number {
+  const status = deploymentStatusPriority(left.status) - deploymentStatusPriority(right.status);
+  if (status !== 0) {
+    return status;
+  }
+  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
+    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
+  }
+  if (left.updatedAt.logIndex !== right.updatedAt.logIndex) {
+    return right.updatedAt.logIndex - left.updatedAt.logIndex;
+  }
+  return left.deploymentId.localeCompare(right.deploymentId);
+}
+
+function deploymentStatusPriority(status: StateMachineDeploymentStatus): number {
+  switch (status) {
+    case "active":
+      return 0;
+    case "canary":
+      return 1;
+    case "candidate":
+      return 2;
+    case "deprecated":
+      return 3;
+    case "retired":
+      return 4;
+    default:
+      return 5;
+  }
+}
+
+function findPlanForEvent(
+  plans: Map<string, MutableStateMachinePlanProjection>,
+  event: ChainEvent,
+  planId: Hex
+): MutableStateMachinePlanProjection | undefined {
+  const exact = plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
+  if (exact) {
+    return exact;
+  }
+  const matches = [...plans.values()].filter((plan) =>
+    plan.registeredAt.chainId === event.chainId && plan.planId === planId
   );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function findPlanForOrder(
+  plans: Map<string, MutableStateMachinePlanProjection>,
+  order: MutableStateMachineOrderProjection
+): MutableStateMachinePlanProjection | undefined {
+  return plans.get(stateMachineScopedKey(order.chainId, order.contractAddress, order.planId));
 }
 
 function hookStatusFromArg(value: unknown): StateMachineHookStatus {
@@ -1641,6 +2008,88 @@ function selectorBindingsArg(event: ChainEvent): readonly StateMachineStageSelec
   return value.map((item, index) => selectorBindingArg(item, event, index));
 }
 
+function signalCapabilitiesArg(event: ChainEvent): readonly StateMachineSignalCapabilityProjection[] {
+  const value = event.args["signalCapabilities"];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item, index) => signalCapabilityArg(item, event, index)).sort(compareSignalCapabilities);
+}
+
+function signalCapabilityArg(
+  value: unknown,
+  event: ChainEvent,
+  index: number
+): StateMachineSignalCapabilityProjection {
+  if (Array.isArray(value)) {
+    return {
+      stageId: normalizeBytes32(String(value[0] ?? ""), `${event.eventName}.signalCapabilities[${index}].stageId`),
+      targetSourceId: normalizeBytes32(String(value[1] ?? ""), `${event.eventName}.signalCapabilities[${index}].targetSourceId`),
+      signalId: normalizeBytes32(String(value[2] ?? ""), `${event.eventName}.signalCapabilities[${index}].signalId`),
+      targetOrderRelation: signalTargetRelationFromArg(value[3]),
+      registeredAt: provenanceOf(event),
+      proof: proofOf(event)
+    };
+  }
+  if (!value || typeof value !== "object") {
+    throw new ProjectionError(`${event.eventName}.signalCapabilities[${index}] must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    stageId: bytes32RecordField(record, "stageId", `${event.eventName}.signalCapabilities[${index}].stageId`),
+    targetSourceId: bytes32RecordField(record, "targetSourceId", `${event.eventName}.signalCapabilities[${index}].targetSourceId`),
+    signalId: bytes32RecordField(record, "signalId", `${event.eventName}.signalCapabilities[${index}].signalId`),
+    targetOrderRelation: signalTargetRelationFromArg(record["targetOrderRelation"] ?? record["relation"]),
+    registeredAt: provenanceOf(event),
+    proof: proofOf(event)
+  };
+}
+
+function signalCapabilityFromEvent(event: ChainEvent): StateMachineSignalCapabilityProjection {
+  return {
+    stageId: requiredBytes32Arg(event, "stageId"),
+    targetSourceId: requiredBytes32Arg(event, "targetSourceId"),
+    signalId: requiredBytes32Arg(event, "signalId"),
+    targetOrderRelation: signalTargetRelationFromArg(event.args["targetOrderRelation"] ?? event.args["relation"]),
+    registeredAt: provenanceOf(event),
+    proof: proofOf(event, { planId: requiredBytes32Arg(event, "planId") })
+  };
+}
+
+function signalCapabilityEquals(
+  left: StateMachineSignalCapabilityProjection,
+  right: StateMachineSignalCapabilityProjection
+): boolean {
+  return left.stageId === right.stageId &&
+    left.targetSourceId === right.targetSourceId &&
+    left.signalId === right.signalId &&
+    left.targetOrderRelation === right.targetOrderRelation;
+}
+
+function compareSignalCapabilities(
+  left: StateMachineSignalCapabilityProjection,
+  right: StateMachineSignalCapabilityProjection
+): number {
+  return left.stageId.localeCompare(right.stageId) ||
+    left.targetSourceId.localeCompare(right.targetSourceId) ||
+    left.signalId.localeCompare(right.signalId) ||
+    left.targetOrderRelation.localeCompare(right.targetOrderRelation);
+}
+
+function signalTargetRelationFromArg(value: unknown): StateMachineSignalTargetRelation {
+  if (value === "current" || value === "triggerOrigin") {
+    return value;
+  }
+  const relation = typeof value === "bigint" ? Number(value) : typeof value === "string" ? Number(value) : value;
+  if (relation === 0) {
+    return "current";
+  }
+  if (relation === 1) {
+    return "triggerOrigin";
+  }
+  return "unknown";
+}
+
 function selectorBindingArg(
   value: unknown,
   event: ChainEvent,
@@ -1680,6 +2129,14 @@ function bindingBytes32(
     throw new ProjectionError(`${event.eventName}.selectorBindings[${index}].${field} must be a 32-byte hex string`);
   }
   return normalizeBytes32(value, `${event.eventName}.selectorBindings[${index}].${field}`);
+}
+
+function bytes32RecordField(record: Record<string, unknown>, field: string, context: string): Hex {
+  const value = record[field];
+  if (typeof value !== "string") {
+    throw new ProjectionError(`${context} must be a 32-byte hex string`);
+  }
+  return normalizeBytes32(value, context);
 }
 
 function bindingOptionalBytes32(

@@ -11,6 +11,12 @@ import {
 import { createConfiguredGovernanceChainAdapter, createGovernanceService } from "../governance/index.js";
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
+import {
+  createDockedSignalAutomationService,
+  createStateMachineDockedSignalBroadcastAdapter,
+  notSupportedDockedSignalBroadcastAdapter,
+  type DockedSignalBroadcastAdapter
+} from "../docked-signals/index.js";
 import { createNotificationService } from "../notifications/index.js";
 import {
   AnvilProductOrderTriggerBroadcastAdapter,
@@ -74,8 +80,23 @@ export async function startApiServer(
     supplierMetadataStore: stores.storeSupplierMetadataStore,
     productSchemaResolver
   });
+  const dockingVerifyingContract = dockingModuleAddress(config);
+  const dockedSignalBroadcastAdapter = createConfiguredDockedSignalBroadcastAdapter(config, dockingVerifyingContract);
+  const dockedSignalAutomationService = createDockedSignalAutomationService({
+    config: config.dockedSignalAutomation,
+    ...(dockingVerifyingContract ? { dockingModuleAddress: dockingVerifyingContract } : {}),
+    broadcastAdapter: dockedSignalBroadcastAdapter ?? notSupportedDockedSignalBroadcastAdapter(),
+    logger
+  });
   const indexer = eventSource
-    ? new IndexerService({ config, eventSource, store, notificationProcessor: notificationService, logger })
+    ? new IndexerService({
+      config,
+      eventSource,
+      store,
+      notificationProcessor: notificationService,
+      projectionAutomationProcessor: dockedSignalAutomationService,
+      logger
+    })
     : undefined;
 
   if (indexer) {
@@ -84,7 +105,6 @@ export async function startApiServer(
 
   const submissionVerifyingContract = stateMachineAddress(config.network.contracts);
   const stagePatchVerifyingContract = stagePatchModuleAddress(config) ?? submissionVerifyingContract;
-  const dockingVerifyingContract = dockingModuleAddress(config) ?? submissionVerifyingContract;
   const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(config, submissionVerifyingContract, audit);
   const stageExecutorPatchBroadcastAdapter = createConfiguredStageExecutorPatchBroadcastAdapter(config, stagePatchVerifyingContract);
   const stageResourcePatchBroadcastAdapter = createConfiguredStageResourcePatchBroadcastAdapter(config, stagePatchVerifyingContract);
@@ -502,6 +522,33 @@ function createConfiguredDockedOrderLinkBroadcastAdapter(
     waitForReceipt: true,
     rejectGasPayerAsSelector: config.security.environment !== "local",
     receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
+  });
+}
+
+function createConfiguredDockedSignalBroadcastAdapter(
+  config: ChainServicesConfig,
+  dockingModule: Address | undefined
+): DockedSignalBroadcastAdapter | undefined {
+  if (!config.relayer.broadcastEnabled || !config.dockedSignalAutomation.enabled) {
+    return undefined;
+  }
+  if (!dockingModule) {
+    return undefined;
+  }
+  const privateKeyEnv = config.relayer.stateMachinePrivateKeyEnv;
+  if (!process.env[privateKeyEnv]?.trim()) {
+    return undefined;
+  }
+  return createStateMachineDockedSignalBroadcastAdapter({
+    chainId: config.network.chainId,
+    rpcUrl: config.network.rpcUrl,
+    relayerPrivateKeyEnv: privateKeyEnv,
+    waitForReceipt: config.dockedSignalAutomation.waitForReceipt,
+    confirmOnReceipt: true,
+    receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs,
+    ...(config.dockedSignalAutomation.maxGasPerTx !== undefined
+      ? { maxGasPerTx: config.dockedSignalAutomation.maxGasPerTx }
+      : {})
   });
 }
 
