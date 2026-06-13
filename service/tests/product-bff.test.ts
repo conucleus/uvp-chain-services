@@ -324,6 +324,36 @@ describe("product BFF order drafts and invites", () => {
     expect((registrationResponse.body as { trigger: ProductOrderTriggerDTO }).trigger).toEqual(prepared.trigger);
   });
 
+  it("only lets the trigger stage executor prepare outside trigger typed data", async () => {
+    const { router } = await createRouterWithTrust([
+      ...activeDeploymentEvents(),
+      planAttestedEvent(11n)
+    ]);
+    const draft = await createReadyDraft(router);
+
+    const wrongExecutorResponse = await router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+      body: { walletAddress: testWallet(1) }
+    });
+    expect(wrongExecutorResponse.status).toBe(403);
+    expect(wrongExecutorResponse.body).toMatchObject({
+      error: "trigger_submitter_not_authorized",
+      details: {
+        roleSlotId: "funds",
+        expectedWalletAddress: testWallet(0),
+        walletAddress: testWallet(1)
+      }
+    });
+
+    const executorResponse = await router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+      body: { walletAddress: testWallet(0) }
+    });
+    expect(executorResponse.status).toBe(200);
+  });
+
   it("broadcasts trigger only with a valid prepared wallet signature", async () => {
     const { router, triggerAdapter } = await createRouterWithTrust([
       ...activeDeploymentEvents(),

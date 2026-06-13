@@ -350,7 +350,8 @@ describe("indexer projection replay", () => {
         executor: overlayExecutor,
         role: bytes32Text("overlay-role"),
         metadataHash: bytes32Hex("8001"),
-        patchNonce: 1n
+        patchNonce: 1n,
+        metadataURI: "ipfs://stage-executor-patch/1"
       }),
       chainEvent(5n, 0, "StageResourcePatchApplied", {
         orderId: stateMachineOrderId,
@@ -430,6 +431,39 @@ describe("indexer projection replay", () => {
     ]));
     expect(order?.timeline.map((event) => event.eventName)).toContain("StageExecutorPatchApplied");
     expect(order?.timeline.map((event) => event.eventName)).toContain("StageResourcePatchApplied");
+  });
+
+  it("projects module-level derived signal provenance on the target order", () => {
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(2n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      chainEvent(3n, 0, "DerivedSignalSubmitted", {
+        fromOrderId: bytes32Hex("7101"),
+        fromStageId: selectorStageId,
+        targetOrderId: stateMachineOrderId,
+        targetSourceId: sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signer
+      })
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
+
+    expect(order?.proof).toContainEqual(expect.objectContaining({
+      eventName: "DerivedSignalSubmitted",
+      submitter: signer
+    }));
+    expect(order?.timeline.map((event) => event.eventName)).toContain("DerivedSignalSubmitted");
   });
 
   it("removes logs from deterministic replay when a removed reorg log is present", () => {
@@ -1039,12 +1073,19 @@ describe("indexer projection replay", () => {
 
     indexer.refreshIfIdle();
     await new Promise((r) => setTimeout(r, 50));
+    await expect(store.getSyncState()).resolves.toMatchObject({
+      syncStatus: "degraded",
+      degradedReason: "connection refused"
+    });
 
     indexer.refreshIfIdle();
     await new Promise((r) => setTimeout(r, 50));
 
     expect(callCount).toBe(2);
     expect(secondCallSucceeded).toBe(true);
+    await expect(store.getSyncState()).resolves.toMatchObject({
+      syncStatus: "indexed"
+    });
   });
 });
 

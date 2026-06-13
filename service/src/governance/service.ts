@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import type { TxReconcileFields } from "../reconcile/status.js";
 import {
@@ -79,7 +80,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
   const adapter = options.adapter ?? createSimulatedGovernanceChainAdapter();
   const now = options.now ?? (() => new Date());
   const audit = options.audit ?? noopAuditSink;
-  let sequence = 1;
 
   return {
     async listReviews(query = {}) {
@@ -97,7 +97,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
         input,
         principal,
         now,
-        nextReviewId: (subjectId) => nextId("review", sequence++, subjectId)
+        nextReviewId: (subjectId) => nextId("review", subjectId)
       });
     },
 
@@ -108,7 +108,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
         input,
         principal,
         now,
-        nextReviewId: (subjectId) => nextId("review", sequence++, subjectId)
+        nextReviewId: (subjectId) => nextId("review", subjectId)
       });
     },
 
@@ -148,7 +148,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       }
       const broadcast = await safeBroadcast(() => adapter.attestPlan(request));
       const timestamp = now().toISOString();
-      const log = planLog(nextId("plan_log", sequence++), "attest_plan", request, broadcast, principal, timestamp);
+      const log = planLog(nextId("plan_log"), "attest_plan", request, broadcast, principal, timestamp);
       await store.appendPlanAttestationLog(log);
       await auditGovernanceLog(audit, log, auditOutcomeFromBroadcast(broadcast));
       return { request, broadcast, log };
@@ -182,7 +182,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       }
       const broadcast = await safeBroadcast(() => adapter.revokePlan(request));
       const timestamp = now().toISOString();
-      const log = planLog(nextId("plan_log", sequence++), "revoke_plan", request, broadcast, principal, timestamp);
+      const log = planLog(nextId("plan_log"), "revoke_plan", request, broadcast, principal, timestamp);
       await store.appendPlanAttestationLog(log);
       await auditGovernanceLog(audit, log, auditOutcomeFromBroadcast(broadcast));
       return { request, broadcast, log };
@@ -225,7 +225,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       }
       const broadcast = await safeBroadcast(() => adapter.attestSupplier(request));
       const timestamp = now().toISOString();
-      const log = supplierLog(nextId("supplier_log", sequence++), "attest_supplier", request, broadcast, principal, timestamp);
+      const log = supplierLog(nextId("supplier_log"), "attest_supplier", request, broadcast, principal, timestamp);
       await store.appendSupplierAttestationLog(log);
       await auditGovernanceLog(audit, log, auditOutcomeFromBroadcast(broadcast));
       return { request, broadcast, log };
@@ -259,7 +259,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       }
       const broadcast = await safeBroadcast(() => adapter.revokeSupplier(request));
       const timestamp = now().toISOString();
-      const log = supplierLog(nextId("supplier_log", sequence++), "revoke_supplier", request, broadcast, principal, timestamp);
+      const log = supplierLog(nextId("supplier_log"), "revoke_supplier", request, broadcast, principal, timestamp);
       await store.appendSupplierAttestationLog(log);
       await auditGovernanceLog(audit, log, auditOutcomeFromBroadcast(broadcast));
       return { request, broadcast, log };
@@ -869,9 +869,9 @@ function parseSubjectType(value: string): GovernanceSubjectType {
   }
 }
 
-function nextId(prefix: string, seed: number, subjectId?: string): string {
+function nextId(prefix: string, subjectId?: string): string {
   const suffix = subjectId ? `_${slugId(subjectId).slice(0, 20)}` : "";
-  return `${prefix}_${seed.toString().padStart(6, "0")}${suffix}`;
+  return `${prefix}_${randomUUID()}${suffix}`;
 }
 
 function slugId(value: string): string {

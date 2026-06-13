@@ -517,6 +517,9 @@ function applyStateMachineEvent(
     case "DockedSignalSubmitted":
       applyDockedSignalSubmitted(state, event);
       return;
+    case "DerivedSignalSubmitted":
+      applyDerivedSignalSubmitted(state, event);
+      return;
     case "HookStatusChanged":
       applyHookStatusChanged(state, event);
       return;
@@ -1104,6 +1107,7 @@ function applyStageExecutorActivated(
       roleHash: requiredBytes32Arg(event, "role"),
       executorMetadataHash: requiredBytes32Arg(event, "metadataHash"),
       patchNonce,
+      metadataURI: optionalStringArg(event, "metadataURI") ?? existing.metadataURI,
       updatedAt: provenanceOf(event),
       activatedAt: provenanceOf(event),
       activationProof: proof
@@ -1217,6 +1221,25 @@ function applyDockedSignalSubmitted(
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "关联秩序信号已触发本地信号", proof, { orderId: localOrderId, planId: order.planId }));
+}
+
+function applyDerivedSignalSubmitted(
+  state: {
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent
+): void {
+  const targetOrderId = requiredBytes32Arg(event, "targetOrderId");
+  const order = ensureStateMachineOrder(state.orders, event, targetOrderId);
+  const proof = proofOf(event, {
+    orderId: targetOrderId,
+    planId: order.planId,
+    planHash: order.planHash,
+    submitter: optionalAddressArg(event, "submitter")
+  });
+  order.updatedAt = provenanceOf(event);
+  appendOrderProof(order, proof);
+  appendOrderTimeline(order, timelineOf(event, "派生信号已提交", proof, { orderId: targetOrderId, planId: order.planId }));
 }
 
 function applyHookStatusChanged(

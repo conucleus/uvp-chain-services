@@ -594,7 +594,7 @@ function buildSuggestedProductSchema(
   const orderPermissionTable = permissionTableFromOnchainArtifact(artifact, stageIds);
   const capabilityPlugins = roleSlots.flatMap((slot) => slot.capabilityPlugins ?? []);
   const selectorBindings = selectorBindingsFromOnchainArtifact(artifact);
-  const createOrderTrigger = createOrderTriggerFromOnchainArtifact(artifact);
+  const createOrderTrigger = createOrderTriggerFromOnchainArtifact(artifact, stages, roleSlots);
   const schemaWithoutHash: Omit<StoreProductSchemaDTO, "schemaHash" | "validation"> & {
     readonly schemaHash?: string;
     readonly validation?: StoreProductSchemaValidationDTO;
@@ -663,7 +663,11 @@ function permissionTableFromOnchainArtifact(
     }));
 }
 
-function createOrderTriggerFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreProductSchemaDTO["createOrderTrigger"] {
+function createOrderTriggerFromOnchainArtifact(
+  artifact: OnchainHookPlanArtifact,
+  stages: readonly ZhixuStageDTO[],
+  roleSlots: readonly RoleSlotDTO[]
+): StoreProductSchemaDTO["createOrderTrigger"] {
   const hook = artifact.compiledHooks.find((item) =>
     item.isTrigger &&
     item.dependencies.some((dependency) => dependency.source === "order" && dependency.signalName === "registered")
@@ -676,8 +680,24 @@ function createOrderTriggerFromOnchainArtifact(artifact: OnchainHookPlanArtifact
     source: dependency.source,
     signalName: dependency.signalName,
     triggerHookId: hook.hookId,
-    triggerStageId: hook.stageId
+    triggerStageId: hook.stageId,
+    ...triggerSubmitterRoleSlot(hook.stageIdentifier, stages, roleSlots)
   };
+}
+
+function triggerSubmitterRoleSlot(
+  stageIdentifier: string,
+  stages: readonly ZhixuStageDTO[],
+  roleSlots: readonly RoleSlotDTO[]
+): { readonly submitterRoleSlotId: string } | Record<string, never> {
+  const stage = stages.find((item) => item.stageId === stageIdentifier);
+  if (stage?.staticExecutorRoleSlotId) {
+    return { submitterRoleSlotId: stage.staticExecutorRoleSlotId };
+  }
+  const candidateSlots = roleSlots.filter((slot) =>
+    (slot.capabilityPlugins ?? []).some((plugin) => plugin.stageIds.includes(stageIdentifier))
+  );
+  return candidateSlots.length === 1 ? { submitterRoleSlotId: candidateSlots[0]!.slotId } : {};
 }
 
 function selectorBindingsFromOnchainArtifact(
@@ -927,6 +947,15 @@ function validateProductSchemaBundle(
       severity: "error",
       message: "at least one role slot is required",
       path: "roleSlots"
+    });
+  }
+  if (schema.createOrderTrigger?.submitterRoleSlotId && !roleSlots.has(schema.createOrderTrigger.submitterRoleSlotId)) {
+    issues.push({
+      code: "create_order_trigger_invalid",
+      severity: "error",
+      message: "createOrderTrigger.submitterRoleSlotId must reference an existing trigger stage executor role slot",
+      path: "createOrderTrigger.submitterRoleSlotId",
+      roleSlotId: schema.createOrderTrigger.submitterRoleSlotId
     });
   }
 
@@ -1596,8 +1625,21 @@ function optionalCreateOrderTrigger(
     source: stringField(trigger, "source"),
     signalName: requiredString(trigger, "signalName"),
     triggerHookId: requiredString(trigger, "triggerHookId"),
-    triggerStageId: requiredString(trigger, "triggerStageId")
+    triggerStageId: requiredString(trigger, "triggerStageId"),
+    ...optionalNonEmptyStringField(trigger, "submitterRoleSlotId")
   };
+}
+
+function optionalNonEmptyStringField(record: Record<string, unknown>, key: string): Record<string, string> {
+  const value = record[key];
+  if (value === undefined || value === null) {
+    return {};
+  }
+  if (typeof value !== "string") {
+    throw new StoreZhixuDraftWorkflowError(400, "invalid_product_schema", `${key} must be a string`);
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? { [key]: trimmed } : {};
 }
 
 function stringField(record: Record<string, unknown>, key: string): string {
