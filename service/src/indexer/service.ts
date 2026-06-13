@@ -423,6 +423,11 @@ export class IndexerService implements LifecycleService {
         this.#refreshQueued = false;
         await this.refreshFromCursorWithSummary()
           .catch((error: unknown) => {
+            void this.#markDegraded(undefined, error).catch((markError: unknown) => {
+              this.#logger.warn("indexer failed to mark background refresh degraded", {
+                message: markError instanceof Error ? redactErrorMessage(markError) : "unknown error"
+              });
+            });
             this.#logger.warn("indexer background refresh failed", {
               message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
             });
@@ -455,7 +460,7 @@ export class IndexerService implements LifecycleService {
     const existing = await this.#store.getSyncState(this.#scope);
     const syncState = await this.#store.saveSyncState({
       ...this.#scope,
-      syncStatus: existing?.syncStatus ?? "indexed",
+      syncStatus: "indexed",
       ...(existing?.latestIndexedBlock !== undefined ? { latestIndexedBlock: existing.latestIndexedBlock } : {}),
       finalizedBlock: input.toBlock,
       confirmationDepth: this.#config.network.finalityConfirmations,
@@ -522,13 +527,15 @@ export class IndexerService implements LifecycleService {
     }
   }
 
-  async #markDegraded(finalizedBlock: bigint, error: unknown): Promise<void> {
+  async #markDegraded(finalizedBlock: bigint | undefined, error: unknown): Promise<void> {
     const existing = await this.#store.getSyncState(this.#scope).catch(() => undefined);
+    const effectiveFinalizedBlock =
+      finalizedBlock ?? existing?.finalizedBlock ?? this.#cursor?.finalizedBlock ?? this.#config.network.deploymentBlock;
     await this.#store.saveSyncState({
       ...this.#scope,
       syncStatus: "degraded",
       ...(existing?.latestIndexedBlock !== undefined ? { latestIndexedBlock: existing.latestIndexedBlock } : {}),
-      finalizedBlock,
+      finalizedBlock: effectiveFinalizedBlock,
       confirmationDepth: this.#config.network.finalityConfirmations,
       ...(existing?.lastEventName ? { lastEventName: existing.lastEventName } : {}),
       eventCount: existing?.eventCount ?? 0,
@@ -538,7 +545,7 @@ export class IndexerService implements LifecycleService {
         completedAt: new Date().toISOString(),
         deploymentBlock: this.#config.network.deploymentBlock,
         fromBlock: this.#config.network.deploymentBlock,
-        toBlock: finalizedBlock,
+        toBlock: effectiveFinalizedBlock,
         eventCount: existing?.eventCount ?? 0,
         activeEventCount: existing?.eventCount ?? 0,
         removedEventCount: existing?.rebuild?.removedEventCount ?? 0,

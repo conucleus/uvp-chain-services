@@ -35,6 +35,34 @@ const registryAddress = "0x5555555555555555555555555555555555555555" as Address;
 const simulatedTx = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" as Hex;
 
 describe("governance admin API", () => {
+  it("generates restart-safe review IDs for the same subject", async () => {
+    const store = new InMemoryGovernanceStore();
+    const principal = { adminId: "admin-1", role: "admin" } as const;
+    const firstService = createGovernanceService({
+      store,
+      now: () => new Date("2026-04-28T00:00:00Z")
+    });
+    const first = await firstService.reviewZhixu({
+      subjectId: "cross-border-demo",
+      status: "submitted",
+      publicSummary: "First review."
+    }, principal);
+
+    const restartedService = createGovernanceService({
+      store,
+      now: () => new Date("2026-04-28T00:01:00Z")
+    });
+    const second = await restartedService.reviewZhixu({
+      subjectId: "cross-border-demo",
+      status: "submitted",
+      publicSummary: "Second review after restart."
+    }, principal);
+
+    expect(second.review.reviewId).not.toBe(first.review.reviewId);
+    await expect(store.listReviews({ subjectType: "zhixu", subjectId: "cross-border-demo" }))
+      .resolves.toHaveLength(2);
+  });
+
   it("stores review state, keeps internal notes out of public DTOs, and rejects invalid terminal transitions", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), {
       governanceService: createGovernanceService({

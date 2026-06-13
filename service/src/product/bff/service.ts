@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { onchainStageId } from "@uvp-eth/compiler";
 import {
   type StoreZhixuVersionSummaryDTO,
   type ZhixuDetailDTO
@@ -200,6 +201,10 @@ export function createProductBffService(options: ProductBffServiceOptions): Prod
       const existingRegistration = await store.getRegistrationByDraft(draftId);
       const walletAddress = normalizeAddress(input.walletAddress, "walletAddress");
       const prepareNow = now();
+      const zhixu = await requireActiveZhixu(options.productService, draft.zhixuId, options.versionResolver);
+      assertDraftUsesActiveZhixuVersion(draft, zhixu);
+      const createOrderTrigger = requireCreateOrderTrigger(zhixu);
+      const submitter = requireTriggerSubmitter(zhixu, createOrderTrigger, participants, walletAddress);
       if (existingRegistration) {
         const expiredPreparedTrigger = existingRegistration.status === "prepared" &&
           existingRegistration.submitter === walletAddress &&
@@ -223,12 +228,9 @@ export function createProductBffService(options: ProductBffServiceOptions): Prod
         });
       }
 
-      const zhixu = await requireActiveZhixu(options.productService, draft.zhixuId, options.versionResolver);
-      assertDraftUsesActiveZhixuVersion(draft, zhixu);
       const activeDeployment = await requireActiveStateMachineDeployment(options.productService);
       const orderId = randomOrderId(draft, idScope, sequence);
       const creator = creatorForDraft(draft, registrationCreatorAddress ?? registrarAddress);
-      const submitter = requireTriggerSubmitter(draft, participants, walletAddress, creator);
       await rejectRevokedSupplierParticipants(participants, options.supplierTrustResolver);
       const builtAuthorization = buildAuthorizations(() =>
         authorizationBuilder.build({
@@ -239,7 +241,6 @@ export function createProductBffService(options: ProductBffServiceOptions): Prod
           registrarAddress
         })
       );
-      const createOrderTrigger = requireCreateOrderTrigger(zhixu);
       const stateMachineAddress = normalizeAddress(activeDeployment.stateMachineAddress, "activeStateMachineAddress");
       const deploymentId = normalizeBytes32(activeDeployment.deploymentId, "activeDeploymentId");
       const createdAt = prepareNow.toISOString();
@@ -335,6 +336,9 @@ export function createProductBffService(options: ProductBffServiceOptions): Prod
           walletAddress: submitter
         });
       }
+      const zhixu = await requireActiveZhixu(options.productService, draft.zhixuId, options.versionResolver);
+      assertDraftUsesActiveZhixuVersion(draft, zhixu);
+      requireTriggerSubmitter(zhixu, requireCreateOrderTrigger(zhixu), participants, submitter);
       assertPrepareNotExpired(registration, now());
       const recovered = await recoverTriggerSigner(registration.typedData, input.signature);
       if (recovered !== registration.submitter) {
@@ -888,28 +892,110 @@ function requireCreateOrderTrigger(zhixu: ZhixuDetailDTO): NonNullable<ZhixuDeta
   return zhixu.createOrderTrigger;
 }
 
+type CreateOrderTrigger = NonNullable<ZhixuDetailDTO["createOrderTrigger"]>;
+
+interface TriggerSubmitterAuthority {
+  readonly roleSlotId: string;
+  readonly roleLabel: string;
+  readonly stageId?: string;
+}
+
 function requireTriggerSubmitter(
-  draft: ProductOrderDraftDTO,
+  zhixu: ZhixuDetailDTO,
+  createOrderTrigger: CreateOrderTrigger,
   participants: readonly DraftParticipantDTO[],
-  walletAddress: string,
-  creator: Address
+  walletAddress: string
 ): Address {
   const submitter = normalizeAddress(walletAddress, "walletAddress");
-  if (submitter === creator) {
-    return submitter;
+  const authority = resolveTriggerSubmitterAuthority(zhixu, createOrderTrigger);
+  const participant = participants.find((item) => item.roleSlotId === authority.roleSlotId);
+  if (!participant || participant.status !== "accepted" || !participant.walletAddress) {
+    throw new ProductBffError(409, "trigger_executor_not_accepted", "trigger executor role must have an accepted participant wallet", {
+      roleSlotId: authority.roleSlotId,
+      roleLabel: authority.roleLabel,
+      ...(authority.stageId ? { stageId: authority.stageId } : {})
+    });
   }
-  const participant = participants.find((item) =>
-    item.status === "accepted" &&
-    item.walletAddress &&
-    normalizeAddress(item.walletAddress, "participant.walletAddress") === submitter
+  const authorityWallet = normalizeAddress(participant.walletAddress, "participant.walletAddress");
+  if (authorityWallet !== submitter) {
+    throw new ProductBffError(403, "trigger_submitter_not_authorized", "trigger submitter must be the accepted executor for the trigger stage", {
+      roleSlotId: authority.roleSlotId,
+      roleLabel: authority.roleLabel,
+      expectedWalletAddress: authorityWallet,
+      walletAddress: submitter,
+      ...(authority.stageId ? { stageId: authority.stageId } : {})
+    });
+  }
+  return submitter;
+}
+
+function resolveTriggerSubmitterAuthority(
+  zhixu: ZhixuDetailDTO,
+  createOrderTrigger: CreateOrderTrigger
+): TriggerSubmitterAuthority {
+  const explicitRoleSlotId = createOrderTrigger.submitterRoleSlotId?.trim();
+  if (explicitRoleSlotId) {
+    return requireTriggerAuthorityRoleSlot(zhixu, explicitRoleSlotId, undefined);
+  }
+
+  const triggerStageId = normalizeBytes32(createOrderTrigger.triggerStageId, "createOrderTrigger.triggerStageId");
+  const stage = zhixu.stages.find((item) => stageMatchesTriggerStage(item.stageId, triggerStageId));
+  if (!stage) {
+    throw new ProductBffError(409, "trigger_authority_unresolved", "createOrderTrigger must declare submitterRoleSlotId when triggerStageId cannot be mapped to a Product stage", {
+      triggerStageId
+    });
+  }
+
+  if (stage.staticExecutorRoleSlotId) {
+    return requireTriggerAuthorityRoleSlot(zhixu, stage.staticExecutorRoleSlotId, stage.stageId);
+  }
+
+  const candidateSlots = zhixu.roleSlots.filter((slot) =>
+    (slot.capabilityPlugins ?? []).some((plugin) => plugin.stageIds.includes(stage.stageId))
   );
-  if (participant) {
-    return submitter;
+  if (candidateSlots.length === 1) {
+    return {
+      roleSlotId: candidateSlots[0]!.slotId,
+      roleLabel: candidateSlots[0]!.label,
+      stageId: stage.stageId
+    };
   }
-  throw new ProductBffError(403, "trigger_submitter_not_authorized", "trigger submitter must be the draft creator or an accepted participant", {
-    draftId: draft.draftId,
-    walletAddress: submitter
+
+  throw new ProductBffError(409, "trigger_authority_unresolved", "trigger stage executor role is ambiguous; createOrderTrigger.submitterRoleSlotId is required", {
+    triggerStageId,
+    stageId: stage.stageId,
+    candidateRoleSlotIds: candidateSlots.map((slot) => slot.slotId)
   });
+}
+
+function requireTriggerAuthorityRoleSlot(
+  zhixu: ZhixuDetailDTO,
+  roleSlotId: string,
+  stageId: string | undefined
+): TriggerSubmitterAuthority {
+  const roleSlot = zhixu.roleSlots.find((slot) => slot.slotId === roleSlotId);
+  if (!roleSlot) {
+    throw new ProductBffError(409, "trigger_authority_unresolved", "createOrderTrigger.submitterRoleSlotId must reference an existing role slot", {
+      roleSlotId,
+      ...(stageId ? { stageId } : {})
+    });
+  }
+  return {
+    roleSlotId: roleSlot.slotId,
+    roleLabel: roleSlot.label,
+    ...(stageId ? { stageId } : {})
+  };
+}
+
+function stageMatchesTriggerStage(stageId: string, triggerStageId: Hex): boolean {
+  try {
+    if (normalizeBytes32(stageId, "stage.stageId") === triggerStageId) {
+      return true;
+    }
+  } catch {
+    // Textual Product stage ids are compared by their on-chain stage hash below.
+  }
+  return onchainStageId(stageId) === triggerStageId;
 }
 
 async function recoverTriggerSigner(typedData: unknown, signature: string): Promise<Address> {

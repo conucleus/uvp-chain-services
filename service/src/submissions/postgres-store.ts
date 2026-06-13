@@ -297,20 +297,48 @@ export class PostgresSubmissionStore implements ProductSubmissionStore {
 
   async listSubmissions(): Promise<readonly ProductSubmissionDTO[]> {
     const result = await this.#database.query(
-      `SELECT submission_id
+      `SELECT submission_id, submission_json::text AS submission_json
        FROM submission
        WHERE submission_id IS NOT NULL AND submission_json IS NOT NULL
        ORDER BY created_at ASC, submission_id ASC`
     );
-    const submissions: ProductSubmissionDTO[] = [];
-    for (const row of result.rows) {
+    const submissions = result.rows.map((row) => {
       const record = rowObject(row, "submission list query");
-      const submissionId = stringColumn(record, "submission_id");
-      const submission = await this.getSubmission(submissionId);
-      if (submission) {
-        submissions.push(submission);
-      }
+      return {
+        submissionId: stringColumn(record, "submission_id"),
+        submission: parseStorageJson<ProductSubmissionDTO>(stringColumn(record, "submission_json"))
+      };
+    });
+    if (submissions.length === 0) {
+      return [];
     }
-    return submissions;
+
+    const attemptsBySubmission = new Map<string, ProductSubmissionAttemptDTO[]>();
+    const placeholders = submissions.map((_submission, index) => `$${index + 1}`).join(", ");
+    const attemptResult = await this.#database.query(
+      `SELECT submission_id, attempt_json::text AS attempt_json
+       FROM submission_attempt
+       WHERE submission_id IN (${placeholders})
+       ORDER BY submission_id ASC, attempt_number ASC, attempt_id ASC`,
+      submissions.map((submission) => submission.submissionId)
+    );
+    for (const row of attemptResult.rows) {
+      const record = rowObject(row, "submission_attempt list query");
+      const submissionId = stringColumn(record, "submission_id");
+      const attempts = attemptsBySubmission.get(submissionId) ?? [];
+      attempts.push(parseStorageJson<ProductSubmissionAttemptDTO>(stringColumn(record, "attempt_json")));
+      attemptsBySubmission.set(submissionId, attempts);
+    }
+
+    const hydrated: ProductSubmissionDTO[] = [];
+    for (const { submissionId, submission } of submissions) {
+      const attempts = attemptsBySubmission.get(submissionId) ?? [];
+      hydrated.push({
+        ...submission,
+        attempts,
+        attemptCount: attempts.length
+      });
+    }
+    return hydrated;
   }
 }
