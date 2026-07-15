@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import {
-  phase2CustomsOnchainHookPlanArtifact,
-  phase2CustomsPlanIds,
-  phase2CustomsStoreProductSchema
+  customsOnchainHookPlanArtifact,
+  customsPlanIds,
+  customsStoreProductSchema
 } from "@uvp-eth/product-dto/fixtures";
 import {
   createNotificationService,
@@ -20,21 +20,17 @@ import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const stateMachineAddress = "0x1111111111111111111111111111111111111111" as Address;
-const trustRegistryAddress = "0x2222222222222222222222222222222222222222" as Address;
+const identityRegistryAddress = "0x2222222222222222222222222222222222222222" as Address;
 const signalSubmitter = "0x3333333333333333333333333333333333333333" as Address;
 const supplierWallet = "0x4444444444444444444444444444444444444444" as Address;
-const attester = "0x5555555555555555555555555555555555555555" as Address;
 const orderId = bytes32Hex("3001");
 const supplierSubjectId = bytes32Hex("5001");
 const payloadHash = bytes32Hex("7001");
 const idempotencyKey = bytes32Hex("6001");
 const metadataHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Hex;
-const capabilityHash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" as Hex;
-const reputationHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" as Hex;
-const reasonHash = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as Hex;
-const registeredDependency = phase2CustomsOnchainHookPlanArtifact.compiledHooks[0]?.dependencies[0];
-const resourceHook = phase2CustomsOnchainHookPlanArtifact.compiledHooks[0];
-const customsHook = phase2CustomsOnchainHookPlanArtifact.compiledHooks.find((hook) => hook.hookName === "customs_ready");
+const registeredDependency = customsOnchainHookPlanArtifact.compiledHooks[0]?.dependencies[0];
+const resourceHook = customsOnchainHookPlanArtifact.compiledHooks[0];
+const customsHook = customsOnchainHookPlanArtifact.compiledHooks.find((hook) => hook.hookName === "customs_ready");
 const customsDependencyA = customsHook?.dependencies[0];
 const customsDependencyB = customsHook?.dependencies[1];
 const adminHeaders = {
@@ -47,7 +43,7 @@ describe("signal-routed notifications", () => {
     const sent: NotificationDispatchRequest[] = [];
     const event = signalEvent(6n, requiredDependency(registeredDependency));
     const { store, supplierStore } = await notificationStore({
-      supportedStageIds: phase2CustomsOnchainHookPlanArtifact.compiledHooks
+      supportedStageIds: customsOnchainHookPlanArtifact.compiledHooks
         .filter((hook) => hook.dependencies.some((dependency) => dependency.signalId === registeredDependency?.signalId))
         .map((hook) => hook.stageId),
       events: [event]
@@ -116,6 +112,28 @@ describe("signal-routed notifications", () => {
     ]);
   });
 
+  it("fails instead of treating an invalid stored plan artifact as missing", async () => {
+    const event = signalEvent(6n, requiredDependency(registeredDependency));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: customsOnchainHookPlanArtifact.compiledHooks.map((hook) => hook.stageId),
+      events: [event]
+    });
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return {
+            ...customsStoreProductSchema,
+            onchainHookPlanArtifact: { schemaVersion: "invalid" }
+          } as unknown as typeof customsStoreProductSchema;
+        }
+      }
+    });
+
+    await expect(service.processSignalSubmittedEvents([event])).rejects.toThrow();
+  });
+
   it("does not notify the signal submitter unless they resolve as a receiver supplier", async () => {
     const sent: NotificationDispatchRequest[] = [];
     const { store, supplierStore } = await notificationStore({
@@ -132,15 +150,10 @@ describe("signal-routed notifications", () => {
     expect(signalSubmitter).not.toBe(supplierWallet);
   });
 
-  it("gates dispatch on Store supplier metadata, active SupplierAttested, and notification profile", async () => {
+  it("requires Store supplier metadata and a notification profile", async () => {
     const missingProfile = await notificationStore({
       supportedStageIds: [requiredHook(customsHook).stageId],
       includeProfile: false,
-      events: [signalEvent(6n, requiredDependency(customsDependencyA))]
-    });
-    const revoked = await notificationStore({
-      supportedStageIds: [requiredHook(customsHook).stageId],
-      supplierRevoked: true,
       events: [signalEvent(6n, requiredDependency(customsDependencyA))]
     });
     const noStoreSupplier = await notificationStore({
@@ -150,17 +163,12 @@ describe("signal-routed notifications", () => {
     });
 
     const missingProfileService = serviceFor(missingProfile.store, missingProfile.supplierStore);
-    const revokedService = serviceFor(revoked.store, revoked.supplierStore);
     const noStoreSupplierService = serviceFor(noStoreSupplier.store, noStoreSupplier.supplierStore);
     await missingProfileService.processSignalSubmittedEvents([signalEvent(6n, requiredDependency(customsDependencyA))]);
-    await revokedService.processSignalSubmittedEvents([signalEvent(6n, requiredDependency(customsDependencyA))]);
     await noStoreSupplierService.processSignalSubmittedEvents([signalEvent(6n, requiredDependency(customsDependencyA))]);
 
     await expect(missingProfileService.listDeliveries()).resolves.toEqual([
       expect.objectContaining({ status: "skipped", reason: "notification_profile_missing" })
-    ]);
-    await expect(revokedService.listDeliveries()).resolves.toEqual([
-      expect.objectContaining({ status: "skipped", reason: "supplier_revoked" })
     ]);
     await expect(noStoreSupplierService.listDeliveries()).resolves.toEqual([
       expect.objectContaining({ status: "skipped", reason: "receiver_not_found" })
@@ -173,6 +181,8 @@ describe("signal-routed notifications", () => {
     const { store, supplierStore } = await notificationStore({
       supportedStageIds: [readyHook.stageId, submittedHook.stageId],
       events: [
+        signalCapabilityEvent(3n, readyHook),
+        signalCapabilityEvent(3n, submittedHook, 1),
         authorizationEvent(4n, readyHook, supplierWallet),
         hookReadyEvent(5n, readyHook),
         authorizationEvent(6n, submittedHook, supplierWallet),
@@ -215,6 +225,7 @@ describe("signal-routed notifications", () => {
     const { store, supplierStore } = await notificationStore({
       supportedStageIds: [requiredHook(customsHook).stageId],
       events: [
+        signalCapabilityEvent(3n, requiredHook(customsHook)),
         authorizationEvent(4n, requiredHook(customsHook), supplierWallet),
         hookReadyEvent(5n, requiredHook(customsHook)),
         signalEvent(6n, requiredDependency(customsDependencyA))
@@ -225,7 +236,7 @@ describe("signal-routed notifications", () => {
       supplierMetadataStore: supplierStore,
       productSchemaResolver: {
         async getProductSchemaByPlan() {
-          return phase2CustomsStoreProductSchema;
+          return customsStoreProductSchema;
         }
       },
       deliveryStore
@@ -294,7 +305,7 @@ describe("signal-routed notifications", () => {
     expect(serialized).not.toContain("externalReceiptRef");
   });
 
-  it("keeps admin delivery controls but removes run-once scanning", async () => {
+  it("lists, retries, and dead-letters notification deliveries", async () => {
     const sent: NotificationDispatchRequest[] = [];
     const { store, supplierStore } = await notificationStore({
       supportedStageIds: [requiredHook(customsHook).stageId],
@@ -306,7 +317,7 @@ describe("signal-routed notifications", () => {
       supplierMetadataStore: supplierStore,
       productSchemaResolver: {
         async getProductSchemaByPlan() {
-          return phase2CustomsStoreProductSchema;
+          return customsStoreProductSchema;
         }
       },
       deliveryStore
@@ -317,7 +328,7 @@ describe("signal-routed notifications", () => {
       supplierMetadataStore: supplierStore,
       productSchemaResolver: {
         async getProductSchemaByPlan() {
-          return phase2CustomsStoreProductSchema;
+          return customsStoreProductSchema;
         }
       },
       deliveryStore,
@@ -329,12 +340,6 @@ describe("signal-routed notifications", () => {
       }
     });
     const router = createApiRouter(store, { notificationService, storeSupplierMetadataStore: supplierStore });
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: "/admin/notifications/run-once",
-      headers: adminHeaders
-    })).resolves.toMatchObject({ status: 404 });
 
     const deliveriesResponse = await router.handle({
       method: "GET",
@@ -372,6 +377,7 @@ describe("signal-routed notifications", () => {
     const { store, supplierStore } = await notificationStore({
       supportedStageIds: [requiredHook(customsHook).stageId],
       events: [
+        signalCapabilityEvent(3n, requiredHook(customsHook)),
         chainEvent(4n, "SignalSubmitterAuthorized", {
           orderId,
           sourceId: requiredHook(customsHook).hookId,
@@ -399,13 +405,6 @@ describe("signal-routed notifications", () => {
       pathname: "/product/me/activity-feed",
       query: { walletAddress: supplierWallet }
     });
-    const oldRouteResponse = await router.handle({
-      method: "GET",
-      pathname: "/product/me/notifications",
-      query: { walletAddress: supplierWallet }
-    });
-
-    expect(oldRouteResponse).toMatchObject({ status: 404 });
     expect(visibleResponse.status).toBe(200);
     const visibleBody = visibleResponse.body as {
       readonly notifications: Array<{ readonly notificationId: Hex; readonly kind: string; readonly readStatus: string }>;
@@ -435,7 +434,7 @@ describe("signal-routed notifications", () => {
       capabilityTags: [],
       supportedRoleSlotIds: [],
       supportedStageIds: [requiredHook(customsHook).stageId],
-      registryAddresses: [trustRegistryAddress],
+      registryAddresses: [identityRegistryAddress],
       reviewStatus: "approved_for_broadcast",
       createdAt: "2026-05-01T00:00:00.000Z",
       updatedAt: "2026-05-01T00:00:00.000Z"
@@ -505,7 +504,7 @@ function serviceFor(
     supplierMetadataStore: supplierStore,
     productSchemaResolver: {
       async getProductSchemaByPlan() {
-        return phase2CustomsStoreProductSchema;
+        return customsStoreProductSchema;
       }
     },
     dispatcher
@@ -518,38 +517,18 @@ async function notificationStore(options: {
   readonly finalizedBlock?: bigint;
   readonly includeStoreSupplier?: boolean;
   readonly includeProfile?: boolean;
-  readonly supplierRevoked?: boolean;
 }): Promise<{ readonly store: MemoryProjectionStore; readonly supplierStore: InMemoryStoreSupplierMetadataStore }> {
   const events = [
     chainEvent(1n, "PlanRegistered", {
-      planId: phase2CustomsPlanIds.planId,
-      planHash: phase2CustomsPlanIds.planHash,
-      hookCount: BigInt(phase2CustomsOnchainHookPlanArtifact.compiledHooks.length)
+      planId: customsPlanIds.planId,
+      planHash: customsPlanIds.planHash,
+      hookCount: BigInt(customsOnchainHookPlanArtifact.compiledHooks.length)
     }),
     chainEvent(2n, "OrderRegistered", {
       orderId,
-      planId: phase2CustomsPlanIds.planId
+      planId: customsPlanIds.planId
     }),
-    chainEvent(3n, "SupplierAttested", {
-      supplierSubjectId,
-      wallet: supplierWallet,
-      profileHash: metadataHash,
-      capabilityHash,
-      reputationHash,
-      metadataURI: "ipfs://supplier-a",
-      attester
-    }, trustRegistryAddress),
-    ...(options.events ?? []),
-    ...(options.supplierRevoked
-      ? [
-          chainEvent(8n, "SupplierRevoked", {
-            supplierSubjectId,
-            reasonHash,
-            reasonURI: "ipfs://supplier-revoked",
-            revoker: attester
-          }, trustRegistryAddress)
-        ]
-      : [])
+    ...(options.events ?? [])
   ];
   const store = await projectionStoreFromEvents(events, options.finalizedBlock ?? 8n);
   const supplierStore = new InMemoryStoreSupplierMetadataStore();
@@ -569,7 +548,7 @@ async function notificationStore(options: {
       capabilityTags: [],
       supportedRoleSlotIds: [],
       supportedStageIds: options.supportedStageIds,
-      registryAddresses: [trustRegistryAddress],
+      registryAddresses: [identityRegistryAddress],
       reviewStatus: "approved_for_broadcast",
       createdAt: "2026-05-01T00:00:00.000Z",
       updatedAt: "2026-05-01T00:00:00.000Z"
@@ -623,6 +602,23 @@ function authorizationEvent(
     role: bytes32Text("executor"),
     metadataHash
   });
+}
+
+function signalCapabilityEvent(
+  blockNumber: bigint,
+  hook: { readonly hookId: string; readonly stageId: string },
+  logIndex = 0
+): ChainEvent {
+  return {
+    ...chainEvent(blockNumber, "SignalCapabilityRegistered", {
+      planId: customsPlanIds.planId,
+      stageId: hook.stageId,
+      targetSourceId: hook.hookId,
+      signalId: hook.hookId,
+      targetOrderRelation: 0
+    }),
+    logIndex
+  };
 }
 
 function hookReadyEvent(

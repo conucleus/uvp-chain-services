@@ -12,17 +12,11 @@ export type GovernanceReviewStatus =
   | "rejected"
   | "revoked";
 
-export type GovernanceAttestationLogStatus = "pending" | "confirmed" | "failed";
-
 export type GovernanceTxLogStatus = "pending" | "broadcasting" | "indexing" | "confirmed" | "failed";
 
 export type GovernanceBroadcastStatus = "simulated_tx" | "broadcasting" | "submitted" | "confirmed" | "failed";
 
-export type GovernanceTxAction =
-  | "attest_plan"
-  | "revoke_plan"
-  | "attest_supplier"
-  | "revoke_supplier";
+export type GovernanceTxAction = "register_identity" | "revoke_identity";
 
 export interface GovernancePrincipal {
   readonly adminId: string;
@@ -61,50 +55,27 @@ export interface ReviewInput {
   readonly policy?: unknown;
 }
 
-export interface PlanAttestationRequestDTO {
-  readonly kind: "attestPlan";
-  readonly planId: Hex;
-  readonly planHash: Hex;
-  readonly artifactHash: Hex;
-  readonly policyHash: Hex;
-  readonly metadataHash: Hex;
-  readonly metadataURI: string;
+export interface IdentityRegistrationRequestDTO {
+  readonly kind: "registerIdentity";
+  readonly subjectId: Hex;
+  readonly account: Address;
+  readonly descriptorHash: Hex;
+  readonly descriptorURI: string;
   readonly reviewId?: string;
 }
 
-export interface PlanRevocationRequestDTO {
-  readonly kind: "revokePlan";
-  readonly planId: Hex;
-  readonly reasonHash: Hex;
-  readonly reasonURI: string;
-  readonly reviewId?: string;
-}
-
-export interface SupplierAttestationRequestDTO {
-  readonly kind: "attestSupplier";
-  readonly supplierSubjectId: Hex;
-  readonly wallet: Address;
-  readonly profileHash: Hex;
-  readonly capabilityHash: Hex;
-  readonly reputationHash: Hex;
-  readonly metadataHash: Hex;
-  readonly metadataURI: string;
-  readonly reviewId?: string;
-}
-
-export interface SupplierRevocationRequestDTO {
-  readonly kind: "revokeSupplier";
-  readonly supplierSubjectId: Hex;
+export interface IdentityRevocationRequestDTO {
+  readonly kind: "revokeIdentity";
+  readonly bindingId: Hex;
+  readonly subjectId: Hex;
   readonly reasonHash: Hex;
   readonly reasonURI: string;
   readonly reviewId?: string;
 }
 
 export type GovernanceChainRequestDTO =
-  | PlanAttestationRequestDTO
-  | PlanRevocationRequestDTO
-  | SupplierAttestationRequestDTO
-  | SupplierRevocationRequestDTO;
+  | IdentityRegistrationRequestDTO
+  | IdentityRevocationRequestDTO;
 
 export interface GovernanceBroadcastResultDTO {
   readonly status: GovernanceBroadcastStatus;
@@ -117,17 +88,15 @@ export interface GovernanceBroadcastResultDTO {
   readonly simulated: boolean;
 }
 
-export interface PlanAttestationLogDTO extends TxReconcileFields {
+export interface IdentityTxLogDTO extends TxReconcileFields {
   readonly logId: string;
   readonly txLogId: string;
-  readonly action: "attest_plan" | "revoke_plan";
+  readonly action: "register_identity" | "revoke_identity";
   readonly subjectId: Hex;
-  readonly planId: Hex;
-  readonly planHash?: Hex;
-  readonly artifactHash?: Hex;
-  readonly policyHash?: Hex;
-  readonly metadataHash?: Hex;
-  readonly metadataURI?: string;
+  readonly account?: Address;
+  readonly bindingId?: Hex;
+  readonly descriptorHash?: Hex;
+  readonly descriptorURI?: string;
   readonly reasonHash?: Hex;
   readonly reasonURI?: string;
   readonly txHash?: Hex;
@@ -139,66 +108,26 @@ export interface PlanAttestationLogDTO extends TxReconcileFields {
   readonly errorCode?: string;
   readonly errorMessage?: string;
   readonly retryable: boolean;
-  readonly request: PlanAttestationRequestDTO | PlanRevocationRequestDTO;
+  readonly request: IdentityRegistrationRequestDTO | IdentityRevocationRequestDTO;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
 
-export interface SupplierAttestationLogDTO extends TxReconcileFields {
-  readonly logId: string;
-  readonly txLogId: string;
-  readonly action: "attest_supplier" | "revoke_supplier";
-  readonly subjectId: Hex;
-  readonly supplierSubjectId: Hex;
-  readonly wallet?: Address;
-  readonly profileHash?: Hex;
-  readonly capabilityHash?: Hex;
-  readonly reputationHash?: Hex;
-  readonly metadataHash?: Hex;
-  readonly metadataURI?: string;
-  readonly reasonHash?: Hex;
-  readonly reasonURI?: string;
-  readonly txHash?: Hex;
-  readonly blockNumber?: string;
-  readonly signer?: Address;
-  readonly requester: string;
-  readonly status: GovernanceTxLogStatus;
-  readonly broadcastStatus: GovernanceBroadcastStatus;
-  readonly errorCode?: string;
-  readonly errorMessage?: string;
-  readonly retryable: boolean;
-  readonly request: SupplierAttestationRequestDTO | SupplierRevocationRequestDTO;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-export type GovernanceTxLogDTO = PlanAttestationLogDTO | SupplierAttestationLogDTO;
+export type GovernanceTxLogDTO = IdentityTxLogDTO;
 
 export interface GovernanceReviewResultDTO {
   readonly review: GovernanceReviewDTO;
   readonly publicReview: PublicGovernanceReviewDTO;
 }
 
-export interface GovernancePlanAttestationResultDTO {
-  readonly request: PlanAttestationRequestDTO;
+export interface GovernanceIdentityRegistrationResultDTO {
+  readonly request: IdentityRegistrationRequestDTO;
   readonly broadcast: GovernanceBroadcastResultDTO;
-  readonly log: PlanAttestationLogDTO;
+  readonly log: IdentityTxLogDTO;
 }
 
-export interface GovernancePlanRevocationResultDTO {
-  readonly request: PlanRevocationRequestDTO;
+export interface GovernanceIdentityRevocationResultDTO {
+  readonly request: IdentityRevocationRequestDTO;
   readonly broadcast: GovernanceBroadcastResultDTO;
-  readonly log: PlanAttestationLogDTO;
-}
-
-export interface GovernanceSupplierAttestationResultDTO {
-  readonly request: SupplierAttestationRequestDTO;
-  readonly broadcast: GovernanceBroadcastResultDTO;
-  readonly log: SupplierAttestationLogDTO;
-}
-
-export interface GovernanceSupplierRevocationResultDTO {
-  readonly request: SupplierRevocationRequestDTO;
-  readonly broadcast: GovernanceBroadcastResultDTO;
-  readonly log: SupplierAttestationLogDTO;
+  readonly log: IdentityTxLogDTO;
 }

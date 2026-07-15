@@ -8,8 +8,7 @@ import type {
   GovernanceReviewDTO,
   GovernanceSubjectType,
   GovernanceTxLogDTO,
-  PlanAttestationLogDTO,
-  SupplierAttestationLogDTO
+  IdentityTxLogDTO
 } from "./types.js";
 import type { GovernanceReviewQuery, GovernanceStore } from "./store.js";
 
@@ -133,32 +132,17 @@ export class PostgresGovernanceStore implements GovernanceStore {
     return (await this.listReviews({ subjectType, subjectId }))[0];
   }
 
-  async listPlanAttestationLogs(): Promise<readonly PlanAttestationLogDTO[]> {
+  async listIdentityTxLogs(): Promise<readonly IdentityTxLogDTO[]> {
     const result = await this.#database.query(
       `SELECT log_json::text AS log_json
        FROM governance_tx_log
-       WHERE log_kind = 'plan'
        ORDER BY created_at DESC, log_id DESC`
     );
-    return result.rows.map((row) => parseTxLogRow(row) as PlanAttestationLogDTO);
+    return result.rows.map((row) => parseTxLogRow(row) as IdentityTxLogDTO);
   }
 
-  async appendPlanAttestationLog(log: PlanAttestationLogDTO): Promise<void> {
-    await this.#upsertTxLog("plan", log);
-  }
-
-  async listSupplierAttestationLogs(): Promise<readonly SupplierAttestationLogDTO[]> {
-    const result = await this.#database.query(
-      `SELECT log_json::text AS log_json
-       FROM governance_tx_log
-       WHERE log_kind = 'supplier'
-       ORDER BY created_at DESC, log_id DESC`
-    );
-    return result.rows.map((row) => parseTxLogRow(row) as SupplierAttestationLogDTO);
-  }
-
-  async appendSupplierAttestationLog(log: SupplierAttestationLogDTO): Promise<void> {
-    await this.#upsertTxLog("supplier", log);
+  async appendIdentityTxLog(log: IdentityTxLogDTO): Promise<void> {
+    await this.#upsertTxLog(log);
   }
 
   async getTxLog(txLogId: string): Promise<GovernanceTxLogDTO | undefined> {
@@ -172,35 +156,26 @@ export class PostgresGovernanceStore implements GovernanceStore {
   }
 
   async updateTxLog(log: GovernanceTxLogDTO): Promise<void> {
-    const kind = log.action === "attest_plan" || log.action === "revoke_plan" ? "plan" : "supplier";
-    await this.#upsertTxLog(kind, log);
+    await this.#upsertTxLog(log);
   }
 
-  async #upsertTxLog(kind: "plan" | "supplier", log: PlanAttestationLogDTO | SupplierAttestationLogDTO): Promise<void> {
-    const planLog = kind === "plan" ? log as PlanAttestationLogDTO : undefined;
-    const supplierLog = kind === "supplier" ? log as SupplierAttestationLogDTO : undefined;
+  async #upsertTxLog(log: IdentityTxLogDTO): Promise<void> {
     await this.#database.query(
       `INSERT INTO governance_tx_log (
-         log_id, tx_log_id, log_kind, action, subject_id, plan_id,
-         supplier_subject_id, wallet, plan_hash, artifact_hash, policy_hash,
-         metadata_hash, metadata_uri, reason_hash, reason_uri, tx_hash,
+         log_id, tx_log_id, action, subject_id, account, descriptor_hash,
+         descriptor_uri, binding_id, reason_hash, reason_uri, tx_hash,
          block_number, signer, requester, status, broadcast_status, error_code,
          error_message, retryable, request_json, log_json, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25::jsonb, $26::jsonb, $27, $28)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21::jsonb, $22, $23)
        ON CONFLICT(log_id)
        DO UPDATE SET
          tx_log_id = excluded.tx_log_id,
-         log_kind = excluded.log_kind,
          action = excluded.action,
          subject_id = excluded.subject_id,
-         plan_id = excluded.plan_id,
-         supplier_subject_id = excluded.supplier_subject_id,
-         wallet = excluded.wallet,
-         plan_hash = excluded.plan_hash,
-         artifact_hash = excluded.artifact_hash,
-         policy_hash = excluded.policy_hash,
-         metadata_hash = excluded.metadata_hash,
-         metadata_uri = excluded.metadata_uri,
+         account = excluded.account,
+         descriptor_hash = excluded.descriptor_hash,
+         descriptor_uri = excluded.descriptor_uri,
+         binding_id = excluded.binding_id,
          reason_hash = excluded.reason_hash,
          reason_uri = excluded.reason_uri,
          tx_hash = excluded.tx_hash,
@@ -219,17 +194,12 @@ export class PostgresGovernanceStore implements GovernanceStore {
       [
         log.logId,
         log.txLogId,
-        kind,
         log.action,
         log.subjectId,
-        planLog?.planId ?? null,
-        supplierLog?.supplierSubjectId ?? null,
-        supplierLog?.wallet ?? null,
-        planLog?.planHash ?? null,
-        planLog?.artifactHash ?? null,
-        planLog?.policyHash ?? null,
-        log.metadataHash ?? null,
-        log.metadataURI ?? null,
+        log.account ?? null,
+        log.descriptorHash ?? null,
+        log.descriptorURI ?? null,
+        log.bindingId ?? null,
         log.reasonHash ?? null,
         log.reasonURI ?? null,
         log.txHash ?? null,

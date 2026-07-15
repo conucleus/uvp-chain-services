@@ -7,7 +7,7 @@ import { ConfigError, normalizeAddress, normalizeBytes32 } from "../../shared/ty
 import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-type ParsedTrustQuery =
+type ParsedIdentityQuery =
   | { readonly ok: true; readonly query: Record<string, string> }
   | { readonly ok: false; readonly response: ApiResponse };
 
@@ -18,7 +18,7 @@ export function createGovernanceRouteModule(): RouteModule {
       if (adminResponse) {
         return adminResponse;
       }
-      return handleTrustProjectionRequest(request, context);
+      return handleIdentityProjectionRequest(request, context);
     }
   };
 }
@@ -77,31 +77,17 @@ async function handleGovernanceRequest(
       };
     }
 
-    if (request.method === "POST" && request.pathname === "/admin/governance/attest-zhixu") {
+    if (request.method === "POST" && request.pathname === "/admin/governance/register-identity") {
       return {
         status: 202,
-        body: await context.governanceService.attestZhixu(request.body, principal)
+        body: await context.governanceService.registerIdentity(request.body, principal)
       };
     }
 
-    if (request.method === "POST" && request.pathname === "/admin/governance/revoke-zhixu") {
+    if (request.method === "POST" && request.pathname === "/admin/governance/revoke-identity") {
       return {
         status: 202,
-        body: await context.governanceService.revokeZhixu(request.body, principal)
-      };
-    }
-
-    if (request.method === "POST" && request.pathname === "/admin/governance/attest-supplier") {
-      return {
-        status: 202,
-        body: await context.governanceService.attestSupplier(request.body, principal)
-      };
-    }
-
-    if (request.method === "POST" && request.pathname === "/admin/governance/revoke-supplier") {
-      return {
-        status: 202,
-        body: await context.governanceService.revokeSupplier(request.body, principal)
+        body: await context.governanceService.revokeIdentity(request.body, principal)
       };
     }
   } catch (error) {
@@ -124,34 +110,19 @@ async function handleGovernanceRequest(
   };
 }
 
-async function handleTrustProjectionRequest(
+async function handleIdentityProjectionRequest(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1]
 ): Promise<ApiResponse | undefined> {
-  if (request.method === "GET" && request.pathname === "/trust/plans") {
-    const parsedQuery = parsePlanTrustQuery(request.query);
+  if (request.method === "GET" && request.pathname === "/identity/bindings") {
+    const parsedQuery = parseIdentityBindingQuery(request.query);
     if (!parsedQuery.ok) {
       return parsedQuery.response;
     }
-    const query = parsedQuery.query;
     return {
       status: 200,
       body: {
-        plans: await context.store.listPlanTrust(query)
-      }
-    };
-  }
-
-  if (request.method === "GET" && request.pathname === "/trust/suppliers") {
-    const parsedQuery = parseSupplierTrustQuery(request.query);
-    if (!parsedQuery.ok) {
-      return parsedQuery.response;
-    }
-    const query = parsedQuery.query;
-    return {
-      status: 200,
-      body: {
-        suppliers: await context.store.listSupplierTrust(query)
+        bindings: await context.store.listIdentityBindings(parsedQuery.query)
       }
     };
   }
@@ -159,40 +130,38 @@ async function handleTrustProjectionRequest(
   return undefined;
 }
 
-function parsePlanTrustQuery(query: ApiRequest["query"]): ParsedTrustQuery {
-  return validateTrustQuery(
+function parseIdentityBindingQuery(query: ApiRequest["query"]): ParsedIdentityQuery {
+  const activeOnly = query?.activeOnly;
+  if (activeOnly && activeOnly !== "true" && activeOnly !== "false") {
+    return {
+      ok: false,
+      response: { status: 400, body: { error: "invalid_query", message: "activeOnly must be true or false" } }
+    };
+  }
+  const parsed = validateIdentityQuery(
     cleanQuery({
       registryAddress: query?.registryAddress,
-      planId: query?.planId,
-      planHash: query?.planHash
+      bindingId: query?.bindingId,
+      subjectId: query?.subjectId,
+      account: query?.account
     }),
     {
       registryAddress: "address",
-      planId: "bytes32",
-      planHash: "bytes32"
+      bindingId: "bytes32",
+      subjectId: "bytes32",
+      account: "address"
     }
   );
+  if (!parsed.ok || !activeOnly) {
+    return parsed;
+  }
+  return { ok: true, query: { ...parsed.query, activeOnly } };
 }
 
-function parseSupplierTrustQuery(query: ApiRequest["query"]): ParsedTrustQuery {
-  return validateTrustQuery(
-    cleanQuery({
-      registryAddress: query?.registryAddress,
-      supplierSubjectId: query?.supplierSubjectId,
-      wallet: query?.wallet
-    }),
-    {
-      registryAddress: "address",
-      supplierSubjectId: "bytes32",
-      wallet: "address"
-    }
-  );
-}
-
-function validateTrustQuery(
+function validateIdentityQuery(
   query: Record<string, string>,
   fields: Readonly<Record<string, "address" | "bytes32">>
-): ParsedTrustQuery {
+): ParsedIdentityQuery {
   try {
     for (const [field, kind] of Object.entries(fields)) {
       const value = query[field];

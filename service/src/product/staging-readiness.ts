@@ -21,9 +21,8 @@ export interface ProductApiStagingReadiness {
   readonly profile: JsonRecord;
   readonly deployment: JsonRecord;
   readonly indexer: JsonRecord;
-  readonly planTrust: JsonRecord;
+  readonly planPublication: JsonRecord;
   readonly productState: JsonRecord;
-  readonly supplierTrust: JsonRecord;
   readonly proof: JsonRecord;
   readonly evidenceStorage: JsonRecord;
   readonly roleInputs: JsonRecord;
@@ -44,23 +43,23 @@ export async function buildProductApiStagingReadiness(
     orders,
     tasks,
     activeDeployment,
-    trustSnapshot,
     orderSnapshot
   ] = await Promise.all([
     options.productService.listZhixu(),
     options.productService.listOrders(),
     options.productService.listTasks(),
     options.productService.getActiveStateMachineDeployment(),
-    options.store.getTrustSnapshot(),
     options.store.getOrderSnapshot?.() ?? Promise.resolve(undefined)
   ]);
   const diagnostics = options.diagnostics;
   const profile = profileSummary(diagnostics);
   const deployment = deploymentSummary(diagnostics, activeDeployment, orderSnapshot);
   const indexer = indexerSummary(diagnostics);
-  const planTrust = planTrustSummary(orders, Object.values(trustSnapshot.plans), zhixus.length);
+  const planPublication = planPublicationSummary(
+    orders,
+    Object.values(orderSnapshot?.stateMachinePlans ?? {}),
+  );
   const productState = productStateSummary(zhixus.length, orders, tasks);
-  const supplierTrust = supplierTrustSummary(tasks, Object.keys(trustSnapshot.suppliers).length);
   const proof = proofSummary(orders, tasks);
   const evidenceStorage = evidenceStorageSummary(diagnostics);
   const roleInputs = roleInputSummary(diagnostics);
@@ -69,9 +68,8 @@ export async function buildProductApiStagingReadiness(
     profile,
     deployment,
     indexer,
-    planTrust,
+    planPublication,
     productState,
-    supplierTrust,
     proof,
     evidenceStorage,
     roleInputs
@@ -88,9 +86,8 @@ export async function buildProductApiStagingReadiness(
     profile,
     deployment,
     indexer,
-    planTrust,
+    planPublication,
     productState,
-    supplierTrust,
     proof,
     evidenceStorage,
     roleInputs
@@ -101,9 +98,8 @@ function readinessReasons(input: {
   readonly profile: JsonRecord;
   readonly deployment: JsonRecord;
   readonly indexer: JsonRecord;
-  readonly planTrust: JsonRecord;
+  readonly planPublication: JsonRecord;
   readonly productState: JsonRecord;
-  readonly supplierTrust: JsonRecord;
   readonly proof: JsonRecord;
   readonly evidenceStorage: JsonRecord;
   readonly roleInputs: JsonRecord;
@@ -147,15 +143,6 @@ function readinessReasons(input: {
   if (input.indexer.rebuildReady !== true) {
     reasons.push("projection_rebuild_not_complete");
   }
-  if (input.planTrust.productFacingAttestedPlanCount === 0) {
-    reasons.push("no_attested_product_plan");
-  }
-  if (input.planTrust.ordersWithMissingPlanTrustCount !== 0) {
-    reasons.push("plan_trust_missing");
-  }
-  if (input.planTrust.ordersWithRevokedPlanTrustCount !== 0) {
-    reasons.push("plan_trust_revoked");
-  }
   if (input.productState.orderCount === 0) {
     reasons.push("no_chain_projected_order");
   }
@@ -164,12 +151,6 @@ function readinessReasons(input: {
   }
   if (input.proof.orderProofEventCount === 0 || input.proof.taskProofRowCount === 0) {
     reasons.push("no_chain_proof");
-  }
-  if (input.supplierTrust.blocker === true) {
-    reasons.push("supplier_trust_revoked");
-  }
-  if (input.supplierTrust.severity === "degraded") {
-    reasons.push("supplier_trust_degraded");
   }
   return reasons;
 }
@@ -217,7 +198,7 @@ function deploymentSummary(
     projectionStatus: activeDeploymentProjection?.status ?? "missing",
     registryProjectionPresent: Boolean(activeDeploymentProjection),
     configuredStateMachine: network?.stateMachineConfigured === true,
-    configuredTrustRegistry: network?.trustRegistryConfigured === true,
+    configuredIdentityRegistry: network?.identityRegistryConfigured === true,
     source: activeDeployment ? "registry_projection" : "missing"
   };
 }
@@ -262,27 +243,19 @@ function indexerSummary(diagnostics: JsonRecord): JsonRecord {
   };
 }
 
-function planTrustSummary(
+function planPublicationSummary(
   orders: readonly ProductOrderApiDTO[],
   plans: readonly {
     readonly planId: string;
     readonly planHash: string;
-    readonly status: string;
-    readonly revoked: boolean;
   }[],
-  productFacingAttestedPlanCount: number
 ): JsonRecord {
-  const activePlanCount = plans.filter((plan) => plan.status === "attested" && !plan.revoked).length;
-  const revokedPlanCount = plans.filter((plan) => plan.revoked || plan.status === "revoked").length;
-  const orderTrust = orders.map((order) => planTrustForOrder(order, plans));
+  const orderPlans = orders.map((order) => publishedPlanForOrder(order, plans));
   return {
-    attestedPlanCount: activePlanCount,
-    revokedPlanCount,
-    productFacingAttestedPlanCount,
+    publishedPlanCount: plans.length,
     orderCount: orders.length,
-    ordersWithActivePlanTrustCount: orderTrust.filter((trust) => trust?.status === "attested" && !trust.revoked).length,
-    ordersWithMissingPlanTrustCount: orderTrust.filter((trust) => trust === undefined).length,
-    ordersWithRevokedPlanTrustCount: orderTrust.filter((trust) => trust?.revoked || trust?.status === "revoked").length
+    ordersWithPublishedPlanCount: orderPlans.filter(Boolean).length,
+    ordersWithMissingPlanCount: orderPlans.filter((plan) => !plan).length,
   };
 }
 
@@ -316,95 +289,11 @@ function productStateSummary(
       chainStatus: task.chainStatus ?? null,
       canSubmit: task.canSubmit === true,
       assigneeWallet: task.assigneeWallet ?? task.participantWallet ?? null,
-      supplierTrustStatus: task.supplierTrustStatus ?? null,
       proofRowCount: task.proofRows?.length ?? 0,
       readyTxHash: task.readyTxHash ?? null,
       projection: task.projection ?? null
     }))
   };
-}
-
-function supplierTrustSummary(tasks: readonly ProductTaskApiDTO[], supplierProjectionCount: number): JsonRecord {
-  const assignedTasks = tasks.filter((task) => Boolean(task.assigneeWallet ?? task.participantWallet));
-  const attestedTasks = assignedTasks.filter((task) => task.supplierTrustStatus === "attested");
-  const revokedTasks = assignedTasks.filter((task) => task.supplierTrustStatus === "revoked");
-  const missingTasks = assignedTasks.filter((task) => task.supplierTrustStatus === "not_found" || !task.supplierTrustStatus);
-  const input = {
-    supplierProjectionCount,
-    assignedCount: assignedTasks.length,
-    attestedCount: attestedTasks.length,
-    revokedCount: revokedTasks.length,
-    missingCount: missingTasks.length
-  };
-  const severity = supplierTrustSeverity(input);
-  return {
-    supplierProjectionCount: input.supplierProjectionCount,
-    assignedTaskCount: input.assignedCount,
-    attestedTaskCount: input.attestedCount,
-    revokedTaskCount: input.revokedCount,
-    missingTaskCount: input.missingCount,
-    assessment: supplierTrustAssessment(input),
-    severity,
-    blocker: severity === "blocker",
-    revokedTasks: revokedTasks.slice(0, 20).map((task) => ({
-      taskId: task.taskId,
-      orderId: task.orderId,
-      assigneeWallet: task.assigneeWallet ?? task.participantWallet ?? null,
-      supplierSubjectId: task.supplierSubjectId ?? null
-    }))
-  };
-}
-
-type SupplierTrustSeverity = "blocker" | "degraded" | "acceptable" | "ready";
-
-function supplierTrustSeverity(input: {
-  readonly supplierProjectionCount: number;
-  readonly assignedCount: number;
-  readonly attestedCount: number;
-  readonly revokedCount: number;
-  readonly missingCount: number;
-}): SupplierTrustSeverity {
-  if (input.revokedCount > 0) {
-    return "blocker";
-  }
-  if (input.supplierProjectionCount === 0 && input.assignedCount > 0 && input.attestedCount === 0) {
-    return "degraded";
-  }
-  if (input.missingCount > 0 && input.attestedCount === 0 && input.supplierProjectionCount > 0) {
-    return "degraded";
-  }
-  if (input.attestedCount === input.assignedCount && input.missingCount === 0 && input.assignedCount > 0) {
-    return "ready";
-  }
-  return "acceptable";
-}
-
-function supplierTrustAssessment(input: {
-  readonly supplierProjectionCount: number;
-  readonly assignedCount: number;
-  readonly attestedCount: number;
-  readonly revokedCount: number;
-  readonly missingCount: number;
-}): string {
-  if (input.revokedCount > 0) {
-    return "blocker: one or more assigned tasks reference a revoked supplier trust attestation";
-  }
-  if (input.supplierProjectionCount === 0 && input.assignedCount > 0 && input.attestedCount === 0) {
-    return "degraded: no supplier trust projections are indexed, but assigned tasks exist without attested trust records — chain events may not include SupplierAttested for this deployment";
-  }
-  if (input.missingCount > 0 && input.attestedCount === 0 && input.supplierProjectionCount > 0) {
-    return "degraded: supplier trust records exist in projection but none match the assigned tasks";
-  }
-  if (input.missingCount > 0 && input.attestedCount > 0) {
-    return "acceptable: some assigned tasks lack attested supplier trust, but other tasks have valid attestations";
-  }
-  if (input.supplierProjectionCount === 0 && input.assignedCount === 0) {
-    return "acceptable: no assigned tasks require supplier trust";
-  }
-  if (input.attestedCount === input.assignedCount && input.missingCount === 0) {
-    return "ready: all assigned tasks have attested supplier trust";
-  }
-  return `acceptable: supplier projections=${input.supplierProjectionCount}, assigned=${input.assignedCount}, attested=${input.attestedCount}, missing=${input.missingCount}`;
 }
 
 function proofSummary(
@@ -427,8 +316,7 @@ function evidenceStorageSummary(diagnostics: JsonRecord): JsonRecord {
   return {
     adapterKind: stringOf(evidenceStorage?.adapterKind) ?? "unknown",
     readiness: stringOf(evidenceStorage?.readiness) ?? "unknown",
-    productionSafe: evidenceStorage?.productionSafe === true,
-    credentialsExposed: false
+    productionSafe: evidenceStorage?.productionSafe === true
   };
 }
 
@@ -472,21 +360,17 @@ function roleInputSummary(diagnostics: JsonRecord): JsonRecord {
     governanceRegistryOwnerConfigured: addressRoleReady(governanceRegistryOwner),
     governanceSignerConfigured: privateKeyRoleReady(governanceSigner),
     governanceAdminReviewerCount: numberOf(governanceAdminReviewer?.configuredCount),
-    opsConsoleAdminCount: numberOf(opsConsoleAdmin?.configuredCount),
-    backendBusinessSigning: "forbidden",
-    privateValuesExposed: false
+    opsConsoleAdminCount: numberOf(opsConsoleAdmin?.configuredCount)
   };
 }
 
-function planTrustForOrder(
+function publishedPlanForOrder(
   order: ProductOrderApiDTO,
   plans: readonly {
     readonly planId: string;
     readonly planHash: string;
-    readonly status: string;
-    readonly revoked: boolean;
   }[]
-): { readonly status: string; readonly revoked: boolean } | undefined {
+): { readonly planId: string; readonly planHash: string } | undefined {
   return plans.find((plan) =>
     equalHex(plan.planId, order.planId) && (!order.planHash || equalHex(plan.planHash, order.planHash))
   );

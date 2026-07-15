@@ -31,22 +31,7 @@ export function createProductBffRouteModule(): RouteModule {
             status: 201,
             body: result
           };
-        }, {
-          audit: context.audit,
-          blockedAudit: (error) => error instanceof ProductBffError && error.code === "plan_revoked"
-            ? {
-                type: "product.order.create.revoked_plan_attempt",
-                action: "create_order_draft",
-                outcome: "blocked",
-                subject: {
-                  zhixuId: input.zhixuId,
-                  createdBy: input.createdBy ?? "unknown"
-                },
-                errorCode: error.code,
-                retryable: false
-              }
-            : undefined
-        });
+        }, { audit: context.audit });
       }
 
       const productOrderDraftPrepareTriggerMatch = /^\/product\/order-drafts\/([^/]+)\/prepare-trigger$/.exec(request.pathname);

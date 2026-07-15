@@ -8,7 +8,7 @@ export * from "./governance/index.js";
 export * from "./indexer/events.js";
 export * from "./indexer/projections.js";
 export * from "./indexer/service.js";
-export * from "./indexer/trust-projections.js";
+export * from "./indexer/identity-projections.js";
 export * from "./indexer/viem-event-source.js";
 export * from "./notifications/index.js";
 export * from "./product/service.js";

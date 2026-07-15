@@ -30,8 +30,8 @@ export type StoreSupplierAuditAction =
   | "review"
   | "tags_updated"
   | "notification_profile_updated"
-  | "request_attestation"
-  | "request_revocation";
+  | "request_identity_registration"
+  | "request_identity_revocation";
 
 export interface StoreSupplierAuditRecord {
   readonly auditId: string;

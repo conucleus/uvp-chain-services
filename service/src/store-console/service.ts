@@ -3,7 +3,7 @@ import {
   storeConsoleSummary,
   toStoreZhixuConsoleDTO,
   toStoreZhixuDetailDTO,
-  type ChainAttestationStatus,
+  type PlanPublicationStatus,
   type ReviewStatus,
   type StoreConsoleSummaryDTO,
   type StoreOrderCandidateDTO,
@@ -25,15 +25,15 @@ import {
   crossBorderPlanIds
 } from "@uvp-eth/product-dto/fixtures";
 import type { StateMachineOrderProjection } from "../indexer/projections.js";
-import type { SupplierTrustProjection } from "../indexer/trust-projections.js";
 import type { ProductOrderApiDTO, ProductService, ProductTaskApiDTO } from "../product/service.js";
 import type { ProjectionStore, ProjectionSyncState } from "../storage/projection-store.js";
+import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store-suppliers/types.js";
 
 export interface StoreConsoleListQuery {
   readonly query?: string;
   readonly lifecycle?: StoreZhixuLifecycleStatus | "all";
   readonly review?: ReviewStatus | "all";
-  readonly trust?: ChainAttestationStatus | "all";
+  readonly publication?: PlanPublicationStatus | "all";
 }
 
 export interface StoreSearchQuery {
@@ -59,6 +59,7 @@ export interface StoreConsoleService {
 export function createStoreConsoleService(options: {
   readonly productService: ProductService;
   readonly store: ProjectionStore;
+  readonly supplierMetadataStore: StoreSupplierMetadataStore;
 }): StoreConsoleService {
   return {
     async listZhixus(query = {}) {
@@ -101,14 +102,17 @@ export function createStoreConsoleService(options: {
 async function buildStoreConsoleZhixus(options: {
   readonly productService: ProductService;
   readonly store: ProjectionStore;
+  readonly supplierMetadataStore: StoreSupplierMetadataStore;
 }): Promise<readonly StoreZhixuConsoleDTO[]> {
-  const [listedZhixus, orders, tasks, trustSnapshot] = await Promise.all([
+  const [listedZhixus, orders, tasks, suppliers] = await Promise.all([
     options.productService.listZhixu(),
     options.productService.listOrders(),
     options.productService.listTasks(),
-    options.store.getTrustSnapshot()
+    options.supplierMetadataStore.listSuppliers()
   ]);
-  const activeSupplierCount = Object.values(trustSnapshot.suppliers).filter((supplier) => !supplier.revoked).length;
+  const activeSupplierCount = suppliers.filter(
+    (supplier) => supplier.reviewStatus !== "rejected" && supplier.reviewStatus !== "revoked"
+  ).length;
   const rows = listedZhixus
     .map((zhixu) => consoleRowFromSummary(zhixu, {
       activeSupplierCount,
@@ -134,7 +138,7 @@ function consoleRowFromSummary(
     orderCount: metrics.orderCount,
     openTaskCount: metrics.openTaskCount,
     supplierCount: metrics.activeSupplierCount,
-    versionLabel: zhixu.chainAttestation.status === "attested" ? "链上当前版本" : "本地候选版本"
+    versionLabel: zhixu.planPublication.status === "published" ? "链上当前版本" : "本地候选版本"
   });
 }
 
@@ -142,6 +146,7 @@ async function searchStore(
   options: {
     readonly productService: ProductService;
     readonly store: ProjectionStore;
+    readonly supplierMetadataStore: StoreSupplierMetadataStore;
   },
   query: StoreSearchQuery
 ): Promise<StoreSearchResponseDTO> {
@@ -149,10 +154,10 @@ async function searchStore(
   const normalizedQuery = normalizeSearchText(rawQuery);
   const type = query.type ?? "all";
   const limit = clampLimit(query.limit);
-  const [zhixuList, orders, trustSnapshot, syncState] = await Promise.all([
+  const [zhixuList, orders, suppliers, syncState] = await Promise.all([
     buildStoreConsoleZhixus(options),
     options.productService.listOrders(),
-    options.store.getTrustSnapshot(),
+    options.supplierMetadataStore.listSuppliers(),
     options.store.getSyncState()
   ]);
   const detailsById = await buildZhixuDetailsById(options.productService, zhixuList);
@@ -186,7 +191,6 @@ async function searchStore(
     }
   }
 
-  const suppliers = Object.values(trustSnapshot.suppliers);
   if (normalizedQuery.length > 0 && searchIncludes(type, "supplier")) {
     for (const supplier of suppliers) {
       const matchedFields = exactSupplierMatchedFields(supplier, normalizedQuery);
@@ -249,6 +253,7 @@ async function listOrderCandidates(
   options: {
     readonly productService: ProductService;
     readonly store: ProjectionStore;
+    readonly supplierMetadataStore: StoreSupplierMetadataStore;
   },
   orderId: string
 ): Promise<StoreOrderCandidatesResponseDTO> {
@@ -284,7 +289,7 @@ function filterStoreZhixus(
   return zhixus.filter((zhixu) =>
     (!query.lifecycle || query.lifecycle === "all" || zhixu.lifecycleStatus === query.lifecycle) &&
     (!query.review || query.review === "all" || zhixu.reviewStatus === query.review) &&
-    (!query.trust || query.trust === "all" || zhixu.chainAttestation.status === query.trust) &&
+    (!query.publication || query.publication === "all" || zhixu.planPublication.status === query.publication) &&
     (normalizedQuery.length === 0 || zhixuListQueryFields(zhixu).some((field) => field.includes(normalizedQuery)))
   );
 }
@@ -366,34 +371,41 @@ function taskMatched(task: ProductTaskApiDTO, normalizedQuery: string): boolean 
     task.subtitle,
     task.assigneeRole,
     task.assigneeWallet,
-    task.supplierSubjectId,
     task.stageName,
     ...task.requiredEvidence
   ].some((field) => typeof field === "string" && normalizeSearchText(field).includes(normalizedQuery));
 }
 
 function exactSupplierMatchedFields(
-  supplier: SupplierTrustProjection,
+  supplier: StoreSupplierMetadataRecord,
   normalizedQuery: string
 ): readonly string[] {
   const fields: string[] = [];
   if (normalizeSearchText(supplier.supplierSubjectId) === normalizedQuery) {
     fields.push("supplierSubjectId");
   }
-  if (normalizeSearchText(supplier.wallet) === normalizedQuery) {
+  if (supplier.wallet && normalizeSearchText(supplier.wallet) === normalizedQuery) {
     fields.push("wallet");
   }
   return fields;
 }
 
 function supplierMatchedFields(
-  supplier: SupplierTrustProjection,
+  supplier: StoreSupplierMetadataRecord,
   normalizedQuery: string
 ): readonly string[] {
   const fields = [...exactSupplierMatchedFields(supplier, normalizedQuery)];
+  addMatch(fields, "displayName", supplier.displayName, normalizedQuery);
   addMatch(fields, "metadataURI", supplier.metadataURI, normalizedQuery);
-  addMatch(fields, "capabilityHash", supplier.capabilityHash, normalizedQuery);
-  addMatch(fields, "reputationHash", supplier.reputationHash, normalizedQuery);
+  if (supplier.capabilityTags.some((tag) => normalizeSearchText(tag).includes(normalizedQuery))) {
+    fields.push("capabilityTags");
+  }
+  if (supplier.supportedRoleSlotIds.some((id) => normalizeSearchText(id).includes(normalizedQuery))) {
+    fields.push("supportedRoleSlotIds");
+  }
+  if (supplier.supportedStageIds.some((id) => normalizeSearchText(id).includes(normalizedQuery))) {
+    fields.push("supportedStageIds");
+  }
   return [...new Set(fields)];
 }
 
@@ -413,7 +425,7 @@ function zhixuSearchResult(
     title: zhixu.title,
     subtitle: zhixu.subtitle,
     badgeLabel: zhixu.lifecycleLabel,
-    statusLabel: zhixu.chainAttestation.label,
+    statusLabel: zhixu.planPublication.label,
     matchedFields,
     primaryHref: `/store/zhixus/${encodeURIComponent(zhixu.zhixuId)}`,
     sourceOfTruth: zhixuSourceOfTruth(zhixu),
@@ -476,21 +488,21 @@ function ambiguousOrderSearchResult(candidates: StoreOrderCandidatesResponseDTO)
 }
 
 function supplierSearchResult(
-  supplier: SupplierTrustProjection,
+  supplier: StoreSupplierMetadataRecord,
   matchedFields: readonly string[]
 ): StoreSearchResultDTO {
   return {
     resultType: "supplier",
     id: supplier.supplierSubjectId,
     title: supplierDisplayName(supplier),
-    subtitle: supplier.wallet,
-    badgeLabel: supplier.revoked ? "已撤销" : "已背书",
-    statusLabel: supplier.revoked ? "供应商背书已撤销" : "供应商背书有效",
+    subtitle: supplier.wallet ?? supplier.supplierSubjectId,
+    badgeLabel: supplier.reviewStatus === "approved_for_broadcast" ? "已审核" : "Store 资料",
+    statusLabel: supplierReviewLabel(supplier.reviewStatus),
     matchedFields,
     primaryHref: `/store/suppliers/${encodeURIComponent(supplier.supplierSubjectId)}`,
-    sourceOfTruth: "chain",
-    proofHint: shortHash(supplier.updatedAt.transactionHash),
-    updatedAt: `block ${supplier.updatedAt.blockNumber.toString()}`
+    sourceOfTruth: "store-metadata",
+    ...(supplier.metadataURI ? { proofHint: supplier.metadataURI } : {}),
+    updatedAt: supplier.updatedAt
   };
 }
 
@@ -558,7 +570,7 @@ function detailFallbackFromRow(row: StoreZhixuConsoleDTO): ZhixuDetailDTO {
     supportedPaymentMethods: [],
     maintainer: row.maintainer,
     updatedAt: row.updatedAt,
-    chainAttestation: row.chainAttestation,
+    planPublication: row.planPublication,
     roleSlots: [],
     dockableModules: [],
     stages: [],
@@ -571,7 +583,7 @@ function detailFallbackFromRow(row: StoreZhixuConsoleDTO): ZhixuDetailDTO {
 }
 
 function zhixuSourceOfTruth(zhixu: StoreZhixuConsoleDTO): StoreSearchSourceOfTruth {
-  return zhixu.chainAttestation.status === "not_found" ? "store-metadata" : "chain-and-store-metadata";
+  return zhixu.planPublication.status === "not_found" ? "store-metadata" : "chain-and-store-metadata";
 }
 
 function searchIncludes(type: StoreSearchType, resultType: Exclude<StoreSearchType, "all">): boolean {
@@ -596,14 +608,23 @@ function shortHash(value: string): string {
   return `${value.slice(0, 10)}...${value.slice(-6)}`;
 }
 
-function supplierDisplayName(supplier: SupplierTrustProjection): string {
-  if (supplier.metadataURI.length > 0) {
-    const tail = supplier.metadataURI.split(/[/?#]/).filter((part) => part.length > 0).at(-1);
-    if (tail) {
-      return `供应商 ${tail.replace(/[-_]+/g, " ")}`;
-    }
+function supplierDisplayName(supplier: StoreSupplierMetadataRecord): string {
+  return supplier.displayName || `供应商 ${shortHash(supplier.supplierSubjectId)}`;
+}
+
+function supplierReviewLabel(status: StoreSupplierMetadataRecord["reviewStatus"]): string {
+  switch (status) {
+    case "draft":
+      return "资料草稿";
+    case "submitted":
+      return "待 Store 审核";
+    case "approved_for_broadcast":
+      return "Store 审核通过";
+    case "rejected":
+      return "Store 审核拒绝";
+    case "revoked":
+      return "Store 已撤销";
   }
-  return `供应商 ${shortHash(supplier.supplierSubjectId)}`;
 }
 
 function zhixuIdForPlan(planId: string, planHash: string | undefined): string {
@@ -615,17 +636,7 @@ function zhixuIdForPlan(planId: string, planHash: string | undefined): string {
 function stateMachineOrderStatusLabel(status: StateMachineOrderProjection["status"]): string {
   switch (status) {
     case "registered":
-      return "已创建";
-    case "running":
-      return "进行中";
-    case "waiting":
-      return "等待时间条件";
-    case "action_required":
-      return "待处理";
-    case "completed":
-      return "已完成";
-    case "cancelled":
-      return "已取消";
+      return "已注册";
     case "unknown":
       return "同步中";
   }
@@ -635,21 +646,19 @@ function lifecycleRank(status: StoreZhixuConsoleDTO["lifecycleStatus"]): number 
   switch (status) {
     case "active":
       return 0;
-    case "attested":
-      return 1;
     case "approved_for_broadcast":
-      return 2;
+      return 1;
     case "submitted_for_review":
-      return 3;
+      return 2;
     case "compiled":
-      return 4;
+      return 3;
     case "draft":
-      return 5;
+      return 4;
     case "deprecated":
-      return 6;
+      return 5;
     case "rejected":
-      return 7;
+      return 6;
     case "revoked":
-      return 8;
+      return 7;
   }
 }

@@ -136,9 +136,8 @@ async function handleStagePatchRequest(action: () => Promise<ApiResponse>): Prom
 
 function parsePrepareExecutorBody(body: unknown): PrepareProductStageExecutorPatchInput {
   const record = requireBodyRecord(body);
-  rejectLegacyResourceBundleFields(record);
   const mode = optionalString(record, "mode");
-  const previousExecutor = canonicalPreviousExecutor(record);
+  const previousExecutor = optionalString(record, "previousExecutorWallet");
   const approval = approvalFields(record);
   return {
     selectorWallet: requiredString(record, "selectorWallet"),
@@ -158,8 +157,6 @@ function parsePrepareExecutorBody(body: unknown): PrepareProductStageExecutorPat
 
 function parsePrepareResourceBody(body: unknown): PrepareProductStageResourcePatchInput {
   const record = requireBodyRecord(body);
-  rejectLegacyResourceBundleFields(record);
-  rejectResourcePatchPhase2Fields(record);
   return {
     selectorWallet: requiredString(record, "selectorWallet"),
     targetStageId: requiredString(record, "targetStageId"),
@@ -214,7 +211,6 @@ function parseSubmitExecutorBody(body: unknown): SubmitProductStageExecutorPatch
 
 function parseSubmitResourceBody(body: unknown): SubmitProductStageResourcePatchInput {
   const record = requireBodyRecord(body);
-  rejectResourcePatchPhase2Fields(record);
   const prepareId = optionalString(record, "prepareId");
   const patch = optionalPatch<PreparedStageResourcePatchDTO>(record, "patch");
   return {
@@ -246,51 +242,12 @@ function requireBodyRecord(body: unknown): Record<string, unknown> {
   throw new ProductStagePatchError(400, "invalid_body", "request body must be a JSON object");
 }
 
-function rejectLegacyResourceBundleFields(record: Record<string, unknown>): void {
-  if ("fileResourcesBundle" in record || "fileResourcesHash" in record) {
-    throw new ProductStagePatchError(
-      400,
-      "legacy_resource_bundle_rejected",
-      "stage patches no longer accept legacy file resource bundles; publish a stage resource patch manifest instead"
-    );
-  }
-}
-
-function rejectResourcePatchPhase2Fields(record: Record<string, unknown>): void {
-  if ("writerWallet" in record) {
-    throw new ProductStagePatchError(
-      400,
-      "writer_wallet_not_allowed",
-      "stage resource patches use selectorWallet as the chain controller field"
-    );
-  }
-  if ("visibility" in record) {
-    throw new ProductStagePatchError(
-      400,
-      "visibility_not_allowed",
-      "resource visibility belongs in the off-chain resource manifest, not the chain prepare payload"
-    );
-  }
-}
-
 function requiredString(record: Record<string, unknown>, field: string): string {
   const value = record[field];
   if (typeof value !== "string" || value.trim().length === 0) {
     throw new ProductStagePatchError(400, "invalid_body", `${field} must be a non-empty string`);
   }
   return value.trim();
-}
-
-function requiredStringAlias(record: Record<string, unknown>, field: string, legacyField: string): string {
-  const value = optionalString(record, field);
-  const legacyValue = optionalString(record, legacyField);
-  if (value && legacyValue && value.toLowerCase() !== legacyValue.toLowerCase()) {
-    throw new ProductStagePatchError(400, "invalid_body", `${field} must match ${legacyField} when both are provided`);
-  }
-  if (value ?? legacyValue) {
-    return value ?? legacyValue!;
-  }
-  throw new ProductStagePatchError(400, "invalid_body", `${field} must be a non-empty string`);
 }
 
 function optionalString(record: Record<string, unknown>, field: string): string | undefined {
@@ -307,19 +264,6 @@ function optionalPatch<TPatch>(record: Record<string, unknown>, field: string): 
     return value as TPatch;
   }
   throw new ProductStagePatchError(400, "invalid_body", `${field} must be a prepared patch object`);
-}
-
-function canonicalPreviousExecutor(record: Record<string, unknown>): string | undefined {
-  const previousExecutorWallet = optionalString(record, "previousExecutorWallet");
-  const legacyPreviousExecutor = optionalString(record, "previousExecutor");
-  if (previousExecutorWallet && legacyPreviousExecutor && previousExecutorWallet.toLowerCase() !== legacyPreviousExecutor.toLowerCase()) {
-    throw new ProductStagePatchError(
-      400,
-      "previous_executor_mismatch",
-      "previousExecutorWallet must match previousExecutor when both are provided"
-    );
-  }
-  return previousExecutorWallet ?? legacyPreviousExecutor;
 }
 
 function approvalFields(record: Record<string, unknown>): {

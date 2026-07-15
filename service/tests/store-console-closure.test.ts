@@ -17,10 +17,8 @@ const readerHeaders = {
 };
 
 const contractAddress = "0x1111111111111111111111111111111111111111" as Address;
-const attester = "0x2222222222222222222222222222222222222222";
 const submitter = "0x3333333333333333333333333333333333333333";
 const metadataHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-const policyHash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const payloadHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const orderId = bytes32Hex("0202");
 const hookId = bytes32Hex("0303");
@@ -69,8 +67,6 @@ describe("Store Console closure dry-run summary", () => {
           authMode: "dev_store_headers"
         },
         authorityBoundaries: {
-          storeMetadataCreatesTrust: false,
-          supplierCapabilityTagsCreateTrust: false,
           dockingDraftPublishesZhixu: false,
           auditCreatesProtocolFacts: false,
           backendCanCreateBusinessSignatures: false
@@ -96,14 +92,11 @@ describe("Store Console closure dry-run summary", () => {
     const supplierAudit = summary.checks.find((check) => check.key === "supplier_tag_audit_readback");
     expect(supplierAudit?.details).toMatchObject({
       nonAuthoritative: true,
-      trustSourceOfTruth: "SupplierAttested/SupplierRevoked projection",
-      supplierCapabilityTagsCreateTrust: false
+      identitySourceOfTruth: "IdentityBindingRegistered/IdentityBindingRevoked projection",
     });
     const docking = summary.checks.find((check) => check.key === "docking_create_validate_save");
     expect(docking?.details).toMatchObject({
-      nonPublishing: true,
-      createsOrder: false,
-      createsSignalAuthorization: false
+      nonPublishing: true
     });
     const runtime = summary.checks.find((check) => check.key === "runtime_proof_audit_readiness");
     expect(runtime?.details).toMatchObject({
@@ -185,15 +178,6 @@ function stateMachineOrderEvents(): readonly ChainEvent[] {
       planId: crossBorderPlanIds.planId,
       planHash: crossBorderPlanIds.planHash,
       hookCount: 1n
-    }),
-    chainEvent(2n, "PlanAttested", {
-      planId: crossBorderPlanIds.planId,
-      planHash: crossBorderPlanIds.planHash,
-      artifactHash: crossBorderPlanIds.artifactHash,
-      policyHash,
-      metadataHash,
-      metadataURI: "https://store.example/zhixu/cross-border",
-      attester
     }),
     chainEvent(3n, "OrderRegistered", {
       orderId,

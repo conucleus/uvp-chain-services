@@ -165,10 +165,8 @@ export class TxReconcileWorker implements LifecycleService {
     }
 
     if (this.#governanceStore) {
-      const logs = [
-        ...(await this.#governanceStore.listPlanAttestationLogs()),
-        ...(await this.#governanceStore.listSupplierAttestationLogs())
-      ].filter(isReconcileableGovernanceLog);
+      const logs = (await this.#governanceStore.listIdentityTxLogs())
+        .filter(isReconcileableGovernanceLog);
       for (const log of logs) {
         summary.governanceLogsChecked += 1;
         const updated = await this.#reconcileGovernanceLog(log);
@@ -531,44 +529,24 @@ async function governanceProjectionConfirmation(
   projectionStore: ProjectionStore,
   log: GovernanceTxLogDTO
 ): Promise<ProjectionConfirmation | undefined> {
-  if (log.action === "attest_plan" || log.action === "revoke_plan") {
-    const plans = await projectionStore.listPlanTrust({
-      planId: log.planId
-    });
-    if (log.action === "attest_plan") {
-      const plan = plans.find((plan) =>
-        plan.planId === log.planId &&
-        plan.planHash === log.planHash &&
-        (!log.txHash || plan.attestedAt.transactionHash === log.txHash)
-      );
-      return projectionConfirmationFromProvenance(plan?.attestedAt, log.txHash);
-    }
-    const plan = plans.find((plan) =>
-      plan.planId === log.planId &&
-      plan.revoked &&
-      (!log.txHash || plan.revokedAt?.transactionHash === log.txHash)
-    );
-    return projectionConfirmationFromProvenance(plan?.revokedAt, log.txHash);
-  }
-
-  const supplierLog = log as Extract<GovernanceTxLogDTO, { readonly action: "attest_supplier" | "revoke_supplier" }>;
-  const suppliers = await projectionStore.listSupplierTrust({
-    supplierSubjectId: supplierLog.supplierSubjectId
+  const identities = await projectionStore.listIdentityBindings({
+    ...(log.bindingId ? { bindingId: log.bindingId } : {}),
+    subjectId: log.subjectId
   });
-  if (supplierLog.action === "attest_supplier") {
-    const supplier = suppliers.find((supplier) =>
-      supplier.supplierSubjectId === supplierLog.supplierSubjectId &&
-      (!supplierLog.wallet || supplier.wallet === supplierLog.wallet) &&
-      (!supplierLog.txHash || supplier.attestedAt.transactionHash === supplierLog.txHash)
+  if (log.action === "register_identity") {
+    const identity = identities.find((item) =>
+      item.subjectId === log.subjectId &&
+      (!log.account || item.account === log.account) &&
+      (!log.txHash || item.registeredAt.transactionHash === log.txHash)
     );
-    return projectionConfirmationFromProvenance(supplier?.attestedAt, supplierLog.txHash);
+    return projectionConfirmationFromProvenance(identity?.registeredAt, log.txHash);
   }
-  const supplier = suppliers.find((supplier) =>
-    supplier.supplierSubjectId === supplierLog.supplierSubjectId &&
-    supplier.revoked &&
-    (!supplierLog.txHash || supplier.revokedAt?.transactionHash === supplierLog.txHash)
+  const identity = identities.find((item) =>
+    item.bindingId === log.bindingId &&
+    item.status === "revoked" &&
+    (!log.txHash || item.revokedAt?.transactionHash === log.txHash)
   );
-  return projectionConfirmationFromProvenance(supplier?.revokedAt, supplierLog.txHash);
+  return projectionConfirmationFromProvenance(identity?.revokedAt, log.txHash);
 }
 
 function draftFromReconciledRegistration(

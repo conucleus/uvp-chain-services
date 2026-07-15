@@ -105,7 +105,6 @@ export interface PrepareProductStageExecutorPatchInput {
   readonly targetStageId: string;
   readonly executorWallet: string;
   readonly mode?: string;
-  readonly previousExecutor?: string;
   readonly previousExecutorWallet?: string;
   readonly approvalSourceId?: string;
   readonly approvalSignalId?: string;

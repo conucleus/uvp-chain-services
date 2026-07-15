@@ -39,7 +39,6 @@ describe("Store JWT/JWKS operator identity", () => {
     });
     expect(session.capabilities).toContain("store.draft.import");
     expect(session.capabilities).toContain("store.docking.save");
-    expect(session.capabilities).not.toContain("store.draft.attestation.request");
     expect(JSON.stringify(session)).not.toContain("Bearer");
   });
 
@@ -61,7 +60,6 @@ describe("Store JWT/JWKS operator identity", () => {
       roles: ["store_admin"]
     }));
     expect(storeAdmin.capabilities).toContain("store.version.activate");
-    expect(storeAdmin.capabilities).not.toContain("store.version.revocation.request");
 
     const governanceAdmin = await storeSession(router, await signStoreToken(fixture, {
       sub: "governance-admin-1",
@@ -71,8 +69,8 @@ describe("Store JWT/JWKS operator identity", () => {
       accessLevel: "store_read",
       roles: ["governance_admin"]
     });
-    expect(governanceAdmin.capabilities).toContain("store.draft.attestation.request");
-    expect(governanceAdmin.capabilities).toContain("store.supplier.revocation.request");
+    expect(governanceAdmin.capabilities).toContain("store.supplier.identity.register");
+    expect(governanceAdmin.capabilities).toContain("store.supplier.identity.revoke");
     expect(governanceAdmin.capabilities).not.toContain("store.draft.import");
     expect(governanceAdmin.capabilities).not.toContain("store.version.activate");
   });

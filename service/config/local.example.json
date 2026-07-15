@@ -7,7 +7,7 @@
     "reorgBufferBlocks": 8,
     "contracts": {
       "UVPStateMachine": "0x0000000000000000000000000000000000000000",
-      "ZhixuTrustRegistry": "0x0000000000000000000000000000000000000000"
+      "UVPIdentityRegistry": "0x0000000000000000000000000000000000000000"
     }
   },
   "database": {

@@ -51,7 +51,6 @@ describe("Store operator identity and capability auth", () => {
     });
     expect(operator.capabilities).toContain("store.draft.import");
     expect(operator.capabilities).toContain("store.docking.save");
-    expect(operator.capabilities).not.toContain("store.draft.attestation.request");
 
     const storeAdmin = await session(router, storeAdminHeaders);
     expect(storeAdmin).toMatchObject({
@@ -61,7 +60,6 @@ describe("Store operator identity and capability auth", () => {
       authMode: "dev_store_headers"
     });
     expect(storeAdmin.capabilities).toContain("store.version.activate");
-    expect(storeAdmin.capabilities).not.toContain("store.version.revocation.request");
 
     const governanceAdmin = await session(router, governanceAdminHeaders);
     expect(governanceAdmin).toMatchObject({
@@ -71,8 +69,8 @@ describe("Store operator identity and capability auth", () => {
       authMode: "dev_governance_admin_headers",
       roles: ["store_admin", "governance_admin"]
     });
-    expect(governanceAdmin.capabilities).toContain("store.draft.attestation.request");
-    expect(governanceAdmin.capabilities).toContain("store.supplier.revocation.request");
+    expect(governanceAdmin.capabilities).toContain("store.supplier.identity.register");
+    expect(governanceAdmin.capabilities).toContain("store.supplier.identity.revoke");
   });
 
   it("fails Store writes closed when a principal lacks the named capability", async () => {

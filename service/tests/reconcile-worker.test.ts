@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryGovernanceStore, type PlanAttestationLogDTO } from "../src/governance/index.js";
+import { InMemoryGovernanceStore, type IdentityTxLogDTO } from "../src/governance/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProductBffStore } from "../src/product/bff/store.js";
 import type {
@@ -15,13 +15,10 @@ const baseNow = new Date("2026-04-28T00:00:00Z");
 const contractAddress = address("1111");
 const creator = address("2222");
 const submitter = address("3333");
-const attester = address("4444");
 const gasPayer = address("9999");
 const orderId = bytes32("1001");
 const planId = bytes32("2001");
 const planHash = bytes32("2002");
-const artifactHash = bytes32("2003");
-const policyHash = bytes32("2004");
 const metadataHash = bytes32("2005");
 const sourceId = bytes32("3001");
 const signalId = bytes32("3002");
@@ -158,18 +155,18 @@ describe("tx/indexer reconcile worker", () => {
     });
   });
 
-  it("confirms governance tx logs only after the trust projection contains the expected event", async () => {
+  it("confirms identity registration after its event is projected", async () => {
     const projectionStore = new MemoryProjectionStore();
     const governanceStore = new InMemoryGovernanceStore();
     const txHash = bytes32("dddd");
     const receipts = new Map<Hex, ReconcileReceipt | undefined>([
       [txHash, { status: "success", blockNumber: 30n }]
     ]);
-    await governanceStore.appendPlanAttestationLog(planLogFixture({ txHash }));
+    await governanceStore.appendIdentityTxLog(identityLogFixture({ txHash }));
     const worker = workerFixture({ projectionStore, governanceStore, receipts });
 
     await worker.runOnce();
-    await expect(governanceStore.getTxLog("plan_log_1")).resolves.toMatchObject({
+    await expect(governanceStore.getTxLog("identity_log_1")).resolves.toMatchObject({
       status: "indexing",
       receiptStatus: "success",
       projectionStatus: "missing"
@@ -177,19 +174,18 @@ describe("tx/indexer reconcile worker", () => {
 
     await projectionStore.resetFromEvents({
       deploymentBlock: 0n,
-      events: [chainEvent(30n, txHash, 0, "PlanAttested", {
-        planId,
-        planHash,
-        artifactHash,
-        policyHash,
-        metadataHash,
-        metadataURI: "uvp://metadata/plan",
-        attester
+      events: [chainEvent(30n, txHash, 0, "IdentityBindingRegistered", {
+        bindingId: bytes32("2006"),
+        subjectId: planId,
+        account: submitter,
+        descriptorHash: metadataHash,
+        descriptorURI: "uvp-store://identities/acme",
+        registrar: creator
       })]
     });
     await worker.runOnce();
 
-    await expect(governanceStore.getTxLog("plan_log_1")).resolves.toMatchObject({
+    await expect(governanceStore.getTxLog("identity_log_1")).resolves.toMatchObject({
       status: "confirmed",
       broadcastStatus: "confirmed",
       reconcileStatus: "confirmed",
@@ -361,32 +357,27 @@ function submissionFixture(input: {
   };
 }
 
-function planLogFixture(input: { readonly txHash: Hex }): PlanAttestationLogDTO {
+function identityLogFixture(input: { readonly txHash: Hex }): IdentityTxLogDTO {
   return {
-    logId: "plan_log_1",
-    txLogId: "plan_log_1",
-    action: "attest_plan",
+    logId: "identity_log_1",
+    txLogId: "identity_log_1",
+    action: "register_identity",
     subjectId: planId,
-    planId,
-    planHash,
-    artifactHash,
-    policyHash,
-    metadataHash,
-    metadataURI: "uvp://metadata/plan",
+    account: submitter,
+    descriptorHash: metadataHash,
+    descriptorURI: "uvp-store://identities/acme",
     txHash: input.txHash,
-    signer: attester,
+    signer: creator,
     requester: "admin_1",
     status: "pending",
     broadcastStatus: "submitted",
     retryable: false,
     request: {
-      kind: "attestPlan",
-      planId,
-      planHash,
-      artifactHash,
-      policyHash,
-      metadataHash,
-      metadataURI: "uvp://metadata/plan"
+      kind: "registerIdentity",
+      subjectId: planId,
+      account: submitter,
+      descriptorHash: metadataHash,
+      descriptorURI: "uvp-store://identities/acme"
     },
     createdAt: baseNow.toISOString(),
     updatedAt: baseNow.toISOString()

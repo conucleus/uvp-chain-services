@@ -1,6 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
-import { createGovernanceService, type GovernanceChainAdapter } from "../src/governance/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
@@ -20,15 +19,7 @@ const supplierWallet = "0x4444444444444444444444444444444444444444" as Address;
 
 describe("Store sensitive action confirmation", () => {
   it("requires exact confirmation before supplier approval and governance handoff side effects", async () => {
-    const adapter: GovernanceChainAdapter = {
-      attestPlan: vi.fn(),
-      revokePlan: vi.fn(),
-      attestSupplier: vi.fn(),
-      revokeSupplier: vi.fn()
-    };
-    const router = createApiRouter(new MemoryProjectionStore(), {
-      governanceService: createGovernanceService({ adapter })
-    });
+    const router = createApiRouter(new MemoryProjectionStore());
 
     await expect(router.handle({
       method: "POST",
@@ -87,37 +78,13 @@ describe("Store sensitive action confirmation", () => {
 
     await expect(router.handle({
       method: "POST",
-      pathname: "/store/suppliers/supplier-confirm/request-attestation",
+      pathname: "/store/suppliers/supplier-confirm/request-identity-registration",
       headers: adminHeaders,
       body: {}
     })).resolves.toMatchObject({
       status: 400,
       body: { error: "store_confirmation_required" }
     });
-    expect(adapter.attestSupplier).not.toHaveBeenCalled();
-  });
-
-  it("requires draft attestation confirmation before governance adapter invocation", async () => {
-    const adapter: GovernanceChainAdapter = {
-      attestPlan: vi.fn(),
-      revokePlan: vi.fn(),
-      attestSupplier: vi.fn(),
-      revokeSupplier: vi.fn()
-    };
-    const router = createApiRouter(new MemoryProjectionStore(), {
-      governanceService: createGovernanceService({ adapter })
-    });
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: "/store/zhixu-drafts/missing-draft/request-attestation",
-      headers: adminHeaders,
-      body: {}
-    })).resolves.toMatchObject({
-      status: 400,
-      body: { error: "store_confirmation_required" }
-    });
-    expect(adapter.attestPlan).not.toHaveBeenCalled();
   });
 });
 

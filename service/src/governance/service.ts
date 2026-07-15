@@ -9,13 +9,8 @@ import {
   hashGovernanceCanonicalJson,
   hashGovernanceReviewMetadata,
   hashGovernanceReviewPolicy,
-  hashPlanMetadata,
-  hashPlanPolicy,
   hashRevocationReason,
-  hashSupplierCapability,
-  hashSupplierMetadata,
-  hashSupplierProfile,
-  hashSupplierReputation,
+  hashIdentityDescriptor,
   type GovernanceReviewHashInput
 } from "./hashing.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
@@ -24,24 +19,19 @@ import { InMemoryGovernanceStore, type GovernanceReviewQuery, type GovernanceSto
 import type {
   GovernanceBroadcastResultDTO,
   GovernanceChainRequestDTO,
-  GovernancePlanAttestationResultDTO,
-  GovernancePlanRevocationResultDTO,
   GovernancePrincipal,
   GovernanceReviewDTO,
   GovernanceReviewResultDTO,
   GovernanceReviewStatus,
   GovernanceSubjectType,
-  GovernanceSupplierAttestationResultDTO,
-  GovernanceSupplierRevocationResultDTO,
+  GovernanceIdentityRegistrationResultDTO,
+  GovernanceIdentityRevocationResultDTO,
   GovernanceTxAction,
   GovernanceTxLogDTO,
-  PlanAttestationLogDTO,
-  PlanAttestationRequestDTO,
-  PlanRevocationRequestDTO,
   PublicGovernanceReviewDTO,
-  SupplierAttestationLogDTO,
-  SupplierAttestationRequestDTO,
-  SupplierRevocationRequestDTO
+  IdentityTxLogDTO,
+  IdentityRegistrationRequestDTO,
+  IdentityRevocationRequestDTO
 } from "./types.js";
 
 export class GovernanceServiceError extends Error {
@@ -69,10 +59,8 @@ export interface GovernanceService {
   getTxLog(txLogId: string): Promise<GovernanceTxLogDTO | undefined>;
   reviewZhixu(input: unknown, principal: GovernancePrincipal): Promise<GovernanceReviewResultDTO>;
   reviewSupplier(input: unknown, principal: GovernancePrincipal): Promise<GovernanceReviewResultDTO>;
-  attestZhixu(input: unknown, principal: GovernancePrincipal): Promise<GovernancePlanAttestationResultDTO>;
-  revokeZhixu(input: unknown, principal: GovernancePrincipal): Promise<GovernancePlanRevocationResultDTO>;
-  attestSupplier(input: unknown, principal: GovernancePrincipal): Promise<GovernanceSupplierAttestationResultDTO>;
-  revokeSupplier(input: unknown, principal: GovernancePrincipal): Promise<GovernanceSupplierRevocationResultDTO>;
+  registerIdentity(input: unknown, principal: GovernancePrincipal): Promise<GovernanceIdentityRegistrationResultDTO>;
+  revokeIdentity(input: unknown, principal: GovernancePrincipal): Promise<GovernanceIdentityRevocationResultDTO>;
 }
 
 export function createGovernanceService(options: GovernanceServiceOptions = {}): GovernanceService {
@@ -112,159 +100,91 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       });
     },
 
-    async attestZhixu(input, principal) {
+    async registerIdentity(input, principal) {
       const record = requireBodyRecord(input);
-      const planId = requiredBytes32(record, "planId");
-      const planHash = requiredBytes32(record, "planHash");
-      const artifactHash = requiredBytes32(record, "artifactHash");
-      const subjectId = optionalString(record, "subjectId") ?? optionalString(record, "zhixuId") ?? planId;
-      const review = await resolveReview(store, record, "zhixu", subjectId);
-      const reviewHash = review ? reviewHashInput(review) : reviewHashInputFromRecord(record, "zhixu", subjectId, "approved_for_broadcast");
-      assertReviewAllowsAttestation(reviewHash.status);
-      const hashInput = {
-        planId,
-        planHash,
-        artifactHash,
-        review: reviewHash,
-        ...optionalHashPayload(record)
-      };
-      const metadataHash = hashPlanMetadata(hashInput);
-      const policyHash = hashPlanPolicy(hashInput);
-      const metadataURI = review?.metadataURI ?? defaultMetadataURI(metadataHash);
-      const request: PlanAttestationRequestDTO = {
-        kind: "attestPlan",
-        planId,
-        planHash,
-        artifactHash,
-        policyHash,
-        metadataHash,
-        metadataURI,
-        ...(review ? { reviewId: review.reviewId } : {})
-      };
-      const duplicate = await reusableDuplicatePlanLog(store, "attest_plan", request);
-      if (duplicate) {
-        await auditGovernanceLog(audit, duplicate, "duplicate");
-        return { request, broadcast: broadcastFromLog(duplicate), log: duplicate };
-      }
-      const broadcast = await safeBroadcast(() => adapter.attestPlan(request));
-      const timestamp = now().toISOString();
-      const log = planLog(nextId("plan_log"), "attest_plan", request, broadcast, principal, timestamp);
-      await store.appendPlanAttestationLog(log);
-      await auditGovernanceLog(audit, log, auditOutcomeFromBroadcast(broadcast));
-      return { request, broadcast, log };
-    },
-
-    async revokeZhixu(input, principal) {
-      const record = requireBodyRecord(input);
-      const planId = requiredBytes32(record, "planId");
-      const subjectId = optionalString(record, "subjectId") ?? optionalString(record, "zhixuId") ?? planId;
-      const review = await markReviewRevoked(store, record, "zhixu", subjectId, principal, now);
-      const reason = optionalString(record, "reason") ?? optionalString(record, "publicSummary") ?? "governance revocation";
-      const reasonHash = hashRevocationReason({
-        subjectType: "zhixu",
-        subjectId: planId,
-        reason,
-        ...(optionalUnknown(record, "metadata") !== undefined ? { metadata: record.metadata } : {}),
-        ...(review ? { review: reviewHashInput(review) } : {})
-      });
-      const reasonURI = defaultMetadataURI(reasonHash);
-      const request: PlanRevocationRequestDTO = {
-        kind: "revokePlan",
-        planId,
-        reasonHash,
-        reasonURI,
-        ...(review ? { reviewId: review.reviewId } : {})
-      };
-      const duplicate = await reusableDuplicatePlanLog(store, "revoke_plan", request);
-      if (duplicate) {
-        await auditGovernanceLog(audit, duplicate, "duplicate");
-        return { request, broadcast: broadcastFromLog(duplicate), log: duplicate };
-      }
-      const broadcast = await safeBroadcast(() => adapter.revokePlan(request));
-      const timestamp = now().toISOString();
-      const log = planLog(nextId("plan_log"), "revoke_plan", request, broadcast, principal, timestamp);
-      await store.appendPlanAttestationLog(log);
-      await auditGovernanceLog(audit, log, auditOutcomeFromBroadcast(broadcast));
-      return { request, broadcast, log };
-    },
-
-    async attestSupplier(input, principal) {
-      const record = requireBodyRecord(input);
-      const supplierSubjectId = requiredBytes32(record, "supplierSubjectId");
-      const wallet = requiredAddress(record, "wallet");
-      const subjectId = optionalString(record, "subjectId") ?? supplierSubjectId;
+      const subjectId = requiredBytes32(record, "subjectId");
+      const account = requiredAddress(record, "account");
       const review = await resolveReview(store, record, "supplier", subjectId);
       const reviewHash = review ? reviewHashInput(review) : reviewHashInputFromRecord(record, "supplier", subjectId, "approved_for_broadcast");
-      assertReviewAllowsAttestation(reviewHash.status);
-      const hashInput = {
-        supplierSubjectId,
-        wallet,
+      assertReviewAllowsIdentityRegistration(reviewHash.status);
+      const descriptorInput = {
+        subjectId,
+        account,
         review: reviewHash,
         ...optionalSupplierHashPayload(record)
       };
-      const metadataHash = hashSupplierMetadata(hashInput);
-      const profileHash = hashSupplierProfile(hashInput);
-      const capabilityHash = hashSupplierCapability(hashInput);
-      const reputationHash = hashSupplierReputation(hashInput);
-      const metadataURI = review?.metadataURI ?? defaultMetadataURI(metadataHash);
-      const request: SupplierAttestationRequestDTO = {
-        kind: "attestSupplier",
-        supplierSubjectId,
-        wallet,
-        profileHash,
-        capabilityHash,
-        reputationHash,
-        metadataHash,
-        metadataURI,
+      const descriptorHash = hashIdentityDescriptor(descriptorInput);
+      const descriptorURI = review?.metadataURI ?? defaultMetadataURI(descriptorHash);
+      const request: IdentityRegistrationRequestDTO = {
+        kind: "registerIdentity",
+        subjectId,
+        account,
+        descriptorHash,
+        descriptorURI,
         ...(review ? { reviewId: review.reviewId } : {})
       };
-      const duplicate = await reusableDuplicateSupplierLog(store, "attest_supplier", request);
+      const duplicate = await reusableDuplicateIdentityLog(store, "register_identity", request);
       if (duplicate) {
         await auditGovernanceLog(audit, duplicate, "duplicate");
         return { request, broadcast: broadcastFromLog(duplicate), log: duplicate };
       }
-      const broadcast = await safeBroadcast(() => adapter.attestSupplier(request));
+      const broadcast = await safeBroadcast(() => broadcastIdentityRegistration(adapter, request));
       const timestamp = now().toISOString();
-      const log = supplierLog(nextId("supplier_log"), "attest_supplier", request, broadcast, principal, timestamp);
-      await store.appendSupplierAttestationLog(log);
+      const log = identityLog(nextId("identity_log"), "register_identity", request, broadcast, principal, timestamp);
+      await store.appendIdentityTxLog(log);
       await auditGovernanceLog(audit, log, auditOutcomeFromBroadcast(broadcast));
       return { request, broadcast, log };
     },
 
-    async revokeSupplier(input, principal) {
+    async revokeIdentity(input, principal) {
       const record = requireBodyRecord(input);
-      const supplierSubjectId = requiredBytes32(record, "supplierSubjectId");
-      const subjectId = optionalString(record, "subjectId") ?? supplierSubjectId;
+      const subjectId = requiredBytes32(record, "subjectId");
+      const bindingId = requiredBytes32(record, "bindingId");
       const review = await markReviewRevoked(store, record, "supplier", subjectId, principal, now);
       const reason = optionalString(record, "reason") ?? optionalString(record, "publicSummary") ?? "governance revocation";
       const reasonHash = hashRevocationReason({
         subjectType: "supplier",
-        subjectId: supplierSubjectId,
+        subjectId,
         reason,
         ...(optionalUnknown(record, "metadata") !== undefined ? { metadata: record.metadata } : {}),
         ...(review ? { review: reviewHashInput(review) } : {})
       });
       const reasonURI = defaultMetadataURI(reasonHash);
-      const request: SupplierRevocationRequestDTO = {
-        kind: "revokeSupplier",
-        supplierSubjectId,
+      const request: IdentityRevocationRequestDTO = {
+        kind: "revokeIdentity",
+        bindingId,
+        subjectId,
         reasonHash,
         reasonURI,
         ...(review ? { reviewId: review.reviewId } : {})
       };
-      const duplicate = await reusableDuplicateSupplierLog(store, "revoke_supplier", request);
+      const duplicate = await reusableDuplicateIdentityLog(store, "revoke_identity", request);
       if (duplicate) {
         await auditGovernanceLog(audit, duplicate, "duplicate");
         return { request, broadcast: broadcastFromLog(duplicate), log: duplicate };
       }
-      const broadcast = await safeBroadcast(() => adapter.revokeSupplier(request));
+      const broadcast = await safeBroadcast(() => broadcastIdentityRevocation(adapter, request));
       const timestamp = now().toISOString();
-      const log = supplierLog(nextId("supplier_log"), "revoke_supplier", request, broadcast, principal, timestamp);
-      await store.appendSupplierAttestationLog(log);
+      const log = identityLog(nextId("identity_log"), "revoke_identity", request, broadcast, principal, timestamp);
+      await store.appendIdentityTxLog(log);
       await auditGovernanceLog(audit, log, auditOutcomeFromBroadcast(broadcast));
       return { request, broadcast, log };
     }
   };
+}
+
+function broadcastIdentityRegistration(
+  adapter: GovernanceChainAdapter,
+  request: IdentityRegistrationRequestDTO
+): Promise<GovernanceBroadcastResultDTO> {
+  return adapter.registerIdentity(request);
+}
+
+function broadcastIdentityRevocation(
+  adapter: GovernanceChainAdapter,
+  request: IdentityRevocationRequestDTO
+): Promise<GovernanceBroadcastResultDTO> {
+  return adapter.revokeIdentity(request);
 }
 
 export function toPublicGovernanceReview(review: GovernanceReviewDTO): PublicGovernanceReviewDTO {
@@ -409,7 +329,7 @@ async function resolveReview(
       throw new GovernanceServiceError(404, "review_not_found", "review not found");
     }
     if (review.subjectType !== subjectType || review.subjectId !== subjectId) {
-      throw new GovernanceServiceError(409, "review_subject_mismatch", "review does not match attestation subject");
+      throw new GovernanceServiceError(409, "review_subject_mismatch", "review does not match identity subject");
     }
     return review;
   }
@@ -457,9 +377,9 @@ async function markReviewRevoked(
   return updated;
 }
 
-function assertReviewAllowsAttestation(status: GovernanceReviewStatus): void {
+function assertReviewAllowsIdentityRegistration(status: GovernanceReviewStatus): void {
   if (status !== "approved_for_broadcast" && status !== "approved" && status !== "restricted") {
-    throw new GovernanceServiceError(409, "review_not_attestable", `${status} review cannot be attested`);
+    throw new GovernanceServiceError(409, "review_not_approved", `${status} review cannot register an identity`);
   }
 }
 
@@ -514,27 +434,25 @@ function reviewHashInputFromFields(input: {
   };
 }
 
-function planLog(
+function identityLog(
   logId: string,
-  action: "attest_plan" | "revoke_plan",
-  request: PlanAttestationRequestDTO | PlanRevocationRequestDTO,
+  action: "register_identity" | "revoke_identity",
+  request: IdentityRegistrationRequestDTO | IdentityRevocationRequestDTO,
   broadcast: GovernanceBroadcastResultDTO,
   principal: GovernancePrincipal,
   createdAt: string
-): PlanAttestationLogDTO {
+): IdentityTxLogDTO {
   return {
     logId,
     txLogId: logId,
     action,
-    subjectId: request.planId,
-    planId: request.planId,
-    ...(request.kind === "attestPlan" ? {
-      planHash: request.planHash,
-      artifactHash: request.artifactHash,
-      policyHash: request.policyHash,
-      metadataHash: request.metadataHash,
-      metadataURI: request.metadataURI
+    subjectId: request.subjectId,
+    ...(request.kind === "registerIdentity" ? {
+      account: request.account,
+      descriptorHash: request.descriptorHash,
+      descriptorURI: request.descriptorURI
     } : {
+      bindingId: request.bindingId,
       reasonHash: request.reasonHash,
       reasonURI: request.reasonURI
     }),
@@ -554,65 +472,13 @@ function planLog(
   };
 }
 
-function supplierLog(
-  logId: string,
-  action: "attest_supplier" | "revoke_supplier",
-  request: SupplierAttestationRequestDTO | SupplierRevocationRequestDTO,
-  broadcast: GovernanceBroadcastResultDTO,
-  principal: GovernancePrincipal,
-  createdAt: string
-): SupplierAttestationLogDTO {
-  return {
-    logId,
-    txLogId: logId,
-    action,
-    subjectId: request.supplierSubjectId,
-    supplierSubjectId: request.supplierSubjectId,
-    ...(request.kind === "attestSupplier" ? {
-      wallet: request.wallet,
-      profileHash: request.profileHash,
-      capabilityHash: request.capabilityHash,
-      reputationHash: request.reputationHash,
-      metadataHash: request.metadataHash,
-      metadataURI: request.metadataURI
-    } : {
-      reasonHash: request.reasonHash,
-      reasonURI: request.reasonURI
-    }),
-    ...(broadcast.txHash ? { txHash: broadcast.txHash } : {}),
-    ...(broadcast.blockNumber ? { blockNumber: broadcast.blockNumber } : {}),
-    ...(broadcast.signer ? { signer: broadcast.signer } : {}),
-    requester: principal.adminId,
-    status: txLogStatusFromBroadcast(broadcast.status),
-    broadcastStatus: broadcast.status,
-    ...defaultGovernanceReconcileFields(broadcast),
-    ...(broadcast.errorCode ? { errorCode: broadcast.errorCode } : {}),
-    ...(broadcast.message ? { errorMessage: broadcast.message } : {}),
-    retryable: broadcast.retryable,
-    request,
-    createdAt,
-    updatedAt: createdAt
-  };
-}
-
-async function reusableDuplicatePlanLog(
+async function reusableDuplicateIdentityLog(
   store: GovernanceStore,
-  action: "attest_plan" | "revoke_plan",
-  request: PlanAttestationRequestDTO | PlanRevocationRequestDTO
-): Promise<PlanAttestationLogDTO | undefined> {
+  action: "register_identity" | "revoke_identity",
+  request: IdentityRegistrationRequestDTO | IdentityRevocationRequestDTO
+): Promise<IdentityTxLogDTO | undefined> {
   const key = governanceRequestKey(action, request);
-  const duplicate = (await store.listPlanAttestationLogs())
-    .find((log) => log.action === action && governanceRequestKey(log.action, log.request) === key);
-  return duplicate && isReusableDuplicateLog(duplicate) ? duplicate : undefined;
-}
-
-async function reusableDuplicateSupplierLog(
-  store: GovernanceStore,
-  action: "attest_supplier" | "revoke_supplier",
-  request: SupplierAttestationRequestDTO | SupplierRevocationRequestDTO
-): Promise<SupplierAttestationLogDTO | undefined> {
-  const key = governanceRequestKey(action, request);
-  const duplicate = (await store.listSupplierAttestationLogs())
+  const duplicate = (await store.listIdentityTxLogs())
     .find((log) => log.action === action && governanceRequestKey(log.action, log.request) === key);
   return duplicate && isReusableDuplicateLog(duplicate) ? duplicate : undefined;
 }
@@ -687,7 +553,7 @@ async function safeBroadcast(action: () => Promise<GovernanceBroadcastResultDTO>
   }
 }
 
-function txLogStatusFromBroadcast(status: GovernanceBroadcastResultDTO["status"]): PlanAttestationLogDTO["status"] {
+function txLogStatusFromBroadcast(status: GovernanceBroadcastResultDTO["status"]): IdentityTxLogDTO["status"] {
   switch (status) {
     case "simulated_tx":
     case "submitted":

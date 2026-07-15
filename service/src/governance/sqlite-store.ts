@@ -17,8 +17,7 @@ import type {
   GovernanceReviewDTO,
   GovernanceSubjectType,
   GovernanceTxLogDTO,
-  PlanAttestationLogDTO,
-  SupplierAttestationLogDTO
+  IdentityTxLogDTO
 } from "./types.js";
 import type { GovernanceReviewQuery, GovernanceStore } from "./store.js";
 
@@ -141,30 +140,16 @@ export class SqliteGovernanceStore implements GovernanceStore {
     return (await this.listReviews({ subjectType, subjectId }))[0];
   }
 
-  async listPlanAttestationLogs(): Promise<readonly PlanAttestationLogDTO[]> {
+  async listIdentityTxLogs(): Promise<readonly IdentityTxLogDTO[]> {
     return this.#database.prepare(
       `SELECT log_json
        FROM governance_tx_log
-       WHERE log_kind = 'plan'
        ORDER BY created_at DESC, log_id DESC`
-    ).all().map((row) => parseTxLogRow(row) as PlanAttestationLogDTO);
+    ).all().map((row) => parseTxLogRow(row) as IdentityTxLogDTO);
   }
 
-  async appendPlanAttestationLog(log: PlanAttestationLogDTO): Promise<void> {
-    runSqliteWrite(() => this.#upsertTxLog("plan", log));
-  }
-
-  async listSupplierAttestationLogs(): Promise<readonly SupplierAttestationLogDTO[]> {
-    return this.#database.prepare(
-      `SELECT log_json
-       FROM governance_tx_log
-       WHERE log_kind = 'supplier'
-       ORDER BY created_at DESC, log_id DESC`
-    ).all().map((row) => parseTxLogRow(row) as SupplierAttestationLogDTO);
-  }
-
-  async appendSupplierAttestationLog(log: SupplierAttestationLogDTO): Promise<void> {
-    runSqliteWrite(() => this.#upsertTxLog("supplier", log));
+  async appendIdentityTxLog(log: IdentityTxLogDTO): Promise<void> {
+    runSqliteWrite(() => this.#upsertTxLog(log));
   }
 
   async getTxLog(txLogId: string): Promise<GovernanceTxLogDTO | undefined> {
@@ -177,35 +162,26 @@ export class SqliteGovernanceStore implements GovernanceStore {
   }
 
   async updateTxLog(log: GovernanceTxLogDTO): Promise<void> {
-    const kind = log.action === "attest_plan" || log.action === "revoke_plan" ? "plan" : "supplier";
-    runSqliteWrite(() => this.#upsertTxLog(kind, log));
+    runSqliteWrite(() => this.#upsertTxLog(log));
   }
 
-  #upsertTxLog(kind: "plan" | "supplier", log: PlanAttestationLogDTO | SupplierAttestationLogDTO): void {
-    const planLog = kind === "plan" ? log as PlanAttestationLogDTO : undefined;
-    const supplierLog = kind === "supplier" ? log as SupplierAttestationLogDTO : undefined;
+  #upsertTxLog(log: IdentityTxLogDTO): void {
     this.#database.prepare(
       `INSERT INTO governance_tx_log (
-         log_id, tx_log_id, log_kind, action, subject_id, plan_id,
-         supplier_subject_id, wallet, plan_hash, artifact_hash, policy_hash,
-         metadata_hash, metadata_uri, reason_hash, reason_uri, tx_hash,
+         log_id, tx_log_id, action, subject_id, account, descriptor_hash,
+         descriptor_uri, binding_id, reason_hash, reason_uri, tx_hash,
          block_number, signer, requester, status, broadcast_status, error_code,
          error_message, retryable, request_json, log_json, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(log_id)
        DO UPDATE SET
          tx_log_id = excluded.tx_log_id,
-         log_kind = excluded.log_kind,
          action = excluded.action,
          subject_id = excluded.subject_id,
-         plan_id = excluded.plan_id,
-         supplier_subject_id = excluded.supplier_subject_id,
-         wallet = excluded.wallet,
-         plan_hash = excluded.plan_hash,
-         artifact_hash = excluded.artifact_hash,
-         policy_hash = excluded.policy_hash,
-         metadata_hash = excluded.metadata_hash,
-         metadata_uri = excluded.metadata_uri,
+         account = excluded.account,
+         descriptor_hash = excluded.descriptor_hash,
+         descriptor_uri = excluded.descriptor_uri,
+         binding_id = excluded.binding_id,
          reason_hash = excluded.reason_hash,
          reason_uri = excluded.reason_uri,
          tx_hash = excluded.tx_hash,
@@ -224,17 +200,12 @@ export class SqliteGovernanceStore implements GovernanceStore {
     ).run(
       log.logId,
       log.txLogId,
-      kind,
       log.action,
       log.subjectId,
-      planLog?.planId ?? null,
-      supplierLog?.supplierSubjectId ?? null,
-      supplierLog?.wallet ?? null,
-      planLog?.planHash ?? null,
-      planLog?.artifactHash ?? null,
-      planLog?.policyHash ?? null,
-      log.metadataHash ?? null,
-      log.metadataURI ?? null,
+      log.account ?? null,
+      log.descriptorHash ?? null,
+      log.descriptorURI ?? null,
+      log.bindingId ?? null,
       log.reasonHash ?? null,
       log.reasonURI ?? null,
       log.txHash ?? null,

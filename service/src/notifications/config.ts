@@ -1,11 +1,5 @@
 import { verifyMessage } from "viem";
-import {
-  hashGovernanceCanonicalJson,
-  hashSupplierCapability,
-  hashSupplierMetadata,
-  hashSupplierProfile,
-  hashSupplierReputation
-} from "../governance/hashing.js";
+import { hashGovernanceCanonicalJson } from "../governance/hashing.js";
 import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import {
   parseSupplierNotificationProfile,
@@ -34,26 +28,9 @@ export interface SupplierNotificationProfileConfigRequest {
   readonly supplierSubjectId: Hex;
   readonly wallet: Address;
   readonly notification: SupplierNotificationProfile;
-  readonly profile?: unknown;
-  readonly capability: unknown;
-  readonly metadata: unknown;
-  readonly reputation?: unknown;
+  readonly metadata?: unknown;
   readonly notificationHash: Hex;
-  readonly metadataHash: Hex;
-  readonly profileHash: Hex;
-  readonly capabilityHash: Hex;
-  readonly reputationHash: Hex;
   readonly expectedMessage: string;
-  readonly attestSupplierInput: SupplierNotificationAttestSupplierInput;
-}
-
-export interface SupplierNotificationAttestSupplierInput {
-  readonly supplierSubjectId: Hex;
-  readonly wallet: Address;
-  readonly metadata: unknown;
-  readonly capability: unknown;
-  readonly profile?: unknown;
-  readonly reputation?: unknown;
 }
 
 export interface SupplierNotificationProfileConfigRecord extends SupplierNotificationProfileConfigRequest {
@@ -152,59 +129,19 @@ export function buildSupplierNotificationProfileConfigRequest(input: unknown): S
     throw new SupplierNotificationConfigError(400, "invalid_notification_profile", "notification must be a SupplierNotificationProfile v1 document");
   }
 
-  const metadataInput = optionalRecord(record, "metadata") ?? {};
-  const capabilityInput = optionalRecord(record, "capability") ?? optionalRecord(metadataInput, "capability") ?? {};
-  const capability = {
-    ...capabilityInput,
-    notification
-  };
-  const metadata = {
-    ...metadataInput,
-    capability
-  };
-  const profile = optionalUnknown(record, "profile");
-  const reputation = optionalUnknown(record, "reputation");
-  const hashInput = {
-    supplierSubjectId,
-    wallet,
-    metadata,
-    capability,
-    ...(profile !== undefined ? { profile } : {}),
-    ...(reputation !== undefined ? { reputation } : {})
-  };
+  const metadata = optionalUnknown(record, "metadata");
   const notificationHash = hashGovernanceCanonicalJson(notification, "notificationHash");
-  const metadataHash = hashSupplierMetadata(hashInput);
-  const profileHash = hashSupplierProfile(hashInput);
-  const capabilityHash = hashSupplierCapability(hashInput);
-  const reputationHash = hashSupplierReputation(hashInput);
-  const attestSupplierInput = {
-    supplierSubjectId,
-    wallet,
-    metadata,
-    capability,
-    ...(profile !== undefined ? { profile } : {}),
-    ...(reputation !== undefined ? { reputation } : {})
-  };
-
   return {
     supplierSubjectId,
     wallet,
     notification,
-    ...(profile !== undefined ? { profile } : {}),
-    capability,
-    metadata,
-    ...(reputation !== undefined ? { reputation } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
     notificationHash,
-    metadataHash,
-    profileHash,
-    capabilityHash,
-    reputationHash,
     expectedMessage: supplierNotificationProfileConfigMessage({
       supplierSubjectId,
       wallet,
       notificationHash
-    }),
-    attestSupplierInput
+    })
   };
 }
 

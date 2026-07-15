@@ -14,11 +14,6 @@ import {
   type StateMachineTaskProjection
 } from "../indexer/projections.js";
 import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "../indexer/events.js";
-import type {
-  PlanTrustProjection,
-  SupplierTrustProjection,
-  TrustProjectionSnapshot
-} from "../indexer/trust-projections.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { Address, Hex } from "../shared/types.js";
 import type { ProductSchemaResolver } from "../product/service.js";
@@ -40,8 +35,6 @@ export type NotificationSkippedReason =
   | "receiver_ambiguous"
   | "store_supplier_not_found"
   | "store_supplier_ambiguous"
-  | "supplier_trust_not_found"
-  | "supplier_revoked"
   | "notification_profile_missing"
   | "transport_not_supported"
   | "executor_watch_self_managed"
@@ -119,9 +112,7 @@ export type ParticipantNotificationKind =
   | "signal_submitted"
   | "submission_confirmed"
   | "submission_failed"
-  | "task_revoked"
-  | "plan_revoked"
-  | "supplier_revoked";
+  | "task_revoked";
 
 export type ParticipantNotificationSeverity = "info" | "action" | "warning" | "critical" | "success";
 export type ParticipantNotificationReadStatus = "read" | "unread";
@@ -255,7 +246,7 @@ export interface NotificationDispatcher {
 }
 
 export interface NotificationProfileResolution {
-  readonly supplier: SupplierTrustProjection;
+  readonly supplier: StoreSupplierMetadataRecord;
   readonly profile?: SupplierNotificationProfile;
   readonly resolved: boolean;
   readonly reason?: string;
@@ -288,7 +279,7 @@ export interface CreateNotificationServiceOptions {
   readonly store: ProjectionStore;
   readonly supplierMetadataStore?: StoreSupplierMetadataStore;
   readonly productSchemaResolver?: ProductSchemaResolver;
-  readonly planArtifactResolver?: (order: StateMachineOrderProjection, trustSnapshot: TrustProjectionSnapshot) => Promise<OnchainHookPlanArtifact | undefined>;
+  readonly planArtifactResolver?: (order: StateMachineOrderProjection) => Promise<OnchainHookPlanArtifact | undefined>;
   readonly deliveryStore?: NotificationDeliveryStore;
   readonly participantReadStateStore?: ParticipantNotificationReadStateStore;
   readonly dispatcher?: NotificationDispatcher;
@@ -368,7 +359,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
             order: undefined,
             signal: undefined,
             receiverHook: undefined,
-            supplier: undefined,
             supplierMetadata: undefined,
             reason: "order_projection_missing",
             transportType: undefined,
@@ -384,7 +374,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
             order,
             signal: undefined,
             receiverHook: undefined,
-            supplier: undefined,
             supplierMetadata: undefined,
             reason: "signal_projection_missing",
             transportType: undefined,
@@ -393,9 +382,8 @@ export function createNotificationService(options: CreateNotificationServiceOpti
           continue;
         }
         summary.signalsProcessed += 1;
-        const trustSnapshot = await options.store.getTrustSnapshot();
         const supplierRows = await options.supplierMetadataStore?.listSuppliers() ?? [];
-        const artifact = await resolvePlanArtifact(options, order, trustSnapshot);
+        const artifact = await resolvePlanArtifact(options, order);
         if (!artifact) {
           updateIntentSummary(summary, await saveSkippedSignalDelivery({
             deliveryStore,
@@ -403,7 +391,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
             order,
             signal,
             receiverHook: undefined,
-            supplier: undefined,
             supplierMetadata: undefined,
             reason: "artifact_mapping_missing",
             transportType: undefined,
@@ -415,7 +402,7 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         const receiverHooks = [...receiverHooksForSignal(artifact, signal)].sort(compareReceiverHooks);
         summary.receiverHooksMatched += receiverHooks.length;
         for (const receiverHook of receiverHooks) {
-          const resolution = resolveReceiverSupplier(order, receiverHook, supplierRows, trustSnapshot);
+          const resolution = resolveReceiverSupplier(order, receiverHook, supplierRows);
           if (resolution.status !== "ok") {
             updateIntentSummary(summary, await saveSkippedSignalDelivery({
               deliveryStore,
@@ -423,7 +410,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
               order,
               signal,
               receiverHook,
-              supplier: resolution.supplier,
               supplierMetadata: resolution.supplierMetadata,
               reason: resolution.reason,
               transportType: undefined,
@@ -439,7 +425,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
               order,
               signal,
               receiverHook,
-              supplier: resolution.supplier,
               supplierMetadata: resolution.supplierMetadata,
               reason: "notification_profile_missing",
               transportType: undefined,
@@ -455,7 +440,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
               order,
               signal,
               receiverHook,
-              supplier: resolution.supplier,
               supplierMetadata: resolution.supplierMetadata,
               reason: "transport_not_supported",
               transportType: undefined,
@@ -470,7 +454,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
               order,
               signal,
               receiverHook,
-              supplier: resolution.supplier,
               supplierMetadata: resolution.supplierMetadata,
               reason: "executor_watch_self_managed",
               transportType: transport.type,
@@ -485,7 +468,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
               order,
               signal,
               receiverHook,
-              supplier: resolution.supplier,
               supplierMetadata: resolution.supplierMetadata,
               reason: "transport_not_supported",
               transportType: transport.type,
@@ -500,7 +482,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
             order,
             signal,
             receiverHook,
-            supplier: resolution.supplier,
             supplierMetadata: resolution.supplierMetadata,
             profile,
             transport,
@@ -514,21 +495,16 @@ export function createNotificationService(options: CreateNotificationServiceOpti
     },
 
     async listProfiles() {
-      const trustSnapshot = await options.store.getTrustSnapshot();
       const supplierRows = await options.supplierMetadataStore?.listSuppliers() ?? [];
-      return Promise.all(Object.values(trustSnapshot.suppliers).map(async (supplier) => {
-        const metadata = supplierRows.find((row) =>
-          row.supplierSubjectId === supplier.supplierSubjectId &&
-          row.wallet?.toLowerCase() === supplier.wallet.toLowerCase()
-        );
-        const profile = metadata?.notificationProfile;
+      return supplierRows.map((supplier) => {
+        const profile = supplier.notificationProfile;
         return {
           supplier,
           ...(profile ? { profile } : {}),
           resolved: Boolean(profile),
           ...(profile ? {} : { reason: "notification_profile_missing" })
         };
-      }));
+      });
     },
 
     async listDeliveries(query = {}) {
@@ -775,8 +751,6 @@ function isNotificationSkippedReason(reason: string): reason is NotificationSkip
     "receiver_ambiguous",
     "store_supplier_not_found",
     "store_supplier_ambiguous",
-    "supplier_trust_not_found",
-    "supplier_revoked",
     "notification_profile_missing",
     "transport_not_supported",
     "executor_watch_self_managed",
@@ -796,10 +770,9 @@ async function buildParticipantNotificationList(input: {
     return emptyParticipantNotificationList();
   }
 
-  const [tasks, orders, trustSnapshot, deliveries] = await Promise.all([
+  const [tasks, orders, deliveries] = await Promise.all([
     input.store.listStateMachineTasks(),
     input.store.listStateMachineOrders(),
-    input.store.getTrustSnapshot(),
     input.deliveryStore.listDeliveries({ supplier: participantKey })
   ]);
   const visibleTasks = tasks
@@ -812,18 +785,6 @@ async function buildParticipantNotificationList(input: {
     const taskNotification = participantTaskNotification(task, order, input.now());
     if (taskNotification) {
       notifications.set(taskNotification.notificationId, taskNotification);
-    }
-
-    const planTrust = order ? revokedPlanTrustForOrder(trustSnapshot, order) : undefined;
-    if (planTrust) {
-      const planNotification = participantPlanRevokedNotification(task, order, planTrust);
-      notifications.set(planNotification.notificationId, planNotification);
-    }
-
-    const supplierTrust = task.assigneeWallet ? revokedSupplierTrustForWallet(trustSnapshot, task.assigneeWallet) : undefined;
-    if (supplierTrust) {
-      const supplierNotification = participantSupplierRevokedNotification(task, order, supplierTrust);
-      notifications.set(supplierNotification.notificationId, supplierNotification);
     }
   }
 
@@ -981,54 +942,6 @@ function participantSignalNotification(
   };
 }
 
-function participantPlanRevokedNotification(
-  task: StateMachineTaskProjection,
-  order: StateMachineOrderProjection | undefined,
-  trust: PlanTrustProjection
-): ParticipantNotificationRecord {
-  return {
-    ...participantNotificationBase(task, order),
-    notificationId: participantNotificationId("plan_revoked", task.orderId, trust.planId, task.assigneeWallet ?? ""),
-    kind: "plan_revoked",
-    severity: "critical",
-    eventLabel: "秩序背书已撤销",
-    message: "当前订单关联的秩序背书已被撤销，继续处理前请核对订单证明和运营指引。",
-    createdAt: provenanceTime(trust.revokedAt ?? trust.updatedAt),
-    proof: {
-      eventName: "PlanRevoked",
-      chainId: trust.revokedAt?.chainId ?? trust.updatedAt.chainId,
-      contractAddress: trust.revokedAt?.contractAddress ?? trust.updatedAt.contractAddress,
-      blockNumber: (trust.revokedAt?.blockNumber ?? trust.updatedAt.blockNumber).toString(),
-      transactionHash: trust.revokedAt?.transactionHash ?? trust.updatedAt.transactionHash,
-      logIndex: trust.revokedAt?.logIndex ?? trust.updatedAt.logIndex
-    }
-  };
-}
-
-function participantSupplierRevokedNotification(
-  task: StateMachineTaskProjection,
-  order: StateMachineOrderProjection | undefined,
-  trust: SupplierTrustProjection
-): ParticipantNotificationRecord {
-  return {
-    ...participantNotificationBase(task, order),
-    notificationId: participantNotificationId("supplier_revoked", trust.supplierSubjectId, task.orderId),
-    kind: "supplier_revoked",
-    severity: "critical",
-    eventLabel: "参与方背书已撤销",
-    message: "与你的钱包匹配的供应方背书已撤销；该提醒不改变任务状态，请以链上订单和运营审核为准。",
-    createdAt: provenanceTime(trust.revokedAt ?? trust.updatedAt),
-    proof: {
-      eventName: "SupplierRevoked",
-      chainId: trust.revokedAt?.chainId ?? trust.updatedAt.chainId,
-      contractAddress: trust.revokedAt?.contractAddress ?? trust.updatedAt.contractAddress,
-      blockNumber: (trust.revokedAt?.blockNumber ?? trust.updatedAt.blockNumber).toString(),
-      transactionHash: trust.revokedAt?.transactionHash ?? trust.updatedAt.transactionHash,
-      logIndex: trust.revokedAt?.logIndex ?? trust.updatedAt.logIndex
-    }
-  };
-}
-
 function participantDeliveryFailedNotification(
   delivery: NotificationDeliveryRecord,
   task: StateMachineTaskProjection | undefined,
@@ -1166,33 +1079,6 @@ function participantCanSeeOrderSignals(order: StateMachineOrderProjection, parti
     );
 }
 
-function revokedPlanTrustForOrder(
-  trustSnapshot: TrustProjectionSnapshot,
-  order: StateMachineOrderProjection
-): PlanTrustProjection | undefined {
-  const matches = Object.values(trustSnapshot.plans).filter((trust) =>
-    trust.planId === order.planId &&
-    (!order.planHash || trust.planHash === order.planHash)
-  );
-  if (matches.some((trust) => !trust.revoked)) {
-    return undefined;
-  }
-  return matches.find((trust) => trust.revoked);
-}
-
-function revokedSupplierTrustForWallet(
-  trustSnapshot: TrustProjectionSnapshot,
-  wallet: Address
-): SupplierTrustProjection | undefined {
-  const matches = Object.values(trustSnapshot.suppliers)
-    .filter((trust) => trust.wallet.toLowerCase() === wallet.toLowerCase())
-    .sort(compareSuppliersForDelivery);
-  if (matches.some((trust) => !trust.revoked)) {
-    return undefined;
-  }
-  return matches.find((trust) => trust.revoked);
-}
-
 function orderTitle(input: StateMachineOrderProjection | StateMachineTaskProjection | NotificationDeliveryRecord): string {
   return `链上订单 ${shortId(input.orderId)}`;
 }
@@ -1285,13 +1171,11 @@ type MutableNotificationRunSummary = {
 type ReceiverResolution =
   | {
       readonly status: "ok";
-      readonly supplier: SupplierTrustProjection;
       readonly supplierMetadata: StoreSupplierMetadataRecord;
     }
   | {
       readonly status: "skipped";
       readonly reason: NotificationSkippedReason;
-      readonly supplier?: SupplierTrustProjection;
       readonly supplierMetadata?: StoreSupplierMetadataRecord;
     };
 
@@ -1318,45 +1202,25 @@ function finalizedSignalSubmittedEvents(
 
 async function resolvePlanArtifact(
   options: CreateNotificationServiceOptions,
-  order: StateMachineOrderProjection,
-  trustSnapshot: TrustProjectionSnapshot
+  order: StateMachineOrderProjection
 ): Promise<OnchainHookPlanArtifact | undefined> {
-  const customArtifact = await options.planArtifactResolver?.(order, trustSnapshot);
+  const customArtifact = await options.planArtifactResolver?.(order);
   if (customArtifact) {
     return customArtifact;
   }
   if (!options.productSchemaResolver || !order.planHash) {
     return undefined;
   }
-  const trust = matchingPlanTrust(order, trustSnapshot);
   const schema = await options.productSchemaResolver.getProductSchemaByPlan(
     order.planId,
-    order.planHash,
-    trust?.artifactHash
+    order.planHash
   );
   const artifact = (schema as { readonly onchainHookPlanArtifact?: unknown } | undefined)?.onchainHookPlanArtifact;
   if (!artifact) {
     return undefined;
   }
-  try {
-    assertOnchainHookPlanArtifact(artifact);
-    return artifact as OnchainHookPlanArtifact;
-  } catch {
-    return undefined;
-  }
-}
-
-function matchingPlanTrust(
-  order: StateMachineOrderProjection,
-  trustSnapshot: TrustProjectionSnapshot
-): PlanTrustProjection | undefined {
-  const matches = Object.values(trustSnapshot.plans)
-    .filter((trust) =>
-      trust.planId === order.planId &&
-      (!order.planHash || trust.planHash === order.planHash)
-    )
-    .sort(comparePlansForArtifactResolution);
-  return matches.find((trust) => !trust.revoked) ?? matches[0];
+  assertOnchainHookPlanArtifact(artifact);
+  return artifact;
 }
 
 function receiverHooksForSignal(
@@ -1388,8 +1252,7 @@ function compareReceiverHooks(left: OnchainCompiledHook, right: OnchainCompiledH
 function resolveReceiverSupplier(
   order: StateMachineOrderProjection,
   receiverHook: OnchainCompiledHook,
-  supplierRows: readonly StoreSupplierMetadataRecord[],
-  trustSnapshot: TrustProjectionSnapshot
+  supplierRows: readonly StoreSupplierMetadataRecord[]
 ): ReceiverResolution {
   const overlay = order.stageExecutorOverlays[receiverHook.stageId.toLowerCase()];
   const receiverWallet = overlay?.activeExecutorWallet ?? receiverAuthorizationWallet(order, receiverHook);
@@ -1401,19 +1264,8 @@ function resolveReceiverSupplier(
     return metadataResolution;
   }
 
-  const supplierResolution = activeSupplierTrustForMetadata(metadataResolution.supplierMetadata, trustSnapshot);
-  if (supplierResolution.status !== "ok") {
-    return {
-      status: "skipped",
-      reason: supplierResolution.reason,
-      ...(supplierResolution.supplier ? { supplier: supplierResolution.supplier } : {}),
-      supplierMetadata: metadataResolution.supplierMetadata
-    };
-  }
-
   return {
     status: "ok",
-    supplier: supplierResolution.supplier,
     supplierMetadata: metadataResolution.supplierMetadata
   };
 }
@@ -1463,27 +1315,6 @@ function supplierMetadataByStage(
     : { status: "skipped", reason: "receiver_not_found" };
 }
 
-function activeSupplierTrustForMetadata(
-  supplierMetadata: StoreSupplierMetadataRecord,
-  trustSnapshot: TrustProjectionSnapshot
-): ReceiverResolution {
-  const matches = Object.values(trustSnapshot.suppliers)
-    .filter((supplier) =>
-      supplier.supplierSubjectId === supplierMetadata.supplierSubjectId &&
-      (!supplierMetadata.wallet || supplier.wallet.toLowerCase() === supplierMetadata.wallet.toLowerCase())
-    )
-    .sort(compareSuppliersForDelivery);
-  const active = matches.find((supplier) => !supplier.revoked);
-  if (active) {
-    return { status: "ok", supplier: active, supplierMetadata };
-  }
-  const revoked = matches.find((supplier) => supplier.revoked);
-  if (revoked) {
-    return { status: "skipped", reason: "supplier_revoked", supplier: revoked, supplierMetadata };
-  }
-  return { status: "skipped", reason: "supplier_trust_not_found", supplierMetadata };
-}
-
 function receiverAuthorizationWallet(
   order: StateMachineOrderProjection,
   receiverHook: OnchainCompiledHook
@@ -1519,7 +1350,6 @@ async function dispatchSignalTransportDelivery(input: {
   readonly order: StateMachineOrderProjection;
   readonly signal: StateMachineSignalProjection;
   readonly receiverHook: OnchainCompiledHook;
-  readonly supplier: SupplierTrustProjection;
   readonly supplierMetadata: StoreSupplierMetadataRecord;
   readonly profile: SupplierNotificationProfile;
   readonly transport: SupplierNotificationTransport;
@@ -1537,7 +1367,6 @@ async function dispatchSignalTransportDelivery(input: {
       input.order,
       input.signal,
       input.receiverHook,
-      input.supplier,
       input.supplierMetadata,
       input.transport.type,
       input.now
@@ -1629,10 +1458,6 @@ async function resolveRetryTransport(
   if (!supplierMetadata) {
     return { status: "skipped", reason: "store_supplier_not_found" };
   }
-  const trustResolution = activeSupplierTrustForMetadata(supplierMetadata, await options.store.getTrustSnapshot());
-  if (trustResolution.status !== "ok") {
-    return { status: "skipped", reason: trustResolution.reason };
-  }
   const profile = supplierMetadata.notificationProfile;
   if (!profile) {
     return { status: "skipped", reason: "notification_profile_missing" };
@@ -1656,7 +1481,6 @@ async function saveSkippedSignalDelivery(input: {
   readonly order: StateMachineOrderProjection | undefined;
   readonly signal: StateMachineSignalProjection | undefined;
   readonly receiverHook: OnchainCompiledHook | undefined;
-  readonly supplier: SupplierTrustProjection | undefined;
   readonly supplierMetadata: StoreSupplierMetadataRecord | undefined;
   readonly reason: NotificationSkippedReason;
   readonly transportType: string | undefined;
@@ -1673,7 +1497,6 @@ async function saveSkippedSignalDelivery(input: {
       input.order,
       input.signal,
       input.receiverHook,
-      input.supplier,
       input.supplierMetadata,
       input.transportType,
       input.now
@@ -1689,7 +1512,6 @@ function baseSignalDeliveryRecord(
   order: StateMachineOrderProjection | undefined,
   signal: StateMachineSignalProjection | undefined,
   receiverHook: OnchainCompiledHook | undefined,
-  supplier: SupplierTrustProjection | undefined,
   supplierMetadata: StoreSupplierMetadataRecord | undefined,
   transportType: string | undefined,
   now: () => string
@@ -1716,9 +1538,12 @@ function baseSignalDeliveryRecord(
     chainId: event.chainId,
     stateMachineAddress: order?.contractAddress ?? event.contractAddress,
     ...(signalSubmitter ? { submitter: signalSubmitter } : {}),
-    ...(supplier ? { supplierSubjectId: supplier.supplierSubjectId, supplierWallet: supplier.wallet } : {}),
+    ...(supplierMetadata ? {
+      supplierSubjectId: supplierMetadata.supplierSubjectId,
+      ...(supplierMetadata.wallet ? { supplierWallet: supplierMetadata.wallet } : {})
+    } : {}),
     ...(transportType ? { transportType } : {}),
-    payload: payloadForSignal(event, order, signal, receiverHook, supplier, supplierMetadata),
+    payload: payloadForSignal(event, order, signal, receiverHook, supplierMetadata),
     attempts: 0,
     createdAt,
     updatedAt: createdAt
@@ -1730,7 +1555,6 @@ function payloadForSignal(
   order: StateMachineOrderProjection | undefined,
   signal: StateMachineSignalProjection | undefined,
   receiverHook: OnchainCompiledHook | undefined,
-  supplier: SupplierTrustProjection | undefined,
   supplierMetadata: StoreSupplierMetadataRecord | undefined
 ): SignalNotificationPayload {
   const orderId = signal?.orderId ?? bytes32Arg(event, "orderId") ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
@@ -1741,8 +1565,8 @@ function payloadForSignal(
   const signalSubmitter = signal?.submitter ?? addressArg(event, "submitter") ?? "0x0000000000000000000000000000000000000000" as Address;
   const receiverHookId = receiverHook?.hookId as Hex | undefined ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
   const receiverStageId = receiverHook?.stageId as Hex | undefined ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
-  const receiverSupplierSubjectId = supplier?.supplierSubjectId ?? supplierMetadata?.supplierSubjectId ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
-  const receiverWallet = supplier?.wallet ?? supplierMetadata?.wallet ?? "0x0000000000000000000000000000000000000000" as Address;
+  const receiverSupplierSubjectId = supplierMetadata?.supplierSubjectId ?? "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+  const receiverWallet = supplierMetadata?.wallet ?? "0x0000000000000000000000000000000000000000" as Address;
   return {
     version: "uvp.signalReceivedNotification.v1",
     chainId: event.chainId,
@@ -1895,26 +1719,6 @@ function compareDeliveryRecords(left: NotificationDeliveryRecord, right: Notific
     return left.createdAt.localeCompare(right.createdAt);
   }
   return left.deliveryId.localeCompare(right.deliveryId);
-}
-
-function compareSuppliersForDelivery(left: SupplierTrustProjection, right: SupplierTrustProjection): number {
-  if (left.revoked !== right.revoked) {
-    return left.revoked ? 1 : -1;
-  }
-  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
-    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
-  }
-  return left.supplierSubjectId.localeCompare(right.supplierSubjectId);
-}
-
-function comparePlansForArtifactResolution(left: PlanTrustProjection, right: PlanTrustProjection): number {
-  if (left.revoked !== right.revoked) {
-    return left.revoked ? 1 : -1;
-  }
-  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
-    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
-  }
-  return left.planHash.localeCompare(right.planHash);
 }
 
 function compareSupplierMetadataForDelivery(

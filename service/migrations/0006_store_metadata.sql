@@ -10,10 +10,8 @@ CREATE TABLE IF NOT EXISTS store_zhixu_draft (
   tags_json TEXT NOT NULL,
   compile_preview_json TEXT,
   review_id TEXT,
-  governance_tx_log_id TEXT,
   errors_json TEXT NOT NULL,
   review_status TEXT,
-  attestation_domain_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

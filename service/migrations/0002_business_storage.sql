@@ -208,17 +208,12 @@ CREATE INDEX IF NOT EXISTS governance_review_subject_idx
 CREATE TABLE IF NOT EXISTS governance_tx_log (
   log_id TEXT PRIMARY KEY,
   tx_log_id TEXT NOT NULL UNIQUE,
-  log_kind TEXT NOT NULL,
   action TEXT NOT NULL,
   subject_id TEXT NOT NULL,
-  plan_id TEXT,
-  supplier_subject_id TEXT,
-  wallet TEXT,
-  plan_hash TEXT,
-  artifact_hash TEXT,
-  policy_hash TEXT,
-  metadata_hash TEXT,
-  metadata_uri TEXT,
+  account TEXT,
+  descriptor_hash TEXT,
+  descriptor_uri TEXT,
+  binding_id TEXT,
   reason_hash TEXT,
   reason_uri TEXT,
   tx_hash TEXT UNIQUE,
@@ -236,5 +231,5 @@ CREATE TABLE IF NOT EXISTS governance_tx_log (
   updated_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS governance_tx_log_kind_created_idx
-  ON governance_tx_log (log_kind, created_at);
+CREATE INDEX IF NOT EXISTS governance_tx_log_subject_created_idx
+  ON governance_tx_log (subject_id, created_at);

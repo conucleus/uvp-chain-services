@@ -43,48 +43,6 @@ const abiHash = "0xddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 describe("indexer projection replay", () => {
-  it("ignores removed escrow-shaped events in product projections", () => {
-    const events: readonly ChainEvent[] = [
-      chainEvent(2n, 0, "OrderFunded", { orderId: "order-1" }),
-      chainEvent(1n, 0, "OrderCreated", {
-        orderId: "order-1",
-        buyer,
-        seller,
-        zhixuHash: emptyHash,
-        metadataHash: emptyHash
-      }),
-      chainEvent(3n, 0, "StageApproved", {
-        orderId: "order-1",
-        stageId: "stage-1",
-        signer,
-        signal: "approve",
-        evidenceHash
-      })
-    ];
-
-    const snapshot = rebuildOrderProjections(events);
-
-    expect(snapshot.rebuildable).toBe(true);
-    expect(snapshot.eventCount).toBe(3);
-    expect(snapshot.orders).toEqual({});
-    expect(snapshot.stateMachineOrders).toEqual({});
-  });
-
-  it("can wipe and rebuild the in-memory projection store without restoring removed escrow projections", async () => {
-    const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "OrderCreated", { orderId: "order-2", buyer, seller }),
-      chainEvent(2n, 0, "StageReleased", { orderId: "order-2", stageId: "stage-1" })
-    ];
-
-    const store = new MemoryProjectionStore();
-    const first = await store.resetFromEvents({ deploymentBlock: 0n, events });
-    await store.resetFromEvents({ deploymentBlock: 0n, events: [] });
-    const rebuilt = await store.resetFromEvents({ deploymentBlock: 0n, events });
-
-    expect(rebuilt.orders).toEqual(first.orders);
-    expect(await store.getOrder("order-2")).toBeUndefined();
-  });
-
   it("rebuilds state-machine orders, tasks, timeline, and proof from chain events", () => {
     const events = stateMachineEvents();
 
@@ -96,7 +54,7 @@ describe("indexer projection replay", () => {
 
     expect(snapshot.rebuildable).toBe(true);
     expect(snapshot.stateMachinePlans[planKey]?.planHash).toBe(planHash);
-    expect(order?.status).toBe("action_required");
+    expect(order?.status).toBe("registered");
     expect(order?.planId).toBe(planId);
     expect(order?.planHash).toBe(planHash);
     expect(order?.currentStage).toBe(stageId);
@@ -126,7 +84,14 @@ describe("indexer projection replay", () => {
         orderId: stateMachineOrderId,
         planId
       }),
-      chainEvent(3n, 0, "SignalSubmitterAuthorized", {
+      chainEvent(3n, 0, "SignalCapabilityRegistered", {
+        planId,
+        stageId,
+        targetSourceId: stageId,
+        signalId: hookName,
+        targetOrderRelation: 0
+      }),
+      chainEvent(4n, 0, "SignalSubmitterAuthorized", {
         orderId: stateMachineOrderId,
         sourceId: stageId,
         signalId: hookName,
@@ -134,7 +99,7 @@ describe("indexer projection replay", () => {
         role: bytes32Text("executor"),
         metadataHash: emptyHash
       }),
-      chainEvent(4n, 0, "HookReady", {
+      chainEvent(5n, 0, "HookReady", {
         orderId: stateMachineOrderId,
         hookId,
         stageId,
@@ -254,7 +219,7 @@ describe("indexer projection replay", () => {
     const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
     const task = snapshot.stateMachineTasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`];
 
-    expect(order?.status).toBe("running");
+    expect(order?.status).toBe("registered");
     expect(task).toMatchObject({
       status: "submitted",
       proof: expect.objectContaining({
@@ -264,7 +229,7 @@ describe("indexer projection replay", () => {
     });
   });
 
-  it("prefers explicit submit-signal authorizations over legacy hook-name matches", () => {
+  it("matches task authorization only against declared submit signals", () => {
     const events: readonly ChainEvent[] = [
       chainEvent(1n, 0, "PlanRegistered", {
         planId,
@@ -287,7 +252,7 @@ describe("indexer projection replay", () => {
         sourceId: stageId,
         signalId: hookName,
         submitter: signer,
-        role: bytes32Text("legacy"),
+        role: bytes32Text("unrelated"),
         metadataHash: emptyHash
       }),
       chainEvent(5n, 0, "HookReady", {
@@ -685,7 +650,6 @@ describe("indexer projection replay", () => {
       removedLogsFiltered: true,
       projectionRebuilt: true,
       stateMachineOrderCount: 1,
-      trustPlanCount: 0,
       mismatchCount: 0,
       syncStatus: "indexed",
       finalizedBlock: "9",
@@ -851,7 +815,7 @@ describe("indexer projection replay", () => {
       .toMatchObject({
         planId,
         stateMachineAddress: contractAddress,
-        chainStatus: "action_required",
+        chainStatus: "registered",
         projection: expect.objectContaining({
           syncStatus: "indexed",
           eventCount: 9,
@@ -1246,7 +1210,6 @@ function testConfig(): ChainServicesConfig {
     dockedSignalAutomation: {
       enabled: false,
       maxCandidatesPerRun: 4,
-      requireTrustedPlans: true,
       maxGasPerTx: 500_000n,
       waitForReceipt: true
     },

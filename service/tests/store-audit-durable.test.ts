@@ -167,16 +167,6 @@ describe("durable Store operator audit", () => {
     });
 
     await expect(router.handle({
-      method: "POST",
-      pathname: "/store/zhixu-drafts/missing-draft/request-attestation",
-      headers: adminHeaders,
-      body: {}
-    })).resolves.toMatchObject({
-      status: 400,
-      body: { error: "store_confirmation_required" }
-    });
-
-    await expect(router.handle({
       method: "GET",
       pathname: "/store/audit",
       query: {
@@ -197,26 +187,6 @@ describe("durable Store operator audit", () => {
       }
     });
 
-    await expect(router.handle({
-      method: "GET",
-      pathname: "/store/audit",
-      query: {
-        action: "store.draft.attestation.request",
-        outcome: "rejected"
-      },
-      headers: readerHeaders
-    })).resolves.toMatchObject({
-      status: 200,
-      body: {
-        records: [
-          expect.objectContaining({
-            action: "store.draft.attestation.request",
-            outcome: "rejected",
-            errorCode: "store_confirmation_required"
-          })
-        ]
-      }
-    });
   });
 });
 

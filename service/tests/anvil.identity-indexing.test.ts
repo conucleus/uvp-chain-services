@@ -24,12 +24,12 @@ import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, "../../..");
 const contractsDir = resolve(rootDir, "uvp-protocol/contracts/uvp-contracts");
-const registryArtifactPath = resolve(contractsDir, "out/ZhixuTrustRegistry.sol/ZhixuTrustRegistry.json");
+const registryArtifactPath = resolve(contractsDir, "out/UVPIdentityRegistry.sol/UVPIdentityRegistry.json");
 const anvilPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const canRunAnvil = commandExists("anvil") && commandExists("forge");
 const maybeIt = canRunAnvil ? it : it.skip;
 
-describe("anvil trust registry indexing", () => {
+describe("anvil identity registry indexing", () => {
   let anvil: ChildProcess | undefined;
   let apiServer: Server | undefined;
 
@@ -44,7 +44,7 @@ describe("anvil trust registry indexing", () => {
     }
   });
 
-  maybeIt("indexes registry logs with Viem and serves revoked plan trust over HTTP", async () => {
+  maybeIt("indexes identity binding registration and revocation over HTTP", async () => {
     execFileSync("forge", ["build"], { cwd: contractsDir, stdio: "pipe" });
 
     const rpcPort = await freePort();
@@ -73,29 +73,28 @@ describe("anvil trust registry indexing", () => {
     const deployReceipt = await publicClient.waitForTransactionReceipt({ hash: deployHash });
     const registry = getAddress(deployReceipt.contractAddress as Address);
 
-    const planId = hashText("chain-services:test-plan");
-    const planHash = hashText("plan-hash");
-    const artifactHash = hashText("artifact-hash");
-    const policyHash = hashText("policy-hash");
-    const metadataHash = hashText("metadata-hash");
     const reasonHash = hashText("reason-hash");
     const supplierSubjectId = hashText("chain-services:test-supplier");
     const supplierWallet = getAddress("0x4444444444444444444444444444444444444444");
-    const profileHash = hashText("profile-hash");
-    const capabilityHash = hashText("capability-hash");
-    const reputationHash = hashText("reputation-hash");
+    const descriptorHash = hashText("identity-descriptor");
 
     await writeAndWait(publicClient, await wallet.writeContract({
       address: registry,
       abi: artifact.abi,
-      functionName: "attestPlan",
-      args: [planId, planHash, artifactHash, policyHash, metadataHash, "uvp-eth://plans/test"]
+      functionName: "registerIdentityBinding",
+      args: [supplierSubjectId, supplierWallet, descriptorHash, "uvp-store://identities/test"]
     }));
+    const bindingId = await publicClient.readContract({
+      address: registry,
+      abi: artifact.abi,
+      functionName: "activeBindingForAccount",
+      args: [supplierWallet]
+    }) as Hex;
     await writeAndWait(publicClient, await wallet.writeContract({
       address: registry,
       abi: artifact.abi,
-      functionName: "revokePlan",
-      args: [planId, reasonHash, "uvp-eth://revocations/test"]
+      functionName: "revokeIdentityBinding",
+      args: [bindingId, reasonHash, "uvp-store://identity-revocations/test"]
     }));
 
     apiServer = await startApiServer(testConfig({
@@ -106,39 +105,13 @@ describe("anvil trust registry indexing", () => {
     }), new MemoryProjectionStore());
 
     const apiBase = httpServerBaseUrl(apiServer);
-    const response = await fetch(`${apiBase}/trust/plans?registryAddress=${registry}&planId=${planId}`);
-    const body = await response.json() as { readonly plans?: Array<{ readonly revoked?: boolean; readonly revokeReasonHash?: string }> };
+    const identity = await waitForIdentityBinding(apiBase, registry, bindingId);
 
-    expect(response.status).toBe(200);
-    expect(body.plans).toHaveLength(1);
-    expect(body.plans?.[0]?.revoked).toBe(true);
-    expect(body.plans?.[0]?.revokeReasonHash).toBe(reasonHash);
+    expect(identity.status).toBe("revoked");
+    expect(identity.revokeReasonHash).toBe(reasonHash);
+    expect(identity.account).toBe(supplierWallet.toLowerCase());
 
-    await writeAndWait(publicClient, await wallet.writeContract({
-      address: registry,
-      abi: artifact.abi,
-      functionName: "attestSupplier",
-      args: [
-        supplierSubjectId,
-        supplierWallet,
-        profileHash,
-        capabilityHash,
-        reputationHash,
-        "uvp-eth://suppliers/test"
-      ]
-    }));
-    await writeAndWait(publicClient, await wallet.writeContract({
-      address: registry,
-      abi: artifact.abi,
-      functionName: "revokeSupplier",
-      args: [supplierSubjectId, reasonHash, "uvp-eth://supplier-revocations/test"]
-    }));
-
-    const supplier = await waitForSupplierTrust(apiBase, registry, supplierSubjectId);
-    expect(supplier.revoked).toBe(true);
-    expect(supplier.revokeReasonHash).toBe(reasonHash);
-
-    const optionsResponse = await fetch(`${apiBase}/trust/plans?registryAddress=${registry}&planId=${planId}`, {
+    const optionsResponse = await fetch(`${apiBase}/identity/bindings?registryAddress=${registry}&bindingId=${bindingId}`, {
       method: "OPTIONS"
     });
     expect(optionsResponse.status).toBe(204);
@@ -179,7 +152,7 @@ function testConfig(input: {
       finalityConfirmations: 0,
       reorgBufferBlocks: 0,
       contracts: {
-        ZhixuTrustRegistry: input.registry
+        UVPIdentityRegistry: input.registry
       }
     },
     database: {
@@ -223,7 +196,6 @@ function testConfig(input: {
     dockedSignalAutomation: {
       enabled: false,
       maxCandidatesPerRun: 4,
-      requireTrustedPlans: true,
       maxGasPerTx: 500_000n,
       waitForReceipt: true
     },
@@ -292,23 +264,23 @@ function httpServerBaseUrl(server: Server): string {
   return `http://127.0.0.1:${address.port}`;
 }
 
-async function waitForSupplierTrust(
+async function waitForIdentityBinding(
   apiBase: string,
   registryAddress: Address,
-  supplierSubjectId: Hex
-): Promise<{ readonly revoked?: boolean; readonly revokeReasonHash?: string }> {
+  bindingId: Hex
+): Promise<{ readonly status?: string; readonly revokeReasonHash?: string; readonly account?: string }> {
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    const response = await fetch(`${apiBase}/trust/suppliers?registryAddress=${registryAddress}&supplierSubjectId=${supplierSubjectId}`);
+    const response = await fetch(`${apiBase}/identity/bindings?registryAddress=${registryAddress}&bindingId=${bindingId}`);
     const body = await response.json() as {
-      readonly suppliers?: Array<{ readonly revoked?: boolean; readonly revokeReasonHash?: string }>;
+      readonly bindings?: Array<{ readonly status?: string; readonly revokeReasonHash?: string; readonly account?: string }>;
     };
-    const supplier = body.suppliers?.[0];
-    if (response.status === 200 && supplier?.revoked === true) {
-      return supplier;
+    const identity = body.bindings?.[0];
+    if (response.status === 200 && identity?.status === "revoked") {
+      return identity;
     }
     await delay(100);
   }
-  throw new Error("supplier trust projection did not refresh to revoked=true");
+  throw new Error("identity binding projection did not reach revoked status");
 }
 
 async function closeHttpServer(server: Server): Promise<void> {

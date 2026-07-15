@@ -13,23 +13,11 @@ export interface GovernanceReviewHashInput {
   readonly policy?: unknown;
 }
 
-export interface PlanAttestationHashInput {
-  readonly planId: Hex;
-  readonly planHash: Hex;
-  readonly artifactHash: Hex;
+export interface IdentityDescriptorHashInput {
+  readonly subjectId: Hex;
+  readonly account: string;
   readonly review?: GovernanceReviewHashInput;
   readonly metadata?: unknown;
-  readonly policy?: unknown;
-}
-
-export interface SupplierAttestationHashInput {
-  readonly supplierSubjectId: Hex;
-  readonly wallet: string;
-  readonly review?: GovernanceReviewHashInput;
-  readonly metadata?: unknown;
-  readonly profile?: unknown;
-  readonly capability?: unknown;
-  readonly reputation?: unknown;
 }
 
 export function hashGovernanceReviewMetadata(input: GovernanceReviewHashInput): Hex {
@@ -40,71 +28,15 @@ export function hashGovernanceReviewPolicy(input: GovernanceReviewHashInput): He
   return hashGovernanceCanonicalJson(buildGovernanceReviewPolicyDocument(input), "policyHash");
 }
 
-export function hashPlanMetadata(input: PlanAttestationHashInput): Hex {
+export function hashIdentityDescriptor(input: IdentityDescriptorHashInput): Hex {
   return hashGovernanceCanonicalJson({
     version: 1,
-    kind: "planAttestationMetadata",
-    planId: input.planId,
-    planHash: input.planHash,
-    artifactHash: input.artifactHash,
+    kind: "identityDescriptor",
+    subjectId: input.subjectId,
+    account: input.account.toLowerCase(),
     review: input.review ? buildGovernanceReviewMetadataDocument(input.review) : null,
     metadata: input.metadata ?? null
-  }, "metadataHash");
-}
-
-export function hashPlanPolicy(input: PlanAttestationHashInput): Hex {
-  return hashGovernanceCanonicalJson({
-    version: 1,
-    kind: "planAttestationPolicy",
-    planId: input.planId,
-    planHash: input.planHash,
-    artifactHash: input.artifactHash,
-    reviewPolicy: input.review ? buildGovernanceReviewPolicyDocument(input.review) : null,
-    policy: input.policy ?? null
-  }, "policyHash");
-}
-
-export function hashSupplierMetadata(input: SupplierAttestationHashInput): Hex {
-  return hashGovernanceCanonicalJson({
-    version: 1,
-    kind: "supplierAttestationMetadata",
-    supplierSubjectId: input.supplierSubjectId,
-    wallet: input.wallet.toLowerCase(),
-    review: input.review ? buildGovernanceReviewMetadataDocument(input.review) : null,
-    metadata: input.metadata ?? null
-  }, "metadataHash");
-}
-
-export function hashSupplierProfile(input: SupplierAttestationHashInput): Hex {
-  return hashGovernanceCanonicalJson({
-    version: 1,
-    kind: "supplierProfile",
-    supplierSubjectId: input.supplierSubjectId,
-    wallet: input.wallet.toLowerCase(),
-    profile: input.profile ?? input.metadata ?? null,
-    review: input.review ? publicReviewHashMaterial(input.review) : null
-  }, "profileHash");
-}
-
-export function hashSupplierCapability(input: SupplierAttestationHashInput): Hex {
-  return hashGovernanceCanonicalJson({
-    version: 1,
-    kind: "supplierCapability",
-    supplierSubjectId: input.supplierSubjectId,
-    wallet: input.wallet.toLowerCase(),
-    capability: input.capability ?? null
-  }, "capabilityHash");
-}
-
-export function hashSupplierReputation(input: SupplierAttestationHashInput): Hex {
-  return hashGovernanceCanonicalJson({
-    version: 1,
-    kind: "supplierReputation",
-    supplierSubjectId: input.supplierSubjectId,
-    wallet: input.wallet.toLowerCase(),
-    reputation: input.reputation ?? null,
-    risk: input.review ? publicReviewHashMaterial(input.review) : null
-  }, "reputationHash");
+  }, "descriptorHash");
 }
 
 export function hashRevocationReason(input: {

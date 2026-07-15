@@ -8,7 +8,7 @@ import {
 } from "./events.js";
 import type { ProjectionSnapshot } from "./projections.js";
 import { createEmptyProjectionSnapshot, rebuildOrderProjections } from "./projections.js";
-import { rebuildTrustProjections, type TrustProjectionSnapshot } from "./trust-projections.js";
+import { rebuildIdentityProjections } from "./identity-projections.js";
 import { createProjectionStore } from "../storage/factory.js";
 import {
   defaultProjectionScope,
@@ -37,7 +37,7 @@ export interface ChainEventNotificationProcessor {
 }
 
 export interface ProjectionAutomationProcessor {
-  processProjection(snapshot: ProjectionSnapshot, trustSnapshot?: TrustProjectionSnapshot): Promise<unknown>;
+  processProjection(snapshot: ProjectionSnapshot): Promise<unknown>;
 }
 
 export interface IndexerRebuildSummary {
@@ -51,7 +51,7 @@ export interface IndexerRebuildSummary {
   readonly removedLogsFiltered: boolean;
   readonly projectionRebuilt: boolean;
   readonly stateMachineOrderCount: number;
-  readonly trustPlanCount: number;
+  readonly identityBindingCount: number;
   readonly mismatchCount: number;
   readonly syncStatus: ProjectionSyncState["syncStatus"];
   readonly finalizedBlock: string;
@@ -165,7 +165,7 @@ export class IndexerService implements LifecycleService {
           fromBlock: deploymentBlock,
           toBlock: finalizedBlock,
           snapshot: createEmptyProjectionSnapshot(),
-          trustPlanCount: 0,
+          identityBindingCount: 0,
           eventCount: 0,
           activeEventCount: 0,
           removedEventCount: 0,
@@ -206,7 +206,7 @@ export class IndexerService implements LifecycleService {
       const replaySummary = buildActiveChainEventReplaySummary(events);
       const activeEvents = [...replaySummary.activeEvents];
       const lastEvent = sortChainEvents(activeEvents).at(-1);
-      const trustSnapshot = rebuildTrustProjections(events);
+      const identitySnapshot = rebuildIdentityProjections(events);
 
       const syncStateInput: Omit<ProjectionSyncState, "updatedAt"> = {
         ...this.#scope,
@@ -238,7 +238,7 @@ export class IndexerService implements LifecycleService {
         syncState: syncStateInput
       });
       await this.#processSignalNotifications(activeEvents);
-      await this.#processProjectionAutomation(snapshot, trustSnapshot);
+      await this.#processProjectionAutomation(snapshot);
 
       this.#cursor = {
         chainId: this.#config.network.chainId,
@@ -255,7 +255,7 @@ export class IndexerService implements LifecycleService {
         fromBlock: deploymentBlock,
         toBlock: finalizedBlock,
         snapshot,
-        trustPlanCount: Object.keys(trustSnapshot.plans).length,
+        identityBindingCount: Object.keys(identitySnapshot.bindings).length,
         eventCount: activeEvents.length,
         activeEventCount: replaySummary.activeEventCount,
         removedEventCount: replaySummary.removedEventCount,
@@ -267,7 +267,7 @@ export class IndexerService implements LifecycleService {
       this.#logger.info("indexer rebuilt projections from chain events", {
         eventCount: summary.eventCount,
         stateMachineOrderCount: summary.stateMachineOrderCount,
-        trustPlanCount: summary.trustPlanCount,
+        identityBindingCount: summary.identityBindingCount,
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
       });
@@ -312,8 +312,7 @@ export class IndexerService implements LifecycleService {
         toBlock: finalizedBlock,
         newEventCount: 0
       });
-      const trustSnapshot = await durableStore.getTrustSnapshot();
-      await this.#processProjectionAutomation(result.snapshot, trustSnapshot);
+      await this.#processProjectionAutomation(result.snapshot);
       return result;
     }
 
@@ -337,9 +336,9 @@ export class IndexerService implements LifecycleService {
       const activeEvents = [...replaySummary.activeEvents];
       const lastEvent = sortChainEvents(activeEvents).at(-1);
       const snapshot = rebuildOrderProjections(allEvents);
-      const trustSnapshot = rebuildTrustProjections(allEvents);
+      const identitySnapshot = rebuildIdentityProjections(allEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
-      await durableStore.saveSnapshot(this.#scope, "trust", trustSnapshot);
+      await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
       const syncState = await durableStore.saveSyncState({
         ...this.#scope,
         syncStatus: "indexed",
@@ -363,14 +362,13 @@ export class IndexerService implements LifecycleService {
       });
       return {
         snapshot,
-        trustSnapshot,
         summary: summaryFromSnapshot({
           chainId: this.#config.network.chainId,
           deploymentBlock,
           fromBlock,
           toBlock: finalizedBlock,
           snapshot,
-          trustPlanCount: Object.keys(trustSnapshot.plans).length,
+          identityBindingCount: Object.keys(identitySnapshot.bindings).length,
           eventCount: activeEvents.length,
           activeEventCount: replaySummary.activeEventCount,
           removedEventCount: replaySummary.removedEventCount,
@@ -389,7 +387,7 @@ export class IndexerService implements LifecycleService {
     };
     await this.#saveCursor();
     await this.#processSignalNotifications(activeNewEvents);
-    await this.#processProjectionAutomation(result.snapshot, result.trustSnapshot);
+    await this.#processProjectionAutomation(result.snapshot);
 
     this.#logger.info("indexer incrementally refreshed projections from chain events", {
       fromBlock: fromBlock.toString(),
@@ -456,7 +454,7 @@ export class IndexerService implements LifecycleService {
     readonly newEventCount: number;
   }): Promise<IndexerRebuildResult> {
     const snapshot = await this.#store.getOrderSnapshot?.() ?? createEmptyProjectionSnapshot();
-    const trustSnapshot = await this.#store.getTrustSnapshot();
+    const identitySnapshot = await this.#store.getIdentitySnapshot();
     const existing = await this.#store.getSyncState(this.#scope);
     const syncState = await this.#store.saveSyncState({
       ...this.#scope,
@@ -487,7 +485,7 @@ export class IndexerService implements LifecycleService {
         fromBlock: input.fromBlock,
         toBlock: input.toBlock,
         snapshot,
-        trustPlanCount: Object.keys(trustSnapshot.plans).length,
+        identityBindingCount: Object.keys(identitySnapshot.bindings).length,
         eventCount: syncState.eventCount,
         activeEventCount: syncState.eventCount,
         removedEventCount: 0,
@@ -512,14 +510,13 @@ export class IndexerService implements LifecycleService {
   }
 
   async #processProjectionAutomation(
-    snapshot: ProjectionSnapshot,
-    trustSnapshot?: TrustProjectionSnapshot
+    snapshot: ProjectionSnapshot
   ): Promise<void> {
     if (!this.#projectionAutomationProcessor) {
       return;
     }
     try {
-      await this.#projectionAutomationProcessor.processProjection(snapshot, trustSnapshot);
+      await this.#projectionAutomationProcessor.processProjection(snapshot);
     } catch (error) {
       this.#logger.warn("projection automation processor failed after indexer projection commit", {
         message: error instanceof Error ? redactErrorMessage(error) : "unknown projection automation error"
@@ -608,7 +605,7 @@ function summaryFromSnapshot(input: {
   readonly fromBlock: bigint;
   readonly toBlock: bigint;
   readonly snapshot: ProjectionSnapshot;
-  readonly trustPlanCount: number;
+  readonly identityBindingCount: number;
   readonly eventCount: number;
   readonly activeEventCount: number;
   readonly removedEventCount: number;
@@ -627,7 +624,7 @@ function summaryFromSnapshot(input: {
     removedLogsFiltered: input.removedLogsFiltered,
     projectionRebuilt: input.snapshot.rebuildable,
     stateMachineOrderCount: Object.keys(input.snapshot.stateMachineOrders).length,
-    trustPlanCount: input.trustPlanCount,
+    identityBindingCount: input.identityBindingCount,
     mismatchCount: input.mismatchCount,
     syncStatus: input.syncState.syncStatus,
     finalizedBlock: input.syncState.finalizedBlock?.toString() ?? input.toBlock.toString(),
