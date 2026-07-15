@@ -126,7 +126,6 @@ export function buildOperatorOpsStatus(diagnostics: Record<string, unknown>): Re
     evidenceStorage: diagnostics.evidenceStorage ?? {},
     storeMetadata: diagnostics.storeMetadata ?? {},
     operatorRoles: diagnostics.operatorRoles ?? {},
-    roleBoundaries: buildOperatorRoleBoundaryDiagnostics(diagnostics),
     recoveryPolicy: {
       sourceOfTruth: "contracts-and-chain-events",
       actionsAreNonAuthoritative: true,
@@ -180,15 +179,12 @@ export function buildOperatorOpsSummary(diagnostics: Record<string, unknown>): R
     },
     evidenceStorage: {
       adapterKind: evidenceStorage?.adapterKind ?? "unknown",
-      readiness: evidenceStorage?.readiness ?? "unknown",
-      credentialsExposed: false
+      readiness: evidenceStorage?.readiness ?? "unknown"
     },
     storeMetadata: {
       readiness: storeMetadata?.readiness ?? "unknown",
-      stores: storeMetadata?.stores ?? {},
-      credentialsExposed: false
+      stores: storeMetadata?.stores ?? {}
     },
-    roleBoundaries: status.roleBoundaries ?? {},
     recoveryPolicy: status.recoveryPolicy ?? {}
   });
 }
@@ -337,10 +333,8 @@ async function buildGovernanceTxDiagnostics(
     };
   }
 
-  const logs = [
-    ...(await store.listPlanAttestationLogs()),
-    ...(await store.listSupplierAttestationLogs())
-  ].sort(compareGovernanceUpdatedDesc);
+  const logs = [...(await store.listIdentityTxLogs())]
+    .sort(compareGovernanceUpdatedDesc);
 
   return {
     configured: true,
@@ -367,8 +361,7 @@ function buildEvidenceStorageDiagnostics(input: {
     return {
       adapterKind: "unknown",
       productionSafe: false,
-      readiness: "unknown" satisfies EvidenceReadiness,
-      credentialsExposed: false
+      readiness: "unknown" satisfies EvidenceReadiness
     };
   }
 
@@ -379,8 +372,7 @@ function buildEvidenceStorageDiagnostics(input: {
   return {
     adapterKind: input.source.adapterKind,
     productionSafe: input.source.productionSafe,
-    readiness,
-    credentialsExposed: false
+    readiness
   };
 }
 
@@ -407,7 +399,6 @@ function buildStoreMetadataDiagnostics(input: {
       : "ready";
   return {
     readiness,
-    credentialsExposed: false,
     nonAuthoritative: true,
     sourceOfTruth: "contracts-and-chain-events",
     stores
@@ -423,7 +414,6 @@ function storeMetadataStoreStatus(
   readonly kind: StoreMetadataKind;
   readonly durable: boolean;
   readonly readiness: StoreMetadataReadiness;
-  readonly credentialsExposed: false;
   readonly representedBy?: StoreMetadataRepresentation;
 } {
   const kind = storeMetadataKind(source);
@@ -437,7 +427,6 @@ function storeMetadataStoreStatus(
       : nonLocalRuntime && !durable
         ? "degraded"
         : "ready",
-    credentialsExposed: false,
     ...(representedBy ? { representedBy } : {})
   };
 }
@@ -594,30 +583,6 @@ function operatorRuntimeDiagnostics(diagnostics: JsonRecord): JsonRecord {
     environment: diagnostics.environment ?? null,
     chainId: network?.chainId ?? null,
     contracts: network?.contracts ?? {}
-  };
-}
-
-function buildOperatorRoleBoundaryDiagnostics(diagnostics: JsonRecord): JsonRecord {
-  const relayer = recordOf(diagnostics.relayer);
-  const governance = recordOf(diagnostics.governance);
-  return {
-    sourceOfTruth: "contracts-and-chain-events",
-    backendBusinessSigning: "forbidden",
-    relayer: {
-      transactionSubmission: relayer?.configured === true ? "configured" : "not_configured",
-      businessSignatures: "forbidden",
-      privateValuesExposed: false
-    },
-    governance: {
-      txBroadcast: governance?.configured === true ? "configured" : "not_configured",
-      reviewAuthority: "admin_headers_v1",
-      privateValuesExposed: false
-    },
-    configuredRoles: diagnostics.operatorRoles ?? {},
-    rawCalldataExposed: false,
-    fullSignaturesExposed: false,
-    evidencePlaintextExposed: false,
-    credentialValuesExposed: false
   };
 }
 

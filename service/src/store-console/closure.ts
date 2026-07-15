@@ -1,10 +1,13 @@
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
-import { createGovernanceService, type GovernancePrincipal } from "../governance/index.js";
+import {
+  createGovernanceService,
+  type GovernancePrincipal,
+} from "../governance/index.js";
 import type { ProductOrderApiDTO, ProductService } from "../product/service.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import {
   createStoreSupplierService,
-  InMemoryStoreSupplierMetadataStore
+  InMemoryStoreSupplierMetadataStore,
 } from "../store-suppliers/service.js";
 import type { Address, Hex } from "../shared/types.js";
 import {
@@ -12,21 +15,26 @@ import {
   storeSessionFromAccess,
   type StoreAccessState,
   type StoreCapability,
-  type StoreSessionDTO
+  type StoreSessionDTO,
 } from "./access.js";
 import type { StoreAuditStore } from "./audit.js";
 import {
   createStoreDockingService,
-  MemoryStoreDockingSessionStore
+  MemoryStoreDockingSessionStore,
 } from "./docking.js";
 import type { StoreRuntimeService } from "./runtime.js";
 import type { StoreConsoleService } from "./service.js";
 import {
   createStoreZhixuDraftWorkflowService,
-  MemoryStoreZhixuDraftStore
+  MemoryStoreZhixuDraftStore,
 } from "./zhixu-drafts.js";
 
-export type StoreClosureCheckStatus = "passed" | "blocked" | "skipped" | "failed" | "warning";
+export type StoreClosureCheckStatus =
+  | "passed"
+  | "blocked"
+  | "skipped"
+  | "failed"
+  | "warning";
 export type StoreClosureEvidenceClassification =
   | "dry_run"
   | "projection"
@@ -40,7 +48,9 @@ export interface StoreClosureCheckDTO {
   readonly status: StoreClosureCheckStatus;
   readonly classification: StoreClosureEvidenceClassification;
   readonly nonAuthoritative: true;
-  readonly sourceOfTruth: "contracts-and-chain-events" | "store-workflow-metadata";
+  readonly sourceOfTruth:
+    | "contracts-and-chain-events"
+    | "store-workflow-metadata";
   readonly requiredCapabilities?: readonly StoreCapability[];
   readonly missingCapabilities?: readonly StoreCapability[];
   readonly details?: Readonly<Record<string, unknown>>;
@@ -59,12 +69,10 @@ export interface StoreClosureDryRunSummaryDTO {
   readonly prototypeReasons: readonly string[];
   readonly session: StoreSessionDTO;
   readonly authorityBoundaries: {
-    readonly storeMetadataCreatesTrust: false;
-    readonly supplierCapabilityTagsCreateTrust: false;
     readonly dockingDraftPublishesZhixu: false;
     readonly auditCreatesProtocolFacts: false;
     readonly backendCanCreateBusinessSignatures: false;
-    readonly trustSourceOfTruth: "ZhixuTrustRegistry events and UVPStateMachine events";
+    readonly trustSourceOfTruth: "UVPIdentityRegistry events and UVPStateMachine events";
   };
   readonly checks: readonly StoreClosureCheckDTO[];
   readonly diagnostics: {
@@ -116,11 +124,13 @@ spec:
 
 const CLOSURE_SUPPLIER_SUBJECT_ID =
   "0x0000000000000000000000000000000000000000000000000000000000011601" as Hex;
-const CLOSURE_SUPPLIER_WALLET = "0x1160000000000000000000000000000000000001" as Address;
-const CLOSURE_REGISTRY_ADDRESS = "0x1160000000000000000000000000000000000011" as Address;
+const CLOSURE_SUPPLIER_WALLET =
+  "0x1160000000000000000000000000000000000001" as Address;
+const CLOSURE_REGISTRY_ADDRESS =
+  "0x1160000000000000000000000000000000000011" as Address;
 
 export async function buildStoreClosureDryRunSummary(
-  options: StoreClosureDryRunOptions
+  options: StoreClosureDryRunOptions,
 ): Promise<StoreClosureDryRunSummaryDTO> {
   const now = options.now ?? (() => new Date());
   const generatedAt = now().toISOString();
@@ -128,12 +138,17 @@ export async function buildStoreClosureDryRunSummary(
   const checks: StoreClosureCheckDTO[] = [];
 
   checks.push(sessionCheck(options.access, diagnostics));
-  checks.push(await runCheck({
-    key: "search_detail",
-    label: "Store search/detail projection",
-    classification: "projection",
-    sourceOfTruth: "contracts-and-chain-events"
-  }, () => checkSearchDetail(options.storeConsoleService)));
+  checks.push(
+    await runCheck(
+      {
+        key: "search_detail",
+        label: "Store search/detail projection",
+        classification: "projection",
+        sourceOfTruth: "contracts-and-chain-events",
+      },
+      () => checkSearchDetail(options.storeConsoleService),
+    ),
+  );
   checks.push(await checkDraftImportCompileReview(options));
   checks.push(await checkSupplierTagAuditReadback(options));
   checks.push(await checkDockingCreateValidateSave(options));
@@ -143,7 +158,7 @@ export async function buildStoreClosureDryRunSummary(
   const prototypeReasons = prototypeReasonsFor({
     access: options.access,
     checks,
-    diagnostics
+    diagnostics,
   });
   return {
     mode: "store_console_closure_dry_run",
@@ -154,38 +169,47 @@ export async function buildStoreClosureDryRunSummary(
     sourceOfTruth: "contracts-and-chain-events",
     authorityNotice:
       "Store metadata, audit rows, dry-run drafts, and docking sessions are workflow/projection evidence only; plan, supplier, order, signal, hook, and proof truth remains on chain.",
-    releaseClassification: prototypeReasons.length === 0 ? "verified" : "prototype",
+    releaseClassification:
+      prototypeReasons.length === 0 ? "verified" : "prototype",
     prototypeReasons,
     session: storeSessionFromAccess(options.access),
     authorityBoundaries: {
-      storeMetadataCreatesTrust: false,
-      supplierCapabilityTagsCreateTrust: false,
       dockingDraftPublishesZhixu: false,
       auditCreatesProtocolFacts: false,
       backendCanCreateBusinessSignatures: false,
-      trustSourceOfTruth: "ZhixuTrustRegistry events and UVPStateMachine events"
+      trustSourceOfTruth:
+        "UVPIdentityRegistry events and UVPStateMachine events",
     },
     checks,
     diagnostics: {
       runtimeEnvironment: runtimeEnvironmentFromDiagnostics(diagnostics),
       evidenceStorage: recordOf(diagnostics.evidenceStorage) ?? {},
       storeMetadata: recordOf(diagnostics.storeMetadata) ?? {},
-      indexer: recordOf(diagnostics.indexer) ?? {}
-    }
+      indexer: recordOf(diagnostics.indexer) ?? {},
+    },
   };
 }
 
-function sessionCheck(access: StoreAccessState, diagnostics: Record<string, unknown>): StoreClosureCheckDTO {
+function sessionCheck(
+  access: StoreAccessState,
+  diagnostics: Record<string, unknown>,
+): StoreClosureCheckDTO {
   const storeAuth = recordOf(diagnostics.storeAuth);
   const externalIdentityEvidence = storeAuth?.externalIdentityEvidence === true;
-  const evidenceClassification = typeof storeAuth?.evidenceClassification === "string"
-    ? storeAuth.evidenceClassification
-    : access.authMode === "jwt" ? "not_verified" : "prototype";
+  const evidenceClassification =
+    typeof storeAuth?.evidenceClassification === "string"
+      ? storeAuth.evidenceClassification
+      : access.authMode === "jwt"
+        ? "not_verified"
+        : "prototype";
   return {
     key: "session",
     label: "Store operator session",
     status: access.principalId ? "passed" : "blocked",
-    classification: access.authMode === "jwt" && externalIdentityEvidence ? "external_identity" : "prototype",
+    classification:
+      access.authMode === "jwt" && externalIdentityEvidence
+        ? "external_identity"
+        : "prototype",
     nonAuthoritative: true,
     sourceOfTruth: "store-workflow-metadata",
     details: {
@@ -196,25 +220,40 @@ function sessionCheck(access: StoreAccessState, diagnostics: Record<string, unkn
       jwtIdentityEvidence: access.authMode === "jwt",
       externalOidcEvidence: externalIdentityEvidence,
       storeAuthEvidenceClassification: evidenceClassification,
-      storeAuthKeySource: typeof storeAuth?.keySource === "string" ? storeAuth.keySource : "missing",
-      externalOidcEvidenceNote: "The dry-run cannot prove a non-local issuer/JWKS endpoint; staging evidence must validate Store auth config.",
-      localPilotPrototype: access.authMode !== "jwt" || !externalIdentityEvidence
+      storeAuthKeySource:
+        typeof storeAuth?.keySource === "string"
+          ? storeAuth.keySource
+          : "missing",
+      externalOidcEvidenceNote:
+        "The dry-run cannot prove a non-local issuer/JWKS endpoint; staging evidence must validate Store auth config.",
+      localPilotPrototype:
+        access.authMode !== "jwt" || !externalIdentityEvidence,
     },
     ...(access.principalId
       ? {}
-      : { message: access.authenticationFailure?.message ?? "Store identity is missing" })
+      : {
+          message:
+            access.authenticationFailure?.message ??
+            "Store identity is missing",
+        }),
   };
 }
 
 async function checkSearchDetail(
-  storeConsoleService: StoreConsoleService
+  storeConsoleService: StoreConsoleService,
 ): Promise<StoreClosureCheckDTO> {
   const [list, search] = await Promise.all([
-    storeConsoleService.listZhixus({ lifecycle: "all", review: "all", trust: "all" }),
-    storeConsoleService.search({ query: "", type: "all", limit: 5 })
+    storeConsoleService.listZhixus({
+      lifecycle: "all",
+      review: "all",
+      publication: "all",
+    }),
+    storeConsoleService.search({ query: "", type: "all", limit: 5 }),
   ]);
   const first = list.zhixus[0];
-  const detail = first ? await storeConsoleService.getZhixu(first.zhixuId) : undefined;
+  const detail = first
+    ? await storeConsoleService.getZhixu(first.zhixuId)
+    : undefined;
   if (!first) {
     return check({
       key: "search_detail",
@@ -225,8 +264,8 @@ async function checkSearchDetail(
       message: "No zhixu projection is available for detail readback.",
       details: {
         resultCount: search.resultCount,
-        totalZhixus: list.summary.totalZhixus
-      }
+        totalZhixus: list.summary.totalZhixus,
+      },
     });
   }
   return check({
@@ -240,353 +279,425 @@ async function checkSearchDetail(
       totalZhixus: list.summary.totalZhixus,
       detailZhixuId: first.zhixuId,
       detailFound: Boolean(detail),
-      chainAttestationStatus: first.chainAttestation.status
-    }
+      planPublicationStatus: first.planPublication.status,
+    },
   });
 }
 
 async function checkDraftImportCompileReview(
-  options: StoreClosureDryRunOptions
+  options: StoreClosureDryRunOptions,
 ): Promise<StoreClosureCheckDTO> {
   const required = [
     "store.draft.import",
     "store.draft.compile",
     "store.draft.schema.save",
-    "store.draft.review"
+    "store.draft.review",
   ] as const satisfies readonly StoreCapability[];
   const missing = missingCapabilities(options.access, required);
   if (missing.length > 0) {
-    return blockedCapabilityCheck("draft_import_compile_review", "Draft import/compile/review dry-run", required, missing);
+    return blockedCapabilityCheck(
+      "draft_import_compile_review",
+      "Draft import/compile/review dry-run",
+      required,
+      missing,
+    );
   }
 
-  return runCheck({
-    key: "draft_import_compile_review",
-    label: "Draft import/compile/review dry-run",
-    classification: "workflow_metadata",
-    sourceOfTruth: "store-workflow-metadata",
-    requiredCapabilities: required
-  }, async () => {
-    const draftWorkflow = createStoreZhixuDraftWorkflowService({
-      draftStore: new MemoryStoreZhixuDraftStore(),
-      governanceService: createGovernanceService({
-        ...(options.now ? { now: options.now } : {})
-      }),
-      projectionStore: options.projectionStore,
-      ...(options.now ? { now: options.now } : {}),
-      draftIdFactory: () => "zhixu_draft_closure_dry_run"
-    });
-    const imported = await draftWorkflow.importDraft({
-      sourceKind: "zhixu_yaml",
-      content: CLOSURE_DRY_RUN_ZHIXU_YAML,
-      title: "Store closure dry-run draft",
-      maintainer: "Store Console dry-run"
-    });
-    const compiled = await draftWorkflow.compilePreview(imported.draftId);
-    if (!compiled.compilePreview) {
-      return check({
-        key: "draft_import_compile_review",
-        label: "Draft import/compile/review dry-run",
-        status: "failed",
-        classification: "workflow_metadata",
-        sourceOfTruth: "store-workflow-metadata",
-        requiredCapabilities: required,
-        message: "Compile preview did not produce a deterministic artifact.",
-        details: {
-          draftId: imported.draftId,
-          status: compiled.status,
-          errorCount: compiled.errors.length
-        }
-      });
-    }
-    const productSchema = await draftWorkflow.getProductSchema(imported.draftId);
-    const explicitSchema = productSchema ? explicitProductSchema(productSchema) : undefined;
-    const validation = explicitSchema
-      ? (await draftWorkflow.updateProductSchema(imported.draftId, { productSchema: explicitSchema })).validation
-      : await draftWorkflow.validateProductSchema(imported.draftId);
-    const reviewed = validation.ok
-      ? await draftWorkflow.submitReview(
-          imported.draftId,
-          {
-            status: "approved_for_broadcast",
-            publicSummary: "Store closure dry-run review only; no attestation request was broadcast."
-          },
-          governancePrincipalFromAccess(options.access)
-        )
-      : undefined;
-
-    return check({
+  return runCheck(
+    {
       key: "draft_import_compile_review",
       label: "Draft import/compile/review dry-run",
-      status: validation.ok && reviewed ? "passed" : "warning",
       classification: "workflow_metadata",
       sourceOfTruth: "store-workflow-metadata",
       requiredCapabilities: required,
-      details: {
-        draftId: imported.draftId,
-        draftStatus: reviewed?.draft.status ?? compiled.status,
-        planId: compiled.compilePreview.planId,
-        planHash: compiled.compilePreview.planHash,
-        artifactHash: compiled.compilePreview.artifactHash,
-        schemaValidationOk: validation.ok,
-        reviewId: reviewed?.review.reviewId,
-        nonPublishing: true,
-        attestationRequested: false
+    },
+    async () => {
+      const draftWorkflow = createStoreZhixuDraftWorkflowService({
+        draftStore: new MemoryStoreZhixuDraftStore(),
+        governanceService: createGovernanceService({
+          ...(options.now ? { now: options.now } : {}),
+        }),
+        projectionStore: options.projectionStore,
+        ...(options.now ? { now: options.now } : {}),
+        draftIdFactory: () => "zhixu_draft_closure_dry_run",
+      });
+      const imported = await draftWorkflow.importDraft({
+        sourceKind: "zhixu_yaml",
+        content: CLOSURE_DRY_RUN_ZHIXU_YAML,
+        title: "Store closure dry-run draft",
+        maintainer: "Store Console dry-run",
+      });
+      const compiled = await draftWorkflow.compilePreview(imported.draftId);
+      if (!compiled.compilePreview) {
+        return check({
+          key: "draft_import_compile_review",
+          label: "Draft import/compile/review dry-run",
+          status: "failed",
+          classification: "workflow_metadata",
+          sourceOfTruth: "store-workflow-metadata",
+          requiredCapabilities: required,
+          message: "Compile preview did not produce a deterministic artifact.",
+          details: {
+            draftId: imported.draftId,
+            status: compiled.status,
+            errorCount: compiled.errors.length,
+          },
+        });
       }
-    });
-  });
+      const productSchema = await draftWorkflow.getProductSchema(
+        imported.draftId,
+      );
+      const explicitSchema = productSchema
+        ? explicitProductSchema(productSchema)
+        : undefined;
+      const validation = explicitSchema
+        ? (
+            await draftWorkflow.updateProductSchema(imported.draftId, {
+              productSchema: explicitSchema,
+            })
+          ).validation
+        : await draftWorkflow.validateProductSchema(imported.draftId);
+      const reviewed = validation.ok
+        ? await draftWorkflow.submitReview(
+            imported.draftId,
+            {
+              status: "approved_for_broadcast",
+              publicSummary: "Store closure dry-run review.",
+            },
+            governancePrincipalFromAccess(options.access),
+          )
+        : undefined;
+
+      return check({
+        key: "draft_import_compile_review",
+        label: "Draft import/compile/review dry-run",
+        status: validation.ok && reviewed ? "passed" : "warning",
+        classification: "workflow_metadata",
+        sourceOfTruth: "store-workflow-metadata",
+        requiredCapabilities: required,
+        details: {
+          draftId: imported.draftId,
+          draftStatus: reviewed?.draft.status ?? compiled.status,
+          planId: compiled.compilePreview.planId,
+          planHash: compiled.compilePreview.planHash,
+          artifactHash: compiled.compilePreview.artifactHash,
+          schemaValidationOk: validation.ok,
+          reviewId: reviewed?.review.reviewId,
+          nonPublishing: true,
+        },
+      });
+    },
+  );
 }
 
 async function checkSupplierTagAuditReadback(
-  options: StoreClosureDryRunOptions
+  options: StoreClosureDryRunOptions,
 ): Promise<StoreClosureCheckDTO> {
   const required = [
     "store.supplier.create",
     "store.supplier.review",
     "store.supplier.tags.update",
-    "store.audit.read"
+    "store.audit.read",
   ] as const satisfies readonly StoreCapability[];
   const missing = missingCapabilities(options.access, required);
   if (missing.length > 0) {
-    return blockedCapabilityCheck("supplier_tag_audit_readback", "Supplier capability tag audit readback", required, missing);
+    return blockedCapabilityCheck(
+      "supplier_tag_audit_readback",
+      "Supplier capability tag audit readback",
+      required,
+      missing,
+    );
   }
 
-  return runCheck({
-    key: "supplier_tag_audit_readback",
-    label: "Supplier capability tag audit readback",
-    classification: "workflow_metadata",
-    sourceOfTruth: "store-workflow-metadata",
-    requiredCapabilities: required
-  }, async () => {
-    const metadataStore = new InMemoryStoreSupplierMetadataStore();
-    const supplierService = createStoreSupplierService({
-      productService: options.productService,
-      store: options.projectionStore,
-      governanceService: createGovernanceService({
-        ...(options.now ? { now: options.now } : {})
-      }),
-      metadataStore,
-      ...(options.now ? { now: options.now } : {})
-    });
-    const principal = {
-      operatorId: options.access.principalId ?? "store-closure-dry-run",
-      role: options.access.roles[0] ?? options.access.level
-    };
-    await supplierService.createSupplier({
-      supplierId: "supplier-closure-dry-run",
-      supplierSubjectId: CLOSURE_SUPPLIER_SUBJECT_ID,
-      displayName: "Closure Dry-run Supplier",
-      wallet: CLOSURE_SUPPLIER_WALLET,
-      capabilityTags: ["logistics"],
-      supportedRoleSlotIds: ["delivery"],
-      supportedStageIds: ["shipping"],
-      registryAddresses: [CLOSURE_REGISTRY_ADDRESS]
-    }, principal);
-    await supplierService.reviewSupplier("supplier-closure-dry-run", {
-      reviewStatus: "submitted",
-      capabilityTags: ["inspection", "logistics"],
-      supportedRoleSlotIds: ["customs-broker", "logistics-operator"],
-      supportedStageIds: ["export.customs"],
-      publicSummary: "Closure dry-run tag update only."
-    }, principal);
-    const auditReadback = await supplierService.listSupplierAudits("supplier-closure-dry-run");
-    const tagAudit = auditReadback.records.find((record) => record.action === "tags_updated");
-    return check({
+  return runCheck(
+    {
       key: "supplier_tag_audit_readback",
       label: "Supplier capability tag audit readback",
-      status: tagAudit ? "passed" : "failed",
       classification: "workflow_metadata",
       sourceOfTruth: "store-workflow-metadata",
       requiredCapabilities: required,
-      details: {
-        supplierId: "supplier-closure-dry-run",
-        auditRecordCount: auditReadback.records.length,
-        tagAuditFound: Boolean(tagAudit),
-        nonAuthoritative: auditReadback.nonAuthoritative,
-        trustSourceOfTruth: auditReadback.trustSourceOfTruth,
-        supplierCapabilityTagsCreateTrust: false
-      }
-    });
-  });
+    },
+    async () => {
+      const metadataStore = new InMemoryStoreSupplierMetadataStore();
+      const supplierService = createStoreSupplierService({
+        productService: options.productService,
+        store: options.projectionStore,
+        governanceService: createGovernanceService({
+          ...(options.now ? { now: options.now } : {}),
+        }),
+        metadataStore,
+        ...(options.now ? { now: options.now } : {}),
+      });
+      const principal = {
+        operatorId: options.access.principalId ?? "store-closure-dry-run",
+        role: options.access.roles[0] ?? options.access.level,
+      };
+      await supplierService.createSupplier(
+        {
+          supplierId: "supplier-closure-dry-run",
+          supplierSubjectId: CLOSURE_SUPPLIER_SUBJECT_ID,
+          displayName: "Closure Dry-run Supplier",
+          wallet: CLOSURE_SUPPLIER_WALLET,
+          capabilityTags: ["logistics"],
+          supportedRoleSlotIds: ["delivery"],
+          supportedStageIds: ["shipping"],
+          registryAddresses: [CLOSURE_REGISTRY_ADDRESS],
+        },
+        principal,
+      );
+      await supplierService.reviewSupplier(
+        "supplier-closure-dry-run",
+        {
+          reviewStatus: "submitted",
+          capabilityTags: ["inspection", "logistics"],
+          supportedRoleSlotIds: ["customs-broker", "logistics-operator"],
+          supportedStageIds: ["export.customs"],
+          publicSummary: "Closure dry-run tag update only.",
+        },
+        principal,
+      );
+      const auditReadback = await supplierService.listSupplierAudits(
+        "supplier-closure-dry-run",
+      );
+      const tagAudit = auditReadback.records.find(
+        (record) => record.action === "tags_updated",
+      );
+      return check({
+        key: "supplier_tag_audit_readback",
+        label: "Supplier capability tag audit readback",
+        status: tagAudit ? "passed" : "failed",
+        classification: "workflow_metadata",
+        sourceOfTruth: "store-workflow-metadata",
+        requiredCapabilities: required,
+        details: {
+          supplierId: "supplier-closure-dry-run",
+          auditRecordCount: auditReadback.records.length,
+          tagAuditFound: Boolean(tagAudit),
+          nonAuthoritative: auditReadback.nonAuthoritative,
+          identitySourceOfTruth: auditReadback.identitySourceOfTruth,
+        },
+      });
+    },
+  );
 }
 
 async function checkDockingCreateValidateSave(
-  options: StoreClosureDryRunOptions
+  options: StoreClosureDryRunOptions,
 ): Promise<StoreClosureCheckDTO> {
   const required = [
     "store.docking.create",
     "store.docking.validate",
-    "store.docking.save"
+    "store.docking.save",
   ] as const satisfies readonly StoreCapability[];
   const missing = missingCapabilities(options.access, required);
   if (missing.length > 0) {
-    return blockedCapabilityCheck("docking_create_validate_save", "Docking sandbox create/validate/save", required, missing);
+    return blockedCapabilityCheck(
+      "docking_create_validate_save",
+      "Docking sandbox create/validate/save",
+      required,
+      missing,
+    );
   }
 
-  return runCheck({
-    key: "docking_create_validate_save",
-    label: "Docking sandbox create/validate/save",
-    classification: "workflow_metadata",
-    sourceOfTruth: "store-workflow-metadata",
-    requiredCapabilities: required
-  }, async () => {
-    const list = await options.storeConsoleService.listZhixus({ lifecycle: "all", review: "all", trust: "attested" });
-    const source = list.zhixus.find((zhixu) => zhixu.chainAttestation.status === "attested");
-    if (!source) {
-      return check({
-        key: "docking_create_validate_save",
-        label: "Docking sandbox create/validate/save",
-        status: "skipped",
-        classification: "workflow_metadata",
-        sourceOfTruth: "store-workflow-metadata",
-        requiredCapabilities: required,
-        message: "No attested zhixu projection is available for docking sandbox validation.",
-        details: {
-          totalZhixus: list.summary.totalZhixus,
-          nonPublishing: true
-        }
-      });
-    }
-    const docking = createStoreDockingService({
-      productService: options.productService,
-      sessionStore: new MemoryStoreDockingSessionStore(),
-      ...(options.now ? { now: options.now } : {})
-    });
-    const created = await docking.createSession({
-      sourceZhixuId: source.zhixuId,
-      targetZhixuId: source.zhixuId
-    });
-    const candidate = created.candidateMappings[0];
-    if (!candidate) {
-      return check({
-        key: "docking_create_validate_save",
-        label: "Docking sandbox create/validate/save",
-        status: "warning",
-        classification: "workflow_metadata",
-        sourceOfTruth: "store-workflow-metadata",
-        requiredCapabilities: required,
-        message: "Docking session was created, but no candidate signal mapping was available.",
-        details: {
-          sessionId: created.sessionId,
-          validationOk: created.validation.ok,
-          nonPublishing: created.validation.nonPublishing
-        }
-      });
-    }
-    const draftSignalMap = [{
-      sourceSignalId: candidate.sourceSignal.signalId,
-      targetSignalId: candidate.targetSignal.signalId,
-      note: "closure dry-run candidate"
-    }];
-    const validated = await docking.validateSession(created.sessionId, draftSignalMap);
-    const saved = await docking.saveDraftMap(created.sessionId, draftSignalMap);
-    return check({
+  return runCheck(
+    {
       key: "docking_create_validate_save",
       label: "Docking sandbox create/validate/save",
-      status: saved.validation.ok ? "passed" : "warning",
       classification: "workflow_metadata",
       sourceOfTruth: "store-workflow-metadata",
       requiredCapabilities: required,
-      details: {
-        sessionId: created.sessionId,
-        sourceZhixuId: source.zhixuId,
-        candidateMappingCount: created.candidateMappings.length,
-        validateStatus: validated.status,
-        saveStatus: saved.status,
-        savedDraftEntries: saved.draftSignalMap.length,
-        validationOk: saved.validation.ok,
-        nonPublishing: saved.validation.nonPublishing,
-        createsOrder: false,
-        createsSignalAuthorization: false
+    },
+    async () => {
+      const list = await options.storeConsoleService.listZhixus({
+        lifecycle: "all",
+        review: "all",
+        publication: "published",
+      });
+      const source = list.zhixus.find(
+        (zhixu) => zhixu.planPublication.status === "published",
+      );
+      if (!source) {
+        return check({
+          key: "docking_create_validate_save",
+          label: "Docking sandbox create/validate/save",
+          status: "skipped",
+          classification: "workflow_metadata",
+          sourceOfTruth: "store-workflow-metadata",
+          requiredCapabilities: required,
+          message:
+            "No published zhixu projection is available for docking sandbox validation.",
+          details: {
+            totalZhixus: list.summary.totalZhixus,
+            nonPublishing: true,
+          },
+        });
       }
-    });
-  });
+      const docking = createStoreDockingService({
+        productService: options.productService,
+        sessionStore: new MemoryStoreDockingSessionStore(),
+        ...(options.now ? { now: options.now } : {}),
+      });
+      const created = await docking.createSession({
+        sourceZhixuId: source.zhixuId,
+        targetZhixuId: source.zhixuId,
+      });
+      const candidate = created.candidateMappings[0];
+      if (!candidate) {
+        return check({
+          key: "docking_create_validate_save",
+          label: "Docking sandbox create/validate/save",
+          status: "warning",
+          classification: "workflow_metadata",
+          sourceOfTruth: "store-workflow-metadata",
+          requiredCapabilities: required,
+          message:
+            "Docking session was created, but no candidate signal mapping was available.",
+          details: {
+            sessionId: created.sessionId,
+            validationOk: created.validation.ok,
+            nonPublishing: created.validation.nonPublishing,
+          },
+        });
+      }
+      const draftSignalMap = [
+        {
+          sourceSignalId: candidate.sourceSignal.signalId,
+          targetSignalId: candidate.targetSignal.signalId,
+          note: "closure dry-run candidate",
+        },
+      ];
+      const validated = await docking.validateSession(
+        created.sessionId,
+        draftSignalMap,
+      );
+      const saved = await docking.saveDraftMap(
+        created.sessionId,
+        draftSignalMap,
+      );
+      return check({
+        key: "docking_create_validate_save",
+        label: "Docking sandbox create/validate/save",
+        status: saved.validation.ok ? "passed" : "warning",
+        classification: "workflow_metadata",
+        sourceOfTruth: "store-workflow-metadata",
+        requiredCapabilities: required,
+        details: {
+          sessionId: created.sessionId,
+          sourceZhixuId: source.zhixuId,
+          candidateMappingCount: created.candidateMappings.length,
+          validateStatus: validated.status,
+          saveStatus: saved.status,
+          savedDraftEntries: saved.draftSignalMap.length,
+          validationOk: saved.validation.ok,
+          nonPublishing: saved.validation.nonPublishing,
+          createsOrder: false,
+          createsSignalAuthorization: false,
+        },
+      });
+    },
+  );
 }
 
 async function checkRuntimeProofAudit(
-  options: StoreClosureDryRunOptions
+  options: StoreClosureDryRunOptions,
 ): Promise<StoreClosureCheckDTO> {
-  return runCheck({
-    key: "runtime_proof_audit_readiness",
-    label: "Runtime/proof/audit readiness",
-    classification: "projection",
-    sourceOfTruth: "contracts-and-chain-events"
-  }, async () => {
-    const [runtimeSummary, orders] = await Promise.all([
-      options.storeRuntimeService.getSummary(),
-      options.productService.listOrders()
-    ]);
-    const order = orders[0];
-    if (!order) {
+  return runCheck(
+    {
+      key: "runtime_proof_audit_readiness",
+      label: "Runtime/proof/audit readiness",
+      classification: "projection",
+      sourceOfTruth: "contracts-and-chain-events",
+    },
+    async () => {
+      const [runtimeSummary, orders] = await Promise.all([
+        options.storeRuntimeService.getSummary(),
+        options.productService.listOrders(),
+      ]);
+      const order = orders[0];
+      if (!order) {
+        return check({
+          key: "runtime_proof_audit_readiness",
+          label: "Runtime/proof/audit readiness",
+          status: "skipped",
+          classification: "projection",
+          sourceOfTruth: "contracts-and-chain-events",
+          message:
+            "No chain-backed order projection is available for proof/audit readback.",
+          details: {
+            runningOrderCount: runtimeSummary.runningOrderCount,
+            openTaskCount: runtimeSummary.openTaskCount,
+            indexerStatus: runtimeSummary.indexerStatus,
+          },
+        });
+      }
+      const [observation, replay, auditSummary] = await Promise.all([
+        options.storeRuntimeService.getOrderObservation(order.orderId),
+        options.storeRuntimeService.getOrderReplay(order.orderId),
+        options.storeRuntimeService.getOrderAuditSummary(order.orderId),
+      ]);
       return check({
         key: "runtime_proof_audit_readiness",
         label: "Runtime/proof/audit readiness",
-        status: "skipped",
+        status: observation && auditSummary ? "passed" : "warning",
         classification: "projection",
         sourceOfTruth: "contracts-and-chain-events",
-        message: "No chain-backed order projection is available for proof/audit readback.",
         details: {
+          orderId: redactedOrderId(order),
           runningOrderCount: runtimeSummary.runningOrderCount,
           openTaskCount: runtimeSummary.openTaskCount,
-          indexerStatus: runtimeSummary.indexerStatus
-        }
+          indexerStatus: runtimeSummary.indexerStatus,
+          observationFound: Boolean(observation),
+          replayStatus:
+            replay?.replayStatus ?? observation?.replayStatus ?? "not_found",
+          proofRowCount: observation?.proofRows.length ?? 0,
+          timelineCount: observation?.timeline.length ?? 0,
+          auditSummaryFound: Boolean(auditSummary),
+          redactionNotice: auditSummary?.redactionNotice,
+        },
       });
-    }
-    const [observation, replay, auditSummary] = await Promise.all([
-      options.storeRuntimeService.getOrderObservation(order.orderId),
-      options.storeRuntimeService.getOrderReplay(order.orderId),
-      options.storeRuntimeService.getOrderAuditSummary(order.orderId)
-    ]);
-    return check({
-      key: "runtime_proof_audit_readiness",
-      label: "Runtime/proof/audit readiness",
-      status: observation && auditSummary ? "passed" : "warning",
-      classification: "projection",
-      sourceOfTruth: "contracts-and-chain-events",
-      details: {
-        orderId: redactedOrderId(order),
-        runningOrderCount: runtimeSummary.runningOrderCount,
-        openTaskCount: runtimeSummary.openTaskCount,
-        indexerStatus: runtimeSummary.indexerStatus,
-        observationFound: Boolean(observation),
-        replayStatus: replay?.replayStatus ?? observation?.replayStatus ?? "not_found",
-        proofRowCount: observation?.proofRows.length ?? 0,
-        timelineCount: observation?.timeline.length ?? 0,
-        auditSummaryFound: Boolean(auditSummary),
-        redactionNotice: auditSummary?.redactionNotice
-      }
-    });
-  });
+    },
+  );
 }
 
 async function checkAuditReadiness(
-  options: StoreClosureDryRunOptions
+  options: StoreClosureDryRunOptions,
 ): Promise<StoreClosureCheckDTO> {
-  return runCheck({
-    key: "store_operator_audit_readiness",
-    label: "Store operator audit readiness",
-    classification: "workflow_metadata",
-    sourceOfTruth: "store-workflow-metadata"
-  }, async () => {
-    const records = await options.storeAuditStore.query({ limit: 5 });
-    return check({
+  return runCheck(
+    {
       key: "store_operator_audit_readiness",
       label: "Store operator audit readiness",
-      status: "passed",
       classification: "workflow_metadata",
       sourceOfTruth: "store-workflow-metadata",
-      details: {
-        recordCount: records.length,
-        redacted: true,
-        nonAuthoritative: true,
-        canCreateProtocolFacts: false
-      }
-    });
-  });
+    },
+    async () => {
+      const records = await options.storeAuditStore.query({ limit: 5 });
+      return check({
+        key: "store_operator_audit_readiness",
+        label: "Store operator audit readiness",
+        status: "passed",
+        classification: "workflow_metadata",
+        sourceOfTruth: "store-workflow-metadata",
+        details: {
+          recordCount: records.length,
+          redacted: true,
+          nonAuthoritative: true,
+          canCreateProtocolFacts: false,
+        },
+      });
+    },
+  );
 }
 
 async function runCheck(
-  descriptor: Pick<StoreClosureCheckDTO, "key" | "label" | "classification" | "sourceOfTruth" | "requiredCapabilities">,
-  callback: () => Promise<StoreClosureCheckDTO>
+  descriptor: Pick<
+    StoreClosureCheckDTO,
+    | "key"
+    | "label"
+    | "classification"
+    | "sourceOfTruth"
+    | "requiredCapabilities"
+  >,
+  callback: () => Promise<StoreClosureCheckDTO>,
 ): Promise<StoreClosureCheckDTO> {
   try {
     return await callback();
@@ -594,18 +705,23 @@ async function runCheck(
     return check({
       ...descriptor,
       status: "failed",
-      message: error instanceof Error ? error.message : "Store closure dry-run check failed",
+      message:
+        error instanceof Error
+          ? error.message
+          : "Store closure dry-run check failed",
       details: {
-        errorName: error instanceof Error ? error.name : typeof error
-      }
+        errorName: error instanceof Error ? error.name : typeof error,
+      },
     });
   }
 }
 
-function check(input: Omit<StoreClosureCheckDTO, "nonAuthoritative">): StoreClosureCheckDTO {
+function check(
+  input: Omit<StoreClosureCheckDTO, "nonAuthoritative">,
+): StoreClosureCheckDTO {
   return {
     ...input,
-    nonAuthoritative: true
+    nonAuthoritative: true,
   };
 }
 
@@ -613,7 +729,7 @@ function blockedCapabilityCheck(
   key: string,
   label: string,
   requiredCapabilities: readonly StoreCapability[],
-  missingCapabilities: readonly StoreCapability[]
+  missingCapabilities: readonly StoreCapability[],
 ): StoreClosureCheckDTO {
   return check({
     key,
@@ -623,44 +739,53 @@ function blockedCapabilityCheck(
     sourceOfTruth: "store-workflow-metadata",
     requiredCapabilities,
     missingCapabilities,
-    message: "The current Store session lacks one or more write capabilities for this dry-run step.",
+    message:
+      "The current Store session lacks one or more write capabilities for this dry-run step.",
     details: {
-      writeControlsFailClosed: true
-    }
+      writeControlsFailClosed: true,
+    },
   });
 }
 
 function missingCapabilities(
   access: StoreAccessState,
-  required: readonly StoreCapability[]
+  required: readonly StoreCapability[],
 ): readonly StoreCapability[] {
-  return required.filter((capability) => !hasStoreCapability(access, capability));
+  return required.filter(
+    (capability) => !hasStoreCapability(access, capability),
+  );
 }
 
-function explicitProductSchema(schema: StoreProductSchemaDTO): StoreProductSchemaDTO {
+function explicitProductSchema(
+  schema: StoreProductSchemaDTO,
+): StoreProductSchemaDTO {
   const roleSlots = schema.roleSlots.map((slot) => ({
     ...slot,
     capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
       ...plugin,
-      source: "explicit" as const
-    }))
+      source: "explicit" as const,
+    })),
   }));
   return {
     ...schema,
     roleSlots,
-    capabilityPlugins: roleSlots.flatMap((slot) => slot.capabilityPlugins ?? [])
+    capabilityPlugins: roleSlots.flatMap(
+      (slot) => slot.capabilityPlugins ?? [],
+    ),
   };
 }
 
-function governancePrincipalFromAccess(access: StoreAccessState): GovernancePrincipal {
+function governancePrincipalFromAccess(
+  access: StoreAccessState,
+): GovernancePrincipal {
   return {
     adminId: access.principalId ?? "store-closure-dry-run",
-    role: access.roles[0] ?? access.level
+    role: access.roles[0] ?? access.level,
   };
 }
 
 async function safeDiagnostics(
-  buildDiagnostics: () => Promise<Record<string, unknown>>
+  buildDiagnostics: () => Promise<Record<string, unknown>>,
 ): Promise<Record<string, unknown>> {
   try {
     return await buildDiagnostics();
@@ -670,7 +795,8 @@ async function safeDiagnostics(
       evidenceStorage: { readiness: "unknown" },
       storeMetadata: { readiness: "unknown" },
       indexer: { syncStatus: "unknown" },
-      diagnosticsError: error instanceof Error ? error.message : "diagnostics unavailable"
+      diagnosticsError:
+        error instanceof Error ? error.message : "diagnostics unavailable",
     };
   }
 }
@@ -709,15 +835,21 @@ function prototypeReasonsFor(input: {
   return [...reasons].sort();
 }
 
-function hasMemoryMetadataStore(storeMetadata: Record<string, unknown> | undefined): boolean {
+function hasMemoryMetadataStore(
+  storeMetadata: Record<string, unknown> | undefined,
+): boolean {
   const stores = recordOf(storeMetadata?.stores);
   if (!stores) {
     return false;
   }
-  return Object.values(stores).some((value) => recordOf(value)?.kind === "memory");
+  return Object.values(stores).some(
+    (value) => recordOf(value)?.kind === "memory",
+  );
 }
 
-function runtimeEnvironmentFromDiagnostics(diagnostics: Record<string, unknown>): string {
+function runtimeEnvironmentFromDiagnostics(
+  diagnostics: Record<string, unknown>,
+): string {
   const runtime = recordOf(diagnostics.runtime);
   const environment = runtime?.environment;
   return typeof environment === "string" ? environment : "unknown";
@@ -732,6 +864,6 @@ function redactedOrderId(order: ProductOrderApiDTO): string {
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : undefined;
 }

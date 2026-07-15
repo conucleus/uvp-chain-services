@@ -5,7 +5,7 @@ import {
   discoverDockedSignalCandidates,
   dockedSignalIdempotencyKey,
   type DockedSignalBroadcastAdapter,
-  type SubmitDockedSignalCall
+  type SubmitDockedSignalCall,
 } from "../src/docked-signals/index.js";
 import {
   stateMachineScopedKey,
@@ -14,14 +14,15 @@ import {
   type StateMachineDockedSignalBindingProjection,
   type StateMachineOrderProjection,
   type StateMachineProofProjection,
-  type StateMachineSignalProjection
+  type StateMachineSignalProjection,
 } from "../src/indexer/projections.js";
-import type { TrustProjectionSnapshot } from "../src/indexer/trust-projections.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const chainId = 31337;
-const stateMachineAddress = "0x1111111111111111111111111111111111111111" as Address;
-const dockingModuleAddress = "0x2222222222222222222222222222222222222222" as Address;
+const stateMachineAddress =
+  "0x1111111111111111111111111111111111111111" as Address;
+const dockingModuleAddress =
+  "0x2222222222222222222222222222222222222222" as Address;
 const gasPayer = "0x3333333333333333333333333333333333333333" as Address;
 const localOrderId = bytes32("1");
 const linkedOrderId = bytes32("2");
@@ -35,7 +36,6 @@ const localPlanId = bytes32("100");
 const localPlanHash = bytes32("101");
 const linkedPlanId = bytes32("102");
 const linkedPlanHash = bytes32("103");
-const trustRegistryAddress = "0x4444444444444444444444444444444444444444" as Address;
 
 describe("docked signal automation", () => {
   it("discovers a linked signal that has not been mapped into the local order", () => {
@@ -43,12 +43,12 @@ describe("docked signal automation", () => {
 
     const discovery = discoverDockedSignalCandidates(snapshot, {
       dockingModuleAddress,
-      maxCandidates: 10
+      maxCandidates: 10,
     });
 
     expect(discovery).toMatchObject({
       scannedBindings: 1,
-      capped: false
+      capped: false,
     });
     expect(discovery.candidates).toHaveLength(1);
     expect(discovery.candidates[0]).toMatchObject({
@@ -57,51 +57,25 @@ describe("docked signal automation", () => {
       idempotencyKey: dockedSignalIdempotencyKey(
         stateMachineOrder(localOrderId, { docked: true }),
         binding(),
-        linkedSignal()
-      )
+        linkedSignal(),
+      ),
     });
   });
 
   it("does not rediscover a docked signal after the local mapped signal exists", () => {
     const snapshot = projectionSnapshot({
       localSignals: {
-        [`${localSourceId}:${localSignalId}`]: signal(localOrderId, localSourceId, localSignalId)
-      }
+        [`${localSourceId}:${localSignalId}`]: signal(
+          localOrderId,
+          localSourceId,
+          localSignalId,
+        ),
+      },
     });
 
     const discovery = discoverDockedSignalCandidates(snapshot, {
       dockingModuleAddress,
-      maxCandidates: 10
-    });
-
-    expect(discovery.candidates).toEqual([]);
-  });
-
-  it("requires active Store plan trust when the trusted-plan policy is enabled", () => {
-    const snapshot = projectionSnapshot();
-
-    const untrustedDiscovery = discoverDockedSignalCandidates(snapshot, {
-      dockingModuleAddress,
       maxCandidates: 10,
-      requireTrustedPlans: true
-    });
-    const trustedDiscovery = discoverDockedSignalCandidates(snapshot, {
-      dockingModuleAddress,
-      maxCandidates: 10,
-      requireTrustedPlans: true,
-      trustSnapshot: trustSnapshot()
-    });
-
-    expect(untrustedDiscovery.candidates).toEqual([]);
-    expect(trustedDiscovery.candidates).toHaveLength(1);
-  });
-
-  it("does not automate a docked signal after either Zhixu plan is revoked", () => {
-    const discovery = discoverDockedSignalCandidates(projectionSnapshot(), {
-      dockingModuleAddress,
-      maxCandidates: 10,
-      requireTrustedPlans: true,
-      trustSnapshot: trustSnapshot({ linkedRevoked: true })
     });
 
     expect(discovery.candidates).toEqual([]);
@@ -115,19 +89,18 @@ describe("docked signal automation", () => {
       attempt: {
         status: "submitted" as const,
         txHash: bytes32("99"),
-        retryable: false
-      }
+        retryable: false,
+      },
     }));
     const service = createDockedSignalAutomationService({
       config: {
         enabled: true,
         maxCandidatesPerRun: 4,
-        requireTrustedPlans: false,
         maxGasPerTx: 500_000n,
-        waitForReceipt: true
+        waitForReceipt: true,
       },
       dockingModuleAddress,
-      broadcastAdapter: { broadcast } satisfies DockedSignalBroadcastAdapter
+      broadcastAdapter: { broadcast } satisfies DockedSignalBroadcastAdapter,
     });
     const snapshot = projectionSnapshot();
 
@@ -140,22 +113,25 @@ describe("docked signal automation", () => {
   it("skips broadcast when estimated gas exceeds the configured cap", async () => {
     const walletClient = {
       account: { address: gasPayer },
-      writeContract: vi.fn(async () => bytes32("10"))
+      writeContract: vi.fn(async () => bytes32("10")),
     };
     const publicClient = {
       getChainId: vi.fn(async () => chainId),
       estimateContractGas: vi.fn(async () => 600_000n),
-      waitForTransactionReceipt: vi.fn(async () => ({ status: "success" as const, blockNumber: 12n }))
+      waitForTransactionReceipt: vi.fn(async () => ({
+        status: "success" as const,
+        blockNumber: 12n,
+      })),
     };
     const adapter = createStateMachineDockedSignalBroadcastAdapter({
       chainId,
       publicClient,
       walletClient,
-      maxGasPerTx: 500_000n
+      maxGasPerTx: 500_000n,
     });
     const candidate = discoverDockedSignalCandidates(projectionSnapshot(), {
       dockingModuleAddress,
-      maxCandidates: 10
+      maxCandidates: 10,
     }).candidates[0]!;
 
     const result = await adapter.broadcast(candidate);
@@ -165,8 +141,8 @@ describe("docked signal automation", () => {
       attempt: {
         status: "skipped",
         errorCode: "estimated_gas_exceeds_cap",
-        estimatedGas: "600000"
-      }
+        estimatedGas: "600000",
+      },
     });
     expect(walletClient.writeContract).not.toHaveBeenCalled();
   });
@@ -174,23 +150,28 @@ describe("docked signal automation", () => {
   it("writes submitDockedSignal with deterministic args under the gas cap", async () => {
     const walletClient = {
       account: { address: gasPayer },
-      writeContract: vi.fn(async (_call: SubmitDockedSignalCall) => bytes32("11"))
+      writeContract: vi.fn(async (_call: SubmitDockedSignalCall) =>
+        bytes32("11"),
+      ),
     };
     const publicClient = {
       getChainId: vi.fn(async () => chainId),
       estimateContractGas: vi.fn(async () => 120_000n),
-      waitForTransactionReceipt: vi.fn(async () => ({ status: "success" as const, blockNumber: 12n }))
+      waitForTransactionReceipt: vi.fn(async () => ({
+        status: "success" as const,
+        blockNumber: 12n,
+      })),
     };
     const adapter = createStateMachineDockedSignalBroadcastAdapter({
       chainId,
       publicClient,
       walletClient,
       maxGasPerTx: 500_000n,
-      confirmOnReceipt: true
+      confirmOnReceipt: true,
     });
     const candidate = discoverDockedSignalCandidates(projectionSnapshot(), {
       dockingModuleAddress,
-      maxCandidates: 10
+      maxCandidates: 10,
     }).candidates[0]!;
 
     const result = await adapter.broadcast(candidate);
@@ -198,29 +179,41 @@ describe("docked signal automation", () => {
     expect(result).toMatchObject({
       status: "confirmed",
       txHash: bytes32("11"),
-      blockNumber: "12"
+      blockNumber: "12",
     });
-    expect(walletClient.writeContract).toHaveBeenCalledWith(expect.objectContaining({
-      address: dockingModuleAddress,
-      functionName: "submitDockedSignal",
-      args: [localOrderId, linkedOrderId, linkedSourceId, linkedSignalId, candidate.idempotencyKey]
-    }));
+    expect(walletClient.writeContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: dockingModuleAddress,
+        functionName: "submitDockedSignal",
+        args: [
+          localOrderId,
+          linkedOrderId,
+          linkedSourceId,
+          linkedSignalId,
+          candidate.idempotencyKey,
+        ],
+      }),
+    );
   });
 });
 
-function projectionSnapshot(options: {
-  readonly localSignals?: Readonly<Record<string, StateMachineSignalProjection>>;
-} = {}): ProjectionSnapshot {
+function projectionSnapshot(
+  options: {
+    readonly localSignals?: Readonly<
+      Record<string, StateMachineSignalProjection>
+    >;
+  } = {},
+): ProjectionSnapshot {
   const localOrder = stateMachineOrder(localOrderId, {
     docked: true,
-    ...(options.localSignals ? { signals: options.localSignals } : {})
+    ...(options.localSignals ? { signals: options.localSignals } : {}),
   });
   const linkedOrder = stateMachineOrder(linkedOrderId, {
     planId: linkedPlanId,
     planHash: linkedPlanHash,
     signals: {
-      [`${linkedSourceId}:${linkedSignalId}`]: linkedSignal()
-    }
+      [`${linkedSourceId}:${linkedSignalId}`]: linkedSignal(),
+    },
   });
   return {
     rebuildable: true,
@@ -230,26 +223,31 @@ function projectionSnapshot(options: {
     stateMachineModules: {},
     stateMachineDeployments: {},
     stateMachineOrders: {
-      [stateMachineScopedKey(chainId, stateMachineAddress, localOrderId)]: localOrder,
-      [stateMachineScopedKey(chainId, stateMachineAddress, linkedOrderId)]: linkedOrder
+      [stateMachineScopedKey(chainId, stateMachineAddress, localOrderId)]:
+        localOrder,
+      [stateMachineScopedKey(chainId, stateMachineAddress, linkedOrderId)]:
+        linkedOrder,
     },
-    stateMachineTasks: {}
+    stateMachineTasks: {},
   };
 }
 
-function stateMachineOrder(orderId: Hex, options: {
-  readonly docked?: boolean;
-  readonly signals?: Readonly<Record<string, StateMachineSignalProjection>>;
-  readonly planId?: Hex;
-  readonly planHash?: Hex;
-} = {}): StateMachineOrderProjection {
+function stateMachineOrder(
+  orderId: Hex,
+  options: {
+    readonly docked?: boolean;
+    readonly signals?: Readonly<Record<string, StateMachineSignalProjection>>;
+    readonly planId?: Hex;
+    readonly planHash?: Hex;
+  } = {},
+): StateMachineOrderProjection {
   return {
     orderId,
     chainId,
     contractAddress: stateMachineAddress,
     planId: options.planId ?? localPlanId,
     planHash: options.planHash ?? localPlanHash,
-    status: "running",
+    status: "registered",
     authorizations: {},
     signals: options.signals ?? {},
     stageExecutorOverlays: {},
@@ -267,56 +265,18 @@ function stateMachineOrder(orderId: Hex, options: {
             linkNonce: "1",
             metadataURI: "",
             signalBindings: {
-              [`${linkedSourceId}:${linkedSignalId}`]: binding()
+              [`${linkedSourceId}:${linkedSignalId}`]: binding(),
             },
             updatedAt: provenance(1),
-            proof: proof("DockedOrderLinked", 1)
-          }
+            proof: proof("DockedOrderLinked", 1),
+          },
         }
       : {},
     hooks: {},
     tasks: {},
     timeline: [],
     proof: [],
-    updatedAt: provenance(1)
-  };
-}
-
-function trustSnapshot(options: {
-  readonly localRevoked?: boolean;
-  readonly linkedRevoked?: boolean;
-} = {}): TrustProjectionSnapshot {
-  return {
-    rebuildable: true,
-    eventCount: 2,
-    plans: {
-      local: planTrust(localPlanId, localPlanHash, options.localRevoked ?? false, 40),
-      linked: planTrust(linkedPlanId, linkedPlanHash, options.linkedRevoked ?? false, 41)
-    },
-    suppliers: {}
-  };
-}
-
-function planTrust(planId: Hex, planHash: Hex, revoked: boolean, index: number): TrustProjectionSnapshot["plans"][string] {
-  const updatedAt = provenance(index);
-  return {
-    registryAddress: trustRegistryAddress,
-    planId,
-    planHash,
-    artifactHash: bytes32(String(index + 100)),
-    policyHash: bytes32(String(index + 101)),
-    metadataHash: bytes32(String(index + 102)),
-    metadataURI: "",
-    attester: gasPayer,
-    status: revoked ? "revoked" : "attested",
-    revoked,
-    attestedAt: provenance(index - 1),
-    updatedAt,
-    ...(revoked ? {
-      revokeReasonHash: bytes32(String(index + 103)),
-      revokeReasonURI: "",
-      revokedAt: updatedAt
-    } : {})
+    updatedAt: provenance(1),
   };
 }
 
@@ -329,7 +289,7 @@ function binding(): StateMachineDockedSignalBindingProjection {
     linkedSourceId,
     linkedSignalId,
     updatedAt: provenance(2),
-    proof: proof("DockedSignalMapped", 2)
+    proof: proof("DockedSignalMapped", 2),
   };
 }
 
@@ -337,7 +297,11 @@ function linkedSignal(): StateMachineSignalProjection {
   return signal(linkedOrderId, linkedSourceId, linkedSignalId);
 }
 
-function signal(orderId: Hex, sourceId: Hex, signalId: Hex): StateMachineSignalProjection {
+function signal(
+  orderId: Hex,
+  sourceId: Hex,
+  signalId: Hex,
+): StateMachineSignalProjection {
   return {
     orderId,
     sourceId,
@@ -346,7 +310,7 @@ function signal(orderId: Hex, sourceId: Hex, signalId: Hex): StateMachineSignalP
     idempotencyKey: linkedIdempotencyKey,
     submitter: gasPayer,
     submittedAt: provenance(3),
-    proof: proof("SignalSubmitted", 3)
+    proof: proof("SignalSubmitted", 3),
   };
 }
 
@@ -355,7 +319,7 @@ function proof(eventName: string, index: number): StateMachineProofProjection {
     ...provenance(index),
     eventId: `event-${index}`,
     eventName,
-    args: {}
+    args: {},
   };
 }
 
@@ -365,7 +329,7 @@ function provenance(index: number): ProjectionProvenance {
     contractAddress: stateMachineAddress,
     blockNumber: BigInt(index),
     transactionHash: bytes32(String(index + 20)),
-    logIndex: index
+    logIndex: index,
   };
 }
 

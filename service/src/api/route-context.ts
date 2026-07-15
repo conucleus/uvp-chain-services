@@ -155,8 +155,6 @@ export interface AdminOpsRecoveryActions {
 
 export interface ProductE2EControls {
   readonly enabled: boolean;
-  createRevokedZhixu(): ZhixuDetailDTO;
-  clearRevokedZhixu(): void;
   setSyncing(enabled: boolean): void;
   listZhixu(zhixus: readonly ZhixuSummaryDTO[]): readonly ZhixuSummaryDTO[];
   getZhixu(zhixuId: string): ZhixuDetailDTO | undefined;

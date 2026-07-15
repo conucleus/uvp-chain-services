@@ -28,7 +28,7 @@ export interface ConfigDiagnostics {
     readonly reorgBufferBlocks: number;
     readonly contracts: Readonly<Record<string, Address>>;
     readonly stateMachineConfigured: boolean;
-    readonly trustRegistryConfigured: boolean;
+    readonly identityRegistryConfigured: boolean;
   };
   readonly warnings: readonly string[];
   readonly preflight: {
@@ -63,7 +63,6 @@ export interface ConfigDiagnostics {
     readonly relayerGasPayer: PrivateKeyRoleDiagnostics;
     readonly participantWallet: {
       readonly configuredCount: number;
-      readonly backendBusinessSigning: "forbidden";
     };
     readonly governanceRegistryOwner: AddressRoleDiagnostics;
     readonly governanceSigner: PrivateKeyRoleDiagnostics;
@@ -156,7 +155,7 @@ export interface RunConfigPreflightOptions {
   };
 }
 
-const trustRegistryOwnerAbi = parseAbi([
+const identityRegistryOwnerAbi = parseAbi([
   "function owner() view returns (address)"
 ]);
 const stateMachineModuleAbi = parseAbi([
@@ -214,7 +213,7 @@ export function buildConfigDiagnostics(
 ): ConfigDiagnostics {
   const env = options.env ?? process.env;
   const stateMachine = stateMachineAddress(config.network.contracts);
-  const trustRegistry = trustRegistryAddress(config.network.contracts);
+  const identityRegistry = identityRegistryAddress(config.network.contracts);
   const relayerPrivateKeyConfigured = Boolean(env[config.relayer.stateMachinePrivateKeyEnv]?.trim());
   const relayerGasPayer = privateKeyAddress(env[config.relayer.stateMachinePrivateKeyEnv], "relayer gas payer");
   const relayerConfigured = Boolean(config.relayer.broadcastEnabled && stateMachine && relayerPrivateKeyConfigured);
@@ -222,7 +221,7 @@ export function buildConfigDiagnostics(
   const governanceSignerAddress = config.governance.signerPrivateKey
     ? privateKeyAddress(config.governance.signerPrivateKey, "governance signer")
     : undefined;
-  const governanceContractConfigured = Boolean(trustRegistry);
+  const governanceContractConfigured = Boolean(identityRegistry);
   const demoMode = enabledEnv(env, "UVP_PRODUCT_DEMO_MODE");
   const e2eControls = enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES");
   const permissiveAuthorizationRequested = enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") ||
@@ -247,7 +246,7 @@ export function buildConfigDiagnostics(
       reorgBufferBlocks: config.network.reorgBufferBlocks,
       contracts: config.network.contracts,
       stateMachineConfigured: Boolean(stateMachine),
-      trustRegistryConfigured: Boolean(trustRegistry)
+      identityRegistryConfigured: Boolean(identityRegistry)
     },
     warnings: diagnosticWarnings(config, {
       relayerConfigured,
@@ -389,9 +388,9 @@ function runStaticPreflight(
   runProductRegistrationPreflight(config, env, checks, errors);
 
   if (config.governance.broadcastEnabled) {
-    const trustRegistry = trustRegistryAddress(config.network.contracts);
-    if (!trustRegistry) {
-      fail(checks, errors, "governance.contract", "ZhixuTrustRegistry contract address is required when governance broadcast is enabled");
+    const identityRegistry = identityRegistryAddress(config.network.contracts);
+    if (!identityRegistry) {
+      fail(checks, errors, "governance.contract", "UVPIdentityRegistry contract address is required when governance broadcast is enabled");
     } else {
       pass(checks, "governance.contract");
     }
@@ -481,7 +480,7 @@ function runProductionSafetyPreflight(
   }
 
   const stateMachine = stateMachineAddress(config.network.contracts);
-  const trustRegistry = trustRegistryAddress(config.network.contracts);
+  const identityRegistry = identityRegistryAddress(config.network.contracts);
 
   if (config.security.preflightStrict) {
     pass(checks, "security.preflight_strict");
@@ -544,10 +543,10 @@ function runProductionSafetyPreflight(
     fail(checks, errors, "contracts.state_machine", "UVPStateMachine contract address is required in production");
   }
 
-  if (trustRegistry) {
-    pass(checks, "contracts.trust_registry");
+  if (identityRegistry) {
+    pass(checks, "contracts.identity_registry");
   } else {
-    fail(checks, errors, "contracts.trust_registry", "ZhixuTrustRegistry contract address is required in production");
+    fail(checks, errors, "contracts.identity_registry", "UVPIdentityRegistry contract address is required in production");
   }
 }
 
@@ -580,7 +579,7 @@ function runTestnetSafetyPreflight(
   }
 
   const stateMachine = stateMachineAddress(config.network.contracts);
-  const trustRegistry = trustRegistryAddress(config.network.contracts);
+  const identityRegistry = identityRegistryAddress(config.network.contracts);
 
   if (config.security.preflightStrict) {
     pass(checks, "security.preflight_strict");
@@ -619,10 +618,10 @@ function runTestnetSafetyPreflight(
     fail(checks, errors, "contracts.state_machine", "UVPStateMachine contract address is required in testnet");
   }
 
-  if (trustRegistry) {
-    pass(checks, "contracts.trust_registry");
+  if (identityRegistry) {
+    pass(checks, "contracts.identity_registry");
   } else {
-    fail(checks, errors, "contracts.trust_registry", "ZhixuTrustRegistry contract address is required in testnet");
+    fail(checks, errors, "contracts.identity_registry", "UVPIdentityRegistry contract address is required in testnet");
   }
 
   if (config.productBff.registrationAdapter === "memory") {
@@ -684,7 +683,7 @@ function runStagingSafetyPreflight(
   }
 
   const stateMachine = stateMachineAddress(config.network.contracts);
-  const trustRegistry = trustRegistryAddress(config.network.contracts);
+  const identityRegistry = identityRegistryAddress(config.network.contracts);
 
   if (config.security.preflightStrict) {
     pass(checks, "security.preflight_strict");
@@ -735,10 +734,10 @@ function runStagingSafetyPreflight(
   } else {
     fail(checks, errors, "contracts.state_machine", "UVPStateMachine contract address is required in staging");
   }
-  if (trustRegistry) {
-    pass(checks, "contracts.trust_registry");
+  if (identityRegistry) {
+    pass(checks, "contracts.identity_registry");
   } else {
-    fail(checks, errors, "contracts.trust_registry", "ZhixuTrustRegistry contract address is required in staging");
+    fail(checks, errors, "contracts.identity_registry", "UVPIdentityRegistry contract address is required in staging");
   }
 
   if (config.productBff.registrationAdapter === "anvil") {
@@ -997,8 +996,8 @@ async function runRpcPreflight(
     errors
   });
   await checkContractCode({
-    name: "contracts.trust_registry_code",
-    address: trustRegistryAddress(config.network.contracts),
+    name: "contracts.identity_registry_code",
+    address: identityRegistryAddress(config.network.contracts),
     client: networkClient,
     requireBytecode: config.security.environment === "staging" || config.security.environment === "production",
     checks,
@@ -1017,8 +1016,8 @@ async function runRpcPreflight(
     return;
   }
 
-  const trustRegistry = trustRegistryAddress(config.network.contracts);
-  if (!trustRegistry) {
+  const identityRegistry = identityRegistryAddress(config.network.contracts);
+  if (!identityRegistry) {
     return;
   }
 
@@ -1043,8 +1042,8 @@ async function runRpcPreflight(
   try {
     const signer = normalizeAddress(privateKeyToAccount(config.governance.signerPrivateKey).address, "governance signer");
     const owner = normalizeAddress(String(await governanceClient.readContract({
-      address: trustRegistry as ViemAddress,
-      abi: trustRegistryOwnerAbi,
+      address: identityRegistry as ViemAddress,
+      abi: identityRegistryOwnerAbi,
       functionName: "owner"
     })), "governance registry owner");
     if (config.governance.registryOwnerAddress && owner !== config.governance.registryOwnerAddress) {
@@ -1175,13 +1174,10 @@ function publicClient(rpcUrl: string): PreflightPublicClient {
 }
 
 function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
-  for (const alias of ["UVPStateMachine", "StateMachine", "stateMachine", "uvpStateMachine"]) {
-    const address = contracts[alias];
-    if (address && address !== zeroAddress) {
-      return normalizeAddress(address, `contract ${alias}`);
-    }
-  }
-  return undefined;
+  const address = contracts.UVPStateMachine;
+  return address && address !== zeroAddress
+    ? normalizeAddress(address, "contract UVPStateMachine")
+    : undefined;
 }
 
 function activeStateMachineDeployment(config: ChainServicesConfig): NonNullable<ChainServicesConfig["network"]["stateMachineDeployments"]>[number] | undefined {
@@ -1195,14 +1191,11 @@ function activeStateMachineDeployment(config: ChainServicesConfig): NonNullable<
   return deployments.find((deployment) => deployment.status === "active") ?? deployments[0];
 }
 
-function trustRegistryAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
-  for (const alias of ["ZhixuTrustRegistry", "TrustRegistry", "trustRegistry", "zhixuTrustRegistry"]) {
-    const address = contracts[alias];
-    if (address && address !== zeroAddress) {
-      return normalizeAddress(address, `contract ${alias}`);
-    }
-  }
-  return undefined;
+function identityRegistryAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
+  const address = contracts.UVPIdentityRegistry;
+  return address && address !== zeroAddress
+    ? normalizeAddress(address, "contract UVPIdentityRegistry")
+    : undefined;
 }
 
 function diagnosticWarnings(
@@ -1276,8 +1269,7 @@ function operatorRoleDiagnostics(config: ChainServicesConfig, env: Env): ConfigD
       config.relayer.expectedGasPayer ?? config.operatorRoles.relayerGasPayerAddress
     ),
     participantWallet: {
-      configuredCount: config.operatorRoles.participantWallets.length,
-      backendBusinessSigning: "forbidden"
+      configuredCount: config.operatorRoles.participantWallets.length
     },
     governanceRegistryOwner: addressRoleDiagnostics(
       config.operatorRoles.governanceRegistryOwnerAddress ?? config.governance.registryOwnerAddress

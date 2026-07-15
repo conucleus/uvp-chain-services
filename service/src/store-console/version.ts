@@ -1,10 +1,8 @@
 import {
-  type ChainAttestationStatus,
+  type PlanPublicationStatus,
   type StoreZhixuVersionStatus,
-  type StoreZhixuVersionSummaryDTO
+  type StoreZhixuVersionSummaryDTO,
 } from "@uvp-eth/product-dto";
-import type { GovernancePlanRevocationResultDTO, GovernancePrincipal, GovernanceService } from "../governance/index.js";
-import type { PlanTrustProjection, TrustProjectionSnapshot } from "../indexer/trust-projections.js";
 import type { ProductService } from "../product/service.js";
 import { normalizeBytes32, type Hex } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
@@ -14,20 +12,16 @@ export interface StoreZhixuVersionService {
   activate(
     seriesId: string,
     versionId: string,
-    input?: StoreZhixuVersionMutationInput
+    input?: StoreZhixuVersionMutationInput,
   ): Promise<StoreZhixuVersionMutationDTO>;
   deprecate(
     seriesId: string,
     versionId: string,
-    input?: StoreZhixuVersionMutationInput
+    input?: StoreZhixuVersionMutationInput,
   ): Promise<StoreZhixuVersionMutationDTO>;
-  requestRevocation(
-    seriesId: string,
-    versionId: string,
-    input: StoreZhixuVersionRevocationInput,
-    principal: GovernancePrincipal
-  ): Promise<StoreZhixuVersionRevocationDTO>;
-  resolveActiveVersion(zhixuId: string): Promise<StoreZhixuVersionSummaryDTO | undefined>;
+  resolveActiveVersion(
+    zhixuId: string,
+  ): Promise<StoreZhixuVersionSummaryDTO | undefined>;
 }
 
 export interface StoreZhixuVersionListDTO {
@@ -40,12 +34,6 @@ export interface StoreZhixuVersionMutationDTO extends StoreZhixuVersionListDTO {
   readonly version: StoreZhixuVersionSummaryDTO;
 }
 
-export interface StoreZhixuVersionRevocationDTO {
-  readonly sourceOfTruth: "contracts-and-chain-events";
-  readonly version: StoreZhixuVersionSummaryDTO;
-  readonly revocation: GovernancePlanRevocationResultDTO;
-}
-
 export interface StoreZhixuVersionMutationInput {
   readonly zhixuId?: string;
   readonly versionLabel?: string;
@@ -53,12 +41,6 @@ export interface StoreZhixuVersionMutationInput {
   readonly planHash?: string;
   readonly artifactHash?: string;
   readonly cutoverReason?: string;
-}
-
-export interface StoreZhixuVersionRevocationInput extends StoreZhixuVersionMutationInput {
-  readonly reason?: string;
-  readonly publicSummary?: string;
-  readonly metadata?: unknown;
 }
 
 export interface StoreZhixuVersionRecord {
@@ -77,20 +59,30 @@ export interface StoreZhixuVersionRecord {
 
 export interface StoreZhixuVersionMetadataStore {
   listVersions(seriesId: string): Promise<readonly StoreZhixuVersionRecord[]>;
-  getVersion(seriesId: string, versionId: string): Promise<StoreZhixuVersionRecord | undefined>;
+  getVersion(
+    seriesId: string,
+    versionId: string,
+  ): Promise<StoreZhixuVersionRecord | undefined>;
   upsertVersion(record: StoreZhixuVersionRecord): Promise<void>;
 }
 
-export class MemoryStoreZhixuVersionMetadataStore implements StoreZhixuVersionMetadataStore {
+export class MemoryStoreZhixuVersionMetadataStore
+  implements StoreZhixuVersionMetadataStore
+{
   readonly #records = new Map<string, StoreZhixuVersionRecord>();
 
-  async listVersions(seriesId: string): Promise<readonly StoreZhixuVersionRecord[]> {
+  async listVersions(
+    seriesId: string,
+  ): Promise<readonly StoreZhixuVersionRecord[]> {
     return [...this.#records.values()]
       .filter((record) => record.seriesId === seriesId)
       .sort(compareVersionRecords);
   }
 
-  async getVersion(seriesId: string, versionId: string): Promise<StoreZhixuVersionRecord | undefined> {
+  async getVersion(
+    seriesId: string,
+    versionId: string,
+  ): Promise<StoreZhixuVersionRecord | undefined> {
     return this.#records.get(versionKey(seriesId, versionId));
   }
 
@@ -106,7 +98,7 @@ export class StoreZhixuVersionError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
-    readonly details?: unknown
+    readonly details?: unknown,
   ) {
     super(message);
   }
@@ -116,10 +108,10 @@ export function createStoreZhixuVersionService(options: {
   readonly productService: ProductService;
   readonly projectionStore: ProjectionStore;
   readonly metadataStore?: StoreZhixuVersionMetadataStore;
-  readonly governanceService?: GovernanceService;
   readonly now?: () => Date;
 }): StoreZhixuVersionService {
-  const metadataStore = options.metadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
+  const metadataStore =
+    options.metadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
   const now = options.now ?? (() => new Date());
 
   return {
@@ -132,8 +124,8 @@ export function createStoreZhixuVersionService(options: {
           metadataStore,
           productService: options.productService,
           projectionStore: options.projectionStore,
-          now
-        })
+          now,
+        }),
       };
     },
 
@@ -145,9 +137,13 @@ export function createStoreZhixuVersionService(options: {
         seriesId,
         versionId,
         input,
-        now
+        now,
       });
-      const summary = await summarizeRecord(record, options.productService, options.projectionStore);
+      const summary = await summarizeRecord(
+        record,
+        options.productService,
+        options.projectionStore,
+      );
       assertActivatable(summary);
       const cutoverAt = now().toISOString();
       const existing = await effectiveVersionRecords({
@@ -155,7 +151,7 @@ export function createStoreZhixuVersionService(options: {
         metadataStore,
         productService: options.productService,
         projectionStore: options.projectionStore,
-        now
+        now,
       });
       for (const item of existing) {
         if (item.versionId === record.versionId) {
@@ -166,7 +162,7 @@ export function createStoreZhixuVersionService(options: {
             ...item,
             status: "deprecated",
             cutoverAt,
-            cutoverReason: "Superseded by active Store version."
+            cutoverReason: "Superseded by active Store version.",
           });
         }
       }
@@ -174,10 +170,21 @@ export function createStoreZhixuVersionService(options: {
         ...record,
         status: "active",
         cutoverAt,
-        ...(input.cutoverReason ? { cutoverReason: input.cutoverReason } : record.cutoverReason ? { cutoverReason: record.cutoverReason } : {})
+        ...(input.cutoverReason
+          ? { cutoverReason: input.cutoverReason }
+          : record.cutoverReason
+            ? { cutoverReason: record.cutoverReason }
+            : {}),
       };
       await metadataStore.upsertVersion(active);
-      return mutationResult(seriesId, active, metadataStore, options.productService, options.projectionStore, now);
+      return mutationResult(
+        seriesId,
+        active,
+        metadataStore,
+        options.productService,
+        options.projectionStore,
+        now,
+      );
     },
 
     async deprecate(seriesId, versionId, input = {}) {
@@ -188,43 +195,27 @@ export function createStoreZhixuVersionService(options: {
         seriesId,
         versionId,
         input,
-        now
+        now,
       });
       const deprecated: StoreZhixuVersionRecord = {
         ...record,
         status: "deprecated",
         cutoverAt: now().toISOString(),
-        ...(input.cutoverReason ? { cutoverReason: input.cutoverReason } : record.cutoverReason ? { cutoverReason: record.cutoverReason } : {})
+        ...(input.cutoverReason
+          ? { cutoverReason: input.cutoverReason }
+          : record.cutoverReason
+            ? { cutoverReason: record.cutoverReason }
+            : {}),
       };
       await metadataStore.upsertVersion(deprecated);
-      return mutationResult(seriesId, deprecated, metadataStore, options.productService, options.projectionStore, now);
-    },
-
-    async requestRevocation(seriesId, versionId, input, principal) {
-      if (!options.governanceService) {
-        throw new StoreZhixuVersionError(503, "governance_service_unavailable", "governance service is unavailable");
-      }
-      const record = await ensureVersionRecord({
-        metadataStore,
-        productService: options.productService,
-        projectionStore: options.projectionStore,
+      return mutationResult(
         seriesId,
-        versionId,
-        input,
-        now
-      });
-      const revocation = await options.governanceService.revokeZhixu({
-        planId: record.planId,
-        subjectId: record.zhixuId,
-        reason: input.reason ?? input.publicSummary ?? "Store operator requested plan revocation.",
-        ...(input.publicSummary ? { publicSummary: input.publicSummary } : {}),
-        ...(input.metadata !== undefined ? { metadata: input.metadata } : {})
-      }, principal);
-      return {
-        sourceOfTruth: "contracts-and-chain-events",
-        version: await summarizeRecord(record, options.productService, options.projectionStore),
-        revocation
-      };
+        deprecated,
+        metadataStore,
+        options.productService,
+        options.projectionStore,
+        now,
+      );
     },
 
     async resolveActiveVersion(zhixuId) {
@@ -233,16 +224,21 @@ export function createStoreZhixuVersionService(options: {
         metadataStore,
         productService: options.productService,
         projectionStore: options.projectionStore,
-        now
+        now,
       });
       const persistedRecords = await metadataStore.listVersions(zhixuId);
-      const activeRecord = persistedRecords.length > 0
-        ? records.find((record) => record.status === "active")
-        : records[0];
+      const activeRecord =
+        persistedRecords.length > 0
+          ? records.find((record) => record.status === "active")
+          : records[0];
       return activeRecord
-        ? summarizeRecord(activeRecord, options.productService, options.projectionStore)
+        ? summarizeRecord(
+            activeRecord,
+            options.productService,
+            options.projectionStore,
+          )
         : undefined;
-    }
+    },
   };
 }
 
@@ -252,17 +248,23 @@ async function mutationResult(
   metadataStore: StoreZhixuVersionMetadataStore,
   productService: ProductService,
   projectionStore: ProjectionStore,
-  now: () => Date
+  now: () => Date,
 ): Promise<StoreZhixuVersionMutationDTO> {
   const [version, versions] = await Promise.all([
     summarizeRecord(record, productService, projectionStore),
-    summarizeSeries({ seriesId, metadataStore, productService, projectionStore, now })
+    summarizeSeries({
+      seriesId,
+      metadataStore,
+      productService,
+      projectionStore,
+      now,
+    }),
   ]);
   return {
     sourceOfTruth: "contracts-and-chain-events",
     seriesId,
     version,
-    versions
+    versions,
   };
 }
 
@@ -275,7 +277,10 @@ async function ensureVersionRecord(input: {
   readonly input: StoreZhixuVersionMutationInput;
   readonly now: () => Date;
 }): Promise<StoreZhixuVersionRecord> {
-  const existing = await input.metadataStore.getVersion(input.seriesId, input.versionId);
+  const existing = await input.metadataStore.getVersion(
+    input.seriesId,
+    input.versionId,
+  );
   if (existing) {
     return patchVersionRecord(existing, input.input);
   }
@@ -284,17 +289,24 @@ async function ensureVersionRecord(input: {
     metadataStore: input.metadataStore,
     productService: input.productService,
     projectionStore: input.projectionStore,
-    now: input.now
+    now: input.now,
   });
-  const synthesized = effective.find((record) => record.versionId === input.versionId);
+  const synthesized = effective.find(
+    (record) => record.versionId === input.versionId,
+  );
   if (synthesized) {
     return patchVersionRecord(synthesized, input.input);
   }
   if (!input.input.planId || !input.input.planHash) {
-    throw new StoreZhixuVersionError(404, "version_not_found", "Store zhixu version not found", {
-      seriesId: input.seriesId,
-      versionId: input.versionId
-    });
+    throw new StoreZhixuVersionError(
+      404,
+      "version_not_found",
+      "Store zhixu version not found",
+      {
+        seriesId: input.seriesId,
+        versionId: input.versionId,
+      },
+    );
   }
   return {
     versionId: input.versionId,
@@ -304,24 +316,39 @@ async function ensureVersionRecord(input: {
     status: "candidate",
     planId: normalizeBytes32(input.input.planId, "planId"),
     planHash: normalizeBytes32(input.input.planHash, "planHash"),
-    ...(input.input.artifactHash ? { artifactHash: normalizeBytes32(input.input.artifactHash, "artifactHash") } : {}),
+    ...(input.input.artifactHash
+      ? {
+          artifactHash: normalizeBytes32(
+            input.input.artifactHash,
+            "artifactHash",
+          ),
+        }
+      : {}),
     createdAt: input.now().toISOString(),
-    ...(input.input.cutoverReason ? { cutoverReason: input.input.cutoverReason } : {})
+    ...(input.input.cutoverReason
+      ? { cutoverReason: input.input.cutoverReason }
+      : {}),
   };
 }
 
 function patchVersionRecord(
   record: StoreZhixuVersionRecord,
-  input: StoreZhixuVersionMutationInput
+  input: StoreZhixuVersionMutationInput,
 ): StoreZhixuVersionRecord {
   return {
     ...record,
     ...(input.zhixuId ? { zhixuId: input.zhixuId } : {}),
     ...(input.versionLabel ? { versionLabel: input.versionLabel } : {}),
-    ...(input.planId ? { planId: normalizeBytes32(input.planId, "planId") } : {}),
-    ...(input.planHash ? { planHash: normalizeBytes32(input.planHash, "planHash") } : {}),
-    ...(input.artifactHash ? { artifactHash: normalizeBytes32(input.artifactHash, "artifactHash") } : {}),
-    ...(input.cutoverReason ? { cutoverReason: input.cutoverReason } : {})
+    ...(input.planId
+      ? { planId: normalizeBytes32(input.planId, "planId") }
+      : {}),
+    ...(input.planHash
+      ? { planHash: normalizeBytes32(input.planHash, "planHash") }
+      : {}),
+    ...(input.artifactHash
+      ? { artifactHash: normalizeBytes32(input.artifactHash, "artifactHash") }
+      : {}),
+    ...(input.cutoverReason ? { cutoverReason: input.cutoverReason } : {}),
   };
 }
 
@@ -333,9 +360,11 @@ async function summarizeSeries(input: {
   readonly now: () => Date;
 }): Promise<readonly StoreZhixuVersionSummaryDTO[]> {
   const records = await effectiveVersionRecords(input);
-  const summaries = await Promise.all(records.map((record) =>
-    summarizeRecord(record, input.productService, input.projectionStore)
-  ));
+  const summaries = await Promise.all(
+    records.map((record) =>
+      summarizeRecord(record, input.productService, input.projectionStore),
+    ),
+  );
   return summaries.sort(compareVersionSummaries);
 }
 
@@ -350,95 +379,90 @@ async function effectiveVersionRecords(input: {
   if (records.length > 0) {
     return records;
   }
-  const synthesized = await synthesizeDefaultVersion(input.seriesId, input.productService, input.now);
+  const synthesized = await synthesizeDefaultVersion(
+    input.seriesId,
+    input.productService,
+    input.now,
+  );
   return synthesized ? [synthesized] : [];
 }
 
 async function synthesizeDefaultVersion(
   seriesId: string,
   productService: ProductService,
-  now: () => Date
+  now: () => Date,
 ): Promise<StoreZhixuVersionRecord | undefined> {
-  const zhixu = await productService.getZhixu(seriesId, { includeUnattested: true });
+  const zhixu = await productService.getZhixu(seriesId);
   if (!zhixu) {
     return undefined;
   }
   return {
-    versionId: defaultVersionId(seriesId, zhixu.chainAttestation.planId),
+    versionId: defaultVersionId(seriesId, zhixu.planPublication.planId),
     zhixuId: zhixu.zhixuId,
     seriesId,
     versionLabel: "当前版本",
-    status: zhixu.chainAttestation.status === "attested" ? "active" : "candidate",
-    planId: normalizeBytes32(zhixu.chainAttestation.planId, "planId"),
-    planHash: normalizeBytes32(zhixu.chainAttestation.planHash, "planHash"),
-    ...(zhixu.chainAttestation.artifactHash
-      ? { artifactHash: normalizeBytes32(zhixu.chainAttestation.artifactHash, "artifactHash") }
+    status: "active",
+    planId: normalizeBytes32(zhixu.planPublication.planId, "planId"),
+    planHash: normalizeBytes32(zhixu.planPublication.planHash, "planHash"),
+    ...(zhixu.planPublication.artifactHash
+      ? {
+          artifactHash: normalizeBytes32(
+            zhixu.planPublication.artifactHash,
+            "artifactHash",
+          ),
+        }
       : {}),
-    createdAt: zhixu.updatedAt || now().toISOString()
+    createdAt: zhixu.updatedAt || now().toISOString(),
   };
 }
 
 async function summarizeRecord(
   record: StoreZhixuVersionRecord,
   productService: ProductService,
-  projectionStore: ProjectionStore
+  projectionStore: ProjectionStore,
 ): Promise<StoreZhixuVersionSummaryDTO> {
-  const [trustSnapshot, orders] = await Promise.all([
-    projectionStore.getTrustSnapshot(),
-    productService.listOrders()
+  const [orderSnapshot, orders] = await Promise.all([
+    projectionStore.getOrderSnapshot(),
+    productService.listOrders(),
   ]);
-  const trust = planTrustForRecord(trustSnapshot, record);
-  const attestationStatus = attestationStatusForTrust(trust);
-  const artifactHash = record.artifactHash ?? trust?.artifactHash;
+  const plan = Object.values(orderSnapshot.stateMachinePlans).find(
+    (candidate) => candidate.planId === record.planId && candidate.planHash === record.planHash,
+  );
+  const publicationStatus: PlanPublicationStatus = plan ? "published" : "not_found";
+  const artifactHash = record.artifactHash;
   return {
     versionId: record.versionId,
     zhixuId: record.zhixuId,
     seriesId: record.seriesId,
     versionLabel: record.versionLabel,
-    status: trust?.revoked ? "revoked" : record.status,
+    status: record.status,
     planId: record.planId,
     planHash: record.planHash,
     ...(artifactHash ? { artifactHash } : {}),
-    attestationStatus,
-    orderCount: orders.filter((order) =>
-      order.planId === record.planId && (!order.planHash || order.planHash === record.planHash)
+    publicationStatus,
+    orderCount: orders.filter(
+      (order) =>
+        order.planId === record.planId &&
+        (!order.planHash || order.planHash === record.planHash),
     ).length,
     createdAt: record.createdAt,
     ...(record.cutoverAt ? { cutoverAt: record.cutoverAt } : {}),
-    ...(record.cutoverReason ? { cutoverReason: record.cutoverReason } : {})
+    ...(record.cutoverReason ? { cutoverReason: record.cutoverReason } : {}),
   };
 }
 
 function assertActivatable(version: StoreZhixuVersionSummaryDTO): void {
-  if (version.attestationStatus === "revoked" || version.status === "revoked") {
-    throw new StoreZhixuVersionError(409, "plan_revoked", "revoked Store zhixu version cannot be activated", {
-      versionId: version.versionId,
-      planId: version.planId
-    });
+  if (version.publicationStatus !== "published") {
+    throw new StoreZhixuVersionError(
+      409,
+      "plan_not_published",
+      "Store zhixu version must be published to the state machine before activation",
+      {
+        versionId: version.versionId,
+        planId: version.planId,
+      },
+    );
   }
-  if (version.attestationStatus !== "attested") {
-    throw new StoreZhixuVersionError(403, "plan_not_attested", "Store zhixu version must be attested before activation", {
-      versionId: version.versionId,
-      planId: version.planId
-    });
-  }
-}
-
-function planTrustForRecord(
-  snapshot: TrustProjectionSnapshot,
-  record: StoreZhixuVersionRecord
-): PlanTrustProjection | undefined {
-  return Object.values(snapshot.plans).find((plan) =>
-    plan.planId === record.planId &&
-    plan.planHash === record.planHash
-  );
-}
-
-function attestationStatusForTrust(trust: PlanTrustProjection | undefined): ChainAttestationStatus {
-  if (!trust) {
-    return "not_found";
-  }
-  return trust.revoked ? "revoked" : "attested";
 }
 
 function defaultVersionId(seriesId: string, planId: string): string {
@@ -449,17 +473,25 @@ function versionKey(seriesId: string, versionId: string): string {
   return `${seriesId}:${versionId}`;
 }
 
-function compareVersionRecords(left: StoreZhixuVersionRecord, right: StoreZhixuVersionRecord): number {
-  return left.createdAt.localeCompare(right.createdAt) || left.versionId.localeCompare(right.versionId);
+function compareVersionRecords(
+  left: StoreZhixuVersionRecord,
+  right: StoreZhixuVersionRecord,
+): number {
+  return (
+    left.createdAt.localeCompare(right.createdAt) ||
+    left.versionId.localeCompare(right.versionId)
+  );
 }
 
 function compareVersionSummaries(
   left: StoreZhixuVersionSummaryDTO,
-  right: StoreZhixuVersionSummaryDTO
+  right: StoreZhixuVersionSummaryDTO,
 ): number {
-  return statusRank(left.status) - statusRank(right.status) ||
+  return (
+    statusRank(left.status) - statusRank(right.status) ||
     left.createdAt.localeCompare(right.createdAt) ||
-    left.versionId.localeCompare(right.versionId);
+    left.versionId.localeCompare(right.versionId)
+  );
 }
 
 function statusRank(status: StoreZhixuVersionStatus): number {
@@ -470,13 +502,13 @@ function statusRank(status: StoreZhixuVersionStatus): number {
       return 1;
     case "deprecated":
       return 2;
-    case "revoked":
-      return 3;
     case "rejected":
-      return 4;
+      return 3;
   }
 }
 
 function shortId(value: string): string {
-  return value.length > 16 ? `${value.slice(0, 8)}...${value.slice(-6)}` : value;
+  return value.length > 16
+    ? `${value.slice(0, 8)}...${value.slice(-6)}`
+    : value;
 }

@@ -15,7 +15,7 @@ const productionRegistrarPrivateKey = "0x222222222222222222222222222222222222222
 const productionRegistrarAddress = "0x1563915e194d8cfba1943570603f7606a3115508";
 const productionContracts = JSON.stringify({
   UVPStateMachine: "0x1111111111111111111111111111111111111111",
-  ZhixuTrustRegistry: "0x2222222222222222222222222222222222222222"
+  UVPIdentityRegistry: "0x2222222222222222222222222222222222222222"
 });
 const testnetRelayerPrivateKey = "0x3333333333333333333333333333333333333333333333333333333333333333";
 const testnetRegistrarPrivateKey = "0x4444444444444444444444444444444444444444444444444444444444444444";
@@ -64,7 +64,7 @@ describe("chain-services config", () => {
           address: "0x1111111111111111111111111111111111111111",
           deployment: { blockNumber: 20 }
         },
-        ZhixuTrustRegistry: {
+        UVPIdentityRegistry: {
           address: "0x2222222222222222222222222222222222222222",
           deployment: { blockNumber: 12 }
         }
@@ -75,7 +75,7 @@ describe("chain-services config", () => {
       UVP_ADDRESS_MANIFEST: manifestPath,
       ANVIL_RPC_URL: "http://127.0.0.1:18545",
       UVP_CONTRACTS_JSON: JSON.stringify({
-        ZhixuTrustRegistry: "0x3333333333333333333333333333333333333333"
+        UVPIdentityRegistry: "0x3333333333333333333333333333333333333333"
       })
     });
 
@@ -83,38 +83,10 @@ describe("chain-services config", () => {
     expect(config.network.rpcUrl).toBe("http://127.0.0.1:18545");
     expect(config.network.deploymentBlock).toBe(11n);
     expect(config.network.contracts.UVPStateMachine).toBe("0x1111111111111111111111111111111111111111");
-    expect(config.network.contracts.ZhixuTrustRegistry).toBe("0x3333333333333333333333333333333333333333");
+    expect(config.network.contracts.UVPIdentityRegistry).toBe("0x3333333333333333333333333333333333333333");
   });
 
-  it("loads address manifest from UVP_STAGING_REHEARSAL_MANIFEST as a tertiary fallback", () => {
-    const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-"));
-    tempDirs.push(dir);
-    const manifestPath = join(dir, "rehearsal.addresses.json");
-    writeFileSync(manifestPath, JSON.stringify({
-      network: {
-        chainId: 31337,
-        rpcUrlEnv: "ANVIL_RPC_URL"
-      },
-      deployment: { blockNumber: 7 },
-      contracts: {
-        UVPStateMachine: {
-          address: "0xaaaa111111111111111111111111111111111111",
-          deployment: { blockNumber: 8 }
-        }
-      }
-    }));
-
-    const config = loadConfigFromEnv({
-      UVP_STAGING_REHEARSAL_MANIFEST: manifestPath,
-      ANVIL_RPC_URL: "http://127.0.0.1:18545"
-    });
-
-    expect(config.network.chainId).toBe(31337);
-    expect(config.network.deploymentBlock).toBe(7n);
-    expect(config.network.contracts.UVPStateMachine).toBe("0xaaaa111111111111111111111111111111111111");
-  });
-
-  it("loads v5 deployment registry manifests with contract fallbacks and modules", () => {
+  it("loads v5 deployment registry manifests with modules", () => {
     const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-"));
     tempDirs.push(dir);
     const manifestPath = join(dir, "addresses.v5.json");
@@ -147,7 +119,7 @@ describe("chain-services config", () => {
           address: "0x1111111111111111111111111111111111111111",
           deployment: { blockNumber: 20 }
         },
-        ZhixuTrustRegistry: {
+        UVPIdentityRegistry: {
           address: "0x2222222222222222222222222222222222222222",
           deployment: { blockNumber: 18 }
         }
@@ -184,7 +156,7 @@ describe("chain-services config", () => {
     const manifestPath = join(dir, "addresses.json");
     writeFileSync(manifestPath, JSON.stringify({
       contracts: {
-        ZhixuTrustRegistry: {
+        UVPIdentityRegistry: {
           address: "0x2222222222222222222222222222222222222222"
         }
       }
@@ -193,11 +165,11 @@ describe("chain-services config", () => {
     const config = loadConfigFromEnv({
       UVP_ADDRESS_MANIFEST: manifestPath,
       UVP_CONTRACTS_JSON: JSON.stringify({
-        ZhixuTrustRegistry: "0x0000000000000000000000000000000000000000"
+        UVPIdentityRegistry: "0x0000000000000000000000000000000000000000"
       })
     });
 
-    expect(config.network.contracts.ZhixuTrustRegistry).toBe("0x2222222222222222222222222222222222222222");
+    expect(config.network.contracts.UVPIdentityRegistry).toBe("0x2222222222222222222222222222222222222222");
   });
 
   it("defaults durable storage to the memory driver", () => {
@@ -241,7 +213,6 @@ describe("chain-services config", () => {
   it("loads docked signal automation config and gas cap", () => {
     const config = loadConfigFromEnv({
       UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED: "true",
-      UVP_DOCKED_SIGNAL_REQUIRE_TRUSTED_PLANS: "true",
       UVP_DOCKED_SIGNAL_MAX_CANDIDATES_PER_RUN: "2",
       UVP_DOCKED_SIGNAL_MAX_GAS_PER_TX: "250000",
       UVP_DOCKED_SIGNAL_WAIT_FOR_RECEIPT: "false"
@@ -249,18 +220,10 @@ describe("chain-services config", () => {
 
     expect(config.dockedSignalAutomation).toEqual({
       enabled: true,
-      requireTrustedPlans: true,
       maxCandidatesPerRun: 2,
       maxGasPerTx: 250_000n,
       waitForReceipt: false
     });
-  });
-
-  it("rejects non-local docked signal automation without trusted-plan gating", () => {
-    expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
-      UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED: "true",
-      UVP_DOCKED_SIGNAL_REQUIRE_TRUSTED_PLANS: "false"
-    }))).toThrow(/UVP_DOCKED_SIGNAL_REQUIRE_TRUSTED_PLANS=false/);
   });
 
   it("infers postgres driver from database URL", () => {
@@ -274,7 +237,7 @@ describe("chain-services config", () => {
 
   it("loads security hardening config", () => {
     const config = loadConfigFromEnv({
-      CHAIN_SERVICES_ENV: "local",
+      CHAIN_SERVICES_RUNTIME_ENV: "local",
       SECURITY_PREFLIGHT_STRICT: "true",
       LOG_REDACTION_ENABLED: "false",
       BROADCAST_MAX_IN_FLIGHT_PER_ORDER: "2",
@@ -368,7 +331,7 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_CONTRACTS_JSON: JSON.stringify({
-        ZhixuTrustRegistry: "0x2222222222222222222222222222222222222222"
+        UVPIdentityRegistry: "0x2222222222222222222222222222222222222222"
       })
     }))).toThrow(/UVPStateMachine contract address/);
 
@@ -376,7 +339,7 @@ describe("chain-services config", () => {
       UVP_CONTRACTS_JSON: JSON.stringify({
         UVPStateMachine: "0x1111111111111111111111111111111111111111"
       })
-    }))).toThrow(/ZhixuTrustRegistry contract address/);
+    }))).toThrow(/UVPIdentityRegistry contract address/);
   });
 
   it("rejects testnet demo controls, permissive auth, memory registration, and unsafe keys", () => {
@@ -445,7 +408,7 @@ describe("chain-services config", () => {
       network: {
         chainId: 84532,
         stateMachineConfigured: true,
-        trustRegistryConfigured: true
+        identityRegistryConfigured: true
       },
       product: {
         demoMode: false,
@@ -660,7 +623,7 @@ describe("chain-services config", () => {
 
   it("rejects staging missing or example address manifests and missing role anchors", () => {
     const { UVP_ADDRESS_MANIFEST: _manifest, ...missingManifest } = stagingEnv(tempDirs);
-    expect(() => loadConfigFromEnv(missingManifest)).toThrow(/UVP_ADDRESS_MANIFEST, UVP_ETH_ADDRESS_MANIFEST, or UVP_STAGING_REHEARSAL_MANIFEST is required in staging/);
+    expect(() => loadConfigFromEnv(missingManifest)).toThrow(/UVP_ADDRESS_MANIFEST is required in staging/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_ADDRESS_MANIFEST: stagingManifestPath(tempDirs, "staging.example.json")
@@ -677,21 +640,6 @@ describe("chain-services config", () => {
 
     const { OPS_CONSOLE_ADMIN_IDS: _opsAdmins, ...missingOpsAdmins } = stagingEnv(tempDirs);
     expect(() => loadConfigFromEnv(missingOpsAdmins)).toThrow(/OPS_CONSOLE_ADMIN_IDS/);
-  });
-
-  it("accepts UVP_STAGING_REHEARSAL_MANIFEST as a valid staging address manifest source", () => {
-    const manifestPath = stagingManifestPath(tempDirs);
-    const env = {
-      ...stagingEnv(tempDirs),
-      UVP_STAGING_REHEARSAL_MANIFEST: manifestPath
-    };
-    delete (env as Record<string, string | undefined>).UVP_ADDRESS_MANIFEST;
-
-    const config = loadConfigFromEnv(env);
-
-    expect(config.network.contracts.UVPStateMachine).toBe("0x1111111111111111111111111111111111111111");
-    expect(config.network.deploymentBlock).toBe(100n);
-    expect(config.security.environment).toBe("staging");
   });
 
   it("runs safe strict preflight diagnostics for the staging profile", async () => {
@@ -857,7 +805,7 @@ describe("chain-services config", () => {
 
   it("rejects production non-Postgres storage, unsafe migrations, and Anvil default private keys", () => {
     expect(() => loadConfigFromEnv({
-      CHAIN_SERVICES_ENV: "production",
+      CHAIN_SERVICES_RUNTIME_ENV: "production",
       ...storeAuthJwtEnv
     })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production/);
 
@@ -937,7 +885,7 @@ describe("chain-services config", () => {
   it("requires production chain contracts and relay signer configuration", () => {
     expect(() => loadConfigFromEnv(productionEnv({
       UVP_CONTRACTS_JSON: JSON.stringify({
-        ZhixuTrustRegistry: "0x2222222222222222222222222222222222222222"
+        UVPIdentityRegistry: "0x2222222222222222222222222222222222222222"
       })
     }))).toThrow(/UVPStateMachine contract address/);
 
@@ -945,7 +893,7 @@ describe("chain-services config", () => {
       UVP_CONTRACTS_JSON: JSON.stringify({
         UVPStateMachine: "0x1111111111111111111111111111111111111111"
       })
-    }))).toThrow(/ZhixuTrustRegistry contract address/);
+    }))).toThrow(/UVPIdentityRegistry contract address/);
 
     const { UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: _privateKey, ...missingRelayer } = productionEnv();
     expect(() => loadConfigFromEnv(missingRelayer)).toThrow(/UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY is required/);
@@ -1117,16 +1065,15 @@ describe("chain-services config", () => {
         },
         storeMetadata: {
           readiness: "ready",
-          credentialsExposed: false,
           nonAuthoritative: true,
           sourceOfTruth: "contracts-and-chain-events",
           stores: {
-            draft: { kind: "memory", readiness: "ready", durable: false, credentialsExposed: false },
-            productSchema: { kind: "memory", readiness: "ready", durable: false, credentialsExposed: false, representedBy: "draft" },
-            version: { kind: "memory", readiness: "ready", durable: false, credentialsExposed: false },
-            supplier: { kind: "memory", readiness: "ready", durable: false, credentialsExposed: false },
-            supplierAudit: { kind: "memory", readiness: "ready", durable: false, credentialsExposed: false, representedBy: "supplier" },
-            docking: { kind: "memory", readiness: "ready", durable: false, credentialsExposed: false }
+            draft: { kind: "memory", readiness: "ready", durable: false },
+            productSchema: { kind: "memory", readiness: "ready", durable: false, representedBy: "draft" },
+            version: { kind: "memory", readiness: "ready", durable: false },
+            supplier: { kind: "memory", readiness: "ready", durable: false },
+            supplierAudit: { kind: "memory", readiness: "ready", durable: false, representedBy: "supplier" },
+            docking: { kind: "memory", readiness: "ready", durable: false }
           }
         }
       }
@@ -1175,7 +1122,7 @@ describe("chain-services config", () => {
 
 function productionEnv(overrides: Record<string, string | undefined> = {}): Record<string, string | undefined> {
   return {
-    CHAIN_SERVICES_ENV: "production",
+    CHAIN_SERVICES_RUNTIME_ENV: "production",
     CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:db-secret@prod-db.internal:5432/uvp",
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
@@ -1300,7 +1247,7 @@ function stagingManifestPath(tempDirs: string[], filename = "staging.addresses.j
         address: "0x1111111111111111111111111111111111111111",
         deployment: { blockNumber: 110 }
       },
-      ZhixuTrustRegistry: {
+      UVPIdentityRegistry: {
         address: "0x2222222222222222222222222222222222222222",
         deployment: { blockNumber: 111 }
       }

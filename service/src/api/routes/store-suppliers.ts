@@ -104,7 +104,7 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           };
         }
 
-        const supplierMatch = /^\/store\/suppliers\/([^/]+)(?:\/(review|request-attestation|request-revocation))?$/.exec(request.pathname);
+        const supplierMatch = /^\/store\/suppliers\/([^/]+)(?:\/(review|request-identity-registration|request-identity-revocation))?$/.exec(request.pathname);
         if (!supplierMatch) {
           return {
             status: 404,
@@ -165,9 +165,9 @@ export function createStoreSuppliersRouteModule(): RouteModule {
                 throw error;
               }
             }
-            case "request-attestation": {
+            case "request-identity-registration": {
               try {
-                const body = await context.storeSupplierService.requestAttestation(
+                const body = await context.storeSupplierService.requestIdentityRegistration(
                   supplierId,
                   request.body,
                   storeOperatorPrincipalFromAccess(authorization.access)
@@ -179,9 +179,9 @@ export function createStoreSuppliersRouteModule(): RouteModule {
                 throw error;
               }
             }
-            case "request-revocation": {
+            case "request-identity-revocation": {
               try {
-                const body = await context.storeSupplierService.requestRevocation(
+                const body = await context.storeSupplierService.requestIdentityRevocation(
                   supplierId,
                   request.body,
                   storeOperatorPrincipalFromAccess(authorization.access)
@@ -253,13 +253,13 @@ export function createStoreSuppliersRouteModule(): RouteModule {
 }
 
 function parseStoreSupplierQuery(query: ApiRequest["query"]): ParsedStoreSupplierQuery {
-  const trust = query?.trust;
-  if (trust && trust !== "active" && trust !== "revoked" && trust !== "not_found") {
+  const identity = query?.identity;
+  if (identity && identity !== "active" && identity !== "revoked" && identity !== "not_found") {
     return {
       ok: false,
       response: {
         status: 400,
-        body: { error: "invalid_query", message: "trust must be active, revoked, or not_found" }
+        body: { error: "invalid_query", message: "identity must be active, revoked, or not_found" }
       }
     };
   }
@@ -268,7 +268,7 @@ function parseStoreSupplierQuery(query: ApiRequest["query"]): ParsedStoreSupplie
     query: cleanQuery({
       query: query?.query,
       tag: query?.tag,
-      trust
+      identity
     }) as StoreSupplierListQuery
   };
 }
@@ -277,10 +277,10 @@ function supplierCapability(action: string): StoreCapability {
   switch (action) {
     case "review":
       return "store.supplier.review";
-    case "request-attestation":
-      return "store.supplier.attestation.request";
-    case "request-revocation":
-      return "store.supplier.revocation.request";
+    case "request-identity-registration":
+      return "store.supplier.identity.register";
+    case "request-identity-revocation":
+      return "store.supplier.identity.revoke";
     default:
       return "store.supplier.review";
   }

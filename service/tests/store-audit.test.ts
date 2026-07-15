@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
 import {
   createGovernanceService,
@@ -96,17 +96,11 @@ describe("Store operator audit events", () => {
   it("audits governance handoff requests separately from supplier metadata rows", async () => {
     const requests: GovernanceChainRequestDTO[] = [];
     const adapter: GovernanceChainAdapter = {
-      async attestPlan() {
-        throw new Error("not used");
-      },
-      async revokePlan() {
-        throw new Error("not used");
-      },
-      attestSupplier: vi.fn(async (request) => {
+      async registerIdentity(request) {
         requests.push(request);
         return { status: "submitted" as const, txHash, signer, retryable: false, simulated: false };
-      }),
-      async revokeSupplier() {
+      },
+      async revokeIdentity() {
         throw new Error("not used");
       }
     };
@@ -138,10 +132,10 @@ describe("Store operator audit events", () => {
 
     await expect(router.handle({
       method: "POST",
-      pathname: "/store/suppliers/supplier-audit/request-attestation",
+      pathname: "/store/suppliers/supplier-audit/request-identity-registration",
       headers: {
         ...governanceAdminHeaders,
-        "x-request-id": "req-supplier-attest-1"
+        "x-request-id": "req-identity-register-1"
       },
       body: {
         confirmation: {
@@ -153,7 +147,7 @@ describe("Store operator audit events", () => {
     expect(requests).toHaveLength(1);
     expect(audit.list()).toContainEqual(expect.objectContaining({
       type: "store.operator",
-      action: "store.supplier.attestation.request",
+      action: "store.supplier.identity.register",
       outcome: "succeeded",
       actor: "governance-admin-1",
       subject: expect.objectContaining({
@@ -162,7 +156,7 @@ describe("Store operator audit events", () => {
         roles: ["store_admin", "governance_admin"]
       }),
       metadata: expect.objectContaining({
-        requestId: "req-supplier-attest-1"
+        requestId: "req-identity-register-1"
       })
     }));
   });

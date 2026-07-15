@@ -114,9 +114,9 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
       `INSERT INTO store_zhixu_draft (
          draft_id, source_kind, content, status, zhixu_id, title, maintainer,
          public_summary, tags_json, compile_preview_json, product_schema_json, review_id,
-         governance_tx_log_id, errors_json, review_status,
+         errors_json, review_status,
          created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14::jsonb, $15, $16, $17)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13::jsonb, $14, $15, $16)`,
       draftValues(draft)
     );
   }
@@ -155,9 +155,9 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
       `INSERT INTO store_zhixu_draft (
          draft_id, source_kind, content, status, zhixu_id, title, maintainer,
          public_summary, tags_json, compile_preview_json, product_schema_json, review_id,
-         governance_tx_log_id, errors_json, review_status,
+         errors_json, review_status,
          created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14::jsonb, $15, $16, $17)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13::jsonb, $14, $15, $16)
        ON CONFLICT(draft_id)
        DO UPDATE SET
          source_kind = excluded.source_kind,
@@ -171,7 +171,6 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
          compile_preview_json = excluded.compile_preview_json,
          product_schema_json = excluded.product_schema_json,
          review_id = excluded.review_id,
-         governance_tx_log_id = excluded.governance_tx_log_id,
          errors_json = excluded.errors_json,
          review_status = excluded.review_status,
          created_at = excluded.created_at,
@@ -387,7 +386,6 @@ function draftValues(draft: StoreZhixuDraftRecord): readonly unknown[] {
     draft.compilePreview ? stringifyStorageJson(draft.compilePreview) : null,
     draft.productSchema ? stringifyStorageJson(draft.productSchema) : null,
     draft.reviewId ?? null,
-    draft.governanceTxLogId ?? null,
     stringifyStorageJson(draft.errors),
     draft.reviewStatus ?? null,
     draft.createdAt,
@@ -402,7 +400,6 @@ function draftRow(row: unknown): StoreZhixuDraftRecord {
   const compilePreview = optionalJson<StoreCompilePreviewDTO>(record, "compile_preview_json");
   const productSchema = optionalJson<StoreProductSchemaDTO>(record, "product_schema_json");
   const reviewId = optionalString(record, "review_id");
-  const governanceTxLogId = optionalString(record, "governance_tx_log_id");
   const reviewStatus = optionalString(record, "review_status") as StoreZhixuDraftRecord["reviewStatus"];
   return {
     draftId: stringColumn(record, "draft_id"),
@@ -417,7 +414,6 @@ function draftRow(row: unknown): StoreZhixuDraftRecord {
     ...(compilePreview !== undefined ? { compilePreview } : {}),
     ...(productSchema !== undefined ? { productSchema } : {}),
     ...(reviewId !== undefined ? { reviewId } : {}),
-    ...(governanceTxLogId !== undefined ? { governanceTxLogId } : {}),
     errors: parseStorageJson<readonly StoreDraftErrorDTO[]>(stringColumn(record, "errors_json")),
     ...(reviewStatus !== undefined ? { reviewStatus } : {}),
     createdAt: stringColumn(record, "created_at"),

@@ -8,7 +8,6 @@ import type { Address, Hex } from "../shared/types.js";
 export interface DockedSignalAutomationConfig {
   readonly enabled: boolean;
   readonly maxCandidatesPerRun: number;
-  readonly requireTrustedPlans: boolean;
   readonly maxGasPerTx?: bigint;
   readonly waitForReceipt: boolean;
 }

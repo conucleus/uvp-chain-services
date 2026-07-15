@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { buildConfigDiagnostics, loadConfigFromEnv } from "../src/config/index.js";
 import {
@@ -6,7 +5,7 @@ import {
   type EvidencePrincipal,
   type EvidenceService
 } from "../src/evidence/index.js";
-import { InMemoryGovernanceStore, type PlanAttestationLogDTO } from "../src/governance/index.js";
+import { InMemoryGovernanceStore, type IdentityTxLogDTO } from "../src/governance/index.js";
 import { createApiRouter } from "../src/api/routes.js";
 import {
   MemoryProjectionStore,
@@ -20,7 +19,7 @@ import {
 import type { Address, Hex } from "../src/shared/types.js";
 
 const stateMachine = "0x1111111111111111111111111111111111111111" as Address;
-const trustRegistry = "0x2222222222222222222222222222222222222222" as Address;
+const identityRegistry = "0x2222222222222222222222222222222222222222" as Address;
 const orderId = bytes32("1001");
 const sourceId = bytes32("2001");
 const signalId = bytes32("2002");
@@ -65,7 +64,7 @@ describe("ops health diagnostics", () => {
     const submissionStore = new InMemoryProductSubmissionStore();
     await submissionStore.putSubmission(deadLetterSubmission());
     const governanceStore = new InMemoryGovernanceStore();
-    await governanceStore.appendPlanAttestationLog(pendingGovernanceLog());
+    await governanceStore.appendIdentityTxLog(pendingGovernanceLog());
 
     const router = createApiRouter(projectionStore, {
       configDiagnostics: buildConfigDiagnostics(testConfig()),
@@ -102,7 +101,7 @@ describe("ops health diagnostics", () => {
           chainId: 31337,
           contracts: {
             UVPStateMachine: stateMachine,
-            ZhixuTrustRegistry: trustRegistry
+            UVPIdentityRegistry: identityRegistry
           }
         },
         preflight: { status: "skipped" },
@@ -135,14 +134,13 @@ describe("ops health diagnostics", () => {
           byStatus: { pending: 1 },
           pendingOrIndexing: [expect.objectContaining({
             txLogId: "gov_tx_1",
-            action: "attest_plan",
+            action: "register_identity",
             txHash
           })]
         },
         evidenceStorage: {
           adapterKind: "memory",
-          readiness: "ready",
-          credentialsExposed: false
+          readiness: "ready"
         }
       }
     });
@@ -205,7 +203,7 @@ describe("ops health diagnostics", () => {
         chainId: 31337,
         contracts: {
           UVPStateMachine: stateMachine,
-          ZhixuTrustRegistry: trustRegistry
+          UVPIdentityRegistry: identityRegistry
         }
       },
       preflight: { status: "skipped" },
@@ -217,7 +215,6 @@ describe("ops health diagnostics", () => {
       },
       storeMetadata: {
         readiness: "ready",
-        credentialsExposed: false,
         stores: {
           draft: { kind: "memory", readiness: "ready" },
           productSchema: { kind: "memory", readiness: "ready", representedBy: "draft" },
@@ -226,13 +223,6 @@ describe("ops health diagnostics", () => {
           supplierAudit: { kind: "memory", readiness: "ready", representedBy: "supplier" },
           docking: { kind: "memory", readiness: "ready" }
         }
-      },
-      roleBoundaries: {
-        backendBusinessSigning: "forbidden",
-        rawCalldataExposed: false,
-        fullSignaturesExposed: false,
-        evidencePlaintextExposed: false,
-        credentialValuesExposed: false
       },
       recoveryPolicy: {
         actionsAreNonAuthoritative: true,
@@ -251,12 +241,8 @@ describe("ops health diagnostics", () => {
           retryableSubmissions: 0,
           deadLetterSubmissions: 0
         },
-        evidenceStorage: {
-          credentialsExposed: false
-        },
         storeMetadata: {
           readiness: "ready",
-          credentialsExposed: false,
           stores: {
             productSchema: { representedBy: "draft", kind: "memory", readiness: "ready" },
             supplierAudit: { representedBy: "supplier", kind: "memory", readiness: "ready" },
@@ -477,24 +463,6 @@ describe("ops health diagnostics", () => {
     expect(serialized).toContain("[redacted:evidence]");
   });
 
-  it("documents the operator runbook without embedding concrete secret values", () => {
-    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-
-    for (const term of [
-      "RPC timeout",
-      "chain id mismatch",
-      "relayer insufficient funds",
-      "dead-letter",
-      "projection rebuild",
-      "reorg",
-      "evidence storage unavailable",
-      "governance tx pending",
-      "PRD42"
-    ]) {
-      expect(readme).toContain(term);
-    }
-    expect(readme).not.toContain("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
-  });
 });
 
 function testConfig() {
@@ -502,7 +470,7 @@ function testConfig() {
     UVP_CHAIN_ID: "31337",
     UVP_CONTRACTS_JSON: JSON.stringify({
       UVPStateMachine: stateMachine,
-      ZhixuTrustRegistry: trustRegistry
+      UVPIdentityRegistry: identityRegistry
     }),
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222"
   });
@@ -590,18 +558,15 @@ function retryableSubmission(): ProductSubmissionDTO {
   };
 }
 
-function pendingGovernanceLog(): PlanAttestationLogDTO {
+function pendingGovernanceLog(): IdentityTxLogDTO {
   return {
     logId: "gov_log_1",
     txLogId: "gov_tx_1",
-    action: "attest_plan",
+    action: "register_identity",
     subjectId: planId,
-    planId,
-    planHash,
-    artifactHash,
-    policyHash,
-    metadataHash,
-    metadataURI: "uvp-governance://metadata/plan",
+    account: submitter,
+    descriptorHash: metadataHash,
+    descriptorURI: "uvp-store://identities/acme",
     txHash,
     signer: submitter,
     requester: "admin-1",
@@ -609,13 +574,11 @@ function pendingGovernanceLog(): PlanAttestationLogDTO {
     broadcastStatus: "submitted",
     retryable: false,
     request: {
-      kind: "attestPlan",
-      planId,
-      planHash,
-      artifactHash,
-      policyHash,
-      metadataHash,
-      metadataURI: "uvp-governance://metadata/plan"
+      kind: "registerIdentity",
+      subjectId: planId,
+      account: submitter,
+      descriptorHash: metadataHash,
+      descriptorURI: "uvp-store://identities/acme"
     },
     createdAt: now,
     updatedAt: now

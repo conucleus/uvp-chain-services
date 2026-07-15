@@ -15,8 +15,7 @@ import {
 } from "../../store-console/zhixu-drafts.js";
 import {
   StoreZhixuVersionError,
-  type StoreZhixuVersionMutationInput,
-  type StoreZhixuVersionRevocationInput
+  type StoreZhixuVersionMutationInput
 } from "../../store-console/version.js";
 import {
   type StoreConsoleListQuery,
@@ -291,7 +290,7 @@ async function handleStoreZhixuVersionRequest(
       };
     }
 
-    const actionMatch = /^\/store\/zhixu-series\/([^/]+)\/versions\/([^/]+)\/(activate|deprecate|request-revocation)$/
+    const actionMatch = /^\/store\/zhixu-series\/([^/]+)\/versions\/([^/]+)\/(activate|deprecate)$/
       .exec(request.pathname);
     if (request.method === "POST" && actionMatch) {
       const seriesId = decodeURIComponent(actionMatch[1] ?? "");
@@ -327,19 +326,6 @@ async function handleStoreZhixuVersionRequest(
           await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
           throw error;
         }
-      }
-      try {
-        const body = await context.storeZhixuVersionService.requestRevocation(
-          seriesId,
-          versionId,
-          parseStoreVersionRevocationBody(request.body),
-          authorization.access.governancePrincipal!
-        );
-        await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
-        return { status: 202, body };
-      } catch (error) {
-        await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
-        throw error;
       }
     }
   } catch (error) {
@@ -466,7 +452,7 @@ async function handleStoreZhixuDraftRequest(
       }
     }
 
-    const draftMatch = /^\/store\/zhixu-drafts\/([^/]+)(?:\/(compile-preview|submit-review|request-attestation))?$/.exec(
+    const draftMatch = /^\/store\/zhixu-drafts\/([^/]+)(?:\/(compile-preview|submit-review))?$/.exec(
       request.pathname
     );
     if (!draftMatch) {
@@ -537,34 +523,6 @@ async function handleStoreZhixuDraftRequest(
       }
     }
 
-    if (request.method === "POST" && action === "request-attestation") {
-      const capability = "store.draft.attestation.request";
-      const resource = { type: "store_zhixu_draft", id: draftId };
-      const authorization = await authorizeStoreCapability(context, request, capability, resource);
-      if (!isStoreAuthorizationResult(authorization)) {
-        return authorization;
-      }
-      const confirmationError = await draftAttestationConfirmationError(context, request, draftId);
-      if (confirmationError) {
-        await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, confirmationError);
-        return storeConfirmationErrorResponse(confirmationError);
-      }
-      try {
-        const body = await context.storeZhixuDraftWorkflowService.requestAttestation(
-          draftId,
-          request.body,
-          authorization.access.governancePrincipal!
-        );
-        await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
-        return {
-          status: 202,
-          body
-        };
-      } catch (error) {
-        await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
-        throw error;
-      }
-    }
   } catch (error) {
     if (error instanceof StoreZhixuDraftWorkflowError) {
       return {
@@ -612,28 +570,6 @@ function storeMetadataUnavailableResponse(error: unknown): ApiResponse {
       message: redactErrorMessage(error)
     }
   };
-}
-
-async function draftAttestationConfirmationError(
-  context: Parameters<RouteModule["handle"]>[1],
-  request: ApiRequest,
-  draftId: string
-): Promise<StoreConfirmationError | undefined> {
-  try {
-    const body = optionalBodyRecord(request.body);
-    const draft = await context.storeZhixuDraftWorkflowService.getDraft(draftId);
-    requireStoreConfirmation(request.body, {
-      draftId,
-      planId: draft?.compilePreview?.planId,
-      planHash: draft?.compilePreview?.planHash
-    });
-    return undefined;
-  } catch (error) {
-    if (error instanceof StoreConfirmationError) {
-      return error;
-    }
-    throw error;
-  }
 }
 
 async function storeVersionConfirmationError(
@@ -712,7 +648,7 @@ function parseStoreZhixuListQuery(query: ApiRequest["query"]): StoreConsoleListQ
     query: query?.query,
     lifecycle: query?.lifecycle,
     review: query?.review,
-    trust: query?.trust
+    publication: query?.publication
   }) as StoreConsoleListQuery;
 }
 
@@ -722,8 +658,6 @@ function versionCapability(action: string | undefined): StoreCapability {
       return "store.version.activate";
     case "deprecate":
       return "store.version.deprecate";
-    case "request-revocation":
-      return "store.version.revocation.request";
     default:
       return "store.version.activate";
   }
@@ -797,18 +731,6 @@ function parseStoreVersionMutationBody(body: unknown): StoreZhixuVersionMutation
     ...(planHash !== undefined ? { planHash } : {}),
     ...(artifactHash !== undefined ? { artifactHash } : {}),
     ...(cutoverReason !== undefined ? { cutoverReason } : {})
-  };
-}
-
-function parseStoreVersionRevocationBody(body: unknown): StoreZhixuVersionRevocationInput {
-  const record = optionalBodyRecord(body);
-  const reason = optionalString(record, "reason");
-  const publicSummary = optionalString(record, "publicSummary");
-  return {
-    ...parseStoreVersionMutationBody(record),
-    ...(reason !== undefined ? { reason } : {}),
-    ...(publicSummary !== undefined ? { publicSummary } : {}),
-    ...(Object.hasOwn(record, "metadata") ? { metadata: record.metadata } : {})
   };
 }
 

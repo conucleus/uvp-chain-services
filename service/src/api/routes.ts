@@ -4,7 +4,6 @@ import { createNoopRiskGraphService } from "../risk/index.js";
 import { createProductService } from "../product/service.js";
 import {
   createProductBffService,
-  type ProductBffSupplierTrustResolver
 } from "../product/bff/service.js";
 import type { ProductBffStore } from "../product/bff/store.js";
 import { createEvidenceService, LocalEvidenceStorage } from "../evidence/index.js";
@@ -48,7 +47,6 @@ import { createDiagnosticsRouteModule } from "./routes/diagnostics.js";
 import { createProductE2EControls, createProductE2EControlsRouteModule } from "./routes/e2e-controls.js";
 import { createEvidenceRouteModule } from "./routes/evidence.js";
 import { createGovernanceRouteModule } from "./routes/governance.js";
-import { createLegacyOrdersRouteModule } from "./routes/legacy-orders.js";
 import { createNotificationsRouteModule } from "./routes/notifications.js";
 import { createProductBffRouteModule } from "./routes/product-bff.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
@@ -86,7 +84,11 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash, artifactHash)
   };
   const productService = createProductService(store, { productSchemaResolver });
-  const storeConsoleService = createStoreConsoleService({ productService, store });
+  const storeConsoleService = createStoreConsoleService({
+    productService,
+    store,
+    supplierMetadataStore: storeSupplierMetadataStore
+  });
   const storeDockingService = createStoreDockingService({
     productService,
     sessionStore: storeDockingSessionStore,
@@ -106,7 +108,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const storeZhixuVersionService = createStoreZhixuVersionService({
     productService,
     projectionStore: store,
-    governanceService,
     metadataStore: storeZhixuVersionMetadataStore,
     ...(options.now ? { now: options.now } : {})
   });
@@ -124,7 +125,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.productRegistrationCreatorAddress ? { registrationCreatorAddress: options.productRegistrationCreatorAddress } : {}),
     ...(options.productRegistrarAddress ? { registrarAddress: options.productRegistrarAddress } : {}), triggerChainId: options.productTriggerChainId ?? options.submissionChainId ?? 31337,
     versionResolver: storeZhixuVersionService,
-    supplierTrustResolver: productBffSupplierTrustResolver(store),
     ...(options.now ? { now: options.now } : {})
   });
   const defaultEvidenceStorage = options.evidenceStorage ?? (options.evidenceService ? undefined : new LocalEvidenceStorage());
@@ -257,7 +257,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const modules: readonly RouteModule[] = [
     createDiagnosticsRouteModule(),
     createAdminOpsRouteModule(),
-    createLegacyOrdersRouteModule(),
     createProductE2EControlsRouteModule(),
     createStoreConsoleRouteModule(),
     createStoreComplianceRouteModule(),
@@ -355,42 +354,6 @@ function productBffActiveStageExecutorAuthorization(
     source: "active_stage_executor_overlay",
     ...(authorized ? {} : { reason: "submitter is not the active stage executor" })
   };
-}
-
-function productBffSupplierTrustResolver(store: ProjectionStore): ProductBffSupplierTrustResolver {
-  return async (wallet) => {
-    const normalizedWallet = wallet.toLowerCase();
-    const matches = Object.values((await store.getTrustSnapshot()).suppliers)
-      .filter((supplier) => supplier.wallet.toLowerCase() === normalizedWallet)
-      .sort(compareSupplierTrustForBff);
-    const trust = matches.find((supplier) => !supplier.revoked) ?? matches[0];
-    return trust
-      ? {
-          registryAddress: trust.registryAddress,
-          supplierSubjectId: trust.supplierSubjectId,
-          wallet: trust.wallet,
-          status: trust.status,
-          revoked: trust.revoked,
-          updatedAt: trust.updatedAt
-        }
-      : undefined;
-  };
-}
-
-function compareSupplierTrustForBff(
-  left: Awaited<ReturnType<ProjectionStore["getTrustSnapshot"]>>["suppliers"][string],
-  right: Awaited<ReturnType<ProjectionStore["getTrustSnapshot"]>>["suppliers"][string]
-): number {
-  if (left.revoked !== right.revoked) {
-    return left.revoked ? 1 : -1;
-  }
-  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
-    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
-  }
-  if (left.updatedAt.logIndex !== right.updatedAt.logIndex) {
-    return right.updatedAt.logIndex - left.updatedAt.logIndex;
-  }
-  return left.supplierSubjectId.localeCompare(right.supplierSubjectId);
 }
 
 function equalHex(left: string, right: string): boolean {

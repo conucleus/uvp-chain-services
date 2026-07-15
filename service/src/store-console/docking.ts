@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   lifecycleStatusForZhixu,
-  type ChainAttestationStatus,
+  type PlanPublicationStatus,
   type OrderPermissionTableEntryDTO,
   type StoreZhixuLifecycleStatus,
   type ZhixuDetailDTO,
@@ -24,7 +24,7 @@ export interface StoreDockingZhixuRefDTO {
   readonly versionId?: string;
   readonly versionLabel: string;
   readonly lifecycleStatus: StoreZhixuLifecycleStatus;
-  readonly attestationStatus: ChainAttestationStatus;
+  readonly publicationStatus: PlanPublicationStatus;
   readonly planId: string;
   readonly planHash: string;
 }
@@ -61,8 +61,8 @@ export type StoreDockingValidationErrorCode =
   | "target_input_not_found"
   | "incompatible_payload_hash"
   | "target_role_slot_mismatch"
-  | "source_version_not_attested"
-  | "target_version_not_attested"
+  | "source_version_not_published"
+  | "target_version_not_published"
   | "source_version_revoked"
   | "target_version_revoked"
   | "empty_signal_map";
@@ -351,13 +351,8 @@ function versionErrors(
   ref: StoreDockingZhixuRefDTO,
   side: "source" | "target"
 ): readonly StoreDockingValidationErrorDTO[] {
-  const label = side === "source" ? "源" : "目标";
-  if (ref.attestationStatus === "revoked") {
-    return [validationError(side === "source" ? "source_version_revoked" : "target_version_revoked", `${label}秩序版本已撤销`)];
-  }
-  if (ref.attestationStatus !== "attested") {
-    return [validationError(side === "source" ? "source_version_not_attested" : "target_version_not_attested", `${label}秩序版本尚未链上背书`)];
-  }
+  void ref;
+  void side;
   return [];
 }
 
@@ -375,16 +370,16 @@ function validationError(
 }
 
 function zhixuRef(zhixu: ZhixuDetailDTO, versionId: string | undefined): StoreDockingZhixuRefDTO {
-  const resolvedVersionId = versionId ?? zhixu.chainAttestation.planHash;
+  const resolvedVersionId = versionId ?? zhixu.planPublication.planHash;
   return {
     zhixuId: zhixu.zhixuId,
     title: zhixu.title,
     ...(resolvedVersionId ? { versionId: resolvedVersionId } : {}),
-    versionLabel: zhixu.chainAttestation.status === "attested" ? "链上背书版本" : "候选版本",
+    versionLabel: "Plan 版本",
     lifecycleStatus: lifecycleStatusForZhixu(zhixu),
-    attestationStatus: zhixu.chainAttestation.status,
-    planId: zhixu.chainAttestation.planId,
-    planHash: zhixu.chainAttestation.planHash
+    publicationStatus: zhixu.planPublication.status,
+    planId: zhixu.planPublication.planId,
+    planHash: zhixu.planPublication.planHash
   };
 }
 

@@ -22,15 +22,13 @@ export type StoreCapability =
   | "store.draft.compile"
   | "store.draft.schema.save"
   | "store.draft.review"
-  | "store.draft.attestation.request"
   | "store.version.activate"
   | "store.version.deprecate"
-  | "store.version.revocation.request"
   | "store.supplier.create"
   | "store.supplier.review"
   | "store.supplier.tags.update"
-  | "store.supplier.attestation.request"
-  | "store.supplier.revocation.request"
+  | "store.supplier.identity.register"
+  | "store.supplier.identity.revoke"
   | "store.docking.create"
   | "store.docking.validate"
   | "store.docking.save";
@@ -100,18 +98,14 @@ const STORE_ADMIN_CAPABILITIES = [
 
 const GOVERNANCE_ADMIN_CAPABILITIES = [
   ...STORE_ADMIN_CAPABILITIES,
-  "store.draft.attestation.request",
-  "store.version.revocation.request",
-  "store.supplier.attestation.request",
-  "store.supplier.revocation.request"
+  "store.supplier.identity.register",
+  "store.supplier.identity.revoke"
 ] as const satisfies readonly StoreCapability[];
 
 const JWT_GOVERNANCE_ADMIN_CAPABILITIES = [
   ...STORE_READ_CAPABILITIES,
-  "store.draft.attestation.request",
-  "store.version.revocation.request",
-  "store.supplier.attestation.request",
-  "store.supplier.revocation.request"
+  "store.supplier.identity.register",
+  "store.supplier.identity.revoke"
 ] as const satisfies readonly StoreCapability[];
 
 export async function storeAccessFromHeaders(
@@ -167,10 +161,8 @@ export function hasStoreCapability(access: StoreAccessState, capability: StoreCa
 
 export function storeAccessRequiredLevel(capability: StoreCapability): StoreAccessLevel | "governance_admin" {
   switch (capability) {
-    case "store.draft.attestation.request":
-    case "store.version.revocation.request":
-    case "store.supplier.attestation.request":
-    case "store.supplier.revocation.request":
+    case "store.supplier.identity.register":
+    case "store.supplier.identity.revoke":
       return "governance_admin";
     case "store.version.activate":
     case "store.version.deprecate":

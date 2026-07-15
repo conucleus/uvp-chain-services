@@ -13,7 +13,7 @@ import {
   EXECUTOR_PATCH_MODE_REPLACEMENT
 } from "../shared/protocol-constants.js";
 
-export type OrderStatus = "created" | "funded" | "active" | "in_dispute" | "settled";
+export type OrderStatus = "registered";
 export type StageStatus = "approved" | "released" | "refunded" | "disputed" | "resolved";
 
 export interface ProjectionProvenance {
@@ -48,14 +48,7 @@ export interface OrderProjection {
   readonly stages: Readonly<Record<string, StageProjection>>;
 }
 
-export type StateMachineOrderStatus =
-  | "registered"
-  | "running"
-  | "waiting"
-  | "action_required"
-  | "completed"
-  | "cancelled"
-  | "unknown";
+export type StateMachineOrderStatus = "registered" | "unknown";
 export type StateMachineHookStatus = "init" | "waiting" | "ready" | "cancelled" | "unknown";
 export type StateMachineTaskStatus = "ready" | "submitted" | "cancelled" | "unknown";
 export type StateMachineDeploymentStatus =
@@ -762,7 +755,7 @@ function applyOrderMaterialized(
     deploymentId
   );
   const proof = proofOf(event, { orderId, planId, planHash: order.planHash ?? plan?.planHash });
-  order.status = order.status === "action_required" ? order.status : "running";
+  order.status = "registered";
   order.currentStage = stageId;
   order.planId = planId;
   if (plan && !order.planHash) {
@@ -825,9 +818,7 @@ function applySignalCapabilityRegistered(
       refreshTaskSubmitSignals(order, task, plan);
       changed = markTaskSubmittedFromExistingSignals(order, task) || changed;
     }
-    if (changed && Object.values(order.tasks).every((task) => task.status !== "ready")) {
-      order.status = "running";
-    }
+    void changed;
   }
 }
 
@@ -884,7 +875,7 @@ function applySignalSubmitted(
     proof
   };
   order.signals[signalProjectionKey(sourceId, signalId)] = signal;
-  order.status = order.status === "registered" || order.status === "unknown" ? "running" : order.status;
+  order.status = "registered";
   order.updatedAt = provenanceOf(event);
   markMatchingTasksSubmitted(order, sourceId, signalId, proof);
   appendOrderProof(order, proof);
@@ -902,7 +893,7 @@ function applyStageMaterialized(
   const stageId = requiredBytes32Arg(event, "stageId");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash });
   order.currentStage = stageId;
-  order.status = order.status === "action_required" ? order.status : "running";
+  order.status = "registered";
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "环节已启动", proof, { orderId, planId: order.planId }));
@@ -1264,7 +1255,7 @@ function applyHookStatusChanged(
   }
   hook.updatedAt = provenanceOf(event);
   hook.proof = proof;
-  order.status = orderStatusFromHookStatus(order, hookStatus);
+  order.status = "registered";
   order.updatedAt = provenanceOf(event);
   if (hookStatus === "cancelled") {
     cancelTask(order, hookId, proof);
@@ -1336,9 +1327,7 @@ function applyHookReady(
   markTaskSubmittedFromExistingSignals(order, task);
   order.tasks[taskId] = task;
   order.currentStage = stageIdentifier;
-  order.status = task.status === "ready" || Object.values(order.tasks).some((item) => item.status === "ready")
-    ? "action_required"
-    : "running";
+  order.status = "registered";
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "待办已生成", proof, { orderId, planId: order.planId }));
@@ -1462,9 +1451,7 @@ function markMatchingTasksSubmitted(
     changed = markTaskSubmitted(task, proof) || changed;
   }
 
-  if (changed && Object.values(order.tasks).every((task) => task.status !== "ready")) {
-    order.status = "running";
-  }
+  void changed;
 }
 
 function refreshTaskSubmitSignals(
@@ -1594,9 +1581,7 @@ function markMatchingTasksAssigned(
     });
     changed = markTaskSubmittedFromExistingSignals(order, task) || changed;
   }
-  if (changed && Object.values(order.tasks).every((task) => task.status !== "ready")) {
-    order.status = "running";
-  }
+  void changed;
 }
 
 function markTargetStageTasksAssignedFromOverlay(
@@ -1761,10 +1746,7 @@ export function signalAuthorizationMatchesHook(
   authorization: StateMachineSignalAuthorizationProjection,
   hook: SignalAuthorizationHookMatchInput
 ): boolean {
-  if ((hook.submitSignals ?? []).length > 0) {
-    return authorizationMatchesSubmitSignals(authorization, hook.submitSignals ?? []);
-  }
-  return legacySignalAuthorizationMatchesHook(authorization, hook);
+  return authorizationMatchesSubmitSignals(authorization, hook.submitSignals ?? []);
 }
 
 function authorizationMatchesSubmitSignals(
@@ -1774,16 +1756,6 @@ function authorizationMatchesSubmitSignals(
   return submitSignals.some((signal) =>
     signal.sourceId === authorization.sourceId && signal.signalId === authorization.signalId
   );
-}
-
-function legacySignalAuthorizationMatchesHook(
-  authorization: StateMachineSignalAuthorizationProjection,
-  hook: SignalAuthorizationHookMatchInput
-): boolean {
-  return (authorization.sourceId === hook.stageIdentifier && authorization.signalId === hook.hookName) ||
-    authorization.sourceId === hook.hookId ||
-    authorization.signalId === hook.hookId ||
-    authorization.signalId === hook.hookName;
 }
 
 export function stateMachineScopedKey(chainId: number, stateMachineAddress: Address, id: Hex): string {
@@ -1893,23 +1865,6 @@ function hookStatusFromArg(value: unknown): StateMachineHookStatus {
       return "cancelled";
     default:
       return "unknown";
-  }
-}
-
-function orderStatusFromHookStatus(
-  order: StateMachineOrderProjection,
-  hookStatus: StateMachineHookStatus
-): StateMachineOrderStatus {
-  switch (hookStatus) {
-    case "waiting":
-      return "waiting";
-    case "ready":
-      return order.status === "action_required" ? "action_required" : "running";
-    case "cancelled":
-      return "cancelled";
-    case "init":
-    case "unknown":
-      return order.status === "registered" || order.status === "unknown" ? "running" : order.status;
   }
 }
 

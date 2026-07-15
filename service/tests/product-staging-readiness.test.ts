@@ -12,7 +12,7 @@ import type { Address, Hex } from "../src/shared/types.js";
 
 const chainId = 84532;
 const stateMachineAddress = "0x1111111111111111111111111111111111111111" as Address;
-const trustRegistryAddress = "0x2222222222222222222222222222222222222222" as Address;
+const identityRegistryAddress = "0x2222222222222222222222222222222222222222" as Address;
 const deploymentRegistryAddress = "0x8888888888888888888888888888888888888888" as Address;
 const activeDeploymentId = bytes32Hex("d02");
 const stateMachineOrderId = bytes32Hex("202");
@@ -21,13 +21,10 @@ const stageId = bytes32Text("export.customs");
 const hookName = bytes32Text("customs-review");
 const sourceId = bytes32Text("customs-source");
 const signalId = bytes32Text("cmp");
-const supplierSubjectId = bytes32Hex("3001");
 const metadataHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-const policyHash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const payloadHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const idempotencyKey = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const abiHash = bytes32Hex("abc");
-const attester = "0x2222222222222222222222222222222222222222" as Address;
 const submitter = "0x3333333333333333333333333333333333333333" as Address;
 const productionRelayerPrivateKey = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const productionRelayerAddress = "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a";
@@ -58,7 +55,7 @@ describe("Product API staging readiness", () => {
       latestIndexedBlock: 9n,
       finalizedBlock: 9n,
       confirmationDepth: 12,
-      lastEventName: "SupplierAttested",
+      lastEventName: "SignalSubmitterAuthorized",
       eventCount: 9,
       rebuild: {
         status: "completed",
@@ -66,7 +63,7 @@ describe("Product API staging readiness", () => {
         fromBlock: 1n,
         toBlock: 9n,
         eventCount: 9,
-        activeEventCount: 8,
+        activeEventCount: 9,
         removedEventCount: 1,
         removedLogsFiltered: true,
         projectionRebuilt: true,
@@ -122,23 +119,17 @@ describe("Product API staging readiness", () => {
           deploymentBlock: "1",
           fromBlock: "1",
           toBlock: "9",
-          activeEventCount: 8,
+          activeEventCount: 9,
           removedEventCount: 1,
           removedLogsFiltered: true,
           projectionRebuilt: true,
           mismatchCount: 0
         },
-        activeEventCount: 8,
+        activeEventCount: 9,
         removedEventCount: 1,
         removedLogsFiltered: true,
         projectionRebuilt: true,
-        eventRowsReplayed: 8
-      },
-      planTrust: {
-        productFacingAttestedPlanCount: 1,
-        ordersWithActivePlanTrustCount: 1,
-        ordersWithMissingPlanTrustCount: 0,
-        ordersWithRevokedPlanTrustCount: 0
+        eventRowsReplayed: 9
       },
       productState: {
         zhixuCount: 1,
@@ -160,40 +151,26 @@ describe("Product API staging readiness", () => {
             status: "open",
             canSubmit: true,
             assigneeWallet: submitter,
-            supplierTrustStatus: "attested",
             readyTxHash: txHash(7n)
           })
         ]
-      },
-      supplierTrust: {
-        supplierProjectionCount: 1,
-        assignedTaskCount: 1,
-        attestedTaskCount: 1,
-        revokedTaskCount: 0,
-        missingTaskCount: 0,
-        assessment: expect.stringContaining("ready"),
-        severity: "ready",
-        blocker: false
       },
       proof: {
         orderProofEventCount: expect.any(Number),
         taskProofRowCount: expect.any(Number),
         payloadHashEventCount: 1,
-        eventNames: expect.arrayContaining(["OrderRegistered", "SignalSubmitted", "HookReady", "PlanAttested"])
+        eventNames: expect.arrayContaining(["OrderRegistered", "SignalSubmitted", "HookReady", "PlanRegistered"])
       },
       evidenceStorage: {
         adapterKind: "object",
         readiness: "ready",
-        productionSafe: true,
-        credentialsExposed: false
+        productionSafe: true
       },
       roleInputs: {
         ready: true,
         relayerConfigured: true,
         governanceConfigured: true,
-        participantWalletCount: 1,
-        backendBusinessSigning: "forbidden",
-        privateValuesExposed: false
+        participantWalletCount: 1
       }
     });
     const serialized = JSON.stringify(response.body);
@@ -279,7 +256,6 @@ describe("Product API staging readiness", () => {
         "staging_preflight_not_passed",
         "no_active_deployment",
         "indexer_not_indexed",
-        "no_attested_product_plan",
         "no_chain_projected_order",
         "no_chain_projected_task",
         "no_chain_proof"
@@ -327,84 +303,6 @@ describe("Product API staging readiness", () => {
     });
   });
 
-  it("fails closed when a submitter task has revoked supplier trust", async () => {
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: readinessEvents({ supplierRevoked: true })
-    });
-    const router = createApiRouter(store, {
-      configDiagnostics: stagingDiagnostics(tempDirs),
-      productRuntimeEnvironment: "staging",
-      evidenceStorage: productionSafeEvidenceStorage(),
-      now: () => new Date(generatedAt)
-    });
-
-    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness" });
-
-    expect(response.status).toBe(503);
-    expect(response.body).toMatchObject({
-      ok: false,
-      reasons: expect.arrayContaining(["supplier_trust_revoked"]),
-      supplierTrust: {
-        revokedTaskCount: 1,
-        missingTaskCount: 0,
-        assessment: expect.stringContaining("blocker"),
-        severity: "blocker",
-        blocker: true,
-        revokedTasks: [
-          expect.objectContaining({
-            orderId: stateMachineOrderId,
-            assigneeWallet: submitter,
-            supplierSubjectId
-          })
-        ]
-      },
-      productState: {
-        sampleTasks: [
-          expect.objectContaining({
-            status: "blocked",
-            canSubmit: false,
-            supplierTrustStatus: "revoked"
-          })
-        ]
-      }
-    });
-  });
-
-  it("reports degraded supplier trust assessment when projection count is zero and tasks are assigned but unattested", async () => {
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: readinessEvents({ includeSupplierAttestation: false })
-    });
-    const router = createApiRouter(store, {
-      configDiagnostics: stagingDiagnostics(tempDirs),
-      productRuntimeEnvironment: "staging",
-      evidenceStorage: productionSafeEvidenceStorage(),
-      now: () => new Date(generatedAt)
-    });
-
-    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness" });
-
-    expect(response.status).toBe(503);
-    expect(response.body).toMatchObject({
-      ok: false,
-      ready: false,
-      status: "not_ready",
-      reasons: expect.arrayContaining(["supplier_trust_degraded"]),
-      supplierTrust: {
-        supplierProjectionCount: 0,
-        assignedTaskCount: 1,
-        attestedTaskCount: 0,
-        revokedTaskCount: 0,
-        missingTaskCount: 1,
-        assessment: expect.stringContaining("degraded"),
-        severity: "degraded",
-        blocker: false
-      }
-    });
-  });
 });
 
 function stagingDiagnostics(tempDirs: string[]): ConfigDiagnostics {
@@ -416,7 +314,7 @@ function stagingDiagnostics(tempDirs: string[]): ConfigDiagnostics {
       checks: [
         { name: "network.chain_id", status: "passed" },
         { name: "contracts.state_machine_code", status: "passed" },
-        { name: "contracts.trust_registry_code", status: "passed" },
+        { name: "contracts.identity_registry_code", status: "passed" },
         { name: "governance.owner", status: "passed" }
       ]
     }
@@ -506,8 +404,8 @@ function stagingManifestPath(tempDirs: string[]): string {
         address: stateMachineAddress,
         deployment: { blockNumber: 4 }
       },
-      ZhixuTrustRegistry: {
-        address: trustRegistryAddress,
+      UVPIdentityRegistry: {
+        address: identityRegistryAddress,
         deployment: { blockNumber: 4 }
       }
     }
@@ -517,8 +415,6 @@ function stagingManifestPath(tempDirs: string[]): string {
 
 function readinessEvents(options: {
   readonly includeActiveDeployment?: boolean;
-  readonly supplierRevoked?: boolean;
-  readonly includeSupplierAttestation?: boolean;
 } = {}): readonly ChainEvent[] {
   return [
     ...(options.includeActiveDeployment === false ? [] : activeDeploymentEvents()),
@@ -527,15 +423,13 @@ function readinessEvents(options: {
       planHash: crossBorderPlanIds.planHash,
       hookCount: 1n
     }),
-    chainEvent(5n, 0, "PlanAttested", {
+    chainEvent(5n, 0, "SignalCapabilityRegistered", {
       planId: crossBorderPlanIds.planId,
-      planHash: crossBorderPlanIds.planHash,
-      artifactHash: crossBorderPlanIds.artifactHash,
-      policyHash,
-      metadataHash,
-      metadataURI: "https://store.example/zhixu/cross-border",
-      attester
-    }, trustRegistryAddress),
+      stageId,
+      targetSourceId: stageId,
+      signalId: hookName,
+      targetOrderRelation: 0
+    }),
     chainEvent(6n, 0, "OrderRegistered", {
       orderId: stateMachineOrderId,
       planId: crossBorderPlanIds.planId
@@ -561,28 +455,7 @@ function readinessEvents(options: {
       submitter,
       role: bytes32Text("customs-broker"),
       metadataHash
-    }),
-    ...(options.includeSupplierAttestation === false ? [] : [
-      chainEvent(9n, 0, "SupplierAttested", {
-        supplierSubjectId,
-        wallet: submitter,
-        profileHash: metadataHash,
-        capabilityHash: policyHash,
-        reputationHash: payloadHash,
-        metadataURI: "https://store.example/suppliers/customs-broker",
-        attester
-      }, trustRegistryAddress)
-    ]),
-    ...(options.supplierRevoked
-      ? [
-          chainEvent(10n, 0, "SupplierRevoked", {
-            supplierSubjectId,
-            reasonHash: metadataHash,
-            reasonURI: "https://store.example/supplier-revocations/customs-broker",
-            revoker: attester
-          }, trustRegistryAddress)
-        ]
-      : [])
+    })
   ];
 }
 

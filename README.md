@@ -23,7 +23,7 @@ requires the protocol packages to be published or linked into an equivalent loca
 workspace.
 
 Services may cache, project, relay, and translate chain facts, but they must not
-become the source of truth for plans, orders, signals, hooks, attestations, funds,
+become the source of truth for plans, orders, signals, hooks, identity bindings, funds,
 approvals, releases, refunds, or disputes. Rebuildability from contract events is
 the default rule.
 

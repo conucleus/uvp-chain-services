@@ -4,7 +4,10 @@ import { privateKeyToAccount } from "viem/accounts";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
 import type { ChainServicesRuntimeEnv } from "../src/config/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProductBffStore, type ProductBffStore } from "../src/product/bff/store.js";
+import {
+  MemoryProductBffStore,
+  type ProductBffStore,
+} from "../src/product/bff/store.js";
 import {
   createProductDockedOrderLinkService,
   createProductStageExecutorPatchService,
@@ -16,31 +19,43 @@ import {
   type PreparedStageResourcePatchDTO,
   type StageExecutorPatchBroadcastAdapter,
   type StagePatchBroadcastResult,
-  type StageResourcePatchBroadcastAdapter
+  type StageResourcePatchBroadcastAdapter,
 } from "../src/stage-patches/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { normalizeAddress, type Address, type Hex } from "../src/shared/types.js";
+import {
+  normalizeAddress,
+  type Address,
+  type Hex,
+} from "../src/shared/types.js";
 
 const chainId = 31337;
 const contractAddress = "0x1111111111111111111111111111111111111111" as Address;
-const trustRegistryAddress = "0x4444444444444444444444444444444444444444" as Address;
+const stateMachineAddress =
+  "0x4444444444444444444444444444444444444444" as Address;
 const planId = bytes32Hex("101");
-const planHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Hex;
+const planHash =
+  "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Hex;
 const linkedPlanId = bytes32Hex("102");
-const linkedPlanHash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" as Hex;
-const artifactHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Hex;
+const linkedPlanHash =
+  "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" as Hex;
+const artifactHash =
+  "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Hex;
 const orderId = bytes32Hex("202");
 const linkedOrderId = bytes32Hex("203");
 const selectorStageId = bytes32Text("selector.stage");
-const selectorStageOnchainId = "0x31ca11fdde4f72e7368e356f13c363594453a94adc6f834b1a29a03a67319af0" as Hex;
+const selectorStageOnchainId =
+  "0x31ca11fdde4f72e7368e356f13c363594453a94adc6f834b1a29a03a67319af0" as Hex;
 const targetStageId = bytes32Text("target.stage");
-const targetStageOnchainId = "0x26cc04b18410316cea7364178848d74c4c4cdbec93b7497a57eec8a6f7f49fbc" as Hex;
+const targetStageOnchainId =
+  "0x26cc04b18410316cea7364178848d74c4c4cdbec93b7497a57eec8a6f7f49fbc" as Hex;
 const selectorHookId = bytes32Hex("303");
 const selectorHookName = bytes32Text("select-executor");
 const selectorRoleSlotId = "buyer-selector";
 const resourceControllerRoleSlotId = "buyer-resource-controller";
-const executorPatchSignalId = "0xbbb1770c9313f4029a89e03f4719037cdad52864ab4da5f623bc7c8a0c489e97" as Hex;
-const resourcePatchSignalId = "0x6dff331f2bb7b785cbcd99a911e6d30dc8714f43b3b9ba80c658215445ddd0ba" as Hex;
+const executorPatchSignalId =
+  "0xbbb1770c9313f4029a89e03f4719037cdad52864ab4da5f623bc7c8a0c489e97" as Hex;
+const resourcePatchSignalId =
+  "0x6dff331f2bb7b785cbcd99a911e6d30dc8714f43b3b9ba80c658215445ddd0ba" as Hex;
 const approvalSourceId = bytes32Text("approval.stage");
 const approvalSignalId = bytes32Text("approve-replacement");
 const roleHash = bytes32Text("target.executor");
@@ -51,10 +66,17 @@ const txHash = bytes32Hex("707");
 const manifestHash = bytes32Hex("a11");
 const policyHash = bytes32Hex("b22");
 const resourceKey = "invoice-pdf";
-const selectorAccount = privateKeyToAccount("0x1111111111111111111111111111111111111111111111111111111111111111");
-const previousExecutorAccount = privateKeyToAccount("0x2222222222222222222222222222222222222222222222222222222222222222");
+const selectorAccount = privateKeyToAccount(
+  "0x1111111111111111111111111111111111111111111111111111111111111111",
+);
+const previousExecutorAccount = privateKeyToAccount(
+  "0x2222222222222222222222222222222222222222222222222222222222222222",
+);
 const selectorWallet = normalizeAddress(selectorAccount.address, "selector");
-const previousExecutorWallet = normalizeAddress(previousExecutorAccount.address, "previousExecutor");
+const previousExecutorWallet = normalizeAddress(
+  previousExecutorAccount.address,
+  "previousExecutor",
+);
 const wrongWallet = "0x2222222222222222222222222222222222222222" as Address;
 const executorWallet = "0x3333333333333333333333333333333333333333" as Address;
 const baseNow = new Date("2026-04-30T00:00:00Z");
@@ -66,14 +88,14 @@ describe("stage executor/resource patch Product API", () => {
       resourceKey,
       visibility: "protected",
       storageCID: "bafy-a",
-      policyHash
+      policyHash,
     });
     const right = hashResourceManifest({
       policyHash,
       storageCID: "bafy-a",
       visibility: "protected",
       resourceKey,
-      schemaVersion: "uvp-resource-manifest-v1"
+      schemaVersion: "uvp-resource-manifest-v1",
     });
 
     expect(left).toBe(right);
@@ -90,14 +112,14 @@ describe("stage executor/resource patch Product API", () => {
         selectorWallet,
         typedData: reverseObjectKeys(prepared.typedData),
         patch: reverseObjectKeys(prepared),
-        signature: await signExecutorPrepared(prepared)
-      }
+        signature: await signExecutorPrepared(prepared),
+      },
     });
 
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       signatureStatus: "signature_verified",
-      recoveredSelector: selectorWallet
+      recoveredSelector: selectorWallet,
     });
   });
 
@@ -112,11 +134,13 @@ describe("stage executor/resource patch Product API", () => {
         return {
           status: "submitted",
           txHash,
-          blockNumber: "123"
+          blockNumber: "123",
         };
-      })
+      }),
     };
-    const { router } = await routerFixture({ executorBroadcastAdapter: broadcast });
+    const { router } = await routerFixture({
+      executorBroadcastAdapter: broadcast,
+    });
 
     const prepared = await prepareStageExecutorPatch(router);
     const signature = await signExecutorPrepared(prepared);
@@ -127,8 +151,8 @@ describe("stage executor/resource patch Product API", () => {
         selectorWallet,
         typedData: prepared.typedData,
         patch: prepared,
-        signature
-      }
+        signature,
+      },
     });
 
     expect(prepared).toMatchObject({
@@ -149,16 +173,18 @@ describe("stage executor/resource patch Product API", () => {
           name: "UVPStagePatchModule",
           version: "0.1",
           chainId,
-          verifyingContract: contractAddress
+          verifyingContract: contractAddress,
         },
-        primaryType: "UVPStagePatchModuleStageExecutorPatch"
-      }
+        primaryType: "UVPStagePatchModuleStageExecutorPatch",
+      },
     });
     expect(prepared.typedData.message).toMatchObject({
       mode: prepared.modeHash,
       previousExecutor: "0x0000000000000000000000000000000000000000",
-      approvalSourceId: "0x0000000000000000000000000000000000000000000000000000000000000000",
-      approvalSignalId: "0x0000000000000000000000000000000000000000000000000000000000000000"
+      approvalSourceId:
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+      approvalSignalId:
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
     });
     expect(prepared.patchHash).toMatch(/^0x[0-9a-f]{64}$/);
     expect(JSON.stringify(prepared)).not.toContain("fileResources");
@@ -173,23 +199,25 @@ describe("stage executor/resource patch Product API", () => {
       broadcastStatus: "submitted",
       txHash,
       blockNumber: "123",
-      retryable: false
+      retryable: false,
     });
     expect(JSON.stringify(submitResponse.body)).not.toContain("fileResources");
     expect(broadcast.broadcast).toHaveBeenCalledOnce();
   });
 
   it("rejects assign mode after the target stage has submitted a signal", async () => {
-    const { router } = await routerFixture({ events: [...baseEvents(), targetSignalSubmittedEvent(5n)] });
+    const { router } = await routerFixture({
+      events: [...baseEvents(), targetSignalSubmittedEvent(5n)],
+    });
     const response = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-      body: prepareExecutorBody({ mode: "assign" })
+      body: prepareExecutorBody({ mode: "assign" }),
     });
 
     expect(response).toMatchObject({
       status: 409,
-      body: { error: "target_stage_started_assign_rejected" }
+      body: { error: "target_stage_started_assign_rejected" },
     });
   });
 
@@ -202,17 +230,17 @@ describe("stage executor/resource patch Product API", () => {
         expect(request.recoveredPreviousExecutor).toBe(previousExecutorWallet);
         return {
           status: "submitted",
-          txHash
+          txHash,
         };
-      })
+      }),
     };
     const { router } = await routerFixture({
       events: [...baseEvents(), targetSignalSubmittedEvent(5n)],
-      executorBroadcastAdapter: broadcast
+      executorBroadcastAdapter: broadcast,
     });
     const prepared = await prepareStageExecutorPatch(router, {
       mode: "handoff",
-      previousExecutor: previousExecutorWallet
+      previousExecutorWallet,
     });
     const selectorSignature = await signExecutorPrepared(prepared);
 
@@ -222,22 +250,25 @@ describe("stage executor/resource patch Product API", () => {
       body: {
         prepareId: prepared.prepareId,
         selectorWallet,
-        signature: selectorSignature
-      }
+        signature: selectorSignature,
+      },
     });
     expect(missingPrevious).toMatchObject({
       status: 400,
-      body: { error: "previous_executor_signature_required" }
+      body: { error: "previous_executor_signature_required" },
     });
 
     const wrongPrevious = await routerFixture({
       events: [...baseEvents(), targetSignalSubmittedEvent(5n)],
-      executorBroadcastAdapter: broadcast
+      executorBroadcastAdapter: broadcast,
     });
-    const wrongPrepared = await prepareStageExecutorPatch(wrongPrevious.router, {
-      mode: "handoff",
-      previousExecutor: previousExecutorWallet
-    });
+    const wrongPrepared = await prepareStageExecutorPatch(
+      wrongPrevious.router,
+      {
+        mode: "handoff",
+        previousExecutorWallet,
+      },
+    );
     const wrongResponse = await wrongPrevious.router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
@@ -245,21 +276,21 @@ describe("stage executor/resource patch Product API", () => {
         prepareId: wrongPrepared.prepareId,
         selectorWallet,
         signature: await signExecutorPrepared(wrongPrepared),
-        previousExecutorSignature: await signExecutorPrepared(wrongPrepared)
-      }
+        previousExecutorSignature: await signExecutorPrepared(wrongPrepared),
+      },
     });
     expect(wrongResponse).toMatchObject({
       status: 400,
-      body: { error: "invalid_previous_executor_signature" }
+      body: { error: "invalid_previous_executor_signature" },
     });
 
     const valid = await routerFixture({
       events: [...baseEvents(), targetSignalSubmittedEvent(5n)],
-      executorBroadcastAdapter: broadcast
+      executorBroadcastAdapter: broadcast,
     });
     const validPrepared = await prepareStageExecutorPatch(valid.router, {
       mode: "handoff",
-      previousExecutor: previousExecutorWallet
+      previousExecutorWallet,
     });
     const validResponse = await valid.router.handle({
       method: "POST",
@@ -268,8 +299,11 @@ describe("stage executor/resource patch Product API", () => {
         prepareId: validPrepared.prepareId,
         selectorWallet,
         signature: await signExecutorPrepared(validPrepared),
-        previousExecutorSignature: await signExecutorPrepared(validPrepared, previousExecutorAccount)
-      }
+        previousExecutorSignature: await signExecutorPrepared(
+          validPrepared,
+          previousExecutorAccount,
+        ),
+      },
     });
 
     expect(validResponse).toMatchObject({
@@ -279,14 +313,16 @@ describe("stage executor/resource patch Product API", () => {
         previousExecutor: previousExecutorWallet,
         selectorSignatureStatus: "signature_verified",
         previousExecutorSignatureStatus: "signature_verified",
-        recoveredPreviousExecutor: previousExecutorWallet
-      }
+        recoveredPreviousExecutor: previousExecutorWallet,
+      },
     });
     expect(broadcast.broadcast).toHaveBeenCalledOnce();
   });
 
   it("requires an existing approval signal for replacement mode", async () => {
-    const missing = await routerFixture({ events: [...baseEvents(), targetSignalSubmittedEvent(5n)] });
+    const missing = await routerFixture({
+      events: [...baseEvents(), targetSignalSubmittedEvent(5n)],
+    });
     const missingResponse = await missing.router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
@@ -295,13 +331,13 @@ describe("stage executor/resource patch Product API", () => {
         previousExecutorWallet,
         approval: {
           sourceId: approvalSourceId,
-          signalId: approvalSignalId
-        }
-      })
+          signalId: approvalSignalId,
+        },
+      }),
     });
     expect(missingResponse).toMatchObject({
       status: 409,
-      body: { error: "approval_signal_missing" }
+      body: { error: "approval_signal_missing" },
     });
 
     const broadcast: StageExecutorPatchBroadcastAdapter = {
@@ -312,21 +348,25 @@ describe("stage executor/resource patch Product API", () => {
         expect(request.previousExecutorSignature).toBeUndefined();
         return {
           status: "submitted",
-          txHash
+          txHash,
         };
-      })
+      }),
     };
     const valid = await routerFixture({
-      events: [...baseEvents(), targetSignalSubmittedEvent(5n), approvalSignalSubmittedEvent(6n)],
-      executorBroadcastAdapter: broadcast
+      events: [
+        ...baseEvents(),
+        targetSignalSubmittedEvent(5n),
+        approvalSignalSubmittedEvent(6n),
+      ],
+      executorBroadcastAdapter: broadcast,
     });
     const prepared = await prepareStageExecutorPatch(valid.router, {
       mode: "replace",
       previousExecutorWallet,
       approval: {
         sourceId: approvalSourceId,
-        signalId: approvalSignalId
-      }
+        signalId: approvalSignalId,
+      },
     });
     const response = await valid.router.handle({
       method: "POST",
@@ -334,8 +374,8 @@ describe("stage executor/resource patch Product API", () => {
       body: {
         prepareId: prepared.prepareId,
         selectorWallet,
-        signature: await signExecutorPrepared(prepared)
-      }
+        signature: await signExecutorPrepared(prepared),
+      },
     });
 
     expect(response).toMatchObject({
@@ -346,16 +386,23 @@ describe("stage executor/resource patch Product API", () => {
         approvalSourceId,
         approvalSignalId,
         previousExecutorSignatureStatus: "not_required",
-        txHash
-      }
+        txHash,
+      },
     });
-    expect((response.body as { readonly proofRows: readonly unknown[] }).proofRows).toEqual(expect.arrayContaining([
-      { label: "Mode", value: "replacement" },
-      { label: "Previous executor", value: previousExecutorWallet },
-      { label: "Approval signal", value: `${approvalSourceId}:${approvalSignalId}` },
-      { label: "Selector signature", value: "signature_verified" },
-      { label: "Previous executor signature", value: "not_required" }
-    ]));
+    expect(
+      (response.body as { readonly proofRows: readonly unknown[] }).proofRows,
+    ).toEqual(
+      expect.arrayContaining([
+        { label: "Mode", value: "replacement" },
+        { label: "Previous executor", value: previousExecutorWallet },
+        {
+          label: "Approval signal",
+          value: `${approvalSourceId}:${approvalSignalId}`,
+        },
+        { label: "Selector signature", value: "signature_verified" },
+        { label: "Previous executor signature", value: "not_required" },
+      ]),
+    );
     expect(broadcast.broadcast).toHaveBeenCalledOnce();
   });
 
@@ -369,11 +416,13 @@ describe("stage executor/resource patch Product API", () => {
         return {
           status: "confirmed",
           txHash,
-          blockNumber: "124"
+          blockNumber: "124",
         };
-      })
+      }),
     };
-    const { router } = await routerFixture({ resourceBroadcastAdapter: broadcast });
+    const { router } = await routerFixture({
+      resourceBroadcastAdapter: broadcast,
+    });
 
     const prepared = await prepareStageResourcePatch(router);
     const signature = await signResourcePrepared(prepared);
@@ -384,8 +433,8 @@ describe("stage executor/resource patch Product API", () => {
         selectorWallet,
         typedData: prepared.typedData,
         patch: prepared,
-        signature
-      }
+        signature,
+      },
     });
 
     expect(prepared).toMatchObject({
@@ -401,8 +450,8 @@ describe("stage executor/resource patch Product API", () => {
       manifestURI: "ipfs://resource-manifests/invoice-v1",
       status: "prepared",
       typedData: {
-        primaryType: "UVPStagePatchModuleStageResourcePatch"
-      }
+        primaryType: "UVPStagePatchModuleStageResourcePatch",
+      },
     });
     expect(prepared.resourceKey).toMatch(/^0x[0-9a-f]{64}$/);
     expect(prepared.patchHash).toMatch(/^0x[0-9a-f]{64}$/);
@@ -415,90 +464,56 @@ describe("stage executor/resource patch Product API", () => {
       broadcastStatus: "confirmed",
       txHash,
       blockNumber: "124",
-      retryable: false
+      retryable: false,
     });
     expect(broadcast.broadcast).toHaveBeenCalledOnce();
   });
 
-  it("rejects legacy file resource bundles at the Product API boundary", async () => {
-    const { router } = await routerFixture();
-    const response = await router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-      body: {
-        ...prepareExecutorBody(),
-        fileResourcesBundle: {
-          invoice: { handle: "plain_text:invoice contents" }
-        }
-      }
+  it("requires content-addressed resource manifest references in production", async () => {
+    const { router } = await routerFixture({
+      runtimeEnvironment: "production",
     });
-
-    expect(response).toMatchObject({
-      status: 400,
-      body: { error: "legacy_resource_bundle_rejected" }
-    });
-  });
-
-  it("rejects production http, txcloud, and plain_text resource manifest handles", async () => {
-    const { router } = await routerFixture({ runtimeEnvironment: "production" });
     for (const manifestURI of [
       "https://files.example/invoice.pdf",
-      "txcloud://bucket/key",
-      "plain_text:invoice contents"
+      "invoice-manifest.json",
     ]) {
       const response = await router.handle({
         method: "POST",
         pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
-        body: prepareResourceBody({ manifestURI })
+        body: prepareResourceBody({ manifestURI }),
       });
       expect(response).toMatchObject({
         status: 400,
-        body: { error: "legacy_resource_handle_rejected" }
+        body: { error: "invalid_manifest_uri" },
       });
     }
   });
 
-  it("rejects writerWallet and visibility aliases on Phase 2 resource patch payloads", async () => {
-    const { router } = await routerFixture();
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
-      body: prepareResourceBody({ writerWallet: selectorWallet })
-    })).resolves.toMatchObject({
-      status: 400,
-      body: { error: "writer_wallet_not_allowed" }
-    });
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
-      body: prepareResourceBody({ visibility: "protected" })
-    })).resolves.toMatchObject({
-      status: 400,
-      body: { error: "visibility_not_allowed" }
-    });
-  });
-
   it("rejects selector patch prepares without order-level patch signal authorization", async () => {
-    const { router } = await routerFixture({ events: baseEvents({ includePatchAuthorizations: false }) });
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-      body: prepareExecutorBody()
-    })).resolves.toMatchObject({
-      status: 403,
-      body: { error: "order_signal_authorization_missing" }
+    const { router } = await routerFixture({
+      events: baseEvents({ includePatchAuthorizations: false }),
     });
 
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
-      body: prepareResourceBody()
-    })).resolves.toMatchObject({
+    await expect(
+      router.handle({
+        method: "POST",
+        pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+        body: prepareExecutorBody(),
+      }),
+    ).resolves.toMatchObject({
       status: 403,
-      body: { error: "order_signal_authorization_missing" }
+      body: { error: "order_signal_authorization_missing" },
+    });
+
+    await expect(
+      router.handle({
+        method: "POST",
+        pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
+        body: prepareResourceBody(),
+      }),
+    ).resolves.toMatchObject({
+      status: 403,
+      body: { error: "order_signal_authorization_missing" },
     });
   });
 
@@ -507,12 +522,12 @@ describe("stage executor/resource patch Product API", () => {
     const response = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-      body: prepareExecutorBody({ selectorWallet: wrongWallet })
+      body: prepareExecutorBody({ selectorWallet: wrongWallet }),
     });
 
     expect(response).toMatchObject({
       status: 403,
-      body: { error: "selector_wallet_not_authorized" }
+      body: { error: "selector_wallet_not_authorized" },
     });
   });
 
@@ -521,26 +536,26 @@ describe("stage executor/resource patch Product API", () => {
       events: baseEvents({
         includeSelectorTaskAuthorization: false,
         selectorStageId: selectorStageOnchainId,
-        targetStageId: targetStageOnchainId
+        targetStageId: targetStageOnchainId,
       }),
       productBffStore: await productStoreFixture([
         participantFixture(selectorRoleSlotId, selectorWallet),
-        participantFixture(resourceControllerRoleSlotId, wrongWallet)
+        participantFixture(resourceControllerRoleSlotId, wrongWallet),
       ]),
-      productSchema: productSchemaFixture()
+      productSchema: productSchemaFixture(),
     });
 
     const response = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-      body: prepareExecutorBody({ targetStageId: "target.stage" })
+      body: prepareExecutorBody({ targetStageId: "target.stage" }),
     });
 
     expect(response.status).toBe(201);
     expect(response.body).toMatchObject({
       selectorStageId: selectorStageOnchainId,
       targetStageId: targetStageOnchainId,
-      selectorWallet
+      selectorWallet,
     });
   });
 
@@ -549,24 +564,27 @@ describe("stage executor/resource patch Product API", () => {
       events: baseEvents({
         includeSelectorTaskAuthorization: false,
         selectorStageId: selectorStageOnchainId,
-        targetStageId: targetStageOnchainId
+        targetStageId: targetStageOnchainId,
       }),
       productBffStore: await productStoreFixture([
         participantFixture(selectorRoleSlotId, selectorWallet),
-        participantFixture(resourceControllerRoleSlotId, wrongWallet)
+        participantFixture(resourceControllerRoleSlotId, wrongWallet),
       ]),
-      productSchema: productSchemaFixture()
+      productSchema: productSchemaFixture(),
     });
 
     const response = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-      body: prepareExecutorBody({ selectorWallet: wrongWallet, targetStageId: "target.stage" })
+      body: prepareExecutorBody({
+        selectorWallet: wrongWallet,
+        targetStageId: "target.stage",
+      }),
     });
 
     expect(response).toMatchObject({
       status: 403,
-      body: { error: "selector_wallet_not_authorized" }
+      body: { error: "selector_wallet_not_authorized" },
     });
   });
 
@@ -575,20 +593,20 @@ describe("stage executor/resource patch Product API", () => {
       events: baseEvents({
         includeSelectorTaskAuthorization: false,
         selectorStageId: selectorStageOnchainId,
-        targetStageId: targetStageOnchainId
+        targetStageId: targetStageOnchainId,
       }),
-      productSchema: productSchemaFixture()
+      productSchema: productSchemaFixture(),
     });
 
     const response = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-      body: prepareExecutorBody({ targetStageId: "target.stage" })
+      body: prepareExecutorBody({ targetStageId: "target.stage" }),
     });
 
     expect(response).toMatchObject({
       status: 403,
-      body: { error: "selector_wallet_not_authorized" }
+      body: { error: "selector_wallet_not_authorized" },
     });
   });
 
@@ -597,12 +615,14 @@ describe("stage executor/resource patch Product API", () => {
     const response = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
-      body: prepareResourceBody({ targetStageId: bytes32Text("unknown.stage") })
+      body: prepareResourceBody({
+        targetStageId: bytes32Text("unknown.stage"),
+      }),
     });
 
     expect(response).toMatchObject({
       status: 400,
-      body: { error: "invalid_target_stage" }
+      body: { error: "invalid_target_stage" },
     });
   });
 
@@ -611,10 +631,7 @@ describe("stage executor/resource patch Product API", () => {
     const stalePrepared = await prepareStageExecutorPatch(stale.router);
     await stale.store.resetFromEvents({
       deploymentBlock: 0n,
-      events: [
-        ...baseEvents(),
-        stageExecutorPatchAppliedEvent(5n, 1n)
-      ]
+      events: [...baseEvents(), stageExecutorPatchAppliedEvent(5n, 1n)],
     });
     const staleResponse = await stale.router.handle({
       method: "POST",
@@ -622,13 +639,13 @@ describe("stage executor/resource patch Product API", () => {
       body: {
         prepareId: stalePrepared.prepareId,
         selectorWallet,
-        signature: await signExecutorPrepared(stalePrepared)
-      }
+        signature: await signExecutorPrepared(stalePrepared),
+      },
     });
 
     expect(staleResponse).toMatchObject({
       status: 409,
-      body: { error: "stale_stage_executor_patch_nonce" }
+      body: { error: "stale_stage_executor_patch_nonce" },
     });
 
     const duplicate = await routerFixture();
@@ -640,8 +657,8 @@ describe("stage executor/resource patch Product API", () => {
       body: {
         prepareId: duplicatePrepared.prepareId,
         selectorWallet,
-        signature: duplicateSignature
-      }
+        signature: duplicateSignature,
+      },
     });
     const secondSubmit = await duplicate.router.handle({
       method: "POST",
@@ -649,14 +666,14 @@ describe("stage executor/resource patch Product API", () => {
       body: {
         prepareId: duplicatePrepared.prepareId,
         selectorWallet,
-        signature: duplicateSignature
-      }
+        signature: duplicateSignature,
+      },
     });
 
     expect(firstSubmit.status).toBe(200);
     expect(secondSubmit).toMatchObject({
       status: 409,
-      body: { error: "prepare_already_used" }
+      body: { error: "prepare_already_used" },
     });
   });
 
@@ -669,8 +686,8 @@ describe("stage executor/resource patch Product API", () => {
       body: {
         prepareId: prepared.prepareId,
         selectorWallet,
-        signature: await signResourcePrepared(prepared)
-      }
+        signature: await signResourcePrepared(prepared),
+      },
     });
 
     expect(response).toMatchObject({
@@ -681,40 +698,19 @@ describe("stage executor/resource patch Product API", () => {
         recoveredSelector: selectorWallet,
         broadcastStatus: "not_attempted",
         errorCode: "broadcast_disabled",
-        retryable: false
-      }
+        retryable: false,
+      },
     });
   });
 
-  it("rejects docked order links when the linked plan lacks official trust", async () => {
+  it("prepares docked order links after both plans are registered", async () => {
     const { router } = await routerFixture({
       events: [
         ...baseEvents(),
-        planAttestedEvent(5n, planId, planHash),
-        ...linkedOrderEvents(6n)
-      ]
-    });
-
-    const response = await router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${selectorTaskId()}/prepare-docked-order-link`,
-      body: prepareDockedBody()
-    });
-
-    expect(response).toMatchObject({
-      status: 403,
-      body: { error: "linked_plan_not_attested" }
-    });
-  });
-
-  it("prepares docked order links only after both plans are officially trusted", async () => {
-    const { router } = await routerFixture({
-      events: [
-        ...baseEvents(),
-        planAttestedEvent(5n, planId, planHash),
+        planRegisteredEvent(5n, planId, planHash),
         ...linkedOrderEvents(6n),
-        planAttestedEvent(8n, linkedPlanId, linkedPlanHash)
-      ]
+        planRegisteredEvent(8n, linkedPlanId, linkedPlanHash),
+      ],
     });
 
     const prepared = await prepareDockedOrderLink(router);
@@ -729,28 +725,40 @@ describe("stage executor/resource patch Product API", () => {
       localSourceId: targetStageId,
       status: "prepared",
       typedData: {
-        primaryType: "UVPDockingModuleDockedOrderLink"
-      }
+        primaryType: "UVPDockingModuleDockedOrderLink",
+      },
     });
   });
 });
 
-async function routerFixture(options: {
-  readonly executorBroadcastAdapter?: StageExecutorPatchBroadcastAdapter;
-  readonly resourceBroadcastAdapter?: StageResourcePatchBroadcastAdapter;
-  readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
-  readonly events?: readonly ChainEvent[];
-  readonly productBffStore?: ProductBffStore;
-  readonly productSchema?: StoreProductSchemaDTO;
-} = {}): Promise<{ readonly router: ApiRouter; readonly store: MemoryProjectionStore }> {
+async function routerFixture(
+  options: {
+    readonly executorBroadcastAdapter?: StageExecutorPatchBroadcastAdapter;
+    readonly resourceBroadcastAdapter?: StageResourcePatchBroadcastAdapter;
+    readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
+    readonly events?: readonly ChainEvent[];
+    readonly productBffStore?: ProductBffStore;
+    readonly productSchema?: StoreProductSchemaDTO;
+  } = {},
+): Promise<{
+  readonly router: ApiRouter;
+  readonly store: MemoryProjectionStore;
+}> {
   const store = new MemoryProjectionStore();
-  await store.resetFromEvents({ deploymentBlock: 0n, events: options.events ?? baseEvents() });
+  await store.resetFromEvents({
+    deploymentBlock: 0n,
+    events: options.events ?? baseEvents(),
+  });
   const productSchemaResolver = options.productSchema
     ? {
-        getProductSchemaByPlan: async (requestedPlanId: string, requestedPlanHash: string) =>
-          requestedPlanId === options.productSchema!.planId && requestedPlanHash === options.productSchema!.planHash
+        getProductSchemaByPlan: async (
+          requestedPlanId: string,
+          requestedPlanHash: string,
+        ) =>
+          requestedPlanId === options.productSchema!.planId &&
+          requestedPlanHash === options.productSchema!.planHash
             ? options.productSchema
-            : undefined
+            : undefined,
       }
     : undefined;
   let prepareCount = 0;
@@ -758,69 +766,83 @@ async function routerFixture(options: {
   const commonOptions = {
     store,
     ...(productSchemaResolver ? { productSchemaResolver } : {}),
-    ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
+    ...(options.productBffStore
+      ? { productBffStore: options.productBffStore }
+      : {}),
     chainId,
     verifyingContract: contractAddress,
     now: () => baseNow,
     prepareIdFactory: () => `prep_${++prepareCount}`,
-    submissionIdFactory: () => `sub_${++submissionCount}`
+    submissionIdFactory: () => `sub_${++submissionCount}`,
   };
   const executorService = createProductStageExecutorPatchService({
     ...commonOptions,
-    ...(options.executorBroadcastAdapter ? { broadcastAdapter: options.executorBroadcastAdapter } : {})
+    ...(options.executorBroadcastAdapter
+      ? { broadcastAdapter: options.executorBroadcastAdapter }
+      : {}),
   });
   const resourceService = createProductStageResourcePatchService({
     ...commonOptions,
-    ...(options.resourceBroadcastAdapter ? { broadcastAdapter: options.resourceBroadcastAdapter } : {}),
-    ...(options.runtimeEnvironment ? { runtimeEnvironment: options.runtimeEnvironment } : {})
+    ...(options.resourceBroadcastAdapter
+      ? { broadcastAdapter: options.resourceBroadcastAdapter }
+      : {}),
+    ...(options.runtimeEnvironment
+      ? { runtimeEnvironment: options.runtimeEnvironment }
+      : {}),
   });
   const dockedOrderLinkService = createProductDockedOrderLinkService({
-    ...commonOptions
+    ...commonOptions,
   });
   return {
     store,
     router: createApiRouter(store, {
       productStageExecutorPatchService: executorService,
       productStageResourcePatchService: resourceService,
-      productDockedOrderLinkService: dockedOrderLinkService
-    })
+      productDockedOrderLinkService: dockedOrderLinkService,
+    }),
   };
 }
 
 async function prepareStageExecutorPatch(
   router: ApiRouter,
-  overrides: Record<string, unknown> = {}
+  overrides: Record<string, unknown> = {},
 ): Promise<PreparedStageExecutorPatchDTO> {
   const response = await router.handle({
     method: "POST",
     pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-    body: prepareExecutorBody(overrides)
+    body: prepareExecutorBody(overrides),
   });
   expect(response.status).toBe(201);
   return response.body as PreparedStageExecutorPatchDTO;
 }
 
-async function prepareStageResourcePatch(router: ApiRouter): Promise<PreparedStageResourcePatchDTO> {
+async function prepareStageResourcePatch(
+  router: ApiRouter,
+): Promise<PreparedStageResourcePatchDTO> {
   const response = await router.handle({
     method: "POST",
     pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
-    body: prepareResourceBody()
+    body: prepareResourceBody(),
   });
   expect(response.status).toBe(201);
   return response.body as PreparedStageResourcePatchDTO;
 }
 
-async function prepareDockedOrderLink(router: ApiRouter): Promise<PreparedDockedOrderLinkDTO> {
+async function prepareDockedOrderLink(
+  router: ApiRouter,
+): Promise<PreparedDockedOrderLinkDTO> {
   const response = await router.handle({
     method: "POST",
     pathname: `/product/tasks/${selectorTaskId()}/prepare-docked-order-link`,
-    body: prepareDockedBody()
+    body: prepareDockedBody(),
   });
   expect(response.status).toBe(201);
   return response.body as PreparedDockedOrderLinkDTO;
 }
 
-function prepareExecutorBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function prepareExecutorBody(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     selectorWallet,
     targetStageId,
@@ -829,11 +851,13 @@ function prepareExecutorBody(overrides: Record<string, unknown> = {}): Record<st
     roleHash,
     executorMetadataHash,
     metadataURI: "ipfs://stage-executor-patches/1",
-    ...overrides
+    ...overrides,
   };
 }
 
-function prepareResourceBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function prepareResourceBody(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     selectorWallet,
     targetStageId,
@@ -841,39 +865,49 @@ function prepareResourceBody(overrides: Record<string, unknown> = {}): Record<st
     manifestHash,
     policyHash,
     manifestURI: "ipfs://resource-manifests/invoice-v1",
-    ...overrides
+    ...overrides,
   };
 }
 
-function prepareDockedBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function prepareDockedBody(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     selectorWallet,
     localSourceId: targetStageId,
     linkedOrderId,
     linkedPlanId,
-    signalBindings: [{
-      localSourceId: targetStageId,
-      localSignalId: bytes32Text("local.done"),
-      linkedSourceId: targetStageId,
-      linkedSignalId: bytes32Text("linked.done")
-    }],
+    signalBindings: [
+      {
+        localSourceId: targetStageId,
+        localSignalId: bytes32Text("local.done"),
+        linkedSourceId: targetStageId,
+        linkedSignalId: bytes32Text("linked.done"),
+      },
+    ],
     metadataURI: "ipfs://docked-order-links/1",
-    ...overrides
+    ...overrides,
   };
 }
 
 async function signExecutorPrepared(
   prepared: PreparedStageExecutorPatchDTO,
-  account: typeof selectorAccount = selectorAccount
+  account: typeof selectorAccount = selectorAccount,
 ): Promise<Hex> {
   return await account.signTypedData(
-    prepared.typedData as unknown as Parameters<typeof account.signTypedData>[0]
+    prepared.typedData as unknown as Parameters<
+      typeof account.signTypedData
+    >[0],
   );
 }
 
-async function signResourcePrepared(prepared: PreparedStageResourcePatchDTO): Promise<Hex> {
+async function signResourcePrepared(
+  prepared: PreparedStageResourcePatchDTO,
+): Promise<Hex> {
   return await selectorAccount.signTypedData(
-    prepared.typedData as unknown as Parameters<typeof selectorAccount.signTypedData>[0]
+    prepared.typedData as unknown as Parameters<
+      typeof selectorAccount.signTypedData
+    >[0],
   );
 }
 
@@ -882,7 +916,10 @@ interface ParticipantFixture {
   readonly walletAddress: Address;
 }
 
-function participantFixture(roleSlotId: string, walletAddress: Address): ParticipantFixture {
+function participantFixture(
+  roleSlotId: string,
+  walletAddress: Address,
+): ParticipantFixture {
   return { roleSlotId, walletAddress };
 }
 
@@ -894,40 +931,45 @@ function reverseObjectKeys(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
         .reverse()
-        .map(([key, nested]) => [key, reverseObjectKeys(nested)])
+        .map(([key, nested]) => [key, reverseObjectKeys(nested)]),
     );
   }
   return value;
 }
 
-async function productStoreFixture(participants: readonly ParticipantFixture[]): Promise<ProductBffStore> {
+async function productStoreFixture(
+  participants: readonly ParticipantFixture[],
+): Promise<ProductBffStore> {
   const store = new MemoryProductBffStore();
-  await store.createDraft({
-    draftId: "draft_stage_patch_1",
-    zhixuId: "stage-patch-test",
-    planId,
-    planHash,
-    title: "Stage patch test order",
-    businessType: "stage-patch",
-    goods: [],
-    totalAmount: "0",
-    currency: "USDC",
-    status: "triggered",
-    createdAt: baseNow.toISOString(),
-    updatedAt: baseNow.toISOString(),
-    triggeredOrderId: orderId
-  }, participants.map((participant, index) => ({
-    participantId: `participant_${index + 1}`,
-    draftId: "draft_stage_patch_1",
-    roleSlotId: participant.roleSlotId,
-    roleLabel: participant.roleSlotId,
-    displayName: participant.roleSlotId,
-    walletAddress: participant.walletAddress,
-    contact: `${participant.roleSlotId}@stage-patch.test`,
-    status: "accepted" as const,
-    required: true,
-    acceptedAt: baseNow.toISOString()
-  })));
+  await store.createDraft(
+    {
+      draftId: "draft_stage_patch_1",
+      zhixuId: "stage-patch-test",
+      planId,
+      planHash,
+      title: "Stage patch test order",
+      businessType: "stage-patch",
+      goods: [],
+      totalAmount: "0",
+      currency: "USDC",
+      status: "triggered",
+      createdAt: baseNow.toISOString(),
+      updatedAt: baseNow.toISOString(),
+      triggeredOrderId: orderId,
+    },
+    participants.map((participant, index) => ({
+      participantId: `participant_${index + 1}`,
+      draftId: "draft_stage_patch_1",
+      roleSlotId: participant.roleSlotId,
+      roleLabel: participant.roleSlotId,
+      displayName: participant.roleSlotId,
+      walletAddress: participant.walletAddress,
+      contact: `${participant.roleSlotId}@stage-patch.test`,
+      status: "accepted" as const,
+      required: true,
+      acceptedAt: baseNow.toISOString(),
+    })),
+  );
   await store.createRegistration({
     triggerId: "registration_stage_patch_1",
     prepareId: "prepare_stage_patch_1",
@@ -952,7 +994,7 @@ async function productStoreFixture(participants: readonly ParticipantFixture[]):
     updatedAt: baseNow.toISOString(),
     creator: selectorWallet,
     authorizations: [],
-    permissions: []
+    permissions: [],
   });
   return store;
 }
@@ -962,13 +1004,13 @@ function productSchemaFixture(): StoreProductSchemaDTO {
     pluginKind: "evidence_submission",
     source: "explicit",
     stageIds: ["selector.stage"],
-    requiredEvidence: []
+    requiredEvidence: [],
   } as const;
   const resourceControllerPlugin = {
     pluginKind: "evidence_submission",
     source: "explicit",
     stageIds: ["resource-controller.stage"],
-    requiredEvidence: []
+    requiredEvidence: [],
   } as const;
   return {
     schemaVersion: "store-product-schema.v1",
@@ -989,7 +1031,7 @@ function productSchemaFixture(): StoreProductSchemaDTO {
         status: "required",
         tone: "info",
         required: true,
-        capabilityPlugins: [selectorPlugin]
+        capabilityPlugins: [selectorPlugin],
       },
       {
         slotId: resourceControllerRoleSlotId,
@@ -1000,8 +1042,8 @@ function productSchemaFixture(): StoreProductSchemaDTO {
         status: "required",
         tone: "info",
         required: true,
-        capabilityPlugins: [resourceControllerPlugin]
-      }
+        capabilityPlugins: [resourceControllerPlugin],
+      },
     ],
     orderPermissionTable: [
       {
@@ -1011,7 +1053,7 @@ function productSchemaFixture(): StoreProductSchemaDTO {
         source: "selector",
         signalName: "select-executor",
         payloadPolicy: "required",
-        requiredEvidence: []
+        requiredEvidence: [],
       },
       {
         permissionId: "resource-controller.resource-patch",
@@ -1020,8 +1062,8 @@ function productSchemaFixture(): StoreProductSchemaDTO {
         source: "resource-controller",
         signalName: "publish-resource",
         payloadPolicy: "required",
-        requiredEvidence: []
-      }
+        requiredEvidence: [],
+      },
     ],
     capabilityPlugins: [selectorPlugin, resourceControllerPlugin],
     businessPersonaLabels: ["buyer"],
@@ -1038,35 +1080,40 @@ function productSchemaFixture(): StoreProductSchemaDTO {
         executorAssignment: "static",
         staticExecutorRoleSlotId: selectorRoleSlotId,
         selectedStageTargets: ["target.stage"],
-        addOnKind: "stage_executor_patch"
-      }
+        addOnKind: "stage_executor_patch",
+      },
     ],
-    selectorBindings: [{
-      selectorStageIdentifier: "selector.stage",
-      targetStageIdentifier: "target.stage",
-      selectorStageId: selectorStageOnchainId,
-      targetStageId: targetStageOnchainId,
-      bindingHash: bytes32Hex("919")
-    }],
+    selectorBindings: [
+      {
+        selectorStageIdentifier: "selector.stage",
+        targetStageIdentifier: "target.stage",
+        selectorStageId: selectorStageOnchainId,
+        targetStageId: targetStageOnchainId,
+        bindingHash: bytes32Hex("919"),
+      },
+    ],
     schemaHash: bytes32Hex("a1a1"),
     validation: {
       ok: true,
       status: "explicit",
-      issues: []
+      issues: [],
     },
     createdAt: baseNow.toISOString(),
-    updatedAt: baseNow.toISOString()
+    updatedAt: baseNow.toISOString(),
   };
 }
 
-function baseEvents(options: {
-  readonly includePatchAuthorizations?: boolean;
-  readonly includeSelectorTaskAuthorization?: boolean;
-  readonly selectorStageId?: Hex;
-  readonly targetStageId?: Hex;
-} = {}): readonly ChainEvent[] {
+function baseEvents(
+  options: {
+    readonly includePatchAuthorizations?: boolean;
+    readonly includeSelectorTaskAuthorization?: boolean;
+    readonly selectorStageId?: Hex;
+    readonly targetStageId?: Hex;
+  } = {},
+): readonly ChainEvent[] {
   const includePatchAuthorizations = options.includePatchAuthorizations ?? true;
-  const includeSelectorTaskAuthorization = options.includeSelectorTaskAuthorization ?? true;
+  const includeSelectorTaskAuthorization =
+    options.includeSelectorTaskAuthorization ?? true;
   const eventSelectorStageId = options.selectorStageId ?? selectorStageId;
   const eventTargetStageId = options.targetStageId ?? targetStageId;
   return [
@@ -1074,17 +1121,31 @@ function baseEvents(options: {
       planId,
       planHash,
       hookCount: 1n,
-      selectorBindings: [{
-        selectorStageIdentifier: "selector.stage",
-        targetStageIdentifier: "target.stage",
-        selectorStageId: eventSelectorStageId,
-        targetStageId: eventTargetStageId,
-        bindingHash: bytes32Hex("808")
-      }]
+      selectorBindings: [
+        {
+          selectorStageIdentifier: "selector.stage",
+          targetStageIdentifier: "target.stage",
+          selectorStageId: eventSelectorStageId,
+          targetStageId: eventTargetStageId,
+          bindingHash: bytes32Hex("808"),
+        },
+      ],
     }),
+    chainEvent(
+      1n,
+      "SignalCapabilityRegistered",
+      {
+        planId,
+        stageId: eventSelectorStageId,
+        targetSourceId: eventSelectorStageId,
+        signalId: selectorHookName,
+        targetOrderRelation: 0,
+      },
+      1,
+    ),
     chainEvent(2n, "OrderRegistered", {
       orderId,
-      planId
+      planId,
     }),
     ...(includeSelectorTaskAuthorization
       ? [
@@ -1094,44 +1155,59 @@ function baseEvents(options: {
             signalId: selectorHookName,
             submitter: selectorWallet,
             role: bytes32Text("selector"),
-            metadataHash: bytes32Hex("909")
-          })
+            metadataHash: bytes32Hex("909"),
+          }),
         ]
       : []),
     ...(includePatchAuthorizations
       ? [
-          chainEvent(3n, "SignalSubmitterAuthorized", {
-            orderId,
-            sourceId: eventSelectorStageId,
-            signalId: executorPatchSignalId,
-            submitter: selectorWallet,
-            role: bytes32Text("selector"),
-            metadataHash: bytes32Hex("90a")
-          }, 1),
-          chainEvent(3n, "SignalSubmitterAuthorized", {
-            orderId,
-            sourceId: eventSelectorStageId,
-            signalId: resourcePatchSignalId,
-            submitter: selectorWallet,
-            role: bytes32Text("selector"),
-            metadataHash: bytes32Hex("90b")
-          }, 2),
-          chainEvent(3n, "SignalSubmitterAuthorized", {
-            orderId,
-            sourceId: eventSelectorStageId,
-            signalId: DOCKED_ORDER_LINK_SIGNAL_ID,
-            submitter: selectorWallet,
-            role: bytes32Text("selector"),
-            metadataHash: bytes32Hex("90c")
-          }, 3)
+          chainEvent(
+            3n,
+            "SignalSubmitterAuthorized",
+            {
+              orderId,
+              sourceId: eventSelectorStageId,
+              signalId: executorPatchSignalId,
+              submitter: selectorWallet,
+              role: bytes32Text("selector"),
+              metadataHash: bytes32Hex("90a"),
+            },
+            1,
+          ),
+          chainEvent(
+            3n,
+            "SignalSubmitterAuthorized",
+            {
+              orderId,
+              sourceId: eventSelectorStageId,
+              signalId: resourcePatchSignalId,
+              submitter: selectorWallet,
+              role: bytes32Text("selector"),
+              metadataHash: bytes32Hex("90b"),
+            },
+            2,
+          ),
+          chainEvent(
+            3n,
+            "SignalSubmitterAuthorized",
+            {
+              orderId,
+              sourceId: eventSelectorStageId,
+              signalId: DOCKED_ORDER_LINK_SIGNAL_ID,
+              submitter: selectorWallet,
+              role: bytes32Text("selector"),
+              metadataHash: bytes32Hex("90c"),
+            },
+            3,
+          ),
         ]
       : []),
     chainEvent(4n, "HookReady", {
       orderId,
       hookId: selectorHookId,
       stageId: eventSelectorStageId,
-      hookName: selectorHookName
-    })
+      hookName: selectorHookName,
+    }),
   ];
 }
 
@@ -1141,36 +1217,39 @@ function linkedOrderEvents(blockNumber: bigint): readonly ChainEvent[] {
       planId: linkedPlanId,
       planHash: linkedPlanHash,
       hookCount: 1n,
-      selectorBindings: []
+      selectorBindings: [],
     }),
     chainEvent(blockNumber + 1n, "OrderRegistered", {
       orderId: linkedOrderId,
-      planId: linkedPlanId
-    })
+      planId: linkedPlanId,
+    }),
   ];
 }
 
-function planAttestedEvent(blockNumber: bigint, trustedPlanId: Hex, trustedPlanHash: Hex): ChainEvent {
+function planRegisteredEvent(
+  blockNumber: bigint,
+  publishedPlanId: Hex,
+  publishedPlanHash: Hex,
+): ChainEvent {
   return {
     chainId,
-    contractAddress: trustRegistryAddress,
+    contractAddress: stateMachineAddress,
     blockNumber,
     transactionHash: bytes32Hex(`a${blockNumber.toString(16)}`) as Hex,
     logIndex: 0,
-    eventName: "PlanAttested",
+    eventName: "PlanRegistered",
     args: {
-      planId: trustedPlanId,
-      planHash: trustedPlanHash,
-      artifactHash,
-      policyHash,
-      metadataHash: bytes32Hex("d00d"),
-      metadataURI: "ipfs://plan-attestation",
-      attester: selectorWallet
-    }
+      planId: publishedPlanId,
+      planHash: publishedPlanHash,
+      hookCount: 1n,
+    },
   };
 }
 
-function stageExecutorPatchAppliedEvent(blockNumber: bigint, patchNonce: bigint): ChainEvent {
+function stageExecutorPatchAppliedEvent(
+  blockNumber: bigint,
+  patchNonce: bigint,
+): ChainEvent {
   return chainEvent(blockNumber, "StageExecutorPatchApplied", {
     orderId,
     selectorStageId,
@@ -1181,7 +1260,7 @@ function stageExecutorPatchAppliedEvent(blockNumber: bigint, patchNonce: bigint)
     executorMetadataHash,
     patchHash: executorPatchHash,
     patchNonce,
-    metadataURI: "ipfs://stage-executor-patches/1"
+    metadataURI: "ipfs://stage-executor-patches/1",
   });
 }
 
@@ -1192,7 +1271,7 @@ function targetSignalSubmittedEvent(blockNumber: bigint): ChainEvent {
     signalId: bytes32Text("target-started"),
     payloadHash: bytes32Hex("515"),
     idempotencyKey: bytes32Hex("616"),
-    submitter: previousExecutorWallet
+    submitter: previousExecutorWallet,
   });
 }
 
@@ -1203,7 +1282,7 @@ function approvalSignalSubmittedEvent(blockNumber: bigint): ChainEvent {
     signalId: approvalSignalId,
     payloadHash: bytes32Hex("717"),
     idempotencyKey: bytes32Hex("818"),
-    submitter: selectorWallet
+    submitter: selectorWallet,
   });
 }
 
@@ -1211,7 +1290,12 @@ function selectorTaskId(): string {
   return `${contractAddress}:${orderId}:${selectorHookId}`;
 }
 
-function chainEvent(blockNumber: bigint, eventName: string, args: Record<string, unknown>, logIndex = 0): ChainEvent {
+function chainEvent(
+  blockNumber: bigint,
+  eventName: string,
+  args: Record<string, unknown>,
+  logIndex = 0,
+): ChainEvent {
   return {
     chainId,
     contractAddress,
@@ -1219,7 +1303,7 @@ function chainEvent(blockNumber: bigint, eventName: string, args: Record<string,
     transactionHash: bytes32Hex(blockNumber.toString(16)) as Hex,
     logIndex,
     eventName,
-    args
+    args,
   };
 }
 

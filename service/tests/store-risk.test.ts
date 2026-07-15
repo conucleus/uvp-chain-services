@@ -36,7 +36,7 @@ describe("Store risk graph no-op routes", () => {
         providerMode: "noop",
         configured: false,
         supportedSubjects: ["zhixu", "order", "entity"],
-        supportedInputs: ["signal_metadata", "trust_snapshot", "evidence_metadata"],
+        supportedInputs: ["signal_metadata", "evidence_metadata"],
         readsBusinessPlaintext: false
       }
     });
@@ -220,7 +220,7 @@ function fakeRiskGraphService(): RiskGraphService {
     providerMode: "external",
     configured: true,
     supportedSubjects: ["order"],
-    supportedInputs: ["signal_metadata", "trust_snapshot", "evidence_metadata"],
+    supportedInputs: ["signal_metadata", "evidence_metadata"],
     readsBusinessPlaintext: false
   };
   return {

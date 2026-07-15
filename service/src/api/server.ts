@@ -356,37 +356,25 @@ function setCorsHeaders(response: ServerResponse): void {
 }
 
 function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
-  return contracts.UVPStateMachine ?? contracts.StateMachine ?? contracts.stateMachine ?? contracts.uvpStateMachine;
+  return contracts.UVPStateMachine;
 }
 
 function stagePatchModuleAddress(config: ChainServicesConfig): Address | undefined {
-  return moduleAddress(config, "stagePatch", [
-    "UVPStagePatchModule",
-    "StagePatchModule",
-    "stagePatchModule",
-    "stagePatch"
-  ]);
+  return moduleAddress(config, "stagePatch", "UVPStagePatchModule");
 }
 
 function dockingModuleAddress(config: ChainServicesConfig): Address | undefined {
-  return moduleAddress(config, "docking", [
-    "UVPDockingModule",
-    "DockingModule",
-    "dockingModule",
-    "docking"
-  ]);
+  return moduleAddress(config, "docking", "UVPDockingModule");
 }
 
 function moduleAddress(
   config: ChainServicesConfig,
   key: "stagePatch" | "derivedSignal" | "docking" | "planMetadata" | "orderLink" | "lens",
-  contractAliases: readonly string[]
+  contractName: string
 ): Address | undefined {
-  for (const alias of contractAliases) {
-    const address = config.network.contracts[alias];
-    if (address) {
-      return address;
-    }
+  const configuredAddress = config.network.contracts[contractName];
+  if (configuredAddress) {
+    return configuredAddress;
   }
   const activeDeployment = config.network.stateMachineDeployments?.find((deployment) =>
     (config.network.activeDeploymentId && deployment.deploymentId === config.network.activeDeploymentId) ||

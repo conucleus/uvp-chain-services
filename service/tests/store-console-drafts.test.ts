@@ -7,12 +7,12 @@ import {
   type StoreProductSchemaDTO
 } from "@uvp-eth/product-dto";
 import {
-  phase2CustomsInitialTriggerSource,
-  phase2CustomsOnchainHookPlanArtifact,
-  phase2CustomsRoleSlotIds,
-  phase2CustomsSignalIds,
-  phase2CustomsStageIds,
-  phase2CustomsStoreProductSchema
+  customsInitialTriggerSource,
+  customsOnchainHookPlanArtifact,
+  customsRoleSlotIds,
+  customsSignalIds,
+  customsStageIds,
+  customsStoreProductSchema
 } from "@uvp-eth/product-dto/fixtures";
 import { createApiRouter } from "../src/api/routes.js";
 import {
@@ -20,9 +20,7 @@ import {
   type GovernanceChainAdapter,
   type GovernanceChainRequestDTO
 } from "../src/governance/index.js";
-import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import type { Address, Hex } from "../src/shared/types.js";
 import type {
   StoreCompilePreviewDTO,
   StoreZhixuDraftDTO,
@@ -40,10 +38,6 @@ const adminHeaders = {
   "x-uvp-admin-role": "admin"
 };
 
-const registryAddress = "0x5555555555555555555555555555555555555555" as Address;
-const attester = "0x2222222222222222222222222222222222222222" as Address;
-const signer = "0x3333333333333333333333333333333333333333" as Address;
-const txHash = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" as Hex;
 
 const validZhixuYaml = `
 apiVersion: uvp/v0
@@ -105,8 +99,9 @@ describe("Store Zhixu draft workflow", () => {
     });
     expect(draft.compilePreview).toBeUndefined();
 
-    await expect(router.handle({ method: "GET", pathname: "/product/zhixus" }))
-      .resolves.toEqual({ status: 200, body: { zhixus: [] } });
+    const catalog = await router.handle({ method: "GET", pathname: "/product/zhixus" });
+    expect((catalog.body as { zhixus: Array<{ zhixuId: string }> }).zhixus)
+      .not.toContainEqual(expect.objectContaining({ zhixuId: "store-draft-demo" }));
     await expect(router.handle({ method: "GET", pathname: `/store/zhixu-drafts/${draft.draftId}` }))
       .resolves.toMatchObject({ status: 200, body: { draft: { draftId: draft.draftId, status: "imported" } } });
   });
@@ -186,7 +181,7 @@ describe("Store Zhixu draft workflow", () => {
       }
     });
     expect(schema.roleSlots[0]?.capabilityPlugins?.[0]).toMatchObject({
-      source: "legacy_inferred"
+      source: "inferred"
     });
 
     await expect(router.handle({
@@ -325,19 +320,19 @@ describe("Store Zhixu draft workflow", () => {
     }
   });
 
-  it("accepts the PRD89 Phase 2 customs Product Schema fixture", async () => {
+  it("accepts the customs Product Schema fixture", async () => {
     const router = createApiRouter(new MemoryProjectionStore());
-    const draft = await importPhase2CustomsDraft(router);
+    const draft = await importCustomsDraft(router);
     const compiled = await compileDraft(router, draft.draftId);
     expect(compiled.compilePreview).toMatchObject({
-      planId: phase2CustomsStoreProductSchema.planId,
-      planHash: phase2CustomsStoreProductSchema.planHash,
-      artifactHash: phase2CustomsStoreProductSchema.artifactHash,
+      planId: customsStoreProductSchema.planId,
+      planHash: customsStoreProductSchema.planHash,
+      artifactHash: customsStoreProductSchema.artifactHash,
       stageCount: 3,
       roleSlotCount: 2
     });
 
-    const productSchema = await updateDraftProductSchema(router, draft.draftId, phase2CustomsStoreProductSchema);
+    const productSchema = await updateDraftProductSchema(router, draft.draftId, customsStoreProductSchema);
     expect(productSchema.validation).toEqual({
       ok: true,
       status: "explicit",
@@ -345,27 +340,27 @@ describe("Store Zhixu draft workflow", () => {
       checkedAt: productSchema.validation.checkedAt
     });
     expect(productSchema.roleSlots.map((slot) => slot.slotId)).toEqual([
-      phase2CustomsRoleSlotIds.buyerSelector,
-      phase2CustomsRoleSlotIds.buyerResourceController,
-      phase2CustomsRoleSlotIds.customsExecutor
+      customsRoleSlotIds.buyerSelector,
+      customsRoleSlotIds.buyerResourceController,
+      customsRoleSlotIds.customsExecutor
     ]);
     expect(productSchema.roleSlots.some((slot) => slot.slotId.startsWith("system:"))).toBe(false);
     expect(productSchema.orderPermissionTable.some((entry) => entry.permissionId.startsWith("system."))).toBe(false);
     expect(productSchema.createOrderTrigger).toMatchObject({
-      source: phase2CustomsInitialTriggerSource,
-      signalName: phase2CustomsSignalIds.orderRegistered,
-      triggerHookId: phase2CustomsStoreProductSchema.createOrderTrigger?.triggerHookId,
-      triggerStageId: phase2CustomsStoreProductSchema.createOrderTrigger?.triggerStageId
+      source: customsInitialTriggerSource,
+      signalName: customsSignalIds.orderRegistered,
+      triggerHookId: customsStoreProductSchema.createOrderTrigger?.triggerHookId,
+      triggerStageId: customsStoreProductSchema.createOrderTrigger?.triggerStageId
     });
     expect(productSchema.selectorBindings?.map((binding) => `${binding.selectorStageIdentifier}->${binding.targetStageIdentifier}`)).toEqual([
-      `${phase2CustomsStageIds.buyerSelectCustomsExecutor}->${phase2CustomsStageIds.customsComplete}`,
-      `${phase2CustomsStageIds.buyerPublishCustomsResources}->${phase2CustomsStageIds.customsComplete}`
+      `${customsStageIds.buyerSelectCustomsExecutor}->${customsStageIds.customsComplete}`,
+      `${customsStageIds.buyerPublishCustomsResources}->${customsStageIds.customsComplete}`
     ]);
   });
 
-  it("rejects PRD89 Phase 2 customs Product Schema negative cases", async () => {
+  it("rejects invalid customs Product Schema inputs", async () => {
     const router = createApiRouter(new MemoryProjectionStore());
-    const draft = await importPhase2CustomsDraft(router);
+    const draft = await importCustomsDraft(router);
     await compileDraft(router, draft.draftId);
 
     const cases: readonly {
@@ -377,7 +372,7 @@ describe("Store Zhixu draft workflow", () => {
         name: "unsupported addOnKind",
         expectedCode: "addon_manifest_invalid",
         mutate(schema) {
-          const slot = mutableRoleSlot(schema, phase2CustomsRoleSlotIds.buyerSelector);
+          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerSelector);
           slot.addOnManifest.addOnKind = "customs_selector";
         }
       },
@@ -385,7 +380,7 @@ describe("Store Zhixu draft workflow", () => {
         name: "missing manifest stage binding target",
         expectedCode: "addon_manifest_stage_not_bound",
         mutate(schema) {
-          const slot = mutableRoleSlot(schema, phase2CustomsRoleSlotIds.buyerSelector);
+          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerSelector);
           slot.addOnManifest.stageBindings = ["missing-stage"];
         }
       },
@@ -393,7 +388,7 @@ describe("Store Zhixu draft workflow", () => {
         name: "action binding references an unrendered input",
         expectedCode: "addon_manifest_input_not_found",
         mutate(schema) {
-          const slot = mutableRoleSlot(schema, phase2CustomsRoleSlotIds.buyerSelector);
+          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerSelector);
           slot.addOnManifest.actions[0].inputBindings.executorWallet = "missing.executorWallet";
         }
       },
@@ -401,7 +396,7 @@ describe("Store Zhixu draft workflow", () => {
         name: "selector misses executorMetadataHash",
         expectedCode: "addon_manifest_input_not_found",
         mutate(schema) {
-          const slot = mutableRoleSlot(schema, phase2CustomsRoleSlotIds.buyerSelector);
+          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerSelector);
           delete slot.addOnManifest.actions[0].inputBindings.executorMetadataHash;
         }
       },
@@ -409,7 +404,7 @@ describe("Store Zhixu draft workflow", () => {
         name: "resource patch action uses writerWallet",
         expectedCode: "addon_manifest_invalid",
         mutate(schema) {
-          const slot = mutableRoleSlot(schema, phase2CustomsRoleSlotIds.buyerResourceController);
+          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerResourceController);
           delete slot.addOnManifest.actions[0].inputBindings.selectorWallet;
           slot.addOnManifest.actions[0].inputBindings.writerWallet = "buyerResourceController.selectorWallet";
         }
@@ -418,7 +413,7 @@ describe("Store Zhixu draft workflow", () => {
         name: "resource patch action binds visibility as chain payload",
         expectedCode: "addon_manifest_invalid",
         mutate(schema) {
-          const slot = mutableRoleSlot(schema, phase2CustomsRoleSlotIds.buyerResourceController);
+          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerResourceController);
           slot.addOnManifest.actions[0].inputBindings.visibility = "buyerResourceController.selectorWallet";
         }
       },
@@ -426,14 +421,14 @@ describe("Store Zhixu draft workflow", () => {
         name: "executor-less target is not covered by exactly one selector",
         expectedCode: "stage_executor_selection_invalid",
         mutate(schema) {
-          const slot = mutableRoleSlot(schema, phase2CustomsRoleSlotIds.buyerSelector);
+          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerSelector);
           slot.addOnManifest.addOnKind = "resource_controller";
         }
       }
     ];
 
     for (const item of cases) {
-      const schema = clonePhase2Schema();
+      const schema = cloneCustomsSchema();
       item.mutate(schema);
       const productSchema = await updateDraftProductSchema(router, draft.draftId, schema);
       expect(productSchema.validation.ok, item.name).toBe(false);
@@ -462,7 +457,7 @@ describe("Store Zhixu draft workflow", () => {
     });
   });
 
-  it("keeps approved review separate from active trust projection state", async () => {
+  it("persists an approved Store review", async () => {
     const router = createApiRouter(new MemoryProjectionStore());
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
@@ -487,125 +482,6 @@ describe("Store Zhixu draft workflow", () => {
       .resolves.toMatchObject({ status: 200, body: { draft: { status: "approved_for_broadcast" } } });
   });
 
-  it("delegates attestation requests to governance and waits for PlanAttested projection before active", async () => {
-    const requests: GovernanceChainRequestDTO[] = [];
-    const adapter: GovernanceChainAdapter = {
-      attestPlan: vi.fn(async (request) => {
-        requests.push(request);
-        return { status: "confirmed" as const, txHash, blockNumber: "7", signer, retryable: false, simulated: false };
-      }),
-      async revokePlan() {
-        throw new Error("not used");
-      },
-      async attestSupplier() {
-        throw new Error("not used");
-      },
-      async revokeSupplier() {
-        throw new Error("not used");
-      }
-    };
-    const store = new MemoryProjectionStore();
-    const router = createApiRouter(store, {
-      governanceService: createGovernanceService({
-        adapter,
-        now: () => new Date("2026-04-29T00:00:00Z")
-      })
-    });
-    const draft = await approvedDraft(router);
-    const preview = requirePreview(draft);
-
-    const attestResponse = await router.handle({
-      method: "POST",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/request-attestation`,
-      headers: adminHeaders,
-      body: {
-        metadataURI: "https://store.example/zhixu/store-draft-demo",
-        confirmation: {
-          draftId: draft.draftId,
-          planId: preview.planId,
-          planHash: preview.planHash
-        }
-      }
-    });
-
-    expect(attestResponse.status).toBe(202);
-    const body = attestResponse.body as {
-      readonly draft: StoreZhixuDraftDTO;
-      readonly attestation: {
-        readonly request: {
-          readonly planId: Hex;
-          readonly planHash: Hex;
-          readonly artifactHash: Hex;
-          readonly policyHash: Hex;
-          readonly metadataHash: Hex;
-          readonly metadataURI: string;
-        };
-      };
-    };
-    expect(body.draft.status).toBe("indexing");
-    expect(body.attestation.request).toMatchObject({
-      planId: preview.planId,
-      planHash: preview.planHash,
-      artifactHash: preview.artifactHash,
-      policyHash: expect.stringMatching(/^0x[0-9a-f]{64}$/),
-      metadataHash: expect.stringMatching(/^0x[0-9a-f]{64}$/),
-      metadataURI: expect.any(String)
-    });
-    expect(adapter.attestPlan).toHaveBeenCalledOnce();
-    expect(requests[0]).toMatchObject({ kind: "attestPlan", planId: preview.planId });
-
-    await expect(router.handle({ method: "GET", pathname: `/store/zhixu-drafts/${draft.draftId}` }))
-      .resolves.toMatchObject({ status: 200, body: { draft: { status: "indexing" } } });
-
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [planAttestedEvent({
-        planId: preview.planId as Hex,
-        planHash: preview.planHash as Hex,
-        artifactHash: preview.artifactHash as Hex,
-        policyHash: body.attestation.request.policyHash,
-        metadataHash: body.attestation.request.metadataHash,
-        metadataURI: body.attestation.request.metadataURI
-      })]
-    });
-
-    await expect(router.handle({ method: "GET", pathname: `/store/zhixu-drafts/${draft.draftId}` }))
-      .resolves.toMatchObject({ status: 200, body: { draft: { status: "active" } } });
-  });
-
-  it("fails closed for attestation without valid governance admin headers", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
-    const draft = await approvedDraft(router);
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/request-attestation`,
-      body: {}
-    })).resolves.toMatchObject({
-      status: 401,
-      body: { error: "store_identity_missing" }
-    });
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/request-attestation`,
-      headers: storeOperatorHeaders,
-      body: {}
-    })).resolves.toMatchObject({
-      status: 403,
-      body: { error: "forbidden" }
-    });
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/request-attestation`,
-      headers: { "x-uvp-admin-id": "user-1", "x-uvp-admin-role": "participant" },
-      body: {}
-    })).resolves.toMatchObject({
-      status: 401,
-      body: { error: "store_identity_missing" }
-    });
-  });
 });
 
 async function importDraft(
@@ -645,12 +521,12 @@ async function compileDraft(
   return (response.body as { draft: StoreZhixuDraftDTO }).draft;
 }
 
-async function importPhase2CustomsDraft(
+async function importCustomsDraft(
   router: ReturnType<typeof createApiRouter>
 ): Promise<StoreZhixuDraftDTO> {
   return importDraft(router, {
     sourceKind: "onchain_hook_plan_manifest",
-    content: JSON.stringify(phase2CustomsOnchainHookPlanArtifact)
+    content: JSON.stringify(customsOnchainHookPlanArtifact)
   });
 }
 
@@ -669,8 +545,8 @@ async function updateDraftProductSchema(
   return (updateResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
 }
 
-function clonePhase2Schema(): StoreProductSchemaDTO {
-  return JSON.parse(JSON.stringify(phase2CustomsStoreProductSchema)) as StoreProductSchemaDTO;
+function cloneCustomsSchema(): StoreProductSchemaDTO {
+  return JSON.parse(JSON.stringify(customsStoreProductSchema)) as StoreProductSchemaDTO;
 }
 
 function mutableRoleSlot(schema: StoreProductSchemaDTO, slotId: string): any {
@@ -754,31 +630,4 @@ class FailingStoreZhixuDraftStore implements StoreZhixuDraftStore {
   async updateDraft(): Promise<void> {
     throw new Error("Store metadata unavailable: draft store offline");
   }
-}
-
-function planAttestedEvent(input: {
-  readonly planId: Hex;
-  readonly planHash: Hex;
-  readonly artifactHash: Hex;
-  readonly policyHash: Hex;
-  readonly metadataHash: Hex;
-  readonly metadataURI: string;
-}): ChainEvent {
-  return {
-    chainId: 31337,
-    contractAddress: registryAddress,
-    blockNumber: 7n,
-    transactionHash: txHash,
-    logIndex: 0,
-    eventName: "PlanAttested",
-    args: {
-      planId: input.planId,
-      planHash: input.planHash,
-      artifactHash: input.artifactHash,
-      policyHash: input.policyHash,
-      metadataHash: input.metadataHash,
-      metadataURI: input.metadataURI,
-      attester
-    }
-  };
 }

@@ -1,5 +1,5 @@
 export const RISK_GRAPH_SUPPORTED_SUBJECTS = ["zhixu", "order", "entity"] as const;
-export const RISK_GRAPH_SUPPORTED_INPUTS = ["signal_metadata", "trust_snapshot", "evidence_metadata"] as const;
+export const RISK_GRAPH_SUPPORTED_INPUTS = ["signal_metadata", "evidence_metadata"] as const;
 
 export type RiskGraphSubjectType = typeof RISK_GRAPH_SUPPORTED_SUBJECTS[number];
 export type RiskGraphInputKind = typeof RISK_GRAPH_SUPPORTED_INPUTS[number];

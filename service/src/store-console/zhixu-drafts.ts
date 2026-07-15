@@ -23,13 +23,11 @@ import {
   type ZhixuStageDTO
 } from "@uvp-eth/product-dto";
 import type {
-  GovernancePlanAttestationResultDTO,
   GovernancePrincipal,
   GovernanceReviewResultDTO,
   GovernanceReviewStatus,
   GovernanceService
 } from "../governance/index.js";
-import type { PlanTrustProjection } from "../indexer/trust-projections.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 
 export type StoreZhixuDraftSourceKind = "zhixu_yaml" | "onchain_hook_plan_manifest";
@@ -40,8 +38,6 @@ export type StoreZhixuDraftStatus =
   | "compiled"
   | "submitted_for_review"
   | "approved_for_broadcast"
-  | "broadcasting"
-  | "indexing"
   | "active"
   | "rejected"
   | "revoked";
@@ -81,7 +77,6 @@ export interface StoreZhixuDraftDTO {
   readonly compilePreview?: StoreCompilePreviewDTO;
   readonly productSchema?: StoreProductSchemaDTO;
   readonly reviewId?: string;
-  readonly governanceTxLogId?: string;
   readonly errors: readonly StoreDraftErrorDTO[];
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -101,12 +96,6 @@ export interface SubmitStoreZhixuReviewInput {
   readonly riskTags?: readonly string[];
   readonly publicSummary?: string;
   readonly internalNotes?: string;
-  readonly metadataURI?: string;
-  readonly metadata?: unknown;
-  readonly policy?: unknown;
-}
-
-export interface RequestStoreZhixuAttestationInput {
   readonly metadataURI?: string;
   readonly metadata?: unknown;
   readonly policy?: unknown;
@@ -197,14 +186,6 @@ export interface StoreZhixuDraftWorkflowService {
   ): Promise<{
     readonly draft: StoreZhixuDraftDTO;
     readonly review: GovernanceReviewResultDTO["publicReview"];
-  }>;
-  requestAttestation(
-    draftId: string,
-    input: unknown,
-    principal: GovernancePrincipal
-  ): Promise<{
-    readonly draft: StoreZhixuDraftDTO;
-    readonly attestation: GovernancePlanAttestationResultDTO;
   }>;
 }
 
@@ -347,33 +328,6 @@ export function createStoreZhixuDraftWorkflowService(options: {
       };
     },
 
-    async requestAttestation(draftId, input, principal) {
-      const draft = await requireDraft(draftStore, draftId);
-      assertDraftReadyForAttestation(draft);
-      const body = parseRequestAttestationInput(input);
-      const result = await options.governanceService.attestZhixu({
-        subjectId: draft.compilePreview.planId,
-        reviewId: draft.reviewId,
-        planId: draft.compilePreview.planId,
-        planHash: draft.compilePreview.planHash,
-        artifactHash: draft.compilePreview.artifactHash,
-        ...(body.metadataURI ? { metadataURI: body.metadataURI } : {}),
-        metadata: body.metadata ?? attestationMetadataForDraft(draft),
-        policy: body.policy ?? attestationPolicyForDraft(draft)
-      }, principal);
-      const timestamp = now().toISOString();
-      const updated: StoreZhixuDraftRecord = {
-        ...draft,
-        status: statusFromGovernanceTxLog(result.log.status),
-        governanceTxLogId: result.log.txLogId,
-        updatedAt: timestamp
-      };
-      await draftStore.updateDraft(updated);
-      return {
-        draft: await toDraftDTO(updated, options.projectionStore),
-        attestation: result
-      };
-    }
   };
 }
 
@@ -413,28 +367,12 @@ function assertDraftCompiledForReview(
   }
 }
 
-function assertDraftReadyForAttestation(
-  draft: StoreZhixuDraftRecord
-): asserts draft is StoreZhixuDraftRecord & {
-  readonly compilePreview: StoreCompilePreviewDTO;
-  readonly productSchema: StoreProductSchemaDTO;
-  readonly reviewId: string;
-} {
-  assertDraftCompiledForReview(draft);
-  if (!draft.reviewId) {
-    throw new StoreZhixuDraftWorkflowError(409, "review_required", "governance review is required before attestation");
-  }
-  if (draft.reviewStatus !== "approved_for_broadcast" && draft.reviewStatus !== "approved" && draft.reviewStatus !== "restricted") {
-    throw new StoreZhixuDraftWorkflowError(409, "review_not_attestable", "review is not approved for broadcast");
-  }
-}
-
 function assertDraftSchemaMutable(draft: StoreZhixuDraftRecord): void {
-  if (draft.governanceTxLogId || draft.status === "broadcasting" || draft.status === "indexing" || draft.status === "active") {
+  if (draft.status === "active") {
     throw new StoreZhixuDraftWorkflowError(
       409,
       "product_schema_new_version_required",
-      "attested or broadcasting product schema cannot be changed in place; create a new draft version"
+      "active product schema cannot be changed in place; create a new draft version"
     );
   }
 }
@@ -474,15 +412,6 @@ function parseSubmitReviewInput(input: unknown): SubmitStoreZhixuReviewInput {
     ...(optionalStringArray(record, "riskTags") ? { riskTags: optionalStringArray(record, "riskTags")! } : {}),
     ...(optionalString(record, "publicSummary") ? { publicSummary: optionalString(record, "publicSummary")! } : {}),
     ...(optionalString(record, "internalNotes") ? { internalNotes: optionalString(record, "internalNotes")! } : {}),
-    ...(optionalString(record, "metadataURI") ? { metadataURI: optionalString(record, "metadataURI")! } : {}),
-    ...(Object.hasOwn(record, "metadata") ? { metadata: record.metadata } : {}),
-    ...(Object.hasOwn(record, "policy") ? { policy: record.policy } : {})
-  };
-}
-
-function parseRequestAttestationInput(input: unknown): RequestStoreZhixuAttestationInput {
-  const record = requireRecord(input, "request-attestation request");
-  return {
     ...(optionalString(record, "metadataURI") ? { metadataURI: optionalString(record, "metadataURI")! } : {}),
     ...(Object.hasOwn(record, "metadata") ? { metadata: record.metadata } : {}),
     ...(Object.hasOwn(record, "policy") ? { policy: record.policy } : {})
@@ -716,7 +645,7 @@ function suggestedPluginForStage(stageId: string): SlotCapabilityPluginDTO {
   const pluginKind = inferPluginKind(stageId);
   return {
     pluginKind,
-    source: "legacy_inferred",
+    source: "inferred",
     stageIds: [stageId],
     title: `${displayStageLabel(stageId)}能力插件`,
     summary: "由编译产物推断生成，必须由 Store operator 确认为 explicit 后才能发布。",
@@ -855,7 +784,7 @@ function normalizeProductSchemaInput(
     ...(selectorBindings.length > 0 ? { selectorBindings } : {}),
     createdAt: optionalRecordString(schemaRecord, "createdAt") ?? draft.productSchema?.createdAt ?? timestamp,
     updatedAt: timestamp,
-    ...(optionalRecordString(schemaRecord, "attestedAt") ? { attestedAt: optionalRecordString(schemaRecord, "attestedAt")! } : {}),
+    ...(optionalRecordString(schemaRecord, "publishedAt") ? { publishedAt: optionalRecordString(schemaRecord, "publishedAt")! } : {}),
     ...(optionalRecordString(schemaRecord, "deprecatedAt") ? { deprecatedAt: optionalRecordString(schemaRecord, "deprecatedAt")! } : {})
   };
   return finalizeProductSchema(schemaWithoutHash, preview, timestamp);
@@ -904,7 +833,7 @@ function productSchemaHashPayload(
     businessPersonaLabels: schema.businessPersonaLabels,
     stages: schema.stages,
     selectorBindings: schema.selectorBindings ?? [],
-    attestedAt: schema.attestedAt ?? null,
+    publishedAt: schema.publishedAt ?? null,
     deprecatedAt: schema.deprecatedAt ?? null
   };
 }
@@ -1439,12 +1368,10 @@ async function toDraftDTO(
   draft: StoreZhixuDraftRecord,
   projectionStore: ProjectionStore
 ): Promise<StoreZhixuDraftDTO> {
-  const trust = draft.compilePreview ? await matchingTrustProjection(draft, projectionStore) : undefined;
-  const status = trust?.revoked
-    ? "revoked"
-    : trust?.status === "attested"
-      ? "active"
-      : draft.status;
+  const published = draft.compilePreview
+    ? await hasPublishedPlan(draft, projectionStore)
+    : false;
+  const status = published ? "active" : draft.status;
 
   return {
     draftId: draft.draftId,
@@ -1455,25 +1382,25 @@ async function toDraftDTO(
     ...(draft.compilePreview ? { compilePreview: draft.compilePreview } : {}),
     ...(draft.productSchema ? { productSchema: draft.productSchema } : {}),
     ...(draft.reviewId ? { reviewId: draft.reviewId } : {}),
-    ...(draft.governanceTxLogId ? { governanceTxLogId: draft.governanceTxLogId } : {}),
     errors: draft.errors,
     createdAt: draft.createdAt,
     updatedAt: draft.updatedAt
   };
 }
 
-async function matchingTrustProjection(
+async function hasPublishedPlan(
   draft: StoreZhixuDraftRecord & { readonly compilePreview?: StoreCompilePreviewDTO },
   projectionStore: ProjectionStore
-): Promise<PlanTrustProjection | undefined> {
+): Promise<boolean> {
   if (!draft.compilePreview) {
-    return undefined;
+    return false;
   }
-  const plans = await projectionStore.listPlanTrust({
-    planId: draft.compilePreview.planId,
-    planHash: draft.compilePreview.planHash
-  });
-  return plans.find((plan) => plan.artifactHash === draft.compilePreview?.artifactHash);
+  const snapshot = await projectionStore.getOrderSnapshot();
+  return Object.values(snapshot.stateMachinePlans).some(
+    (plan) =>
+      plan.planId === draft.compilePreview?.planId &&
+      plan.planHash === draft.compilePreview.planHash
+  );
 }
 
 function draftStatusFromReviewStatus(status: GovernanceReviewStatus): StoreZhixuDraftStatus {
@@ -1489,19 +1416,6 @@ function draftStatusFromReviewStatus(status: GovernanceReviewStatus): StoreZhixu
       return "rejected";
     case "revoked":
       return "revoked";
-  }
-}
-
-function statusFromGovernanceTxLog(status: GovernancePlanAttestationResultDTO["log"]["status"]): StoreZhixuDraftStatus {
-  switch (status) {
-    case "confirmed":
-    case "indexing":
-      return "indexing";
-    case "pending":
-    case "broadcasting":
-      return "broadcasting";
-    case "failed":
-      return "approved_for_broadcast";
   }
 }
 
@@ -1531,38 +1445,7 @@ function reviewPolicyForDraft(draft: StoreZhixuDraftRecord & {
     artifactHash: draft.compilePreview.artifactHash,
     productSchemaHash: draft.productSchema.schemaHash,
     productSchemaStatus: draft.productSchema.validation.status,
-    businessSignaturesCreated: false,
-    draftIsTrustSource: false
-  };
-}
-
-function attestationMetadataForDraft(draft: StoreZhixuDraftRecord & { readonly compilePreview: StoreCompilePreviewDTO }): unknown {
-  return {
-    source: "store_zhixu_draft_attestation",
-    draftId: draft.draftId,
-    zhixuId: draft.zhixuId ?? null,
-    title: draft.title,
-    maintainer: draft.maintainer,
-    publicSummary: draft.publicSummary ?? "",
-    tags: draft.tags,
-    compilePreview: draft.compilePreview,
-    productSchemaHash: draft.productSchema?.schemaHash ?? null,
-    productSchema: draft.productSchema ?? null
-  };
-}
-
-function attestationPolicyForDraft(draft: StoreZhixuDraftRecord & {
-  readonly compilePreview: StoreCompilePreviewDTO;
-  readonly productSchema: StoreProductSchemaDTO;
-}): unknown {
-  return {
-    workflow: "store_zhixu_import_compile_review_publish",
-    reviewId: draft.reviewId ?? null,
-    planId: draft.compilePreview.planId,
-    planHash: draft.compilePreview.planHash,
-    artifactHash: draft.compilePreview.artifactHash,
-    productSchemaHash: draft.productSchema.schemaHash,
-    activeRequiresTrustProjection: true
+    businessSignaturesCreated: false
   };
 }
 

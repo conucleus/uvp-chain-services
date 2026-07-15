@@ -4,16 +4,16 @@ import {
   CROSS_BORDER_ZHIXU_ID,
   crossBorderPlanIds,
   demoZhixuDetail,
-  phase2CustomsOnchainHookPlanArtifact,
-  phase2CustomsRoleSlotIds,
-  phase2CustomsStageIds,
-  phase2CustomsStoreProductSchema
+  customsOnchainHookPlanArtifact,
+  customsRoleSlotIds,
+  customsStageIds,
+  customsStoreProductSchema,
 } from "@uvp-eth/product-dto/fixtures";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import {
   ProductAuthorizationBuilder,
-  ProductAuthorizationBuilderError
+  ProductAuthorizationBuilderError,
 } from "../src/product/bff/authorization.js";
 import { MemoryProductOrderTriggerBroadcastAdapter } from "../src/product/bff/trigger.js";
 import { MemoryStoreZhixuVersionMetadataStore } from "../src/store-console/version.js";
@@ -21,7 +21,7 @@ import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { MemoryProductBffStore } from "../src/product/bff/store.js";
 import {
   STAGE_EXECUTOR_PATCH_SIGNAL_ID,
-  STAGE_RESOURCE_PATCH_SIGNAL_ID
+  STAGE_RESOURCE_PATCH_SIGNAL_ID,
 } from "../src/stage-patches/index.js";
 import type {
   DraftParticipantDTO,
@@ -29,59 +29,76 @@ import type {
   ProductInviteDTO,
   ProductOrderDraftDTO,
   SignalAuthorizationDTO,
-  SubmitProductOrderDraftResult
+  SubmitProductOrderDraftResult,
 } from "../src/product/bff/types.js";
 import type { Hex } from "../src/shared/types.js";
 
 const contractAddress = "0x1111111111111111111111111111111111111111";
 const activeStateMachineAddress = "0x9999999999999999999999999999999999999999";
 const deploymentRegistryAddress = "0x8888888888888888888888888888888888888888";
-const trustRegistryAddress = "0x7777777777777777777777777777777777777777";
-const activeDeploymentId = "0x0000000000000000000000000000000000000000000000000000000000000d02";
-const attester = "0x2222222222222222222222222222222222222222";
-const metadataHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-const policyHash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-const reasonHash = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const activeDeploymentId =
+  "0x0000000000000000000000000000000000000000000000000000000000000d02";
+const metadataHash =
+  "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
 describe("product BFF order drafts and invites", () => {
-  it("creates an order draft from an attested plan and exposes draft participants", async () => {
-    const { router } = await createRouterWithTrust([planAttestedEvent(1n)]);
+  it("creates an order draft from a published plan and exposes draft participants", async () => {
+    const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
 
     const response = await createDraft(router);
 
-    expect(response.status).toBe(201);
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
     const body = response.body as DraftResponse;
     expect(body.draft).toMatchObject({
       zhixuId: CROSS_BORDER_ZHIXU_ID,
       planId: crossBorderPlanIds.planId,
       planHash: crossBorderPlanIds.planHash,
       title: "A company purchase",
-      status: "draft"
+      status: "draft",
     });
-    expect(body.participants.filter((participant) => participant.required).length).toBeGreaterThan(0);
-    expect(body.participants.every((participant) => participant.status === "missing")).toBe(true);
+    expect(
+      body.participants.filter((participant) => participant.required).length,
+    ).toBeGreaterThan(0);
+    expect(
+      body.participants.every(
+        (participant) => participant.status === "missing",
+      ),
+    ).toBe(true);
 
     const getResponse = await router.handle({
       method: "GET",
-      pathname: `/product/order-drafts/${body.draft.draftId}`
+      pathname: `/product/order-drafts/${body.draft.draftId}`,
     });
     expect(getResponse.status).toBe(200);
-    expect((getResponse.body as DraftResponse).participants).toHaveLength(body.participants.length);
+    expect((getResponse.body as DraftResponse).participants).toHaveLength(
+      body.participants.length,
+    );
 
     const patchResponse = await router.handle({
       method: "PATCH",
       pathname: `/product/order-drafts/${body.draft.draftId}`,
-      body: { title: "Updated purchase", goods: ["vehicles"] }
+      body: { title: "Updated purchase", goods: ["vehicles"] },
     });
     expect(patchResponse.status).toBe(200);
-    expect((patchResponse.body as { draft: ProductOrderDraftDTO }).draft.title).toBe("Updated purchase");
+    expect(
+      (patchResponse.body as { draft: ProductOrderDraftDTO }).draft.title,
+    ).toBe("Updated purchase");
   });
 
   it("accepts and rejects participant invites", async () => {
-    const { router } = await createRouterWithTrust([planAttestedEvent(1n)]);
-    const draft = (await createDraft(router).then((response) => response.body as DraftResponse)).draft;
+    const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
+    const draft = (
+      await createDraft(router).then(
+        (response) => response.body as DraftResponse,
+      )
+    ).draft;
 
-    const fundsInvite = await createInvite(router, draft.draftId, "funds", "funds@example.com");
+    const fundsInvite = await createInvite(
+      router,
+      draft.draftId,
+      "funds",
+      "funds@example.com",
+    );
     expect(fundsInvite.draft.status).toBe("awaiting_participants");
     expect(fundsInvite.participant.status).toBe("invited");
 
@@ -91,51 +108,71 @@ describe("product BFF order drafts and invites", () => {
       body: {
         displayName: "Buyer Finance",
         walletAddress: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        contact: "buyer@example.com"
-      }
+        contact: "buyer@example.com",
+      },
     });
     expect(acceptResponse.status).toBe(200);
     const accepted = acceptResponse.body as InviteResponse;
     expect(accepted.participant).toMatchObject({
       roleSlotId: "funds",
       status: "accepted",
-      walletAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      walletAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     });
     expect(accepted.draft.status).toBe("awaiting_participants");
 
-    const supplyInvite = await createInvite(router, draft.draftId, "supply", "supply@example.com");
+    const supplyInvite = await createInvite(
+      router,
+      draft.draftId,
+      "supply",
+      "supply@example.com",
+    );
     const rejectResponse = await router.handle({
       method: "POST",
       pathname: `/product/invites/${supplyInvite.invite.inviteId}/reject`,
-      body: { displayName: "Supplier", contact: "supply@example.com" }
+      body: { displayName: "Supplier", contact: "supply@example.com" },
     });
     expect(rejectResponse.status).toBe(200);
     const rejected = rejectResponse.body as InviteResponse;
     expect(rejected.participant).toMatchObject({
       roleSlotId: "supply",
-      status: "rejected"
+      status: "rejected",
     });
     expect(rejected.draft.status).toBe("awaiting_participants");
   });
 
   it("previews invites and blocks wrong-wallet or already accepted recovery states", async () => {
-    const { router } = await createRouterWithTrust([planAttestedEvent(1n)]);
-    const draft = (await createDraft(router).then((response) => response.body as DraftResponse)).draft;
-    const fundsInvite = await createInvite(router, draft.draftId, "funds", "funds@example.com");
+    const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
+    const draft = (
+      await createDraft(router).then(
+        (response) => response.body as DraftResponse,
+      )
+    ).draft;
+    const fundsInvite = await createInvite(
+      router,
+      draft.draftId,
+      "funds",
+      "funds@example.com",
+    );
     const acceptedWallet = testWallet(0);
 
     const previewResponse = await router.handle({
       method: "GET",
       pathname: `/product/invites/${fundsInvite.invite.inviteId}`,
-      headers: { "x-uvp-wallet-address": acceptedWallet }
+      headers: { "x-uvp-wallet-address": acceptedWallet },
     });
     expect(previewResponse.status).toBe(200);
-    expect((previewResponse.body as { invite: Record<string, unknown> }).invite).not.toHaveProperty("tokenHash");
+    expect(
+      (previewResponse.body as { invite: Record<string, unknown> }).invite,
+    ).not.toHaveProperty("tokenHash");
     expect(previewResponse.body).toMatchObject({
       invite: { inviteId: fundsInvite.invite.inviteId, status: "active" },
       participant: { roleSlotId: "funds" },
       acceptance: { canAccept: true, status: "can_accept" },
-      walletBinding: { walletAddress: acceptedWallet, alreadyBound: false, canAccept: true }
+      walletBinding: {
+        walletAddress: acceptedWallet,
+        alreadyBound: false,
+        canAccept: true,
+      },
     });
 
     const wrongWalletResponse = await router.handle({
@@ -145,12 +182,12 @@ describe("product BFF order drafts and invites", () => {
       body: {
         displayName: "Buyer Finance",
         walletAddress: acceptedWallet,
-        contact: "buyer@example.com"
-      }
+        contact: "buyer@example.com",
+      },
     });
     expect(wrongWalletResponse).toMatchObject({
       status: 403,
-      body: { error: "wrong_wallet" }
+      body: { error: "wrong_wallet" },
     });
 
     const acceptResponse = await router.handle({
@@ -160,28 +197,29 @@ describe("product BFF order drafts and invites", () => {
       body: {
         displayName: "Buyer Finance",
         walletAddress: acceptedWallet,
-        contact: "buyer@example.com"
-      }
+        contact: "buyer@example.com",
+      },
     });
     expect(acceptResponse.status).toBe(200);
 
     const meResponse = await router.handle({
       method: "GET",
       pathname: "/product/me",
-      headers: { "x-uvp-wallet-address": acceptedWallet }
+      headers: { "x-uvp-wallet-address": acceptedWallet },
     });
     expect(meResponse.status).toBe(200);
     expect(meResponse.body).toMatchObject({
       participant: {
-        participantId: (acceptResponse.body as InviteResponse).participant.participantId,
+        participantId: (acceptResponse.body as InviteResponse).participant
+          .participantId,
         displayName: "Buyer Finance",
         source: "accepted_participant",
-        roleLabels: expect.arrayContaining(["资金方"])
+        roleLabels: expect.arrayContaining(["资金方"]),
       },
       summary: {
         orderCount: 0,
-        openTaskCount: 0
-      }
+        openTaskCount: 0,
+      },
     });
 
     const alreadyAcceptedResponse = await router.handle({
@@ -191,21 +229,30 @@ describe("product BFF order drafts and invites", () => {
       body: {
         displayName: "Buyer Finance",
         walletAddress: acceptedWallet,
-        contact: "buyer@example.com"
-      }
+        contact: "buyer@example.com",
+      },
     });
     expect(alreadyAcceptedResponse).toMatchObject({
       status: 409,
-      body: { error: "invite_already_accepted" }
+      body: { error: "invite_already_accepted" },
     });
   });
 
   it("blocks expired invites and duplicate participant wallet binding", async () => {
-    const { router } = await createRouterWithTrust([planAttestedEvent(1n)]);
-    const draft = (await createDraft(router).then((response) => response.body as DraftResponse)).draft;
+    const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
+    const draft = (
+      await createDraft(router).then(
+        (response) => response.body as DraftResponse,
+      )
+    ).draft;
     await inviteAndAccept(router, draft.draftId, "funds", 0);
 
-    const duplicateInvite = await createInvite(router, draft.draftId, "delivery", "delivery@example.com");
+    const duplicateInvite = await createInvite(
+      router,
+      draft.draftId,
+      "delivery",
+      "delivery@example.com",
+    );
     const duplicateAcceptResponse = await router.handle({
       method: "POST",
       pathname: `/product/invites/${duplicateInvite.invite.inviteId}/accept`,
@@ -213,12 +260,12 @@ describe("product BFF order drafts and invites", () => {
       body: {
         displayName: "Delivery",
         walletAddress: testWallet(0),
-        contact: "delivery@example.com"
-      }
+        contact: "delivery@example.com",
+      },
     });
     expect(duplicateAcceptResponse).toMatchObject({
       status: 409,
-      body: { error: "wallet_already_bound" }
+      body: { error: "wallet_already_bound" },
     });
 
     const expiredInvite = await createInvite(
@@ -226,19 +273,19 @@ describe("product BFF order drafts and invites", () => {
       draft.draftId,
       "supply",
       "supply@example.com",
-      "2000-01-01T00:00:00.000Z"
+      "2000-01-01T00:00:00.000Z",
     );
     const expiredPreviewResponse = await router.handle({
       method: "GET",
       pathname: `/product/invites/${expiredInvite.invite.inviteId}`,
-      headers: { "x-uvp-wallet-address": testWallet(2) }
+      headers: { "x-uvp-wallet-address": testWallet(2) },
     });
     expect(expiredPreviewResponse).toMatchObject({
       status: 200,
       body: {
         invite: { status: "expired" },
-        acceptance: { canAccept: false, status: "expired" }
-      }
+        acceptance: { canAccept: false, status: "expired" },
+      },
     });
 
     const expiredAcceptResponse = await router.handle({
@@ -248,54 +295,80 @@ describe("product BFF order drafts and invites", () => {
       body: {
         displayName: "Supplier",
         walletAddress: testWallet(2),
-        contact: "supply@example.com"
-      }
+        contact: "supply@example.com",
+      },
     });
     expect(expiredAcceptResponse).toMatchObject({
       status: 410,
-      body: { error: "invite_expired" }
+      body: { error: "invite_expired" },
     });
   });
 
   it("prepares signed trigger typed data after required participants accept", async () => {
-    const { router, triggerAdapter } = await createRouterWithTrust([
+    const { router, triggerAdapter } = await createRouterFixture([
       ...activeDeploymentEvents(),
-      planAttestedEvent(11n)
+      planRegisteredEvent(11n),
     ]);
-    const draft = (await createDraft(router).then((response) => response.body as DraftResponse)).draft;
+    const draft = (
+      await createDraft(router).then(
+        (response) => response.body as DraftResponse,
+      )
+    ).draft;
     const participants = await listParticipants(router, draft.draftId);
-    const requiredParticipants = participants.filter((participant) => participant.required);
+    const requiredParticipants = participants.filter(
+      (participant) => participant.required,
+    );
 
-    for (const [index, participant] of requiredParticipants.slice(0, -1).entries()) {
-      await inviteAndAccept(router, draft.draftId, participant.roleSlotId, index);
+    for (const [index, participant] of requiredParticipants
+      .slice(0, -1)
+      .entries()) {
+      await inviteAndAccept(
+        router,
+        draft.draftId,
+        participant.roleSlotId,
+        index,
+      );
     }
 
     const blockedSubmit = await router.handle({
       method: "POST",
       pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
-      body: { walletAddress: testWallet(0) }
+      body: { walletAddress: testWallet(0) },
     });
     expect(blockedSubmit.status).toBe(409);
-    expect(blockedSubmit.body).toMatchObject({ error: "required_participant_missing" });
+    expect(blockedSubmit.body).toMatchObject({
+      error: "required_participant_missing",
+    });
 
     const lastRequired = requiredParticipants.at(-1);
     expect(lastRequired).toBeDefined();
-    await inviteAndAccept(router, draft.draftId, lastRequired!.roleSlotId, requiredParticipants.length);
+    await inviteAndAccept(
+      router,
+      draft.draftId,
+      lastRequired!.roleSlotId,
+      requiredParticipants.length,
+    );
 
     const readyDraft = await router.handle({
       method: "GET",
-      pathname: `/product/order-drafts/${draft.draftId}`
+      pathname: `/product/order-drafts/${draft.draftId}`,
     });
-    expect((readyDraft.body as DraftResponse).draft.status).toBe("ready_to_trigger");
+    expect((readyDraft.body as DraftResponse).draft.status).toBe(
+      "ready_to_trigger",
+    );
 
     const prepareResponse = await router.handle({
       method: "POST",
       pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
-      body: { walletAddress: testWallet(0) }
+      body: { walletAddress: testWallet(0) },
     });
     expect(prepareResponse.status).toBe(200);
     const prepared = prepareResponse.body as SubmitProductOrderDraftResult & {
-      readonly prepared: { readonly prepareId: string; readonly typedData: Record<string, unknown>; readonly submitter: string };
+      readonly prepared: {
+        readonly prepareId: string;
+        readonly typedData: Record<string, unknown>;
+        readonly submitter: string;
+      };
     };
     expect(prepared.draft.status).toBe("ready_to_trigger");
     expect(prepared.trigger).toMatchObject({
@@ -303,7 +376,7 @@ describe("product BFF order drafts and invites", () => {
       planId: crossBorderPlanIds.planId,
       planHash: crossBorderPlanIds.planHash,
       status: "prepared",
-      retryable: false
+      retryable: false,
     });
     expect(prepared.trigger.triggerId).toMatch(/^trigger_/);
     expect(prepared.trigger.orderId).toMatch(/^0x[0-9a-f]{64}$/);
@@ -312,29 +385,34 @@ describe("product BFF order drafts and invites", () => {
     expect(prepared.prepared.prepareId).toMatch(/^prepare_/);
     expect(prepared.prepared.submitter).toBe(testWallet(0));
     expect(prepared.prepared.typedData).toMatchObject({
-      domain: expect.objectContaining({ verifyingContract: activeStateMachineAddress }),
-      primaryType: "UVPStateMachineTriggerOrderFromOutside"
+      domain: expect.objectContaining({
+        verifyingContract: activeStateMachineAddress,
+      }),
+      primaryType: "UVPStateMachineTriggerOrderFromOutside",
     });
     expect(triggerAdapter.listAttempts()).toHaveLength(0);
     const registrationResponse = await router.handle({
       method: "GET",
-      pathname: `/product/order-triggers/${prepared.trigger.triggerId}`
+      pathname: `/product/order-triggers/${prepared.trigger.triggerId}`,
     });
     expect(registrationResponse.status).toBe(200);
-    expect((registrationResponse.body as { trigger: ProductOrderTriggerDTO }).trigger).toEqual(prepared.trigger);
+    expect(
+      (registrationResponse.body as { trigger: ProductOrderTriggerDTO })
+        .trigger,
+    ).toEqual(prepared.trigger);
   });
 
   it("only lets the trigger stage executor prepare outside trigger typed data", async () => {
-    const { router } = await createRouterWithTrust([
+    const { router } = await createRouterFixture([
       ...activeDeploymentEvents(),
-      planAttestedEvent(11n)
+      planRegisteredEvent(11n),
     ]);
     const draft = await createReadyDraft(router);
 
     const wrongExecutorResponse = await router.handle({
       method: "POST",
       pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
-      body: { walletAddress: testWallet(1) }
+      body: { walletAddress: testWallet(1) },
     });
     expect(wrongExecutorResponse.status).toBe(403);
     expect(wrongExecutorResponse.body).toMatchObject({
@@ -342,33 +420,37 @@ describe("product BFF order drafts and invites", () => {
       details: {
         roleSlotId: "funds",
         expectedWalletAddress: testWallet(0),
-        walletAddress: testWallet(1)
-      }
+        walletAddress: testWallet(1),
+      },
     });
 
     const executorResponse = await router.handle({
       method: "POST",
       pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
-      body: { walletAddress: testWallet(0) }
+      body: { walletAddress: testWallet(0) },
     });
     expect(executorResponse.status).toBe(200);
   });
 
   it("broadcasts trigger only with a valid prepared wallet signature", async () => {
-    const { router, triggerAdapter } = await createRouterWithTrust([
+    const { router, triggerAdapter } = await createRouterFixture([
       ...activeDeploymentEvents(),
-      planAttestedEvent(11n)
+      planRegisteredEvent(11n),
     ]);
     const draft = await createReadyDraft(router);
-    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    const prepared = await prepareDraftTrigger(
+      router,
+      draft.draftId,
+      testWallet(0),
+    );
 
     const noSignature = await router.handle({
       method: "POST",
       pathname: `/product/order-drafts/${draft.draftId}/trigger`,
       body: {
         prepareId: prepared.prepared.prepareId,
-        walletAddress: testWallet(0)
-      }
+        walletAddress: testWallet(0),
+      },
     });
     expect(noSignature.status).toBe(400);
 
@@ -378,8 +460,8 @@ describe("product BFF order drafts and invites", () => {
       body: {
         prepareId: prepared.prepared.prepareId,
         walletAddress: testWallet(0),
-        signature: "0x1234"
-      }
+        signature: "0x1234",
+      },
     });
     expect(wrongSignature.status).toBe(400);
     expect(triggerAdapter.listAttempts()).toHaveLength(0);
@@ -389,28 +471,37 @@ describe("product BFF order drafts and invites", () => {
     const triggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter({
       status: "confirmed",
       blockNumber: "42",
-      retryable: false
+      retryable: false,
     });
-    const { router } = await createRouterWithTrust([
-      ...activeDeploymentEvents(),
-      planAttestedEvent(11n)
-    ], triggerAdapter);
+    const { router } = await createRouterFixture(
+      [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+      triggerAdapter,
+    );
     const draft = await createReadyDraft(router);
 
-    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
-    const trigger = await triggerPreparedDraft(router, draft.draftId, prepared, testWallet(0));
+    const prepared = await prepareDraftTrigger(
+      router,
+      draft.draftId,
+      testWallet(0),
+    );
+    const trigger = await triggerPreparedDraft(
+      router,
+      draft.draftId,
+      prepared,
+      testWallet(0),
+    );
     const [attempt] = triggerAdapter.listAttempts();
 
     expect(trigger.trigger).toMatchObject({
       deploymentId: activeDeploymentId,
       stateMachineAddress: activeStateMachineAddress,
       status: "confirmed",
-      blockNumber: "42"
+      blockNumber: "42",
     });
     expect(trigger.draft).toMatchObject({
       status: "triggered",
       triggeredOrderId: trigger.trigger.orderId,
-      triggerTxHash: trigger.trigger.txHash
+      triggerTxHash: trigger.trigger.txHash,
     });
     expect(attempt).toMatchObject({
       deploymentId: activeDeploymentId,
@@ -418,15 +509,15 @@ describe("product BFF order drafts and invites", () => {
       orderId: prepared.trigger.orderId,
       planId: prepared.trigger.planId,
       submitter: testWallet(0),
-      signature: expect.stringMatching(/^0x[0-9a-f]+$/)
+      signature: expect.stringMatching(/^0x[0-9a-f]+$/),
     });
     expect(attempt!.authorizations).toHaveLength(trigger.permissions.length);
   });
 
   it("rejects client-supplied authorization tables in prepare and trigger", async () => {
-    const { router, triggerAdapter } = await createRouterWithTrust([
+    const { router, triggerAdapter } = await createRouterFixture([
       ...activeDeploymentEvents(),
-      planAttestedEvent(11n)
+      planRegisteredEvent(11n),
     ]);
     const draft = await createReadyDraft(router);
 
@@ -435,13 +526,19 @@ describe("product BFF order drafts and invites", () => {
       pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
       body: {
         walletAddress: testWallet(0),
-        authorizations: []
-      }
+        authorizations: [],
+      },
     });
     expect(prepareResponse.status).toBe(400);
-    expect(prepareResponse.body).toMatchObject({ error: "client_authorizations_not_allowed" });
+    expect(prepareResponse.body).toMatchObject({
+      error: "client_authorizations_not_allowed",
+    });
 
-    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    const prepared = await prepareDraftTrigger(
+      router,
+      draft.draftId,
+      testWallet(0),
+    );
     const triggerResponse = await router.handle({
       method: "POST",
       pathname: `/product/order-drafts/${draft.draftId}/trigger`,
@@ -449,84 +546,11 @@ describe("product BFF order drafts and invites", () => {
         prepareId: prepared.prepared.prepareId,
         walletAddress: testWallet(0),
         signature: "0x1234",
-        permissions: []
-      }
+        permissions: [],
+      },
     });
     expect(triggerResponse.status).toBe(400);
     expect(triggerAdapter.listAttempts()).toHaveLength(0);
-  });
-
-  it("blocks unattested and revoked plans for create and prepare", async () => {
-    const { router: unattestedRouter } = await createRouterWithTrust([]);
-    const unattestedResponse = await createDraft(unattestedRouter);
-    expect(unattestedResponse.status).toBe(403);
-    expect(unattestedResponse.body).toMatchObject({ error: "plan_not_attested" });
-
-    const { router: revokedRouter } = await createRouterWithTrust([
-      planAttestedEvent(1n),
-      planRevokedEvent(2n)
-    ]);
-    const revokedResponse = await createDraft(revokedRouter);
-    expect(revokedResponse.status).toBe(409);
-    expect(revokedResponse.body).toMatchObject({ error: "plan_revoked" });
-
-    const { router, store } = await createRouterWithTrust([planAttestedEvent(1n)]);
-    const draft = (await createDraft(router).then((response) => response.body as DraftResponse)).draft;
-    const participants = await listParticipants(router, draft.draftId);
-    const requiredParticipants = participants.filter((participant) => participant.required);
-    for (const [index, participant] of requiredParticipants.entries()) {
-      await inviteAndAccept(router, draft.draftId, participant.roleSlotId, index);
-    }
-
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [planAttestedEvent(1n), planRevokedEvent(2n)]
-    });
-    const submitAfterRevoke = await router.handle({
-      method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
-      body: { walletAddress: testWallet(0) }
-    });
-    expect(submitAfterRevoke.status).toBe(409);
-    expect(submitAfterRevoke.body).toMatchObject({ error: "plan_revoked" });
-  });
-
-  it("does not let Store version metadata revive a revoked Product chain attestation", async () => {
-    const replacementPlanId = "0x0000000000000000000000000000000000000000000000000000000000000f01";
-    const replacementPlanHash = "0x0000000000000000000000000000000000000000000000000000000000000f02";
-    const replacementArtifactHash = "0x0000000000000000000000000000000000000000000000000000000000000f03";
-    const versionStore = new MemoryStoreZhixuVersionMetadataStore();
-    await versionStore.upsertVersion({
-      versionId: "cross-border-v2",
-      zhixuId: CROSS_BORDER_ZHIXU_ID,
-      seriesId: CROSS_BORDER_ZHIXU_ID,
-      versionLabel: "Cross-border v2",
-      status: "active",
-      planId: replacementPlanId,
-      planHash: replacementPlanHash,
-      artifactHash: replacementArtifactHash,
-      createdAt: "2026-04-29T00:00:00.000Z",
-      cutoverAt: "2026-04-29T00:00:00.000Z",
-      cutoverReason: "test metadata must not replace chain truth"
-    });
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        planAttestedEvent(1n),
-        planRevokedEvent(2n),
-        planAttestedEventFor(3n, 2, replacementPlanId, replacementPlanHash, replacementArtifactHash)
-      ]
-    });
-    const router = createApiRouter(store, {
-      productRegistrationAdapter: new MemoryProductOrderTriggerBroadcastAdapter(),
-      storeZhixuVersionMetadataStore: versionStore
-    });
-
-    const response = await createDraft(router);
-
-    expect(response.status).toBe(409);
-    expect(response.body).toMatchObject({ error: "plan_revoked" });
   });
 
   it("generates stable server-side signal authorizations", async () => {
@@ -534,85 +558,115 @@ describe("product BFF order drafts and invites", () => {
     const second = await submitReadyDraft();
 
     expect(first.authorizations).toEqual(second.authorizations);
-    expect(stablePermissionShape(first.permissions)).toEqual(stablePermissionShape(second.permissions));
+    expect(stablePermissionShape(first.permissions)).toEqual(
+      stablePermissionShape(second.permissions),
+    );
     expect(first.authorizations.length).toBeGreaterThan(0);
     expect(first.permissions).toHaveLength(first.authorizations.length);
-    expect(first.permissions.every((permission) =>
-      permission.draftId.length > 0 &&
-      typeof permission.orderId === "string" &&
-      /^0x[0-9a-f]{64}$/.test(permission.orderId) &&
-      permission.participantId.length > 0
-    )).toBe(true);
-    expect(first.authorizations.every((authorization) =>
-      /^0x[0-9a-f]{64}$/.test(authorization.sourceId) &&
-      /^0x[0-9a-f]{64}$/.test(authorization.signalId) &&
-      /^0x[0-9a-f]{40}$/.test(authorization.submitter) &&
-      /^0x[0-9a-f]{64}$/.test(authorization.role) &&
-      /^0x[0-9a-f]{64}$/.test(authorization.metadataHash)
-    )).toBe(true);
+    expect(
+      first.permissions.every(
+        (permission) =>
+          permission.draftId.length > 0 &&
+          typeof permission.orderId === "string" &&
+          /^0x[0-9a-f]{64}$/.test(permission.orderId) &&
+          permission.participantId.length > 0,
+      ),
+    ).toBe(true);
+    expect(
+      first.authorizations.every(
+        (authorization) =>
+          /^0x[0-9a-f]{64}$/.test(authorization.sourceId) &&
+          /^0x[0-9a-f]{64}$/.test(authorization.signalId) &&
+          /^0x[0-9a-f]{40}$/.test(authorization.submitter) &&
+          /^0x[0-9a-f]{64}$/.test(authorization.role) &&
+          /^0x[0-9a-f]{64}$/.test(authorization.metadataHash),
+      ),
+    ).toBe(true);
   });
 
-  it("generates explicit stage patch authorizations from Phase 2 add-on actions", () => {
-    const input = phase2AuthorizationBuildInput();
+  it("generates explicit stage patch authorizations from add-on actions", () => {
+    const input = customsAuthorizationBuildInput();
     const result = new ProductAuthorizationBuilder().build(input);
     const selectorWallet = testWallet(0);
     const resourcePatchWallet = testWallet(1);
-    const selectorHook = requiredPhase2Hook(phase2CustomsStageIds.buyerSelectCustomsExecutor);
-    const resourcePatchHook = requiredPhase2Hook(phase2CustomsStageIds.buyerPublishCustomsResources);
+    const selectorHook = requiredCustomsHook(
+      customsStageIds.buyerSelectCustomsExecutor,
+    );
+    const resourcePatchHook = requiredCustomsHook(
+      customsStageIds.buyerPublishCustomsResources,
+    );
 
-    expect(result.authorizations).toEqual(expect.arrayContaining([
+    expect(result.authorizations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: selectorHook.stageId,
+          signalId: STAGE_EXECUTOR_PATCH_SIGNAL_ID,
+          submitter: selectorWallet,
+        }),
+        expect.objectContaining({
+          sourceId: resourcePatchHook.stageId,
+          signalId: STAGE_RESOURCE_PATCH_SIGNAL_ID,
+          submitter: resourcePatchWallet,
+        }),
+      ]),
+    );
+    expect(result.permissions).toContainEqual(
       expect.objectContaining({
-        sourceId: selectorHook.stageId,
-        signalId: STAGE_EXECUTOR_PATCH_SIGNAL_ID,
-        submitter: selectorWallet
+        permissionId: "customs.executor-patch",
+        roleSlotId: customsRoleSlotIds.buyerSelector,
+        submitterAddress: selectorWallet,
       }),
+    );
+    expect(result.permissions).toContainEqual(
       expect.objectContaining({
-        sourceId: resourcePatchHook.stageId,
-        signalId: STAGE_RESOURCE_PATCH_SIGNAL_ID,
-        submitter: resourcePatchWallet
-      })
-    ]));
-    expect(result.permissions).toContainEqual(expect.objectContaining({
-      permissionId: "phase2.customs.executor-patch",
-      roleSlotId: phase2CustomsRoleSlotIds.buyerSelector,
-      submitterAddress: selectorWallet
-    }));
-    expect(result.permissions).toContainEqual(expect.objectContaining({
-      permissionId: "phase2.customs.resource-patch",
-      roleSlotId: phase2CustomsRoleSlotIds.buyerResourceController,
-      submitterAddress: resourcePatchWallet
-    }));
+        permissionId: "customs.resource-patch",
+        roleSlotId: customsRoleSlotIds.buyerResourceController,
+        submitterAddress: resourcePatchWallet,
+      }),
+    );
   });
 
   it("does not derive stage patch authorizations without an explicit add-on action manifest", () => {
-    const input = phase2AuthorizationBuildInput({
-      omitAddOnManifestForRoleSlot: phase2CustomsRoleSlotIds.buyerSelector
+    const input = customsAuthorizationBuildInput({
+      omitAddOnManifestForRoleSlot: customsRoleSlotIds.buyerSelector,
     });
     const result = new ProductAuthorizationBuilder().build(input);
-    const selectorHook = requiredPhase2Hook(phase2CustomsStageIds.buyerSelectCustomsExecutor);
-    const resourcePatchHook = requiredPhase2Hook(phase2CustomsStageIds.buyerPublishCustomsResources);
+    const selectorHook = requiredCustomsHook(
+      customsStageIds.buyerSelectCustomsExecutor,
+    );
+    const resourcePatchHook = requiredCustomsHook(
+      customsStageIds.buyerPublishCustomsResources,
+    );
 
-    expect(result.authorizations).not.toContainEqual(expect.objectContaining({
-      sourceId: selectorHook.stageId,
-      signalId: STAGE_EXECUTOR_PATCH_SIGNAL_ID,
-      submitter: testWallet(0)
-    }));
-    expect(result.authorizations).toContainEqual(expect.objectContaining({
-      sourceId: resourcePatchHook.stageId,
-      signalId: STAGE_RESOURCE_PATCH_SIGNAL_ID,
-      submitter: testWallet(1)
-    }));
+    expect(result.authorizations).not.toContainEqual(
+      expect.objectContaining({
+        sourceId: selectorHook.stageId,
+        signalId: STAGE_EXECUTOR_PATCH_SIGNAL_ID,
+        submitter: testWallet(0),
+      }),
+    );
+    expect(result.authorizations).toContainEqual(
+      expect.objectContaining({
+        sourceId: resourcePatchHook.stageId,
+        signalId: STAGE_RESOURCE_PATCH_SIGNAL_ID,
+        submitter: testWallet(1),
+      }),
+    );
   });
 
-  it("fails Phase 2 authorization when a stage patch role has no accepted participant", () => {
-    const input = phase2AuthorizationBuildInput();
+  it("fails authorization when a stage patch role has no accepted participant", () => {
+    const input = customsAuthorizationBuildInput();
 
-    expectAuthorizationError({
-      ...input,
-      participants: input.participants.filter((participant) =>
-        participant.roleSlotId !== phase2CustomsRoleSlotIds.buyerSelector
-      )
-    }, "required_role_missing");
+    expectAuthorizationError(
+      {
+        ...input,
+        participants: input.participants.filter(
+          (participant) =>
+            participant.roleSlotId !== customsRoleSlotIds.buyerSelector,
+        ),
+      },
+      "required_role_missing",
+    );
   });
 
   it("builds order authorizations from explicit permission rows instead of role text aliases", () => {
@@ -625,14 +679,14 @@ describe("product BFF order drafts and invites", () => {
         ...input.zhixu,
         stages: input.zhixu.stages.map((stage) => ({
           ...stage,
-          ownerRole: `unmatched owner ${stage.stageId}`
-        }))
+          ownerRole: `unmatched owner ${stage.stageId}`,
+        })),
       },
       participants: input.participants.map((participant) => ({
         ...participant,
         roleLabel: `unmatched label ${participant.roleSlotId}`,
-        displayName: `unmatched display ${participant.roleSlotId}`
-      }))
+        displayName: `unmatched display ${participant.roleSlotId}`,
+      })),
     };
 
     expect(builder.build(renamedInput)).toEqual(baseline);
@@ -641,51 +695,70 @@ describe("product BFF order drafts and invites", () => {
   it("fails authorization build before submit when explicit permission rows are incomplete", () => {
     const input = authorizationBuildInput();
 
-    expectAuthorizationError({
-      ...input,
-      zhixu: { ...input.zhixu, orderPermissionTable: [] }
-    }, "permission_table_missing");
-    expectAuthorizationError({
-      ...input,
-      zhixu: {
-        ...input.zhixu,
-        orderPermissionTable: input.zhixu.orderPermissionTable.map((entry) =>
-          entry.permissionId === "stage.order-confirmed.confirm_stage"
-            ? { ...entry, roleSlotId: "missing-role" }
-            : entry
-        )
-      }
-    }, "permission_role_not_found");
-    expectAuthorizationError({
-      ...input,
-      zhixu: {
-        ...input.zhixu,
-        orderPermissionTable: input.zhixu.orderPermissionTable.map((entry) =>
-          entry.permissionId === "stage.order-confirmed.confirm_stage"
-            ? { ...entry, stageId: "missing-stage" }
-            : entry
-        )
-      }
-    }, "permission_stage_not_found");
-    expectAuthorizationError({
-      ...input,
-      participants: input.participants.filter((participant) => participant.roleSlotId !== "funds")
-    }, "required_role_missing");
-    expectAuthorizationError({
-      ...input,
-      zhixu: {
-        ...input.zhixu,
-        orderPermissionTable: [
-          ...input.zhixu.orderPermissionTable,
-          {
-            ...input.zhixu.orderPermissionTable.find((entry) => entry.permissionId === "stage.order-confirmed.confirm_stage")!,
-            permissionId: "stage.order-confirmed.confirm_stage.duplicate"
-          }
-        ]
-      }
-    }, "permission_authorization_duplicate");
+    expectAuthorizationError(
+      {
+        ...input,
+        zhixu: { ...input.zhixu, orderPermissionTable: [] },
+      },
+      "permission_table_missing",
+    );
+    expectAuthorizationError(
+      {
+        ...input,
+        zhixu: {
+          ...input.zhixu,
+          orderPermissionTable: input.zhixu.orderPermissionTable.map((entry) =>
+            entry.permissionId === "stage.order-confirmed.confirm_stage"
+              ? { ...entry, roleSlotId: "missing-role" }
+              : entry,
+          ),
+        },
+      },
+      "permission_role_not_found",
+    );
+    expectAuthorizationError(
+      {
+        ...input,
+        zhixu: {
+          ...input.zhixu,
+          orderPermissionTable: input.zhixu.orderPermissionTable.map((entry) =>
+            entry.permissionId === "stage.order-confirmed.confirm_stage"
+              ? { ...entry, stageId: "missing-stage" }
+              : entry,
+          ),
+        },
+      },
+      "permission_stage_not_found",
+    );
+    expectAuthorizationError(
+      {
+        ...input,
+        participants: input.participants.filter(
+          (participant) => participant.roleSlotId !== "funds",
+        ),
+      },
+      "required_role_missing",
+    );
+    expectAuthorizationError(
+      {
+        ...input,
+        zhixu: {
+          ...input.zhixu,
+          orderPermissionTable: [
+            ...input.zhixu.orderPermissionTable,
+            {
+              ...input.zhixu.orderPermissionTable.find(
+                (entry) =>
+                  entry.permissionId === "stage.order-confirmed.confirm_stage",
+              )!,
+              permissionId: "stage.order-confirmed.confirm_stage.duplicate",
+            },
+          ],
+        },
+      },
+      "permission_authorization_duplicate",
+    );
   });
-
 });
 
 interface DraftResponse {
@@ -699,16 +772,16 @@ interface InviteResponse {
   readonly draft: ProductOrderDraftDTO;
 }
 
-function createRouterWithTrust(events: readonly ChainEvent[]): Promise<{
+function createRouterFixture(events: readonly ChainEvent[]): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
   readonly productStore: MemoryProductBffStore;
   readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
 }>;
 
-function createRouterWithTrust(
+function createRouterFixture(
   events: readonly ChainEvent[],
-  triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter
+  triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter,
 ): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
@@ -716,9 +789,9 @@ function createRouterWithTrust(
   readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
 }>;
 
-async function createRouterWithTrust(
+async function createRouterFixture(
   events: readonly ChainEvent[],
-  triggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter()
+  triggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter(),
 ): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
@@ -731,11 +804,11 @@ async function createRouterWithTrust(
   return {
     router: createApiRouter(store, {
       productRegistrationAdapter: triggerAdapter,
-      productBffStore: productStore
+      productBffStore: productStore,
     }),
     store,
     productStore,
-    triggerAdapter
+    triggerAdapter,
   };
 }
 
@@ -749,24 +822,32 @@ async function createDraft(router: ApiRouter) {
       businessType: "parallel-export",
       totalAmount: "10000",
       currency: "USDC",
-      createdBy: testWallet(0)
-    }
+      createdBy: testWallet(0),
+    },
   });
 }
 
-async function createReadyDraft(router: ApiRouter): Promise<ProductOrderDraftDTO> {
-  const draft = (await createDraft(router).then((response) => response.body as DraftResponse)).draft;
+async function createReadyDraft(
+  router: ApiRouter,
+): Promise<ProductOrderDraftDTO> {
+  const draft = (
+    await createDraft(router).then((response) => response.body as DraftResponse)
+  ).draft;
   const participants = await listParticipants(router, draft.draftId);
-  const requiredParticipants = participants.filter((participant) => participant.required);
+  const requiredParticipants = participants.filter(
+    (participant) => participant.required,
+  );
   for (const [index, participant] of requiredParticipants.entries()) {
     await inviteAndAccept(router, draft.draftId, participant.roleSlotId, index);
   }
   const readyResponse = await router.handle({
     method: "GET",
-    pathname: `/product/order-drafts/${draft.draftId}`
+    pathname: `/product/order-drafts/${draft.draftId}`,
   });
   expect(readyResponse.status).toBe(200);
-  expect((readyResponse.body as DraftResponse).draft.status).toBe("ready_to_trigger");
+  expect((readyResponse.body as DraftResponse).draft.status).toBe(
+    "ready_to_trigger",
+  );
   return (readyResponse.body as DraftResponse).draft;
 }
 
@@ -774,18 +855,29 @@ async function submitReadyDraft(): Promise<{
   readonly authorizations: readonly SignalAuthorizationDTO[];
   readonly permissions: SubmitProductOrderDraftResult["permissions"];
 }> {
-  const { router, productStore } = await createRouterWithTrust([
+  const { router, productStore } = await createRouterFixture([
     ...activeDeploymentEvents(),
-    planAttestedEvent(11n)
+    planRegisteredEvent(11n),
   ]);
   const draft = await createReadyDraft(router);
-  const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
-  const registration = await productStore.getRegistration(prepared.trigger.triggerId);
+  const prepared = await prepareDraftTrigger(
+    router,
+    draft.draftId,
+    testWallet(0),
+  );
+  const registration = await productStore.getRegistration(
+    prepared.trigger.triggerId,
+  );
   expect(registration).toBeDefined();
-  return { authorizations: registration!.authorizations, permissions: prepared.permissions };
+  return {
+    authorizations: registration!.authorizations,
+    permissions: prepared.permissions,
+  };
 }
 
-function stablePermissionShape(permissions: SubmitProductOrderDraftResult["permissions"]) {
+function stablePermissionShape(
+  permissions: SubmitProductOrderDraftResult["permissions"],
+) {
   return permissions.map((permission) => ({
     payloadPolicy: permission.payloadPolicy,
     permissionId: permission.permissionId,
@@ -794,7 +886,7 @@ function stablePermissionShape(permissions: SubmitProductOrderDraftResult["permi
     signalName: permission.signalName,
     source: permission.source,
     stageIdentifier: permission.stageIdentifier,
-    submitterAddress: permission.submitterAddress
+    submitterAddress: permission.submitterAddress,
   }));
 }
 
@@ -809,12 +901,12 @@ interface PreparedTriggerResponse extends SubmitProductOrderDraftResult {
 async function prepareDraftTrigger(
   router: ApiRouter,
   draftId: string,
-  walletAddress: string
+  walletAddress: string,
 ): Promise<PreparedTriggerResponse> {
   const response = await router.handle({
     method: "POST",
     pathname: `/product/order-drafts/${draftId}/prepare-trigger`,
-    body: { walletAddress }
+    body: { walletAddress },
   });
   expect(response.status).toBe(200);
   return response.body as PreparedTriggerResponse;
@@ -824,18 +916,22 @@ async function triggerPreparedDraft(
   router: ApiRouter,
   draftId: string,
   prepared: PreparedTriggerResponse,
-  walletAddress: string
+  walletAddress: string,
 ): Promise<SubmitProductOrderDraftResult> {
-  const account = privateKeyToAccount(testPrivateKey(walletAddressIndex(walletAddress)));
-  const signature = await account.signTypedData(prepared.prepared.typedData as Parameters<typeof account.signTypedData>[0]);
+  const account = privateKeyToAccount(
+    testPrivateKey(walletAddressIndex(walletAddress)),
+  );
+  const signature = await account.signTypedData(
+    prepared.prepared.typedData as Parameters<typeof account.signTypedData>[0],
+  );
   const response = await router.handle({
     method: "POST",
     pathname: `/product/order-drafts/${draftId}/trigger`,
     body: {
       prepareId: prepared.prepared.prepareId,
       walletAddress,
-      signature
-    }
+      signature,
+    },
   });
   expect(response.status).toBe(200);
   return response.body as SubmitProductOrderDraftResult;
@@ -846,7 +942,7 @@ async function createInvite(
   draftId: string,
   roleSlotId: string,
   contact: string,
-  expiresAt?: string
+  expiresAt?: string,
 ): Promise<InviteResponse> {
   const response = await router.handle({
     method: "POST",
@@ -854,8 +950,8 @@ async function createInvite(
     body: {
       roleSlotId,
       contact,
-      ...(expiresAt ? { expiresAt } : {})
-    }
+      ...(expiresAt ? { expiresAt } : {}),
+    },
   });
   expect(response.status).toBe(201);
   return response.body as InviteResponse;
@@ -865,29 +961,38 @@ async function inviteAndAccept(
   router: ApiRouter,
   draftId: string,
   roleSlotId: string,
-  index: number
+  index: number,
 ): Promise<InviteResponse> {
-  const invitation = await createInvite(router, draftId, roleSlotId, `${roleSlotId}@example.com`);
+  const invitation = await createInvite(
+    router,
+    draftId,
+    roleSlotId,
+    `${roleSlotId}@example.com`,
+  );
   const response = await router.handle({
     method: "POST",
     pathname: `/product/invites/${invitation.invite.inviteId}/accept`,
     body: {
       displayName: `${roleSlotId} participant`,
       walletAddress: testWallet(index),
-      contact: `${roleSlotId}@example.com`
-    }
+      contact: `${roleSlotId}@example.com`,
+    },
   });
   expect(response.status).toBe(200);
   return response.body as InviteResponse;
 }
 
-async function listParticipants(router: ApiRouter, draftId: string): Promise<readonly DraftParticipantDTO[]> {
+async function listParticipants(
+  router: ApiRouter,
+  draftId: string,
+): Promise<readonly DraftParticipantDTO[]> {
   const response = await router.handle({
     method: "GET",
-    pathname: `/product/orders/${draftId}/participants`
+    pathname: `/product/orders/${draftId}/participants`,
   });
   expect(response.status).toBe(200);
-  return (response.body as { participants: readonly DraftParticipantDTO[] }).participants;
+  return (response.body as { participants: readonly DraftParticipantDTO[] })
+    .participants;
 }
 
 function testWallet(index: number): string {
@@ -920,90 +1025,104 @@ function authorizationBuildInput() {
     currency: "USDC",
     status: "ready_to_trigger",
     createdAt: "2026-04-29T00:00:00.000Z",
-    updatedAt: "2026-04-29T00:00:00.000Z"
+    updatedAt: "2026-04-29T00:00:00.000Z",
   };
-  const participants: readonly DraftParticipantDTO[] = demoZhixuDetail.roleSlots.map((slot, index) => ({
-    participantId: `participant_${slot.slotId}`,
-    draftId: draft.draftId,
-    roleSlotId: slot.slotId,
-    roleLabel: slot.label,
-    displayName: slot.title,
-    walletAddress: testWallet(index),
-    contact: `${slot.slotId}@example.com`,
-    status: "accepted" as const,
-    required: slot.required,
-    acceptedAt: "2026-04-29T00:00:00.000Z"
-  }));
+  const participants: readonly DraftParticipantDTO[] =
+    demoZhixuDetail.roleSlots.map((slot, index) => ({
+      participantId: `participant_${slot.slotId}`,
+      draftId: draft.draftId,
+      roleSlotId: slot.slotId,
+      roleLabel: slot.label,
+      displayName: slot.title,
+      walletAddress: testWallet(index),
+      contact: `${slot.slotId}@example.com`,
+      status: "accepted" as const,
+      required: slot.required,
+      acceptedAt: "2026-04-29T00:00:00.000Z",
+    }));
   return {
     zhixu: demoZhixuDetail,
     draft,
     participants,
-    orderId: "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" as const,
-    registrarAddress: "0x000000000000000000000000000000000000bff1" as const
+    orderId:
+      "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" as const,
+    registrarAddress: "0x000000000000000000000000000000000000bff1" as const,
   };
 }
 
-function phase2AuthorizationBuildInput(options: {
-  readonly omitAddOnManifestForRoleSlot?: string;
-} = {}): Parameters<ProductAuthorizationBuilder["build"]>[0] {
+function customsAuthorizationBuildInput(
+  options: {
+    readonly omitAddOnManifestForRoleSlot?: string;
+  } = {},
+): Parameters<ProductAuthorizationBuilder["build"]>[0] {
   const draft: ProductOrderDraftDTO = {
-    draftId: "draft_phase2_authorization_unit",
-    zhixuId: phase2CustomsStoreProductSchema.zhixuId ?? "phase2-customs-completion",
-    planId: phase2CustomsStoreProductSchema.planId as Hex,
-    planHash: phase2CustomsStoreProductSchema.planHash as Hex,
-    title: "Phase 2 authorization unit",
-    businessType: "phase2-customs",
+    draftId: "draft_customs_authorization_unit",
+    zhixuId:
+      customsStoreProductSchema.zhixuId ?? "customs-completion",
+    planId: customsStoreProductSchema.planId as Hex,
+    planHash: customsStoreProductSchema.planHash as Hex,
+    title: "Customs authorization unit",
+    businessType: "customs",
     goods: [],
     totalAmount: "0",
     currency: "USDC",
     status: "ready_to_trigger",
     createdAt: "2026-05-02T00:00:00.000Z",
-    updatedAt: "2026-05-02T00:00:00.000Z"
+    updatedAt: "2026-05-02T00:00:00.000Z",
   };
-  const roleSlots = phase2CustomsStoreProductSchema.roleSlots.map((slot) =>
+  const roleSlots = customsStoreProductSchema.roleSlots.map((slot) =>
     slot.slotId === options.omitAddOnManifestForRoleSlot
-      ? (({ addOnManifest: _addOnManifest, ...withoutManifest }) => withoutManifest)(slot)
-      : slot
+      ? (({ addOnManifest: _addOnManifest, ...withoutManifest }) =>
+          withoutManifest)(slot)
+      : slot,
   );
-  const participants: readonly DraftParticipantDTO[] = roleSlots.map((slot, index) => ({
-    participantId: `participant_${slot.slotId}`,
-    draftId: draft.draftId,
-    roleSlotId: slot.slotId,
-    roleLabel: slot.label,
-    displayName: slot.title,
-    walletAddress: testWallet(index),
-    contact: `${slot.slotId}@example.com`,
-    status: "accepted" as const,
-    required: slot.required,
-    acceptedAt: "2026-05-02T00:00:00.000Z"
-  }));
+  const participants: readonly DraftParticipantDTO[] = roleSlots.map(
+    (slot, index) => ({
+      participantId: `participant_${slot.slotId}`,
+      draftId: draft.draftId,
+      roleSlotId: slot.slotId,
+      roleLabel: slot.label,
+      displayName: slot.title,
+      walletAddress: testWallet(index),
+      contact: `${slot.slotId}@example.com`,
+      status: "accepted" as const,
+      required: slot.required,
+      acceptedAt: "2026-05-02T00:00:00.000Z",
+    }),
+  );
   return {
     zhixu: {
-      zhixuId: phase2CustomsStoreProductSchema.zhixuId,
+      zhixuId: customsStoreProductSchema.zhixuId,
       roleSlots,
-      stages: phase2CustomsStoreProductSchema.stages,
-      orderPermissionTable: phase2CustomsStoreProductSchema.orderPermissionTable
-    } as unknown as Parameters<ProductAuthorizationBuilder["build"]>[0]["zhixu"],
+      stages: customsStoreProductSchema.stages,
+      orderPermissionTable:
+        customsStoreProductSchema.orderPermissionTable,
+    } as unknown as Parameters<
+      ProductAuthorizationBuilder["build"]
+    >[0]["zhixu"],
     draft,
     participants,
-    orderId: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as const,
-    registrarAddress: "0x000000000000000000000000000000000000bff1" as const
+    orderId:
+      "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" as const,
+    registrarAddress: "0x000000000000000000000000000000000000bff1" as const,
   };
 }
 
-function requiredPhase2Hook(
-  stageIdentifier: string
-): (typeof phase2CustomsOnchainHookPlanArtifact.compiledHooks)[number] {
-  const hook = phase2CustomsOnchainHookPlanArtifact.compiledHooks.find((item) => item.stageIdentifier === stageIdentifier);
+function requiredCustomsHook(
+  stageIdentifier: string,
+): (typeof customsOnchainHookPlanArtifact.compiledHooks)[number] {
+  const hook = customsOnchainHookPlanArtifact.compiledHooks.find(
+    (item) => item.stageIdentifier === stageIdentifier,
+  );
   if (!hook) {
-    throw new Error(`missing Phase 2 hook for ${stageIdentifier}`);
+    throw new Error(`missing customs hook for ${stageIdentifier}`);
   }
   return hook;
 }
 
 function expectAuthorizationError(
   input: Parameters<ProductAuthorizationBuilder["build"]>[0],
-  code: string
+  code: string,
 ): void {
   try {
     new ProductAuthorizationBuilder().build(input);
@@ -1014,65 +1133,54 @@ function expectAuthorizationError(
   }
 }
 
-function planAttestedEvent(blockNumber: bigint): ChainEvent {
-  return planAttestedEventFor(
-    blockNumber,
-    0,
-    crossBorderPlanIds.planId,
-    crossBorderPlanIds.planHash,
-    crossBorderPlanIds.artifactHash
-  );
-}
-
-function planAttestedEventFor(
-  blockNumber: bigint,
-  logIndex: number,
-  planId: string,
-  planHash: string,
-  artifactHash: string
-): ChainEvent {
-  return chainEvent(blockNumber, logIndex, "PlanAttested", {
-    planId,
-    planHash,
-    artifactHash,
-    policyHash,
-    metadataHash,
-    metadataURI: "https://store.example/zhixu/cross-border",
-    attester
-  });
-}
-
-function planRevokedEvent(blockNumber: bigint): ChainEvent {
-  return chainEvent(blockNumber, 1, "PlanRevoked", {
+function planRegisteredEvent(blockNumber: bigint): ChainEvent {
+  return chainEvent(blockNumber, 0, "PlanRegistered", {
     planId: crossBorderPlanIds.planId,
-    reasonHash,
-    reasonURI: "https://store.example/revocations/cross-border",
-    revoker: attester
+    planHash: crossBorderPlanIds.planHash,
+    hookCount: 1n,
   });
 }
 
 function activeDeploymentEvents(): readonly ChainEvent[] {
   return [
-    chainEvent(1n, 0, "DeploymentRegistered", {
-      deploymentId: activeDeploymentId,
-      stateMachine: activeStateMachineAddress,
-      trustRegistry: trustRegistryAddress,
-      artifactHash: crossBorderPlanIds.artifactHash,
-      abiHash: metadataHash,
-      deploymentBlock: 1n,
-      metadataURI: "uvp-eth://deployments/v2"
-    }, deploymentRegistryAddress),
-    chainEvent(2n, 0, "DeploymentCanaryMarked", {
-      deploymentId: activeDeploymentId,
-      evidenceHash: metadataHash,
-      evidenceURI: "uvp-eth://evidence/v2"
-    }, deploymentRegistryAddress),
-    chainEvent(3n, 0, "DeploymentActivated", {
-      previousDeploymentId: "0x0000000000000000000000000000000000000000000000000000000000000000",
-      newDeploymentId: activeDeploymentId,
-      evidenceHash: metadataHash,
-      evidenceURI: "uvp-eth://evidence/v2"
-    }, deploymentRegistryAddress)
+    chainEvent(
+      1n,
+      0,
+      "DeploymentRegistered",
+      {
+        deploymentId: activeDeploymentId,
+        stateMachine: activeStateMachineAddress,
+        artifactHash: crossBorderPlanIds.artifactHash,
+        abiHash: metadataHash,
+        deploymentBlock: 1n,
+        metadataURI: "uvp-eth://deployments/v2",
+      },
+      deploymentRegistryAddress,
+    ),
+    chainEvent(
+      2n,
+      0,
+      "DeploymentCanaryMarked",
+      {
+        deploymentId: activeDeploymentId,
+        evidenceHash: metadataHash,
+        evidenceURI: "uvp-eth://evidence/v2",
+      },
+      deploymentRegistryAddress,
+    ),
+    chainEvent(
+      3n,
+      0,
+      "DeploymentActivated",
+      {
+        previousDeploymentId:
+          "0x0000000000000000000000000000000000000000000000000000000000000000",
+        newDeploymentId: activeDeploymentId,
+        evidenceHash: metadataHash,
+        evidenceURI: "uvp-eth://evidence/v2",
+      },
+      deploymentRegistryAddress,
+    ),
   ];
 }
 
@@ -1081,7 +1189,7 @@ function chainEvent(
   logIndex: number,
   eventName: string,
   args: Record<string, unknown>,
-  eventContractAddress = contractAddress
+  eventContractAddress = contractAddress,
 ): ChainEvent {
   return {
     chainId: 31337,
@@ -1090,6 +1198,6 @@ function chainEvent(
     transactionHash: `0x${blockNumber.toString(16).padStart(64, "0")}`,
     logIndex,
     eventName,
-    args
+    args,
   };
 }

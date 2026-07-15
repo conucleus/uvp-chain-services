@@ -13,21 +13,17 @@ import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex
 import { redactErrorMessage } from "../security/redaction.js";
 import type {
   GovernanceBroadcastResultDTO,
-  PlanAttestationRequestDTO,
-  PlanRevocationRequestDTO,
-  SupplierAttestationRequestDTO,
-  SupplierRevocationRequestDTO
+  IdentityRegistrationRequestDTO,
+  IdentityRevocationRequestDTO
 } from "./types.js";
 
-const zhixuTrustRegistryAbi = parseAbi([
+const uvpIdentityRegistryAbi = parseAbi([
   "function owner() view returns (address)",
-  "function attestPlan(bytes32 planId,bytes32 planHash,bytes32 artifactHash,bytes32 policyHash,bytes32 metadataHash,string metadataURI)",
-  "function revokePlan(bytes32 planId,bytes32 reasonHash,string reasonURI)",
-  "function attestSupplier(bytes32 supplierSubjectId,address wallet,bytes32 profileHash,bytes32 capabilityHash,bytes32 reputationHash,string metadataURI)",
-  "function revokeSupplier(bytes32 supplierSubjectId,bytes32 reasonHash,string reasonURI)"
+  "function registerIdentityBinding(bytes32 subjectId,address account,bytes32 descriptorHash,string descriptorURI) returns (bytes32 bindingId)",
+  "function revokeIdentityBinding(bytes32 bindingId,bytes32 reasonHash,string reasonURI)"
 ]);
 
-export type GovernanceWriteFunctionName = "attestPlan" | "revokePlan" | "attestSupplier" | "revokeSupplier";
+export type GovernanceWriteFunctionName = "registerIdentityBinding" | "revokeIdentityBinding";
 
 export interface GovernancePublicClient {
   getChainId(): Promise<number>;
@@ -69,24 +65,16 @@ export interface GovernanceBroadcasterAdapterOptions {
 }
 
 export interface GovernanceChainAdapter {
-  attestPlan(request: PlanAttestationRequestDTO): Promise<GovernanceBroadcastResultDTO>;
-  revokePlan(request: PlanRevocationRequestDTO): Promise<GovernanceBroadcastResultDTO>;
-  attestSupplier(request: SupplierAttestationRequestDTO): Promise<GovernanceBroadcastResultDTO>;
-  revokeSupplier(request: SupplierRevocationRequestDTO): Promise<GovernanceBroadcastResultDTO>;
+  registerIdentity(request: IdentityRegistrationRequestDTO): Promise<GovernanceBroadcastResultDTO>;
+  revokeIdentity(request: IdentityRevocationRequestDTO): Promise<GovernanceBroadcastResultDTO>;
 }
 
 export function createSimulatedGovernanceChainAdapter(): GovernanceChainAdapter {
   return {
-    async attestPlan(request) {
+    async registerIdentity(request) {
       return simulatedBroadcast(request);
     },
-    async revokePlan(request) {
-      return simulatedBroadcast(request);
-    },
-    async attestSupplier(request) {
-      return simulatedBroadcast(request);
-    },
-    async revokeSupplier(request) {
+    async revokeIdentity(request) {
       return simulatedBroadcast(request);
     }
   };
@@ -110,9 +98,9 @@ export function createConfiguredGovernanceChainAdapter(config: ChainServicesConf
     return createSimulatedGovernanceChainAdapter();
   }
 
-  const contractAddress = trustRegistryAddress(config.network.contracts);
+  const contractAddress = identityRegistryAddress(config.network.contracts);
   if (!contractAddress) {
-    throw new ConfigError("ZhixuTrustRegistry contract address is required when governance broadcast is enabled");
+    throw new ConfigError("UVPIdentityRegistry contract address is required when governance broadcast is enabled");
   }
   if (!config.governance.signerPrivateKey) {
     throw new ConfigError("GOVERNANCE_SIGNER_PRIVATE_KEY is required when governance broadcast is enabled");
@@ -152,7 +140,7 @@ export function createGovernanceBroadcasterAdapter(
   }) as GovernanceWalletClient;
 
   async function broadcast(
-    request: PlanAttestationRequestDTO | PlanRevocationRequestDTO | SupplierAttestationRequestDTO | SupplierRevocationRequestDTO,
+    request: IdentityRegistrationRequestDTO | IdentityRevocationRequestDTO,
     functionName: GovernanceWriteFunctionName,
     args: readonly unknown[]
   ): Promise<GovernanceBroadcastResultDTO> {
@@ -171,7 +159,7 @@ export function createGovernanceBroadcasterAdapter(
     try {
       const txHash = normalizeTxHash(await walletClient.writeContract({
         address: contractAddress as ViemAddress,
-        abi: zhixuTrustRegistryAbi,
+        abi: uvpIdentityRegistryAbi,
         account,
         chain,
         functionName,
@@ -225,36 +213,17 @@ export function createGovernanceBroadcasterAdapter(
   }
 
   return {
-    attestPlan(request) {
-      return broadcast(request, "attestPlan", [
-        request.planId,
-        request.planHash,
-        request.artifactHash,
-        request.policyHash,
-        request.metadataHash,
-        request.metadataURI
+    registerIdentity(request) {
+      return broadcast(request, "registerIdentityBinding", [
+        request.subjectId,
+        request.account,
+        request.descriptorHash,
+        request.descriptorURI
       ]);
     },
-    revokePlan(request) {
-      return broadcast(request, "revokePlan", [
-        request.planId,
-        request.reasonHash,
-        request.reasonURI
-      ]);
-    },
-    attestSupplier(request) {
-      return broadcast(request, "attestSupplier", [
-        request.supplierSubjectId,
-        request.wallet,
-        request.profileHash,
-        request.capabilityHash,
-        request.reputationHash,
-        request.metadataURI
-      ]);
-    },
-    revokeSupplier(request) {
-      return broadcast(request, "revokeSupplier", [
-        request.supplierSubjectId,
+    revokeIdentity(request) {
+      return broadcast(request, "revokeIdentityBinding", [
+        request.bindingId,
         request.reasonHash,
         request.reasonURI
       ]);
@@ -293,7 +262,7 @@ async function preflightBroadcast(input: {
   try {
     owner = normalizeAddress(String(await input.publicClient.readContract({
       address: input.contractAddress as ViemAddress,
-      abi: zhixuTrustRegistryAbi,
+      abi: uvpIdentityRegistryAbi,
       functionName: "owner"
     })), "governance registry owner");
   } catch (error) {
@@ -333,14 +302,11 @@ function failedBroadcast(input: {
   };
 }
 
-function trustRegistryAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
-  for (const alias of ["ZhixuTrustRegistry", "TrustRegistry", "trustRegistry", "zhixuTrustRegistry"]) {
-    const address = contracts[alias];
-    if (address && address !== zeroAddress) {
-      return normalizeAddress(address, `contract ${alias}`);
-    }
-  }
-  return undefined;
+function identityRegistryAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
+  const address = contracts.UVPIdentityRegistry;
+  return address && address !== zeroAddress
+    ? normalizeAddress(address, "contract UVPIdentityRegistry")
+    : undefined;
 }
 
 function governanceChain(chainId: number, rpcUrl: string): Chain {

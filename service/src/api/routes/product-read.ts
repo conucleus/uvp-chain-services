@@ -110,7 +110,7 @@ export function createProductReadRouteModule(): RouteModule {
         });
       }
 
-      if (request.method === "GET" && (request.pathname === "/product/zhixu" || request.pathname === "/product/zhixus")) {
+      if (request.method === "GET" && request.pathname === "/product/zhixus") {
         return withStorageGuard(async () => {
           const demoFallbackRequested = isDemoFallbackRequested(request.query);
           if (demoFallbackRequested && !context.productDemoMode) {
@@ -119,7 +119,7 @@ export function createProductReadRouteModule(): RouteModule {
               body: { error: "demo_mode_disabled" }
             };
           }
-          const zhixus = await context.productService.listZhixu({ demoFallback: demoFallbackRequested && context.productDemoMode });
+          const zhixus = await context.productService.listZhixu();
           return {
             status: 200,
             body: { zhixus: context.productE2eControls.listZhixu(zhixus) }

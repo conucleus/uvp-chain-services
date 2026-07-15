@@ -122,6 +122,32 @@ describe("ViemChainEventSource", () => {
       })
     ]);
   });
+
+  it("fails the index range when a configured contract emits an undecodable log", async () => {
+    const invalidLog = {
+      ...planRegisteredLog(),
+      data: "0x01" as Hex
+    } as Log;
+    const eventSource = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 0n;
+        },
+        async getLogs() {
+          return [invalidLog];
+        }
+      }
+    });
+
+    await expect(eventSource.readEvents(
+      {
+        chainId: 84532,
+        fromBlock: 100n,
+        toBlock: 100n
+      },
+      chainServicesConfig()
+    )).rejects.toThrow(/failed to decode UVPStateMachine event at block 100/);
+  });
 });
 
 const stateMachineTestAbi = parseAbi([
