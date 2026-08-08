@@ -59,8 +59,7 @@ spec:
         - name: intake
           source: buyer
           trigger: ["TRIGGER"]
-          receiveSignals:
-            TRIGGER: "::OUTSIDE"
+          externalSignals: ["TRIGGER"]
           sendSignals: ["cmp"]
           executor:
             supplierType: organization
@@ -83,8 +82,7 @@ spec:
         - name: intake
           source: buyer
           trigger: ["MISSING"]
-          receiveSignals:
-            TRIGGER: "::OUTSIDE"
+          externalSignals: ["TRIGGER"]
 `;
 
 describe("Store Zhixu draft workflow", () => {

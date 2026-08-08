@@ -479,6 +479,9 @@ function previewFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreCom
       }
     }
   }
+  for (const route of artifact.executorRoutes) {
+    stages.add(route.stageId);
+  }
 
   return {
     planId: artifact.planId,

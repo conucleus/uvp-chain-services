@@ -429,7 +429,6 @@ function sourceOutputPorts(zhixu: ZhixuDetailDTO): readonly StoreDockingSignalPo
 
 function targetInputPorts(zhixu: ZhixuDetailDTO): readonly StoreDockingSignalPortDTO[] {
   return zhixu.orderPermissionTable
-    .filter((entry) => entry.signalName !== "OUTSIDE")
     .map((entry) => inputPortFromPermission(zhixu, entry));
 }
 
@@ -477,7 +476,7 @@ function signalPort(input: {
 }
 
 function roleSlotIdForStage(zhixu: ZhixuDetailDTO, stage: ZhixuStageDTO): string {
-  return zhixu.orderPermissionTable.find((entry) => entry.stageId === stage.stageId && entry.signalName !== "OUTSIDE")?.roleSlotId ??
+  return zhixu.orderPermissionTable.find((entry) => entry.stageId === stage.stageId)?.roleSlotId ??
     stage.ownerRole;
 }
 
