@@ -222,6 +222,81 @@ describe("relayer non-signing boundary", () => {
     ]));
   });
 
+  it("escalates retryable failure delays exponentially and resets after success", async () => {
+    let failing = true;
+    const recorded: unknown[] = [];
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => {
+          if (failing) {
+            throw new Error("rpc unavailable");
+          }
+          return { txHash };
+        }
+      },
+      nonceStore: {
+        reserve: async () => true,
+        release: async () => undefined
+      },
+      submissionStore: {
+        record: async (submission) => {
+          recorded.push(submission);
+        }
+      },
+      now: () => new Date("2026-01-01T00:00:00Z"),
+      retryBaseMs: 250,
+      retryMaxMs: 2_000
+    });
+
+    const baseTime = Date.parse("2026-01-01T00:00:00Z");
+
+    const first = await relayer.relay(request("nonce-backoff"));
+    expect(first).toMatchObject({ status: "failed", retryable: true });
+    expect(first.nextRetryAt).toBe(new Date(baseTime + 250).toISOString());
+
+    const second = await relayer.relay(request("nonce-backoff"));
+    expect(second.nextRetryAt).toBe(new Date(baseTime + 500).toISOString());
+
+    failing = false;
+    const third = await relayer.relay(request("nonce-backoff"));
+    expect(third).toMatchObject({ status: "submitted" });
+
+    failing = true;
+    const fourth = await relayer.relay(request("nonce-backoff"));
+    expect(fourth.nextRetryAt).toBe(new Date(baseTime + 250).toISOString());
+    expect(recorded).toHaveLength(4);
+  });
+
+  it("caps retryable failure delays at retryMaxMs without overflowing", async () => {
+    let failures = 0;
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => {
+          failures += 1;
+          throw new Error("rpc unavailable");
+        }
+      },
+      nonceStore: new MemoryRelayNonceStore(),
+      now: () => new Date("2026-01-01T00:00:00Z"),
+      retryBaseMs: 250,
+      retryMaxMs: 1_000
+    });
+
+    const baseTime = Date.parse("2026-01-01T00:00:00Z");
+    const expectedDelays = [250, 500, 1_000, 1_000, 1_000];
+    for (const expectedDelay of expectedDelays) {
+      const submission = await relayer.relay(request("nonce-backoff-cap"));
+      expect(submission.nextRetryAt).toBe(new Date(baseTime + expectedDelay).toISOString());
+    }
+    expect(failures).toBe(expectedDelays.length);
+  });
+
   it("classifies relayer submitter failures for release diagnostics", () => {
     expect(classifyRelaySubmitterError(new Error("UnknownOrder"))).toMatchObject({
       errorCode: "unknown_order",

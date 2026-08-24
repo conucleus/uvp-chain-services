@@ -87,6 +87,7 @@ export class RelayerService implements LifecycleService {
   readonly #retryBaseMs: number;
   readonly #retryMaxMs: number;
   readonly #inFlightByOrder = new Map<string, number>();
+  readonly #failedAttemptsBySubmission = new Map<string, number>();
 
   constructor(options: RelayerServiceOptions) {
     this.#verifier = options.verifier;
@@ -143,6 +144,9 @@ export class RelayerService implements LifecycleService {
       return submission;
     }
 
+    const submissionKey = submissionId(request);
+    const priorFailedAttempts = this.#failedAttemptsBySubmission.get(submissionKey) ?? 0;
+
     if (!this.acquireOrder(request)) {
       await this.releaseNonce(request);
       const classification = relayFailure({
@@ -151,7 +155,7 @@ export class RelayerService implements LifecycleService {
         failureCategory: "retryable",
         retryable: true,
         deadLetter: false,
-        ...this.retrySchedule()
+        ...this.retrySchedule(priorFailedAttempts)
       });
       const submission = failedSubmission(request, classification);
       await this.record(submission);
@@ -161,12 +165,14 @@ export class RelayerService implements LifecycleService {
     try {
       const transaction = await this.#submitter.submit(freezeRelayRequest(request));
       const submission = submittedSubmission(request, transaction.txHash);
+      this.#failedAttemptsBySubmission.delete(submissionKey);
       await this.record(submission);
       return submission;
     } catch (error) {
-      const classification = classifyRelaySubmitterError(error, this.retrySchedule());
+      const classification = classifyRelaySubmitterError(error, this.retrySchedule(priorFailedAttempts));
       if (classification.retryable) {
         await this.releaseNonce(request);
+        this.#failedAttemptsBySubmission.set(submissionKey, priorFailedAttempts + 1);
       }
 
       const submission = failedSubmission(request, classification);
@@ -222,11 +228,11 @@ export class RelayerService implements LifecycleService {
     this.#inFlightByOrder.set(key, next);
   }
 
-  private retrySchedule(): { readonly nextRetryAt?: string } {
+  private retrySchedule(failedAttempts: number): { readonly nextRetryAt?: string } {
     if (this.#retryBaseMs <= 0 || this.#retryMaxMs <= 0) {
       return {};
     }
-    const delayMs = Math.min(this.#retryBaseMs, this.#retryMaxMs);
+    const delayMs = cappedExponentialBackoffMs(this.#retryBaseMs, this.#retryMaxMs, failedAttempts);
     return {
       nextRetryAt: new Date(this.#now().getTime() + delayMs).toISOString()
     };
@@ -526,6 +532,17 @@ function retryStateFor(retryable: boolean, deadLetter: boolean): RelayRetryState
     return "dead_letter";
   }
   return retryable ? "retryable" : "not_retryable";
+}
+
+function cappedExponentialBackoffMs(baseMs: number, maxMs: number, attempts: number): number {
+  const safeAttempts = Number.isFinite(attempts) ? Math.max(Math.floor(attempts), 0) : 0;
+  let delayMs = baseMs;
+  let remaining = safeAttempts;
+  while (remaining > 0 && delayMs < maxMs) {
+    delayMs *= 2;
+    remaining -= 1;
+  }
+  return Math.min(delayMs, maxMs);
 }
 
 function errorLabelForRelayError(errorCode: string): string {

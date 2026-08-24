@@ -317,7 +317,8 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       `INSERT INTO chain_event_log (
          chain_id, contract_address, block_number, transaction_hash, log_index,
          event_id, event_name, args_json, removed, block_hash, created_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
+       ON CONFLICT DO NOTHING`,
       [
         event.chainId,
         normalizedContract,

@@ -18,7 +18,7 @@ import {
   type ProjectionSyncState
 } from "../storage/projection-store.js";
 import { consoleLogger, noopLogger, type LifecycleService, type Logger } from "../shared/types.js";
-import { redactErrorMessage } from "../security/redaction.js";
+import { redactErrorMessage, redactSecrets } from "../security/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
 
 export interface ChainEventRange {
@@ -584,11 +584,11 @@ async function main(): Promise<void> {
     }
     return;
   }
-  consoleLogger.info("indexer framework ready", {
+  consoleLogger.info("indexer framework ready", redactSecrets({
     chainId: config.network.chainId,
     deploymentBlock: config.network.deploymentBlock.toString(),
     databaseUrl: config.database.url
-  });
+  }));
 }
 
 if (isDirectRun(import.meta.url)) {

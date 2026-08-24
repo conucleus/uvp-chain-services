@@ -175,7 +175,7 @@ describe("durable storage", () => {
     ).toHaveLength(0);
   });
 
-  it("enforces projection event unique constraints", async () => {
+  it("absorbs duplicate projection event inserts idempotently", async () => {
     const store = openStore(tempDirs);
     stores.push(store);
     const event = chainEvent(10n, 0, "OrderCreated", {
@@ -185,10 +185,18 @@ describe("durable storage", () => {
     });
 
     await store.appendEvent(event);
+    await expect(store.appendEvent(event)).resolves.toBeUndefined();
 
-    await expect(store.appendEvent(event)).rejects.toBeInstanceOf(
-      StorageConstraintError,
-    );
+    await expect(
+      store.listEvents({ chainId, contractAddress }),
+    ).resolves.toHaveLength(1);
+
+    const sameLogIndexDifferentTx = {
+      ...event,
+      transactionHash:
+        "0x9999999999999999999999999999999999999999999999999999999999999999" as const,
+    };
+    await expect(store.appendEvent(sameLogIndexDifferentTx)).resolves.toBeUndefined();
     await expect(
       store.listEvents({ chainId, contractAddress }),
     ).resolves.toHaveLength(1);
@@ -1014,6 +1022,36 @@ describePostgres(
         latestIndexedBlock: 3n,
         finalizedBlock: 3n,
       });
+    });
+
+    it("absorbs duplicate Postgres projection event inserts idempotently", async () => {
+      const databaseUrl = await postgresSchemaUrl(schemas);
+      const store = new PostgresProjectionStore({
+        databaseUrl,
+        chainId,
+        migrations: { autoRun: true, directory: postgresMigrationsDirectory() },
+      });
+      stores.push(store);
+
+      const event = chainEvent(10n, 0, "OrderCreated", {
+        orderId: "order-postgres-unique",
+        buyer,
+        seller,
+      });
+      await store.appendEvent(event);
+      await expect(store.appendEvent(event)).resolves.toBeUndefined();
+      const sameLogIndexDifferentTx = {
+        ...event,
+        transactionHash:
+          "0x9999999999999999999999999999999999999999999999999999999999999999" as const,
+      };
+      await expect(
+        store.appendEvent(sameLogIndexDifferentTx),
+      ).resolves.toBeUndefined();
+
+      await expect(
+        store.listEvents({ chainId, contractAddress }),
+      ).resolves.toHaveLength(1);
     });
 
     it("wires all chain-services stores to durable Postgres across service restarts", async () => {

@@ -317,7 +317,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       }
       this.#database
         .prepare(
-          `INSERT INTO chain_event_log (
+          `INSERT OR IGNORE INTO chain_event_log (
            chain_id, contract_address, block_number, transaction_hash, log_index,
            event_id, event_name, args_json, removed, block_hash, created_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

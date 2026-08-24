@@ -512,7 +512,7 @@ describe("indexer projection replay", () => {
     });
   });
 
-  it("projects state-machine module, plan publisher, and order registrar provenance", () => {
+  it("projects state-machine module and plan publisher provenance", () => {
     const moduleId = bytes32Text("uvp.module.docking.v1") as `0x${string}`;
     const moduleAddress = "0x6666666666666666666666666666666666666666";
     const previousModule = "0x7777777777777777777777777777777777777777";
@@ -529,11 +529,6 @@ describe("indexer projection replay", () => {
       chainEvent(2n, 0, "OrderRegistered", {
         orderId: stateMachineOrderId,
         planId
-      }),
-      chainEvent(2n, 1, "OrderRegistrarRecorded", {
-        orderId: stateMachineOrderId,
-        registrar: buyer,
-        creator: seller
       }),
       chainEvent(3n, 0, "StateMachineModuleSet", {
         moduleId,
@@ -552,11 +547,9 @@ describe("indexer projection replay", () => {
       publisherProof: expect.objectContaining({ eventName: "PlanPublisherRecorded" })
     });
     expect(order).toMatchObject({
-      registrar: buyer,
-      creator: seller,
-      registrarProof: expect.objectContaining({ eventName: "OrderRegistrarRecorded" }),
-      proof: expect.arrayContaining([expect.objectContaining({ eventName: "OrderRegistrarRecorded" })])
+      status: "registered"
     });
+    expect(order?.proof.every((entry) => entry.eventName !== "OrderRegistrarRecorded")).toBe(true);
     expect(module).toMatchObject({
       stateMachineAddress: contractAddress,
       moduleId,

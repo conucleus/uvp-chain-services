@@ -257,8 +257,6 @@ export interface StateMachineOrderProjection {
   readonly deploymentId?: Hex;
   readonly planId: Hex;
   readonly planHash?: Hex;
-  readonly registrar?: Address;
-  readonly creator?: Address;
   readonly status: StateMachineOrderStatus;
   readonly currentStage?: Hex;
   readonly authorizations: Readonly<Record<string, StateMachineSignalAuthorizationProjection>>;
@@ -272,9 +270,7 @@ export interface StateMachineOrderProjection {
   readonly timeline: readonly StateMachineTimelineEventProjection[];
   readonly proof: readonly StateMachineProofProjection[];
   readonly registeredAt?: ProjectionProvenance;
-  readonly registrarRecordedAt?: ProjectionProvenance;
   readonly updatedAt: ProjectionProvenance;
-  readonly registrarProof?: StateMachineProofProjection;
 }
 
 export interface StateMachineModuleProjection {
@@ -464,9 +460,6 @@ function applyStateMachineEvent(
       return;
     case "OrderRegistered":
       applyOrderRegistered(state, event);
-      return;
-    case "OrderRegistrarRecorded":
-      applyOrderRegistrarRecorded(state, event);
       return;
     case "OrderMaterialized":
       applyOrderMaterialized(state, event);
@@ -707,31 +700,6 @@ function applyOrderRegistered(
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "订单已创建", proof, { orderId, planId }));
-}
-
-function applyOrderRegistrarRecorded(
-  state: {
-    orders: Map<string, MutableStateMachineOrderProjection>;
-  },
-  event: ChainEvent
-): void {
-  const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
-  const registrar = requiredAddressArg(event, "registrar");
-  const creator = requiredAddressArg(event, "creator");
-  const proof = proofOf(event, {
-    orderId,
-    planId: order.planId,
-    planHash: order.planHash,
-    submitter: registrar
-  });
-  order.registrar = registrar;
-  order.creator = creator;
-  order.registrarRecordedAt = provenanceOf(event);
-  order.registrarProof = proof;
-  order.updatedAt = provenanceOf(event);
-  appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "订单注册来源已记录", proof, { orderId, planId: order.planId }));
 }
 
 function applyOrderMaterialized(
