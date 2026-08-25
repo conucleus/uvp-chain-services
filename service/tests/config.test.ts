@@ -1005,6 +1005,12 @@ describe("chain-services config", () => {
     })).rejects.toThrow(/on-chain governance registry owner does not match GOVERNANCE_REGISTRY_OWNER_ADDRESS/);
   });
 
+  it("drops the query string when a logged URL cannot be parsed", () => {
+    const malformed = "https://exa mple.com/path?token=raw-secret-value";
+    const redacted = redactSecrets({ url: malformed });
+    expect(redacted.url).toBe("https://exa mple.com/path?[redacted]");
+  });
+
   it("redacts secrets and exposes safe health diagnostics", async () => {
     const rpcUrl = "https://rpc.example/path?api_key=rpc-secret&chain=local";
     const redacted = redactSecrets({

@@ -119,7 +119,11 @@ function redactRpcUrl(value: string): string {
     }
     return url.toString();
   } catch {
-    return value;
+    // Unparseable URLs must not reach logs verbatim: their query string may
+    // carry credentials that the generic patterns would miss. Drop the whole
+    // query instead.
+    const queryStart = value.indexOf("?");
+    return queryStart === -1 ? value : `${value.slice(0, queryStart)}?[redacted]`;
   }
 }
 
