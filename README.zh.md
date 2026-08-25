@@ -18,4 +18,4 @@ EVM 原生 UVP 方向的非信任服务边界。
 
 Services 可以缓存、投影、relay 和翻译链上事实，但不能成为 plans、orders、signals、hooks、identity bindings、funds、approvals、releases、refunds 或 disputes 的事实来源。默认规则是必须能从 contract events 重建。
 
-在 repo split 前，本域按 PRD109 作为 service 侧收束门禁，覆盖 Product Schema v1、dynamic stage executor authority、docked Zhixu projection language、resource manifest/access state、Store authoring、proof/read models、operator audit 和 signal-container producer APIs。
+本域实现 service 侧收束门禁，覆盖 Product Schema v1、dynamic stage executor authority、docked Zhixu projection language、resource manifest/access state、Store authoring、proof/read models、operator audit 和 signal-container producer APIs。

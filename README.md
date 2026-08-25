@@ -27,7 +27,7 @@ become the source of truth for plans, orders, signals, hooks, identity bindings,
 approvals, releases, refunds, or disputes. Rebuildability from contract events is
 the default rule.
 
-Before repo split, this domain follows PRD109 as the service-side convergence
-gate for Product Schema v1, dynamic stage executor authority, docked Zhixu
-projection language, resource manifest/access state, Store authoring, proof/read models,
-operator audit, and signal-container producer APIs.
+This domain implements the service-side convergence gate for Product Schema v1,
+dynamic stage executor authority, docked Zhixu projection language, resource
+manifest/access state, Store authoring, proof/read models, operator audit, and
+signal-container producer APIs.
