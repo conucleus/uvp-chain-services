@@ -29,6 +29,7 @@ export type StoreCapability =
   | "store.supplier.tags.update"
   | "store.supplier.identity.register"
   | "store.supplier.identity.revoke"
+  | "store.supplier.notification_profile.update"
   | "store.docking.create"
   | "store.docking.validate"
   | "store.docking.save";
@@ -85,6 +86,7 @@ const STORE_OPERATOR_CAPABILITIES = [
   "store.supplier.create",
   "store.supplier.review",
   "store.supplier.tags.update",
+  "store.supplier.notification_profile.update",
   "store.docking.create",
   "store.docking.validate",
   "store.docking.save"

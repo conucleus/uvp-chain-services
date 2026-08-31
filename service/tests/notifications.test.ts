@@ -446,9 +446,16 @@ describe("signal-routed notifications", () => {
       notification
     };
 
+    // 通知配置写路由已挂 store capability 鉴权（模-5）：请求需携带
+    // operator 身份头。
+    const operatorHeaders = {
+      "x-uvp-store-operator-id": "store-operator-1",
+      "x-uvp-store-operator-role": "store_operator"
+    };
     const prepareResponse = await router.handle({
       method: "POST",
       pathname: "/store/suppliers/supplier-a/notification-profile/prepare",
+      headers: operatorHeaders,
       body
     });
     expect(prepareResponse.status).toBe(200);
@@ -458,6 +465,7 @@ describe("signal-routed notifications", () => {
     const saveResponse = await router.handle({
       method: "POST",
       pathname: "/store/suppliers/supplier-a/notification-profile",
+      headers: operatorHeaders,
       body: {
         ...body,
         walletProof: {

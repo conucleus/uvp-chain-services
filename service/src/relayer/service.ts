@@ -418,6 +418,17 @@ export function classifyRelaySubmitterError(
       ...schedule
     });
   }
+  // 其余 revert（真实执行失败）仍按永久失败处理；顺序保证复合文本
+  // （"reverted." + "Error: UnknownOrder()"）先命中瞬态 UnknownOrder。
+  if (/execution reverted|transaction reverted|reverted/i.test(haystack)) {
+    return relayFailure({
+      errorCode: "transaction_reverted",
+      message: "relay transaction reverted before submission could be accepted",
+      failureCategory: "permanent",
+      retryable: false,
+      deadLetter: true
+    });
+  }
   if (/timeout|timed out|ETIMEDOUT|AbortError|ECONNRESET|ECONNREFUSED|rate.?limit|429|rpc unavailable|network/i.test(haystack)) {
     return relayFailure({
       errorCode: "rpc_unavailable",

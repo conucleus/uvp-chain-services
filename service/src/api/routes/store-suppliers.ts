@@ -92,6 +92,15 @@ export function createStoreSuppliersRouteModule(): RouteModule {
         if (request.method === "POST" && notificationProfileMatch) {
           const supplierId = decodeURIComponent(notificationProfileMatch[1] ?? "");
           const action = notificationProfileMatch[2];
+          // 与同模块其余写路由同口径：通知配置可改写供应商钱包与 webhook，
+          // 必须走 store capability 鉴权——裸 wallet 证明只证明"签名者控制
+          // 请求体里的新 wallet"，与供应商既有身份无关。
+          const profileCapability: StoreCapability = "store.supplier.notification_profile.update";
+          const profileResource = { type: "store_supplier", id: supplierId };
+          const profileAuthorization = await authorizeStoreCapability(context, request, profileCapability, profileResource);
+          if (!isStoreAuthorizationResult(profileAuthorization)) {
+            return profileAuthorization;
+          }
           if (action === "prepare") {
             return {
               status: 200,

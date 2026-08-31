@@ -115,7 +115,9 @@ describe("anvil identity registry indexing", () => {
       method: "OPTIONS"
     });
     expect(optionsResponse.status).toBe(204);
-    expect(optionsResponse.headers.get("access-control-allow-origin")).toBe("*");
+    // 模-5 裁决：跨源默认关闭。未配置 UVP_API_CORS_ALLOWED_ORIGINS 时不回
+    // allow-origin 头（通配 "*" 已废除）。
+    expect(optionsResponse.headers.get("access-control-allow-origin")).toBeNull();
   }, 120_000);
 });
 

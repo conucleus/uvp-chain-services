@@ -178,7 +178,7 @@ export async function startApiServer(
     const runId = runIdFromHeaders(request);
     void (async () => {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-      setCorsHeaders(response);
+      setCorsHeaders(response, request);
       response.setHeader("x-request-id", requestId);
       if (runId) {
         response.setHeader("x-uvp-run-id", runId);
@@ -368,14 +368,28 @@ function normalizeStartOptions(
   return configOrOptions;
 }
 
-function setCorsHeaders(response: ServerResponse): void {
-  response.setHeader("access-control-allow-origin", "*");
+// 模-5 裁决：跨源默认关闭（不回 allow-origin，浏览器跨源读写被拦）；
+// 显式配置 UVP_API_CORS_ALLOWED_ORIGINS（逗号分隔）后按 Origin 精确回显。
+// 通配 "*" + 放行 x-uvp-* 身份头会让任意网页伪造管理员调用，已废除。
+const CORS_ALLOWED_ORIGINS = new Set(
+  (process.env.UVP_API_CORS_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+);
+
+function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): void {
   response.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
     "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role"
   );
   response.setHeader("access-control-max-age", "86400");
+  const origin = request?.headers.origin?.trim() ?? "";
+  if (origin !== "" && CORS_ALLOWED_ORIGINS.has(origin)) {
+    response.setHeader("access-control-allow-origin", origin);
+    response.setHeader("vary", "Origin");
+  }
 }
 
 function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
