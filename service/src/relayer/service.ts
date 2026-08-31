@@ -405,15 +405,9 @@ export function classifyRelaySubmitterError(
       deadLetter: true
     });
   }
-  if (/execution reverted|transaction reverted|reverted/i.test(haystack)) {
-    return relayFailure({
-      errorCode: "transaction_reverted",
-      message: "relay transaction reverted before submission could be accepted",
-      failureCategory: "permanent",
-      retryable: false,
-      deadLetter: true
-    });
-  }
+  // UnknownOrder 必须先于泛 reverted 判定：viem 的合约执行错误文本同时含
+  // "reverted." 与 "Error: UnknownOrder()"，泛规则在前会把"订单尚未注册"
+  // 的典型瞬态永久死信（与 submissions 的 broadcast-adapter 分类口径一致）。
   if (/UnknownOrder/i.test(haystack)) {
     return relayFailure({
       errorCode: "unknown_order",
