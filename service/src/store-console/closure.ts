@@ -113,8 +113,6 @@ spec:
       stages:
         - name: intake
           source: buyer
-          trigger: ["TRIGGER"]
-          externalSignals: ["TRIGGER"]
           sendSignals: ["cmp"]
           executor:
             supplierType: organization

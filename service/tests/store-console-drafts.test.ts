@@ -58,8 +58,6 @@ spec:
       stages:
         - name: intake
           source: buyer
-          trigger: ["TRIGGER"]
-          externalSignals: ["TRIGGER"]
           sendSignals: ["cmp"]
           executor:
             supplierType: organization
@@ -81,13 +79,11 @@ spec:
       stages:
         - name: intake
           source: buyer
-          trigger: ["MISSING"]
-          externalSignals: ["TRIGGER"]
 `;
 
 describe("Store Zhixu draft workflow", () => {
   it("imports a Zhixu draft without adding it to the public Product catalog", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const draft = await importDraft(router);
 
     expect(draft).toMatchObject({
@@ -105,7 +101,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("fails Store metadata writes closed when the draft store is unavailable", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeZhixuDraftStore: new FailingStoreZhixuDraftStore()
     });
 
@@ -131,7 +127,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("produces deterministic compile previews for DSL and manifest imports", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const yamlDraft = await importDraft(router);
     const first = await compileDraft(router, yamlDraft.draftId);
     const second = await compileDraft(router, yamlDraft.draftId);
@@ -158,7 +154,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("generates durable Product Schema Bundle and blocks inferred plugins before review", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const draft = await importDraft(router);
     const compiled = await compileDraft(router, draft.draftId);
     const preview = requirePreview(compiled);
@@ -225,7 +221,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("validates role-slot add-on manifests before Product Schema review", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
     const schemaResponse = await router.handle({
@@ -319,7 +315,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("accepts the customs Product Schema fixture", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const draft = await importCustomsDraft(router);
     const compiled = await compileDraft(router, draft.draftId);
     expect(compiled.compilePreview).toMatchObject({
@@ -357,7 +353,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("rejects invalid customs Product Schema inputs", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const draft = await importCustomsDraft(router);
     await compileDraft(router, draft.draftId);
 
@@ -437,7 +433,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("records compile failures and blocks review submission", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const draft = await importDraft(router, { content: invalidZhixuYaml });
     const compiled = await compileDraft(router, draft.draftId);
 
@@ -456,7 +452,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("persists an approved Store review", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
     await confirmDraftProductSchema(router, draft.draftId);
