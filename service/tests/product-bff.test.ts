@@ -15,7 +15,13 @@ import {
   ProductAuthorizationBuilder,
   ProductAuthorizationBuilderError,
 } from "../src/product/bff/authorization.js";
+import { crossBorderSchemaResolver } from "./cross-border-schema.js";
 import { MemoryProductOrderTriggerBroadcastAdapter } from "../src/product/bff/trigger.js";
+import type {
+  ProductBroadcastOutsideTriggerInput,
+  ProductOrderTriggerBroadcastAdapter,
+  ProductOrderTriggerBroadcastResult,
+} from "../src/product/bff/trigger.js";
 import { MemoryStoreZhixuVersionMetadataStore } from "../src/store-console/version.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { MemoryProductBffStore } from "../src/product/bff/store.js";
@@ -32,6 +38,7 @@ import type {
   SubmitProductOrderDraftResult,
 } from "../src/product/bff/types.js";
 import type { Hex } from "../src/shared/types.js";
+import type { Address } from "../src/shared/types.js";
 
 const contractAddress = "0x1111111111111111111111111111111111111111";
 const activeStateMachineAddress = "0x9999999999999999999999999999999999999999";
@@ -40,6 +47,34 @@ const activeDeploymentId =
   "0x0000000000000000000000000000000000000000000000000000000000000d02";
 const metadataHash =
   "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+/**
+ * Test-only trigger adapter that records attempts exactly like the
+ * memory-trigger adapter but returns an explicitly scripted broadcast outcome.
+ * The production memory-trigger adapter can never claim a chain result, so any
+ * test that needs a confirmed outcome must assemble this fake itself.
+ */
+class ScriptedOutcomeTriggerAdapter implements ProductOrderTriggerBroadcastAdapter {
+  readonly #memory = new MemoryProductOrderTriggerBroadcastAdapter();
+  readonly registrarAddress: Address;
+  readonly #outcome: ProductOrderTriggerBroadcastResult;
+
+  constructor(outcome: ProductOrderTriggerBroadcastResult) {
+    this.#outcome = outcome;
+    this.registrarAddress = this.#memory.registrarAddress;
+  }
+
+  listAttempts(): readonly ProductBroadcastOutsideTriggerInput[] {
+    return this.#memory.listAttempts();
+  }
+
+  async broadcastOutsideTrigger(
+    input: ProductBroadcastOutsideTriggerInput,
+  ): Promise<ProductOrderTriggerBroadcastResult> {
+    await this.#memory.broadcastOutsideTrigger(input);
+    return this.#outcome;
+  }
+}
 
 describe("product BFF order drafts and invites", () => {
   it("creates an order draft from a published plan and exposes draft participants", async () => {
@@ -468,8 +503,9 @@ describe("product BFF order drafts and invites", () => {
   });
 
   it("triggers the order atomically from signed outside trigger data", async () => {
-    const triggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter({
+    const triggerAdapter = new ScriptedOutcomeTriggerAdapter({
       status: "confirmed",
+      txHash: "0x4242424242424242424242424242424242424242424242424242424242424242",
       blockNumber: "42",
       retryable: false,
     });
@@ -772,37 +808,41 @@ interface InviteResponse {
   readonly draft: ProductOrderDraftDTO;
 }
 
+type RouterFixtureTriggerAdapter =
+  | MemoryProductOrderTriggerBroadcastAdapter
+  | ScriptedOutcomeTriggerAdapter;
+
 function createRouterFixture(events: readonly ChainEvent[]): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
   readonly productStore: MemoryProductBffStore;
-  readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
+  readonly triggerAdapter: RouterFixtureTriggerAdapter;
 }>;
 
 function createRouterFixture(
   events: readonly ChainEvent[],
-  triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter,
+  triggerAdapter: RouterFixtureTriggerAdapter,
 ): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
   readonly productStore: MemoryProductBffStore;
-  readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
+  readonly triggerAdapter: RouterFixtureTriggerAdapter;
 }>;
 
 async function createRouterFixture(
   events: readonly ChainEvent[],
-  triggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter(),
+  triggerAdapter: RouterFixtureTriggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter(),
 ): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
   readonly productStore: MemoryProductBffStore;
-  readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
+  readonly triggerAdapter: RouterFixtureTriggerAdapter;
 }> {
   const store = new MemoryProjectionStore();
   const productStore = new MemoryProductBffStore();
   await store.resetFromEvents({ deploymentBlock: 0n, events });
   return {
-    router: createApiRouter(store, {
+    router: createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRegistrationAdapter: triggerAdapter,
       productBffStore: productStore,
     }),

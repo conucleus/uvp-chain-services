@@ -75,7 +75,7 @@ export interface GovernanceConfig {
 }
 
 export interface ProductBffConfig {
-  readonly registrationAdapter: "memory" | "anvil";
+  readonly registrationAdapter: "memory-trigger" | "anvil";
   readonly registrarPrivateKeyEnv: string;
   readonly registrarAddress?: Address;
   readonly waitForReceipt: boolean;
@@ -204,11 +204,10 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
   };
   const chainId = parseInteger(env, "UVP_CHAIN_ID", manifest.chainId ?? 31337);
   const rpcUrl = resolveRpcUrl(env, manifest.rpcUrlEnv);
-  const explicitDatabaseUrl = optionalEnv(env, "CHAIN_SERVICES_DATABASE_URL");
   const databaseDriver = parseStorageDriver(
     optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER"),
-    explicitDatabaseUrl,
   );
+  const databaseUrl = requiredEnv(env, "CHAIN_SERVICES_DATABASE_URL");
   const registrationCreatorAddress = optionalAddressEnv(
     env,
     "UVP_PRODUCT_BFF_CREATOR_ADDRESS",
@@ -236,7 +235,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     },
     database: {
       driver: databaseDriver,
-      url: explicitDatabaseUrl ?? defaultDatabaseUrl(databaseDriver),
+      url: databaseUrl,
       migrationsAutoRun: parseBoolean(env, "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN", false),
     },
     api: {
@@ -286,7 +285,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
       enabled: parseBoolean(
         env,
         "UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED",
-        environment === "local",
+        false,
       ),
       maxCandidatesPerRun: parseInteger(
         env,
@@ -411,13 +410,17 @@ function parseRuntimeEnv(env: Env): ChainServicesRuntimeEnv {
 function parseProductRegistrationAdapter(
   env: Env,
 ): ProductBffConfig["registrationAdapter"] {
-  const rawValue =
-    optionalEnv(env, "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER") ?? "memory";
-  if (rawValue === "memory" || rawValue === "anvil") {
+  const rawValue = optionalEnv(env, "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER");
+  if (!rawValue) {
+    throw new ConfigError(
+      "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER is required (memory-trigger or anvil)",
+    );
+  }
+  if (rawValue === "memory-trigger" || rawValue === "anvil") {
     return rawValue;
   }
   throw new ConfigError(
-    "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER must be memory or anvil",
+    "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER must be memory-trigger or anvil",
   );
 }
 
@@ -655,57 +658,30 @@ function discoveryUrlFromIssuer(issuer: string): string {
   return `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
 }
 
-function parseStorageDriver(
-  rawDriver: string | undefined,
-  databaseUrl: string | undefined,
-): StorageDriver {
-  if (rawDriver) {
-    if (
-      rawDriver === "memory" ||
-      rawDriver === "sqlite" ||
-      rawDriver === "postgres"
-    ) {
-      return rawDriver;
-    }
+function requiredEnv(env: Env, name: string): string {
+  const value = optionalEnv(env, name);
+  if (!value) {
+    throw new ConfigError(`${name} is required`);
+  }
+  return value;
+}
+
+function parseStorageDriver(rawDriver: string | undefined): StorageDriver {
+  if (!rawDriver) {
     throw new ConfigError(
-      "CHAIN_SERVICES_DATABASE_DRIVER must be memory, sqlite, or postgres",
+      "CHAIN_SERVICES_DATABASE_DRIVER is required (memory, sqlite, or postgres)",
     );
   }
-  return inferStorageDriver(databaseUrl) ?? "memory";
-}
-
-function inferStorageDriver(
-  databaseUrl: string | undefined,
-): StorageDriver | undefined {
-  if (!databaseUrl) {
-    return undefined;
-  }
-  if (databaseUrl.startsWith("memory:")) {
-    return "memory";
-  }
-  if (databaseUrl.startsWith("sqlite:") || databaseUrl.startsWith("file:")) {
-    return "sqlite";
-  }
   if (
-    databaseUrl.startsWith("postgres:") ||
-    databaseUrl.startsWith("postgresql:")
+    rawDriver === "memory" ||
+    rawDriver === "sqlite" ||
+    rawDriver === "postgres"
   ) {
-    return "postgres";
+    return rawDriver;
   }
-  return undefined;
-}
-
-function defaultDatabaseUrl(driver: StorageDriver): string {
-  switch (driver) {
-    case "memory":
-      return "memory://projection-store";
-    case "sqlite":
-      return "sqlite://./chain-services.sqlite3";
-    case "postgres":
-      throw new ConfigError(
-        "CHAIN_SERVICES_DATABASE_URL is required when CHAIN_SERVICES_DATABASE_DRIVER=postgres",
-      );
-  }
+  throw new ConfigError(
+    "CHAIN_SERVICES_DATABASE_DRIVER must be memory, sqlite, or postgres",
+  );
 }
 
 function parseBigIntValue(env: Env, name: string, fallback: bigint): bigint {
@@ -1196,9 +1172,6 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
       "GOVERNANCE_BROADCAST_ENABLED=true uses env private-key governance and is forbidden in production",
     );
   }
-  if (parseBoolean(env, "UVP_PRODUCT_DEMO_MODE", false)) {
-    throw new ConfigError("UVP_PRODUCT_DEMO_MODE=1 is forbidden in production");
-  }
   if (parseBoolean(env, "UVP_PRODUCT_E2E_FIXTURES", false)) {
     throw new ConfigError(
       "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in production",
@@ -1212,9 +1185,9 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
       "permissive Product submission authorization is forbidden in production",
     );
   }
-  if (config.productBff.registrationAdapter === "memory") {
+  if (config.productBff.registrationAdapter !== "anvil") {
     throw new ConfigError(
-      "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=memory is forbidden in production",
+      "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production",
     );
   }
   if (!stateMachineAddress(config.network.contracts)) {
@@ -1238,6 +1211,28 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   ) {
     throw new ConfigError(
       `${config.productBff.registrarPrivateKeyEnv} is required when Product BFF registration adapter is anvil`,
+    );
+  }
+
+  if (config.evidenceStorage.adapter !== "s3") {
+    throw new ConfigError(
+      "UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in production",
+    );
+  }
+  if (!config.evidenceStorage.s3Bucket) {
+    throw new ConfigError("UVP_EVIDENCE_S3_BUCKET is required in production");
+  }
+  if (!config.evidenceStorage.s3Region) {
+    throw new ConfigError("UVP_EVIDENCE_S3_REGION is required in production");
+  }
+  if (!config.evidenceStorage.s3AccessKeyIdEnv) {
+    throw new ConfigError(
+      "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV is required in production",
+    );
+  }
+  if (!config.evidenceStorage.s3SecretAccessKeyEnv) {
+    throw new ConfigError(
+      "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV is required in production",
     );
   }
 }
@@ -1328,9 +1323,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
     );
   }
 
-  if (parseBoolean(env, "UVP_PRODUCT_DEMO_MODE", false)) {
-    throw new ConfigError("UVP_PRODUCT_DEMO_MODE=1 is forbidden in staging");
-  }
   if (parseBoolean(env, "UVP_PRODUCT_E2E_FIXTURES", false)) {
     throw new ConfigError("UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in staging");
   }
@@ -1563,9 +1555,6 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "LOG_REDACTION_ENABLED=false is forbidden in testnet",
     );
   }
-  if (parseBoolean(env, "UVP_PRODUCT_DEMO_MODE", false)) {
-    throw new ConfigError("UVP_PRODUCT_DEMO_MODE=1 is forbidden in testnet");
-  }
   if (parseBoolean(env, "UVP_PRODUCT_E2E_FIXTURES", false)) {
     throw new ConfigError("UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in testnet");
   }
@@ -1577,9 +1566,9 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "permissive Product submission authorization is forbidden in testnet",
     );
   }
-  if (config.productBff.registrationAdapter === "memory") {
+  if (config.productBff.registrationAdapter !== "anvil") {
     throw new ConfigError(
-      "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=memory is forbidden in testnet",
+      "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in testnet",
     );
   }
   if (config.evidenceStorage.adapter !== "rehearsal-object") {

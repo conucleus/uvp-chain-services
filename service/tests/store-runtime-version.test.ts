@@ -9,6 +9,7 @@ import {
   type StoreZhixuVersionRecord,
 } from "../src/store-console/version.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { crossBorderSchemaResolver } from "./cross-border-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const stateMachine = "0x1111111111111111111111111111111111111111" as Address;
@@ -60,7 +61,9 @@ describe("Store runtime and version selection", () => {
     });
 
     const summary = await createStoreRuntimeService({
-      productService: createProductService(store),
+      productService: createProductService(store, {
+        productSchemaResolver: crossBorderSchemaResolver()
+      }),
       store,
     }).getSummary();
 

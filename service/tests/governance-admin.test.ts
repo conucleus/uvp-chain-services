@@ -25,7 +25,7 @@ const txHash = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 describe("identity governance API", () => {
   it("keeps admin review off-chain and requires an authenticated admin", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     await expect(router.handle({
       method: "POST",
       pathname: "/admin/governance/review-supplier",
@@ -55,7 +55,7 @@ describe("identity governance API", () => {
         return { status: "submitted", txHash, signer, retryable: false, simulated: false };
       },
     };
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       governanceService: createGovernanceService({ adapter }),
     });
     await router.handle({

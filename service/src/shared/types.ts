@@ -7,9 +7,41 @@ export interface ChainPointer {
   readonly chainId: ChainId;
   readonly contractAddress: Address;
   readonly blockNumber: bigint;
+  /**
+   * Canonical EVM transaction position within the block. Older persisted
+   * events may not have this field, so adapters must keep it optional when
+   * reading legacy data.
+   */
+  readonly transactionIndex?: number;
   readonly transactionHash: Hex;
   readonly logIndex: number;
   readonly blockHash?: Hex;
+}
+
+/**
+ * Compare chain facts in the order in which an EVM execution produced them.
+ * The transaction index is the decisive tie-breaker for separate
+ * transactions in the same block; legacy events without it retain the
+ * deterministic log-index fallback.
+ */
+export function compareChainPointers(
+  left: Pick<ChainPointer, "chainId" | "blockNumber" | "transactionIndex" | "transactionHash" | "logIndex">,
+  right: Pick<ChainPointer, "chainId" | "blockNumber" | "transactionIndex" | "transactionHash" | "logIndex">
+): number {
+  if (left.chainId !== right.chainId) {
+    return left.chainId - right.chainId;
+  }
+  if (left.blockNumber !== right.blockNumber) {
+    return left.blockNumber < right.blockNumber ? -1 : 1;
+  }
+  if (left.transactionIndex !== undefined && right.transactionIndex !== undefined &&
+      left.transactionIndex !== right.transactionIndex) {
+    return left.transactionIndex - right.transactionIndex;
+  }
+  if (left.logIndex !== right.logIndex) {
+    return left.logIndex - right.logIndex;
+  }
+  return left.transactionHash.localeCompare(right.transactionHash);
 }
 
 export interface LifecycleService {

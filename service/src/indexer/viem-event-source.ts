@@ -265,6 +265,9 @@ function decodeChainEventLog(
       ...(log.blockHash
         ? { blockHash: log.blockHash.toLowerCase() as Hex }
         : {}),
+      ...(log.transactionIndex != null
+        ? { transactionIndex: Number(log.transactionIndex) }
+        : {}),
       ...(logRemoved(log) ? { removed: true } : {}),
       eventName,
       args: normalizeEventArgs(decoded.args),

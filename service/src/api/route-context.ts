@@ -61,7 +61,6 @@ import type {
   StoreSupplierMetadataStore,
   StoreSupplierService
 } from "../store-suppliers/service.js";
-import type { ProductOrderDTO, ProductTaskDTO, ZhixuDetailDTO, ZhixuSummaryDTO } from "@uvp-eth/product-dto";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
 export interface ApiRequest {
@@ -112,8 +111,6 @@ export interface CreateApiRouterOptions {
   readonly productRegistrationCreatorAddress?: Address;
   readonly productRegistrarAddress?: Address;
   readonly productRuntimeEnvironment?: ChainServicesRuntimeEnv;
-  readonly productE2eControlsEnabled?: boolean;
-  readonly productDemoMode?: boolean;
   readonly audit?: AuditSink;
   readonly configDiagnostics?: ConfigDiagnostics;
   readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
@@ -153,17 +150,6 @@ export interface AdminOpsRecoveryActions {
   retrySubmission?(input: AdminOpsRetrySubmissionInput): Promise<AdminOpsActionEffect | void>;
 }
 
-export interface ProductE2EControls {
-  readonly enabled: boolean;
-  setSyncing(enabled: boolean): void;
-  listZhixu(zhixus: readonly ZhixuSummaryDTO[]): readonly ZhixuSummaryDTO[];
-  getZhixu(zhixuId: string): ZhixuDetailDTO | undefined;
-  listOrders(orders: readonly ProductOrderDTO[]): readonly ProductOrderDTO[];
-  order(order: ProductOrderDTO | undefined): ProductOrderDTO | undefined;
-  listTasks(tasks: readonly ProductTaskDTO[]): readonly ProductTaskDTO[];
-  task(task: ProductTaskDTO | undefined): ProductTaskDTO | undefined;
-}
-
 export interface ApiRouteContext {
   readonly store: ProjectionStore;
   readonly productService: ProductService;
@@ -188,8 +174,6 @@ export interface ApiRouteContext {
   readonly productDockedOrderLinkService: ProductDockedOrderLinkService;
   readonly submissionStore?: ProductSubmissionStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
-  readonly productE2eControls: ProductE2EControls;
-  readonly productDemoMode: boolean;
   readonly audit: AuditSink;
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
   readonly onTxMined?: () => void;

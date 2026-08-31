@@ -61,26 +61,20 @@ export interface ProductOrderTriggerBroadcastAdapter {
 
 export interface MemoryProductTriggerBroadcastAdapterOptions {
   readonly registrarAddress?: Address;
-  readonly status?: ProductOrderTriggerStatus;
-  readonly txHash?: Hex;
-  readonly blockNumber?: string;
-  readonly errorCode?: string;
-  readonly errorMessage?: string;
-  readonly retryable?: boolean;
 }
 
+/**
+ * memory-trigger adapter: records the trigger attempt in process memory only.
+ * It never broadcasts and never claims an on-chain outcome, so it always
+ * reports status "pending" with no transaction hash. Drafts stay out of the
+ * "triggered" state until a real chain adapter confirms the order.
+ */
 export class MemoryProductOrderTriggerBroadcastAdapter implements ProductOrderTriggerBroadcastAdapter {
   readonly registrarAddress: Address;
   readonly #attempts: ProductBroadcastOutsideTriggerInput[] = [];
-  #result: ProductOrderTriggerBroadcastResult;
 
   constructor(options: MemoryProductTriggerBroadcastAdapterOptions = {}) {
     this.registrarAddress = normalizeAddress(options.registrarAddress ?? DEFAULT_PRODUCT_REGISTRAR_ADDRESS, "registrarAddress");
-    this.#result = triggerResultFromOptions(options);
-  }
-
-  setResult(options: Omit<MemoryProductTriggerBroadcastAdapterOptions, "registrarAddress">): void {
-    this.#result = triggerResultFromOptions(options);
   }
 
   listAttempts(): readonly ProductBroadcastOutsideTriggerInput[] {
@@ -95,13 +89,10 @@ export class MemoryProductOrderTriggerBroadcastAdapter implements ProductOrderTr
       ...input,
       authorizations: [...input.authorizations]
     });
-    if (shouldGenerateMemoryTriggerTxHash(this.#result)) {
-      return {
-        ...this.#result,
-        txHash: keccak256(stringToBytes(`uvp:product-bff:memory-trigger:${input.triggerId}`))
-      };
-    }
-    return this.#result;
+    return {
+      status: "pending",
+      retryable: false
+    };
   }
 }
 
@@ -263,22 +254,6 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
       }) as ProductTriggerBroadcastWalletClient
     };
   }
-}
-
-function triggerResultFromOptions(options: Omit<MemoryProductTriggerBroadcastAdapterOptions, "registrarAddress">): ProductOrderTriggerBroadcastResult {
-  const status = options.status ?? "confirmed";
-  return {
-    status,
-    ...(options.txHash ? { txHash: options.txHash } : {}),
-    ...(options.blockNumber ? { blockNumber: options.blockNumber } : {}),
-    ...(options.errorCode ? { errorCode: options.errorCode } : {}),
-    ...(options.errorMessage ? { errorMessage: options.errorMessage } : {}),
-    retryable: options.retryable ?? status === "failed"
-  };
-}
-
-function shouldGenerateMemoryTriggerTxHash(result: ProductOrderTriggerBroadcastResult): boolean {
-  return result.status !== "prepared" && result.status !== "failed" && result.status !== "expired" && !result.txHash;
 }
 
 function normalizePrivateKey(value: Hex | string, fieldName: string): Hex {

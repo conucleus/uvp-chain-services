@@ -80,7 +80,7 @@ export interface ProductBffServiceOptions {
   readonly versionResolver?: ProductDraftVersionResolver;
   readonly registrationCreatorAddress?: Address;
   readonly registrarAddress?: Address;
-  readonly triggerChainId?: number;
+  readonly triggerChainId: number;
   readonly now?: () => Date;
 }
 
@@ -163,7 +163,10 @@ export function createProductBffService(
         "registrationCreatorAddress",
       )
     : undefined;
-  const triggerChainId = options.triggerChainId ?? 31337;
+  if (!Number.isInteger(options.triggerChainId)) {
+    throw new Error("triggerChainId is required to create the Product BFF service");
+  }
+  const triggerChainId = options.triggerChainId;
   const now = options.now ?? (() => new Date());
   const idScope = randomUUID().replaceAll("-", "").slice(0, 8);
   let sequence = 1;
@@ -1734,7 +1737,11 @@ function defaultRegistrationReconcileFields(
       projectionStatus: "missing",
     };
   }
-  if (registration.status === "prepared" || registration.status === "expired") {
+  if (
+    registration.status === "pending" ||
+    registration.status === "prepared" ||
+    registration.status === "expired"
+  ) {
     return {
       receiptStatus: "not_checked",
       projectionStatus: "not_checked",

@@ -1,4 +1,4 @@
-import type { ChainPointer } from "../shared/types.js";
+import { compareChainPointers, type ChainPointer } from "../shared/types.js";
 
 export type EventArgs = Readonly<Record<string, unknown>>;
 
@@ -33,20 +33,15 @@ export function chainEventKey(event: ChainEvent): string {
 }
 
 export function compareChainEvents(left: ChainEvent, right: ChainEvent): number {
-  if (left.chainId !== right.chainId) {
-    return left.chainId - right.chainId;
-  }
-  if (left.blockNumber !== right.blockNumber) {
-    return left.blockNumber < right.blockNumber ? -1 : 1;
-  }
-  if (left.logIndex !== right.logIndex) {
-    return left.logIndex - right.logIndex;
+  const position = compareChainPointers(left, right);
+  if (position !== 0) {
+    return position;
   }
   const contractCompare = left.contractAddress.localeCompare(right.contractAddress);
   if (contractCompare !== 0) {
     return contractCompare;
   }
-  return left.transactionHash.localeCompare(right.transactionHash);
+  return 0;
 }
 
 export function sortChainEvents<TEvent extends ChainEvent>(events: readonly TEvent[]): TEvent[] {

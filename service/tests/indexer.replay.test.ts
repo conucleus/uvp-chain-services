@@ -9,7 +9,7 @@ import { IndexerService, type ChainEventSource } from "../src/indexer/service.js
 import { rebuildOrderProjections, stateMachineScopedKey } from "../src/indexer/projections.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { SqliteProjectionStore } from "../src/storage/sqlite-projection-store.js";
-import { buildActiveChainEventReplaySummary, type ChainEvent } from "../src/indexer/events.js";
+import { buildActiveChainEventReplaySummary, sortChainEvents, type ChainEvent } from "../src/indexer/events.js";
 import { EXECUTOR_PATCH_MODE_ASSIGN } from "../src/stage-patches/typed-data.js";
 
 const contractAddress = "0x1111111111111111111111111111111111111111";
@@ -43,6 +43,24 @@ const abiHash = "0xddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 describe("indexer projection replay", () => {
+  it("orders same-block events by EVM transaction index before log index", () => {
+    const ordered = sortChainEvents([
+      chainEvent(10n, 0, "SecondTransaction", {}, contractAddress, {
+        transactionHash: bytes32Hex("b1"),
+        transactionIndex: 2,
+      }),
+      chainEvent(10n, 0, "FirstTransaction", {}, contractAddress, {
+        transactionHash: bytes32Hex("a1"),
+        transactionIndex: 1,
+      }),
+    ]);
+
+    expect(ordered.map((event) => event.eventName)).toEqual([
+      "FirstTransaction",
+      "SecondTransaction",
+    ]);
+  });
+
   it("rebuilds state-machine orders, tasks, timeline, and proof from chain events", () => {
     const events = stateMachineEvents();
 
@@ -497,7 +515,7 @@ describe("indexer projection replay", () => {
 
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events });
-    const router = createApiRouter(store);
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const response = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
 
     expect(response.status).toBe(409);
@@ -781,7 +799,7 @@ describe("indexer projection replay", () => {
   it("serves state-machine projection through Product API endpoints", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineEvents() });
-    const router = createApiRouter(store);
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
     const ordersResponse = await router.handle({ method: "GET", pathname: "/product/orders" });
@@ -902,7 +920,7 @@ describe("indexer projection replay", () => {
     unblock!();
     await waitForCondition(() => readCount === 2);
 
-    const router = createApiRouter(store);
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const proofResponse = await router.handle({
       method: "GET",
       pathname: `/product/orders/${stateMachineOrderId}/proof`
@@ -993,7 +1011,7 @@ describe("indexer projection replay", () => {
     unblock!();
     await waitForCondition(() => readCount === 2);
 
-    const router = createApiRouter(store);
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const proofResponse = await router.handle({
       method: "GET",
       pathname: `/product/orders/${queuedOrderId}/proof`
@@ -1186,7 +1204,7 @@ function testConfig(): ChainServicesConfig {
       allowedOperators: []
     },
     productBff: {
-      registrationAdapter: "memory",
+      registrationAdapter: "memory-trigger",
       registrarPrivateKeyEnv: "UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY",
       waitForReceipt: false
     },
@@ -1237,7 +1255,7 @@ function bytes32Text(value: string): string {
   return `0x${Buffer.from(value, "utf8").toString("hex").padEnd(64, "0")}`;
 }
 
-function bytes32Hex(value: string): string {
+function bytes32Hex(value: string): `0x${string}` {
   return `0x${value.padStart(64, "0")}`;
 }
 
@@ -1246,7 +1264,8 @@ function chainEvent(
   logIndex: number,
   eventName: string,
   args: Record<string, unknown>,
-  eventContractAddress = contractAddress
+  eventContractAddress = contractAddress,
+  overrides: Partial<Pick<ChainEvent, "transactionHash" | "transactionIndex">> = {}
 ): ChainEvent {
   return {
     chainId: 31337,
@@ -1255,6 +1274,7 @@ function chainEvent(
     transactionHash: `0x${blockNumber.toString(16).padStart(64, "0")}`,
     logIndex,
     eventName,
-    args
+    args,
+    ...overrides
   };
 }

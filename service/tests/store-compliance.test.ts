@@ -21,7 +21,7 @@ const readOnlyHeaders = {
 
 describe("Store compliance no-op routes", () => {
   it("returns no-op capabilities to authenticated Store readers", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const response = await router.handle({
       method: "GET",
@@ -54,7 +54,7 @@ describe("Store compliance no-op routes", () => {
   });
 
   it("requires an authenticated Store identity for capabilities", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const response = await router.handle({
       method: "GET",
@@ -69,7 +69,7 @@ describe("Store compliance no-op routes", () => {
   });
 
   it("previews no-op access decisions by data layer", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(preview(router, "zhixu_definition")).resolves.toMatchObject({
       decision: "allow",
@@ -95,7 +95,7 @@ describe("Store compliance no-op routes", () => {
   });
 
   it("blocks read-only principals from access-preview", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const response = await router.handle({
       method: "POST",
@@ -113,7 +113,7 @@ describe("Store compliance no-op routes", () => {
 
   it("audits access-preview without raw payload, credential, object content, or signatures", async () => {
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), { audit });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", audit });
 
     const response = await router.handle({
       method: "POST",
@@ -165,7 +165,7 @@ describe("Store compliance no-op routes", () => {
 
   it("allows a private compliance provider to be injected through the router", async () => {
     const service = fakeComplianceService();
-    const router = createApiRouter(new MemoryProjectionStore(), { complianceService: service });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", complianceService: service });
 
     const capabilities = await router.handle({
       method: "GET",

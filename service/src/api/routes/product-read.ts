@@ -6,7 +6,9 @@ import {
   type ProductParticipantViewQuery
 } from "../../product/service.js";
 import { buildProductApiStagingReadiness } from "../../product/staging-readiness.js";
+import { redactErrorMessage } from "../../security/redaction.js";
 import { normalizeAddress } from "../../shared/types.js";
+import type { ProjectionSyncState } from "../../storage/projection-store.js";
 import { StorageUnavailableError } from "../../storage/errors.js";
 import { cleanQuery, readApiHeader, type ApiRequest, type ApiResponse, type ApiRouteContext } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
@@ -16,7 +18,7 @@ type ParsedParticipantViewQuery =
   | { readonly ok: false; readonly response: ApiResponse };
 
 export function createProductReadRouteModule(): RouteModule {
-  return {
+  const routeModule: RouteModule = {
     async handle(request, context) {
       if (request.method === "GET" && request.pathname === "/product/staging/readiness") {
         return withStorageGuard(async () => {
@@ -69,7 +71,7 @@ export function createProductReadRouteModule(): RouteModule {
           const view = await context.productService.getParticipantView(participantQuery.query);
           return {
             status: 200,
-            body: { participant: view.participant, tasks: context.productE2eControls.listTasks(view.tasks) }
+            body: { participant: view.participant, tasks: view.tasks }
           };
         });
       }
@@ -83,7 +85,7 @@ export function createProductReadRouteModule(): RouteModule {
           const view = await context.productService.getParticipantView(participantQuery.query);
           return {
             status: 200,
-            body: { participant: view.participant, orders: context.productE2eControls.listOrders(view.orders) }
+            body: { participant: view.participant, orders: view.orders }
           };
         });
       }
@@ -112,17 +114,10 @@ export function createProductReadRouteModule(): RouteModule {
 
       if (request.method === "GET" && request.pathname === "/product/zhixus") {
         return withStorageGuard(async () => {
-          const demoFallbackRequested = isDemoFallbackRequested(request.query);
-          if (demoFallbackRequested && !context.productDemoMode) {
-            return {
-              status: 403,
-              body: { error: "demo_mode_disabled" }
-            };
-          }
           const zhixus = await context.productService.listZhixu();
           return {
             status: 200,
-            body: { zhixus: context.productE2eControls.listZhixu(zhixus) }
+            body: { zhixus }
           };
         });
       }
@@ -132,7 +127,7 @@ export function createProductReadRouteModule(): RouteModule {
           const orders = await context.productService.listOrders();
           return {
             status: 200,
-            body: { orders: context.productE2eControls.listOrders(orders) }
+            body: { orders }
           };
         });
       }
@@ -141,7 +136,7 @@ export function createProductReadRouteModule(): RouteModule {
       if (request.method === "GET" && productZhixuMatch) {
         return withStorageGuard(async () => {
           const zhixuId = decodeURIComponent(productZhixuMatch[1] ?? "");
-          const zhixu = context.productE2eControls.getZhixu(zhixuId) ?? await context.productService.getZhixu(zhixuId);
+          const zhixu = await context.productService.getZhixu(zhixuId);
           if (!zhixu) {
             return {
               status: 404,
@@ -197,7 +192,7 @@ export function createProductReadRouteModule(): RouteModule {
           const orderId = decodeURIComponent(productOrderMatch[1] ?? "");
           let order: ProductOrderDTO | undefined;
           try {
-            order = context.productE2eControls.order(await context.productService.getOrder(orderId));
+            order = await context.productService.getOrder(orderId);
           } catch (error) {
             if (error instanceof ProductOrderLookupError) {
               return {
@@ -232,7 +227,7 @@ export function createProductReadRouteModule(): RouteModule {
           }));
           return {
             status: 200,
-            body: { tasks: context.productE2eControls.listTasks(tasks) }
+            body: { tasks }
           };
         });
       }
@@ -241,7 +236,7 @@ export function createProductReadRouteModule(): RouteModule {
       if (request.method === "GET" && productTaskMatch) {
         return withStorageGuard(async () => {
           const taskId = decodeURIComponent(productTaskMatch[1] ?? "");
-          const task = context.productE2eControls.task(await context.productService.getTask(taskId));
+          const task = await context.productService.getTask(taskId);
           if (!task) {
             return {
               status: 404,
@@ -258,6 +253,49 @@ export function createProductReadRouteModule(): RouteModule {
       return undefined;
     }
   };
+  return withProjectionDegradationMeta(routeModule);
+}
+
+/**
+ * Product reads are projections of chain events. When the indexer marked the
+ * projection degraded (background refresh failed), every successful read
+ * response carries a meta.projectionSync marker so callers can see the
+ * projection may lag or be incomplete instead of silently trusting it.
+ */
+function withProjectionDegradationMeta(module: RouteModule): RouteModule {
+  return {
+    async handle(request, context) {
+      const response = await module.handle(request, context);
+      if (!response || response.status !== 200 || !isJsonRecord(response.body)) {
+        return response;
+      }
+      let syncState: ProjectionSyncState | undefined;
+      try {
+        syncState = await context.store.getSyncState();
+      } catch {
+        return response;
+      }
+      if (syncState?.syncStatus !== "degraded") {
+        return response;
+      }
+      return {
+        ...response,
+        body: {
+          ...response.body,
+          meta: {
+            projectionSync: {
+              status: "degraded",
+              ...(syncState.degradedReason ? { reason: redactErrorMessage(syncState.degradedReason) } : {})
+            }
+          }
+        }
+      };
+    }
+  };
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function parseParticipantViewQuery(
@@ -309,10 +347,6 @@ function productParticipantIdentityFromAssignment(assignment: ProductParticipant
     draftTitle: assignment.draft.title,
     ...(orderId ? { orderId } : {})
   };
-}
-
-function isDemoFallbackRequested(query: ApiRequest["query"]): boolean {
-  return query?.fallback === "demo" || query?.demo === "1" || query?.demo === "true";
 }
 
 async function withStorageGuard(action: () => Promise<ApiResponse>): Promise<ApiResponse> {

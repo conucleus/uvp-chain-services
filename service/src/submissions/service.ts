@@ -33,7 +33,6 @@ import type {
 import type { EvidencePrincipal, EvidenceRecordDTO } from "../evidence/index.js";
 
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const PRODUCT_SIGNAL_SOURCE = "product";
 
 export class ProductSubmissionError extends Error {
@@ -52,8 +51,8 @@ export class ProductSubmissionError extends Error {
 export interface ProductSubmissionServiceOptions {
   readonly productTasks: ProductTaskReader;
   readonly evidenceReader: ProductSubmissionEvidenceReader;
-  readonly chainId?: number;
-  readonly verifyingContract?: Address;
+  readonly chainId: number;
+  readonly verifyingContract: Address;
   readonly authorization?: SubmissionAuthorizationAdapter;
   readonly broadcastAdapter?: SubmissionBroadcastAdapter;
   readonly store?: ProductSubmissionStore;
@@ -82,11 +81,17 @@ export function createProductSubmissionService(options: ProductSubmissionService
   const prepareIdFactory = options.prepareIdFactory ?? (() => `prep_${randomUUID()}`);
   const submissionIdFactory = options.submissionIdFactory ?? (() => `sub_${randomUUID()}`);
   const nonceFactory = options.nonceFactory ?? randomNonce;
-      const authorization = options.authorization ?? denyByDefaultSubmissionAuthorization();
+  const authorization = options.authorization ?? denyByDefaultSubmissionAuthorization();
   const broadcastAdapter = options.broadcastAdapter ?? notSupportedSubmissionBroadcastAdapter();
   const audit = options.audit ?? noopAuditSink;
-      const chainId = options.chainId ?? 31337;
-  const defaultVerifyingContract = options.verifyingContract ?? ZERO_ADDRESS;
+  if (!Number.isInteger(options.chainId)) {
+    throw new Error("chainId is required to create the product submission service");
+  }
+  if (!options.verifyingContract) {
+    throw new Error("verifyingContract is required to create the product submission service");
+  }
+  const chainId = options.chainId;
+  const defaultVerifyingContract = options.verifyingContract;
 
   return {
     async prepareSubmit(taskId, input, principal) {
@@ -238,6 +243,41 @@ export function createProductSubmissionService(options: ProductSubmissionService
         throw new ProductSubmissionError(400, "invalid_signature", "signature recovery did not match prepared submitter", {
           recoveredSubmitter
         });
+      }
+
+      // Adapters that cannot broadcast must not consume the prepared
+      // submission or its nonce: the signature is received and reported,
+      // but no chain transaction was attempted and nothing is marked used.
+      if (broadcastAdapter.attemptsBroadcast === false) {
+        const submissionId = submissionIdFactory();
+        const createdAt = now().toISOString();
+        const signatureHash = signatureHashFor(signature);
+        const broadcast = await broadcastAdapter.broadcast({
+          prepared: dtoFromPreparedRecord(prepared),
+          signature,
+          recoveredSubmitter,
+          evidence: prepared.evidenceRecords
+        });
+        const submission = withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
+          submissionId,
+          recoveredSubmitter,
+          signatureHash,
+          createdAt,
+          broadcast
+        }));
+        await store.putSubmission(submission);
+        await audit.record({
+          type: "relayer.submit.result",
+          action: prepared.signalName,
+          outcome: "skipped",
+          subject: {
+            ...submissionAuditSubject(prepared),
+            submissionId
+          },
+          ...(submission.errorCode ? { errorCode: submission.errorCode } : {}),
+          retryable: false
+        });
+        return submission;
       }
 
       const nonceKey = submissionNonceKey(prepared);
@@ -430,6 +470,7 @@ function normalizeBytes32OrHash(value: string, fieldName: string): Hex {
 
 export function notSupportedSubmissionBroadcastAdapter(): SubmissionBroadcastAdapter {
   return {
+    attemptsBroadcast: false,
     async broadcast() {
       return {
         status: "not_attempted",

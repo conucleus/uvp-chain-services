@@ -497,30 +497,49 @@ export class IndexerService implements LifecycleService {
   }
 
   async #processSignalNotifications(events: readonly ChainEvent[]): Promise<void> {
-    if (!this.#notificationProcessor || events.length === 0) {
+    const processor = this.#notificationProcessor;
+    if (!processor || events.length === 0) {
       return;
     }
-    try {
-      await this.#notificationProcessor.processSignalSubmittedEvents(events);
-    } catch (error) {
-      this.#logger.warn("notification processor failed after indexer projection commit", {
-        message: error instanceof Error ? redactErrorMessage(error) : "unknown notification processor error"
-      });
-    }
+    await this.#runPostCommitStepWithBoundedRetry("signal notification", () =>
+      processor.processSignalSubmittedEvents(events)
+    );
   }
 
   async #processProjectionAutomation(
     snapshot: ProjectionSnapshot
   ): Promise<void> {
-    if (!this.#projectionAutomationProcessor) {
+    const processor = this.#projectionAutomationProcessor;
+    if (!processor) {
       return;
     }
-    try {
-      await this.#projectionAutomationProcessor.processProjection(snapshot);
-    } catch (error) {
-      this.#logger.warn("projection automation processor failed after indexer projection commit", {
-        message: error instanceof Error ? redactErrorMessage(error) : "unknown projection automation error"
-      });
+    await this.#runPostCommitStepWithBoundedRetry("projection automation", () =>
+      processor.processProjection(snapshot)
+    );
+  }
+
+  /**
+   * Post-commit steps run after the projection commit succeeded. Failures are
+   * retried a bounded number of times in-process; once retries are exhausted
+   * the step gives up with an error log instead of blocking the indexer loop.
+   */
+  async #runPostCommitStepWithBoundedRetry(step: string, run: () => Promise<unknown>): Promise<void> {
+    for (let attempt = 1; attempt <= POST_COMMIT_STEP_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await run();
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? redactErrorMessage(error) : `unknown ${step} error`;
+        if (attempt === POST_COMMIT_STEP_MAX_ATTEMPTS) {
+          this.#logger.error(`post-commit ${step} failed after ${POST_COMMIT_STEP_MAX_ATTEMPTS} attempts`, {
+            message
+          });
+          return;
+        }
+        const nextDelayMs = postCommitStepRetryDelayMs(attempt);
+        this.#logger.warn(`post-commit ${step} failed; retrying`, { attempt, nextDelayMs, message });
+        await sleep(nextDelayMs);
+      }
     }
   }
 
@@ -597,6 +616,21 @@ if (isDirectRun(import.meta.url)) {
 
 function minBlock(left: bigint, right: bigint | undefined): bigint {
   return right === undefined || left <= right ? left : right;
+}
+
+const POST_COMMIT_STEP_MAX_ATTEMPTS = 3;
+const POST_COMMIT_STEP_RETRY_BASE_DELAY_MS = 100;
+const POST_COMMIT_STEP_RETRY_MAX_DELAY_MS = 2000;
+
+function postCommitStepRetryDelayMs(attempt: number): number {
+  return Math.min(
+    POST_COMMIT_STEP_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
+    POST_COMMIT_STEP_RETRY_MAX_DELAY_MS
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function summaryFromSnapshot(input: {

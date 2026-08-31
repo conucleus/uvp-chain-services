@@ -6,7 +6,7 @@ import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 
 describe("API route modularization", () => {
   it("keeps the composed router fallback behavior stable", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(router.handle({ method: "GET", pathname: "/unknown-route" }))
       .resolves.toEqual({
@@ -15,11 +15,9 @@ describe("API route modularization", () => {
       });
   });
 
-  it("keeps production demo fallback disabled", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), {
+  it("keeps production reads free of demo fallback data", async () => {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "production",
-      productDemoMode: true,
-      productE2eControlsEnabled: true,
       evidenceStorage: productionSafeEvidenceStorage()
     });
 
@@ -27,9 +25,9 @@ describe("API route modularization", () => {
       method: "GET",
       pathname: "/product/zhixus",
       query: { fallback: "demo" }
-    })).resolves.toEqual({
-      status: 403,
-      body: { error: "demo_mode_disabled" }
+    })).resolves.toMatchObject({
+      status: 200,
+      body: { zhixus: [] }
     });
   });
 

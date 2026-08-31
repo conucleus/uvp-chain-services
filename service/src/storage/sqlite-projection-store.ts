@@ -42,6 +42,7 @@ import {
   type SqliteDatabase,
   type SqliteValue,
 } from "./sqlite.js";
+import { optionalNumberColumn } from "./sqlite-rows.js";
 
 export interface SqliteProjectionStoreOptions {
   readonly databaseUrl: string;
@@ -318,15 +319,16 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       this.#database
         .prepare(
           `INSERT OR IGNORE INTO chain_event_log (
-           chain_id, contract_address, block_number, transaction_hash, log_index,
+           chain_id, contract_address, block_number, transaction_hash, transaction_index, log_index,
            event_id, event_name, args_json, removed, block_hash, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           event.chainId,
           normalizedContract,
           event.blockNumber.toString(),
           event.transactionHash.toLowerCase(),
+          event.transactionIndex ?? null,
           event.logIndex,
           chainEventKey({ ...event, contractAddress: normalizedContract }),
           event.eventName,
@@ -361,6 +363,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
          contract_address AS contractAddress,
          block_number AS blockNumber,
          transaction_hash AS transactionHash,
+         transaction_index AS transactionIndex,
          log_index AS logIndex,
          event_name AS eventName,
          args_json AS argsJson,
@@ -368,7 +371,8 @@ export class SqliteProjectionStore implements DurableProjectionStore {
          block_hash AS blockHash
        FROM chain_event_log
        ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
-       ORDER BY chain_id ASC, CAST(block_number AS INTEGER) ASC, log_index ASC`,
+       ORDER BY chain_id ASC, CAST(block_number AS INTEGER) ASC,
+         transaction_index ASC, log_index ASC`,
       )
       .all(...values);
 
@@ -546,6 +550,7 @@ function eventRow(row: unknown): ChainEvent {
   const record = rowObject(row);
   const blockHash = nullableStringColumn(record, "blockHash");
   const removed = numberColumn(record, "removed") === 1;
+  const transactionIndex = optionalNumberColumn(record, "transactionIndex");
   return {
     chainId: numberColumn(record, "chainId"),
     contractAddress: normalizeAddress(
@@ -554,6 +559,7 @@ function eventRow(row: unknown): ChainEvent {
     ),
     blockNumber: BigInt(stringColumn(record, "blockNumber")),
     transactionHash: stringColumn(record, "transactionHash") as Hex,
+    ...(transactionIndex !== undefined ? { transactionIndex } : {}),
     logIndex: numberColumn(record, "logIndex"),
     eventName: stringColumn(record, "eventName"),
     args: parseStorageJson<Record<string, unknown>>(

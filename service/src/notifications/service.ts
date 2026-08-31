@@ -15,7 +15,7 @@ import {
 } from "../indexer/projections.js";
 import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "../indexer/events.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
-import type { Address, Hex } from "../shared/types.js";
+import { compareChainPointers, type Address, type Hex } from "../shared/types.js";
 import type { ProductSchemaResolver } from "../product/service.js";
 import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store-suppliers/types.js";
 import {
@@ -62,6 +62,7 @@ export interface SignalNotificationProof {
   readonly chainId: number;
   readonly contractAddress: Address;
   readonly blockNumber: string;
+  readonly transactionIndex?: number;
   readonly transactionHash: Hex;
   readonly logIndex: number;
   readonly blockHash?: Hex;
@@ -122,6 +123,7 @@ export interface ParticipantNotificationProof {
   readonly chainId: number;
   readonly contractAddress: Address;
   readonly blockNumber: string;
+  readonly transactionIndex?: number;
   readonly transactionHash: Hex;
   readonly logIndex: number;
 }
@@ -1040,6 +1042,7 @@ function notificationProof(proof: StateMachineTaskProjection["proof"]): Particip
     chainId: proof.chainId,
     contractAddress: proof.contractAddress,
     blockNumber: proof.blockNumber.toString(),
+    ...(proof.transactionIndex !== undefined ? { transactionIndex: proof.transactionIndex } : {}),
     transactionHash: proof.transactionHash,
     logIndex: proof.logIndex
   };
@@ -1051,6 +1054,7 @@ function signalNotificationProof(proof: StateMachineSignalProjection["proof"]): 
     chainId: proof.chainId,
     contractAddress: proof.contractAddress,
     blockNumber: proof.blockNumber.toString(),
+    ...(proof.transactionIndex !== undefined ? { transactionIndex: proof.transactionIndex } : {}),
     transactionHash: proof.transactionHash,
     logIndex: proof.logIndex
   };
@@ -1062,6 +1066,7 @@ function signalPayloadNotificationProof(proof: SignalNotificationProof): Partici
     chainId: proof.chainId,
     contractAddress: proof.contractAddress,
     blockNumber: proof.blockNumber,
+    ...(proof.transactionIndex !== undefined ? { transactionIndex: proof.transactionIndex } : {}),
     transactionHash: proof.transactionHash,
     logIndex: proof.logIndex
   };
@@ -1586,6 +1591,7 @@ function payloadForSignal(
       chainId: event.chainId,
       contractAddress: event.contractAddress,
       blockNumber: event.blockNumber.toString(),
+      ...(event.transactionIndex !== undefined ? { transactionIndex: event.transactionIndex } : {}),
       transactionHash: event.transactionHash,
       logIndex: event.logIndex,
       ...(event.blockHash ? { blockHash: event.blockHash } : {})
@@ -1735,11 +1741,9 @@ function compareSignalAuthorizationsForDelivery(
   left: StateMachineSignalAuthorizationProjection,
   right: StateMachineSignalAuthorizationProjection
 ): number {
-  if (left.authorizedAt.blockNumber !== right.authorizedAt.blockNumber) {
-    return left.authorizedAt.blockNumber < right.authorizedAt.blockNumber ? -1 : 1;
-  }
-  if (left.authorizedAt.logIndex !== right.authorizedAt.logIndex) {
-    return left.authorizedAt.logIndex - right.authorizedAt.logIndex;
+  const position = compareChainPointers(left.authorizedAt, right.authorizedAt);
+  if (position !== 0) {
+    return position;
   }
   return left.submitter.localeCompare(right.submitter);
 }

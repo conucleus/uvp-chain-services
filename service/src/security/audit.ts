@@ -1,7 +1,7 @@
 import type { Logger } from "../shared/types.js";
 import { redactSecrets } from "./redaction.js";
 
-export type AuditOutcome = "accepted" | "blocked" | "failed" | "succeeded" | "duplicate" | "rejected" | "retry";
+export type AuditOutcome = "accepted" | "blocked" | "failed" | "succeeded" | "duplicate" | "rejected" | "retry" | "skipped";
 
 export interface AuditEvent {
   readonly type: string;

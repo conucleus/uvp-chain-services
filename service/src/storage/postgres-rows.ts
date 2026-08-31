@@ -37,6 +37,14 @@ export function numberColumn(record: Record<string, unknown>, key: string): numb
   return value;
 }
 
+export function optionalNumberColumn(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  return numberColumn(record, key);
+}
+
 export function booleanColumn(record: Record<string, unknown>, key: string): boolean {
   const value = record[key];
   if (typeof value !== "boolean") {

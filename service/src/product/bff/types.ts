@@ -14,6 +14,7 @@ export type DraftParticipantStatus = "missing" | "invited" | "accepted" | "rejec
 export type ProductInviteStatus = "active" | "accepted" | "rejected" | "expired" | "revoked";
 export type PermissionPayloadPolicy = "required" | "optional";
 export type ProductOrderTriggerStatus =
+  | "pending"
   | "prepared"
   | "submitted"
   | "indexing"
@@ -139,7 +140,6 @@ export interface CreateProductOrderDraftInput {
   readonly expectedCompletionDate?: string;
   readonly notes?: string;
   readonly createdBy?: string;
-  readonly allowDemoPlanFallback?: boolean;
 }
 
 export interface UpdateProductOrderDraftInput {

@@ -248,6 +248,13 @@ export type SubmissionBroadcastResult =
     };
 
 export interface SubmissionBroadcastAdapter {
+  /**
+   * Capability flag: does this adapter actually broadcast to chain?
+   * Adapters that cannot broadcast must declare `attemptsBroadcast: false`
+   * so callers never reserve nonces or consume prepared submissions for
+   * transactions that will never be sent.
+   */
+  readonly attemptsBroadcast?: boolean;
   broadcast(request: SubmissionBroadcastRequest): Promise<SubmissionBroadcastResult>;
 }
 

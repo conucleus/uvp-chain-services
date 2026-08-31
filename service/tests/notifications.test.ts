@@ -267,7 +267,7 @@ describe("signal-routed notifications", () => {
       deliveryReasonCode: "transport_adapter_missing"
     }));
 
-    const router = createApiRouter(store, { notificationService: service, storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService: service, storeSupplierMetadataStore: supplierStore });
     await expect(router.handle({
       method: "GET",
       pathname: "/admin/notifications/redacted-evidence",
@@ -339,7 +339,7 @@ describe("signal-routed notifications", () => {
         }
       }
     });
-    const router = createApiRouter(store, { notificationService, storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService, storeSupplierMetadataStore: supplierStore });
 
     const deliveriesResponse = await router.handle({
       method: "GET",
@@ -395,7 +395,7 @@ describe("signal-routed notifications", () => {
         signalEvent(6n, requiredDependency(customsDependencyA))
       ]
     });
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       notificationService: serviceFor(store, supplierStore),
       storeSupplierMetadataStore: supplierStore
     });
@@ -439,7 +439,7 @@ describe("signal-routed notifications", () => {
       createdAt: "2026-05-01T00:00:00.000Z",
       updatedAt: "2026-05-01T00:00:00.000Z"
     });
-    const router = createApiRouter(store, { storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeSupplierMetadataStore: supplierStore });
     const notification = notificationProfile(account.address.toLowerCase() as Address);
     const body = {
       wallet: account.address,

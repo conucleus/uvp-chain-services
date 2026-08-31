@@ -26,6 +26,7 @@ import {
   booleanColumn,
   nullableStringColumn,
   numberColumn,
+  optionalNumberColumn,
   rowObject,
   stringColumn,
 } from "./postgres-rows.js";
@@ -315,15 +316,16 @@ export class PostgresProjectionStore implements DurableProjectionStore {
 
     await this.#database.query(
       `INSERT INTO chain_event_log (
-         chain_id, contract_address, block_number, transaction_hash, log_index,
+         chain_id, contract_address, block_number, transaction_hash, transaction_index, log_index,
          event_id, event_name, args_json, removed, block_hash, created_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)
        ON CONFLICT DO NOTHING`,
       [
         event.chainId,
         normalizedContract,
         event.blockNumber.toString(),
         event.transactionHash.toLowerCase(),
+        event.transactionIndex ?? null,
         event.logIndex,
         chainEventKey({ ...event, contractAddress: normalizedContract }),
         event.eventName,
@@ -357,6 +359,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
          contract_address AS "contractAddress",
          block_number::text AS "blockNumber",
          transaction_hash AS "transactionHash",
+         transaction_index AS "transactionIndex",
          log_index AS "logIndex",
          event_name AS "eventName",
          args_json::text AS "argsJson",
@@ -364,7 +367,8 @@ export class PostgresProjectionStore implements DurableProjectionStore {
          block_hash AS "blockHash"
        FROM chain_event_log
        ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
-       ORDER BY chain_id ASC, block_number ASC, log_index ASC`,
+       ORDER BY chain_id ASC, block_number ASC,
+         transaction_index ASC, log_index ASC`,
       values,
     );
 
@@ -538,6 +542,7 @@ function eventRow(row: unknown): ChainEvent {
   const record = rowObject(row, "chain_event_log query");
   const blockHash = nullableStringColumn(record, "blockHash");
   const removed = booleanColumn(record, "removed");
+  const transactionIndex = optionalNumberColumn(record, "transactionIndex");
   return {
     chainId: numberColumn(record, "chainId"),
     contractAddress: normalizeAddress(
@@ -546,6 +551,7 @@ function eventRow(row: unknown): ChainEvent {
     ),
     blockNumber: BigInt(stringColumn(record, "blockNumber")),
     transactionHash: stringColumn(record, "transactionHash") as Hex,
+    ...(transactionIndex !== undefined ? { transactionIndex } : {}),
     logIndex: numberColumn(record, "logIndex"),
     eventName: stringColumn(record, "eventName"),
     args: parseStorageJson<Record<string, unknown>>(

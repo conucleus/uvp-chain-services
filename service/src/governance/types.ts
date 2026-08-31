@@ -105,6 +105,8 @@ export interface IdentityTxLogDTO extends TxReconcileFields {
   readonly requester: string;
   readonly status: GovernanceTxLogStatus;
   readonly broadcastStatus: GovernanceBroadcastStatus;
+  /** Explicit marker for how the entry was produced; "simulated" entries never hit chain and are skipped by reconciliation. */
+  readonly executionMode?: "simulated" | "on_chain";
   readonly errorCode?: string;
   readonly errorMessage?: string;
   readonly retryable: boolean;

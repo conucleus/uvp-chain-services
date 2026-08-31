@@ -167,7 +167,14 @@ export class TxReconcileWorker implements LifecycleService {
     if (this.#governanceStore) {
       const logs = (await this.#governanceStore.listIdentityTxLogs())
         .filter(isReconcileableGovernanceLog);
-      for (const log of logs) {
+      const actionable = logs.filter((log) => !isSimulatedGovernanceLog(log));
+      const skippedSimulatedCount = logs.length - actionable.length;
+      if (skippedSimulatedCount > 0) {
+        this.#logger.warn("reconcile worker skipped simulated governance ledger entries; they never hit chain and cannot be reconciled", {
+          skippedSimulatedCount
+        });
+      }
+      for (const log of actionable) {
         summary.governanceLogsChecked += 1;
         const updated = await this.#reconcileGovernanceLog(log);
         if (updated) {
@@ -488,6 +495,10 @@ function isReconcileableSubmission(submission: ProductSubmissionDTO): boolean {
 
 function isReconcileableGovernanceLog(log: GovernanceTxLogDTO): boolean {
   return log.status === "pending" || log.status === "broadcasting" || log.status === "indexing";
+}
+
+function isSimulatedGovernanceLog(log: GovernanceTxLogDTO): boolean {
+  return log.executionMode === "simulated" || log.broadcastStatus === "simulated_tx";
 }
 
 async function registrationProjectionConfirmation(

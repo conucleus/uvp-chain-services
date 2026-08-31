@@ -47,6 +47,7 @@ export function createSecureSubmissionBroadcastAdapter(
   const txHashOwners = new Map<string, string>();
 
   return {
+    attemptsBroadcast: options.adapter.attemptsBroadcast !== false,
     async broadcast(request) {
       const idempotencyKey = request.prepared.idempotencyKey;
       const orderKey = request.prepared.onchainOrderId;

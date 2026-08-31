@@ -14,6 +14,7 @@ import {
   crossBorderPlanIds,
 } from "@uvp-eth/product-dto/fixtures";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
+import { crossBorderSchemaResolver } from "./cross-border-schema.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import type { ProjectionSnapshot } from "../src/indexer/projections.js";
 import { SqliteEvidenceStore } from "../src/evidence/sqlite-store.js";
@@ -95,6 +96,7 @@ const expectedMigrationVersions = [
   "0008_store_audit",
   "0009_product_trigger_prepare",
   "0010_store_supplier_capability_audit",
+  "0011_canonical_chain_event_order",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -175,7 +177,7 @@ describe("durable storage", () => {
     ).toHaveLength(0);
   });
 
-  it("absorbs duplicate projection event inserts idempotently", async () => {
+  it("deduplicates the same event but retains same-position logs from different transactions", async () => {
     const store = openStore(tempDirs);
     stores.push(store);
     const event = chainEvent(10n, 0, "OrderCreated", {
@@ -184,8 +186,8 @@ describe("durable storage", () => {
       seller,
     });
 
-    await store.appendEvent(event);
-    await expect(store.appendEvent(event)).resolves.toBeUndefined();
+    await store.appendEvent({ ...event, transactionIndex: 0 });
+    await expect(store.appendEvent({ ...event, transactionIndex: 0 })).resolves.toBeUndefined();
 
     await expect(
       store.listEvents({ chainId, contractAddress }),
@@ -195,11 +197,17 @@ describe("durable storage", () => {
       ...event,
       transactionHash:
         "0x9999999999999999999999999999999999999999999999999999999999999999" as const,
+      transactionIndex: 1,
     };
     await expect(store.appendEvent(sameLogIndexDifferentTx)).resolves.toBeUndefined();
     await expect(
       store.listEvents({ chainId, contractAddress }),
-    ).resolves.toHaveLength(1);
+    ).resolves.toHaveLength(2);
+    await expect(
+      store.listEvents({ chainId, contractAddress }),
+    ).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ transactionIndex: 1 }),
+    ]));
   });
 
   it("rolls back writes when a transaction fails", async () => {
@@ -1501,7 +1509,7 @@ function openGovernanceStore(databaseUrl: string): SqliteGovernanceStore {
 }
 
 function createStoreMetadataRouter(stores: ChainServicesStores): ApiRouter {
-  return createApiRouter(stores.projectionStore, {
+  return createApiRouter(stores.projectionStore, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
     productBffStore: stores.productBffStore,
     evidenceMetadataStore: stores.evidenceMetadataStore,
     submissionStore: stores.submissionStore,

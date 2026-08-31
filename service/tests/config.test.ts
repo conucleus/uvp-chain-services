@@ -2,7 +2,20 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildConfigDiagnostics, loadConfigFromEnv, runConfigPreflight } from "../src/config/index.js";
+import { buildConfigDiagnostics, loadConfigFromEnv as loadRawConfigFromEnv, runConfigPreflight } from "../src/config/index.js";
+
+// Storage driver/URL and the registration adapter are mandatory in every
+// environment now; tests that do not assert those failures get explicit
+// defaults injected here.
+const MANDATORY_STORAGE_AND_REGISTRATION_ENV = {
+  CHAIN_SERVICES_DATABASE_DRIVER: "memory",
+  CHAIN_SERVICES_DATABASE_URL: "memory://projection-store",
+  UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+} as const;
+
+function loadConfigFromEnv(env: Record<string, string | undefined> = {}): ReturnType<typeof loadRawConfigFromEnv> {
+  return loadRawConfigFromEnv({ ...MANDATORY_STORAGE_AND_REGISTRATION_ENV, ...env });
+}
 import { createApiRouter } from "../src/api/routes.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
@@ -172,9 +185,14 @@ describe("chain-services config", () => {
     expect(config.network.contracts.UVPIdentityRegistry).toBe("0x2222222222222222222222222222222222222222");
   });
 
-  it("defaults durable storage to the memory driver", () => {
-    const config = loadConfigFromEnv({});
+  it("requires the durable storage driver and URL to be declared explicitly", () => {
+    expect(() => loadRawConfigFromEnv({})).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
 
+    expect(() => loadRawConfigFromEnv({
+      CHAIN_SERVICES_DATABASE_DRIVER: "memory"
+    })).toThrow(/CHAIN_SERVICES_DATABASE_URL is required/);
+
+    const config = loadConfigFromEnv({});
     expect(config.database).toEqual({
       driver: "memory",
       url: "memory://projection-store",
@@ -226,13 +244,10 @@ describe("chain-services config", () => {
     });
   });
 
-  it("infers postgres driver from database URL", () => {
-    const config = loadConfigFromEnv({
+  it("does not infer a storage driver from the database URL", () => {
+    expect(() => loadRawConfigFromEnv({
       CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:uvp@127.0.0.1:5432/uvp"
-    });
-
-    expect(config.database.driver).toBe("postgres");
-    expect(config.database.url).toBe("postgres://uvp:uvp@127.0.0.1:5432/uvp");
+    })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
   });
 
   it("loads security hardening config", () => {
@@ -304,7 +319,7 @@ describe("chain-services config", () => {
     }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in testnet/);
 
     const { CHAIN_SERVICES_DATABASE_URL: _databaseUrl, ...missingDatabaseUrl } = testnetEnv(databaseUrl);
-    expect(() => loadConfigFromEnv(missingDatabaseUrl)).toThrow(/CHAIN_SERVICES_DATABASE_URL is required/);
+    expect(() => loadRawConfigFromEnv(missingDatabaseUrl)).toThrow(/CHAIN_SERVICES_DATABASE_URL is required/);
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       CHAIN_SERVICES_DATABASE_DRIVER: "sqlite",
@@ -345,9 +360,11 @@ describe("chain-services config", () => {
   it("rejects testnet demo controls, permissive auth, memory registration, and unsafe keys", () => {
     const databaseUrl = testnetPostgresConfigUrl();
 
-    expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
+    // UVP_PRODUCT_DEMO_MODE no longer exists; unknown keys are ignored and no
+    // demo fallback can be enabled anywhere.
+    expect(loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_PRODUCT_DEMO_MODE: "1"
-    }))).toThrow(/UVP_PRODUCT_DEMO_MODE/);
+    })).security.environment).toBe("testnet");
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_PRODUCT_E2E_FIXTURES: "1"
@@ -359,7 +376,11 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory"
-    }))).toThrow(/REGISTRATION_ADAPTER=memory/);
+    }))).toThrow(/UVP_PRODUCT_BFF_REGISTRATION_ADAPTER must be memory-trigger or anvil/);
+
+    expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
+      UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+    }))).toThrow(/REGISTRATION_ADAPTER=anvil is required in testnet/);
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED: "false"
@@ -411,7 +432,6 @@ describe("chain-services config", () => {
         identityRegistryConfigured: true
       },
       product: {
-        demoMode: false,
         e2eControls: false,
         registrationAdapter: "anvil",
         permissiveAuthorizationRequested: false
@@ -516,7 +536,7 @@ describe("chain-services config", () => {
     }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres/);
 
     const { CHAIN_SERVICES_DATABASE_URL: _databaseUrl, ...missingDatabaseUrl } = stagingEnv(tempDirs);
-    expect(() => loadConfigFromEnv(missingDatabaseUrl)).toThrow(/CHAIN_SERVICES_DATABASE_URL/);
+    expect(() => loadRawConfigFromEnv(missingDatabaseUrl)).toThrow(/CHAIN_SERVICES_DATABASE_URL/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "true"
@@ -538,9 +558,11 @@ describe("chain-services config", () => {
       UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object"
     }))).toThrow(/UVP_EVIDENCE_STORAGE_ADAPTER=s3/);
 
-    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+    // UVP_PRODUCT_DEMO_MODE no longer exists; unknown keys are ignored and no
+    // demo fallback can be enabled anywhere.
+    expect(loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_DEMO_MODE: "1"
-    }))).toThrow(/UVP_PRODUCT_DEMO_MODE/);
+    })).security.environment).toBe("staging");
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_E2E_FIXTURES: "1"
@@ -552,7 +574,11 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory"
-    }))).toThrow(/REGISTRATION_ADAPTER=anvil/);
+    }))).toThrow(/UVP_PRODUCT_BFF_REGISTRATION_ADAPTER must be memory-trigger or anvil/);
+
+    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+      UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+    }))).toThrow(/REGISTRATION_ADAPTER=anvil is required in staging/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: "false"
@@ -717,7 +743,6 @@ describe("chain-services config", () => {
         opsConsoleAdmin: { configuredCount: 1 }
       },
       product: {
-        demoMode: false,
         e2eControls: false,
         registrationAdapter: "anvil",
         permissiveAuthorizationRequested: false
@@ -804,10 +829,10 @@ describe("chain-services config", () => {
   });
 
   it("rejects production non-Postgres storage, unsafe migrations, and Anvil default private keys", () => {
-    expect(() => loadConfigFromEnv({
+    expect(() => loadRawConfigFromEnv({
       CHAIN_SERVICES_RUNTIME_ENV: "production",
       ...storeAuthJwtEnv
-    })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production/);
+    })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
 
     expect(() => loadConfigFromEnv(productionEnv({
       CHAIN_SERVICES_DATABASE_DRIVER: "sqlite",
@@ -823,12 +848,49 @@ describe("chain-services config", () => {
     }))).toThrow(/Anvil default private key/);
   });
 
+  it("requires fully configured s3 evidence storage in production", () => {
+    const { UVP_EVIDENCE_STORAGE_ADAPTER: _adapter, ...missingAdapter } = productionEnv();
+    expect(() => loadConfigFromEnv(missingAdapter)).toThrow(
+      /UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in production/
+    );
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_EVIDENCE_STORAGE_ADAPTER: "local"
+    }))).toThrow(/UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in production/);
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object"
+    }))).toThrow(/UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in production/);
+
+    const { UVP_EVIDENCE_S3_BUCKET: _bucket, ...missingBucket } = productionEnv();
+    expect(() => loadConfigFromEnv(missingBucket)).toThrow(
+      /UVP_EVIDENCE_S3_BUCKET is required in production/
+    );
+
+    const { UVP_EVIDENCE_S3_REGION: _region, ...missingRegion } = productionEnv();
+    expect(() => loadConfigFromEnv(missingRegion)).toThrow(
+      /UVP_EVIDENCE_S3_REGION is required in production/
+    );
+
+    const { UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV: _accessKeyEnv, ...missingAccessKeyEnv } = productionEnv();
+    expect(() => loadConfigFromEnv(missingAccessKeyEnv)).toThrow(
+      /UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV is required in production/
+    );
+
+    const { UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV: _secretKeyEnv, ...missingSecretKeyEnv } = productionEnv();
+    expect(() => loadConfigFromEnv(missingSecretKeyEnv)).toThrow(
+      /UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV is required in production/
+    );
+  });
+
   it("rejects production demo, test controls, permissive auth, redaction gaps, and mock registration", () => {
     expect(loadConfigFromEnv(productionEnv()).security.environment).toBe("production");
 
-    expect(() => loadConfigFromEnv(productionEnv({
+    // UVP_PRODUCT_DEMO_MODE no longer exists; unknown keys are ignored and no
+    // demo fallback can be enabled anywhere.
+    expect(loadConfigFromEnv(productionEnv({
       UVP_PRODUCT_DEMO_MODE: "1"
-    }))).toThrow(/UVP_PRODUCT_DEMO_MODE/);
+    })).security.environment).toBe("production");
 
     expect(() => loadConfigFromEnv(productionEnv({
       UVP_PRODUCT_E2E_FIXTURES: "1"
@@ -859,7 +921,11 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(productionEnv({
       UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory"
-    }))).toThrow(/REGISTRATION_ADAPTER=memory/);
+    }))).toThrow(/UVP_PRODUCT_BFF_REGISTRATION_ADAPTER must be memory-trigger or anvil/);
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+    }))).toThrow(/REGISTRATION_ADAPTER=anvil is required in production/);
 
     expect(() => loadConfigFromEnv(productionEnv({
       GOVERNANCE_BROADCAST_ENABLED: "true",
@@ -1046,14 +1112,13 @@ describe("chain-services config", () => {
         UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222"
       }
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { configDiagnostics: diagnostics });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", configDiagnostics: diagnostics });
     const response = await router.handle({ method: "GET", pathname: "/healthz" });
 
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       diagnostics: {
         environment: "local",
-        demoMode: false,
         e2eControls: false,
         storageDriver: "sqlite",
         relayerConfigured: true,
@@ -1061,9 +1126,8 @@ describe("chain-services config", () => {
         governance: { broadcastEnabled: false },
         storage: { driver: "sqlite", durable: true },
         product: {
-          demoMode: false,
           e2eControls: false,
-          registrationAdapter: "memory",
+          registrationAdapter: "memory-trigger",
           permissiveAuthorizationRequested: false
         },
         security: {
@@ -1096,7 +1160,7 @@ describe("chain-services config", () => {
         checks: [{ name: "store_metadata.durable", status: "passed" }]
       }
     });
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: diagnostics,
       productRuntimeEnvironment: "production",
       evidenceStorage: productionSafeEvidenceStorage()
@@ -1134,6 +1198,11 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Reco
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
     ...storeAuthJwtEnv,
     UVP_CONTRACTS_JSON: productionContracts,
+    UVP_EVIDENCE_STORAGE_ADAPTER: "s3",
+    UVP_EVIDENCE_S3_BUCKET: "uvp-production-evidence",
+    UVP_EVIDENCE_S3_REGION: "us-east-1",
+    UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV: "UVP_PRODUCTION_EVIDENCE_S3_ACCESS_KEY_ID",
+    UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV: "UVP_PRODUCTION_EVIDENCE_S3_SECRET_ACCESS_KEY",
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: productionRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: productionRelayerPrivateKey,

@@ -10,6 +10,7 @@ import {
 } from "../shared/protocol-constants.js";
 import {
   ConfigError,
+  compareChainPointers,
   normalizeAddress,
   normalizeBytes32,
   type Address,
@@ -1768,23 +1769,24 @@ function expectedPreviousExecutorForPatch(
 function compareSignalSubmissionOrder(
   left: {
     readonly submittedAt: {
+      readonly chainId: number;
       readonly blockNumber: bigint;
+      readonly transactionIndex?: number;
+      readonly transactionHash: Hex;
       readonly logIndex: number;
     };
   },
   right: {
     readonly submittedAt: {
+      readonly chainId: number;
       readonly blockNumber: bigint;
+      readonly transactionIndex?: number;
+      readonly transactionHash: Hex;
       readonly logIndex: number;
     };
   },
 ): number {
-  if (left.submittedAt.blockNumber !== right.submittedAt.blockNumber) {
-    return left.submittedAt.blockNumber < right.submittedAt.blockNumber
-      ? -1
-      : 1;
-  }
-  return left.submittedAt.logIndex - right.submittedAt.logIndex;
+  return compareChainPointers(left.submittedAt, right.submittedAt);
 }
 
 function nextStageExecutorPatchNonce(

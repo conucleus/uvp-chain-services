@@ -57,7 +57,7 @@ describe("identity registry projection", () => {
     });
 
     expect(await store.listIdentityBindings({ account })).toHaveLength(1);
-    const response = await createApiRouter(store).handle({
+    const response = await createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({
       method: "GET",
       pathname: "/identity/bindings",
       query: { registryAddress, account },

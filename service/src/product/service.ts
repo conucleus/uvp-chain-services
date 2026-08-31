@@ -14,12 +14,6 @@ import {
   type ZhixuStageDTO,
   type ZhixuSummaryDTO,
 } from "@uvp-eth/product-dto";
-import {
-  CROSS_BORDER_ZHIXU_ID,
-  crossBorderPlanIds,
-  demoOrder,
-  demoProductCatalog,
-} from "@uvp-eth/product-dto/fixtures";
 import { keccak256, stringToBytes, type Hex } from "viem";
 import type {
   EventProofArgs,
@@ -40,12 +34,14 @@ import type {
   ProjectionStore,
   ProjectionSyncState,
 } from "../storage/projection-store.js";
+import { compareChainPointers } from "../shared/types.js";
 
 export interface ProductChainProofDTO {
   readonly eventId: string;
   readonly chainId: number;
   readonly contractAddress: string;
   readonly blockNumber: string;
+  readonly transactionIndex?: number;
   readonly transactionHash: string;
   readonly logIndex: number;
   readonly eventName: string;
@@ -274,20 +270,27 @@ export function createProductService(
   return {
     async listZhixu() {
       const snapshot = await store.getOrderSnapshot();
-      return demoProductCatalog.zhixus.map((zhixu) =>
-        summarizeZhixu(withPlanPublication(zhixu, snapshot.stateMachinePlans)),
+      const rows = await Promise.all(
+        Object.values(snapshot.stateMachinePlans).map(async (plan) => {
+          const schema = await explicitStoreSchemaForPlan(plan, productSchemaResolver);
+          const detail = schema ? zhixuDetailFromProductSchema(schema) : zhixuDetailFromPlan(plan);
+          return summarizeZhixu(overlayPlanPublication(detail, plan));
+        }),
       );
+      return rows.sort((left, right) => left.zhixuId.localeCompare(right.zhixuId));
     },
 
     async getZhixu(zhixuId) {
-      const zhixu = demoProductCatalog.zhixus.find(
-        (item) => item.zhixuId === zhixuId,
-      );
-      if (!zhixu) {
-        return undefined;
-      }
       const snapshot = await store.getOrderSnapshot();
-      return withPlanPublication(zhixu, snapshot.stateMachinePlans);
+      for (const plan of Object.values(snapshot.stateMachinePlans)) {
+        const schema = await explicitStoreSchemaForPlan(plan, productSchemaResolver);
+        const candidateZhixuId = schema?.zhixuId ?? zhixuIdFromPlanId(plan.planId);
+        if (candidateZhixuId === zhixuId) {
+          const detail = schema ? zhixuDetailFromProductSchema(schema) : zhixuDetailFromPlan(plan);
+          return overlayPlanPublication(detail, plan);
+        }
+      }
+      return undefined;
     },
 
     async listOrders() {
@@ -500,29 +503,42 @@ export function createProductService(
   };
 }
 
-function withPlanPublication<TZhixu extends ZhixuDetailDTO>(
-  zhixu: TZhixu,
-  plans: ProjectionSnapshot["stateMachinePlans"],
-): TZhixu {
-  const plan = Object.values(plans).find(
-    (candidate) =>
-      hexStringEquals(candidate.planId, zhixu.planPublication.planId) &&
-      hexStringEquals(candidate.planHash, zhixu.planPublication.planHash),
-  );
-  if (!plan) {
-    return zhixu;
-  }
+function zhixuDetailFromPlan(
+  plan: ProjectionSnapshot["stateMachinePlans"][string],
+): ZhixuDetailDTO {
+  const zhixuId = zhixuIdFromPlanId(plan.planId);
   return {
-    ...zhixu,
+    zhixuId,
+    title: `链上秩序 ${shortId(plan.planId)}`,
+    subtitle:
+      "该秩序由链上 Plan 事件重建；业务 schema 未在 Store 登记前不提供阶段与角色解释。",
+    reviewStatus: "unreviewed",
+    reviewLabel: "Store 审核未登记",
+    riskLevel: "以 Store 审核记录为准",
+    applicableBusiness: [],
+    excludedBusiness: [],
+    stageCount: 0,
+    roleSlotCount: 0,
+    supportedPaymentMethods: [],
+    maintainer: plan.publisher ?? "未登记",
+    updatedAt: `block ${plan.updatedAt.blockNumber.toString()}`,
     planPublication: {
-      ...zhixu.planPublication,
       status: "published",
       label: "Plan 已发布",
       stateMachineLabel: plan.stateMachineAddress,
+      planId: plan.planId,
+      planHash: plan.planHash,
       txHash: plan.proof.transactionHash,
       blockNumber: plan.proof.blockNumber.toString(),
       ...(plan.publisher ? { publisher: plan.publisher } : {}),
     },
+    roleSlots: [],
+    dockableModules: [],
+    stages: [],
+    orderPermissionTable: [],
+    proofRows: proofRowsFromProof(proofFromStateMachineProof(plan.proof)),
+    createOrderHint:
+      "订单创建必须使用链上 planId/planHash，并由 Product API 按该 schema 解释普通用户任务。",
   };
 }
 
@@ -557,12 +573,13 @@ async function productOrderFromStateMachine(
     activeTask?.stageName ??
     stages.find((stage) => stage.stageId === currentStageId)?.name ??
     displayBytes32(order.currentStage, "当前阶段");
+  const orderZhixuId = await zhixuIdForOrderProjection(order, productSchemaResolver);
 
   return {
     orderId: order.orderId,
     stateMachineAddress: order.contractAddress,
     ...(order.deploymentId ? { deploymentId: order.deploymentId } : {}),
-    zhixuId: zhixuIdForPlan(order),
+    zhixuId: orderZhixuId,
     title: `链上订单 ${shortId(order.orderId)}`,
     status: mapStateMachineOrderStatus(order.status),
     statusLabel: mapStateMachineOrderStatusLabel(order.status),
@@ -582,10 +599,7 @@ async function productOrderFromStateMachine(
     ...(Object.keys(resourceRequirements).length > 0
       ? { resourceRequirements }
       : {}),
-    participants:
-      zhixuIdForPlan(order) === CROSS_BORDER_ZHIXU_ID
-        ? demoOrder.participants
-        : [],
+    participants: [],
     recentEvents: timeline
       .slice(-3)
       .reverse()
@@ -738,7 +752,7 @@ async function productTaskFromStateMachineTask(
     stateMachineAddress: task.stateMachineAddress,
     ...(task.deploymentId ? { deploymentId: task.deploymentId } : {}),
     orderTitle,
-    zhixuId: order ? zhixuIdForPlan(order) : CROSS_BORDER_ZHIXU_ID,
+    zhixuId: order ? await zhixuIdForOrderProjection(order, productSchemaResolver) : "not_found",
     title: hookLabel === "链上待办" ? "处理链上待办" : `处理${hookLabel}`,
     subtitle: `${stageName} 已满足链上触发条件，需要继续处理。`,
     assigneeRole: displayAssigneeRole(task.assigneeRole),
@@ -1106,13 +1120,7 @@ async function zhixuDetailForOrder(
     return zhixuDetailFromProductSchema(storeSchema);
   }
 
-  const catalogZhixu = demoProductCatalog.zhixus.find((zhixu) =>
-    zhixuMatchesOrderPlan(zhixu, order),
-  );
-  if (catalogZhixu) {
-    return catalogZhixu;
-  }
-
+  // Schema 未登记时不再回退到任何内置目录；调用方按显式缺失处理。
   return undefined;
 }
 
@@ -1209,21 +1217,8 @@ function zhixuIdFromPlanIdentity(planId: string, planHash: string): string {
   return `plan-${shortId(planId)}-${shortId(planHash)}`;
 }
 
-function zhixuMatchesOrderPlan(
-  zhixu: ZhixuDetailDTO,
-  order: StateMachineOrderProjection,
-): boolean {
-  if (!hexStringEquals(zhixu.planPublication.planId, order.planId)) {
-    return false;
-  }
-  return (
-    order.planHash === undefined ||
-    hexStringEquals(zhixu.planPublication.planHash, order.planHash)
-  );
-}
-
-function hexStringEquals(left: string, right: string): boolean {
-  return left.toLowerCase() === right.toLowerCase();
+function zhixuIdFromPlanId(planId: string): string {
+  return `plan-${shortId(planId)}`;
 }
 
 function taskCapabilityPluginFromSlot(
@@ -1813,6 +1808,9 @@ function proofFromStateMachineProof(
     chainId: proof.chainId,
     contractAddress: proof.contractAddress,
     blockNumber: proof.blockNumber.toString(),
+    ...(proof.transactionIndex !== undefined
+      ? { transactionIndex: proof.transactionIndex }
+      : {}),
     transactionHash: proof.transactionHash,
     logIndex: proof.logIndex,
     eventName: proof.eventName,
@@ -1928,11 +1926,73 @@ function paymentConditionSummaryFromStateMachine(
 }
 
 function zhixuIdForPlan(order: StateMachineOrderProjection): string {
-  return order.planId === crossBorderPlanIds.planId ||
-    (order.planHash !== undefined &&
-      order.planHash === crossBorderPlanIds.planHash)
-    ? CROSS_BORDER_ZHIXU_ID
-    : `plan-${shortId(order.planId)}`;
+  return zhixuIdFromPlanId(order.planId);
+}
+
+/**
+ * The zhixu id of an order/task follows the Store-registered schema for its
+ * plan when one exists; otherwise it falls back to the plan-derived id so the
+ * id always points at a real catalog entry built from the same projection.
+ */
+async function zhixuIdForOrderProjection(
+  order: StateMachineOrderProjection,
+  productSchemaResolver?: ProductSchemaResolver,
+): Promise<string> {
+  const schema = await explicitStoreSchemaForPlanId(order.planId, order.planHash, productSchemaResolver);
+  return schema?.zhixuId ?? zhixuIdForPlan(order);
+}
+
+/**
+ * Catalog entries describe the same plan the chain published. When the plan
+ * projection exists, its publication evidence overrides the schema bundle's
+ * "not yet synced" placeholder.
+ */
+function overlayPlanPublication(
+  detail: ZhixuDetailDTO,
+  plan: ProjectionSnapshot["stateMachinePlans"][string] | undefined,
+): ZhixuDetailDTO {
+  if (!plan) {
+    return detail;
+  }
+  return {
+    ...detail,
+    planPublication: {
+      status: "published",
+      label: "Plan 已发布",
+      stateMachineLabel: plan.stateMachineAddress,
+      planId: plan.planId,
+      planHash: plan.planHash,
+      txHash: plan.proof.transactionHash,
+      blockNumber: plan.proof.blockNumber.toString(),
+      ...(plan.publisher ? { publisher: plan.publisher } : {}),
+      ...(detail.planPublication.artifactHash
+        ? { artifactHash: detail.planPublication.artifactHash }
+        : {}),
+    },
+  };
+}
+
+async function explicitStoreSchemaForPlan(
+  plan: ProjectionSnapshot["stateMachinePlans"][string],
+  productSchemaResolver?: ProductSchemaResolver,
+): Promise<StoreProductSchemaDTO | undefined> {
+  if (!productSchemaResolver || !plan.planHash) {
+    return undefined;
+  }
+  const schema = await productSchemaResolver.getProductSchemaByPlan(plan.planId, plan.planHash);
+  return schema && isExplicitStoreProductSchema(schema) ? schema : undefined;
+}
+
+async function explicitStoreSchemaForPlanId(
+  planId: string,
+  planHash: string | undefined,
+  productSchemaResolver?: ProductSchemaResolver,
+): Promise<StoreProductSchemaDTO | undefined> {
+  if (!productSchemaResolver || !planHash) {
+    return undefined;
+  }
+  const schema = await productSchemaResolver.getProductSchemaByPlan(planId, planHash);
+  return schema && isExplicitStoreProductSchema(schema) ? schema : undefined;
 }
 
 function planKey(planId: string, planHash: string): string {
@@ -2126,18 +2186,25 @@ function compareProductProof(
   left: ProductChainProofDTO,
   right: ProductChainProofDTO,
 ): number {
-  if (left.chainId !== right.chainId) {
-    return left.chainId - right.chainId;
-  }
-  const blockCompare = compareNumericStrings(
-    left.blockNumber,
-    right.blockNumber,
-  );
-  if (blockCompare !== 0) {
-    return blockCompare;
-  }
-  if (left.logIndex !== right.logIndex) {
-    return left.logIndex - right.logIndex;
+  const position = compareChainPointers({
+    chainId: left.chainId,
+    blockNumber: BigInt(left.blockNumber),
+    ...(left.transactionIndex !== undefined
+      ? { transactionIndex: left.transactionIndex }
+      : {}),
+    transactionHash: left.transactionHash as `0x${string}`,
+    logIndex: left.logIndex,
+  }, {
+    chainId: right.chainId,
+    blockNumber: BigInt(right.blockNumber),
+    ...(right.transactionIndex !== undefined
+      ? { transactionIndex: right.transactionIndex }
+      : {}),
+    transactionHash: right.transactionHash as `0x${string}`,
+    logIndex: right.logIndex,
+  });
+  if (position !== 0) {
+    return position;
   }
   return left.eventId.localeCompare(right.eventId);
 }
@@ -2146,25 +2213,7 @@ function compareProvenance(
   left: ProjectionProvenance,
   right: ProjectionProvenance,
 ): number {
-  if (left.chainId !== right.chainId) {
-    return left.chainId - right.chainId;
-  }
-  if (left.blockNumber !== right.blockNumber) {
-    return left.blockNumber < right.blockNumber ? -1 : 1;
-  }
-  if (left.logIndex !== right.logIndex) {
-    return left.logIndex - right.logIndex;
-  }
-  return left.transactionHash.localeCompare(right.transactionHash);
-}
-
-function compareNumericStrings(left: string, right: string): number {
-  if (!/^\d+$/.test(left) || !/^\d+$/.test(right)) {
-    return left.localeCompare(right);
-  }
-  const leftValue = BigInt(left);
-  const rightValue = BigInt(right);
-  return leftValue === rightValue ? 0 : leftValue < rightValue ? -1 : 1;
+  return compareChainPointers(left, right);
 }
 
 function displayStageId(value: string): string {

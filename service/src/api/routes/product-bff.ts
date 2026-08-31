@@ -224,7 +224,6 @@ function parseCreateDraftBody(body: unknown): CreateProductOrderDraftInput {
   const expectedCompletionDate = optionalString(record, "expectedCompletionDate");
   const notes = optionalString(record, "notes");
   const createdBy = optionalString(record, "createdBy");
-  const allowDemoPlanFallback = optionalBoolean(record, "allowDemoPlanFallback");
 
   return {
     zhixuId: requiredString(record, "zhixuId"),
@@ -237,8 +236,7 @@ function parseCreateDraftBody(body: unknown): CreateProductOrderDraftInput {
     ...(destinationRegion !== undefined ? { destinationRegion } : {}),
     ...(expectedCompletionDate !== undefined ? { expectedCompletionDate } : {}),
     ...(notes !== undefined ? { notes } : {}),
-    ...(createdBy !== undefined ? { createdBy } : {}),
-    ...(allowDemoPlanFallback !== undefined ? { allowDemoPlanFallback } : {})
+    ...(createdBy !== undefined ? { createdBy } : {})
   };
 }
 
@@ -361,16 +359,6 @@ function optionalString(record: Record<string, unknown>, field: string): string 
   return value.trim();
 }
 
-function optionalBoolean(record: Record<string, unknown>, field: string): boolean | undefined {
-  if (!Object.hasOwn(record, field)) {
-    return undefined;
-  }
-  const value = record[field];
-  if (typeof value !== "boolean") {
-    throw new ProductBffError(400, "invalid_body", `${field} must be a boolean`);
-  }
-  return value;
-}
 
 function optionalStringArray(record: Record<string, unknown>, field: string): readonly string[] | undefined {
   if (!Object.hasOwn(record, field)) {

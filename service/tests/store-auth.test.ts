@@ -25,7 +25,7 @@ const governanceAdminHeaders = {
 
 describe("Store operator identity and capability auth", () => {
   it("resolves Store sessions through the identity provider capability matrix", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(session(router, undefined)).resolves.toMatchObject({
       authenticated: false,
@@ -74,7 +74,7 @@ describe("Store operator identity and capability auth", () => {
   });
 
   it("fails Store writes closed when a principal lacks the named capability", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(router.handle({
       method: "POST",
@@ -107,7 +107,7 @@ describe("Store operator identity and capability auth", () => {
   });
 
   it("disables development header auth in staging and production runtime", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "staging",
       evidenceRuntimeEnvironment: "local"
     });

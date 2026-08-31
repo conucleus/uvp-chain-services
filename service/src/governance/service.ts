@@ -462,6 +462,7 @@ function identityLog(
     requester: principal.adminId,
     status: txLogStatusFromBroadcast(broadcast.status),
     broadcastStatus: broadcast.status,
+    executionMode: broadcast.simulated || broadcast.status === "simulated_tx" ? "simulated" : "on_chain",
     ...defaultGovernanceReconcileFields(broadcast),
     ...(broadcast.errorCode ? { errorCode: broadcast.errorCode } : {}),
     ...(broadcast.message ? { errorMessage: broadcast.message } : {}),
@@ -505,7 +506,7 @@ function broadcastFromLog(log: GovernanceTxLogDTO): GovernanceBroadcastResultDTO
     ...(log.errorCode ? { errorCode: log.errorCode } : {}),
     ...(log.errorMessage ? { message: log.errorMessage } : {}),
     retryable: log.retryable,
-    simulated: log.broadcastStatus === "simulated_tx"
+    simulated: log.broadcastStatus === "simulated_tx" || log.executionMode === "simulated"
   };
 }
 

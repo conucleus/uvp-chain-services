@@ -19,7 +19,6 @@ import {
 } from "../store-console/version.js";
 import {
   createProductSubmissionService,
-  permissiveProductProjectionAuthorization,
   type SubmissionAuthorizationAdapter,
   type SubmissionAuthorizationRequest,
   type SubmissionAuthorizationResult
@@ -42,9 +41,8 @@ import { createStoreDockingService, MemoryStoreDockingSessionStore } from "../st
 import { createStoreSupplierService, InMemoryStoreSupplierMetadataStore } from "../store-suppliers/service.js";
 import type { ApiRouteContext, ApiRouter, CreateApiRouterOptions } from "./route-context.js";
 import type { RouteModule } from "./route-module.js";
-import { createAdminOpsRouteModule } from "./routes/admin-ops.js";
 import { createDiagnosticsRouteModule } from "./routes/diagnostics.js";
-import { createProductE2EControls, createProductE2EControlsRouteModule } from "./routes/e2e-controls.js";
+import { createAdminOpsRouteModule } from "./routes/admin-ops.js";
 import { createEvidenceRouteModule } from "./routes/evidence.js";
 import { createGovernanceRouteModule } from "./routes/governance.js";
 import { createNotificationsRouteModule } from "./routes/notifications.js";
@@ -71,9 +69,6 @@ export type {
 export function createApiRouter(store: ProjectionStore, options: CreateApiRouterOptions = {}): ApiRouter {
   const audit = options.audit ?? noopAuditSink;
   const productRuntimeEnvironment = options.productRuntimeEnvironment ?? options.configDiagnostics?.environment;
-  const productionRuntime = productRuntimeEnvironment === "production";
-  const requestedProductDemoMode = options.productDemoMode ?? process.env.UVP_PRODUCT_DEMO_MODE === "1";
-  const productDemoMode = productionRuntime ? false : requestedProductDemoMode;
   const storeZhixuDraftStore = options.storeZhixuDraftStore ?? new MemoryStoreZhixuDraftStore();
   const storeZhixuVersionMetadataStore = options.storeZhixuVersionMetadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
   const storeSupplierMetadataStore = options.storeSupplierMetadataStore ?? new InMemoryStoreSupplierMetadataStore();
@@ -111,19 +106,21 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     metadataStore: storeZhixuVersionMetadataStore,
     ...(options.now ? { now: options.now } : {})
   });
-  const productE2eControls = createProductE2EControls(!productionRuntime && Boolean(options.productE2eControlsEnabled));
   const submissionAuthorization = options.productBffStore
     ? productBffStoreSubmissionAuthorization(options.productBffStore)
-    : productDemoMode
-      ? permissiveProductProjectionAuthorization()
-      : undefined;
+    : undefined;
+  const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
+  if (productTriggerChainId === undefined) {
+    throw new Error("productTriggerChainId or submissionChainId is required to create the Product BFF service");
+  }
   const productBffService = createProductBffService({
     productService,
     ...(options.productBffStore ? { store: options.productBffStore } : {}),
     ...(options.productRegistrationAdapter ? { registrationAdapter: options.productRegistrationAdapter } : {}),
     ...(options.productTriggerAdapter ? { triggerAdapter: options.productTriggerAdapter } : {}),
     ...(options.productRegistrationCreatorAddress ? { registrationCreatorAddress: options.productRegistrationCreatorAddress } : {}),
-    ...(options.productRegistrarAddress ? { registrarAddress: options.productRegistrarAddress } : {}), triggerChainId: options.productTriggerChainId ?? options.submissionChainId ?? 31337,
+    ...(options.productRegistrarAddress ? { registrarAddress: options.productRegistrarAddress } : {}),
+    triggerChainId: productTriggerChainId,
     versionResolver: storeZhixuVersionService,
     ...(options.now ? { now: options.now } : {})
   });
@@ -155,12 +152,20 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   });
   const supplierNotificationConfigService = options.supplierNotificationConfigService ??
     createSupplierNotificationProfileConfigService();
+  const submissionChainId = options.submissionChainId;
+  if (submissionChainId === undefined) {
+    throw new Error("submissionChainId is required to create the product submission service");
+  }
+  const submissionVerifyingContract = options.submissionVerifyingContract;
+  if (submissionVerifyingContract === undefined) {
+    throw new Error("submissionVerifyingContract is required to create the product submission service");
+  }
   const submissionService = options.submissionService ?? createProductSubmissionService({
     productTasks: productService,
     evidenceReader: evidenceService,
     ...(options.submissionStore ? { store: options.submissionStore } : {}),
-    ...(options.submissionChainId !== undefined ? { chainId: options.submissionChainId } : {}),
-    ...(options.submissionVerifyingContract ? { verifyingContract: options.submissionVerifyingContract } : {}),
+    chainId: submissionChainId,
+    verifyingContract: submissionVerifyingContract,
     ...(options.submissionBroadcastAdapter ? { broadcastAdapter: options.submissionBroadcastAdapter } : {}),
     ...(submissionAuthorization ? { authorization: submissionAuthorization } : {}),
     audit
@@ -247,8 +252,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     productDockedOrderLinkService,
     ...(options.submissionStore ? { submissionStore: options.submissionStore } : {}),
     ...(options.opsRecoveryActions ? { opsRecoveryActions: options.opsRecoveryActions } : {}),
-    productE2eControls,
-    productDemoMode,
     audit,
     buildDiagnostics,
     ...(options.onTxMined ? { onTxMined: options.onTxMined } : {}),
@@ -257,7 +260,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const modules: readonly RouteModule[] = [
     createDiagnosticsRouteModule(),
     createAdminOpsRouteModule(),
-    createProductE2EControlsRouteModule(),
     createStoreConsoleRouteModule(),
     createStoreComplianceRouteModule(),
     createStoreDockingRouteModule(),

@@ -3,6 +3,7 @@ import {
   ProjectionError,
   normalizeAddress,
   normalizeBytes32,
+  compareChainPointers,
   type Address,
   type ChainPointer,
   type Hex
@@ -20,6 +21,7 @@ export interface ProjectionProvenance {
   readonly chainId: number;
   readonly contractAddress: Address;
   readonly blockNumber: bigint;
+  readonly transactionIndex?: number;
   readonly transactionHash: Hex;
   readonly logIndex: number;
 }
@@ -1772,11 +1774,9 @@ function compareDeploymentSelection(
   if (status !== 0) {
     return status;
   }
-  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
-    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
-  }
-  if (left.updatedAt.logIndex !== right.updatedAt.logIndex) {
-    return right.updatedAt.logIndex - left.updatedAt.logIndex;
+  const position = compareChainPointers(right.updatedAt, left.updatedAt);
+  if (position !== 0) {
+    return position;
   }
   return left.deploymentId.localeCompare(right.deploymentId);
 }
@@ -1859,14 +1859,9 @@ function compareTimelineEvents(
 }
 
 function compareProofEvents(left: StateMachineProofProjection, right: StateMachineProofProjection): number {
-  if (left.chainId !== right.chainId) {
-    return left.chainId - right.chainId;
-  }
-  if (left.blockNumber !== right.blockNumber) {
-    return left.blockNumber < right.blockNumber ? -1 : 1;
-  }
-  if (left.logIndex !== right.logIndex) {
-    return left.logIndex - right.logIndex;
+  const position = compareChainPointers(left, right);
+  if (position !== 0) {
+    return position;
   }
   return left.eventId.localeCompare(right.eventId);
 }
@@ -1889,6 +1884,7 @@ function provenanceOf(pointer: ChainPointer): ProjectionProvenance {
     chainId: pointer.chainId,
     contractAddress: pointer.contractAddress,
     blockNumber: pointer.blockNumber,
+    ...(pointer.transactionIndex !== undefined ? { transactionIndex: pointer.transactionIndex } : {}),
     transactionHash: pointer.transactionHash,
     logIndex: pointer.logIndex
   };

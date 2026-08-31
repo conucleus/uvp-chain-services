@@ -17,7 +17,6 @@ export interface ConfigDiagnosticCheck {
 
 export interface ConfigDiagnostics {
   readonly environment: ChainServicesConfig["security"]["environment"];
-  readonly demoMode: boolean;
   readonly e2eControls: boolean;
   readonly storageDriver: string;
   readonly relayerConfigured: boolean;
@@ -112,7 +111,6 @@ export interface ConfigDiagnostics {
     readonly clockToleranceSeconds: number;
   };
   readonly product: {
-    readonly demoMode: boolean;
     readonly e2eControls: boolean;
     readonly registrationAdapter: ChainServicesConfig["productBff"]["registrationAdapter"];
     readonly permissiveAuthorizationRequested: boolean;
@@ -222,7 +220,6 @@ export function buildConfigDiagnostics(
     ? privateKeyAddress(config.governance.signerPrivateKey, "governance signer")
     : undefined;
   const governanceContractConfigured = Boolean(identityRegistry);
-  const demoMode = enabledEnv(env, "UVP_PRODUCT_DEMO_MODE");
   const e2eControls = enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES");
   const permissiveAuthorizationRequested = enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") ||
     isPermissiveAuthorizationRequested(env);
@@ -235,7 +232,6 @@ export function buildConfigDiagnostics(
 
   return {
     environment: config.security.environment,
-    demoMode,
     e2eControls,
     storageDriver: config.database.driver,
     relayerConfigured,
@@ -251,7 +247,6 @@ export function buildConfigDiagnostics(
     warnings: diagnosticWarnings(config, {
       relayerConfigured,
       relayerPrivateKeyConfigured,
-      demoMode,
       e2eControls,
       permissiveAuthorizationRequested
     }),
@@ -326,7 +321,6 @@ export function buildConfigDiagnostics(
       clockToleranceSeconds: storeAuth.clockToleranceSeconds
     },
     product: {
-      demoMode,
       e2eControls,
       registrationAdapter: config.productBff.registrationAdapter,
       permissiveAuthorizationRequested
@@ -506,16 +500,10 @@ function runProductionSafetyPreflight(
     pass(checks, "storage.migrations_auto_run");
   }
 
-  if (config.productBff.registrationAdapter === "memory") {
-    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=memory is forbidden in production");
+  if (config.productBff.registrationAdapter !== "anvil") {
+    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production");
   } else {
     pass(checks, "product.registration_adapter");
-  }
-
-  if (enabledEnv(env, "UVP_PRODUCT_DEMO_MODE")) {
-    fail(checks, errors, "product.demo_mode", "UVP_PRODUCT_DEMO_MODE=1 is forbidden in production");
-  } else {
-    pass(checks, "product.demo_mode");
   }
 
   if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
@@ -624,8 +612,8 @@ function runTestnetSafetyPreflight(
     fail(checks, errors, "contracts.identity_registry", "UVPIdentityRegistry contract address is required in testnet");
   }
 
-  if (config.productBff.registrationAdapter === "memory") {
-    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=memory is forbidden in testnet");
+  if (config.productBff.registrationAdapter !== "anvil") {
+    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in testnet");
   } else {
     pass(checks, "product.registration_adapter");
   }
@@ -640,12 +628,6 @@ function runTestnetSafetyPreflight(
     pass(checks, "evidence.storage_adapter");
   } else {
     fail(checks, errors, "evidence.storage_adapter", "UVP_EVIDENCE_STORAGE_ADAPTER=rehearsal-object is required in testnet");
-  }
-
-  if (enabledEnv(env, "UVP_PRODUCT_DEMO_MODE")) {
-    fail(checks, errors, "product.demo_mode", "UVP_PRODUCT_DEMO_MODE=1 is forbidden in testnet");
-  } else {
-    pass(checks, "product.demo_mode");
   }
 
   if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
@@ -781,11 +763,6 @@ function runStagingSafetyPreflight(
     pass(checks, "evidence.s3_object_namespace");
   }
 
-  if (enabledEnv(env, "UVP_PRODUCT_DEMO_MODE")) {
-    fail(checks, errors, "product.demo_mode", "UVP_PRODUCT_DEMO_MODE=1 is forbidden in staging");
-  } else {
-    pass(checks, "product.demo_mode");
-  }
   if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
     fail(checks, errors, "product.e2e_controls", "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in staging");
   } else {
@@ -945,8 +922,8 @@ function runProductRegistrationPreflight(
   checks: ConfigDiagnosticCheck[],
   errors: string[]
 ): void {
-  if (config.productBff.registrationAdapter === "memory") {
-    skip(checks, "product.registration_configured", "Product BFF registration adapter is memory");
+  if (config.productBff.registrationAdapter === "memory-trigger") {
+    skip(checks, "product.registration_configured", "Product BFF registration adapter is memory-trigger");
     return;
   }
 
@@ -1203,7 +1180,6 @@ function diagnosticWarnings(
   values: {
     readonly relayerConfigured: boolean;
     readonly relayerPrivateKeyConfigured: boolean;
-    readonly demoMode: boolean;
     readonly e2eControls: boolean;
     readonly permissiveAuthorizationRequested: boolean;
   }
@@ -1212,11 +1188,8 @@ function diagnosticWarnings(
   if (config.database.driver === "memory") {
     warnings.push("memory storage is non-durable");
   }
-  if (config.productBff.registrationAdapter === "memory") {
-    warnings.push("Product BFF registration uses the memory adapter");
-  }
-  if (values.demoMode) {
-    warnings.push("Product demo mode is enabled");
+  if (config.productBff.registrationAdapter === "memory-trigger") {
+    warnings.push("Product BFF registration uses the memory-trigger adapter");
   }
   if (values.e2eControls) {
     warnings.push("Product E2E controls are requested");

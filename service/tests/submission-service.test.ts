@@ -243,21 +243,51 @@ describe("product task submissions", () => {
     expect(broadcast.broadcast).not.toHaveBeenCalled();
   });
 
-  it("rejects duplicate submit for the same prepared nonce", async () => {
+  it("keeps the prepared signal reusable when broadcasting is disabled and rejects duplicates when it is not", async () => {
     const fixture = await submissionFixture();
     const prepared = await prepare(fixture);
     const signature = await signPrepared(prepared);
 
-    await fixture.service.submit(task.taskId, {
+    const first = await fixture.service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
       signature
     });
+    expect(first).toMatchObject({
+      status: "signature_received",
+      broadcastStatus: "not_attempted"
+    });
 
+    // Nothing was broadcast, so the prepared signal is deliberately not
+    // consumed: the submitter can retry it later against a configured relayer.
     await expect(fixture.service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
       signature
+    })).resolves.toMatchObject({
+      status: "signature_received",
+      broadcastStatus: "not_attempted"
+    });
+
+    // With a real broadcasting adapter the same reuse is rejected instead.
+    const broadcastingFixture = await submissionFixture({
+      broadcastAdapter: {
+        async broadcast() {
+          return { status: "submitted" as const, txHash: txHash("9"), blockNumber: "1" };
+        }
+      }
+    });
+    const broadcastingPrepared = await prepare(broadcastingFixture);
+    const broadcastingSignature = await signPrepared(broadcastingPrepared);
+    await broadcastingFixture.service.submit(task.taskId, {
+      prepareId: broadcastingPrepared.prepareId,
+      walletAddress: submitter,
+      signature: broadcastingSignature
+    });
+    await expect(broadcastingFixture.service.submit(task.taskId, {
+      prepareId: broadcastingPrepared.prepareId,
+      walletAddress: submitter,
+      signature: broadcastingSignature
     })).rejects.toMatchObject({
       code: "prepare_already_used",
       status: 409

@@ -60,7 +60,7 @@ describe("submission API routes", () => {
       submissionIdFactory: () => "sub_route",
       nonceFactory: () => "7"
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { evidenceService, submissionService });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", evidenceService, submissionService });
 
     const uploadResponse = await router.handle({
       method: "POST",
@@ -161,7 +161,7 @@ describe("submission API routes", () => {
       submissionIdFactory: () => "sub_broadcast",
       nonceFactory: () => "8"
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { evidenceService, submissionService });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", evidenceService, submissionService });
 
     const uploadResponse = await router.handle({
       method: "POST",
@@ -278,7 +278,7 @@ describe("submission API routes", () => {
     await projectionStore.resetFromEvents({ deploymentBlock: 0n, events: baseEvents });
     let preparedForRefresh: PreparedSubmissionDTO | undefined;
     let refresh: Promise<unknown> | undefined;
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceService,
       submissionService,
       onTxMined: () => {

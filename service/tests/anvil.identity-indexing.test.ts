@@ -152,7 +152,8 @@ function testConfig(input: {
       finalityConfirmations: 0,
       reorgBufferBlocks: 0,
       contracts: {
-        UVPIdentityRegistry: input.registry
+        UVPIdentityRegistry: input.registry,
+        UVPStateMachine: "0x1111111111111111111111111111111111111111"
       }
     },
     database: {
@@ -179,7 +180,7 @@ function testConfig(input: {
       allowedOperators: []
     },
     productBff: {
-      registrationAdapter: "memory",
+      registrationAdapter: "memory-trigger",
       registrarPrivateKeyEnv: "UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY",
       waitForReceipt: false
     },

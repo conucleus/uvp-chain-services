@@ -28,7 +28,7 @@ const signer = "0x3333333333333333333333333333333333333333" as Address;
 describe("Store operator audit events", () => {
   it("audits blocked Store writes with actor, capability, resource, and request id", async () => {
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), { audit });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", audit });
 
     const response = await router.handle({
       method: "POST",
@@ -60,7 +60,7 @@ describe("Store operator audit events", () => {
 
   it("audits successful Store metadata mutations", async () => {
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), { audit });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", audit });
 
     const response = await router.handle({
       method: "POST",
@@ -105,7 +105,7 @@ describe("Store operator audit events", () => {
       }
     };
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       audit,
       governanceService: createGovernanceService({ adapter })
     });

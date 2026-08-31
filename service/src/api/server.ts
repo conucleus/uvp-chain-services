@@ -106,6 +106,11 @@ export async function startApiServer(
   const submissionVerifyingContract = stateMachineAddress(config.network.contracts);
   const stagePatchVerifyingContract = stagePatchModuleAddress(config) ?? submissionVerifyingContract;
   const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(config, submissionVerifyingContract, audit);
+  if (!submissionBroadcastAdapter && (config.security.environment !== "local" || config.relayer.broadcastEnabled)) {
+    throw new ConfigError(
+      `state-machine signal broadcast is not configured: UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED=true and a non-empty ${config.relayer.stateMachinePrivateKeyEnv} are required when the runtime is not local or broadcast was explicitly enabled`,
+    );
+  }
   const stageExecutorPatchBroadcastAdapter = createConfiguredStageExecutorPatchBroadcastAdapter(config, stagePatchVerifyingContract);
   const stageResourcePatchBroadcastAdapter = createConfiguredStageResourcePatchBroadcastAdapter(config, stagePatchVerifyingContract);
   const dockedOrderLinkBroadcastAdapter = createConfiguredDockedOrderLinkBroadcastAdapter(config, dockingVerifyingContract);
@@ -156,8 +161,6 @@ export async function startApiServer(
     ...(config.productBff.registrationCreatorAddress
       ? { productRegistrationCreatorAddress: config.productBff.registrationCreatorAddress }
       : {}),
-    productE2eControlsEnabled: config.security.environment === "local" && process.env.UVP_PRODUCT_E2E_FIXTURES === "1",
-    productDemoMode: process.env.UVP_PRODUCT_DEMO_MODE === "1",
     productRuntimeEnvironment: config.security.environment,
     ...(config.storeAuth ? { storeAuthConfig: config.storeAuth } : {}),
     evidenceRuntimeEnvironment: config.security.environment,
@@ -289,15 +292,35 @@ export async function startApiServer(
 export function createConfiguredEvidenceStorage(config: ChainServicesConfig): EvidenceStorage {
   const evidenceStorageConfig = config.evidenceStorage;
   if (evidenceStorageConfig.adapter === "s3") {
+    if (!evidenceStorageConfig.s3Bucket) {
+      throw new ConfigError(
+        "UVP_EVIDENCE_S3_BUCKET is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
+      );
+    }
+    if (!evidenceStorageConfig.s3Region) {
+      throw new ConfigError(
+        "UVP_EVIDENCE_S3_REGION is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
+      );
+    }
+    if (!evidenceStorageConfig.s3AccessKeyIdEnv) {
+      throw new ConfigError(
+        "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
+      );
+    }
+    if (!evidenceStorageConfig.s3SecretAccessKeyEnv) {
+      throw new ConfigError(
+        "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
+      );
+    }
     return new ObjectEvidenceStorage({
       client: new S3EvidenceStorageClient({
-        bucket: evidenceStorageConfig.s3Bucket ?? "",
+        bucket: evidenceStorageConfig.s3Bucket,
         ...(evidenceStorageConfig.s3Prefix ? { prefix: evidenceStorageConfig.s3Prefix } : {}),
-        region: evidenceStorageConfig.s3Region ?? "",
+        region: evidenceStorageConfig.s3Region,
         ...(evidenceStorageConfig.s3Endpoint ? { endpoint: evidenceStorageConfig.s3Endpoint } : {}),
         forcePathStyle: evidenceStorageConfig.s3ForcePathStyle ?? false,
-        accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv ?? "",
-        secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv ?? "",
+        accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv,
+        secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv,
         ...(evidenceStorageConfig.s3UriMode === "object"
           ? {
               uriMode: evidenceStorageConfig.s3UriMode,
@@ -384,7 +407,7 @@ function moduleAddress(
 }
 
 function productRegistrationAdapterFromConfig(config: ChainServicesConfig): ProductOrderTriggerBroadcastAdapter {
-  if (config.productBff.registrationAdapter === "memory") {
+  if (config.productBff.registrationAdapter === "memory-trigger") {
     return new MemoryProductOrderTriggerBroadcastAdapter();
   }
 

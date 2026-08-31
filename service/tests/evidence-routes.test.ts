@@ -26,7 +26,7 @@ describe("evidence API routes", () => {
   });
 
   it("uploads text evidence and serves its proof for an authorized participant", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceService: createEvidenceService({
         storage: new InMemoryEvidenceStorage(),
         now: () => new Date("2026-04-28T00:00:00Z")
@@ -73,7 +73,7 @@ describe("evidence API routes", () => {
   });
 
   it("uploads through rehearsal object storage in testnet mode", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceStorage: new RehearsalObjectEvidenceStorage({
         rootDir: tempDir(tempDirs),
         namespace: "uvp-route-rehearsal"
@@ -107,7 +107,7 @@ describe("evidence API routes", () => {
 
   it("uploads through S3-compatible storage and returns private object proof", async () => {
     const mockClient = new MockS3CompatibleObjectClient();
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceStorage: new ObjectEvidenceStorage({
         client: new S3EvidenceStorageClient({
           bucket: "private-evidence-bucket",
@@ -182,7 +182,7 @@ describe("evidence API routes", () => {
   });
 
   it("rejects unauthorized evidence reads and returns 404 for missing evidence", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceService: createEvidenceService({
         storage: new InMemoryEvidenceStorage(),
         now: () => new Date("2026-04-28T00:00:00Z")
@@ -225,7 +225,7 @@ describe("evidence API routes", () => {
 
   it("audits admin proof reads through the route boundary", async () => {
     const metadataStore = new InMemoryEvidenceMetadataStore();
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceService: createEvidenceService({
         metadataStore,
         storage: new InMemoryEvidenceStorage(),

@@ -21,7 +21,7 @@ const readOnlyHeaders = {
 
 describe("Store risk graph no-op routes", () => {
   it("returns no-op capabilities to authenticated Store audit readers", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const response = await router.handle({
       method: "GET",
@@ -43,7 +43,7 @@ describe("Store risk graph no-op routes", () => {
   });
 
   it("requires an authenticated Store identity for capabilities", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const response = await router.handle({
       method: "GET",
@@ -58,7 +58,7 @@ describe("Store risk graph no-op routes", () => {
   });
 
   it("returns not_configured assessments for zhixu, order, and entity subjects", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(assess(router, { subjectType: "zhixu", zhixuId: "zhixu-cross-border" })).resolves.toMatchObject({
       riskLevel: "not_configured",
@@ -82,7 +82,7 @@ describe("Store risk graph no-op routes", () => {
   });
 
   it("requires an authenticated Store identity for assessments", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const response = await router.handle({
       method: "POST",
@@ -101,7 +101,7 @@ describe("Store risk graph no-op routes", () => {
   });
 
   it("rejects invalid assessment subjects", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const response = await router.handle({
       method: "POST",
@@ -120,7 +120,7 @@ describe("Store risk graph no-op routes", () => {
 
   it("audits assessments without raw payload, evidence content, API keys, or signatures", async () => {
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), { audit });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", audit });
 
     const response = await router.handle({
       method: "POST",
@@ -171,7 +171,7 @@ describe("Store risk graph no-op routes", () => {
 
   it("allows a private risk graph provider to be injected through the router", async () => {
     const service = fakeRiskGraphService();
-    const router = createApiRouter(new MemoryProjectionStore(), { riskGraphService: service });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", riskGraphService: service });
 
     const capabilities = await router.handle({
       method: "GET",

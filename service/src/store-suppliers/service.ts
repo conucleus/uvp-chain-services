@@ -17,6 +17,7 @@ import {
 import type { ProductService, ProductTaskApiDTO } from "../product/service.js";
 import {
   ConfigError,
+  compareChainPointers,
   normalizeAddress,
   normalizeBytes32,
   type Address,
@@ -1258,11 +1259,9 @@ function compareIdentityUpdatedDesc(
   left: IdentityBindingProjection,
   right: IdentityBindingProjection,
 ): number {
-  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
-    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
-  }
-  if (left.updatedAt.logIndex !== right.updatedAt.logIndex) {
-    return right.updatedAt.logIndex - left.updatedAt.logIndex;
+  const position = compareChainPointers(right.updatedAt, left.updatedAt);
+  if (position !== 0) {
+    return position;
   }
   return left.registryAddress.localeCompare(right.registryAddress);
 }

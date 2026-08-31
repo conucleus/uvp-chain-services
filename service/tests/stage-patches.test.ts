@@ -795,7 +795,7 @@ async function routerFixture(
   });
   return {
     store,
-    router: createApiRouter(store, {
+    router: createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productStageExecutorPatchService: executorService,
       productStageResourcePatchService: resourceService,
       productDockedOrderLinkService: dockedOrderLinkService,

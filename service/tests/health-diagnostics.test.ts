@@ -66,7 +66,7 @@ describe("ops health diagnostics", () => {
     const governanceStore = new InMemoryGovernanceStore();
     await governanceStore.appendIdentityTxLog(pendingGovernanceLog());
 
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: buildConfigDiagnostics(testConfig()),
       submissionStore,
       governanceStore,
@@ -148,7 +148,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("requires admin headers for operator console routes", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     for (const request of [
       { method: "GET", pathname: "/admin/ops/status" },
@@ -175,7 +175,7 @@ describe("ops health diagnostics", () => {
       eventCount: 4,
       rebuild: { status: "completed", toBlock: 12n, eventCount: 4 }
     });
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: buildConfigDiagnostics(testConfig()),
       evidenceStorage: new InMemoryEvidenceStorage(),
       now: () => new Date(now)
@@ -260,7 +260,7 @@ describe("ops health diagnostics", () => {
     const submissionStore = new InMemoryProductSubmissionStore();
     await submissionStore.putSubmission(retryableSubmission());
     const seenRetries: string[] = [];
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       submissionStore,
       now: () => new Date(now),
       opsRecoveryActions: {
@@ -355,7 +355,7 @@ describe("ops health diagnostics", () => {
         }]
       }
     };
-    const preflightFailedRouter = createApiRouter(new MemoryProjectionStore(), {
+    const preflightFailedRouter = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: failedDiagnostics,
       opsRecoveryActions: {
         async runReconcile() {
@@ -364,7 +364,7 @@ describe("ops health diagnostics", () => {
         }
       }
     });
-    const missingDependencyRouter = createApiRouter(new MemoryProjectionStore());
+    const missingDependencyRouter = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const failedResponse = await preflightFailedRouter.handle({
       method: "POST",
@@ -410,7 +410,7 @@ describe("ops health diagnostics", () => {
       degradedReason: "RPC timeout token=secret"
     });
 
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceService: noopEvidenceService(),
       evidenceStorage: new InMemoryEvidenceStorage(),
       evidenceRuntimeEnvironment: "production",
@@ -467,6 +467,9 @@ describe("ops health diagnostics", () => {
 
 function testConfig() {
   return loadConfigFromEnv({
+    CHAIN_SERVICES_DATABASE_DRIVER: "memory",
+    CHAIN_SERVICES_DATABASE_URL: "memory://projection-store",
+    UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger",
     UVP_CHAIN_ID: "31337",
     UVP_CONTRACTS_JSON: JSON.stringify({
       UVPStateMachine: stateMachine,

@@ -5,6 +5,7 @@ import {
   CROSS_BORDER_ZHIXU_ID,
 } from "@uvp-eth/product-dto/fixtures";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
+import { crossBorderSchemaResolver } from "./cross-border-schema.js";
 import {
   createGovernanceService,
   type GovernanceChainAdapter,
@@ -113,7 +114,7 @@ describe("Store supplier directory API", () => {
   it("projects identity status across registration and revocation replay", async () => {
     const store = new MemoryProjectionStore();
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
-    let router = createApiRouter(store, {
+    let router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeSupplierMetadataStore: metadataStore,
     });
     await createSupplier(router);
@@ -132,7 +133,7 @@ describe("Store supplier directory API", () => {
       deploymentBlock: 0n,
       events: [identityRegisteredEvent(2n), identityRevokedEvent(3n)],
     });
-    router = createApiRouter(store, {
+    router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeSupplierMetadataStore: metadataStore,
     });
     const revoked = await getSupplier(router, "supplier-shenzhen-logistics");
@@ -182,7 +183,7 @@ describe("Store supplier directory API", () => {
     };
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
     const projectionStore = new MemoryProjectionStore();
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeSupplierMetadataStore: metadataStore,
       governanceService: createGovernanceService({ adapter }),
     });
@@ -342,7 +343,7 @@ describe("Store supplier directory API", () => {
         }),
       ],
     });
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeSupplierMetadataStore: metadataStore,
     });
 
@@ -427,12 +428,12 @@ describe("Store supplier directory API", () => {
   it("requires store.supplier.tags.update for role-slot and stage support edits", async () => {
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
     const store = new MemoryProjectionStore();
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeSupplierMetadataStore: metadataStore,
     });
     await createSupplier(router);
 
-    const reviewOnlyRouter = createApiRouter(store, {
+    const reviewOnlyRouter = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeSupplierMetadataStore: metadataStore,
       storeIdentityProvider: reviewOnlyStoreIdentityProvider(),
     });
@@ -464,7 +465,7 @@ async function createRouter(events: readonly ChainEvent[]): Promise<{
   const store = new MemoryProjectionStore();
   await store.resetFromEvents({ deploymentBlock: 0n, events });
   return {
-    router: createApiRouter(store),
+    router: createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }),
     store,
   };
 }

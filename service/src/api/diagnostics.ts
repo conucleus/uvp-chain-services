@@ -603,7 +603,6 @@ function arrayCount(value: unknown): number {
 function fallbackConfigDiagnostics(environment: ChainServicesRuntimeEnv): Record<string, unknown> {
   return {
     environment,
-    demoMode: false,
     e2eControls: false,
     storageDriver: "unknown",
     relayerConfigured: false,

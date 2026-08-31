@@ -30,10 +30,9 @@ pnpm run dev:api
 - `CHAIN_SERVICES_DATABASE_DRIVER`, `CHAIN_SERVICES_DATABASE_URL`: 投影和业务存储
 - `UVP_EVIDENCE_STORAGE_ADAPTER`: 证据存储适配器
 - `UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED`: State Machine 广播开关
-- `UVP_IDENTITY_REGISTRY_BROADCAST_ENABLED`: Identity Registry 广播开关
 - `RECONCILE_WORKER_ENABLED`: 交易回执对账
 
-非本地环境应使用持久数据库和对象存储，并通过安全预检。
+非本地环境应使用持久数据库和对象存储，并通过安全预检。仓库不含 demo/fixture/mock 运行路径。
 
 ## 接口概览
 

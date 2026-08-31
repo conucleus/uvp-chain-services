@@ -606,7 +606,10 @@ function createOrderTriggerFromOnchainArtifact(
   // 首条携带正依赖的 receive hook（注册者的 bootstrap 入口）。signalMap 委托
   // 缝的 hook 是父秩序转发信号，不能当开单入口；依赖按 kind 字典序排序，必须
   // 显式取正依赖，负依赖不能用于构造开单 typed data。
+  // isTrigger（= mint 出生阶段）是冻结合约 triggerOrderFrom* 的硬门槛：
+  // 缺失时用户签名后链上 InvalidTriggerHook revert，draft 永久无法开单。
   const hook = artifact.compiledHooks.find((item) =>
+    item.isTrigger === true &&
     item.kind === "receive" &&
     item.dependencies.some((dependency) => dependency.kind === "positive")
   );

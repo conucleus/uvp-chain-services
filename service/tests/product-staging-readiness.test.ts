@@ -8,6 +8,7 @@ import { createApiRouter } from "../src/api/routes.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { crossBorderSchemaResolver } from "./cross-border-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const chainId = 84532;
@@ -70,7 +71,7 @@ describe("Product API staging readiness", () => {
         mismatchCount: 0
       }
     });
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: stagingDiagnostics(tempDirs),
       productRuntimeEnvironment: "staging",
       evidenceStorage: productionSafeEvidenceStorage(),
@@ -92,7 +93,6 @@ describe("Product API staging readiness", () => {
         environment: "staging",
         preflightStrict: true,
         preflightStatus: "passed",
-        demoMode: false,
         e2eControls: false,
         registrationAdapter: "anvil",
         storageDriver: "postgres",
@@ -183,26 +183,22 @@ describe("Product API staging readiness", () => {
     expect(serialized).not.toContain(stagingGovernancePrivateKey.slice(2));
   });
 
-  it("fails closed when demo or fixture controls are presented as staging evidence", async () => {
+  it("fails closed when fixture controls are presented as staging evidence", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents({ includeActiveDeployment: false }) });
     const baseDiagnostics = stagingDiagnostics(tempDirs);
     const unsafeDiagnostics: ConfigDiagnostics = {
       ...baseDiagnostics,
-      demoMode: true,
       e2eControls: true,
       product: {
         ...baseDiagnostics.product,
-        demoMode: true,
         e2eControls: true,
         permissiveAuthorizationRequested: true
       }
     };
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
-      productDemoMode: true,
-      productE2eControlsEnabled: true,
       evidenceStorage: productionSafeEvidenceStorage(),
       now: () => new Date(generatedAt)
     });
@@ -215,7 +211,6 @@ describe("Product API staging readiness", () => {
       ready: false,
       status: "not_ready",
       reasons: expect.arrayContaining([
-        "product_demo_mode_enabled",
         "product_e2e_fixtures_enabled",
         "permissive_product_authorization_requested",
         "no_active_deployment"
@@ -240,7 +235,7 @@ describe("Product API staging readiness", () => {
         }]
       }
     };
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: failedDiagnostics,
       productRuntimeEnvironment: "staging",
       evidenceStorage: productionSafeEvidenceStorage(),
@@ -280,7 +275,7 @@ describe("Product API staging readiness", () => {
     };
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents() });
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
       evidenceStorage: productionSafeEvidenceStorage(),
