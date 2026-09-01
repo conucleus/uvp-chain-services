@@ -6,14 +6,21 @@ import {
   DEMO_ORDER_ID,
   DEMO_TASK_ID,
   crossBorderPlanIds,
-  customsStoreProductSchema
+  customsStoreProductSchema,
+  demoZhixuDetail
 } from "@uvp-eth/product-dto/fixtures";
 import { createApiRouter } from "../src/api/routes.js";
 import { createEvidenceService, InMemoryEvidenceStorage, ObjectEvidenceStorage } from "../src/evidence/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProductBffStore } from "../src/product/bff/store.js";
+import type { ProductService } from "../src/product/service.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import {
+  DOCK_TARGET_ZHIXU_ID,
+  crossBorderSchemaResolver,
+  dockTargetPlanIds
+} from "./cross-border-schema.js";
+import { createStoreDockingService } from "../src/store-console/docking.js";
 import { MemoryStoreZhixuDraftStore } from "../src/store-console/zhixu-drafts.js";
 import { InMemoryStoreSupplierMetadataStore } from "../src/store-suppliers/service.js";
 import type { Address, Hex } from "../src/shared/types.js";
@@ -353,19 +360,25 @@ describe("product API routes", () => {
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           hookCount: 1n
+        }),
+        chainEvent(2n, "PlanRegistered", {
+          planId: dockTargetPlanIds.planId,
+          planHash: dockTargetPlanIds.planHash,
+          hookCount: 1n
         })
       ]
     });
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", now: () => new Date("2026-04-29T00:00:00Z") });
 
     const detailBefore = await router.handle({ method: "GET", pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}` });
+    // STORE-03：docking 必须是两个不同 zhixu 之间的会话。
     const createResponse = await router.handle({
       method: "POST",
       pathname: "/store/docking-sessions",
       headers: storeOperatorHeaders,
       body: {
         sourceZhixuId: CROSS_BORDER_ZHIXU_ID,
-        targetZhixuId: CROSS_BORDER_ZHIXU_ID
+        targetZhixuId: DOCK_TARGET_ZHIXU_ID
       }
     });
 
@@ -462,7 +475,7 @@ describe("product API routes", () => {
       headers: storeOperatorHeaders,
       body: {
         sourceZhixuId: CROSS_BORDER_ZHIXU_ID,
-        targetZhixuId: CROSS_BORDER_ZHIXU_ID
+        targetZhixuId: DOCK_TARGET_ZHIXU_ID
       }
     });
     expect(missingZhixuResponse).toMatchObject({ status: 404 });
@@ -475,6 +488,11 @@ describe("product API routes", () => {
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           hookCount: 1n
+        }),
+        chainEvent(2n, "PlanRegistered", {
+          planId: dockTargetPlanIds.planId,
+          planHash: dockTargetPlanIds.planHash,
+          hookCount: 1n
         })
       ]
     });
@@ -484,7 +502,7 @@ describe("product API routes", () => {
       headers: storeOperatorHeaders,
       body: {
         sourceZhixuId: CROSS_BORDER_ZHIXU_ID,
-        targetZhixuId: CROSS_BORDER_ZHIXU_ID
+        targetZhixuId: DOCK_TARGET_ZHIXU_ID
       }
     });
     expect((revokedResponse.body as {
@@ -492,7 +510,7 @@ describe("product API routes", () => {
     }).session.validation.errors.map((error) => error.code)).toEqual([]);
   });
 
-  it("returns missing source and target signal validation errors for docking drafts", async () => {
+  it("rejects self-docking sessions at the route and service layers (STORE-03)", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
       deploymentBlock: 0n,
@@ -505,13 +523,61 @@ describe("product API routes", () => {
       ]
     });
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
-    const createResponse = await router.handle({
+
+    // 路由层快速拦截：source === target → 422 self_docking_forbidden。
+    await expect(router.handle({
       method: "POST",
       pathname: "/store/docking-sessions",
       headers: storeOperatorHeaders,
       body: {
         sourceZhixuId: CROSS_BORDER_ZHIXU_ID,
         targetZhixuId: CROSS_BORDER_ZHIXU_ID
+      }
+    })).resolves.toMatchObject({
+      status: 422,
+      body: { error: "self_docking_forbidden" }
+    });
+
+    // 服务层权威校验：即使绕过路由解析同样拒绝（含仅空白差异的等价 id）。
+    const service = createStoreDockingService({
+      productService: {
+        getZhixu: async () => demoZhixuDetail
+      } as unknown as ProductService
+    });
+    await expect(service.createSession({
+      sourceZhixuId: "zhixu-a",
+      targetZhixuId: "  zhixu-a  "
+    })).rejects.toMatchObject({
+      status: 422,
+      code: "self_docking_forbidden"
+    });
+  });
+
+  it("returns missing source and target signal validation errors for docking drafts", async () => {
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(1n, "PlanRegistered", {
+          planId: crossBorderPlanIds.planId,
+          planHash: crossBorderPlanIds.planHash,
+          hookCount: 1n
+        }),
+        chainEvent(2n, "PlanRegistered", {
+          planId: dockTargetPlanIds.planId,
+          planHash: dockTargetPlanIds.planHash,
+          hookCount: 1n
+        })
+      ]
+    });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const createResponse = await router.handle({
+      method: "POST",
+      pathname: "/store/docking-sessions",
+      headers: storeOperatorHeaders,
+      body: {
+        sourceZhixuId: CROSS_BORDER_ZHIXU_ID,
+        targetZhixuId: DOCK_TARGET_ZHIXU_ID
       }
     });
     const created = (createResponse.body as {

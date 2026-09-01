@@ -141,9 +141,20 @@ function parseStoreDockingCreateBody(body: unknown): StoreDockingSessionCreateDT
   const record = requireStoreDockingBodyRecord(body);
   const sourceVersionId = optionalStoreDockingString(record, "sourceVersionId");
   const targetVersionId = optionalStoreDockingString(record, "targetVersionId");
+  const sourceZhixuId = requiredStoreDockingString(record, "sourceZhixuId");
+  const targetZhixuId = requiredStoreDockingString(record, "targetZhixuId");
+  // STORE-03：路由层快速拦截 self-docking（服务层为权威校验）。
+  if (sourceZhixuId === targetZhixuId) {
+    throw new StoreDockingServiceError(
+      422,
+      "self_docking_forbidden",
+      "sourceZhixuId and targetZhixuId must be different zhixu definitions",
+      { sourceZhixuId, targetZhixuId }
+    );
+  }
   return {
-    sourceZhixuId: requiredStoreDockingString(record, "sourceZhixuId"),
-    targetZhixuId: requiredStoreDockingString(record, "targetZhixuId"),
+    sourceZhixuId,
+    targetZhixuId,
     ...(sourceVersionId !== undefined ? { sourceVersionId } : {}),
     ...(targetVersionId !== undefined ? { targetVersionId } : {})
   };

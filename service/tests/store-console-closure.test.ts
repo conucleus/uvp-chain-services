@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CROSS_BORDER_ZHIXU_ID, crossBorderPlanIds } from "@uvp-eth/product-dto/fixtures";
 import { createApiRouter } from "../src/api/routes.js";
-import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import { crossBorderSchemaResolver, dockTargetPlanIds } from "./cross-border-schema.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { MemoryStoreAuditStore } from "../src/store-console/audit.js";
@@ -178,6 +178,12 @@ function stateMachineOrderEvents(): readonly ChainEvent[] {
     chainEvent(1n, "PlanRegistered", {
       planId: crossBorderPlanIds.planId,
       planHash: crossBorderPlanIds.planHash,
+      hookCount: 1n
+    }),
+    // STORE-03：closure dry-run 的 docking 沙箱需要第二个已发布 zhixu 作 target。
+    chainEvent(2n, "PlanRegistered", {
+      planId: dockTargetPlanIds.planId,
+      planHash: dockTargetPlanIds.planHash,
       hookCount: 1n
     }),
     chainEvent(3n, "OrderRegistered", {

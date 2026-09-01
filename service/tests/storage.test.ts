@@ -14,7 +14,11 @@ import {
   crossBorderPlanIds,
 } from "@uvp-eth/product-dto/fixtures";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
-import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import {
+  DOCK_TARGET_ZHIXU_ID,
+  crossBorderSchemaResolver,
+  dockTargetPlanIds,
+} from "./cross-border-schema.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import type { ProjectionSnapshot } from "../src/indexer/projections.js";
 import { SqliteEvidenceStore } from "../src/evidence/sqlite-store.js";
@@ -765,6 +769,11 @@ describe("durable storage", () => {
           planHash: crossBorderPlanIds.planHash,
           hookCount: 1n,
         }),
+        chainEvent(7n, 0, "PlanRegistered", {
+          planId: dockTargetPlanIds.planId,
+          planHash: dockTargetPlanIds.planHash,
+          hookCount: 1n,
+        }),
       ],
     });
     const firstRouter = createStoreMetadataRouter(first);
@@ -831,7 +840,7 @@ describe("durable storage", () => {
       headers: adminHeaders,
       body: {
         sourceZhixuId: CROSS_BORDER_ZHIXU_ID,
-        targetZhixuId: CROSS_BORDER_ZHIXU_ID,
+        targetZhixuId: DOCK_TARGET_ZHIXU_ID,
       },
     });
     expect(dockingResponse.status).toBe(201);
@@ -1275,6 +1284,11 @@ describePostgres(
             planHash: crossBorderPlanIds.planHash,
             hookCount: 1n,
           }),
+          chainEvent(7n, 0, "PlanRegistered", {
+            planId: dockTargetPlanIds.planId,
+            planHash: dockTargetPlanIds.planHash,
+            hookCount: 1n,
+          }),
         ],
       });
       const firstRouter = createStoreMetadataRouter(first);
@@ -1353,7 +1367,7 @@ describePostgres(
         headers: adminHeaders,
         body: {
           sourceZhixuId: CROSS_BORDER_ZHIXU_ID,
-          targetZhixuId: CROSS_BORDER_ZHIXU_ID,
+          targetZhixuId: DOCK_TARGET_ZHIXU_ID,
         },
       });
       expect(dockingResponse.status).toBe(201);

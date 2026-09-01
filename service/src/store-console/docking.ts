@@ -145,6 +145,16 @@ export function createStoreDockingService(options: {
 
   return {
     async createSession(input) {
+      // STORE-03：self-docking 无业务意义且会绕过信号映射校验的 source/target
+      // 前提；服务层为权威校验，路由层另做同规则快速拦截。
+      if (input.sourceZhixuId.trim() === input.targetZhixuId.trim()) {
+        throw new StoreDockingServiceError(
+          422,
+          "self_docking_forbidden",
+          "sourceZhixuId and targetZhixuId must be different zhixu definitions",
+          { sourceZhixuId: input.sourceZhixuId, targetZhixuId: input.targetZhixuId }
+        );
+      }
       const sourceDetail = await requireZhixu(options.productService, input.sourceZhixuId, "sourceZhixuId");
       const targetDetail = await requireZhixu(options.productService, input.targetZhixuId, "targetZhixuId");
       const createdAt = now().toISOString();

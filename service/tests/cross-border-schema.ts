@@ -42,9 +42,37 @@ export const crossBorderStoreProductSchema: StoreProductSchemaDTO = {
 export function crossBorderSchemaResolver(): ProductSchemaResolver {
   return {
     async getProductSchemaByPlan(planId) {
-      return planId === crossBorderPlanIds.planId
-        ? crossBorderStoreProductSchema
-        : undefined;
+      if (planId === crossBorderPlanIds.planId) {
+        return crossBorderStoreProductSchema;
+      }
+      if (planId === dockTargetPlanIds.planId) {
+        return dockTargetStoreProductSchema;
+      }
+      return undefined;
     }
   };
 }
+
+/**
+ * STORE-03 之后 docking 禁止 self-docking：docking 测试需要一个与 cross-border
+ * 不同的第二个 zhixu 作为 target，形状与 cross-border schema 一致以便
+ * 产生候选信号映射。
+ */
+export const DOCK_TARGET_ZHIXU_ID = "dock-target-staged-payment";
+
+export const dockTargetPlanIds = {
+  planId: "0x0000000000000000000000000000000000000000000000000000000000000102",
+  planHash: "0x0000000000000000000000000000000000000000000000000000000000000202",
+  artifactHash: "0x0000000000000000000000000000000000000000000000000000000000000302"
+} as const;
+
+export const dockTargetStoreProductSchema: StoreProductSchemaDTO = {
+  ...crossBorderStoreProductSchema,
+  zhixuId: DOCK_TARGET_ZHIXU_ID,
+  title: "Dock target staged payment",
+  planId: dockTargetPlanIds.planId,
+  planHash: dockTargetPlanIds.planHash,
+  artifactHash: dockTargetPlanIds.artifactHash,
+  schemaHash:
+    "0x8c2d6cda824a197ddea166e33c955cfa27a67bb693aad840daf14a24512be7ae"
+};

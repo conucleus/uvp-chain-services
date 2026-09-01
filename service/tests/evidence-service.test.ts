@@ -769,3 +769,57 @@ describe("evidence backup storage (ETH-05)", () => {
     })).rejects.toThrow(/backup bucket unavailable/);
   });
 });
+
+describe("evidence PDF magic validation (STORE-02)", () => {
+  it("rejects a declared application/pdf payload without the %PDF- magic header", async () => {
+    const service = testEvidenceService();
+
+    await expect(service.uploadEvidence({
+      orderId: "order-1",
+      stageIdentifier: "export-documents",
+      documentType: "customs-declaration",
+      fileName: "fake.pdf",
+      mimeType: "application/pdf",
+      content: { encoding: "base64", value: Buffer.from("this is not a pdf document").toString("base64") }
+    }, owner)).rejects.toMatchObject({
+      code: "pdf_magic_mismatch",
+      status: 400
+    });
+
+    await expect(service.uploadEvidence({
+      orderId: "order-1",
+      stageIdentifier: "export-documents",
+      documentType: "customs-declaration",
+      fileName: "truncated.pdf",
+      mimeType: "application/pdf",
+      content: { encoding: "base64", value: Buffer.from("%PD").toString("base64") }
+    }, owner)).rejects.toMatchObject({
+      code: "pdf_magic_mismatch",
+      status: 400
+    });
+
+    // 真实 %PDF- 魔数通过。
+    const accepted = await service.uploadEvidence({
+      orderId: "order-1",
+      stageIdentifier: "export-documents",
+      documentType: "customs-declaration",
+      fileName: "real.pdf",
+      mimeType: "application/pdf",
+      content: { encoding: "base64", value: Buffer.from("%PDF-1.7 real payload").toString("base64") }
+    }, owner);
+    expect(accepted.evidence.mimeType).toBe("application/pdf");
+  });
+
+  it("does not apply PDF magic validation to non-PDF evidence accepts", async () => {
+    const service = testEvidenceService();
+    const uploaded = await service.uploadEvidence({
+      orderId: "order-1",
+      stageIdentifier: "export-documents",
+      documentType: "customs-declaration",
+      fileName: "notes.txt",
+      mimeType: "text/plain",
+      content: { encoding: "text", value: "%PDF- is not required here" }
+    }, owner);
+    expect(uploaded.evidence.mimeType).toBe("text/plain");
+  });
+});

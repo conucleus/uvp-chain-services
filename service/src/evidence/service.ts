@@ -44,6 +44,7 @@ export type EvidenceServiceErrorCode =
   | "forbidden"
   | "invalid_request"
   | "payload_too_large"
+  | "pdf_magic_mismatch"
   | "unauthenticated"
   | "unsupported_mime_type";
 
@@ -112,6 +113,11 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
 
       if (!SUPPORTED_MIME_TYPES.has(mimeType)) {
         throw new EvidenceServiceError("unsupported_mime_type", `${mimeType} is not supported by Evidence Service v1`, 415);
+      }
+      // STORE-02：声明为 PDF 的证据必须以 %PDF- 魔数开头；服务端是权威校验，
+      // 客户端拦截只是快速提示。非 PDF accept 不受影响。
+      if (mimeType === "application/pdf" && !isPdfBytes(content.bytes)) {
+        throw new EvidenceServiceError("pdf_magic_mismatch", "declared application/pdf payload does not start with the %PDF- magic header", 400);
       }
       if (content.bytes.byteLength > maxPayloadBytes) {
         throw new EvidenceServiceError("payload_too_large", "evidence payload exceeds the configured size limit", 413);
@@ -497,6 +503,19 @@ function decodeBase64(value: string): Uint8Array {
     throw invalidRequest("base64 evidence content is malformed");
   }
   return Buffer.from(compact, "base64");
+}
+
+function isPdfBytes(bytes: Uint8Array): boolean {
+  const header = "%PDF-";
+  if (bytes.byteLength < header.length) {
+    return false;
+  }
+  for (let index = 0; index < header.length; index += 1) {
+    if (bytes[index] !== header.charCodeAt(index)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function normalizePrincipal(principal: EvidencePrincipal): EvidencePrincipal {
