@@ -17,7 +17,7 @@ export interface StateMachineSubmitSignalForCall {
   readonly address: Address;
   readonly abi: typeof STATE_MACHINE_ABI;
   readonly functionName: "submitSignalFor";
-  readonly args: readonly [Hex, Hex, Hex, Hex, Hex, Address, bigint, Hex];
+  readonly args: readonly [Hex, Hex, Hex, Hex, Hex, Hex, Address, bigint, Hex];
   readonly data?: Hex;
   readonly chainId?: number;
 }
@@ -55,6 +55,7 @@ export interface ClassifiedStateMachineBroadcastError {
 
 const DEFAULT_RELAYER_PRIVATE_KEY_ENV = "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 export function createStateMachineSubmissionBroadcastAdapter(
   options: StateMachineSubmissionBroadcastAdapterOptions
@@ -80,6 +81,19 @@ export function createStateMachineSubmissionBroadcastAdapter(
 
   return {
     async broadcast(request): Promise<SubmissionBroadcastResult> {
+      // Audit #10: submitSignalFor is plan-scoped. A prepared submission
+      // without a non-zero planId can only produce a transaction that fails the
+      // on-chain (planId, orderId) existence check — refuse to construct the
+      // call instead of broadcasting a doomed tx.
+      const planId = normalizePlanId(request.prepared.planId);
+      if (!planId) {
+        return failedResult(
+          "order_plan_unresolved",
+          "prepared submission has no non-zero planId for the plan-scoped submitSignalFor ABI",
+          false,
+          gasPayer
+        );
+      }
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(request.prepared.deadline) < currentSeconds) {
         return failedResult("expired_signal_signature", "signature deadline has expired", false, gasPayer);
@@ -135,6 +149,7 @@ export function createStateMachineSubmissionBroadcastAdapter(
           stateMachineAddress: request.prepared.typedData.domain.verifyingContract ?? stateMachineAddress,
           chainId: options.chainId
         }, {
+          planId,
           orderId: request.prepared.onchainOrderId,
           sourceId: request.prepared.sourceId,
           signalId: request.prepared.signalId,
@@ -385,6 +400,7 @@ function deadLetterForBroadcastError(errorCode: string, retryable: boolean): boo
     case "chain_id_mismatch":
     case "expired_signal_signature":
     case "invalid_signal_signature":
+    case "order_plan_unresolved":
     case "relayer_business_signer_reuse":
     case "relayer_insufficient_funds":
     case "signal_already_exists":
@@ -408,6 +424,14 @@ function loadRelayerPrivateKey(options: StateMachineSubmissionBroadcastAdapterOp
     throw new ConfigError(`${options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV} must be a 32-byte private key`);
   }
   return privateKey.toLowerCase() as Hex;
+}
+
+function normalizePlanId(value: Hex | string | undefined): Hex | undefined {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    return undefined;
+  }
+  const normalized = value.toLowerCase() as Hex;
+  return normalized === ZERO_BYTES32 ? undefined : normalized;
 }
 
 function normalizeGasPayer(value: string | undefined): Address {

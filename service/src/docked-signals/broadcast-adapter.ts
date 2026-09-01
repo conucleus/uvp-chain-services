@@ -22,7 +22,7 @@ export interface SubmitDockedSignalCall {
   readonly address: Address;
   readonly abi: typeof DOCKING_MODULE_ABI;
   readonly functionName: "submitDockedSignal";
-  readonly args: readonly [Hex, Hex, Hex, Hex, Hex];
+  readonly args: readonly [Hex, Hex, Hex, Hex, Hex, Hex, Hex];
   readonly data: Hex;
   readonly chainId?: number;
 }
@@ -51,6 +51,7 @@ export interface StateMachineDockedSignalBroadcastAdapterOptions {
 }
 
 const DEFAULT_RELAYER_PRIVATE_KEY_ENV = "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY";
+const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 export function createStateMachineDockedSignalBroadcastAdapter(
   options: StateMachineDockedSignalBroadcastAdapterOptions
@@ -71,11 +72,28 @@ export function createStateMachineDockedSignalBroadcastAdapter(
 
   return {
     async broadcast(candidate): Promise<DockedSignalBroadcastResult> {
+      // Audit #10: submitDockedSignal is plan-scoped — the projection must
+      // supply non-zero localPlanId/linkedPlanId, otherwise the tx can only
+      // fail the on-chain (localPlanId, localOrderId, linkedPlanId,
+      // linkedOrderId) lookup. Refuse to construct the call.
+      const localPlanId = nonZeroPlanId(candidate.localOrder.planId);
+      const linkedPlanId = nonZeroPlanId(candidate.linkedOrder.planId);
+      if (!localPlanId || !linkedPlanId) {
+        return failedResult(
+          candidate,
+          "order_plan_unresolved",
+          "docked signal projection is missing a non-zero planId for the plan-scoped submitDockedSignal ABI",
+          false,
+          gasPayer
+        );
+      }
       const call = buildSubmitDockedSignalCall({
         dockingModuleAddress: candidate.dockingModuleAddress,
         ...(candidate.chainId !== undefined ? { chainId: candidate.chainId } : {})
       }, {
+        localPlanId,
         localOrderId: candidate.binding.localOrderId,
+        linkedPlanId,
         linkedOrderId: candidate.binding.linkedOrderId,
         linkedSourceId: candidate.binding.linkedSourceId,
         linkedSignalId: candidate.binding.linkedSignalId,
@@ -277,6 +295,14 @@ function findErrorName(error: unknown): string | undefined {
 
 function normalizeGasPayer(value: string | undefined): Address | undefined {
   return value ? normalizeAddress(value, "gasPayer") : undefined;
+}
+
+function nonZeroPlanId(value: Hex | string | undefined): Hex | undefined {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    return undefined;
+  }
+  const normalized = value.toLowerCase() as Hex;
+  return normalized === ZERO_BYTES32 ? undefined : normalized;
 }
 
 function loadRelayerPrivateKey(options: StateMachineDockedSignalBroadcastAdapterOptions): Hex {

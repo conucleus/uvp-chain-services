@@ -23,6 +23,7 @@ export interface StageExecutorPatchTypedData {
   };
   readonly primaryType: "UVPStagePatchModuleStageExecutorPatch";
   readonly message: {
+    readonly planId: Hex;
     readonly orderId: Hex;
     readonly selectorStageId: Hex;
     readonly targetStageId: Hex;
@@ -53,6 +54,7 @@ export interface StageResourcePatchTypedData {
   };
   readonly primaryType: "UVPStagePatchModuleStageResourcePatch";
   readonly message: {
+    readonly planId: Hex;
     readonly orderId: Hex;
     readonly selectorStageId: Hex;
     readonly targetStageId: Hex;
@@ -79,6 +81,7 @@ export interface DockedOrderLinkTypedData {
   };
   readonly primaryType: "UVPDockingModuleDockedOrderLink";
   readonly message: {
+    readonly localPlanId: Hex;
     readonly localOrderId: Hex;
     readonly selectorStageId: Hex;
     readonly localSourceId: Hex;

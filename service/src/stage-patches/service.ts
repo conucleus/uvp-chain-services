@@ -281,6 +281,7 @@ export function createProductStageExecutorPatchService(
       const typedData = buildStageExecutorPatchTypedData({
         chainId,
         verifyingContract: stagePatchModuleAddress,
+        planId: context.order.planId,
         orderId: context.order.orderId,
         selectorStageId: context.task.stageIdentifier,
         targetStageId: context.targetStageId,
@@ -565,6 +566,7 @@ export function createProductStageResourcePatchService(
       const typedData = buildStageResourcePatchTypedData({
         chainId,
         verifyingContract: stagePatchModuleAddress,
+        planId: context.order.planId,
         orderId: context.order.orderId,
         selectorStageId: context.task.stageIdentifier,
         targetStageId: context.targetStageId,
@@ -773,6 +775,7 @@ export function createProductDockedOrderLinkService(
       const metadataURI = normalizedMetadataURI(input.metadataURI);
       const linkNonce = nextDockedOrderLinkNonce(context.order, linkedOrderId);
       const linkHash = hashDockedOrderLinkPayload({
+        localPlanId: context.order.planId,
         localOrderId: context.order.orderId,
         selectorStageId: context.task.stageIdentifier,
         localSourceId: context.targetStageId,
@@ -791,6 +794,7 @@ export function createProductDockedOrderLinkService(
       const typedData = buildDockedOrderLinkTypedData({
         chainId,
         verifyingContract: dockingModuleAddress,
+        localPlanId: context.order.planId,
         localOrderId: context.order.orderId,
         selectorStageId: context.task.stageIdentifier,
         localSourceId: context.targetStageId,

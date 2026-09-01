@@ -56,6 +56,13 @@ export interface ProductSubmissionServiceOptions {
   readonly authorization?: SubmissionAuthorizationAdapter;
   readonly broadcastAdapter?: SubmissionBroadcastAdapter;
   readonly store?: ProductSubmissionStore;
+  /**
+   * Audit #10: resolves the order planId for the on-chain order id from the
+   * indexer projection (OrderRegistered/OrderMaterialized carry the indexed
+   * planId). prepareSubmit refuses to build the plan-scoped signature when the
+   * projection cannot supply a non-zero planId.
+   */
+  readonly resolveOrderPlanId?: (onchainOrderId: Hex) => Promise<Hex | undefined>;
   readonly now?: () => Date;
   readonly prepareTtlSeconds?: number;
   readonly prepareIdFactory?: () => string;
@@ -140,6 +147,22 @@ export function createProductSubmissionService(options: ProductSubmissionService
         });
       }
 
+      // Audit #10: submitSignal is plan-scoped and the signature commits to
+      // (planId, orderId). The planId comes from the indexer projection, never
+      // from local fabrication; a missing planId must fail the prepare instead
+      // of producing a signature that can only be rejected on chain.
+      const planId = normalizeResolvedPlanId(
+        options.resolveOrderPlanId ? await options.resolveOrderPlanId(chainSignal.orderId) : undefined
+      );
+      if (!planId) {
+        throw new ProductSubmissionError(
+          409,
+          "order_plan_unresolved",
+          "state-machine projection has no planId for this order; refusing to prepare a plan-scoped signal signature",
+          { orderId: chainSignal.orderId }
+        );
+      }
+
       const createdAt = now();
       const deadlineSeconds = Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const nonce = normalizeNonce(nonceFactory());
@@ -155,6 +178,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
       const typedData = buildProductSubmitTypedData({
         chainId,
         verifyingContract,
+        planId,
         orderId: chainSignal.orderId,
         sourceId: chainSignal.sourceId,
         signalId: chainSignal.signalId,
@@ -169,6 +193,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
         taskId,
         orderId: task.orderId,
         onchainOrderId: chainSignal.orderId,
+        planId,
         stageIdentifier: task.stageId,
         signalName,
         sourceId: chainSignal.sourceId,
@@ -479,6 +504,21 @@ function normalizeBytes32OrHash(value: string, fieldName: string): Hex {
     throw new ProductSubmissionError(400, "invalid_chain_identifier", `${fieldName} is required`);
   }
   return keccak256Hex(value) as Hex;
+}
+
+const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+/**
+ * Audit #10: the projection must supply a real, non-zero planId. Anything else
+ * (undefined, malformed, or the zero placeholder) is treated as "unresolved" so
+ * the zero placeholder can never be signed or broadcast.
+ */
+function normalizeResolvedPlanId(value: Hex | string | undefined): Hex | undefined {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    return undefined;
+  }
+  const normalized = value.toLowerCase() as Hex;
+  return normalized === ZERO_BYTES32 ? undefined : normalized;
 }
 
 export function notSupportedSubmissionBroadcastAdapter(): SubmissionBroadcastAdapter {

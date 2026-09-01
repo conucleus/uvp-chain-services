@@ -18,6 +18,7 @@ const privateKey = "0x1111111111111111111111111111111111111111111111111111111111
 const account = privateKeyToAccount(privateKey);
 const submitter = normalizeAddress(account.address, "account.address");
 const verifyingContract = "0x1111111111111111111111111111111111111111" as Address;
+const routePlanId = "0x7777777777777777777777777777777777777777777777777777777777777777" as Hex;
 
 const routeTask: ProductTaskDTO = {
   taskId: "task-route",
@@ -49,6 +50,7 @@ describe("submission API routes", () => {
       evidenceReader: evidenceService,
       chainId: 31337,
       verifyingContract,
+      resolveOrderPlanId: async () => routePlanId,
       authorization: allowListedSubmissionAuthorization([{
         orderId: routeTask.orderId,
         stageIdentifier: routeTask.stageId,
@@ -149,6 +151,7 @@ describe("submission API routes", () => {
       evidenceReader: evidenceService,
       chainId: 31337,
       verifyingContract,
+      resolveOrderPlanId: async () => routePlanId,
       authorization: allowListedSubmissionAuthorization([{
         orderId: routeTask.orderId,
         stageIdentifier: routeTask.stageId,
@@ -258,6 +261,7 @@ describe("submission API routes", () => {
       evidenceReader: evidenceService,
       chainId: 31337,
       verifyingContract,
+      resolveOrderPlanId: async () => routePlanId,
       authorization: allowListedSubmissionAuthorization([{
         orderId: projectedTask.orderId,
         stageIdentifier: projectedTask.stageId,

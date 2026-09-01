@@ -1,4 +1,5 @@
 import type { ProjectionStore } from "../storage/projection-store.js";
+import type { Hex } from "../shared/types.js";
 import { createNoopComplianceService } from "../compliance/index.js";
 import { createNoopRiskGraphService } from "../risk/index.js";
 import { createProductService } from "../product/service.js";
@@ -166,6 +167,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.submissionStore ? { store: options.submissionStore } : {}),
     chainId: submissionChainId,
     verifyingContract: submissionVerifyingContract,
+    // 审计 #10：plan 作用域 submitSignal 的 planId 取自索引器投影
+    // （OrderRegistered/OrderMaterialized 的 indexed planId）。
+    resolveOrderPlanId: resolveOrderPlanIdFromStore(store),
     ...(options.submissionBroadcastAdapter ? { broadcastAdapter: options.submissionBroadcastAdapter } : {}),
     ...(submissionAuthorization ? { authorization: submissionAuthorization } : {}),
     audit
@@ -360,4 +364,24 @@ function productBffActiveStageExecutorAuthorization(
 
 function equalHex(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
+}
+
+const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+/**
+ * 审计 #10：plan 作用域 submitSignal 的 planId 从索引器投影读取
+ * （OrderRegistered/OrderMaterialized 均带 indexed planId，投影行已存）。
+ * 找不到非零 planId 时返回 undefined，由 submission service 拒绝 prepare。
+ */
+function resolveOrderPlanIdFromStore(
+  store: ProjectionStore
+): (onchainOrderId: Hex) => Promise<Hex | undefined> {
+  return async (onchainOrderId) => {
+    const orders = await store.findStateMachineOrdersByOrderId(onchainOrderId);
+    const order = orders.find((candidate) =>
+      Boolean(candidate.planId) &&
+      candidate.planId.toLowerCase() !== ZERO_BYTES32
+    );
+    return order?.planId;
+  };
 }

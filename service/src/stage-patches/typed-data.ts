@@ -3,12 +3,15 @@ import {
   DOCKED_ORDER_LINK_DOMAIN_NAME,
   DOCKED_ORDER_LINK_DOMAIN_VERSION,
   DOCKED_ORDER_LINK_PRIMARY_TYPE,
+  DOCKED_ORDER_LINK_TYPED_DATA_FIELDS as PROTOCOL_DOCKED_ORDER_LINK_TYPED_DATA_FIELDS,
   STAGE_EXECUTOR_PATCH_DOMAIN_NAME,
   STAGE_EXECUTOR_PATCH_DOMAIN_VERSION,
   STAGE_EXECUTOR_PATCH_PRIMARY_TYPE,
+  STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS as PROTOCOL_STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS,
   STAGE_RESOURCE_PATCH_DOMAIN_NAME,
   STAGE_RESOURCE_PATCH_DOMAIN_VERSION,
   STAGE_RESOURCE_PATCH_PRIMARY_TYPE,
+  STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS as PROTOCOL_STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS,
   buildDockedOrderLinkTypedData as buildProtocolDockedOrderLinkTypedData,
   hashDockedOrderLinkPayload as hashProtocolDockedOrderLinkPayload,
   recoverDockedOrderLinkSigner as recoverProtocolDockedOrderLinkSigner
@@ -36,51 +39,17 @@ export {
   EXECUTOR_PATCH_MODE_REPLACEMENT
 } from "../shared/protocol-constants.js";
 
-export const STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS = [
-  { name: "orderId", type: "bytes32" },
-  { name: "selectorStageId", type: "bytes32" },
-  { name: "targetStageId", type: "bytes32" },
-  { name: "executor", type: "address" },
-  { name: "role", type: "bytes32" },
-  { name: "executorMetadataHash", type: "bytes32" },
-  { name: "mode", type: "bytes32" },
-  { name: "previousExecutor", type: "address" },
-  { name: "approvalSourceId", type: "bytes32" },
-  { name: "approvalSignalId", type: "bytes32" },
-  { name: "patchHash", type: "bytes32" },
-  { name: "patchNonce", type: "uint256" },
-  { name: "metadataURI", type: "string" },
-  { name: "selector", type: "address" },
-  { name: "deadline", type: "uint256" }
-] as const satisfies readonly StagePatchTypedDataField[];
+// 审计 #10：patch 模块的 EIP-712 结构体现在以 planId 开头
+// （UVPStagePatchModuleStageExecutorPatch(bytes32 planId,bytes32 orderId,...)）。
+// 字段表从 protocol-bindings 导入，禁止本地漂移。
+export const STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS =
+  PROTOCOL_STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS;
 
-export const STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS = [
-  { name: "orderId", type: "bytes32" },
-  { name: "selectorStageId", type: "bytes32" },
-  { name: "targetStageId", type: "bytes32" },
-  { name: "resourceKey", type: "bytes32" },
-  { name: "manifestHash", type: "bytes32" },
-  { name: "policyHash", type: "bytes32" },
-  { name: "patchHash", type: "bytes32" },
-  { name: "patchNonce", type: "uint256" },
-  { name: "manifestURI", type: "string" },
-  { name: "selector", type: "address" },
-  { name: "deadline", type: "uint256" }
-] as const satisfies readonly StagePatchTypedDataField[];
+export const STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS =
+  PROTOCOL_STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS;
 
-export const DOCKED_ORDER_LINK_TYPED_DATA_FIELDS = [
-  { name: "localOrderId", type: "bytes32" },
-  { name: "selectorStageId", type: "bytes32" },
-  { name: "localSourceId", type: "bytes32" },
-  { name: "linkedOrderId", type: "bytes32" },
-  { name: "linkedPlanId", type: "bytes32" },
-  { name: "linkHash", type: "bytes32" },
-  { name: "linkNonce", type: "uint256" },
-  { name: "signalBindingsHash", type: "bytes32" },
-  { name: "metadataURI", type: "string" },
-  { name: "selector", type: "address" },
-  { name: "deadline", type: "uint256" }
-] as const satisfies readonly StagePatchTypedDataField[];
+export const DOCKED_ORDER_LINK_TYPED_DATA_FIELDS =
+  PROTOCOL_DOCKED_ORDER_LINK_TYPED_DATA_FIELDS;
 
 export interface StageExecutorPatchPayload {
   readonly orderId: Hex;
@@ -98,6 +67,8 @@ export interface StageExecutorPatchPayload {
 }
 
 export interface BuildStageExecutorPatchTypedDataInput extends StageExecutorPatchPayload {
+  /** 审计 #10：订单所属 plan，签名首字段。 */
+  readonly planId: Hex;
   readonly chainId: number;
   readonly verifyingContract: Address | string;
   readonly patchHash: Hex;
@@ -117,6 +88,8 @@ export interface StageResourcePatchPayload {
 }
 
 export interface BuildStageResourcePatchTypedDataInput extends StageResourcePatchPayload {
+  /** 审计 #10：订单所属 plan，签名首字段。 */
+  readonly planId: Hex;
   readonly chainId: number;
   readonly verifyingContract: Address | string;
   readonly patchHash: Hex;
@@ -126,6 +99,8 @@ export interface BuildStageResourcePatchTypedDataInput extends StageResourcePatc
 
 export interface DockedOrderLinkPayload {
   readonly localOrderId: Hex;
+  /** 审计 #10：本地订单所属 plan，签名首字段。 */
+  readonly localPlanId: Hex;
   readonly selectorStageId: Hex;
   readonly localSourceId: Hex;
   readonly linkedOrderId: Hex;
@@ -246,6 +221,7 @@ export function buildStageExecutorPatchTypedData(input: BuildStageExecutorPatchT
       },
       primaryType: STAGE_EXECUTOR_PATCH_PRIMARY_TYPE,
       message: {
+        planId: input.planId,
         orderId: input.orderId,
         selectorStageId: input.selectorStageId,
         targetStageId: input.targetStageId,
@@ -282,6 +258,7 @@ export function buildStageResourcePatchTypedData(input: BuildStageResourcePatchT
       },
       primaryType: STAGE_RESOURCE_PATCH_PRIMARY_TYPE,
       message: {
+        planId: input.planId,
         orderId: input.orderId,
         selectorStageId: input.selectorStageId,
         targetStageId: input.targetStageId,
@@ -305,6 +282,7 @@ export function buildDockedOrderLinkTypedData(input: BuildDockedOrderLinkTypedDa
     return buildProtocolDockedOrderLinkTypedData({
       chainId: input.chainId,
       verifyingContract: input.verifyingContract,
+      localPlanId: input.localPlanId,
       localOrderId: input.localOrderId,
       selectorStageId: input.selectorStageId,
       localSourceId: input.localSourceId,

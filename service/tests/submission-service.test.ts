@@ -31,6 +31,8 @@ const privateKey = "0x1111111111111111111111111111111111111111111111111111111111
 const account = privateKeyToAccount(privateKey);
 const submitter = normalizeAddress(account.address, "account.address");
 const verifyingContract = "0x1111111111111111111111111111111111111111" as Address;
+const planId = "0x7777777777777777777777777777777777777777777777777777777777777777" as Hex;
+const zeroPlanId = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
 const chainId = 31337;
 const owner: EvidencePrincipal = { id: "seller", role: "participant" };
 const baseNow = new Date("2026-04-28T00:00:00Z");
@@ -145,6 +147,7 @@ describe("product task submissions", () => {
         },
         primaryType: "UVPStateMachineSignal",
         message: {
+          planId,
           orderId: prepared.onchainOrderId,
           sourceId: prepared.sourceId,
           signalId: prepared.signalId,
@@ -155,7 +158,9 @@ describe("product task submissions", () => {
         }
       }
     });
+    // 审计 #10：UVPStateMachineSignal 签名域并入 planId，且首字段为 planId。
     expect(prepared.typedData.types.UVPStateMachineSignal.map((field) => field.name)).toEqual([
+      "planId",
       "orderId",
       "sourceId",
       "signalId",
@@ -164,6 +169,54 @@ describe("product task submissions", () => {
       "submitter",
       "deadline"
     ]);
+    expect(prepared.planId).toBe(planId);
+  });
+
+  it("refuses to prepare when the projection cannot supply the order planId", async () => {
+    // 审计 #10 负例：投影无 planId（或为零占位）时不构造签名，prepare 直接失败。
+    const fixture = await submissionFixture({
+      authorization: permissiveProductProjectionAuthorization()
+    });
+    const service = createProductSubmissionService({
+      productTasks: {
+        getTask: async (taskId) => taskId === task.taskId ? task : undefined
+      },
+      evidenceReader: fixture.evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => undefined,
+      authorization: permissiveProductProjectionAuthorization(),
+      now: () => baseNow
+    });
+
+    await expect(service.prepareSubmit(task.taskId, {
+      evidenceIds: [fixture.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "order_plan_unresolved",
+      status: 409
+    });
+
+    const zeroService = createProductSubmissionService({
+      productTasks: {
+        getTask: async (taskId) => taskId === task.taskId ? task : undefined
+      },
+      evidenceReader: fixture.evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => zeroPlanId,
+      authorization: permissiveProductProjectionAuthorization(),
+      now: () => baseNow
+    });
+    await expect(zeroService.prepareSubmit(task.taskId, {
+      evidenceIds: [fixture.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "order_plan_unresolved",
+      status: 409
+    });
   });
 
   it("recovers and verifies the submitter signature without broadcasting by default", async () => {
@@ -636,6 +689,7 @@ describe("product task submissions", () => {
       evidenceReader: fixture.evidenceService,
       chainId,
       verifyingContract,
+      resolveOrderPlanId: async () => planId,
       authorization: allowListedSubmissionAuthorization([{
         orderId: task.orderId,
         stageIdentifier: task.stageId,
@@ -758,6 +812,7 @@ describe("product task submissions", () => {
     });
     expect((calls[0] as StateMachineSubmitSignalForCall & { readonly data?: string }).data).toMatch(/^0x[0-9a-f]+$/);
     expect(calls[0]!.args).toEqual([
+      prepared.planId,
       prepared.onchainOrderId,
       prepared.sourceId,
       prepared.signalId,
@@ -787,6 +842,50 @@ describe("product task submissions", () => {
       retryState: "not_applicable",
       deadLetter: false
     });
+  });
+
+  it("refuses to broadcast a prepared submission whose planId is missing or zero", async () => {
+    // 审计 #10 负例：零占位 planId 无法通过链上 (planId, orderId) 存在性校验，
+    // broadcast 适配器必须拒绝构造调用而不是发一笔注定 revert 的交易。
+    const walletClient = {
+      account: { address: "0x9999999999999999999999999999999999999999" as Address },
+      writeContract: vi.fn(async () => txHash("79"))
+    };
+    const adapter = createStateMachineSubmissionBroadcastAdapter({
+      stateMachineAddress: verifyingContract,
+      chainId,
+      publicClient: { getChainId: async () => chainId },
+      walletClient,
+      waitForReceipt: false,
+      now: () => baseNow
+    });
+    const fixture = await submissionFixture();
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+    const zeroPrepared: PreparedSubmissionDTO = {
+      ...prepared,
+      planId: zeroPlanId,
+      typedData: {
+        ...prepared.typedData,
+        message: {
+          ...prepared.typedData.message,
+          planId: zeroPlanId
+        }
+      }
+    };
+
+    await expect(adapter.broadcast({
+      prepared: zeroPrepared,
+      signature,
+      recoveredSubmitter: submitter,
+      evidence: []
+    })).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "order_plan_unresolved",
+      retryable: false,
+      deadLetter: true
+    });
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
   });
 
   it("refuses recovered submitter mismatches before submitSignalFor", async () => {
@@ -1319,6 +1418,7 @@ async function submissionFixture(options: {
     evidenceReader: evidenceService,
     chainId,
     verifyingContract,
+    resolveOrderPlanId: async () => planId,
     authorization,
     ...(options.broadcastAdapter ? { broadcastAdapter: options.broadcastAdapter } : {}),
     now,
@@ -1337,6 +1437,7 @@ function submissionServiceForEvidence(evidenceService: EvidenceService): Product
     evidenceReader: evidenceService,
     chainId,
     verifyingContract,
+    resolveOrderPlanId: async () => planId,
     authorization: allowListedSubmissionAuthorization([{
       orderId: task.orderId,
       stageIdentifier: task.stageId,

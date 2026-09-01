@@ -1760,6 +1760,7 @@ function preparedSubmission(): PreparedSubmissionRecord {
     orderId: "order-1",
     onchainOrderId:
       "0x8888888888888888888888888888888888888888888888888888888888888888",
+    planId: "0x6666666666666666666666666666666666666666666666666666666666666666",
     stageIdentifier: "stage-1",
     signalName: "confirm_stage",
     sourceId:
@@ -1798,6 +1799,7 @@ function preparedSubmission(): PreparedSubmissionRecord {
       },
       types: {
         UVPStateMachineSignal: [
+          { name: "planId", type: "bytes32" },
           { name: "orderId", type: "bytes32" },
           { name: "sourceId", type: "bytes32" },
           { name: "signalId", type: "bytes32" },
@@ -1809,6 +1811,8 @@ function preparedSubmission(): PreparedSubmissionRecord {
       },
       primaryType: "UVPStateMachineSignal",
       message: {
+        planId:
+          "0x6666666666666666666666666666666666666666666666666666666666666",
         orderId:
           "0x8888888888888888888888888888888888888888888888888888888888888888",
         sourceId:

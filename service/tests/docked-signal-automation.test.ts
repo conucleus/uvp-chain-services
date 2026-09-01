@@ -36,6 +36,7 @@ const localPlanId = bytes32("100");
 const localPlanHash = bytes32("101");
 const linkedPlanId = bytes32("102");
 const linkedPlanHash = bytes32("103");
+const zeroPlanId = `0x${"0".repeat(64)}` as Hex;
 
 describe("docked signal automation", () => {
   it("discovers a linked signal that has not been mapped into the local order", () => {
@@ -147,6 +148,57 @@ describe("docked signal automation", () => {
     expect(walletClient.writeContract).not.toHaveBeenCalled();
   });
 
+  it("refuses to construct submitDockedSignal when a projection planId is zero", async () => {
+    // 审计 #10 负例：投影行缺（零）planId 时不构造提交，直接返回失败结果。
+    const walletClient = {
+      account: { address: gasPayer },
+      writeContract: vi.fn(async () => bytes32("12")),
+    };
+    const publicClient = {
+      getChainId: vi.fn(async () => chainId),
+      estimateContractGas: vi.fn(async () => 120_000n),
+      waitForTransactionReceipt: vi.fn(async () => ({
+        status: "success" as const,
+        blockNumber: 12n,
+      })),
+    };
+    const adapter = createStateMachineDockedSignalBroadcastAdapter({
+      chainId,
+      publicClient,
+      walletClient,
+    });
+    const snapshot = projectionSnapshot();
+    const linkedOrder = snapshot.stateMachineOrders[
+      stateMachineScopedKey(chainId, stateMachineAddress, linkedOrderId)
+    ]!;
+    const brokenSnapshot: ProjectionSnapshot = {
+      ...snapshot,
+      stateMachineOrders: {
+        ...snapshot.stateMachineOrders,
+        [stateMachineScopedKey(chainId, stateMachineAddress, linkedOrderId)]: {
+          ...linkedOrder,
+          planId: zeroPlanId,
+        },
+      },
+    };
+    const candidate = discoverDockedSignalCandidates(brokenSnapshot, {
+      dockingModuleAddress,
+      maxCandidates: 10,
+    }).candidates[0]!;
+
+    const result = await adapter.broadcast(candidate);
+
+    expect(result).toMatchObject({
+      status: "failed",
+      errorCode: "order_plan_unresolved",
+      attempt: {
+        errorCode: "order_plan_unresolved",
+        retryable: false,
+      },
+    });
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
+  });
+
   it("writes submitDockedSignal with deterministic args under the gas cap", async () => {
     const walletClient = {
       account: { address: gasPayer },
@@ -181,12 +233,15 @@ describe("docked signal automation", () => {
       txHash: bytes32("11"),
       blockNumber: "12",
     });
+    // 审计 #10：submitDockedSignal 变为 plan 作用域，planId 领参。
     expect(walletClient.writeContract).toHaveBeenCalledWith(
       expect.objectContaining({
         address: dockingModuleAddress,
         functionName: "submitDockedSignal",
         args: [
+          localPlanId,
           localOrderId,
+          linkedPlanId,
           linkedOrderId,
           linkedSourceId,
           linkedSignalId,
