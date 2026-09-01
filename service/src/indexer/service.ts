@@ -152,7 +152,7 @@ export class IndexerService implements LifecycleService {
           eventCount: 0,
           activeEventCount: 0,
           removedEventCount: 0,
-          removedLogsFiltered: true,
+          removedLogsFiltered: false,
           projectionRebuilt: true,
           mismatchCount: 0
         }
@@ -169,7 +169,7 @@ export class IndexerService implements LifecycleService {
           eventCount: 0,
           activeEventCount: 0,
           removedEventCount: 0,
-          removedLogsFiltered: true,
+          removedLogsFiltered: false,
           syncState,
           mismatchCount: 0
         })
@@ -472,7 +472,7 @@ export class IndexerService implements LifecycleService {
         eventCount: input.newEventCount,
         activeEventCount: existing?.eventCount ?? 0,
         removedEventCount: 0,
-        removedLogsFiltered: true,
+        removedLogsFiltered: false,
         projectionRebuilt: snapshot.rebuildable,
         mismatchCount: 0
       }
@@ -489,7 +489,7 @@ export class IndexerService implements LifecycleService {
         eventCount: syncState.eventCount,
         activeEventCount: syncState.eventCount,
         removedEventCount: 0,
-        removedLogsFiltered: true,
+        removedLogsFiltered: false,
         syncState,
         mismatchCount: 0
       })
@@ -565,7 +565,7 @@ export class IndexerService implements LifecycleService {
         eventCount: existing?.eventCount ?? 0,
         activeEventCount: existing?.eventCount ?? 0,
         removedEventCount: existing?.rebuild?.removedEventCount ?? 0,
-        removedLogsFiltered: existing?.rebuild?.removedLogsFiltered ?? true,
+        removedLogsFiltered: existing?.rebuild?.removedLogsFiltered ?? false,
         projectionRebuilt: false,
         mismatchCount: existing?.rebuild?.mismatchCount ?? 0
       },

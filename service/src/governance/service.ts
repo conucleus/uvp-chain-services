@@ -105,8 +105,26 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const subjectId = requiredBytes32(record, "subjectId");
       const account = requiredAddress(record, "account");
       const review = await resolveReview(store, record, "supplier", subjectId);
-      const reviewHash = review ? reviewHashInput(review) : reviewHashInputFromRecord(record, "supplier", subjectId, "approved_for_broadcast");
-      assertReviewAllowsIdentityRegistration(reviewHash.status);
+      if (!review) {
+        // Audit #34: never fabricate an on-chain review hash from request-body
+        // fields. The removed fallback hashed the caller's own fields with a
+        // default "approved_for_broadcast" status, which put a descriptorHash
+        // on chain whose review material did not exist anywhere in the store.
+        // Identity registration therefore requires an existing review record
+        // (created via review-zhixu / review-supplier / store supplier
+        // review) — the same bar as assertReviewAllowsIdentityRegistration,
+        // except there is nothing to assert when no review exists, so the
+        // request is refused instead of being broadcast with a forged
+        // "approved" hash.
+        throw new GovernanceServiceError(
+          409,
+          "review_not_approved",
+          "identity registration requires an existing supplier review record; no review was found for this subject",
+          { subjectId }
+        );
+      }
+      const reviewHash = reviewHashInput(review);
+      assertReviewAllowsIdentityRegistration(review.status);
       const descriptorInput = {
         subjectId,
         account,
@@ -391,24 +409,6 @@ function reviewHashInput(review: GovernanceReviewDTO): GovernanceReviewHashInput
     riskLevel: review.riskLevel,
     riskTags: review.riskTags,
     publicSummary: review.publicSummary
-  });
-}
-
-function reviewHashInputFromRecord(
-  record: Record<string, unknown>,
-  subjectType: GovernanceSubjectType,
-  subjectId: string,
-  defaultStatus: GovernanceReviewStatus
-): GovernanceReviewHashInput {
-  return reviewHashInputFromFields({
-    subjectType,
-    subjectId,
-    status: optionalReviewStatus(record, "status") ?? defaultStatus,
-    riskLevel: optionalString(record, "riskLevel") ?? "unknown",
-    riskTags: optionalStringArray(record, "riskTags") ?? [],
-    publicSummary: optionalString(record, "publicSummary") ?? "",
-    metadata: optionalUnknown(record, "metadata"),
-    policy: optionalUnknown(record, "policy")
   });
 }
 
@@ -704,11 +704,6 @@ function requiredAddress(record: Record<string, unknown>, field: string): Addres
 
 function requiredReviewStatus(record: Record<string, unknown>, field: string): GovernanceReviewStatus {
   return parseReviewStatus(requiredString(record, field));
-}
-
-function optionalReviewStatus(record: Record<string, unknown>, field: string): GovernanceReviewStatus | undefined {
-  const value = optionalString(record, field);
-  return value ? parseReviewStatus(value) : undefined;
 }
 
 function parseReviewStatus(value: string): GovernanceReviewStatus {

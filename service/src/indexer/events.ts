@@ -12,6 +12,11 @@ export interface ActiveChainEventReplaySummary<TEvent extends ChainEvent = Chain
   readonly activeEvents: readonly TEvent[];
   readonly activeEventCount: number;
   readonly removedEventCount: number;
+  /**
+   * Audit #33: honest metric — true only when this replay actually filtered at
+   * least one `removed` log (removedEventCount > 0). It never reports a
+   * vacuous true for replays that saw no removed logs at all.
+   */
   readonly removedLogsFiltered: boolean;
 }
 
@@ -78,6 +83,6 @@ export function buildActiveChainEventReplaySummary<TEvent extends ChainEvent>(
     activeEvents,
     activeEventCount: activeEvents.length,
     removedEventCount,
-    removedLogsFiltered: [...removedEventIds].every((eventId) => !activeByEventId.has(eventId))
+    removedLogsFiltered: removedEventCount > 0
   };
 }

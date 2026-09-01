@@ -24,7 +24,6 @@ export interface ConfigDiagnostics {
     readonly chainId: number;
     readonly deploymentBlock: string;
     readonly finalityConfirmations: number;
-    readonly reorgBufferBlocks: number;
     readonly contracts: Readonly<Record<string, Address>>;
     readonly stateMachineConfigured: boolean;
     readonly identityRegistryConfigured: boolean;
@@ -239,7 +238,6 @@ export function buildConfigDiagnostics(
       chainId: config.network.chainId,
       deploymentBlock: config.network.deploymentBlock.toString(),
       finalityConfirmations: config.network.finalityConfirmations,
-      reorgBufferBlocks: config.network.reorgBufferBlocks,
       contracts: config.network.contracts,
       stateMachineConfigured: Boolean(stateMachine),
       identityRegistryConfigured: Boolean(identityRegistry)
@@ -701,15 +699,15 @@ function runStagingSafetyPreflight(
   } else {
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia or staging RPC in staging");
   }
+  // Audit #15: finalityConfirmations is the only reorg-safety defense the
+  // indexer has today; explicit reorg rollback handling is registered
+  // follow-up work. The former UVP_REORG_BUFFER_BLOCKS check here was a ghost
+  // config nothing consumed, and was removed instead of pretending extra
+  // safety.
   if (config.network.finalityConfirmations > 0) {
     pass(checks, "network.finality_confirmations");
   } else {
     fail(checks, errors, "network.finality_confirmations", "UVP_FINALITY_CONFIRMATIONS must be positive in staging");
-  }
-  if (config.network.reorgBufferBlocks > 0) {
-    pass(checks, "network.reorg_buffer_blocks");
-  } else {
-    fail(checks, errors, "network.reorg_buffer_blocks", "UVP_REORG_BUFFER_BLOCKS must be positive in staging");
   }
   if (stateMachine) {
     pass(checks, "contracts.state_machine");

@@ -610,7 +610,6 @@ function fallbackConfigDiagnostics(environment: ChainServicesRuntimeEnv): Record
       chainId: null,
       deploymentBlock: null,
       finalityConfirmations: null,
-      reorgBufferBlocks: null,
       contracts: {}
     },
     warnings: [],

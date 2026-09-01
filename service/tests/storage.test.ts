@@ -496,6 +496,8 @@ describe("durable storage", () => {
     await store.putPrepared(prepared);
     await expect(store.reserveNonce("nonce-key")).resolves.toBe(true);
     await expect(store.reserveNonce("nonce-key")).resolves.toBe(false);
+    await store.releaseNonce("nonce-key");
+    await expect(store.reserveNonce("nonce-key")).resolves.toBe(true);
     await store.putSubmission(submission);
     await store.markPreparedUsed(
       prepared.prepareId,

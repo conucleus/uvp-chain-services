@@ -4,7 +4,6 @@
     "rpcUrl": "http://127.0.0.1:8545",
     "deploymentBlock": "0",
     "finalityConfirmations": 1,
-    "reorgBufferBlocks": 8,
     "contracts": {
       "UVPStateMachine": "0x0000000000000000000000000000000000000000",
       "UVPIdentityRegistry": "0x0000000000000000000000000000000000000000"

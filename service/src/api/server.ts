@@ -321,6 +321,12 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
         forcePathStyle: evidenceStorageConfig.s3ForcePathStyle ?? false,
         accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv,
         secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv,
+        // Audit #19: forward the optional STS session-token env so temporary
+        // credentials actually reach the S3 client instead of dying at the
+        // first upload/read with a 403 that preflight never saw.
+        ...(evidenceStorageConfig.s3SessionTokenEnv
+          ? { sessionTokenEnv: evidenceStorageConfig.s3SessionTokenEnv }
+          : {}),
         ...(evidenceStorageConfig.s3UriMode === "object"
           ? {
               uriMode: evidenceStorageConfig.s3UriMode,

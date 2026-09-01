@@ -8,9 +8,11 @@ import {
   createSecureSubmissionBroadcastAdapter,
   createStateMachineSubmissionBroadcastAdapter,
   createProductSubmissionService,
+  InMemoryProductSubmissionStore,
   permissiveProductProjectionAuthorization,
   type PreparedSubmissionDTO,
   type ProductSubmissionService,
+  type ProductSubmissionStore,
   type StateMachineSubmitSignalForCall,
   type SubmissionBroadcastAdapter,
   type SubmissionBroadcastResult
@@ -552,6 +554,158 @@ describe("product task submissions", () => {
     expect(proof).toMatchObject({
       verificationStatus: "unbound"
     });
+  });
+
+  it("releases the reserved nonce when broadcast throws so the same prepareId stays retryable", async () => {
+    let broadcastCalls = 0;
+    const broadcast: SubmissionBroadcastAdapter = {
+      attemptsBroadcast: true,
+      async broadcast(): Promise<SubmissionBroadcastResult> {
+        broadcastCalls += 1;
+        if (broadcastCalls === 1) {
+          throw new Error("rpc connection reset before writeContract");
+        }
+        return { status: "submitted" as const, txHash: txHash("30"), blockNumber: "7" };
+      }
+    };
+    const fixture = await submissionFixture({ broadcastAdapter: broadcast });
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+
+    // First attempt throws after the nonce was reserved: nothing was
+    // broadcast and no submission exists, so the error must propagate.
+    await expect(fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toThrow("rpc connection reset before writeContract");
+
+    // The nonce was released, so retrying the same prepareId succeeds instead
+    // of reporting a false duplicate_submit.
+    const retried = await fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    });
+
+    expect(retried).toMatchObject({
+      submissionId: "sub_1",
+      status: "submitted",
+      txHash: txHash("30")
+    });
+    expect(broadcastCalls).toBe(2);
+    await expect(fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toMatchObject({
+      code: "prepare_already_used",
+      status: 409
+    });
+  });
+
+  it("releases the reserved nonce when the store write fails so the same prepareId stays retryable", async () => {
+    const inner = new InMemoryProductSubmissionStore();
+    let putSubmissionCalls = 0;
+    const flakyStore: ProductSubmissionStore = {
+      withTransaction: (operation) => (inner as ProductSubmissionStore).withTransaction?.(operation) ?? operation(),
+      putPrepared: (record) => inner.putPrepared(record),
+      getPrepared: (prepareId) => inner.getPrepared(prepareId),
+      markPreparedUsed: (prepareId, submissionId, usedAt) => inner.markPreparedUsed(prepareId, submissionId, usedAt),
+      reserveNonce: (key) => inner.reserveNonce(key),
+      releaseNonce: (key) => inner.releaseNonce(key),
+      putSubmission: async (submission) => {
+        putSubmissionCalls += 1;
+        if (putSubmissionCalls === 1) {
+          throw new Error("simulated durable store outage");
+        }
+        return inner.putSubmission(submission);
+      },
+      getSubmission: (submissionId) => inner.getSubmission(submissionId),
+      listSubmissions: () => inner.listSubmissions()
+    };
+    const broadcast: SubmissionBroadcastAdapter = {
+      attemptsBroadcast: true,
+      async broadcast(): Promise<SubmissionBroadcastResult> {
+        return { status: "submitted" as const, txHash: txHash("31") };
+      }
+    };
+    const fixture = await submissionFixture({ broadcastAdapter: broadcast });
+    const service = createProductSubmissionService({
+      productTasks: { getTask: async (taskId) => taskId === task.taskId ? task : undefined },
+      evidenceReader: fixture.evidenceService,
+      chainId,
+      verifyingContract,
+      authorization: allowListedSubmissionAuthorization([{
+        orderId: task.orderId,
+        stageIdentifier: task.stageId,
+        signalName: "confirm_stage",
+        submitter
+      }]),
+      broadcastAdapter: broadcast,
+      store: flakyStore,
+      now: () => baseNow,
+      prepareIdFactory: () => "prep_1",
+      submissionIdFactory: () => "sub_1",
+      nonceFactory: () => "42"
+    });
+    const prepared = await prepare({ service, evidence: fixture.evidence, task });
+    const signature = await signPrepared(prepared);
+
+    await expect(service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toThrow("simulated durable store outage");
+    expect(putSubmissionCalls).toBe(1);
+
+    const retried = await service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    });
+
+    expect(retried).toMatchObject({
+      status: "submitted",
+      txHash: txHash("31")
+    });
+    expect(putSubmissionCalls).toBe(2);
+  });
+
+  it("classifies getChainId RPC failures as failed broadcast results instead of throwing", async () => {
+    const walletClient = {
+      account: { address: "0x9999999999999999999999999999999999999999" },
+      writeContract: vi.fn(async () => txHash("32"))
+    };
+    const adapter = createStateMachineSubmissionBroadcastAdapter({
+      stateMachineAddress: verifyingContract,
+      chainId,
+      publicClient: {
+        getChainId: async () => {
+          throw new Error("RPC read timed out");
+        }
+      },
+      walletClient,
+      waitForReceipt: false,
+      now: () => baseNow
+    });
+    const fixture = await submissionFixture();
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+
+    await expect(adapter.broadcast({
+      prepared,
+      signature,
+      recoveredSubmitter: submitter,
+      evidence: []
+    })).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "rpc_timeout",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false
+    });
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
   });
 
   it("broadcasts submitSignalFor with the state-machine ABI arguments", async () => {

@@ -13,6 +13,7 @@ import {
   LocalEvidenceStorage,
   ObjectEvidenceStorage,
   RehearsalObjectEvidenceStorage,
+  defaultRehearsalObjectStorageRoot,
   S3EvidenceStorageClient,
   type S3CompatibleObjectClient,
   type S3ObjectOperationInput,
@@ -175,6 +176,77 @@ describe("evidence service", () => {
     ]);
   });
 
+  it("rejects attributing uploaded evidence to another participant via ownerParticipantId or request writers", async () => {
+    const metadataStore = new InMemoryEvidenceMetadataStore();
+    const service = createEvidenceService({
+      metadataStore,
+      storage: new InMemoryEvidenceStorage(),
+      now: () => new Date("2026-04-28T00:00:00Z"),
+      evidenceIdFactory: () => "ev_forge"
+    });
+    const attacker: EvidencePrincipal = { id: "attacker", role: "participant" };
+
+    // A self-asserted writers list in the same request body must not vouch
+    // for attributing the record to someone else.
+    await expect(service.uploadEvidence({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "forged invoice",
+      ownerParticipantId: "seller",
+      accessPolicy: { writers: ["attacker"] }
+    }, attacker)).rejects.toMatchObject({ code: "forbidden", status: 403 });
+
+    await expect(metadataStore.get("ev_forge")).resolves.toBeUndefined();
+
+    // A plain writers grant without the owner claim is equally rejected: the
+    // request body cannot create evidence owned by another participant.
+    await expect(service.uploadEvidence({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "forged invoice",
+      ownerParticipantId: "seller",
+      accessPolicy: { writers: ["attacker"], readers: ["seller"] }
+    }, attacker)).rejects.toMatchObject({ code: "forbidden", status: 403 });
+    await expect(metadataStore.get("ev_forge")).resolves.toBeUndefined();
+
+    // The principal can still declare itself as owner explicitly.
+    const own = await service.uploadEvidence({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "own invoice",
+      ownerParticipantId: "attacker",
+      accessPolicy: { writers: ["attacker"] }
+    }, attacker);
+    expect(own.evidence.ownerParticipantId).toBe("attacker");
+
+    // Admin keeps the existing on-behalf ability, and an omitted owner
+    // defaults to the authenticated principal.
+    const onBehalf = await service.uploadEvidence({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "admin invoice",
+      ownerParticipantId: "seller"
+    }, { id: "ops-admin", role: "admin" });
+    expect(onBehalf.evidence.ownerParticipantId).toBe("seller");
+
+    const defaulted = await service.uploadEvidence({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "default owner invoice"
+    }, owner);
+    expect(defaulted.evidence.ownerParticipantId).toBe("seller");
+  });
+
   it("returns proof and reports missing_file or mismatch without deleting evidence metadata", async () => {
     const storage = new InMemoryEvidenceStorage();
     const service = createEvidenceService({
@@ -308,8 +380,7 @@ describe("evidence service", () => {
     const rootDir = tempDir();
     const storage = new RehearsalObjectEvidenceStorage({
       rootDir,
-      namespace: "uvp-rehearsal-test",
-      runId: "run-1"
+      namespace: "uvp-rehearsal-test"
     });
     const service = createEvidenceService({
       storage,
@@ -325,6 +396,18 @@ describe("evidence service", () => {
     await expect(service.getProof(upload.evidence.evidenceId, owner)).resolves.toMatchObject({
       verificationStatus: "unbound"
     });
+  });
+
+  it("keeps the default rehearsal object root stable across process restarts", () => {
+    // Audit #20: stored metadata references bytes under this root, so the
+    // default must never embed a timestamp or pid that changes on restart.
+    const first = new RehearsalObjectEvidenceStorage();
+    const second = new RehearsalObjectEvidenceStorage();
+    const expected = join(process.cwd(), "data", "evidence-object", "ev_restart.bin");
+
+    expect(first.pathForStorageURI("object://uvp-rehearsal/ev_restart")).toBe(expected);
+    expect(second.pathForStorageURI("object://uvp-rehearsal/ev_restart")).toBe(expected);
+    expect(defaultRehearsalObjectStorageRoot()).toBe(join(process.cwd(), "data", "evidence-object"));
   });
 
   it("accepts production-like object storage but rejects public or credential-bearing storage URIs", async () => {
@@ -466,6 +549,34 @@ describe("evidence service", () => {
     } catch (error) {
       expect(error instanceof Error ? error.message : String(error)).not.toContain("access-value-that-must-not-leak");
     }
+  });
+
+  it("resolves a configured STS session token env at construction time", () => {
+    // Audit #19: the session token must reach the S3 client when configured,
+    // and a configured-but-empty token env must fail construction instead of
+    // producing a client that passes preflight and 403s on first use.
+    expect(() => new S3EvidenceStorageClient({
+      bucket: "private-evidence-bucket",
+      region: "us-east-1",
+      accessKeyIdEnv: "S3_ACCESS_KEY_ID",
+      secretAccessKeyEnv: "S3_SECRET_ACCESS_KEY",
+      sessionTokenEnv: "S3_SESSION_TOKEN",
+      env: {
+        ...s3CredentialEnv(),
+        S3_SESSION_TOKEN: "sts-session-token-value"
+      },
+      objectClient: new MockS3CompatibleObjectClient()
+    })).not.toThrow();
+
+    expect(() => new S3EvidenceStorageClient({
+      bucket: "private-evidence-bucket",
+      region: "us-east-1",
+      accessKeyIdEnv: "S3_ACCESS_KEY_ID",
+      secretAccessKeyEnv: "S3_SECRET_ACCESS_KEY",
+      sessionTokenEnv: "S3_SESSION_TOKEN",
+      env: s3CredentialEnv(),
+      objectClient: new MockS3CompatibleObjectClient()
+    })).toThrow(EvidenceStorageConfigurationError);
   });
 
   it("returns undefined for missing evidence records", async () => {

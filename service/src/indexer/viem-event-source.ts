@@ -92,6 +92,11 @@ export class ViemChainEventSource implements ChainEventSource {
 
   async getFinalizedBlock(config: ChainServicesConfig): Promise<bigint> {
     const latestBlock = await this.#client(config).getBlockNumber();
+    // Audit #15: current reorg safety = finalityConfirmations. Events are only
+    // read below this many blocks from the head; there is no additional
+    // reorg-buffer setting, and explicit reorg rollback handling (rewriting
+    // projections from `removed` logs) is registered follow-up work, not
+    // implemented here.
     const confirmations = BigInt(config.network.finalityConfirmations);
     if (latestBlock <= confirmations) {
       return 0n;

@@ -15,8 +15,12 @@ export interface NetworkConfig {
   readonly chainId: number;
   readonly rpcUrl: string;
   readonly deploymentBlock: bigint;
+  /**
+   * Sole reorg-safety mechanism of the indexer today: only logs at least this
+   * many blocks deep are treated as final. Explicit reorg rollback handling
+   * (`removed` log replay) is registered as follow-up work, not implemented.
+   */
   readonly finalityConfirmations: number;
-  readonly reorgBufferBlocks: number;
   readonly contracts: Readonly<Record<string, Address>>;
   readonly stateMachineDeployments?: readonly StateMachineDeploymentConfig[];
   readonly activeDeploymentId?: Hex;
@@ -226,7 +230,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         manifest.deploymentBlock ?? 0n,
       ),
       finalityConfirmations: parseInteger(env, "UVP_FINALITY_CONFIRMATIONS", 1),
-      reorgBufferBlocks: parseInteger(env, "UVP_REORG_BUFFER_BLOCKS", 8),
       contracts,
       stateMachineDeployments: manifest.stateMachineDeployments,
       ...(manifest.activeDeploymentId
@@ -1302,14 +1305,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   ) {
     throw new ConfigError(
       "UVP_FINALITY_CONFIRMATIONS must be an explicit positive integer in staging",
-    );
-  }
-  if (
-    !optionalEnv(env, "UVP_REORG_BUFFER_BLOCKS") ||
-    config.network.reorgBufferBlocks <= 0
-  ) {
-    throw new ConfigError(
-      "UVP_REORG_BUFFER_BLOCKS must be an explicit positive integer in staging",
     );
   }
   if (!stateMachineAddress(config.network.contracts)) {

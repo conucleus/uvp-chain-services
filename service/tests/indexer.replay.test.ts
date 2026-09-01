@@ -658,7 +658,7 @@ describe("indexer projection replay", () => {
       eventCount: 9,
       activeEventCount: 9,
       removedEventCount: 0,
-      removedLogsFiltered: true,
+      removedLogsFiltered: false,
       projectionRebuilt: true,
       stateMachineOrderCount: 1,
       mismatchCount: 0,
@@ -678,7 +678,7 @@ describe("indexer projection replay", () => {
         deploymentBlock: 0n,
         activeEventCount: 9,
         removedEventCount: 0,
-        removedLogsFiltered: true,
+        removedLogsFiltered: false,
         projectionRebuilt: true
       })
     });
@@ -1177,7 +1177,6 @@ function testConfig(): ChainServicesConfig {
       rpcUrl: "http://127.0.0.1:8545",
       deploymentBlock: 0n,
       finalityConfirmations: 2,
-      reorgBufferBlocks: 8,
       contracts: {}
     },
     database: {

@@ -294,33 +294,46 @@ export function createProductSubmissionService(options: ProductSubmissionService
         throw new ProductSubmissionError(409, "duplicate_submit", "submission nonce has already been used");
       }
 
-      const submissionId = submissionIdFactory();
-      const createdAt = now().toISOString();
-      const signatureHash = signatureHashFor(signature);
-      const broadcast = await broadcastAdapter.broadcast({
-        prepared: dtoFromPreparedRecord(prepared),
-        signature,
-        recoveredSubmitter,
-        evidence: prepared.evidenceRecords
-      });
-      const submission = withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
-        submissionId,
-        recoveredSubmitter,
-        signatureHash,
-        createdAt,
-        broadcast
-      }));
-      await withSubmissionStoreTransaction(store, async () => {
-        await store.putSubmission(submission);
-        await store.markPreparedUsed(prepared.prepareId, submissionId, submission.updatedAt);
-      });
+      // From here the nonce reservation is consumed. If the broadcast or the
+      // durable store write throws before any submission record exists, release
+      // the reservation and rethrow: nothing was broadcast and nothing was
+      // recorded, so the same prepareId must stay retryable instead of
+      // surfacing as a permanent 409 duplicate_submit on a transient RPC or
+      // store failure. A broadcast that *returns* a failed result is recorded
+      // as a failed submission and keeps the nonce consumed by design.
+      let submission: ProductSubmissionDTO;
+      try {
+        const submissionId = submissionIdFactory();
+        const createdAt = now().toISOString();
+        const signatureHash = signatureHashFor(signature);
+        const broadcast = await broadcastAdapter.broadcast({
+          prepared: dtoFromPreparedRecord(prepared),
+          signature,
+          recoveredSubmitter,
+          evidence: prepared.evidenceRecords
+        });
+        submission = withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
+          submissionId,
+          recoveredSubmitter,
+          signatureHash,
+          createdAt,
+          broadcast
+        }));
+        await withSubmissionStoreTransaction(store, async () => {
+          await store.putSubmission(submission);
+          await store.markPreparedUsed(prepared.prepareId, submissionId, submission.updatedAt);
+        });
+      } catch (error) {
+        await store.releaseNonce?.(nonceKey);
+        throw error;
+      }
       await audit.record({
         type: "relayer.submit.result",
         action: prepared.signalName,
         outcome: submission.status === "failed" ? "failed" : "succeeded",
         subject: {
           ...submissionAuditSubject(prepared),
-          submissionId
+          submissionId: submission.submissionId
         },
         ...(submission.txHash ? { txHash: submission.txHash } : {}),
         ...(submission.errorCode ? { errorCode: submission.errorCode } : {}),

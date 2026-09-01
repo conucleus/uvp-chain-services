@@ -98,6 +98,11 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
       const taskId = optionalNonEmptyString(input.taskId, "taskId");
       const stageIdentifier = requiredNonEmptyString(input.stageIdentifier, "stageIdentifier");
       const documentType = requiredNonEmptyString(input.documentType, "documentType");
+      // Audit #16: evidence ownership is a server-side derivation. The request
+      // body cannot attribute a record to another participant: canWriteEvidence
+      // only accepts the authenticated principal itself (or an admin acting on
+      // behalf), and a request-supplied access policy can never vouch for the
+      // requester because it comes from the same untrusted body.
       const ownerParticipantId = normalizeParticipantId(
         optionalNonEmptyString(input.ownerParticipantId, "ownerParticipantId") ?? normalizedPrincipal.id
       );
@@ -112,13 +117,9 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
         throw new EvidenceServiceError("payload_too_large", "evidence payload exceeds the configured size limit", 413);
       }
 
-      const provisionalAccessPolicy = normalizeAccessPolicy({
-        evidenceId: "pending",
-        ownerParticipantId,
-        ...(orderId ? { orderId } : {}),
-        ...(input.accessPolicy ? { input: input.accessPolicy } : {})
-      });
-      if (!canWriteEvidence(normalizedPrincipal, ownerParticipantId, provisionalAccessPolicy)) {
+      // The provisional policy is not built here anymore: write authorization
+      // is derived from the principal and the derived owner only (audit #16).
+      if (!canWriteEvidence(normalizedPrincipal, ownerParticipantId)) {
         throw new EvidenceServiceError("forbidden", "principal cannot upload evidence for this owner", 403);
       }
 
@@ -361,9 +362,13 @@ function requireAuthenticated(principal: EvidencePrincipal): void {
 
 function canWriteEvidence(
   principal: EvidencePrincipal,
-  ownerParticipantId: string,
-  accessPolicy: EvidenceAccessPolicyDTO
+  ownerParticipantId: string
 ): boolean {
+  // Audit #16: membership in a request-supplied `writers` list must never
+  // authorize an upload — the list arrives in the same request body that is
+  // trying to claim ownership, so it cannot vouch for the requester. Write
+  // authority over a new record is derived from the authenticated principal
+  // alone (owner = self, or admin on behalf).
   if (principal.role === "admin") {
     return true;
   }
@@ -371,7 +376,7 @@ function canWriteEvidence(
   if (!principalId) {
     return false;
   }
-  return principalId === ownerParticipantId || accessPolicy.writers.includes(principalId);
+  return principalId === ownerParticipantId;
 }
 
 function canReadEvidence(principal: EvidencePrincipal, record: EvidenceMetadataRecord): boolean {

@@ -218,7 +218,6 @@ function chainServicesConfig(): ChainServicesConfig {
       rpcUrl: "https://sepolia.base.org",
       deploymentBlock: 100n,
       finalityConfirmations: 2,
-      reorgBufferBlocks: 12,
       contracts: {
         UVPStateMachine: "0x1111111111111111111111111111111111111111"
       }

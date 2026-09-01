@@ -94,6 +94,57 @@ describe("identity governance API", () => {
     expect(requests.map((request) => request.kind)).toEqual(["registerIdentity", "revokeIdentity"]);
   });
 
+  it("refuses identity registration without any review record instead of faking an approved hash", async () => {
+    const requests: GovernanceChainRequestDTO[] = [];
+    const adapter: GovernanceChainAdapter = {
+      async registerIdentity(request) {
+        requests.push(request);
+        return { status: "submitted", txHash, signer, retryable: false, simulated: false };
+      },
+      async revokeIdentity(request) {
+        requests.push(request);
+        return { status: "submitted", txHash, signer, retryable: false, simulated: false };
+      },
+    };
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      governanceService: createGovernanceService({ adapter }),
+    });
+
+    // No review exists for the subject: the request must be refused. The
+    // removed fallback would have hashed the request body itself into an
+    // "approved_for_broadcast" review hash and broadcast that on chain.
+    const unreviewed = await router.handle({
+      method: "POST",
+      pathname: "/admin/governance/register-identity",
+      headers: adminHeaders,
+      body: { subjectId, account: wallet, status: "approved_for_broadcast", publicSummary: "self approved" },
+    });
+    expect(unreviewed).toMatchObject({
+      status: 409,
+      body: { error: "review_not_approved" },
+    });
+    expect(requests).toEqual([]);
+
+    // A non-approved review keeps the existing guard as well.
+    await router.handle({
+      method: "POST",
+      pathname: "/admin/governance/review-supplier",
+      headers: adminHeaders,
+      body: { subjectId, status: "draft" },
+    });
+    const draftOnly = await router.handle({
+      method: "POST",
+      pathname: "/admin/governance/register-identity",
+      headers: adminHeaders,
+      body: { subjectId, account: wallet },
+    });
+    expect(draftOnly).toMatchObject({
+      status: 409,
+      body: { error: "review_not_approved" },
+    });
+    expect(requests).toEqual([]);
+  });
+
   it("broadcasts only UVPIdentityRegistry methods after owner preflight", async () => {
     const writeContract = vi.fn(async () => txHash);
     const publicClient: GovernancePublicClient = {

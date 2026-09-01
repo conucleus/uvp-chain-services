@@ -162,6 +162,15 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     }
   }
 
+  async releaseNonce(key: string): Promise<void> {
+    runSqliteWrite(() => {
+      this.#database.prepare(
+        `DELETE FROM submission_nonce
+         WHERE nonce_key = ?`
+      ).run(key.toLowerCase());
+    });
+  }
+
   async putSubmission(submission: ProductSubmissionDTO): Promise<void> {
     await this.withTransaction(async () => {
       runSqliteWrite(() => {

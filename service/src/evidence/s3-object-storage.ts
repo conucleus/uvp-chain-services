@@ -24,6 +24,8 @@ export interface S3EvidenceStorageClientOptions {
   readonly forcePathStyle?: boolean;
   readonly accessKeyIdEnv: string;
   readonly secretAccessKeyEnv: string;
+  /** Optional name of the env variable holding an STS session token; required to be populated when set (audit #19). */
+  readonly sessionTokenEnv?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly objectClient?: S3CompatibleObjectClient;
   readonly uriMode?: S3EvidenceStorageURIMode;
@@ -69,6 +71,16 @@ export class S3EvidenceStorageClient implements ObjectEvidenceStorageClient {
     const env = options.env ?? process.env;
     const accessKeyId = readCredentialValue(env, accessKeyIdEnv, "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV");
     const secretAccessKey = readCredentialValue(env, secretAccessKeyEnv, "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV");
+    // Audit #19: a configured STS session-token env must resolve here, at
+    // construction time. Skipping it used to produce a client that passed
+    // preflight but failed every first upload/read with a credential 403.
+    const sessionToken = options.sessionTokenEnv
+      ? readCredentialValue(
+          env,
+          normalizeCredentialEnvName(options.sessionTokenEnv, "UVP_EVIDENCE_S3_SESSION_TOKEN_ENV"),
+          "UVP_EVIDENCE_S3_SESSION_TOKEN_ENV"
+        )
+      : undefined;
     this.#uriMode = options.uriMode ?? "s3";
     this.#objectNamespace = this.#uriMode === "object"
       ? normalizeObjectNamespace(options.objectNamespace)
@@ -78,7 +90,8 @@ export class S3EvidenceStorageClient implements ObjectEvidenceStorageClient {
       ...(endpoint ? { endpoint } : {}),
       forcePathStyle: options.forcePathStyle ?? false,
       accessKeyId,
-      secretAccessKey
+      secretAccessKey,
+      ...(sessionToken ? { sessionToken } : {})
     });
     assertProductionStorageURI(this.storageURIForKey(this.objectKeyForEvidenceId("ev_probe")));
   }
@@ -160,6 +173,7 @@ export interface AwsS3CompatibleObjectClientOptions {
   readonly forcePathStyle: boolean;
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
+  readonly sessionToken?: string;
 }
 
 export class AwsS3CompatibleObjectClient implements S3CompatibleObjectClient {
@@ -172,7 +186,8 @@ export class AwsS3CompatibleObjectClient implements S3CompatibleObjectClient {
       forcePathStyle: options.forcePathStyle,
       credentials: {
         accessKeyId: options.accessKeyId,
-        secretAccessKey: options.secretAccessKey
+        secretAccessKey: options.secretAccessKey,
+        ...(options.sessionToken ? { sessionToken: options.sessionToken } : {})
       }
     });
   }

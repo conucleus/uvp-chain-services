@@ -153,6 +153,14 @@ export class PostgresSubmissionStore implements ProductSubmissionStore {
     }
   }
 
+  async releaseNonce(key: string): Promise<void> {
+    await this.#database.query(
+      `DELETE FROM submission_nonce
+       WHERE nonce_key = $1`,
+      [key.toLowerCase()]
+    );
+  }
+
   async putSubmission(submission: ProductSubmissionDTO): Promise<void> {
     await this.withTransaction(async () => {
       const existing = await this.#database.query(

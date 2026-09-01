@@ -11,7 +11,6 @@ import {
 export interface RehearsalObjectEvidenceStorageOptions {
   readonly rootDir?: string;
   readonly namespace?: string;
-  readonly runId?: string;
 }
 
 const DEFAULT_NAMESPACE = "uvp-rehearsal";
@@ -26,7 +25,7 @@ export class RehearsalObjectEvidenceStorage implements EvidenceStorage {
 
   constructor(options: RehearsalObjectEvidenceStorageOptions = {}) {
     this.#namespace = normalizeObjectNamespace(options.namespace ?? DEFAULT_NAMESPACE);
-    this.#rootDir = resolve(options.rootDir ?? defaultRehearsalObjectStorageRoot(options.runId));
+    this.#rootDir = resolve(options.rootDir ?? defaultRehearsalObjectStorageRoot());
     assertProductionStorageURI(`object://${this.#namespace}/`);
   }
 
@@ -82,8 +81,14 @@ export class RehearsalObjectEvidenceStorage implements EvidenceStorage {
   }
 }
 
-export function defaultRehearsalObjectStorageRoot(runId = defaultRunId()): string {
-  return resolve(process.cwd(), "cache", "evidence-object", runId);
+/**
+ * Audit #20: the default root must be stable across restarts. Evidence
+ * metadata references bytes under this root, so a per-process directory
+ * (timestamp or pid) breaks every stored storageURI after a restart. Deployments
+ * that need a different location set UVP_EVIDENCE_OBJECT_ROOT_DIR explicitly.
+ */
+export function defaultRehearsalObjectStorageRoot(): string {
+  return resolve(process.cwd(), "data", "evidence-object");
 }
 
 function normalizeObjectNamespace(value: string): string {
@@ -102,10 +107,6 @@ function normalizeEvidenceObjectId(value: string): string {
     throw new Error("evidence object id contains unsupported characters");
   }
   return evidenceId;
-}
-
-function defaultRunId(): string {
-  return `${Date.now()}-${process.pid}`;
 }
 
 function isNotFoundError(error: unknown): boolean {

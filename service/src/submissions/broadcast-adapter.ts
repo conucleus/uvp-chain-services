@@ -103,11 +103,27 @@ export function createStateMachineSubmissionBroadcastAdapter(
         );
       }
 
-      const chainId = await publicClient.getChainId?.();
-      if (chainId !== undefined && chainId !== options.chainId) {
+      // The chain-id preflight is an RPC round trip like any other: a
+      // transport failure must be classified into a failed broadcast result,
+      // never thrown past the caller (an escaping throw used to consume the
+      // reserved nonce without recording any submission).
+      let rpcChainId: number | undefined;
+      try {
+        rpcChainId = await publicClient.getChainId?.();
+      } catch (error) {
+        const classified = classifyStateMachineBroadcastError(error);
+        return failedResult(
+          classified.errorCode,
+          classified.message,
+          classified.retryable,
+          gasPayer,
+          classified.revertReason
+        );
+      }
+      if (rpcChainId !== undefined && rpcChainId !== options.chainId) {
         return failedResult(
           "chain_id_mismatch",
-          `configured chainId ${options.chainId} does not match RPC chainId ${chainId}`,
+          `configured chainId ${options.chainId} does not match RPC chainId ${rpcChainId}`,
           false,
           gasPayer
         );

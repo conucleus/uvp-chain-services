@@ -1262,7 +1262,6 @@ function stagingEnv(tempDirs: string[], overrides: Record<string, string | undef
     UVP_RPC_URL: "https://base-sepolia.example/rpc?api_key=rpc-secret",
     UVP_ADDRESS_MANIFEST: stagingManifestPath(tempDirs),
     UVP_FINALITY_CONFIRMATIONS: "12",
-    UVP_REORG_BUFFER_BLOCKS: "24",
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY_ENV: "UVP_STAGING_ORDER_REGISTRAR_PRIVATE_KEY",
     UVP_STAGING_ORDER_REGISTRAR_PRIVATE_KEY: productionRegistrarPrivateKey,

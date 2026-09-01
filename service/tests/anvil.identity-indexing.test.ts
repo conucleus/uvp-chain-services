@@ -152,7 +152,6 @@ function testConfig(input: {
       rpcUrl: input.rpcUrl,
       deploymentBlock: input.deploymentBlock,
       finalityConfirmations: 0,
-      reorgBufferBlocks: 0,
       contracts: {
         UVPIdentityRegistry: input.registry,
         UVPStateMachine: "0x1111111111111111111111111111111111111111"

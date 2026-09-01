@@ -264,6 +264,14 @@ export interface ProductSubmissionStore {
   getPrepared(prepareId: string): Promise<PreparedSubmissionRecord | undefined>;
   markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void>;
   reserveNonce(key: string): Promise<boolean>;
+  /**
+   * Release a previously reserved nonce so the same prepared submission can be
+   * retried after a failure that consumed the reservation without ever
+   * recording a submission (transient RPC or store failure). Optional for
+   * backward compatibility; submission-service treats a missing releaseNonce
+   * as best-effort.
+   */
+  releaseNonce?(key: string): Promise<void>;
   putSubmission(submission: ProductSubmissionDTO): Promise<void>;
   getSubmission(submissionId: string): Promise<ProductSubmissionDTO | undefined>;
   listSubmissions(): Promise<readonly ProductSubmissionDTO[]>;
