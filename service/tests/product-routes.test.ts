@@ -18,6 +18,7 @@ import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import {
   DOCK_TARGET_ZHIXU_ID,
   crossBorderSchemaResolver,
+  crossBorderStoreProductSchema,
   dockTargetPlanIds
 } from "./cross-border-schema.js";
 import { createStoreDockingService } from "../src/store-console/docking.js";
@@ -508,6 +509,56 @@ describe("product API routes", () => {
     expect((revokedResponse.body as {
       session: { validation: { errors: Array<{ code: string }> } };
     }).session.validation.errors.map((error) => error.code)).toEqual([]);
+  });
+
+  it("projects publisher evidenceSpec from the store schema onto product tasks (evidenceSpec passthrough)", async () => {
+    // schema 是发布者拥有的不透明 JSON：stage 上携带的 evidenceSpec 不在
+    // protocol ZhixuStageDTO 类型上，任务投影必须结构化透传而不是静默丢弃。
+    const evidenceSpec = [
+      {
+        key: "delivery-evidence",
+        label: "阶段交付凭证",
+        inputKind: "file",
+        accept: ["application/pdf"],
+        required: true,
+        description: "发布者配置的交付凭证槽位"
+      },
+      { key: "completed-at", label: "完成日期", inputKind: "date" }
+    ];
+    const schemaWithEvidenceSpec = {
+      ...crossBorderStoreProductSchema,
+      stages: [
+        ...crossBorderStoreProductSchema.stages,
+        {
+          stageId: "export.customs",
+          index: crossBorderStoreProductSchema.stages.length,
+          name: "出口单证",
+          evidence: ["阶段交付凭证"],
+          ownerRole: "supply",
+          status: "active",
+          evidenceSpec
+        }
+      ]
+    } as unknown as StoreProductSchemaDTO;
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
+    const router = createApiRouter(store, { productSchemaResolver: {
+      async getProductSchemaByPlan(planId) {
+        return planId === crossBorderPlanIds.planId ? schemaWithEvidenceSpec : undefined;
+      }
+    }, submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+
+    const tasksResponse = await router.handle({
+      method: "GET",
+      pathname: "/product/tasks",
+      query: { orderId: stateMachineOrderId }
+    });
+
+    expect(tasksResponse.status).toBe(200);
+    const task = (tasksResponse.body as { tasks: Array<{ stageId: string; evidenceSpec?: unknown }> })
+      .tasks.find((item) => item.stageId === "export.customs");
+    expect(task).toBeDefined();
+    expect(task?.evidenceSpec).toEqual(evidenceSpec);
   });
 
   it("rejects self-docking sessions at the route and service layers (STORE-03)", async () => {

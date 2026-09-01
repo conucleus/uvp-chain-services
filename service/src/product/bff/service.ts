@@ -17,7 +17,7 @@ import {
   type Hex,
 } from "../../shared/types.js";
 import type { TxReconcileFields } from "../../reconcile/status.js";
-import type { ProductService } from "../service.js";
+import { normalizeEvidenceSpec, type ProductService } from "../service.js";
 import {
   ProductAuthorizationBuilder,
   ProductAuthorizationBuilderError,
@@ -986,11 +986,16 @@ function inviteRolePreview(
   const roleSlot = zhixu?.roleSlots.find(
     (slot) => slot.slotId === participant.roleSlotId,
   );
+  // 发布者携带的结构化证据要求（schema roleSlot 不透明 JSON，结构化读取）。
+  const evidenceSpec = normalizeEvidenceSpec(
+    (roleSlot as { readonly evidenceSpec?: unknown } | undefined)?.evidenceSpec,
+  );
   return {
     roleSlotId: participant.roleSlotId,
     label: roleSlot?.label ?? participant.roleLabel,
     duty: roleSlot?.duty ?? "按订单职责处理待办并提交必要业务凭证。",
     requiredEvidence: roleSlot?.evidence ?? [],
+    ...(evidenceSpec ? { evidenceSpec } : {})
   };
 }
 

@@ -220,6 +220,81 @@ describe("Store Zhixu draft workflow", () => {
     });
   });
 
+  it("preserves publisher evidenceSpec on stages and capability plugins across schema rebuild (evidenceSpec passthrough)", async () => {
+    // schema 是发布者拥有的不透明 JSON：从编译产物重建 schema 时，
+    // stage / capability plugin 携带的 evidenceSpec 不得被静默丢掉。
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const draft = await importDraft(router);
+    await compileDraft(router, draft.draftId);
+    const schemaResponse = await router.handle({
+      method: "GET",
+      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`
+    });
+    expect(schemaResponse.status).toBe(200);
+    const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
+    const firstSlotId = schema.roleSlots[0]!.slotId;
+
+    const stageEvidenceSpec = [
+      {
+        key: "stage-evidence",
+        label: "阶段交付凭证",
+        inputKind: "file",
+        accept: ["application/pdf"],
+        required: true
+      }
+    ];
+    const pluginEvidenceSpec = [
+      { key: "completed-at", label: "完成日期", inputKind: "date", required: true }
+    ];
+    const schemaWithEvidenceSpec = {
+      ...schema,
+      stages: schema.stages.map((stage) =>
+        stage.stageId === firstSlotId
+          ? { ...stage, evidenceSpec: stageEvidenceSpec }
+          : stage
+      ),
+      roleSlots: schema.roleSlots.map((slot) =>
+        slot.slotId === firstSlotId
+          ? {
+              ...slot,
+              capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
+                ...plugin,
+                source: "explicit" as const,
+                evidenceSpec: pluginEvidenceSpec
+              }))
+            }
+          : slot
+      ),
+      capabilityPlugins: schema.roleSlots.flatMap((slot) =>
+        (slot.capabilityPlugins ?? []).map((plugin) => ({
+          ...plugin,
+          source: "explicit" as const,
+          ...(slot.slotId === firstSlotId ? { evidenceSpec: pluginEvidenceSpec } : {})
+        }))
+      )
+    } as StoreProductSchemaDTO;
+    await updateDraftProductSchema(router, draft.draftId, schemaWithEvidenceSpec);
+
+    // 重新 compile：schema 从编译产物重建，发布者 evidenceSpec 必须保留。
+    const recompiled = await compileDraft(router, draft.draftId);
+    const rebuilt = recompiled.productSchema;
+    expect(rebuilt).toBeDefined();
+    const rebuiltStage = rebuilt?.stages.find((stage) => stage.stageId === firstSlotId);
+    expect((rebuiltStage as { evidenceSpec?: unknown } | undefined)?.evidenceSpec)
+      .toEqual(stageEvidenceSpec);
+    const rebuiltSlot = rebuilt?.roleSlots.find((slot) => slot.slotId === firstSlotId);
+    expect(
+      (rebuiltSlot?.capabilityPlugins?.[0] as { evidenceSpec?: unknown } | undefined)?.evidenceSpec
+    ).toEqual(pluginEvidenceSpec);
+    // add-on manifest 的 evidence 组件同样透传 evidenceSpec 供参与方页面渲染。
+    const rebuiltComponent = rebuiltSlot?.addOnManifest?.pages
+      .flatMap((page) => page.sections)
+      .flatMap((section) => section.components)
+      .find((component) => component.componentId === "evidence");
+    expect((rebuiltComponent as { evidenceSpec?: unknown } | undefined)?.evidenceSpec)
+      .toEqual(pluginEvidenceSpec);
+  });
+
   it("validates role-slot add-on manifests before Product Schema review", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const draft = await importDraft(router);

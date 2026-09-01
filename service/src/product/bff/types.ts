@@ -82,7 +82,25 @@ export interface ParticipantPermissionDTO {
   readonly submitterAddress: string;
   readonly payloadPolicy: PermissionPayloadPolicy;
   readonly requiredEvidence: readonly string[];
+  /**
+   * 发布者携带的结构化证据要求（镜像 productDto.v1 ProductTaskDTO.evidenceSpec，
+   * schema 为不透明 JSON，结构化读取；缺省时消费方降级为通用证据槽位）。
+   */
+  readonly evidenceSpec?: readonly ProductEvidenceSpecDTO[];
   readonly deadlinePolicy?: string;
+}
+
+/**
+ * evidenceSpec 槽位的局部结构镜像：key/label 必填，其余为发布者可选的
+ * 渲染/上传约束。不 import protocol 包，跟随 requiredEvidence 的内联定义方式。
+ */
+export interface ProductEvidenceSpecDTO {
+  readonly key: string;
+  readonly label: string;
+  readonly inputKind?: "file" | "text" | "date";
+  readonly accept?: readonly string[];
+  readonly required?: boolean;
+  readonly description?: string;
 }
 
 export interface SignalAuthorizationDTO {
@@ -224,6 +242,8 @@ export interface ProductInviteRolePreviewDTO {
   readonly label: string;
   readonly duty: string;
   readonly requiredEvidence: readonly string[];
+  /** 发布者携带的结构化证据要求；缺省时前端降级为通用证据槽位。 */
+  readonly evidenceSpec?: readonly ProductEvidenceSpecDTO[];
 }
 
 export interface ProductInvitePreviewResponse extends ProductInviteResponse {

@@ -501,19 +501,34 @@ function buildSuggestedProductSchema(
   timestamp: string
 ): StoreProductSchemaDTO {
   const preview = previewFromOnchainArtifact(artifact);
-  const stages = stagesFromOnchainArtifact(artifact);
+  // evidenceSpec 保留：schema 是发布者拥有的不透明 JSON，重建（从编译产物
+  // 重新推断 stage/plugin）不得丢掉上一版 schema 携带的结构化证据要求。
+  const evidenceSpecByStage = previousEvidenceSpecByStageId(draft.productSchema);
+  const evidenceSpecByPlugin = previousPluginEvidenceSpecBySlotId(draft.productSchema);
+  const stages = stagesFromOnchainArtifact(artifact).map((stage) => {
+    const evidenceSpec = evidenceSpecByStage.get(stage.stageId);
+    return {
+      ...stage,
+      ...(evidenceSpec !== undefined ? { evidenceSpec } : {})
+    };
+  });
   const stageIds = new Set(stages.map((stage) => stage.stageId));
   const routeByStage = new Map(artifact.executorRoutes.map((route) => [route.stageIdentifier, route]));
   const roleSlots: RoleSlotDTO[] = stages.map((stage) => {
     const route = routeByStage.get(stage.stageId);
-    const plugin = suggestedPluginForStage(stage.stageId);
     const slotId = stage.stageId;
+    const plugin = withPreservedPluginEvidenceSpec(
+      suggestedPluginForStage(stage.stageId),
+      evidenceSpecByPlugin.get(slotId),
+    );
+    const stageEvidenceSpec = evidenceSpecByStage.get(stage.stageId);
     return {
       slotId,
       title: route?.executorId ? `${stage.name}执行方` : `${stage.name}履约者`,
       label: route?.executorId ?? stage.ownerRole,
       duty: `负责 ${stage.name} 阶段的链下履约、凭证提交和签名确认。`,
       evidence: stage.evidence,
+      ...(stageEvidenceSpec !== undefined ? { evidenceSpec: stageEvidenceSpec } : {}),
       status: "required",
       tone: "info",
       required: true,
@@ -675,6 +690,52 @@ function suggestedPluginForStage(stageId: string): SlotCapabilityPluginDTO {
   };
 }
 
+/**
+ * evidenceSpec 不在 protocol 的 ZhixuStageDTO / SlotCapabilityPluginDTO
+ * 类型上（发布者经不透明 schema JSON 携带）；重建按 stageId / slotId
+ * 结构化找回并原样保留，缺失时不合成。
+ */
+function previousEvidenceSpecByStageId(
+  previous: StoreProductSchemaDTO | undefined
+): ReadonlyMap<string, unknown> {
+  const byStageId = new Map<string, unknown>();
+  for (const stage of previous?.stages ?? []) {
+    const evidenceSpec = (stage as { readonly evidenceSpec?: unknown }).evidenceSpec;
+    if (evidenceSpec !== undefined) {
+      byStageId.set(stage.stageId, evidenceSpec);
+    }
+  }
+  return byStageId;
+}
+
+function previousPluginEvidenceSpecBySlotId(
+  previous: StoreProductSchemaDTO | undefined
+): ReadonlyMap<string, unknown> {
+  const bySlotId = new Map<string, unknown>();
+  for (const slot of previous?.roleSlots ?? []) {
+    for (const plugin of slot.capabilityPlugins ?? []) {
+      const evidenceSpec = (plugin as { readonly evidenceSpec?: unknown }).evidenceSpec;
+      if (evidenceSpec !== undefined && !bySlotId.has(slot.slotId)) {
+        bySlotId.set(slot.slotId, evidenceSpec);
+      }
+    }
+  }
+  return bySlotId;
+}
+
+function withPreservedPluginEvidenceSpec(
+  plugin: SlotCapabilityPluginDTO,
+  evidenceSpec: unknown
+): SlotCapabilityPluginDTO {
+  if (evidenceSpec === undefined) {
+    return plugin;
+  }
+  return {
+    ...plugin,
+    ...(evidenceSpec !== undefined ? { evidenceSpec } : {})
+  };
+}
+
 function suggestedAddOnManifestForSlot(
   roleSlotId: string,
   stageName: string,
@@ -714,7 +775,11 @@ function suggestedAddOnManifestForSlot(
                 componentKind: "evidence_refs",
                 inputId: evidenceInputId,
                 label: plugin.requiredEvidence[0] ?? defaultEvidenceLabel(roleSlotId),
-                required: true
+                required: true,
+                // 发布者携带的结构化证据要求原样透传给参与方页面渲染。
+                ...((plugin as { readonly evidenceSpec?: unknown }).evidenceSpec !== undefined
+                  ? { evidenceSpec: (plugin as { readonly evidenceSpec?: unknown }).evidenceSpec }
+                  : {})
               },
               {
                 componentId: "confirmation",

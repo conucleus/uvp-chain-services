@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
+import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
   CROSS_BORDER_ZHIXU_ID,
   crossBorderPlanIds,
@@ -15,7 +16,10 @@ import {
   ProductAuthorizationBuilder,
   ProductAuthorizationBuilderError,
 } from "../src/product/bff/authorization.js";
-import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import {
+  crossBorderSchemaResolver,
+  crossBorderStoreProductSchema,
+} from "./cross-border-schema.js";
 import { MemoryProductOrderTriggerBroadcastAdapter } from "../src/product/bff/trigger.js";
 import type {
   ProductBroadcastOutsideTriggerInput,
@@ -337,6 +341,79 @@ describe("product BFF order drafts and invites", () => {
       status: 410,
       body: { error: "invite_expired" },
     });
+  });
+
+  it("carries publisher evidenceSpec into invite previews and prepared permissions (evidenceSpec passthrough)", async () => {
+    // schema stage / roleSlot 上发布者携带的 evidenceSpec 不在 protocol DTO
+    // 类型上；invite 预览与权限投影必须结构化透传而不是静默丢弃。
+    const stageEvidenceSpec = [
+      {
+        key: "stage-evidence",
+        label: "阶段交付凭证",
+        inputKind: "file",
+        accept: ["application/pdf"],
+        required: true
+      }
+    ];
+    const slotEvidenceSpec = [
+      { key: "funds-confirmed-at", label: "完成日期", inputKind: "date", required: true }
+    ];
+    const schemaWithEvidenceSpec = {
+      ...crossBorderStoreProductSchema,
+      stages: crossBorderStoreProductSchema.stages.map((stage) =>
+        stage.stageId === "customs-complete"
+          ? { ...stage, evidenceSpec: stageEvidenceSpec }
+          : stage
+      ),
+      roleSlots: crossBorderStoreProductSchema.roleSlots.map((slot) =>
+        slot.slotId === "funds"
+          ? { ...slot, evidenceSpec: slotEvidenceSpec }
+          : slot
+      )
+    } as unknown as StoreProductSchemaDTO;
+    const store = new MemoryProjectionStore();
+    const productStore = new MemoryProductBffStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [...activeDeploymentEvents(), planRegisteredEvent(11n)]
+    });
+    const router = createApiRouter(store, {
+      productSchemaResolver: {
+        async getProductSchemaByPlan(planId) {
+          return planId === crossBorderPlanIds.planId ? schemaWithEvidenceSpec : undefined;
+        }
+      },
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRegistrationAdapter: new MemoryProductOrderTriggerBroadcastAdapter(),
+      productBffStore: productStore
+    });
+
+    // invite role preview：roleSlot 的 evidenceSpec 透传。
+    const draft = (
+      await createDraft(router).then((response) => response.body as DraftResponse)
+    ).draft;
+    const invite = await createInvite(router, draft.draftId, "funds", "funds-contact@example");
+    const preview = await router.handle({
+      method: "GET",
+      pathname: `/product/invites/${invite.invite.inviteId}`
+    });
+    expect(preview.status).toBe(200);
+    expect((preview.body as { role: { evidenceSpec?: unknown } }).role.evidenceSpec)
+      .toEqual(slotEvidenceSpec);
+
+    // prepared permissions：schema stage 的 evidenceSpec 透传到权限行。
+    const readyDraft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(
+      router,
+      readyDraft.draftId,
+      testWallet(0)
+    );
+    const customsPermission = prepared.permissions.find(
+      (permission) => permission.stageIdentifier === "customs-complete"
+    );
+    expect(customsPermission).toBeDefined();
+    expect(customsPermission?.evidenceSpec).toEqual(stageEvidenceSpec);
   });
 
   it("prepares signed trigger typed data after required participants accept", async () => {

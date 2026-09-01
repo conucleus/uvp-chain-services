@@ -708,6 +708,10 @@ async function productTaskFromStateMachineTask(
   const requiredEvidence = capabilityResolution
     ? requiredEvidenceForCapability(capabilityResolution.capabilityPlugin)
     : (productStage?.evidence ?? []);
+  // evidenceSpec：发布者携带的结构化证据要求（productDto.v1 可选字段）。
+  // schema 是不透明 JSON，按结构化读取逐字段透传，缺失时缺省（消费方
+  // 降级为通用证据槽位），不参与鉴权或状态判定。
+  const evidenceSpec = evidenceSpecFromStage(productStage);
   const requiredInputs = capabilityResolution
     ? requiredInputsForCapability(
         capabilityResolution.capabilityPlugin,
@@ -768,6 +772,7 @@ async function productTaskFromStateMachineTask(
         ? fundingImpactForAddOn(productAddOnKind)
         : "缺少履约插槽能力插件元数据，当前只能展示链上证明，不能提交业务动作",
     requiredEvidence,
+    ...(evidenceSpec ? { evidenceSpec } : {}),
     status: productStatus,
     ...(capabilityResolution
       ? {
@@ -1279,6 +1284,55 @@ function requiredEvidenceForCapability(
     : requiredEvidenceForFulfillment(plugin.pluginKind);
 }
 
+/**
+ * ProductTaskDTO.evidenceSpec 的本仓结构镜像（productDto.v1 可选字段，
+ * 不 import protocol 包，跟随 requiredEvidence 的内联定义方式）。
+ */
+export interface ProductTaskEvidenceSpecDTO {
+  readonly key: string;
+  readonly label: string;
+  readonly inputKind?: "file" | "text" | "date";
+  readonly accept?: readonly string[];
+  readonly required?: boolean;
+  readonly description?: string;
+}
+
+/**
+ * schema 是不透明 JSON，发布者携带的 evidenceSpec 不在 protocol DTO 类型上；
+ * 按结构化读取并做最小形状过滤（key/label 非空字符串的条目保留），
+ * 避免逐字段投影静默丢掉发布者数据。
+ */
+export function normalizeEvidenceSpec(
+  value: unknown,
+): readonly ProductTaskEvidenceSpecDTO[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const entries = value.filter(isEvidenceSpecEntry) as readonly ProductTaskEvidenceSpecDTO[];
+  return entries.length > 0 ? entries : undefined;
+}
+
+function isEvidenceSpecEntry(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.key === "string" &&
+    record.key.trim().length > 0 &&
+    typeof record.label === "string" &&
+    record.label.trim().length > 0
+  );
+}
+
+function evidenceSpecFromStage(
+  stage: ZhixuStageDTO | undefined,
+): readonly ProductTaskEvidenceSpecDTO[] | undefined {
+  return normalizeEvidenceSpec(
+    (stage as { readonly evidenceSpec?: unknown } | undefined)?.evidenceSpec,
+  );
+}
+
 function requiredInputsForCapability(
   plugin: ProductTaskCapabilityPluginDTO,
   completed: boolean,
@@ -1334,17 +1388,20 @@ function primaryActionForFulfillment(kind: FulfillmentPluginKind): string {
 function requiredEvidenceForFulfillment(
   kind: FulfillmentPluginKind,
 ): readonly string[] {
+  // 商店框架化裁决：兜底文案不得携带具体业务词（单证/行业类型等），
+  // 只描述"阶段凭证/确认"的通用槽位语义；具体业务词由发布者的
+  // evidenceSpec/requiredEvidence 配置携带。
   switch (kind) {
     case "payment_placeholder":
       return ["付款条件确认", "资金凭证指纹"];
     case "delivery_update":
-      return ["交付/报关凭证", "业务确认"];
+      return ["阶段交付凭证", "阶段完成确认"];
     case "validation_confirm":
       return ["检验报告", "验收确认"];
     case "dispute_material":
       return ["争议说明", "补充凭证"];
     case "evidence_submission":
-      return ["凭证指纹或业务确认"];
+      return ["凭证指纹或阶段完成确认"];
   }
 }
 
@@ -1429,7 +1486,7 @@ function requiredInputsForFulfillment(
       return [
         {
           inputId: "stage-evidence",
-          label: kind === "delivery_update" ? "交付/报关凭证" : "阶段凭证",
+          label: kind === "delivery_update" ? "阶段交付凭证" : "阶段凭证",
           inputType: "evidence",
           required: true,
           completed,
