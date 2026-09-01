@@ -1097,6 +1097,40 @@ describe("chain-services config", () => {
     expect(redacted.url).toBe("https://exa mple.com/path?[redacted]");
   });
 
+  it("keeps 64-hex business identifiers and only redacts secrets by key name or labeled text", () => {
+    // ETH-10：64-hex（bytes32）是业务标识，按键名驱动脱敏后必须保留原值。
+    const orderId = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const prepareId = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const redacted = redactSecrets({
+      planId: orderId,
+      message: `order ${orderId} prepared as ${prepareId} is ready`,
+      nested: { orderId, hookId: prepareId }
+    }) as { planId: string; message: string; nested: { orderId: string; hookId: string } };
+
+    expect(redacted.planId).toBe(orderId);
+    expect(redacted.message).toContain(orderId);
+    expect(redacted.message).toContain(prepareId);
+    expect(redacted.nested.orderId).toBe(orderId);
+    expect(redacted.nested.hookId).toBe(prepareId);
+
+    // 私钥/签名不能漏：键名匹配 secret 模式仍打码；错误消息里带标签的
+    // 私钥、裸 130-hex 签名同样打码。
+    const secretsRedacted = redactSecrets({
+      private_key: "0x1111111111111111111111111111111111111111111111111111111111111111",
+      signature: `0x${"aa".repeat(65)}`,
+      auth_token: "token-value",
+      errorText: `signing failed: private key 0x2222222222222222222222222222222222222222222222222222222222222222 is invalid`,
+      signatureText: `broadcast returned sig 0x${"bb".repeat(65)}`
+    }) as { private_key: string; signature: string; auth_token: string; errorText: string; signatureText: string };
+
+    expect(secretsRedacted.private_key).toBe("[redacted:secret]");
+    expect(secretsRedacted.signature).toBe("[redacted:secret]");
+    expect(secretsRedacted.auth_token).toBe("[redacted:secret]");
+    expect(secretsRedacted.errorText).not.toContain("22222222222222222222222222222222");
+    expect(secretsRedacted.errorText).toContain("[redacted:secret]");
+    expect(secretsRedacted.signatureText).not.toContain("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  });
+
   it("redacts secrets and exposes safe health diagnostics", async () => {
     const rpcUrl = "https://rpc.example/path?api_key=rpc-secret&chain=local";
     const redacted = redactSecrets({

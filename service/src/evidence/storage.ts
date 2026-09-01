@@ -1,5 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { hashEvidenceBytes } from "./hashing.js";
 
 export type EvidenceStorageAdapterKind = "memory" | "local" | "object";
 export type EvidenceStorageRuntimeEnvironment = "local" | "testnet" | "staging" | "production";
@@ -172,6 +173,100 @@ export class ObjectEvidenceStorage implements EvidenceStorage {
     if (this.#client.delete) {
       await this.#client.delete(storageURI);
     }
+  }
+}
+
+export interface BackupEvidenceStorageOptions {
+  readonly primary: EvidenceStorage;
+  /** 第二副本存储：UVP_EVIDENCE_BACKUP_BUCKET 指定的第二 bucket（或同 bucket 备份前缀）。 */
+  readonly backup: EvidenceStorage;
+}
+
+export interface EvidenceBackupVerifyResult {
+  readonly backupPresent: boolean;
+  readonly hashMatches: boolean;
+}
+
+/**
+ * ETH-05：证据第二副本。put 成功后立即写第二副本；备份写入失败按整体
+ * 失败处理（上抛），不允许"主存成功、副本静默丢失"。提供按 hash 校验与
+ * 从副本恢复主对象的能力。
+ */
+export class BackupEvidenceStorage implements EvidenceStorage {
+  readonly adapterKind: EvidenceStorageAdapterKind;
+  readonly productionSafe: boolean;
+  readonly rehearsalOnly?: boolean;
+
+  readonly #primary: EvidenceStorage;
+  readonly #backup: EvidenceStorage;
+
+  constructor(options: BackupEvidenceStorageOptions) {
+    this.#primary = options.primary;
+    this.#backup = options.backup;
+    this.adapterKind = options.primary.adapterKind;
+    this.productionSafe = options.primary.productionSafe;
+    if (options.primary.rehearsalOnly) {
+      this.rehearsalOnly = options.primary.rehearsalOnly;
+    }
+  }
+
+  async put(input: EvidenceStoragePutInput): Promise<EvidenceStoragePutResult> {
+    const result = await this.#primary.put(input);
+    // 副本写入失败必须上抛：调用方（evidence service）尚未落 metadata，
+    // 重试/告警仍能补救；静默吞掉会制造"看起来有副本"的假象。
+    await this.#backup.put({ evidenceId: input.evidenceId, bytes: copyBytes(input.bytes) });
+    return result;
+  }
+
+  async get(storageURI: string): Promise<Uint8Array | undefined> {
+    return this.#primary.get(storageURI);
+  }
+
+  async exists(storageURI: string): Promise<boolean> {
+    return this.#primary.exists(storageURI);
+  }
+
+  async delete(storageURI: string): Promise<void> {
+    const primaryDelete = this.#primary.delete;
+    if (primaryDelete) {
+      await primaryDelete.call(this.#primary, storageURI);
+    }
+    const backupDelete = this.#backup.delete;
+    if (backupDelete) {
+      await backupDelete.call(this.#backup, storageURI);
+    }
+  }
+
+  /** 读取第二副本并按期望 hash 校验（链上/库内 contentHash，keccak256）。 */
+  async verifyBackup(storageURI: string, expectedContentHash: string): Promise<EvidenceBackupVerifyResult> {
+    const bytes = await this.#backup.get(storageURI);
+    if (!bytes) {
+      return { backupPresent: false, hashMatches: false };
+    }
+    return {
+      backupPresent: true,
+      hashMatches: hashEvidenceBytes(bytes, "backup.contentHash") === expectedContentHash.toLowerCase()
+    };
+  }
+
+  /**
+   * 主对象损坏/缺失时从第二副本恢复：副本字节摘要必须与期望 hash 一致
+   * 才允许写回主存储；成功返回 true。
+   */
+  async restoreFromBackup(storageURI: string, evidenceId: string, expectedContentHash: string): Promise<boolean> {
+    const bytes = await this.#backup.get(storageURI);
+    if (!bytes) {
+      return false;
+    }
+    if (hashEvidenceBytes(bytes, "backup.contentHash") !== expectedContentHash.toLowerCase()) {
+      return false;
+    }
+    await this.#primary.put({ evidenceId, bytes });
+    return true;
+  }
+
+  get backupStorage(): EvidenceStorage {
+    return this.#backup;
   }
 }
 

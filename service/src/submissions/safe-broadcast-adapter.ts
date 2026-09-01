@@ -5,6 +5,7 @@ import type {
   SubmissionBroadcastRequest,
   SubmissionBroadcastResult
 } from "./types.js";
+import type { BroadcastDedupeStore } from "./broadcast-dedupe-sqlite-store.js";
 
 type FailedSubmissionBroadcastResult = Extract<SubmissionBroadcastResult, { readonly status: "failed" }>;
 
@@ -18,6 +19,11 @@ export interface SecureSubmissionBroadcastAdapterOptions {
   readonly retryMaxMs?: number;
   readonly now?: () => Date;
   readonly audit?: AuditSink;
+  /**
+   * ETH-07：可选持久化去重存储。进程内 Map 仍是主缓存（语义不变），
+   * 持久层保证重启后同一 idempotencyKey / txHash 依旧被去重。
+   */
+  readonly dedupeStore?: BroadcastDedupeStore;
 }
 
 interface BroadcastState {
@@ -45,6 +51,10 @@ export function createSecureSubmissionBroadcastAdapter(
   const inFlightByOrder = new Map<string, number>();
   const inFlightBySubmitter = new Map<string, number>();
   const txHashOwners = new Map<string, string>();
+  const dedupeStore = options.dedupeStore;
+
+  const currentStateFor = async (idempotencyKey: string): Promise<BroadcastState | undefined> =>
+    states.get(idempotencyKey) ?? (dedupeStore ? await dedupeStore.load(idempotencyKey) : undefined);
 
   return {
     attemptsBroadcast: options.adapter.attemptsBroadcast !== false,
@@ -52,7 +62,7 @@ export function createSecureSubmissionBroadcastAdapter(
       const idempotencyKey = request.prepared.idempotencyKey;
       const orderKey = request.prepared.onchainOrderId;
       const submitterKey = request.prepared.submitter;
-      const currentState = states.get(idempotencyKey);
+      const currentState = await currentStateFor(idempotencyKey);
       const duplicate = duplicateResult(currentState, maxRetry);
       if (duplicate) {
         const duplicateFailure = duplicate.status === "failed" ? duplicate : undefined;
@@ -134,12 +144,15 @@ export function createSecureSubmissionBroadcastAdapter(
           retryBaseMs,
           retryMaxMs
         });
-        const duplicateTxHash = duplicateTxHashResult(idempotencyKey, broadcast, txHashOwners, attemptNumber);
+        const duplicateTxHash = await duplicateTxHashResult(idempotencyKey, broadcast, txHashOwners, attemptNumber, dedupeStore);
         const result = duplicateTxHash ?? broadcast;
-        states.set(idempotencyKey, {
+        const newState = {
           attempts: attemptNumber,
           lastResult: result
-        });
+        };
+        states.set(idempotencyKey, newState);
+        // ETH-07：写穿持久层；失败不吞——与内存路径同等严格。
+        await dedupeStore?.save(idempotencyKey, newState);
 
         if (result.status === "failed") {
           await audit.record({
@@ -201,12 +214,13 @@ function duplicateResult(
   return lastResult;
 }
 
-function duplicateTxHashResult(
+async function duplicateTxHashResult(
   idempotencyKey: string,
   result: SubmissionBroadcastResult,
   txHashOwners: Map<string, string>,
-  attemptNumber: number
-): SubmissionBroadcastResult | undefined {
+  attemptNumber: number,
+  dedupeStore: BroadcastDedupeStore | undefined
+): Promise<SubmissionBroadcastResult | undefined> {
   const txHash = result.status === "submitted" || result.status === "confirmed" || result.status === "broadcasting"
     ? result.txHash
     : result.status === "failed"
@@ -216,9 +230,14 @@ function duplicateTxHashResult(
     return undefined;
   }
 
-  const owner = txHashOwners.get(txHash);
+  const normalizedTxHash = txHash.toLowerCase();
+  let owner = txHashOwners.get(normalizedTxHash);
+  if (!owner && dedupeStore) {
+    // ETH-07：内存未命中时问持久层；无归属则登记归属。
+    owner = await dedupeStore.claimTxHash(normalizedTxHash, idempotencyKey);
+  }
   if (!owner) {
-    txHashOwners.set(txHash, idempotencyKey);
+    txHashOwners.set(normalizedTxHash, idempotencyKey);
     return undefined;
   }
   if (owner === idempotencyKey) {

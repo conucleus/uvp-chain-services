@@ -256,6 +256,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     productDockedOrderLinkService,
     ...(options.submissionStore ? { submissionStore: options.submissionStore } : {}),
     ...(options.opsRecoveryActions ? { opsRecoveryActions: options.opsRecoveryActions } : {}),
+    ...(options.opsConsoleAdminIds ? { opsConsoleAdminIds: options.opsConsoleAdminIds } : {}),
     audit,
     buildDiagnostics,
     ...(options.onTxMined ? { onTxMined: options.onTxMined } : {}),

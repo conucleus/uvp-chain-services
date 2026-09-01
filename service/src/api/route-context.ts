@@ -129,6 +129,12 @@ export interface CreateApiRouterOptions {
   readonly storeIdentityProvider?: StoreIdentityProvider;
   readonly storeAuthConfig?: StoreAuthConfig;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
+  /**
+   * ETH-03：OPS_CONSOLE_ADMIN_IDS 白名单（去空格后的 id 列表）。非空时
+   * /admin/ops 只放行集合内的 admin id；未配置时回退到既有 governance
+   * admin 鉴权（adminPrincipalFromHeaders），保持本地开发兼容。
+   */
+  readonly opsConsoleAdminIds?: readonly string[];
   readonly onTxMined?: () => void;
   readonly now?: () => Date;
 }
@@ -174,6 +180,8 @@ export interface ApiRouteContext {
   readonly productDockedOrderLinkService: ProductDockedOrderLinkService;
   readonly submissionStore?: ProductSubmissionStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
+  /** ETH-03：见 CreateApiRouterOptions.opsConsoleAdminIds。 */
+  readonly opsConsoleAdminIds?: readonly string[];
   readonly audit: AuditSink;
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
   readonly onTxMined?: () => void;

@@ -79,23 +79,34 @@ function redactStringForKey(value: string, key: string | undefined): string {
 function redactString(value: string): string {
   let redacted = redactRpcUrl(value);
   redacted = redacted.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED_SECRET}`);
+  // 带 secret 标签的 64+ hex（如错误文本里的 private key 0x…）必须拦截，
+  // 这是对"裸 64-hex 不再按值打码"（ETH-10）的私钥兜底。
+  redacted = redacted.replace(
+    /\b(private[_\s-]?key|secret|token|authorization|signature|password)(\s*[:=]?\s*)0x[0-9a-fA-F]{64,}/gi,
+    (_match, label: string, separator: string) => `${label}${separator}${REDACTED_SECRET}`
+  );
   redacted = redacted.replace(
     /\b(api[_-]?key|apikey|access[_-]?token|auth|key|token|secret|signature|password)(\s*[:=]\s*)[^;,\s]+/gi,
     (_match, label: string, separator: string) => `${label}${separator}${REDACTED_SECRET}`
   );
+  // 130-hex = 65 字节，几乎必然是 (r,s,v) 签名；即使没有 secret 键名也打码。
   redacted = redacted.replace(/\b0x[0-9a-fA-F]{130}\b/g, REDACTED_SECRET);
+  // ETH-10：64-hex（bytes32）是 planId/orderId/prepareId/submissionId/hookId
+  // 等业务标识，不再按值形状一律打码；≥128-hex 的 calldata/大 blob 保持打码
+  // （128-hex 同时覆盖 64 字节签名的值形状）。私钥/签名依赖键名与带标签的
+  // 文本模式（上面两条）拦截。
   redacted = redacted.replace(/0x[0-9a-fA-F]{128,}/g, REDACTED_CALLDATA);
   return redacted;
 }
 
 function redactSecretLikeErrorHex(value: string): string {
-  let redacted = value.replace(
+  const redacted = value.replace(
     /\b(private[_\s-]?key|secret|token|authorization|signature|password)(\s*[:=]?\s*)0x[0-9a-fA-F]{64,}/gi,
     (_match, label: string, separator: string) => `${label}${separator}${REDACTED_SECRET}`
   );
-  redacted = redacted.replace(/\b0x[0-9a-fA-F]{130}\b/g, REDACTED_SECRET);
-  redacted = redacted.replace(/\b0x[0-9a-fA-F]{64}\b/g, REDACTED_SECRET);
-  return redacted;
+  // ETH-10：裸 64-hex 不再打码（业务标识会出现在错误消息里）；带 secret
+  // 标签的 hex 已由上面的模式拦截，130-hex 签名由 redactString 兜底。
+  return redacted.replace(/\b0x[0-9a-fA-F]{130}\b/g, REDACTED_SECRET);
 }
 
 function redactRpcUrl(value: string): string {

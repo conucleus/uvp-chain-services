@@ -1,3 +1,8 @@
+import { createHmac } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import {
@@ -8,16 +13,22 @@ import {
 import {
   createNotificationService,
   MemoryNotificationDeliveryStore,
+  NOTIFICATION_WEBHOOK_SIGNATURE_HEADER,
   SUPPLIER_NOTIFICATION_PROFILE_VERSION,
+  WebhookNotificationDispatcher,
+  type NotificationDeliveryRecord,
   type NotificationDispatchRequest,
   type NotificationDispatcher,
   type SupplierNotificationProfile
 } from "../src/notifications/index.js";
+import { SqliteNotificationStateStore } from "../src/notifications/sqlite-store.js";
 import { createApiRouter } from "../src/api/routes.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { InMemoryStoreSupplierMetadataStore } from "../src/store-suppliers/service.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { Address, Hex } from "../src/shared/types.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const stateMachineAddress = "0x1111111111111111111111111111111111111111" as Address;
 const identityRegistryAddress = "0x2222222222222222222222222222222222222222" as Address;
@@ -494,6 +505,71 @@ describe("signal-routed notifications", () => {
       body
     })).resolves.toMatchObject({ status: 404 });
   });
+
+  it("delivers through the generic webhook transport with HMAC signature header (ETH-04)", async () => {
+    const requests: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+    const dispatcher = new WebhookNotificationDispatcher({
+      url: "https://ops.example/uvp/notify",
+      secret: "webhook-secret",
+      fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+        requests.push({ url: String(url), init: init ?? {} });
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch
+    });
+
+    const result = await dispatcher.send({ record: deliveryRecord(), profile: notificationProfile(supplierWallet), transport: notificationProfile(supplierWallet).transports[0] as never });
+
+    expect(result.ok).toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("https://ops.example/uvp/notify");
+    expect(requests[0]?.init.method).toBe("POST");
+    const signatureHeader = (requests[0]?.init.headers as Record<string, string>)?.[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER];
+    const expected = `sha256=${createHmac("sha256", "webhook-secret").update(requests[0]?.init.body as string).digest("hex")}`;
+    expect(signatureHeader).toBe(expected);
+    // body 不携带外部端点或 payload 明文。
+    expect(requests[0]?.init.body as string).not.toContain("secret://");
+
+    const failing = new WebhookNotificationDispatcher({
+      url: "https://ops.example/uvp/notify",
+      fetchImpl: (async () => new Response("nope", { status: 500 })) as typeof fetch
+    });
+    await expect(failing.send({ record: deliveryRecord(), profile: notificationProfile(supplierWallet), transport: notificationProfile(supplierWallet).transports[0] as never }))
+      .resolves.toMatchObject({ ok: false, error: "webhook_http_500" });
+  });
+
+  it("persists notification delivery and read state across store rebuilds (ETH-04)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-notification-state-"));
+    const databaseUrl = `sqlite://${join(tempDir, "state.sqlite3")}`;
+    const migrations = { autoRun: true, directory: resolve(__dirname, "../migrations") };
+    try {
+      const first = new SqliteNotificationStateStore({ databaseUrl, migrations });
+      await first.saveDelivery(deliveryRecord());
+      await first.markRead({
+        participantKey: "wallet:0xabc",
+        notificationId: deliveryRecord().deliveryId,
+        readAt: "2026-05-01T10:00:00.000Z"
+      });
+      await first.close();
+
+      const second = new SqliteNotificationStateStore({ databaseUrl, migrations });
+      const delivery = await second.getDelivery(deliveryRecord().deliveryId);
+      expect(delivery).toMatchObject({
+        deliveryId: deliveryRecord().deliveryId,
+        status: "sent",
+        attempts: 2,
+        taskId: "task-1"
+      });
+      expect(delivery?.payload.proof.eventName).toBe("SignalSubmitted");
+      const deliveries = await second.listDeliveries({ orderId });
+      expect(deliveries).toHaveLength(1);
+      await expect(second.getReadState("wallet:0xabc", deliveryRecord().deliveryId)).resolves.toMatchObject({
+        readAt: "2026-05-01T10:00:00.000Z"
+      });
+      await second.close();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 function serviceFor(
@@ -698,4 +774,51 @@ function bytes32Hex(suffix: string): Hex {
 
 function bytes32Text(value: string): Hex {
   return `0x${Buffer.from(value, "utf8").toString("hex").padEnd(64, "0")}`;
+}
+
+function deliveryRecord(): NotificationDeliveryRecord {
+  return {
+    deliveryId: bytes32Hex("9001"),
+    kind: "signal_received",
+    status: "sent",
+    taskId: "task-1",
+    orderId,
+    receiverHookId: bytes32Hex("303"),
+    sourceId: bytes32Hex("404"),
+    signalId: bytes32Hex("505"),
+    payloadHash,
+    idempotencyKey,
+    chainId: 31337,
+    stateMachineAddress,
+    submitter: signalSubmitter,
+    supplierSubjectId,
+    supplierWallet,
+    transportType: "webhook",
+    attempts: 2,
+    createdAt: "2026-05-01T00:00:00.000Z",
+    updatedAt: "2026-05-01T00:01:00.000Z",
+    payload: {
+      version: "uvp.signalReceivedNotification.v1",
+      chainId: 31337,
+      stateMachineAddress,
+      orderId,
+      sourceId: bytes32Hex("404"),
+      signalId: bytes32Hex("505"),
+      payloadHash,
+      idempotencyKey,
+      signalSubmitter: signalSubmitter,
+      receiverHookId: bytes32Hex("303"),
+      receiverStageId: bytes32Hex("target.stage"),
+      receiverSupplierSubjectId: supplierSubjectId,
+      receiverWallet: supplierWallet,
+      proof: {
+        eventName: "SignalSubmitted",
+        chainId: 31337,
+        contractAddress: stateMachineAddress,
+        blockNumber: "6",
+        transactionHash: txHash(6n),
+        logIndex: 0
+      }
+    }
+  };
 }

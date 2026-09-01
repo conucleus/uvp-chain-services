@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { loadConfigFromEnv, runConfigPreflight, type ChainServicesConfig } from "../config/index.js";
 import {
+  BackupEvidenceStorage,
   LocalEvidenceStorage,
   ObjectEvidenceStorage,
   RehearsalObjectEvidenceStorage,
@@ -17,7 +18,7 @@ import {
   notSupportedDockedSignalBroadcastAdapter,
   type DockedSignalBroadcastAdapter
 } from "../docked-signals/index.js";
-import { createNotificationService } from "../notifications/index.js";
+import { createNotificationService, WebhookNotificationDispatcher } from "../notifications/index.js";
 import {
   AnvilProductOrderTriggerBroadcastAdapter,
   MemoryProductOrderTriggerBroadcastAdapter,
@@ -75,10 +76,32 @@ export async function startApiServer(
     getProductSchemaByPlan: (planId: string, planHash: string, artifactHash?: string) =>
       stores.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash, artifactHash)
   };
+  // ETH-04(a)：通用 webhook transport。产品渠道决策仍未做，默认关闭——
+  // 只在显式配置 UVP_NOTIFY_WEBHOOK_URL 时装配 dispatcher；未配置时保持
+  // 现状（delivery 记为 transport_adapter_missing），并给出一次性启动警告。
+  const notificationDispatcher = config.notifications?.webhookUrl
+    ? new WebhookNotificationDispatcher({
+      url: config.notifications.webhookUrl,
+      ...(config.notifications.webhookSecretConfigured && process.env.UVP_NOTIFY_WEBHOOK_SECRET?.trim()
+        ? { secret: process.env.UVP_NOTIFY_WEBHOOK_SECRET.trim() }
+        : {})
+    })
+    : undefined;
+  if (!notificationDispatcher) {
+    logger.warn("NOTIFICATION DELIVERY IS NOT CONFIGURED: set UVP_NOTIFY_WEBHOOK_URL to enable the generic webhook transport; until then every delivery is recorded as failed (transport_adapter_missing) and no external channel is notified");
+  }
   const notificationService = createNotificationService({
     store,
     supplierMetadataStore: stores.storeSupplierMetadataStore,
-    productSchemaResolver
+    productSchemaResolver,
+    // ETH-04(b)：delivery / read 状态落 sqlite（memory 驱动保持内存语义）。
+    ...(stores.notificationStateStore
+      ? {
+        deliveryStore: stores.notificationStateStore,
+        participantReadStateStore: stores.notificationStateStore
+      }
+      : {}),
+    ...(notificationDispatcher ? { dispatcher: notificationDispatcher } : {})
   });
   const dockingVerifyingContract = dockingModuleAddress(config);
   const dockedSignalBroadcastAdapter = createConfiguredDockedSignalBroadcastAdapter(config, dockingVerifyingContract);
@@ -105,7 +128,13 @@ export async function startApiServer(
 
   const submissionVerifyingContract = stateMachineAddress(config.network.contracts);
   const stagePatchVerifyingContract = stagePatchModuleAddress(config) ?? submissionVerifyingContract;
-  const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(config, submissionVerifyingContract, audit);
+  const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(
+    config,
+    submissionVerifyingContract,
+    audit,
+    // ETH-07：sqlite 驱动下 broadcast 去重状态持久化，重启后仍可去重。
+    stores.broadcastDedupeStore
+  );
   if (!submissionBroadcastAdapter && (config.security.environment !== "local" || config.relayer.broadcastEnabled)) {
     throw new ConfigError(
       `state-machine signal broadcast is not configured: UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED=true and a non-empty ${config.relayer.stateMachinePrivateKeyEnv} are required when the runtime is not local or broadcast was explicitly enabled`,
@@ -133,6 +162,51 @@ export async function startApiServer(
     governanceStore,
     logger
   });
+  // ETH-06：admin recovery actions 从既有 worker/indexer 原语构造，路由
+  // 不再拿到 ops_dependency_unavailable 的假边界。retrySubmission 复用
+  // reconcile 原语（按 receipt 重新推进提交状态）并回报该提交的当前状态。
+  const opsRecoveryActions = {
+    ...(indexer
+      ? {
+        rebuildProjections: async () => {
+          const { summary } = await indexer.rebuildFromDeploymentBlockWithSummary();
+          return {
+            status: "completed" as const,
+            summary: {
+              eventCount: summary.eventCount,
+              activeEventCount: summary.activeEventCount,
+              mismatchCount: summary.mismatchCount,
+              finalizedBlock: summary.finalizedBlock,
+              syncStatus: summary.syncStatus
+            }
+          };
+        }
+      }
+      : {}),
+    runReconcile: async () => {
+      const summary = await reconcileWorker.runOnce();
+      return { status: "completed" as const, summary };
+    },
+    ...(stores.submissionStore
+      ? {
+        retrySubmission: async (input: { readonly submissionId: string }) => {
+          const reconcileSummary = await reconcileWorker.runOnce();
+          const submission = await stores.submissionStore!.getSubmission(input.submissionId);
+          return {
+            status: "completed" as const,
+            summary: {
+              reconcile: reconcileSummary,
+              submissionId: input.submissionId,
+              ...(submission
+                ? { status: submission.status, retryState: submission.retryState }
+                : { found: false })
+            }
+          };
+        }
+      }
+      : {})
+  };
+  const opsConsoleAdminIds = config.operatorRoles.opsConsoleAdmins ?? [];
   const router = createApiRouter(store, {
     productBffStore,
     evidenceMetadataStore: stores.evidenceMetadataStore,
@@ -141,6 +215,9 @@ export async function startApiServer(
     governanceStore,
     governanceService,
     productSchemaResolver,
+    // ETH-03：ops 控制台白名单进入鉴权；未配置时回退 governance admin 检查。
+    ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
+    opsRecoveryActions,
     storeZhixuDraftStore: stores.storeZhixuDraftStore,
     storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
     storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
@@ -312,7 +389,7 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
         "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
       );
     }
-    return new ObjectEvidenceStorage({
+    const primary = new ObjectEvidenceStorage({
       client: new S3EvidenceStorageClient({
         bucket: evidenceStorageConfig.s3Bucket,
         ...(evidenceStorageConfig.s3Prefix ? { prefix: evidenceStorageConfig.s3Prefix } : {}),
@@ -335,6 +412,25 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
           : {})
       })
     });
+    // ETH-05：配置了第二副本 bucket 时，put 同步写第二副本并提供
+    // 按 hash 校验/恢复能力；未配置时保持单副本（preflight 警告）。
+    if (evidenceStorageConfig.s3BackupBucket) {
+      const backup = new ObjectEvidenceStorage({
+        client: new S3EvidenceStorageClient({
+          bucket: evidenceStorageConfig.s3BackupBucket,
+          region: evidenceStorageConfig.s3Region,
+          ...(evidenceStorageConfig.s3Endpoint ? { endpoint: evidenceStorageConfig.s3Endpoint } : {}),
+          forcePathStyle: evidenceStorageConfig.s3ForcePathStyle ?? false,
+          accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv,
+          secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv,
+          ...(evidenceStorageConfig.s3SessionTokenEnv
+            ? { sessionTokenEnv: evidenceStorageConfig.s3SessionTokenEnv }
+            : {})
+        })
+      });
+      return new BackupEvidenceStorage({ primary, backup });
+    }
+    return primary;
   }
   if (evidenceStorageConfig.adapter === "rehearsal-object") {
     return new RehearsalObjectEvidenceStorage({
@@ -451,7 +547,8 @@ function productRegistrationAdapterFromConfig(config: ChainServicesConfig): Prod
 function createConfiguredSubmissionBroadcastAdapter(
   config: ChainServicesConfig,
   stateMachine: Address | undefined,
-  audit: AuditSink
+  audit: AuditSink,
+  dedupeStore?: import("../submissions/index.js").BroadcastDedupeStore
 ): SubmissionBroadcastAdapter | undefined {
   if (!config.relayer.broadcastEnabled) {
     return undefined;
@@ -477,6 +574,7 @@ function createConfiguredSubmissionBroadcastAdapter(
     maxRetryAttempts: config.security.broadcastMaxRetry,
     retryBaseMs: config.security.broadcastRetryBaseMs,
     retryMaxMs: config.security.broadcastRetryMaxMs,
+    ...(dedupeStore ? { dedupeStore } : {}),
     audit
   });
 }

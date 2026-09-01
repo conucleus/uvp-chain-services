@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
 import { onchainSignalId, onchainSourceId } from "@uvp-eth/compiler";
@@ -10,11 +14,13 @@ import {
   createProductSubmissionService,
   InMemoryProductSubmissionStore,
   permissiveProductProjectionAuthorization,
+  SqliteBroadcastDedupeStore,
   type PreparedSubmissionDTO,
   type ProductSubmissionService,
   type ProductSubmissionStore,
   type StateMachineSubmitSignalForCall,
   type SubmissionBroadcastAdapter,
+  type SubmissionBroadcastRequest,
   type SubmissionBroadcastResult
 } from "../src/submissions/index.js";
 import {
@@ -1496,3 +1502,85 @@ async function signPrepared(prepared: PreparedSubmissionDTO): Promise<Hex> {
 function txHash(value: string): Hex {
   return `0x${value.padStart(64, "0")}`;
 }
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const signatureHex = ("0x" + "cd".repeat(65)) as Hex;
+const onchainOrderId = txHash("order-dedupe") as Address;
+
+function idempotencyKeyHex(value: string): Hex {
+  return `0x${Buffer.from(value, "utf8").toString("hex").padStart(64, "0")}` as Hex;
+}
+
+describe("secure broadcast durable dedupe (ETH-07)", () => {
+  it("dedupes the same submission through a rebuilt adapter backed by the durable store", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-broadcast-dedupe-"));
+    const databaseUrl = `sqlite://${join(tempDir, "dedupe.sqlite3")}`;
+    const migrations = { autoRun: true, directory: resolve(__dirname, "../migrations") };
+    try {
+      let broadcastCalls = 0;
+      const inner: SubmissionBroadcastAdapter = {
+        attemptsBroadcast: true,
+        async broadcast(): Promise<SubmissionBroadcastResult> {
+          broadcastCalls += 1;
+          return {
+            status: "submitted",
+            txHash: txHash("31"),
+            attempt: { status: "submitted", txHash: txHash("31") }
+          };
+        }
+      };
+      const request: SubmissionBroadcastRequest = {
+        prepared: {
+          prepareId: "prep_dedupe",
+          taskId: "task-dedupe",
+          orderId: "order-dedupe",
+          onchainOrderId: onchainOrderId,
+          signalName: "confirm_stage",
+          idempotencyKey: idempotencyKeyHex("dedupe-1"),
+          submitter
+        } as unknown as PreparedSubmissionDTO,
+        signature: signatureHex,
+        recoveredSubmitter: submitter,
+        evidence: []
+      };
+
+      const first = createSecureSubmissionBroadcastAdapter({
+        adapter: inner,
+        dedupeStore: new SqliteBroadcastDedupeStore({ databaseUrl, migrations })
+      });
+      await expect(first.broadcast(request)).resolves.toMatchObject({ status: "submitted" });
+      expect(broadcastCalls).toBe(1);
+
+      // 进程重启：重建 adapter 实例，同一 idempotencyKey 仍被去重。
+      const second = createSecureSubmissionBroadcastAdapter({
+        adapter: inner,
+        dedupeStore: new SqliteBroadcastDedupeStore({ databaseUrl, migrations })
+      });
+      await expect(second.broadcast(request)).resolves.toMatchObject({
+        status: "submitted",
+        txHash: txHash("31")
+      });
+      expect(broadcastCalls).toBe(1);
+
+      // txHash 归属持久化：另一个 idempotencyKey 复用同一 txHash 会被拒绝。
+      const third = createSecureSubmissionBroadcastAdapter({
+        adapter: inner,
+        dedupeStore: new SqliteBroadcastDedupeStore({ databaseUrl, migrations })
+      });
+      await expect(third.broadcast({
+        ...request,
+        prepared: {
+          ...request.prepared,
+          prepareId: "prep_dedupe_2",
+          idempotencyKey: idempotencyKeyHex("dedupe-2")
+        } as unknown as PreparedSubmissionDTO
+      })).resolves.toMatchObject({
+        status: "failed",
+        errorCode: "duplicate_tx_hash"
+      });
+      expect(broadcastCalls).toBe(2);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});

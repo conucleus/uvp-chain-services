@@ -3,10 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  BackupEvidenceStorage,
   buildPayloadHashDocument,
   createEvidenceService,
   EvidenceServiceError,
   EvidenceStorageConfigurationError,
+  hashEvidenceBytes,
   hashEvidencePayload,
   InMemoryEvidenceMetadataStore,
   InMemoryEvidenceStorage,
@@ -15,6 +17,7 @@ import {
   RehearsalObjectEvidenceStorage,
   defaultRehearsalObjectStorageRoot,
   S3EvidenceStorageClient,
+  type EvidenceStorage,
   type S3CompatibleObjectClient,
   type S3ObjectOperationInput,
   type S3ObjectPutOperationInput,
@@ -710,3 +713,59 @@ async function uploadTextEvidence(
     throw error;
   });
 }
+
+describe("evidence backup storage (ETH-05)", () => {
+  it("writes a second copy on put and restores the primary object from the verified backup", async () => {
+    const primary = new InMemoryEvidenceStorage();
+    const backup = new InMemoryEvidenceStorage();
+    const storage = new BackupEvidenceStorage({ primary, backup });
+    const evidenceId = "ev_backup_1";
+    const bytes = new TextEncoder().encode("evidence-bytes-for-backup");
+
+    await storage.put({ evidenceId, bytes });
+
+    const primaryURI = `memory://evidence/${evidenceId}`;
+    await expect(backup.exists(primaryURI)).resolves.toBe(true);
+    const storedHash = hashEvidenceBytes(bytes);
+
+    // 主对象被"损坏"：内容被替换，hash 不再匹配。
+    await primary.put({ evidenceId, bytes: new TextEncoder().encode("corrupted-bytes") });
+    await expect(storage.verifyBackup(primaryURI, storedHash)).resolves.toEqual({
+      backupPresent: true,
+      hashMatches: true
+    });
+
+    await expect(storage.restoreFromBackup(primaryURI, evidenceId, storedHash)).resolves.toBe(true);
+    await expect(primary.get(primaryURI)).resolves.toEqual(bytes);
+
+    // 副本 hash 不匹配时拒绝恢复。
+    await backup.put({ evidenceId, bytes: new TextEncoder().encode("tampered-backup") });
+    await expect(storage.restoreFromBackup(primaryURI, evidenceId, storedHash)).resolves.toBe(false);
+
+    // 缺失副本时报告不可用。
+    await backup.delete(primaryURI);
+    await expect(storage.verifyBackup(primaryURI, storedHash)).resolves.toEqual({
+      backupPresent: false,
+      hashMatches: false
+    });
+  });
+
+  it("propagates backup write failures instead of pretending a copy exists", async () => {
+    const primary = new InMemoryEvidenceStorage();
+    const failingBackup: EvidenceStorage = {
+      adapterKind: "memory",
+      productionSafe: false,
+      put: async () => {
+        throw new Error("backup bucket unavailable");
+      },
+      get: async () => undefined,
+      exists: async () => false
+    };
+    const storage = new BackupEvidenceStorage({ primary, backup: failingBackup });
+
+    await expect(storage.put({
+      evidenceId: "ev_backup_fail",
+      bytes: new TextEncoder().encode("payload")
+    })).rejects.toThrow(/backup bucket unavailable/);
+  });
+});

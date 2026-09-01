@@ -12,7 +12,14 @@ import type { Address } from "../shared/types.js";
 import { InMemoryProductSubmissionStore } from "../submissions/store.js";
 import { PostgresSubmissionStore } from "../submissions/postgres-store.js";
 import { SqliteSubmissionStore } from "../submissions/sqlite-store.js";
+import { SqliteBroadcastDedupeStore } from "../submissions/broadcast-dedupe-sqlite-store.js";
+import type { BroadcastDedupeStore } from "../submissions/broadcast-dedupe-sqlite-store.js";
 import type { ProductSubmissionStore } from "../submissions/types.js";
+import { SqliteNotificationStateStore } from "../notifications/sqlite-store.js";
+import type {
+  NotificationDeliveryStore,
+  ParticipantNotificationReadStateStore
+} from "../notifications/service.js";
 import {
   InMemoryStoreSupplierMetadataStore,
   PostgresStoreSupplierMetadataStore,
@@ -66,6 +73,10 @@ export interface ChainServicesStores {
   readonly storeSupplierMetadataStore: StoreSupplierMetadataStore;
   readonly storeDockingSessionStore: StoreDockingSessionStore;
   readonly storeAuditStore: StoreAuditStore;
+  /** ETH-04(b)：sqlite 驱动下提供持久化通知状态；其余驱动为 undefined（内存）。 */
+  readonly notificationStateStore?: SqliteNotificationStateStore;
+  /** ETH-07：sqlite 驱动下提供持久化 broadcast 去重状态；其余驱动为 undefined。 */
+  readonly broadcastDedupeStore?: SqliteBroadcastDedupeStore;
   close(): Promise<void>;
 }
 
@@ -170,6 +181,15 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         storeAuditStore: new SqliteStoreAuditStore({
           databaseUrl: options.database.url,
           migrations
+        }),
+        // ETH-04(b)/ETH-07：通知状态与 broadcast 去重状态落 sqlite。
+        notificationStateStore: new SqliteNotificationStateStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        broadcastDedupeStore: new SqliteBroadcastDedupeStore({
+          databaseUrl: options.database.url,
+          migrations
         })
       };
       return {
@@ -185,7 +205,9 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
             stores.storeZhixuVersionMetadataStore,
             stores.storeSupplierMetadataStore,
             stores.storeDockingSessionStore,
-            stores.storeAuditStore
+            stores.storeAuditStore,
+            stores.notificationStateStore,
+            stores.broadcastDedupeStore
           ]);
         }
       };

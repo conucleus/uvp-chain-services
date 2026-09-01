@@ -128,6 +128,8 @@ export interface EvidenceStorageConfig {
   readonly s3SessionTokenEnv?: string;
   readonly s3UriMode?: "s3" | "object";
   readonly s3ObjectNamespace?: string;
+  /** ETH-05：可选第二副本 bucket（UVP_EVIDENCE_BACKUP_BUCKET）。 */
+  readonly s3BackupBucket?: string;
 }
 
 export type ChainServicesRuntimeEnv =
@@ -161,6 +163,12 @@ export interface SecurityConfig {
   readonly broadcastReceiptTimeoutMs: number;
 }
 
+export interface NotificationsConfig {
+  /** ETH-04：通用 webhook transport；未配置时不装配 dispatcher（默认关）。 */
+  readonly webhookUrl?: string;
+  readonly webhookSecretConfigured: boolean;
+}
+
 export interface ChainServicesConfig {
   readonly network: NetworkConfig;
   readonly database: DatabaseConfig;
@@ -172,6 +180,7 @@ export interface ChainServicesConfig {
   readonly reconcile: ReconcileConfig;
   readonly dockedSignalAutomation: DockedSignalAutomationConfig;
   readonly evidenceStorage: EvidenceStorageConfig;
+  readonly notifications?: NotificationsConfig;
   readonly storeAuth?: StoreAuthConfig;
   readonly security: SecurityConfig;
 }
@@ -305,6 +314,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
       ),
     },
     evidenceStorage: parseEvidenceStorageConfig(env),
+    notifications: parseNotificationsConfig(env),
     storeAuth: parseStoreAuthConfig(env, environment),
     security: {
       environment,
@@ -460,6 +470,8 @@ function parseEvidenceStorageConfig(env: Env): EvidenceStorageConfig {
     env,
     "UVP_EVIDENCE_S3_OBJECT_NAMESPACE",
   );
+  // ETH-05：可选的第二副本 bucket；未配置时 preflight 警告。
+  const s3BackupBucket = optionalEnv(env, "UVP_EVIDENCE_BACKUP_BUCKET");
 
   return {
     adapter,
@@ -475,6 +487,15 @@ function parseEvidenceStorageConfig(env: Env): EvidenceStorageConfig {
     ...(s3SecretAccessKeyEnv ? { s3SecretAccessKeyEnv } : {}),
     ...(s3SessionTokenEnv ? { s3SessionTokenEnv } : {}),
     ...(s3ObjectNamespace ? { s3ObjectNamespace } : {}),
+    ...(s3BackupBucket ? { s3BackupBucket } : {}),
+  };
+}
+
+function parseNotificationsConfig(env: Env): NotificationsConfig {
+  const webhookUrl = optionalEnv(env, "UVP_NOTIFY_WEBHOOK_URL");
+  return {
+    ...(webhookUrl ? { webhookUrl } : {}),
+    webhookSecretConfigured: Boolean(optionalEnv(env, "UVP_NOTIFY_WEBHOOK_SECRET"))
   };
 }
 

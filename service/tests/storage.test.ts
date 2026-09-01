@@ -98,6 +98,7 @@ const expectedMigrationVersions = [
   "0010_store_supplier_capability_audit",
   "0011_canonical_chain_event_order",
   "0012_cursor_block_hash",
+  "0013_notification_broadcast_state",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
