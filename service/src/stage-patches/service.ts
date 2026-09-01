@@ -456,37 +456,46 @@ export function createProductStageExecutorPatchService(
         );
       }
 
-      const broadcast = await broadcastAdapter.broadcast({
-        prepared: executorDtoFromPrepared(prepared),
-        signature,
-        ...(previousSignature
-          ? { previousExecutorSignature: previousSignature }
-          : {}),
-        recoveredSelector,
-        ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
-      });
-      const timestamp = now().toISOString();
-      const submission = executorSubmissionFromBroadcast(prepared, {
-        submissionId: submissionIdFactory(),
-        signatureHash: signatureHashFor(signature),
-        ...(previousSignature
-          ? {
-              previousExecutorSignatureHash:
-                signatureHashFor(previousSignature),
-            }
-          : {}),
-        recoveredSelector,
-        ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
-        broadcast,
-        timestamp,
-      });
-      await stageExecutorPatchStore.putSubmission(submission);
-      await stageExecutorPatchStore.markPreparedUsed(
-        prepared.prepareId,
-        submission.submissionId,
-        submission.updatedAt,
-      );
-      return submission;
+      // ETH-01：nonce 已被占用。若 broadcast 或存储写入在落库前抛错，
+      // 先释放 nonce 再 rethrow：同一 prepareId 在瞬时 RPC/存储失败后
+      // 仍可重试，而不是永久 409。broadcast 返回失败结果视为已消费，
+      // 保持与 submissions 主路径一致的语义。
+      try {
+        const broadcast = await broadcastAdapter.broadcast({
+          prepared: executorDtoFromPrepared(prepared),
+          signature,
+          ...(previousSignature
+            ? { previousExecutorSignature: previousSignature }
+            : {}),
+          recoveredSelector,
+          ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
+        });
+        const timestamp = now().toISOString();
+        const submission = executorSubmissionFromBroadcast(prepared, {
+          submissionId: submissionIdFactory(),
+          signatureHash: signatureHashFor(signature),
+          ...(previousSignature
+            ? {
+                previousExecutorSignatureHash:
+                  signatureHashFor(previousSignature),
+              }
+            : {}),
+          recoveredSelector,
+          ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
+          broadcast,
+          timestamp,
+        });
+        await stageExecutorPatchStore.putSubmission(submission);
+        await stageExecutorPatchStore.markPreparedUsed(
+          prepared.prepareId,
+          submission.submissionId,
+          submission.updatedAt,
+        );
+        return submission;
+      } catch (error) {
+        await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
+        throw error;
+      }
     },
 
     async getStageExecutorPatchSubmission(submissionId) {
@@ -697,26 +706,32 @@ export function createProductStageResourcePatchService(
         );
       }
 
-      const broadcast = await broadcastAdapter.broadcast({
-        prepared: resourceDtoFromPrepared(prepared),
-        signature,
-        recoveredSelector,
-      });
-      const timestamp = now().toISOString();
-      const submission = resourceSubmissionFromBroadcast(prepared, {
-        submissionId: submissionIdFactory(),
-        signatureHash: signatureHashFor(signature),
-        recoveredSelector,
-        broadcast,
-        timestamp,
-      });
-      await stageResourcePatchStore.putSubmission(submission);
-      await stageResourcePatchStore.markPreparedUsed(
-        prepared.prepareId,
-        submission.submissionId,
-        submission.updatedAt,
-      );
-      return submission;
+      // ETH-01：同 executor patch 路径，broadcast/落库失败先释放 nonce。
+      try {
+        const broadcast = await broadcastAdapter.broadcast({
+          prepared: resourceDtoFromPrepared(prepared),
+          signature,
+          recoveredSelector,
+        });
+        const timestamp = now().toISOString();
+        const submission = resourceSubmissionFromBroadcast(prepared, {
+          submissionId: submissionIdFactory(),
+          signatureHash: signatureHashFor(signature),
+          recoveredSelector,
+          broadcast,
+          timestamp,
+        });
+        await stageResourcePatchStore.putSubmission(submission);
+        await stageResourcePatchStore.markPreparedUsed(
+          prepared.prepareId,
+          submission.submissionId,
+          submission.updatedAt,
+        );
+        return submission;
+      } catch (error) {
+        await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
+        throw error;
+      }
     },
 
     async getStageResourcePatchSubmission(submissionId) {
@@ -931,26 +946,32 @@ export function createProductDockedOrderLinkService(
         );
       }
 
-      const broadcast = await broadcastAdapter.broadcast({
-        prepared: dockedDtoFromPrepared(prepared),
-        signature,
-        recoveredSelector,
-      });
-      const timestamp = now().toISOString();
-      const submission = dockedSubmissionFromBroadcast(prepared, {
-        submissionId: submissionIdFactory(),
-        signatureHash: signatureHashFor(signature),
-        recoveredSelector,
-        broadcast,
-        timestamp,
-      });
-      await dockedOrderLinkStore.putSubmission(submission);
-      await dockedOrderLinkStore.markPreparedUsed(
-        prepared.prepareId,
-        submission.submissionId,
-        submission.updatedAt,
-      );
-      return submission;
+      // ETH-01：同 executor patch 路径，broadcast/落库失败先释放 nonce。
+      try {
+        const broadcast = await broadcastAdapter.broadcast({
+          prepared: dockedDtoFromPrepared(prepared),
+          signature,
+          recoveredSelector,
+        });
+        const timestamp = now().toISOString();
+        const submission = dockedSubmissionFromBroadcast(prepared, {
+          submissionId: submissionIdFactory(),
+          signatureHash: signatureHashFor(signature),
+          recoveredSelector,
+          broadcast,
+          timestamp,
+        });
+        await dockedOrderLinkStore.putSubmission(submission);
+        await dockedOrderLinkStore.markPreparedUsed(
+          prepared.prepareId,
+          submission.submissionId,
+          submission.updatedAt,
+        );
+        return submission;
+      } catch (error) {
+        await dockedOrderLinkStore.releaseNonce?.(prepared.nonceKey);
+        throw error;
+      }
     },
 
     async getDockedOrderLinkSubmission(submissionId) {

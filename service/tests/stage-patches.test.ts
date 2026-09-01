@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
+import {
+  hashResourceManifest as hashProtocolResourceManifest,
+  type ResourceManifestV1
+} from "@uvp-eth/protocol-bindings";
 import { privateKeyToAccount } from "viem/accounts";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
 import type { ChainServicesRuntimeEnv } from "../src/config/index.js";
@@ -14,10 +18,13 @@ import {
   createProductStageResourcePatchService,
   DOCKED_ORDER_LINK_SIGNAL_ID,
   hashResourceManifest,
+  InMemoryProductStagePatchStore,
   type PreparedDockedOrderLinkDTO,
   type PreparedStageExecutorPatchDTO,
+  type PreparedStageExecutorPatchRecord,
   type PreparedStageResourcePatchDTO,
   type StageExecutorPatchBroadcastAdapter,
+  type StageExecutorPatchSubmissionDTO,
   type StagePatchBroadcastResult,
   type StageResourcePatchBroadcastAdapter,
 } from "../src/stage-patches/index.js";
@@ -82,23 +89,40 @@ const executorWallet = "0x3333333333333333333333333333333333333333" as Address;
 const baseNow = new Date("2026-04-30T00:00:00Z");
 
 describe("stage executor/resource patch Product API", () => {
-  it("hashes resource manifests deterministically", () => {
-    const left = hashResourceManifest({
+  it("hashes resource manifests deterministically with the protocol canonical hash", () => {
+    // ETH-08：两栈必须对同一 manifest 算出同一 hash——chain-services 的
+    // helper 直接委托 protocol-bindings 的 canonical 实现（domain + normalization）。
+    const manifest: ResourceManifestV1 = {
       schemaVersion: "uvp-resource-manifest-v1",
-      resourceKey,
+      orderId,
+      targetStageId: targetStageOnchainId,
+      resourceKey: bytes32Text(resourceKey),
       visibility: "protected",
-      storageCID: "bafy-a",
+      ciphertextHash: bytes32Hex("808"),
+      storageCID: "ipfs://bafy-resource-ciphertext",
       policyHash,
-    });
-    const right = hashResourceManifest({
+      recipientEnvelopeRoot: bytes32Hex("909"),
+      createdBy: selectorWallet,
+      createdAt: "2026-04-30T00:00:00.000Z"
+    };
+    const reordered: ResourceManifestV1 = {
+      createdAt: "2026-04-30T00:00:00.000Z",
+      createdBy: selectorWallet,
+      recipientEnvelopeRoot: bytes32Hex("909"),
       policyHash,
-      storageCID: "bafy-a",
+      storageCID: "ipfs://bafy-resource-ciphertext",
+      ciphertextHash: bytes32Hex("808"),
       visibility: "protected",
-      resourceKey,
-      schemaVersion: "uvp-resource-manifest-v1",
-    });
+      resourceKey: bytes32Text(resourceKey),
+      targetStageId: targetStageOnchainId,
+      orderId,
+      schemaVersion: "uvp-resource-manifest-v1"
+    };
 
-    expect(left).toBe(right);
+    const left = hashResourceManifest(manifest);
+    expect(left).toBe(hashResourceManifest(reordered));
+    // parity：与 protocol-bindings 直接导出的实现逐字节一致。
+    expect(left).toBe(hashProtocolResourceManifest(manifest));
   });
 
   it("accepts reordered prepared envelopes when comparing canonical typed data", async () => {
@@ -701,6 +725,120 @@ describe("stage executor/resource patch Product API", () => {
         retryable: false,
       },
     });
+  });
+
+  it("releases the reserved patch nonce when broadcast throws so the same prepareId stays retryable", async () => {
+    // ETH-01：broadcast 在 nonce 已 reserve 后抛错（模拟瞬时 RPC 故障），
+    // nonce 必须被释放，否则同一 prepareId 重试会永久 409 duplicate nonce。
+    let broadcastCalls = 0;
+    const broadcast: StageExecutorPatchBroadcastAdapter = {
+      broadcast: async (): Promise<StagePatchBroadcastResult> => {
+        broadcastCalls += 1;
+        if (broadcastCalls === 1) {
+          throw new Error("rpc connection reset before writeContract");
+        }
+        return { status: "submitted", txHash };
+      },
+    };
+    const { router } = await routerFixture({
+      executorBroadcastAdapter: broadcast,
+    });
+    const prepared = await prepareStageExecutorPatch(router);
+    const signature = await signExecutorPrepared(prepared);
+    const submitBody = {
+      prepareId: prepared.prepareId,
+      selectorWallet,
+      signature,
+    };
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    })).rejects.toThrow("rpc connection reset before writeContract");
+
+    const retried = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    });
+
+    expect(retried).toMatchObject({ status: 200 });
+    expect(broadcastCalls).toBe(2);
+  });
+
+  it("releases the reserved patch nonce when the patch store write fails so the same prepareId stays retryable", async () => {
+    // ETH-01：putSubmission/markPreparedUsed 失败同样必须释放 nonce。
+    const innerBroadcast: StageExecutorPatchBroadcastAdapter = {
+      broadcast: async (): Promise<StagePatchBroadcastResult> => ({
+        status: "submitted",
+        txHash,
+      }),
+    };
+    const failingStore = new class extends InMemoryProductStagePatchStore<
+      PreparedStageExecutorPatchRecord,
+      StageExecutorPatchSubmissionDTO
+    > {
+      putSubmissionCalls = 0;
+      override async putSubmission(
+        submission: StageExecutorPatchSubmissionDTO,
+      ): Promise<void> {
+        this.putSubmissionCalls += 1;
+        if (this.putSubmissionCalls === 1) {
+          throw new Error("simulated durable patch store outage");
+        }
+        return super.putSubmission(submission);
+      }
+    }();
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: baseEvents(),
+    });
+    const failingService = createProductStageExecutorPatchService({
+      store,
+      chainId,
+      verifyingContract: contractAddress,
+      now: () => baseNow,
+      prepareIdFactory: () => "prep_1",
+      submissionIdFactory: () => "sub_1",
+      stageExecutorPatchStore: failingStore,
+      broadcastAdapter: innerBroadcast,
+    });
+    const router = createApiRouter(store, {
+      submissionChainId: 84532,
+      submissionVerifyingContract:
+        "0x1111111111111111111111111111111111111111",
+      productStageExecutorPatchService: failingService,
+    });
+    const prepareResponse = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody(),
+    });
+    expect(prepareResponse.status).toBe(201);
+    const prepared = prepareResponse.body as PreparedStageExecutorPatchDTO;
+    const signature = await signExecutorPrepared(prepared);
+    const submitBody = {
+      prepareId: prepared.prepareId,
+      selectorWallet,
+      signature,
+    };
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    })).rejects.toThrow("simulated durable patch store outage");
+
+    const retried = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    });
+
+    expect(retried).toMatchObject({ status: 200 });
+    expect(failingStore.putSubmissionCalls).toBe(2);
   });
 
   it("prepares docked order links after both plans are registered", async () => {

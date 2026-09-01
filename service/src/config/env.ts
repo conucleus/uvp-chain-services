@@ -229,6 +229,8 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         "UVP_DEPLOYMENT_BLOCK",
         manifest.deploymentBlock ?? 0n,
       ),
+      // ETH-11：默认 1 仅供本地/测试网；production 预检要求显式配置
+      // （validateProductionSafety / runProductionSafetyPreflight）。
       finalityConfirmations: parseInteger(env, "UVP_FINALITY_CONFIRMATIONS", 1),
       contracts,
       stateMachineDeployments: manifest.stateMachineDeployments,
@@ -1129,6 +1131,16 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   ) {
     throw new ConfigError(
       "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production",
+    );
+  }
+  // ETH-11：production 禁止静默使用 env 默认值 1。finality 确认数是索引器
+  // reorg 缓冲的唯一防线，必须显式配置为正整数；非生产保持默认 1 不变。
+  if (
+    !optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
+    config.network.finalityConfirmations <= 0
+  ) {
+    throw new ConfigError(
+      "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production",
     );
   }
   if (!optionalEnv(env, "CHAIN_SERVICES_DATABASE_URL")) {

@@ -372,6 +372,41 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
   };
 }
 
+/**
+ * ETH-09：rebuild summary 的 mismatchCount 必须反映真实 replay 异常，而不是
+ * 硬编码 0。这里统计两类可观测异常：
+ * 1. 重复/矛盾投递 —— 同一事件键（chain/contract/block/tx/log）作为活跃
+ *    事件出现多次（replay 会静默去重，但这是真实异常，必须计数）；
+ * 2. 投影 apply 失败 —— 事件流引用未知 plan 等导致 rebuildOrderProjections
+ *    抛错（调用方随后按 degraded 处理，异常本身计为 1）。
+ *
+ * 已调查 uvp-protocol 的 @uvp-eth/statemachine 语义 replay oracle
+ * （replayChainEvents）：它要求带 compiledHooks/dependencyIndex 的完整
+ * plan 编译产物与 zhixuId 富化事件，索引器投影的事件流不携带这些数据，
+ * 且依赖 @uvp-eth/hook-core 的原生 uvp-core 运行时；在索引器内接通属于
+ * 独立集成任务，此处先用真实可观测异常计数。
+ */
+export function countReplayAnomalies(events: readonly ChainEvent[]): number {
+  let anomalies = 0;
+  const seenActive = new Set<string>();
+  for (const event of events) {
+    if (event.removed === true) {
+      continue;
+    }
+    const key = chainEventKey(event);
+    if (seenActive.has(key)) {
+      anomalies += 1;
+    }
+    seenActive.add(key);
+  }
+  try {
+    rebuildOrderProjections(events);
+  } catch {
+    anomalies += 1;
+  }
+  return anomalies;
+}
+
 export function rebuildOrderProjections(events: readonly ChainEvent[]): ProjectionSnapshot {
   const stateMachineDeployments = new Map<string, MutableStateMachineDeploymentProjection>();
   const stateMachineModules = new Map<string, MutableStateMachineModuleProjection>();

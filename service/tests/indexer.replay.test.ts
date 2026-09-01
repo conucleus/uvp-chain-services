@@ -8,6 +8,7 @@ import type { ChainServicesConfig } from "../src/config/index.js";
 import { IndexerService, type ChainEventSource } from "../src/indexer/service.js";
 import { rebuildOrderProjections, stateMachineScopedKey } from "../src/indexer/projections.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import type { Hex } from "../src/shared/types.js";
 import { SqliteProjectionStore } from "../src/storage/sqlite-projection-store.js";
 import { buildActiveChainEventReplaySummary, sortChainEvents, type ChainEvent } from "../src/indexer/events.js";
 import { EXECUTOR_PATCH_MODE_ASSIGN } from "../src/stage-patches/typed-data.js";
@@ -796,6 +797,229 @@ describe("indexer projection replay", () => {
     }
   });
 
+  it("rolls back stored events and replays the canonical fork when a reorg breaks cursor hash continuity", async () => {
+    // ETH-02：模拟 fork——block 3 之后链被替换。cursor 哈希校验发现断链，
+    // 共同祖先定位到 block 2，删除 block 3 的旧事件，从 fork 链重放。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      // block 1..2 两链一致；block 3 起分叉（不同哈希、不同事件）。
+      const canonicalEvents: readonly ChainEvent[] = [
+        chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+        chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId })
+      ];
+      const staleBlock3Event = {
+        ...chainEvent(3n, 0, "SignalSubmitted", {
+          orderId: stateMachineOrderId,
+          sourceId,
+          signalId,
+          payloadHash,
+          idempotencyKey,
+          submitter: signer
+        }),
+        blockHash: blockHashHex("block-3-stale")
+      };
+      const originalEvents = [
+        ...canonicalEvents.map((event, index) => ({ ...event, blockHash: blockHashHex(`block-${index + 1}`) })),
+        staleBlock3Event
+      ];
+      const forkedBlock3Event = {
+        ...chainEvent(3n, 0, "SignalSubmitted", {
+          orderId: stateMachineOrderId,
+          sourceId,
+          signalId,
+          payloadHash: bytes32Hex("feed"),
+          idempotencyKey: bytes32Hex("9002"),
+          submitter: signer
+        }),
+        blockHash: blockHashHex("block-3-fork")
+      };
+      const forkedBlock4Event = {
+        ...chainEvent(4n, 0, "HookReady", {
+          orderId: stateMachineOrderId,
+          hookId,
+          stageId,
+          hookName
+        }),
+        blockHash: blockHashHex("block-4-fork")
+      };
+      let canonicalBlocks = new Map<bigint, Hex>([
+        [1n, blockHashHex("block-1")],
+        [2n, blockHashHex("block-2")],
+        [3n, blockHashHex("block-3-stale")]
+      ]);
+      let readableEvents: readonly ChainEvent[] = originalEvents;
+      let finalizedBlock = 3n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return readableEvents.filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        },
+        async getBlockHash(blockNumber) {
+          return canonicalBlocks.get(blockNumber) ?? zeroBlockHash();
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store
+      });
+
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+      await expect(store.listEvents({ chainId: 31337 })).resolves.toHaveLength(3);
+
+      // fork 生效：block 3 哈希改变并出现 block 4 的新事件。
+      canonicalBlocks = new Map<bigint, Hex>([
+        [1n, blockHashHex("block-1")],
+        [2n, blockHashHex("block-2")],
+        [3n, blockHashHex("block-3-fork")],
+        [4n, blockHashHex("block-4-fork")]
+      ]);
+      readableEvents = [...canonicalEvents.map((event, index) => ({ ...event, blockHash: blockHashHex(`block-${index + 1}`) })), forkedBlock3Event, forkedBlock4Event];
+      finalizedBlock = 4n;
+
+      const result = await indexer.refreshFromCursorWithSummary();
+
+      // 旧 block-3 事件被删除，fork 链事件无重复地重放。
+      const storedEvents = await store.listEvents({ chainId: 31337 });
+      expect(storedEvents).toHaveLength(4);
+      expect(storedEvents.filter((event) => event.blockNumber === 3n)).toHaveLength(1);
+      expect(storedEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ blockNumber: 3n, blockHash: blockHashHex("block-3-fork") }),
+        expect.objectContaining({ blockNumber: 4n, blockHash: blockHashHex("block-4-fork") })
+      ]));
+      expect(result.summary).toMatchObject({
+        fromBlock: "3",
+        toBlock: "4",
+        syncStatus: "indexed",
+        finalizedBlock: "4",
+        mismatchCount: 0
+      });
+      await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
+        .resolves.toMatchObject({ nextBlock: 5n, finalizedBlock: 4n, blockHash: blockHashHex("block-4-fork") });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails with a full-rebuild demand when a reorg erases every known block hash", async () => {
+    // ETH-02：整条已知链都被替换时，回溯窗口内找不到共同祖先 → 报错。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-deep-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const originalEvents = stateMachineEvents().map((event) => ({
+        ...event,
+        blockHash: blockHashHex(`orig-${event.blockNumber}`)
+      }));
+      let canonicalBlocks = new Map<bigint, Hex>(
+        [1n, 2n, 3n, 4n, 5n, 6n, 7n].map((block) => [block, blockHashHex(`orig-${block}`)])
+      );
+      let finalizedBlock = 7n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return originalEvents.filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        },
+        async getBlockHash(blockNumber) {
+          return canonicalBlocks.get(blockNumber) ?? zeroBlockHash();
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store
+      });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      // 整链替换：所有已知块的 canonical 哈希都变了。
+      canonicalBlocks = new Map<bigint, Hex>(
+        [1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n].map((block) => [block, blockHashHex(`fork-${block}`)])
+      );
+      finalizedBlock = 8n;
+
+      await expect(indexer.refreshFromCursorWithSummary()).rejects.toThrow(
+        /reorg deeper than the 1000-block rollback window; full projection rebuild is required/
+      );
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports real replay anomalies in rebuild mismatchCount instead of a hardcoded zero", async () => {
+    // ETH-09：同一事件键作为活跃事件重复投递（矛盾投递）必须计入
+    // mismatchCount；正常流保持 0。
+    const events = stateMachineEvents();
+    const duplicated = [...events, events[2]!];
+    const store = new MemoryProjectionStore();
+    const eventSource: ChainEventSource = {
+      async getFinalizedBlock() {
+        return 9n;
+      },
+      async readEvents() {
+        return duplicated;
+      }
+    };
+    const indexer = new IndexerService({
+      config: testConfig(),
+      eventSource,
+      store
+    });
+
+    const result = await indexer.rebuildFromDeploymentBlockWithSummary();
+
+    expect(result.summary.mismatchCount).toBe(1);
+    expect(result.summary.eventCount).toBe(9);
+
+    const degradedStore = new MemoryProjectionStore();
+    // 投影 apply 失败（未知 plan 引用）同样计入并进入 degraded。
+    const corruptSource: ChainEventSource = {
+      async getFinalizedBlock() {
+        return 5n;
+      },
+      async readEvents() {
+        return [
+          chainEvent(1n, 0, "SignalCapabilityRegistered", {
+            planId,
+            stageId,
+            targetSourceId: sourceId,
+            signalId,
+            targetOrderRelation: 0
+          })
+        ];
+      }
+    };
+    const corruptIndexer = new IndexerService({
+      config: testConfig(),
+      eventSource: corruptSource,
+      store: degradedStore
+    });
+    await expect(corruptIndexer.rebuildFromDeploymentBlockWithSummary()).rejects.toThrow(/unknown plan/);
+    await expect(degradedStore.getSyncState()).resolves.toMatchObject({
+      syncStatus: "degraded",
+      rebuild: expect.objectContaining({ status: "failed", mismatchCount: 1 })
+    });
+  });
+
   it("serves state-machine projection through Product API endpoints", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineEvents() });
@@ -1252,6 +1476,14 @@ async function waitForCondition(predicate: () => boolean): Promise<void> {
 
 function bytes32Text(value: string): string {
   return `0x${Buffer.from(value, "utf8").toString("hex").padEnd(64, "0")}`;
+}
+
+function blockHashHex(label: string): Hex {
+  return `0x${Buffer.from(label, "utf8").toString("hex").padStart(64, "0").slice(0, 64)}` as Hex;
+}
+
+function zeroBlockHash(): Hex {
+  return `0x${"0".repeat(64)}` as Hex;
 }
 
 function bytes32Hex(value: string): `0x${string}` {

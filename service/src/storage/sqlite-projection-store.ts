@@ -236,13 +236,14 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       this.#database
         .prepare(
           `INSERT INTO chain_index_cursor (
-           chain_id, contract_address, deployment_block, next_block, finalized_block, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?)
+           chain_id, contract_address, deployment_block, next_block, finalized_block, block_hash, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(chain_id, contract_address)
          DO UPDATE SET
            deployment_block = excluded.deployment_block,
            next_block = excluded.next_block,
            finalized_block = excluded.finalized_block,
+           block_hash = excluded.block_hash,
            updated_at = excluded.updated_at`,
         )
         .run(
@@ -251,6 +252,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
           cursor.deploymentBlock.toString(),
           cursor.nextBlock.toString(),
           cursor.finalizedBlock?.toString() ?? null,
+          cursor.blockHash?.toLowerCase() ?? null,
           updatedAt,
         );
     });
@@ -263,6 +265,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       ...(cursor.finalizedBlock !== undefined
         ? { finalizedBlock: cursor.finalizedBlock }
         : {}),
+      ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {}),
       updatedAt,
     };
   }
@@ -278,6 +281,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
          deployment_block AS deploymentBlock,
          next_block AS nextBlock,
          finalized_block AS finalizedBlock,
+         block_hash AS blockHash,
          updated_at AS updatedAt
        FROM chain_index_cursor
        WHERE chain_id = ? AND contract_address = ?`,
@@ -287,6 +291,30 @@ export class SqliteProjectionStore implements DurableProjectionStore {
         normalizeAddress(scope.contractAddress, "cursor.contractAddress"),
       );
     return row ? cursorRow(row) : undefined;
+  }
+
+  async deleteEventsAfterBlock(
+    scope: Partial<ProjectionScope> = {},
+    blockNumber: bigint = 0n,
+  ): Promise<number> {
+    const clauses: string[] = ["CAST(block_number AS INTEGER) > ?"];
+    const values: SqliteValue[] = [blockNumber.toString()];
+    if (scope.chainId !== undefined) {
+      clauses.push("chain_id = ?");
+      values.push(scope.chainId);
+    }
+    if (scope.contractAddress) {
+      clauses.push("contract_address = ?");
+      values.push(
+        normalizeAddress(scope.contractAddress, "event.contractAddress"),
+      );
+    }
+    return runSqliteWrite(() => {
+      const result = this.#database
+        .prepare(`DELETE FROM chain_event_log WHERE ${clauses.join(" AND ")}`)
+        .run(...values);
+      return result.changes;
+    });
   }
 
   async appendEvent(event: ChainEvent): Promise<void> {
@@ -531,6 +559,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
 function cursorRow(row: unknown): StoredProjectionCursor {
   const record = rowObject(row);
   const finalizedBlock = nullableStringColumn(record, "finalizedBlock");
+  const blockHash = nullableStringColumn(record, "blockHash");
   return {
     chainId: numberColumn(record, "chainId"),
     contractAddress: normalizeAddress(
@@ -542,6 +571,7 @@ function cursorRow(row: unknown): StoredProjectionCursor {
     ...(finalizedBlock !== null
       ? { finalizedBlock: BigInt(finalizedBlock) }
       : {}),
+    ...(blockHash !== null ? { blockHash: blockHash as Hex } : {}),
     updatedAt: stringColumn(record, "updatedAt"),
   };
 }

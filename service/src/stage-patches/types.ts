@@ -521,6 +521,13 @@ export interface ProductStagePatchStore<
   getPrepared(prepareId: string): Promise<TPrepared | undefined>;
   markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void>;
   reserveNonce(key: string): Promise<boolean>;
+  /**
+   * ETH-01：reserve 之后的 broadcast/存储写入抛错时，提交服务会先释放
+   * nonce 再 rethrow，保证同一 prepareId 在瞬时 RPC/存储失败后仍可重试。
+   * 与 ProductSubmissionStore.releaseNonce 相同的可选语义：旧实现缺失时
+   * patch 服务按 nonce 已消费处理（保持向后兼容）。
+   */
+  releaseNonce?(key: string): Promise<void>;
   putSubmission(submission: TSubmission): Promise<void>;
   getSubmission(submissionId: string): Promise<TSubmission | undefined>;
 }

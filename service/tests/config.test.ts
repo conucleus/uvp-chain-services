@@ -848,6 +848,26 @@ describe("chain-services config", () => {
     }))).toThrow(/Anvil default private key/);
   });
 
+  it("requires an explicit UVP_FINALITY_CONFIRMATIONS in production but keeps the default elsewhere", () => {
+    // ETH-11：production 不允许静默落到默认值 1（reorg 防线必须显式配置）。
+    const { UVP_FINALITY_CONFIRMATIONS: _finality, ...missingFinality } = productionEnv();
+    expect(() => loadConfigFromEnv(missingFinality)).toThrow(
+      /UVP_FINALITY_CONFIRMATIONS must be explicitly configured/
+    );
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_FINALITY_CONFIRMATIONS: "0"
+    }))).toThrow(/UVP_FINALITY_CONFIRMATIONS must be explicitly configured/);
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_FINALITY_CONFIRMATIONS: "-2"
+    }))).toThrow(/UVP_FINALITY_CONFIRMATIONS must be a non-negative safe integer/);
+
+    // 非生产保持默认 1 不变。
+    expect(loadConfigFromEnv(stagingEnv(tempDirs)).network.finalityConfirmations).toBe(12);
+    expect(loadConfigFromEnv().network.finalityConfirmations).toBe(1);
+  });
+
   it("requires fully configured s3 evidence storage in production", () => {
     const { UVP_EVIDENCE_STORAGE_ADAPTER: _adapter, ...missingAdapter } = productionEnv();
     expect(() => loadConfigFromEnv(missingAdapter)).toThrow(
@@ -1206,6 +1226,8 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Reco
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: productionRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: productionRelayerPrivateKey,
+    // ETH-11：production 要求显式配置 finality 确认数，基线 env 一并带上。
+    UVP_FINALITY_CONFIRMATIONS: "12",
     ...storeAuthJwtEnv,
     ...overrides
   };

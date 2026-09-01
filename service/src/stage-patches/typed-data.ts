@@ -14,7 +14,9 @@ import {
   STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS as PROTOCOL_STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS,
   buildDockedOrderLinkTypedData as buildProtocolDockedOrderLinkTypedData,
   hashDockedOrderLinkPayload as hashProtocolDockedOrderLinkPayload,
-  recoverDockedOrderLinkSigner as recoverProtocolDockedOrderLinkSigner
+  hashResourceManifest as hashProtocolResourceManifest,
+  recoverDockedOrderLinkSigner as recoverProtocolDockedOrderLinkSigner,
+  type ResourceManifestV1
 } from "@uvp-eth/protocol-bindings";
 import {
   EXECUTOR_PATCH_MODE_ASSIGN,
@@ -335,8 +337,20 @@ export async function recoverDockedOrderLinkSigner(
   return recoverProtocolDockedOrderLinkSigner(typedData, signature);
 }
 
-export function hashResourceManifest(manifest: unknown): Hex {
-  return nonZeroHash(keccak256(stringToHex(stableJson(manifest))), "manifestHash");
+export function hashResourceManifest(manifest: ResourceManifestV1): Hex {
+  // ETH-08：manifest hash 必须与 protocol-bindings 的 canonical 实现
+  // （带 domain 与 normalization）一致；本地"排序 JSON 裸 keccak"已废除，
+  // 不做双哈希兼容层（项目未上线，直接统一两栈）。
+  try {
+    return nonZeroHash(
+      hashProtocolResourceManifest(manifest),
+      "manifestHash",
+    );
+  } catch (error) {
+    throw new ConfigError(
+      error instanceof Error ? error.message : "invalid resource manifest",
+    );
+  }
 }
 
 export function normalizeSignature(value: Hex | string): Hex {
@@ -371,17 +385,4 @@ function nonZeroHash(value: Hex, fieldName: string): Hex {
 
 export function textHash(value: string): Hex {
   return keccak256(stringToHex(value));
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableJson).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
 }

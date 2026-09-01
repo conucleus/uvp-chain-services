@@ -77,6 +77,7 @@ interface ViemLogReader {
     readonly fromBlock: bigint;
     readonly toBlock: bigint;
   }): Promise<readonly Log[]>;
+  getBlock?(input: { readonly blockNumber: bigint }): Promise<{ readonly hash: Hex }>;
 }
 
 export interface ViemChainEventSourceOptions {
@@ -92,16 +93,31 @@ export class ViemChainEventSource implements ChainEventSource {
 
   async getFinalizedBlock(config: ChainServicesConfig): Promise<bigint> {
     const latestBlock = await this.#client(config).getBlockNumber();
-    // Audit #15: current reorg safety = finalityConfirmations. Events are only
-    // read below this many blocks from the head; there is no additional
-    // reorg-buffer setting, and explicit reorg rollback handling (rewriting
-    // projections from `removed` logs) is registered follow-up work, not
-    // implemented here.
+    // Audit #15 + ETH-02：reorg 安全 = finalityConfirmations 缓冲 + 追加前的
+    // 哈希连续性校验（indexer/service.ts）。finalityConfirmations 之上的
+    // 深度 reorg 仍无法自动回滚，需要 full rebuild；`removed` log 改写投影
+    // 依旧不是本服务的职责。
     const confirmations = BigInt(config.network.finalityConfirmations);
     if (latestBlock <= confirmations) {
       return 0n;
     }
     return latestBlock - confirmations;
+  }
+
+  /**
+   * ETH-02：返回当前 canonical 链上指定高度的区块哈希，供 indexer 在
+   * 追加事件前校验 cursor 连续性、reorg 时定位共同祖先。
+   */
+  async getBlockHash(
+    blockNumber: bigint,
+    config: ChainServicesConfig,
+  ): Promise<Hex> {
+    const client = this.#client(config);
+    if (!client.getBlock) {
+      throw new ConfigError("configured RPC client does not support getBlock; reorg detection is unavailable");
+    }
+    const block = await client.getBlock({ blockNumber });
+    return block.hash.toLowerCase() as Hex;
   }
 
   async readEvents(

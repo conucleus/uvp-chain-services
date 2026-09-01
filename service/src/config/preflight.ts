@@ -498,6 +498,14 @@ function runProductionSafetyPreflight(
     pass(checks, "storage.migrations_auto_run");
   }
 
+  // ETH-11：production 不允许静默落到 env 默认值 1。finality 确认数是
+  // 索引器 reorg 缓冲的唯一防线，必须显式配置；非生产环境保持默认 1。
+  if (env.UVP_FINALITY_CONFIRMATIONS?.trim() && config.network.finalityConfirmations > 0) {
+    pass(checks, "network.finality_confirmations_explicit");
+  } else {
+    fail(checks, errors, "network.finality_confirmations_explicit", "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production");
+  }
+
   if (config.productBff.registrationAdapter !== "anvil") {
     fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production");
   } else {

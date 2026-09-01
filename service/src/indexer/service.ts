@@ -7,7 +7,7 @@ import {
   sortChainEvents
 } from "./events.js";
 import type { ProjectionSnapshot } from "./projections.js";
-import { createEmptyProjectionSnapshot, rebuildOrderProjections } from "./projections.js";
+import { countReplayAnomalies, createEmptyProjectionSnapshot, rebuildOrderProjections } from "./projections.js";
 import { rebuildIdentityProjections } from "./identity-projections.js";
 import { createProjectionStore } from "../storage/factory.js";
 import {
@@ -17,7 +17,7 @@ import {
   type ProjectionStore,
   type ProjectionSyncState
 } from "../storage/projection-store.js";
-import { consoleLogger, noopLogger, type LifecycleService, type Logger } from "../shared/types.js";
+import { consoleLogger, noopLogger, ConfigError, type Hex, type LifecycleService, type Logger } from "../shared/types.js";
 import { redactErrorMessage, redactSecrets } from "../security/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
 
@@ -30,6 +30,12 @@ export interface ChainEventRange {
 export interface ChainEventSource {
   getFinalizedBlock(config: ChainServicesConfig): Promise<bigint>;
   readEvents(range: ChainEventRange, config: ChainServicesConfig): Promise<readonly ChainEvent[]>;
+  /**
+   * ETH-02：返回当前 canonical 链上指定高度区块哈希；用于追加前的
+   * cursor 哈希连续性校验与 reorg 共同祖先定位。事件源不支持时
+   * （可选方法缺失）索引器跳过校验，仅依赖 finalityConfirmations 缓冲。
+   */
+  getBlockHash?(blockNumber: bigint, config: ChainServicesConfig): Promise<Hex>;
 }
 
 export interface ChainEventNotificationProcessor {
@@ -177,6 +183,7 @@ export class IndexerService implements LifecycleService {
     }
 
     const startedAt = new Date().toISOString();
+    let mismatchCount = 0;
     await this.#store.saveSyncState({
       ...this.#scope,
       syncStatus: "rebuilding",
@@ -203,6 +210,9 @@ export class IndexerService implements LifecycleService {
         },
         this.#config
       );
+      // ETH-09：mismatchCount 反映真实 replay 异常（重复/矛盾投递、投影
+      // apply 失败），不再硬编码 0。
+      mismatchCount = countReplayAnomalies(events);
       const replaySummary = buildActiveChainEventReplaySummary(events);
       const activeEvents = [...replaySummary.activeEvents];
       const lastEvent = sortChainEvents(activeEvents).at(-1);
@@ -228,7 +238,7 @@ export class IndexerService implements LifecycleService {
           removedEventCount: replaySummary.removedEventCount,
           removedLogsFiltered: replaySummary.removedLogsFiltered,
           projectionRebuilt: true,
-          mismatchCount: 0
+          mismatchCount
         }
       };
       const snapshot = await this.#store.resetFromEvents({
@@ -244,7 +254,8 @@ export class IndexerService implements LifecycleService {
         chainId: this.#config.network.chainId,
         deploymentBlock,
         nextBlock: finalizedBlock + 1n,
-        finalizedBlock
+        finalizedBlock,
+        ...(await this.#cursorBlockHash(finalizedBlock))
       };
       await this.#saveCursor();
 
@@ -261,20 +272,23 @@ export class IndexerService implements LifecycleService {
         removedEventCount: replaySummary.removedEventCount,
         removedLogsFiltered: replaySummary.removedLogsFiltered,
         syncState,
-        mismatchCount: 0
+        mismatchCount
       });
 
       this.#logger.info("indexer rebuilt projections from chain events", {
         eventCount: summary.eventCount,
         stateMachineOrderCount: summary.stateMachineOrderCount,
         identityBindingCount: summary.identityBindingCount,
+        mismatchCount: summary.mismatchCount,
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
       });
 
       return { snapshot, summary };
     } catch (error) {
-      await this.#markDegraded(finalizedBlock, error);
+      // ETH-09：投影 apply 失败（如未知 plan 引用）时把已统计到的真实
+      // 异常数带入 degraded 状态，而不是回退为旧值/0。
+      await this.#markDegraded(finalizedBlock, error, mismatchCount);
       throw error;
     }
   }
@@ -299,16 +313,20 @@ export class IndexerService implements LifecycleService {
     }
 
     const fromBlock = cursor.nextBlock > deploymentBlock ? cursor.nextBlock : deploymentBlock;
-    if (finalizedBlock < fromBlock) {
+    // ETH-02：追加前做哈希连续性校验。深度 reorg 会在这里被检测到并回滚
+    // 投影；finalityConfirmations 仍是第一道缓冲，超过其深度的 reorg 若
+    // 回溯窗口内找不到共同祖先则报错要求 full rebuild。
+    const effectiveFromBlock = await this.#rollbackOnReorg(fromBlock);
+    if (finalizedBlock < effectiveFromBlock) {
       this.#cursor = {
         chainId: this.#config.network.chainId,
         deploymentBlock,
-        nextBlock: fromBlock,
+        nextBlock: effectiveFromBlock,
         finalizedBlock
       };
       await this.#saveCursor();
       const result = await this.#summarizeStoredProjection({
-        fromBlock,
+        fromBlock: effectiveFromBlock,
         toBlock: finalizedBlock,
         newEventCount: 0
       });
@@ -319,7 +337,7 @@ export class IndexerService implements LifecycleService {
     const events = await this.#eventSource.readEvents(
       {
         chainId: this.#config.network.chainId,
-        fromBlock,
+        fromBlock: effectiveFromBlock,
         toBlock: finalizedBlock
       },
       this.#config
@@ -339,6 +357,8 @@ export class IndexerService implements LifecycleService {
       const identitySnapshot = rebuildIdentityProjections(allEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
+      // ETH-09：mismatchCount 反映真实 replay 异常，不再硬编码 0。
+      const mismatchCount = countReplayAnomalies(allEvents);
       const syncState = await durableStore.saveSyncState({
         ...this.#scope,
         syncStatus: "indexed",
@@ -350,14 +370,14 @@ export class IndexerService implements LifecycleService {
         rebuild: {
           status: "idle",
           deploymentBlock,
-          fromBlock,
+          fromBlock: effectiveFromBlock,
           toBlock: finalizedBlock,
           eventCount: activeNewEvents.length,
           activeEventCount: replaySummary.activeEventCount,
           removedEventCount: replaySummary.removedEventCount,
           removedLogsFiltered: replaySummary.removedLogsFiltered,
           projectionRebuilt: true,
-          mismatchCount: 0
+          mismatchCount
         }
       });
       return {
@@ -365,7 +385,7 @@ export class IndexerService implements LifecycleService {
         summary: summaryFromSnapshot({
           chainId: this.#config.network.chainId,
           deploymentBlock,
-          fromBlock,
+          fromBlock: effectiveFromBlock,
           toBlock: finalizedBlock,
           snapshot,
           identityBindingCount: Object.keys(identitySnapshot.bindings).length,
@@ -374,7 +394,7 @@ export class IndexerService implements LifecycleService {
           removedEventCount: replaySummary.removedEventCount,
           removedLogsFiltered: replaySummary.removedLogsFiltered,
           syncState,
-          mismatchCount: 0
+          mismatchCount
         })
       };
     });
@@ -383,18 +403,20 @@ export class IndexerService implements LifecycleService {
       chainId: this.#config.network.chainId,
       deploymentBlock,
       nextBlock: finalizedBlock + 1n,
-      finalizedBlock
+      finalizedBlock,
+      ...(await this.#cursorBlockHash(finalizedBlock))
     };
     await this.#saveCursor();
     await this.#processSignalNotifications(activeNewEvents);
     await this.#processProjectionAutomation(result.snapshot);
 
     this.#logger.info("indexer incrementally refreshed projections from chain events", {
-      fromBlock: fromBlock.toString(),
+      fromBlock: effectiveFromBlock.toString(),
       toBlock: finalizedBlock.toString(),
       newEventCount: activeNewEvents.length,
       eventCount: result.summary.eventCount,
       stateMachineOrderCount: result.summary.stateMachineOrderCount,
+      mismatchCount: result.summary.mismatchCount,
       nextBlock: this.#cursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
     });
@@ -444,8 +466,155 @@ export class IndexerService implements LifecycleService {
       ...this.#scope,
       deploymentBlock: this.#cursor.deploymentBlock,
       nextBlock: this.#cursor.nextBlock,
-      ...(this.#cursor.finalizedBlock !== undefined ? { finalizedBlock: this.#cursor.finalizedBlock } : {})
+      ...(this.#cursor.finalizedBlock !== undefined ? { finalizedBlock: this.#cursor.finalizedBlock } : {}),
+      ...(this.#cursor.blockHash !== undefined ? { blockHash: this.#cursor.blockHash } : {})
     });
+  }
+
+  /**
+   * ETH-02：cursor 高度（finalizedBlock）区块哈希；事件源不支持时省略，
+   * 下次刷新将跳过哈希校验（仅靠 finalityConfirmations 缓冲）。
+   */
+  async #cursorBlockHash(blockNumber: bigint): Promise<{ readonly blockHash: Hex } | undefined> {
+    const blockHash = await this.#eventSource.getBlockHash?.(blockNumber, this.#config);
+    return blockHash ? { blockHash } : undefined;
+  }
+
+  /**
+   * ETH-02：追加前校验哈希连续性——cursor 已存块哈希是 cursor 高度
+   * （nextBlock - 1 = fromBlock - 1）区块的哈希；取 canonical 链上同一
+   * 高度的哈希与之比较（与"取高度+1 块比 parentHash"等价），不一致即
+   * 发生过 reorg：从 cursor 向回（有界，MAX_REORG_BACKTRACK_BLOCKS）在
+   * 已存事件与 canonical 链之间找共同祖先，删除祖先之后的事件、从剩余
+   * 事件重建快照并回退 cursor，然后从祖先 + 1 正常追加。
+   *
+   * 残余风险：超过 finalityConfirmations 的深度 reorg 仍可能伪造出
+   * "完全一致"的历史；回溯窗口内找不到共同祖先时报错要求 full rebuild。
+   * cursor 无已存哈希（旧数据/事件源不支持）时跳过校验。
+   */
+  async #rollbackOnReorg(fromBlock: bigint): Promise<bigint> {
+    const durableStore = this.#store;
+    if (!isDurableProjectionStore(durableStore)) {
+      return fromBlock;
+    }
+    const storedCursor = await durableStore.getCursor(this.#scope);
+    const storedHash = storedCursor?.blockHash;
+    const getBlockHash = this.#eventSource.getBlockHash?.bind(this.#eventSource);
+    if (!storedHash || !getBlockHash) {
+      return fromBlock;
+    }
+    const cursorHeight = fromBlock - 1n;
+    if (cursorHeight < this.#config.network.deploymentBlock) {
+      return fromBlock;
+    }
+
+    const canonicalHash = await getBlockHash(cursorHeight, this.#config);
+    if (isSameBlockHash(canonicalHash, storedHash)) {
+      return fromBlock;
+    }
+    return this.#rollbackToCommonAncestor(durableStore, fromBlock);
+  }
+
+  /** ETH-02：从 cursor 高度向回找共同祖先（有界），找到则回滚投影。 */
+  async #rollbackToCommonAncestor(
+    durableStore: DurableProjectionStore,
+    fromBlock: bigint
+  ): Promise<bigint> {
+    const deploymentBlock = this.#config.network.deploymentBlock;
+    const storedEvents = await durableStore.listEvents({ chainId: this.#scope.chainId });
+    const backtrackFloor = fromBlock > BigInt(MAX_REORG_BACKTRACK_BLOCKS)
+      ? fromBlock - BigInt(MAX_REORG_BACKTRACK_BLOCKS)
+      : deploymentBlock;
+
+    // 从最新的带哈希事件向回找：第一个 canonical 哈希一致的块即共同祖先。
+    const candidates = storedEvents
+      .filter((event): event is ChainEvent & { readonly blockHash: Hex } =>
+        !event.removed &&
+        event.blockHash !== undefined &&
+        event.blockNumber >= backtrackFloor &&
+        event.blockNumber < fromBlock)
+      .sort((left, right) => (right.blockNumber > left.blockNumber ? 1 : right.blockNumber < left.blockNumber ? -1 : 0));
+    const seenBlocks = new Set<bigint>();
+    for (const event of candidates) {
+      if (seenBlocks.has(event.blockNumber)) {
+        continue;
+      }
+      seenBlocks.add(event.blockNumber);
+      const canonicalHash = await this.#eventSource.getBlockHash?.(event.blockNumber, this.#config);
+      if (canonicalHash && isSameBlockHash(canonicalHash, event.blockHash)) {
+        return this.#applyReorgRollback(durableStore, event.blockNumber, canonicalHash);
+      }
+    }
+
+    throw new ConfigError(
+      `chain reorg deeper than the ${MAX_REORG_BACKTRACK_BLOCKS}-block rollback window; full projection rebuild is required`
+    );
+  }
+
+  /** ETH-02：删除祖先之后的事件、重建快照、回退 cursor。 */
+  async #applyReorgRollback(
+    durableStore: DurableProjectionStore,
+    ancestorBlock: bigint,
+    ancestorHash: Hex
+  ): Promise<bigint> {
+    const deploymentBlock = this.#config.network.deploymentBlock;
+    await durableStore.withTransaction(async () => {
+      const deleted = await durableStore.deleteEventsAfterBlock(
+        { chainId: this.#scope.chainId },
+        ancestorBlock
+      );
+      const remainingEvents = await durableStore.listEvents({ chainId: this.#scope.chainId });
+      const snapshot = rebuildOrderProjections(remainingEvents);
+      const identitySnapshot = rebuildIdentityProjections(remainingEvents);
+      await durableStore.saveSnapshot(this.#scope, "order", snapshot);
+      await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
+      const replaySummary = buildActiveChainEventReplaySummary(remainingEvents);
+      const existing = await durableStore.getSyncState(this.#scope).catch(() => undefined);
+      await durableStore.saveSyncState({
+        ...this.#scope,
+        syncStatus: "syncing",
+        ...(existing?.latestIndexedBlock !== undefined && existing.latestIndexedBlock <= ancestorBlock
+          ? { latestIndexedBlock: existing.latestIndexedBlock }
+          : {}),
+        finalizedBlock: ancestorBlock,
+        confirmationDepth: this.#config.network.finalityConfirmations,
+        ...(existing?.lastEventName ? { lastEventName: existing.lastEventName } : {}),
+        eventCount: replaySummary.activeEventCount,
+        rebuild: {
+          status: "idle",
+          deploymentBlock,
+          fromBlock: deploymentBlock,
+          toBlock: ancestorBlock,
+          eventCount: 0,
+          activeEventCount: replaySummary.activeEventCount,
+          removedEventCount: 0,
+          removedLogsFiltered: false,
+          projectionRebuilt: true,
+          mismatchCount: 0
+        }
+      });
+      await durableStore.saveCursor({
+        ...this.#scope,
+        deploymentBlock,
+        nextBlock: ancestorBlock + 1n > deploymentBlock ? ancestorBlock + 1n : deploymentBlock,
+        finalizedBlock: ancestorBlock,
+        blockHash: ancestorHash
+      });
+      this.#logger.warn("indexer rolled back projections after chain reorg", {
+        ancestorBlock: ancestorBlock.toString(),
+        deletedEvents: deleted,
+        nextBlock: (ancestorBlock + 1n).toString()
+      });
+    });
+    const nextBlock = ancestorBlock + 1n > deploymentBlock ? ancestorBlock + 1n : deploymentBlock;
+    this.#cursor = {
+      chainId: this.#config.network.chainId,
+      deploymentBlock,
+      nextBlock,
+      finalizedBlock: ancestorBlock,
+      blockHash: ancestorHash
+    };
+    return nextBlock;
   }
 
   async #summarizeStoredProjection(input: {
@@ -543,7 +712,11 @@ export class IndexerService implements LifecycleService {
     }
   }
 
-  async #markDegraded(finalizedBlock: bigint | undefined, error: unknown): Promise<void> {
+  async #markDegraded(
+    finalizedBlock: bigint | undefined,
+    error: unknown,
+    mismatchCount?: number
+  ): Promise<void> {
     const existing = await this.#store.getSyncState(this.#scope).catch(() => undefined);
     const effectiveFinalizedBlock =
       finalizedBlock ?? existing?.finalizedBlock ?? this.#cursor?.finalizedBlock ?? this.#config.network.deploymentBlock;
@@ -567,7 +740,7 @@ export class IndexerService implements LifecycleService {
         removedEventCount: existing?.rebuild?.removedEventCount ?? 0,
         removedLogsFiltered: existing?.rebuild?.removedLogsFiltered ?? false,
         projectionRebuilt: false,
-        mismatchCount: existing?.rebuild?.mismatchCount ?? 0
+        mismatchCount: mismatchCount ?? existing?.rebuild?.mismatchCount ?? 0
       },
       degradedReason: error instanceof Error ? error.message : "unknown indexer rebuild error"
     });
@@ -616,6 +789,12 @@ if (isDirectRun(import.meta.url)) {
 
 function minBlock(left: bigint, right: bigint | undefined): bigint {
   return right === undefined || left <= right ? left : right;
+}
+
+const MAX_REORG_BACKTRACK_BLOCKS = 1_000;
+
+function isSameBlockHash(left: Hex, right: Hex): boolean {
+  return left.toLowerCase() === right.toLowerCase();
 }
 
 const POST_COMMIT_STEP_MAX_ATTEMPTS = 3;

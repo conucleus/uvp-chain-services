@@ -1,4 +1,4 @@
-import { compareChainPointers, type ChainPointer } from "../shared/types.js";
+import { compareChainPointers, type ChainPointer, type Hex } from "../shared/types.js";
 
 export type EventArgs = Readonly<Record<string, unknown>>;
 
@@ -25,6 +25,11 @@ export interface EventCursor {
   readonly deploymentBlock: bigint;
   readonly nextBlock: bigint;
   readonly finalizedBlock?: bigint;
+  /**
+   * ETH-02：cursor 高度（nextBlock - 1）区块的哈希。下一次追加前用它做
+   * 哈希连续性校验；缺失（旧 cursor 或事件源不支持）时跳过校验。
+   */
+  readonly blockHash?: Hex;
 }
 
 export function chainEventKey(event: ChainEvent): string {

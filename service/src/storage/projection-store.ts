@@ -16,7 +16,7 @@ import {
   type IdentityBindingQuery,
   type IdentityProjectionSnapshot,
 } from "../indexer/identity-projections.js";
-import type { Address } from "../shared/types.js";
+import type { Address, Hex } from "../shared/types.js";
 import type { StorageAdapterLifecycle, TransactionalStorage } from "./types.js";
 
 export const projectionScopeContractAddress =
@@ -77,6 +77,8 @@ export interface StoredProjectionCursor extends ProjectionScope {
   readonly deploymentBlock: bigint;
   readonly nextBlock: bigint;
   readonly finalizedBlock?: bigint;
+  /** ETH-02：nextBlock - 1 高度区块哈希，用于追加前的哈希连续性校验。 */
+  readonly blockHash?: Hex;
   readonly updatedAt: string;
 }
 
@@ -129,6 +131,14 @@ export interface DurableProjectionStore
   ): Promise<StoredProjectionCursor | undefined>;
   appendEvent(event: ChainEvent): Promise<void>;
   listEvents(scope: Partial<ProjectionScope>): Promise<readonly ChainEvent[]>;
+  /**
+   * ETH-02：删除 blockNumber > block 的已投影事件（reorg 回滚），
+   * 返回删除行数。调用方随后必须从剩余事件重建快照并回退 cursor。
+   */
+  deleteEventsAfterBlock(
+    scope: Partial<ProjectionScope>,
+    blockNumber: bigint,
+  ): Promise<number>;
   saveSnapshot<TSnapshot>(
     scope: ProjectionScope,
     kind: ProjectionSnapshotKind,

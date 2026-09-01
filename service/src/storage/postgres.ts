@@ -237,13 +237,14 @@ export class PostgresProjectionStore implements DurableProjectionStore {
     );
     await this.#database.query(
       `INSERT INTO chain_index_cursor (
-         chain_id, contract_address, deployment_block, next_block, finalized_block, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6)
+         chain_id, contract_address, deployment_block, next_block, finalized_block, block_hash, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT(chain_id, contract_address)
        DO UPDATE SET
          deployment_block = excluded.deployment_block,
          next_block = excluded.next_block,
          finalized_block = excluded.finalized_block,
+         block_hash = excluded.block_hash,
          updated_at = excluded.updated_at`,
       [
         cursor.chainId,
@@ -251,6 +252,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
         cursor.deploymentBlock.toString(),
         cursor.nextBlock.toString(),
         cursor.finalizedBlock?.toString() ?? null,
+        cursor.blockHash?.toLowerCase() ?? null,
         updatedAt,
       ],
     );
@@ -263,6 +265,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       ...(cursor.finalizedBlock !== undefined
         ? { finalizedBlock: cursor.finalizedBlock }
         : {}),
+      ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {}),
       updatedAt,
     };
   }
@@ -277,6 +280,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
          deployment_block::text AS "deploymentBlock",
          next_block::text AS "nextBlock",
          finalized_block::text AS "finalizedBlock",
+         block_hash AS "blockHash",
          updated_at AS "updatedAt"
        FROM chain_index_cursor
        WHERE chain_id = $1 AND contract_address = $2`,
@@ -286,6 +290,29 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       ],
     );
     return result.rows[0] ? cursorRow(result.rows[0]) : undefined;
+  }
+
+  async deleteEventsAfterBlock(
+    scope: Partial<ProjectionScope> = {},
+    blockNumber: bigint = 0n,
+  ): Promise<number> {
+    const clauses: string[] = ["block_number > $1"];
+    const values: unknown[] = [blockNumber.toString()];
+    if (scope.chainId !== undefined) {
+      values.push(scope.chainId);
+      clauses.push(`chain_id = $${values.length}`);
+    }
+    if (scope.contractAddress) {
+      values.push(
+        normalizeAddress(scope.contractAddress, "event.contractAddress"),
+      );
+      clauses.push(`contract_address = $${values.length}`);
+    }
+    const result = await this.#database.query(
+      `DELETE FROM chain_event_log WHERE ${clauses.join(" AND ")}`,
+      values,
+    );
+    return result.rowCount ?? 0;
   }
 
   async appendEvent(event: ChainEvent): Promise<void> {
@@ -523,6 +550,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
 function cursorRow(row: unknown): StoredProjectionCursor {
   const record = rowObject(row, "chain_index_cursor query");
   const finalizedBlock = nullableStringColumn(record, "finalizedBlock");
+  const blockHash = nullableStringColumn(record, "blockHash");
   return {
     chainId: numberColumn(record, "chainId"),
     contractAddress: normalizeAddress(
@@ -534,6 +562,7 @@ function cursorRow(row: unknown): StoredProjectionCursor {
     ...(finalizedBlock !== null
       ? { finalizedBlock: BigInt(finalizedBlock) }
       : {}),
+    ...(blockHash !== null ? { blockHash: blockHash as Hex } : {}),
     updatedAt: stringColumn(record, "updatedAt"),
   };
 }
