@@ -115,6 +115,46 @@ describe("Product BFF trigger broadcast adapter", () => {
     expect(walletClient.writeContract).toHaveBeenCalledTimes(1);
     expect(publicClient.waitForTransactionReceipt).toHaveBeenCalledWith({ hash: startTxHash });
   });
+
+  it("carries the broadcast txHash through failures after writeContract succeeded", async () => {
+    // writeContract 成功（交易已上链）后等待回执抛错：failed 结果不得丢失 txHash。
+    const walletClient: ProductTriggerBroadcastWalletClient = {
+      account: { address: registrarAddress },
+      writeContract: vi.fn(async () => startTxHash)
+    };
+    const publicClient: ProductTriggerBroadcastPublicClient = {
+      waitForTransactionReceipt: vi.fn(async () => {
+        throw new Error("receipt wait timed out");
+      })
+    };
+    const adapter = adapterWithClients(publicClient, walletClient);
+
+    const result = await adapter.broadcastOutsideTrigger({
+      draftId: "draft_1",
+      triggerId: "trigger_1",
+      orderId,
+      planId,
+      creator: registrarAddress,
+      triggerHookId,
+      triggerStageId,
+      sourceId,
+      signalId,
+      stateMachineAddress,
+      payloadHash,
+      idempotencyKey,
+      authorizations: [],
+      submitter: registrarAddress,
+      deadline: "9999999999",
+      signature
+    });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      errorCode: "trigger_order_broadcast_failed",
+      txHash: startTxHash,
+      retryable: true
+    });
+  });
 });
 
 function adapterWithClients(

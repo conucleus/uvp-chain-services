@@ -158,6 +158,10 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
   }
 
   async broadcastOutsideTrigger(input: ProductBroadcastOutsideTriggerInput): Promise<ProductOrderTriggerBroadcastResult> {
+    // 已广播的 txHash 必须穿越 catch：writeContract 成功后等待回执/解析回执
+    // 抛错时，链上交易已经存在，failed 结果不得丢失 txHash（对齐
+    // submissions/broadcast-adapter 的 failedResult 携带方式）。
+    let txHash: Hex | undefined;
     try {
       const { publicClient, wallet } = this.#clients();
       const stateMachineAddress = input.stateMachineAddress ?? this.#options.stateMachineAddress;
@@ -179,7 +183,7 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
         authorizations: input.authorizations,
         signature: input.signature
       });
-      const txHash = await wallet.writeContract({
+      txHash = await wallet.writeContract({
         address: call.address,
         abi: call.abi,
         functionName: call.functionName,
@@ -220,6 +224,7 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
     } catch (error) {
       return {
         status: "failed",
+        ...(txHash ? { txHash } : {}),
         errorCode: "trigger_order_broadcast_failed",
         errorMessage: error instanceof Error ? error.message : "triggerOrderFromOutsideFor broadcast failed",
         retryable: true
