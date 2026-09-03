@@ -274,10 +274,7 @@ export function createProductStageExecutorPatchService(
         Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
       const stateMachineAddress = stateMachineAddressFor(context, options);
-      const stagePatchModuleAddress = stagePatchModuleAddressFor(
-        context,
-        options,
-      );
+      const stagePatchModuleAddress = stagePatchModuleAddressFor(options);
       const typedData = buildStageExecutorPatchTypedData({
         chainId,
         verifyingContract: stagePatchModuleAddress,
@@ -568,10 +565,7 @@ export function createProductStageResourcePatchService(
         Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
       const stateMachineAddress = stateMachineAddressFor(context, options);
-      const stagePatchModuleAddress = stagePatchModuleAddressFor(
-        context,
-        options,
-      );
+      const stagePatchModuleAddress = stagePatchModuleAddressFor(options);
       const typedData = buildStageResourcePatchTypedData({
         chainId,
         verifyingContract: stagePatchModuleAddress,
@@ -805,7 +799,7 @@ export function createProductDockedOrderLinkService(
         Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
       const stateMachineAddress = stateMachineAddressFor(context, options);
-      const dockingModuleAddress = dockingModuleAddressFor(context, options);
+      const dockingModuleAddress = dockingModuleAddressFor(options);
       const typedData = buildDockedOrderLinkTypedData({
         chainId,
         verifyingContract: dockingModuleAddress,
@@ -1949,49 +1943,33 @@ function stateMachineAddressFor(
 }
 
 function stagePatchModuleAddressFor(
-  context: SelectorTaskContext,
   options: ProductStagePatchServiceOptions,
 ): Address {
-  return moduleAddressFor(
-    context,
-    options,
-    options.stagePatchModuleAddress,
-    "stagePatchModuleAddress",
-  );
+  return moduleAddressFor(options.stagePatchModuleAddress, "stagePatchModuleAddress");
 }
 
 function dockingModuleAddressFor(
-  context: SelectorTaskContext,
   options: ProductStagePatchServiceOptions,
 ): Address {
-  return moduleAddressFor(
-    context,
-    options,
-    options.dockingModuleAddress,
-    "dockingModuleAddress",
-  );
+  return moduleAddressFor(options.dockingModuleAddress, "dockingModuleAddress");
 }
 
 function moduleAddressFor(
-  context: SelectorTaskContext,
-  options: ProductStagePatchServiceOptions,
   configured: Address | undefined,
-  label: string,
+  label: string
 ): Address {
-  const moduleAddress = normalizeAddress(
-    configured ??
-      options.verifyingContract ??
-      stateMachineAddressFor(context, options),
-    label,
-  );
-  if (moduleAddress === ZERO_ADDRESS) {
+  // 审计 fail-open 修复：模块地址必须显式存在于选项/地址清单中。
+  // 不再静默回退到状态机地址（options.verifyingContract /
+  // stateMachineAddressFor 派生）——用错误 verifyingContract 域签出的
+  // typed data 无法通过链上域校验，等于把签名发给错误合约。缺失即 fail-closed。
+  if (!configured) {
     throw new ProductStagePatchError(
       409,
       "module_address_missing",
       `${label} is required for stage patch typed data`,
     );
   }
-  return moduleAddress;
+  return normalizeAddress(configured, label);
 }
 
 function stagePatchNonceKey(input: {

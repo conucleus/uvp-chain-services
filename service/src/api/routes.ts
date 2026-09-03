@@ -175,36 +175,39 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     audit
   });
   const stageExecutorPatchChainId = options.stageExecutorPatchChainId ?? options.submissionChainId;
-  const stageExecutorPatchVerifyingContract = options.stageExecutorPatchVerifyingContract ?? options.submissionVerifyingContract;
+  // 审计 fail-open：patch/docking 模块地址必须显式提供（地址清单），
+  // 不再默认到 submissionVerifyingContract（状态机地址）；缺省时服务不持有
+  // 模块地址，patch/docking prepare 按模块地址缺失 fail-closed。
+  const stageExecutorPatchVerifyingContract = options.stageExecutorPatchVerifyingContract;
   const productStageExecutorPatchService = options.productStageExecutorPatchService ?? createProductStageExecutorPatchService({
     store,
     productSchemaResolver,
     ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
     ...(stageExecutorPatchChainId !== undefined ? { chainId: stageExecutorPatchChainId } : {}),
-    ...(stageExecutorPatchVerifyingContract ? { verifyingContract: stageExecutorPatchVerifyingContract } : {}),
+    ...(stageExecutorPatchVerifyingContract ? { stagePatchModuleAddress: stageExecutorPatchVerifyingContract } : {}),
     ...(options.stageExecutorPatchBroadcastAdapter ? { broadcastAdapter: options.stageExecutorPatchBroadcastAdapter } : {}),
     ...(options.now ? { now: options.now } : {})
   });
   const stageResourcePatchChainId = options.stageResourcePatchChainId ?? options.submissionChainId;
-  const stageResourcePatchVerifyingContract = options.stageResourcePatchVerifyingContract ?? options.submissionVerifyingContract;
+  const stageResourcePatchVerifyingContract = options.stageResourcePatchVerifyingContract;
   const productStageResourcePatchService = options.productStageResourcePatchService ?? createProductStageResourcePatchService({
     store,
     productSchemaResolver,
     ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
     ...(stageResourcePatchChainId !== undefined ? { chainId: stageResourcePatchChainId } : {}),
-    ...(stageResourcePatchVerifyingContract ? { verifyingContract: stageResourcePatchVerifyingContract } : {}),
+    ...(stageResourcePatchVerifyingContract ? { stagePatchModuleAddress: stageResourcePatchVerifyingContract } : {}),
     ...(options.stageResourcePatchBroadcastAdapter ? { broadcastAdapter: options.stageResourcePatchBroadcastAdapter } : {}),
     ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
     ...(options.now ? { now: options.now } : {})
   });
   const dockedOrderLinkChainId = options.dockedOrderLinkChainId ?? options.submissionChainId;
-  const dockedOrderLinkVerifyingContract = options.dockedOrderLinkVerifyingContract ?? options.submissionVerifyingContract;
+  const dockedOrderLinkVerifyingContract = options.dockedOrderLinkVerifyingContract;
   const productDockedOrderLinkService = options.productDockedOrderLinkService ?? createProductDockedOrderLinkService({
     store,
     productSchemaResolver,
     ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
     ...(dockedOrderLinkChainId !== undefined ? { chainId: dockedOrderLinkChainId } : {}),
-    ...(dockedOrderLinkVerifyingContract ? { verifyingContract: dockedOrderLinkVerifyingContract } : {}),
+    ...(dockedOrderLinkVerifyingContract ? { dockingModuleAddress: dockedOrderLinkVerifyingContract } : {}),
     ...(options.dockedOrderLinkBroadcastAdapter ? { broadcastAdapter: options.dockedOrderLinkBroadcastAdapter } : {}),
     ...(options.now ? { now: options.now } : {})
   });

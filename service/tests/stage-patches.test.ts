@@ -798,7 +798,7 @@ describe("stage executor/resource patch Product API", () => {
     const failingService = createProductStageExecutorPatchService({
       store,
       chainId,
-      verifyingContract: contractAddress,
+      stagePatchModuleAddress: contractAddress,
       now: () => baseNow,
       prepareIdFactory: () => "prep_1",
       submissionIdFactory: () => "sub_1",
@@ -867,6 +867,33 @@ describe("stage executor/resource patch Product API", () => {
       },
     });
   });
+
+  it("fails closed when no explicit module address is configured", async () => {
+    // 审计 fail-open：模块地址缺失时不得静默回退到状态机地址签 typed data，
+    // prepare 必须 409 module_address_missing。
+    const { router } = await routerFixture({
+      explicitModuleAddresses: false,
+      events: [
+        ...baseEvents(),
+        planRegisteredEvent(5n, planId, planHash),
+        ...linkedOrderEvents(6n),
+        planRegisteredEvent(8n, linkedPlanId, linkedPlanHash),
+      ],
+    });
+
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-docked-order-link`,
+      body: prepareDockedBody(),
+    });
+
+    expect(response).toMatchObject({
+      status: 409,
+      body: {
+        error: "module_address_missing",
+      },
+    });
+  });
 });
 
 async function routerFixture(
@@ -877,6 +904,7 @@ async function routerFixture(
     readonly events?: readonly ChainEvent[];
     readonly productBffStore?: ProductBffStore;
     readonly productSchema?: StoreProductSchemaDTO;
+    readonly explicitModuleAddresses?: boolean;
   } = {},
 ): Promise<{
   readonly router: ApiRouter;
@@ -901,6 +929,7 @@ async function routerFixture(
     : undefined;
   let prepareCount = 0;
   let submissionCount = 0;
+  const explicitModuleAddresses = options.explicitModuleAddresses ?? true;
   const commonOptions = {
     store,
     ...(productSchemaResolver ? { productSchemaResolver } : {}),
@@ -908,7 +937,12 @@ async function routerFixture(
       ? { productBffStore: options.productBffStore }
       : {}),
     chainId,
-    verifyingContract: contractAddress,
+    ...(explicitModuleAddresses
+      ? {
+          stagePatchModuleAddress: contractAddress,
+          dockingModuleAddress: contractAddress,
+        }
+      : {}),
     now: () => baseNow,
     prepareIdFactory: () => `prep_${++prepareCount}`,
     submissionIdFactory: () => `sub_${++submissionCount}`,

@@ -127,7 +127,10 @@ export async function startApiServer(
   }
 
   const submissionVerifyingContract = stateMachineAddress(config.network.contracts);
-  const stagePatchVerifyingContract = stagePatchModuleAddress(config) ?? submissionVerifyingContract;
+  // 审计 fail-open：stage-patch / docking 模块地址必须显式存在于配置或
+  // 地址清单；缺失时不再回退到状态机地址（strict preflight 亦会对清单
+  // 缺项 fail-fast），未配置即不装配对应 patch/docking 服务地址。
+  const stagePatchVerifyingContract = stagePatchModuleAddress(config);
   const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(
     config,
     submissionVerifyingContract,

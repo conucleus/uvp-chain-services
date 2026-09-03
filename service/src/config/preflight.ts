@@ -1077,7 +1077,15 @@ async function checkStateMachineModules(input: {
     for (const key of Object.keys(getterByKey) as Array<keyof typeof getterByKey>) {
       const expected = deployment.modules[key];
       if (!expected) {
-        continue;
+        // 审计 fail-open：模块地址必须在配置/地址清单中显式存在
+        // （stage-patch / docking 等模块地址缺失曾按 skip 处理）。
+        fail(
+          input.checks,
+          input.errors,
+          "contracts.state_machine_modules",
+          `state-machine module manifest is missing ${key} (${getterByKey[key]}); module addresses must be explicit`
+        );
+        return;
       }
       const actual = normalizeAddress(String(await input.client.readContract({
         address: deployment.stateMachineAddress as ViemAddress,
