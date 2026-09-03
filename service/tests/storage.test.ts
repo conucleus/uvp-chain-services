@@ -533,6 +533,49 @@ describe("durable storage", () => {
     await expect(reopened.listSubmissions()).resolves.toHaveLength(1);
   });
 
+  it("keeps the prepared signal reusable when a non-broadcast submission is recorded", async () => {
+    // 非广播路径（广播未配置）落档的 signature_received 提交不得消费
+    // prepare：used_at 只能由 markPreparedUsed 写入（与内存 store 同语义）。
+    const databaseUrl = sqliteUrl(tempDirs);
+    const store = openSubmissionStore(databaseUrl);
+    stores.push(store);
+    const prepared = preparedSubmission();
+    const { txHash: _omittedTxHash, ...nonBroadcastBase } = productSubmission(prepared);
+    const signatureReceived: ProductSubmissionDTO = {
+      ...nonBroadcastBase,
+      submissionId: "sub_signature_received",
+      status: "signature_received",
+      broadcastStatus: "not_attempted",
+      attempts: [],
+      attemptCount: 0,
+    };
+
+    await store.putPrepared(prepared);
+    await store.putSubmission(signatureReceived);
+
+    const reusable = await store.getPrepared(prepared.prepareId);
+    expect(reusable).toMatchObject({ prepareId: prepared.prepareId });
+    expect(reusable?.usedAt).toBeUndefined();
+    expect(reusable?.submissionId).toBeUndefined();
+    await expect(store.getSubmission("sub_signature_received")).resolves.toMatchObject({
+      submissionId: "sub_signature_received",
+      status: "signature_received",
+    });
+
+    // 广播路径：markPreparedUsed 之后 prepare 才算已消费。
+    await store.putSubmission(productSubmission(prepared));
+    await store.markPreparedUsed(
+      prepared.prepareId,
+      "sub_sqlite",
+      "2026-04-28T00:00:00.000Z",
+    );
+    await expect(store.getPrepared(prepared.prepareId)).resolves.toMatchObject({
+      prepareId: prepared.prepareId,
+      submissionId: "sub_sqlite",
+      usedAt: "2026-04-28T00:00:00.000Z",
+    });
+  });
+
   it("persists governance reviews and tx logs across SQLite store restarts", async () => {
     const databaseUrl = sqliteUrl(tempDirs);
     const store = openGovernanceStore(databaseUrl);

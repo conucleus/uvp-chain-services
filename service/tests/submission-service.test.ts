@@ -15,6 +15,7 @@ import {
   InMemoryProductSubmissionStore,
   permissiveProductProjectionAuthorization,
   SqliteBroadcastDedupeStore,
+  SqliteSubmissionStore,
   type PreparedSubmissionDTO,
   type ProductSubmissionService,
   type ProductSubmissionStore,
@@ -353,6 +354,70 @@ describe("product task submissions", () => {
       code: "prepare_already_used",
       status: 409
     });
+  });
+
+  it("keeps the prepared signal reusable on the durable sqlite store when broadcasting is disabled", async () => {
+    // 与上一条用例同语义，落到持久驱动：非广播路径不消费 prepare，
+    // 广播路径标记 used 后拒绝复用。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-submission-sqlite-"));
+    const store = new SqliteSubmissionStore({
+      databaseUrl: `sqlite://${join(tempDir, "submissions.sqlite")}`,
+      migrations: {
+        autoRun: true,
+        directory: fileURLToPath(new URL("../migrations", import.meta.url))
+      }
+    });
+    try {
+      const fixture = await submissionFixture({ store });
+      const prepared = await prepare(fixture);
+      const signature = await signPrepared(prepared);
+
+      const first = await fixture.service.submit(task.taskId, {
+        prepareId: prepared.prepareId,
+        walletAddress: submitter,
+        signature
+      });
+      expect(first).toMatchObject({
+        status: "signature_received",
+        broadcastStatus: "not_attempted"
+      });
+
+      await expect(fixture.service.submit(task.taskId, {
+        prepareId: prepared.prepareId,
+        walletAddress: submitter,
+        signature
+      })).resolves.toMatchObject({
+        status: "signature_received",
+        broadcastStatus: "not_attempted"
+      });
+
+      const broadcastingFixture = await submissionFixture({
+        store,
+        broadcastAdapter: {
+          async broadcast() {
+            return { status: "submitted" as const, txHash: txHash("10"), blockNumber: "1" };
+          }
+        }
+      });
+      const broadcastingPrepared = await prepare(broadcastingFixture);
+      const broadcastingSignature = await signPrepared(broadcastingPrepared);
+      await broadcastingFixture.service.submit(task.taskId, {
+        prepareId: broadcastingPrepared.prepareId,
+        walletAddress: submitter,
+        signature: broadcastingSignature
+      });
+      await expect(broadcastingFixture.service.submit(task.taskId, {
+        prepareId: broadcastingPrepared.prepareId,
+        walletAddress: submitter,
+        signature: broadcastingSignature
+      })).rejects.toMatchObject({
+        code: "prepare_already_used",
+        status: 409
+      });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("rejects a submitter that is not authorized for the task signal", async () => {
@@ -1389,6 +1454,7 @@ async function submissionFixture(options: {
   readonly authorizedSubmitter?: Address;
   readonly authorization?: Parameters<typeof createProductSubmissionService>[0]["authorization"];
   readonly task?: ProductTaskDTO;
+  readonly store?: ProductSubmissionStore;
 } = {}): Promise<{
   readonly service: ProductSubmissionService;
   readonly evidenceService: EvidenceService;
@@ -1431,6 +1497,7 @@ async function submissionFixture(options: {
     resolveOrderPlanId: async () => planId,
     authorization,
     ...(options.broadcastAdapter ? { broadcastAdapter: options.broadcastAdapter } : {}),
+    ...(options.store ? { store: options.store } : {}),
     now,
     prepareIdFactory: () => "prep_1",
     submissionIdFactory: () => "sub_1",

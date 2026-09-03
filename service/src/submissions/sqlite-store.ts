@@ -128,9 +128,16 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     const prepared = parseStorageJson<PreparedSubmissionRecord>(stringColumn(record, "prepared_json"));
     const usedAt = optionalStringColumn(record, "used_at");
     const submissionId = optionalStringColumn(record, "submission_id");
+    // used 语义与内存 store 对齐：只有 markPreparedUsed 写入的 used_at 才
+    // 表示 prepare 已消费。非广播路径（广播未配置）落档的提交不写 used_at，
+    // prepare 保持可复用；此时行上的 submission_id 只是落档提交的检索键，
+    // 不得当作消费标记。
+    if (usedAt === undefined) {
+      return prepared;
+    }
     return {
       ...prepared,
-      ...(usedAt !== undefined ? { usedAt } : {}),
+      usedAt,
       ...(submissionId !== undefined ? { submissionId } : {})
     };
   }
@@ -212,7 +219,6 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
              status = excluded.status,
              prepared_json = excluded.prepared_json,
              submission_json = excluded.submission_json,
-             used_at = excluded.used_at,
              created_at = excluded.created_at,
              updated_at = excluded.updated_at`
         ).run(
@@ -235,7 +241,9 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
           submission.status,
           preparedJson,
           stringifyStorageJson(submission),
-          submission.updatedAt,
+          // used_at 只能由 markPreparedUsed 写入（与内存 store 同语义）：
+          // 非广播路径（广播未配置）的 putSubmission 不得消费 prepare。
+          null,
           createdAt,
           submission.updatedAt
         );
