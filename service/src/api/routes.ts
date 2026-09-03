@@ -25,7 +25,6 @@ import {
   type SubmissionAuthorizationResult
 } from "../submissions/index.js";
 import {
-  createProductDockedOrderLinkService,
   createProductStageExecutorPatchService,
   createProductStageResourcePatchService
 } from "../stage-patches/index.js";
@@ -40,6 +39,31 @@ import { MemoryStoreAuditStore } from "../store-console/audit.js";
 import { createStoreIdentityProvider } from "../store-console/access.js";
 import { createStoreDockingService, MemoryStoreDockingSessionStore } from "../store-console/docking.js";
 import { createStoreSupplierService, InMemoryStoreSupplierMetadataStore } from "../store-suppliers/service.js";
+import {
+  createStoreSessionService,
+  createWalletSessionStoreIdentityProvider,
+  InMemoryStoreWalletSessionStore
+} from "../store-sessions/index.js";
+import {
+  createStoreDecorationService,
+  InMemoryStorePublisherDelegationStore,
+  InMemoryStoreZhixuDecorationStore
+} from "../store-decoration/index.js";
+import {
+  InMemoryStoreIdentityDescriptorSnapshotStore
+} from "../governance/descriptors.js";
+import {
+  createStoreListingService,
+  InMemoryStoreListingStore
+} from "../store-listings/index.js";
+import {
+  createStoreJoinService,
+  InMemoryStoreJoinApplicationStore
+} from "../store-join/index.js";
+import { createStoreAuthRouteModule } from "./routes/store-auth.js";
+import { createStoreDecorationRouteModule } from "./routes/store-decoration.js";
+import { createStoreJoinRouteModule } from "./routes/store-join.js";
+import { createStoreListingsRouteModule } from "./routes/store-listings.js";
 import type { ApiRouteContext, ApiRouter, CreateApiRouterOptions } from "./route-context.js";
 import type { RouteModule } from "./route-module.js";
 import { createDiagnosticsRouteModule } from "./routes/diagnostics.js";
@@ -90,9 +114,13 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     sessionStore: storeDockingSessionStore,
     ...(options.now ? { now: options.now } : {})
   });
+  const identityDescriptorSnapshots = options.identityDescriptorSnapshots
+    ?? new InMemoryStoreIdentityDescriptorSnapshotStore();
   const governanceService = options.governanceService ?? createGovernanceService({
     ...(options.governanceStore ? { store: options.governanceStore } : {}),
-    audit
+    audit,
+    descriptorSnapshotStore: identityDescriptorSnapshots,
+    ...(options.descriptorPublicBaseUrl ? { descriptorPublicBaseUrl: options.descriptorPublicBaseUrl } : {})
   });
   const complianceService = options.complianceService ?? createNoopComplianceService();
   const riskGraphService = options.riskGraphService ?? createNoopRiskGraphService();
@@ -200,17 +228,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
     ...(options.now ? { now: options.now } : {})
   });
-  const dockedOrderLinkChainId = options.dockedOrderLinkChainId ?? options.submissionChainId;
-  const dockedOrderLinkVerifyingContract = options.dockedOrderLinkVerifyingContract;
-  const productDockedOrderLinkService = options.productDockedOrderLinkService ?? createProductDockedOrderLinkService({
-    store,
-    productSchemaResolver,
-    ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
-    ...(dockedOrderLinkChainId !== undefined ? { chainId: dockedOrderLinkChainId } : {}),
-    ...(dockedOrderLinkVerifyingContract ? { dockingModuleAddress: dockedOrderLinkVerifyingContract } : {}),
-    ...(options.dockedOrderLinkBroadcastAdapter ? { broadcastAdapter: options.dockedOrderLinkBroadcastAdapter } : {}),
-    ...(options.now ? { now: options.now } : {})
-  });
   const buildDiagnostics = () => buildOperationalDiagnostics({
     store,
     ...(options.configDiagnostics ? { configDiagnostics: options.configDiagnostics } : {}),
@@ -231,9 +248,56 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       : {})
   });
   const now = options.now ?? (() => new Date());
-  const storeIdentityProvider = options.storeIdentityProvider ?? createStoreIdentityProvider({
+  const storeWalletSessionStore = options.storeWalletSessionStore ?? new InMemoryStoreWalletSessionStore();
+  const storeAuthConfig = options.storeAuthConfig;
+  const sessionService = options.storeSessionService ?? createStoreSessionService({
+    store: storeWalletSessionStore,
+    ...(storeAuthConfig?.walletSession ? { config: storeAuthConfig.walletSession } : {}),
+    ...(options.now ? { now: options.now } : {})
+  });
+  const baseStoreIdentityProvider = options.storeIdentityProvider ?? createStoreIdentityProvider({
     ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
-    ...(options.storeAuthConfig ? { authConfig: options.storeAuthConfig } : {})
+    ...(storeAuthConfig ? { authConfig: storeAuthConfig } : {})
+  });
+  // PRD89：钱包会话叠加层（未启用时原样透传，fail-closed）。
+  const storeIdentityProvider = createWalletSessionStoreIdentityProvider({
+    base: baseStoreIdentityProvider,
+    sessionService,
+    ...(storeAuthConfig?.walletSession ? { config: storeAuthConfig.walletSession } : {}),
+    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {})
+  });
+  const storeDecorationService = options.storeDecorationService ?? createStoreDecorationService({
+    projectionStore: store,
+    decorationStore: options.storeDecorationStore ?? new InMemoryStoreZhixuDecorationStore(),
+    delegationStore: options.storePublisherDelegationStore ?? new InMemoryStorePublisherDelegationStore(),
+    ...(options.now ? { now: options.now } : {})
+  });
+  const listingService = options.storeListingService ?? createStoreListingService({
+    projectionStore: store,
+    listingStore: options.storeListingStore ?? new InMemoryStoreListingStore(),
+    ...(options.listingAnchorChainView ? { chainView: options.listingAnchorChainView } : {}),
+    ...(options.now ? { now: options.now } : {})
+  });
+  const joinService = options.storeJoinService ?? createStoreJoinService({
+    projectionStore: store,
+    productService,
+    supplierService: storeSupplierService,
+    publisherAccess: storeDecorationService,
+    // PRD92 红线：加入入口被下架/锚冲突 listing 抑制（服务端强制）。
+    listingGate: {
+      getListingForPlan: async (planId) => {
+        const detail = await listingService.findListingByPlanId(planId);
+        if (!detail) {
+          return undefined;
+        }
+        return {
+          status: detail.listing.status,
+          anchorVerification: { status: detail.anchorVerification.status }
+        };
+      }
+    },
+    joinStore: options.storeJoinApplicationStore ?? new InMemoryStoreJoinApplicationStore(),
+    ...(options.now ? { now: options.now } : {})
   });
   const context: ApiRouteContext = {
     store,
@@ -247,6 +311,11 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     storeSupplierService,
     storeAuditStore,
     storeIdentityProvider,
+    sessionService,
+    decorationService: storeDecorationService,
+    listingService,
+    joinService,
+    identityDescriptorSnapshots,
     governanceService,
     complianceService,
     riskGraphService,
@@ -256,7 +325,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     submissionService,
     productStageExecutorPatchService,
     productStageResourcePatchService,
-    productDockedOrderLinkService,
     ...(options.submissionStore ? { submissionStore: options.submissionStore } : {}),
     ...(options.opsRecoveryActions ? { opsRecoveryActions: options.opsRecoveryActions } : {}),
     ...(options.opsConsoleAdminIds ? { opsConsoleAdminIds: options.opsConsoleAdminIds } : {}),
@@ -268,7 +336,11 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const modules: readonly RouteModule[] = [
     createDiagnosticsRouteModule(),
     createAdminOpsRouteModule(),
+    createStoreAuthRouteModule({ sessionService }),
     createStoreConsoleRouteModule(),
+    createStoreDecorationRouteModule({ decorationService: storeDecorationService }),
+    createStoreJoinRouteModule({ joinService }),
+    createStoreListingsRouteModule({ listingService }),
     createStoreComplianceRouteModule(),
     createStoreDockingRouteModule(),
     createStoreRiskRouteModule(),

@@ -299,7 +299,15 @@ describe("chain-services config", () => {
       roleClaim: "roles",
       principalClaim: "sub",
       displayNameClaim: "name",
-      clockToleranceSeconds: 60
+      clockToleranceSeconds: 60,
+      walletSession: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: true
+      }
     });
 
     expect(loadConfigFromEnv(storeAuthJwtEnv).storeAuth).toEqual({
@@ -310,7 +318,15 @@ describe("chain-services config", () => {
       roleClaim: "roles",
       principalClaim: "sub",
       displayNameClaim: "name",
-      clockToleranceSeconds: 30
+      clockToleranceSeconds: 30,
+      walletSession: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: true
+      }
     });
   });
 

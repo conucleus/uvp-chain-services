@@ -13,13 +13,10 @@ import {
   type ProductBffStore,
 } from "../src/product/bff/store.js";
 import {
-  createProductDockedOrderLinkService,
   createProductStageExecutorPatchService,
   createProductStageResourcePatchService,
-  DOCKED_ORDER_LINK_SIGNAL_ID,
   hashResourceManifest,
   InMemoryProductStagePatchStore,
-  type PreparedDockedOrderLinkDTO,
   type PreparedStageExecutorPatchDTO,
   type PreparedStageExecutorPatchRecord,
   type PreparedStageResourcePatchDTO,
@@ -841,59 +838,7 @@ describe("stage executor/resource patch Product API", () => {
     expect(failingStore.putSubmissionCalls).toBe(2);
   });
 
-  it("prepares docked order links after both plans are registered", async () => {
-    const { router } = await routerFixture({
-      events: [
-        ...baseEvents(),
-        planRegisteredEvent(5n, planId, planHash),
-        ...linkedOrderEvents(6n),
-        planRegisteredEvent(8n, linkedPlanId, linkedPlanHash),
-      ],
-    });
 
-    const prepared = await prepareDockedOrderLink(router);
-
-    expect(prepared).toMatchObject({
-      prepareId: "prep_1",
-      taskId: selectorTaskId(),
-      localOrderId: orderId,
-      linkedOrderId,
-      linkedPlanId,
-      selectorWallet,
-      localSourceId: targetStageId,
-      status: "prepared",
-      typedData: {
-        primaryType: "UVPDockingModuleDockedOrderLink",
-      },
-    });
-  });
-
-  it("fails closed when no explicit module address is configured", async () => {
-    // 审计 fail-open：模块地址缺失时不得静默回退到状态机地址签 typed data，
-    // prepare 必须 409 module_address_missing。
-    const { router } = await routerFixture({
-      explicitModuleAddresses: false,
-      events: [
-        ...baseEvents(),
-        planRegisteredEvent(5n, planId, planHash),
-        ...linkedOrderEvents(6n),
-        planRegisteredEvent(8n, linkedPlanId, linkedPlanHash),
-      ],
-    });
-
-    const response = await router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${selectorTaskId()}/prepare-docked-order-link`,
-      body: prepareDockedBody(),
-    });
-
-    expect(response).toMatchObject({
-      status: 409,
-      body: {
-        error: "module_address_missing",
-      },
-    });
-  });
 });
 
 async function routerFixture(
@@ -962,15 +907,11 @@ async function routerFixture(
       ? { runtimeEnvironment: options.runtimeEnvironment }
       : {}),
   });
-  const dockedOrderLinkService = createProductDockedOrderLinkService({
-    ...commonOptions,
-  });
   return {
     store,
     router: createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productStageExecutorPatchService: executorService,
       productStageResourcePatchService: resourceService,
-      productDockedOrderLinkService: dockedOrderLinkService,
     }),
   };
 }
@@ -1000,17 +941,6 @@ async function prepareStageResourcePatch(
   return response.body as PreparedStageResourcePatchDTO;
 }
 
-async function prepareDockedOrderLink(
-  router: ApiRouter,
-): Promise<PreparedDockedOrderLinkDTO> {
-  const response = await router.handle({
-    method: "POST",
-    pathname: `/product/tasks/${selectorTaskId()}/prepare-docked-order-link`,
-    body: prepareDockedBody(),
-  });
-  expect(response.status).toBe(201);
-  return response.body as PreparedDockedOrderLinkDTO;
-}
 
 function prepareExecutorBody(
   overrides: Record<string, unknown> = {},
@@ -1041,26 +971,6 @@ function prepareResourceBody(
   };
 }
 
-function prepareDockedBody(
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> {
-  return {
-    selectorWallet,
-    localSourceId: targetStageId,
-    linkedOrderId,
-    linkedPlanId,
-    signalBindings: [
-      {
-        localSourceId: targetStageId,
-        localSignalId: bytes32Text("local.done"),
-        linkedSourceId: targetStageId,
-        linkedSignalId: bytes32Text("linked.done"),
-      },
-    ],
-    metadataURI: "ipfs://docked-order-links/1",
-    ...overrides,
-  };
-}
 
 async function signExecutorPrepared(
   prepared: PreparedStageExecutorPatchDTO,
@@ -1358,19 +1268,6 @@ function baseEvents(
               metadataHash: bytes32Hex("90b"),
             },
             2,
-          ),
-          chainEvent(
-            3n,
-            "SignalSubmitterAuthorized",
-            {
-              orderId,
-              sourceId: eventSelectorStageId,
-              signalId: DOCKED_ORDER_LINK_SIGNAL_ID,
-              submitter: selectorWallet,
-              role: bytes32Text("selector"),
-              metadataHash: bytes32Hex("90c"),
-            },
-            3,
           ),
         ]
       : []),

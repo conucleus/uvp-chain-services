@@ -1,13 +1,10 @@
 import { redactErrorMessage } from "../../security/redaction.js";
 import {
   ProductStagePatchError,
-  type PrepareProductDockedOrderLinkInput,
   type PrepareProductStageExecutorPatchInput,
   type PrepareProductStageResourcePatchInput,
-  type PreparedDockedOrderLinkDTO,
   type PreparedStageExecutorPatchDTO,
   type PreparedStageResourcePatchDTO,
-  type SubmitProductDockedOrderLinkInput,
   type SubmitProductStageExecutorPatchInput,
   type SubmitProductStageResourcePatchInput
 } from "../../stage-patches/index.js";
@@ -69,34 +66,6 @@ export function createStagePatchRouteModule(): RouteModule {
             body: await context.productStageResourcePatchService.submitStageResourcePatch(
               taskId,
               parseSubmitResourceBody(request.body)
-            )
-          };
-        });
-      }
-
-      const prepareDockedMatch = /^\/product\/tasks\/([^/]+)\/prepare-docked-order-link$/.exec(request.pathname);
-      if (request.method === "POST" && prepareDockedMatch) {
-        return handleStagePatchRequest(async () => {
-          const taskId = decodeURIComponent(prepareDockedMatch[1] ?? "");
-          return {
-            status: 201,
-            body: await context.productDockedOrderLinkService.prepareDockedOrderLink(
-              taskId,
-              parsePrepareDockedBody(request.body)
-            )
-          };
-        });
-      }
-
-      const submitDockedMatch = /^\/product\/tasks\/([^/]+)\/submit-docked-order-link$/.exec(request.pathname);
-      if (request.method === "POST" && submitDockedMatch) {
-        return handleStagePatchRequest(async () => {
-          const taskId = decodeURIComponent(submitDockedMatch[1] ?? "");
-          return {
-            status: 200,
-            body: await context.productDockedOrderLinkService.submitDockedOrderLink(
-              taskId,
-              parseSubmitDockedBody(request.body)
             )
           };
         });
@@ -167,32 +136,6 @@ function parsePrepareResourceBody(body: unknown): PrepareProductStageResourcePat
   };
 }
 
-function parsePrepareDockedBody(body: unknown): PrepareProductDockedOrderLinkInput {
-  const record = requireBodyRecord(body);
-  const rawBindings = record.signalBindings;
-  if (!Array.isArray(rawBindings)) {
-    throw new ProductStagePatchError(400, "invalid_body", "signalBindings must be an array");
-  }
-  return {
-    selectorWallet: requiredString(record, "selectorWallet"),
-    localSourceId: requiredString(record, "localSourceId"),
-    linkedOrderId: requiredString(record, "linkedOrderId"),
-    linkedPlanId: requiredString(record, "linkedPlanId"),
-    signalBindings: rawBindings.map((binding, index) => {
-      if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
-        throw new ProductStagePatchError(400, "invalid_body", `signalBindings.${index} must be an object`);
-      }
-      const bindingRecord = binding as Record<string, unknown>;
-      return {
-        localSourceId: requiredString(bindingRecord, "localSourceId"),
-        localSignalId: requiredString(bindingRecord, "localSignalId"),
-        linkedSourceId: requiredString(bindingRecord, "linkedSourceId"),
-        linkedSignalId: requiredString(bindingRecord, "linkedSignalId")
-      };
-    }),
-    metadataURI: requiredString(record, "metadataURI")
-  };
-}
 
 function parseSubmitExecutorBody(body: unknown): SubmitProductStageExecutorPatchInput {
   const record = requireBodyRecord(body);
@@ -222,18 +165,6 @@ function parseSubmitResourceBody(body: unknown): SubmitProductStageResourcePatch
   };
 }
 
-function parseSubmitDockedBody(body: unknown): SubmitProductDockedOrderLinkInput {
-  const record = requireBodyRecord(body);
-  const prepareId = optionalString(record, "prepareId");
-  const link = optionalPatch<PreparedDockedOrderLinkDTO>(record, "link");
-  return {
-    ...(prepareId ? { prepareId } : {}),
-    selectorWallet: requiredString(record, "selectorWallet"),
-    ...("typedData" in record ? { typedData: record.typedData } : {}),
-    signature: requiredString(record, "signature"),
-    ...(link ? { link } : {})
-  };
-}
 
 function requireBodyRecord(body: unknown): Record<string, unknown> {
   if (body && typeof body === "object" && !Array.isArray(body)) {

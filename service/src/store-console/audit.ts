@@ -14,7 +14,7 @@ export interface StoreAuditResource {
 }
 
 export interface StoreAuditInput {
-  readonly action: StoreCapability;
+  readonly action: StoreCapability | "store.address_anchor_required";
   readonly outcome: AuditOutcome;
   readonly access: StoreAccessState;
   readonly resource: StoreAuditResource;
@@ -27,7 +27,7 @@ export interface StoreAuditRecord {
   readonly auditId: string;
   readonly createdAt: string;
   readonly actor: string;
-  readonly action: StoreCapability;
+  readonly action: StoreCapability | "store.address_anchor_required";
   readonly outcome: AuditOutcome;
   readonly resourceType: string;
   readonly resourceId?: string;

@@ -24,6 +24,15 @@ import {
 import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {
+  STORE_SESSION_HEADER,
+  storeSessionDtoWithWalletOverlay,
+  type StoreSessionService,
+  type StoreWalletSessionView
+} from "../../store-sessions/index.js";
+import type { StoreDecorationService } from "../../store-decoration/index.js";
+import type { StoreListingService } from "../../store-listings/index.js";
+import { normalizeBytes32 } from "../../shared/types.js";
+import {
   authorizeStoreCapability,
   isStoreAuthorizationResult,
   recordStoreCapabilityFailure,
@@ -42,10 +51,25 @@ export function createStoreConsoleRouteModule(): RouteModule {
     async handle(request, context) {
       if (request.method === "GET" && request.pathname === "/store/session") {
         const access = await context.storeIdentityProvider.resolve(request.headers);
+        let session = storeSessionFromAccess(access);
+        // PRD89：有钱包会话时叠加锚定地址与账号地址表。
+        const walletSession = await resolveWalletSessionView(request, context.sessionService);
+        if (walletSession && access.anchoredAddress) {
+          session = storeSessionDtoWithWalletOverlay(session, {
+            sessionId: walletSession.sessionId,
+            accountId: walletSession.accountId,
+            anchoredAddress: walletSession.anchoredAddress,
+            createdAt: walletSession.createdAt,
+            expiresAt: walletSession.expiresAt,
+            addresses: walletSession.addresses
+          });
+        }
         return {
           status: 200,
           body: {
-            session: storeSessionFromAccess(access)
+            session,
+            ...(access.anchoredAddress ? { anchoredAddress: access.anchoredAddress } : {}),
+            ...(access.anchorSource ? { anchorSource: access.anchorSource } : {})
           }
         };
       }
@@ -111,9 +135,10 @@ export function createStoreConsoleRouteModule(): RouteModule {
       }
 
       if (request.method === "GET" && request.pathname === "/store/zhixus") {
+        const body = await context.storeConsoleService.listZhixus(parseStoreZhixuListQuery(request.query));
         return {
           status: 200,
-          body: await context.storeConsoleService.listZhixus(parseStoreZhixuListQuery(request.query))
+          body: await filterDelistedZhixus(request, context, body)
         };
       }
 
@@ -169,9 +194,11 @@ export function createStoreConsoleRouteModule(): RouteModule {
             body: { error: "store_zhixu_not_found" }
           };
         }
+        // PRD92：详情页叠加锚核验 + listing 状态 + 装修数据（PRD91）。
+        const overlay = await buildStoreZhixuOverlay(request, context, zhixu.planId);
         return {
           status: 200,
-          body: { zhixu }
+          body: { zhixu, ...(overlay ? { storeOverlay: overlay } : {}) }
         };
       }
 
@@ -757,4 +784,105 @@ function optionalString(record: Record<string, unknown>, field: string): string 
     throw new ProductBffError(400, "invalid_body", `${field} must be a string`);
   }
   return value.trim();
+}
+
+
+async function resolveWalletSessionView(
+  request: ApiRequest,
+  sessionService: StoreSessionService | undefined
+): Promise<StoreWalletSessionView | undefined> {
+  if (!sessionService) {
+    return undefined;
+  }
+  const token = request.headers?.[STORE_SESSION_HEADER] ?? request.headers?.[STORE_SESSION_HEADER.toLowerCase()];
+  const resolved = await sessionService.resolveSessionFromToken(token?.trim() || undefined);
+  return resolved?.session;
+}
+
+/** PRD92：下架 listing 在目录中不可见（运营方除外，便于治理观察）。 */
+async function filterDelistedZhixus(
+  request: ApiRequest,
+  context: Parameters<RouteModule["handle"]>[1],
+  body: unknown
+): Promise<unknown> {
+  if (!context.listingService) {
+    return body;
+  }
+  const access = await context.storeIdentityProvider.resolve(request.headers);
+  const isOperator = access.level === "store_operator" || access.level === "store_admin";
+  const delisted = new Set(
+    (await context.listingService.listListings("delisted"))
+      .map((listing) => listing.planId.toLowerCase())
+  );
+  if (delisted.size === 0) {
+    return body;
+  }
+  const record = body as { readonly zhixus?: readonly { readonly planId?: string }[] };
+  if (!record?.zhixus) {
+    return body;
+  }
+  const zhixus = isOperator
+    ? record.zhixus
+    : record.zhixus.filter((row) => !row.planId || !delisted.has(row.planId.toLowerCase()));
+  return { ...record, zhixus, ...(isOperator ? { delistedPlanIds: [...delisted] } : {}) };
+}
+
+function isPlanNotProjectedError(error: unknown): boolean {
+  return Boolean(
+    error && typeof error === "object" && "code" in error &&
+    (error as { readonly code?: unknown }).code === "plan_not_found"
+  );
+}
+
+interface StoreZhixuOverlayDTO {
+  readonly listing?: unknown;
+  readonly anchorVerification?: unknown;
+  readonly decoration?: unknown;
+  readonly viewerPermission?: unknown;
+}
+
+async function buildStoreZhixuOverlay(
+  request: ApiRequest,
+  context: Parameters<RouteModule["handle"]>[1],
+  planId: string
+): Promise<StoreZhixuOverlayDTO | undefined> {
+  if (!context.listingService && !context.decorationService) {
+    return undefined;
+  }
+  let normalizedPlanId: string;
+  try {
+    normalizedPlanId = normalizeBytes32(planId, "planId");
+  } catch {
+    return undefined;
+  }
+  let listingBlock: Pick<StoreZhixuOverlayDTO, "listing" | "anchorVerification"> | undefined;
+  if (context.listingService) {
+    const listingDetail = await context.listingService.findListingByPlanId(normalizedPlanId);
+    if (listingDetail) {
+      listingBlock = {
+        listing: listingDetail.listing,
+        anchorVerification: listingDetail.anchorVerification
+      };
+    }
+  }
+  let decorationBlock: Pick<StoreZhixuOverlayDTO, "decoration" | "viewerPermission"> | undefined;
+  if (context.decorationService) {
+    // 展示层叠加：plan 尚未投影时静默缺省（详情本身仍是链投影视图），
+    // 不得因为装修域查不到 plan 而 404 掉整个详情页。
+    try {
+      const access = await context.storeIdentityProvider.resolve(request.headers);
+      decorationBlock = {
+        decoration: await context.decorationService.getDecoration(normalizedPlanId),
+        viewerPermission: await context.decorationService.getPermissionView(normalizedPlanId, access.anchoredAddress)
+      };
+    } catch (error) {
+      if (!isPlanNotProjectedError(error)) {
+        throw error;
+      }
+    }
+  }
+  return {
+    ...(listingBlock ?? {}),
+    ...(decorationBlock ?? {})
+  };
 }

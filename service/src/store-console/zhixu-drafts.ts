@@ -615,16 +615,17 @@ function createOrderTriggerFromOnchainArtifact(
   stages: readonly ZhixuStageDTO[],
   roleSlots: readonly RoleSlotDTO[]
 ): StoreProductSchemaDTO["createOrderTrigger"] {
-  // uvp-semantic/0.7：入口表退役。mint 出生阶段的订阅已可上链（编译为
-  // SIGNAL 指令、isTrigger=true，现实成立后经 triggerOrderFrom* 开放提交）；
-  // 非 mint 阶段的订阅不上链。这里为 Store 产品 schema 选择 createOrderTrigger：
-  // 首条携带正依赖的 receive hook（注册者的 bootstrap 入口）。signalMap 委托
-  // 缝的 hook 是父秩序转发信号，不能当开单入口；依赖按 kind 字典序排序，必须
+  // uvp-semantic/0.7 + dock v1：入口表退役。mint 出生阶段的订阅已可上链
+  // （编译为 SIGNAL 指令、orderTriggerKind=mint，现实成立后经
+  // triggerOrderFrom* 开放提交）；非 mint 阶段的订阅不上链。这里为 Store
+  // 产品 schema 选择 createOrderTrigger：首条携带正依赖的 receive hook
+  // （注册者的 bootstrap 入口）。dock 委托 hook（orderTriggerKind=dock）是
+  // 目标出生入口，不属于本定义的开单路径；依赖按 kind 字典序排序，必须
   // 显式取正依赖，负依赖不能用于构造开单 typed data。
-  // isTrigger（= mint 出生阶段）是冻结合约 triggerOrderFrom* 的硬门槛：
-  // 缺失时用户签名后链上 InvalidTriggerHook revert，draft 永久无法开单。
+  // ORDER_TRIGGER_MINT 是冻结合约 triggerOrderFrom* 的硬门槛：缺失时用户
+  // 签名后链上 InvalidTriggerHook revert，draft 永久无法开单。
   const hook = artifact.compiledHooks.find((item) =>
-    item.isTrigger === true &&
+    item.orderTriggerKind === "mint" &&
     item.kind === "receive" &&
     item.dependencies.some((dependency) => dependency.kind === "positive")
   );

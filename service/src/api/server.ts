@@ -12,12 +12,6 @@ import {
 import { createConfiguredGovernanceChainAdapter, createGovernanceService } from "../governance/index.js";
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
-import {
-  createDockedSignalAutomationService,
-  createStateMachineDockedSignalBroadcastAdapter,
-  notSupportedDockedSignalBroadcastAdapter,
-  type DockedSignalBroadcastAdapter
-} from "../docked-signals/index.js";
 import { createNotificationService, WebhookNotificationDispatcher } from "../notifications/index.js";
 import {
   AnvilProductOrderTriggerBroadcastAdapter,
@@ -45,6 +39,7 @@ import { createRedactingLogger, redactErrorMessage, redactSecrets } from "../sec
 import { isDirectRun } from "../shared/runtime.js";
 import { ConfigError, consoleLogger, type Address, type Logger } from "../shared/types.js";
 import { createApiRouter } from "./routes.js";
+import { createListingAnchorChainView } from "../store-listings/index.js";
 
 export interface StartApiServerOptions {
   readonly config?: ChainServicesConfig;
@@ -103,21 +98,14 @@ export async function startApiServer(
       : {}),
     ...(notificationDispatcher ? { dispatcher: notificationDispatcher } : {})
   });
-  const dockingVerifyingContract = dockingModuleAddress(config);
-  const dockedSignalBroadcastAdapter = createConfiguredDockedSignalBroadcastAdapter(config, dockingVerifyingContract);
-  const dockedSignalAutomationService = createDockedSignalAutomationService({
-    config: config.dockedSignalAutomation,
-    ...(dockingVerifyingContract ? { dockingModuleAddress: dockingVerifyingContract } : {}),
-    broadcastAdapter: dockedSignalBroadcastAdapter ?? notSupportedDockedSignalBroadcastAdapter(),
-    logger
-  });
+  // Dock v2（PRD95 §11）：v1 的 docked-signal 自动化已随 linkDockedOrder 模型
+  // 删除；open/input/output keeper worker 属于 M4 后续交付。
   const indexer = eventSource
     ? new IndexerService({
       config,
       eventSource,
       store,
       notificationProcessor: notificationService,
-      projectionAutomationProcessor: dockedSignalAutomationService,
       logger
     })
     : undefined;
@@ -145,13 +133,17 @@ export async function startApiServer(
   }
   const stageExecutorPatchBroadcastAdapter = createConfiguredStageExecutorPatchBroadcastAdapter(config, stagePatchVerifyingContract);
   const stageResourcePatchBroadcastAdapter = createConfiguredStageResourcePatchBroadcastAdapter(config, stagePatchVerifyingContract);
-  const dockedOrderLinkBroadcastAdapter = createConfiguredDockedOrderLinkBroadcastAdapter(config, dockingVerifyingContract);
   const productRegistrationAdapter = productRegistrationAdapterFromConfig(config);
   const evidenceStorage = createConfiguredEvidenceStorage(config);
   const governanceService = createGovernanceService({
     store: governanceStore,
     adapter: createConfiguredGovernanceChainAdapter(config),
-    audit
+    audit,
+    // PRD89 descriptor 托管：注册时快照被哈希原文，descriptorURI 指向公开端点。
+    descriptorSnapshotStore: stores.identityDescriptorSnapshots,
+    ...(config.api.identityDescriptorPublicBaseUrl
+      ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
+      : {})
   });
   const reconcileWorker = new TxReconcileWorker({
     config: config.reconcile,
@@ -226,16 +218,32 @@ export async function startApiServer(
     storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
     storeDockingSessionStore: stores.storeDockingSessionStore,
     storeAuditStore: stores.storeAuditStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    ...(config.api.identityDescriptorPublicBaseUrl
+      ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
+      : {}),
+    // PRD92 锚核验链直读：RPC + 状态机地址齐备时提供第二证据源。
+    ...(config.network.rpcUrl && submissionVerifyingContract
+      ? {
+        listingAnchorChainView: createListingAnchorChainView({
+          rpcUrl: config.network.rpcUrl,
+          stateMachineAddress: submissionVerifyingContract
+        })
+      }
+      : {}),
     notificationService,
     submissionChainId: config.network.chainId,
     ...(submissionVerifyingContract ? { submissionVerifyingContract } : {}),
     ...(stagePatchVerifyingContract ? { stageExecutorPatchVerifyingContract: stagePatchVerifyingContract } : {}),
     ...(stagePatchVerifyingContract ? { stageResourcePatchVerifyingContract: stagePatchVerifyingContract } : {}),
-    ...(dockingVerifyingContract ? { dockedOrderLinkVerifyingContract: dockingVerifyingContract } : {}),
     ...(submissionBroadcastAdapter ? { submissionBroadcastAdapter } : {}),
     ...(stageExecutorPatchBroadcastAdapter ? { stageExecutorPatchBroadcastAdapter } : {}),
     ...(stageResourcePatchBroadcastAdapter ? { stageResourcePatchBroadcastAdapter } : {}),
-    ...(dockedOrderLinkBroadcastAdapter ? { dockedOrderLinkBroadcastAdapter } : {}),
     productRegistrationAdapter,
     productTriggerChainId: config.network.chainId,
     ...(config.productBff.registrationCreatorAddress
@@ -487,7 +495,7 @@ function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): vo
   response.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
-    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role"
+    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role, x-uvp-store-session, x-uvp-store-dev-anchored-address"
   );
   response.setHeader("access-control-max-age", "86400");
   const origin = request?.headers.origin?.trim() ?? "";
@@ -654,33 +662,6 @@ function createConfiguredDockedOrderLinkBroadcastAdapter(
     waitForReceipt: true,
     rejectGasPayerAsSelector: config.security.environment !== "local",
     receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
-  });
-}
-
-function createConfiguredDockedSignalBroadcastAdapter(
-  config: ChainServicesConfig,
-  dockingModule: Address | undefined
-): DockedSignalBroadcastAdapter | undefined {
-  if (!config.relayer.broadcastEnabled || !config.dockedSignalAutomation.enabled) {
-    return undefined;
-  }
-  if (!dockingModule) {
-    return undefined;
-  }
-  const privateKeyEnv = config.relayer.stateMachinePrivateKeyEnv;
-  if (!process.env[privateKeyEnv]?.trim()) {
-    return undefined;
-  }
-  return createStateMachineDockedSignalBroadcastAdapter({
-    chainId: config.network.chainId,
-    rpcUrl: config.network.rpcUrl,
-    relayerPrivateKeyEnv: privateKeyEnv,
-    waitForReceipt: config.dockedSignalAutomation.waitForReceipt,
-    confirmOnReceipt: true,
-    receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs,
-    ...(config.dockedSignalAutomation.maxGasPerTx !== undefined
-      ? { maxGasPerTx: config.dockedSignalAutomation.maxGasPerTx }
-      : {})
   });
 }
 

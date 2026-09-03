@@ -103,6 +103,8 @@ const expectedMigrationVersions = [
   "0011_canonical_chain_event_order",
   "0012_cursor_block_hash",
   "0013_notification_broadcast_state",
+  "0014_store_wallet_session",
+  "0015_store_listing_decoration_join",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0

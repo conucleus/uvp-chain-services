@@ -1,9 +1,5 @@
 import { encodeAbiParameters, keccak256, recoverTypedDataAddress, stringToHex } from "viem";
 import {
-  DOCKED_ORDER_LINK_DOMAIN_NAME,
-  DOCKED_ORDER_LINK_DOMAIN_VERSION,
-  DOCKED_ORDER_LINK_PRIMARY_TYPE,
-  DOCKED_ORDER_LINK_TYPED_DATA_FIELDS as PROTOCOL_DOCKED_ORDER_LINK_TYPED_DATA_FIELDS,
   STAGE_EXECUTOR_PATCH_DOMAIN_NAME,
   STAGE_EXECUTOR_PATCH_DOMAIN_VERSION,
   STAGE_EXECUTOR_PATCH_PRIMARY_TYPE,
@@ -12,10 +8,7 @@ import {
   STAGE_RESOURCE_PATCH_DOMAIN_VERSION,
   STAGE_RESOURCE_PATCH_PRIMARY_TYPE,
   STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS as PROTOCOL_STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS,
-  buildDockedOrderLinkTypedData as buildProtocolDockedOrderLinkTypedData,
-  hashDockedOrderLinkPayload as hashProtocolDockedOrderLinkPayload,
   hashResourceManifest as hashProtocolResourceManifest,
-  recoverDockedOrderLinkSigner as recoverProtocolDockedOrderLinkSigner,
   type ResourceManifestV1
 } from "@uvp-eth/protocol-bindings";
 import {
@@ -25,8 +18,6 @@ import {
 } from "../shared/protocol-constants.js";
 import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import type {
-  DockedOrderLinkTypedData,
-  DockedSignalBindingDTO,
   StageExecutorPatchMode,
   StageExecutorPatchTypedData,
   StagePatchTypedDataField,
@@ -50,8 +41,6 @@ export const STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS =
 export const STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS =
   PROTOCOL_STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS;
 
-export const DOCKED_ORDER_LINK_TYPED_DATA_FIELDS =
-  PROTOCOL_DOCKED_ORDER_LINK_TYPED_DATA_FIELDS;
 
 export interface StageExecutorPatchPayload {
   readonly orderId: Hex;
@@ -99,26 +88,7 @@ export interface BuildStageResourcePatchTypedDataInput extends StageResourcePatc
   readonly deadline: string;
 }
 
-export interface DockedOrderLinkPayload {
-  readonly localOrderId: Hex;
-  /** 审计 #10：本地订单所属 plan，签名首字段。 */
-  readonly localPlanId: Hex;
-  readonly selectorStageId: Hex;
-  readonly localSourceId: Hex;
-  readonly linkedOrderId: Hex;
-  readonly linkedPlanId: Hex;
-  readonly linkNonce: string;
-  readonly metadataURI: string;
-  readonly signalBindings: readonly DockedSignalBindingDTO[];
-}
 
-export interface BuildDockedOrderLinkTypedDataInput extends DockedOrderLinkPayload {
-  readonly chainId: number;
-  readonly verifyingContract: Address | string;
-  readonly linkHash: Hex;
-  readonly selector: Address | string;
-  readonly deadline: string;
-}
 
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
 
@@ -190,24 +160,6 @@ export function hashStageResourcePatchPayload(payload: StageResourcePatchPayload
   }
 }
 
-export function hashDockedOrderLinkPayload(payload: DockedOrderLinkPayload): Hex {
-  try {
-    return nonZeroHash(
-      hashProtocolDockedOrderLinkPayload({
-        selectorStageId: payload.selectorStageId,
-        localSourceId: payload.localSourceId,
-        linkedOrderId: payload.linkedOrderId,
-        linkedPlanId: payload.linkedPlanId,
-        linkNonce: payload.linkNonce,
-        metadataURI: payload.metadataURI,
-        signalBindings: payload.signalBindings
-      }),
-      "linkHash"
-    );
-  } catch (error) {
-    throw new ConfigError(error instanceof Error ? error.message : "invalid docked order link payload");
-  }
-}
 
 export function buildStageExecutorPatchTypedData(input: BuildStageExecutorPatchTypedDataInput): StageExecutorPatchTypedData {
   try {
@@ -279,28 +231,6 @@ export function buildStageResourcePatchTypedData(input: BuildStageResourcePatchT
   }
 }
 
-export function buildDockedOrderLinkTypedData(input: BuildDockedOrderLinkTypedDataInput): DockedOrderLinkTypedData {
-  try {
-    return buildProtocolDockedOrderLinkTypedData({
-      chainId: input.chainId,
-      verifyingContract: input.verifyingContract,
-      localPlanId: input.localPlanId,
-      localOrderId: input.localOrderId,
-      selectorStageId: input.selectorStageId,
-      localSourceId: input.localSourceId,
-      linkedOrderId: input.linkedOrderId,
-      linkedPlanId: input.linkedPlanId,
-      linkHash: input.linkHash,
-      linkNonce: input.linkNonce,
-      metadataURI: input.metadataURI,
-      signalBindings: input.signalBindings,
-      selector: input.selector,
-      deadline: input.deadline
-    }) as DockedOrderLinkTypedData;
-  } catch (error) {
-    throw new ConfigError(error instanceof Error ? error.message : "invalid docked order link typed data");
-  }
-}
 
 export async function recoverStageExecutorPatchSigner(
   typedData: StageExecutorPatchTypedData,
@@ -330,12 +260,6 @@ export async function recoverStageResourcePatchSigner(
   return normalizeAddress(recovered, "recoveredSelector");
 }
 
-export async function recoverDockedOrderLinkSigner(
-  typedData: DockedOrderLinkTypedData,
-  signature: Hex | string
-): Promise<Address> {
-  return recoverProtocolDockedOrderLinkSigner(typedData, signature);
-}
 
 export function hashResourceManifest(manifest: ResourceManifestV1): Hex {
   // ETH-08：manifest hash 必须与 protocol-bindings 的 canonical 实现

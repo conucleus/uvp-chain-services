@@ -1,6 +1,9 @@
 import {
   adminPrincipalFromHeaders,
-  GovernanceServiceError
+  GovernanceDescriptorError,
+  GovernanceServiceError,
+  listIdentityDescriptorSnapshots,
+  readIdentityDescriptorSnapshot
 } from "../../governance/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError, normalizeAddress, normalizeBytes32 } from "../../shared/types.js";
@@ -114,6 +117,37 @@ async function handleIdentityProjectionRequest(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1]
 ): Promise<ApiResponse | undefined> {
+  // PRD89 descriptor 托管：公开、免鉴权的档案快照取回端点（按 descriptorHash 锁内容）。
+  const descriptorMatch = /^\/identity\/descriptors\/([^/]+)(?:\/([^/]+))?$/.exec(request.pathname);
+  if (request.method === "GET" && descriptorMatch && context.identityDescriptorSnapshots) {
+    try {
+      const subjectId = decodeURIComponent(descriptorMatch[1] ?? "");
+      const descriptorHash = descriptorMatch[2] ? decodeURIComponent(descriptorMatch[2]) : undefined;
+      if (!descriptorHash) {
+        return {
+          status: 200,
+          body: await listIdentityDescriptorSnapshots(context.identityDescriptorSnapshots, subjectId)
+        };
+      }
+      return {
+        status: 200,
+        body: await readIdentityDescriptorSnapshot(context.identityDescriptorSnapshots, subjectId, descriptorHash)
+      };
+    } catch (error) {
+      if (error instanceof GovernanceDescriptorError) {
+        return {
+          status: error.status,
+          body: {
+            error: error.code,
+            message: redactErrorMessage(error),
+            ...(error.details !== undefined ? { details: error.details } : {})
+          }
+        };
+      }
+      throw error;
+    }
+  }
+
   if (request.method === "GET" && request.pathname === "/identity/bindings") {
     const parsedQuery = parseIdentityBindingQuery(request.query);
     if (!parsedQuery.ok) {

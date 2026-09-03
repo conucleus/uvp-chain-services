@@ -22,8 +22,6 @@ import type {
   SubmissionBroadcastAdapter
 } from "../submissions/index.js";
 import type {
-  DockedOrderLinkBroadcastAdapter,
-  ProductDockedOrderLinkService,
   ProductStageExecutorPatchService,
   ProductStageResourcePatchService,
   StageExecutorPatchBroadcastAdapter,
@@ -61,6 +59,11 @@ import type {
   StoreSupplierMetadataStore,
   StoreSupplierService
 } from "../store-suppliers/service.js";
+import type { StoreSessionService, StoreWalletSessionStore } from "../store-sessions/index.js";
+import type { StoreDecorationService, StoreZhixuDecorationStore, StorePublisherDelegationStore } from "../store-decoration/index.js";
+import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
+import type { ListingAnchorChainView, StoreListingService, StoreListingStore } from "../store-listings/index.js";
+import type { StoreJoinService, StoreJoinApplicationStore } from "../store-join/index.js";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
 export interface ApiRequest {
@@ -100,8 +103,6 @@ export interface CreateApiRouterOptions {
   readonly stageResourcePatchBroadcastAdapter?: StageResourcePatchBroadcastAdapter;
   readonly stageResourcePatchChainId?: number;
   readonly stageResourcePatchVerifyingContract?: Address;
-  readonly productDockedOrderLinkService?: ProductDockedOrderLinkService;
-  readonly dockedOrderLinkBroadcastAdapter?: DockedOrderLinkBroadcastAdapter;
   readonly dockedOrderLinkChainId?: number;
   readonly dockedOrderLinkVerifyingContract?: Address;
   readonly productBffStore?: ProductBffStore;
@@ -128,6 +129,18 @@ export interface CreateApiRouterOptions {
   readonly storeAuditStore?: StoreAuditStore;
   readonly storeIdentityProvider?: StoreIdentityProvider;
   readonly storeAuthConfig?: StoreAuthConfig;
+  readonly storeWalletSessionStore?: StoreWalletSessionStore;
+  readonly storeSessionService?: StoreSessionService;
+  readonly storeDecorationStore?: StoreZhixuDecorationStore;
+  readonly storePublisherDelegationStore?: StorePublisherDelegationStore;
+  readonly storeDecorationService?: StoreDecorationService;
+  readonly identityDescriptorSnapshots?: StoreIdentityDescriptorSnapshotStore;
+  readonly descriptorPublicBaseUrl?: string;
+  readonly storeListingStore?: StoreListingStore;
+  readonly storeListingService?: StoreListingService;
+  readonly listingAnchorChainView?: ListingAnchorChainView;
+  readonly storeJoinService?: StoreJoinService;
+  readonly storeJoinApplicationStore?: StoreJoinApplicationStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   /**
    * ETH-03：OPS_CONSOLE_ADMIN_IDS 白名单（去空格后的 id 列表）。非空时
@@ -168,6 +181,11 @@ export interface ApiRouteContext {
   readonly storeSupplierService: StoreSupplierService;
   readonly storeAuditStore: StoreAuditStore;
   readonly storeIdentityProvider: StoreIdentityProvider;
+  readonly sessionService?: StoreSessionService;
+  readonly decorationService?: StoreDecorationService;
+  readonly listingService?: StoreListingService;
+  readonly joinService?: StoreJoinService;
+  readonly identityDescriptorSnapshots?: StoreIdentityDescriptorSnapshotStore;
   readonly governanceService: GovernanceService;
   readonly complianceService: ComplianceService;
   readonly riskGraphService: RiskGraphService;
@@ -177,7 +195,6 @@ export interface ApiRouteContext {
   readonly submissionService: ProductSubmissionService;
   readonly productStageExecutorPatchService: ProductStageExecutorPatchService;
   readonly productStageResourcePatchService: ProductStageResourcePatchService;
-  readonly productDockedOrderLinkService: ProductDockedOrderLinkService;
   readonly submissionStore?: ProductSubmissionStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   /** ETH-03：见 CreateApiRouterOptions.opsConsoleAdminIds。 */

@@ -3,6 +3,7 @@ import { adminPrincipalFromHeaders } from "../governance/index.js";
 import type { ChainServicesRuntimeEnv, StoreAuthConfig } from "../config/index.js";
 import { assessStoreAuthEvidence } from "../config/index.js";
 import type { GovernancePrincipal } from "../governance/index.js";
+import type { Address } from "../shared/types.js";
 
 export type StoreAccessLevel = "anonymous_read" | "store_read" | "store_operator" | "store_admin";
 
@@ -24,6 +25,7 @@ export type StoreCapability =
   | "store.draft.review"
   | "store.version.activate"
   | "store.version.deprecate"
+  | "store.listing.manage"
   | "store.supplier.create"
   | "store.supplier.review"
   | "store.supplier.tags.update"
@@ -33,6 +35,12 @@ export type StoreCapability =
   | "store.docking.create"
   | "store.docking.validate"
   | "store.docking.save";
+
+/**
+ * PRD89：会话锚定地址。锚定来源只能是钱包会话（签名证明）或
+ * local 开发头（devAnchoredAddressHeaderEnabled，staging/prod 拒绝）。
+ */
+export type StoreAnchorSource = "wallet_session" | "dev_header";
 
 export interface StoreAccessState {
   readonly level: StoreAccessLevel;
@@ -45,6 +53,11 @@ export interface StoreAccessState {
   readonly governancePrincipal?: GovernancePrincipal;
   readonly canWrite: boolean;
   readonly canAdmin: boolean;
+  /** 会话已证明控制的钱包地址（PRD89 会话配对）。 */
+  readonly anchoredAddress?: Address;
+  readonly anchorSource?: StoreAnchorSource;
+  readonly walletAccountId?: string;
+  readonly walletSessionId?: string;
 }
 
 export interface StoreAuthenticationFailure {
@@ -83,6 +96,7 @@ const STORE_OPERATOR_CAPABILITIES = [
   "store.draft.compile",
   "store.draft.schema.save",
   "store.draft.review",
+  "store.listing.manage",
   "store.supplier.create",
   "store.supplier.review",
   "store.supplier.tags.update",
@@ -169,6 +183,8 @@ export function storeAccessRequiredLevel(capability: StoreCapability): StoreAcce
     case "store.version.activate":
     case "store.version.deprecate":
       return "store_admin";
+    case "store.listing.manage":
+      return "store_operator";
     case "store.read":
     case "store.audit.read":
       return "store_read";

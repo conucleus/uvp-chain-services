@@ -53,6 +53,8 @@ export interface DatabaseConfig {
 }
 
 export interface ApiConfig {
+  /** PRD89：descriptor 托管公网基址（配置后 descriptorURI 指向 /identity/descriptors/...）。 */
+  readonly identityDescriptorPublicBaseUrl?: string;
   readonly host: string;
   readonly port: number;
   readonly indexerPollIntervalMs: number;
@@ -150,6 +152,25 @@ export interface StoreAuthConfig {
   readonly principalClaim: string;
   readonly displayNameClaim?: string;
   readonly clockToleranceSeconds: number;
+  /** PRD89：钱包会话（SIWE 式登录 + 地址锚定）子配置。 */
+  readonly walletSession?: StoreWalletSessionConfig;
+}
+
+/**
+ * PRD89 钱包会话配置：
+ * - enabled：local/testnet 默认开；staging/production 必须显式开启。
+ * - operatorWallets/adminWallets：MVP 单运营方地址清单——会话锚定地址
+ *   命中清单即获得对应 Store 角色能力（会话能力继承所锚地址的链上角色
+ *   与 Store 委托关系的运营方子集；plan 级权限另行按 planPublisher 核验）。
+ * - devAnchoredAddressHeaderEnabled：仅 local 开发头锚定，生产拒绝。
+ */
+export interface StoreWalletSessionConfig {
+  readonly enabled: boolean;
+  readonly operatorWallets: readonly Address[];
+  readonly adminWallets: readonly Address[];
+  readonly sessionTtlSeconds: number;
+  readonly challengeTtlSeconds: number;
+  readonly devAnchoredAddressHeaderEnabled: boolean;
 }
 
 export interface SecurityConfig {
@@ -260,6 +281,9 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         "UVP_INDEXER_POLL_INTERVAL_MS",
         5_000,
       ),
+      ...(optionalEnv(env, "STORE_IDENTITY_DESCRIPTOR_PUBLIC_BASE_URL")
+        ? { identityDescriptorPublicBaseUrl: optionalEnv(env, "STORE_IDENTITY_DESCRIPTOR_PUBLIC_BASE_URL")!.replace(/\/+$/, "") }
+        : {}),
     },
     relayer: {
       businessSigning: "forbidden",
@@ -627,7 +651,65 @@ function parseStoreAuthConfig(
     principalClaim,
     ...(displayNameClaim ? { displayNameClaim } : {}),
     clockToleranceSeconds,
+    walletSession: parseStoreWalletSessionConfig(env, environment),
   };
+}
+
+function parseStoreWalletSessionConfig(
+  env: Env,
+  environment: ChainServicesRuntimeEnv,
+): StoreWalletSessionConfig {
+  const strict = environment === "staging" || environment === "production";
+  const enabledRaw = optionalEnv(env, "STORE_AUTH_WALLET_SESSION_ENABLED");
+  const enabled = enabledRaw !== undefined
+    ? parseBooleanFlag(enabledRaw, "STORE_AUTH_WALLET_SESSION_ENABLED")
+    : !strict;
+  const operatorWallets = parseWalletAddressList(env, "STORE_AUTH_OPERATOR_WALLETS");
+  const adminWallets = parseWalletAddressList(env, "STORE_AUTH_ADMIN_WALLETS");
+  const sessionTtlSeconds = parseInteger(
+    env,
+    "STORE_AUTH_WALLET_SESSION_TTL_SECONDS",
+    43200,
+  );
+  const challengeTtlSeconds = parseInteger(
+    env,
+    "STORE_AUTH_CHALLENGE_TTL_SECONDS",
+    300,
+  );
+  const devHeaderRaw = optionalEnv(env, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER");
+  return {
+    enabled,
+    operatorWallets,
+    adminWallets,
+    sessionTtlSeconds,
+    challengeTtlSeconds,
+    devAnchoredAddressHeaderEnabled: devHeaderRaw !== undefined
+      ? parseBooleanFlag(devHeaderRaw, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")
+      : !strict,
+  };
+}
+
+function parseWalletAddressList(env: Env, name: string): readonly Address[] {
+  const raw = optionalEnv(env, name);
+  if (!raw) {
+    return [];
+  }
+  const wallets = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .map((item) => normalizeAddress(item, name));
+  return [...new Set(wallets.map((wallet) => wallet.toLowerCase()))] as readonly Address[];
+}
+
+function parseBooleanFlag(value: string, name: string): boolean {
+  if (value === "true" || value === "1") {
+    return true;
+  }
+  if (value === "false" || value === "0") {
+    return false;
+  }
+  throw new ConfigError(`${name} must be true or false`);
 }
 
 function parseStoreAuthMode(

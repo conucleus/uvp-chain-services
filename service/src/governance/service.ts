@@ -16,6 +16,11 @@ import {
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { InMemoryGovernanceStore, type GovernanceReviewQuery, type GovernanceStore } from "./store.js";
+import {
+  buildDescriptorPublicUri,
+  persistIdentityDescriptorSnapshot,
+  type StoreIdentityDescriptorSnapshotStore
+} from "./descriptors.js";
 import type {
   GovernanceBroadcastResultDTO,
   GovernanceChainRequestDTO,
@@ -52,6 +57,10 @@ export interface GovernanceServiceOptions {
   readonly adapter?: GovernanceChainAdapter;
   readonly now?: () => Date;
   readonly audit?: AuditSink;
+  /** PRD89 descriptor 托管：登记身份时把被哈希的档案原文追加为 append-only 快照。 */
+  readonly descriptorSnapshotStore?: StoreIdentityDescriptorSnapshotStore;
+  /** 配置后 descriptorURI 指向 Store 公开端点（GET /identity/descriptors/...）。 */
+  readonly descriptorPublicBaseUrl?: string;
 }
 
 export interface GovernanceService {
@@ -132,7 +141,19 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
         ...optionalSupplierHashPayload(record)
       };
       const descriptorHash = hashIdentityDescriptor(descriptorInput);
-      const descriptorURI = review?.metadataURI ?? defaultMetadataURI(descriptorHash);
+      if (options.descriptorSnapshotStore) {
+        await persistIdentityDescriptorSnapshot({
+          store: options.descriptorSnapshotStore,
+          subjectId,
+          descriptorInput,
+          descriptorHash,
+          createdBy: principal.adminId,
+          now
+        });
+      }
+      const descriptorURI = options.descriptorPublicBaseUrl
+        ? buildDescriptorPublicUri(options.descriptorPublicBaseUrl, subjectId, descriptorHash)
+        : (review?.metadataURI ?? defaultMetadataURI(descriptorHash));
       const request: IdentityRegistrationRequestDTO = {
         kind: "registerIdentity",
         subjectId,

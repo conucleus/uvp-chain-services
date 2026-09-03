@@ -11,9 +11,60 @@ import {
   type StoreAuditResource
 } from "../store-console/audit.js";
 import type { AuditOutcome } from "../security/audit.js";
+import type { Address } from "../shared/types.js";
 
 export interface StoreAuthorizationResult {
   readonly access: StoreAccessState;
+}
+
+/**
+ * PRD89 红线：敏感操作（授权、装修、审核写操作）要求会话已锚定地址。
+ * 锚定来源：钱包会话（签名证明）或 local 开发头；服务端强制。
+ */
+export interface AnchoredStoreAuthorizationResult {
+  readonly access: StoreAccessState;
+  readonly anchoredAddress: Address;
+  readonly accountId?: string;
+}
+
+export function isAnchoredStoreAuthorizationResult(
+  value: AnchoredStoreAuthorizationResult | ApiResponse
+): value is AnchoredStoreAuthorizationResult {
+  return "anchoredAddress" in value;
+}
+
+export async function requireAnchoredStoreAddress(
+  context: ApiRouteContext,
+  request: ApiRequest,
+  resource: StoreAuditResource
+): Promise<AnchoredStoreAuthorizationResult | ApiResponse> {
+  const access = await context.storeIdentityProvider.resolve(request.headers);
+  if (access.anchoredAddress) {
+    return {
+      access,
+      anchoredAddress: access.anchoredAddress,
+      ...(access.walletAccountId ? { accountId: access.walletAccountId } : {})
+    };
+  }
+  await recordStoreAudit(context.audit, {
+    action: "store.address_anchor_required",
+    outcome: "blocked",
+    access,
+    resource,
+    errorCode: isStoreAccessAuthenticated(access) ? "store_address_anchor_required" : access.authenticationFailure?.code ?? "store_identity_missing",
+    ...(request.headers ? { headers: request.headers } : {})
+  }, { store: context.storeAuditStore, now: context.now });
+  return {
+    status: isStoreAccessAuthenticated(access) ? 403 : 401,
+    body: {
+      error: isStoreAccessAuthenticated(access) ? "store_address_anchor_required" : (access.authenticationFailure?.code ?? "store_identity_missing"),
+      message: isStoreAccessAuthenticated(access)
+        ? "this action requires a session anchored to a wallet address (log in with a wallet session)"
+        : (access.authenticationFailure?.message ?? "Store identity is required"),
+      accessLevel: access.level,
+      authMode: access.authMode
+    }
+  };
 }
 
 export async function authorizeStoreCapability(
