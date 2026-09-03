@@ -381,7 +381,7 @@ function stagingManifestPath(tempDirs: string[]): string {
   tempDirs.push(dir);
   const manifestPath = join(dir, "staging.addresses.json");
   writeFileSync(manifestPath, JSON.stringify({
-    schemaVersion: "uvp-eth.addresses.v5",
+    schemaVersion: "uvp-eth.addresses.v1",
     network: {
       chainId,
       rpcUrlEnv: "UVP_RPC_URL"

@@ -65,6 +65,7 @@ describe("chain-services config", () => {
     tempDirs.push(dir);
     const manifestPath = join(dir, "addresses.json");
     writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
       network: {
         chainId: 31337,
         rpcUrlEnv: "ANVIL_RPC_URL"
@@ -99,13 +100,13 @@ describe("chain-services config", () => {
     expect(config.network.contracts.UVPIdentityRegistry).toBe("0x3333333333333333333333333333333333333333");
   });
 
-  it("loads v5 deployment registry manifests with modules", () => {
+  it("loads v1 deployment registry manifests with modules", () => {
     const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-"));
     tempDirs.push(dir);
-    const manifestPath = join(dir, "addresses.v5.json");
+    const manifestPath = join(dir, "addresses.v1.json");
     const deploymentId = `0x${"01".repeat(32)}`;
     writeFileSync(manifestPath, JSON.stringify({
-      schemaVersion: "uvp-eth.addresses.v5",
+      schemaVersion: "uvp-eth.addresses.v1",
       activeDeploymentId: deploymentId,
       stateMachineDeployments: [
         {
@@ -163,11 +164,28 @@ describe("chain-services config", () => {
     ]);
   });
 
+  it("rejects address manifests with a missing or unsupported schemaVersion", () => {
+    const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-"));
+    tempDirs.push(dir);
+    const missingPath = join(dir, "missing-schema.json");
+    writeFileSync(missingPath, JSON.stringify({ contracts: {} }));
+    expect(() => loadConfigFromEnv({ UVP_ADDRESS_MANIFEST: missingPath })).toThrow(
+      /schemaVersion must be "uvp-eth.addresses.v1"/,
+    );
+
+    const stalePath = join(dir, "stale-schema.json");
+    writeFileSync(stalePath, JSON.stringify({ schemaVersion: "uvp-eth.addresses.v5", contracts: {} }));
+    expect(() => loadConfigFromEnv({ UVP_ADDRESS_MANIFEST: stalePath })).toThrow(
+      /schemaVersion must be "uvp-eth.addresses.v1"/,
+    );
+  });
+
   it("does not let zero-address manual overrides erase manifest contracts", () => {
     const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-"));
     tempDirs.push(dir);
     const manifestPath = join(dir, "addresses.json");
     writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
       contracts: {
         UVPIdentityRegistry: {
           address: "0x2222222222222222222222222222222222222222"
@@ -1364,7 +1382,7 @@ function stagingManifestPath(tempDirs: string[], filename = "staging.addresses.j
   tempDirs.push(dir);
   const manifestPath = join(dir, filename);
   writeFileSync(manifestPath, JSON.stringify({
-    schemaVersion: "uvp-eth.addresses.v5",
+    schemaVersion: "uvp-eth.addresses.v1",
     network: {
       chainId: 84532,
       rpcUrlEnv: "UVP_RPC_URL"

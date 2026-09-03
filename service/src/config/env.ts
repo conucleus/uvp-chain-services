@@ -938,6 +938,14 @@ function parseAddressManifest(env: Env): ParsedAddressManifest {
   }
 
   const manifest = parsed as Record<string, unknown>;
+  // 地址清单是输入不是猜想：schemaVersion 不符直接拒绝，避免按已作废的
+  // 清单版本（如 v5）解析出口径漂移的部署记录。
+  const schemaVersion = stringValue(manifest.schemaVersion);
+  if (schemaVersion !== "uvp-eth.addresses.v1") {
+    throw new ConfigError(
+      `address manifest schemaVersion must be "uvp-eth.addresses.v1", got: ${schemaVersion || "(missing)"}`,
+    );
+  }
   const network = objectValue(manifest.network);
   const deployment = objectValue(manifest.deployment);
   const rawContracts = objectValue(manifest.contracts);
