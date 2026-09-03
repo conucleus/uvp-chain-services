@@ -14,17 +14,23 @@ Chain Services 把 UVP 链上事实投影成 Product、Store 和运维接口，�
 
 ```bash
 pnpm install
-cp .env.example .env.local
+cp .env.example .env.local   # 仅作为配置参考，服务本身不会加载该文件
 pnpm run typecheck
 pnpm run test
 pnpm run dev:api
+```
+
+配置全部从进程环境变量读取（服务内没有任何 dotenv/`.env` 文件加载逻辑）。`.env.example` 只是模板；实际运行时请在 shell 中 export 变量，或使用支持 `--env-file` 的启动器注入，例如：
+
+```bash
+node --env-file=.env.local --import tsx src/api/server.ts
 ```
 
 默认 API 地址为 `http://127.0.0.1:8787`。地址清单必须使用当前 schema，并明确提供 `stateMachineDeployments`；服务不会根据单个合约地址合成部署记录。
 
 ## 主要配置
 
-- `CHAIN_SERVICES_RUNTIME_ENV`: `local`、`testnet` 或 `production`
+- `CHAIN_SERVICES_RUNTIME_ENV`: `local`、`testnet`、`staging` 或 `production`
 - `UVP_ADDRESS_MANIFEST`: 当前网络地址清单
 - `UVP_RPC_URL`, `UVP_CHAIN_ID`: RPC 与链 ID
 - `CHAIN_SERVICES_DATABASE_DRIVER`, `CHAIN_SERVICES_DATABASE_URL`: 投影和业务存储
