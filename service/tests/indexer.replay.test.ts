@@ -470,7 +470,10 @@ describe("indexer projection replay", () => {
     expect(snapshot.eventCount).toBe(1);
   });
 
-  it("summarizes active-chain replay and tombstones removed logs before projection", () => {
+  it("revives a log re-emitted at the same position after its removed tombstone", () => {
+    // removed 墓碑只过滤“曾 removed 且此后未复活”的窗口：reorg 后 canonical
+    // 链在同一 (block,txHash,logIndex) 重新出现的非 removed 事件必须被处理，
+    // 而不是被墓碑永久跳过。
     const registered = chainEvent(2n, 0, "OrderRegistered", {
       orderId: stateMachineOrderId,
       planId
@@ -487,11 +490,46 @@ describe("indexer projection replay", () => {
     ]);
 
     expect(summary).toMatchObject({
-      activeEventCount: 1,
+      activeEventCount: 2,
       removedEventCount: 1,
       removedLogsFiltered: true
     });
-    expect(summary.activeEvents.map((event) => event.eventName)).toEqual(["PlanRegistered"]);
+    expect(summary.activeEvents.map((event) => event.eventName)).toEqual([
+      "PlanRegistered",
+      "OrderRegistered"
+    ]);
+
+    const snapshot = rebuildOrderProjections([
+      { ...registered, removed: true },
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      registered
+    ]);
+    expect(snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)]).toBeDefined();
+    expect(snapshot.eventCount).toBe(2);
+  });
+
+  it("still filters removed logs that were never revived", () => {
+    const registered = chainEvent(2n, 0, "OrderRegistered", {
+      orderId: stateMachineOrderId,
+      planId
+    });
+
+    const snapshot = rebuildOrderProjections([
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      registered,
+      { ...registered, removed: true }
+    ]);
+
+    expect(snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)]).toBeUndefined();
+    expect(snapshot.eventCount).toBe(1);
   });
 
   it("projects registry deployments and scopes identical order ids by state machine", async () => {

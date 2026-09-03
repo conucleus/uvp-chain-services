@@ -343,6 +343,31 @@ export class SqliteProjectionStore implements DurableProjectionStore {
         if (result.changes > 0) {
           return;
         }
+      } else {
+        // 复活：同主键（chain/contract/block/txHash/logIndex）的事件此前
+        // 因 reorg 被打上 removed 墓碑，canonical 链重新出现同一位日志时
+        // 必须解除墓碑；INSERT OR IGNORE 只会忽略主键冲突、保留 removed=1，
+        // 导致复活事件被永久跳过。
+        const revival = this.#database
+          .prepare(
+            `UPDATE chain_event_log
+           SET removed = 0, event_name = ?, args_json = ?, block_hash = COALESCE(?, block_hash)
+           WHERE chain_id = ? AND contract_address = ? AND block_number = ?
+             AND transaction_hash = ? AND log_index = ? AND removed = 1`,
+          )
+          .run(
+            event.eventName,
+            stringifyStorageJson(event.args),
+            event.blockHash?.toLowerCase() ?? null,
+            event.chainId,
+            normalizedContract,
+            event.blockNumber.toString(),
+            event.transactionHash.toLowerCase(),
+            event.logIndex,
+          );
+        if (revival.changes > 0) {
+          return;
+        }
       }
       this.#database
         .prepare(

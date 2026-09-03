@@ -72,14 +72,16 @@ export function buildActiveChainEventReplaySummary<TEvent extends ChainEvent>(
   for (const event of sortChainEvents(events)) {
     const eventId = chainEventKey(event);
     if (event.removed === true) {
+      // removed 墓碑：把同位事件移出活跃 replay。
       removedEventIds.add(eventId);
       removedEventCount += 1;
       activeByEventId.delete(eventId);
       continue;
     }
-    if (removedEventIds.has(eventId)) {
-      continue;
-    }
+    // 复活：同 (block,txHash,logIndex) 的非 removed 事件在此之后出现，
+    // 覆盖先前的 removed 墓碑。墓碑只用于过滤“曾 removed 且此后未复活”
+    // 的窗口，不得把 reorg 后重新出现的同位事件永久跳过。
+    removedEventIds.delete(eventId);
     activeByEventId.set(eventId, event);
   }
 

@@ -216,6 +216,31 @@ describe("durable storage", () => {
     ]));
   });
 
+  it("revives a stored event when the canonical chain re-emits the same log without removed", async () => {
+    // removed 墓碑后同 (block,txHash,logIndex) 的非 removed 事件必须解除
+    // 墓碑复活；INSERT OR IGNORE 不得让 removed=1 永久留存。
+    const store = openStore(tempDirs);
+    stores.push(store);
+    const event = chainEvent(10n, 0, "OrderCreated", {
+      orderId: "order-revive",
+      buyer,
+      seller,
+    });
+    const tombstoned = { ...event, removed: true as const };
+
+    await store.appendEvent(event);
+    await store.appendEvent(tombstoned);
+    const afterTombstone = await store.listEvents({ chainId, contractAddress });
+    expect(afterTombstone).toHaveLength(1);
+    expect(afterTombstone[0]).toMatchObject({ removed: true });
+
+    await store.appendEvent(event);
+    const revived = await store.listEvents({ chainId, contractAddress });
+    expect(revived).toHaveLength(1);
+    expect(revived[0]?.removed).toBeUndefined();
+    expect(revived[0]).toMatchObject({ eventName: "OrderCreated" });
+  });
+
   it("rolls back writes when a transaction fails", async () => {
     const store = openStore(tempDirs);
     stores.push(store);

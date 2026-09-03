@@ -339,6 +339,30 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       if ((result.rowCount ?? 0) > 0) {
         return;
       }
+    } else {
+      // 复活：同主键（chain/contract/block/txHash/logIndex）的事件此前因
+      // reorg 被打上 removed 墓碑，canonical 链重新出现同一位日志时必须
+      // 解除墓碑；ON CONFLICT DO NOTHING 只会忽略主键冲突、保留 removed=TRUE，
+      // 导致复活事件被永久跳过。
+      const revival = await this.#database.query(
+        `UPDATE chain_event_log
+         SET removed = FALSE, event_name = $1, args_json = $2::jsonb, block_hash = COALESCE($3, block_hash)
+         WHERE chain_id = $4 AND contract_address = $5 AND block_number = $6
+           AND transaction_hash = $7 AND log_index = $8 AND removed = TRUE`,
+        [
+          event.eventName,
+          stringifyStorageJson(event.args),
+          event.blockHash?.toLowerCase() ?? null,
+          event.chainId,
+          normalizedContract,
+          event.blockNumber.toString(),
+          event.transactionHash.toLowerCase(),
+          event.logIndex,
+        ],
+      );
+      if ((revival.rowCount ?? 0) > 0) {
+        return;
+      }
     }
 
     await this.#database.query(
