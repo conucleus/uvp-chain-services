@@ -220,6 +220,81 @@ describe("tx/indexer reconcile worker", () => {
       errorCode: "tx_reconcile_timeout"
     });
   });
+
+  it("keeps tx-less pending submissions in broadcasting instead of relabeling them submitted", async () => {
+    // pending（无 txHash）= 仍在广播、回执未知：不得硬编码改标 submitted。
+    const projectionStore = new MemoryProjectionStore();
+    const submissionStore = new InMemoryProductSubmissionStore();
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_broadcasting",
+      status: "broadcasting",
+      broadcastStatus: "broadcasting"
+    }));
+    const worker = workerFixture({ projectionStore, submissionStore, receipts: new Map() });
+
+    const summary = await worker.runOnce();
+
+    expect(summary.submissionsChecked).toBe(1);
+    await expect(submissionStore.getSubmission("sub_broadcasting")).resolves.toMatchObject({
+      status: "broadcasting",
+      broadcastStatus: "broadcasting",
+      reconcileStatus: "broadcasting",
+      receiptStatus: "not_checked"
+    });
+  });
+
+  it("re-checks failed submissions that carry a txHash and self-heals on a successful receipt plus projection", async () => {
+    // 带 txHash 的 failed 必须复核回执：链上真相（回执成功 + 投影呈现）
+    // 推翻本地失败标记 → confirmed；无 txHash 的 failed 不进复扫。
+    const projectionStore = new MemoryProjectionStore();
+    const submissionStore = new InMemoryProductSubmissionStore();
+    const healedTx = bytes32("bbbb");
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_failed_with_tx",
+      txHash: healedTx,
+      status: "failed",
+      broadcastStatus: "failed"
+    }));
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_failed_without_tx",
+      status: "failed",
+      broadcastStatus: "failed"
+    }));
+    const receipts = new Map<Hex, ReconcileReceipt | undefined>([
+      [healedTx, { status: "success", blockNumber: 20n }]
+    ]);
+    const worker = workerFixture({ projectionStore, submissionStore, receipts });
+
+    const summary = await worker.runOnce();
+    // 只有带 txHash 的 failed 进复扫。
+    expect(summary.submissionsChecked).toBe(1);
+
+    // 回执未落地（map 命中前）时保持 failed，不虚报 submitted —— 这里直接
+    // 推进到投影确认后断言自愈结果。
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [chainEvent(20n, healedTx, 0, "SignalSubmitted", {
+        orderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter
+      })]
+    });
+    await worker.runOnce();
+
+    await expect(submissionStore.getSubmission("sub_failed_with_tx")).resolves.toMatchObject({
+      status: "confirmed",
+      broadcastStatus: "confirmed",
+      reconcileStatus: "confirmed",
+      receiptStatus: "success",
+      projectionStatus: "present"
+    });
+    await expect(submissionStore.getSubmission("sub_failed_without_tx")).resolves.toMatchObject({
+      status: "failed"
+    });
+  });
 });
 
 function workerFixture(input: {
@@ -305,8 +380,11 @@ function registrationFixture(input: {
 
 function submissionFixture(input: {
   readonly submissionId: string;
-  readonly txHash: Hex;
+  readonly txHash?: Hex;
+  readonly status?: ProductSubmissionDTO["status"];
+  readonly broadcastStatus?: ProductSubmissionDTO["broadcastStatus"];
 }): ProductSubmissionDTO {
+  const status = input.status ?? "submitted";
   return {
     submissionId: input.submissionId,
     prepareId: `${input.submissionId}_prepare`,
@@ -324,33 +402,37 @@ function submissionFixture(input: {
     submitter,
     nonce: "1",
     deadline: "1770000000",
-    status: "submitted",
+    status,
     signatureStatus: "signature_verified",
     signatureHash: bytes32("5001"),
     recoveredSubmitter: submitter,
-    broadcastStatus: "submitted",
-    txHash: input.txHash,
+    broadcastStatus: input.broadcastStatus ?? (input.txHash ? "submitted" : "broadcasting"),
+    ...(input.txHash ? { txHash: input.txHash } : {}),
     retryable: false,
     retryState: "not_applicable",
     deadLetter: false,
-    attempts: [{
-      attemptId: `${input.submissionId}:1`,
-      submissionId: input.submissionId,
-      orderId,
-      sourceId,
-      signalId,
-      submitter,
-      txHash: input.txHash,
-      status: "submitted",
-      gasPayer,
-      attemptNumber: 1,
-      retryable: false,
-      retryState: "not_applicable",
-      deadLetter: false,
-      createdAt: baseNow.toISOString(),
-      updatedAt: baseNow.toISOString()
-    }],
-    attemptCount: 1,
+    ...(input.txHash
+      ? {
+          attempts: [{
+            attemptId: `${input.submissionId}:1`,
+            submissionId: input.submissionId,
+            orderId,
+            sourceId,
+            signalId,
+            submitter,
+            txHash: input.txHash,
+            status: "submitted",
+            gasPayer,
+            attemptNumber: 1,
+            retryable: false,
+            retryState: "not_applicable",
+            deadLetter: false,
+            createdAt: baseNow.toISOString(),
+            updatedAt: baseNow.toISOString()
+          }],
+          attemptCount: 1
+        }
+      : { attempts: [], attemptCount: 0 }),
     proofRows: [],
     createdAt: baseNow.toISOString(),
     updatedAt: baseNow.toISOString()

@@ -965,9 +965,15 @@ function defaultSubmissionReconcileFields(submission: ProductSubmissionDTO): TxR
     };
   }
   if (submission.status === "failed") {
+    // failed + txHash ≠ 回执失败：只有广播适配器确认回执 reverted
+    // （errorCode = transaction_reverted）才如实报 failed；其余带 txHash 的
+    // 失败（回执未复核/回执等待抛错）回执未知，如实报 not_checked，
+    // 交给 reconcile worker 复核。
+    const receiptVerifiedFailed = submission.txHash !== undefined
+      && submission.errorCode === "transaction_reverted";
     return {
       reconcileStatus: "failed",
-      receiptStatus: submission.txHash ? "failed" : "not_checked",
+      receiptStatus: receiptVerifiedFailed ? "failed" : "not_checked",
       projectionStatus: "not_checked"
     };
   }

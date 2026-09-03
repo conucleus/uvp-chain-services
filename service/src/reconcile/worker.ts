@@ -251,7 +251,7 @@ export class TxReconcileWorker implements LifecycleService {
       return undefined;
     }
 
-    const submissionStatus = submissionStatusFromOutcome(outcome);
+    const submissionStatus = submissionStatusFromOutcome(outcome, submission);
     const deadLetter = submissionDeadLetterFromOutcome(outcome, submissionStatus);
     const updated: ProductSubmissionDTO = {
       ...submission,
@@ -490,6 +490,12 @@ function isReconcileableRegistration(registration: ProductOrderTriggerRecord): b
 }
 
 function isReconcileableSubmission(submission: ProductSubmissionDTO): boolean {
+  // 带 txHash 的 failed 必须复核回执：链上真相可能推翻本地失败标记
+  // （回执成功且投影已呈现 → 自愈为 confirmed）。无 txHash 的 failed
+  // 从未上链，没有回执可查。
+  if (submission.status === "failed") {
+    return Boolean(submission.txHash);
+  }
   return submission.status === "broadcasting" || submission.status === "submitted" || submission.status === "indexing";
 }
 
@@ -588,7 +594,10 @@ function draftFromReconciledRegistration(
   };
 }
 
-function submissionStatusFromOutcome(outcome: ResolvedReconcileOutcome): ProductSubmissionDTO["status"] {
+function submissionStatusFromOutcome(
+  outcome: ResolvedReconcileOutcome,
+  submission: ProductSubmissionDTO
+): ProductSubmissionDTO["status"] {
   switch (outcome.kind) {
     case "confirmed":
       return "confirmed";
@@ -598,7 +607,10 @@ function submissionStatusFromOutcome(outcome: ResolvedReconcileOutcome): Product
     case "indexing":
       return "indexing";
     case "pending":
-      return "submitted";
+      // pending + 无 txHash = 仍在广播、回执未知：不得虚标 submitted
+      // （投影不得替链说话），保持原状态（broadcasting）。有 txHash 的
+      // pending 表示已广播、回执未落地，标 submitted 是如实的。
+      return submission.txHash ? "submitted" : submission.status;
   }
 }
 

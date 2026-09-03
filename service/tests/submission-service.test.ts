@@ -1134,7 +1134,9 @@ describe("product task submissions", () => {
       txHash: txHash("21"),
       retryable: true,
       retryState: "retryable",
-      deadLetter: false
+      deadLetter: false,
+      // 回执未知（等待回执抛错）：不得虚报 failed，如实报 not_checked。
+      receiptStatus: "not_checked"
     });
     expect(submission.attempts[0]).toMatchObject({
       status: "failed",
@@ -1179,7 +1181,9 @@ describe("product task submissions", () => {
       blockNumber: "456",
       retryable: false,
       retryState: "dead_letter",
-      deadLetter: true
+      deadLetter: true,
+      // 回执确实为 reverted：如实报 failed。
+      receiptStatus: "failed"
     });
     expect(submission.attempts[0]).toMatchObject({
       txHash: txHash("22"),
