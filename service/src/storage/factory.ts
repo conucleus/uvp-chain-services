@@ -12,10 +12,11 @@ import type { Address } from "../shared/types.js";
 import { InMemoryProductSubmissionStore } from "../submissions/store.js";
 import { PostgresSubmissionStore } from "../submissions/postgres-store.js";
 import { SqliteSubmissionStore } from "../submissions/sqlite-store.js";
-import { SqliteBroadcastDedupeStore } from "../submissions/broadcast-dedupe-sqlite-store.js";
-import type { BroadcastDedupeStore } from "../submissions/broadcast-dedupe-sqlite-store.js";
+import { SqliteBroadcastDedupeStore, type BroadcastDedupeStore } from "../submissions/broadcast-dedupe-sqlite-store.js";
+import { PostgresBroadcastDedupeStore } from "../submissions/broadcast-dedupe-postgres-store.js";
 import type { ProductSubmissionStore } from "../submissions/types.js";
 import { SqliteNotificationStateStore } from "../notifications/sqlite-store.js";
+import { PostgresNotificationStateStore } from "../notifications/postgres-store.js";
 import type {
   NotificationDeliveryStore,
   ParticipantNotificationReadStateStore
@@ -73,10 +74,10 @@ export interface ChainServicesStores {
   readonly storeSupplierMetadataStore: StoreSupplierMetadataStore;
   readonly storeDockingSessionStore: StoreDockingSessionStore;
   readonly storeAuditStore: StoreAuditStore;
-  /** ETH-04(b)：sqlite 驱动下提供持久化通知状态；其余驱动为 undefined（内存）。 */
-  readonly notificationStateStore?: SqliteNotificationStateStore;
-  /** ETH-07：sqlite 驱动下提供持久化 broadcast 去重状态；其余驱动为 undefined。 */
-  readonly broadcastDedupeStore?: SqliteBroadcastDedupeStore;
+  /** ETH-04(b)：sqlite/postgres 驱动下提供持久化通知状态；其余驱动为 undefined（内存）。 */
+  readonly notificationStateStore?: NotificationDeliveryStore & ParticipantNotificationReadStateStore;
+  /** ETH-07：sqlite/postgres 驱动下提供持久化 broadcast 去重状态；其余驱动为 undefined。 */
+  readonly broadcastDedupeStore?: BroadcastDedupeStore;
   close(): Promise<void>;
 }
 
@@ -238,7 +239,12 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         storeZhixuVersionMetadataStore: new PostgresStoreZhixuVersionMetadataStore({ database }),
         storeSupplierMetadataStore: new PostgresStoreSupplierMetadataStore({ database }),
         storeDockingSessionStore: new PostgresStoreDockingSessionStore({ database }),
-        storeAuditStore: new PostgresStoreAuditStore({ database })
+        storeAuditStore: new PostgresStoreAuditStore({ database }),
+        // ETH-04(b)/ETH-07：通知状态与 broadcast 去重状态在生产拓扑（postgres）
+        // 同样持久化；表迁移见 migrations/postgres/0013。共享 database 连接，
+        // close 由 database.close() 统一负责。
+        notificationStateStore: new PostgresNotificationStateStore({ database }),
+        broadcastDedupeStore: new PostgresBroadcastDedupeStore({ database })
       };
       return {
         ...stores,

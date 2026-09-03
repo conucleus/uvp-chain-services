@@ -1118,6 +1118,56 @@ describePostgres(
       ).resolves.toHaveLength(1);
     });
 
+    it("assembles and persists notification state and broadcast dedupe stores in the Postgres factory wiring", async () => {
+      // ETH-04(b)/ETH-07：生产拓扑（postgres）同样装配持久化通知状态与
+      // broadcast 去重状态，而不是静默退化为 undefined。
+      const databaseUrl = await postgresSchemaUrl(schemas);
+      const factoryStores = createChainServicesStores({
+        database: {
+          driver: "postgres" as const,
+          url: databaseUrl,
+          migrationsAutoRun: true,
+        },
+        chainId,
+        migrationsDirectory: migrationsDirectory(),
+      });
+      stores.push(factoryStores);
+
+      expect(factoryStores.notificationStateStore).toBeDefined();
+      expect(factoryStores.broadcastDedupeStore).toBeDefined();
+
+      const notificationState = factoryStores.notificationStateStore!;
+      const marked = await notificationState.markRead({
+        participantKey: "supplier:postgres-1",
+        notificationId: planId as Hex,
+        readAt: "2026-04-28T00:00:00.000Z",
+      });
+      expect(marked.readAt).toBe("2026-04-28T00:00:00.000Z");
+      await expect(
+        notificationState.getReadState("supplier:postgres-1", planId as Hex),
+      ).resolves.toMatchObject({
+        participantKey: "supplier:postgres-1",
+        notificationId: planId,
+        readAt: "2026-04-28T00:00:00.000Z",
+      });
+
+      const dedupe = factoryStores.broadcastDedupeStore!;
+      const dedupeTxHash =
+        "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b" as Hex;
+      await dedupe.save("idem-postgres-1", {
+        attempts: 1,
+        lastResult: { status: "submitted", txHash: dedupeTxHash },
+      });
+      await expect(dedupe.load("idem-postgres-1")).resolves.toMatchObject({
+        attempts: 1,
+        lastResult: { status: "submitted", txHash: dedupeTxHash },
+      });
+      await expect(dedupe.claimTxHash(dedupeTxHash, "idem-postgres-1")).resolves.toBeUndefined();
+      await expect(dedupe.claimTxHash(dedupeTxHash, "idem-postgres-2")).resolves.toBe(
+        "idem-postgres-1",
+      );
+    });
+
     it("wires all chain-services stores to durable Postgres across service restarts", async () => {
       const databaseUrl = await postgresSchemaUrl(schemas);
       const database = {
