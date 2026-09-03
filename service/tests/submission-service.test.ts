@@ -728,8 +728,12 @@ describe("product task submissions", () => {
     });
   });
 
-  it("releases the reserved nonce when the store write fails so the same prepareId stays retryable", async () => {
+  it("records persist_failed with txHash and keeps the nonce when the store write fails after a successful broadcast", async () => {
+    // 广播已成功（拿到 txHash）但持久化失败：必须尽力落一条 failed
+    // （persist_failed，回执未知）档案，且不释放 nonce（链上可能已占用）；
+    // 只有广播本身抛错（未拿到 txHash）才释放 nonce。
     const inner = new InMemoryProductSubmissionStore();
+    const releasedKeys: string[] = [];
     let putSubmissionCalls = 0;
     const flakyStore: ProductSubmissionStore = {
       withTransaction: (operation) => (inner as ProductSubmissionStore).withTransaction?.(operation) ?? operation(),
@@ -737,7 +741,10 @@ describe("product task submissions", () => {
       getPrepared: (prepareId) => inner.getPrepared(prepareId),
       markPreparedUsed: (prepareId, submissionId, usedAt) => inner.markPreparedUsed(prepareId, submissionId, usedAt),
       reserveNonce: (key) => inner.reserveNonce(key),
-      releaseNonce: (key) => inner.releaseNonce(key),
+      releaseNonce: (key) => {
+        releasedKeys.push(key);
+        return inner.releaseNonce(key);
+      },
       putSubmission: async (submission) => {
         putSubmissionCalls += 1;
         if (putSubmissionCalls === 1) {
@@ -782,19 +789,28 @@ describe("product task submissions", () => {
       walletAddress: submitter,
       signature
     })).rejects.toThrow("simulated durable store outage");
-    expect(putSubmissionCalls).toBe(1);
 
-    const retried = await service.submit(task.taskId, {
+    // 第一次 putSubmission 抛错；第二次是 catch 中的尽力落档。
+    expect(putSubmissionCalls).toBe(2);
+    await expect(inner.getSubmission("sub_1")).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "persist_failed",
+      txHash: txHash("31"),
+      deadLetter: true,
+      receiptStatus: "not_checked"
+    });
+    // nonce 不释放。
+    expect(releasedKeys).toHaveLength(0);
+
+    // nonce 仍被占用：重试同一 prepare 被 duplicate_submit 拒绝而不是双花。
+    await expect(service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
       signature
+    })).rejects.toMatchObject({
+      code: "duplicate_submit",
+      status: 409
     });
-
-    expect(retried).toMatchObject({
-      status: "submitted",
-      txHash: txHash("31")
-    });
-    expect(putSubmissionCalls).toBe(2);
   });
 
   it("classifies getChainId RPC failures as failed broadcast results instead of throwing", async () => {

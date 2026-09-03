@@ -327,6 +327,8 @@ export function createProductSubmissionService(options: ProductSubmissionService
       // store failure. A broadcast that *returns* a failed result is recorded
       // as a failed submission and keeps the nonce consumed by design.
       let submission: ProductSubmissionDTO;
+      let broadcastSubmissionId: string | undefined;
+      let broadcastTxHash: Hex | undefined;
       try {
         const submissionId = submissionIdFactory();
         const createdAt = now().toISOString();
@@ -344,11 +346,40 @@ export function createProductSubmissionService(options: ProductSubmissionService
           createdAt,
           broadcast
         }));
+        broadcastSubmissionId = submissionId;
+        broadcastTxHash = submission.txHash;
         await withSubmissionStoreTransaction(store, async () => {
           await store.putSubmission(submission);
           await store.markPreparedUsed(prepared.prepareId, submissionId, submission.updatedAt);
         });
       } catch (error) {
+        if (broadcastSubmissionId && broadcastTxHash) {
+          // 广播已成功（拿到 txHash）但持久化失败：链上交易可能已占用
+          // nonce，不得释放。先尽力落一条 failed（persist_failed，带 txHash、
+          // 回执未知如实报 not_checked）的提交档案保证台账可追溯，再上抛
+          // 原始错误；落档本身失败也不能掩盖原始错误。
+          try {
+            await store.putSubmission(withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
+              submissionId: broadcastSubmissionId,
+              recoveredSubmitter,
+              signatureHash: signatureHashFor(signature),
+              createdAt: now().toISOString(),
+              broadcast: {
+                status: "failed",
+                txHash: broadcastTxHash,
+                errorCode: "persist_failed",
+                message: "broadcast succeeded but persisting the submission failed; the receipt is unknown and the nonce stays consumed",
+                retryable: false,
+                deadLetter: true
+              }
+            })));
+          } catch {
+            // 尽力而为：落档失败时保持原始错误继续上抛。
+          }
+          throw error;
+        }
+        // 广播本身抛错（未拿到 txHash）：未上链、未落档，释放 nonce 让同一
+        // prepareId 保持可重试（基线 c64f4e8 行为）。
         await store.releaseNonce?.(nonceKey);
         throw error;
       }
