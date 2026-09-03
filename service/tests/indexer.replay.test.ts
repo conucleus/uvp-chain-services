@@ -578,6 +578,161 @@ describe("indexer projection replay", () => {
     });
   });
 
+  it("routes module-emitted order events to the owning state-machine order instead of phantom module buckets", () => {
+    // P0 幻影订单：7 类订单维度事件由模块合约发出（event.contractAddress =
+    // 模块地址）。归一化后必须落到所属状态机的订单桶，且不得在模块地址下
+    // 产生 planId=0 的 unknown 幻影订单。
+    const moduleId = bytes32Text("uvp.module.stage-patch.v1");
+    const moduleAddress = "0x6666666666666666666666666666666666666666";
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(2n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      chainEvent(3n, 0, "StateMachineModuleSet", {
+        moduleId,
+        previousModule: "0x0000000000000000000000000000000000000000",
+        newModule: moduleAddress
+      }),
+      chainEvent(4n, 0, "StageExecutorPatchApplied", {
+        orderId: stateMachineOrderId,
+        selectorStageId,
+        targetStageId: stageId,
+        selector: signer,
+        executor: overlayExecutor,
+        role: bytes32Text("overlay-role"),
+        executorMetadataHash: bytes32Hex("8001"),
+        mode: EXECUTOR_PATCH_MODE_ASSIGN,
+        patchHash,
+        patchNonce: 1n,
+        metadataURI: "ipfs://stage-executor-patch/1"
+      }, moduleAddress),
+      chainEvent(5n, 0, "DockedOrderLinked", {
+        localOrderId: stateMachineOrderId,
+        linkedOrderId: bytes32Hex("303"),
+        localSourceId: sourceId,
+        selectorStageId,
+        linkedPlanId: bytes32Hex("404"),
+        selector: signer,
+        linkHash: patchHash,
+        linkNonce: 1n,
+        metadataURI: "ipfs://docked-link/1"
+      }, moduleAddress),
+      chainEvent(6n, 0, "DockedSignalMapped", {
+        localOrderId: stateMachineOrderId,
+        linkedOrderId: bytes32Hex("303"),
+        linkedSourceId: sourceId,
+        linkedSignalId: signalId,
+        localSourceId: sourceId,
+        localSignalId: signalId
+      }, moduleAddress),
+      chainEvent(7n, 0, "DerivedSignalSubmitted", {
+        fromOrderId: stateMachineOrderId,
+        targetOrderId: stateMachineOrderId,
+        signalId,
+        fromStageId: stageId,
+        targetSourceId: sourceId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signer
+      }, moduleAddress)
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const orderKey = stateMachineScopedKey(31337, contractAddress, stateMachineOrderId);
+    const order = snapshot.stateMachineOrders[orderKey];
+
+    // 模块事件全部落到真实订单桶。
+    expect(order).toBeDefined();
+    expect(order?.stageExecutorOverlays[stageId]).toMatchObject({
+      activeExecutorWallet: overlayExecutor,
+      proof: expect.objectContaining({ eventName: "StageExecutorPatchApplied" })
+    });
+    expect(Object.keys(order?.dockedOrderLinks ?? {})).toContain(bytes32Hex("303"));
+    expect(order?.proof.map((proof) => proof.eventName)).toEqual(expect.arrayContaining([
+      "StageExecutorPatchApplied",
+      "DockedOrderLinked",
+      "DockedSignalMapped",
+      "DerivedSignalSubmitted"
+    ]));
+    // 不产生以模块地址为桶的幻影订单；全部订单都归属状态机地址。
+    expect(Object.keys(snapshot.stateMachineOrders)).toEqual([orderKey]);
+    expect(Object.values(snapshot.stateMachineOrders).every((entry) => entry.contractAddress === contractAddress)).toBe(true);
+    expect(snapshot.unresolvedModuleOrderEventCount).toBe(0);
+  });
+
+  it("counts module order events that cannot be attributed to a state machine instead of silently bucketing", () => {
+    // 模块地址未（尚未）通过 StateMachineModuleSet 登记：事件保持现状建桶，
+    // 但必须计入显式诊断计数，不允许静默。
+    const unregisteredModuleAddress = "0x7777777777777777777777777777777777777777";
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "StageExecutorPatchApplied", {
+        orderId: stateMachineOrderId,
+        selectorStageId,
+        targetStageId: stageId,
+        selector: signer,
+        executor: overlayExecutor,
+        role: bytes32Text("overlay-role"),
+        executorMetadataHash: bytes32Hex("8001"),
+        mode: EXECUTOR_PATCH_MODE_ASSIGN,
+        patchHash,
+        patchNonce: 1n,
+        metadataURI: "ipfs://stage-executor-patch/1"
+      }, unregisteredModuleAddress)
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+
+    expect(snapshot.unresolvedModuleOrderEventCount).toBe(1);
+    expect(Object.keys(snapshot.stateMachineOrders)).toEqual([
+      stateMachineScopedKey(31337, unregisteredModuleAddress, stateMachineOrderId)
+    ]);
+  });
+
+  it("resolves plan events from module addresses when the same planId exists across deployments", () => {
+    // 同 planId 双部署 + plan 维度事件（SignalCapabilityRegistered）由模块
+    // 合约发出：归一化后必须精确命中所属状态机的 plan，不再走歧义回退抛
+    // ProjectionError 把索引器打进永久 degraded。
+    const planMetadataModuleAddress = "0xaaaa111111111111111111111111111111111111";
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }, contractAddress),
+      chainEvent(2n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }, contractAddressV2),
+      chainEvent(3n, 0, "StateMachineModuleSet", {
+        moduleId: bytes32Text("uvp.module.plan-metadata.v1"),
+        previousModule: "0x0000000000000000000000000000000000000000",
+        newModule: planMetadataModuleAddress
+      }, contractAddressV2),
+      chainEvent(4n, 0, "SignalCapabilityRegistered", {
+        planId,
+        stageId,
+        targetSourceId: sourceId,
+        signalId,
+        targetOrderRelation: 0
+      }, planMetadataModuleAddress)
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+
+    const planV2 = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddressV2, planId)];
+    expect(planV2?.signalCapabilities).toHaveLength(1);
+    expect(planV2?.signalCapabilities[0]).toMatchObject({ stageId, signalId });
+    const planV1 = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
+    expect(planV1?.signalCapabilities).toHaveLength(0);
+  });
+
   it("binds plans and orders to the active deployment for reused state-machine addresses", () => {
     const events: readonly ChainEvent[] = [
       chainEvent(1n, 0, "DeploymentRegistered", {
