@@ -499,7 +499,8 @@ function runProductionSafetyPreflight(
   }
 
   // ETH-11：production 不允许静默落到 env 默认值 1。finality 确认数是
-  // 索引器 reorg 缓冲的唯一防线，必须显式配置；非生产环境保持默认 1。
+  // 索引器 reorg 缓冲必须显式配置；追加前哈希连续性校验与有界共同祖先
+  // 回滚由 indexer/service.ts 执行，非生产环境保持默认 1。
   if (env.UVP_FINALITY_CONFIRMATIONS?.trim() && config.network.finalityConfirmations > 0) {
     pass(checks, "network.finality_confirmations_explicit");
   } else {
@@ -707,11 +708,10 @@ function runStagingSafetyPreflight(
   } else {
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia or staging RPC in staging");
   }
-  // Audit #15: finalityConfirmations is the only reorg-safety defense the
-  // indexer has today; explicit reorg rollback handling is registered
-  // follow-up work. The former UVP_REORG_BUFFER_BLOCKS check here was a ghost
-  // config nothing consumed, and was removed instead of pretending extra
-  // safety.
+  // finalityConfirmations controls the normal indexing buffer. The indexer
+  // additionally verifies block-hash continuity and performs a bounded
+  // common-ancestor rollback when a reorg is observed. The former
+  // UVP_REORG_BUFFER_BLOCKS check was a ghost config nothing consumed.
   if (config.network.finalityConfirmations > 0) {
     pass(checks, "network.finality_confirmations");
   } else {

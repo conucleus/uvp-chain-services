@@ -136,10 +136,9 @@ export class ViemChainEventSource implements ChainEventSource {
 
   async getFinalizedBlock(config: ChainServicesConfig): Promise<bigint> {
     const latestBlock = await this.#client(config).getBlockNumber();
-    // Audit #15 + ETH-02：reorg 安全 = finalityConfirmations 缓冲 + 追加前的
-    // 哈希连续性校验（indexer/service.ts）。finalityConfirmations 之上的
-    // 深度 reorg 仍无法自动回滚，需要 full rebuild；`removed` log 改写投影
-    // 依旧不是本服务的职责。
+    // ETH-02：reorg 安全 = finalityConfirmations 缓冲 + indexer/service.ts
+    // 的追加前哈希连续性校验与有界共同祖先回滚。超过回滚窗口的深 reorg
+    // 仍需 full rebuild；`removed` log 的墓碑/复活过滤在 replay 层完成。
     const confirmations = BigInt(config.network.finalityConfirmations);
     if (latestBlock <= confirmations) {
       return 0n;

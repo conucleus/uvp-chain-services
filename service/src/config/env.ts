@@ -16,9 +16,9 @@ export interface NetworkConfig {
   readonly rpcUrl: string;
   readonly deploymentBlock: bigint;
   /**
-   * Sole reorg-safety mechanism of the indexer today: only logs at least this
-   * many blocks deep are treated as final. Explicit reorg rollback handling
-   * (`removed` log replay) is registered as follow-up work, not implemented.
+   * Finality buffer used before an event range is indexed. The indexer also
+   * persists block hashes and rolls back to a common ancestor when a reorg is
+   * detected; this value bounds the normal exposure window.
    */
   readonly finalityConfirmations: number;
   readonly contracts: Readonly<Record<string, Address>>;
@@ -1247,7 +1247,8 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
     );
   }
   // ETH-11：production 禁止静默使用 env 默认值 1。finality 确认数是索引器
-  // reorg 缓冲的唯一防线，必须显式配置为正整数；非生产保持默认 1 不变。
+  // reorg 缓冲必须显式配置为正整数；非生产保持默认 1 不变。追加前的
+  // block-hash continuity check 与有界共同祖先回滚由 indexer 一并执行。
   if (
     !optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
     config.network.finalityConfirmations <= 0
