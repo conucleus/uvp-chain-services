@@ -3,11 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import type {
-  DockedOrderLinkBroadcastAdapter,
-  DockedOrderLinkBroadcastRequest,
-  DockedOrderLinkSubmissionDTO,
   PreparedStageExecutorPatchDTO,
-  PreparedDockedOrderLinkDTO,
   PreparedStageResourcePatchDTO,
   StageExecutorPatchBroadcastAdapter,
   StagePatchBroadcastResult,
@@ -20,10 +16,6 @@ export const STATE_MACHINE_STAGE_EXECUTOR_PATCH_ABI = parseAbi([
 
 export const STATE_MACHINE_STAGE_RESOURCE_PATCH_ABI = parseAbi([
   "function applyStageResourcePatchFor(bytes32 orderId,(bytes32 selectorStageId,bytes32 targetStageId,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI) patch,address selector,uint256 deadline,bytes signature)"
-]);
-
-export const STATE_MACHINE_DOCKED_ORDER_LINK_ABI = parseAbi([
-  "function linkDockedOrderFor(bytes32 localOrderId,(bytes32 selectorStageId,bytes32 localSourceId,bytes32 linkedOrderId,bytes32 linkedPlanId,bytes32 linkHash,uint256 linkNonce,string metadataURI,(bytes32 localSourceId,bytes32 localSignalId,bytes32 linkedSourceId,bytes32 linkedSignalId)[] signalBindings) link,address selector,uint256 deadline,bytes signature)"
 ]);
 
 export interface StateMachineStagePatchPublicClient {
@@ -87,39 +79,9 @@ export interface StateMachineStageResourcePatchCall {
   readonly chainId?: number;
 }
 
-export interface StateMachineDockedOrderLinkCall {
-  readonly address: Address;
-  readonly abi: typeof STATE_MACHINE_DOCKED_ORDER_LINK_ABI;
-  readonly functionName: "linkDockedOrderFor";
-  readonly args: readonly [
-    Hex,
-    {
-      readonly selectorStageId: Hex;
-      readonly localSourceId: Hex;
-      readonly linkedOrderId: Hex;
-      readonly linkedPlanId: Hex;
-      readonly linkHash: Hex;
-      readonly linkNonce: bigint;
-      readonly metadataURI: string;
-      readonly signalBindings: readonly {
-        readonly localSourceId: Hex;
-        readonly localSignalId: Hex;
-        readonly linkedSourceId: Hex;
-        readonly linkedSignalId: Hex;
-      }[];
-    },
-    Address,
-    bigint,
-    Hex
-  ];
-  readonly data: Hex;
-  readonly chainId?: number;
-}
-
 export type StateMachineStagePatchCall =
   | StateMachineStageExecutorPatchCall
-  | StateMachineStageResourcePatchCall
-  | StateMachineDockedOrderLinkCall;
+  | StateMachineStageResourcePatchCall;
 
 export interface StateMachineStagePatchWalletClient {
   readonly account?: { readonly address?: string };
@@ -144,7 +106,6 @@ export interface StateMachineStagePatchBroadcastAdapterOptions {
 
 export type StateMachineStageExecutorPatchBroadcastAdapterOptions = StateMachineStagePatchBroadcastAdapterOptions;
 export type StateMachineStageResourcePatchBroadcastAdapterOptions = StateMachineStagePatchBroadcastAdapterOptions;
-export type StateMachineDockedOrderLinkBroadcastAdapterOptions = StateMachineStagePatchBroadcastAdapterOptions;
 
 const DEFAULT_RELAYER_PRIVATE_KEY_ENV = "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
@@ -179,22 +140,9 @@ export function createStateMachineStageResourcePatchBroadcastAdapter(
   });
 }
 
-export function createStateMachineDockedOrderLinkBroadcastAdapter(
-  options: StateMachineDockedOrderLinkBroadcastAdapterOptions
-): DockedOrderLinkBroadcastAdapter {
-  return createStagePatchBroadcastAdapter(options, {
-    label: "docked order link",
-    invalidSignatureError: "invalid_docked_order_link_signature",
-    staleNonceError: "stale_docked_order_link_nonce",
-    genericFailureError: "docked_order_link_broadcast_failed",
-    buildCall: (config, prepared, request) => buildLinkDockedOrderForCall(config, prepared, request.signature)
-  });
-}
-
 type PreparedPatchForBroadcast =
   | PreparedStageExecutorPatchDTO
-  | PreparedStageResourcePatchDTO
-  | PreparedDockedOrderLinkDTO;
+  | PreparedStageResourcePatchDTO;
 type StagePatchBroadcastRequestBase<TPrepared extends PreparedPatchForBroadcast> = {
   readonly prepared: TPrepared;
   readonly signature: Hex;
@@ -405,42 +353,6 @@ export function buildApplyStageResourcePatchForCall(
   };
 }
 
-export function buildLinkDockedOrderForCall(
-  config: { readonly stateMachineAddress: Address; readonly chainId?: number },
-  prepared: PreparedDockedOrderLinkDTO,
-  signature: Hex
-): StateMachineDockedOrderLinkCall {
-  const link = {
-    selectorStageId: prepared.selectorStageId,
-    localSourceId: prepared.localSourceId,
-    linkedOrderId: prepared.linkedOrderId,
-    linkedPlanId: prepared.linkedPlanId,
-    linkHash: prepared.linkHash,
-    linkNonce: BigInt(prepared.linkNonce),
-    metadataURI: prepared.metadataURI,
-    signalBindings: prepared.signalBindings
-  } as const;
-  const args = [
-    prepared.onchainLocalOrderId,
-    link,
-    prepared.selectorWallet,
-    BigInt(prepared.deadline),
-    signature
-  ] as const;
-  return {
-    address: normalizeAddress(config.stateMachineAddress, "stateMachineAddress"),
-    abi: STATE_MACHINE_DOCKED_ORDER_LINK_ABI,
-    functionName: "linkDockedOrderFor",
-    args,
-    data: encodeFunctionData({
-      abi: STATE_MACHINE_DOCKED_ORDER_LINK_ABI,
-      functionName: "linkDockedOrderFor",
-      args
-    }),
-    ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
-  };
-}
-
 export function notSupportedStageExecutorPatchBroadcastAdapter(): StageExecutorPatchBroadcastAdapter {
   return {
     async broadcast() {
@@ -465,18 +377,6 @@ export function notSupportedStageResourcePatchBroadcastAdapter(): StageResourceP
   };
 }
 
-export function notSupportedDockedOrderLinkBroadcastAdapter(): DockedOrderLinkBroadcastAdapter {
-  return {
-    async broadcast() {
-      return {
-        status: "not_attempted",
-        errorCode: "broadcast_disabled",
-        reason: "UVPStateMachine docked order link relayer broadcast is not configured; the selector signature was verified but no chain transaction was sent"
-      };
-    }
-  };
-}
-
 interface ClassifiedBroadcastError {
   readonly errorCode: string;
   readonly message: string;
@@ -493,8 +393,7 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
   if (
     haystack.includes("InvalidStagePatchSignature") ||
     haystack.includes("InvalidStageExecutorPatchSignature") ||
-    haystack.includes("InvalidStageResourcePatchSignature") ||
-    haystack.includes("InvalidDockedOrderLinkSignature")
+    haystack.includes("InvalidStageResourcePatchSignature")
   ) {
     return {
       errorCode: labels.invalidSignatureError,
@@ -505,8 +404,7 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
   if (
     haystack.includes("StaleStagePatchNonce") ||
     haystack.includes("StaleStageExecutorPatchNonce") ||
-    haystack.includes("StaleStageResourcePatchNonce") ||
-    haystack.includes("DockedOrderLinkNonceNotIncreasing")
+    haystack.includes("StaleStageResourcePatchNonce")
   ) {
     return {
       errorCode: labels.staleNonceError,
@@ -517,7 +415,6 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
   if (
     haystack.includes("UnauthorizedSignalSubmitter") ||
     haystack.includes("UnauthorizedStageSelector") ||
-    haystack.includes("UnauthorizedDockedOrderLinkSelector") ||
     haystack.includes("UnauthorizedStageResourceSelector")
   ) {
     return {

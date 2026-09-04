@@ -103,8 +103,6 @@ export interface CreateApiRouterOptions {
   readonly stageResourcePatchBroadcastAdapter?: StageResourcePatchBroadcastAdapter;
   readonly stageResourcePatchChainId?: number;
   readonly stageResourcePatchVerifyingContract?: Address;
-  readonly dockedOrderLinkChainId?: number;
-  readonly dockedOrderLinkVerifyingContract?: Address;
   readonly productBffStore?: ProductBffStore;
   readonly productRegistrationAdapter?: ProductOrderTriggerBroadcastAdapter;
   readonly productTriggerAdapter?: ProductOrderTriggerBroadcastAdapter;

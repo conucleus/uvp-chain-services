@@ -37,24 +37,16 @@ import {
   textHash,
 } from "./typed-data.js";
 import {
-  notSupportedDockedOrderLinkBroadcastAdapter,
   notSupportedStageExecutorPatchBroadcastAdapter,
   notSupportedStageResourcePatchBroadcastAdapter,
 } from "./broadcast-adapter.js";
 import type {
-  DockedOrderLinkBroadcastAdapter,
-  DockedOrderLinkSubmissionDTO,
-  DockedSignalBindingDTO,
-  PrepareProductDockedOrderLinkInput,
   PrepareProductStageExecutorPatchInput,
   PrepareProductStageResourcePatchInput,
-  PreparedDockedOrderLinkDTO,
-  PreparedDockedOrderLinkRecord,
   PreparedStageExecutorPatchDTO,
   PreparedStageExecutorPatchRecord,
   PreparedStageResourcePatchDTO,
   PreparedStageResourcePatchRecord,
-  ProductDockedOrderLinkStore,
   ProductStageExecutorPatchStore,
   ProductStageResourcePatchStore,
   StageExecutorPatchMode,
@@ -64,7 +56,6 @@ import type {
   StagePatchBroadcastResult,
   StageResourcePatchBroadcastAdapter,
   StageResourcePatchSubmissionDTO,
-  SubmitProductDockedOrderLinkInput,
   SubmitProductStageExecutorPatchInput,
   SubmitProductStageResourcePatchInput,
 } from "./types.js";
@@ -1617,14 +1608,13 @@ function moduleAddressFor(
 }
 
 function stagePatchNonceKey(input: {
-  readonly kind: "executor" | "resource" | "docked_order_link";
+  readonly kind: "executor" | "resource";
   readonly chainId: number;
   readonly stateMachineAddress: Address;
   readonly orderId: Hex;
   readonly targetStageId: Hex;
   readonly targetSignalId?: Hex;
   readonly resourceKey?: Hex;
-  readonly linkedOrderId?: Hex;
   readonly patchNonce: string;
 }): string {
   return [
@@ -1635,7 +1625,6 @@ function stagePatchNonceKey(input: {
     input.targetStageId,
     input.targetSignalId ?? "",
     input.resourceKey ?? "",
-    input.linkedOrderId ?? "",
     input.patchNonce,
   ].join(":");
 }
@@ -1645,20 +1634,6 @@ function stageResourceOverlayProjectionKey(
   resourceKey: Hex,
 ): string {
   return `${targetStageId.toLowerCase()}:${resourceKey.toLowerCase()}`;
-}
-
-function dockedOrderLinkRecord(
-  order: StateMachineOrderProjection,
-): Readonly<Record<string, { readonly linkNonce: string }>> {
-  return (
-    (
-      order as StateMachineOrderProjection & {
-        readonly dockedOrderLinks?: Readonly<
-          Record<string, { readonly linkNonce: string }>
-        >;
-      }
-    ).dockedOrderLinks ?? {}
-  );
 }
 
 function validatePreparedForSubmit(
@@ -1725,8 +1700,7 @@ function prepareIdForSubmit(
 function validateSubmittedPreparedEnvelope<
   TPrepared extends
     | PreparedStageExecutorPatchDTO
-    | PreparedStageResourcePatchDTO
-    | PreparedDockedOrderLinkDTO,
+    | PreparedStageResourcePatchDTO,
 >(
   input: {
     readonly typedData?: unknown;
@@ -1846,18 +1820,6 @@ function resourceDtoFromPrepared(
   return dto;
 }
 
-function dockedDtoFromPrepared(
-  record: PreparedDockedOrderLinkRecord,
-): PreparedDockedOrderLinkDTO {
-  const {
-    nonceKey: _nonceKey,
-    usedAt: _usedAt,
-    submissionId: _submissionId,
-    ...dto
-  } = record;
-  return dto;
-}
-
 function expiredExecutorSubmission(
   prepared: PreparedStageExecutorPatchRecord,
   submissionId: string,
@@ -1931,32 +1893,6 @@ function expiredResourceSubmission(
   };
 }
 
-function expiredDockedSubmission(
-  prepared: PreparedDockedOrderLinkRecord,
-  submissionId: string,
-  timestamp: string,
-): DockedOrderLinkSubmissionDTO {
-  return {
-    ...dockedSubmissionCommon(prepared, {
-      submissionId,
-      createdAt: timestamp,
-    }),
-    status: "expired",
-    signatureStatus: "not_verified",
-    broadcastStatus: "not_attempted",
-    errorCode: "docked_order_link_expired",
-    errorMessage: "prepared docked order link deadline has expired",
-    retryable: false,
-    proofRows: proofRows({
-      label: "Docked order link status",
-      status: "expired",
-      selector: prepared.selectorWallet,
-      patchHash: prepared.linkHash,
-      errorCode: "docked_order_link_expired",
-    }),
-  };
-}
-
 function executorSubmissionFromBroadcast(
   prepared: PreparedStageExecutorPatchRecord,
   input: {
@@ -2011,34 +1947,10 @@ function resourceSubmissionFromBroadcast(
   );
 }
 
-function dockedSubmissionFromBroadcast(
-  prepared: PreparedDockedOrderLinkRecord,
-  input: {
-    readonly submissionId: string;
-    readonly signatureHash: Hex;
-    readonly recoveredSelector: Address;
-    readonly broadcast: StagePatchBroadcastResult;
-    readonly timestamp: string;
-  },
-): DockedOrderLinkSubmissionDTO {
-  const common = dockedSubmissionCommon(prepared, {
-    submissionId: input.submissionId,
-    signatureHash: input.signatureHash,
-    recoveredSelector: input.recoveredSelector,
-    createdAt: input.timestamp,
-  });
-  return submissionFromBroadcastCommon(
-    common,
-    input.broadcast,
-    "Docked order link status",
-  );
-}
-
 function submissionFromBroadcastCommon<
   TSubmission extends
     | StageExecutorPatchSubmissionDTO
-    | StageResourcePatchSubmissionDTO
-    | DockedOrderLinkSubmissionDTO,
+    | StageResourcePatchSubmissionDTO,
 >(
   common: Omit<
     TSubmission,
@@ -2205,44 +2117,6 @@ function resourceSubmissionCommon(
     patchHash: prepared.patchHash,
     patchNonce: prepared.patchNonce,
     manifestURI: prepared.manifestURI,
-    deadline: prepared.deadline,
-    ...(input.signatureHash ? { signatureHash: input.signatureHash } : {}),
-    ...(input.recoveredSelector
-      ? { recoveredSelector: input.recoveredSelector }
-      : {}),
-    createdAt: input.createdAt,
-    updatedAt: input.createdAt,
-  };
-}
-
-function dockedSubmissionCommon(
-  prepared: PreparedDockedOrderLinkRecord,
-  input: {
-    readonly submissionId: string;
-    readonly signatureHash?: Hex;
-    readonly recoveredSelector?: Address;
-    readonly createdAt: string;
-  },
-): Omit<
-  DockedOrderLinkSubmissionDTO,
-  "status" | "signatureStatus" | "broadcastStatus" | "retryable" | "proofRows"
-> {
-  return {
-    submissionId: input.submissionId,
-    prepareId: prepared.prepareId,
-    taskId: prepared.taskId,
-    localOrderId: prepared.localOrderId,
-    onchainLocalOrderId: prepared.onchainLocalOrderId,
-    stateMachineAddress: prepared.stateMachineAddress,
-    selectorStageId: prepared.selectorStageId,
-    localSourceId: prepared.localSourceId,
-    linkedOrderId: prepared.linkedOrderId,
-    linkedPlanId: prepared.linkedPlanId,
-    selectorWallet: prepared.selectorWallet,
-    linkHash: prepared.linkHash,
-    linkNonce: prepared.linkNonce,
-    metadataURI: prepared.metadataURI,
-    signalBindings: prepared.signalBindings,
     deadline: prepared.deadline,
     ...(input.signatureHash ? { signatureHash: input.signatureHash } : {}),
     ...(input.recoveredSelector

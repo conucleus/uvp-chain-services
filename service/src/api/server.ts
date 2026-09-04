@@ -28,10 +28,8 @@ import {
   type SubmissionBroadcastAdapter
 } from "../submissions/index.js";
 import {
-  createStateMachineDockedOrderLinkBroadcastAdapter,
   createStateMachineStageExecutorPatchBroadcastAdapter,
   createStateMachineStageResourcePatchBroadcastAdapter,
-  type DockedOrderLinkBroadcastAdapter,
   type StageExecutorPatchBroadcastAdapter,
   type StageResourcePatchBroadcastAdapter
 } from "../stage-patches/index.js";
@@ -99,8 +97,8 @@ export async function startApiServer(
       : {}),
     ...(notificationDispatcher ? { dispatcher: notificationDispatcher } : {})
   });
-  // Dock v2（PRD95 §11）：v1 的 docked-signal 自动化已随 linkDockedOrder 模型
-  // 删除；open/input/output keeper worker 属于 M4 后续交付。
+  // open/input/output 的 dock 活性自动化（PRD95 §18：keeper 只提供活性）
+  // 由 DockAutomationWorker 按显式 route source 承担。
   const indexer = eventSource
     ? new IndexerService({
       config,
@@ -643,31 +641,6 @@ function createConfiguredStageResourcePatchBroadcastAdapter(
     return undefined;
   }
   return createStateMachineStageResourcePatchBroadcastAdapter({
-    stateMachineAddress: stateMachine,
-    chainId: config.network.chainId,
-    rpcUrl: config.network.rpcUrl,
-    relayerPrivateKeyEnv: privateKeyEnv,
-    waitForReceipt: true,
-    rejectGasPayerAsSelector: config.security.environment !== "local",
-    receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
-  });
-}
-
-function createConfiguredDockedOrderLinkBroadcastAdapter(
-  config: ChainServicesConfig,
-  stateMachine: Address | undefined
-): DockedOrderLinkBroadcastAdapter | undefined {
-  if (!config.relayer.broadcastEnabled) {
-    return undefined;
-  }
-  if (!stateMachine) {
-    return undefined;
-  }
-  const privateKeyEnv = config.relayer.stateMachinePrivateKeyEnv;
-  if (!process.env[privateKeyEnv]?.trim()) {
-    return undefined;
-  }
-  return createStateMachineDockedOrderLinkBroadcastAdapter({
     stateMachineAddress: stateMachine,
     chainId: config.network.chainId,
     rpcUrl: config.network.rpcUrl,
