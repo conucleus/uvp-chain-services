@@ -92,9 +92,17 @@ export function createStoreListingsRouteModule(options: {
         }
 
         if (request.method === "GET" && action === "anchor-verification") {
+          // 公开目录之外的 listing 仅限运营方核验；否则泄露 listingId 后，
+          // 匿名调用者仍可读取 imported/rejected/delisted 的治理与链锚状态。
+          const detail = await options.listingService.getListing(listingId);
+          const access = await context.storeIdentityProvider.resolve(request.headers);
+          const isOperator = access.level === "store_operator" || access.level === "store_admin";
+          if (!isOperator && detail.listing.status !== "public") {
+            return { status: 404, body: { error: "listing_not_found" } };
+          }
           return {
             status: 200,
-            body: { anchorVerification: await options.listingService.verifyListing(listingId) }
+            body: { anchorVerification: detail.anchorVerification }
           };
         }
 

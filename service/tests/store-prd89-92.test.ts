@@ -369,6 +369,13 @@ describe("PRD89-92 store access domains", () => {
     expect(approved.status).toBe(200);
     expect((approved.body as { listing: { status: string } }).listing.status).toBe("public");
 
+    const publicAnchorVerification = await router.handle({
+      method: "GET",
+      pathname: `/store/listings/${listing.listing.listingId}/anchor-verification`
+    });
+    expect(publicAnchorVerification.status).toBe(200);
+    expect((publicAnchorVerification.body as { anchorVerification: { status: string } }).anchorVerification.status).toBe("consistent");
+
     // 目录可见（含该 zhixu）。
     const catalogBefore = await router.handle({ method: "GET", pathname: "/store/zhixus" });
     const zhixusBefore = (catalogBefore.body as { zhixus: { planId: string }[] }).zhixus;
@@ -403,6 +410,13 @@ describe("PRD89-92 store access domains", () => {
     });
     expect(detailAfter.status).toBe(200);
     expect((detailAfter.body as { storeOverlay?: { listing?: { status: string } } }).storeOverlay?.listing?.status).toBe("delisted");
+
+    const hiddenAnchorVerification = await router.handle({
+      method: "GET",
+      pathname: `/store/listings/${listing.listing.listingId}/anchor-verification`
+    });
+    expect(hiddenAnchorVerification.status).toBe(404);
+    expect(hiddenAnchorVerification.body).toMatchObject({ error: "listing_not_found" });
 
     // 运营方仍能在目录里看到（治理观察）。
     const operatorCatalog = await router.handle({
@@ -694,8 +708,17 @@ it("PRD89: revoking an anchored address immediately invalidates sessions for it"
       method: "GET",
       pathname: `/store/listings/${listing.listing.listingId}/anchor-verification`
     });
-    expect(verification.status).toBe(200);
-    expect((verification.body as { anchorVerification: { chainReadFailed?: boolean } }).anchorVerification.chainReadFailed).toBe(true);
+    expect(verification.status).toBe(404);
+    expect(verification.body).toMatchObject({ error: "listing_not_found" });
+
+    const operatorVerification = await router.handle({
+      method: "GET",
+      pathname: `/store/listings/${listing.listing.listingId}/anchor-verification`,
+      headers: storeOperatorHeaders
+    });
+    expect(operatorVerification.status).toBe(200);
+    expect((operatorVerification.body as { anchorVerification: { chainReadFailed?: boolean } }).anchorVerification.chainReadFailed).toBe(true);
+
     const publish = await router.handle({
       method: "POST",
       pathname: `/store/listings/${listing.listing.listingId}/review`,
