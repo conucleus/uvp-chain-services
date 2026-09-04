@@ -764,6 +764,59 @@ describe("stage executor/resource patch Product API", () => {
     expect(broadcastCalls).toBe(2);
   });
 
+  it("reopens the same prepare after a retryable broadcast result without txHash", async () => {
+    // U-008：failed(retryable=true) 代表尚未拿到链上交易，不能消费
+    // prepareId；第二次提交应复用原签名和 nonce，而不是 409。
+    let broadcastCalls = 0;
+    const broadcast: StageExecutorPatchBroadcastAdapter = {
+      broadcast: async (): Promise<StagePatchBroadcastResult> => {
+        broadcastCalls += 1;
+        return broadcastCalls === 1
+          ? {
+              status: "failed",
+              errorCode: "rpc_timeout",
+              message: "RPC request timed out",
+              retryable: true,
+            }
+          : { status: "submitted", txHash };
+      },
+    };
+    const { router } = await routerFixture({
+      executorBroadcastAdapter: broadcast,
+    });
+    const prepared = await prepareStageExecutorPatch(router);
+    const submitBody = {
+      prepareId: prepared.prepareId,
+      selectorWallet,
+      signature: await signExecutorPrepared(prepared),
+    };
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    })).resolves.toMatchObject({
+      status: 200,
+      body: {
+        status: "failed",
+        retryable: true,
+      },
+    });
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    })).resolves.toMatchObject({
+      status: 200,
+      body: {
+        status: "submitted",
+        txHash,
+      },
+    });
+    expect(broadcastCalls).toBe(2);
+  });
+
   it("releases the reserved patch nonce when the patch store write fails so the same prepareId stays retryable", async () => {
     // ETH-01：putSubmission/markPreparedUsed 失败同样必须释放 nonce。
     const innerBroadcast: StageExecutorPatchBroadcastAdapter = {

@@ -200,17 +200,18 @@ export class MemoryProjectionStore implements ProjectionStore {
   async listStateMachineOrders(): Promise<
     readonly StateMachineOrderProjection[]
   > {
-    return Object.values(this.#snapshot.stateMachineOrders);
+    return uniqueProjectionValues(this.#snapshot.stateMachineOrders);
   }
 
   async getStateMachineOrder(
     orderId: string,
   ): Promise<StateMachineOrderProjection | undefined> {
+    const orders = uniqueProjectionValues(this.#snapshot.stateMachineOrders);
     return (
       this.#snapshot.stateMachineOrders[orderId.toLowerCase()] ??
       this.#snapshot.stateMachineOrders[orderId] ??
       uniqueOrderByBareId(
-        Object.values(this.#snapshot.stateMachineOrders),
+        orders,
         orderId,
       )
     );
@@ -219,7 +220,7 @@ export class MemoryProjectionStore implements ProjectionStore {
   async findStateMachineOrdersByOrderId(
     orderId: string,
   ): Promise<readonly StateMachineOrderProjection[]> {
-    return Object.values(this.#snapshot.stateMachineOrders).filter(
+    return uniqueProjectionValues(this.#snapshot.stateMachineOrders).filter(
       (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
     );
   }
@@ -227,13 +228,18 @@ export class MemoryProjectionStore implements ProjectionStore {
   async listStateMachineTasks(): Promise<
     readonly StateMachineTaskProjection[]
   > {
-    return Object.values(this.#snapshot.stateMachineTasks);
+    return uniqueProjectionValues(this.#snapshot.stateMachineTasks);
   }
 
   async getStateMachineTask(
     taskId: string,
   ): Promise<StateMachineTaskProjection | undefined> {
-    return this.#snapshot.stateMachineTasks[taskId];
+    const normalizedTaskId = taskId.toLowerCase();
+    return (
+      this.#snapshot.stateMachineTasks[normalizedTaskId] ??
+      this.#snapshot.stateMachineTasks[taskId] ??
+      uniqueTaskByBareId(uniqueProjectionValues(this.#snapshot.stateMachineTasks), taskId)
+    );
   }
 
   async listIdentityBindings(
@@ -308,4 +314,17 @@ function uniqueOrderByBareId(
     (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
   );
   return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueTaskByBareId(
+  tasks: readonly StateMachineTaskProjection[],
+  taskId: string,
+): StateMachineTaskProjection | undefined {
+  const normalizedTaskId = taskId.toLowerCase();
+  const matches = tasks.filter((task) => task.taskId.toLowerCase() === normalizedTaskId);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueProjectionValues<TValue>(record: Readonly<Record<string, TValue>>): TValue[] {
+  return [...new Set(Object.values(record))];
 }

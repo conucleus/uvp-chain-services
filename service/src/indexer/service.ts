@@ -141,7 +141,10 @@ export class IndexerService implements LifecycleService {
         chainId: this.#config.network.chainId,
         deploymentBlock,
         nextBlock: deploymentBlock,
-        finalizedBlock
+        finalizedBlock,
+        ...(deploymentBlock > 0n
+          ? (await this.#cursorBlockHash(deploymentBlock - 1n) ?? {})
+          : {})
       };
       await this.#saveCursor();
       const syncState = await this.#store.saveSyncState({
@@ -322,7 +325,10 @@ export class IndexerService implements LifecycleService {
         chainId: this.#config.network.chainId,
         deploymentBlock,
         nextBlock: effectiveFromBlock,
-        finalizedBlock
+        finalizedBlock,
+        ...(effectiveFromBlock > 0n
+          ? (await this.#cursorBlockHash(effectiveFromBlock - 1n) ?? {})
+          : {})
       };
       await this.#saveCursor();
       const result = await this.#summarizeStoredProjection({
@@ -523,7 +529,9 @@ export class IndexerService implements LifecycleService {
     const deploymentBlock = this.#config.network.deploymentBlock;
     const storedEvents = await durableStore.listEvents({ chainId: this.#scope.chainId });
     const backtrackFloor = fromBlock > BigInt(MAX_REORG_BACKTRACK_BLOCKS)
-      ? fromBlock - BigInt(MAX_REORG_BACKTRACK_BLOCKS)
+      ? (fromBlock - BigInt(MAX_REORG_BACKTRACK_BLOCKS) > deploymentBlock
+        ? fromBlock - BigInt(MAX_REORG_BACKTRACK_BLOCKS)
+        : deploymentBlock)
       : deploymentBlock;
 
     // 从最新的带哈希事件向回找：第一个 canonical 哈希一致的块即共同祖先。
@@ -569,6 +577,7 @@ export class IndexerService implements LifecycleService {
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
       const replaySummary = buildActiveChainEventReplaySummary(remainingEvents);
+      const mismatchCount = countReplayAnomalies(remainingEvents);
       const existing = await durableStore.getSyncState(this.#scope).catch(() => undefined);
       await durableStore.saveSyncState({
         ...this.#scope,
@@ -585,12 +594,12 @@ export class IndexerService implements LifecycleService {
           deploymentBlock,
           fromBlock: deploymentBlock,
           toBlock: ancestorBlock,
-          eventCount: 0,
+          eventCount: replaySummary.activeEventCount,
           activeEventCount: replaySummary.activeEventCount,
           removedEventCount: 0,
           removedLogsFiltered: false,
           projectionRebuilt: true,
-          mismatchCount: 0
+          mismatchCount
         }
       });
       await durableStore.saveCursor({
@@ -625,6 +634,7 @@ export class IndexerService implements LifecycleService {
     const snapshot = await this.#store.getOrderSnapshot?.() ?? createEmptyProjectionSnapshot();
     const identitySnapshot = await this.#store.getIdentitySnapshot();
     const existing = await this.#store.getSyncState(this.#scope);
+    const mismatchCount = await this.#storedMismatchCount(existing);
     const syncState = await this.#store.saveSyncState({
       ...this.#scope,
       syncStatus: "indexed",
@@ -643,7 +653,7 @@ export class IndexerService implements LifecycleService {
         removedEventCount: 0,
         removedLogsFiltered: false,
         projectionRebuilt: snapshot.rebuildable,
-        mismatchCount: 0
+        mismatchCount
       }
     });
     return {
@@ -660,7 +670,7 @@ export class IndexerService implements LifecycleService {
         removedEventCount: 0,
         removedLogsFiltered: false,
         syncState,
-        mismatchCount: 0
+        mismatchCount
       })
     };
   }
@@ -720,6 +730,9 @@ export class IndexerService implements LifecycleService {
     const existing = await this.#store.getSyncState(this.#scope).catch(() => undefined);
     const effectiveFinalizedBlock =
       finalizedBlock ?? existing?.finalizedBlock ?? this.#cursor?.finalizedBlock ?? this.#config.network.deploymentBlock;
+    const effectiveMismatchCount = mismatchCount ??
+      existing?.rebuild?.mismatchCount ??
+      await this.#storedMismatchCount(existing);
     await this.#store.saveSyncState({
       ...this.#scope,
       syncStatus: "degraded",
@@ -740,10 +753,18 @@ export class IndexerService implements LifecycleService {
         removedEventCount: existing?.rebuild?.removedEventCount ?? 0,
         removedLogsFiltered: existing?.rebuild?.removedLogsFiltered ?? false,
         projectionRebuilt: false,
-        mismatchCount: mismatchCount ?? existing?.rebuild?.mismatchCount ?? 0
+        mismatchCount: effectiveMismatchCount
       },
       degradedReason: error instanceof Error ? error.message : "unknown indexer rebuild error"
     });
+  }
+
+  async #storedMismatchCount(existing?: ProjectionSyncState): Promise<number> {
+    if (isDurableProjectionStore(this.#store)) {
+      const events = await this.#store.listEvents({ chainId: this.#scope.chainId });
+      return countReplayAnomalies(events);
+    }
+    return existing?.rebuild?.mismatchCount ?? 0;
   }
 }
 
@@ -836,7 +857,9 @@ function summaryFromSnapshot(input: {
     removedEventCount: input.removedEventCount,
     removedLogsFiltered: input.removedLogsFiltered,
     projectionRebuilt: input.snapshot.rebuildable,
-    stateMachineOrderCount: Object.keys(input.snapshot.stateMachineOrders).length,
+    // Compatibility aliases may be present for the pre-plan key shape.  They
+    // point to the same object and must not inflate health/rebuild counts.
+    stateMachineOrderCount: new Set(Object.values(input.snapshot.stateMachineOrders)).size,
     identityBindingCount: input.identityBindingCount,
     mismatchCount: input.mismatchCount,
     syncStatus: input.syncState.syncStatus,

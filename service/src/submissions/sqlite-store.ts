@@ -61,17 +61,18 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     runSqliteWrite(() => {
       this.#database.prepare(
         `INSERT INTO submission (
-           prepare_id, submission_id, task_id, order_id, onchain_order_id, stage_identifier,
+           prepare_id, submission_id, task_id, order_id, onchain_order_id, plan_id, stage_identifier,
            signal_name, source_id, signal_id, intent, payload_hash, payload_ref,
            idempotency_key, submitter, nonce, deadline, status, prepared_json,
            submission_json, used_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(prepare_id)
          DO UPDATE SET
            submission_id = excluded.submission_id,
            task_id = excluded.task_id,
            order_id = excluded.order_id,
            onchain_order_id = excluded.onchain_order_id,
+           plan_id = excluded.plan_id,
            stage_identifier = excluded.stage_identifier,
            signal_name = excluded.signal_name,
            source_id = excluded.source_id,
@@ -94,6 +95,7 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
         record.taskId,
         record.orderId,
         record.onchainOrderId,
+        record.planId,
         record.stageIdentifier,
         record.signalName,
         record.sourceId,
@@ -117,7 +119,7 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
 
   async getPrepared(prepareId: string): Promise<PreparedSubmissionRecord | undefined> {
     const row = this.#database.prepare(
-      `SELECT prepared_json, used_at, submission_id
+      `SELECT prepared_json, plan_id, used_at, submission_id
        FROM submission
        WHERE prepare_id = ?`
     ).get(prepareId);
@@ -126,6 +128,7 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     }
     const record = rowObject(row, "submission prepared query");
     const prepared = parseStorageJson<PreparedSubmissionRecord>(stringColumn(record, "prepared_json"));
+    const relationalPlanId = optionalStringColumn(record, "plan_id");
     const usedAt = optionalStringColumn(record, "used_at");
     const submissionId = optionalStringColumn(record, "submission_id");
     // used 语义与内存 store 对齐：只有 markPreparedUsed 写入的 used_at 才
@@ -133,10 +136,13 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     // prepare 保持可复用；此时行上的 submission_id 只是落档提交的检索键，
     // 不得当作消费标记。
     if (usedAt === undefined) {
-      return prepared;
+      return relationalPlanId && !(prepared as PreparedSubmissionRecord & { readonly planId?: string }).planId
+        ? { ...prepared, planId: relationalPlanId as PreparedSubmissionRecord["planId"] }
+        : prepared;
     }
     return {
       ...prepared,
+      ...(!prepared.planId && relationalPlanId ? { planId: relationalPlanId as PreparedSubmissionRecord["planId"] } : {}),
       usedAt,
       ...(submissionId !== undefined ? { submissionId } : {})
     };
@@ -193,18 +199,19 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
         const createdAt = existingRecord ? stringColumn(existingRecord, "created_at") : submission.createdAt;
 
         this.#database.prepare(
-          `INSERT INTO submission (
-             prepare_id, submission_id, task_id, order_id, onchain_order_id, stage_identifier,
+        `INSERT INTO submission (
+             prepare_id, submission_id, task_id, order_id, onchain_order_id, plan_id, stage_identifier,
              signal_name, source_id, signal_id, intent, payload_hash, payload_ref,
              idempotency_key, submitter, nonce, deadline, status, prepared_json,
              submission_json, used_at, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(prepare_id)
            DO UPDATE SET
              submission_id = excluded.submission_id,
              task_id = excluded.task_id,
              order_id = excluded.order_id,
              onchain_order_id = excluded.onchain_order_id,
+             plan_id = excluded.plan_id,
              stage_identifier = excluded.stage_identifier,
              signal_name = excluded.signal_name,
              source_id = excluded.source_id,
@@ -227,6 +234,7 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
           submission.taskId,
           submission.orderId,
           submission.onchainOrderId,
+          submission.planId,
           submission.stageIdentifier,
           submission.signalName,
           submission.sourceId,
@@ -290,7 +298,7 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
 
   async getSubmission(submissionId: string): Promise<ProductSubmissionDTO | undefined> {
     const row = this.#database.prepare(
-      `SELECT submission_json
+      `SELECT submission_json, plan_id
        FROM submission
        WHERE submission_id = ?`
     ).get(submissionId);
@@ -299,6 +307,7 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     }
     const record = rowObject(row, "submission query");
     const stored = parseStorageJson<ProductSubmissionDTO>(stringColumn(record, "submission_json"));
+    const relationalPlanId = optionalStringColumn(record, "plan_id");
     const attempts = this.#database.prepare(
       `SELECT attempt_json
        FROM submission_attempt
@@ -311,6 +320,7 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     );
     return {
       ...stored,
+      ...(!stored.planId && relationalPlanId ? { planId: relationalPlanId as ProductSubmissionDTO["planId"] } : {}),
       attempts,
       attemptCount: attempts.length
     };
@@ -318,16 +328,20 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
 
   async listSubmissions(): Promise<readonly ProductSubmissionDTO[]> {
     const rows = this.#database.prepare(
-      `SELECT submission_id, submission_json
+      `SELECT submission_id, submission_json, plan_id
        FROM submission
        WHERE submission_id IS NOT NULL AND submission_json IS NOT NULL
        ORDER BY created_at ASC, submission_id ASC`
     ).all();
     const submissions = rows.map((row) => {
       const record = rowObject(row, "submission list query");
+      const stored = parseStorageJson<ProductSubmissionDTO>(stringColumn(record, "submission_json"));
+      const relationalPlanId = optionalStringColumn(record, "plan_id");
       return {
         submissionId: stringColumn(record, "submission_id"),
-        submission: parseStorageJson<ProductSubmissionDTO>(stringColumn(record, "submission_json"))
+        submission: !stored.planId && relationalPlanId
+          ? { ...stored, planId: relationalPlanId as ProductSubmissionDTO["planId"] }
+          : stored
       };
     });
     if (submissions.length === 0) {

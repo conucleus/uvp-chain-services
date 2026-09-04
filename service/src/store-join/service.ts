@@ -520,7 +520,7 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     application: StoreJoinApplicationRecord
   ): Promise<{ readonly txHash?: Hex } | undefined> {
     const snapshot = await projectionStore.getOrderSnapshot();
-    const orders = [...Object.values(snapshot.stateMachineOrders)]
+    const orders = [...new Set(Object.values(snapshot.stateMachineOrders))]
       .filter((order) => order.planId.toLowerCase() === application.planId.toLowerCase());
     for (const order of orders) {
       if (application.authorizationKind === "signal_submitter") {

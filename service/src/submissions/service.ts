@@ -319,13 +319,12 @@ export function createProductSubmissionService(options: ProductSubmissionService
         throw new ProductSubmissionError(409, "duplicate_submit", "submission nonce has already been used");
       }
 
-      // From here the nonce reservation is consumed. If the broadcast or the
-      // durable store write throws before any submission record exists, release
-      // the reservation and rethrow: nothing was broadcast and nothing was
-      // recorded, so the same prepareId must stay retryable instead of
-      // surfacing as a permanent 409 duplicate_submit on a transient RPC or
-      // store failure. A broadcast that *returns* a failed result is recorded
-      // as a failed submission and keeps the nonce consumed by design.
+      // From here the nonce reservation is held. If the broadcast or durable
+      // store write throws before a submission record exists, release it and
+      // rethrow. A returned retryable failure without a txHash is likewise a
+      // pre-broadcast observation: record the attempt, release the nonce, and
+      // leave the prepare reusable. Any result carrying a txHash keeps the
+      // reservation because the chain may already own that nonce.
       let submission: ProductSubmissionDTO;
       let broadcastSubmissionId: string | undefined;
       let broadcastTxHash: Hex | undefined;
@@ -350,8 +349,14 @@ export function createProductSubmissionService(options: ProductSubmissionService
         broadcastTxHash = submission.txHash;
         await withSubmissionStoreTransaction(store, async () => {
           await store.putSubmission(submission);
+          if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
+            return;
+          }
           await store.markPreparedUsed(prepared.prepareId, submissionId, submission.updatedAt);
         });
+        if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
+          await store.releaseNonce?.(nonceKey);
+        }
       } catch (error) {
         if (broadcastSubmissionId && broadcastTxHash) {
           // 广播已成功（拿到 txHash）但持久化失败：链上交易可能已占用
@@ -1004,7 +1009,11 @@ function defaultSubmissionReconcileFields(submission: ProductSubmissionDTO): TxR
       && submission.errorCode === "transaction_reverted";
     return {
       reconcileStatus: "failed",
-      receiptStatus: receiptVerifiedFailed ? "failed" : "not_checked",
+      receiptStatus: receiptVerifiedFailed
+        ? "failed"
+        : submission.txHash && submission.errorCode === "transaction_receipt_unknown"
+          ? "unknown"
+          : "not_checked",
       projectionStatus: "not_checked"
     };
   }
@@ -1047,6 +1056,7 @@ function submissionCommon(
     taskId: prepared.taskId,
     orderId: prepared.orderId,
     onchainOrderId: prepared.onchainOrderId,
+    planId: prepared.planId,
     stageIdentifier: prepared.stageIdentifier,
     signalName: prepared.signalName,
     sourceId: prepared.sourceId,

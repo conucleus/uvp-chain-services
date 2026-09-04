@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { keccak256, stringToBytes } from "viem";
+import { encodeAbiParameters, keccak256, stringToBytes } from "viem";
 import {
   AnvilProductOrderTriggerBroadcastAdapter,
   productSignalId,
@@ -21,7 +21,11 @@ const triggerHookId = productSignalId("v0.8.create-order.trigger");
 const triggerStageId = productSignalSourceId("v0.8.create-order.stage");
 const sourceId = productSignalSourceId("order");
 const signalId = productSignalId("registered");
-const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,address)")) as Hex;
+const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,address)")) as Hex;
+const signalSubmittedData = encodeAbiParameters(
+  [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }, { type: "address" }],
+  [signalId, payloadHash, idempotencyKey, registrarAddress]
+);
 
 describe("Product BFF trigger broadcast adapter", () => {
   it("submits signed trigger order and confirms the trigger signal", async () => {
@@ -37,7 +41,8 @@ describe("Product BFF trigger broadcast adapter", () => {
         blockNumber: 12n,
         logs: [{
           address: stateMachineAddress,
-          topics: [signalSubmittedTopic, orderId, sourceId, signalId]
+          topics: [signalSubmittedTopic, planId, orderId, sourceId],
+          data: signalSubmittedData
         }]
       }))
     };
@@ -110,7 +115,7 @@ describe("Product BFF trigger broadcast adapter", () => {
     expect(result).toMatchObject({
       status: "failed",
       errorCode: "trigger_order_reverted",
-      retryable: true
+      retryable: false
     });
     expect(walletClient.writeContract).toHaveBeenCalledTimes(1);
     expect(publicClient.waitForTransactionReceipt).toHaveBeenCalledWith({ hash: startTxHash });
@@ -149,10 +154,84 @@ describe("Product BFF trigger broadcast adapter", () => {
     });
 
     expect(result).toMatchObject({
-      status: "failed",
-      errorCode: "trigger_order_broadcast_failed",
+      status: "indexing",
+      errorCode: "transaction_receipt_unknown",
       txHash: startTxHash,
       retryable: true
+    });
+  });
+
+  it("keeps an unknown receipt in indexing instead of claiming success or revert", async () => {
+    const walletClient: ProductTriggerBroadcastWalletClient = {
+      account: { address: registrarAddress },
+      writeContract: vi.fn(async () => startTxHash)
+    };
+    const publicClient: ProductTriggerBroadcastPublicClient = {
+      waitForTransactionReceipt: vi.fn(async () => ({
+        status: "pending",
+        logs: []
+      }))
+    };
+    const adapter = adapterWithClients(publicClient, walletClient);
+
+    await expect(adapter.broadcastOutsideTrigger({
+      draftId: "draft_1",
+      triggerId: "trigger_1",
+      orderId,
+      planId,
+      creator: registrarAddress,
+      triggerHookId,
+      triggerStageId,
+      sourceId,
+      signalId,
+      stateMachineAddress,
+      payloadHash,
+      idempotencyKey,
+      authorizations: [],
+      submitter: registrarAddress,
+      deadline: "9999999999",
+      signature
+    })).resolves.toMatchObject({
+      status: "indexing",
+      txHash: startTxHash,
+      errorCode: "transaction_receipt_unknown",
+      retryable: true
+    });
+  });
+
+  it("marks deterministic write reverts non-retryable", async () => {
+    const walletClient: ProductTriggerBroadcastWalletClient = {
+      account: { address: registrarAddress },
+      writeContract: vi.fn(async () => {
+        throw new Error("execution reverted: UnknownOrder");
+      })
+    };
+    const publicClient: ProductTriggerBroadcastPublicClient = {
+      waitForTransactionReceipt: vi.fn()
+    };
+    const adapter = adapterWithClients(publicClient, walletClient);
+
+    await expect(adapter.broadcastOutsideTrigger({
+      draftId: "draft_1",
+      triggerId: "trigger_1",
+      orderId,
+      planId,
+      creator: registrarAddress,
+      triggerHookId,
+      triggerStageId,
+      sourceId,
+      signalId,
+      stateMachineAddress,
+      payloadHash,
+      idempotencyKey,
+      authorizations: [],
+      submitter: registrarAddress,
+      deadline: "9999999999",
+      signature
+    })).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "trigger_order_reverted",
+      retryable: false
     });
   });
 });

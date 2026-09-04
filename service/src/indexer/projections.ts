@@ -254,6 +254,13 @@ export interface StateMachineTaskProjection {
   readonly taskId: string;
   readonly orderId: Hex;
   readonly stateMachineAddress: Address;
+  /**
+   * The task id remains an API-facing hook/order identifier for compatibility,
+   * but the projection itself is plan-scoped.  Keeping the plan id on the
+   * flattened row lets consumers join a task back to the right order when two
+   * plans intentionally reuse the same orderId and hookId.
+   */
+  readonly planId?: Hex;
   readonly deploymentId?: Hex;
   readonly hookId: Hex;
   readonly stageIdentifier: Hex;
@@ -498,6 +505,8 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
       outputDeliveries: { ...dock.outputDeliveries }
     };
   }
+  const legacyOrderCandidates = new Map<string, StateMachineOrderProjection[]>();
+  const legacyTaskCandidates = new Map<string, StateMachineTaskProjection[]>();
   for (const [orderId, order] of stateMachineOrders) {
     const readonlyTasks: Record<string, StateMachineTaskProjection> = {};
     for (const [taskId, task] of Object.entries(order.tasks)) {
@@ -506,9 +515,18 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
         ...(task.submitSignals ? { submitSignals: [...task.submitSignals] } : {})
       };
       readonlyTasks[taskId] = readonlyTask;
-      stateMachineTaskRecord[taskId] = readonlyTask;
+      stateMachineTaskRecord[stateMachineTaskProjectionKey(
+        order.chainId,
+        order.contractAddress,
+        order.planId,
+        order.orderId,
+        task.hookId
+      )] = readonlyTask;
+      const taskCandidates = legacyTaskCandidates.get(task.taskId) ?? [];
+      taskCandidates.push(readonlyTask);
+      legacyTaskCandidates.set(task.taskId, taskCandidates);
     }
-    stateMachineOrderRecord[orderId] = {
+    const readonlyOrder = {
       ...order,
       authorizations: { ...order.authorizations },
       signals: { ...order.signals },
@@ -520,7 +538,53 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
       timeline: [...order.timeline].sort(compareTimelineEvents),
       proof: [...order.proof].sort(compareProofEvents)
     };
+    stateMachineOrderRecord[orderId] = readonlyOrder;
+    const legacyKey = stateMachineScopedKey(order.chainId, order.contractAddress, order.orderId);
+    const orderCandidates = legacyOrderCandidates.get(legacyKey) ?? [];
+    orderCandidates.push(readonlyOrder);
+    legacyOrderCandidates.set(legacyKey, orderCandidates);
   }
+
+  // Keep the old direct lookup shape only when it is unambiguous.  The aliases
+  // are compatibility entries for callers that used the pre-plan key shape;
+  // all storage/list paths deduplicate by object identity, and a reused bare
+  // id can never silently overwrite its sibling.
+  for (const [legacyKey, candidates] of legacyOrderCandidates) {
+    if (candidates.length === 1) {
+      const order = candidates[0];
+      if (order) {
+        hideFromEnumeration(
+          stateMachineOrderRecord,
+          stateMachineOrderProjectionKey(order.chainId, order.contractAddress, order.planId, order.orderId),
+        );
+      }
+      defineCompatibilityAlias(stateMachineOrderRecord, legacyKey, order);
+    }
+  }
+  for (const [legacyKey, candidates] of legacyTaskCandidates) {
+    if (candidates.length === 1) {
+      const task = candidates[0];
+      if (task) {
+        hideFromEnumeration(
+          stateMachineTaskRecord,
+          stateMachineTaskProjectionKey(
+            task.createdAt.chainId,
+            task.stateMachineAddress,
+            task.planId ?? ZERO_BYTES32,
+            task.orderId,
+            task.hookId,
+          ),
+        );
+      }
+      defineCompatibilityAlias(stateMachineTaskRecord, legacyKey, task);
+    }
+  }
+  // Snapshot consumers from older releases still enumerate the compatibility
+  // key, while durable JSON must always carry the canonical composite key.
+  // `toJSON` gives storage a canonical view without changing the read-time
+  // compatibility behavior above.
+  defineCanonicalSerialization(stateMachineOrderRecord, stateMachineOrders);
+  defineCanonicalSerialization(stateMachineTaskRecord, stateMachineTasksFromOrders(stateMachineOrders));
 
   return {
     rebuildable: true,
@@ -978,7 +1042,8 @@ function applySignalSubmitterAuthorized(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const sourceId = requiredBytes32Arg(event, "sourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
   const submitter = requiredAddressArg(event, "submitter");
@@ -1008,7 +1073,8 @@ function applySignalSubmitted(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const sourceId = requiredBytes32Arg(event, "sourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
   const submitter = requiredAddressArg(event, "submitter");
@@ -1038,7 +1104,8 @@ function applyStageMaterialized(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const stageId = requiredBytes32Arg(event, "stageId");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash });
   order.currentStage = stageId;
@@ -1096,6 +1163,7 @@ function applyOrderLinked(
   const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
   const originSourceId = requiredBytes32Arg(event, "originSourceId");
   const originSignalId = requiredBytes32Arg(event, "originSignalId");
+  const planId = optionalBytes32Arg(event, "planId");
   // P0 幻影订单：OrderLinked 由 UVPOrderLinkModule 发出，先归一化到所属
   // 状态机地址再做部署归属与建桶。
   const stateMachineAddress = stateMachineAddressForOrderEvent(state, event);
@@ -1103,7 +1171,7 @@ function applyOrderLinked(
     state.orders,
     event,
     triggeredOrderId,
-    undefined,
+    planId,
     findDeploymentByStateMachine(state.deployments, event.chainId, stateMachineAddress)?.deploymentId,
     stateMachineAddress
   );
@@ -1142,8 +1210,9 @@ function applyStageExecutorPatchApplied(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
+  const planId = optionalBytes32Arg(event, "planId");
   // P0 幻影订单：StageExecutorPatchApplied 由 UVPStagePatchModule 发出。
-  const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId);
+  const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId, planId);
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
   const selectorWallet = requiredAddressArg(event, "selector");
@@ -1197,8 +1266,9 @@ function applyStageResourcePatchApplied(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
+  const planId = optionalBytes32Arg(event, "planId");
   // P0 幻影订单：StageResourcePatchApplied 由 UVPStagePatchModule 发出。
-  const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId);
+  const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId, planId);
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
   const resourceKey = requiredBytes32Arg(event, "resourceKey");
@@ -1240,7 +1310,8 @@ function applyStageExecutorActivated(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
   const executor = requiredAddressArg(event, "executor");
   const patchNonce = uintArgAsString(event, "patchNonce");
@@ -1519,8 +1590,9 @@ function applyDerivedSignalSubmitted(
   event: ChainEvent
 ): void {
   const targetOrderId = requiredBytes32Arg(event, "targetOrderId");
+  const planId = optionalBytes32Arg(event, "targetPlanId") ?? optionalBytes32Arg(event, "planId");
   // P0 幻影订单：DerivedSignalSubmitted 由 UVPDerivedSignalModule 发出。
-  const order = ensureStateMachineOrderFromModuleEvent(state, event, targetOrderId);
+  const order = ensureStateMachineOrderFromModuleEvent(state, event, targetOrderId, planId);
   const proof = proofOf(event, {
     orderId: targetOrderId,
     planId: order.planId,
@@ -1540,7 +1612,8 @@ function applyHookStatusChanged(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const hookId = requiredBytes32Arg(event, "hookId");
   const hookStatus = hookStatusFromArg(event.args["newStatus"]);
   const dueAt = optionalUintArgAsString(event, "dueAt");
@@ -1571,7 +1644,8 @@ function applyHookReady(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const hookId = requiredBytes32Arg(event, "hookId");
   const stageIdentifier = requiredBytes32Arg(event, "stageId");
   const hookName = requiredBytes32Arg(event, "hookName");
@@ -1603,6 +1677,7 @@ function applyHookReady(
     taskId,
     orderId,
     stateMachineAddress: order.contractAddress,
+    planId: order.planId,
     ...(order.deploymentId ? { deploymentId: order.deploymentId } : {}),
     hookId,
     stageIdentifier,
@@ -1640,7 +1715,8 @@ function applyTimerPoked(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const hookId = requiredBytes32Arg(event, "hookId");
   const dueAt = optionalUintArgAsString(event, "dueAt");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash });
@@ -1668,11 +1744,57 @@ function ensureStateMachineOrder(
   bucketStateMachineAddress?: Address
 ): MutableStateMachineOrderProjection {
   const contractAddress = bucketStateMachineAddress ?? event.contractAddress;
-  const orderKey = stateMachineScopedKey(event.chainId, contractAddress, orderId);
-  const existing = orders.get(orderKey);
+  const normalizedContractAddress = contractAddress.toLowerCase() as Address;
+  const candidates = [...orders.values()].filter((candidate) =>
+    candidate.chainId === event.chainId &&
+    candidate.contractAddress.toLowerCase() === normalizedContractAddress &&
+    candidate.orderId.toLowerCase() === orderId.toLowerCase()
+  );
+  const explicitPlanId = planId;
+  const orderKey = stateMachineOrderProjectionKey(
+    event.chainId,
+    normalizedContractAddress,
+    explicitPlanId ?? ZERO_BYTES32,
+    orderId
+  );
+  let existing = explicitPlanId ? orders.get(orderKey) : undefined;
+
+  if (!existing && explicitPlanId) {
+    const unknown = candidates.filter((candidate) => candidate.planId === ZERO_BYTES32);
+    if (unknown.length > 1) {
+      throw new ProjectionError(
+        `${event.eventName} has multiple unknown projections for ${normalizedContractAddress}:${orderId}; planId is required`
+      );
+    }
+    const unknownOrder = unknown[0];
+    if (unknownOrder) {
+      const unknownKey = stateMachineOrderProjectionKey(
+        event.chainId,
+        normalizedContractAddress,
+        ZERO_BYTES32,
+        orderId
+      );
+      orders.delete(unknownKey);
+      unknownOrder.planId = explicitPlanId;
+      existing = unknownOrder;
+      orders.set(orderKey, existing);
+    }
+  }
+
+  if (!existing && !explicitPlanId) {
+    if (candidates.length > 1) {
+      throw new ProjectionError(
+        `${event.eventName} has ambiguous order ${orderId}; planId is required`
+      );
+    }
+    existing = candidates[0];
+  }
+
   if (existing) {
-    if (planId && existing.planId === ZERO_BYTES32) {
-      existing.planId = planId;
+    if (explicitPlanId && existing.planId !== explicitPlanId) {
+      throw new ProjectionError(
+        `${event.eventName} order ${orderId} belongs to plan ${existing.planId}, not ${explicitPlanId}`
+      );
     }
     if (deploymentId && !existing.deploymentId) {
       existing.deploymentId = deploymentId;
@@ -1988,6 +2110,31 @@ function taskProjectionId(orderId: Hex, hookId: Hex, stateMachineAddress?: Addre
   return stateMachineAddress ? `${stateMachineAddress}:${orderId}:${hookId}` : `${orderId}:${hookId}`;
 }
 
+/**
+ * Canonical identity for an order projection.  `orderId` is only unique inside
+ * a plan, so every storage/read path must use this four-part key when it has
+ * plan context available.
+ */
+export function stateMachineOrderProjectionKey(
+  chainId: number,
+  stateMachineAddress: Address,
+  planId: Hex,
+  orderId: Hex
+): string {
+  return `${chainId}:${stateMachineAddress.toLowerCase()}:${planId.toLowerCase()}:${orderId.toLowerCase()}`;
+}
+
+/** Canonical identity for a task projection under a plan-scoped order. */
+export function stateMachineTaskProjectionKey(
+  chainId: number,
+  stateMachineAddress: Address,
+  planId: Hex,
+  orderId: Hex,
+  hookId: Hex
+): string {
+  return `${stateMachineOrderProjectionKey(chainId, stateMachineAddress, planId, orderId)}:${hookId.toLowerCase()}`;
+}
+
 function signalProjectionKey(sourceId: Hex, signalId: Hex): string {
   return `${sourceId}:${signalId}`;
 }
@@ -2063,8 +2210,84 @@ function authorizationMatchesSubmitSignals(
   );
 }
 
-export function stateMachineScopedKey(chainId: number, stateMachineAddress: Address, id: Hex): string {
-  return `${chainId}:${stateMachineAddress.toLowerCase()}:${id.toLowerCase()}`;
+/**
+ * Legacy three-part scope key used by plans/modules/docks.  The four-argument
+ * overload is provided for order callers so new code can use one familiar
+ * helper without changing existing plan/module keys.
+ */
+export function stateMachineScopedKey(chainId: number, stateMachineAddress: Address, id: Hex): string;
+export function stateMachineScopedKey(
+  chainId: number,
+  stateMachineAddress: Address,
+  planId: Hex,
+  orderId: Hex,
+): string;
+export function stateMachineScopedKey(
+  chainId: number,
+  stateMachineAddress: Address,
+  idOrPlanId: Hex,
+  orderId?: Hex,
+): string {
+  return orderId === undefined
+    ? `${chainId}:${stateMachineAddress.toLowerCase()}:${idOrPlanId.toLowerCase()}`
+    : stateMachineOrderProjectionKey(chainId, stateMachineAddress, idOrPlanId, orderId);
+}
+
+function defineCompatibilityAlias<TValue>(
+  record: Record<string, TValue>,
+  key: string,
+  value: TValue | undefined
+): void {
+  if (value === undefined || Object.prototype.hasOwnProperty.call(record, key)) {
+    return;
+  }
+  Object.defineProperty(record, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: false
+  });
+}
+
+function hideFromEnumeration<TValue>(record: Record<string, TValue>, key: string): void {
+  if (!Object.prototype.hasOwnProperty.call(record, key)) {
+    return;
+  }
+  Object.defineProperty(record, key, { enumerable: false });
+}
+
+function defineCanonicalSerialization<TValue>(
+  record: Record<string, TValue>,
+  canonicalValues: ReadonlyMap<string, TValue>,
+): void {
+  const canonicalRecord = Object.fromEntries(canonicalValues);
+  Object.defineProperty(record, "toJSON", {
+    configurable: true,
+    enumerable: false,
+    value: () => canonicalRecord,
+    writable: false,
+  });
+}
+
+function stateMachineTasksFromOrders(
+  orders: ReadonlyMap<string, MutableStateMachineOrderProjection>,
+): ReadonlyMap<string, StateMachineTaskProjection> {
+  const tasks = new Map<string, StateMachineTaskProjection>();
+  for (const order of orders.values()) {
+    for (const task of Object.values(order.tasks)) {
+      tasks.set(
+        stateMachineTaskProjectionKey(
+          order.chainId,
+          order.contractAddress,
+          order.planId,
+          order.orderId,
+          task.hookId,
+        ),
+        task,
+      );
+    }
+  }
+  return tasks;
 }
 
 function deploymentProjectionKey(chainId: number, registryAddress: Address, deploymentId: Hex): string {

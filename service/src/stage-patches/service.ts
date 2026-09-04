@@ -451,6 +451,16 @@ export function createProductStageExecutorPatchService(
           timestamp,
         });
         await stageExecutorPatchStore.putSubmission(submission);
+        // A retryable failure without a transaction hash means the relayer
+        // never obtained a chain transaction. Keep the prepare reusable and
+        // release the reservation after recording the attempt. A retryable
+        // result that carries a txHash is different: the chain may already
+        // own the nonce, so it remains consumed and is reconciled instead of
+        // being broadcast a second time.
+        if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
+          await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
+          return submission;
+        }
         await stageExecutorPatchStore.markPreparedUsed(
           prepared.prepareId,
           submission.submissionId,
@@ -684,6 +694,12 @@ export function createProductStageResourcePatchService(
           timestamp,
         });
         await stageResourcePatchStore.putSubmission(submission);
+        // See the executor-patch path above: only a retryable failure with no
+        // txHash is safe to reopen for the same prepareId.
+        if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
+          await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
+          return submission;
+        }
         await stageResourcePatchStore.markPreparedUsed(
           prepared.prepareId,
           submission.submissionId,

@@ -4,7 +4,8 @@ import {
   defineChain,
   http,
   keccak256,
-  stringToBytes
+  stringToBytes,
+  decodeAbiParameters
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
@@ -15,7 +16,9 @@ import { ConfigError, normalizeAddress, type Address, type Hex } from "../../sha
 import type { ProductOrderTriggerStatus, SignalAuthorizationDTO } from "./types.js";
 
 export const DEFAULT_PRODUCT_REGISTRAR_ADDRESS = "0x000000000000000000000000000000000000bff1" as const;
-const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,address)"));
+// UVPStateMachine v0.9: planId/orderId/sourceId are indexed; signalId is the
+// first value in the data payload (not a fourth topic).
+const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,address)"));
 
 export function productSignalSourceId(source: string): Hex {
   return keccak256(stringToBytes(source)) as Hex;
@@ -112,16 +115,17 @@ export interface AnvilProductTriggerBroadcastAdapterOptions {
 export interface ProductTriggerBroadcastReceiptLog {
   readonly address?: Address;
   readonly topics: readonly Hex[];
+  readonly data?: Hex;
 }
 
 export interface ProductTriggerBroadcastReceipt {
   readonly status?: "success" | "reverted" | "failed" | string;
-  readonly blockNumber: bigint;
+  readonly blockNumber?: bigint;
   readonly logs: readonly ProductTriggerBroadcastReceiptLog[];
 }
 
 export interface ProductTriggerBroadcastPublicClient {
-  waitForTransactionReceipt(parameters: { readonly hash: Hex; readonly timeout?: number }): Promise<ProductTriggerBroadcastReceipt>;
+  waitForTransactionReceipt(parameters: { readonly hash: Hex; readonly timeout?: number }): Promise<ProductTriggerBroadcastReceipt | undefined>;
 }
 
 export interface ProductTriggerBroadcastWalletClient {
@@ -197,37 +201,53 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
         };
       }
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-      if (receipt.status === "success" && hasSignalSubmittedEvent(receipt.logs, input.orderId, input.sourceId, input.signalId)) {
+      if (receipt?.status === "success" && hasSignalSubmittedEvent(receipt.logs, input.planId, input.orderId, input.sourceId, input.signalId)) {
         return {
           status: "confirmed",
           txHash,
-          blockNumber: receipt.blockNumber.toString(),
+          ...(receipt.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
           retryable: false
         };
       }
-      if (receipt.status === "success") {
+      if (receipt?.status === "success") {
         return {
           status: "indexing",
           txHash,
-          blockNumber: receipt.blockNumber.toString(),
+          ...(receipt.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
           retryable: false
         };
       }
+      if (receipt?.status === "reverted" || receipt?.status === "failed") {
+        return {
+          status: "failed",
+          txHash,
+          ...(receipt.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
+          errorCode: "trigger_order_reverted",
+          errorMessage: `triggerOrderFromOutsideFor transaction receipt status ${receipt.status}`,
+          retryable: false
+        };
+      }
+      // A missing receipt or an RPC/client-specific status is neither a
+      // success nor a deterministic revert. Keep the known tx in indexing so
+      // reconcile can probe it later; callers must not rebroadcast it.
       return {
-        status: "failed",
+        status: "indexing",
         txHash,
-        blockNumber: receipt.blockNumber.toString(),
-        errorCode: "trigger_order_reverted",
-        errorMessage: `triggerOrderFromOutsideFor transaction receipt status ${receipt.status}`,
+        ...(receipt?.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
+        errorCode: "transaction_receipt_unknown",
+        errorMessage: "trigger transaction receipt is missing or has an unknown status",
         retryable: true
       };
     } catch (error) {
+      const classified = classifyProductTriggerBroadcastError(error);
       return {
-        status: "failed",
+        status: txHash && classified.retryable ? "indexing" : "failed",
         ...(txHash ? { txHash } : {}),
-        errorCode: "trigger_order_broadcast_failed",
-        errorMessage: error instanceof Error ? error.message : "triggerOrderFromOutsideFor broadcast failed",
-        retryable: true
+        errorCode: txHash && classified.retryable ? "transaction_receipt_unknown" : classified.errorCode,
+        errorMessage: txHash && classified.retryable
+          ? "trigger transaction receipt could not be verified"
+          : classified.message,
+        retryable: classified.retryable
       };
     }
   }
@@ -269,18 +289,71 @@ function normalizePrivateKey(value: Hex | string, fieldName: string): Hex {
 }
 
 function hasSignalSubmittedEvent(
-  logs: readonly { readonly topics: readonly Hex[] }[],
+  logs: readonly ProductTriggerBroadcastReceiptLog[],
+  planId: Hex,
   orderId: Hex,
   sourceId: Hex,
   signalId: Hex
 ): boolean {
+  const normalizedPlanId = planId.toLowerCase();
   const normalizedOrderId = orderId.toLowerCase();
   return logs.some((log) =>
     log.topics[0]?.toLowerCase() === signalSubmittedTopic &&
-    log.topics[1]?.toLowerCase() === normalizedOrderId &&
-    log.topics[2]?.toLowerCase() === sourceId.toLowerCase() &&
-    log.topics[3]?.toLowerCase() === signalId.toLowerCase()
+    log.topics[1]?.toLowerCase() === normalizedPlanId &&
+    log.topics[2]?.toLowerCase() === normalizedOrderId &&
+    log.topics[3]?.toLowerCase() === sourceId.toLowerCase() &&
+    signalIdFromEventData(log.data) === signalId.toLowerCase()
   );
+}
+
+function signalIdFromEventData(data: Hex | undefined): string | undefined {
+  if (!data) {
+    return undefined;
+  }
+  try {
+    const [signalId] = decodeAbiParameters(
+      [
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "address" }
+      ],
+      data
+    );
+    return typeof signalId === "string" ? signalId.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface ClassifiedProductTriggerBroadcastError {
+  readonly errorCode: string;
+  readonly message: string;
+  readonly retryable: boolean;
+}
+
+function classifyProductTriggerBroadcastError(error: unknown): ClassifiedProductTriggerBroadcastError {
+  const message = error instanceof Error ? error.message : "triggerOrderFromOutsideFor broadcast failed";
+  const haystack = `${error instanceof Error ? error.name : ""} ${message}`;
+  if (/revert|invalid|expired|deadline|unknown.?order|already.?exists|unauthori[sz]ed|signature/i.test(haystack)) {
+    return {
+      errorCode: "trigger_order_reverted",
+      message: "triggerOrderFromOutsideFor transaction was rejected deterministically",
+      retryable: false
+    };
+  }
+  if (/timeout|timed out|ETIMEDOUT|AbortError|ECONNRESET|network|socket|transport/i.test(haystack)) {
+    return {
+      errorCode: "trigger_order_broadcast_failed",
+      message,
+      retryable: true
+    };
+  }
+  return {
+    errorCode: "trigger_order_broadcast_failed",
+    message,
+    retryable: true
+  };
 }
 
 export type ProductOrderTriggerResult = ProductOrderTriggerBroadcastResult;

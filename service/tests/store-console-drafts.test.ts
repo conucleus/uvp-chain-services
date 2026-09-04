@@ -54,10 +54,20 @@ spec:
   nucleation:
     id: store-draft
   taskPatterns:
+    - name: selector
+      stages:
+        - name: gate
+          source: buyer
+          sendSignals: ["ready"]
+          executor:
+            supplierType: organization
+            supplierID: selector-ops
     - name: order
       stages:
         - name: intake
           source: buyer
+          receiveSignals:
+            START: "buyer::selector.gate.ready"
           sendSignals: ["cmp"]
           executor:
             supplierType: organization
@@ -139,8 +149,8 @@ describe("Store Zhixu draft workflow", () => {
       planHash: expect.stringMatching(/^0x[0-9a-f]{64}$/),
       artifactHash: expect.stringMatching(/^0x[0-9a-f]{64}$/),
       canonicalArtifactHash: first.compilePreview?.artifactHash,
-      stageCount: 1,
-      roleSlotCount: 1
+      stageCount: 2,
+      roleSlotCount: 2
     });
 
     const manifest = compileZhixuOnchainHookPlan(parseZhixuDefinition(validZhixuYaml, "store-draft.yaml"));

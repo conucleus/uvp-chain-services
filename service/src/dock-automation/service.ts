@@ -247,7 +247,7 @@ export class DockAutomationWorker implements LifecycleService {
     planId: Hex,
     orderId: Hex
   ) {
-    return Object.values(snapshot.stateMachineOrders).find(
+    return [...new Set(Object.values(snapshot.stateMachineOrders))].find(
       (candidate) =>
         candidate.chainId === this.#chainId &&
         candidate.planId.toLowerCase() === planId.toLowerCase() &&

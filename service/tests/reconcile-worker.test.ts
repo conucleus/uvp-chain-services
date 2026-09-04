@@ -40,7 +40,8 @@ describe("tx/indexer reconcile worker", () => {
       status: "submitted",
       reconcileStatus: "submitted",
       receiptStatus: "missing",
-      projectionStatus: "not_checked"
+      projectionStatus: "not_checked",
+      retryable: true
     });
 
     receipts.set(txHash, { status: "success", blockNumber: 10n });
@@ -110,12 +111,15 @@ describe("tx/indexer reconcile worker", () => {
     const submissionStore = new InMemoryProductSubmissionStore();
     const successTx = bytes32("bbbb");
     const failedTx = bytes32("cccc");
+    const unknownTx = bytes32("dddd");
     const receipts = new Map<Hex, ReconcileReceipt | undefined>([
       [successTx, { status: "success", blockNumber: 20n }],
-      [failedTx, { status: "reverted", blockNumber: 21n }]
+      [failedTx, { status: "reverted", blockNumber: 21n }],
+      [unknownTx, { status: "pending", blockNumber: 22n }]
     ]);
     await submissionStore.putSubmission(submissionFixture({ submissionId: "sub_success", txHash: successTx }));
     await submissionStore.putSubmission(submissionFixture({ submissionId: "sub_failed", txHash: failedTx }));
+    await submissionStore.putSubmission(submissionFixture({ submissionId: "sub_unknown", txHash: unknownTx }));
     const worker = workerFixture({ projectionStore, submissionStore, receipts });
 
     await worker.runOnce();
@@ -132,10 +136,19 @@ describe("tx/indexer reconcile worker", () => {
       errorCode: "transaction_reverted",
       receiptStatus: "failed"
     });
+    await expect(submissionStore.getSubmission("sub_unknown")).resolves.toMatchObject({
+      status: "submitted",
+      blockNumber: "22",
+      receiptStatus: "unknown",
+      reconcileStatus: "submitted",
+      retryable: true,
+      deadLetter: false
+    });
 
     await projectionStore.resetFromEvents({
       deploymentBlock: 0n,
       events: [chainEvent(20n, successTx, 0, "SignalSubmitted", {
+        planId,
         orderId,
         sourceId,
         signalId,
@@ -274,6 +287,7 @@ describe("tx/indexer reconcile worker", () => {
     await projectionStore.resetFromEvents({
       deploymentBlock: 0n,
       events: [chainEvent(20n, healedTx, 0, "SignalSubmitted", {
+        planId,
         orderId,
         sourceId,
         signalId,
@@ -391,6 +405,7 @@ function submissionFixture(input: {
     taskId: `${orderId}:${sourceId}`,
     orderId,
     onchainOrderId: orderId,
+    planId,
     stageIdentifier: "stage",
     signalName: "confirm_stage",
     sourceId,

@@ -148,7 +148,7 @@ describe("product task submissions", () => {
       typedData: {
         domain: {
           name: "UVPStateMachine",
-          version: "0.8",
+          version: "0.9",
           chainId,
           verifyingContract
         },
@@ -678,6 +678,42 @@ describe("product task submissions", () => {
     expect(proof).toMatchObject({
       verificationStatus: "unbound"
     });
+  });
+
+  it("reopens the same prepare after a retryable broadcast result without txHash", async () => {
+    let broadcastCalls = 0;
+    const broadcast: SubmissionBroadcastAdapter = {
+      attemptsBroadcast: true,
+      async broadcast(): Promise<SubmissionBroadcastResult> {
+        broadcastCalls += 1;
+        return broadcastCalls === 1
+          ? {
+              status: "failed",
+              errorCode: "rpc_timeout",
+              message: "RPC request timed out while broadcasting the signal",
+              retryable: true,
+            }
+          : { status: "submitted", txHash: txHash("23") };
+      },
+    };
+    const fixture = await submissionFixture({ broadcastAdapter: broadcast });
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+    const input = {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature,
+    };
+
+    await expect(fixture.service.submit(task.taskId, input)).resolves.toMatchObject({
+      status: "failed",
+      retryable: true,
+    });
+    await expect(fixture.service.submit(task.taskId, input)).resolves.toMatchObject({
+      status: "submitted",
+      txHash: txHash("23"),
+    });
+    expect(broadcastCalls).toBe(2);
   });
 
   it("releases the reserved nonce when broadcast throws so the same prepareId stays retryable", async () => {

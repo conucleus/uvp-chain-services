@@ -30,6 +30,7 @@ import type {
   StateMachineTaskStatus,
   StateMachineTimelineEventProjection,
 } from "../indexer/projections.js";
+import { stateMachineOrderProjectionKey } from "../indexer/projections.js";
 import type {
   ProjectionStore,
   ProjectionSyncState,
@@ -368,13 +369,12 @@ export function createProductService(
     async listTasks(query = {}) {
       const syncState = await store.getSyncState();
       const orders = await store.listStateMachineOrders();
-      const ordersByTaskId = stateMachineOrdersByTaskId(orders);
       const stateMachineTasks = await store.listStateMachineTasks();
       const tasks = await Promise.all(
         stateMachineTasks.map((task) =>
           productTaskFromStateMachineTask(
             task,
-            ordersByTaskId.get(task.taskId),
+            findStateMachineOrderForTask(orders, task),
             syncState,
             productSchemaResolver,
           ),
@@ -411,38 +411,68 @@ export function createProductService(
         : [];
       const syncState = await store.getSyncState();
       const orders = await store.listStateMachineOrders();
-      const ordersByTaskId = stateMachineOrdersByTaskId(orders);
-      const allTasks = (
-        await Promise.all(
-          (await store.listStateMachineTasks()).map((task) =>
-            productTaskFromStateMachineTask(
-              task,
-              ordersByTaskId.get(task.taskId),
-              syncState,
-              productSchemaResolver,
-            ),
-          ),
-        )
-      ).filter((task) =>
-        matchesTaskQuery(
+      const taskRows = await Promise.all(
+        (await store.listStateMachineTasks()).map(async (task) => ({
           task,
-          walletAddress ? { assignee: walletAddress } : {},
-        ),
+          order: findStateMachineOrderForTask(orders, task),
+          dto: await productTaskFromStateMachineTask(
+            task,
+            findStateMachineOrderForTask(orders, task),
+            syncState,
+            productSchemaResolver,
+          ),
+        })),
+      );
+      const visibleTaskRows = taskRows.filter(({ dto }) =>
+        matchesTaskQuery(dto, walletAddress ? { assignee: walletAddress } : {}),
       );
       const tasks = walletAddress
-        ? allTasks.filter(
-            (task) => task.assigneeWallet?.toLowerCase() === walletAddress,
-          )
+        ? visibleTaskRows
+            .filter(({ dto }) => dto.assigneeWallet?.toLowerCase() === walletAddress)
+            .map(({ dto }) => dto)
         : [];
-      const visibleOrderIds = new Set([
-        ...tasks.map((task) => task.orderId),
-        ...acceptedParticipants
-          .map((participant) => participant.orderId)
-          .filter((orderId): orderId is string => Boolean(orderId)),
-      ]);
+      const visibleOrderKeys = new Set<string>();
+      for (const { task, order } of visibleTaskRows) {
+        if (walletAddress && task.assigneeWallet?.toLowerCase() === walletAddress && order) {
+          visibleOrderKeys.add(stateMachineOrderProjectionKey(
+            order.chainId,
+            order.contractAddress,
+            order.planId,
+            order.orderId,
+          ));
+        }
+      }
+      for (const participant of acceptedParticipants) {
+        if (!participant.orderId) {
+          continue;
+        }
+        const matchingOrders = orders.filter((order) =>
+          orderIdentifierMatches(order, participant.orderId!),
+        );
+        // A bare order id is intentionally not enough to expose one of two
+        // plans.  The accepted participant record must carry a canonical key
+        // in that case, otherwise no order is returned.
+        if (matchingOrders.length === 1) {
+          const order = matchingOrders[0];
+          if (!order) {
+            continue;
+          }
+          visibleOrderKeys.add(stateMachineOrderProjectionKey(
+            order.chainId,
+            order.contractAddress,
+            order.planId,
+            order.orderId,
+          ));
+        }
+      }
       const visibleOrders = await Promise.all(
         orders
-          .filter((order) => visibleOrderIds.has(order.orderId))
+          .filter((order) => visibleOrderKeys.has(stateMachineOrderProjectionKey(
+            order.chainId,
+            order.contractAddress,
+            order.planId,
+            order.orderId,
+          )))
           .map((order) =>
             productOrderFromStateMachine(
               order,
@@ -636,27 +666,35 @@ async function productOrderFromStateMachine(
   };
 }
 
-function stateMachineOrdersByTaskId(
-  orders: readonly StateMachineOrderProjection[],
-): ReadonlyMap<string, StateMachineOrderProjection> {
-  const byTaskId = new Map<string, StateMachineOrderProjection>();
-  for (const order of orders) {
-    for (const taskId of Object.keys(order.tasks)) {
-      byTaskId.set(taskId, order);
-    }
-  }
-  return byTaskId;
-}
-
 function findStateMachineOrderForTask(
   orders: readonly StateMachineOrderProjection[],
   task: StateMachineTaskProjection,
 ): StateMachineOrderProjection | undefined {
-  return orders.find(
+  const matches = orders.filter(
     (order) =>
+      order.chainId === task.proof.chainId &&
       order.orderId.toLowerCase() === task.orderId.toLowerCase() &&
+      order.contractAddress.toLowerCase() === task.stateMachineAddress.toLowerCase() &&
+      (!task.planId || order.planId.toLowerCase() === task.planId.toLowerCase()) &&
       Object.prototype.hasOwnProperty.call(order.tasks, task.taskId),
   );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function orderIdentifierMatches(
+  order: StateMachineOrderProjection,
+  identifier: string,
+): boolean {
+  if (order.orderId.toLowerCase() === identifier.toLowerCase()) {
+    return true;
+  }
+  return stateMachineOrderProjectionKey(
+    order.chainId,
+    order.contractAddress,
+    order.planId,
+    order.orderId,
+  ).toLowerCase() === identifier.toLowerCase() ||
+    `${order.chainId}:${order.contractAddress.toLowerCase()}:${order.orderId.toLowerCase()}` === identifier.toLowerCase();
 }
 
 async function productTaskFromStateMachineTask(

@@ -50,6 +50,62 @@ const adminHeaders = {
 };
 
 describe("signal-routed notifications", () => {
+  it("consumes SignalSubmitted.planId when the same order id exists in two plans", async () => {
+    const sent: NotificationDispatchRequest[] = [];
+    const planA = bytes32Hex("9101");
+    const planB = bytes32Hex("9102");
+    const dependency = requiredDependency(registeredDependency);
+    const signalA = chainEvent(6n, "SignalSubmitted", {
+      planId: planA,
+      orderId,
+      sourceId: dependency.sourceId,
+      signalId: dependency.signalId,
+      payloadHash: bytes32Hex("a701"),
+      idempotencyKey: bytes32Hex("a702"),
+      submitter: signalSubmitter
+    });
+    const signalB = chainEvent(7n, "SignalSubmitted", {
+      planId: planB,
+      orderId,
+      sourceId: dependency.sourceId,
+      signalId: dependency.signalId,
+      payloadHash: bytes32Hex("b701"),
+      idempotencyKey: bytes32Hex("b702"),
+      submitter: signalSubmitter
+    });
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: customsOnchainHookPlanArtifact.compiledHooks
+        .filter((hook) => hook.dependencies.some((candidate) => candidate.signalId === dependency.signalId))
+        .map((hook) => hook.stageId),
+      finalizedBlock: 7n,
+      events: [
+        chainEvent(1n, "PlanRegistered", {
+          planId: planA,
+          planHash: customsPlanIds.planHash,
+          hookCount: BigInt(customsOnchainHookPlanArtifact.compiledHooks.length)
+        }),
+        chainEvent(2n, "PlanRegistered", {
+          planId: planB,
+          planHash: customsPlanIds.planHash,
+          hookCount: BigInt(customsOnchainHookPlanArtifact.compiledHooks.length)
+        }),
+        chainEvent(3n, "OrderRegistered", { orderId, planId: planA }),
+        chainEvent(4n, "OrderRegistered", { orderId, planId: planB }),
+        signalA,
+        signalB
+      ]
+    });
+    const service = serviceFor(store, supplierStore, sent);
+
+    const summary = await service.processSignalSubmittedEvents([signalB]);
+    const deliveries = await service.listDeliveries();
+
+    expect(summary.signalsProcessed).toBe(1);
+    expect(deliveries.length).toBeGreaterThan(0);
+    expect(deliveries.every((delivery) => delivery.payloadHash === bytes32Hex("b701"))).toBe(true);
+    expect(sent.every((request) => request.record.payload.payloadHash === bytes32Hex("b701"))).toBe(true);
+  });
+
   it("delivers finalized SignalSubmitted to every receive hook depending on that signal", async () => {
     const sent: NotificationDispatchRequest[] = [];
     const event = signalEvent(6n, requiredDependency(registeredDependency));
@@ -186,6 +242,53 @@ describe("signal-routed notifications", () => {
     ]);
   });
 
+  it("keeps a missing dispatcher skipped and retries it after the adapter is configured", async () => {
+    const event = signalEvent(6n, requiredDependency(customsDependencyA));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [event]
+    });
+    const deliveryStore = new MemoryNotificationDeliveryStore();
+    const common = {
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      deliveryStore
+    } as const;
+    const withoutDispatcher = createNotificationService(common);
+
+    await withoutDispatcher.processSignalSubmittedEvents([event]);
+    const [skipped] = await withoutDispatcher.listDeliveries();
+    expect(skipped).toMatchObject({
+      status: "skipped",
+      reason: "transport_adapter_missing",
+      attempts: 0
+    });
+
+    const sent: NotificationDispatchRequest[] = [];
+    const withDispatcher = createNotificationService({
+      ...common,
+      dispatcher: {
+        async send(request) {
+          sent.push(request);
+          return { ok: true, externalReceiptRef: "receipt:webhook" };
+        }
+      }
+    });
+    const retried = await withDispatcher.retryDelivery(skipped!.deliveryId);
+
+    expect(retried).toMatchObject({
+      status: "sent",
+      attempts: 1,
+      externalReceiptRef: "receipt:webhook"
+    });
+    expect(sent).toHaveLength(1);
+  });
+
   it("builds redacted ready-task and submission recipient evidence only from task projections", async () => {
     const readyHook = requiredHook(resourceHook);
     const submittedHook = requiredHook(customsHook);
@@ -256,8 +359,9 @@ describe("signal-routed notifications", () => {
     await service.processSignalSubmittedEvents([signalEvent(6n, requiredDependency(customsDependencyA))]);
     const [delivery] = await service.listDeliveries();
     expect(delivery).toMatchObject({
-      status: "failed",
+      status: "skipped",
       reason: "transport_adapter_missing",
+      attempts: 0,
       taskId: expect.stringContaining(orderId)
     });
 
@@ -274,7 +378,7 @@ describe("signal-routed notifications", () => {
     expect(blocked.classifications).toContainEqual(expect.objectContaining({
       kind: "blocked",
       source: "notification_delivery_with_product_task_projection",
-      deliveryStatus: "failed",
+      deliveryStatus: "skipped",
       deliveryReasonCode: "transport_adapter_missing"
     }));
 
@@ -296,6 +400,11 @@ describe("signal-routed notifications", () => {
     });
 
     await service.deadLetterDelivery(delivery!.deliveryId, "operator pasted sensitive review details");
+    await expect(service.retryDelivery(delivery!.deliveryId)).resolves.toMatchObject({
+      status: "dead_letter",
+      reason: "operator pasted sensitive review details",
+      attempts: 0
+    });
     const deadLetter = await service.buildRedactedEvidence({ walletAddress: supplierWallet, orderId });
     const serialized = JSON.stringify(deadLetter);
 

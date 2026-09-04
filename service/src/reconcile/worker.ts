@@ -317,7 +317,11 @@ export class TxReconcileWorker implements LifecycleService {
             receiptStatus: "not_checked",
             projectionStatus: "not_checked"
           },
-          retryable: retryableOf(record)
+          // No transaction hash means no chain fact has been observed yet;
+          // this is a pending/reconcile condition regardless of the adapter's
+          // original retry flag. It must not be dead-lettered as a permanent
+          // broadcast failure.
+          retryable: true
         };
       }
       return staleOutcome(checkedAt);
@@ -343,12 +347,14 @@ export class TxReconcileWorker implements LifecycleService {
           receiptStatus: "missing",
           projectionStatus: "not_checked"
         },
-        retryable: retryableOf(record)
+        // A missing receipt is a temporary observation gap, not a reverted
+        // transaction. Keep probing until the timeout lane takes over.
+        retryable: true
       };
     }
 
     const blockNumber = normalizeBlockNumber(receipt.blockNumber);
-    if (receipt.status !== "success") {
+    if (receipt.status === "reverted" || receipt.status === "failed") {
       return {
         kind: "failed",
         registrationStatus: "failed",
@@ -363,6 +369,25 @@ export class TxReconcileWorker implements LifecycleService {
         errorCode: "transaction_reverted",
         errorMessage: `transaction receipt status ${receipt.status ?? "failed"}`,
         retryable: false
+      };
+    }
+    if (receipt.status !== "success") {
+      // Receipt status is an open input at the RPC boundary. Unknown,
+      // pending, or omitted values must remain pending/retryable; treating
+      // them as a revert can isolate a transaction which is actually still
+      // mining (or already successful on the canonical chain).
+      return {
+        kind: "pending",
+        registrationStatus: record.status as ProductOrderTriggerStatus,
+        checkedAt,
+        fields: {
+          reconcileStatus: "submitted",
+          lastCheckedAt: checkedAt,
+          receiptStatus: "unknown",
+          projectionStatus: "not_checked"
+        },
+        ...(blockNumber ? { blockNumber } : {}),
+        retryable: true
       };
     }
 
@@ -529,6 +554,11 @@ async function submissionProjectionConfirmation(
   submission: ProductSubmissionDTO
 ): Promise<ProjectionConfirmation | undefined> {
   const order = await projectionStore.getStateMachineOrder(submission.onchainOrderId);
+  // The state-machine identity is (planId, orderId), not bare orderId. A
+  // projection from another plan must never confirm this signed submission.
+  if (!order || order.planId.toLowerCase() !== submission.planId.toLowerCase()) {
+    return undefined;
+  }
   const signal = order?.signals[`${submission.sourceId}:${submission.signalId}`];
   const matches = Boolean(
     signal &&

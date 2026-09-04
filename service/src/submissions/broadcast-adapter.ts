@@ -10,7 +10,7 @@ export interface StateMachineSubmissionPublicClient {
   waitForTransactionReceipt?(args: { readonly hash: Hex; readonly timeout?: number }): Promise<{
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
-  }>;
+  } | undefined>;
 }
 
 export interface StateMachineSubmitSignalForCall {
@@ -191,7 +191,7 @@ export function createStateMachineSubmissionBroadcastAdapter(
           hash: txHash,
           ...(options.receiptTimeoutMs && options.receiptTimeoutMs > 0 ? { timeout: options.receiptTimeoutMs } : {})
         });
-        if (receipt?.status === "reverted") {
+        if (receipt?.status === "reverted" || receipt?.status === "failed") {
           return failedResult(
             "transaction_reverted",
             "transaction reverted",
@@ -200,6 +200,22 @@ export function createStateMachineSubmissionBroadcastAdapter(
             "transaction_reverted",
             txHash,
             receipt.blockNumber?.toString()
+          );
+        }
+        // A receipt is only authoritative when its status is one of the
+        // protocol's closed-set values.  A missing receipt (for example when
+        // an injected client has no wait method) or an RPC/client extension
+        // status is an unknown outcome: preserve the tx hash and keep it in
+        // the reconcile lane instead of claiming submitted/confirmed.
+        if (receipt?.status !== "success") {
+          return failedResult(
+            "transaction_receipt_unknown",
+            "transaction receipt is missing or has an unknown status",
+            true,
+            gasPayer,
+            "transaction_receipt_unknown",
+            txHash,
+            receipt?.blockNumber?.toString()
           );
         }
         const status = options.confirmOnReceipt ? "confirmed" : "submitted";
@@ -385,6 +401,8 @@ function errorLabelForBroadcastError(errorCode: string): string {
       return "RPC request timed out";
     case "transaction_reverted":
       return "Transaction reverted";
+    case "transaction_receipt_unknown":
+      return "Transaction receipt is unknown";
     case "state_machine_broadcast_failed":
       return "Broadcast failed";
     default:

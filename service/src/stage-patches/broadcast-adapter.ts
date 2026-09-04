@@ -23,7 +23,7 @@ export interface StateMachineStagePatchPublicClient {
   waitForTransactionReceipt?(args: { readonly hash: Hex; readonly timeout?: number }): Promise<{
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
-  }>;
+  } | undefined>;
 }
 
 export interface StateMachineStageExecutorPatchCall {
@@ -251,8 +251,21 @@ function createStagePatchBroadcastAdapter<TPrepared extends PreparedPatchForBroa
           hash: txHash,
           ...(options.receiptTimeoutMs && options.receiptTimeoutMs > 0 ? { timeout: options.receiptTimeoutMs } : {})
         });
-        if (receipt?.status === "reverted") {
+        if (receipt?.status === "reverted" || receipt?.status === "failed") {
           return failedResult("transaction_reverted", "transaction reverted", false, gasPayer, txHash, receipt.blockNumber?.toString());
+        }
+        // Do not treat an absent receipt or an extension/unknown status as a
+        // successful submission. The transaction hash is retained so an
+        // operator/reconcile path can inspect it without broadcasting again.
+        if (receipt?.status !== "success") {
+          return failedResult(
+            "transaction_receipt_unknown",
+            "transaction receipt is missing or has an unknown status",
+            true,
+            gasPayer,
+            txHash,
+            receipt?.blockNumber?.toString()
+          );
         }
         const status = options.confirmOnReceipt ? "confirmed" : "submitted";
         return {

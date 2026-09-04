@@ -8,6 +8,7 @@ import {
 } from "@uvp-eth/compiler";
 import {
   signalAuthorizationMatchesHook,
+  stateMachineOrderProjectionKey,
   type StateMachineOrderProjection,
   type StateMachineSignalAuthorizationProjection,
   type StateMachineSignalProjection,
@@ -351,9 +352,25 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       const signalEvents = finalizedSignalSubmittedEvents(events, finalizedBlock);
       for (const event of signalEvents) {
         const orderId = bytes32Arg(event, "orderId");
+        const planId = bytes32Arg(event, "planId");
         const sourceId = bytes32Arg(event, "sourceId");
         const signalId = bytes32Arg(event, "signalId");
-        const order = orderId ? await options.store.getStateMachineOrder(orderId) : undefined;
+        // SignalSubmitted is plan-scoped on the frozen state-machine ABI.  A
+        // bare order id is only a compatibility fallback for legacy events;
+        // when planId is present, resolve the canonical composite identity so
+        // two plans reusing the same orderId cannot receive each other's
+        // notification.
+        const orderLookupKey = orderId && planId
+          ? stateMachineOrderProjectionKey(
+              event.chainId,
+              event.contractAddress,
+              planId,
+              orderId,
+            )
+          : orderId;
+        const order = orderLookupKey
+          ? await options.store.getStateMachineOrder(orderLookupKey)
+          : undefined;
         if (!order) {
           updateIntentSummary(summary, await saveSkippedSignalDelivery({
             deliveryStore,
@@ -515,7 +532,10 @@ export function createNotificationService(options: CreateNotificationServiceOpti
 
     async retryDelivery(deliveryId) {
       const existing = await deliveryStore.getDelivery(deliveryId);
-      if (!existing || existing.status === "sent") {
+      // Sent and dead-lettered rows are terminal until an operator explicitly
+      // reopens them; a skipped row (for example, no configured dispatcher)
+      // is safe to retry after the missing dependency is restored.
+      if (!existing || existing.status === "sent" || existing.status === "dead_letter") {
         return existing;
       }
       const { reason: _reason, lastError: _lastError, ...rest } = existing;
@@ -611,7 +631,6 @@ async function buildNotificationRedactedEvidence(input: {
     input.store.listStateMachineTasks(),
     input.deliveryStore.listDeliveries()
   ]);
-  const taskById = new Map(tasks.map((task) => [task.taskId, task]));
   const matchingTasks = tasks
     .filter((task) => taskMatchesNotificationEvidenceQuery(task, input.query, participantKey))
     .sort(compareTasksForParticipantNotifications);
@@ -633,7 +652,9 @@ async function buildNotificationRedactedEvidence(input: {
     if (!deliveryMatchesNotificationEvidenceQuery(delivery, input.query, participantKey)) {
       continue;
     }
-    const task = delivery.taskId ? taskById.get(delivery.taskId) : undefined;
+    const task = delivery.taskId
+      ? uniqueTaskForDelivery(tasks, delivery)
+      : undefined;
     if (!task || !taskMatchesNotificationEvidenceQuery(task, input.query, participantKey)) {
       deliveryRowsWithoutTaskProjection += 1;
       continue;
@@ -777,13 +798,16 @@ async function buildParticipantNotificationList(input: {
     input.store.listStateMachineOrders(),
     input.deliveryStore.listDeliveries({ supplier: participantKey })
   ]);
-  const visibleTasks = tasks
-    .filter((task) => task.assigneeWallet?.toLowerCase() === participantKey)
-    .sort(compareTasksForParticipantNotifications);
+  const taskRows = tasks.map((task) => ({
+    task,
+    order: findOrderForTask(orders, task)
+  }));
+  const visibleTaskRows = taskRows
+    .filter(({ task }) => task.assigneeWallet?.toLowerCase() === participantKey)
+    .sort((left, right) => compareTasksForParticipantNotifications(left.task, right.task));
   const notifications = new Map<Hex, ParticipantNotificationRecord>();
 
-  for (const task of visibleTasks) {
-    const order = findOrderForTask(orders, task);
+  for (const { task, order } of visibleTaskRows) {
     const taskNotification = participantTaskNotification(task, order, input.now());
     if (taskNotification) {
       notifications.set(taskNotification.notificationId, taskNotification);
@@ -801,8 +825,10 @@ async function buildParticipantNotificationList(input: {
     if (delivery.status !== "failed") {
       continue;
     }
-    const task = tasks.find((item) => item.taskId === delivery.taskId);
-    const order = task ? findOrderForTask(orders, task) : orders.find((item) => item.orderId === delivery.orderId);
+    const task = delivery.taskId ? uniqueTaskForDelivery(tasks, delivery) : undefined;
+    const order = task
+      ? findOrderForTask(orders, task)
+      : uniqueOrderForDelivery(orders, delivery);
     const failed = participantDeliveryFailedNotification(delivery, task, order);
     notifications.set(failed.notificationId, failed);
   }
@@ -1401,7 +1427,10 @@ async function dispatchPreparedDelivery(input: {
   if (!input.dispatcher) {
     return input.deliveryStore.saveDelivery({
       ...input.pending,
-      status: "failed",
+      // No delivery attempt was made. Keep this distinct from a transport
+      // failure so retry budgets and operator evidence do not count a missing
+      // adapter as an exhausted send attempt.
+      status: "skipped",
       reason: "transport_adapter_missing",
       updatedAt: input.now()
     });
@@ -1654,11 +1683,43 @@ function findOrderForTask(
   orders: readonly StateMachineOrderProjection[],
   task: StateMachineTaskProjection
 ): StateMachineOrderProjection | undefined {
-  return orders.find((order) =>
-    order.orderId === task.orderId &&
-    order.contractAddress === task.stateMachineAddress &&
+  const matches = orders.filter((order) =>
+    order.chainId === task.createdAt.chainId &&
+    order.orderId.toLowerCase() === task.orderId.toLowerCase() &&
+    order.contractAddress.toLowerCase() === task.stateMachineAddress.toLowerCase() &&
+    (!task.planId || order.planId.toLowerCase() === task.planId.toLowerCase()) &&
     Object.hasOwn(order.tasks, task.taskId)
   );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueTaskForDelivery(
+  tasks: readonly StateMachineTaskProjection[],
+  delivery: NotificationDeliveryRecord
+): StateMachineTaskProjection | undefined {
+  if (!delivery.taskId) {
+    return undefined;
+  }
+  const normalizedTaskId = delivery.taskId.toLowerCase();
+  const matches = tasks.filter((task) =>
+    task.taskId.toLowerCase() === normalizedTaskId &&
+    task.orderId.toLowerCase() === delivery.orderId.toLowerCase() &&
+    task.stateMachineAddress.toLowerCase() === delivery.stateMachineAddress.toLowerCase() &&
+    task.createdAt.chainId === delivery.chainId
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueOrderForDelivery(
+  orders: readonly StateMachineOrderProjection[],
+  delivery: NotificationDeliveryRecord
+): StateMachineOrderProjection | undefined {
+  const matches = orders.filter((order) =>
+    order.chainId === delivery.chainId &&
+    order.orderId.toLowerCase() === delivery.orderId.toLowerCase() &&
+    order.contractAddress.toLowerCase() === delivery.stateMachineAddress.toLowerCase()
+  );
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function taskForReceiverHook(
@@ -1687,6 +1748,7 @@ function signalDeliveryIdFor(
     "uvp:signal-received-notification-delivery:v1",
     event.chainId.toString(),
     (order?.contractAddress ?? event.contractAddress).toLowerCase(),
+    order?.planId ?? bytes32Arg(event, "planId") ?? "unknown-plan",
     signal?.orderId ?? bytes32Arg(event, "orderId") ?? "unknown-order",
     signal?.sourceId ?? bytes32Arg(event, "sourceId") ?? "unknown-source",
     signal?.signalId ?? bytes32Arg(event, "signalId") ?? "unknown-signal",

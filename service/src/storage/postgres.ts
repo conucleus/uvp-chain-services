@@ -500,7 +500,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
   async listStateMachineOrders(): Promise<
     readonly StateMachineOrderProjection[]
   > {
-    return Object.values(
+    return uniqueProjectionValues(
       (await this.#currentOrderSnapshot()).stateMachineOrders,
     );
   }
@@ -509,10 +509,11 @@ export class PostgresProjectionStore implements DurableProjectionStore {
     orderId: string,
   ): Promise<StateMachineOrderProjection | undefined> {
     const snapshot = await this.#currentOrderSnapshot();
+    const orders = uniqueProjectionValues(snapshot.stateMachineOrders);
     return (
       snapshot.stateMachineOrders[orderId.toLowerCase()] ??
       snapshot.stateMachineOrders[orderId] ??
-      uniqueOrderByBareId(Object.values(snapshot.stateMachineOrders), orderId)
+      uniqueOrderByBareId(orders, orderId)
     );
   }
 
@@ -520,7 +521,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
     orderId: string,
   ): Promise<readonly StateMachineOrderProjection[]> {
     const snapshot = await this.#currentOrderSnapshot();
-    return Object.values(snapshot.stateMachineOrders).filter(
+    return uniqueProjectionValues(snapshot.stateMachineOrders).filter(
       (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
     );
   }
@@ -528,7 +529,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
   async listStateMachineTasks(): Promise<
     readonly StateMachineTaskProjection[]
   > {
-    return Object.values(
+    return uniqueProjectionValues(
       (await this.#currentOrderSnapshot()).stateMachineTasks,
     );
   }
@@ -536,7 +537,12 @@ export class PostgresProjectionStore implements DurableProjectionStore {
   async getStateMachineTask(
     taskId: string,
   ): Promise<StateMachineTaskProjection | undefined> {
-    return (await this.#currentOrderSnapshot()).stateMachineTasks[taskId];
+    const tasks = (await this.#currentOrderSnapshot()).stateMachineTasks;
+    return (
+      tasks[taskId.toLowerCase()] ??
+      tasks[taskId] ??
+      uniqueTaskByBareId(uniqueProjectionValues(tasks), taskId)
+    );
   }
 
   async listIdentityBindings(
@@ -675,6 +681,19 @@ function uniqueOrderByBareId(
     (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
   );
   return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueTaskByBareId(
+  tasks: readonly StateMachineTaskProjection[],
+  taskId: string,
+): StateMachineTaskProjection | undefined {
+  const normalizedTaskId = taskId.toLowerCase();
+  const matches = tasks.filter((task) => task.taskId.toLowerCase() === normalizedTaskId);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueProjectionValues<TValue>(record: Readonly<Record<string, TValue>>): TValue[] {
+  return [...new Set(Object.values(record))];
 }
 
 function snapshotKindColumn(

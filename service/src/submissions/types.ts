@@ -129,6 +129,8 @@ export interface ProductSubmissionDTO extends TxReconcileFields {
   readonly taskId: string;
   readonly orderId: string;
   readonly onchainOrderId: Hex;
+  /** The plan-scoped identity committed by the prepared EIP-712 signature. */
+  readonly planId: Hex;
   readonly stageIdentifier: string;
   readonly signalName: string;
   readonly sourceId: Hex;

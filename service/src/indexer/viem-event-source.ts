@@ -70,12 +70,30 @@ const identityRegistryAbi = parseAbi([
 ]);
 
 const deploymentRegistryAbi = parseAbi([
+  "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
   "event DeploymentRegistered(bytes32 indexed deploymentId,address indexed stateMachine,bytes32 artifactHash,bytes32 abiHash,uint64 deploymentBlock,string metadataURI)",
   "event DeploymentCanaryMarked(bytes32 indexed deploymentId,bytes32 evidenceHash,string evidenceURI)",
   "event DeploymentActivated(bytes32 indexed previousDeploymentId,bytes32 indexed newDeploymentId,bytes32 evidenceHash,string evidenceURI)",
   "event DeploymentDeprecated(bytes32 indexed deploymentId,bytes32 reasonHash,string reasonURI)",
   "event DeploymentRetired(bytes32 indexed deploymentId,bytes32 reasonHash,string reasonURI)",
 ]);
+
+/**
+ * Event-only ABI surface consumed by the indexer. Keep this exported so the
+ * decoder can be regression-tested against the frozen protocol ABI fixtures;
+ * a fixture topic mismatch is a build failure instead of a silent empty
+ * projection.
+ */
+export const INDEXER_EVENT_ABIS = {
+  UVPStateMachine: stateMachineAbi,
+  UVPIdentityRegistry: identityRegistryAbi,
+  UVPDeploymentRegistry: deploymentRegistryAbi,
+  UVPStagePatchModule: stagePatchModuleAbi,
+  UVPPlanMetadataModule: planMetadataModuleAbi,
+  UVPDerivedSignalModule: derivedSignalModuleAbi,
+  UVPOrderLinkModule: orderLinkModuleAbi,
+  UVPDockingModule: dockingModuleAbi
+} as const;
 
 const maxGetLogsBlockSpan = 9_999n;
 

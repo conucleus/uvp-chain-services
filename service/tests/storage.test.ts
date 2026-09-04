@@ -105,6 +105,7 @@ const expectedMigrationVersions = [
   "0013_notification_broadcast_state",
   "0014_store_wallet_session",
   "0015_store_listing_decoration_join",
+  "0016_submission_plan_id",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -1929,7 +1930,7 @@ function preparedSubmission(): PreparedSubmissionRecord {
     typedData: {
       domain: {
         name: "UVPStateMachine",
-        version: "0.8",
+        version: "0.9",
         chainId,
         verifyingContract: contractAddress as Address,
       },
@@ -1990,6 +1991,7 @@ function productSubmission(
     taskId: prepared.taskId,
     orderId: prepared.orderId,
     onchainOrderId: prepared.onchainOrderId,
+    planId: prepared.planId,
     stageIdentifier: prepared.stageIdentifier,
     signalName: prepared.signalName,
     sourceId: prepared.sourceId,

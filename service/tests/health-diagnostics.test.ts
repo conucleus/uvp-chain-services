@@ -582,6 +582,7 @@ function deadLetterSubmission(): ProductSubmissionDTO {
     taskId: "task_dead",
     orderId: "order-dead",
     onchainOrderId: orderId,
+    planId,
     stageIdentifier: "customs",
     signalName: "confirm_stage",
     sourceId,
