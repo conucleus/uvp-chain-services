@@ -58,6 +58,31 @@ export interface RelayNonceStore {
 
 export interface RelaySubmissionStore {
   record(submission: RelaySubmission): Promise<void>;
+  /**
+   * Optional read path used to recover the latest retry state after a relayer
+   * restart. Existing stores only implementing `record` remain valid.
+   */
+  load?(submissionId: string): Promise<RelaySubmission | undefined>;
+  /** Alias for stores that expose reads as `get` rather than `load`. */
+  get?(submissionId: string): Promise<RelaySubmission | undefined>;
+  /** Optional collection read for append-only stores. */
+  list?(): Promise<readonly RelaySubmission[]>;
+}
+
+/**
+ * Optional durable retry-state adapter. The relayer still records the full
+ * submission through `RelaySubmissionStore`; this small state projection lets
+ * deployments persist the retry budget independently when their ledger store
+ * is append-only. Keeping it optional preserves the original relayer API.
+ */
+export interface RelayRetryBudgetSnapshot {
+  readonly failedAttempts: number;
+  readonly lastSubmission?: RelaySubmission;
+}
+
+export interface RelayRetryBudgetStore {
+  load(submissionId: string): Promise<RelayRetryBudgetSnapshot | undefined>;
+  save(submissionId: string, snapshot: RelayRetryBudgetSnapshot): Promise<void>;
 }
 
 export interface RelaySubmission {
@@ -71,6 +96,12 @@ export interface RelaySubmission {
   readonly nonce: string;
   readonly status: RelaySubmissionStatus;
   readonly txHash?: Hex;
+  /** One-based number of broadcast attempts for this submission. */
+  readonly attemptNumber?: number;
+  /** Additive alias for consumers that use the submission DTO vocabulary. */
+  readonly attemptCount?: number;
+  /** Number of retries still available after this outcome, when bounded. */
+  readonly retryBudgetRemaining?: number;
   readonly errorCode?: string;
   readonly errorLabel?: string;
   readonly error?: string;

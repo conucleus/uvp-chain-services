@@ -3,11 +3,14 @@ import {
   classifyRelaySubmitterError,
   createRelayerService,
   MemoryRelayNonceStore,
+  MemoryRelayRetryBudgetStore,
+  MemoryRelaySubmissionStore,
   RelayRejection
 } from "../src/relayer/service.js";
 import type {
   BusinessSignatureVerifier,
   RelayRequest,
+  RelaySubmission,
   RelaySubmissionStore,
   TransactionSubmitter
 } from "../src/relayer/types.js";
@@ -63,7 +66,7 @@ describe("relayer non-signing boundary", () => {
   });
 
   it("keeps retryable failed submissions observable and reusable without leaking raw errors", async () => {
-    const recorded: unknown[] = [];
+    const recorded: RelaySubmission[] = [];
     const submissionStore: RelaySubmissionStore = {
       record: async (submission) => {
         recorded.push(submission);
@@ -101,6 +104,161 @@ describe("relayer non-signing boundary", () => {
       retryable: true
     });
     expect(recorded).toHaveLength(2);
+  });
+
+  it("records an irreversible persist_failed row after broadcast and keeps the nonce reserved", async () => {
+    const recorded: RelaySubmission[] = [];
+    const released: string[] = [];
+    let recordCalls = 0;
+    const persistenceError = new Error("durable ledger unavailable");
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => ({ txHash })
+      },
+      nonceStore: {
+        reserve: async () => true,
+        release: async (_signer, nonce) => {
+          released.push(nonce);
+        }
+      },
+      submissionStore: {
+        record: async (submission) => {
+          recordCalls += 1;
+          if (recordCalls === 1) {
+            throw persistenceError;
+          }
+          recorded.push(submission);
+        },
+        load: async () => recorded.at(-1)
+      },
+      now: () => new Date("2026-01-01T00:00:00Z")
+    });
+
+    await expect(relayer.relay(request("nonce-persist-failed"))).rejects.toBe(persistenceError);
+
+    expect(recordCalls).toBe(2);
+    expect(released).toHaveLength(0);
+    expect(recorded).toEqual([expect.objectContaining({
+      status: "failed",
+      txHash,
+      errorCode: "persist_failed",
+      retryable: false,
+      retryState: "dead_letter",
+      deadLetter: true,
+      attemptNumber: 1
+    })]);
+  });
+
+  it("hydrates the retry budget from the durable ledger and writes a final DLQ", async () => {
+    const store = new MemoryRelaySubmissionStore();
+    const retryBudgetStore = new MemoryRelayRetryBudgetStore();
+    const nonceStore = new MemoryRelayNonceStore();
+    let broadcasts = 0;
+    const options = {
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => {
+          broadcasts += 1;
+          throw new Error("rpc unavailable");
+        }
+      },
+      nonceStore,
+      submissionStore: store,
+      retryBudgetStore,
+      maxRetryAttempts: 1,
+      now: () => new Date("2026-01-01T00:00:00Z")
+    } satisfies Parameters<typeof createRelayerService>[0];
+
+    const first = await createRelayerService(options).relay(request("nonce-durable-budget"));
+    expect(first).toMatchObject({
+      status: "failed",
+      errorCode: "rpc_unavailable",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false,
+      attemptNumber: 1,
+      retryBudgetRemaining: 1
+    });
+
+    const second = await createRelayerService(options).relay(request("nonce-durable-budget"));
+    expect(second).toMatchObject({
+      status: "failed",
+      errorCode: "broadcast_retry_exhausted",
+      retryable: false,
+      retryState: "dead_letter",
+      deadLetter: true,
+      attemptNumber: 2,
+      retryBudgetRemaining: 0
+    });
+    expect(broadcasts).toBe(2);
+
+    const third = await createRelayerService(options).relay(request("nonce-durable-budget"));
+    expect(third).toMatchObject({
+      errorCode: "broadcast_retry_exhausted",
+      retryState: "dead_letter",
+      deadLetter: true
+    });
+    expect(broadcasts).toBe(2);
+    await expect(store.load(first.id)).resolves.toMatchObject({
+      errorCode: "broadcast_retry_exhausted",
+      deadLetter: true
+    });
+    await expect(retryBudgetStore.load(first.id)).resolves.toMatchObject({
+      failedAttempts: 2,
+      lastSubmission: expect.objectContaining({
+        errorCode: "broadcast_retry_exhausted",
+        deadLetter: true
+      })
+    });
+  });
+
+  it("treats insufficient gas funds as recoverable and releases the nonce", async () => {
+    let broadcasts = 0;
+    const released: string[] = [];
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => {
+          broadcasts += 1;
+          if (broadcasts === 1) {
+            throw new Error("insufficient funds for gas * price + value");
+          }
+          return { txHash };
+        }
+      },
+      nonceStore: {
+        reserve: async () => true,
+        release: async (_signer, nonce) => {
+          released.push(nonce);
+        }
+      },
+      now: () => new Date("2026-01-01T00:00:00Z")
+    });
+
+    const first = await relayer.relay(request("nonce-funds"));
+    expect(first).toMatchObject({
+      status: "failed",
+      errorCode: "relayer_insufficient_funds",
+      failureCategory: "broadcaster",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false,
+      attemptNumber: 1
+    });
+    expect(released).toEqual(["nonce-funds"]);
+
+    await expect(relayer.relay(request("nonce-funds"))).resolves.toMatchObject({
+      status: "submitted",
+      txHash,
+      attemptNumber: 2
+    });
   });
 
   it("dead-letters permanent authorization failures with redacted diagnostics", async () => {
@@ -247,6 +405,7 @@ describe("relayer non-signing boundary", () => {
         }
       },
       now: () => new Date("2026-01-01T00:00:00Z"),
+      maxRetryAttempts: 10,
       retryBaseMs: 250,
       retryMaxMs: 2_000
     });
@@ -285,7 +444,8 @@ describe("relayer non-signing boundary", () => {
       nonceStore: new MemoryRelayNonceStore(),
       now: () => new Date("2026-01-01T00:00:00Z"),
       retryBaseMs: 250,
-      retryMaxMs: 1_000
+      retryMaxMs: 1_000,
+      maxRetryAttempts: 10
     });
 
     const baseTime = Date.parse("2026-01-01T00:00:00Z");
@@ -313,8 +473,15 @@ describe("relayer non-signing boundary", () => {
     expect(classifyRelaySubmitterError(new Error("insufficient funds for gas"))).toMatchObject({
       errorCode: "relayer_insufficient_funds",
       failureCategory: "broadcaster",
-      retryable: false,
-      deadLetter: true
+      retryable: true,
+      deadLetter: false
+    });
+    expect(classifyRelaySubmitterError(Object.assign(new Error("balance too low"), {
+      name: "InsufficientFundsError"
+    }))).toMatchObject({
+      errorCode: "relayer_insufficient_funds",
+      retryable: true,
+      deadLetter: false
     });
     expect(classifyRelaySubmitterError(new Error("SignalAlreadyExists"))).toMatchObject({
       errorCode: "signal_already_exists",

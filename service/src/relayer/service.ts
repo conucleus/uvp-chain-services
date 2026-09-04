@@ -18,7 +18,10 @@ import type {
   RelayFailureCategory,
   RelayNonceStore,
   RelayRequest,
+  RelayRetryBudgetSnapshot,
+  RelayRetryBudgetStore,
   RelayRetryState,
+  RelayTransaction,
   RelaySubmission,
   RelaySubmissionStore,
   SignatureVerificationResult,
@@ -54,8 +57,15 @@ export interface RelayerServiceOptions {
   readonly now?: () => Date;
   readonly logger?: Logger;
   readonly maxInFlightPerOrder?: number;
+  /** Maximum retries after the initial broadcast attempt. */
+  readonly maxRetryAttempts?: number;
+  /** Compatibility aliases used by the security/broadcast config. */
+  readonly maxRetries?: number;
+  readonly maxRetry?: number;
   readonly retryBaseMs?: number;
   readonly retryMaxMs?: number;
+  /** Optional durable retry projection, hydrated on every relay call. */
+  readonly retryBudgetStore?: RelayRetryBudgetStore;
 }
 
 export interface RelayFailureClassification {
@@ -70,6 +80,7 @@ export interface RelayFailureClassification {
 }
 
 const DEFAULT_MAX_IN_FLIGHT_PER_ORDER = 1;
+const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
 const DEFAULT_RETRY_BASE_MS = 250;
 const DEFAULT_RETRY_MAX_MS = 5_000;
 
@@ -84,10 +95,14 @@ export class RelayerService implements LifecycleService {
   readonly #now: () => Date;
   readonly #logger: Logger;
   readonly #maxInFlightPerOrder: number;
+  readonly #maxRetryAttempts: number;
   readonly #retryBaseMs: number;
   readonly #retryMaxMs: number;
+  readonly #retryBudgetStore: RelayRetryBudgetStore | undefined;
   readonly #inFlightByOrder = new Map<string, number>();
   readonly #failedAttemptsBySubmission = new Map<string, number>();
+  readonly #lastSubmissionById = new Map<string, RelaySubmission>();
+  readonly #terminalSubmissionIds = new Set<string>();
 
   constructor(options: RelayerServiceOptions) {
     this.#verifier = options.verifier;
@@ -97,8 +112,12 @@ export class RelayerService implements LifecycleService {
     this.#now = options.now ?? (() => new Date());
     this.#logger = options.logger ?? noopLogger;
     this.#maxInFlightPerOrder = options.maxInFlightPerOrder ?? DEFAULT_MAX_IN_FLIGHT_PER_ORDER;
+    this.#maxRetryAttempts = normalizeMaxRetryAttempts(
+      options.maxRetryAttempts ?? options.maxRetries ?? options.maxRetry
+    );
     this.#retryBaseMs = options.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
     this.#retryMaxMs = options.retryMaxMs ?? DEFAULT_RETRY_MAX_MS;
+    this.#retryBudgetStore = options.retryBudgetStore;
   }
 
   async start(): Promise<void> {
@@ -130,6 +149,29 @@ export class RelayerService implements LifecycleService {
     const verification = await this.#verifier.verify(freezeRelayRequest(request));
     ensureVerifiedSigner(request, verification);
 
+    const submissionKey = submissionId(request);
+    const prior = await this.loadRetryState(submissionKey);
+    const priorFailedAttempts = prior.failedAttempts;
+    if (prior.lastSubmission && isTerminalSubmission(prior.lastSubmission)) {
+      // A persisted final outcome is authoritative for this submission id. In
+      // particular, do not turn a durable DLQ into duplicate_signer_nonce or
+      // broadcast it again after a process restart.
+      this.#terminalSubmissionIds.add(submissionKey);
+      return prior.lastSubmission;
+    }
+    if (this.retryBudgetExhausted(priorFailedAttempts)) {
+      const submission = failedSubmission(
+        request,
+        retryBudgetExhaustedFailure(),
+        undefined,
+        priorFailedAttempts,
+        this.retryBudgetRemaining(priorFailedAttempts)
+      );
+      await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
+      this.#terminalSubmissionIds.add(submissionKey);
+      return submission;
+    }
+
     const reserved = await this.reserveNonce(request);
     if (!reserved) {
       const classification = relayFailure({
@@ -139,13 +181,11 @@ export class RelayerService implements LifecycleService {
         retryable: false,
         deadLetter: true
       });
-      const submission = failedSubmission(request, classification);
-      await this.record(submission);
+      const submission = failedSubmission(request, classification, undefined, priorFailedAttempts, this.retryBudgetRemaining(priorFailedAttempts));
+      await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
+      this.#terminalSubmissionIds.add(submissionKey);
       return submission;
     }
-
-    const submissionKey = submissionId(request);
-    const priorFailedAttempts = this.#failedAttemptsBySubmission.get(submissionKey) ?? 0;
 
     if (!this.acquireOrder(request)) {
       await this.releaseNonce(request);
@@ -157,27 +197,88 @@ export class RelayerService implements LifecycleService {
         deadLetter: false,
         ...this.retrySchedule(priorFailedAttempts)
       });
-      const submission = failedSubmission(request, classification);
-      await this.record(submission);
+      const submission = failedSubmission(request, classification, undefined, priorFailedAttempts, this.retryBudgetRemaining(priorFailedAttempts));
+      await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
       return submission;
     }
 
     try {
-      const transaction = await this.#submitter.submit(freezeRelayRequest(request));
-      const submission = submittedSubmission(request, transaction.txHash);
-      this.#failedAttemptsBySubmission.delete(submissionKey);
-      await this.record(submission);
-      return submission;
-    } catch (error) {
-      const classification = classifyRelaySubmitterError(error, this.retrySchedule(priorFailedAttempts));
-      if (classification.retryable) {
-        await this.releaseNonce(request);
-        this.#failedAttemptsBySubmission.set(submissionKey, priorFailedAttempts + 1);
+      let transaction: RelayTransaction;
+      try {
+        transaction = await this.#submitter.submit(freezeRelayRequest(request));
+      } catch (error) {
+        const classification = this.applyRetryBudget(
+          classifyRelaySubmitterError(error, this.retrySchedule(priorFailedAttempts)),
+          priorFailedAttempts
+        );
+        if (classification.retryable) {
+          // A submitter rejection carries no txHash, so the nonce is safe to
+          // retry. This includes operator-recoverable insufficient-funds
+          // failures; a funded relayer can retry the same signed payload.
+          await this.releaseNonce(request);
+        }
+
+        const attemptNumber = priorFailedAttempts + 1;
+        const submission = failedSubmission(
+          request,
+          classification,
+          undefined,
+          attemptNumber,
+          this.retryBudgetRemaining(attemptNumber)
+        );
+        await this.persistOutcome(
+          submissionKey,
+          submission,
+          classification.retryable || classification.errorCode === "broadcast_retry_exhausted"
+            ? attemptNumber
+            : priorFailedAttempts
+        );
+        if (submission.deadLetter) {
+          this.#terminalSubmissionIds.add(submissionKey);
+        }
+        return submission;
       }
 
-      const submission = failedSubmission(request, classification);
-      await this.record(submission);
-      return submission;
+      const attemptNumber = priorFailedAttempts + 1;
+      const submission = submittedSubmission(
+        request,
+        transaction.txHash,
+        attemptNumber
+      );
+      try {
+        await this.record(submission);
+        await this.saveRetryState(submissionKey, {
+          failedAttempts: 0,
+          lastSubmission: submission
+        });
+        this.#failedAttemptsBySubmission.delete(submissionKey);
+        this.#lastSubmissionById.set(submissionKey, submission);
+        this.#terminalSubmissionIds.delete(submissionKey);
+        return submission;
+      } catch (error) {
+        // `submit` returned a txHash: the chain may already have consumed the
+        // nonce. A ledger failure is therefore irreversible from this service's
+        // point of view. Record a terminal, txHash-bearing fallback and keep
+        // the nonce reserved before rethrowing the original persistence error.
+        const persistFailure = failedSubmission(
+          request,
+          relayFailure({
+            errorCode: "persist_failed",
+            message: "relay broadcast succeeded but persisting the submission failed; the receipt is unknown and the nonce stays consumed",
+            failureCategory: "broadcaster",
+            retryable: false,
+            deadLetter: true
+          }),
+          transaction.txHash,
+          attemptNumber,
+          this.retryBudgetRemaining(0)
+        );
+        this.#lastSubmissionById.set(submissionKey, persistFailure);
+        this.#terminalSubmissionIds.add(submissionKey);
+        this.#failedAttemptsBySubmission.delete(submissionKey);
+        await this.bestEffortPersistAfterBroadcast(submissionKey, persistFailure, attemptNumber, error);
+        throw error;
+      }
     } finally {
       this.releaseOrder(request);
     }
@@ -200,6 +301,108 @@ export class RelayerService implements LifecycleService {
 
   private async record(submission: RelaySubmission): Promise<void> {
     await this.#submissionStore?.record(submission);
+  }
+
+  private async loadRetryState(submissionKey: string): Promise<RelayRetryBudgetSnapshot> {
+    const localSubmission = this.#lastSubmissionById.get(submissionKey);
+    const localTerminalSubmission = this.#terminalSubmissionIds.has(submissionKey)
+      ? localSubmission
+      : undefined;
+    const localAttempts = this.#failedAttemptsBySubmission.get(submissionKey) ?? 0;
+    const persistedBudget = this.#retryBudgetStore
+      ? await this.#retryBudgetStore.load(submissionKey)
+      : undefined;
+    const persistedSubmission = await this.loadSubmission(submissionKey);
+    const lastSubmission = persistedBudget?.lastSubmission
+      ?? persistedSubmission
+      ?? localTerminalSubmission
+      ?? localSubmission;
+    const persistedAttempts = persistedBudget?.failedAttempts ?? failedAttemptsFromSubmission(persistedSubmission);
+    const failedAttempts = Math.max(localAttempts, persistedAttempts, failedAttemptsFromSubmission(lastSubmission));
+    return {
+      failedAttempts,
+      ...(lastSubmission ? { lastSubmission } : {})
+    };
+  }
+
+  private async loadSubmission(submissionKey: string): Promise<RelaySubmission | undefined> {
+    if (!this.#submissionStore) {
+      return undefined;
+    }
+    if (this.#submissionStore.load) {
+      return this.#submissionStore.load(submissionKey);
+    }
+    if (this.#submissionStore.get) {
+      return this.#submissionStore.get(submissionKey);
+    }
+    if (this.#submissionStore.list) {
+      const submissions = await this.#submissionStore.list();
+      return submissions.find((submission) => submission.id === submissionKey);
+    }
+    return undefined;
+  }
+
+  private async persistOutcome(
+    submissionKey: string,
+    submission: RelaySubmission,
+    failedAttempts: number
+  ): Promise<void> {
+    this.#lastSubmissionById.set(submissionKey, submission);
+    if (failedAttempts > 0) {
+      this.#failedAttemptsBySubmission.set(submissionKey, failedAttempts);
+    } else {
+      this.#failedAttemptsBySubmission.delete(submissionKey);
+    }
+    await this.record(submission);
+    await this.saveRetryState(submissionKey, { failedAttempts, lastSubmission: submission });
+  }
+
+  private async saveRetryState(submissionKey: string, snapshot: RelayRetryBudgetSnapshot): Promise<void> {
+    await this.#retryBudgetStore?.save(submissionKey, snapshot);
+  }
+
+  private async bestEffortPersistAfterBroadcast(
+    submissionKey: string,
+    submission: RelaySubmission,
+    failedAttempts: number,
+    persistenceError: unknown
+  ): Promise<void> {
+    try {
+      await this.record(submission);
+      await this.saveRetryState(submissionKey, { failedAttempts, lastSubmission: submission });
+    } catch (fallbackError) {
+      this.#logger.error("relayer broadcast succeeded but durable failure record could not be written", {
+        submissionId: submissionKey,
+        error: redactErrorMessage(fallbackError),
+        originalError: redactErrorMessage(persistenceError)
+      });
+    }
+  }
+
+  private retryBudgetExhausted(failedAttempts: number): boolean {
+    // `maxRetryAttempts` is the number of retries after the initial
+    // broadcast. Thus max=1 permits attempt 1 plus attempt 2; once two
+    // failed attempts are persisted, the next call is exhausted.
+    return Number.isFinite(this.#maxRetryAttempts) && failedAttempts > this.#maxRetryAttempts;
+  }
+
+  private retryBudgetRemaining(failedAttempts: number): number | undefined {
+    if (!Number.isFinite(this.#maxRetryAttempts)) {
+      return undefined;
+    }
+    const retriesConsumed = Math.max(failedAttempts - 1, 0);
+    return Math.max(this.#maxRetryAttempts - retriesConsumed, 0);
+  }
+
+  private applyRetryBudget(
+    classification: RelayFailureClassification,
+    priorFailedAttempts: number
+  ): RelayFailureClassification {
+    const attemptNumber = priorFailedAttempts + 1;
+    if (!classification.retryable || !this.retryBudgetExhausted(attemptNumber)) {
+      return classification;
+    }
+    return retryBudgetExhaustedFailure();
   }
 
   private acquireOrder(request: RelayRequest): boolean {
@@ -253,6 +456,44 @@ export class MemoryRelayNonceStore implements RelayNonceStore {
 
   async release(signer: Address, nonce: string): Promise<void> {
     this.#reserved.delete(nonceKey(signer, nonce));
+  }
+}
+
+/**
+ * Small deterministic store for local runs and tests. Production deployments
+ * should provide a durable RelaySubmissionStore implementation; the optional
+ * `load` method is what lets RelayerService recover a final DLQ or retry count
+ * after a restart.
+ */
+export class MemoryRelaySubmissionStore implements RelaySubmissionStore {
+  readonly #submissions = new Map<string, RelaySubmission>();
+
+  async record(submission: RelaySubmission): Promise<void> {
+    this.#submissions.set(submission.id, submission);
+  }
+
+  async load(submissionId: string): Promise<RelaySubmission | undefined> {
+    return this.#submissions.get(submissionId);
+  }
+
+  async get(submissionId: string): Promise<RelaySubmission | undefined> {
+    return this.load(submissionId);
+  }
+
+  async list(): Promise<readonly RelaySubmission[]> {
+    return [...this.#submissions.values()];
+  }
+}
+
+export class MemoryRelayRetryBudgetStore implements RelayRetryBudgetStore {
+  readonly #snapshots = new Map<string, RelayRetryBudgetSnapshot>();
+
+  async load(submissionId: string): Promise<RelayRetryBudgetSnapshot | undefined> {
+    return this.#snapshots.get(submissionId);
+  }
+
+  async save(submissionId: string, snapshot: RelayRetryBudgetSnapshot): Promise<void> {
+    this.#snapshots.set(submissionId, snapshot);
   }
 }
 
@@ -387,13 +628,17 @@ export function classifyRelaySubmitterError(
       deadLetter: true
     });
   }
-  if (/insufficient funds/i.test(haystack)) {
+  if (/insufficient[ _-]?funds/i.test(haystack)) {
     return relayFailure({
       errorCode: "relayer_insufficient_funds",
       message: "relayer gas payer has insufficient funds",
       failureCategory: "broadcaster",
-      retryable: false,
-      deadLetter: true
+      // Funding the gas payer is an operator-recoverable condition. The
+      // submitter did not return a txHash, so the caller may retry the same
+      // signed payload after the balance is restored.
+      retryable: true,
+      deadLetter: false,
+      ...schedule
     });
   }
   if (/chain.?id mismatch|wrong chain/i.test(haystack)) {
@@ -450,21 +695,39 @@ export function classifyRelaySubmitterError(
   });
 }
 
-function submittedSubmission(request: RelayRequest, txHash: Hex): RelaySubmission {
+function submittedSubmission(
+  request: RelayRequest,
+  txHash: Hex,
+  attemptNumber?: number,
+  retryBudgetRemaining?: number
+): RelaySubmission {
   return {
     ...submissionBase(request),
     status: "submitted",
     txHash,
+    ...(attemptNumber !== undefined ? { attemptNumber } : {}),
+    ...(attemptNumber !== undefined ? { attemptCount: attemptNumber } : {}),
+    ...(retryBudgetRemaining !== undefined ? { retryBudgetRemaining } : {}),
     retryable: false,
     retryState: "not_applicable",
     deadLetter: false
   };
 }
 
-function failedSubmission(request: RelayRequest, classification: RelayFailureClassification): RelaySubmission {
+function failedSubmission(
+  request: RelayRequest,
+  classification: RelayFailureClassification,
+  txHash?: Hex,
+  attemptNumber?: number,
+  retryBudgetRemaining?: number
+): RelaySubmission {
   return {
     ...submissionBase(request),
     status: "failed",
+    ...(txHash ? { txHash } : {}),
+    ...(attemptNumber !== undefined ? { attemptNumber } : {}),
+    ...(attemptNumber !== undefined ? { attemptCount: attemptNumber } : {}),
+    ...(retryBudgetRemaining !== undefined ? { retryBudgetRemaining } : {}),
     errorCode: classification.errorCode,
     errorLabel: classification.errorLabel,
     error: classification.message,
@@ -483,6 +746,9 @@ function submissionBase(request: RelayRequest): Omit<
   | "errorCode"
   | "errorLabel"
   | "error"
+  | "attemptNumber"
+  | "attemptCount"
+  | "retryBudgetRemaining"
   | "failureCategory"
   | "retryable"
   | "retryState"
@@ -539,6 +805,45 @@ function retryStateFor(retryable: boolean, deadLetter: boolean): RelayRetryState
   return retryable ? "retryable" : "not_retryable";
 }
 
+function retryBudgetExhaustedFailure(): RelayFailureClassification {
+  return relayFailure({
+    errorCode: "broadcast_retry_exhausted",
+    message: "relay retry budget has been exhausted",
+    failureCategory: "broadcaster",
+    retryable: false,
+    deadLetter: true
+  });
+}
+
+function normalizeMaxRetryAttempts(value: number | undefined): number {
+  // Keep the service bounded by default, matching the chain-services
+  // BROADCAST_MAX_RETRY_ATTEMPTS default. An explicit Infinity remains useful
+  // for backwards-compatible test/dry-run callers that intentionally opt out.
+  if (value === undefined) {
+    return DEFAULT_MAX_RETRY_ATTEMPTS;
+  }
+  if (!Number.isFinite(value)) {
+    return value === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : DEFAULT_MAX_RETRY_ATTEMPTS;
+  }
+  return Math.max(Math.floor(value), 0);
+}
+
+function isTerminalSubmission(submission: RelaySubmission): boolean {
+  return submission.status === "failed" && (
+    submission.deadLetter === true ||
+    submission.retryable === false ||
+    (submission.deadLetter === undefined && submission.retryable === undefined)
+  );
+}
+
+function failedAttemptsFromSubmission(submission: RelaySubmission | undefined): number {
+  if (!submission || submission.status !== "failed" ||
+      (submission.retryable !== true && submission.retryState !== "retryable")) {
+    return 0;
+  }
+  return Math.max(submission.attemptNumber ?? submission.attemptCount ?? 0, 0);
+}
+
 function cappedExponentialBackoffMs(baseMs: number, maxMs: number, attempts: number): number {
   const safeAttempts = Number.isFinite(attempts) ? Math.max(Math.floor(attempts), 0) : 0;
   let delayMs = baseMs;
@@ -574,12 +879,16 @@ function errorLabelForRelayError(errorCode: string): string {
       return "Order relay is already in flight";
     case "relay_broadcast_failed":
       return "Relay broadcast failed";
+    case "persist_failed":
+      return "Relay broadcast succeeded but durable recording failed";
     case "relayer_insufficient_funds":
       return "Relayer gas payer needs funds";
     case "rpc_unavailable":
       return "RPC or broadcaster unavailable";
     case "signal_already_exists":
       return "Signal was already submitted";
+    case "broadcast_retry_exhausted":
+      return "Relay retry limit reached";
     case "transaction_reverted":
       return "Transaction reverted";
     case "unauthorized_signal_submitter":
