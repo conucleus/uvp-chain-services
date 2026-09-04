@@ -137,7 +137,7 @@ export class IndexerService implements LifecycleService {
     );
 
     if (finalizedBlock < deploymentBlock) {
-      this.#cursor = {
+      const nextCursor: EventCursor = {
         chainId: this.#config.network.chainId,
         deploymentBlock,
         nextBlock: deploymentBlock,
@@ -146,7 +146,8 @@ export class IndexerService implements LifecycleService {
           ? (await this.#cursorBlockHash(deploymentBlock - 1n) ?? {})
           : {})
       };
-      await this.#saveCursor();
+      await this.#saveCursor(nextCursor);
+      this.#cursor = nextCursor;
       const syncState = await this.#store.saveSyncState({
         ...this.#scope,
         syncStatus: "syncing",
@@ -253,14 +254,15 @@ export class IndexerService implements LifecycleService {
       await this.#processSignalNotifications(activeEvents);
       await this.#processProjectionAutomation(snapshot);
 
-      this.#cursor = {
+      const nextCursor: EventCursor = {
         chainId: this.#config.network.chainId,
         deploymentBlock,
         nextBlock: finalizedBlock + 1n,
         finalizedBlock,
         ...(await this.#cursorBlockHash(finalizedBlock))
       };
-      await this.#saveCursor();
+      await this.#saveCursor(nextCursor);
+      this.#cursor = nextCursor;
 
       const syncState = await this.#store.getSyncState(this.#scope) ?? await this.#store.saveSyncState(syncStateInput);
       const summary = summaryFromSnapshot({
@@ -321,7 +323,7 @@ export class IndexerService implements LifecycleService {
     // 回溯窗口内找不到共同祖先则报错要求 full rebuild。
     const effectiveFromBlock = await this.#rollbackOnReorg(fromBlock);
     if (finalizedBlock < effectiveFromBlock) {
-      this.#cursor = {
+      const nextCursor: EventCursor = {
         chainId: this.#config.network.chainId,
         deploymentBlock,
         nextBlock: effectiveFromBlock,
@@ -330,7 +332,8 @@ export class IndexerService implements LifecycleService {
           ? (await this.#cursorBlockHash(effectiveFromBlock - 1n) ?? {})
           : {})
       };
-      await this.#saveCursor();
+      await this.#saveCursor(nextCursor);
+      this.#cursor = nextCursor;
       const result = await this.#summarizeStoredProjection({
         fromBlock: effectiveFromBlock,
         toBlock: finalizedBlock,
@@ -405,14 +408,15 @@ export class IndexerService implements LifecycleService {
       };
     });
 
-    this.#cursor = {
+    const nextCursor: EventCursor = {
       chainId: this.#config.network.chainId,
       deploymentBlock,
       nextBlock: finalizedBlock + 1n,
       finalizedBlock,
       ...(await this.#cursorBlockHash(finalizedBlock))
     };
-    await this.#saveCursor();
+    await this.#saveCursor(nextCursor);
+    this.#cursor = nextCursor;
     await this.#processSignalNotifications(activeNewEvents);
     await this.#processProjectionAutomation(result.snapshot);
 
@@ -464,16 +468,16 @@ export class IndexerService implements LifecycleService {
     }
   }
 
-  async #saveCursor(): Promise<void> {
-    if (!isDurableProjectionStore(this.#store) || !this.#cursor) {
+  async #saveCursor(cursor: EventCursor): Promise<void> {
+    if (!isDurableProjectionStore(this.#store)) {
       return;
     }
     await this.#store.saveCursor({
       ...this.#scope,
-      deploymentBlock: this.#cursor.deploymentBlock,
-      nextBlock: this.#cursor.nextBlock,
-      ...(this.#cursor.finalizedBlock !== undefined ? { finalizedBlock: this.#cursor.finalizedBlock } : {}),
-      ...(this.#cursor.blockHash !== undefined ? { blockHash: this.#cursor.blockHash } : {})
+      deploymentBlock: cursor.deploymentBlock,
+      nextBlock: cursor.nextBlock,
+      ...(cursor.finalizedBlock !== undefined ? { finalizedBlock: cursor.finalizedBlock } : {}),
+      ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {})
     });
   }
 

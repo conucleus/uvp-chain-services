@@ -893,6 +893,52 @@ describe("indexer projection replay", () => {
     });
   });
 
+  it("does not advance the in-memory cursor before durable cursor persistence succeeds", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-cursor-failure-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const originalSaveCursor = store.saveCursor.bind(store);
+      let failNextSave = true;
+      store.saveCursor = async (cursor) => {
+        if (failNextSave) {
+          failNextSave = false;
+          throw new Error("cursor write failed");
+        }
+        return originalSaveCursor(cursor);
+      };
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 1n;
+        },
+        async readEvents() {
+          return [];
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store
+      });
+
+      await expect(indexer.rebuildFromDeploymentBlockWithSummary()).rejects.toThrow("cursor write failed");
+      expect(indexer.cursor).toBeUndefined();
+
+      const result = await indexer.rebuildFromDeploymentBlockWithSummary();
+      expect(result.summary.syncStatus).toBe("indexed");
+      expect(indexer.cursor).toMatchObject({ nextBlock: 2n, finalizedBlock: 1n });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("reports removed-log filtering evidence in rebuild summaries", async () => {
     const store = new MemoryProjectionStore();
     const registered = chainEvent(2n, 0, "OrderRegistered", {
