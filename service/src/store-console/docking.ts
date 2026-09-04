@@ -361,9 +361,26 @@ function versionErrors(
   ref: StoreDockingZhixuRefDTO,
   side: "source" | "target"
 ): readonly StoreDockingValidationErrorDTO[] {
-  void ref;
-  void side;
-  return [];
+  const errors: StoreDockingValidationErrorDTO[] = [];
+  const prefix = side === "source" ? "source" : "target";
+
+  // A docking session is review material only, but it must never claim that
+  // an unpublished or revoked plan can participate in a valid composition.
+  // Keep both checks explicit: a revoked definition is terminal even if a
+  // stale projection still reports its old publication marker.
+  if (ref.publicationStatus !== "published") {
+    errors.push(validationError(
+      `${prefix}_version_not_published` as const,
+      `${prefix} version ${ref.versionId ?? ref.planId} is not published on the state machine`
+    ));
+  }
+  if (ref.lifecycleStatus === "revoked") {
+    errors.push(validationError(
+      `${prefix}_version_revoked` as const,
+      `${prefix} version ${ref.versionId ?? ref.planId} has been revoked`
+    ));
+  }
+  return errors;
 }
 
 function validationError(

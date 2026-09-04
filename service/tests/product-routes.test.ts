@@ -695,6 +695,40 @@ describe("product API routes", () => {
     });
   });
 
+  it("keeps docking invalid when either selected version is unpublished or revoked", async () => {
+    const source = {
+      ...demoZhixuDetail,
+      zhixuId: "docking-source-unpublished",
+      planPublication: { ...demoZhixuDetail.planPublication, status: "not_found" as const }
+    };
+    const target = {
+      ...demoZhixuDetail,
+      zhixuId: "docking-target-revoked",
+      reviewStatus: "revoked" as const,
+      planPublication: { ...demoZhixuDetail.planPublication, status: "published" as const }
+    };
+    const service = createStoreDockingService({
+      productService: {
+        getZhixu: async (zhixuId: string) =>
+          zhixuId === source.zhixuId ? source : zhixuId === target.zhixuId ? target : undefined
+      } as unknown as ProductService
+    });
+
+    const session = await service.createSession({
+      sourceZhixuId: source.zhixuId,
+      targetZhixuId: target.zhixuId
+    });
+
+    expect(session.status).toBe("draft");
+    expect(session.validation).toMatchObject({
+      ok: false,
+      errors: expect.arrayContaining([
+        expect.objectContaining({ code: "source_version_not_published" }),
+        expect.objectContaining({ code: "target_version_revoked" })
+      ])
+    });
+  });
+
   it("serves chain-backed product order, task, timeline, proof, and replays consistently", async () => {
     const events = stateMachineProductEvents();
     const store = new MemoryProjectionStore();
