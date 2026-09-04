@@ -18,6 +18,16 @@ describe("ViemChainEventSource", () => {
       UVPOrderLinkModule: "uvp-order-link-module.v0.1.json",
       UVPDockingModule: "uvp-docking-module.v2.0.json"
     };
+    const artifacts: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
+      UVPStateMachine: "UVPStateMachine.sol/UVPStateMachine.json",
+      UVPIdentityRegistry: "UVPIdentityRegistry.sol/UVPIdentityRegistry.json",
+      UVPDeploymentRegistry: "UVPDeploymentRegistry.sol/UVPDeploymentRegistry.json",
+      UVPStagePatchModule: "UVPStagePatchModule.sol/UVPStagePatchModule.json",
+      UVPPlanMetadataModule: "UVPPlanMetadataModule.sol/UVPPlanMetadataModule.json",
+      UVPDerivedSignalModule: "UVPDerivedSignalModule.sol/UVPDerivedSignalModule.json",
+      UVPOrderLinkModule: "UVPOrderLinkModule.sol/UVPOrderLinkModule.json",
+      UVPDockingModule: "UVPDockingModule.sol/UVPDockingModule.json"
+    };
 
     for (const [contractName, fixtureName] of Object.entries(fixtures)) {
       const fixture = JSON.parse(readFileSync(
@@ -36,6 +46,27 @@ describe("ViemChainEventSource", () => {
         Object.entries(fixture.events).map(([eventName, event]) => [eventName, event.topic])
       );
       expect(actualTopics, contractName).toEqual(expectedTopics);
+
+      // A topic alone cannot reveal an indexed/non-indexed layout drift. Read
+      // the compiled Solidity artifact as a second protocol source, so the
+      // decoder cannot pass when its hand-written ABI and log encoder share a
+      // mistaken indexed layout.
+      const artifact = JSON.parse(readFileSync(
+        new URL(
+          `../../../uvp-protocol/contracts/uvp-contracts/out/${artifacts[contractName as keyof typeof INDEXER_EVENT_ABIS]}`,
+          import.meta.url,
+        ),
+        "utf8",
+      )) as { readonly abi: readonly AbiEvent[] };
+      const actualEvents = abi
+        .filter((item) => item.type === "event")
+        .map(eventShape)
+        .sort(compareEventShape);
+      const artifactEvents = artifact.abi
+        .filter((item) => item.type === "event")
+        .map(eventShape)
+        .sort(compareEventShape);
+      expect(actualEvents, `${contractName} event ABI`).toEqual(artifactEvents);
     }
   });
 
@@ -182,6 +213,36 @@ describe("ViemChainEventSource", () => {
     )).rejects.toThrow(/failed to decode UVPStateMachine event at block 100/);
   });
 });
+
+type AbiEvent = {
+  readonly type: "event";
+  readonly name: string;
+  readonly anonymous?: boolean;
+  readonly inputs: readonly {
+    readonly name?: string;
+    readonly type: string;
+    readonly indexed?: boolean;
+  }[];
+};
+
+function eventShape(event: AbiEvent) {
+  return {
+    name: event.name,
+    anonymous: event.anonymous === true,
+    inputs: event.inputs.map((input) => ({
+      name: input.name ?? "",
+      type: input.type,
+      indexed: input.indexed === true
+    }))
+  };
+}
+
+function compareEventShape(
+  left: ReturnType<typeof eventShape>,
+  right: ReturnType<typeof eventShape>
+): number {
+  return left.name.localeCompare(right.name);
+}
 
 const stateMachineTestAbi = parseAbi([
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",

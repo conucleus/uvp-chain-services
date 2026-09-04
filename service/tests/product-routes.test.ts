@@ -274,6 +274,26 @@ describe("product API routes", () => {
           expect.objectContaining({ stateMachineAddress: contractAddressV2 })
         ])
       });
+
+    for (const suffix of ["", "/timeline", "/proof"]) {
+      const response = await ambiguousRouter.handle({
+        method: "GET",
+        pathname: `/product/orders/${stateMachineOrderId}${suffix}`
+      });
+      expect(response).toMatchObject({
+        status: 409,
+        body: {
+          error: "ambiguous_order_id",
+          details: {
+            orderId: stateMachineOrderId,
+            candidates: expect.arrayContaining([
+              expect.objectContaining({ stateMachineAddress: contractAddress }),
+              expect.objectContaining({ stateMachineAddress: contractAddressV2 })
+            ])
+          }
+        }
+      });
+    }
   });
 
   it("searches Store supplier metadata by subject id or wallet", async () => {

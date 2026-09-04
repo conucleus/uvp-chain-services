@@ -154,7 +154,18 @@ export function createProductReadRouteModule(): RouteModule {
       if (request.method === "GET" && productOrderTimelineMatch) {
         return withStorageGuard(async () => {
           const orderId = decodeURIComponent(productOrderTimelineMatch[1] ?? "");
-          const timeline = await context.productService.listOrderTimeline(orderId);
+          let timeline;
+          try {
+            timeline = await context.productService.listOrderTimeline(orderId);
+          } catch (error) {
+            if (error instanceof ProductOrderLookupError) {
+              return {
+                status: 409,
+                body: { error: error.code, details: error.details }
+              };
+            }
+            throw error;
+          }
           if (!timeline) {
             return {
               status: 404,
@@ -172,7 +183,18 @@ export function createProductReadRouteModule(): RouteModule {
       if (request.method === "GET" && productOrderProofMatch) {
         return withStorageGuard(async () => {
           const orderId = decodeURIComponent(productOrderProofMatch[1] ?? "");
-          const proof = await context.productService.listOrderProof(orderId);
+          let proof;
+          try {
+            proof = await context.productService.listOrderProof(orderId);
+          } catch (error) {
+            if (error instanceof ProductOrderLookupError) {
+              return {
+                status: 409,
+                body: { error: error.code, details: error.details }
+              };
+            }
+            throw error;
+          }
           if (!proof) {
             return {
               status: 404,

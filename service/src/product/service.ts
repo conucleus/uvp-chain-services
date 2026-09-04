@@ -263,6 +263,33 @@ export class ProductOrderLookupError extends Error {
   }
 }
 
+/**
+ * Resolves a Product order through the same deployment-aware boundary for
+ * detail, timeline, and proof reads. A bare order id is not an identity when
+ * several state-machine deployments contain it.
+ */
+async function resolveProductOrder(
+  store: ProjectionStore,
+  orderId: string,
+): Promise<StateMachineOrderProjection | undefined> {
+  const matches = await store.findStateMachineOrdersByOrderId(orderId);
+  if (matches.length > 1 && !orderId.includes(":")) {
+    throw new ProductOrderLookupError(
+      "ambiguous_order_id",
+      "order id exists on multiple state machine deployments",
+      {
+        orderId,
+        candidates: matches.map((order) => ({
+          chainId: order.chainId,
+          stateMachineAddress: order.contractAddress,
+          deploymentId: order.deploymentId ?? null,
+        })),
+      },
+    );
+  }
+  return matches[0] ?? store.getStateMachineOrder(orderId);
+}
+
 export function createProductService(
   store: ProjectionStore,
   options: ProductServiceOptions = {},
@@ -314,23 +341,7 @@ export function createProductService(
 
     async getOrder(orderId) {
       const syncState = await store.getSyncState();
-      const matches = await store.findStateMachineOrdersByOrderId(orderId);
-      if (matches.length > 1 && !orderId.includes(":")) {
-        throw new ProductOrderLookupError(
-          "ambiguous_order_id",
-          "order id exists on multiple state machine deployments",
-          {
-            orderId,
-            candidates: matches.map((order) => ({
-              chainId: order.chainId,
-              stateMachineAddress: order.contractAddress,
-              deploymentId: order.deploymentId ?? null,
-            })),
-          },
-        );
-      }
-      const stateMachineOrder =
-        matches[0] ?? (await store.getStateMachineOrder(orderId));
+      const stateMachineOrder = await resolveProductOrder(store, orderId);
       if (stateMachineOrder) {
         return await productOrderFromStateMachine(
           stateMachineOrder,
@@ -343,11 +354,7 @@ export function createProductService(
     },
 
     async listOrderTimeline(orderId) {
-      const matches = await store.findStateMachineOrdersByOrderId(orderId);
-      const order =
-        matches.length === 1
-          ? matches[0]
-          : await store.getStateMachineOrder(orderId);
+      const order = await resolveProductOrder(store, orderId);
       if (!order) {
         return undefined;
       }
@@ -355,11 +362,7 @@ export function createProductService(
     },
 
     async listOrderProof(orderId) {
-      const matches = await store.findStateMachineOrdersByOrderId(orderId);
-      const order =
-        matches.length === 1
-          ? matches[0]
-          : await store.getStateMachineOrder(orderId);
+      const order = await resolveProductOrder(store, orderId);
       if (!order) {
         return undefined;
       }
