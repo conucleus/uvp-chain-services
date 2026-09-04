@@ -108,8 +108,9 @@ export interface ReconcileConfig {
   readonly txTimeoutMs: number;
 }
 
-export interface DockedSignalAutomationConfig {
+export interface DockAutomationConfig {
   readonly enabled: boolean;
+  readonly pollIntervalMs: number;
   readonly maxCandidatesPerRun: number;
   readonly maxGasPerTx?: bigint;
   readonly waitForReceipt: boolean;
@@ -199,7 +200,7 @@ export interface ChainServicesConfig {
   readonly productBff: ProductBffConfig;
   readonly operatorRoles: OperatorRoleConfig;
   readonly reconcile: ReconcileConfig;
-  readonly dockedSignalAutomation: DockedSignalAutomationConfig;
+  readonly dockAutomation: DockAutomationConfig;
   readonly evidenceStorage: EvidenceStorageConfig;
   readonly notifications?: NotificationsConfig;
   readonly storeAuth?: StoreAuthConfig;
@@ -319,21 +320,22 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
       pollIntervalMs: parseInteger(env, "RECONCILE_POLL_INTERVAL_MS", 5_000),
       txTimeoutMs: parseInteger(env, "RECONCILE_TX_TIMEOUT_MS", 30 * 60 * 1000),
     },
-    dockedSignalAutomation: {
+    dockAutomation: {
       enabled: parseBoolean(
         env,
-        "UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED",
+        "UVP_DOCK_AUTOMATION_ENABLED",
         false,
       ),
+      pollIntervalMs: parseInteger(env, "UVP_DOCK_AUTOMATION_POLL_INTERVAL_MS", 5_000),
       maxCandidatesPerRun: parseInteger(
         env,
-        "UVP_DOCKED_SIGNAL_MAX_CANDIDATES_PER_RUN",
+        "UVP_DOCK_AUTOMATION_MAX_CANDIDATES_PER_RUN",
         4,
       ),
-      ...optionalGasCap(env, "UVP_DOCKED_SIGNAL_MAX_GAS_PER_TX", 500_000n),
+      ...optionalGasCap(env, "UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX", 500_000n),
       waitForReceipt: parseBoolean(
         env,
-        "UVP_DOCKED_SIGNAL_WAIT_FOR_RECEIPT",
+        "UVP_DOCK_AUTOMATION_WAIT_FOR_RECEIPT",
         true,
       ),
     },

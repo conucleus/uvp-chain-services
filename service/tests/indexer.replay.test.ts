@@ -622,6 +622,7 @@ describe("indexer projection replay", () => {
     // 产生 planId=0 的 unknown 幻影订单。
     const moduleId = bytes32Text("uvp.module.stage-patch.v1");
     const moduleAddress = "0x6666666666666666666666666666666666666666";
+    const dockInstanceId = bytes32Hex("900");
     const events: readonly ChainEvent[] = [
       chainEvent(1n, 0, "PlanRegistered", {
         planId,
@@ -650,24 +651,27 @@ describe("indexer projection replay", () => {
         patchNonce: 1n,
         metadataURI: "ipfs://stage-executor-patch/1"
       }, moduleAddress),
-      chainEvent(5n, 0, "DockedOrderLinked", {
+      chainEvent(5n, 0, "DockOpened", {
+        dockInstanceId: dockInstanceId,
         localOrderId: stateMachineOrderId,
         linkedOrderId: bytes32Hex("303"),
-        localSourceId: sourceId,
-        selectorStageId,
-        linkedPlanId: bytes32Hex("404"),
-        selector: signer,
-        linkHash: patchHash,
-        linkNonce: 1n,
-        metadataURI: "ipfs://docked-link/1"
+        localPlanId: planId,
+        targetPlanId: bytes32Hex("404"),
+        routeId: bytes32Hex("505"),
+        routeHash: patchHash,
+        depth: 1n,
+        opener: signer
       }, moduleAddress),
-      chainEvent(6n, 0, "DockedSignalMapped", {
-        localOrderId: stateMachineOrderId,
+      chainEvent(6n, 0, "DockInputSubmitted", {
+        dockInstanceId: dockInstanceId,
         linkedOrderId: bytes32Hex("303"),
-        linkedSourceId: sourceId,
-        linkedSignalId: signalId,
-        localSourceId: sourceId,
-        localSignalId: signalId
+        inputBindingHash: bytes32Hex("606"),
+        localPlanId: planId,
+        localOrderId: stateMachineOrderId,
+        targetPlanId: bytes32Hex("404"),
+        targetSignalId: signalId,
+        payloadHash,
+        submitter: signer
       }, moduleAddress),
       chainEvent(7n, 0, "DerivedSignalSubmitted", {
         fromOrderId: stateMachineOrderId,
@@ -691,16 +695,27 @@ describe("indexer projection replay", () => {
       activeExecutorWallet: overlayExecutor,
       proof: expect.objectContaining({ eventName: "StageExecutorPatchApplied" })
     });
-    expect(Object.keys(order?.dockedOrderLinks ?? {})).toContain(bytes32Hex("303"));
     expect(order?.proof.map((proof) => proof.eventName)).toEqual(expect.arrayContaining([
       "StageExecutorPatchApplied",
-      "DockedOrderLinked",
-      "DockedSignalMapped",
+      "DockOpened",
+      "DockInputSubmitted",
       "DerivedSignalSubmitted"
     ]));
-    // 不产生以模块地址为桶的幻影订单；全部订单都归属状态机地址。
-    expect(Object.keys(snapshot.stateMachineOrders)).toEqual([orderKey]);
+    const dockKey = stateMachineScopedKey(31337, contractAddress, dockInstanceId);
+    expect(snapshot.stateMachineDocks[dockKey]).toMatchObject({
+      localOrderId: stateMachineOrderId,
+      linkedOrderId: bytes32Hex("303"),
+      targetPlanId: bytes32Hex("404"),
+      status: "open"
+    });
+    expect(Object.keys(snapshot.stateMachineDocks[dockKey]?.inputDeliveries ?? {})).toEqual([
+      bytes32Hex("606")
+    ]);
+    // 不产生以模块地址为桶的幻影订单；父订单与 dock 创建的子订单都归属状态机地址。
+    const linkedOrderKey = stateMachineScopedKey(31337, contractAddress, bytes32Hex("303"));
+    expect(Object.keys(snapshot.stateMachineOrders).sort()).toEqual([orderKey, linkedOrderKey].sort());
     expect(Object.values(snapshot.stateMachineOrders).every((entry) => entry.contractAddress === contractAddress)).toBe(true);
+    expect(snapshot.stateMachineDocks[dockKey]?.stateMachineAddress).toBe(contractAddress);
     expect(snapshot.unresolvedModuleOrderEventCount).toBe(0);
   });
 
@@ -1634,8 +1649,9 @@ function testConfig(): ChainServicesConfig {
       pollIntervalMs: 50,
       txTimeoutMs: 60_000
     },
-    dockedSignalAutomation: {
+    dockAutomation: {
       enabled: false,
+      pollIntervalMs: 5_000,
       maxCandidatesPerRun: 4,
       maxGasPerTx: 500_000n,
       waitForReceipt: true

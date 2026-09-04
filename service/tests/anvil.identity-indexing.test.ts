@@ -195,8 +195,9 @@ function testConfig(input: {
       pollIntervalMs: 50,
       txTimeoutMs: 60_000
     },
-    dockedSignalAutomation: {
+    dockAutomation: {
       enabled: false,
+      pollIntervalMs: 5_000,
       maxCandidatesPerRun: 4,
       maxGasPerTx: 500_000n,
       waitForReceipt: true

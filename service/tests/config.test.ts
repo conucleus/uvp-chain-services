@@ -246,16 +246,18 @@ describe("chain-services config", () => {
     });
   });
 
-  it("loads docked signal automation config and gas cap", () => {
+  it("loads dock automation config and gas cap", () => {
     const config = loadConfigFromEnv({
-      UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED: "true",
-      UVP_DOCKED_SIGNAL_MAX_CANDIDATES_PER_RUN: "2",
-      UVP_DOCKED_SIGNAL_MAX_GAS_PER_TX: "250000",
-      UVP_DOCKED_SIGNAL_WAIT_FOR_RECEIPT: "false"
+      UVP_DOCK_AUTOMATION_ENABLED: "true",
+      UVP_DOCK_AUTOMATION_POLL_INTERVAL_MS: "250",
+      UVP_DOCK_AUTOMATION_MAX_CANDIDATES_PER_RUN: "2",
+      UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX: "250000",
+      UVP_DOCK_AUTOMATION_WAIT_FOR_RECEIPT: "false"
     });
 
-    expect(config.dockedSignalAutomation).toEqual({
+    expect(config.dockAutomation).toEqual({
       enabled: true,
+      pollIntervalMs: 250,
       maxCandidatesPerRun: 2,
       maxGasPerTx: 250_000n,
       waitForReceipt: false

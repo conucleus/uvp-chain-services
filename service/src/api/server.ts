@@ -19,6 +19,7 @@ import {
   type ProductOrderTriggerBroadcastAdapter
 } from "../product/bff/trigger.js";
 import { createViemReconcileReceiptClient, TxReconcileWorker } from "../reconcile/index.js";
+import { DockAutomationWorker } from "../dock-automation/index.js";
 import { createChainServicesStores } from "../storage/factory.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import {
@@ -155,6 +156,16 @@ export async function startApiServer(
     productStore: productBffStore,
     submissionStore,
     governanceStore,
+    logger
+  });
+  // PRD96 §15：dock liveness worker。routeSource/submitter 未装配时为
+  // 显式 no-op（候选扫描归零），装配点由云编译 route 数据库接入方提供。
+  const dockingModuleAddressValue = moduleAddress(config, "docking", "UVPDockingModule");
+  const dockAutomationWorker = new DockAutomationWorker({
+    config: config.dockAutomation,
+    projectionStore: store,
+    dockingAddress: dockingModuleAddressValue ?? "0x0000000000000000000000000000000000000000",
+    chainId: config.network.chainId,
     logger
   });
   // ETH-06：admin recovery actions 从既有 worker/indexer 原语构造，路由
@@ -359,8 +370,10 @@ export async function startApiServer(
     server.on("close", () => clearInterval(pollInterval));
   }
   await reconcileWorker.start();
+  await dockAutomationWorker.start();
   server.on("close", () => {
     void (async () => {
+      await dockAutomationWorker.stop();
       await reconcileWorker.stop();
       await stores.close();
     })();

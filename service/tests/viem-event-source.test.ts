@@ -152,7 +152,7 @@ describe("ViemChainEventSource", () => {
 
 const stateMachineTestAbi = parseAbi([
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",
-  "event StageExecutorActivated(bytes32 indexed orderId,bytes32 indexed targetStageId,address indexed executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)"
+  "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)"
 ]);
 
 function planRegisteredLog(input: { readonly removed?: boolean } = {}): Log {
@@ -179,6 +179,7 @@ function planRegisteredLog(input: { readonly removed?: boolean } = {}): Log {
 }
 
 function stageExecutorActivatedLog(): Log {
+  const planId = "0x0000000000000000000000000000000000000000000000000000000000000303";
   const orderId = "0x0000000000000000000000000000000000000000000000000000000000000101";
   const targetStageId = "0x0000000000000000000000000000000000000000000000000000000000000202";
   const executor = "0x2222222222222222222222222222222222222222";
@@ -191,17 +192,24 @@ function stageExecutorActivatedLog(): Log {
     logIndex: 0,
     data: encodeAbiParameters(
       [
+        { type: "address" },
         { type: "bytes32" },
         { type: "bytes32" },
         { type: "uint256" },
         { type: "string" }
       ],
-      [bytes32Hex("01"), bytes32Hex("02"), 1n, "ipfs://stage-executor-patch/1"]
+      [
+        executor,
+        bytes32Hex("01"),
+        bytes32Hex("02"),
+        1n,
+        "ipfs://stage-executor-patch/1"
+      ]
     ),
     topics: encodeEventTopics({
       abi: stateMachineTestAbi,
       eventName: "StageExecutorActivated",
-      args: { orderId, targetStageId, executor }
+      args: { planId, orderId, targetStageId }
     }),
     removed: false
   } as Log;

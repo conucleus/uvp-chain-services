@@ -754,8 +754,9 @@ function serverTestConfig(): ChainServicesConfig {
       pollIntervalMs: 0,
       txTimeoutMs: 60_000
     },
-    dockedSignalAutomation: {
+    dockAutomation: {
       enabled: false,
+      pollIntervalMs: 5_000,
       maxCandidatesPerRun: 4,
       maxGasPerTx: 500_000n,
       waitForReceipt: true

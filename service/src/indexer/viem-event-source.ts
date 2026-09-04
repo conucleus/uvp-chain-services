@@ -12,35 +12,55 @@ import { ConfigError, type Address, type Hex } from "../shared/types.js";
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
+// UVPStateMachine v0.9（SM ABI fixture：uvp-state-machine.v0.9.json）：
+// 订单维度事件全部 plan-scoped；patch/metadata/derived/link/dock 事件由
+// 各模块合约发出，按 deployment.modules 分地址挂 ABI。
 const stateMachineAbi = parseAbi([
   "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
   "event StateMachineModuleSet(bytes32 indexed moduleId,address indexed previousModule,address indexed newModule)",
   "event StateMachineModulesFrozen(bytes32 indexed moduleSetHash)",
-  "event PlanCommitted(bytes32 indexed planId,bytes32 indexed planHash,address indexed publisher,bytes32 hooksHash,bytes32 metadataHash,uint256 hookCount)",
+  "event PlanCommitted(bytes32 indexed planId,bytes32 indexed planHash,address indexed publisher,bytes32 hooksHash,bytes32 metadataHash,uint256 hookCount,bytes32 dockRoutesRoot,bytes32 dockInterfaceRoot)",
   "event PlanFinalized(bytes32 indexed planId,bytes32 indexed planHash,bytes32 metadataHash)",
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",
   "event PlanPublisherRecorded(bytes32 indexed planId,address indexed publisher)",
   "event OrderRegistered(bytes32 indexed orderId,bytes32 indexed planId)",
   "event OrderMaterialized(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed stageId)",
-  "event OrderRelayerRecorded(bytes32 indexed orderId,address indexed relayer,address indexed creator)",
-  "event SignalSubmitterAuthorized(bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 indexed signalId,address submitter,bytes32 role,bytes32 metadataHash)",
-  "event SignalSubmitted(bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 indexed signalId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
-  "event StageMaterialized(bytes32 indexed orderId,bytes32 indexed stageId,bytes32 indexed triggerHookId,bytes32 sourceId,bytes32 signalId)",
-  "event SignalCapabilityRegistered(bytes32 indexed planId,bytes32 indexed stageId,bytes32 indexed targetSourceId,bytes32 signalId,uint8 targetOrderRelation)",
+  "event OrderRelayerRecorded(bytes32 indexed planId,bytes32 indexed orderId,address indexed relayer,address creator)",
+  "event SignalSubmitterAuthorized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,address submitter,bytes32 role,bytes32 metadataHash)",
+  "event SignalSubmitted(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
+  "event StageMaterialized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed stageId,bytes32 triggerHookId,bytes32 sourceId,bytes32 signalId)",
   "event OrderTriggered(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed triggerStageId,bytes32 sourceId,bytes32 signalId,address submitter)",
-  "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 originSourceId,bytes32 originSignalId)",
-  "event StageSelectorBindingRegistered(bytes32 indexed planId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId)",
+  "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)",
+  "event StageExecutorSignalDelegated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,bytes32 sourceId,bytes32 signalId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce)",
+  "event HookStatusChanged(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint8 previousStatus,uint8 newStatus,uint64 dueAt)",
+  "event HookReady(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,bytes32 stageId,bytes32 hookName)",
+  "event TimerPoked(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint64 dueAt)",
+]);
+
+const stagePatchModuleAbi = parseAbi([
   "event StageExecutorPatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,address selector,address executor,bytes32 role,bytes32 executorMetadataHash,bytes32 mode,address previousExecutor,bytes32 approvalSourceId,bytes32 approvalSignalId,bytes32 patchHash,uint256 patchNonce,string metadataURI)",
   "event StageResourcePatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,address selector,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI)",
-  "event StageExecutorActivated(bytes32 indexed orderId,bytes32 indexed targetStageId,address indexed executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)",
-  "event StageExecutorSignalDelegated(bytes32 indexed orderId,bytes32 indexed targetStageId,bytes32 indexed sourceId,bytes32 signalId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce)",
-  "event DockedOrderLinked(bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 indexed localSourceId,bytes32 selectorStageId,bytes32 linkedPlanId,address selector,bytes32 linkHash,uint256 linkNonce,string metadataURI)",
-  "event DockedSignalMapped(bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 indexed linkedSourceId,bytes32 linkedSignalId,bytes32 localSourceId,bytes32 localSignalId)",
-  "event DockedSignalSubmitted(bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 indexed linkedSourceId,bytes32 linkedSignalId,bytes32 localSourceId,bytes32 localSignalId,bytes32 payloadHash,address submitter)",
+]);
+
+const planMetadataModuleAbi = parseAbi([
+  "event StageSelectorBindingRegistered(bytes32 indexed planId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId)",
+  "event SignalCapabilityRegistered(bytes32 indexed planId,bytes32 indexed stageId,bytes32 indexed targetSourceId,bytes32 signalId,uint8 relation)",
+]);
+
+const derivedSignalModuleAbi = parseAbi([
   "event DerivedSignalSubmitted(bytes32 indexed fromOrderId,bytes32 indexed targetOrderId,bytes32 indexed signalId,bytes32 fromStageId,bytes32 targetSourceId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
-  "event HookStatusChanged(bytes32 indexed orderId,bytes32 indexed hookId,uint8 previousStatus,uint8 newStatus,uint64 dueAt)",
-  "event HookReady(bytes32 indexed orderId,bytes32 indexed hookId,bytes32 indexed stageId,bytes32 hookName)",
-  "event TimerPoked(bytes32 indexed orderId,bytes32 indexed hookId,uint64 dueAt)",
+]);
+
+const orderLinkModuleAbi = parseAbi([
+  "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 originSourceId,bytes32 originSignalId)",
+]);
+
+// UVPDockingModule v2（uvp.dock.v1 统一委托协议，PRD93-96）。
+const dockingModuleAbi = parseAbi([
+  "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
+  "event DockInputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed inputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 payloadHash,address submitter)",
+  "event DockOutputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed outputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 localSignalId,bytes32 payloadHash,address submitter)",
+  "event DockTerminal(bytes32 indexed dockInstanceId,uint8 terminal)",
 ]);
 
 const identityRegistryAbi = parseAbi([
@@ -62,7 +82,12 @@ const maxGetLogsBlockSpan = 9_999n;
 type IndexedContractName =
   | "UVPStateMachine"
   | "UVPIdentityRegistry"
-  | "UVPDeploymentRegistry";
+  | "UVPDeploymentRegistry"
+  | "UVPStagePatchModule"
+  | "UVPPlanMetadataModule"
+  | "UVPDerivedSignalModule"
+  | "UVPOrderLinkModule"
+  | "UVPDockingModule";
 
 interface IndexedContract {
   readonly name: IndexedContractName;
@@ -198,20 +223,34 @@ function indexedContracts(
       config.network.contracts,
       deploymentRegistryAbi,
     ),
-    ...stateMachineDeployments.flatMap((deployment) => [
-      {
-        name: "UVPStateMachine" as const,
-        address: deployment.stateMachineAddress,
-        abi: stateMachineAbi,
-      },
-      ...Object.values(deployment.modules ?? {})
-        .filter((address): address is Address => Boolean(address))
-        .map((address) => ({
+    ...stateMachineDeployments.flatMap((deployment) => {
+      const modules = deployment.modules ?? {};
+      const moduleContracts = [
+        modules.stagePatch
+          ? moduleContract("UVPStagePatchModule", modules.stagePatch, stagePatchModuleAbi)
+          : undefined,
+        modules.planMetadata
+          ? moduleContract("UVPPlanMetadataModule", modules.planMetadata, planMetadataModuleAbi)
+          : undefined,
+        modules.derivedSignal
+          ? moduleContract("UVPDerivedSignalModule", modules.derivedSignal, derivedSignalModuleAbi)
+          : undefined,
+        modules.orderLink
+          ? moduleContract("UVPOrderLinkModule", modules.orderLink, orderLinkModuleAbi)
+          : undefined,
+        modules.docking
+          ? moduleContract("UVPDockingModule", modules.docking, dockingModuleAbi)
+          : undefined,
+      ].filter((contract): contract is IndexedContract => Boolean(contract));
+      return [
+        {
           name: "UVPStateMachine" as const,
-          address,
+          address: deployment.stateMachineAddress,
           abi: stateMachineAbi,
-        })),
-    ]),
+        },
+        ...moduleContracts,
+      ];
+    }),
   ].filter((contract): contract is IndexedContract => Boolean(contract));
   const seen = new Set<string>();
   return contracts.filter((contract) => {
@@ -222,6 +261,17 @@ function indexedContracts(
     seen.add(key);
     return true;
   });
+}
+
+function moduleContract(
+  name: IndexedContractName,
+  address: Address,
+  abi: Abi,
+): IndexedContract | undefined {
+  if (!address || isZeroAddress(address)) {
+    return undefined;
+  }
+  return { name, address, abi };
 }
 
 function indexedContract(
