@@ -10,7 +10,8 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import {
   STATE_MACHINE_ABI,
-  buildTriggerOrderFromOutsideForCall
+  buildTriggerOrderFromOutsideForCall,
+  deriveTriggerOrderId
 } from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../../shared/types.js";
 import type { ProductOrderTriggerStatus, SignalAuthorizationDTO } from "./types.js";
@@ -173,7 +174,6 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
         stateMachineAddress,
         chainId: this.#options.chainId
       }, {
-        orderId: input.orderId,
         planId: input.planId,
         creator: input.creator,
         triggerHookId: input.triggerHookId,
@@ -201,7 +201,10 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
         };
       }
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-      if (receipt?.status === "success" && hasSignalSubmittedEvent(receipt.logs, input.planId, input.orderId, input.sourceId, input.signalId)) {
+      // 一事一单：链上订单 id 由合约从事实派生——本地镜像同一公式做回执
+      // 事件匹配（input.orderId 是产品侧关联 id，不再进链上请求）。
+      const chainOrderId = deriveTriggerOrderId(input.planId, input.sourceId, input.signalId, input.payloadHash);
+      if (receipt?.status === "success" && hasSignalSubmittedEvent(receipt.logs, input.planId, chainOrderId, input.sourceId, input.signalId)) {
         return {
           status: "confirmed",
           txHash,

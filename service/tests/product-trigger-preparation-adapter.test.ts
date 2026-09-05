@@ -7,6 +7,7 @@ import {
   type ProductTriggerBroadcastPublicClient,
   type ProductTriggerBroadcastWalletClient
 } from "../src/product/bff/trigger.js";
+import { deriveTriggerOrderId } from "@uvp-eth/protocol-bindings";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const stateMachineAddress = address("1111");
@@ -41,7 +42,8 @@ describe("Product BFF trigger broadcast adapter", () => {
         blockNumber: 12n,
         logs: [{
           address: stateMachineAddress,
-          topics: [signalSubmittedTopic, planId, orderId, sourceId],
+          // 一事一单：链上订单 id 由合约派生——回执事件携带派生 id。
+          topics: [signalSubmittedTopic, planId, deriveTriggerOrderId(planId, sourceId, signalId, payloadHash), sourceId],
           data: signalSubmittedData
         }]
       }))

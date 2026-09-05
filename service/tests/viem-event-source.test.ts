@@ -9,14 +9,14 @@ import { UnsupportedChainTargetError } from "../src/shared/types.js";
 describe("ViemChainEventSource", () => {
   it("binds every indexed event topic to the frozen protocol ABI fixtures", () => {
     const fixtures: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
-      UVPStateMachine: "uvp-state-machine.v0.9.json",
+      UVPStateMachine: "uvp-state-machine.v0.10.json",
       UVPIdentityRegistry: "uvp-identity-registry.v0.1.json",
       UVPDeploymentRegistry: "uvp-deployment-registry.v0.2.json",
-      UVPStagePatchModule: "uvp-stage-patch-module.v0.1.json",
-      UVPPlanMetadataModule: "uvp-plan-metadata-module.v0.2.json",
-      UVPDerivedSignalModule: "uvp-derived-signal-module.v0.1.json",
-      UVPOrderLinkModule: "uvp-order-link-module.v0.1.json",
-      UVPDockingModule: "uvp-docking-module.v2.0.json"
+      UVPStagePatchModule: "uvp-stage-patch-module.v0.2.json",
+      UVPPlanMetadataModule: "uvp-plan-metadata-module.v0.3.json",
+      UVPDerivedSignalModule: "uvp-derived-signal-module.v0.2.json",
+      UVPOrderLinkModule: "uvp-order-link-module.v0.2.json",
+      UVPDockingModule: "uvp-docking-module.v2.1.json"
     };
     const artifacts: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
       UVPStateMachine: "UVPStateMachine.sol/UVPStateMachine.json",

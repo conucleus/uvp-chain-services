@@ -6,6 +6,7 @@ import {
 } from "@uvp-eth/product-dto";
 import {
   buildTriggerOrderFromOutsideTypedData,
+  deriveTriggerOrderId,
   recoverTriggerOrderFromOutsideSigner,
   type TriggerOrderFromOutsideTypedData,
 } from "@uvp-eth/protocol-bindings";
@@ -365,6 +366,15 @@ export function createProductBffService(
       const idempotencyKey = hashHex(
         `uvp:product-bff:trigger:idempotency:v2:${draftId}:${orderId}:${prepareId}`,
       );
+      // 一事一单：链上订单 id 不再自报——按合约 triggerOrderIdFor 同公式
+      // 派生（同一 plan+事实恒定同 id，重放幂等）。本地随机 orderId 仍作为
+      // 产品侧关联 id 参与 payload/idempotency 派生，不进链上请求。
+      const chainOrderId = deriveTriggerOrderId(
+        normalizeBytes32(draft.planId, "draft.planId"),
+        sourceId,
+        signalId,
+        payloadHash,
+      );
       const triggerHookId = normalizeBytes32(
         createOrderTrigger.triggerHookId,
         "createOrderTrigger.triggerHookId",
@@ -376,7 +386,6 @@ export function createProductBffService(
       const typedData = buildTriggerOrderFromOutsideTypedData({
         chainId: triggerChainId,
         verifyingContract: stateMachineAddress,
-        orderId,
         planId: draft.planId,
         creator,
         triggerHookId,
@@ -393,7 +402,7 @@ export function createProductBffService(
         triggerId,
         prepareId,
         draftId,
-        orderId,
+        orderId: chainOrderId,
         stateMachineAddress,
         deploymentId,
         planId: draft.planId,
