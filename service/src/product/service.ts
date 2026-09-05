@@ -151,10 +151,21 @@ export interface ProductProjectionMetadataDTO {
   readonly degradedReason?: string;
 }
 
+/**
+ * 订单读面的投影完整性。协议包 OrderStatus 是冻结的单值类型（忠实于合约
+ * 词表），"store 行已建但 OrderRegistered 事件尚未投影"的中间态由本字段
+ * 诚实表达，避免读面看起来"一切正常已注册"：
+ * - "projected"：OrderRegistered 事件已投影（registeredAt 在场）；
+ * - "pending"：订单行已被其他事件建出，但注册投影尚未到达（最终一致
+ *   窗口，不是错误——因此用字段而不是 404/错误码表达）。
+ */
+export type ProductOrderProjectionStatus = "projected" | "pending";
+
 export type ProductOrderApiDTO = ProductOrderDTO & {
   readonly planId?: string;
   readonly planHash?: string;
   readonly chainStatus?: StateMachineOrderStatus;
+  readonly projectionStatus?: ProductOrderProjectionStatus;
   readonly paymentConditionSummary?: string;
   readonly tasks?: readonly ProductTaskApiDTO[];
   readonly stageExecutorOverlays?: Readonly<
@@ -607,6 +618,7 @@ async function productOrderFromStateMachine(
     stages.find((stage) => stage.stageId === currentStageId)?.name ??
     displayBytes32(order.currentStage, "当前阶段");
   const orderZhixuId = await zhixuIdForOrderProjection(order, productSchemaResolver);
+  const projected = orderProjectionComplete(order);
 
   return {
     orderId: order.orderId,
@@ -615,7 +627,8 @@ async function productOrderFromStateMachine(
     zhixuId: orderZhixuId,
     title: `链上订单 ${shortId(order.orderId)}`,
     status: mapStateMachineOrderStatus(order.status),
-    statusLabel: mapStateMachineOrderStatusLabel(order.status),
+    statusLabel: orderProjectionStatusLabel(order.status, projected),
+    projectionStatus: projected ? "projected" : "pending",
     totalAmount: {
       amount: "0",
       currency: "N/A",
@@ -2122,11 +2135,42 @@ function taskStatusMatchesQuery(
   );
 }
 
+/**
+ * 协议包 OrderStatus 是冻结的单值类型（合约词表只有 registered），投影侧的
+ * "unknown"/乐观提升在这里被归一为 "registered"。诚实性由 projectionStatus
+ * （机器可读）与 statusLabel（pending 时"同步中"）承担，二者都以
+ * registeredAt 为判据，见 orderProjectionComplete。
+ */
 function mapStateMachineOrderStatus(
   status: StateMachineOrderStatus,
 ): ProductOrderDTO["status"] {
   void status;
   return "registered";
+}
+
+/**
+ * 投影完整性判据：订单行存在 ≠ 注册事件已投影。行可被任意引用该 orderId
+ * 的事件先建出（SignalSubmitted/HookStatusChanged 等还会把 status 乐观提升
+ * 为 "registered"），而 registeredAt 只由 OrderRegistered 事件写入——与
+ * reconcile worker 判定注册投影在场的判据一致。
+ */
+function orderProjectionComplete(
+  order: StateMachineOrderProjection,
+): boolean {
+  return Boolean(order.registeredAt);
+}
+
+/**
+ * statusLabel 跟投影完整性走：行已建但注册投影未到时显示"同步中"，即使
+ * status 字段已被乐观提升为 registered——避免读面渲染成"已注册"。
+ */
+function orderProjectionStatusLabel(
+  status: StateMachineOrderStatus,
+  projected: boolean,
+): string {
+  return projected
+    ? mapStateMachineOrderStatusLabel(status)
+    : mapStateMachineOrderStatusLabel("unknown");
 }
 
 function mapStateMachineOrderStatusLabel(

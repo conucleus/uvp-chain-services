@@ -748,6 +748,8 @@ describe("product API routes", () => {
       planId: crossBorderPlanIds.planId,
       planHash: crossBorderPlanIds.planHash,
       chainStatus: "registered",
+      projectionStatus: "projected",
+      statusLabel: "已注册",
       currentStageId: "export.customs",
       projection: expect.objectContaining({
         source: "chain_projection",
@@ -806,6 +808,42 @@ describe("product API routes", () => {
       .resolves.toMatchObject({ body: firstProofBody });
     await expect(router.handle({ method: "GET", pathname: "/product/tasks", query: { orderId: stateMachineOrderId } }))
       .resolves.toMatchObject({ body: firstTasksBody });
+  });
+
+  it("marks the un-projected registration window as pending instead of a normal registered order", async () => {
+    const store = new MemoryProjectionStore();
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    // 行已建但 OrderRegistered 未投影：去掉注册事件后，SignalSubmitted 等
+    // 旁路事件会先建出订单行（status 被乐观提升为 registered，registeredAt
+    // 缺席）。读面必须以 projectionStatus: "pending" 诚实暴露该中间态，
+    // 而不是渲染成"一切正常已注册"；同时也不能把最终一致窗口渲染成 404/错误。
+    const eventsWithoutRegistration = stateMachineProductEvents().filter((event) => event.eventName !== "OrderRegistered");
+    await store.resetFromEvents({ deploymentBlock: 0n, events: eventsWithoutRegistration });
+
+    const pendingResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
+    expect(pendingResponse.status).toBe(200);
+    expect((pendingResponse.body as { order: ChainBackedOrder }).order).toMatchObject({
+      orderId: stateMachineOrderId,
+      chainStatus: "registered",
+      projectionStatus: "pending",
+      statusLabel: "同步中"
+    });
+
+    const pendingListResponse = await router.handle({ method: "GET", pathname: "/product/orders" });
+    expect(pendingListResponse.status).toBe(200);
+    expect((pendingListResponse.body as { orders: ChainBackedOrder[] }).orders)
+      .toContainEqual(expect.objectContaining({
+        orderId: stateMachineOrderId,
+        projectionStatus: "pending"
+      }));
+
+    // OrderRegistered 投影到达后，同一读面翻转为 projected——字段表达的是
+    // 可自愈的短暂窗口，不是持久错误。
+    await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` }))
+      .resolves.toMatchObject({
+        body: { order: { orderId: stateMachineOrderId, projectionStatus: "projected", statusLabel: "已注册" } }
+      });
   });
 
   it("marks HookReady task submitted when a matching signal is projected", async () => {
@@ -1579,6 +1617,8 @@ interface ChainBackedOrder {
   readonly planId: string;
   readonly planHash: string;
   readonly chainStatus: string;
+  readonly projectionStatus: string;
+  readonly statusLabel: string;
   readonly currentStageId: string;
   readonly paymentConditionSummary: string;
   readonly confirmations: readonly unknown[];
