@@ -77,13 +77,20 @@ export class PostgresBroadcastDedupeStore implements BroadcastDedupeStore {
     // 单事务 INSERT ... ON CONFLICT DO NOTHING + 随后 SELECT：并发双方在
     // 唯一索引上串行化，后到者必然读到先到者的归属，不再出现"双方都视为
     // 无归属"的撞车窗口。
+    //
+    // 契约（与 memory/sqlite 后端一致）：INSERT 抢到归属（rowCount > 0）
+    // 说明此前无既有归属，必须返回 undefined；只有撞上他人归属时才返回
+    // 归属 idempotencyKey。
     return this.#database.withTransaction(async () => {
-      await this.#database.query(
+      const claimed = await this.#database.query(
         `INSERT INTO broadcast_dedupe_tx_owner (tx_hash, idempotency_key, updated_at)
          VALUES ($1, $2, $3)
          ON CONFLICT(tx_hash) DO NOTHING`,
         [normalizedTxHash, idempotencyKey, this.#now().toISOString()]
       );
+      if ((claimed.rowCount ?? 0) > 0) {
+        return undefined;
+      }
       const existing = await this.#database.query(
         "SELECT idempotency_key FROM broadcast_dedupe_tx_owner WHERE tx_hash = $1",
         [normalizedTxHash]

@@ -67,6 +67,7 @@ import type {
   StoreSupplierMetadataRecord,
 } from "../src/store-suppliers/index.js";
 import { SqliteSubmissionStore } from "../src/submissions/sqlite-store.js";
+import { SqliteBroadcastDedupeStore } from "../src/submissions/broadcast-dedupe-sqlite-store.js";
 import type {
   PreparedSubmissionRecord,
   ProductSubmissionDTO,
@@ -124,12 +125,20 @@ spec:
   nucleation:
     id: route-durable
   taskPatterns:
+    - name: selector
+      stages:
+        - name: gate
+          source: buyer
+          sendSignals: ["ready"]
+          executor:
+            supplierType: organization
+            supplierID: selector-ops
     - name: order
       stages:
         - name: intake
           source: buyer
-          trigger: ["TRIGGER"]
-          externalSignals: ["TRIGGER"]
+          receiveSignals:
+            START: "buyer::selector.gate.ready"
           sendSignals: ["cmp"]
           executor:
             supplierType: organization
@@ -244,6 +253,35 @@ describe("durable storage", () => {
     expect(revived).toHaveLength(1);
     expect(revived[0]?.removed).toBeUndefined();
     expect(revived[0]).toMatchObject({ eventName: "OrderCreated" });
+  });
+
+  it("claims broadcast txHash ownership with the same contract on SQLite as on Postgres", async () => {
+    // ETH-07 三后端 parity：无既有归属时 claim 必须登记归属并返回 undefined，
+    // 已有归属时返回归属 idempotencyKey。Postgres 实现曾在抢到归属时误返回
+    // 自身 key，此断言把该契约锁定到两个持久后端。
+    const dedupe = new SqliteBroadcastDedupeStore({
+      databaseUrl: sqliteUrl(tempDirs),
+      migrations: { autoRun: true, directory: migrationsDirectory() },
+    });
+    stores.push(dedupe);
+    const dedupeTxHash =
+      "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b" as Hex;
+
+    await dedupe.save("idem-sqlite-1", {
+      attempts: 1,
+      lastResult: { status: "submitted", txHash: dedupeTxHash },
+    });
+    await expect(dedupe.load("idem-sqlite-1")).resolves.toMatchObject({
+      attempts: 1,
+      lastResult: { status: "submitted", txHash: dedupeTxHash },
+    });
+
+    await expect(
+      dedupe.claimTxHash(dedupeTxHash, "idem-sqlite-1"),
+    ).resolves.toBeUndefined();
+    await expect(
+      dedupe.claimTxHash(dedupeTxHash, "idem-sqlite-2"),
+    ).resolves.toBe("idem-sqlite-1");
   });
 
   it("rolls back writes when a transaction fails", async () => {
@@ -1119,7 +1157,7 @@ describePostgres(
       });
     });
 
-    it("absorbs duplicate Postgres projection event inserts idempotently", async () => {
+    it("deduplicates the same Postgres event but retains same-position logs from different transactions", async () => {
       const databaseUrl = await postgresSchemaUrl(schemas);
       const store = new PostgresProjectionStore({
         databaseUrl,
@@ -1135,6 +1173,13 @@ describePostgres(
       });
       await store.appendEvent(event);
       await expect(store.appendEvent(event)).resolves.toBeUndefined();
+
+      await expect(
+        store.listEvents({ chainId, contractAddress }),
+      ).resolves.toHaveLength(1);
+
+      // 迁移 0011 后 canonical 身份为 (chain, contract, block, txHash, logIndex)，
+      // 同位不同 tx 的日志必须保留，与 memory/sqlite 后端语义一致。
       const sameLogIndexDifferentTx = {
         ...event,
         transactionHash:
@@ -1146,7 +1191,7 @@ describePostgres(
 
       await expect(
         store.listEvents({ chainId, contractAddress }),
-      ).resolves.toHaveLength(1);
+      ).resolves.toHaveLength(2);
     });
 
     it("assembles and persists notification state and broadcast dedupe stores in the Postgres factory wiring", async () => {
