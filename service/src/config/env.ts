@@ -113,7 +113,13 @@ export interface DockAutomationConfig {
   readonly pollIntervalMs: number;
   readonly maxCandidatesPerRun: number;
   readonly maxGasPerTx?: bigint;
-  readonly waitForReceipt: boolean;
+  /**
+   * 最终性窗口去重（0620 L-7）：同一 binding 广播成功后，在该窗口内
+   * 不重复广播——投影要等链事件 finalize+索引后才呈现 delivery，逐轮
+   * 重发是纯 gas 浪费的 no-op 交易。窗口过后仍未投影为已投递才会重试
+   * （覆盖交易丢失的情形）。
+   */
+  readonly redeliveryWindowMs: number;
 }
 
 export interface EvidenceStorageConfig {
@@ -333,10 +339,10 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         4,
       ),
       ...optionalGasCap(env, "UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX", 500_000n),
-      waitForReceipt: parseBoolean(
+      redeliveryWindowMs: parseInteger(
         env,
-        "UVP_DOCK_AUTOMATION_WAIT_FOR_RECEIPT",
-        true,
+        "UVP_DOCK_AUTOMATION_REDELIVERY_WINDOW_MS",
+        120_000,
       ),
     },
     evidenceStorage: parseEvidenceStorageConfig(env),
@@ -1593,7 +1599,7 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
       "RECONCILE_WORKER_ENABLED=true is required in staging",
     );
   }
-  validateManagedDatabaseCostSafety(config, "staging");
+  validateManagedDatabaseCostSafety(config, env, "staging");
 
   const privateKeyEnvNames = new Set([
     config.relayer.stateMachinePrivateKeyEnv,
@@ -1736,11 +1742,12 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "GOVERNANCE_CHAIN_ID=84532 is required in testnet when governance broadcast is enabled",
     );
   }
-  validateManagedDatabaseCostSafety(config, "testnet");
+  validateManagedDatabaseCostSafety(config, env, "testnet");
 }
 
 function validateManagedDatabaseCostSafety(
   config: ChainServicesConfig,
+  env: Env,
   environment: "staging" | "testnet",
 ): void {
   if (config.database.driver !== "postgres") {
@@ -1751,9 +1758,21 @@ function validateManagedDatabaseCostSafety(
     return;
   }
   const host = classification.redactedHost ?? "non-local Postgres";
-  if (config.api.indexerPollIntervalMs > 0) {
+  // D18：受管 PG 上不再强制 poll=0（那会让外部参与方事件永不入投影、
+  // reconcile 永卡，只能人工 rebuild）。要求 poll 间隔显式配置；允许 0，
+  // 但 =0 必须同时显式确认知情键 UVP_INDEXER_POLL_DISABLED_ACK=1。
+  const pollExplicit = env.UVP_INDEXER_POLL_INTERVAL_MS?.trim() !== undefined && env.UVP_INDEXER_POLL_INTERVAL_MS?.trim() !== "";
+  if (!pollExplicit) {
     throw new ConfigError(
-      `UVP_INDEXER_POLL_INTERVAL_MS=0 is required when CHAIN_SERVICES_DATABASE_URL points to ${host} in ${environment}`,
+      `UVP_INDEXER_POLL_INTERVAL_MS must be explicitly configured when CHAIN_SERVICES_DATABASE_URL points to ${host} in ${environment} (a mild positive interval such as 5000 is recommended)`,
+    );
+  }
+  if (
+    config.api.indexerPollIntervalMs <= 0 &&
+    env.UVP_INDEXER_POLL_DISABLED_ACK?.trim() !== "1"
+  ) {
+    throw new ConfigError(
+      `UVP_INDEXER_POLL_DISABLED_ACK=1 is required to acknowledge the consequences of UVP_INDEXER_POLL_INTERVAL_MS=0 (external participants' events will never enter the projection; reconcile stalls; recovery needs a manual rebuild) when CHAIN_SERVICES_DATABASE_URL points to ${host} in ${environment}`,
     );
   }
   if (

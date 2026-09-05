@@ -165,6 +165,10 @@ export interface AdminOpsRecoveryActions {
   runReconcile?(): Promise<AdminOpsActionEffect | void>;
   rebuildProjections?(): Promise<AdminOpsActionEffect | void>;
   retrySubmission?(input: AdminOpsRetrySubmissionInput): Promise<AdminOpsActionEffect | void>;
+  /** ETH-04：补投 post-commit 失败批次（游标已前进的持久 pending 队列）。 */
+  sweepPendingPostCommitSteps?(): Promise<AdminOpsActionEffect | void>;
+  /** ETH-04：列出 pending 队列（人工研判）。 */
+  listPendingPostCommitSteps?(): Promise<unknown>;
 }
 
 export interface ApiRouteContext {

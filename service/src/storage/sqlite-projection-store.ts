@@ -28,10 +28,13 @@ import {
 } from "./projection-store.js";
 import type {
   DurableProjectionStore,
+  PendingPostCommitKind,
+  PendingPostCommitStep,
   ProjectionRebuildInput,
   ProjectionScope,
   ProjectionSyncState,
   ProjectionSnapshotKind,
+  SavePendingPostCommitStepInput,
   StoredProjectionCursor,
   StoredProjectionSnapshot,
 } from "./projection-store.js";
@@ -294,15 +297,12 @@ export class SqliteProjectionStore implements DurableProjectionStore {
   }
 
   async deleteEventsAfterBlock(
-    scope: Partial<ProjectionScope> = {},
-    blockNumber: bigint = 0n,
+    scope: { readonly chainId: number; readonly contractAddress?: Address },
+    blockNumber: bigint,
   ): Promise<number> {
-    const clauses: string[] = ["CAST(block_number AS INTEGER) > ?"];
-    const values: SqliteValue[] = [blockNumber.toString()];
-    if (scope.chainId !== undefined) {
-      clauses.push("chain_id = ?");
-      values.push(scope.chainId);
-    }
+    // chainId 必填：无链范围的删除会跨链误删其他链的已投影事件。
+    const clauses: string[] = ["CAST(block_number AS INTEGER) > ?", "chain_id = ?"];
+    const values: SqliteValue[] = [blockNumber.toString(), scope.chainId];
     if (scope.contractAddress) {
       clauses.push("contract_address = ?");
       values.push(
@@ -315,6 +315,82 @@ export class SqliteProjectionStore implements DurableProjectionStore {
         .run(...values);
       return result.changes;
     });
+  }
+
+  async savePendingPostCommitStep(
+    input: SavePendingPostCommitStepInput,
+  ): Promise<PendingPostCommitStep> {
+    const now = new Date().toISOString();
+    runSqliteWrite(() => {
+      this.#database
+        .prepare(
+          `INSERT INTO indexer_pending_post_commit (
+           step_id, chain_id, kind, events_json, attempts, last_error, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
+         ON CONFLICT(step_id) DO NOTHING`,
+        )
+        .run(
+          input.stepId,
+          input.chainId,
+          input.kind,
+          input.events ? stringifyStorageJson(input.events) : null,
+          now,
+          now,
+        );
+    });
+    const saved = await this.#pendingStepRow(input.stepId);
+    if (!saved) {
+      throw new Error("sqlite pending post-commit step disappeared after save");
+    }
+    return saved;
+  }
+
+  async listPendingPostCommitSteps(
+    scope: { readonly chainId: number },
+  ): Promise<readonly PendingPostCommitStep[]> {
+    const rows = this.#database
+      .prepare(
+        `SELECT step_id AS stepId, chain_id AS chainId, kind, events_json AS eventsJson,
+           attempts, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt
+         FROM indexer_pending_post_commit
+         WHERE chain_id = ?
+         ORDER BY created_at ASC, step_id ASC`,
+      )
+      .all(scope.chainId);
+    return rows.map((row) => pendingPostCommitRow(row));
+  }
+
+  async recordPendingPostCommitAttempt(stepId: string, error: string): Promise<void> {
+    const updatedAt = new Date().toISOString();
+    runSqliteWrite(() => {
+      this.#database
+        .prepare(
+          `UPDATE indexer_pending_post_commit
+         SET attempts = attempts + 1, last_error = ?, updated_at = ?
+         WHERE step_id = ?`,
+        )
+        .run(error, updatedAt, stepId);
+    });
+  }
+
+  async deletePendingPostCommitStep(stepId: string): Promise<void> {
+    runSqliteWrite(() => {
+      this.#database
+        .prepare("DELETE FROM indexer_pending_post_commit WHERE step_id = ?")
+        .run(stepId);
+    });
+  }
+
+  async #pendingStepRow(stepId: string): Promise<PendingPostCommitStep | undefined> {
+    const row = this.#database
+      .prepare(
+        `SELECT step_id AS stepId, chain_id AS chainId, kind, events_json AS eventsJson,
+           attempts, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt
+         FROM indexer_pending_post_commit
+         WHERE step_id = ?`,
+      )
+      .get(stepId);
+    return row ? pendingPostCommitRow(row) : undefined;
   }
 
   async appendEvent(event: ChainEvent): Promise<void> {
@@ -423,9 +499,9 @@ export class SqliteProjectionStore implements DurableProjectionStore {
          removed,
          block_hash AS blockHash
        FROM chain_event_log
-       ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
+         ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
        ORDER BY chain_id ASC, CAST(block_number AS INTEGER) ASC,
-         transaction_index ASC, log_index ASC`,
+         transaction_index IS NULL ASC, transaction_index ASC, log_index ASC`,
       )
       .all(...values);
 
@@ -517,9 +593,14 @@ export class SqliteProjectionStore implements DurableProjectionStore {
 
   async getStateMachineOrder(
     orderId: string,
+    planId?: string,
   ): Promise<StateMachineOrderProjection | undefined> {
     const snapshot = await this.#currentOrderSnapshot();
     const orders = uniqueProjectionValues(snapshot.stateMachineOrders);
+    if (planId) {
+      // 带 planId 的复合键查询不做裸键回退：兼容别名可能指向别的 plan。
+      return uniqueOrderByBareId(orders, orderId, planId);
+    }
     return (
       snapshot.stateMachineOrders[orderId.toLowerCase()] ??
       snapshot.stateMachineOrders[orderId] ??
@@ -648,6 +729,33 @@ function snapshotRow<TSnapshot>(
   };
 }
 
+function pendingPostCommitRow(row: unknown): PendingPostCommitStep {
+  const record = rowObject(row);
+  const eventsJson = nullableStringColumn(record, "eventsJson");
+  const lastError = nullableStringColumn(record, "lastError");
+  return {
+    stepId: stringColumn(record, "stepId"),
+    chainId: numberColumn(record, "chainId"),
+    kind: pendingPostCommitKindColumn(record, "kind"),
+    ...(eventsJson !== null ? { events: parseStorageJson<readonly ChainEvent[]>(eventsJson) } : {}),
+    attempts: numberColumn(record, "attempts"),
+    ...(lastError !== null ? { lastError } : {}),
+    createdAt: stringColumn(record, "createdAt"),
+    updatedAt: stringColumn(record, "updatedAt"),
+  };
+}
+
+function pendingPostCommitKindColumn(
+  record: Record<string, unknown>,
+  key: string,
+): PendingPostCommitKind {
+  const value = stringColumn(record, key);
+  if (value !== "signal_notification" && value !== "projection_automation") {
+    throw new Error(`SQLite column ${key} must be a known pending post-commit kind`);
+  }
+  return value;
+}
+
 function syncStateRow(row: unknown): ProjectionSyncState {
   const record = rowObject(row);
   const latestIndexedBlock = nullableStringColumn(record, "latestIndexedBlock");
@@ -686,9 +794,12 @@ function syncStateRow(row: unknown): ProjectionSyncState {
 function uniqueOrderByBareId(
   orders: readonly StateMachineOrderProjection[],
   orderId: string,
+  planId?: string,
 ): StateMachineOrderProjection | undefined {
   const matches = orders.filter(
-    (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
+    (order) =>
+      order.orderId.toLowerCase() === orderId.toLowerCase() &&
+      (!planId || order.planId.toLowerCase() === planId.toLowerCase()),
   );
   return matches.length === 1 ? matches[0] : undefined;
 }

@@ -74,23 +74,28 @@ export class PostgresBroadcastDedupeStore implements BroadcastDedupeStore {
 
   async claimTxHash(txHash: string, idempotencyKey: string): Promise<string | undefined> {
     const normalizedTxHash = txHash.toLowerCase();
-    const existing = await this.#database.query(
-      "SELECT idempotency_key FROM broadcast_dedupe_tx_owner WHERE tx_hash = $1",
-      [normalizedTxHash]
-    );
-    const existingRow = existing.rows[0];
-    if (existingRow) {
-      const owner = rowObject(existingRow).idempotency_key;
-      if (typeof owner === "string") {
-        return owner;
+    // 单事务 INSERT ... ON CONFLICT DO NOTHING + 随后 SELECT：并发双方在
+    // 唯一索引上串行化，后到者必然读到先到者的归属，不再出现"双方都视为
+    // 无归属"的撞车窗口。
+    return this.#database.withTransaction(async () => {
+      await this.#database.query(
+        `INSERT INTO broadcast_dedupe_tx_owner (tx_hash, idempotency_key, updated_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT(tx_hash) DO NOTHING`,
+        [normalizedTxHash, idempotencyKey, this.#now().toISOString()]
+      );
+      const existing = await this.#database.query(
+        "SELECT idempotency_key FROM broadcast_dedupe_tx_owner WHERE tx_hash = $1",
+        [normalizedTxHash]
+      );
+      const existingRow = existing.rows[0];
+      if (existingRow) {
+        const owner = rowObject(existingRow).idempotency_key;
+        if (typeof owner === "string") {
+          return owner;
+        }
       }
-    }
-    await this.#database.query(
-      `INSERT INTO broadcast_dedupe_tx_owner (tx_hash, idempotency_key, updated_at)
-       VALUES ($1, $2, $3)
-       ON CONFLICT(tx_hash) DO NOTHING`,
-      [normalizedTxHash, idempotencyKey, this.#now().toISOString()]
-    );
-    return undefined;
+      return undefined;
+    });
   }
 }

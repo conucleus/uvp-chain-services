@@ -106,6 +106,80 @@ describe("tx/indexer reconcile worker", () => {
     });
   });
 
+  it("isolates a broken registration record instead of stalling the whole reconcile round", async () => {
+    // 簇 E-3（2349 #8）：单条坏记录（缺字段/存储写失败）只计失败并继续，
+    // 不再把整轮（含 /admin/ops/reconcile/run）拖成 500。
+    const projectionStore = new MemoryProjectionStore();
+    const txHash = bytes32("a333");
+    const brokenTxHash = bytes32("a444");
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(11n, txHash, 0, "OrderRegistered", { orderId, planId }),
+        chainEvent(12n, brokenTxHash, 0, "OrderRegistered", { orderId: bytes32("0e0e"), planId })
+      ]
+    });
+    const productStore = new class extends MemoryProductBffStore {
+      override async updateRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
+        if (registration.triggerId === "registration_broken") {
+          throw new TypeError("broken legacy record without planId");
+        }
+        return super.updateRegistration(registration);
+      }
+    }();
+    await productStore.createDraft({ ...draftFixture(), draftId: "draft_1" }, []);
+    await productStore.createDraft({ ...draftFixture(), draftId: "draft_broken" }, []);
+    await productStore.createRegistration(registrationFixture({ txHash }));
+    await productStore.createRegistration({
+      ...registrationFixture({ triggerId: "registration_broken", txHash: brokenTxHash }),
+      draftId: "draft_broken",
+      orderId: bytes32("0e0e")
+    });
+    const worker = workerFixture({ projectionStore, productStore, receipts: new Map() });
+
+    const summary = await worker.runOnce();
+
+    // 坏记录计失败，好记录照常确认，整轮不被拖死。
+    expect(summary).toMatchObject({ registrationsChecked: 2, failed: 1 });
+    await expect(productStore.getRegistration("registration_1")).resolves.toMatchObject({
+      status: "confirmed",
+      reconcileStatus: "confirmed"
+    });
+  });
+
+  it("confirms registrations through the (planId, orderId) composite key when two plans reuse an order id", async () => {
+    // 簇 E-3（0132 P2-11/0630 M-5/0632 CS-7）：裸 orderId 在同号订单跨 plan
+    // 复用时永远查不中 → registration 永卡 indexing；复合键查询必须命中
+    // 本 plan 的投影。
+    const otherPlanId = bytes32("0f0f");
+    const projectionStore = new MemoryProjectionStore();
+    const txHash = bytes32("a555");
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(10n, bytes32("a556"), 0, "OrderRegistered", { orderId, planId: otherPlanId }),
+        chainEvent(11n, txHash, 0, "OrderRegistered", { orderId, planId })
+      ]
+    });
+    const productStore = new MemoryProductBffStore();
+    await productStore.createDraft(draftFixture(), []);
+    await productStore.createRegistration(registrationFixture({ txHash }));
+    const worker = workerFixture({
+      projectionStore,
+      productStore,
+      receipts: new Map([[txHash, { status: "success", blockNumber: 11n }]])
+    });
+
+    await worker.runOnce();
+
+    await expect(productStore.getRegistration("registration_1")).resolves.toMatchObject({
+      status: "confirmed",
+      blockNumber: "11",
+      reconcileStatus: "confirmed",
+      projectionStatus: "present"
+    });
+  });
+
   it("moves submissions through indexing, confirmed, and failed receipt states", async () => {
     const projectionStore = new MemoryProjectionStore();
     const submissionStore = new InMemoryProductSubmissionStore();

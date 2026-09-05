@@ -128,21 +128,21 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     }
     const record = rowObject(row, "submission prepared query");
     const prepared = parseStorageJson<PreparedSubmissionRecord>(stringColumn(record, "prepared_json"));
-    const relationalPlanId = optionalStringColumn(record, "plan_id");
     const usedAt = optionalStringColumn(record, "used_at");
     const submissionId = optionalStringColumn(record, "submission_id");
+    // planId 必填（schema NOT NULL）：缺 planId 的行不允许被静默兼容读出。
+    if (!prepared.planId) {
+      throw new Error(`stored submission prepare ${prepareId} is missing planId`);
+    }
     // used 语义与内存 store 对齐：只有 markPreparedUsed 写入的 used_at 才
     // 表示 prepare 已消费。非广播路径（广播未配置）落档的提交不写 used_at，
     // prepare 保持可复用；此时行上的 submission_id 只是落档提交的检索键，
     // 不得当作消费标记。
     if (usedAt === undefined) {
-      return relationalPlanId && !(prepared as PreparedSubmissionRecord & { readonly planId?: string }).planId
-        ? { ...prepared, planId: relationalPlanId as PreparedSubmissionRecord["planId"] }
-        : prepared;
+      return prepared;
     }
     return {
       ...prepared,
-      ...(!prepared.planId && relationalPlanId ? { planId: relationalPlanId as PreparedSubmissionRecord["planId"] } : {}),
       usedAt,
       ...(submissionId !== undefined ? { submissionId } : {})
     };
@@ -307,7 +307,6 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     }
     const record = rowObject(row, "submission query");
     const stored = parseStorageJson<ProductSubmissionDTO>(stringColumn(record, "submission_json"));
-    const relationalPlanId = optionalStringColumn(record, "plan_id");
     const attempts = this.#database.prepare(
       `SELECT attempt_json
        FROM submission_attempt
@@ -318,9 +317,11 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
         stringColumn(rowObject(attemptRow, "submission_attempt query"), "attempt_json")
       )
     );
+    if (!stored.planId) {
+      throw new Error(`stored submission ${submissionId} is missing planId`);
+    }
     return {
       ...stored,
-      ...(!stored.planId && relationalPlanId ? { planId: relationalPlanId as ProductSubmissionDTO["planId"] } : {}),
       attempts,
       attemptCount: attempts.length
     };
@@ -336,12 +337,12 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     const submissions = rows.map((row) => {
       const record = rowObject(row, "submission list query");
       const stored = parseStorageJson<ProductSubmissionDTO>(stringColumn(record, "submission_json"));
-      const relationalPlanId = optionalStringColumn(record, "plan_id");
+      if (!stored.planId) {
+        throw new Error(`stored submission ${stringColumn(record, "submission_id")} is missing planId`);
+      }
       return {
         submissionId: stringColumn(record, "submission_id"),
-        submission: !stored.planId && relationalPlanId
-          ? { ...stored, planId: relationalPlanId as ProductSubmissionDTO["planId"] }
-          : stored
+        submission: stored
       };
     });
     if (submissions.length === 0) {

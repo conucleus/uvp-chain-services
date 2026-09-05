@@ -58,10 +58,18 @@ export class DockAutomationWorker implements LifecycleService {
   readonly #dockingAddress: Hex;
   readonly #chainId: number;
   readonly #logger: Logger;
+  readonly #now: () => Date;
   #timer: NodeJS.Timeout | undefined;
   #running = false;
   #checking = false;
   #lastSummary: DockAutomationRunSummary | undefined;
+  /**
+   * 最终性窗口去重（0620 L-7）：key → 最近一次成功广播时刻。投影要等
+   * 链事件 finalize+索引后才呈现 delivery，窗口内逐轮重发同一 binding 是
+   * 纯 gas 浪费的 no-op 交易；窗口过后仍未投递才允许重试（覆盖交易
+   * 丢失）。进程内状态即可：keeper 是单实例写者。
+   */
+  readonly #lastBroadcastAt = new Map<string, number>();
 
   constructor(options: {
     readonly config: DockAutomationConfig;
@@ -71,6 +79,7 @@ export class DockAutomationWorker implements LifecycleService {
     readonly routeSource?: DockRouteSource;
     readonly submitter?: DockAutomationSubmitter;
     readonly logger?: Logger;
+    readonly now?: () => Date;
   }) {
     this.#config = options.config;
     this.#projectionStore = options.projectionStore;
@@ -79,6 +88,7 @@ export class DockAutomationWorker implements LifecycleService {
     this.#routeSource = options.routeSource;
     this.#submitter = options.submitter;
     this.#logger = options.logger ?? noopLogger;
+    this.#now = options.now ?? (() => new Date());
   }
 
   async start(): Promise<void> {
@@ -119,6 +129,7 @@ export class DockAutomationWorker implements LifecycleService {
       inputCandidates: 0,
       outputCandidates: 0,
       submitted: 0,
+      deduplicated: 0,
       skipped: []
     };
     if (!this.#config.enabled || this.#checking) {
@@ -138,6 +149,7 @@ export class DockAutomationWorker implements LifecycleService {
         inputCandidates: 0,
         outputCandidates: 0,
         submitted: 0,
+        deduplicated: 0,
         skipped: []
       };
       if (routes.length === 0 || !this.#submitter) {
@@ -163,7 +175,12 @@ export class DockAutomationWorker implements LifecycleService {
             this.entranceHookReady(snapshot, route)
           ) {
             summary.openCandidates += 1;
-            await this.#submitCalldata(route.openCalldata, summary, "open");
+            await this.#submitCalldata(
+              route.openCalldata,
+              summary,
+              "open",
+              `open:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}`
+            );
           }
           continue;
         }
@@ -192,7 +209,12 @@ export class DockAutomationWorker implements LifecycleService {
             functionName: "submitDockedInput",
             args: [dock.dockInstanceId, binding.localHookId, binding.bindingHash]
           });
-          await this.#submitCalldata(data, summary, "input");
+          await this.#submitCalldata(
+            data,
+            summary,
+            "input",
+            `input:${dock.dockInstanceId.toLowerCase()}:${binding.bindingHash.toLowerCase()}`
+          );
         }
 
         // output 候选：目标事实已写入投影且 binding 未投递。
@@ -212,7 +234,12 @@ export class DockAutomationWorker implements LifecycleService {
             functionName: "submitDockedSignal",
             args: [dock.dockInstanceId, binding.bindingHash]
           });
-          await this.#submitCalldata(data, summary, "output");
+          await this.#submitCalldata(
+            data,
+            summary,
+            "output",
+            `output:${dock.dockInstanceId.toLowerCase()}:${binding.bindingHash.toLowerCase()}`
+          );
         }
       }
 
@@ -223,9 +250,25 @@ export class DockAutomationWorker implements LifecycleService {
     }
   }
 
-  #submitCalldata(data: Hex, summary: DockAutomationRunSummary, label: string): Promise<void> {
+  /**
+   * 广播 + 最终性窗口去重（0620 L-7）：同一 key 在 redeliveryWindowMs 内
+   * 已成功广播过则本轮跳过（计数 deduplicated，不静默）；窗口过后投影
+   * 仍未呈现 delivery 才会重试，覆盖交易丢失的情形。
+   */
+  #submitCalldata(
+    data: Hex,
+    summary: DockAutomationRunSummary,
+    label: string,
+    dedupeKey: string
+  ): Promise<void> {
     const submitter = this.#submitter;
     if (!submitter) {
+      return Promise.resolve();
+    }
+    const nowMs = this.#now().getTime();
+    const lastBroadcastAt = this.#lastBroadcastAt.get(dedupeKey);
+    if (lastBroadcastAt !== undefined && nowMs - lastBroadcastAt < this.#config.redeliveryWindowMs) {
+      summary.deduplicated += 1;
       return Promise.resolve();
     }
     return submitter
@@ -235,6 +278,7 @@ export class DockAutomationWorker implements LifecycleService {
         ...(this.#config.maxGasPerTx ? { gas: this.#config.maxGasPerTx } : {})
       })
       .then(() => {
+        this.#lastBroadcastAt.set(dedupeKey, this.#now().getTime());
         summary.submitted += 1;
       })
       .catch((error) => {

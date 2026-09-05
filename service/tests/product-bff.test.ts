@@ -627,6 +627,73 @@ describe("product BFF order drafts and invites", () => {
     expect(attempt!.authorizations).toHaveLength(trigger.permissions.length);
   });
 
+  it("serializes concurrent trigger submissions per order so the broadcast fires exactly once", async () => {
+    // 簇 N（BFF 建单触发 per-order 互斥）：triggerOrder 的状态检查与
+    // "置 submitted + 广播"之间隔了 await——并发提交同一 draft 会双双通过
+    // 检查并各自广播同一触发交易。per-order 互斥串行化后，第二个调用者
+    // 在临界区内重读 registration，自然得到 409 trigger_not_prepared。
+    let releaseBroadcast: (() => void) | undefined;
+    const broadcastCalls: ProductBroadcastOutsideTriggerInput[] = [];
+    const gatingAdapter = new (class extends MemoryProductOrderTriggerBroadcastAdapter {
+      override async broadcastOutsideTrigger(
+        input: ProductBroadcastOutsideTriggerInput,
+      ): Promise<ProductOrderTriggerBroadcastResult> {
+        broadcastCalls.push(input);
+        await new Promise<void>((resolve) => {
+          releaseBroadcast = resolve;
+        });
+        return {
+          status: "confirmed",
+          txHash:
+            "0x4242424242424242424242424242424242424242424242424242424242424242",
+          blockNumber: "42",
+          retryable: false,
+        };
+      }
+    })();
+    const { router } = await createRouterFixture(
+      [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+      gatingAdapter,
+    );
+    const draft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    const account = privateKeyToAccount(
+      testPrivateKey(walletAddressIndex(testWallet(0))),
+    );
+    const signature = await account.signTypedData(
+      prepared.prepared.typedData as Parameters<typeof account.signTypedData>[0],
+    );
+    const triggerBody = {
+      prepareId: prepared.prepared.prepareId,
+      walletAddress: testWallet(0),
+      signature,
+    };
+
+    // 两个并发提交：第一个进入广播并挂起，第二个被互斥挡在临界区外。
+    const firstCall = router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/trigger`,
+      body: triggerBody,
+    });
+    for (let attempt = 0; attempt < 100 && broadcastCalls.length < 1; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(broadcastCalls).toHaveLength(1);
+    const secondCall = router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/trigger`,
+      body: triggerBody,
+    });
+    releaseBroadcast?.();
+
+    const [first, second] = await Promise.all([firstCall, secondCall]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(409);
+    expect(second.body).toMatchObject({ error: "trigger_not_prepared" });
+    // 广播只发生一次：没有第二次链上触发交易。
+    expect(broadcastCalls).toHaveLength(1);
+  });
+
   it("rejects client-supplied authorization tables in prepare and trigger", async () => {
     const { router, triggerAdapter } = await createRouterFixture([
       ...activeDeploymentEvents(),

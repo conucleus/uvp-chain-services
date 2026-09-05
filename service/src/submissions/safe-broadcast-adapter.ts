@@ -79,66 +79,69 @@ export function createSecureSubmissionBroadcastAdapter(
         return duplicate;
       }
 
-      const inFlight = inFlightByOrder.get(orderKey) ?? 0;
-      if (inFlight >= maxInFlightPerOrder) {
-        const result = failedBroadcastResult(
-          "broadcast_rate_limited",
-          "another broadcast is already in flight for this order",
-          true,
-          currentState?.attempts ?? 0,
-          retrySchedule(currentState?.attempts ?? 0, { now, retryBaseMs, retryMaxMs })
-        );
-        await audit.record({
-          type: "relayer.broadcast.rate_limited",
-          action: request.prepared.signalName,
-          outcome: "blocked",
-          subject: auditSubject(request),
-          errorCode: result.errorCode,
-          retryable: result.retryable
-        });
-        return result;
-      }
-      const submitterInFlight = inFlightBySubmitter.get(submitterKey) ?? 0;
-      if (submitterInFlight >= maxInFlightPerSubmitter) {
-        const result = failedBroadcastResult(
-          "broadcast_rate_limited",
-          "another broadcast is already in flight for this submitter",
-          true,
-          currentState?.attempts ?? 0,
-          retrySchedule(currentState?.attempts ?? 0, { now, retryBaseMs, retryMaxMs })
-        );
-        await audit.record({
-          type: "relayer.broadcast.rate_limited",
-          action: request.prepared.signalName,
-          outcome: "blocked",
-          subject: auditSubject(request),
-          errorCode: result.errorCode,
-          retryable: result.retryable
-        });
-        return result;
-      }
-
-      const attemptNumber = (currentState?.attempts ?? 0) + 1;
-      if (attemptNumber > 1) {
-        await audit.record({
-          type: "relayer.broadcast.retry",
-          action: request.prepared.signalName,
-          outcome: "retry",
-          subject: auditSubject(request),
-          metadata: { attemptNumber }
-        });
-      } else {
-        await audit.record({
-          type: "relayer.submit.request",
-          action: request.prepared.signalName,
-          outcome: "accepted",
-          subject: auditSubject(request)
-        });
-      }
-
-      inFlightByOrder.set(orderKey, inFlight + 1);
-      inFlightBySubmitter.set(submitterKey, submitterInFlight + 1);
+      // TOCTOU 修复：在任何 await 之前同步占位（先占后查），并发进入的
+      // 同单/同人广播各自拿到递增的占位数，超额者立即释放并限流返回，
+      // 不再出现"双方都读到 0、双双放行"的穿透窗口。
+      const acquiredOrderInFlight = (inFlightByOrder.get(orderKey) ?? 0) + 1;
+      inFlightByOrder.set(orderKey, acquiredOrderInFlight);
+      const acquiredSubmitterInFlight = (inFlightBySubmitter.get(submitterKey) ?? 0) + 1;
+      inFlightBySubmitter.set(submitterKey, acquiredSubmitterInFlight);
       try {
+        if (acquiredOrderInFlight > maxInFlightPerOrder) {
+          const result = failedBroadcastResult(
+            "broadcast_rate_limited",
+            "another broadcast is already in flight for this order",
+            true,
+            currentState?.attempts ?? 0,
+            retrySchedule(currentState?.attempts ?? 0, { now, retryBaseMs, retryMaxMs })
+          );
+          await audit.record({
+            type: "relayer.broadcast.rate_limited",
+            action: request.prepared.signalName,
+            outcome: "blocked",
+            subject: auditSubject(request),
+            errorCode: result.errorCode,
+            retryable: result.retryable
+          });
+          return result;
+        }
+        if (acquiredSubmitterInFlight > maxInFlightPerSubmitter) {
+          const result = failedBroadcastResult(
+            "broadcast_rate_limited",
+            "another broadcast is already in flight for this submitter",
+            true,
+            currentState?.attempts ?? 0,
+            retrySchedule(currentState?.attempts ?? 0, { now, retryBaseMs, retryMaxMs })
+          );
+          await audit.record({
+            type: "relayer.broadcast.rate_limited",
+            action: request.prepared.signalName,
+            outcome: "blocked",
+            subject: auditSubject(request),
+            errorCode: result.errorCode,
+            retryable: result.retryable
+          });
+          return result;
+        }
+
+        const attemptNumber = (currentState?.attempts ?? 0) + 1;
+        if (attemptNumber > 1) {
+          await audit.record({
+            type: "relayer.broadcast.retry",
+            action: request.prepared.signalName,
+            outcome: "retry",
+            subject: auditSubject(request),
+            metadata: { attemptNumber }
+          });
+        } else {
+          await audit.record({
+            type: "relayer.submit.request",
+            action: request.prepared.signalName,
+            outcome: "accepted",
+            subject: auditSubject(request)
+          });
+        }
+
         const broadcast = withAttemptMetadata(await options.adapter.broadcast(request), attemptNumber, {
           now,
           retryBaseMs,
@@ -171,21 +174,20 @@ export function createSecureSubmissionBroadcastAdapter(
         }
         return result;
       } finally {
-        const nextInFlight = (inFlightByOrder.get(orderKey) ?? 1) - 1;
-        if (nextInFlight <= 0) {
-          inFlightByOrder.delete(orderKey);
-        } else {
-          inFlightByOrder.set(orderKey, nextInFlight);
-        }
-        const nextSubmitterInFlight = (inFlightBySubmitter.get(submitterKey) ?? 1) - 1;
-        if (nextSubmitterInFlight <= 0) {
-          inFlightBySubmitter.delete(submitterKey);
-        } else {
-          inFlightBySubmitter.set(submitterKey, nextSubmitterInFlight);
-        }
+        releaseInFlight(inFlightByOrder, orderKey);
+        releaseInFlight(inFlightBySubmitter, submitterKey);
       }
     }
   };
+}
+
+function releaseInFlight(counts: Map<string, number>, key: string): void {
+  const next = (counts.get(key) ?? 1) - 1;
+  if (next <= 0) {
+    counts.delete(key);
+  } else {
+    counts.set(key, next);
+  }
 }
 
 function duplicateResult(

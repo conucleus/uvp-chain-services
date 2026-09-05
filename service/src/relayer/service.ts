@@ -219,10 +219,31 @@ export class RelayerService implements LifecycleService {
         }
 
         const attemptNumber = priorFailedAttempts + 1;
+
+        // "already known"/"nonce too low" 不等于失败：交易可能已经上链。
+        // 先按候选 txHash 探回执，确认成功则按 submitted+txHash 记账
+        //（nonce 视为已消费）；查不到才允许死信，并把探过的 txHash 留在
+        // 台账供人工复核，避免把已上链交易永久标记 failed 误导参与方重签。
+        if (classification.errorCode === "duplicate_transaction") {
+          const resolved = await this.#resolveDuplicateTransaction(
+            submissionKey,
+            request,
+            error,
+            prior.lastSubmission?.txHash,
+            attemptNumber
+          );
+          if (resolved) {
+            return resolved;
+          }
+        }
+
+        const unconfirmedTxHash = classification.errorCode === "duplicate_transaction"
+          ? duplicateTransactionTxHashCandidates(error, prior.lastSubmission?.txHash)[0]
+          : undefined;
         const submission = failedSubmission(
           request,
           classification,
-          undefined,
+          unconfirmedTxHash,
           attemptNumber,
           this.retryBudgetRemaining(attemptNumber)
         );
@@ -301,6 +322,66 @@ export class RelayerService implements LifecycleService {
 
   private async record(submission: RelaySubmission): Promise<void> {
     await this.#submissionStore?.record(submission);
+  }
+
+  /**
+   * duplicate_transaction（already known / nonce too low）的回执裁决：
+   * 交易可能已在链上。按候选 txHash（错误对象携带的哈希 + 该提交此前
+   * 记录的 txHash）探回执；确认 success 则按 submitted 记账并返回，
+   * 否则返回 undefined 走死信路径（复核通道：unconfirmed txHash 保留在
+   * 台账上）。探针不可用（submitter 未实现）时同样走死信。
+   */
+  async #resolveDuplicateTransaction(
+    submissionKey: string,
+    request: RelayRequest,
+    error: unknown,
+    priorTxHash: Hex | undefined,
+    attemptNumber: number
+  ): Promise<RelaySubmission | undefined> {
+    const getReceipt = this.#submitter.getTransactionReceipt;
+    if (!getReceipt) {
+      return undefined;
+    }
+    const candidates = duplicateTransactionTxHashCandidates(error, priorTxHash);
+    for (const txHash of candidates) {
+      let receipt: Awaited<ReturnType<NonNullable<TransactionSubmitter["getTransactionReceipt"]>>>;
+      try {
+        receipt = await getReceipt.call(this.#submitter, txHash);
+      } catch (probeError) {
+        this.#logger.warn("relayer duplicate-transaction receipt probe failed", {
+          submissionId: submissionKey,
+          txHash,
+          message: probeError instanceof Error ? redactErrorMessage(probeError) : "unknown probe error"
+        });
+        continue;
+      }
+      if (receipt?.status === "success") {
+        const submission = submittedSubmission(request, txHash, attemptNumber);
+        try {
+          await this.record(submission);
+          await this.saveRetryState(submissionKey, {
+            failedAttempts: 0,
+            lastSubmission: submission
+          });
+          this.#failedAttemptsBySubmission.delete(submissionKey);
+          this.#lastSubmissionById.set(submissionKey, submission);
+          this.#terminalSubmissionIds.delete(submissionKey);
+        } catch (persistError) {
+          this.#logger.warn("relayer resolved duplicate transaction but persisting the outcome failed; the nonce stays consumed", {
+            submissionId: submissionKey,
+            txHash,
+            message: persistError instanceof Error ? redactErrorMessage(persistError) : "unknown persist error"
+          });
+          throw persistError;
+        }
+        this.#logger.info("relayer resolved duplicate transaction via on-chain receipt", {
+          submissionId: submissionKey,
+          txHash
+        });
+        return submission;
+      }
+    }
+    return undefined;
   }
 
   private async loadRetryState(submissionKey: string): Promise<RelayRetryBudgetSnapshot> {
@@ -499,6 +580,64 @@ export class MemoryRelayRetryBudgetStore implements RelayRetryBudgetStore {
 
 export function createRelayerService(options: RelayerServiceOptions): RelayerService {
   return new RelayerService(options);
+}
+
+const TX_HASH_LIKE = /^0x[0-9a-fA-F]{64}$/;
+
+/**
+ * duplicate_transaction 的候选 txHash（去重保序）：错误对象上携带的
+ * txHash/transactionHash 字段（viem/节点错误常见），加上该提交此前记录
+ * 的 txHash——"already known" 通常是同一签名载荷先前已广播。
+ */
+function duplicateTransactionTxHashCandidates(
+  error: unknown,
+  priorTxHash: Hex | undefined
+): readonly Hex[] {
+  const candidates: Hex[] = [];
+  const push = (value: unknown): void => {
+    if (typeof value === "string" && TX_HASH_LIKE.test(value)) {
+      const normalized = value.toLowerCase() as Hex;
+      if (!candidates.includes(normalized)) {
+        candidates.push(normalized);
+      }
+    }
+  };
+  collectTxHashLikeFields(error, push, 0);
+  push(priorTxHash);
+  return candidates;
+}
+
+function collectTxHashLikeFields(
+  value: unknown,
+  visit: (value: unknown) => void,
+  depth: number
+): void {
+  if (depth > 4 || value == null) {
+    return;
+  }
+  if (typeof value === "string") {
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectTxHashLikeFields(item, visit, depth + 1);
+    }
+    return;
+  }
+  if (typeof value !== "object") {
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ["txHash", "transactionHash", "hash"]) {
+    if (key in record) {
+      visit(record[key]);
+    }
+  }
+  for (const key of ["transaction", "cause", "error", "details"]) {
+    if (key in record) {
+      collectTxHashLikeFields(record[key], visit, depth + 1);
+    }
+  }
 }
 
 function validateRelayRequest(request: RelayRequest, now: Date): void {

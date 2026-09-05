@@ -252,7 +252,7 @@ describe("chain-services config", () => {
       UVP_DOCK_AUTOMATION_POLL_INTERVAL_MS: "250",
       UVP_DOCK_AUTOMATION_MAX_CANDIDATES_PER_RUN: "2",
       UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX: "250000",
-      UVP_DOCK_AUTOMATION_WAIT_FOR_RECEIPT: "false"
+      UVP_DOCK_AUTOMATION_REDELIVERY_WINDOW_MS: "60000"
     });
 
     expect(config.dockAutomation).toEqual({
@@ -260,7 +260,7 @@ describe("chain-services config", () => {
       pollIntervalMs: 250,
       maxCandidatesPerRun: 2,
       maxGasPerTx: 250_000n,
-      waitForReceipt: false
+      redeliveryWindowMs: 60_000
     });
   });
 
@@ -362,9 +362,20 @@ describe("chain-services config", () => {
       CHAIN_SERVICES_DATABASE_URL: sqliteConfigUrl(tempDirs)
     }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in testnet/);
 
+    // D18 裁决：受管 PG 上 poll 间隔必须显式配置（推荐温和正值）；
+    // 显式 0 需 UVP_INDEXER_POLL_DISABLED_ACK=1 知情确认。
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
-      UVP_INDEXER_POLL_INTERVAL_MS: "1000"
-    }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS=0/);
+      UVP_INDEXER_POLL_INTERVAL_MS: undefined
+    }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS must be explicitly configured/);
+
+    expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
+      UVP_INDEXER_POLL_INTERVAL_MS: "0"
+    }))).toThrow(/UVP_INDEXER_POLL_DISABLED_ACK=1/);
+
+    expect(loadConfigFromEnv(testnetEnv(databaseUrl, {
+      UVP_INDEXER_POLL_INTERVAL_MS: "0",
+      UVP_INDEXER_POLL_DISABLED_ACK: "1"
+    })).api.indexerPollIntervalMs).toBe(0);
   });
 
   it("rejects testnet missing RPC, wrong chain id, local RPC, or incomplete contracts", () => {
@@ -444,7 +455,9 @@ describe("chain-services config", () => {
 
   it("runs safe strict preflight diagnostics for the testnet profile", async () => {
     const env = testnetEnv(testnetPostgresConfigUrl(), {
-      UVP_RPC_URL: "https://base-sepolia.example/rpc?api_key=rpc-secret"
+      UVP_RPC_URL: "https://base-sepolia.example/rpc?api_key=rpc-secret",
+      // strict 环境的模块清单 fail-closed 预检需要带 modules 的 deployment。
+      UVP_ADDRESS_MANIFEST: stagingManifestPath(tempDirs, "testnet.addresses.json")
     });
     const config = loadConfigFromEnv(env);
 
@@ -579,8 +592,18 @@ describe("chain-services config", () => {
     }))).toThrow(/UVP_STAGING_ALLOW_AUTO_MIGRATIONS/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
-      UVP_INDEXER_POLL_INTERVAL_MS: "5000"
-    }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS=0/);
+      UVP_INDEXER_POLL_INTERVAL_MS: undefined
+    }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS must be explicitly configured/);
+
+    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+      UVP_INDEXER_POLL_INTERVAL_MS: "0"
+    }))).toThrow(/UVP_INDEXER_POLL_DISABLED_ACK=1/);
+
+    // D18 裁决：poll=0 带显式知情确认即可加载；温和正值是推荐缺省。
+    expect(loadConfigFromEnv(stagingEnv(tempDirs, {
+      UVP_INDEXER_POLL_INTERVAL_MS: "0",
+      UVP_INDEXER_POLL_DISABLED_ACK: "1"
+    })).api.indexerPollIntervalMs).toBe(0);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       RECONCILE_POLL_INTERVAL_MS: "5000"
@@ -710,16 +733,7 @@ describe("chain-services config", () => {
 
     const diagnostics = await runConfigPreflight(config, {
       env,
-      clients: {
-        network: {
-          getChainId: async () => 84532,
-          getBytecode: async () => "0x01"
-        },
-        governance: {
-          getChainId: async () => 84532,
-          readContract: async () => stagingGovernanceAddress
-        }
-      }
+      clients: stagingPreflightClients()
     });
 
     expect(diagnostics).toMatchObject({
@@ -817,6 +831,53 @@ describe("chain-services config", () => {
     expect(serialized).not.toContain(productionRegistrarPrivateKey.slice(2));
     expect(serialized).not.toContain(testnetRelayerPrivateKey.slice(2));
     expect(serialized).not.toContain(testnetRegistrarPrivateKey.slice(2));
+  });
+
+  it("fails strict preflight closed when the active deployment manifest is missing modules", async () => {
+    // 簇 N：manifest 缺 modules 必须启动失败——扁平合约地址写法会让索引器
+    // 静默丢弃全部 patch/dock/派生信号模块事件投影。
+    const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-modules-"));
+    tempDirs.push(manifestDir);
+    const manifestPath = join(manifestDir, "flat.addresses.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
+      network: { chainId: 84532, rpcUrlEnv: "UVP_RPC_URL" },
+      deployment: { blockNumber: 100 },
+      contracts: {
+        UVPStateMachine: {
+          address: "0x1111111111111111111111111111111111111111",
+          deployment: { blockNumber: 110 }
+        },
+        UVPIdentityRegistry: {
+          address: "0x2222222222222222222222222222222222222222",
+          deployment: { blockNumber: 111 }
+        }
+      }
+    }));
+    const env = stagingEnv(tempDirs, {
+      UVP_ADDRESS_MANIFEST: manifestPath
+    });
+    const config = loadConfigFromEnv(env);
+    await expect(runConfigPreflight(config, {
+      env,
+      clients: stagingPreflightClients()
+    })).rejects.toThrow(/stateMachineDeployments with modules are required/);
+
+    // local 环境豁免：模块清单不是本地最小路径的硬门槛。
+    const localConfig = loadConfigFromEnv({
+      UVP_ADDRESS_MANIFEST: manifestPath,
+      UVP_RPC_URL: "http://127.0.0.1:8545"
+    });
+    const localDiagnostics = await runConfigPreflight(localConfig, {
+      env: { UVP_ADDRESS_MANIFEST: manifestPath },
+      clients: stagingPreflightClients()
+    });
+    expect(localDiagnostics.preflight.checks).toContainEqual(
+      expect.objectContaining({
+        name: "contracts.state_machine_modules_manifest",
+        status: "skipped"
+      })
+    );
   });
 
   it("fails staging preflight on signer mismatch, missing bytecode reads, or governance owner mismatch", async () => {
@@ -1328,7 +1389,7 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: databaseUrl,
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "true",
-    UVP_INDEXER_POLL_INTERVAL_MS: "0",
+    UVP_INDEXER_POLL_INTERVAL_MS: "5000",
     UVP_CHAIN_ID: "84532",
     UVP_RPC_URL: "https://base-sepolia.example/rpc",
     UVP_CONTRACTS_JSON: productionContracts,
@@ -1348,7 +1409,7 @@ function stagingEnv(tempDirs: string[], overrides: Record<string, string | undef
     CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:db-secret@staging-db.internal:5432/uvp",
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
-    UVP_INDEXER_POLL_INTERVAL_MS: "0",
+    UVP_INDEXER_POLL_INTERVAL_MS: "5000",
     ...storeAuthJwtEnv,
     UVP_CHAIN_ID: "84532",
     UVP_RPC_URL: "https://base-sepolia.example/rpc?api_key=rpc-secret",
@@ -1417,16 +1478,46 @@ function stagingManifestPath(tempDirs: string[], filename = "staging.addresses.j
         address: "0x2222222222222222222222222222222222222222",
         deployment: { blockNumber: 111 }
       }
-    }
+    },
+    // strict 环境（production/testnet/staging）要求 active deployment 携带
+    // 全量模块清单：模块地址只经 deployment.modules 进索引器，扁平写法会
+    // 静默丢失全部 patch/dock 投影（fail-closed 预检）。
+    stateMachineDeployments: [
+      {
+        deploymentId: "0x" + "ab".repeat(32),
+        stateMachineAddress: "0x1111111111111111111111111111111111111111",
+        status: "active",
+        deploymentBlock: 110,
+        modules: {
+          stagePatch: "0x1212121212121212121212121212121212121212",
+          derivedSignal: "0x1313131313131313131313131313131313131313",
+          docking: "0x1414141414141414141414141414141414141414",
+          planMetadata: "0x1515151515151515151515151515151515151515",
+          orderLink: "0x1616161616161616161616161616161616161616",
+          lens: "0x1717171717171717171717171717171717171717"
+        }
+      }
+    ]
   }));
   return manifestPath;
 }
 
 function stagingPreflightClients() {
+  const manifestModuleByGetter: Record<string, string> = {
+    stagePatchModule: "0x1212121212121212121212121212121212121212",
+    derivedSignalModule: "0x1313131313131313131313131313131313131313",
+    dockingModule: "0x1414141414141414141414141414141414141414",
+    planMetadataModule: "0x1515151515151515151515151515151515151515",
+    orderLinkModule: "0x1616161616161616161616161616161616161616",
+    lens: "0x1717171717171717171717171717171717171717"
+  };
   return {
     network: {
       getChainId: async () => 84532,
-      getBytecode: async () => "0x01" as const
+      getBytecode: async () => "0x01" as const,
+      // 模块 getter 预检：返回与 stagingManifestPath 清单一致的模块地址。
+      readContract: async (call: { functionName: string }) =>
+        manifestModuleByGetter[call.functionName] ?? "0x0000000000000000000000000000000000000000"
     },
     governance: {
       getChainId: async () => 84532,

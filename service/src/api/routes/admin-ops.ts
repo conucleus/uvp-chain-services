@@ -10,7 +10,7 @@ import type { AdminOpsActionEffect, ApiRequest, ApiResponse } from "../route-con
 import { readApiHeader } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions.retry";
+type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions.retry" | "indexer.sweep_pending";
 
 interface AdminOpsRequestContext {
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
@@ -23,6 +23,8 @@ interface AdminOpsRequestContext {
       readonly submissionId: string;
       readonly submission?: ProductSubmissionDTO;
     }): Promise<AdminOpsActionEffect | void>;
+    sweepPendingPostCommitSteps?(): Promise<AdminOpsActionEffect | void>;
+    listPendingPostCommitSteps?(): Promise<unknown>;
   };
   readonly submissionStore?: {
     getSubmission(submissionId: string): Promise<ProductSubmissionDTO | undefined>;
@@ -108,6 +110,29 @@ async function handleAdminOpsRequest(
     return runAdminOpsAction(request, context, {
       action: "projections.rebuild",
       run: context.actions?.rebuildProjections
+    });
+  }
+
+  // ETH-04：post-commit 失败批次（信号通知/投影自动化）的持久 pending
+  // 队列——列表供研判，重试触发一轮 sweep 直至成功或人工干预。
+  if (request.method === "GET" && request.pathname === "/admin/ops/indexer/pending-steps") {
+    if (!context.actions?.listPendingPostCommitSteps) {
+      return {
+        status: 503,
+        body: { ok: false, error: "ops_dependency_unavailable" }
+      };
+    }
+    const pendingSteps = await context.actions.listPendingPostCommitSteps();
+    return {
+      status: 200,
+      body: redactSecrets({ ok: true, pendingSteps })
+    };
+  }
+
+  if (request.method === "POST" && request.pathname === "/admin/ops/indexer/pending-steps/retry") {
+    return runAdminOpsAction(request, context, {
+      action: "indexer.sweep_pending",
+      run: context.actions?.sweepPendingPostCommitSteps
     });
   }
 

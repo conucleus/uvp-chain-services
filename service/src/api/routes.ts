@@ -2,7 +2,7 @@ import type { ProjectionStore } from "../storage/projection-store.js";
 import type { Hex } from "../shared/types.js";
 import { createNoopComplianceService } from "../compliance/index.js";
 import { createNoopRiskGraphService } from "../risk/index.js";
-import { createProductService } from "../product/service.js";
+import { createProductService, ProductOrderLookupError } from "../product/service.js";
 import {
   createProductBffService,
 } from "../product/bff/service.js";
@@ -379,9 +379,20 @@ export function productBffStoreSubmissionAuthorization(store: ProductBffStore): 
       }
 
       const registrations = await store.listRegistrations();
-      const registration = registrations.find((item) =>
+      const matches = registrations.filter((item) =>
         equalHex(item.orderId, request.onchainOrderId) || item.orderId.toLowerCase() === request.orderId.toLowerCase()
       );
+      // 同号订单跨 plan 复用时歧义即拒（ambiguous_order_id），不取第一条，
+      // 防止用别的 plan 的 trigger 授权通过本单的提交鉴权。
+      const distinctPlanIds = new Set(matches.map((item) => item.planId.toLowerCase()));
+      if (distinctPlanIds.size > 1) {
+        return {
+          authorized: false,
+          source: "product_bff_trigger",
+          reason: "ambiguous_order_id: order id exists on multiple plans"
+        };
+      }
+      const registration = matches[0];
       if (!registration) {
         return {
           authorized: false,
@@ -447,17 +458,31 @@ const ZERO_BYTES32 = "0x00000000000000000000000000000000000000000000000000000000
 /**
  * 审计 #10：plan 作用域 submitSignal 的 planId 从索引器投影读取
  * （OrderRegistered/OrderMaterialized 均带 indexed planId，投影行已存）。
- * 找不到非零 planId 时返回 undefined，由 submission service 拒绝 prepare。
+ * 找不到非零 planId 时返回 undefined，由 submission service 拒绝 prepare；
+ * 同号订单跨 plan 复用（多命中非零 planId）时歧义即拒
+ * （ambiguous_order_id，对齐 product/service.ts resolveProductOrder 先例），
+ * 绝不取第一个。
  */
 function resolveOrderPlanIdFromStore(
   store: ProjectionStore
 ): (onchainOrderId: Hex) => Promise<Hex | undefined> {
   return async (onchainOrderId) => {
     const orders = await store.findStateMachineOrdersByOrderId(onchainOrderId);
-    const order = orders.find((candidate) =>
+    const candidates = orders.filter((candidate) =>
       Boolean(candidate.planId) &&
       candidate.planId.toLowerCase() !== ZERO_BYTES32
     );
-    return order?.planId;
+    const distinctPlanIds = new Set(candidates.map((candidate) => candidate.planId.toLowerCase()));
+    if (distinctPlanIds.size > 1) {
+      throw new ProductOrderLookupError(
+        "ambiguous_order_id",
+        "order id exists on multiple plans; refusing to pick a planId for the plan-scoped signature",
+        {
+          orderId: onchainOrderId,
+          planIds: [...distinctPlanIds]
+        }
+      );
+    }
+    return candidates[0]?.planId;
   };
 }

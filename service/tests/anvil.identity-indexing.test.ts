@@ -200,7 +200,7 @@ function testConfig(input: {
       pollIntervalMs: 5_000,
       maxCandidatesPerRun: 4,
       maxGasPerTx: 500_000n,
-      waitForReceipt: true
+      redeliveryWindowMs: 120_000
     },
     evidenceStorage: {
       adapter: "local",

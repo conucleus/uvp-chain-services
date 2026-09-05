@@ -344,6 +344,7 @@ function runStaticPreflight(
   runStagingSafetyPreflight(config, env, checks, errors);
   runStoreAuthPreflight(config, env, checks, errors);
   runNonLocalRoleSafetyPreflight(config, env, checks, errors);
+  runStateMachineModulesManifestPreflight(config, checks, errors);
 
   if (config.relayer.broadcastEnabled) {
     if (!stateMachine) {
@@ -783,6 +784,82 @@ function runStagingSafetyPreflight(
   runStagingRolePreflight(config, env, checks, errors);
 }
 
+const REQUIRED_STATE_MACHINE_MODULE_KEYS = [
+  "stagePatch",
+  "derivedSignal",
+  "docking",
+  "planMetadata",
+  "orderLink",
+  "lens"
+] as const;
+
+/**
+ * 模块清单 fail-closed：索引器只从 deployment.modules（嵌套写法）取模块
+ * 地址，扁平写法会静默丢失全部 patch/dock 投影且旧预检全绿。strict 环境
+ * （production/testnet/staging）必须有 stateMachineDeployments，且 active
+ * deployment 的 modules 含全部必填模块；缺失即启动失败。local 保持豁免
+ * （skip），因为本地开发可以只配状态机地址跑最小路径。
+ */
+function runStateMachineModulesManifestPreflight(
+  config: ChainServicesConfig,
+  checks: ConfigDiagnosticCheck[],
+  errors: string[]
+): void {
+  const strictRuntime =
+    config.security.environment === "production" ||
+    config.security.environment === "testnet" ||
+    config.security.environment === "staging";
+  if (!strictRuntime) {
+    skip(checks, "contracts.state_machine_modules_manifest", "module manifest completeness is not required in local mode");
+    return;
+  }
+
+  const deployments = config.network.stateMachineDeployments ?? [];
+  if (deployments.length === 0) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_modules_manifest",
+      "stateMachineDeployments with modules are required in production/testnet/staging; the flat contract-address form silently drops all module-event projections"
+    );
+    return;
+  }
+
+  const active = selectActiveStateMachineDeployment(config);
+  if (!active) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_modules_manifest",
+      "no state-machine deployment could be selected; configure activeDeploymentId or mark one deployment active"
+    );
+    return;
+  }
+
+  const modules = active.modules;
+  if (!modules) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_modules_manifest",
+      `active deployment ${active.deploymentId} is missing the modules manifest; module addresses must be explicit`
+    );
+    return;
+  }
+
+  const missing = REQUIRED_STATE_MACHINE_MODULE_KEYS.filter((key) => !modules[key]);
+  if (missing.length > 0) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_modules_manifest",
+      `active deployment ${active.deploymentId} is missing required modules: ${missing.join(", ")}`
+    );
+    return;
+  }
+  pass(checks, "contracts.state_machine_modules_manifest");
+}
+
 function runNonLocalRoleSafetyPreflight(
   config: ChainServicesConfig,
   env: Env,
@@ -1050,7 +1127,7 @@ async function checkStateMachineModules(input: {
   readonly checks: ConfigDiagnosticCheck[];
   readonly errors: string[];
 }): Promise<void> {
-  const deployment = activeStateMachineDeployment(input.config);
+  const deployment = selectActiveStateMachineDeployment(input.config);
   if (!deployment?.modules) {
     skip(input.checks, "contracts.state_machine_modules", "no state-machine module manifest entries configured");
     return;
@@ -1171,7 +1248,14 @@ function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Addr
     : undefined;
 }
 
-function activeStateMachineDeployment(config: ChainServicesConfig): NonNullable<ChainServicesConfig["network"]["stateMachineDeployments"]>[number] | undefined {
+/**
+ * 统一的 active deployment 选择口径：精确 activeDeploymentId 优先，其次
+ * status=active，最后唯一回退首项。server.ts（模块地址解析）与
+ * preflight（模块校验）共用，避免两处谓词漂移。
+ */
+export function selectActiveStateMachineDeployment(
+  config: ChainServicesConfig
+): NonNullable<ChainServicesConfig["network"]["stateMachineDeployments"]>[number] | undefined {
   const deployments = config.network.stateMachineDeployments ?? [];
   if (config.network.activeDeploymentId) {
     const active = deployments.find((deployment) => deployment.deploymentId === config.network.activeDeploymentId);

@@ -157,6 +157,8 @@ export interface PreparedStageExecutorPatchDTO {
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   readonly stateMachineAddress: Address;
+  /** plan-scoped 补丁身份：applyStageExecutorPatchFor 首参，必填。 */
+  readonly planId: Hex;
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
   readonly selectorWallet: Address;
@@ -184,6 +186,8 @@ export interface PreparedStageResourcePatchDTO {
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   readonly stateMachineAddress: Address;
+  /** plan-scoped 补丁身份：applyStageResourcePatchFor 首参，必填。 */
+  readonly planId: Hex;
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
   readonly resourceKey: Hex;

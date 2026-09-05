@@ -1203,9 +1203,11 @@ describe("product task submissions", () => {
       status: "failed",
       errorCode: "relayer_insufficient_funds",
       errorLabel: "Relayer gas payer needs funds",
-      retryable: false,
-      retryState: "dead_letter",
-      deadLetter: true,
+      // 0653 L-10：与 relayer 口径统一——充值是运营可修复条件，同签名
+      // 载荷可重试（submitter 未产生 txHash，nonce 未消费），不烧死信。
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false,
       attemptCount: 1
     });
   });

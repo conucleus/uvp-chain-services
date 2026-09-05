@@ -817,8 +817,10 @@ describe("stage executor/resource patch Product API", () => {
     expect(broadcastCalls).toBe(2);
   });
 
-  it("releases the reserved patch nonce when the patch store write fails so the same prepareId stays retryable", async () => {
-    // ETH-01：putSubmission/markPreparedUsed 失败同样必须释放 nonce。
+  it("keeps the patch nonce consumed when a broadcast already returned a txHash and the store write fails", async () => {
+    // 0653 L-9：广播已返回 txHash 后的落库失败不得释放 nonce——链上交易
+    // 可能已占用该 nonce，重试会二次广播同一 patch；对齐 submissions 主
+    // 路径语义（只有确认失败且无 txHash 才释放）。
     const innerBroadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => ({
         status: "submitted",
@@ -834,10 +836,7 @@ describe("stage executor/resource patch Product API", () => {
         submission: StageExecutorPatchSubmissionDTO,
       ): Promise<void> {
         this.putSubmissionCalls += 1;
-        if (this.putSubmissionCalls === 1) {
-          throw new Error("simulated durable patch store outage");
-        }
-        return super.putSubmission(submission);
+        throw new Error("simulated durable patch store outage");
       }
     }();
     const store = new MemoryProjectionStore();
@@ -881,14 +880,89 @@ describe("stage executor/resource patch Product API", () => {
       body: submitBody,
     })).rejects.toThrow("simulated durable patch store outage");
 
+    // nonce 未释放：同一 prepareId 重试撞 duplicate_stage_executor_patch_nonce
+    //（409），不会二次广播；补单交给 reconcile 从链上回执对账。
     const retried = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
       body: submitBody,
     });
 
-    expect(retried).toMatchObject({ status: 200 });
-    expect(failingStore.putSubmissionCalls).toBe(2);
+    expect(retried).toMatchObject({
+      status: 409,
+      body: { error: "duplicate_stage_executor_patch_nonce" },
+    });
+    expect(failingStore.putSubmissionCalls).toBe(1);
+  });
+
+  it("releases the reserved patch nonce when the broadcast throws before producing a txHash so the same prepareId stays retryable", async () => {
+    // ETH-01：尚未拿到 txHash 的失败（RPC 抛错/存储写入抛错）必须释放
+    // nonce，同一 prepareId 在瞬时故障后仍可重试。
+    const broadcastCalls = { count: 0 };
+    const innerBroadcast: StageExecutorPatchBroadcastAdapter = {
+      broadcast: async (): Promise<StagePatchBroadcastResult> => {
+        broadcastCalls.count += 1;
+        if (broadcastCalls.count === 1) {
+          throw new Error("simulated RPC outage before broadcast");
+        }
+        return { status: "submitted", txHash };
+      },
+    };
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: baseEvents(),
+    });
+    const service = createProductStageExecutorPatchService({
+      store,
+      chainId,
+      stagePatchModuleAddress: contractAddress,
+      now: () => baseNow,
+      prepareIdFactory: () => "prep_1",
+      submissionIdFactory: () => "sub_1",
+      stageExecutorPatchStore: new InMemoryProductStagePatchStore<
+        PreparedStageExecutorPatchRecord,
+        StageExecutorPatchSubmissionDTO
+      >(),
+      broadcastAdapter: innerBroadcast,
+    });
+    const router = createApiRouter(store, {
+      submissionChainId: 84532,
+      submissionVerifyingContract:
+        "0x1111111111111111111111111111111111111111",
+      productStageExecutorPatchService: service,
+    });
+    const prepareResponse = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody(),
+    });
+    expect(prepareResponse.status).toBe(201);
+    const prepared = prepareResponse.body as PreparedStageExecutorPatchDTO;
+    const signature = await signExecutorPrepared(prepared);
+    const submitBody = {
+      prepareId: prepared.prepareId,
+      selectorWallet,
+      signature,
+    };
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    })).rejects.toThrow("simulated RPC outage before broadcast");
+
+    const retried = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    });
+
+    expect(retried).toMatchObject({
+      status: 200,
+      body: { status: "submitted", txHash },
+    });
+    expect(broadcastCalls.count).toBe(2);
   });
 
 

@@ -47,8 +47,20 @@ export interface RelayTransaction {
   readonly txHash: Hex;
 }
 
+/** 回执探针的最小事实面：状态与块高即可裁决 duplicate 死信。 */
+export interface RelayTransactionReceiptProbe {
+  readonly status?: "success" | "reverted" | string;
+  readonly blockNumber?: bigint | number | string;
+}
+
 export interface TransactionSubmitter {
   submit(request: Readonly<RelayRequest>): Promise<RelayTransaction>;
+  /**
+   * 可选回执探针：broadcaster 报 "already known"/"nonce too low" 时交易
+   * 可能已经上链。先按 txHash 查回执，确认成功则记 submitted+txHash，
+   * 查不到才允许死信，避免把已上链交易永久标记 failed 误导参与方重签。
+   */
+  getTransactionReceipt?(txHash: Hex): Promise<RelayTransactionReceiptProbe | undefined>;
 }
 
 export interface RelayNonceStore {

@@ -1210,8 +1210,10 @@ describe("indexer projection replay", () => {
       );
       finalizedBlock = 8n;
 
+      // 全库最新已存事件锚点本身已不在 canonical 链上：reorg 深于全部已投影
+      // 数据，仍要求人工 full rebuild。
       await expect(indexer.refreshFromCursorWithSummary()).rejects.toThrow(
-        /reorg deeper than the 1000-block rollback window; full projection rebuild is required/
+        /reorg deeper than the stored projection history; full projection rebuild is required/
       );
     } finally {
       await store.close();
@@ -1540,6 +1542,347 @@ describe("indexer projection replay", () => {
       syncStatus: "indexed"
     });
   });
+
+  it("replays the real two-step plan publish transaction log order without a ProjectionError", () => {
+    // 簇 E-1（0620 H-1/0630 C-1）：真实链序 commitPlan 先发 PlanCommitted →
+    // PlanPublisherRecorded；finalizePlan 内先调 plan metadata 模块（模块
+    // 事件 logIndex 更小），随后才发 PlanFinalized + PlanRegistered。投影
+    // 若只认 PlanRegistered 建桶，首次两步发布即在 finalize 交易内撞
+    // "unknown plan" → ProjectionError → 索引器永久 degraded。
+    const planMetadataModuleId = bytes32Text("uvp.module.plan-metadata.v1");
+    const planMetadataModuleAddress = "0x7676767676767676767676767676767676767676";
+    const hooksHash = bytes32Hex("9001");
+    const metadataHash = bytes32Hex("9002");
+    const dockRoutesRoot = bytes32Hex("9003");
+    const dockInterfaceRoot = bytes32Hex("9004");
+    const publisher = "0x4444444444444444444444444444444444444444";
+    const events: readonly ChainEvent[] = [
+      // 部署交易：登记 plan metadata 模块。
+      chainEvent(1n, 0, "StateMachineModuleSet", {
+        moduleId: planMetadataModuleId,
+        previousModule: "0x0000000000000000000000000000000000000000",
+        newModule: planMetadataModuleAddress
+      }),
+      // commitPlan 交易：PlanCommitted 先于 PlanPublisherRecorded。
+      chainEvent(2n, 0, "PlanCommitted", {
+        planId,
+        planHash,
+        publisher,
+        hooksHash,
+        metadataHash,
+        hookCount: 2n,
+        dockRoutesRoot,
+        dockInterfaceRoot
+      }),
+      chainEvent(2n, 1, "PlanPublisherRecorded", {
+        planId,
+        publisher
+      }),
+      // finalizePlan 交易：模块事件 logIndex 先于 PlanFinalized/PlanRegistered
+      //（合约 finalizePlanMetadata 调用在两个 emit 之前）。
+      chainEvent(3n, 0, "SignalCapabilityRegistered", {
+        planId,
+        stageId,
+        targetSourceId: sourceId,
+        signalId,
+        targetOrderRelation: 0
+      }, planMetadataModuleAddress),
+      chainEvent(3n, 1, "StageSelectorBindingRegistered", {
+        planId,
+        selectorStageId,
+        targetStageId: stageId
+      }, planMetadataModuleAddress),
+      chainEvent(3n, 2, "PlanFinalized", {
+        planId,
+        planHash,
+        metadataHash
+      }),
+      chainEvent(3n, 3, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 2n
+      })
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const planKey = stateMachineScopedKey(31337, contractAddress, planId);
+    const plan = snapshot.stateMachinePlans[planKey];
+
+    expect(snapshot.rebuildable).toBe(true);
+    expect(plan).toMatchObject({
+      planId,
+      planHash,
+      publisher,
+      hookCount: "2",
+      metadataHash
+    });
+    // 两阶段 provenance：桶在 PlanCommitted 建立，PlanRegistered 覆写注册时点。
+    expect(plan?.committedAt).toMatchObject({ blockNumber: 2n, logIndex: 0 });
+    expect(plan?.finalizedAt).toMatchObject({ blockNumber: 3n, logIndex: 2 });
+    expect(plan?.registeredAt).toMatchObject({ blockNumber: 3n, logIndex: 3 });
+    // finalize 交易内的模块事件已并入 plan 元数据。
+    expect(plan?.signalCapabilities).toEqual([
+      expect.objectContaining({ stageId, targetSourceId: sourceId, signalId })
+    ]);
+    expect(plan?.selectorBindings).toEqual([
+      expect.objectContaining({ selectorStageId, targetStageId: stageId })
+    ]);
+  });
+
+  it("recovers from a shallow reorg on a quiet chain whose stored events are far below the backtrack window", async () => {
+    // 簇 E-2（0620 M-6）：安静链上浅 reorg——回溯窗口内没有任何已存事件
+    // 锚点不代表 reorg 深于窗口，只代表这段链上本来就没有事件。回退到全库
+    // 最新已存事件锚点核对 canonical 哈希，一致即正常继续，不误判要求人工
+    // full rebuild。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-quiet-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const originalEvents = stateMachineEvents().map((event) => ({
+        ...event,
+        blockHash: blockHashHex(`orig-${event.blockNumber}`)
+      }));
+      let finalizedBlock = 3n;
+      // 安静链：所有高度都是 orig 哈希（没有新事件）。
+      let canonicalBlocks = new Map<bigint, Hex>(
+        [1n, 2n, 3n, 4n, 2500n, 2600n].map((block) => [block, blockHashHex(`orig-${block}`)])
+      );
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return originalEvents.filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        },
+        async getBlockHash(blockNumber) {
+          return canonicalBlocks.get(blockNumber) ?? zeroBlockHash();
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store
+      });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      // 安静推进到 2500：无新事件，cursor 走到 2501（哈希 orig-2500）。
+      finalizedBlock = 2500n;
+      await indexer.refreshFromCursorWithSummary();
+      await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
+        .resolves.toMatchObject({ nextBlock: 2501n, blockHash: blockHashHex("orig-2500") });
+
+      // 浅 reorg：tip 块 2600 换哈希。fromBlock=2601 > 1000 窗口，已存事件
+      //（块 1-3）全部在窗口下界之下——旧逻辑在此误判"reorg 深于窗口"要求
+      // 人工 full rebuild；新逻辑回退到全库最新锚点（块 3）核对一致后继续。
+      canonicalBlocks = new Map<bigint, Hex>([
+        ...canonicalBlocks,
+        [2600n, blockHashHex("fork-2600")]
+      ]);
+      finalizedBlock = 2600n;
+      const result = await indexer.refreshFromCursorWithSummary();
+
+      expect(result.summary).toMatchObject({ syncStatus: "indexed" });
+      await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
+        .resolves.toMatchObject({ nextBlock: 2601n, blockHash: blockHashHex("fork-2600") });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists exhausted post-commit notification batches and redelivers them from the durable sweep", async () => {
+    // 簇 E-4（0630 C-8/0632 CS-4/0653 M-10）：通知 post-commit 3 次进程内
+    // 重试耗尽且 cursor 已越过——失败批次必须落持久 pending 表（0017）由
+    // 后台 sweep 补投，不允许静默丢。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-pending-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      let deliveryDown = true;
+      const deliveredBatches: (readonly ChainEvent[])[] = [];
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 9n;
+        },
+        async readEvents(range) {
+          return stateMachineEvents().filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents(events) {
+            if (deliveryDown) {
+              throw new Error("notification delivery outage");
+            }
+            deliveredBatches.push(events);
+          }
+        }
+      });
+
+      // rebuild 本身成功（投影与 cursor 已落库）；通知失败 3 次后落 pending。
+      const { summary } = await indexer.rebuildFromDeploymentBlockWithSummary();
+      expect(summary.syncStatus).toBe("indexed");
+
+      const pendingAfterFailure = await indexer.listPendingPostCommitSteps();
+      expect(pendingAfterFailure.length).toBe(1);
+      expect(pendingAfterFailure[0]).toMatchObject({
+        kind: "signal_notification",
+        chainId: 31337,
+        attempts: 1
+      });
+      expect(pendingAfterFailure[0]?.events?.length).toBeGreaterThan(0);
+
+      // sweep 在投递通道恢复后补投成功并出队。
+      deliveryDown = false;
+      const sweepSummary = await indexer.sweepPendingPostCommitSteps();
+      expect(sweepSummary).toMatchObject({ swept: 1, delivered: 1, failed: 0 });
+      expect(deliveredBatches.length).toBe(1);
+      await expect(indexer.listPendingPostCommitSteps()).resolves.toEqual([]);
+
+      // 通道仍故障时 sweep 不丢批次：attempts 累加、批次留存。
+      deliveryDown = true;
+      const indexer2 = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents() {
+            throw new Error("notification delivery still down");
+          }
+        }
+      });
+      const { summary: secondSummary } = await indexer2.rebuildFromDeploymentBlockWithSummary();
+      expect(secondSummary.syncStatus).toBe("indexed");
+      const stillPending = await indexer2.listPendingPostCommitSteps();
+      expect(stillPending.length).toBe(1);
+      const failedSweep = await indexer2.sweepPendingPostCommitSteps();
+      expect(failedSweep).toMatchObject({ swept: 1, delivered: 0, failed: 1 });
+      const queuedAfterFailedSweep = await indexer2.listPendingPostCommitSteps();
+      expect(queuedAfterFailedSweep.length).toBe(1);
+      expect(queuedAfterFailedSweep[0]?.attempts).toBe(2);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("moves a task off ready when an out-of-vocabulary explicit authorization submits on chain", () => {
+    // 簇 N（0653 M-8）：合约 _authorizeSignalSubmitter 不校验 plan 能力词表
+    // ——显式授权可以落在词表之外。SignalSubmitted 落链后任务匹配必须以
+    // 链上事实为准（StageExecutorSignalDelegated 的 targetStageId 阶段归属
+    // + hookId===sourceId/signalId 绑定键），否则任务永远停在 ready，与链
+    // 不一致。
+    const outOfVocabSourceId = bytes32Hex("8101");
+    const outOfVocabSignalId = bytes32Hex("8102");
+    const delegatedExecutor = "0x5555555555555555555555555555555555555555";
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(2n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      chainEvent(3n, 0, "HookReady", {
+        orderId: stateMachineOrderId,
+        hookId,
+        stageId,
+        hookName
+      }),
+      // 词表外显式授权（plan 词表为空——"超能力"声明）。
+      chainEvent(4n, 0, "SignalSubmitterAuthorized", {
+        planId,
+        orderId: stateMachineOrderId,
+        sourceId: outOfVocabSourceId,
+        signalId: outOfVocabSignalId,
+        submitter: delegatedExecutor,
+        role: bytes32Text("delegated-executor"),
+        metadataHash: emptyHash
+      }),
+      // 链上事实：词表外信号已提交。
+      chainEvent(5n, 0, "SignalSubmitted", {
+        planId,
+        orderId: stateMachineOrderId,
+        sourceId: outOfVocabSourceId,
+        signalId: outOfVocabSignalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: delegatedExecutor
+      }),
+      // 显式阶段归属：把 (sourceId, signalId) 委派到目标阶段。
+      chainEvent(6n, 0, "StageExecutorSignalDelegated", {
+        planId,
+        orderId: stateMachineOrderId,
+        targetStageId: stageId,
+        sourceId: outOfVocabSourceId,
+        signalId: outOfVocabSignalId,
+        executor: delegatedExecutor,
+        role: bytes32Text("delegated-executor"),
+        metadataHash: emptyHash,
+        patchNonce: 1n
+      })
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
+    const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
+    const task = order?.tasks[taskId];
+
+    // 任务不再停在 ready：委派阶段归属让已提交的链上事实推进任务。
+    expect(task).toMatchObject({
+      stageIdentifier: stageId,
+      status: "submitted",
+      assigneeWallet: delegatedExecutor
+    });
+    expect(task?.submitSignals).toEqual([
+      { sourceId: outOfVocabSourceId, signalId: outOfVocabSignalId, source: "authorization" }
+    ]);
+  });
+
+  it("resolves state-machine orders by the (planId, orderId) composite key and fails closed on bare-id ambiguity", async () => {
+    // 簇 E-3/簇 N（0630 M-5/0632 CS-7）：订单身份是 (planId, orderId)。裸
+    // orderId 多命中必须 fail-closed 返回 undefined（绝不取第一个），带
+    // planId 的复合键查询必须命中正确的 plan。
+    const otherPlanId = bytes32Hex("8101");
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineEvents(undefined, stateMachineOrderId).map((event) => ({
+          ...event,
+          args: { ...event.args, planId }
+        })),
+        ...stateMachineEvents(undefined, stateMachineOrderId, 20n).map((event) => ({
+          ...event,
+          args: { ...event.args, planId: otherPlanId }
+        }))
+      ]
+    });
+
+    await expect(store.getStateMachineOrder(stateMachineOrderId, otherPlanId))
+      .resolves.toMatchObject({ orderId: stateMachineOrderId, planId: otherPlanId });
+    await expect(store.getStateMachineOrder(stateMachineOrderId, planId))
+      .resolves.toMatchObject({ orderId: stateMachineOrderId, planId });
+    // 裸 orderId 同号跨 plan 复用：歧义即拒（undefined），不猜第一个。
+    await expect(store.getStateMachineOrder(stateMachineOrderId)).resolves.toBeUndefined();
+  });
 });
 
 function deploymentRegistryEvents(): readonly ChainEvent[] {
@@ -1700,7 +2043,7 @@ function testConfig(): ChainServicesConfig {
       pollIntervalMs: 5_000,
       maxCandidatesPerRun: 4,
       maxGasPerTx: 500_000n,
-      waitForReceipt: true
+      redeliveryWindowMs: 120_000
     },
     evidenceStorage: {
       adapter: "local",

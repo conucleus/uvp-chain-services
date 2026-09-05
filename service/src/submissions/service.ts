@@ -31,6 +31,7 @@ import type {
   PrepareProductTaskSubmitInput
 } from "./types.js";
 import type { EvidencePrincipal, EvidenceRecordDTO } from "../evidence/index.js";
+import { ProductOrderLookupError } from "../product/service.js";
 
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
 const PRODUCT_SIGNAL_SOURCE = "product";
@@ -150,10 +151,26 @@ export function createProductSubmissionService(options: ProductSubmissionService
       // Audit #10: submitSignal is plan-scoped and the signature commits to
       // (planId, orderId). The planId comes from the indexer projection, never
       // from local fabrication; a missing planId must fail the prepare instead
-      // of producing a signature that can only be rejected on chain.
-      const planId = normalizeResolvedPlanId(
-        options.resolveOrderPlanId ? await options.resolveOrderPlanId(chainSignal.orderId) : undefined
-      );
+      // of producing a signature that can only be rejected on chain. An
+      // ambiguous bare order id (same orderId reused across plans) is rejected
+      // as ambiguous_order_id instead of silently picking one plan.
+      let resolvedPlanId: Hex | undefined;
+      try {
+        resolvedPlanId = options.resolveOrderPlanId
+          ? await options.resolveOrderPlanId(chainSignal.orderId)
+          : undefined;
+      } catch (error) {
+        if (error instanceof ProductOrderLookupError) {
+          throw new ProductSubmissionError(
+            409,
+            "ambiguous_order_id",
+            error.message,
+            { orderId: chainSignal.orderId, details: error.details }
+          );
+        }
+        throw error;
+      }
+      const planId = normalizeResolvedPlanId(resolvedPlanId);
       if (!planId) {
         throw new ProductSubmissionError(
           409,

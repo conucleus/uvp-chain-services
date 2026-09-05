@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { loadConfigFromEnv, runConfigPreflight, type ChainServicesConfig } from "../config/index.js";
+import { selectActiveStateMachineDeployment } from "../config/preflight.js";
 import {
   BackupEvidenceStorage,
   LocalEvidenceStorage,
@@ -62,7 +63,9 @@ export async function startApiServer(
   const logger = createRedactingLogger(options.logger ?? consoleLogger, config.security.logRedactionEnabled);
   const audit = createLoggerAuditSink(logger);
   const configDiagnostics = await runConfigPreflight(config);
-  const eventSource = options.eventSource === undefined ? createChainEventSourceForTarget(config) : options.eventSource;
+  const eventSource = options.eventSource === undefined
+    ? createChainEventSourceForTarget(config, { logger })
+    : options.eventSource;
   const productBffStore = stores.productBffStore;
   const submissionStore = stores.submissionStore;
   const governanceStore = stores.governanceStore;
@@ -184,7 +187,13 @@ export async function startApiServer(
               syncStatus: summary.syncStatus
             }
           };
-        }
+        },
+        // ETH-04：post-commit 失败批次（游标已前进）的人工补投入口。
+        sweepPendingPostCommitSteps: async () => {
+          const summary = await indexer.sweepPendingPostCommitSteps();
+          return { status: "completed" as const, summary };
+        },
+        listPendingPostCommitSteps: async () => indexer.listPendingPostCommitSteps()
       }
       : {}),
     runReconcile: async () => {
@@ -468,7 +477,11 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
 function startProjectionRefresh(indexer: IndexerService, config: ChainServicesConfig, logger: Logger): NodeJS.Timeout | undefined {
   const pollIntervalMs = config.api.indexerPollIntervalMs;
   if (pollIntervalMs <= 0) {
-    logger.info("api indexer polling disabled");
+    // D18：poll=0 意味着外部参与方事件永不入投影、reconcile 永卡，只能
+    // 人工 rebuild——必须响亮提示，不允许静默。
+    logger.warn(
+      "INDEXER POLLING IS DISABLED (UVP_INDEXER_POLL_INTERVAL_MS=0): chain events from external participants will never enter the projection, reconcile will stall at indexing, and recovery requires a manual projection rebuild"
+    );
     return undefined;
   }
 
@@ -537,10 +550,9 @@ function moduleAddress(
   if (configuredAddress) {
     return configuredAddress;
   }
-  const activeDeployment = config.network.stateMachineDeployments?.find((deployment) =>
-    (config.network.activeDeploymentId && deployment.deploymentId === config.network.activeDeploymentId) ||
-    deployment.status === "active"
-  );
+  // D16：与 preflight 共用同一选择口径（精确 activeDeploymentId 优先，
+  // 其次 status=active）——OR 谓词首中曾在两处口径漂移时取错部署。
+  const activeDeployment = selectActiveStateMachineDeployment(config);
   return activeDeployment?.modules?.[key];
 }
 

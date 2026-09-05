@@ -302,7 +302,9 @@ export function classifyStateMachineBroadcastError(error: unknown): ClassifiedSt
     return classifiedBroadcastError(
       "relayer_insufficient_funds",
       "relayer gas payer has insufficient funds",
-      false,
+      // 与 relayer 口径统一：给 gas payer 充值是运营可修复条件，同签名
+      // 载荷可重试；不消费 prepare/nonce（submitter 未产生 txHash）。
+      true,
       text
     );
   }
@@ -420,7 +422,6 @@ function deadLetterForBroadcastError(errorCode: string, retryable: boolean): boo
     case "invalid_signal_signature":
     case "order_plan_unresolved":
     case "relayer_business_signer_reuse":
-    case "relayer_insufficient_funds":
     case "signal_already_exists":
     case "transaction_reverted":
     case "unauthorized_signal_submitter":
@@ -464,8 +465,10 @@ function normalizeGasPayer(value: string | undefined): Address {
 }
 
 function requiredRpcUrl(rpcUrl: string | undefined): string {
+  // fail-closed：无显式 RPC 配置即抛错，不回落 127.0.0.1:8545（本地环境
+  // 也必须显式传 UVP_RPC_URL）。
   if (!rpcUrl) {
-    return "http://127.0.0.1:8545";
+    throw new ConfigError("UVP_RPC_URL is required for state-machine submission broadcast; refusing to fall back to a default RPC endpoint");
   }
   return rpcUrl;
 }

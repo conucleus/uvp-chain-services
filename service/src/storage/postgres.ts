@@ -36,10 +36,13 @@ import {
 } from "./projection-store.js";
 import type {
   DurableProjectionStore,
+  PendingPostCommitKind,
+  PendingPostCommitStep,
   ProjectionRebuildInput,
   ProjectionScope,
   ProjectionSyncState,
   ProjectionSnapshotKind,
+  SavePendingPostCommitStepInput,
   StoredProjectionCursor,
   StoredProjectionSnapshot,
 } from "./projection-store.js";
@@ -293,15 +296,12 @@ export class PostgresProjectionStore implements DurableProjectionStore {
   }
 
   async deleteEventsAfterBlock(
-    scope: Partial<ProjectionScope> = {},
-    blockNumber: bigint = 0n,
+    scope: { readonly chainId: number; readonly contractAddress?: Address },
+    blockNumber: bigint,
   ): Promise<number> {
-    const clauses: string[] = ["block_number > $1"];
-    const values: unknown[] = [blockNumber.toString()];
-    if (scope.chainId !== undefined) {
-      values.push(scope.chainId);
-      clauses.push(`chain_id = $${values.length}`);
-    }
+    // chainId 必填：无链范围的删除会跨链误删其他链的已投影事件。
+    const clauses: string[] = ["block_number > $1", "chain_id = $2"];
+    const values: unknown[] = [blockNumber.toString(), scope.chainId];
     if (scope.contractAddress) {
       values.push(
         normalizeAddress(scope.contractAddress, "event.contractAddress"),
@@ -313,6 +313,57 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       values,
     );
     return result.rowCount ?? 0;
+  }
+
+  async savePendingPostCommitStep(
+    input: SavePendingPostCommitStepInput,
+  ): Promise<PendingPostCommitStep> {
+    const now = new Date().toISOString();
+    await this.#database.query(
+      `INSERT INTO indexer_pending_post_commit (
+         step_id, chain_id, kind, events_json, attempts, last_error, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4::jsonb, 0, NULL, $5, $5)
+       ON CONFLICT(step_id) DO NOTHING`,
+      [
+        input.stepId,
+        input.chainId,
+        input.kind,
+        input.events ? stringifyStorageJson(input.events) : null,
+        now,
+      ],
+    );
+    const result = await this.#database.query(pendingPostCommitSelectSql + " WHERE step_id = $1", [input.stepId]);
+    const saved = result.rows[0] ? pendingPostCommitRow(result.rows[0]) : undefined;
+    if (!saved) {
+      throw new Error("postgres pending post-commit step disappeared after save");
+    }
+    return saved;
+  }
+
+  async listPendingPostCommitSteps(
+    scope: { readonly chainId: number },
+  ): Promise<readonly PendingPostCommitStep[]> {
+    const result = await this.#database.query(
+      pendingPostCommitSelectSql + " WHERE chain_id = $1 ORDER BY created_at ASC, step_id ASC",
+      [scope.chainId],
+    );
+    return result.rows.map((row) => pendingPostCommitRow(row));
+  }
+
+  async recordPendingPostCommitAttempt(stepId: string, error: string): Promise<void> {
+    await this.#database.query(
+      `UPDATE indexer_pending_post_commit
+       SET attempts = attempts + 1, last_error = $1, updated_at = $2
+       WHERE step_id = $3`,
+      [error, new Date().toISOString(), stepId],
+    );
+  }
+
+  async deletePendingPostCommitStep(stepId: string): Promise<void> {
+    await this.#database.query(
+      "DELETE FROM indexer_pending_post_commit WHERE step_id = $1",
+      [stepId],
+    );
   }
 
   async appendEvent(event: ChainEvent): Promise<void> {
@@ -507,9 +558,14 @@ export class PostgresProjectionStore implements DurableProjectionStore {
 
   async getStateMachineOrder(
     orderId: string,
+    planId?: string,
   ): Promise<StateMachineOrderProjection | undefined> {
     const snapshot = await this.#currentOrderSnapshot();
     const orders = uniqueProjectionValues(snapshot.stateMachineOrders);
+    if (planId) {
+      // 带 planId 的复合键查询不做裸键回退：兼容别名可能指向别的 plan。
+      return uniqueOrderByBareId(orders, orderId, planId);
+    }
     return (
       snapshot.stateMachineOrders[orderId.toLowerCase()] ??
       snapshot.stateMachineOrders[orderId] ??
@@ -638,6 +694,44 @@ function snapshotRow<TSnapshot>(
   };
 }
 
+const pendingPostCommitSelectSql = `SELECT
+         step_id AS "stepId",
+         chain_id AS "chainId",
+         kind,
+         events_json::text AS "eventsJson",
+         attempts,
+         last_error AS "lastError",
+         created_at AS "createdAt",
+         updated_at AS "updatedAt"
+       FROM indexer_pending_post_commit`;
+
+function pendingPostCommitRow(row: unknown): PendingPostCommitStep {
+  const record = rowObject(row, "indexer_pending_post_commit query");
+  const eventsJson = nullableStringColumn(record, "eventsJson");
+  const lastError = nullableStringColumn(record, "lastError");
+  return {
+    stepId: stringColumn(record, "stepId"),
+    chainId: numberColumn(record, "chainId"),
+    kind: pendingPostCommitKindColumn(record, "kind"),
+    ...(eventsJson !== null ? { events: parseStorageJson<readonly ChainEvent[]>(eventsJson) } : {}),
+    attempts: numberColumn(record, "attempts"),
+    ...(lastError !== null ? { lastError } : {}),
+    createdAt: stringColumn(record, "createdAt"),
+    updatedAt: stringColumn(record, "updatedAt"),
+  };
+}
+
+function pendingPostCommitKindColumn(
+  record: Record<string, unknown>,
+  key: string,
+): PendingPostCommitKind {
+  const value = stringColumn(record, key);
+  if (value !== "signal_notification" && value !== "projection_automation") {
+    throw new Error(`Postgres column ${key} must be a known pending post-commit kind`);
+  }
+  return value;
+}
+
 function syncStateRow(row: unknown): ProjectionSyncState {
   const record = rowObject(row, "chain_projection_sync_state query");
   const latestIndexedBlock = nullableStringColumn(record, "latestIndexedBlock");
@@ -676,9 +770,12 @@ function syncStateRow(row: unknown): ProjectionSyncState {
 function uniqueOrderByBareId(
   orders: readonly StateMachineOrderProjection[],
   orderId: string,
+  planId?: string,
 ): StateMachineOrderProjection | undefined {
   const matches = orders.filter(
-    (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
+    (order) =>
+      order.orderId.toLowerCase() === orderId.toLowerCase() &&
+      (!planId || order.planId.toLowerCase() === planId.toLowerCase()),
   );
   return matches.length === 1 ? matches[0] : undefined;
 }

@@ -1,4 +1,5 @@
 import type { ChainServicesConfig } from "../config/index.js";
+import { createHash } from "node:crypto";
 import { loadConfigFromEnv } from "../config/index.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import type { ChainEvent, EventCursor } from "./events.js";
@@ -13,6 +14,8 @@ import { createProjectionStore } from "../storage/factory.js";
 import {
   defaultProjectionScope,
   type DurableProjectionStore,
+  type PendingPostCommitKind,
+  type PendingPostCommitStep,
   type ProjectionScope,
   type ProjectionStore,
   type ProjectionSyncState
@@ -27,6 +30,10 @@ export interface ChainEventRange {
   readonly toBlock: bigint;
 }
 
+type Writable<TValue> = {
+  -readonly [TKey in keyof TValue]: TValue[TKey];
+};
+
 export interface ChainEventSource {
   getFinalizedBlock(config: ChainServicesConfig): Promise<bigint>;
   readEvents(range: ChainEventRange, config: ChainServicesConfig): Promise<readonly ChainEvent[]>;
@@ -36,6 +43,12 @@ export interface ChainEventSource {
    * （可选方法缺失）索引器跳过校验，仅依赖 finalityConfirmations 缓冲。
    */
   getBlockHash?(blockNumber: bigint, config: ChainServicesConfig): Promise<Hex>;
+  /**
+   * 0132 P2-12：取走"单条不可解码日志被跳过"的累计计数并清零。跳过的
+   * 日志无法投影（游标照常前进），但必须计数留痕——索引器每轮刷新消费
+   * 并写入日志/指标，不允许静默。事件源不支持时视为 0。
+   */
+  consumeUnresolvedLogCount?(): number;
 }
 
 export interface ChainEventNotificationProcessor {
@@ -82,6 +95,15 @@ export interface IndexerServiceOptions {
   readonly projectionAutomationProcessor?: ProjectionAutomationProcessor;
   readonly logger?: Logger;
 }
+
+/** 后台补投一轮持久化 pending post-commit 步骤的结果。 */
+export interface PendingPostCommitSweepSummary {
+  readonly swept: number;
+  readonly delivered: number;
+  readonly failed: number;
+}
+
+type MutablePendingPostCommitSweepSummary = Writable<PendingPostCommitSweepSummary>;
 
 export class IndexerService implements LifecycleService {
   readonly name = "indexer";
@@ -285,6 +307,10 @@ export class IndexerService implements LifecycleService {
         stateMachineOrderCount: summary.stateMachineOrderCount,
         identityBindingCount: summary.identityBindingCount,
         mismatchCount: summary.mismatchCount,
+        unresolvedModuleOrderEventCount: snapshot.unresolvedModuleOrderEventCount ?? 0,
+        unresolvedDockEventCount: snapshot.unresolvedDockEventCount ?? 0,
+        unresolvedStageActivationEventCount: snapshot.unresolvedStageActivationEventCount ?? 0,
+        unresolvedLogCount: this.#consumeUnresolvedLogCount(),
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
       });
@@ -309,6 +335,9 @@ export class IndexerService implements LifecycleService {
       await this.#eventSource.getFinalizedBlock(this.#config),
       options.targetBlock
     );
+    // 先补投历史 pending post-commit 步骤（游标已前进的失败批次），
+    // 再处理本轮增量，避免失败批次无限滞后。
+    await this.sweepPendingPostCommitSteps();
     const storedCursor = await durableStore.getCursor(this.#scope);
     const cursor = this.#cursor ?? storedCursor;
     if (!cursor) {
@@ -427,6 +456,10 @@ export class IndexerService implements LifecycleService {
       eventCount: result.summary.eventCount,
       stateMachineOrderCount: result.summary.stateMachineOrderCount,
       mismatchCount: result.summary.mismatchCount,
+      unresolvedModuleOrderEventCount: result.snapshot.unresolvedModuleOrderEventCount ?? 0,
+      unresolvedDockEventCount: result.snapshot.unresolvedDockEventCount ?? 0,
+      unresolvedStageActivationEventCount: result.snapshot.unresolvedStageActivationEventCount ?? 0,
+      unresolvedLogCount: this.#consumeUnresolvedLogCount(),
       nextBlock: this.#cursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
     });
@@ -558,9 +591,34 @@ export class IndexerService implements LifecycleService {
       }
     }
 
-    throw new ConfigError(
-      `chain reorg deeper than the ${MAX_REORG_BACKTRACK_BLOCKS}-block rollback window; full projection rebuild is required`
-    );
+    // 安静链浅 reorg：回溯窗口内没有任何已存事件锚点不代表 reorg 深于窗口，
+    // 只代表这段链上本来就没有事件。回退到全库最新的已存事件锚点（可能低于
+    // 窗口下界）：其哈希仍与 canonical 一致 → reorg 未触及任何已投影数据，
+    // 正常回滚到该锚点（删除数恒为 0，随后从 canonical 链重读）。
+    const anchorBelowWindow = storedEvents
+      .filter((event): event is ChainEvent & { readonly blockHash: Hex } =>
+        !event.removed &&
+        event.blockHash !== undefined &&
+        event.blockNumber < fromBlock &&
+        event.blockNumber >= deploymentBlock)
+      .sort((left, right) => (right.blockNumber > left.blockNumber ? 1 : right.blockNumber < left.blockNumber ? -1 : 0))[0];
+    if (anchorBelowWindow) {
+      const canonicalHash = await this.#eventSource.getBlockHash?.(anchorBelowWindow.blockNumber, this.#config);
+      if (canonicalHash && isSameBlockHash(canonicalHash, anchorBelowWindow.blockHash)) {
+        return this.#applyReorgRollback(durableStore, anchorBelowWindow.blockNumber, canonicalHash);
+      }
+      // 最新已存事件本身已不在 canonical 链上：reorg 深于全部已投影数据。
+      throw new ConfigError(
+        `chain reorg deeper than the stored projection history; full projection rebuild is required`
+      );
+    }
+
+    // 全库无任何已存事件：没有任何投影数据会被本次 reorg 影响，直接按
+    // canonical 链继续（新 cursor 哈希在刷新结束时保存）。
+    this.#logger.warn("chain reorg detected but no stored events exist; continuing from canonical chain", {
+      fromBlock: fromBlock.toString()
+    });
+    return fromBlock;
   }
 
   /** ETH-02：删除祖先之后的事件、重建快照、回退 cursor。 */
@@ -684,8 +742,9 @@ export class IndexerService implements LifecycleService {
     if (!processor || events.length === 0) {
       return;
     }
-    await this.#runPostCommitStepWithBoundedRetry("signal notification", () =>
-      processor.processSignalSubmittedEvents(events)
+    await this.#runPostCommitStepWithBoundedRetry(
+      { kind: "signal_notification", step: "signal notification", events },
+      () => processor.processSignalSubmittedEvents(events)
     );
   }
 
@@ -696,34 +755,150 @@ export class IndexerService implements LifecycleService {
     if (!processor) {
       return;
     }
-    await this.#runPostCommitStepWithBoundedRetry("projection automation", () =>
-      processor.processProjection(snapshot)
+    await this.#runPostCommitStepWithBoundedRetry(
+      { kind: "projection_automation", step: "projection automation" },
+      () => processor.processProjection(snapshot)
     );
   }
 
   /**
-   * Post-commit steps run after the projection commit succeeded. Failures are
-   * retried a bounded number of times in-process; once retries are exhausted
-   * the step gives up with an error log instead of blocking the indexer loop.
+   * Post-commit steps run after the projection commit and cursor save
+   * succeeded. Failures are retried a bounded number of times in-process;
+   * once retries are exhausted the step is persisted into the durable pending
+   * queue (rebuildable by the background sweep) instead of being dropped —
+   * the cursor already advanced, so the incremental refresh will never see
+   * these events again.
    */
-  async #runPostCommitStepWithBoundedRetry(step: string, run: () => Promise<unknown>): Promise<void> {
+  async #runPostCommitStepWithBoundedRetry(
+    pending: {
+      readonly kind: PendingPostCommitKind;
+      readonly step: string;
+      readonly events?: readonly ChainEvent[];
+    },
+    run: () => Promise<unknown>
+  ): Promise<void> {
     for (let attempt = 1; attempt <= POST_COMMIT_STEP_MAX_ATTEMPTS; attempt += 1) {
       try {
         await run();
         return;
       } catch (error) {
-        const message = error instanceof Error ? redactErrorMessage(error) : `unknown ${step} error`;
+        const message = error instanceof Error ? redactErrorMessage(error) : `unknown ${pending.step} error`;
         if (attempt === POST_COMMIT_STEP_MAX_ATTEMPTS) {
-          this.#logger.error(`post-commit ${step} failed after ${POST_COMMIT_STEP_MAX_ATTEMPTS} attempts`, {
-            message
+          this.#logger.error(`post-commit ${pending.step} failed after ${POST_COMMIT_STEP_MAX_ATTEMPTS} attempts`, {
+            message,
+            persisted: true
           });
+          await this.#persistPendingPostCommitStep(pending, message);
           return;
         }
         const nextDelayMs = postCommitStepRetryDelayMs(attempt);
-        this.#logger.warn(`post-commit ${step} failed; retrying`, { attempt, nextDelayMs, message });
+        this.#logger.warn(`post-commit ${pending.step} failed; retrying`, { attempt, nextDelayMs, message });
         await sleep(nextDelayMs);
       }
     }
+  }
+
+  async #persistPendingPostCommitStep(
+    pending: {
+      readonly kind: PendingPostCommitKind;
+      readonly events?: readonly ChainEvent[];
+    },
+    error: string
+  ): Promise<void> {
+    const durableStore = this.#store;
+    if (!isDurableProjectionStore(durableStore)) {
+      return;
+    }
+    const stepId = pendingPostCommitStepId(pending.kind, pending.events);
+    try {
+      await durableStore.savePendingPostCommitStep({
+        stepId,
+        chainId: this.#scope.chainId,
+        kind: pending.kind,
+        ...(pending.kind === "signal_notification" && pending.events ? { events: pending.events } : {})
+      });
+      await durableStore.recordPendingPostCommitAttempt(stepId, error);
+    } catch (persistError) {
+      const message = persistError instanceof Error ? redactErrorMessage(persistError) : "unknown persist error";
+      this.#logger.error("failed to persist pending post-commit step; manual replay may be required", {
+        kind: pending.kind,
+        message
+      });
+    }
+  }
+
+  /**
+   * 后台补投：重放持久化 pending 队列中的 post-commit 步骤，成功即出队，
+   * 失败累加 attempts 并留待下一轮（或人工经 admin-ops 触发）。每轮增量
+   * 刷新前调用；非持久存储（memory）为 no-op。
+   */
+  async sweepPendingPostCommitSteps(): Promise<PendingPostCommitSweepSummary> {
+    const summary: MutablePendingPostCommitSweepSummary = {
+      swept: 0,
+      delivered: 0,
+      failed: 0
+    };
+    const durableStore = this.#store;
+    if (!isDurableProjectionStore(durableStore)) {
+      return summary;
+    }
+    const pendingSteps = await durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
+    for (const step of pendingSteps) {
+      summary.swept += 1;
+      try {
+        await this.#deliverPendingPostCommitStep(step);
+        await durableStore.deletePendingPostCommitStep(step.stepId);
+        summary.delivered += 1;
+      } catch (error) {
+        summary.failed += 1;
+        const message = error instanceof Error ? redactErrorMessage(error) : "unknown sweep error";
+        await durableStore.recordPendingPostCommitAttempt(step.stepId, message).catch(() => undefined);
+        this.#logger.warn("pending post-commit step retry failed; it stays queued", {
+          stepId: step.stepId,
+          kind: step.kind,
+          attempts: step.attempts + 1,
+          message
+        });
+      }
+    }
+    if (summary.swept > 0) {
+      this.#logger.info("indexer pending post-commit sweep completed", { ...summary });
+    }
+    return summary;
+  }
+
+  /** 持久 pending 队列只读视图（admin-ops 研判入口）。 */
+  async listPendingPostCommitSteps(): Promise<readonly PendingPostCommitStep[]> {
+    const durableStore = this.#store;
+    if (!isDurableProjectionStore(durableStore)) {
+      return [];
+    }
+    return durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
+  }
+
+  /** 0132 P2-12：取走事件源累计的"不可解码日志被跳过"计数（无则 0）。 */
+  #consumeUnresolvedLogCount(): number {
+    return this.#eventSource.consumeUnresolvedLogCount?.() ?? 0;
+  }
+
+  async #deliverPendingPostCommitStep(step: PendingPostCommitStep): Promise<void> {
+    if (step.kind === "signal_notification") {
+      const processor = this.#notificationProcessor;
+      const events = step.events ?? [];
+      if (!processor || events.length === 0) {
+        // 无处理器（部署裁剪）或载荷为空：无法补投，也不应无限滞留。
+        throw new Error(`signal notification processor unavailable for pending step ${step.stepId}`);
+      }
+      await processor.processSignalSubmittedEvents(events);
+      return;
+    }
+    const processor = this.#projectionAutomationProcessor;
+    if (!processor) {
+      throw new Error(`projection automation processor unavailable for pending step ${step.stepId}`);
+    }
+    // 自动化以当前投影为准重放（幂等扫描语义），无需持久化旧快照。
+    const snapshot = await this.#store.getOrderSnapshot();
+    await processor.processProjection(snapshot);
   }
 
   async #markDegraded(
@@ -759,7 +934,9 @@ export class IndexerService implements LifecycleService {
         projectionRebuilt: false,
         mismatchCount: effectiveMismatchCount
       },
-      degradedReason: error instanceof Error ? error.message : "unknown indexer rebuild error"
+      degradedReason: error instanceof Error
+        ? redactErrorMessage(error)
+        : "unknown indexer rebuild error"
     });
   }
 
@@ -779,7 +956,7 @@ export function createIndexerService(options: IndexerServiceOptions): IndexerSer
 async function main(): Promise<void> {
   const config = loadConfigFromEnv();
   if (process.argv.includes("--rebuild")) {
-    const eventSource = createChainEventSourceForTarget(config);
+    const eventSource = createChainEventSourceForTarget(config, { logger: consoleLogger });
     if (!eventSource) {
       throw new Error("no configured indexer contracts; set UVP_CONTRACTS_JSON or an address manifest");
     }
@@ -820,6 +997,31 @@ const MAX_REORG_BACKTRACK_BLOCKS = 1_000;
 
 function isSameBlockHash(left: Hex, right: Hex): boolean {
   return left.toLowerCase() === right.toLowerCase();
+}
+
+/**
+ * pending post-commit 步骤 id：按事件批内容（或自动化种类）派生，同一批
+ * 失败重复落表是幂等 upsert，不会堆积重复行。
+ */
+function pendingPostCommitStepId(
+  kind: PendingPostCommitKind,
+  events: readonly ChainEvent[] | undefined
+): string {
+  const digestSource = kind === "signal_notification" && events && events.length > 0
+    ? events
+        .map((event) =>
+          [
+            event.chainId,
+            event.contractAddress.toLowerCase(),
+            event.blockNumber.toString(),
+            event.transactionHash.toLowerCase(),
+            event.logIndex
+          ].join(":")
+        )
+        .join("|")
+    : `${kind}:${new Date().toISOString()}`;
+  const digest = createHash("sha256").update(digestSource).digest("hex").slice(0, 24);
+  return `pending_${kind}_${digest}`;
 }
 
 const POST_COMMIT_STEP_MAX_ATTEMPTS = 3;

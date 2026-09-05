@@ -270,6 +270,7 @@ export function createProductStageExecutorPatchService(
         orderId: context.order.orderId,
         onchainOrderId: context.order.orderId,
         stateMachineAddress,
+        planId: context.order.planId,
         selectorStageId: context.task.stageIdentifier,
         targetStageId: context.targetStageId,
         selectorWallet: context.selectorWallet,
@@ -421,10 +422,12 @@ export function createProductStageExecutorPatchService(
         );
       }
 
-      // ETH-01：nonce 已被占用。若 broadcast 或存储写入在落库前抛错，
-      // 先释放 nonce 再 rethrow：同一 prepareId 在瞬时 RPC/存储失败后
-      // 仍可重试，而不是永久 409。broadcast 返回失败结果视为已消费，
-      // 保持与 submissions 主路径一致的语义。
+      // ETH-01：nonce 已被占用。若 broadcast 或存储写入在落库前抛错且
+      // 尚未拿到 txHash，先释放 nonce 再 rethrow：同一 prepareId 在瞬时
+      // RPC/存储失败后仍可重试。广播已返回 txHash 后的落库失败不释放——
+      // 链上交易可能已占用 nonce（对齐 submissions 主路径：只有确认失败
+      // 才释放）。broadcast 返回失败结果视为已消费。
+      let broadcastTxHash: Hex | undefined;
       try {
         const broadcast = await broadcastAdapter.broadcast({
           prepared: executorDtoFromPrepared(prepared),
@@ -435,15 +438,20 @@ export function createProductStageExecutorPatchService(
           recoveredSelector,
           ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
         });
+        broadcastTxHash = broadcast.status === "failed"
+          ? broadcast.attempt?.txHash
+          : broadcast.status === "not_attempted"
+            ? undefined
+            : broadcast.txHash;
         const timestamp = now().toISOString();
         const submission = executorSubmissionFromBroadcast(prepared, {
           submissionId: submissionIdFactory(),
           signatureHash: signatureHashFor(signature),
           ...(previousSignature
             ? {
-                previousExecutorSignatureHash:
-                  signatureHashFor(previousSignature),
-              }
+              previousExecutorSignatureHash:
+                signatureHashFor(previousSignature),
+            }
             : {}),
           recoveredSelector,
           ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
@@ -468,7 +476,9 @@ export function createProductStageExecutorPatchService(
         );
         return submission;
       } catch (error) {
-        await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
+        if (!broadcastTxHash) {
+          await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
+        }
         throw error;
       }
     },
@@ -567,6 +577,7 @@ export function createProductStageResourcePatchService(
         orderId: context.order.orderId,
         onchainOrderId: context.order.orderId,
         stateMachineAddress,
+        planId: context.order.planId,
         selectorStageId: context.task.stageIdentifier,
         targetStageId: context.targetStageId,
         resourceKey,
@@ -678,13 +689,21 @@ export function createProductStageResourcePatchService(
         );
       }
 
-      // ETH-01：同 executor patch 路径，broadcast/落库失败先释放 nonce。
+      // ETH-01：同 executor patch 路径——尚未拿到 txHash 的失败先释放
+      // nonce；广播已返回 txHash 后的落库失败不释放（链上可能已占用
+      // nonce，对齐 submissions 主路径语义）。
+      let broadcastTxHash: Hex | undefined;
       try {
         const broadcast = await broadcastAdapter.broadcast({
           prepared: resourceDtoFromPrepared(prepared),
           signature,
           recoveredSelector,
         });
+        broadcastTxHash = broadcast.status === "failed"
+          ? broadcast.attempt?.txHash
+          : broadcast.status === "not_attempted"
+            ? undefined
+            : broadcast.txHash;
         const timestamp = now().toISOString();
         const submission = resourceSubmissionFromBroadcast(prepared, {
           submissionId: submissionIdFactory(),
@@ -707,7 +726,9 @@ export function createProductStageResourcePatchService(
         );
         return submission;
       } catch (error) {
-        await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
+        if (!broadcastTxHash) {
+          await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
+        }
         throw error;
       }
     },

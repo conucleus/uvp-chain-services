@@ -4,11 +4,12 @@ import {
   http,
   parseAbi,
   type Abi,
+  type AbiEvent,
   type Address as ViemAddress,
   type Log,
 } from "viem";
 import type { ChainServicesConfig } from "../config/index.js";
-import { ConfigError, type Address, type Hex } from "../shared/types.js";
+import { ConfigError, noopLogger, type Address, type Hex, type Logger } from "../shared/types.js";
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
@@ -125,13 +126,34 @@ interface ViemLogReader {
 
 export interface ViemChainEventSourceOptions {
   readonly publicClient?: ViemLogReader;
+  /** 不可解码日志的留痕出口；缺省为静默（计数仍可经实例读取）。 */
+  readonly logger?: Logger;
 }
 
 export class ViemChainEventSource implements ChainEventSource {
   readonly #publicClient: ViemLogReader | undefined;
+  readonly #logger: Logger;
+  #unresolvedLogCount = 0;
 
   constructor(options: ViemChainEventSourceOptions = {}) {
     this.#publicClient = options.publicClient;
+    this.#logger = options.logger ?? noopLogger;
+  }
+
+  /**
+   * 单条不可解码日志的累计计数（跳过留痕）。游标照常前进：不可解码的
+   * 日志无法投影，阻塞整轮只会让索引器永久 degraded 并反复重撞同一批
+   * 日志；计数由索引器服务在每轮刷新时取走并入日志/指标。
+   */
+  get unresolvedLogCount(): number {
+    return this.#unresolvedLogCount;
+  }
+
+  /** 取走自上次调用以来的累计计数并清零（索引器服务每轮刷新消费）。 */
+  consumeUnresolvedLogCount(): number {
+    const count = this.#unresolvedLogCount;
+    this.#unresolvedLogCount = 0;
+    return count;
   }
 
   async getFinalizedBlock(config: ChainServicesConfig): Promise<bigint> {
@@ -189,9 +211,26 @@ export class ViemChainEventSource implements ChainEventSource {
             ),
           )
         ).flat();
-        return logs.map((log) =>
-          decodeChainEventLog(log, range.chainId, contract),
-        );
+        const decoded: ChainEvent[] = [];
+        for (const log of logs) {
+          // 不可解码日志跳过留痕（计数 + warn），游标前进；不阻塞整轮。
+          const event = decodeChainEventLog(log, range.chainId, contract);
+          if (event) {
+            decoded.push(event);
+          } else {
+            this.#unresolvedLogCount += 1;
+            this.#logger.warn("skipped undecodable chain log; cursor still advances", {
+              chainId: range.chainId,
+              contract: contract.name,
+              address: contract.address,
+              blockNumber: log.blockNumber?.toString(),
+              transactionHash: log.transactionHash,
+              logIndex: log.logIndex?.toString(),
+              unresolvedLogCount: this.#unresolvedLogCount,
+            });
+          }
+        }
+        return decoded;
       }),
     );
 
@@ -316,11 +355,16 @@ function blockRanges(
   return ranges;
 }
 
+/**
+ * 解码单条日志。解码失败（ABI 不匹配 / 未知事件 / 畸形 data）返回
+ * undefined 由调用方跳过并计数；日志元数据不完整仍抛错——那是 RPC 层
+ * 故障，不是单条日志问题。
+ */
 function decodeChainEventLog(
   log: Log,
   chainId: number,
   contract: IndexedContract,
-): ChainEvent {
+): ChainEvent | undefined {
   if (
     log.blockNumber == null ||
     !log.transactionHash ||
@@ -332,43 +376,43 @@ function decodeChainEventLog(
     );
   }
 
+  let event: ChainEvent | undefined;
   try {
     const decoded = decodeEventLog({
       abi: contract.abi,
       data: log.data,
       topics: log.topics,
     });
-
     const eventName = decoded.eventName;
-    if (!eventName) {
-      throw new Error("decoded event has no name");
-    }
-
-    return {
-      chainId,
-      contractAddress: normalizeLogAddress(log.address),
-      blockNumber: log.blockNumber,
-      transactionHash: log.transactionHash.toLowerCase() as Hex,
-      logIndex: Number(log.logIndex),
-      ...(log.blockHash
-        ? { blockHash: log.blockHash.toLowerCase() as Hex }
-        : {}),
-      ...(log.transactionIndex != null
-        ? { transactionIndex: Number(log.transactionIndex) }
-        : {}),
-      ...(logRemoved(log) ? { removed: true } : {}),
-      eventName,
-      args: normalizeEventArgs(decoded.args),
-    };
-  } catch (error) {
-    throw new Error(
-      `failed to decode ${contract.name} event at block ${log.blockNumber.toString()}, tx ${log.transactionHash}, log ${log.logIndex.toString()}`,
-      { cause: error },
-    );
+    event = eventName
+      ? {
+        chainId,
+        contractAddress: normalizeLogAddress(log.address),
+        blockNumber: log.blockNumber,
+        transactionHash: log.transactionHash.toLowerCase() as Hex,
+        logIndex: Number(log.logIndex),
+        ...(log.blockHash
+          ? { blockHash: log.blockHash.toLowerCase() as Hex }
+          : {}),
+        ...(log.transactionIndex != null
+          ? { transactionIndex: Number(log.transactionIndex) }
+          : {}),
+        ...(logRemoved(log) ? { removed: true } : {}),
+        eventName,
+        args: normalizeEventArgs(decoded.args, eventInputTypes(contract.abi, eventName)),
+      }
+      : undefined;
+  } catch {
+    return undefined;
   }
+  return event;
 }
 
-function normalizeEventArgs(args: unknown): EventArgs {
+/**
+ * string 参数（URI 等）保持原文：整体小写化只允许用于 bytes/address 类型，
+ * 否则 0x 开头的 URI/标识串会被破坏。
+ */
+function normalizeEventArgs(args: unknown, inputTypes: ReadonlyMap<string, string>): EventArgs {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     return {};
   }
@@ -376,7 +420,7 @@ function normalizeEventArgs(args: unknown): EventArgs {
   return Object.fromEntries(
     Object.entries(args as Record<string, unknown>).map(([key, value]) => [
       key,
-      normalizeEventArg(value),
+      normalizeEventArg(value, inputTypes.get(key)),
     ]),
   );
 }
@@ -385,14 +429,41 @@ function logRemoved(log: Log): boolean {
   return (log as { readonly removed?: boolean }).removed === true;
 }
 
-function normalizeEventArg(value: unknown): unknown {
+function normalizeEventArg(value: unknown, abiType: string | undefined): unknown {
+  if (abiType === "string") {
+    return value;
+  }
   if (typeof value === "string" && value.startsWith("0x")) {
     return value.toLowerCase();
   }
   if (Array.isArray(value)) {
-    return value.map(normalizeEventArg);
+    const itemType = arrayItemType(abiType);
+    return value.map((item) => normalizeEventArg(item, itemType));
   }
   return value;
+}
+
+function arrayItemType(abiType: string | undefined): string | undefined {
+  if (!abiType || !abiType.endsWith("[]")) {
+    return undefined;
+  }
+  return abiType.slice(0, -2);
+}
+
+/** 事件名 → 参数名 → ABI 类型（bytes/address/string/uint…）。 */
+function eventInputTypes(abi: Abi, eventName: string): ReadonlyMap<string, string> {
+  const types = new Map<string, string>();
+  for (const entry of abi) {
+    if (entry.type !== "event" || entry.name !== eventName) {
+      continue;
+    }
+    for (const input of (entry as AbiEvent).inputs) {
+      if (input.name) {
+        types.set(input.name, input.type);
+      }
+    }
+  }
+  return types;
 }
 
 function normalizeLogAddress(address: string): Address {

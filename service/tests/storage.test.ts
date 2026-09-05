@@ -106,6 +106,7 @@ const expectedMigrationVersions = [
   "0014_store_wallet_session",
   "0015_store_listing_decoration_join",
   "0016_submission_plan_id",
+  "0017_indexer_pending_post_commit",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0

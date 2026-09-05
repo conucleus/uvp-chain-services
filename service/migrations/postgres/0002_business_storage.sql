@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS submission (
   task_id TEXT NOT NULL,
   order_id TEXT NOT NULL,
   onchain_order_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
   stage_identifier TEXT NOT NULL,
   signal_name TEXT NOT NULL,
   source_id TEXT NOT NULL,
@@ -162,7 +163,7 @@ CREATE INDEX IF NOT EXISTS submission_submission_id_idx
   ON submission (submission_id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS submission_business_key_idx
-  ON submission (order_id, task_id, submitter, signal_name, nonce);
+  ON submission (plan_id, order_id, task_id, submitter, signal_name, nonce);
 
 CREATE TABLE IF NOT EXISTS submission_attempt (
   attempt_id TEXT PRIMARY KEY,

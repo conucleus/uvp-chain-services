@@ -172,6 +172,29 @@ export function createProductBffService(
   const idScope = randomUUID().replaceAll("-", "").slice(0, 8);
   let sequence = 1;
 
+  // BFF 建单触发 per-order 互斥：triggerOrder 的状态检查（status ===
+  // "prepared"）与"置 submitted + 广播"之间隔了 await，同一 draft 的并发
+  // 提交会双双通过检查并各自广播同一触发交易。以 draftId（↔registration
+  // ↔orderId 一一对应）为键串行化；进入临界区后重读 registration，第二个
+  // 调用者自然得到 409 trigger_not_prepared。进程内互斥即可：BFF 服务单实例
+  // 写者，store 无跨实例 CAS 原语。
+  const triggerOrderLocks = new Map<string, Promise<unknown>>();
+
+  function withTriggerOrderLock<T>(
+    draftId: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const previous = triggerOrderLocks.get(draftId) ?? Promise.resolve();
+    const next = previous.then(run, run);
+    triggerOrderLocks.set(draftId, next);
+    void next.catch(() => undefined);
+    return next.finally(() => {
+      if (triggerOrderLocks.get(draftId) === next) {
+        triggerOrderLocks.delete(draftId);
+      }
+    });
+  }
+
   return {
     async createDraft(input) {
       const zhixu = await requireActiveZhixu(
@@ -451,6 +474,7 @@ export function createProductBffService(
     },
 
     async triggerOrder(draftId, input) {
+      return withTriggerOrderLock(draftId, async () => {
       const draft = await requireDraft(store, draftId);
       const participants = await store.listParticipants(draftId);
       const registration = await requireRegistrationByDraft(store, draftId);
@@ -542,6 +566,7 @@ export function createProductBffService(
         participants,
         broadcasted.registration,
       );
+      });
     },
 
     async createInvite(draftId, input) {

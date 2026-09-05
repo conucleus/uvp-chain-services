@@ -1,5 +1,11 @@
-import { createPublicClient, createWalletClient, encodeFunctionData, http, parseAbi, type Chain } from "viem";
+import { createPublicClient, createWalletClient, http, type Chain } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import {
+  buildApplyStageExecutorPatchForCall,
+  buildApplyStageResourcePatchForCall,
+  type ApplyStageExecutorPatchForCall,
+  type ApplyStageResourcePatchForCall
+} from "@uvp-eth/protocol-bindings";
 import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import type {
@@ -10,13 +16,13 @@ import type {
   StageResourcePatchBroadcastAdapter
 } from "./types.js";
 
-export const STATE_MACHINE_STAGE_EXECUTOR_PATCH_ABI = parseAbi([
-  "function applyStageExecutorPatchFor(bytes32 orderId,(bytes32 selectorStageId,bytes32 targetStageId,address executor,bytes32 role,bytes32 executorMetadataHash,bytes32 mode,address previousExecutor,bytes32 approvalSourceId,bytes32 approvalSignalId,bytes32 patchHash,uint256 patchNonce,string metadataURI) patch,address selector,uint256 deadline,bytes selectorSignature,bytes previousExecutorSignature)"
-]);
-
-export const STATE_MACHINE_STAGE_RESOURCE_PATCH_ABI = parseAbi([
-  "function applyStageResourcePatchFor(bytes32 orderId,(bytes32 selectorStageId,bytes32 targetStageId,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI) patch,address selector,uint256 deadline,bytes signature)"
-]);
+// C15：本地手抄的 applyStageExecutorPatchFor/applyStageResourcePatchFor
+// ABI 副本已删除——以 @uvp-eth/protocol-bindings 导出的
+// STAGE_PATCH_MODULE_ABI（fixtures 同源）与调用构造器为准，杜绝再次漂移
+//（本地副本缺 planId 首参时广播必然在链上 revert）。
+export type StateMachineStagePatchCall =
+  | ApplyStageExecutorPatchForCall
+  | ApplyStageResourcePatchForCall;
 
 export interface StateMachineStagePatchPublicClient {
   getChainId?(): Promise<number>;
@@ -25,63 +31,6 @@ export interface StateMachineStagePatchPublicClient {
     readonly blockNumber?: bigint;
   } | undefined>;
 }
-
-export interface StateMachineStageExecutorPatchCall {
-  readonly address: Address;
-  readonly abi: typeof STATE_MACHINE_STAGE_EXECUTOR_PATCH_ABI;
-  readonly functionName: "applyStageExecutorPatchFor";
-  readonly args: readonly [
-    Hex,
-    {
-      readonly selectorStageId: Hex;
-      readonly targetStageId: Hex;
-      readonly executor: Address;
-      readonly role: Hex;
-      readonly executorMetadataHash: Hex;
-      readonly mode: Hex;
-      readonly previousExecutor: Address;
-      readonly approvalSourceId: Hex;
-      readonly approvalSignalId: Hex;
-      readonly patchHash: Hex;
-      readonly patchNonce: bigint;
-      readonly metadataURI: string;
-    },
-    Address,
-    bigint,
-    Hex,
-    Hex
-  ];
-  readonly data: Hex;
-  readonly chainId?: number;
-}
-
-export interface StateMachineStageResourcePatchCall {
-  readonly address: Address;
-  readonly abi: typeof STATE_MACHINE_STAGE_RESOURCE_PATCH_ABI;
-  readonly functionName: "applyStageResourcePatchFor";
-  readonly args: readonly [
-    Hex,
-    {
-      readonly selectorStageId: Hex;
-      readonly targetStageId: Hex;
-      readonly resourceKey: Hex;
-      readonly manifestHash: Hex;
-      readonly policyHash: Hex;
-      readonly patchHash: Hex;
-      readonly patchNonce: bigint;
-      readonly manifestURI: string;
-    },
-    Address,
-    bigint,
-    Hex
-  ];
-  readonly data: Hex;
-  readonly chainId?: number;
-}
-
-export type StateMachineStagePatchCall =
-  | StateMachineStageExecutorPatchCall
-  | StateMachineStageResourcePatchCall;
 
 export interface StateMachineStagePatchWalletClient {
   readonly account?: { readonly address?: string };
@@ -120,10 +69,32 @@ export function createStateMachineStageExecutorPatchBroadcastAdapter(
     staleNonceError: "stale_stage_executor_patch_nonce",
     genericFailureError: "stage_executor_patch_broadcast_failed",
     buildCall: (config, prepared, request) => buildApplyStageExecutorPatchForCall(
-      config,
-      prepared,
-      request.signature,
-      request.previousExecutorSignature
+      {
+        stagePatchModuleAddress: config.stagePatchModuleAddress,
+        ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
+      },
+      {
+        planId: prepared.planId,
+        orderId: prepared.onchainOrderId,
+        patch: {
+          selectorStageId: prepared.selectorStageId,
+          targetStageId: prepared.targetStageId,
+          executor: prepared.executorWallet,
+          role: prepared.roleHash,
+          executorMetadataHash: prepared.executorMetadataHash,
+          mode: prepared.modeHash,
+          previousExecutor: prepared.previousExecutor ?? ZERO_ADDRESS,
+          approvalSourceId: prepared.approvalSourceId ?? ZERO_BYTES32,
+          approvalSignalId: prepared.approvalSignalId ?? ZERO_BYTES32,
+          patchHash: prepared.patchHash,
+          patchNonce: prepared.patchNonce,
+          metadataURI: prepared.metadataURI
+        },
+        selector: prepared.selectorWallet,
+        deadline: prepared.deadline,
+        selectorSignature: request.signature,
+        previousExecutorSignature: request.previousExecutorSignature ?? "0x"
+      }
     )
   });
 }
@@ -136,7 +107,29 @@ export function createStateMachineStageResourcePatchBroadcastAdapter(
     invalidSignatureError: "invalid_stage_resource_patch_signature",
     staleNonceError: "stale_stage_resource_patch_nonce",
     genericFailureError: "stage_resource_patch_broadcast_failed",
-    buildCall: (config, prepared, request) => buildApplyStageResourcePatchForCall(config, prepared, request.signature)
+    buildCall: (config, prepared, request) => buildApplyStageResourcePatchForCall(
+      {
+        stagePatchModuleAddress: config.stagePatchModuleAddress,
+        ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
+      },
+      {
+        planId: prepared.planId,
+        orderId: prepared.onchainOrderId,
+        patch: {
+          selectorStageId: prepared.selectorStageId,
+          targetStageId: prepared.targetStageId,
+          resourceKey: prepared.resourceKey,
+          manifestHash: prepared.manifestHash,
+          policyHash: prepared.policyHash,
+          patchHash: prepared.patchHash,
+          patchNonce: prepared.patchNonce,
+          manifestURI: prepared.manifestURI
+        },
+        selector: prepared.selectorWallet,
+        deadline: prepared.deadline,
+        signature: request.signature
+      }
+    )
   });
 }
 
@@ -156,7 +149,7 @@ interface StagePatchBroadcastAdapterLabels<TPrepared extends PreparedPatchForBro
   readonly staleNonceError: string;
   readonly genericFailureError: string;
   buildCall(
-    config: { readonly stateMachineAddress: Address; readonly chainId?: number },
+    config: { readonly stagePatchModuleAddress: Address; readonly chainId?: number },
     prepared: TPrepared,
     request: StagePatchBroadcastRequestBase<TPrepared>
   ): StateMachineStagePatchCall;
@@ -207,12 +200,29 @@ function createStagePatchBroadcastAdapter<TPrepared extends PreparedPatchForBroa
           gasPayer
         );
       }
+      if (!request.prepared.planId || request.prepared.planId === ZERO_BYTES32) {
+        return failedResult(
+          "order_plan_unresolved",
+          "prepared stage patch has no non-zero planId for the plan-scoped patch ABI",
+          false,
+          gasPayer
+        );
+      }
 
-      const chainId = await publicClient.getChainId?.();
-      if (chainId !== undefined && chainId !== options.chainId) {
+      // 与 submissions 同构：chain-id 预检是一次普通 RPC 往返，传输故障必须
+      // 分类为 failed 广播结果，绝不允许抛穿调用方（抛穿会在未记录任何提交
+      // 的情况下消耗预留 nonce）。
+      let rpcChainId: number | undefined;
+      try {
+        rpcChainId = await publicClient.getChainId?.();
+      } catch (error) {
+        const classified = classifyStagePatchBroadcastError(error, labels);
+        return failedResult(classified.errorCode, classified.message, classified.retryable, gasPayer);
+      }
+      if (rpcChainId !== undefined && rpcChainId !== options.chainId) {
         return failedResult(
           "chain_id_mismatch",
-          `configured chainId ${options.chainId} does not match RPC chainId ${chainId}`,
+          `configured chainId ${options.chainId} does not match RPC chainId ${rpcChainId}`,
           false,
           gasPayer
         );
@@ -220,12 +230,12 @@ function createStagePatchBroadcastAdapter<TPrepared extends PreparedPatchForBroa
 
       let txHash: Hex;
       try {
-        const broadcastAddress = normalizeAddress(
+        const stagePatchModuleAddress = normalizeAddress(
           request.prepared.typedData.domain.verifyingContract ?? request.prepared.stateMachineAddress ?? stateMachineAddress,
           "prepared.typedData.domain.verifyingContract"
         );
         txHash = await walletClient.writeContract(labels.buildCall({
-          stateMachineAddress: broadcastAddress,
+          stagePatchModuleAddress,
           chainId: options.chainId
         }, request.prepared, request));
       } catch (error) {
@@ -285,84 +295,6 @@ function createStagePatchBroadcastAdapter<TPrepared extends PreparedPatchForBroa
         return failedResult(classified.errorCode, classified.message, classified.retryable, gasPayer, txHash);
       }
     }
-  };
-}
-
-export function buildApplyStageExecutorPatchForCall(
-  config: { readonly stateMachineAddress: Address; readonly chainId?: number },
-  prepared: PreparedStageExecutorPatchDTO,
-  signature: Hex,
-  previousExecutorSignature: Hex = "0x" as Hex
-): StateMachineStageExecutorPatchCall {
-  const patch = {
-    selectorStageId: prepared.selectorStageId,
-    targetStageId: prepared.targetStageId,
-    executor: prepared.executorWallet,
-    role: prepared.roleHash,
-    executorMetadataHash: prepared.executorMetadataHash,
-    mode: prepared.modeHash,
-    previousExecutor: prepared.previousExecutor ?? ZERO_ADDRESS,
-    approvalSourceId: prepared.approvalSourceId ?? ZERO_BYTES32,
-    approvalSignalId: prepared.approvalSignalId ?? ZERO_BYTES32,
-    patchHash: prepared.patchHash,
-    patchNonce: BigInt(prepared.patchNonce),
-    metadataURI: prepared.metadataURI
-  } as const;
-  const args = [
-    prepared.onchainOrderId,
-    patch,
-    prepared.selectorWallet,
-    BigInt(prepared.deadline),
-    signature,
-    previousExecutorSignature
-  ] as const;
-  return {
-    address: normalizeAddress(config.stateMachineAddress, "stateMachineAddress"),
-    abi: STATE_MACHINE_STAGE_EXECUTOR_PATCH_ABI,
-    functionName: "applyStageExecutorPatchFor",
-    args,
-    data: encodeFunctionData({
-      abi: STATE_MACHINE_STAGE_EXECUTOR_PATCH_ABI,
-      functionName: "applyStageExecutorPatchFor",
-      args
-    }),
-    ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
-  };
-}
-
-export function buildApplyStageResourcePatchForCall(
-  config: { readonly stateMachineAddress: Address; readonly chainId?: number },
-  prepared: PreparedStageResourcePatchDTO,
-  signature: Hex
-): StateMachineStageResourcePatchCall {
-  const patch = {
-    selectorStageId: prepared.selectorStageId,
-    targetStageId: prepared.targetStageId,
-    resourceKey: prepared.resourceKey,
-    manifestHash: prepared.manifestHash,
-    policyHash: prepared.policyHash,
-    patchHash: prepared.patchHash,
-    patchNonce: BigInt(prepared.patchNonce),
-    manifestURI: prepared.manifestURI
-  } as const;
-  const args = [
-    prepared.onchainOrderId,
-    patch,
-    prepared.selectorWallet,
-    BigInt(prepared.deadline),
-    signature
-  ] as const;
-  return {
-    address: normalizeAddress(config.stateMachineAddress, "stateMachineAddress"),
-    abi: STATE_MACHINE_STAGE_RESOURCE_PATCH_ABI,
-    functionName: "applyStageResourcePatchFor",
-    args,
-    data: encodeFunctionData({
-      abi: STATE_MACHINE_STAGE_RESOURCE_PATCH_ABI,
-      functionName: "applyStageResourcePatchFor",
-      args
-    }),
-    ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
   };
 }
 
@@ -503,7 +435,12 @@ function normalizeGasPayer(value: string | undefined): Address {
 }
 
 function requiredRpcUrl(rpcUrl: string | undefined): string {
-  return rpcUrl ?? "http://127.0.0.1:8545";
+  // fail-closed：无显式 RPC 配置即抛错，不回落 127.0.0.1:8545（本地环境
+  // 也必须显式传 UVP_RPC_URL）。
+  if (!rpcUrl) {
+    throw new ConfigError("UVP_RPC_URL is required for stage patch broadcast; refusing to fall back to a default RPC endpoint");
+  }
+  return rpcUrl;
 }
 
 function chainFor(chainId: number, rpcUrl: string): Chain {

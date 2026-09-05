@@ -138,15 +138,27 @@ export class TxReconcileWorker implements LifecycleService {
       failed: 0
     };
 
+    // 每条记录独立 try/catch：单条坏记录（缺字段/投影查询异常）只计失败
+    // 并继续，不再把整轮（以及 /admin/ops/reconcile/run、retrySubmission）
+    // 一起拖成 500。
     if (this.#productStore) {
       for (const registration of (await this.#productStore.listRegistrations()).filter(isReconcileableRegistration)) {
         summary.registrationsChecked += 1;
-        const updated = await this.#reconcileRegistration(registration);
-        if (updated) {
-          summary.updated += 1;
-          if (updated.status === "failed") {
-            summary.failed += 1;
+        try {
+          const updated = await this.#reconcileRegistration(registration);
+          if (updated) {
+            summary.updated += 1;
+            if (updated.status === "failed") {
+              summary.failed += 1;
+            }
           }
+        } catch (error) {
+          summary.failed += 1;
+          this.#logger.warn("reconcile worker skipped a broken registration record", {
+            triggerId: registration.triggerId,
+            orderId: registration.orderId,
+            message: redactErrorMessage(error)
+          });
         }
       }
     }
@@ -154,12 +166,21 @@ export class TxReconcileWorker implements LifecycleService {
     if (this.#submissionStore) {
       for (const submission of (await this.#submissionStore.listSubmissions()).filter(isReconcileableSubmission)) {
         summary.submissionsChecked += 1;
-        const updated = await this.#reconcileSubmission(submission);
-        if (updated) {
-          summary.updated += 1;
-          if (updated.status === "failed") {
-            summary.failed += 1;
+        try {
+          const updated = await this.#reconcileSubmission(submission);
+          if (updated) {
+            summary.updated += 1;
+            if (updated.status === "failed") {
+              summary.failed += 1;
+            }
           }
+        } catch (error) {
+          summary.failed += 1;
+          this.#logger.warn("reconcile worker skipped a broken submission record", {
+            submissionId: submission.submissionId,
+            orderId: submission.orderId,
+            message: redactErrorMessage(error)
+          });
         }
       }
     }
@@ -176,12 +197,20 @@ export class TxReconcileWorker implements LifecycleService {
       }
       for (const log of actionable) {
         summary.governanceLogsChecked += 1;
-        const updated = await this.#reconcileGovernanceLog(log);
-        if (updated) {
-          summary.updated += 1;
-          if (updated.status === "failed") {
-            summary.failed += 1;
+        try {
+          const updated = await this.#reconcileGovernanceLog(log);
+          if (updated) {
+            summary.updated += 1;
+            if (updated.status === "failed") {
+              summary.failed += 1;
+            }
           }
+        } catch (error) {
+          summary.failed += 1;
+          this.#logger.warn("reconcile worker skipped a broken governance ledger record", {
+            logId: log.logId,
+            message: redactErrorMessage(error)
+          });
         }
       }
     }
@@ -536,8 +565,14 @@ async function registrationProjectionConfirmation(
   projectionStore: ProjectionStore,
   registration: ProductOrderTriggerRecord
 ): Promise<ProjectionConfirmation | undefined> {
-  const order = await projectionStore.getStateMachineOrder(registration.orderId);
-  if (!order?.registeredAt || order.planId.toLowerCase() !== registration.planId.toLowerCase()) {
+  // 订单身份是 (planId, orderId)：registration.planId 必填（schema NOT NULL，
+  // 无 legacy 空值路径），必须走复合键查询——裸 orderId 在同号订单跨 plan
+  // 复用时永远查不中，registration 会永卡 indexing。
+  const order = await projectionStore.getStateMachineOrder(
+    registration.orderId,
+    registration.planId
+  );
+  if (!order?.registeredAt) {
     return undefined;
   }
   if (
@@ -553,10 +588,11 @@ async function submissionProjectionConfirmation(
   projectionStore: ProjectionStore,
   submission: ProductSubmissionDTO
 ): Promise<ProjectionConfirmation | undefined> {
-  const order = await projectionStore.getStateMachineOrder(submission.onchainOrderId);
-  // The state-machine identity is (planId, orderId), not bare orderId. A
-  // projection from another plan must never confirm this signed submission.
-  if (!order || order.planId.toLowerCase() !== submission.planId.toLowerCase()) {
+  // The state-machine identity is (planId, orderId), not bare orderId. The
+  // composite lookup never returns another plan's projection for this signed
+  // submission.
+  const order = await projectionStore.getStateMachineOrder(submission.onchainOrderId, submission.planId);
+  if (!order) {
     return undefined;
   }
   const signal = order?.signals[`${submission.sourceId}:${submission.signalId}`];

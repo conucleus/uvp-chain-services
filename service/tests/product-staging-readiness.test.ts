@@ -324,7 +324,7 @@ function stagingEnv(tempDirs: string[]): Record<string, string | undefined> {
     CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:db-secret@staging-db.internal:5432/uvp",
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
-    UVP_INDEXER_POLL_INTERVAL_MS: "0",
+    UVP_INDEXER_POLL_INTERVAL_MS: "5000",
     STORE_AUTH_MODE: "jwt",
     STORE_AUTH_JWKS_URL: "https://identity.example/.well-known/jwks.json",
     STORE_AUTH_ISSUER: "https://identity.example/",
