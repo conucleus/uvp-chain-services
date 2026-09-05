@@ -142,6 +142,27 @@ export class S3EvidenceStorageClient implements ObjectEvidenceStorageClient {
     return this.#prefix ? `${this.#prefix}/${evidenceId}` : evidenceId;
   }
 
+  /** 簇 N 修正：evidenceId↔storageURI 双向翻译（BackupEvidenceStorage 用）。 */
+  storageURIForEvidenceId(evidenceId: string): string {
+    return this.storageURIForKey(this.objectKeyForEvidenceId(evidenceId));
+  }
+
+  evidenceIdForStorageURI(storageURI: string): string {
+    assertProductionStorageURI(storageURI);
+    const prefix = this.#uriMode === "object"
+      ? `object://${this.#objectNamespace}/`
+      : `s3://${this.#bucket}/`;
+    if (!storageURI.startsWith(prefix)) {
+      throw new Error("storageURI is not managed by S3EvidenceStorageClient");
+    }
+    const key = storageURI.slice(prefix.length);
+    if (this.#prefix && !key.startsWith(`${this.#prefix}/`)) {
+      throw new Error("storageURI is not managed by S3EvidenceStorageClient");
+    }
+    const evidenceId = this.#prefix ? key.slice(this.#prefix.length + 1) : key;
+    return normalizeEvidenceObjectId(evidenceId);
+  }
+
   private storageURIForKey(key: string): string {
     if (this.#uriMode === "object") {
       return `object://${this.#objectNamespace}/${key}`;

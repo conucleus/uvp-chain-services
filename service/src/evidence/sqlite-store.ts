@@ -139,6 +139,24 @@ export class SqliteEvidenceStore implements EvidenceMetadataStore {
     return row ? evidenceRow(row) : undefined;
   }
 
+  async findOwnedByPayloadHash(payloadHash: string, ownerParticipantId: string): Promise<EvidenceMetadataRecord | undefined> {
+    const row = this.#database.prepare(
+      `SELECT
+         object.*,
+         policy.order_id AS policy_order_id,
+         policy.readers_json,
+         policy.writers_json,
+         policy.admin_readers_json,
+         policy.dispute_readers_json
+       FROM evidence_object object
+       JOIN evidence_access_policy policy ON policy.evidence_id = object.evidence_id
+       WHERE object.payload_hash = ? AND object.owner_participant_id = ?
+       ORDER BY object.created_at ASC, object.evidence_id ASC
+       LIMIT 1`
+    ).get(payloadHash, ownerParticipantId);
+    return row ? evidenceRow(row) : undefined;
+  }
+
   async markBound(input: BindEvidenceRequestDTO): Promise<EvidenceMetadataRecord | undefined> {
     const current = await this.get(input.evidenceId);
     if (!current) {

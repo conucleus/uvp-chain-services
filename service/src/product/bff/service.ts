@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { onchainStageId } from "@uvp-eth/compiler";
 import {
   type StoreZhixuVersionSummaryDTO,
@@ -615,14 +615,17 @@ export function createProductBffService(
         contact: input.contact,
         status: "invited",
       };
+      // 簇 D 修正（审计三轮）：tokenHash 由此前可从请求字段推导的
+      // hash(draftId:participantId:contact) 改为随机 token 的哈希——
+      // 库中只存哈希，明文只在 createInvite 响应出现一次；accept/reject
+      // 强制回呈 token 做哈希比对。inviteId 追加随机熵，不再可枚举。
+      const inviteToken = randomBytes(32).toString("hex");
       const invite: ProductInviteDTO = {
-        inviteId: nextId("invite", idScope, sequence++),
+        inviteId: `${nextId("invite", idScope, sequence++)}_${randomBytes(8).toString("hex")}`,
         draftId,
         participantId: participant.participantId,
         roleSlotId: participant.roleSlotId,
-        tokenHash: hashHex(
-          `${draftId}:${participant.participantId}:${input.contact}`,
-        ),
+        tokenHash: inviteTokenHash(inviteToken),
         status: "active",
         expiresAt: input.expiresAt ?? oneWeekFrom(now()),
         createdAt: now().toISOString(),
@@ -631,7 +634,7 @@ export function createProductBffService(
         await store.updateParticipant(invited);
         await store.createInvite(invite);
         const nextDraft = await refreshDraftStatus(store, draft, now);
-        return { invite, participant: invited, draft: nextDraft };
+        return { invite, participant: invited, draft: nextDraft, inviteToken };
       });
     },
 
@@ -664,27 +667,29 @@ export function createProductBffService(
 
     async acceptInvite(inviteId, input) {
       const invite = await requireAcceptableInvite(store, inviteId, now);
+      // 簇 D 修正：token 哈希比对——inviteId 弱凭据不再足以占角色槽。
+      assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const acceptedWalletAddress = normalizeAddress(
         input.walletAddress,
         "walletAddress",
       );
-      if (input.sessionWalletAddress) {
-        const sessionWalletAddress = normalizeAddress(
-          input.sessionWalletAddress,
-          "sessionWalletAddress",
+      // 簇 C 修正：sessionWalletAddress 由路由层从会话锚定地址解析（钱包
+      // 会话签名证明或 local dev 锚定头），不再取自自报头。
+      const sessionWalletAddress = normalizeAddress(
+        input.sessionWalletAddress,
+        "sessionWalletAddress",
+      );
+      if (sessionWalletAddress !== acceptedWalletAddress) {
+        throw new ProductBffError(
+          403,
+          "wrong_wallet",
+          "connected wallet does not match invite acceptance wallet",
+          {
+            connectedWalletAddress: sessionWalletAddress,
+            walletAddress: acceptedWalletAddress,
+          },
         );
-        if (sessionWalletAddress !== acceptedWalletAddress) {
-          throw new ProductBffError(
-            403,
-            "wrong_wallet",
-            "connected wallet does not match invite acceptance wallet",
-            {
-              connectedWalletAddress: sessionWalletAddress,
-              walletAddress: acceptedWalletAddress,
-            },
-          );
-        }
       }
       await assertWalletCanAcceptInvite(
         store,
@@ -719,6 +724,8 @@ export function createProductBffService(
 
     async rejectInvite(inviteId, input) {
       const invite = await requireAcceptableInvite(store, inviteId, now);
+      // 簇 D 修正：reject 同样强制携带 token。
+      assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const rejected: DraftParticipantDTO = {
         ...participant,
@@ -948,6 +955,22 @@ function inviteWithCurrentStatus(
 
 function isInviteExpired(invite: ProductInviteDTO, now: Date): boolean {
   return Date.parse(invite.expiresAt) <= now.getTime();
+}
+
+/** 簇 D 修正（审计三轮）：invite token 的哈希口径（与 createInvite 一致）。 */
+function inviteTokenHash(token: string): `0x${string}` {
+  return hashHex(`uvp:product-bff:invite:v2:${token}`);
+}
+
+function assertInviteToken(invite: ProductInviteDTO, token: string | undefined): void {
+  if (!token || inviteTokenHash(token) !== invite.tokenHash.toLowerCase()) {
+    throw new ProductBffError(
+      403,
+      "invite_token_mismatch",
+      "a valid invite token is required (delivered once with the create-invite response)",
+      { inviteId: invite.inviteId }
+    );
+  }
 }
 
 function requireValidInviteExpiry(expiresAt: string): void {

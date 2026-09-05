@@ -97,8 +97,8 @@ export class SqliteGovernanceStore implements GovernanceStore {
         `INSERT INTO governance_review (
            review_id, subject_type, subject_id, status, risk_level, risk_tags_json,
            public_summary, internal_notes, policy_hash, metadata_hash, metadata_uri,
-           reviewer, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           reviewer, created_at, updated_at, metadata_document_json, policy_document_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(review_id)
          DO UPDATE SET
            subject_type = excluded.subject_type,
@@ -112,8 +112,9 @@ export class SqliteGovernanceStore implements GovernanceStore {
            metadata_hash = excluded.metadata_hash,
            metadata_uri = excluded.metadata_uri,
            reviewer = excluded.reviewer,
-           created_at = excluded.created_at,
-           updated_at = excluded.updated_at`
+           updated_at = excluded.updated_at,
+           metadata_document_json = excluded.metadata_document_json,
+           policy_document_json = excluded.policy_document_json`
       ).run(
         review.reviewId,
         review.subjectType,
@@ -128,7 +129,9 @@ export class SqliteGovernanceStore implements GovernanceStore {
         review.metadataURI,
         review.reviewer,
         review.createdAt,
-        review.updatedAt
+        review.updatedAt,
+        review.metadataDocument !== undefined ? stringifyStorageJson(review.metadataDocument) : null,
+        review.policyDocument !== undefined ? stringifyStorageJson(review.policyDocument) : null
       );
     });
   }
@@ -227,6 +230,8 @@ export class SqliteGovernanceStore implements GovernanceStore {
 
 function reviewRow(row: unknown): GovernanceReviewDTO {
   const record = rowObject(row, "governance_review query");
+  const metadataDocumentJson = optionalStringColumn(record, "metadata_document_json");
+  const policyDocumentJson = optionalStringColumn(record, "policy_document_json");
   return {
     reviewId: stringColumn(record, "review_id"),
     subjectType: stringColumn(record, "subject_type") as GovernanceReviewDTO["subjectType"],
@@ -241,7 +246,9 @@ function reviewRow(row: unknown): GovernanceReviewDTO {
     metadataURI: stringColumn(record, "metadata_uri"),
     reviewer: stringColumn(record, "reviewer"),
     createdAt: stringColumn(record, "created_at"),
-    updatedAt: stringColumn(record, "updated_at")
+    updatedAt: stringColumn(record, "updated_at"),
+    ...(metadataDocumentJson !== undefined ? { metadataDocument: parseStorageJson(metadataDocumentJson) } : {}),
+    ...(policyDocumentJson !== undefined ? { policyDocument: parseStorageJson(policyDocumentJson) } : {})
   };
 }
 

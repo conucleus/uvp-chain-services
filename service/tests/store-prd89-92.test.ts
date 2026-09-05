@@ -205,7 +205,12 @@ describe("PRD89-92 store access domains", () => {
       headers: governanceAdminHeaders,
       body: { supplierSubjectId: subjectId, displayName: "测试供应商", wallet: supplierWallet }
     });
-    const suppliers = await router.handle({ method: "GET", pathname: "/store/suppliers" });
+    const suppliers = await router.handle({
+      method: "GET",
+      pathname: "/store/suppliers",
+      // 簇 N 修正：读面鉴权——用已认证 store 头读取。
+      headers: governanceAdminHeaders
+    });
     const supplierId = (suppliers.body as { suppliers: { supplierId: string }[] }).suppliers[0]!.supplierId;
     await router.handle({
       method: "POST",
@@ -523,7 +528,12 @@ describe("PRD89-92 store access domains", () => {
     expect(approvedBody.identityPairing.bindingStatus).toBe("active");
 
     // 供应商与治理审核记录成对出现（审计配对）。
-    const suppliers = await router.handle({ method: "GET", pathname: "/store/suppliers" });
+    const suppliers = await router.handle({
+      method: "GET",
+      pathname: "/store/suppliers",
+      // 簇 N 修正：读面鉴权——用已认证 store 头读取。
+      headers: governanceAdminHeaders
+    });
     const createdSupplier = (suppliers.body as { suppliers: { wallet?: string; reviewStatus: string; identityStatus: string }[] }).suppliers
       .find((supplier) => supplier.wallet?.toLowerCase() === supplierWallet.toLowerCase());
     expect(createdSupplier).toMatchObject({ reviewStatus: "approved_for_broadcast", identityStatus: "active" });
@@ -901,6 +911,16 @@ function derivedJoinSubject(address: Address): Hex {
   return keccak256(stringToBytes(`uvp:store:join:subject:v1:${address.toLowerCase()}`)) as Hex;
 }
 
+/** 槽位能力键：roleSlot 的首条 permission (source, signalName) 的链上 id。 */
+function slotPermissionKeyForRoleSlot(slotId: string): { readonly sourceId: Hex; readonly signalId: Hex } {
+  const entry = demoZhixuDetail.orderPermissionTable.find((permission) => permission.roleSlotId === slotId)
+    ?? demoZhixuDetail.orderPermissionTable[0]!;
+  return {
+    sourceId: keccak256(stringToBytes(entry.source)) as Hex,
+    signalId: keccak256(stringToBytes(entry.signalName)) as Hex
+  };
+}
+
 async function seedOrderWithAuthorization(store: MemoryProjectionStore, submitter: Address): Promise<void> {
   const orderId = "0x0000000000000000000000000000000000000000000000000000000000000909" as Hex;
   await store.resetFromEvents({
@@ -917,10 +937,12 @@ async function seedOrderWithAuthorization(store: MemoryProjectionStore, submitte
         registrar: publisherAddress
       }),
       chainEvent(3n, 0, "OrderRegistered", { orderId, planId }),
+      // 簇 D 修正（审计三轮）：授权事件的 (sourceId, signalId) 必须落在
+      // 申请槽位的 orderPermissionTable 能力集合内——激活判定不再接受
+      // "同 plan 任意信号"。
       chainEvent(4n, 0, "SignalSubmitterAuthorized", {
         orderId,
-        sourceId: `0x${"11".repeat(32)}`,
-        signalId: `0x${"22".repeat(32)}`,
+        ...slotPermissionKeyForRoleSlot(roleSlotId),
         submitter,
         role: `0x${"33".repeat(32)}`,
         metadataHash: `0x${"44".repeat(32)}`

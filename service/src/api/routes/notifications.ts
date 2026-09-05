@@ -2,16 +2,19 @@ import { adminPrincipalFromHeaders } from "../../governance/index.js";
 import type { NotificationDeliveryStatus, NotificationRedactedEvidenceQuery } from "../../notifications/index.js";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address } from "../../shared/types.js";
 import { cleanQuery, readApiHeader, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { RouteModule } from "../route-module.js";
 
 type ParsedNotificationDeliveryQuery =
   | { readonly query: Record<string, string> & { readonly status?: NotificationDeliveryStatus } }
   | { readonly response: ApiResponse };
 
-export function createNotificationsRouteModule(): RouteModule {
+export function createNotificationsRouteModule(options: {
+  readonly runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2];
+} = {}): RouteModule {
   return {
     async handle(request, context) {
-      const participantNotificationResponse = await handleParticipantNotificationRequest(request, context);
+      const participantNotificationResponse = await handleParticipantNotificationRequest(request, context, options.runtimeEnvironment);
       if (participantNotificationResponse) {
         return participantNotificationResponse;
       }
@@ -22,26 +25,32 @@ export function createNotificationsRouteModule(): RouteModule {
 
 async function handleParticipantNotificationRequest(
   request: ApiRequest,
-  context: Parameters<RouteModule["handle"]>[1]
+  context: Parameters<RouteModule["handle"]>[1],
+  runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2]
 ): Promise<ApiResponse | undefined> {
   if (!request.pathname.startsWith("/product/me/activity-feed")) {
     return undefined;
   }
 
-  const wallet = parseParticipantWallet(request);
+  // 簇 C 修正（审计三轮）：activity-feed 的身份 = 会话锚定地址（钱包会话
+  // 的签名证明，或 local 显式开启的 dev 锚定头）。query/body/header 自报
+  // 钱包只用于与锚定地址一致性核验，不再作为唯一身份——此前 ?wallet= 即
+  // 可读任意人活动流、代标已读。local 之外无会话即 401。
+  const wallet = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment);
   if (!wallet.ok) {
     return wallet.response;
   }
+  const walletAddress = wallet.identity.walletAddress;
 
   if (request.method === "GET" && request.pathname === "/product/me/activity-feed") {
     const notifications = await context.notificationService.listParticipantNotifications({
-      ...(wallet.walletAddress ? { walletAddress: wallet.walletAddress } : {})
+      walletAddress
     });
     return {
       status: 200,
       body: {
         participant: {
-          ...(wallet.walletAddress ? { walletAddress: wallet.walletAddress } : {})
+          walletAddress
         },
         ...notifications
       }
@@ -58,7 +67,7 @@ async function handleParticipantNotificationRequest(
       };
     }
     const notification = await context.notificationService.markParticipantNotificationRead({
-      ...(wallet.walletAddress ? { walletAddress: wallet.walletAddress } : {}),
+      walletAddress,
       notificationId: notificationId.deliveryId
     });
     if (!notification) {
@@ -77,42 +86,6 @@ async function handleParticipantNotificationRequest(
     status: 404,
     body: { error: "not_found" }
   };
-}
-
-function parseParticipantWallet(request: ApiRequest):
-  | { readonly ok: true; readonly walletAddress?: Address }
-  | { readonly ok: false; readonly response: ApiResponse } {
-  const rawWallet = request.query?.wallet ??
-    request.query?.walletAddress ??
-    walletAddressFromBody(request.body) ??
-    readApiHeader(request.headers, "x-uvp-wallet-address") ??
-    readApiHeader(request.headers, "x-uvp-session-wallet-address") ??
-    readApiHeader(request.headers, "x-wallet-address");
-  if (!rawWallet) {
-    return { ok: true };
-  }
-  try {
-    return { ok: true, walletAddress: normalizeAddress(rawWallet, "wallet") };
-  } catch (error) {
-    return {
-      ok: false,
-      response: {
-        status: 400,
-        body: {
-          error: "invalid_wallet",
-          message: error instanceof Error ? error.message : "wallet must be a valid EVM address"
-        }
-      }
-    };
-  }
-}
-
-function walletAddressFromBody(body: unknown): string | undefined {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return undefined;
-  }
-  const walletAddress = (body as Record<string, unknown>).walletAddress;
-  return typeof walletAddress === "string" ? walletAddress : undefined;
 }
 
 async function handleNotificationRequest(

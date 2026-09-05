@@ -144,10 +144,13 @@ describe("product BFF order drafts and invites", () => {
     const acceptResponse = await router.handle({
       method: "POST",
       pathname: `/product/invites/${fundsInvite.invite.inviteId}/accept`,
+      // 簇 C 修正：接受方的钱包声明来自 header/query/会话，不再读 body。
+      headers: { "x-uvp-wallet-address": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
       body: {
         displayName: "Buyer Finance",
         walletAddress: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         contact: "buyer@example.com",
+        token: fundsInvite.inviteToken,
       },
     });
     expect(acceptResponse.status).toBe(200);
@@ -168,7 +171,7 @@ describe("product BFF order drafts and invites", () => {
     const rejectResponse = await router.handle({
       method: "POST",
       pathname: `/product/invites/${supplyInvite.invite.inviteId}/reject`,
-      body: { displayName: "Supplier", contact: "supply@example.com" },
+      body: { displayName: "Supplier", contact: "supply@example.com", token: supplyInvite.inviteToken },
     });
     expect(rejectResponse.status).toBe(200);
     const rejected = rejectResponse.body as InviteResponse;
@@ -222,6 +225,7 @@ describe("product BFF order drafts and invites", () => {
         displayName: "Buyer Finance",
         walletAddress: acceptedWallet,
         contact: "buyer@example.com",
+        token: fundsInvite.inviteToken,
       },
     });
     expect(wrongWalletResponse).toMatchObject({
@@ -237,6 +241,7 @@ describe("product BFF order drafts and invites", () => {
         displayName: "Buyer Finance",
         walletAddress: acceptedWallet,
         contact: "buyer@example.com",
+        token: fundsInvite.inviteToken,
       },
     });
     expect(acceptResponse.status).toBe(200);
@@ -269,6 +274,7 @@ describe("product BFF order drafts and invites", () => {
         displayName: "Buyer Finance",
         walletAddress: acceptedWallet,
         contact: "buyer@example.com",
+        token: fundsInvite.inviteToken,
       },
     });
     expect(alreadyAcceptedResponse).toMatchObject({
@@ -300,6 +306,7 @@ describe("product BFF order drafts and invites", () => {
         displayName: "Delivery",
         walletAddress: testWallet(0),
         contact: "delivery@example.com",
+        token: duplicateInvite.inviteToken,
       },
     });
     expect(duplicateAcceptResponse).toMatchObject({
@@ -335,6 +342,7 @@ describe("product BFF order drafts and invites", () => {
         displayName: "Supplier",
         walletAddress: testWallet(2),
         contact: "supply@example.com",
+        token: expiredInvite.inviteToken,
       },
     });
     expect(expiredAcceptResponse).toMatchObject({
@@ -950,6 +958,8 @@ interface InviteResponse {
   readonly invite: ProductInviteDTO;
   readonly participant: DraftParticipantDTO;
   readonly draft: ProductOrderDraftDTO;
+  /** 簇 D 修正：createInvite 一次性下发的 invite token。 */
+  readonly inviteToken?: string;
 }
 
 type RouterFixtureTriggerAdapter =
@@ -1156,10 +1166,12 @@ async function inviteAndAccept(
   const response = await router.handle({
     method: "POST",
     pathname: `/product/invites/${invitation.invite.inviteId}/accept`,
+    headers: { "x-uvp-wallet-address": testWallet(index) },
     body: {
       displayName: `${roleSlotId} participant`,
       walletAddress: testWallet(index),
       contact: `${roleSlotId}@example.com`,
+      token: invitation.inviteToken,
     },
   });
   expect(response.status).toBe(200);

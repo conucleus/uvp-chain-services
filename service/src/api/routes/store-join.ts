@@ -114,7 +114,7 @@ function ok(body: unknown): ApiResponse {
 }
 
 function joinActor(
-  access: { readonly authMode: string; readonly level: string; readonly principalId?: string },
+  access: { readonly authMode: string; readonly level: string; readonly principalId?: string; readonly roles?: readonly string[] },
   anchoredAddress: Address,
   accountId?: string
 ): StoreJoinActor {
@@ -123,7 +123,9 @@ function joinActor(
     ...(accountId ? { accountId } : {}),
     authMode: access.authMode,
     accessLevel: access.level,
-    ...(access.principalId ? { principalId: access.principalId } : {})
+    ...(access.principalId ? { principalId: access.principalId } : {}),
+    // 簇 D 修正：审批触发链上身份登记时按 governance_admin 权威门禁。
+    ...(access.roles?.includes("governance_admin") ? { governanceAdmin: true } : {})
   };
 }
 

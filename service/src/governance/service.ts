@@ -179,14 +179,17 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const record = requireBodyRecord(input);
       const subjectId = requiredBytes32(record, "subjectId");
       const bindingId = requiredBytes32(record, "bindingId");
-      const review = await markReviewRevoked(store, record, "supplier", subjectId, principal, now);
+      const review = await resolveReview(store, record, "supplier", subjectId);
+      const revokedReview = review
+        ? await markReviewRevoked(store, record, review, "supplier", subjectId, principal, now)
+        : undefined;
       const reason = optionalString(record, "reason") ?? optionalString(record, "publicSummary") ?? "governance revocation";
       const reasonHash = hashRevocationReason({
         subjectType: "supplier",
         subjectId,
         reason,
         ...(optionalUnknown(record, "metadata") !== undefined ? { metadata: record.metadata } : {}),
-        ...(review ? { review: reviewHashInput(review) } : {})
+        ...(revokedReview ? { review: reviewHashInput(revokedReview) } : {})
       });
       const reasonURI = defaultMetadataURI(reasonHash);
       const request: IdentityRevocationRequestDTO = {
@@ -195,7 +198,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
         subjectId,
         reasonHash,
         reasonURI,
-        ...(review ? { reviewId: review.reviewId } : {})
+        ...(revokedReview ? { reviewId: revokedReview.reviewId } : {})
       };
       const duplicate = await reusableDuplicateIdentityLog(store, "revoke_identity", request);
       if (duplicate) {
@@ -203,6 +206,12 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
         return { request, broadcast: broadcastFromLog(duplicate), log: duplicate };
       }
       const broadcast = await safeBroadcast(() => broadcastIdentityRevocation(adapter, request));
+      // 簇 N 修正（审计三轮）：revoke 前置状态回退——review 在广播前已翻成
+      // revoked，广播确定性失败时恢复原状态，避免"库 revoked、链上 binding
+      // 仍 active"的分叉。
+      if (broadcast.status === "failed" && review && review.status !== "revoked") {
+        await store.putReview(review);
+      }
       const timestamp = now().toISOString();
       const log = identityLog(nextId("identity_log"), "revoke_identity", request, broadcast, principal, timestamp);
       await store.appendIdentityTxLog(log);
@@ -230,6 +239,8 @@ export function toPublicGovernanceReview(review: GovernanceReviewDTO): PublicGov
   const {
     internalNotes: _internalNotes,
     reviewer: _reviewer,
+    metadataDocument: _metadataDocument,
+    policyDocument: _policyDocument,
     ...publicReview
   } = review;
   return publicReview;
@@ -295,6 +306,8 @@ async function saveReviewFromRecord(options: {
   const riskTags = optionalStringArray(record, "riskTags") ?? existing?.riskTags ?? [];
   const publicSummary = optionalString(record, "publicSummary") ?? existing?.publicSummary ?? "";
   const internalNotes = optionalString(record, "internalNotes") ?? existing?.internalNotes ?? "";
+  const metadataDocument = optionalUnknown(record, "metadata") ?? existing?.metadataDocument;
+  const policyDocument = optionalUnknown(record, "policy") ?? existing?.policyDocument;
   const hashInput = reviewHashInputFromFields({
     subjectType: options.subjectType,
     subjectId,
@@ -302,8 +315,8 @@ async function saveReviewFromRecord(options: {
     riskLevel,
     riskTags,
     publicSummary,
-    metadata: optionalUnknown(record, "metadata"),
-    policy: optionalUnknown(record, "policy")
+    ...(metadataDocument !== undefined ? { metadata: metadataDocument } : {}),
+    ...(policyDocument !== undefined ? { policy: policyDocument } : {})
   });
   const metadataHash = hashGovernanceReviewMetadata(hashInput);
   const policyHash = hashGovernanceReviewPolicy(hashInput);
@@ -322,7 +335,11 @@ async function saveReviewFromRecord(options: {
     metadataURI: optionalString(record, "metadataURI") ?? existing?.metadataURI ?? defaultMetadataURI(metadataHash),
     reviewer: options.principal.adminId,
     createdAt: existing?.createdAt ?? timestamp,
-    updatedAt: timestamp
+    updatedAt: timestamp,
+    // 簇 D 修正：哈希材料原文随记录持久化，registerIdentity 重建
+    // descriptor 哈希时不再丢 metadata/policy。
+    ...(metadataDocument !== undefined ? { metadataDocument } : {}),
+    ...(policyDocument !== undefined ? { policyDocument } : {})
   };
   await options.store.putReview(review);
   return {
@@ -378,13 +395,13 @@ async function resolveReview(
 async function markReviewRevoked(
   store: GovernanceStore,
   record: Record<string, unknown>,
+  review: GovernanceReviewDTO,
   subjectType: GovernanceSubjectType,
   subjectId: string,
   principal: GovernancePrincipal,
   now: () => Date
-): Promise<GovernanceReviewDTO | undefined> {
-  const review = await resolveReview(store, record, subjectType, subjectId);
-  if (!review || review.status === "revoked") {
+): Promise<GovernanceReviewDTO> {
+  if (review.status === "revoked") {
     return review;
   }
   if (!canTransitionReviewStatus(review.status, "revoked")) {
@@ -399,7 +416,9 @@ async function markReviewRevoked(
     status,
     riskLevel: review.riskLevel,
     riskTags: review.riskTags,
-    publicSummary
+    publicSummary,
+    ...(review.metadataDocument !== undefined ? { metadata: review.metadataDocument } : {}),
+    ...(review.policyDocument !== undefined ? { policy: review.policyDocument } : {})
   });
   const updated: GovernanceReviewDTO = {
     ...review,
@@ -429,7 +448,10 @@ function reviewHashInput(review: GovernanceReviewDTO): GovernanceReviewHashInput
     status: review.status,
     riskLevel: review.riskLevel,
     riskTags: review.riskTags,
-    publicSummary: review.publicSummary
+    publicSummary: review.publicSummary,
+    // 簇 D 修正：用持久化的哈希材料原文重建，不再丢 metadata/policy。
+    ...(review.metadataDocument !== undefined ? { metadata: review.metadataDocument } : {}),
+    ...(review.policyDocument !== undefined ? { policy: review.policyDocument } : {})
   });
 }
 

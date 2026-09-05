@@ -1317,6 +1317,9 @@ describe("product API routes", () => {
       }
     });
     const inviteId = (inviteResponse.body as { invite: { inviteId: string } }).invite.inviteId;
+    // 簇 D 修正：accept 必须携带 createInvite 一次性下发的 token。
+    const inviteToken = (inviteResponse.body as { inviteToken?: string }).inviteToken;
+    expect(typeof inviteToken).toBe("string");
     await expect(router.handle({
       method: "POST",
       pathname: `/product/invites/${inviteId}/accept`,
@@ -1324,7 +1327,8 @@ describe("product API routes", () => {
       body: {
         displayName: "Delivery Operator",
         walletAddress: submitter,
-        contact: "delivery@example.com"
+        contact: "delivery@example.com",
+        token: inviteToken
       }
     })).resolves.toMatchObject({ status: 200 });
 

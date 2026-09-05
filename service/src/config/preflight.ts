@@ -412,10 +412,15 @@ function runStoreAuthPreflight(
   const storeAuth = effectiveStoreAuthConfig(config);
   const mode = envMode === "dev_headers" || envMode === "jwt" ? envMode : storeAuth.mode;
   const strictRuntime = config.security.environment === "staging" || config.security.environment === "production";
+  // 簇 C 修正（审计三轮）：testnet 同样不允许 dev_headers——自报 store 头
+  // 不是 testnet 的身份证明；且必须显式配置（缺省回落已废除）。
+  const devHeadersAllowed = config.security.environment === "local";
   const evidence = assessStoreAuthEvidence(storeAuth, config.security.environment);
 
-  if (strictRuntime && mode !== "jwt") {
-    fail(checks, errors, "store_auth.mode", "STORE_AUTH_MODE=jwt is required in staging and production");
+  if (!devHeadersAllowed && !envMode) {
+    fail(checks, errors, "store_auth.mode", `STORE_AUTH_MODE must be explicitly configured in ${config.security.environment}`);
+  } else if (!devHeadersAllowed && mode !== "jwt") {
+    fail(checks, errors, "store_auth.mode", `STORE_AUTH_MODE=jwt is required in ${config.security.environment}`);
   } else if (mode === "jwt") {
     pass(checks, "store_auth.mode");
   } else {
@@ -491,6 +496,25 @@ function runProductionSafetyPreflight(
     pass(checks, "storage.driver");
   } else {
     fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production");
+  }
+  // 簇 C 修正（审计三轮）：production 此前不检查 RPC——env 缺省静默回落
+  // 127.0.0.1:8545。与 staging/testnet 同口径：显式 + 非本地。
+  if (isNonLocalRpcUrl(config.network.rpcUrl)) {
+    pass(checks, "network.rpc_url_configured");
+  } else {
+    fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must be explicitly configured to a non-local RPC endpoint in production");
+  }
+  // 簇 C 修正（审计三轮）：admin 白名单 production 强制非空（空=任意自报
+  // admin 通过的 fail-open 已在 governance/auth.ts 收口，这里拦配置）。
+  if (config.operatorRoles.adminReviewers.length > 0) {
+    pass(checks, "operator.governance_admin_reviewer");
+  } else {
+    fail(checks, errors, "operator.governance_admin_reviewer", "GOVERNANCE_ADMIN_REVIEWER_IDS is required in production");
+  }
+  if ((config.operatorRoles.opsConsoleAdmins ?? []).length > 0) {
+    pass(checks, "operator.ops_console_admin");
+  } else {
+    fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in production");
   }
   requireDurableStoreMetadata(config, checks, errors, "production");
   if (config.database.migrationsAutoRun && env.UVP_PRODUCTION_ALLOW_AUTO_MIGRATIONS?.trim() !== "1") {
@@ -606,6 +630,19 @@ function runTestnetSafetyPreflight(
     pass(checks, "network.rpc_url_configured");
   } else {
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia RPC in testnet");
+  }
+
+  // 簇 C 修正（审计三轮）：testnet 强制 admin 白名单非空 + STORE_AUTH_MODE
+  // 显式配置（缺省 dev_headers 的静默回落已废除）。
+  if (config.operatorRoles.adminReviewers.length > 0) {
+    pass(checks, "operator.governance_admin_reviewer");
+  } else {
+    fail(checks, errors, "operator.governance_admin_reviewer", "GOVERNANCE_ADMIN_REVIEWER_IDS is required in testnet");
+  }
+  if ((config.operatorRoles.opsConsoleAdmins ?? []).length > 0) {
+    pass(checks, "operator.ops_console_admin");
+  } else {
+    fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in testnet");
   }
 
   if (stateMachine) {

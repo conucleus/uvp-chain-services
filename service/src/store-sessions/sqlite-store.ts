@@ -88,6 +88,22 @@ export class SqliteStoreWalletSessionStore implements StoreWalletSessionStore {
     });
   }
 
+  async consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined> {
+    // 簇 N 修正（审计三轮）：条件 UPDATE 原子占位——
+    // WHERE consumed_at IS NULL 保证并发重放同一 nonce 只有一个赢家。
+    const updated = runSqliteWrite(() =>
+      this.#database.prepare(
+        `UPDATE store_auth_challenge
+         SET consumed_at = ?
+         WHERE nonce = ? AND consumed_at IS NULL`
+      ).run(consumedAt, nonce)
+    );
+    if (updated.changes !== 1) {
+      return undefined;
+    }
+    return this.getChallenge(nonce);
+  }
+
   async putSession(record: StoreWalletSessionRecord): Promise<void> {
     runSqliteWrite(() => {
       this.#database.prepare(

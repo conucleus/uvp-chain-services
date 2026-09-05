@@ -258,7 +258,7 @@ export function createStoreZhixuDraftWorkflowService(options: {
 
     async updateProductSchema(draftId, input) {
       const draft = await requireDraft(draftStore, draftId);
-      assertDraftSchemaMutable(draft);
+      await assertDraftSchemaMutable(draft, options.projectionStore);
       const timestamp = now().toISOString();
       const productSchema = normalizeProductSchemaInput(input, draft, timestamp);
       const updated: StoreZhixuDraftRecord = {
@@ -367,12 +367,29 @@ function assertDraftCompiledForReview(
   }
 }
 
-function assertDraftSchemaMutable(draft: StoreZhixuDraftRecord): void {
+/**
+ * 簇 N 修正（审计三轮）：active schema 守卫修活——此前的判定
+ * `draft.status === "active"` 是死条件（草稿状态机从不落 "active"），
+ * 已发布 plan 的 schema 仍可原地改写。守卫改用发布状态判定：compile
+ * preview 的 (planId, planHash) 已出现在链投影（stateMachinePlans）即
+ * 视为已发布，schema 必须走新版本草稿。
+ */
+async function assertDraftSchemaMutable(
+  draft: StoreZhixuDraftRecord,
+  projectionStore: ProjectionStore
+): Promise<void> {
   if (draft.status === "active") {
     throw new StoreZhixuDraftWorkflowError(
       409,
       "product_schema_new_version_required",
       "active product schema cannot be changed in place; create a new draft version"
+    );
+  }
+  if (await hasPublishedPlan(draft, projectionStore)) {
+    throw new StoreZhixuDraftWorkflowError(
+      409,
+      "product_schema_new_version_required",
+      "this draft anchors a published plan; its product schema cannot be changed in place (create a new draft version)"
     );
   }
 }
@@ -828,9 +845,18 @@ function normalizeProductSchemaInput(
   if (!preview) {
     throw new StoreZhixuDraftWorkflowError(409, "compile_preview_required", "compile preview is required before product schema update");
   }
-  const roleSlots = arrayField<RoleSlotDTO>(schemaRecord, "roleSlots");
-  const orderPermissionTable = arrayField<OrderPermissionTableEntryDTO>(schemaRecord, "orderPermissionTable");
-  const stages = arrayField<ZhixuStageDTO>(schemaRecord, "stages");
+  const roleSlots = validatedRoleSlots(
+    arrayField<RoleSlotDTO>(schemaRecord, "roleSlots"),
+    "roleSlots"
+  );
+  const orderPermissionTable = validatedPermissionRows(
+    arrayField<OrderPermissionTableEntryDTO>(schemaRecord, "orderPermissionTable"),
+    "orderPermissionTable"
+  );
+  const stages = validatedStageRows(
+    arrayField<ZhixuStageDTO>(schemaRecord, "stages"),
+    "stages"
+  );
   const selectorBindings = arrayField<StoreProductSchemaSelectorBindingDTO>(schemaRecord, "selectorBindings", () =>
     draft.productSchema?.selectorBindings ?? []
   );
@@ -904,6 +930,10 @@ function productSchemaHashPayload(
     planId: schema.planId,
     planHash: schema.planHash,
     artifactHash: schema.artifactHash,
+    // 簇 N 修正（审计三轮）：schema 携带的 onchain hook plan 产物主体进
+    // 哈希——此前该对象可被替换而不改变 schemaHash（artifactHash 字段
+    // 单独存在，但产物本体与摘要字段可以不同步地被篡改）。
+    onchainHookPlanArtifact: schema.onchainHookPlanArtifact ?? null,
     createOrderTrigger: schema.createOrderTrigger ?? null,
     roleSlots: schema.roleSlots,
     orderPermissionTable: schema.orderPermissionTable,
@@ -1627,6 +1657,72 @@ function arrayField<TValue>(
     throw new StoreZhixuDraftWorkflowError(400, "invalid_product_schema", `${key} must be an array`);
   }
   return value as readonly TValue[];
+}
+
+/**
+ * 簇 N 修正（审计三轮）：roleSlots 类型校验——此前 arrayField 盲转型，
+ * 非对象条目（字符串/数字/null）在后续语义校验里以 TypeError 崩成 500。
+ * 结构不合法直接 400。
+ */
+function validatedRoleSlots(values: readonly unknown[], field: string): readonly RoleSlotDTO[] {
+  return values.map((slot, index) => {
+    if (!isRecord(slot)) {
+      throw invalidSchemaType(`${field}[${index}] must be an object`);
+    }
+    if (typeof slot.slotId !== "string" || slot.slotId.trim().length === 0) {
+      throw invalidSchemaType(`${field}[${index}].slotId must be a non-empty string`);
+    }
+    if (slot.capabilityPlugins !== undefined) {
+      if (!Array.isArray(slot.capabilityPlugins)) {
+        throw invalidSchemaType(`${field}[${index}].capabilityPlugins must be an array`);
+      }
+      slot.capabilityPlugins.forEach((plugin, pluginIndex) => {
+        if (!isRecord(plugin)) {
+          throw invalidSchemaType(`${field}[${index}].capabilityPlugins[${pluginIndex}] must be an object`);
+        }
+        if (
+          !Array.isArray(plugin.stageIds) ||
+          !plugin.stageIds.every((stageId) => typeof stageId === "string")
+        ) {
+          throw invalidSchemaType(
+            `${field}[${index}].capabilityPlugins[${pluginIndex}].stageIds must be an array of strings`
+          );
+        }
+      });
+    }
+    return slot as unknown as RoleSlotDTO;
+  });
+}
+
+function validatedPermissionRows(values: readonly unknown[], field: string): readonly OrderPermissionTableEntryDTO[] {
+  return values.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw invalidSchemaType(`${field}[${index}] must be an object`);
+    }
+    if (typeof entry.permissionId !== "string" || entry.permissionId.trim().length === 0) {
+      throw invalidSchemaType(`${field}[${index}].permissionId must be a non-empty string`);
+    }
+    if (typeof entry.roleSlotId !== "string" || entry.roleSlotId.trim().length === 0) {
+      throw invalidSchemaType(`${field}[${index}].roleSlotId must be a non-empty string`);
+    }
+    return entry as unknown as OrderPermissionTableEntryDTO;
+  });
+}
+
+function validatedStageRows(values: readonly unknown[], field: string): readonly ZhixuStageDTO[] {
+  return values.map((stage, index) => {
+    if (!isRecord(stage)) {
+      throw invalidSchemaType(`${field}[${index}] must be an object`);
+    }
+    if (typeof stage.stageId !== "string" || stage.stageId.trim().length === 0) {
+      throw invalidSchemaType(`${field}[${index}].stageId must be a non-empty string`);
+    }
+    return stage as unknown as ZhixuStageDTO;
+  });
+}
+
+function invalidSchemaType(message: string): StoreZhixuDraftWorkflowError {
+  return new StoreZhixuDraftWorkflowError(400, "invalid_product_schema", message);
 }
 
 function numberField(record: Record<string, unknown>, key: string): number | undefined {

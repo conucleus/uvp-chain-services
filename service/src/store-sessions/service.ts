@@ -135,9 +135,15 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
         throw new StoreSessionServiceError(401, "store_challenge_expired", "challenge has expired");
       }
       const address = challenge.address;
-      // 单次使用在签名验证前原子占位（burn-on-attempt）：并发重放同一 nonce
-      // 只有一个请求能通过；签名失败可重新取挑战，代价可接受。
-      await store.updateChallenge({ ...challenge, consumedAt: now().toISOString() });
+      // 簇 N 修正（审计三轮）：单次使用改为条件 UPDATE 原子占位
+      //（burn-on-attempt）：并发重放同一 nonce 只有一个请求能通过；
+      // 签名失败可重新取挑战，代价可接受。
+      const consumed = store.consumeChallenge
+        ? await store.consumeChallenge(nonce, now().toISOString())
+        : await legacyConsumeChallenge(store, challenge, now);
+      if (!consumed) {
+        throw new StoreSessionServiceError(401, "store_challenge_invalid", "challenge is unknown or already used");
+      }
       const valid = await verifyWalletMessage({ address, message: challenge.message, signature });
       if (!valid) {
         throw new StoreSessionServiceError(401, "store_challenge_signature_invalid", "signature does not prove control of the address");
@@ -494,6 +500,16 @@ function accountAddressView(record: { readonly address: Address; readonly status
     status: record.status,
     anchoredAt: record.anchoredAt
   };
+}
+
+/** 簇 N 修正：适配未实现条件占位的自定义 store 实现（读-判-写回退）。 */
+async function legacyConsumeChallenge(
+  store: StoreWalletSessionStore,
+  challenge: NonNullable<Awaited<ReturnType<StoreWalletSessionStore["getChallenge"]>>>,
+  now: () => Date
+): Promise<unknown> {
+  await store.updateChallenge({ ...challenge, consumedAt: now().toISOString() });
+  return challenge;
 }
 
 function sha256Hex(value: string): string {

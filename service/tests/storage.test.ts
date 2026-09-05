@@ -107,6 +107,7 @@ const expectedMigrationVersions = [
   "0015_store_listing_decoration_join",
   "0016_submission_plan_id",
   "0017_indexer_pending_post_commit",
+  "0018_store_governance_audit_constraints",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -963,6 +964,7 @@ describe("durable storage", () => {
       reopenedRouter.handle({
         method: "GET",
         pathname: "/store/suppliers/supplier-route-durable",
+        headers: adminHeaders,
       }),
     ).resolves.toMatchObject({
       status: 200,
@@ -1571,6 +1573,7 @@ describePostgres(
         reopenedRouter.handle({
           method: "GET",
           pathname: "/store/suppliers/supplier-postgres-route-durable",
+          headers: adminHeaders,
         }),
       ).resolves.toMatchObject({
         status: 200,

@@ -215,7 +215,10 @@ function indexerSummary(diagnostics: JsonRecord): JsonRecord {
     eventCount: numberOf(indexer?.eventCount),
     lastEventName: stringOrNull(indexer?.lastEventName),
     rebuildStatus,
-    rebuildReady: rebuildStatus === "completed" || rebuildStatus === "idle" || rebuildStatus === "unknown",
+    // 簇 N 修正（审计三轮）：staging readiness 的 rebuild "unknown" 不再
+    // 视为就绪——此前 unknown 与 completed/idle 同权重，重建状态未知的
+    // 部署照样宣告 ready。
+    rebuildReady: rebuildStatus === "completed" || rebuildStatus === "idle",
     rebuild: {
       status: rebuildStatus,
       deploymentBlock: stringOrNull(rebuild?.deploymentBlock),

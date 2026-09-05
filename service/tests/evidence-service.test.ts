@@ -51,8 +51,11 @@ describe("evidence service", () => {
     expect(first.evidence.contentHash).toBe(second.evidence.contentHash);
     expect(first.evidence.metadataHash).toBe(second.evidence.metadataHash);
     expect(first.evidence.payloadHash).toBe(second.evidence.payloadHash);
-    expect(first.evidence.evidenceId).not.toBe(second.evidence.evidenceId);
-    expect(first.evidence.fileName).not.toBe(second.evidence.fileName);
+    // 簇 N 修正（审计三轮）：同一 owner 重复上传完全相同的载荷幂等返回既有
+    // 记录——payloadHash 覆盖 content+metadata+order+stage（fileName 不参与
+    // 哈希），重命名文件重传不再追加内容副本。
+    expect(second.evidence.evidenceId).toBe(first.evidence.evidenceId);
+    expect(second.evidence.fileName).toBe(first.evidence.fileName);
     expect(first.evidence.payloadHash).toBe(hashEvidencePayload({
       contentHash: first.evidence.contentHash,
       metadataHash: first.evidence.metadataHash,

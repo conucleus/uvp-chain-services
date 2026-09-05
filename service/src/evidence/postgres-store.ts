@@ -156,6 +156,48 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
     return result.rows[0] ? evidenceRow(result.rows[0]) : undefined;
   }
 
+  async findOwnedByPayloadHash(payloadHash: string, ownerParticipantId: string): Promise<EvidenceMetadataRecord | undefined> {
+    const result = await this.#database.query(
+      `SELECT
+         obj.evidence_id,
+         obj.order_id,
+         obj.draft_id,
+         obj.task_id,
+         obj.stage_identifier,
+         obj.owner_participant_id,
+         obj.file_name,
+         obj.mime_type,
+         obj.size,
+         obj.storage_uri,
+         obj.content_hash,
+         obj.metadata_hash,
+         obj.payload_hash,
+         obj.payload_ref,
+         obj.status,
+         obj.created_at,
+         obj.bound_signal_tx_hash,
+         obj.bound_submission_id,
+         obj.bound_onchain_order_id,
+         obj.bound_source_id,
+         obj.bound_signal_id,
+         obj.bound_at,
+         obj.metadata_json::text AS metadata_json,
+         obj.canonical_metadata_json::text AS canonical_metadata_json,
+         policy.order_id AS policy_order_id,
+         policy.readers_json::text AS readers_json,
+         policy.writers_json::text AS writers_json,
+         policy.admin_readers_json::text AS admin_readers_json,
+         policy.dispute_readers_json::text AS dispute_readers_json
+       FROM evidence_object obj
+       JOIN evidence_access_policy policy ON policy.evidence_id = obj.evidence_id
+       WHERE obj.payload_hash = $1 AND obj.owner_participant_id = $2
+       ORDER BY obj.created_at ASC, obj.evidence_id ASC
+       LIMIT 1`,
+      [payloadHash, ownerParticipantId]
+    );
+    return result.rows[0] ? evidenceRow(result.rows[0]) : undefined;
+  }
+
   async markBound(input: BindEvidenceRequestDTO): Promise<EvidenceMetadataRecord | undefined> {
     const current = await this.get(input.evidenceId);
     if (!current) {

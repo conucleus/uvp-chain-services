@@ -401,7 +401,13 @@ function canonicalStoreRoles(roles: readonly string[]): readonly StoreRole[] {
 }
 
 function capabilitiesForStoreRoles(roles: readonly StoreRole[]): readonly StoreCapability[] {
-  const capabilities = new Set<StoreCapability>(STORE_READ_CAPABILITIES);
+  // 簇 N 修正（审计三轮）：零角色 JWT 不再并入 store.audit.read——匿名
+  // 语义的 token 只拿到公共读（store.read）；audit.read 随 store_reader
+  // 及以上角色授予。
+  const capabilities = new Set<StoreCapability>(STORE_PUBLIC_READ_CAPABILITIES);
+  if (roles.includes("store_reader")) {
+    addCapabilities(capabilities, STORE_READ_CAPABILITIES);
+  }
   if (roles.includes("store_operator")) {
     addCapabilities(capabilities, STORE_OPERATOR_CAPABILITIES);
   }

@@ -8,7 +8,8 @@ import { storeSessionFromAccess, type StoreAccessState, type StoreCapability } f
 import type { StoreAuditQuery } from "../../store-console/audit.js";
 import { buildStoreClosureDryRunSummary } from "../../store-console/closure.js";
 import {
-  StoreRuntimeError
+  StoreRuntimeError,
+  isSupportedStoreOrderFilterStatus
 } from "../../store-console/runtime.js";
 import {
   StoreZhixuDraftWorkflowError
@@ -75,9 +76,12 @@ export function createStoreConsoleRouteModule(): RouteModule {
       }
 
       if (request.method === "GET" && request.pathname === "/store/search") {
+        const body = await context.storeConsoleService.search(parseStoreSearchQuery(request.query));
+        // 簇 N 修正（审计三轮）：search 过滤已下架——与 /store/zhixus 的
+        // PRD92 口径一致（运营方可见，便于治理观察）。
         return {
           status: 200,
-          body: await context.storeConsoleService.search(parseStoreSearchQuery(request.query))
+          body: await filterDelistedSearchResults(request, context, body)
         };
       }
 
@@ -222,6 +226,17 @@ async function handleStoreRuntimeRequest(
     const zhixuOrdersMatch = /^\/store\/zhixus\/([^/]+)\/orders$/.exec(request.pathname);
     if (request.method === "GET" && zhixuOrdersMatch) {
       const zhixuId = decodeURIComponent(zhixuOrdersMatch[1] ?? "");
+      // 簇 N 修正（审计三轮）：status 过滤词表校验——未知 status 400，
+      // 不再静默返回空集（此前的 "disputed" 等死词已从词表移除）。
+      if (request.query?.status && !isSupportedStoreOrderFilterStatus(request.query.status)) {
+        return {
+          status: 400,
+          body: {
+            error: "invalid_query",
+            message: `status must be one of registered, blocked`
+          }
+        };
+      }
       return {
         status: 200,
         body: await context.storeRuntimeService.listZhixuOrders(zhixuId, {
@@ -825,6 +840,43 @@ async function filterDelistedZhixus(
     ? record.zhixus
     : record.zhixus.filter((row) => !row.planId || !delisted.has(row.planId.toLowerCase()));
   return { ...record, zhixus, ...(isOperator ? { delistedPlanIds: [...delisted] } : {}) };
+}
+
+/** 簇 N 修正：search 结果中的 zhixu 命中同样过滤已下架（非运营方）。 */
+async function filterDelistedSearchResults(
+  request: ApiRequest,
+  context: Parameters<RouteModule["handle"]>[1],
+  body: unknown
+): Promise<unknown> {
+  if (!context.listingService) {
+    return body;
+  }
+  const access = await context.storeIdentityProvider.resolve(request.headers);
+  const isOperator = access.level === "store_operator" || access.level === "store_admin";
+  if (isOperator) {
+    return body;
+  }
+  const delisted = new Set(
+    (await context.listingService.listListings("delisted"))
+      .map((listing) => listing.planId.toLowerCase())
+  );
+  if (delisted.size === 0) {
+    return body;
+  }
+  const record = body as { readonly results?: readonly { readonly resultType?: string; readonly id?: string }[] };
+  if (!record?.results?.length) {
+    return body;
+  }
+  const zhixuPlanIds = await context.productService.listZhixu();
+  const planIdByZhixuId = new Map(zhixuPlanIds.map((zhixu) => [zhixu.zhixuId, zhixu.planPublication.planId.toLowerCase()]));
+  const results = record.results.filter((result) => {
+    if (result.resultType !== "zhixu") {
+      return true;
+    }
+    const planId = result.id ? planIdByZhixuId.get(result.id) : undefined;
+    return !planId || !delisted.has(planId);
+  });
+  return { ...record, results };
 }
 
 function isPlanNotProjectedError(error: unknown): boolean {

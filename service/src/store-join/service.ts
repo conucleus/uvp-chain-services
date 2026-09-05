@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { keccak256Hex } from "@uvp-eth/compiler";
+import { keccak256Hex, onchainStageId } from "@uvp-eth/compiler";
 import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { IdentityBindingProjection } from "../indexer/identity-projections.js";
 import type { ProductService } from "../product/service.js";
+import { productSignalId, productSignalSourceId } from "../product/bff/trigger.js";
 import type { StoreSupplierService, StoreOperatorPrincipal } from "../store-suppliers/service.js";
 import { InMemoryStoreJoinApplicationStore } from "./memory-store.js";
 import type {
@@ -322,12 +323,14 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
   };
 
   /**
-   * 审批通过后的身份配对链（PRD89/PRD90 配对红线）：
-   * 1. 无供应商元数据则以申请信息创建；
-   * 2. 审核状态置 approved_for_broadcast（治理 review 记录落地）；
-   * 3. 链上身份绑定：地址已有同主体 active binding → 复用其交易证据；
-   *    无绑定 → registerIdentity（治理广播，MVP 单 registrar）；
-   *    地址被其他主体占用 → 409，申请留在 under_review。
+   * 审批通过后的身份配对链（PRD89/PRD90 配对红线；簇 D 修正后顺序）：
+   * 1. 双向占用核验（account→subject 与 subject→account，冲突即 409）；
+   * 2. 无供应商元数据则以申请信息创建；
+   * 3. 治理 review 先行（approved_for_broadcast 落 governance 记录）；
+   * 4. 链上身份绑定：地址已有同主体 active binding → 复用其交易证据；
+   *    无绑定 → registerIdentity（要求审批者持有 governance_admin 权威，
+   *    与供应商登记路由的能力门禁同口径——publisher 审批不再绕过）。
+   * 任何一步失败，申请留在 under_review，不落后续状态。
    */
   async function ensureIdentityPairing(
     application: StoreJoinApplicationRecord,
@@ -338,11 +341,7 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     readonly txLogId?: string;
     readonly executionMode?: "simulated" | "on_chain";
   }> {
-    const principal: StoreOperatorPrincipal = {
-      operatorId: actor.anchoredAddress ?? actor.principalId ?? "join-reviewer",
-      role: "store_operator"
-    };
-    // 先做地址占用核验，再创建任何经营数据：409 时不留下孤儿供应商记录。
+    // 先做双向占用核验，再创建任何经营数据：409 时不留下孤儿供应商记录。
     const activeBinding = selectActiveBinding(
       await projectionStore.listIdentityBindings({ account: application.applicantAddress, activeOnly: true })
     );
@@ -354,6 +353,23 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         { boundSubjectId: activeBinding.subjectId }
       );
     }
+    // 簇 D 修正（审计三轮）：subjectId→account 方向同样核验——此前只查
+    // 单向，审批会静默覆写既有供应商钱包 / 为其广播新绑定。
+    const subjectBinding = selectActiveBinding(
+      await projectionStore.listIdentityBindings({ subjectId: application.applicantSubjectId, activeOnly: true })
+    );
+    if (subjectBinding && subjectBinding.account.toLowerCase() !== application.applicantAddress.toLowerCase()) {
+      throw new StoreJoinServiceError(
+        409,
+        "subject_already_bound",
+        "the applicant subject already has an active identity binding to another account; approve would overwrite the existing supplier wallet",
+        { boundAccount: subjectBinding.account }
+      );
+    }
+    const principal: StoreOperatorPrincipal = {
+      operatorId: actor.anchoredAddress ?? actor.principalId ?? "join-reviewer",
+      role: actor.governanceAdmin ? "governance_admin" : "store_operator"
+    };
     let supplierId = application.supplierId;
     const existingSupplier = await options.supplierService.listSuppliers()
       .then((list) => list.suppliers.find((supplier) =>
@@ -396,6 +412,18 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
           publicSummary: "approved via store join loop"
         },
         principal
+      );
+    }
+    // 簇 D 修正（审计三轮）：链上身份登记的门禁与
+    // /store/suppliers/:id/request-identity-registration 一致——governance
+    // _admin 权威。publisher 审批到此为止；无权威时申请留在 under_review
+    // 并提示由治理管理员完成登记。
+    if (!actor.governanceAdmin) {
+      throw new StoreJoinServiceError(
+        403,
+        "governance_admin_required",
+        "on-chain identity registration requires a governance admin (the plan publisher approval alone must not broadcast identity bindings); re-run the approval with a governance-admin session or use the supplier identity-registration endpoint",
+        { applicationId: application.applicationId }
       );
     }
     const registration = await options.supplierService.requestIdentityRegistration(
@@ -516,24 +544,51 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     return updated;
   }
 
+  /**
+   * 簇 D 修正（审计三轮）：激活判定不再"任一订单存在 submitter==申请人"
+   * 即通过——链上授权信号必须与申请的槽位对应：
+   * - signal_submitter：authorization 的 (sourceId, signalId) 必须落在该
+   *   roleSlot 的 orderPermissionTable 能力集合内；
+   * - stage_executor：overlay 的 targetStageId 必须是申请的 stageId。
+   */
   async function findOnChainAuthorizationEvidence(
     application: StoreJoinApplicationRecord
   ): Promise<{ readonly txHash?: Hex } | undefined> {
+    const zhixu = await resolveZhixuForPlan(application.planId).catch(() => undefined);
+    const slotPermissionKeys = new Set(
+      (zhixu?.detail?.orderPermissionTable ?? [])
+        .filter((entry) => entry.roleSlotId === application.roleSlotId)
+        .map((entry) => `${productSignalSourceId(entry.source).toLowerCase()}:${productSignalId(entry.signalName).toLowerCase()}`)
+    );
+    const applicationStageId = application.stageId
+      ? onchainStageId(application.stageId).toLowerCase()
+      : undefined;
     const snapshot = await projectionStore.getOrderSnapshot();
     const orders = [...new Set(Object.values(snapshot.stateMachineOrders))]
       .filter((order) => order.planId.toLowerCase() === application.planId.toLowerCase());
     for (const order of orders) {
       if (application.authorizationKind === "signal_submitter") {
         for (const authorization of Object.values(order.authorizations)) {
-          if (authorization.submitter.toLowerCase() === application.applicantAddress.toLowerCase()) {
-            return { txHash: authorization.authorizedAt.transactionHash };
+          if (authorization.submitter.toLowerCase() !== application.applicantAddress.toLowerCase()) {
+            continue;
           }
+          const key = `${authorization.sourceId.toLowerCase()}:${authorization.signalId.toLowerCase()}`;
+          // 槽位/信号对应：该 plan 无 schema 权限表可比对时 fail-closed
+          //（不激活），不允许"同 plan 任意信号"充数。
+          if (slotPermissionKeys.size === 0 || !slotPermissionKeys.has(key)) {
+            continue;
+          }
+          return { txHash: authorization.authorizedAt.transactionHash };
         }
       } else {
         for (const overlay of Object.values(order.stageExecutorOverlays)) {
-          if (overlay.activeExecutorWallet.toLowerCase() === application.applicantAddress.toLowerCase()) {
-            return { txHash: overlay.updatedAt.transactionHash };
+          if (overlay.activeExecutorWallet.toLowerCase() !== application.applicantAddress.toLowerCase()) {
+            continue;
           }
+          if (!applicationStageId || overlay.targetStageId.toLowerCase() !== applicationStageId) {
+            continue;
+          }
+          return { txHash: overlay.updatedAt.transactionHash };
         }
       }
     }

@@ -95,9 +95,22 @@ describe("ops health diagnostics", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/healthz" });
 
+    // 簇 N 修正（审计三轮）：healthz 收口——只回聚合健康位；诊断明细走
+    // /admin/diagnostics（治理白名单 admin）。
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       sourceOfTruth: "contracts-and-chain-events",
+      status: expect.any(String)
+    });
+    expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
+
+    const detailResponse = await router.handle({
+      method: "GET",
+      pathname: "/admin/diagnostics",
+      headers: { "x-uvp-admin-id": "ops-admin-1", "x-uvp-admin-role": "governance_admin" }
+    });
+    expect(detailResponse.status).toBe(200);
+    expect(detailResponse.body).toMatchObject({
       diagnostics: {
         backendAuthority: false,
         environment: "local",
@@ -148,7 +161,7 @@ describe("ops health diagnostics", () => {
         }
       }
     });
-    expect(JSON.stringify(response.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
+    expect(JSON.stringify(detailResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
   });
 
   it("requires admin headers for operator console routes", async () => {
@@ -522,11 +535,23 @@ describe("ops health diagnostics", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/readyz" });
 
+    // 簇 N 修正（审计三轮）：readyz 收口——只回 ready 位与 reasons；脱敏
+    // 后的诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
       ready: false,
       status: "not_ready",
-      reasons: expect.arrayContaining(["indexer_degraded", "reconcile_error", "evidence_storage_degraded"]),
+      reasons: expect.arrayContaining(["indexer_degraded", "reconcile_error", "evidence_storage_degraded"])
+    });
+    expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
+
+    const detailResponse = await router.handle({
+      method: "GET",
+      pathname: "/admin/diagnostics",
+      headers: { "x-uvp-admin-id": "ops-admin-1", "x-uvp-admin-role": "governance_admin" }
+    });
+    expect(detailResponse.status).toBe(200);
+    expect(detailResponse.body).toMatchObject({
       diagnostics: {
         indexer: {
           syncStatus: "degraded",
@@ -694,6 +719,12 @@ function noopEvidenceService(): EvidenceService {
       return undefined;
     },
     async getProof(_evidenceId: string, _principal: EvidencePrincipal) {
+      return undefined;
+    },
+    async verifyEvidenceBackup() {
+      return undefined;
+    },
+    async restoreEvidenceBackup() {
       return undefined;
     },
     async bindEvidence() {

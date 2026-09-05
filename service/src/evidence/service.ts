@@ -6,6 +6,7 @@ import { InMemoryEvidenceMetadataStore, type EvidenceMetadataRecord, type Eviden
 import {
   assertEvidenceStorageProductionBoundary,
   assertProductionStorageURI,
+  BackupEvidenceStorage,
   InMemoryEvidenceStorage,
   LocalEvidenceStorage,
   type EvidenceStorage,
@@ -41,6 +42,7 @@ const SUPPORTED_MIME_TYPES = new Set([
 export type EvidenceServiceErrorCode =
   | "evidence_not_found"
   | "evidence_already_bound"
+  | "evidence_backup_not_configured"
   | "forbidden"
   | "invalid_request"
   | "payload_too_large"
@@ -74,6 +76,21 @@ export interface EvidenceService {
   getEvidence(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceRecordDTO | undefined>;
   getProof(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceProofDTO | undefined>;
   bindEvidence(input: BindEvidenceRequestDTO): Promise<EvidenceRecordDTO | undefined>;
+  /**
+   * 簇 N 修正（审计三轮）：第二副本 verify 的服务端接线（admin 专用）。
+   * 此前 BackupEvidenceStorage 实现了校验/恢复但没有任何调用方。
+   */
+  verifyEvidenceBackup(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceBackupStatusDTO | undefined>;
+  /** 簇 N 修正：主对象损坏/缺失时从第二副本恢复（admin 专用）。 */
+  restoreEvidenceBackup(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceBackupStatusDTO | undefined>;
+}
+
+export interface EvidenceBackupStatusDTO {
+  readonly evidenceId: string;
+  readonly backupConfigured: boolean;
+  readonly backupPresent?: boolean;
+  readonly hashMatches?: boolean;
+  readonly restored?: boolean;
 }
 
 export function createEvidenceService(options: EvidenceServiceOptions = {}): EvidenceService {
@@ -141,6 +158,19 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
         ...(orderId ? { orderId } : {}),
         stageIdentifier
       });
+      // 簇 N 修正（审计三轮）：重复上传幂等——同一 owner 再次提交完全相同
+      // 的证据载荷（content+metadata+order+stage 全等）时返回既有记录，
+      // 不再追加内容完全相同的副本。
+      const existing = await metadataStore.findOwnedByPayloadHash?.(payloadHash, ownerParticipantId);
+      if (existing) {
+        return {
+          evidence: existing.evidence,
+          metadata: existing.metadata,
+          accessPolicy: existing.accessPolicy,
+          payloadHash: existing.evidence.payloadHash,
+          payloadRef: existing.evidence.payloadRef
+        };
+      }
       const stored = await storage.put({ evidenceId, bytes: content.bytes });
       if (runtimeEnvironment !== "local") {
         assertProductionStorageURI(stored.storageURI);
@@ -254,8 +284,64 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
         ? await metadataStore.markBound(binding)
         : await putBoundRecord(metadataStore, record, binding);
       return updated ? recordToDto(updated) : undefined;
+    },
+
+    async verifyEvidenceBackup(evidenceId, principal) {
+      const record = await metadataStore.get(evidenceId);
+      if (!record) {
+        return undefined;
+      }
+      const normalizedPrincipal = normalizePrincipal(principal);
+      authorizeRead(record, normalizedPrincipal);
+      const backupStorage = backupStorageOf(storage);
+      if (!backupStorage) {
+        return { evidenceId, backupConfigured: false };
+      }
+      const verification = await backupStorage.verifyBackup(
+        record.evidence.storageURI,
+        record.evidence.contentHash
+      );
+      return {
+        evidenceId,
+        backupConfigured: true,
+        backupPresent: verification.backupPresent,
+        hashMatches: verification.hashMatches
+      };
+    },
+
+    async restoreEvidenceBackup(evidenceId, principal) {
+      const record = await metadataStore.get(evidenceId);
+      if (!record) {
+        return undefined;
+      }
+      const normalizedPrincipal = normalizePrincipal(principal);
+      authorizeRead(record, normalizedPrincipal);
+      const backupStorage = backupStorageOf(storage);
+      if (!backupStorage) {
+        throw new EvidenceServiceError("evidence_backup_not_configured", "evidence storage has no backup copy configured", 409);
+      }
+      const restored = await backupStorage.restoreFromBackup(
+        record.evidence.storageURI,
+        record.evidence.evidenceId,
+        record.evidence.contentHash
+      );
+      const verification = await backupStorage.verifyBackup(
+        record.evidence.storageURI,
+        record.evidence.contentHash
+      );
+      return {
+        evidenceId,
+        backupConfigured: true,
+        backupPresent: verification.backupPresent,
+        hashMatches: verification.hashMatches,
+        restored
+      };
     }
   };
+}
+
+function backupStorageOf(storage: EvidenceStorage): BackupEvidenceStorage | undefined {
+  return storage instanceof BackupEvidenceStorage ? storage : undefined;
 }
 
 export function createDefaultEvidenceService(): EvidenceService {
@@ -362,7 +448,11 @@ function assertBindable(record: EvidenceMetadataRecord, binding: BindEvidenceReq
 
 function requireAuthenticated(principal: EvidencePrincipal): void {
   if (!principal.id) {
-    throw new EvidenceServiceError("unauthenticated", "x-uvp-principal-id header is required", 401);
+    throw new EvidenceServiceError(
+      "unauthenticated",
+      "an authenticated participant identity is required (store wallet session or governance admin; self-reported principal headers only work in local development)",
+      401
+    );
   }
 }
 

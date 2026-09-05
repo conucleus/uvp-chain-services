@@ -55,6 +55,13 @@ export interface StoreWalletSessionStore {
   getChallenge(nonce: string): Promise<StoreAuthChallengeRecord | undefined>;
   listChallengesForAddress(address: Address): Promise<readonly StoreAuthChallengeRecord[]>;
   updateChallenge(record: StoreAuthChallengeRecord): Promise<void>;
+  /**
+   * 簇 N 修正（审计三轮）：挑战一次性占位的条件 UPDATE——
+   * `UPDATE ... SET consumed_at = ? WHERE nonce = ? AND consumed_at IS NULL`，
+   * 仅当确实占位成功（行数=1）才返回占位后的记录；并发重放同一 nonce
+   * 只有一个请求能通过（burn-on-attempt 原子化）。
+   */
+  consumeChallenge?(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined>;
 
   putSession(record: StoreWalletSessionRecord): Promise<void>;
   findSessionByTokenHash(tokenHash: string): Promise<StoreWalletSessionRecord | undefined>;

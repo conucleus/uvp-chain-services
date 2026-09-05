@@ -101,6 +101,12 @@ export interface StoreJoinActor {
   readonly authMode: string;
   readonly accessLevel: string;
   readonly principalId?: string;
+  /**
+   * 簇 D 修正（审计三轮）：审批触发链上身份登记（registerIdentity）时
+   * 必须持有 governance_admin 权威——与 /store/suppliers/:id/request-
+   * identity-registration 路由的能力门禁同口径，publisher 审批不再绕过。
+   */
+  readonly governanceAdmin?: boolean;
 }
 
 export interface StoreJoinApplicationDetailDTO {

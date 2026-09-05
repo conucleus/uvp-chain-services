@@ -8,6 +8,7 @@ import {
   type StoreSupplierListQuery
 } from "../../store-suppliers/service.js";
 import type { StoreAccessState, StoreCapability } from "../../store-console/access.js";
+import { isStoreAccessAuthenticated } from "../../store-console/access.js";
 import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {
@@ -17,7 +18,8 @@ import {
   recordStoreCapabilitySuccess,
   requireStoreConfirmation,
   StoreConfirmationError,
-  storeConfirmationErrorResponse
+  storeConfirmationErrorResponse,
+  unauthorizedStoreCapabilityResponse
 } from "../store-authz.js";
 
 type ParsedStoreSupplierQuery =
@@ -36,6 +38,18 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           const parsedQuery = parseStoreSupplierQuery(request.query);
           if (!parsedQuery.ok) {
             return parsedQuery.response;
+          }
+          // 簇 N 修正（审计三轮）：读面鉴权——供应商目录/详情包含钱包、
+          // 主体、任务统计等经营数据，不再匿名可读；要求已认证的 Store
+          // 读身份（store.read 能力 + 非 anonymous）。
+          const capability = "store.read";
+          const resource = { type: "store_supplier" };
+          const authorization = await authorizeStoreCapability(context, request, capability, resource);
+          if (!isStoreAuthorizationResult(authorization)) {
+            return authorization;
+          }
+          if (!isStoreAccessAuthenticated(authorization.access)) {
+            return unauthorizedStoreCapabilityResponse(authorization.access, capability);
           }
           return {
             status: 200,
@@ -125,6 +139,14 @@ export function createStoreSuppliersRouteModule(): RouteModule {
         const action = supplierMatch[2];
 
         if (request.method === "GET" && !action) {
+          // 簇 N 修正：读面鉴权（同列表口径：已认证 Store 读身份）。
+          const readAuthorization = await authorizeStoreCapability(context, request, "store.read", { type: "store_supplier", id: supplierId });
+          if (!isStoreAuthorizationResult(readAuthorization)) {
+            return readAuthorization;
+          }
+          if (!isStoreAccessAuthenticated(readAuthorization.access)) {
+            return unauthorizedStoreCapabilityResponse(readAuthorization.access, "store.read");
+          }
           const supplier = await context.storeSupplierService.getSupplier(supplierId);
           if (!supplier) {
             return {

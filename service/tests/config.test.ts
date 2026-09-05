@@ -486,19 +486,21 @@ describe("chain-services config", () => {
         permissiveAuthorizationRequested: false
       },
       storeAuth: {
-        mode: "dev_headers",
-        jwtConfigured: false,
-        externalIdentityEvidence: false,
-        evidenceClassification: "prototype",
-        evidenceReasons: ["store_auth_dev_headers"],
-        keySource: "missing",
-        jwksUrlConfigured: false,
-        issuerConfigured: false,
-        audienceConfigured: false,
+        // 簇 C 修正（审计三轮）：testnet 不再缺省 dev_headers——基线 env
+        // 显式 jwt + 外部 OIDC 证据。
+        mode: "jwt",
+        jwtConfigured: true,
+        externalIdentityEvidence: true,
+        evidenceClassification: "external_oidc",
+        evidenceReasons: [],
+        keySource: "jwks_url",
+        jwksUrlConfigured: true,
+        issuerConfigured: true,
+        audienceConfigured: true,
         roleClaim: "roles",
         principalClaim: "sub",
         displayNameClaimConfigured: true,
-        clockToleranceSeconds: 60
+        clockToleranceSeconds: 30
       },
       preflight: { strict: true, status: "passed" }
     });
@@ -649,7 +651,7 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       STORE_AUTH_MODE: "dev_headers"
-    }))).toThrow(/STORE_AUTH_MODE=jwt/);
+    }))).toThrow(/dev_headers is only allowed in local/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       STORE_AUTH_JWKS_URL: "http://127.0.0.1:8789/.well-known/jwks.json"
@@ -1027,7 +1029,7 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(productionEnv({
       STORE_AUTH_MODE: "dev_headers"
-    }))).toThrow(/STORE_AUTH_MODE=jwt/);
+    }))).toThrow(/dev_headers is only allowed in local/);
 
     expect(() => loadConfigFromEnv(productionEnv({
       STORE_AUTH_ISSUER: "http://localhost:8789/"
@@ -1266,8 +1268,23 @@ describe("chain-services config", () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", configDiagnostics: diagnostics });
     const response = await router.handle({ method: "GET", pathname: "/healthz" });
 
+    // 簇 N 修正（审计三轮）：公共探针收口——healthz 只回聚合健康位，
+    // 诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
+      ok: true,
+      status: "ok",
+      sourceOfTruth: "contracts-and-chain-events"
+    });
+    expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
+
+    const adminResponse = await router.handle({
+      method: "GET",
+      pathname: "/admin/diagnostics",
+      headers: { "x-uvp-admin-id": "local-admin", "x-uvp-admin-role": "governance_admin" }
+    });
+    expect(adminResponse.status).toBe(200);
+    expect(adminResponse.body).toMatchObject({
       diagnostics: {
         environment: "local",
         e2eControls: false,
@@ -1299,7 +1316,7 @@ describe("chain-services config", () => {
         }
       }
     });
-    expect(JSON.stringify(response.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
+    expect(JSON.stringify(adminResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
   });
 
   it("marks non-local readiness degraded when Store metadata wiring falls back to memory", async () => {
@@ -1319,11 +1336,23 @@ describe("chain-services config", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/readyz" });
 
+    // 簇 N 修正（审计三轮）：readyz 收口——只回 ready 位与 reasons，
+    // 诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
       ok: false,
       ready: false,
-      reasons: expect.arrayContaining(["store_metadata_degraded"]),
+      reasons: expect.arrayContaining(["store_metadata_degraded"])
+    });
+    expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
+
+    const adminResponse = await router.handle({
+      method: "GET",
+      pathname: "/admin/diagnostics",
+      headers: { "x-uvp-admin-id": "gov-reviewer-1", "x-uvp-admin-role": "governance_admin" }
+    });
+    expect(adminResponse.status).toBe(200);
+    expect(adminResponse.body).toMatchObject({
       diagnostics: {
         storeMetadata: {
           readiness: "degraded",
@@ -1359,6 +1388,11 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Reco
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: productionRelayerPrivateKey,
     // ETH-11：production 要求显式配置 finality 确认数，基线 env 一并带上。
     UVP_FINALITY_CONFIRMATIONS: "12",
+    // 簇 C 修正（审计三轮）：production 强制显式非本地 RPC + admin 白名单
+    // 非空——静默回落 127.0.0.1:8545 与空白名单 fail-open 已废除。
+    UVP_RPC_URL: "https://base-mainnet.example/rpc",
+    GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
+    OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
     ...storeAuthJwtEnv,
     ...overrides
   };
@@ -1397,6 +1431,11 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: testnetRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: testnetRelayerPrivateKey,
     UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
+    // 簇 C 修正（审计三轮）：testnet 必须显式 STORE_AUTH_MODE=jwt 且
+    // admin 白名单非空——缺省 dev_headers/空白名单的 fail-open 已废除。
+    ...storeAuthJwtEnv,
+    GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
+    OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
     ...overrides
   };
 }

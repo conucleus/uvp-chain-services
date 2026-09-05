@@ -456,6 +456,15 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
           secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv,
           ...(evidenceStorageConfig.s3SessionTokenEnv
             ? { sessionTokenEnv: evidenceStorageConfig.s3SessionTokenEnv }
+            : {}),
+          // 簇 N 修正（审计三轮）：备份客户端必须沿用主存储的 uriMode/
+          // objectNamespace——object:// URI 空间下两边不一致会让 verify/
+          // restore 的 URI 翻译失效。
+          ...(evidenceStorageConfig.s3UriMode === "object"
+            ? {
+                uriMode: evidenceStorageConfig.s3UriMode,
+                ...(evidenceStorageConfig.s3ObjectNamespace ? { objectNamespace: evidenceStorageConfig.s3ObjectNamespace } : {})
+              }
             : {})
         })
       });

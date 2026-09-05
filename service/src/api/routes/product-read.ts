@@ -7,17 +7,19 @@ import {
 } from "../../product/service.js";
 import { buildProductApiStagingReadiness } from "../../product/staging-readiness.js";
 import { redactErrorMessage } from "../../security/redaction.js";
-import { normalizeAddress } from "../../shared/types.js";
 import type { ProjectionSyncState } from "../../storage/projection-store.js";
 import { StorageUnavailableError } from "../../storage/errors.js";
-import { cleanQuery, readApiHeader, type ApiRequest, type ApiResponse, type ApiRouteContext } from "../route-context.js";
+import { cleanQuery, type ApiRequest, type ApiResponse, type ApiRouteContext } from "../route-context.js";
+import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { RouteModule } from "../route-module.js";
 
 type ParsedParticipantViewQuery =
   | { readonly ok: true; readonly query: ProductParticipantViewQuery }
   | { readonly ok: false; readonly response: ApiResponse };
 
-export function createProductReadRouteModule(): RouteModule {
+export function createProductReadRouteModule(options: {
+  readonly runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2];
+} = {}): RouteModule {
   const routeModule: RouteModule = {
     async handle(request, context) {
       if (request.method === "GET" && request.pathname === "/product/staging/readiness") {
@@ -42,7 +44,7 @@ export function createProductReadRouteModule(): RouteModule {
       const participantTaskMatch = /^\/product\/me\/tasks\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && participantTaskMatch) {
         return withStorageGuard(async () => {
-          const participantQuery = await parseParticipantViewQuery(request, context);
+          const participantQuery = await parseParticipantViewQuery(request, context, options.runtimeEnvironment);
           if (!participantQuery.ok) {
             return participantQuery.response;
           }
@@ -64,7 +66,7 @@ export function createProductReadRouteModule(): RouteModule {
 
       if (request.method === "GET" && request.pathname === "/product/me/tasks") {
         return withStorageGuard(async () => {
-          const participantQuery = await parseParticipantViewQuery(request, context);
+          const participantQuery = await parseParticipantViewQuery(request, context, options.runtimeEnvironment);
           if (!participantQuery.ok) {
             return participantQuery.response;
           }
@@ -78,7 +80,7 @@ export function createProductReadRouteModule(): RouteModule {
 
       if (request.method === "GET" && request.pathname === "/product/me/orders") {
         return withStorageGuard(async () => {
-          const participantQuery = await parseParticipantViewQuery(request, context);
+          const participantQuery = await parseParticipantViewQuery(request, context, options.runtimeEnvironment);
           if (!participantQuery.ok) {
             return participantQuery.response;
           }
@@ -92,7 +94,7 @@ export function createProductReadRouteModule(): RouteModule {
 
       if (request.method === "GET" && request.pathname === "/product/me") {
         return withStorageGuard(async () => {
-          const participantQuery = await parseParticipantViewQuery(request, context);
+          const participantQuery = await parseParticipantViewQuery(request, context, options.runtimeEnvironment);
           if (!participantQuery.ok) {
             return participantQuery.response;
           }
@@ -322,18 +324,19 @@ function isJsonRecord(value: unknown): value is Record<string, unknown> {
 
 async function parseParticipantViewQuery(
   request: ApiRequest,
-  context: ApiRouteContext
+  context: ApiRouteContext,
+  runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2]
 ): Promise<ParsedParticipantViewQuery> {
-  const rawWallet = request.query?.wallet ??
-    request.query?.walletAddress ??
-    readApiHeader(request.headers, "x-uvp-wallet-address") ??
-    readApiHeader(request.headers, "x-uvp-session-wallet-address") ??
-    readApiHeader(request.headers, "x-wallet-address");
-  if (!rawWallet) {
-    return { ok: true, query: {} };
+  // 簇 C 修正（审计三轮）：/product/me* 的身份 = 会话锚定地址（钱包会话
+  // 签名证明或 local dev 锚定头）。自报 query/header 钱包只做一致性核验
+  //（不一致即 403），不再作为唯一身份——此前 ?wallet= 可读任意人任务与
+  // 订单视图。local 之外无会话即 401。
+  const wallet = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment);
+  if (!wallet.ok) {
+    return { ok: false, response: wallet.response };
   }
+  const walletAddress = wallet.identity.walletAddress;
   try {
-    const walletAddress = normalizeAddress(rawWallet, "wallet");
     const acceptedParticipants = (await context.productBffService.listParticipantAssignments(walletAddress))
       .map(productParticipantIdentityFromAssignment);
     return {

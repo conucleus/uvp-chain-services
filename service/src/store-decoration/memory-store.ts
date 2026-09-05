@@ -10,7 +10,15 @@ export class InMemoryStoreZhixuDecorationStore implements StoreZhixuDecorationSt
   readonly #versions = new Map<string, StoreZhixuDecorationVersionRecord>();
 
   async appendVersion(record: StoreZhixuDecorationVersionRecord): Promise<void> {
-    this.#versions.set(`${record.planId.toLowerCase()}#${record.version}`, record);
+    // 簇 N 修正（审计三轮）：与 sqlite/postgres 的 UNIQUE(plan_id, version)
+    // 语义对齐——同 plan 同版本号不可覆盖（此前 Map.set 静默替换最新版本）。
+    const key = `${record.planId.toLowerCase()}#${record.version}`;
+    if (this.#versions.has(key)) {
+      throw new Error(
+        `store_zhixu_decoration unique constraint violated: plan ${record.planId.toLowerCase()} version ${record.version} already exists`
+      );
+    }
+    this.#versions.set(key, record);
   }
 
   async listVersions(planId: Hex): Promise<readonly StoreZhixuDecorationVersionRecord[]> {
@@ -24,19 +32,36 @@ export class InMemoryStorePublisherDelegationStore implements StorePublisherDele
   readonly #delegations = new Map<string, StorePublisherDelegationRecord>();
 
   async appendDelegation(record: StorePublisherDelegationRecord): Promise<void> {
+    // 簇 N 修正（审计三轮）：与 sqlite 的 ON CONFLICT(delegation_id) DO
+    // UPDATE SET revoked_at/revoked_by_address/reason 语义对齐——追加同 id
+    // 记录只更新撤销字段，不整体替换（此前可静默改写 publisher/member）。
+    const existing = this.#delegations.get(record.delegationId);
+    if (existing) {
+      const updated: StorePublisherDelegationRecord = {
+        ...existing,
+        ...(record.revokedAt !== undefined ? { revokedAt: record.revokedAt } : {}),
+        ...(record.revokedByAddress !== undefined ? { revokedByAddress: record.revokedByAddress } : {}),
+        ...(record.reason !== undefined ? { reason: record.reason } : {})
+      };
+      this.#delegations.set(record.delegationId, updated);
+      return;
+    }
     this.#delegations.set(record.delegationId, record);
   }
 
   async updateDelegation(record: StorePublisherDelegationRecord): Promise<void> {
-    this.#delegations.set(record.delegationId, record);
+    await this.appendDelegation(record);
   }
 
   async findActiveDelegation(publisherAddress: Address, memberAddress: Address): Promise<StorePublisherDelegationRecord | undefined> {
-    return [...this.#delegations.values()].find((record) =>
-      record.publisherAddress.toLowerCase() === publisherAddress.toLowerCase() &&
-      record.memberAddress.toLowerCase() === memberAddress.toLowerCase() &&
-      !record.revokedAt
-    );
+    return [...this.#delegations.values()]
+      .filter((record) =>
+        record.publisherAddress.toLowerCase() === publisherAddress.toLowerCase() &&
+        record.memberAddress.toLowerCase() === memberAddress.toLowerCase() &&
+        !record.revokedAt)
+      .sort((left, right) =>
+        right.grantedAt.localeCompare(left.grantedAt) ||
+        right.delegationId.localeCompare(left.delegationId))[0];
   }
 
   async listDelegations(publisherAddress: Address): Promise<readonly StorePublisherDelegationRecord[]> {

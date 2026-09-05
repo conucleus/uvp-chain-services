@@ -17,10 +17,13 @@ import type {
 import type { AuditSink } from "../../security/audit.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError } from "../../shared/types.js";
-import { readApiHeader, type ApiRequest, type ApiResponse } from "../route-context.js";
+import type { ApiRequest, ApiResponse, ApiRouteContext } from "../route-context.js";
+import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { RouteModule } from "../route-module.js";
 
-export function createProductBffRouteModule(): RouteModule {
+export function createProductBffRouteModule(options: {
+  readonly runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2];
+} = {}): RouteModule {
   return {
     async handle(request, context) {
       if (request.method === "POST" && request.pathname === "/product/order-drafts") {
@@ -103,7 +106,11 @@ export function createProductBffRouteModule(): RouteModule {
       if (request.method === "GET" && productInvitePreviewMatch) {
         return handleProductBffRequest(async () => {
           const inviteId = decodeURIComponent(productInvitePreviewMatch[1] ?? "");
-          const walletAddress = walletAddressFromRequest(request);
+          // 簇 C 修正：预览页的钱包视角取会话锚定地址（自报 query/header
+          // 仅做一致性核验）；无会话时仍可预览角色信息，但不携带钱包绑定
+          // 判定（真正占位需要 accept 的会话 + token）。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          const walletAddress = wallet.ok ? wallet.identity.walletAddress : undefined;
           const result = await context.productBffService.getInvite(inviteId, walletAddress ? { walletAddress } : {});
           return {
             status: 200,
@@ -116,9 +123,25 @@ export function createProductBffRouteModule(): RouteModule {
       if (request.method === "POST" && productInviteAcceptMatch) {
         return handleProductBffRequest(async () => {
           const inviteId = decodeURIComponent(productInviteAcceptMatch[1] ?? "");
+          // 簇 C/簇 D 修正：accept 必须是已证明钱包控制的会话（钱包会话签名
+          // 或 local dev 锚定头），自报钱包头不再算数；且必须携带 invite
+          // token（哈希比对）——inviteId 弱凭据不再足以占角色槽。钱包声明
+          // 不读 body（body.walletAddress 是被核验对象，不是证明）。
+          const wallet = await resolveParticipantWalletIdentity(
+            request,
+            context,
+            options.runtimeEnvironment,
+            { includeBodyWallet: false }
+          );
+          if (!wallet.ok) {
+            return wallet.response;
+          }
           return {
             status: 200,
-            body: publicInviteResponse(await context.productBffService.acceptInvite(inviteId, parseAcceptInviteBody(request)))
+            body: publicInviteResponse(await context.productBffService.acceptInvite(
+              inviteId,
+              parseAcceptInviteBody(request, wallet.identity.walletAddress)
+            ))
           };
         }, { audit: context.audit });
       }
@@ -208,14 +231,6 @@ function publicInvitePreviewResponse(response: ProductInvitePreviewResponse) {
   };
 }
 
-function walletAddressFromRequest(request: ApiRequest): string | undefined {
-  return request.query?.wallet ??
-    request.query?.walletAddress ??
-    readApiHeader(request.headers, "x-uvp-wallet-address") ??
-    readApiHeader(request.headers, "x-uvp-session-wallet-address") ??
-    readApiHeader(request.headers, "x-wallet-address");
-}
-
 function parseCreateDraftBody(body: unknown): CreateProductOrderDraftInput {
   const record = requireBodyRecord(body);
   const goods = optionalStringArray(record, "goods");
@@ -283,14 +298,18 @@ function parseCreateInviteBody(body: unknown): CreateProductInviteInput {
   };
 }
 
-function parseAcceptInviteBody(request: ApiRequest): AcceptProductInviteInput {
+function parseAcceptInviteBody(
+  request: ApiRequest,
+  sessionWalletAddress: string
+): AcceptProductInviteInput {
   const record = requireBodyRecord(request.body);
-  const sessionWalletAddress = walletAddressFromRequest(request);
   return {
     displayName: requiredString(record, "displayName"),
     walletAddress: requiredString(record, "walletAddress"),
     contact: requiredString(record, "contact"),
-    ...(sessionWalletAddress ? { sessionWalletAddress } : {})
+    // 簇 D 修正：accept/reject 强制携带 invite token（服务端哈希比对）。
+    token: requiredString(record, "token"),
+    sessionWalletAddress
   };
 }
 
@@ -325,6 +344,7 @@ function parseRejectInviteBody(body: unknown): RejectProductInviteInput {
   const displayName = optionalString(record, "displayName");
   const contact = optionalString(record, "contact");
   return {
+    token: requiredString(record, "token"),
     ...(displayName !== undefined ? { displayName } : {}),
     ...(contact !== undefined ? { contact } : {})
   };

@@ -76,7 +76,9 @@ export class RehearsalObjectEvidenceStorage implements EvidenceStorage {
     return join(this.#rootDir, `${evidenceId}.bin`);
   }
 
-  private storageURIForEvidenceId(evidenceId: string): string {
+  // 簇 N 修正（审计三轮）：改为 public——EvidenceStorage 的可选翻译方法
+  //（BackupEvidenceStorage 的主/备 URI 空间翻译需要它）。
+  storageURIForEvidenceId(evidenceId: string): string {
     return `object://${this.#namespace}/${encodeURIComponent(evidenceId)}`;
   }
 }

@@ -40,14 +40,6 @@ export type {
   StoreSupplierMetadataStore,
 } from "./types.js";
 
-const STORE_OPERATOR_ROLES = new Set([
-  "admin",
-  "store_admin",
-  "store_operator",
-  "governance_admin",
-  "governance",
-]);
-
 export class StoreSupplierServiceError extends Error {
   override readonly name = "StoreSupplierServiceError";
 
@@ -272,6 +264,13 @@ export function createStoreSupplierService(
     async reviewSupplier(supplierId, input, principal) {
       const current = await requireMetadata(metadataStore, supplierId);
       const record = mergeReviewMetadata(current, input, now().toISOString());
+      // 簇 D 修正（审计三轮）："先过治理、后改库"——治理 review 落库成功
+      // 之后才写 Store 元数据。此前先改库后过治理，治理失败时两边分叉
+      //（库显示新状态、治理记录不存在）。
+      const governance = await options.governanceService.reviewSupplier(
+        governanceReviewInput(record, input),
+        governancePrincipal(principal),
+      );
       await metadataStore.putSupplier(record);
       await metadataStore.appendAudit(
         auditRecord("audit", sequence++, record, "review", principal, now, {
@@ -298,10 +297,6 @@ export function createStoreSupplierService(
           ),
         );
       }
-      const governance = await options.governanceService.reviewSupplier(
-        governanceReviewInput(record, input),
-        governancePrincipal(principal),
-      );
       return {
         supplier: await requireBuiltSupplier(
           record.supplierId,
@@ -417,32 +412,37 @@ export function createStoreSupplierService(
           "an active identity binding is required before requesting revocation",
         );
       }
-      const updated: StoreSupplierMetadataRecord = {
-        ...current,
-        reviewStatus: "revoked",
-        updatedAt: now().toISOString(),
-      };
+      // 簇 N 修正（审计三轮）："先过治理、后改库"——撤销广播失败时 Store
+      // 元数据不再预先翻成 revoked（此前失败即分叉：库 revoked、链上
+      // binding 仍 active）。广播结果非 failed 才落库。
       const governance = await options.governanceService.revokeIdentity(
-        supplierRevocationInput(updated, input, activeBinding.bindingId),
+        supplierRevocationInput(current, input, activeBinding.bindingId),
         governancePrincipal(principal),
       );
-      await metadataStore.putSupplier(updated);
-      await metadataStore.appendAudit(
-        auditRecord(
-          "audit",
-          sequence++,
-          updated,
-          "request_identity_revocation",
-          principal,
-          now,
-          {
-            reviewStatus: "revoked",
-          },
-        ),
-      );
+      if (!isFailedGovernanceBroadcast(governance)) {
+        const updated: StoreSupplierMetadataRecord = {
+          ...current,
+          reviewStatus: "revoked",
+          updatedAt: now().toISOString(),
+        };
+        await metadataStore.putSupplier(updated);
+        await metadataStore.appendAudit(
+          auditRecord(
+            "audit",
+            sequence++,
+            updated,
+            "request_identity_revocation",
+            principal,
+            now,
+            {
+              reviewStatus: "revoked",
+            },
+          ),
+        );
+      }
       return {
         supplier: await requireBuiltSupplier(
-          updated.supplierId,
+          current.supplierId,
           metadataStore,
           options.store,
           options.productService,
@@ -453,28 +453,9 @@ export function createStoreSupplierService(
   };
 }
 
-export function storeOperatorPrincipalFromHeaders(
-  headers: Readonly<Record<string, string | undefined>> | undefined,
-): StoreOperatorPrincipal | undefined {
-  const storeOperatorId = readHeader(
-    headers,
-    "x-uvp-store-operator-id",
-  )?.trim();
-  const storeRole = readHeader(headers, "x-uvp-store-operator-role")
-    ?.trim()
-    .toLowerCase();
-  if (storeOperatorId && storeRole && STORE_OPERATOR_ROLES.has(storeRole)) {
-    return { operatorId: storeOperatorId, role: storeRole };
-  }
-
-  const adminId = readHeader(headers, "x-uvp-admin-id")?.trim();
-  const adminRole = readHeader(headers, "x-uvp-admin-role")
-    ?.trim()
-    .toLowerCase();
-  if (adminId && adminRole && STORE_OPERATOR_ROLES.has(adminRole)) {
-    return { operatorId: adminId, role: adminRole };
-  }
-  return undefined;
+function isFailedGovernanceBroadcast(governance: unknown): boolean {
+  const broadcast = (governance as { readonly broadcast?: { readonly status?: string } } | undefined)?.broadcast;
+  return broadcast?.status === "failed";
 }
 
 async function buildStoreSupplierRows(input: {
@@ -1280,22 +1261,6 @@ function shortHex(value: string): string {
   return value.length > 18
     ? `${value.slice(0, 8)}...${value.slice(-8)}`
     : value;
-}
-
-function readHeader(
-  headers: Readonly<Record<string, string | undefined>> | undefined,
-  name: string,
-): string | undefined {
-  if (!headers) {
-    return undefined;
-  }
-  return (
-    headers[name] ??
-    headers[name.toLowerCase()] ??
-    Object.entries(headers).find(
-      ([key]) => key.toLowerCase() === name.toLowerCase(),
-    )?.[1]
-  );
 }
 
 export function storeSupplierErrorFromConfigError(

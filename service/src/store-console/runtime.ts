@@ -436,6 +436,20 @@ async function findStateMachineOrder(
     : await store.getStateMachineOrder(orderId);
 }
 
+/**
+ * 簇 N 修正（审计三轮）：store 订单过滤的 status 映射对齐真实词表。
+ * - 订单投影状态只有 "registered"（OrderStatus），此前的
+ *   `case "disputed": observation.status === "in_dispute"` 是死分支
+ *   （不存在该状态），已删除；
+ * - 过滤词表校验收口到 STORE_ORDER_FILTER_STATUSES，未知 status 由
+ *   路由层 400 拒绝，不再静默返回空集。
+ */
+const STORE_ORDER_FILTER_STATUSES = ["registered", "blocked"] as const;
+
+export function isSupportedStoreOrderFilterStatus(status: string): boolean {
+  return (STORE_ORDER_FILTER_STATUSES as readonly string[]).includes(status);
+}
+
 function matchesStoreOrderFilter(
   observation: StoreOrderObservationDTO,
   status: string | undefined,
@@ -449,10 +463,10 @@ function matchesStoreOrderFilter(
         observation.lifecycleWarnings.length > 0 ||
         observation.tasks.some((task) => task.status === "blocked")
       );
-    case "disputed":
-      return observation.status === "in_dispute";
+    case "registered":
+      return observation.status === "registered";
     default:
-      return observation.status === status;
+      return false;
   }
 }
 

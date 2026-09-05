@@ -3,6 +3,7 @@ import { runSqliteMigrations } from "../storage/migrations.js";
 import {
   openSqliteDatabase,
   runSqliteWrite,
+  withSqliteTransaction,
   type SqliteDatabase,
   type SqliteValue
 } from "../storage/sqlite.js";
@@ -243,6 +244,10 @@ export class SqliteStoreZhixuVersionMetadataStore implements StoreZhixuVersionMe
            cutover_reason = excluded.cutover_reason`
       ).run(...versionValues(record));
     });
+  }
+
+  async withTransaction<T>(operation: () => Promise<T>): Promise<T> {
+    return withSqliteTransaction(this.#database, operation);
   }
 }
 

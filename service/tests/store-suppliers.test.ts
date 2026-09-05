@@ -95,6 +95,7 @@ describe("Store supplier directory API", () => {
     const listResponse = await router.handle({
       method: "GET",
       pathname: "/store/suppliers",
+      headers: storeHeaders,
       query: { identity: "active", tag: "logistics", query: "Shenzhen" },
     });
 
@@ -145,6 +146,7 @@ describe("Store supplier directory API", () => {
     const listResponse = await router.handle({
       method: "GET",
       pathname: "/store/suppliers",
+      headers: storeHeaders,
       query: { identity: "revoked" },
     });
     expect(
@@ -591,9 +593,11 @@ async function getSupplier(
   router: ApiRouter,
   supplierId: string,
 ): Promise<StoreSupplierDTO> {
+  // 簇 N 修正：读面鉴权——测试请求带上已认证的 store 头。
   const response = await router.handle({
     method: "GET",
     pathname: `/store/suppliers/${supplierId}`,
+    headers: storeHeaders,
   });
   expect(response.status).toBe(200);
   return (response.body as { supplier: StoreSupplierDTO }).supplier;
@@ -644,13 +648,18 @@ async function createReadyDraft(
     });
     const inviteId = (inviteResponse.body as { invite: { inviteId: string } })
       .invite.inviteId;
+    const inviteToken = (inviteResponse.body as { inviteToken?: string }).inviteToken;
     const acceptResponse = await router.handle({
       method: "POST",
       pathname: `/product/invites/${inviteId}/accept`,
+      headers: {
+        "x-uvp-wallet-address": index === 0 ? revokedWallet : testWallet(index + 10)
+      },
       body: {
         displayName: `${participant.roleSlotId} participant`,
         walletAddress: index === 0 ? revokedWallet : testWallet(index + 10),
         contact: `${participant.roleSlotId}@example.com`,
+        token: inviteToken,
       },
     });
     expect(acceptResponse.status).toBe(200);

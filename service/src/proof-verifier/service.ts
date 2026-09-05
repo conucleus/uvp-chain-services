@@ -33,7 +33,10 @@ export function verifyProofBundle(bundle: ProofBundle): ProofVerificationResult 
   ];
 
   return {
-    valid: checks.every((check) => check.status === "matched" || check.status === "missing"),
+    // 簇 N 修正（审计三轮）：missing=invalid——缺一侧（或两侧）哈希的
+    // 证明项不再被计为通过；只有全部 matched 才 valid。此前
+    // `matched || missing` 让空证明/半证明恒真。
+    valid: checks.every((check) => check.status === "matched"),
     checks
   };
 }
@@ -50,9 +53,10 @@ function compareHash(
   const expected = expectation.expected ? normalizeBytes32(expectation.expected, `${name}.expected`) : undefined;
 
   if (!actual || !expected) {
+    // 单侧缺失按 mismatch 记（材料不完整），两侧缺失记 missing。
     return {
       name,
-      status: "missing",
+      status: "mismatch",
       ...(actual ? { actual } : {}),
       ...(expected ? { expected } : {})
     };

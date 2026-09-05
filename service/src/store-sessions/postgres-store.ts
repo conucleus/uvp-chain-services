@@ -44,6 +44,19 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
     );
   }
 
+  async consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined> {
+    // 簇 N 修正（审计三轮）：条件 UPDATE 原子占位——
+    // WHERE consumed_at IS NULL 保证并发重放同一 nonce 只有一个赢家。
+    const result = await this.#database.query(
+      `UPDATE store_auth_challenge SET consumed_at = $1 WHERE nonce = $2 AND consumed_at IS NULL`,
+      [consumedAt, nonce]
+    );
+    if ((result.rowCount ?? 0) !== 1) {
+      return undefined;
+    }
+    return this.getChallenge(nonce);
+  }
+
   async putSession(record: StoreWalletSessionRecord): Promise<void> {
     await this.#database.query(
       `INSERT INTO store_wallet_session (session_id, token_hash, account_id, anchored_address, created_at, expires_at, last_seen_at, revoked_at, revoked_reason)

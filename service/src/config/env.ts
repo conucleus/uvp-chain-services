@@ -691,9 +691,12 @@ function parseStoreWalletSessionConfig(
     adminWallets,
     sessionTtlSeconds,
     challengeTtlSeconds,
+    // 簇 C 修正（审计三轮）：dev 锚定地址头缺省仅 local 开；testnet 此前
+    // 缺省开启（!strict），等于允许自报任意地址锚定。非 local 环境必须
+    // 显式开启才生效（生产语义上仍会被 strict runtime 拒绝）。
     devAnchoredAddressHeaderEnabled: devHeaderRaw !== undefined
       ? parseBooleanFlag(devHeaderRaw, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")
-      : !strict,
+      : !strict && environment === "local"
   };
 }
 
@@ -724,15 +727,30 @@ function parseStoreAuthMode(
   env: Env,
   environment: ChainServicesRuntimeEnv,
 ): StoreAuthConfigMode {
-  const rawValue =
-    optionalEnv(env, "STORE_AUTH_MODE") ??
-    (environment === "staging" || environment === "production"
-      ? "jwt"
-      : "dev_headers");
-  if (rawValue === "dev_headers" || rawValue === "jwt") {
-    return rawValue;
+  // 簇 C 修正（审计三轮）：缺省档收紧——只有 local 允许缺省 dev_headers。
+  // testnet 未显式配置 STORE_AUTH_MODE 即启动失败（此前静默回落
+  // dev_headers，任何人自报 store 头即可获得运营方能力）；显式配置
+  // dev_headers 在 local 之外同样拒绝。staging/production 保持必须 jwt。
+  const rawValue = optionalEnv(env, "STORE_AUTH_MODE");
+  if (!rawValue) {
+    if (environment === "local") {
+      return "dev_headers";
+    }
+    throw new ConfigError(
+      environment === "staging" || environment === "production"
+        ? "STORE_AUTH_MODE=jwt is required in staging and production"
+        : "STORE_AUTH_MODE must be explicitly configured in testnet (jwt)",
+    );
   }
-  throw new ConfigError("STORE_AUTH_MODE must be dev_headers or jwt");
+  if (rawValue !== "dev_headers" && rawValue !== "jwt") {
+    throw new ConfigError("STORE_AUTH_MODE must be dev_headers or jwt");
+  }
+  if (rawValue === "dev_headers" && environment !== "local") {
+    throw new ConfigError(
+      "STORE_AUTH_MODE=dev_headers is only allowed in local development",
+    );
+  }
+  return rawValue;
 }
 
 function validateStoreAuthUrl(value: string, envName: string): void {
@@ -1245,12 +1263,34 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   }
 
   if (
-    optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER") !== "postgres" ||
+    !optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER") ||
     config.database.driver !== "postgres"
   ) {
     throw new ConfigError(
       "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production",
     );
+  }
+  // 簇 C 修正（审计三轮）：production 此前不强制 UVP_RPC_URL 且静默回落
+  // 127.0.0.1:8545（staging/testnet 都有强检）。production 同样要求显式
+  // RPC 且拒绝本地/回环地址。
+  if (!optionalEnv(env, "UVP_RPC_URL")) {
+    throw new ConfigError("UVP_RPC_URL is required in production");
+  }
+  if (isLocalRpcUrl(config.network.rpcUrl, "production")) {
+    throw new ConfigError(
+      "UVP_RPC_URL must point to a non-local RPC endpoint in production",
+    );
+  }
+  // 簇 C 修正（审计三轮）：admin 白名单在 production 必须显式非空——
+  // 空白名单意味着任意 x-uvp-admin-id 自报即管理员（governance/auth.ts
+  // 已改为 fail-closed，这里把配置错误拦在启动前）。
+  if (config.operatorRoles.adminReviewers.length === 0) {
+    throw new ConfigError(
+      "GOVERNANCE_ADMIN_REVIEWER_IDS is required in production",
+    );
+  }
+  if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
+    throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in production");
   }
   // ETH-11：production 禁止静默使用 env 默认值 1。finality 确认数是索引器
   // reorg 缓冲必须显式配置为正整数；非生产保持默认 1 不变。追加前的
@@ -1670,6 +1710,16 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
     throw new ConfigError(
       "UVPIdentityRegistry contract address is required in testnet",
     );
+  }
+  // 簇 C 修正（审计三轮）：testnet 同样强制 admin 白名单非空（此前仅
+  // staging 检查，testnet 空白名单=任意自报 admin 通过）。
+  if (config.operatorRoles.adminReviewers.length === 0) {
+    throw new ConfigError(
+      "GOVERNANCE_ADMIN_REVIEWER_IDS is required in testnet",
+    );
+  }
+  if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
+    throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in testnet");
   }
 
   if (!config.security.preflightStrict) {

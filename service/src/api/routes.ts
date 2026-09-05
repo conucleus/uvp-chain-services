@@ -346,12 +346,16 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createStoreRiskRouteModule(),
     createStoreSuppliersRouteModule(),
     createGovernanceRouteModule(),
-    createNotificationsRouteModule(),
-    createEvidenceRouteModule(),
+    createNotificationsRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) }),
+    createEvidenceRouteModule({
+      ...((options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment)
+        ? { runtimeEnvironment: (options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment)! }
+        : {})
+    }),
     createStagePatchRouteModule(),
     createSubmissionsRouteModule(),
-    createProductBffRouteModule(),
-    createProductReadRouteModule()
+    createProductBffRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) }),
+    createProductReadRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) })
   ];
 
   return {
