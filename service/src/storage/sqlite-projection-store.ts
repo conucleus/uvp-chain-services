@@ -598,7 +598,8 @@ export class SqliteProjectionStore implements DurableProjectionStore {
     const snapshot = await this.#currentOrderSnapshot();
     const orders = uniqueProjectionValues(snapshot.stateMachineOrders);
     if (planId) {
-      // 带 planId 的复合键查询不做裸键回退：兼容别名可能指向别的 plan。
+      // 订单身份是 (planId, orderId)：带 planId 的查询只匹配同 plan 投影，
+      // 不做裸键回退，跨 plan 复用同号订单时绝不串单。
       return uniqueOrderByBareId(orders, orderId, planId);
     }
     return (

@@ -140,7 +140,7 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       // 签名失败可重新取挑战，代价可接受。
       const consumed = store.consumeChallenge
         ? await store.consumeChallenge(nonce, now().toISOString())
-        : await legacyConsumeChallenge(store, challenge, now);
+        : await consumeChallengeByReadWrite(store, challenge, now);
       if (!consumed) {
         throw new StoreSessionServiceError(401, "store_challenge_invalid", "challenge is unknown or already used");
       }
@@ -502,8 +502,11 @@ function accountAddressView(record: { readonly address: Address; readonly status
   };
 }
 
-/** 簇 N 修正：适配未实现条件占位的自定义 store 实现（读-判-写回退）。 */
-async function legacyConsumeChallenge(
+/**
+ * 可选能力回退：store 未实现条件占位 consumeChallenge 时，退化为
+ * 读-判-写（非原子）。这是当前接口的可选能力语义，不是旧版本兼容。
+ */
+async function consumeChallengeByReadWrite(
   store: StoreWalletSessionStore,
   challenge: NonNullable<Awaited<ReturnType<StoreWalletSessionStore["getChallenge"]>>>,
   now: () => Date

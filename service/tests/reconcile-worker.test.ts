@@ -122,7 +122,7 @@ describe("tx/indexer reconcile worker", () => {
     const productStore = new class extends MemoryProductBffStore {
       override async updateRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
         if (registration.triggerId === "registration_broken") {
-          throw new TypeError("broken legacy record without planId");
+          throw new TypeError("broken record without planId");
         }
         return super.updateRegistration(registration);
       }

@@ -293,10 +293,10 @@ export interface StateMachineTaskProjection {
   readonly orderId: Hex;
   readonly stateMachineAddress: Address;
   /**
-   * The task id remains an API-facing hook/order identifier for compatibility,
-   * but the projection itself is plan-scoped.  Keeping the plan id on the
-   * flattened row lets consumers join a task back to the right order when two
-   * plans intentionally reuse the same orderId and hookId.
+   * Stable API-facing identifier (hook/order), while the projection itself is
+   * plan-scoped.  Keeping the plan id on the flattened row lets consumers join
+   * a task back to the right order when two plans intentionally reuse the same
+   * orderId and hookId.
    */
   readonly planId?: Hex;
   readonly deploymentId?: Hex;
@@ -567,8 +567,6 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
       outputDeliveries: { ...dock.outputDeliveries }
     };
   }
-  const legacyOrderCandidates = new Map<string, StateMachineOrderProjection[]>();
-  const legacyTaskCandidates = new Map<string, StateMachineTaskProjection[]>();
   for (const [orderId, order] of stateMachineOrders) {
     const readonlyTasks: Record<string, StateMachineTaskProjection> = {};
     for (const [taskId, task] of Object.entries(order.tasks)) {
@@ -584,9 +582,6 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
         order.orderId,
         task.hookId
       )] = readonlyTask;
-      const taskCandidates = legacyTaskCandidates.get(task.taskId) ?? [];
-      taskCandidates.push(readonlyTask);
-      legacyTaskCandidates.set(task.taskId, taskCandidates);
     }
     const readonlyOrder = {
       ...order,
@@ -601,53 +596,11 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
       timeline: [...order.timeline].sort(compareTimelineEvents),
       proof: [...order.proof].sort(compareProofEvents)
     };
+    // 快照只暴露 plan 作用域的复合键。pre-plan 裸键兼容别名已按"未上线、
+    // 旧版本兼容清零"裁决移除：每条订单/任务恰好一个键，裸 orderId 必须
+    // 走 fail-closed 扫描（uniqueOrderByBareId），绝不静默命中。
     stateMachineOrderRecord[orderId] = readonlyOrder;
-    const legacyKey = stateMachineScopedKey(order.chainId, order.contractAddress, order.orderId);
-    const orderCandidates = legacyOrderCandidates.get(legacyKey) ?? [];
-    orderCandidates.push(readonlyOrder);
-    legacyOrderCandidates.set(legacyKey, orderCandidates);
   }
-
-  // Keep the old direct lookup shape only when it is unambiguous.  The aliases
-  // are compatibility entries for callers that used the pre-plan key shape;
-  // all storage/list paths deduplicate by object identity, and a reused bare
-  // id can never silently overwrite its sibling.
-  for (const [legacyKey, candidates] of legacyOrderCandidates) {
-    if (candidates.length === 1) {
-      const order = candidates[0];
-      if (order) {
-        hideFromEnumeration(
-          stateMachineOrderRecord,
-          stateMachineOrderProjectionKey(order.chainId, order.contractAddress, order.planId, order.orderId),
-        );
-      }
-      defineCompatibilityAlias(stateMachineOrderRecord, legacyKey, order);
-    }
-  }
-  for (const [legacyKey, candidates] of legacyTaskCandidates) {
-    if (candidates.length === 1) {
-      const task = candidates[0];
-      if (task) {
-        hideFromEnumeration(
-          stateMachineTaskRecord,
-          stateMachineTaskProjectionKey(
-            task.createdAt.chainId,
-            task.stateMachineAddress,
-            task.planId ?? ZERO_BYTES32,
-            task.orderId,
-            task.hookId,
-          ),
-        );
-      }
-      defineCompatibilityAlias(stateMachineTaskRecord, legacyKey, task);
-    }
-  }
-  // Snapshot consumers from older releases still enumerate the compatibility
-  // key, while durable JSON must always carry the canonical composite key.
-  // `toJSON` gives storage a canonical view without changing the read-time
-  // compatibility behavior above.
-  defineCanonicalSerialization(stateMachineOrderRecord, stateMachineOrders);
-  defineCanonicalSerialization(stateMachineTaskRecord, stateMachineTasksFromOrders(stateMachineOrders));
 
   return {
     rebuildable: true,
@@ -2553,9 +2506,9 @@ function authorizationMatchesSubmitSignals(
 }
 
 /**
- * Legacy three-part scope key used by plans/modules/docks.  The four-argument
- * overload is provided for order callers so new code can use one familiar
- * helper without changing existing plan/module keys.
+ * Plan/module/dock scope key: `chainId:stateMachineAddress:id`.  The
+ * four-argument overload resolves to the plan-scoped order projection key so
+ * order callers share one helper without changing plan/module key shapes.
  */
 export function stateMachineScopedKey(chainId: number, stateMachineAddress: Address, id: Hex): string;
 export function stateMachineScopedKey(
@@ -2573,63 +2526,6 @@ export function stateMachineScopedKey(
   return orderId === undefined
     ? `${chainId}:${stateMachineAddress.toLowerCase()}:${idOrPlanId.toLowerCase()}`
     : stateMachineOrderProjectionKey(chainId, stateMachineAddress, idOrPlanId, orderId);
-}
-
-function defineCompatibilityAlias<TValue>(
-  record: Record<string, TValue>,
-  key: string,
-  value: TValue | undefined
-): void {
-  if (value === undefined || Object.prototype.hasOwnProperty.call(record, key)) {
-    return;
-  }
-  Object.defineProperty(record, key, {
-    configurable: true,
-    enumerable: true,
-    value,
-    writable: false
-  });
-}
-
-function hideFromEnumeration<TValue>(record: Record<string, TValue>, key: string): void {
-  if (!Object.prototype.hasOwnProperty.call(record, key)) {
-    return;
-  }
-  Object.defineProperty(record, key, { enumerable: false });
-}
-
-function defineCanonicalSerialization<TValue>(
-  record: Record<string, TValue>,
-  canonicalValues: ReadonlyMap<string, TValue>,
-): void {
-  const canonicalRecord = Object.fromEntries(canonicalValues);
-  Object.defineProperty(record, "toJSON", {
-    configurable: true,
-    enumerable: false,
-    value: () => canonicalRecord,
-    writable: false,
-  });
-}
-
-function stateMachineTasksFromOrders(
-  orders: ReadonlyMap<string, MutableStateMachineOrderProjection>,
-): ReadonlyMap<string, StateMachineTaskProjection> {
-  const tasks = new Map<string, StateMachineTaskProjection>();
-  for (const order of orders.values()) {
-    for (const task of Object.values(order.tasks)) {
-      tasks.set(
-        stateMachineTaskProjectionKey(
-          order.chainId,
-          order.contractAddress,
-          order.planId,
-          order.orderId,
-          task.hookId,
-        ),
-        task,
-      );
-    }
-  }
-  return tasks;
 }
 
 function deploymentProjectionKey(chainId: number, registryAddress: Address, deploymentId: Hex): string {

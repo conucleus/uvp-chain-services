@@ -1063,9 +1063,8 @@ function summaryFromSnapshot(input: {
     removedEventCount: input.removedEventCount,
     removedLogsFiltered: input.removedLogsFiltered,
     projectionRebuilt: input.snapshot.rebuildable,
-    // Compatibility aliases may be present for the pre-plan key shape.  They
-    // point to the same object and must not inflate health/rebuild counts.
-    stateMachineOrderCount: new Set(Object.values(input.snapshot.stateMachineOrders)).size,
+    // 快照记录只含 plan 作用域复合键，每键一条，计数即唯一订单数。
+    stateMachineOrderCount: Object.values(input.snapshot.stateMachineOrders).length,
     identityBindingCount: input.identityBindingCount,
     mismatchCount: input.mismatchCount,
     syncStatus: input.syncState.syncStatus,

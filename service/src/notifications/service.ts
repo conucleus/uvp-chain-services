@@ -355,22 +355,17 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         const planId = bytes32Arg(event, "planId");
         const sourceId = bytes32Arg(event, "sourceId");
         const signalId = bytes32Arg(event, "signalId");
-        // SignalSubmitted is plan-scoped on the frozen state-machine ABI.  A
-        // bare order id is only a compatibility fallback for legacy events;
-        // when planId is present, resolve the canonical composite identity so
-        // two plans reusing the same orderId cannot receive each other's
-        // notification.
-        const orderLookupKey = orderId && planId
-          ? stateMachineOrderProjectionKey(
-              event.chainId,
-              event.contractAddress,
-              planId,
-              orderId,
-            )
-          : orderId;
-        const order = orderLookupKey
-          ? await options.store.getStateMachineOrder(orderLookupKey)
-          : undefined;
+        // SignalSubmitted is plan-scoped on the frozen state-machine ABI.
+        // An event without a decodable planId is isolated like the indexer's
+        // undecodable logs (skipped without a delivery record): bare order
+        // ids never resolve, so two plans reusing the same orderId cannot
+        // receive each other's notification.
+        if (!planId || !orderId) {
+          continue;
+        }
+        const order = await options.store.getStateMachineOrder(
+          stateMachineOrderProjectionKey(event.chainId, event.contractAddress, planId, orderId)
+        );
         if (!order) {
           updateIntentSummary(summary, await saveSkippedSignalDelivery({
             deliveryStore,

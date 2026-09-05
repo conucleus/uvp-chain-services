@@ -8,9 +8,9 @@ export interface ChainPointer {
   readonly contractAddress: Address;
   readonly blockNumber: bigint;
   /**
-   * Canonical EVM transaction position within the block. Older persisted
-   * events may not have this field, so adapters must keep it optional when
-   * reading legacy data.
+   * Canonical EVM transaction position within the block.  Optional because
+   * some event sources and hand-built fixtures omit it; the comparison and
+   * persistence layers never depend on its presence.
    */
   readonly transactionIndex?: number;
   readonly transactionHash: Hex;
@@ -21,7 +21,7 @@ export interface ChainPointer {
 /**
  * Compare chain facts in the order in which an EVM execution produced them.
  * The transaction index is the decisive tie-breaker for separate
- * transactions in the same block; legacy events without it retain the
+ * transactions in the same block; events without it retain the
  * deterministic log-index fallback.
  */
 export function compareChainPointers(

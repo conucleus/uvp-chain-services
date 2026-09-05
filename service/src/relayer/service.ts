@@ -59,9 +59,6 @@ export interface RelayerServiceOptions {
   readonly maxInFlightPerOrder?: number;
   /** Maximum retries after the initial broadcast attempt. */
   readonly maxRetryAttempts?: number;
-  /** Compatibility aliases used by the security/broadcast config. */
-  readonly maxRetries?: number;
-  readonly maxRetry?: number;
   readonly retryBaseMs?: number;
   readonly retryMaxMs?: number;
   /** Optional durable retry projection, hydrated on every relay call. */
@@ -112,9 +109,7 @@ export class RelayerService implements LifecycleService {
     this.#now = options.now ?? (() => new Date());
     this.#logger = options.logger ?? noopLogger;
     this.#maxInFlightPerOrder = options.maxInFlightPerOrder ?? DEFAULT_MAX_IN_FLIGHT_PER_ORDER;
-    this.#maxRetryAttempts = normalizeMaxRetryAttempts(
-      options.maxRetryAttempts ?? options.maxRetries ?? options.maxRetry
-    );
+    this.#maxRetryAttempts = normalizeMaxRetryAttempts(options.maxRetryAttempts);
     this.#retryBaseMs = options.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
     this.#retryMaxMs = options.retryMaxMs ?? DEFAULT_RETRY_MAX_MS;
     this.#retryBudgetStore = options.retryBudgetStore;
@@ -956,8 +951,8 @@ function retryBudgetExhaustedFailure(): RelayFailureClassification {
 
 function normalizeMaxRetryAttempts(value: number | undefined): number {
   // Keep the service bounded by default, matching the chain-services
-  // BROADCAST_MAX_RETRY_ATTEMPTS default. An explicit Infinity remains useful
-  // for backwards-compatible test/dry-run callers that intentionally opt out.
+  // BROADCAST_MAX_RETRY_ATTEMPTS default. An explicit Infinity is a deliberate
+  // opt-out for test/dry-run callers.
   if (value === undefined) {
     return DEFAULT_MAX_RETRY_ATTEMPTS;
   }

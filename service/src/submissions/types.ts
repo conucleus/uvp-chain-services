@@ -274,9 +274,9 @@ export interface ProductSubmissionStore {
   /**
    * Release a previously reserved nonce so the same prepared submission can be
    * retried after a failure that consumed the reservation without ever
-   * recording a submission (transient RPC or store failure). Optional for
-   * backward compatibility; submission-service treats a missing releaseNonce
-   * as best-effort.
+   * recording a submission (transient RPC or store failure). Optional store
+   * capability: submission-service treats a missing releaseNonce as
+   * best-effort.
    */
   releaseNonce?(key: string): Promise<void>;
   putSubmission(submission: ProductSubmissionDTO): Promise<void>;

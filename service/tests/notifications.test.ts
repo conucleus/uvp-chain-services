@@ -106,6 +106,38 @@ describe("signal-routed notifications", () => {
     expect(sent.every((request) => request.record.payload.payloadHash === bytes32Hex("b701"))).toBe(true);
   });
 
+  it("isolates SignalSubmitted events without a decodable planId instead of resolving them by bare order id", async () => {
+    const sent: NotificationDispatchRequest[] = [];
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: []
+    });
+    const service = serviceFor(store, supplierStore, sent);
+
+    // 冻结 ABI 事件恒带 planId；缺 planId 的事件与索引器"不可解码日志"同
+    // 口径：直接隔离，不落投递记录，也绝不按裸 orderId 解析。
+    const summary = await service.processSignalSubmittedEvents([
+      chainEvent(6n, "SignalSubmitted", {
+        orderId,
+        sourceId: requiredDependency(customsDependencyA).sourceId,
+        signalId: requiredDependency(customsDependencyA).signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signalSubmitter
+      })
+    ]);
+    const deliveries = await service.listDeliveries();
+
+    expect(summary).toMatchObject({
+      signalsProcessed: 0,
+      deliveryIntents: 0,
+      sent: 0,
+      skipped: 0
+    });
+    expect(deliveries).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
   it("delivers finalized SignalSubmitted to every receive hook depending on that signal", async () => {
     const sent: NotificationDispatchRequest[] = [];
     const event = signalEvent(6n, requiredDependency(registeredDependency));
@@ -773,6 +805,7 @@ function signalEvent(
   key: Hex = idempotencyKey
 ): ChainEvent {
   return chainEvent(blockNumber, "SignalSubmitted", {
+    planId: customsPlanIds.planId,
     orderId,
     sourceId: dependency.sourceId,
     signalId: dependency.signalId,

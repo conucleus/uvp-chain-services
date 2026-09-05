@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import { IndexerService, type ChainEventSource } from "../src/indexer/service.js";
-import { rebuildOrderProjections, stateMachineScopedKey } from "../src/indexer/projections.js";
+import { rebuildOrderProjections, stateMachineScopedKey, stateMachineTaskProjectionKey } from "../src/indexer/projections.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { Hex } from "../src/shared/types.js";
 import { SqliteProjectionStore } from "../src/storage/sqlite-projection-store.js";
@@ -66,7 +66,7 @@ describe("indexer projection replay", () => {
     const events = stateMachineEvents();
 
     const snapshot = rebuildOrderProjections(events);
-    const orderKey = stateMachineScopedKey(31337, contractAddress, stateMachineOrderId);
+    const orderKey = stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId);
     const planKey = stateMachineScopedKey(31337, contractAddress, planId);
     const order = snapshot.stateMachineOrders[orderKey];
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
@@ -129,8 +129,8 @@ describe("indexer projection replay", () => {
     const first = await store.resetFromEvents({ deploymentBlock: 0n, events });
     await store.resetFromEvents({ deploymentBlock: 0n, events: [] });
     const rebuilt = await store.resetFromEvents({ deploymentBlock: 0n, events });
-    const order = rebuilt.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
-    const task = rebuilt.stateMachineTasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`];
+    const order = rebuilt.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
+    const task = rebuilt.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
     expect(rebuilt.stateMachineOrders).toEqual(first.stateMachineOrders);
     expect(Object.values(order?.authorizations ?? {})).toContainEqual(expect.objectContaining({
@@ -182,7 +182,7 @@ describe("indexer projection replay", () => {
     ];
 
     const snapshot = rebuildOrderProjections(events);
-    const task = snapshot.stateMachineTasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`];
+    const task = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
     expect(task).toMatchObject({
       status: "submitted",
@@ -235,8 +235,8 @@ describe("indexer projection replay", () => {
     ];
 
     const snapshot = rebuildOrderProjections(events);
-    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
-    const task = snapshot.stateMachineTasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`];
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
+    const task = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
     expect(order?.status).toBe("registered");
     expect(task).toMatchObject({
@@ -283,7 +283,7 @@ describe("indexer projection replay", () => {
     ];
 
     const snapshot = rebuildOrderProjections(events);
-    const task = snapshot.stateMachineTasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`];
+    const task = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
     expect(task).toMatchObject({
       assigneeRole: "unknown",
@@ -372,8 +372,8 @@ describe("indexer projection replay", () => {
     ];
 
     const snapshot = rebuildOrderProjections(events);
-    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
-    const targetTask = snapshot.stateMachineTasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`];
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
+    const targetTask = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
     expect(order?.stageExecutorOverlays[stageId]).toMatchObject({
       orderId: stateMachineOrderId,
@@ -441,7 +441,7 @@ describe("indexer projection replay", () => {
     ];
 
     const snapshot = rebuildOrderProjections(events);
-    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
 
     expect(order?.proof).toContainEqual(expect.objectContaining({
       eventName: "DerivedSignalSubmitted",
@@ -466,7 +466,7 @@ describe("indexer projection replay", () => {
       { ...registered, removed: true }
     ]);
 
-    expect(snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)]).toBeUndefined();
+    expect(snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)]).toBeUndefined();
     expect(snapshot.eventCount).toBe(1);
   });
 
@@ -508,7 +508,7 @@ describe("indexer projection replay", () => {
       }),
       registered
     ]);
-    expect(snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)]).toBeDefined();
+    expect(snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)]).toBeDefined();
     expect(snapshot.eventCount).toBe(2);
   });
 
@@ -528,7 +528,7 @@ describe("indexer projection replay", () => {
       { ...registered, removed: true }
     ]);
 
-    expect(snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)]).toBeUndefined();
+    expect(snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)]).toBeUndefined();
     expect(snapshot.eventCount).toBe(1);
   });
 
@@ -540,8 +540,8 @@ describe("indexer projection replay", () => {
     ];
 
     const snapshot = rebuildOrderProjections(events);
-    const v1Key = stateMachineScopedKey(31337, contractAddress, stateMachineOrderId);
-    const v2Key = stateMachineScopedKey(31337, contractAddressV2, stateMachineOrderId);
+    const v1Key = stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId);
+    const v2Key = stateMachineScopedKey(31337, contractAddressV2, planId, stateMachineOrderId);
 
     expect(snapshot.activeStateMachineDeploymentId).toBe(deploymentIdV2);
     expect(snapshot.stateMachineOrders[v1Key]?.deploymentId).toBe(deploymentIdV1);
@@ -596,7 +596,7 @@ describe("indexer projection replay", () => {
 
     const snapshot = rebuildOrderProjections(events);
     const plan = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
-    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
     const module = snapshot.stateMachineModules[stateMachineScopedKey(31337, contractAddress, moduleId)];
 
     expect(plan).toMatchObject({
@@ -686,7 +686,7 @@ describe("indexer projection replay", () => {
     ];
 
     const snapshot = rebuildOrderProjections(events);
-    const orderKey = stateMachineScopedKey(31337, contractAddress, stateMachineOrderId);
+    const orderKey = stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId);
     const order = snapshot.stateMachineOrders[orderKey];
 
     // 模块事件全部落到真实订单桶。
@@ -712,7 +712,8 @@ describe("indexer projection replay", () => {
       bytes32Hex("606")
     ]);
     // 不产生以模块地址为桶的幻影订单；父订单与 dock 创建的子订单都归属状态机地址。
-    const linkedOrderKey = stateMachineScopedKey(31337, contractAddress, bytes32Hex("303"));
+    // 快照枚举只暴露 plan 作用域复合键（裸键兼容别名已按清零裁决移除）。
+    const linkedOrderKey = stateMachineScopedKey(31337, contractAddress, bytes32Hex("404"), bytes32Hex("303"));
     expect(Object.keys(snapshot.stateMachineOrders).sort()).toEqual([orderKey, linkedOrderKey].sort());
     expect(Object.values(snapshot.stateMachineOrders).every((entry) => entry.contractAddress === contractAddress)).toBe(true);
     expect(snapshot.stateMachineDocks[dockKey]?.stateMachineAddress).toBe(contractAddress);
@@ -742,8 +743,9 @@ describe("indexer projection replay", () => {
     const snapshot = rebuildOrderProjections(events);
 
     expect(snapshot.unresolvedModuleOrderEventCount).toBe(1);
+    // 无 planId 的模块订单事件落入 planId=0 的未知桶；键是 plan 作用域复合键。
     expect(Object.keys(snapshot.stateMachineOrders)).toEqual([
-      stateMachineScopedKey(31337, unregisteredModuleAddress, stateMachineOrderId)
+      stateMachineScopedKey(31337, unregisteredModuleAddress, emptyHash, stateMachineOrderId)
     ]);
   });
 
@@ -829,7 +831,7 @@ describe("indexer projection replay", () => {
 
     const snapshot = rebuildOrderProjections(events);
     const plan = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
-    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
 
     expect(snapshot.stateMachineDeployments[`${31337}:${deploymentRegistryAddress}:${deploymentIdV1}`]?.status).toBe("deprecated");
     expect(snapshot.stateMachineDeployments[`${31337}:${deploymentRegistryAddress}:${deploymentIdV2}`]?.status).toBe("active");
@@ -982,7 +984,7 @@ describe("indexer projection replay", () => {
       projectionRebuilt: true,
       stateMachineOrderCount: 0
     });
-    expect(result.snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)])
+    expect(result.snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)])
       .toBeUndefined();
     expect(syncState?.rebuild).toMatchObject({
       status: "completed",
@@ -1841,7 +1843,7 @@ describe("indexer projection replay", () => {
     ];
 
     const snapshot = rebuildOrderProjections(events);
-    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, stateMachineOrderId)];
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
     const task = order?.tasks[taskId];
 
