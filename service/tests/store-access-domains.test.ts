@@ -10,7 +10,7 @@ import type { Address, Hex } from "../src/shared/types.js";
 import { crossBorderSchemaResolver } from "./cross-border-schema.js";
 
 /**
- * PRD89-92：Store 身份与会话、加入闭环、装修权限、上架与锚核验的后端验收。
+ * Store 身份与会话、加入闭环、装修权限、上架与锚核验的后端验收。
  *
  * 链侧事实全部经投影播种（PlanRegistered/PlanPublisherRecorded/
  * IdentityBindingRegistered/SignalSubmitterAuthorized …），服务端广播走
@@ -46,8 +46,8 @@ const publisherAnchoredHeaders = {
 const roleSlotId = demoZhixuDetail.roleSlots[0]?.slotId ?? "supplier";
 const stageIdOfFirstStage = demoZhixuDetail.stages[0]?.stageId ?? "stage-1";
 
-describe("PRD89-92 store access domains", () => {
-  it("PRD89: wallet challenge → personal_sign verify → session with anchored address", async () => {
+describe("store access domains (sessions, descriptors, decoration, listings, join)", () => {
+  it("wallet challenge → personal_sign verify → session with anchored address", async () => {
     const router = await buildRouter();
 
     const challengeResponse = await router.handle({
@@ -121,7 +121,7 @@ describe("PRD89-92 store access domains", () => {
     expect(afterLogout.status).toBe(401);
   });
 
-  it("PRD89: operator wallet list grants operator capabilities to anchored sessions", async () => {
+  it("operator wallet list grants operator capabilities to anchored sessions", async () => {
     const router = await buildRouter({ operatorWallets: [operatorWallet] });
     const token = await login(router, operatorWallet);
 
@@ -135,7 +135,7 @@ describe("PRD89-92 store access domains", () => {
     expect(session.capabilities).toContain("store.listing.manage");
   });
 
-  it("PRD89: anchoring an additional address links it to the same account; revocation removes it", async () => {
+  it("anchoring an additional address links it to the same account; revocation removes it", async () => {
     const router = await buildRouter();
     const firstToken = await login(router, supplierWallet);
 
@@ -194,7 +194,7 @@ describe("PRD89-92 store access domains", () => {
     expect(afterRevoke.find((entry) => entry.address.toLowerCase() === properAddress.toLowerCase())?.status).toBe("revoked");
   });
 
-  it("PRD89: descriptor snapshots are append-only and verifiable via descriptorHash", async () => {
+  it("descriptor snapshots are append-only and verifiable via descriptorHash", async () => {
     const router = await buildRouter();
     const subjectId = "0x0000000000000000000000000000000000000000000000000000000000007777" as Hex;
 
@@ -253,7 +253,7 @@ describe("PRD89-92 store access domains", () => {
     expect(missing.status).toBe(404);
   });
 
-  it("PRD91: only the plan publisher (or an active delegate) can save decoration data", async () => {
+  it("only the plan publisher (or an active delegate) can save decoration data", async () => {
     const router = await buildRouter();
 
     const denied = await router.handle({
@@ -341,7 +341,7 @@ describe("PRD89-92 store access domains", () => {
     expect((badSpec.body as { error: string }).error).toContain("invalid_evidence_spec");
   });
 
-  it("PRD92: listing import → anchor verification → review publish → delist hides catalog", async () => {
+  it("listing import → anchor verification → review publish → delist hides catalog", async () => {
     const router = await buildRouter();
 
     const imported = await router.handle({
@@ -443,7 +443,7 @@ describe("PRD89-92 store access domains", () => {
     expect((relisted.body as { listing: { status: string } }).listing.status).toBe("public");
   });
 
-  it("PRD92: conflicted anchors block publication (mismatched planHash claim)", async () => {
+  it("conflicted anchors block publication (mismatched planHash claim)", async () => {
     const router = await buildRouter();
     // 为第二个 plan 建 listing，声称错误 planHash。
     const dockPlanId = "0x0000000000000000000000000000000000000000000000000000000000000102";
@@ -467,7 +467,7 @@ describe("PRD89-92 store access domains", () => {
     expect(publish.body).toMatchObject({ error: "anchor_verification_failed" });
   });
 
-  it("PRD90: join loop applied → under_review → authorized (identity pairing tx evidence)", async () => {
+  it("join loop applied → under_review → authorized (identity pairing tx evidence)", async () => {
     const store = new MemoryProjectionStore();
     await seedPlanProjection(store, { withSupplierBinding: true });
     const router = createApiRouter(store, routerOptions());
@@ -539,7 +539,7 @@ describe("PRD89-92 store access domains", () => {
     expect(createdSupplier).toMatchObject({ reviewStatus: "approved_for_broadcast", identityStatus: "active" });
   });
 
-  it("PRD90: on-chain authorization event materializes the application to active", async () => {
+  it("on-chain authorization event materializes the application to active", async () => {
     const store = new MemoryProjectionStore();
     await seedPlanProjection(store, { withSupplierBinding: true });
     const router = createApiRouter(store, routerOptions());
@@ -579,7 +579,7 @@ describe("PRD89-92 store access domains", () => {
     expect(detailBody.events.map((event) => event.type)).toContain("activated");
   });
 
-it("PRD89: revoking an anchored address immediately invalidates sessions for it", async () => {
+it("revoking an anchored address immediately invalidates sessions for it", async () => {
     const router = await buildRouter();
     const firstToken = await login(router, supplierWallet);
 
@@ -625,7 +625,7 @@ it("PRD89: revoking an anchored address immediately invalidates sessions for it"
     expect(teamSessionAfterRevoke.status).toBe(401);
   });
 
-  it("PRD92: publisher (non-operator) can self-import their own plan; join entry is suppressed while delisted", async () => {
+  it("publisher (non-operator) can self-import their own plan; join entry is suppressed while delisted", async () => {
     const store = new MemoryProjectionStore();
     await seedPlanProjection(store);
     const router = createApiRouter(store, routerOptions());
@@ -695,7 +695,7 @@ it("PRD89: revoking an anchored address immediately invalidates sessions for it"
     expect(joinAllowed.status).toBe(201);
   });
 
-  it("PRD92: configured chain read failure blocks publication (fail-closed)", async () => {
+  it("configured chain read failure blocks publication (fail-closed)", async () => {
     const store = new MemoryProjectionStore();
     await seedPlanProjection(store);
     const router = createApiRouter(store, {
@@ -739,7 +739,7 @@ it("PRD89: revoking an anchored address immediately invalidates sessions for it"
     expect(publish.body).toMatchObject({ error: "anchor_verification_failed" });
   });
 
-  it("PRD90: reviewer without planId scope only sees their own applications", async () => {
+  it("reviewer without planId scope only sees their own applications", async () => {
     const store = new MemoryProjectionStore();
     await seedPlanProjection(store, { withSupplierBinding: true });
     const router = createApiRouter(store, routerOptions());
@@ -778,7 +778,7 @@ it("PRD89: revoking an anchored address immediately invalidates sessions for it"
     expect(scoped).toHaveLength(1);
   });
 
-  it("PRD91: sqlite decoration store round-trips versions (driver-level)", async () => {
+  it("sqlite decoration store round-trips versions (driver-level)", async () => {
     const { mkdtempSync, rmSync } = await import("node:fs");
     const { join } = await import("node:path");
     const { tmpdir } = await import("node:os");
@@ -806,7 +806,7 @@ it("PRD89: revoking an anchored address immediately invalidates sessions for it"
     }
   });
 
-  it("PRD90: reject leaves an audited trail with reason and reviewer session", async () => {
+  it("reject leaves an audited trail with reason and reviewer session", async () => {
     const router = await buildRouter();
     const applicantToken = await login(router, supplierWallet);
     const submitted = await router.handle({

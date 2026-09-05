@@ -75,7 +75,7 @@ export class PostgresBroadcastDedupeStore implements BroadcastDedupeStore {
   async claimTxHash(txHash: string, idempotencyKey: string): Promise<string | undefined> {
     const normalizedTxHash = txHash.toLowerCase();
     // 单事务 INSERT ... ON CONFLICT DO NOTHING + 随后 SELECT：并发双方在
-    // 唯一索引上串行化，后到者必然读到先到者的归属，不再出现"双方都视为
+    // 唯一索引上串行化，后到者必然读到先到者的归属，避免"双方都视为
     // 无归属"的撞车窗口。
     //
     // 契约（与 memory/sqlite 后端一致）：INSERT 抢到归属（rowCount > 0）

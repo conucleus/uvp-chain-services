@@ -202,7 +202,7 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
       }
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
       // 一事一单：链上订单 id 由合约从事实派生——本地镜像同一公式做回执
-      // 事件匹配（input.orderId 是产品侧关联 id，不再进链上请求）。
+      // 事件匹配（input.orderId 是产品侧关联 id，不进链上请求）。
       const chainOrderId = deriveTriggerOrderId(input.planId, input.sourceId, input.signalId, input.payloadHash);
       if (receipt?.status === "success" && hasSignalSubmittedEvent(receipt.logs, input.planId, chainOrderId, input.sourceId, input.signalId)) {
         return {

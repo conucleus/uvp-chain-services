@@ -81,7 +81,7 @@ export function createStateMachineSubmissionBroadcastAdapter(
 
   return {
     async broadcast(request): Promise<SubmissionBroadcastResult> {
-      // Audit #10: submitSignalFor is plan-scoped. A prepared submission
+      // submitSignalFor is plan-scoped. A prepared submission
       // without a non-zero planId can only produce a transaction that fails the
       // on-chain (planId, orderId) existence check — refuse to construct the
       // call instead of broadcasting a doomed tx.
@@ -119,7 +119,7 @@ export function createStateMachineSubmissionBroadcastAdapter(
 
       // The chain-id preflight is an RPC round trip like any other: a
       // transport failure must be classified into a failed broadcast result,
-      // never thrown past the caller (an escaping throw used to consume the
+      // never thrown past the caller (an escaping throw would consume the
       // reserved nonce without recording any submission).
       let rpcChainId: number | undefined;
       try {

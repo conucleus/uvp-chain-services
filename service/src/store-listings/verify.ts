@@ -9,7 +9,7 @@ import type {
 import type { ProjectionStore } from "../storage/projection-store.js";
 
 /**
- * 锚核验（PRD92 红线）：listing 声称的锚 vs 投影 vs（可选）链上直读。
+ * 锚核验红线：listing 声称的锚 vs 投影 vs（可选）链上直读。
  *
  * - 投影是 indexer 从链事件重建的事实；链直读是独立的第二证据源。
  * - 没有配置 RPC/状态机地址时链直读标记 unavailable（不伪造），

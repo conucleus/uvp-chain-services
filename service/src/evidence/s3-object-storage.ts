@@ -71,9 +71,9 @@ export class S3EvidenceStorageClient implements ObjectEvidenceStorageClient {
     const env = options.env ?? process.env;
     const accessKeyId = readCredentialValue(env, accessKeyIdEnv, "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV");
     const secretAccessKey = readCredentialValue(env, secretAccessKeyEnv, "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV");
-    // Audit #19: a configured STS session-token env must resolve here, at
-    // construction time. Skipping it used to produce a client that passed
-    // preflight but failed every first upload/read with a credential 403.
+    // A configured STS session-token env must resolve here, at construction
+    // time: a credential that only fails at first upload/read surfaces as a
+    // 403 far from the misconfiguration that caused it.
     const sessionToken = options.sessionTokenEnv
       ? readCredentialValue(
           env,
@@ -142,7 +142,7 @@ export class S3EvidenceStorageClient implements ObjectEvidenceStorageClient {
     return this.#prefix ? `${this.#prefix}/${evidenceId}` : evidenceId;
   }
 
-  /** 簇 N 修正：evidenceId↔storageURI 双向翻译（BackupEvidenceStorage 用）。 */
+  /** evidenceId↔storageURI 双向翻译（BackupEvidenceStorage 用）。 */
   storageURIForEvidenceId(evidenceId: string): string {
     return this.storageURIForKey(this.objectKeyForEvidenceId(evidenceId));
   }

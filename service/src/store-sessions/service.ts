@@ -26,7 +26,7 @@ import type {
 import { StoreSessionServiceError } from "./types.js";
 
 /**
- * PRD89 会话配对：登录会话 ↔ 钱包地址（SIWE 式 personal_sign 证明）。
+ * 会话配对：登录会话 ↔ 钱包地址（SIWE 式 personal_sign 证明）。
  *
  * - 挑战一次性、带 TTL；签名用 viem verifyMessage 校验（服务端不接触私钥）。
  * - 会话 token 只下发一次，库中仅存 SHA-256 哈希。
@@ -135,7 +135,7 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
         throw new StoreSessionServiceError(401, "store_challenge_expired", "challenge has expired");
       }
       const address = challenge.address;
-      // 簇 N 修正（审计三轮）：单次使用改为条件 UPDATE 原子占位
+      // 挑战单次使用：条件 UPDATE 原子占位
       //（burn-on-attempt）：并发重放同一 nonce 只有一个请求能通过；
       // 签名失败可重新取挑战，代价可接受。
       const consumed = store.consumeChallenge

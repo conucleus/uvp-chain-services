@@ -327,9 +327,9 @@ async function parseParticipantViewQuery(
   context: ApiRouteContext,
   runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2]
 ): Promise<ParsedParticipantViewQuery> {
-  // 簇 C 修正（审计三轮）：/product/me* 的身份 = 会话锚定地址（钱包会话
+  // /product/me* 的身份 = 会话锚定地址（钱包会话
   // 签名证明或 local dev 锚定头）。自报 query/header 钱包只做一致性核验
-  //（不一致即 403），不再作为唯一身份——此前 ?wallet= 可读任意人任务与
+  //（不一致即 403），不是身份来源——否则 ?wallet= 可读任意人任务与
   // 订单视图。local 之外无会话即 401。
   const wallet = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment);
   if (!wallet.ok) {

@@ -1,16 +1,16 @@
 import type { Address, Hex } from "../shared/types.js";
 
 /**
- * PRD90 — 供应商自助加入闭环。
+ * 供应商自助加入闭环。
  *
  * 状态机：applied → under_review → authorized（记录链上交易证据）→ active；
  * 任何时点可进入 rejected / revoked（含 binding 撤销联动）。
  *
- * 审计配对（红线）：
+ * 配对红线：
  * - 每条进入 authorized 的申请必须记录链上交易证据（tx hash、类型、
  *   planId、slot、被授权地址）。
  * - 冻结合约下加入时（订单尚未产生）唯一可写的链上授权事实是
- *   UVPIdentityRegistry.registerIdentityBinding（PRD89 身份配对）；
+ *   UVPIdentityRegistry.registerIdentityBinding（身份配对）；
  *   signal submitter / stage executor 授权在订单触发/执行者补丁时落地，
  *   本域记录授权意向（grant）并在投影观察到授权事件时落为 active。
  */
@@ -102,9 +102,9 @@ export interface StoreJoinActor {
   readonly accessLevel: string;
   readonly principalId?: string;
   /**
-   * 簇 D 修正（审计三轮）：审批触发链上身份登记（registerIdentity）时
+   * 审批触发链上身份登记（registerIdentity）时
    * 必须持有 governance_admin 权威——与 /store/suppliers/:id/request-
-   * identity-registration 路由的能力门禁同口径，publisher 审批不再绕过。
+   * identity-registration 路由的能力门禁同口径，publisher 审批不绕过。
    */
   readonly governanceAdmin?: boolean;
 }

@@ -7,7 +7,7 @@ import type {
   StoreWalletSessionStore
 } from "./types.js";
 
-/** PRD89 钱包会话的 postgres 持久化（生产拓扑）。 */
+/** 钱包会话的 postgres 持久化（生产拓扑）。 */
 export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore {
   readonly #database: PostgresDatabase;
 
@@ -45,7 +45,7 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
   }
 
   async consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined> {
-    // 簇 N 修正（审计三轮）：条件 UPDATE 原子占位——
+    // 条件 UPDATE 原子占位——
     // WHERE consumed_at IS NULL 保证并发重放同一 nonce 只有一个赢家。
     const result = await this.#database.query(
       `UPDATE store_auth_challenge SET consumed_at = $1 WHERE nonce = $2 AND consumed_at IS NULL`,

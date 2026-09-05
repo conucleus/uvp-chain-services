@@ -65,7 +65,7 @@ export interface StoreZhixuVersionMetadataStore {
   ): Promise<StoreZhixuVersionRecord | undefined>;
   upsertVersion(record: StoreZhixuVersionRecord): Promise<void>;
   /**
-   * 簇 D 修正（审计三轮）：activate 的"旧 active 批量 deprecated + 新
+   * activate 的"旧 active 批量 deprecated + 新
    * active 落库"必须事务化，中途失败不得留下无 active 或双 active 的
    * 中间态。持久后端提供；内存后端顺序执行即可。
    */
@@ -150,9 +150,9 @@ export function createStoreZhixuVersionService(options: {
         options.productService,
         options.projectionStore,
       );
-      // 簇 D 修正（审计三轮）：激活确认取服务端记录——publicationStatus 由
-      // 链投影（stateMachinePlans）判定，调用方自报的 planId/planHash 不
-      // 再是激活的依据；记录锚不可改（patchVersionRecord 拒绝）。
+      // 激活确认取服务端记录——publicationStatus 由
+      // 链投影（stateMachinePlans）判定，调用方自报的 planId/planHash 不是
+      // 激活的依据；记录锚不可改（patchVersionRecord 拒绝）。
       assertActivatable(summary);
       const cutoverAt = now().toISOString();
       const existing = await effectiveVersionRecords({
@@ -162,7 +162,7 @@ export function createStoreZhixuVersionService(options: {
         projectionStore: options.projectionStore,
         now,
       });
-      // 簇 D 修正：cutover（旧 active 批量 deprecated + 新 active 落库）
+      // cutover（旧 active 批量 deprecated + 新 active 落库）
       // 事务化；持久后端中途失败整体回滚，不留双 active/无 active 中间态。
       const applyCutover = async (): Promise<StoreZhixuVersionRecord> => {
         for (const item of existing) {
@@ -325,8 +325,8 @@ async function ensureVersionRecord(input: {
       },
     );
   }
-  // 簇 D 修正（审计三轮）：新建版本记录的锚（planId/planHash）必须在
-  // 链投影中真实存在——此前可凭空登记任意 plan 的"版本"再激活。
+  // 新建版本记录的锚（planId/planHash）必须在
+  // 链投影中真实存在——否则可凭空登记任意 plan 的"版本"再激活。
   const planId = normalizeBytes32(input.input.planId, "planId");
   const planHash = normalizeBytes32(input.input.planHash, "planHash");
   const snapshot = await input.projectionStore.getOrderSnapshot();
@@ -370,7 +370,7 @@ function patchVersionRecord(
   record: StoreZhixuVersionRecord,
   input: StoreZhixuVersionMutationInput,
 ): StoreZhixuVersionRecord {
-  // 簇 D 修正（审计三轮）：版本记录的链锚不可改——planId/planHash/
+  // 版本记录的链锚不可改——planId/planHash/
   // artifactHash 只能在创建时给定；调用方在其后携带不同锚即 409，
   // 防止"改锚任意 plan"把既有版本偷换到另一个 plan 上。
   for (const [field, rawValue] of [

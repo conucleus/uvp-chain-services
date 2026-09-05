@@ -26,9 +26,9 @@ export interface PostgresNotificationStateStoreOptions {
 }
 
 /**
- * ETH-04(b)：通知 delivery / participant read 状态落 postgres（表结构见
- * migrations/postgres/0013_notification_broadcast_state.sql）。生产拓扑
- * （postgres 驱动）此前完全没有持久化通知状态，装配静默退化为 undefined。
+ * 通知 delivery / participant read 状态落 postgres（表结构见
+ * migrations/postgres/0013_notification_broadcast_state.sql）。
+ * postgres 驱动的生产拓扑要求通知状态持久化，不静默退化为无存储。
  */
 export class PostgresNotificationStateStore implements NotificationDeliveryStore, ParticipantNotificationReadStateStore {
   readonly #database: PostgresDatabase;

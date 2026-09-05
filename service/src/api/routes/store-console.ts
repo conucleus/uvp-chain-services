@@ -53,7 +53,7 @@ export function createStoreConsoleRouteModule(): RouteModule {
       if (request.method === "GET" && request.pathname === "/store/session") {
         const access = await context.storeIdentityProvider.resolve(request.headers);
         let session = storeSessionFromAccess(access);
-        // PRD89：有钱包会话时叠加锚定地址与账号地址表。
+        // 有钱包会话时叠加锚定地址与账号地址表。
         const walletSession = await resolveWalletSessionView(request, context.sessionService);
         if (walletSession && access.anchoredAddress) {
           session = storeSessionDtoWithWalletOverlay(session, {
@@ -77,8 +77,8 @@ export function createStoreConsoleRouteModule(): RouteModule {
 
       if (request.method === "GET" && request.pathname === "/store/search") {
         const body = await context.storeConsoleService.search(parseStoreSearchQuery(request.query));
-        // 簇 N 修正（审计三轮）：search 过滤已下架——与 /store/zhixus 的
-        // PRD92 口径一致（运营方可见，便于治理观察）。
+        // search 过滤已下架——与 /store/zhixus 的
+        // 口径一致（运营方可见，便于治理观察）。
         return {
           status: 200,
           body: await filterDelistedSearchResults(request, context, body)
@@ -198,7 +198,7 @@ export function createStoreConsoleRouteModule(): RouteModule {
             body: { error: "store_zhixu_not_found" }
           };
         }
-        // PRD92：详情页叠加锚核验 + listing 状态 + 装修数据（PRD91）。
+        // 详情页叠加锚核验 + listing 状态 + 装修数据。
         const overlay = await buildStoreZhixuOverlay(request, context, zhixu.planId);
         return {
           status: 200,
@@ -226,8 +226,8 @@ async function handleStoreRuntimeRequest(
     const zhixuOrdersMatch = /^\/store\/zhixus\/([^/]+)\/orders$/.exec(request.pathname);
     if (request.method === "GET" && zhixuOrdersMatch) {
       const zhixuId = decodeURIComponent(zhixuOrdersMatch[1] ?? "");
-      // 簇 N 修正（审计三轮）：status 过滤词表校验——未知 status 400，
-      // 不再静默返回空集（此前的 "disputed" 等死词已从词表移除）。
+      // status 过滤词表校验——未知 status 400，
+      // 不静默返回空集。
       if (request.query?.status && !isSupportedStoreOrderFilterStatus(request.query.status)) {
         return {
           status: 400,
@@ -814,7 +814,7 @@ async function resolveWalletSessionView(
   return resolved?.session;
 }
 
-/** PRD92：下架 listing 在目录中不可见（运营方除外，便于治理观察）。 */
+/** 下架 listing 在目录中不可见（运营方除外，便于治理观察）。 */
 async function filterDelistedZhixus(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1],
@@ -842,7 +842,7 @@ async function filterDelistedZhixus(
   return { ...record, zhixus, ...(isOperator ? { delistedPlanIds: [...delisted] } : {}) };
 }
 
-/** 簇 N 修正：search 结果中的 zhixu 命中同样过滤已下架（非运营方）。 */
+/** search 结果中的 zhixu 命中同样过滤已下架（非运营方）。 */
 async function filterDelistedSearchResults(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1],

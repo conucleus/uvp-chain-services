@@ -9,7 +9,7 @@ import {
 import type { ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-/** PRD90 加入闭环路由。提交/读取要求锚定会话；审核要求 publisher/委托。 */
+/** 加入闭环路由。提交/读取要求锚定会话；审核要求 publisher/委托。 */
 export function createStoreJoinRouteModule(options: {
   readonly joinService: StoreJoinService;
 }): RouteModule {
@@ -124,7 +124,7 @@ function joinActor(
     authMode: access.authMode,
     accessLevel: access.level,
     ...(access.principalId ? { principalId: access.principalId } : {}),
-    // 簇 D 修正：审批触发链上身份登记时按 governance_admin 权威门禁。
+    // 审批触发链上身份登记时按 governance_admin 权威门禁。
     ...(access.roles?.includes("governance_admin") ? { governanceAdmin: true } : {})
   };
 }

@@ -8,7 +8,7 @@ import {
 import type { ApiRequest, ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-/** PRD91 装修路由：publisher（或受托成员）才可写，服务端强制。 */
+/** 装修路由：publisher（或受托成员）才可写，服务端强制。 */
 export function createStoreDecorationRouteModule(options: {
   readonly decorationService: StoreDecorationService;
 }): RouteModule {

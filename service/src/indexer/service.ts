@@ -38,13 +38,13 @@ export interface ChainEventSource {
   getFinalizedBlock(config: ChainServicesConfig): Promise<bigint>;
   readEvents(range: ChainEventRange, config: ChainServicesConfig): Promise<readonly ChainEvent[]>;
   /**
-   * ETH-02：返回当前 canonical 链上指定高度区块哈希；用于追加前的
+   * 返回当前 canonical 链上指定高度区块哈希；用于追加前的
    * cursor 哈希连续性校验与 reorg 共同祖先定位。事件源不支持时
    * （可选方法缺失）索引器跳过校验，仅依赖 finalityConfirmations 缓冲。
    */
   getBlockHash?(blockNumber: bigint, config: ChainServicesConfig): Promise<Hex>;
   /**
-   * 0132 P2-12：取走"单条不可解码日志被跳过"的累计计数并清零。跳过的
+   * 取走"单条不可解码日志被跳过"的累计计数并清零。跳过的
    * 日志无法投影（游标照常前进），但必须计数留痕——索引器每轮刷新消费
    * 并写入日志/指标，不允许静默。事件源不支持时视为 0。
    */
@@ -236,8 +236,8 @@ export class IndexerService implements LifecycleService {
         },
         this.#config
       );
-      // ETH-09：mismatchCount 反映真实 replay 异常（重复/矛盾投递、投影
-      // apply 失败），不再硬编码 0。
+      // mismatchCount 反映真实 replay 异常（重复/矛盾投递、投影
+      // apply 失败），不得硬编码 0。
       mismatchCount = countReplayAnomalies(events);
       const replaySummary = buildActiveChainEventReplaySummary(events);
       const activeEvents = [...replaySummary.activeEvents];
@@ -317,7 +317,7 @@ export class IndexerService implements LifecycleService {
 
       return { snapshot, summary };
     } catch (error) {
-      // ETH-09：投影 apply 失败（如未知 plan 引用）时把已统计到的真实
+      // 投影 apply 失败（如未知 plan 引用）时把已统计到的真实
       // 异常数带入 degraded 状态，而不是回退为旧值/0。
       await this.#markDegraded(finalizedBlock, error, mismatchCount);
       throw error;
@@ -347,7 +347,7 @@ export class IndexerService implements LifecycleService {
     }
 
     const fromBlock = cursor.nextBlock > deploymentBlock ? cursor.nextBlock : deploymentBlock;
-    // ETH-02：追加前做哈希连续性校验。深度 reorg 会在这里被检测到并回滚
+    // 追加前做哈希连续性校验。深度 reorg 会在这里被检测到并回滚
     // 投影；finalityConfirmations 仍是第一道缓冲，超过其深度的 reorg 若
     // 回溯窗口内找不到共同祖先则报错要求 full rebuild。
     const effectiveFromBlock = await this.#rollbackOnReorg(fromBlock);
@@ -395,7 +395,7 @@ export class IndexerService implements LifecycleService {
       const identitySnapshot = rebuildIdentityProjections(allEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
-      // ETH-09：mismatchCount 反映真实 replay 异常，不再硬编码 0。
+      // mismatchCount 反映真实 replay 异常，不得硬编码 0。
       const mismatchCount = countReplayAnomalies(allEvents);
       const syncState = await durableStore.saveSyncState({
         ...this.#scope,
@@ -515,7 +515,7 @@ export class IndexerService implements LifecycleService {
   }
 
   /**
-   * ETH-02：cursor 高度（finalizedBlock）区块哈希；事件源不支持时省略，
+   * cursor 高度（finalizedBlock）区块哈希；事件源不支持时省略，
    * 下次刷新将跳过哈希校验（仅靠 finalityConfirmations 缓冲）。
    */
   async #cursorBlockHash(blockNumber: bigint): Promise<{ readonly blockHash: Hex } | undefined> {
@@ -524,7 +524,7 @@ export class IndexerService implements LifecycleService {
   }
 
   /**
-   * ETH-02：追加前校验哈希连续性——cursor 已存块哈希是 cursor 高度
+   * 追加前校验哈希连续性——cursor 已存块哈希是 cursor 高度
    * （nextBlock - 1 = fromBlock - 1）区块的哈希；取 canonical 链上同一
    * 高度的哈希与之比较（与"取高度+1 块比 parentHash"等价），不一致即
    * 发生过 reorg：从 cursor 向回（有界，MAX_REORG_BACKTRACK_BLOCKS）在
@@ -533,7 +533,7 @@ export class IndexerService implements LifecycleService {
    *
    * 残余风险：超过 finalityConfirmations 的深度 reorg 仍可能伪造出
    * "完全一致"的历史；回溯窗口内找不到共同祖先时报错要求 full rebuild。
-   * cursor 无已存哈希（旧数据/事件源不支持）时跳过校验。
+   * cursor 无已存哈希（事件源不支持或未持久化哈希）时跳过校验。
    */
   async #rollbackOnReorg(fromBlock: bigint): Promise<bigint> {
     const durableStore = this.#store;
@@ -558,7 +558,7 @@ export class IndexerService implements LifecycleService {
     return this.#rollbackToCommonAncestor(durableStore, fromBlock);
   }
 
-  /** ETH-02：从 cursor 高度向回找共同祖先（有界），找到则回滚投影。 */
+  /** 从 cursor 高度向回找共同祖先（有界），找到则回滚投影。 */
   async #rollbackToCommonAncestor(
     durableStore: DurableProjectionStore,
     fromBlock: bigint
@@ -621,7 +621,7 @@ export class IndexerService implements LifecycleService {
     return fromBlock;
   }
 
-  /** ETH-02：删除祖先之后的事件、重建快照、回退 cursor。 */
+  /** 删除祖先之后的事件、重建快照、回退 cursor。 */
   async #applyReorgRollback(
     durableStore: DurableProjectionStore,
     ancestorBlock: bigint,
@@ -876,7 +876,7 @@ export class IndexerService implements LifecycleService {
     return durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
   }
 
-  /** 0132 P2-12：取走事件源累计的"不可解码日志被跳过"计数（无则 0）。 */
+  /** 取走事件源累计的"不可解码日志被跳过"计数（无则 0）。 */
   #consumeUnresolvedLogCount(): number {
     return this.#eventSource.consumeUnresolvedLogCount?.() ?? 0;
   }
@@ -896,7 +896,7 @@ export class IndexerService implements LifecycleService {
     if (!processor) {
       throw new Error(`projection automation processor unavailable for pending step ${step.stepId}`);
     }
-    // 自动化以当前投影为准重放（幂等扫描语义），无需持久化旧快照。
+    // 自动化以当前投影为准重放（幂等扫描语义），无需持久化历史快照。
     const snapshot = await this.#store.getOrderSnapshot();
     await processor.processProjection(snapshot);
   }

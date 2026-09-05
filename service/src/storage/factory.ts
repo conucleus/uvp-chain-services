@@ -110,16 +110,16 @@ export interface ChainServicesStores {
   readonly storeSupplierMetadataStore: StoreSupplierMetadataStore;
   readonly storeDockingSessionStore: StoreDockingSessionStore;
   readonly storeAuditStore: StoreAuditStore;
-  /** PRD89-92：钱包会话 / descriptor 快照 / 装修与委托 / 上架 / 加入申请的持久化 store。 */
+  /** 钱包会话 / descriptor 快照 / 装修与委托 / 上架 / 加入申请的持久化 store。 */
   readonly storeWalletSessionStore: StoreWalletSessionStore;
   readonly identityDescriptorSnapshots: StoreIdentityDescriptorSnapshotStore;
   readonly storeDecorationStore: StoreZhixuDecorationStore;
   readonly storePublisherDelegationStore: StorePublisherDelegationStore;
   readonly storeListingStore: StoreListingStore;
   readonly storeJoinApplicationStore: StoreJoinApplicationStore;
-  /** ETH-04(b)：sqlite/postgres 驱动下提供持久化通知状态；其余驱动为 undefined（内存）。 */
+  /** sqlite/postgres 驱动下提供持久化通知状态；其余驱动为 undefined（内存）。 */
   readonly notificationStateStore?: NotificationDeliveryStore & ParticipantNotificationReadStateStore;
-  /** ETH-07：sqlite/postgres 驱动下提供持久化 broadcast 去重状态；其余驱动为 undefined。 */
+  /** sqlite/postgres 驱动下提供持久化 broadcast 去重状态；其余驱动为 undefined。 */
   readonly broadcastDedupeStore?: BroadcastDedupeStore;
   close(): Promise<void>;
 }
@@ -256,7 +256,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
           databaseUrl: options.database.url,
           migrations
         }),
-        // ETH-04(b)/ETH-07：通知状态与 broadcast 去重状态落 sqlite。
+        // 通知状态与 broadcast 去重状态落 sqlite。
         notificationStateStore: new SqliteNotificationStateStore({
           databaseUrl: options.database.url,
           migrations
@@ -325,7 +325,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         storePublisherDelegationStore: new PostgresStorePublisherDelegationStore({ database }),
         storeListingStore: new PostgresStoreListingStore({ database }),
         storeJoinApplicationStore: new PostgresStoreJoinApplicationStore({ database }),
-        // ETH-04(b)/ETH-07：通知状态与 broadcast 去重状态在生产拓扑（postgres）
+        // 通知状态与 broadcast 去重状态在生产拓扑（postgres）
         // 同样持久化；表迁移见 migrations/postgres/0013。共享 database 连接，
         // close 由 database.close() 统一负责。
         notificationStateStore: new PostgresNotificationStateStore({ database }),

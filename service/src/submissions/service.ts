@@ -58,7 +58,7 @@ export interface ProductSubmissionServiceOptions {
   readonly broadcastAdapter?: SubmissionBroadcastAdapter;
   readonly store?: ProductSubmissionStore;
   /**
-   * Audit #10: resolves the order planId for the on-chain order id from the
+   * resolves the order planId for the on-chain order id from the
    * indexer projection (OrderRegistered/OrderMaterialized carry the indexed
    * planId). prepareSubmit refuses to build the plan-scoped signature when the
    * projection cannot supply a non-zero planId.
@@ -148,7 +148,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
         });
       }
 
-      // Audit #10: submitSignal is plan-scoped and the signature commits to
+      // submitSignal is plan-scoped and the signature commits to
       // (planId, orderId). The planId comes from the indexer projection, never
       // from local fabrication; a missing planId must fail the prepare instead
       // of producing a signature that can only be rejected on chain. An
@@ -562,7 +562,7 @@ function normalizeBytes32OrHash(value: string, fieldName: string): Hex {
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 /**
- * Audit #10: the projection must supply a real, non-zero planId. Anything else
+ * the projection must supply a real, non-zero planId. Anything else
  * (undefined, malformed, or the zero placeholder) is treated as "unresolved" so
  * the zero placeholder can never be signed or broadcast.
  */

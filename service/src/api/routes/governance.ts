@@ -117,7 +117,7 @@ async function handleIdentityProjectionRequest(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1]
 ): Promise<ApiResponse | undefined> {
-  // PRD89 descriptor 托管：公开、免鉴权的档案快照取回端点（按 descriptorHash 锁内容）。
+  // descriptor 托管：公开、免鉴权的档案快照取回端点（按 descriptorHash 锁内容）。
   const descriptorMatch = /^\/identity\/descriptors\/([^/]+)(?:\/([^/]+))?$/.exec(request.pathname);
   if (request.method === "GET" && descriptorMatch && context.identityDescriptorSnapshots) {
     try {

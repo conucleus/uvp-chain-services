@@ -1,13 +1,13 @@
 import type { Address, Hex } from "../shared/types.js";
 
-/** PRD96 §15：dock liveness 自动化配置（keeper 只提供活性，不发明任何协议 word）。 */
+/** dock liveness 自动化配置（keeper 只提供活性，不发明任何协议 word）。 */
 export interface DockAutomationConfig {
   readonly enabled: boolean;
   readonly pollIntervalMs: number;
   readonly maxCandidatesPerRun: number;
   readonly maxGasPerTx?: bigint;
   /**
-   * 最终性窗口去重（0620 L-7）：同一 binding 广播成功后，在该窗口内
+   * 最终性窗口去重：同一 binding 广播成功后，在该窗口内
    * 不重复广播——投影要等链事件 finalize+索引后才呈现 delivery，逐轮
    * 重发是纯 gas 浪费的 no-op 交易。窗口过后仍未投影为已投递才会重试
    * （覆盖交易丢失的情形）。
@@ -80,7 +80,7 @@ export interface DockAutomationRunSummary {
   inputCandidates: number;
   outputCandidates: number;
   submitted: number;
-  /** 最终性窗口内被去重跳过的重复广播次数（0620 L-7）。 */
+  /** 最终性窗口内被去重跳过的重复广播次数。 */
   deduplicated: number;
   skipped: string[];
 }

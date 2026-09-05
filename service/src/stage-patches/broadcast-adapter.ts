@@ -16,9 +16,9 @@ import type {
   StageResourcePatchBroadcastAdapter
 } from "./types.js";
 
-// C15：本地手抄的 applyStageExecutorPatchFor/applyStageResourcePatchFor
-// ABI 副本已删除——以 @uvp-eth/protocol-bindings 导出的
-// STAGE_PATCH_MODULE_ABI（fixtures 同源）与调用构造器为准，杜绝再次漂移
+// applyStageExecutorPatchFor/applyStageResourcePatchFor 的 ABI 以
+// @uvp-eth/protocol-bindings 导出的
+// STAGE_PATCH_MODULE_ABI（fixtures 同源）与调用构造器为准，杜绝本地漂移
 //（本地副本缺 planId 首参时广播必然在链上 revert）。
 export type StateMachineStagePatchCall =
   | ApplyStageExecutorPatchForCall

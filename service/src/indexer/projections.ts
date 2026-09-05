@@ -208,7 +208,7 @@ export interface StateMachineStageResourceOverlayProjection {
 }
 
 /**
- * uvp.dock.v1 统一委托协议（PRD93-96）投影。dock 实例身份由
+ * uvp.dock.v1 统一委托协议投影。dock 实例身份由
  * dockInstanceId 唯一确定（哈希 preimage 覆盖双方 plan/order/route），
  * 投影键为 (chainId, stateMachineAddress, dockInstanceId)；binding 细节
  * （portKey/localHookId/kind/terminal 全量 word）来自 DockingModule
@@ -494,7 +494,7 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
 }
 
 /**
- * ETH-09：rebuild summary 的 mismatchCount 必须反映真实 replay 异常，而不是
+ * rebuild summary 的 mismatchCount 必须反映真实 replay 异常，而不是
  * 硬编码 0。这里统计两类可观测异常：
  * 1. 重复/矛盾投递 —— 同一事件键（chain/contract/block/tx/log）作为活跃
  *    事件出现多次（replay 会静默去重，但这是真实异常，必须计数）；
@@ -596,9 +596,8 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
       timeline: [...order.timeline].sort(compareTimelineEvents),
       proof: [...order.proof].sort(compareProofEvents)
     };
-    // 快照只暴露 plan 作用域的复合键。pre-plan 裸键兼容别名已按"未上线、
-    // 旧版本兼容清零"裁决移除：每条订单/任务恰好一个键，裸 orderId 必须
-    // 走 fail-closed 扫描（uniqueOrderByBareId），绝不静默命中。
+    // 快照只暴露 plan 作用域的复合键：每条订单/任务恰好一个键，
+    // 裸 orderId 必须走 fail-closed 扫描（uniqueOrderByBareId），绝不静默命中。
     stateMachineOrderRecord[orderId] = readonlyOrder;
   }
 
@@ -2365,8 +2364,8 @@ function normalizeProofArg(value: unknown): string | number | boolean | null {
     return value.toString();
   }
   if (typeof value === "string") {
-    // CS-9：事件源解码边界已按 ABI 类型归一化（bytes/address 小写、
-    // string 保持原文）。这里不再对 0x 开头的字符串二次小写化——
+    // 事件源解码边界已按 ABI 类型归一化（bytes/address 小写、
+    // string 保持原文）。这里不对 0x 开头的字符串二次小写化——
     // metadataURI 等 string 参数大小写敏感，改写不可逆。
     return value;
   }

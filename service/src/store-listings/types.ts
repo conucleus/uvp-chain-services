@@ -1,10 +1,10 @@
 import type { Address, Hex } from "../shared/types.js";
 
 /**
- * PRD92 — 秩序上架与锚核验。
+ * 秩序上架与锚核验。
  *
  * - 上架 = 把已注册的链上秩序变成可发现、可核验的商品：导入编译产物锚
- *   （planId / planHash / deploymentId），配装修（PRD91），最小审核后公开。
+ *   （planId / planHash / deploymentId），配装修，最小审核后公开。
  * - 锚核验：listing 声称的锚与链上注册事实（投影 + 可选的直读链）比对；
  *   不一致必须显式冲突并抑制加入入口，不得静默展示旧数据。
  * - 下架/隐藏只改 Store 可见性，链上事实不受影响。

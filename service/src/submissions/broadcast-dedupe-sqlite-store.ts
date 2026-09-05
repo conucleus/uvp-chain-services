@@ -8,9 +8,9 @@ import {
 import type { SubmissionBroadcastResult } from "./types.js";
 
 /**
- * ETH-07：safe broadcast adapter 的去重状态（按 prepared idempotency key
- * 与 txHash 归属）持久化契约。此前全部驻留进程内存，重启后丢去重可能导致
- * 重复提交。语义与内存 Map 完全一致：键为 idempotencyKey / txHash。
+ * safe broadcast adapter 的去重状态（按 prepared idempotency key
+ * 与 txHash 归属）持久化契约：重启后去重状态不得丢失，否则可能重复提交。
+ * 语义与内存 Map 完全一致：键为 idempotencyKey / txHash。
  */
 export interface BroadcastDedupeState {
   readonly attempts: number;

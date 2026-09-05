@@ -20,7 +20,7 @@ export interface SecureSubmissionBroadcastAdapterOptions {
   readonly now?: () => Date;
   readonly audit?: AuditSink;
   /**
-   * ETH-07：可选持久化去重存储。进程内 Map 仍是主缓存（语义不变），
+   * 可选持久化去重存储。进程内 Map 仍是主缓存（语义不变），
    * 持久层保证重启后同一 idempotencyKey / txHash 依旧被去重。
    */
   readonly dedupeStore?: BroadcastDedupeStore;
@@ -79,9 +79,9 @@ export function createSecureSubmissionBroadcastAdapter(
         return duplicate;
       }
 
-      // TOCTOU 修复：在任何 await 之前同步占位（先占后查），并发进入的
+      // TOCTOU 防护：在任何 await 之前同步占位（先占后查），并发进入的
       // 同单/同人广播各自拿到递增的占位数，超额者立即释放并限流返回，
-      // 不再出现"双方都读到 0、双双放行"的穿透窗口。
+      // 避免"双方都读到 0、双双放行"的穿透窗口。
       const acquiredOrderInFlight = (inFlightByOrder.get(orderKey) ?? 0) + 1;
       inFlightByOrder.set(orderKey, acquiredOrderInFlight);
       const acquiredSubmitterInFlight = (inFlightBySubmitter.get(submitterKey) ?? 0) + 1;
@@ -154,7 +154,7 @@ export function createSecureSubmissionBroadcastAdapter(
           lastResult: result
         };
         states.set(idempotencyKey, newState);
-        // ETH-07：写穿持久层；失败不吞——与内存路径同等严格。
+        // 写穿持久层；失败不吞——与内存路径同等严格。
         await dedupeStore?.save(idempotencyKey, newState);
 
         if (result.status === "failed") {
@@ -235,7 +235,7 @@ async function duplicateTxHashResult(
   const normalizedTxHash = txHash.toLowerCase();
   let owner = txHashOwners.get(normalizedTxHash);
   if (!owner && dedupeStore) {
-    // ETH-07：内存未命中时问持久层；无归属则登记归属。
+    // 内存未命中时问持久层；无归属则登记归属。
     owner = await dedupeStore.claimTxHash(normalizedTxHash, idempotencyKey);
   }
   if (!owner) {

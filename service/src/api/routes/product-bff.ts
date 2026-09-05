@@ -106,7 +106,7 @@ export function createProductBffRouteModule(options: {
       if (request.method === "GET" && productInvitePreviewMatch) {
         return handleProductBffRequest(async () => {
           const inviteId = decodeURIComponent(productInvitePreviewMatch[1] ?? "");
-          // 簇 C 修正：预览页的钱包视角取会话锚定地址（自报 query/header
+          // 预览页的钱包视角取会话锚定地址（自报 query/header
           // 仅做一致性核验）；无会话时仍可预览角色信息，但不携带钱包绑定
           // 判定（真正占位需要 accept 的会话 + token）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
@@ -123,9 +123,9 @@ export function createProductBffRouteModule(options: {
       if (request.method === "POST" && productInviteAcceptMatch) {
         return handleProductBffRequest(async () => {
           const inviteId = decodeURIComponent(productInviteAcceptMatch[1] ?? "");
-          // 簇 C/簇 D 修正：accept 必须是已证明钱包控制的会话（钱包会话签名
-          // 或 local dev 锚定头），自报钱包头不再算数；且必须携带 invite
-          // token（哈希比对）——inviteId 弱凭据不再足以占角色槽。钱包声明
+          // accept 必须是已证明钱包控制的会话（钱包会话签名
+          // 或 local dev 锚定头），自报钱包头不算数；且必须携带 invite
+          // token（哈希比对）——inviteId 是弱凭据，不足以占角色槽。钱包声明
           // 不读 body（body.walletAddress 是被核验对象，不是证明）。
           const wallet = await resolveParticipantWalletIdentity(
             request,
@@ -307,7 +307,7 @@ function parseAcceptInviteBody(
     displayName: requiredString(record, "displayName"),
     walletAddress: requiredString(record, "walletAddress"),
     contact: requiredString(record, "contact"),
-    // 簇 D 修正：accept/reject 强制携带 invite token（服务端哈希比对）。
+    // accept/reject 强制携带 invite token（服务端哈希比对）。
     token: requiredString(record, "token"),
     sessionWalletAddress
   };

@@ -13,7 +13,7 @@ import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.
 import type { RouteModule } from "../route-module.js";
 
 /**
- * PRD92 上架路由。导入可由运营方或 plan publisher 发起；
+ * 上架路由。导入可由运营方或 plan publisher 发起；
  * 审核/下架/重新上架是运营方治理动作（store.listing.manage）。
  */
 export function createStoreListingsRouteModule(options: {
@@ -41,7 +41,7 @@ export function createStoreListingsRouteModule(options: {
               throw error;
             }
           }
-          // PRD92：导入也可由该 plan 的 publisher 发起（导入自己的秩序）——
+          // 导入也可由该 plan 的 publisher 发起（导入自己的秩序）——
           // 服务层核验"运营方或 plan publisher"，此处只补锚定会话要求。
           const anchored = await requireAnchoredStoreAddress(context, request, { type: "store_listing" });
           if (!isAnchoredStoreAuthorizationResult(anchored)) {

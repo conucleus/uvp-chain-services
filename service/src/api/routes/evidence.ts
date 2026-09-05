@@ -20,7 +20,7 @@ export function createEvidenceRouteModule(options: {
               body: { error: "method_not_allowed" }
             };
           }
-          // 簇 C 修正：evidence 身份不再取自 x-uvp-principal-* 自报头——
+          // evidence 身份不取自 x-uvp-principal-* 自报头——
           // 治理白名单 admin 或钱包会话锚定地址；非 local 无身份即 401。
           const principal = await resolveEvidencePrincipal(request, context, options.runtimeEnvironment);
           const result = await context.evidenceService.uploadEvidence(

@@ -77,11 +77,10 @@ export interface EvidenceService {
   getProof(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceProofDTO | undefined>;
   bindEvidence(input: BindEvidenceRequestDTO): Promise<EvidenceRecordDTO | undefined>;
   /**
-   * 簇 N 修正（审计三轮）：第二副本 verify 的服务端接线（admin 专用）。
-   * 此前 BackupEvidenceStorage 实现了校验/恢复但没有任何调用方。
+   * 第二副本 verify 的服务端接线（admin 专用）。
    */
   verifyEvidenceBackup(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceBackupStatusDTO | undefined>;
-  /** 簇 N 修正：主对象损坏/缺失时从第二副本恢复（admin 专用）。 */
+  /** 主对象损坏/缺失时从第二副本恢复（admin 专用）。 */
   restoreEvidenceBackup(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceBackupStatusDTO | undefined>;
 }
 
@@ -116,7 +115,7 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
       const taskId = optionalNonEmptyString(input.taskId, "taskId");
       const stageIdentifier = requiredNonEmptyString(input.stageIdentifier, "stageIdentifier");
       const documentType = requiredNonEmptyString(input.documentType, "documentType");
-      // Audit #16: evidence ownership is a server-side derivation. The request
+      // Evidence ownership is a server-side derivation. The request
       // body cannot attribute a record to another participant: canWriteEvidence
       // only accepts the authenticated principal itself (or an admin acting on
       // behalf), and a request-supplied access policy can never vouch for the
@@ -158,9 +157,9 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
         ...(orderId ? { orderId } : {}),
         stageIdentifier
       });
-      // 簇 N 修正（审计三轮）：重复上传幂等——同一 owner 再次提交完全相同
+      // 重复上传幂等：同一 owner 再次提交完全相同
       // 的证据载荷（content+metadata+order+stage 全等）时返回既有记录，
-      // 不再追加内容完全相同的副本。
+      // 不追加内容完全相同的副本。
       const existing = await metadataStore.findOwnedByPayloadHash?.(payloadHash, ownerParticipantId);
       if (existing) {
         return {
@@ -460,7 +459,7 @@ function canWriteEvidence(
   principal: EvidencePrincipal,
   ownerParticipantId: string
 ): boolean {
-  // Audit #16: membership in a request-supplied `writers` list must never
+  // Membership in a request-supplied `writers` list must never
   // authorize an upload — the list arrives in the same request body that is
   // trying to claim ownership, so it cannot vouch for the requester. Write
   // authority over a new record is derived from the authenticated principal

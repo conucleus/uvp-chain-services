@@ -32,9 +32,9 @@ async function handleParticipantNotificationRequest(
     return undefined;
   }
 
-  // 簇 C 修正（审计三轮）：activity-feed 的身份 = 会话锚定地址（钱包会话
+  // activity-feed 的身份 = 会话锚定地址（钱包会话
   // 的签名证明，或 local 显式开启的 dev 锚定头）。query/body/header 自报
-  // 钱包只用于与锚定地址一致性核验，不再作为唯一身份——此前 ?wallet= 即
+  // 钱包只用于与锚定地址一致性核验，不是身份来源——否则 ?wallet= 即
   // 可读任意人活动流、代标已读。local 之外无会话即 401。
   const wallet = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment);
   if (!wallet.ok) {

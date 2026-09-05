@@ -33,9 +33,8 @@ export function verifyProofBundle(bundle: ProofBundle): ProofVerificationResult 
   ];
 
   return {
-    // 簇 N 修正（审计三轮）：missing=invalid——缺一侧（或两侧）哈希的
-    // 证明项不再被计为通过；只有全部 matched 才 valid。此前
-    // `matched || missing` 让空证明/半证明恒真。
+    // missing=invalid：缺任一侧（或两侧）哈希的证明项不算通过；
+    // 只有全部 matched 才 valid，空证明/半证明不得恒真。
     valid: checks.every((check) => check.status === "matched"),
     checks
   };

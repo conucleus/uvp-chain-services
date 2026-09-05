@@ -24,8 +24,8 @@ export interface EvidenceStorage {
   exists(storageURI: string): Promise<boolean>;
   delete?(storageURI: string): Promise<void>;
   /**
-   * 簇 N 修正（审计三轮）：主/备副本 URI 空间可能不同（不同 bucket、
-   * prefix 或 uriMode）。提供 evidenceId↔storageURI 的双向翻译，让
+   * 主/备副本 URI 空间可能不同（不同 bucket、prefix 或 uriMode）。
+   * 提供 evidenceId↔storageURI 的双向翻译，让
    * BackupEvidenceStorage 能用主存储的 URI 定位备份对象，而不是假设
    * 两边 URI 字符串相等。返回 undefined 表示该适配器不支持翻译。
    */
@@ -164,7 +164,7 @@ export interface ObjectEvidenceStorageClient {
   get(storageURI: string): Promise<Uint8Array | undefined>;
   exists(storageURI: string): Promise<boolean>;
   delete?(storageURI: string): Promise<void>;
-  /** 簇 N 修正：主/备 URI 空间翻译（bucket/prefix/uriMode 不同时定位对象）。 */
+  /** 主/备 URI 空间翻译（bucket/prefix/uriMode 不同时定位对象）。 */
   storageURIForEvidenceId?(evidenceId: string): string;
   evidenceIdForStorageURI?(storageURI: string): string;
 }
@@ -235,7 +235,7 @@ export interface EvidenceBackupVerifyResult {
 }
 
 /**
- * ETH-05：证据第二副本。put 成功后立即写第二副本；备份写入失败按整体
+ * 证据第二副本。put 成功后立即写第二副本；备份写入失败按整体
  * 失败处理（上抛），不允许"主存成功、副本静默丢失"。提供按 hash 校验与
  * 从副本恢复主对象的能力。
  */
@@ -285,10 +285,10 @@ export class BackupEvidenceStorage implements EvidenceStorage {
   }
 
   /**
-   * 簇 N 修正（审计三轮）：主存储 URI → 备份存储 URI 的翻译。主/备
+   * 主存储 URI → 备份存储 URI 的翻译。主/备
    * bucket、prefix 或 uriMode 不同时，两边 URI 字符串不相等——直接把
-   * 主 URI 喂给备份适配器会抛 "storageURI is not managed by ..."，verify/
-   * restore 从未真正可用。翻译链：primary.evidenceIdForStorageURI →
+   * 主 URI 喂给备份适配器会抛 "storageURI is not managed by ..."。
+   * 翻译链：primary.evidenceIdForStorageURI →
    * backup.storageURIForEvidenceId；适配器不支持翻译时退回原 URI（同
    * URI 空间的内存/本地存储场景）。
    */

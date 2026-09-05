@@ -1,7 +1,7 @@
 import type { Address, Hex } from "../shared/types.js";
 
 /**
- * PRD91 — Store 装修权限模型。
+ * Store 装修权限模型。
  *
  * - 权限根：`UVPStateMachine.planPublisher(planId)`（投影里的 plan.publisher，
  *   来自 PlanPublisherRecorded/PlanCommitted）——不是 Store 账号体系。

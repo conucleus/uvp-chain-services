@@ -53,7 +53,7 @@ export interface DatabaseConfig {
 }
 
 export interface ApiConfig {
-  /** PRD89：descriptor 托管公网基址（配置后 descriptorURI 指向 /identity/descriptors/...）。 */
+  /** Descriptor 托管公网基址（配置后 descriptorURI 指向 /identity/descriptors/...）。 */
   readonly identityDescriptorPublicBaseUrl?: string;
   readonly host: string;
   readonly port: number;
@@ -114,7 +114,7 @@ export interface DockAutomationConfig {
   readonly maxCandidatesPerRun: number;
   readonly maxGasPerTx?: bigint;
   /**
-   * 最终性窗口去重（0620 L-7）：同一 binding 广播成功后，在该窗口内
+   * 最终性窗口去重：同一 binding 广播成功后，在该窗口内
    * 不重复广播——投影要等链事件 finalize+索引后才呈现 delivery，逐轮
    * 重发是纯 gas 浪费的 no-op 交易。窗口过后仍未投影为已投递才会重试
    * （覆盖交易丢失的情形）。
@@ -137,7 +137,7 @@ export interface EvidenceStorageConfig {
   readonly s3SessionTokenEnv?: string;
   readonly s3UriMode?: "s3" | "object";
   readonly s3ObjectNamespace?: string;
-  /** ETH-05：可选第二副本 bucket（UVP_EVIDENCE_BACKUP_BUCKET）。 */
+  /** 可选第二副本 bucket（UVP_EVIDENCE_BACKUP_BUCKET）。 */
   readonly s3BackupBucket?: string;
 }
 
@@ -159,12 +159,12 @@ export interface StoreAuthConfig {
   readonly principalClaim: string;
   readonly displayNameClaim?: string;
   readonly clockToleranceSeconds: number;
-  /** PRD89：钱包会话（SIWE 式登录 + 地址锚定）子配置。 */
+  /** 钱包会话（SIWE 式登录 + 地址锚定）子配置。 */
   readonly walletSession?: StoreWalletSessionConfig;
 }
 
 /**
- * PRD89 钱包会话配置：
+ * 钱包会话配置：
  * - enabled：local/testnet 默认开；staging/production 必须显式开启。
  * - operatorWallets/adminWallets：MVP 单运营方地址清单——会话锚定地址
  *   命中清单即获得对应 Store 角色能力（会话能力继承所锚地址的链上角色
@@ -192,7 +192,7 @@ export interface SecurityConfig {
 }
 
 export interface NotificationsConfig {
-  /** ETH-04：通用 webhook transport；未配置时不装配 dispatcher（默认关）。 */
+  /** 通用 webhook transport；未配置时不装配 dispatcher（默认关）。 */
   readonly webhookUrl?: string;
   readonly webhookSecretConfigured: boolean;
 }
@@ -266,7 +266,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         "UVP_DEPLOYMENT_BLOCK",
         manifest.deploymentBlock ?? 0n,
       ),
-      // ETH-11：默认 1 仅供本地/测试网；production 预检要求显式配置
+      // 默认 1 仅供本地/测试网；production 预检要求显式配置
       // （validateProductionSafety / runProductionSafetyPreflight）。
       finalityConfirmations: parseInteger(env, "UVP_FINALITY_CONFIRMATIONS", 1),
       contracts,
@@ -502,7 +502,7 @@ function parseEvidenceStorageConfig(env: Env): EvidenceStorageConfig {
     env,
     "UVP_EVIDENCE_S3_OBJECT_NAMESPACE",
   );
-  // ETH-05：可选的第二副本 bucket；未配置时 preflight 警告。
+  // 可选的第二副本 bucket；未配置时 preflight 警告。
   const s3BackupBucket = optionalEnv(env, "UVP_EVIDENCE_BACKUP_BUCKET");
 
   return {
@@ -691,9 +691,9 @@ function parseStoreWalletSessionConfig(
     adminWallets,
     sessionTtlSeconds,
     challengeTtlSeconds,
-    // 簇 C 修正（审计三轮）：dev 锚定地址头缺省仅 local 开；testnet 此前
-    // 缺省开启（!strict），等于允许自报任意地址锚定。非 local 环境必须
-    // 显式开启才生效（生产语义上仍会被 strict runtime 拒绝）。
+    // dev 锚定地址头缺省仅 local 开：非 local 环境自报地址锚定等于
+    // 伪造身份。非 local 环境必须显式开启才生效（生产语义上仍会被
+    // strict runtime 拒绝）。
     devAnchoredAddressHeaderEnabled: devHeaderRaw !== undefined
       ? parseBooleanFlag(devHeaderRaw, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")
       : !strict && environment === "local"
@@ -727,9 +727,9 @@ function parseStoreAuthMode(
   env: Env,
   environment: ChainServicesRuntimeEnv,
 ): StoreAuthConfigMode {
-  // 簇 C 修正（审计三轮）：缺省档收紧——只有 local 允许缺省 dev_headers。
-  // testnet 未显式配置 STORE_AUTH_MODE 即启动失败（此前静默回落
-  // dev_headers，任何人自报 store 头即可获得运营方能力）；显式配置
+  // 缺省档收紧——只有 local 允许缺省 dev_headers。
+  // testnet 未显式配置 STORE_AUTH_MODE 即启动失败（静默回落 dev_headers
+  // 等于任何人自报 store 头即可获得运营方能力）；显式配置
   // dev_headers 在 local 之外同样拒绝。staging/production 保持必须 jwt。
   const rawValue = optionalEnv(env, "STORE_AUTH_MODE");
   if (!rawValue) {
@@ -1270,9 +1270,8 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
       "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production",
     );
   }
-  // 簇 C 修正（审计三轮）：production 此前不强制 UVP_RPC_URL 且静默回落
-  // 127.0.0.1:8545（staging/testnet 都有强检）。production 同样要求显式
-  // RPC 且拒绝本地/回环地址。
+  // production 必须显式配置 UVP_RPC_URL 且拒绝本地/回环地址——静默回落
+  // 127.0.0.1:8545 会把生产指向不存在的节点（staging/testnet 同样强检）。
   if (!optionalEnv(env, "UVP_RPC_URL")) {
     throw new ConfigError("UVP_RPC_URL is required in production");
   }
@@ -1281,9 +1280,9 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_RPC_URL must point to a non-local RPC endpoint in production",
     );
   }
-  // 簇 C 修正（审计三轮）：admin 白名单在 production 必须显式非空——
+  // admin 白名单在 production 必须显式非空——
   // 空白名单意味着任意 x-uvp-admin-id 自报即管理员（governance/auth.ts
-  // 已改为 fail-closed，这里把配置错误拦在启动前）。
+  // 是 fail-closed 的，这里把配置错误拦在启动前）。
   if (config.operatorRoles.adminReviewers.length === 0) {
     throw new ConfigError(
       "GOVERNANCE_ADMIN_REVIEWER_IDS is required in production",
@@ -1292,7 +1291,7 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in production");
   }
-  // ETH-11：production 禁止静默使用 env 默认值 1。finality 确认数是索引器
+  // production 禁止静默使用 env 默认值 1。finality 确认数是索引器
   // reorg 缓冲必须显式配置为正整数；非生产保持默认 1 不变。追加前的
   // block-hash continuity check 与有界共同祖先回滚由 indexer 一并执行。
   if (
@@ -1711,8 +1710,7 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "UVPIdentityRegistry contract address is required in testnet",
     );
   }
-  // 簇 C 修正（审计三轮）：testnet 同样强制 admin 白名单非空（此前仅
-  // staging 检查，testnet 空白名单=任意自报 admin 通过）。
+  // testnet 同样强制 admin 白名单非空——空白名单等于任意自报 admin 通过。
   if (config.operatorRoles.adminReviewers.length === 0) {
     throw new ConfigError(
       "GOVERNANCE_ADMIN_REVIEWER_IDS is required in testnet",
@@ -1808,7 +1806,7 @@ function validateManagedDatabaseCostSafety(
     return;
   }
   const host = classification.redactedHost ?? "non-local Postgres";
-  // D18：受管 PG 上不再强制 poll=0（那会让外部参与方事件永不入投影、
+  // 受管 PG 上不强制 poll=0（那会让外部参与方事件永不入投影、
   // reconcile 永卡，只能人工 rebuild）。要求 poll 间隔显式配置；允许 0，
   // 但 =0 必须同时显式确认知情键 UVP_INDEXER_POLL_DISABLED_ACK=1。
   const pollExplicit = env.UVP_INDEXER_POLL_INTERVAL_MS?.trim() !== undefined && env.UVP_INDEXER_POLL_INTERVAL_MS?.trim() !== "";

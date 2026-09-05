@@ -39,8 +39,8 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           if (!parsedQuery.ok) {
             return parsedQuery.response;
           }
-          // 簇 N 修正（审计三轮）：读面鉴权——供应商目录/详情包含钱包、
-          // 主体、任务统计等经营数据，不再匿名可读；要求已认证的 Store
+          // 读面鉴权——供应商目录/详情包含钱包、
+          // 主体、任务统计等经营数据，不匿名可读；要求已认证的 Store
           // 读身份（store.read 能力 + 非 anonymous）。
           const capability = "store.read";
           const resource = { type: "store_supplier" };
@@ -139,7 +139,7 @@ export function createStoreSuppliersRouteModule(): RouteModule {
         const action = supplierMatch[2];
 
         if (request.method === "GET" && !action) {
-          // 簇 N 修正：读面鉴权（同列表口径：已认证 Store 读身份）。
+          // 读面鉴权（同列表口径：已认证 Store 读身份）。
           const readAuthorization = await authorizeStoreCapability(context, request, "store.read", { type: "store_supplier", id: supplierId });
           if (!isStoreAuthorizationResult(readAuthorization)) {
             return readAuthorization;

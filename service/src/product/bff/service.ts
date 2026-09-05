@@ -389,7 +389,7 @@ export function createProductBffService(
       const idempotencyKey = hashHex(
         `uvp:product-bff:trigger:idempotency:v2:${draftId}:${orderId}:${prepareId}`,
       );
-      // 一事一单：链上订单 id 不再自报——按合约 triggerOrderIdFor 同公式
+      // 一事一单：链上订单 id 不由调用方自报——按合约 triggerOrderIdFor 同公式
       // 派生（同一 plan+事实恒定同 id，重放幂等）。本地随机 orderId 仍作为
       // 产品侧关联 id 参与 payload/idempotency 派生，不进链上请求。
       const chainOrderId = deriveTriggerOrderId(
@@ -615,10 +615,9 @@ export function createProductBffService(
         contact: input.contact,
         status: "invited",
       };
-      // 簇 D 修正（审计三轮）：tokenHash 由此前可从请求字段推导的
-      // hash(draftId:participantId:contact) 改为随机 token 的哈希——
-      // 库中只存哈希，明文只在 createInvite 响应出现一次；accept/reject
-      // 强制回呈 token 做哈希比对。inviteId 追加随机熵，不再可枚举。
+      // tokenHash 为随机 token 的哈希——库中只存哈希，明文只在
+      // createInvite 响应出现一次；accept/reject 强制回呈 token 做哈希比对。
+      // inviteId 追加随机熵，不可枚举。
       const inviteToken = randomBytes(32).toString("hex");
       const invite: ProductInviteDTO = {
         inviteId: `${nextId("invite", idScope, sequence++)}_${randomBytes(8).toString("hex")}`,
@@ -667,15 +666,15 @@ export function createProductBffService(
 
     async acceptInvite(inviteId, input) {
       const invite = await requireAcceptableInvite(store, inviteId, now);
-      // 簇 D 修正：token 哈希比对——inviteId 弱凭据不再足以占角色槽。
+      // token 哈希比对——inviteId 是弱凭据，不足以占角色槽。
       assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const acceptedWalletAddress = normalizeAddress(
         input.walletAddress,
         "walletAddress",
       );
-      // 簇 C 修正：sessionWalletAddress 由路由层从会话锚定地址解析（钱包
-      // 会话签名证明或 local dev 锚定头），不再取自自报头。
+      // sessionWalletAddress 由路由层从会话锚定地址解析（钱包
+      // 会话签名证明或 local dev 锚定头），不取自自报头。
       const sessionWalletAddress = normalizeAddress(
         input.sessionWalletAddress,
         "sessionWalletAddress",
@@ -724,7 +723,7 @@ export function createProductBffService(
 
     async rejectInvite(inviteId, input) {
       const invite = await requireAcceptableInvite(store, inviteId, now);
-      // 簇 D 修正：reject 同样强制携带 token。
+      // reject 同样强制携带 token。
       assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const rejected: DraftParticipantDTO = {
@@ -957,7 +956,7 @@ function isInviteExpired(invite: ProductInviteDTO, now: Date): boolean {
   return Date.parse(invite.expiresAt) <= now.getTime();
 }
 
-/** 簇 D 修正（审计三轮）：invite token 的哈希口径（与 createInvite 一致）。 */
+/** invite token 的哈希口径（与 createInvite 一致）。 */
 function inviteTokenHash(token: string): `0x${string}` {
   return hashHex(`uvp:product-bff:invite:v2:${token}`);
 }

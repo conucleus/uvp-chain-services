@@ -27,7 +27,7 @@ export interface EvidenceMetadataStore {
   recordAdminRead(entry: EvidenceAdminReadAuditDTO): Promise<void>;
   listAdminReads?(): Promise<readonly EvidenceAdminReadAuditDTO[]>;
   /**
-   * 簇 N 修正（审计三轮）：证据重复上传幂等——同一 owner 再次上传相同
+   * 证据重复上传幂等——同一 owner 再次上传相同
    * payload（content+metadata+order+stage 全等，即 payloadHash 相同）时
    * 返回既有记录，而不是落一条内容完全相同的副本。
    */

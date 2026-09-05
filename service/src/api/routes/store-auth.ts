@@ -10,7 +10,7 @@ import type { RouteModule } from "../route-module.js";
 import type { ResolveWalletSessionResult } from "../../store-sessions/index.js";
 
 /**
- * PRD89 会话路由：challenge → 钱包签名 → verify（发 token）→ session 读取。
+ * 会话路由：challenge → 钱包签名 → verify（发 token）→ session 读取。
  * token 以 x-uvp-store-session 头回传；敏感操作经 requireAnchoredStoreAddress
  * 强制"会话已锚定地址"。
  */

@@ -23,7 +23,7 @@ import type {
 } from "./store-listings/types.js";
 
 /**
- * PRD89-92 新增 Store 域的 postgres 持久化。
+ * Store 域的 postgres 持久化。
  * 集中一个模块以共享 row 装配助手；schema 见 migrations/postgres/0014、0015。
  */
 

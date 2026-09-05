@@ -73,7 +73,7 @@ export async function startApiServer(
     getProductSchemaByPlan: (planId: string, planHash: string, artifactHash?: string) =>
       stores.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash, artifactHash)
   };
-  // ETH-04(a)：通用 webhook transport。产品渠道决策仍未做，默认关闭——
+  // 通用 webhook transport。产品渠道决策仍未做，默认关闭——
   // 只在显式配置 UVP_NOTIFY_WEBHOOK_URL 时装配 dispatcher；未配置时保持
   // 现状（delivery 记为 transport_adapter_missing），并给出一次性启动警告。
   const notificationDispatcher = config.notifications?.webhookUrl
@@ -91,7 +91,7 @@ export async function startApiServer(
     store,
     supplierMetadataStore: stores.storeSupplierMetadataStore,
     productSchemaResolver,
-    // ETH-04(b)：delivery / read 状态落 sqlite（memory 驱动保持内存语义）。
+    // delivery / read 状态落 sqlite（memory 驱动保持内存语义）。
     ...(stores.notificationStateStore
       ? {
         deliveryStore: stores.notificationStateStore,
@@ -100,7 +100,7 @@ export async function startApiServer(
       : {}),
     ...(notificationDispatcher ? { dispatcher: notificationDispatcher } : {})
   });
-  // open/input/output 的 dock 活性自动化（PRD95 §18：keeper 只提供活性）
+  // open/input/output 的 dock 活性自动化（keeper 只提供活性）
   // 由 DockAutomationWorker 按显式 route source 承担。
   const indexer = eventSource
     ? new IndexerService({
@@ -117,15 +117,15 @@ export async function startApiServer(
   }
 
   const submissionVerifyingContract = stateMachineAddress(config.network.contracts);
-  // 审计 fail-open：stage-patch / docking 模块地址必须显式存在于配置或
-  // 地址清单；缺失时不再回退到状态机地址（strict preflight 亦会对清单
+  // stage-patch / docking 模块地址必须显式存在于配置或
+  // 地址清单；缺失时不回退到状态机地址（strict preflight 亦会对清单
   // 缺项 fail-fast），未配置即不装配对应 patch/docking 服务地址。
   const stagePatchVerifyingContract = stagePatchModuleAddress(config);
   const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(
     config,
     submissionVerifyingContract,
     audit,
-    // ETH-07：sqlite 驱动下 broadcast 去重状态持久化，重启后仍可去重。
+    // sqlite 驱动下 broadcast 去重状态持久化，重启后仍可去重。
     stores.broadcastDedupeStore
   );
   if (!submissionBroadcastAdapter && (config.security.environment !== "local" || config.relayer.broadcastEnabled)) {
@@ -141,7 +141,7 @@ export async function startApiServer(
     store: governanceStore,
     adapter: createConfiguredGovernanceChainAdapter(config),
     audit,
-    // PRD89 descriptor 托管：注册时快照被哈希原文，descriptorURI 指向公开端点。
+    // descriptor 托管：注册时快照被哈希原文，descriptorURI 指向公开端点。
     descriptorSnapshotStore: stores.identityDescriptorSnapshots,
     ...(config.api.identityDescriptorPublicBaseUrl
       ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
@@ -159,7 +159,7 @@ export async function startApiServer(
     governanceStore,
     logger
   });
-  // PRD96 §15：dock liveness worker。routeSource/submitter 未装配时为
+  // dock liveness worker。routeSource/submitter 未装配时为
   // 显式 no-op（候选扫描归零），装配点由云编译 route 数据库接入方提供。
   const dockingModuleAddressValue = moduleAddress(config, "docking", "UVPDockingModule");
   const dockAutomationWorker = new DockAutomationWorker({
@@ -169,8 +169,8 @@ export async function startApiServer(
     chainId: config.network.chainId,
     logger
   });
-  // ETH-06：admin recovery actions 从既有 worker/indexer 原语构造，路由
-  // 不再拿到 ops_dependency_unavailable 的假边界。retrySubmission 复用
+  // admin recovery actions 从既有 worker/indexer 原语构造，路由
+  // 拿不到 ops_dependency_unavailable 的假边界。retrySubmission 复用
   // reconcile 原语（按 receipt 重新推进提交状态）并回报该提交的当前状态。
   const opsRecoveryActions = {
     ...(indexer
@@ -188,7 +188,7 @@ export async function startApiServer(
             }
           };
         },
-        // ETH-04：post-commit 失败批次（游标已前进）的人工补投入口。
+        // post-commit 失败批次（游标已前进）的人工补投入口。
         sweepPendingPostCommitSteps: async () => {
           const summary = await indexer.sweepPendingPostCommitSteps();
           return { status: "completed" as const, summary };
@@ -228,7 +228,7 @@ export async function startApiServer(
     governanceStore,
     governanceService,
     productSchemaResolver,
-    // ETH-03：ops 控制台白名单进入鉴权；未配置时回退 governance admin 检查。
+    // ops 控制台白名单进入鉴权；未配置时回退 governance admin 检查。
     ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
     opsRecoveryActions,
     storeZhixuDraftStore: stores.storeZhixuDraftStore,
@@ -245,7 +245,7 @@ export async function startApiServer(
     ...(config.api.identityDescriptorPublicBaseUrl
       ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
       : {}),
-    // PRD92 锚核验链直读：RPC + 状态机地址齐备时提供第二证据源。
+    // 锚核验链直读：RPC + 状态机地址齐备时提供第二证据源。
     ...(config.network.rpcUrl && submissionVerifyingContract
       ? {
         listingAnchorChainView: createListingAnchorChainView({
@@ -429,7 +429,7 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
         forcePathStyle: evidenceStorageConfig.s3ForcePathStyle ?? false,
         accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv,
         secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv,
-        // Audit #19: forward the optional STS session-token env so temporary
+        // forward the optional STS session-token env so temporary
         // credentials actually reach the S3 client instead of dying at the
         // first upload/read with a 403 that preflight never saw.
         ...(evidenceStorageConfig.s3SessionTokenEnv
@@ -443,7 +443,7 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
           : {})
       })
     });
-    // ETH-05：配置了第二副本 bucket 时，put 同步写第二副本并提供
+    // 配置了第二副本 bucket 时，put 同步写第二副本并提供
     // 按 hash 校验/恢复能力；未配置时保持单副本（preflight 警告）。
     if (evidenceStorageConfig.s3BackupBucket) {
       const backup = new ObjectEvidenceStorage({
@@ -457,7 +457,7 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
           ...(evidenceStorageConfig.s3SessionTokenEnv
             ? { sessionTokenEnv: evidenceStorageConfig.s3SessionTokenEnv }
             : {}),
-          // 簇 N 修正（审计三轮）：备份客户端必须沿用主存储的 uriMode/
+          // 备份客户端必须沿用主存储的 uriMode/
           // objectNamespace——object:// URI 空间下两边不一致会让 verify/
           // restore 的 URI 翻译失效。
           ...(evidenceStorageConfig.s3UriMode === "object"
@@ -486,7 +486,7 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
 function startProjectionRefresh(indexer: IndexerService, config: ChainServicesConfig, logger: Logger): NodeJS.Timeout | undefined {
   const pollIntervalMs = config.api.indexerPollIntervalMs;
   if (pollIntervalMs <= 0) {
-    // D18：poll=0 意味着外部参与方事件永不入投影、reconcile 永卡，只能
+    // poll=0 意味着外部参与方事件永不入投影、reconcile 永卡，只能
     // 人工 rebuild——必须响亮提示，不允许静默。
     logger.warn(
       "INDEXER POLLING IS DISABLED (UVP_INDEXER_POLL_INTERVAL_MS=0): chain events from external participants will never enter the projection, reconcile will stall at indexing, and recovery requires a manual projection rebuild"
@@ -514,9 +514,9 @@ function normalizeStartOptions(
   return configOrOptions;
 }
 
-// 模-5 裁决：跨源默认关闭（不回 allow-origin，浏览器跨源读写被拦）；
+// 跨源默认关闭（不回 allow-origin，浏览器跨源读写被拦）；
 // 显式配置 UVP_API_CORS_ALLOWED_ORIGINS（逗号分隔）后按 Origin 精确回显。
-// 通配 "*" + 放行 x-uvp-* 身份头会让任意网页伪造管理员调用，已废除。
+// 通配 "*" + 放行 x-uvp-* 身份头会让任意网页伪造管理员调用，禁止使用。
 const CORS_ALLOWED_ORIGINS = new Set(
   (process.env.UVP_API_CORS_ALLOWED_ORIGINS ?? "")
     .split(",")

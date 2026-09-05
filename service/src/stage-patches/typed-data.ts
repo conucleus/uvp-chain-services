@@ -32,7 +32,7 @@ export {
   EXECUTOR_PATCH_MODE_REPLACEMENT
 } from "../shared/protocol-constants.js";
 
-// 审计 #10：patch 模块的 EIP-712 结构体现在以 planId 开头
+// patch 模块的 EIP-712 结构以 planId 开头
 // （UVPStagePatchModuleStageExecutorPatch(bytes32 planId,bytes32 orderId,...)）。
 // 字段表从 protocol-bindings 导入，禁止本地漂移。
 export const STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS =
@@ -58,7 +58,7 @@ export interface StageExecutorPatchPayload {
 }
 
 export interface BuildStageExecutorPatchTypedDataInput extends StageExecutorPatchPayload {
-  /** 审计 #10：订单所属 plan，签名首字段。 */
+  /** 订单所属 plan，签名首字段。 */
   readonly planId: Hex;
   readonly chainId: number;
   readonly verifyingContract: Address | string;
@@ -79,7 +79,7 @@ export interface StageResourcePatchPayload {
 }
 
 export interface BuildStageResourcePatchTypedDataInput extends StageResourcePatchPayload {
-  /** 审计 #10：订单所属 plan，签名首字段。 */
+  /** 订单所属 plan，签名首字段。 */
   readonly planId: Hex;
   readonly chainId: number;
   readonly verifyingContract: Address | string;
@@ -262,9 +262,9 @@ export async function recoverStageResourcePatchSigner(
 
 
 export function hashResourceManifest(manifest: ResourceManifestV1): Hex {
-  // ETH-08：manifest hash 必须与 protocol-bindings 的 canonical 实现
-  // （带 domain 与 normalization）一致；本地"排序 JSON 裸 keccak"已废除，
-  // 不做双哈希兼容层（项目未上线，直接统一两栈）。
+  // manifest hash 必须与 protocol-bindings 的 canonical 实现
+  // （带 domain 与 normalization）一致——两栈只维护一种哈希口径，
+  // 不做本地变体。
   try {
     return nonZeroHash(
       hashProtocolResourceManifest(manifest),

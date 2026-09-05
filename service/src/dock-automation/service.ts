@@ -36,7 +36,7 @@ const dockingWriteAbi = [
 ] as const;
 
 /**
- * Dock liveness worker（PRD95 §18：keeper 只提供活性）。
+ * Dock liveness worker（keeper 只提供活性）。
  *
  * 候选发现完全来自投影 + route 来源，keeper 不发明任何协议 word：
  * - open：route 来源携带预组装的 openDockedOrder calldata（permit 路由
@@ -64,7 +64,7 @@ export class DockAutomationWorker implements LifecycleService {
   #checking = false;
   #lastSummary: DockAutomationRunSummary | undefined;
   /**
-   * 最终性窗口去重（0620 L-7）：key → 最近一次成功广播时刻。投影要等
+   * 最终性窗口去重：key → 最近一次成功广播时刻。投影要等
    * 链事件 finalize+索引后才呈现 delivery，窗口内逐轮重发同一 binding 是
    * 纯 gas 浪费的 no-op 交易；窗口过后仍未投递才允许重试（覆盖交易
    * 丢失）。进程内状态即可：keeper 是单实例写者。
@@ -251,7 +251,7 @@ export class DockAutomationWorker implements LifecycleService {
   }
 
   /**
-   * 广播 + 最终性窗口去重（0620 L-7）：同一 key 在 redeliveryWindowMs 内
+   * 广播 + 最终性窗口去重：同一 key 在 redeliveryWindowMs 内
    * 已成功广播过则本轮跳过（计数 deduplicated，不静默）；窗口过后投影
    * 仍未呈现 delivery 才会重试，覆盖交易丢失的情形。
    */

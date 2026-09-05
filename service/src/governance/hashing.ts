@@ -18,7 +18,7 @@ export interface IdentityDescriptorHashInput {
   readonly account: string;
   readonly review?: GovernanceReviewHashInput;
   readonly metadata?: unknown;
-  /** 簇 N 修正（审计三轮）：供应商档案主体必须进 descriptor 哈希。 */
+  /** 供应商档案主体必须进 descriptor 哈希。 */
   readonly profile?: unknown;
   readonly capability?: unknown;
   readonly reputation?: unknown;
@@ -33,8 +33,8 @@ export function hashGovernanceReviewPolicy(input: GovernanceReviewHashInput): He
 }
 
 export function hashIdentityDescriptor(input: IdentityDescriptorHashInput): Hex {
-  // 簇 N 修正（审计三轮）：descriptor 哈希覆盖 profile/capability/reputation
-  //——此前这三块档案可被替换而不改变 descriptorHash，链上指纹形同虚设。
+  // descriptor 哈希必须覆盖 profile/capability/reputation 全部三块档案，
+  // 否则档案可在不改变 descriptorHash 的情况下被替换，链上指纹形同虚设。
   return hashGovernanceCanonicalJson({
     version: 1,
     kind: "identityDescriptor",

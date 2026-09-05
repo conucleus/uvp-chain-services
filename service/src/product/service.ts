@@ -1179,7 +1179,7 @@ async function zhixuDetailForOrder(
     return zhixuDetailFromProductSchema(storeSchema);
   }
 
-  // Schema 未登记时不再回退到任何内置目录；调用方按显式缺失处理。
+  // Schema 未登记时不回退到任何内置目录；调用方按显式缺失处理。
   return undefined;
 }
 
@@ -1442,7 +1442,7 @@ function primaryActionForFulfillment(kind: FulfillmentPluginKind): string {
 function requiredEvidenceForFulfillment(
   kind: FulfillmentPluginKind,
 ): readonly string[] {
-  // 商店框架化裁决：兜底文案不得携带具体业务词（单证/行业类型等），
+  // 商店框架化约束：兜底文案不得携带具体业务词（单证/行业类型等），
   // 只描述"阶段凭证/确认"的通用槽位语义；具体业务词由发布者的
   // evidenceSpec/requiredEvidence 配置携带。
   switch (kind) {

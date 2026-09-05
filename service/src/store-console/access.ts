@@ -37,7 +37,7 @@ export type StoreCapability =
   | "store.docking.save";
 
 /**
- * PRD89：会话锚定地址。锚定来源只能是钱包会话（签名证明）或
+ * 会话锚定地址。锚定来源只能是钱包会话（签名证明）或
  * local 开发头（devAnchoredAddressHeaderEnabled，staging/prod 拒绝）。
  */
 export type StoreAnchorSource = "wallet_session" | "dev_header";
@@ -53,7 +53,7 @@ export interface StoreAccessState {
   readonly governancePrincipal?: GovernancePrincipal;
   readonly canWrite: boolean;
   readonly canAdmin: boolean;
-  /** 会话已证明控制的钱包地址（PRD89 会话配对）。 */
+  /** 会话已证明控制的钱包地址（会话配对）。 */
   readonly anchoredAddress?: Address;
   readonly anchorSource?: StoreAnchorSource;
   readonly walletAccountId?: string;
@@ -401,7 +401,7 @@ function canonicalStoreRoles(roles: readonly string[]): readonly StoreRole[] {
 }
 
 function capabilitiesForStoreRoles(roles: readonly StoreRole[]): readonly StoreCapability[] {
-  // 簇 N 修正（审计三轮）：零角色 JWT 不再并入 store.audit.read——匿名
+  // 零角色 JWT 不并入 store.audit.read——匿名
   // 语义的 token 只拿到公共读（store.read）；audit.read 随 store_reader
   // 及以上角色授予。
   const capabilities = new Set<StoreCapability>(STORE_PUBLIC_READ_CAPABILITIES);

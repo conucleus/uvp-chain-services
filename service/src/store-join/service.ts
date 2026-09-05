@@ -23,7 +23,7 @@ export interface StoreJoinServiceOptions {
   readonly projectionStore: ProjectionStore;
   readonly productService: ProductService;
   readonly supplierService: StoreSupplierService;
-  /** PRD92 红线：加入入口必须被 listing 状态与锚核验抑制（与详情页同口径）。 */
+  /** 红线：加入入口必须被 listing 状态与锚核验抑制（与详情页同口径）。 */
   readonly listingGate?: {
     readonly getListingForPlan: (planId: Hex) => Promise<{
       readonly status: "imported" | "public" | "rejected" | "delisted";
@@ -323,13 +323,13 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
   };
 
   /**
-   * 审批通过后的身份配对链（PRD89/PRD90 配对红线；簇 D 修正后顺序）：
+   * 审批通过后的身份配对链（配对红线）：
    * 1. 双向占用核验（account→subject 与 subject→account，冲突即 409）；
    * 2. 无供应商元数据则以申请信息创建；
    * 3. 治理 review 先行（approved_for_broadcast 落 governance 记录）；
    * 4. 链上身份绑定：地址已有同主体 active binding → 复用其交易证据；
    *    无绑定 → registerIdentity（要求审批者持有 governance_admin 权威，
-   *    与供应商登记路由的能力门禁同口径——publisher 审批不再绕过）。
+   *    与供应商登记路由的能力门禁同口径——publisher 审批不绕过）。
    * 任何一步失败，申请留在 under_review，不落后续状态。
    */
   async function ensureIdentityPairing(
@@ -353,8 +353,8 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         { boundSubjectId: activeBinding.subjectId }
       );
     }
-    // 簇 D 修正（审计三轮）：subjectId→account 方向同样核验——此前只查
-    // 单向，审批会静默覆写既有供应商钱包 / 为其广播新绑定。
+    // subjectId→account 方向同样核验：缺了这一向，审批会静默覆写
+    // 既有供应商钱包 / 为其广播新绑定。
     const subjectBinding = selectActiveBinding(
       await projectionStore.listIdentityBindings({ subjectId: application.applicantSubjectId, activeOnly: true })
     );
@@ -414,7 +414,7 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         principal
       );
     }
-    // 簇 D 修正（审计三轮）：链上身份登记的门禁与
+    // 链上身份登记的门禁与
     // /store/suppliers/:id/request-identity-registration 一致——governance
     // _admin 权威。publisher 审批到此为止；无权威时申请留在 under_review
     // 并提示由治理管理员完成登记。
@@ -545,7 +545,7 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
   }
 
   /**
-   * 簇 D 修正（审计三轮）：激活判定不再"任一订单存在 submitter==申请人"
+   * 激活判定不是"任一订单存在 submitter==申请人"
    * 即通过——链上授权信号必须与申请的槽位对应：
    * - signal_submitter：authorization 的 (sourceId, signalId) 必须落在该
    *   roleSlot 的 orderPermissionTable 能力集合内；
@@ -637,7 +637,7 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
   }
 
   /**
-   * PRD92 红线（服务端强制，与前端抑制同口径）：
+   * 红线（服务端强制，与前端抑制同口径）：
    * listing 已下架/未公开或锚核验冲突时，加入入口关闭。
    * 无 listing（未走上架流）时按链投影可查即放行——上架是 Store 经营动作，
    * 不是链上事实的前置。
@@ -708,7 +708,7 @@ function requireAnchored(actor: StoreJoinActor): Address {
     throw new StoreJoinServiceError(
       401,
       "store_address_anchor_required",
-      "a session anchored to a wallet address is required (PRD89); log in with a wallet session"
+      "a session anchored to a wallet address is required; log in with a wallet session"
     );
   }
   return actor.anchoredAddress;

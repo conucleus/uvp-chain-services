@@ -18,7 +18,7 @@ export interface StoreAuthorizationResult {
 }
 
 /**
- * PRD89 红线：敏感操作（授权、装修、审核写操作）要求会话已锚定地址。
+ * 红线：敏感操作（授权、装修、审核写操作）要求会话已锚定地址。
  * 锚定来源：钱包会话（签名证明）或 local 开发头；服务端强制。
  */
 export interface AnchoredStoreAuthorizationResult {

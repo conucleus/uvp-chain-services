@@ -368,9 +368,9 @@ function assertDraftCompiledForReview(
 }
 
 /**
- * 簇 N 修正（审计三轮）：active schema 守卫修活——此前的判定
- * `draft.status === "active"` 是死条件（草稿状态机从不落 "active"），
- * 已发布 plan 的 schema 仍可原地改写。守卫改用发布状态判定：compile
+ * active schema 守卫：草稿状态机不落 "active"，
+ * 不能以 `draft.status === "active"` 判定，否则已发布 plan 的 schema
+ * 仍可原地改写。守卫用发布状态判定：compile
  * preview 的 (planId, planHash) 已出现在链投影（stateMachinePlans）即
  * 视为已发布，schema 必须走新版本草稿。
  */
@@ -930,9 +930,9 @@ function productSchemaHashPayload(
     planId: schema.planId,
     planHash: schema.planHash,
     artifactHash: schema.artifactHash,
-    // 簇 N 修正（审计三轮）：schema 携带的 onchain hook plan 产物主体进
-    // 哈希——此前该对象可被替换而不改变 schemaHash（artifactHash 字段
-    // 单独存在，但产物本体与摘要字段可以不同步地被篡改）。
+    // schema 携带的 onchain hook plan 产物主体必须进
+    // 哈希——否则该对象可被替换而不改变 schemaHash（artifactHash 字段
+    // 单独存在，产物本体与摘要字段可能不同步地被篡改）。
     onchainHookPlanArtifact: schema.onchainHookPlanArtifact ?? null,
     createOrderTrigger: schema.createOrderTrigger ?? null,
     roleSlots: schema.roleSlots,
@@ -1660,9 +1660,9 @@ function arrayField<TValue>(
 }
 
 /**
- * 簇 N 修正（审计三轮）：roleSlots 类型校验——此前 arrayField 盲转型，
- * 非对象条目（字符串/数字/null）在后续语义校验里以 TypeError 崩成 500。
- * 结构不合法直接 400。
+ * roleSlots 类型校验：arrayField 只做受控转型，
+ * 非对象条目（字符串/数字/null）必须在结构校验层拒绝，
+ * 否则会在后续语义校验里以 TypeError 崩成 500。
  */
 function validatedRoleSlots(values: readonly unknown[], field: string): readonly RoleSlotDTO[] {
   return values.map((slot, index) => {

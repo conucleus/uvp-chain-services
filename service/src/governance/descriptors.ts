@@ -16,7 +16,7 @@ import { normalizeBytes32, type Hex } from "../shared/types.js";
 import { hashIdentityDescriptor, type IdentityDescriptorHashInput } from "./hashing.js";
 
 /**
- * PRD89 身份配对的 descriptor 托管：
+ * 身份配对的 descriptor 托管：
  *
  * - 审核通过的供应商/凝结核档案在 registerIdentity 时以"被哈希的原文"
  *   形式追加为 append-only 快照（subjectId + descriptorHash 唯一）。

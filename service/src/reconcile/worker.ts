@@ -139,7 +139,7 @@ export class TxReconcileWorker implements LifecycleService {
     };
 
     // 每条记录独立 try/catch：单条坏记录（缺字段/投影查询异常）只计失败
-    // 并继续，不再把整轮（以及 /admin/ops/reconcile/run、retrySubmission）
+    // 并继续，不把整轮（以及 /admin/ops/reconcile/run、retrySubmission）
     // 一起拖成 500。
     if (this.#productStore) {
       for (const registration of (await this.#productStore.listRegistrations()).filter(isReconcileableRegistration)) {
@@ -565,8 +565,8 @@ async function registrationProjectionConfirmation(
   projectionStore: ProjectionStore,
   registration: ProductOrderTriggerRecord
 ): Promise<ProjectionConfirmation | undefined> {
-  // 订单身份是 (planId, orderId)：registration.planId 必填（schema NOT NULL，
-  // 无 legacy 空值路径），必须走复合键查询——裸 orderId 在同号订单跨 plan
+  // 订单身份是 (planId, orderId)：registration.planId 必填（schema NOT
+  // NULL），必须走复合键查询——裸 orderId 在同号订单跨 plan
   // 复用时永远查不中，registration 会永卡 indexing。
   const order = await projectionStore.getStateMachineOrder(
     registration.orderId,

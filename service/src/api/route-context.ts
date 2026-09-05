@@ -141,7 +141,7 @@ export interface CreateApiRouterOptions {
   readonly storeJoinApplicationStore?: StoreJoinApplicationStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   /**
-   * ETH-03：OPS_CONSOLE_ADMIN_IDS 白名单（去空格后的 id 列表）。非空时
+   * OPS_CONSOLE_ADMIN_IDS 白名单（去空格后的 id 列表）。非空时
    * /admin/ops 只放行集合内的 admin id；未配置时回退到既有 governance
    * admin 鉴权（adminPrincipalFromHeaders），保持本地开发兼容。
    */
@@ -165,9 +165,9 @@ export interface AdminOpsRecoveryActions {
   runReconcile?(): Promise<AdminOpsActionEffect | void>;
   rebuildProjections?(): Promise<AdminOpsActionEffect | void>;
   retrySubmission?(input: AdminOpsRetrySubmissionInput): Promise<AdminOpsActionEffect | void>;
-  /** ETH-04：补投 post-commit 失败批次（游标已前进的持久 pending 队列）。 */
+  /** 补投 post-commit 失败批次（游标已前进的持久 pending 队列）。 */
   sweepPendingPostCommitSteps?(): Promise<AdminOpsActionEffect | void>;
-  /** ETH-04：列出 pending 队列（人工研判）。 */
+  /** 列出 pending 队列（人工研判）。 */
   listPendingPostCommitSteps?(): Promise<unknown>;
 }
 
@@ -199,7 +199,7 @@ export interface ApiRouteContext {
   readonly productStageResourcePatchService: ProductStageResourcePatchService;
   readonly submissionStore?: ProductSubmissionStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
-  /** ETH-03：见 CreateApiRouterOptions.opsConsoleAdminIds。 */
+  /** 见 CreateApiRouterOptions.opsConsoleAdminIds。 */
   readonly opsConsoleAdminIds?: readonly string[];
   readonly audit: AuditSink;
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;

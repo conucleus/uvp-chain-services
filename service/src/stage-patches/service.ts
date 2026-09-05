@@ -422,7 +422,7 @@ export function createProductStageExecutorPatchService(
         );
       }
 
-      // ETH-01：nonce 已被占用。若 broadcast 或存储写入在落库前抛错且
+      // nonce 已被占用。若 broadcast 或存储写入在落库前抛错且
       // 尚未拿到 txHash，先释放 nonce 再 rethrow：同一 prepareId 在瞬时
       // RPC/存储失败后仍可重试。广播已返回 txHash 后的落库失败不释放——
       // 链上交易可能已占用 nonce（对齐 submissions 主路径：只有确认失败
@@ -689,7 +689,7 @@ export function createProductStageResourcePatchService(
         );
       }
 
-      // ETH-01：同 executor patch 路径——尚未拿到 txHash 的失败先释放
+      // 同 executor patch 路径——尚未拿到 txHash 的失败先释放
       // nonce；广播已返回 txHash 后的落库失败不释放（链上可能已占用
       // nonce，对齐 submissions 主路径语义）。
       let broadcastTxHash: Hex | undefined;
@@ -1630,8 +1630,8 @@ function moduleAddressFor(
   configured: Address | undefined,
   label: string
 ): Address {
-  // 审计 fail-open 修复：模块地址必须显式存在于选项/地址清单中。
-  // 不再静默回退到状态机地址（options.verifyingContract /
+  // 模块地址必须显式存在于选项/地址清单中，
+  // 不静默回退到状态机地址（options.verifyingContract /
   // stateMachineAddressFor 派生）——用错误 verifyingContract 域签出的
   // typed data 无法通过链上域校验，等于把签名发给错误合约。缺失即 fail-closed。
   if (!configured) {

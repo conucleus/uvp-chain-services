@@ -184,9 +184,9 @@ export interface AcceptProductInviteInput {
   readonly walletAddress: string;
   readonly contact: string;
   /**
-   * 簇 D 修正（审计三轮）：accept/reject 必须携带 invite token——token 只
-   * 在 createInvite 响应中出现一次，库中仅存哈希；inviteId 弱凭据不再
-   * 足以占角色槽。
+   * accept/reject 必须携带 invite token——token 只
+   * 在 createInvite 响应中出现一次，库中仅存哈希；inviteId 是弱凭据，
+   * 不足以占角色槽。
    */
   readonly token: string;
   /** 会话锚定地址（路由层解析；钱包会话签名证明或 local dev 锚定头）。 */
@@ -194,7 +194,7 @@ export interface AcceptProductInviteInput {
 }
 
 export interface RejectProductInviteInput {
-  /** 簇 D 修正：reject 同样强制携带 token（哈希比对）。 */
+  /** reject 同样强制携带 token（哈希比对）。 */
   readonly token: string;
   readonly displayName?: string;
   readonly contact?: string;
@@ -224,7 +224,7 @@ export interface ProductInviteResponse {
   readonly participant: DraftParticipantDTO;
   readonly draft: ProductOrderDraftDTO;
   /**
-   * 簇 D 修正（审计三轮）：createInvite 的响应额外携带一次性明文 token
+   * createInvite 的响应额外携带一次性明文 token
    *（库中只存 tokenHash）。后续 accept/reject 必须回呈该 token。
    */
   readonly inviteToken?: string;

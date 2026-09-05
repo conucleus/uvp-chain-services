@@ -56,7 +56,7 @@ const publisherAnchoredHeaders = {
   "x-uvp-store-dev-anchored-address": publisherAddress
 };
 
-describe("audit round 3 path-5 fixes", () => {
+describe("store, governance, and evidence fail-closed behaviors", () => {
   const tempDirs: string[] = [];
 
   afterEach(() => {
@@ -65,7 +65,7 @@ describe("audit round 3 path-5 fixes", () => {
     }
   });
 
-  describe("cluster C: authentication fail-closed", () => {
+  describe("authentication fail-closed", () => {
     const originalEnv = { ...process.env };
 
     afterEach(() => {
@@ -191,7 +191,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster C: activity-feed identity", () => {
+  describe("activity-feed identity", () => {
     it("requires a wallet session outside local and enforces the claimed wallet", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
@@ -238,7 +238,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster D: invite token", () => {
+  describe("invite token", () => {
     it("rejects invite accept/reject without the one-time token", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
@@ -308,7 +308,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster D: join loop", () => {
+  describe("join loop", () => {
     it("blocks approval when the subject is actively bound to another account (409)", async () => {
       const store = new MemoryProjectionStore();
       // rival 账号占用同一 subject（subjectId→account 方向冲突）。
@@ -412,7 +412,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster D: version activate", () => {
+  describe("version activate", () => {
     it("rejects re-anchoring an existing version and unprojected new anchors", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
@@ -442,7 +442,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster N: governance stores and hashing", () => {
+  describe("governance stores and hashing", () => {
     it("putReview does not overwrite created_at on conflict (sqlite)", async () => {
       const dir = mkdtempSync(join(tmpdir(), "uvp-audit3-governance-"));
       tempDirs.push(dir);
@@ -559,7 +559,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster N: decoration memory store alignment", () => {
+  describe("decoration memory store alignment", () => {
     it("rejects duplicate (planId, version) appends like the sqlite unique constraint", async () => {
       const decorationStore = new InMemoryStoreZhixuDecorationStore();
       const record = {
@@ -604,7 +604,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster N: sessions challenge consume", () => {
+  describe("sessions challenge consume", () => {
     it("consumes a challenge exactly once (conditional update)", async () => {
       const store = new InMemoryStoreWalletSessionStore();
       const service = createStoreSessionService({
@@ -620,7 +620,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster N: proof verifier", () => {
+  describe("proof verifier", () => {
     it("treats missing hash material as invalid instead of passing", () => {
       const matched = "0x" + "cc".repeat(32) as Hex;
       expect(verifyProofBundle({
@@ -639,7 +639,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster N: evidence backup wiring", () => {
+  describe("evidence backup wiring", () => {
     it("translates URIs between primary and backup spaces for verify/restore", async () => {
       // 主存储 s3://primary-bucket/prefix/...，备份 s3://backup-bucket/...——
       // 两边 URI 字符串不同，直传主 URI 会抛 "not managed by"。
@@ -756,7 +756,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster N: store read surfaces", () => {
+  describe("store read surfaces", () => {
     it("requires store.read for /store/suppliers reads", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
@@ -850,7 +850,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster N: product schema guards", () => {
+  describe("product schema guards", () => {
     it("rejects malformed roleSlots, covers onchainHookPlanArtifact in the hash, and blocks edits of published plans", async () => {
       const store = new MemoryProjectionStore();
       // 投影里放入 customs plan（draft 将编译到同一 planId）。
@@ -963,7 +963,7 @@ describe("audit round 3 path-5 fixes", () => {
     });
   });
 
-  describe("cluster N: staging readiness", () => {
+  describe("staging readiness", () => {
     it("does not treat an unknown rebuild status as ready", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);

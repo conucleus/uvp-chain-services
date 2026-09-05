@@ -29,7 +29,7 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
   }
 
   async consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined> {
-    // 簇 N 修正：条件占位——只有未消费的挑战才能被置为已消费。
+    // 条件占位——只有未消费的挑战才能被置为已消费。
     const current = this.#challenges.get(nonce);
     if (!current || current.consumedAt) {
       return undefined;

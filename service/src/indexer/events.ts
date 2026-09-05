@@ -13,7 +13,7 @@ export interface ActiveChainEventReplaySummary<TEvent extends ChainEvent = Chain
   readonly activeEventCount: number;
   readonly removedEventCount: number;
   /**
-   * Audit #33: honest metric — true only when this replay actually filtered at
+   * honest metric — true only when this replay actually filtered at
    * least one `removed` log (removedEventCount > 0). It never reports a
    * vacuous true for replays that saw no removed logs at all.
    */
@@ -26,8 +26,8 @@ export interface EventCursor {
   readonly nextBlock: bigint;
   readonly finalizedBlock?: bigint;
   /**
-   * ETH-02：cursor 高度（nextBlock - 1）区块的哈希。下一次追加前用它做
-   * 哈希连续性校验；缺失（旧 cursor 或事件源不支持）时跳过校验。
+   * cursor 高度（nextBlock - 1）区块的哈希。下一次追加前用它做
+   * 哈希连续性校验；缺失（cursor 未持久化哈希或事件源不支持）时跳过校验。
    */
   readonly blockHash?: Hex;
 }

@@ -63,8 +63,7 @@ function openNotificationStateDatabase(
 }
 
 /**
- * ETH-04(b)：通知 delivery / participant read 状态落 sqlite。此前默认
- * 内存存储，进程重启后 delivery 与已读状态全部丢失。
+ * 通知 delivery / participant read 状态落 sqlite，进程重启后不丢失。
  */
 export class SqliteNotificationStateStore implements NotificationDeliveryStore, ParticipantNotificationReadStateStore {
   readonly #database: SqliteDatabase;

@@ -39,9 +39,9 @@ export interface GovernanceReviewDTO {
   readonly createdAt: string;
   readonly updatedAt: string;
   /**
-   * 簇 D 修正（审计三轮）：哈希材料原文（metadata/policy）随 review 记录
-   * 持久化。此前只存哈希，registerIdentity 重建 descriptor 哈希时材料
-   * 丢失（按 null 参与），同一 review 的两处哈希口径分叉。
+   * 哈希材料原文（metadata/policy）随 review 记录
+   * 持久化：registerIdentity 重建 descriptor 哈希时必须有原文可用，
+   * 缺失会按 null 参与哈希，造成同一 review 两处哈希口径分叉。
    */
   readonly metadataDocument?: unknown;
   readonly policyDocument?: unknown;

@@ -18,7 +18,7 @@ export interface WebhookNotificationDispatcherOptions {
 }
 
 /**
- * ETH-04(a)：通用 webhook 通知 transport。产品渠道决策仍未做，默认关闭：
+ * 通用 webhook 通知 transport。产品渠道决策仍未做，默认关闭：
  * 只在显式配置 UVP_NOTIFY_WEBHOOK_URL 时由 server 装配；secret 可选。
  * body 为投递记录的脱敏摘要，不包含通知 payload 明文与外部端点。
  */

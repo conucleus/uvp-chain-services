@@ -407,7 +407,7 @@ describe("chain-services config", () => {
   it("rejects testnet demo controls, permissive auth, memory registration, and unsafe keys", () => {
     const databaseUrl = testnetPostgresConfigUrl();
 
-    // UVP_PRODUCT_DEMO_MODE no longer exists; unknown keys are ignored and no
+    // UVP_PRODUCT_DEMO_MODE is not a known key: unknown keys are ignored and no
     // demo fallback can be enabled anywhere.
     expect(loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_PRODUCT_DEMO_MODE: "1"
@@ -619,7 +619,7 @@ describe("chain-services config", () => {
       UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object"
     }))).toThrow(/UVP_EVIDENCE_STORAGE_ADAPTER=s3/);
 
-    // UVP_PRODUCT_DEMO_MODE no longer exists; unknown keys are ignored and no
+    // UVP_PRODUCT_DEMO_MODE is not a known key: unknown keys are ignored and no
     // demo fallback can be enabled anywhere.
     expect(loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_DEMO_MODE: "1"
@@ -1005,7 +1005,7 @@ describe("chain-services config", () => {
   it("rejects production demo, test controls, permissive auth, redaction gaps, and mock registration", () => {
     expect(loadConfigFromEnv(productionEnv()).security.environment).toBe("production");
 
-    // UVP_PRODUCT_DEMO_MODE no longer exists; unknown keys are ignored and no
+    // UVP_PRODUCT_DEMO_MODE is not a known key: unknown keys are ignored and no
     // demo fallback can be enabled anywhere.
     expect(loadConfigFromEnv(productionEnv({
       UVP_PRODUCT_DEMO_MODE: "1"

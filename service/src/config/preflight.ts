@@ -412,8 +412,8 @@ function runStoreAuthPreflight(
   const storeAuth = effectiveStoreAuthConfig(config);
   const mode = envMode === "dev_headers" || envMode === "jwt" ? envMode : storeAuth.mode;
   const strictRuntime = config.security.environment === "staging" || config.security.environment === "production";
-  // 簇 C 修正（审计三轮）：testnet 同样不允许 dev_headers——自报 store 头
-  // 不是 testnet 的身份证明；且必须显式配置（缺省回落已废除）。
+  // testnet 不允许 dev_headers——自报 store 头不是 testnet 的身份证明；
+  // STORE_AUTH_MODE 必须显式配置。
   const devHeadersAllowed = config.security.environment === "local";
   const evidence = assessStoreAuthEvidence(storeAuth, config.security.environment);
 
@@ -497,14 +497,14 @@ function runProductionSafetyPreflight(
   } else {
     fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production");
   }
-  // 簇 C 修正（审计三轮）：production 此前不检查 RPC——env 缺省静默回落
-  // 127.0.0.1:8545。与 staging/testnet 同口径：显式 + 非本地。
+  // production 的 RPC 必须显式且非本地——env 缺省会静默回落
+  // 127.0.0.1:8545。与 staging/testnet 同口径。
   if (isNonLocalRpcUrl(config.network.rpcUrl)) {
     pass(checks, "network.rpc_url_configured");
   } else {
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must be explicitly configured to a non-local RPC endpoint in production");
   }
-  // 簇 C 修正（审计三轮）：admin 白名单 production 强制非空（空=任意自报
+  // production 强制 admin 白名单非空（空=任意自报
   // admin 通过的 fail-open 已在 governance/auth.ts 收口，这里拦配置）。
   if (config.operatorRoles.adminReviewers.length > 0) {
     pass(checks, "operator.governance_admin_reviewer");
@@ -523,7 +523,7 @@ function runProductionSafetyPreflight(
     pass(checks, "storage.migrations_auto_run");
   }
 
-  // ETH-11：production 不允许静默落到 env 默认值 1。finality 确认数是
+  // production 不允许静默落到 env 默认值 1。finality 确认数是
   // 索引器 reorg 缓冲必须显式配置；追加前哈希连续性校验与有界共同祖先
   // 回滚由 indexer/service.ts 执行，非生产环境保持默认 1。
   if (env.UVP_FINALITY_CONFIRMATIONS?.trim() && config.network.finalityConfirmations > 0) {
@@ -632,8 +632,8 @@ function runTestnetSafetyPreflight(
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia RPC in testnet");
   }
 
-  // 簇 C 修正（审计三轮）：testnet 强制 admin 白名单非空 + STORE_AUTH_MODE
-  // 显式配置（缺省 dev_headers 的静默回落已废除）。
+  // testnet 强制 admin 白名单非空 + STORE_AUTH_MODE
+  // 显式配置（dev_headers 仅限 local）。
   if (config.operatorRoles.adminReviewers.length > 0) {
     pass(checks, "operator.governance_admin_reviewer");
   } else {
@@ -832,7 +832,8 @@ const REQUIRED_STATE_MACHINE_MODULE_KEYS = [
 
 /**
  * 模块清单 fail-closed：索引器只从 deployment.modules（嵌套写法）取模块
- * 地址，扁平写法会静默丢失全部 patch/dock 投影且旧预检全绿。strict 环境
+ * 地址，扁平写法会静默丢失全部 patch/dock 投影，常规配置校验发现不了。
+ * strict 环境
  * （production/testnet/staging）必须有 stateMachineDeployments，且 active
  * deployment 的 modules 含全部必填模块；缺失即启动失败。local 保持豁免
  * （skip），因为本地开发可以只配状态机地址跑最小路径。
@@ -1191,8 +1192,8 @@ async function checkStateMachineModules(input: {
     for (const key of Object.keys(getterByKey) as Array<keyof typeof getterByKey>) {
       const expected = deployment.modules[key];
       if (!expected) {
-        // 审计 fail-open：模块地址必须在配置/地址清单中显式存在
-        // （stage-patch / docking 等模块地址缺失曾按 skip 处理）。
+        // fail-closed：模块地址必须在配置/地址清单中显式存在，
+        // stage-patch / docking 等模块地址缺失不得跳过。
         fail(
           input.checks,
           input.errors,
@@ -1344,12 +1345,12 @@ function diagnosticWarnings(
   if (config.governance.broadcastEnabled && config.security.environment !== "testnet" && config.security.environment !== "staging") {
     warnings.push("env-key governance broadcaster is for testnet/staging rehearsal only and is not production governance");
   }
-  // ETH-04：产品通知渠道决策未做，webhook transport 默认关闭；未配置时
+  // 产品通知渠道决策未做，webhook transport 默认关闭；未配置时
   // 所有投递按 transport_adapter_missing 记录失败，这里给出可见提醒。
   if (!config.notifications?.webhookUrl) {
     warnings.push("UVP_NOTIFY_WEBHOOK_URL is not configured; notification delivery will be recorded as failed (transport_adapter_missing)");
   }
-  // ETH-05：证据只有单副本时提醒配置第二副本 bucket。
+  // 证据只有单副本时提醒配置第二副本 bucket。
   if (config.evidenceStorage.adapter === "s3" && !config.evidenceStorage.s3BackupBucket) {
     warnings.push("UVP_EVIDENCE_BACKUP_BUCKET is not configured; evidence objects have no code-level backup copy");
   }

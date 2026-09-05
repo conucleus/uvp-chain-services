@@ -5,14 +5,12 @@ import { normalizeAddress, type Address } from "../shared/types.js";
 import type { ApiRequest, ApiResponse, ApiRouteContext } from "./route-context.js";
 
 /**
- * 簇 C 修正（审计三轮）：参与者面身份收口。
+ * 参与者面身份收口。
  *
- * - `/product/me*`、activity-feed、product-bff、evidence 此前把 query/
- *   body/header 自报钱包当作唯一身份，可读任意人活动流、代标已读、代任意
- *   owner 上传证据。
- * - 现在：身份 = 会话锚定地址（钱包会话签名证明，或 local 显式开启的
+ * - 身份 = 会话锚定地址（钱包会话签名证明，或 local 显式开启的
  *   dev 锚定头）。自报钱包只允许作为"与锚定地址一致性"的校验对象，
- *   不一致即 403。
+ *   不一致即 403；不得把 query/body/header 自报钱包当作唯一身份，
+ *   否则可读任意人活动流、代标已读、代任意 owner 上传证据。
  * - local（或未声明环境）保留自报回退，与 STORE_AUTH_MODE=dev_headers
  *   仅限 local 的口径一致；非 local 无会话即 401。
  */
@@ -121,7 +119,7 @@ export async function resolveParticipantWalletIdentity(
 }
 
 /**
- * 簇 C 修正：evidence 身份取值——治理白名单口径的 admin（governance/
+ * evidence 身份取值——治理白名单口径的 admin（governance/
  * auth.ts 已收口：非 local 空白名单 fail-closed）或钱包会话锚定地址；
  * 非 local 无会话即拒绝（service 的 requireAuthenticated 抛 401）。
  */

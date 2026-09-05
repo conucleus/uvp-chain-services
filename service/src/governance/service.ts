@@ -57,7 +57,7 @@ export interface GovernanceServiceOptions {
   readonly adapter?: GovernanceChainAdapter;
   readonly now?: () => Date;
   readonly audit?: AuditSink;
-  /** PRD89 descriptor 托管：登记身份时把被哈希的档案原文追加为 append-only 快照。 */
+  /** descriptor 托管：登记身份时把被哈希的档案原文追加为 append-only 快照。 */
   readonly descriptorSnapshotStore?: StoreIdentityDescriptorSnapshotStore;
   /** 配置后 descriptorURI 指向 Store 公开端点（GET /identity/descriptors/...）。 */
   readonly descriptorPublicBaseUrl?: string;
@@ -115,7 +115,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const account = requiredAddress(record, "account");
       const review = await resolveReview(store, record, "supplier", subjectId);
       if (!review) {
-        // Audit #34: never fabricate an on-chain review hash from request-body
+        // never fabricate an on-chain review hash from request-body
         // fields. The removed fallback hashed the caller's own fields with a
         // default "approved_for_broadcast" status, which put a descriptorHash
         // on chain whose review material did not exist anywhere in the store.
@@ -206,7 +206,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
         return { request, broadcast: broadcastFromLog(duplicate), log: duplicate };
       }
       const broadcast = await safeBroadcast(() => broadcastIdentityRevocation(adapter, request));
-      // 簇 N 修正（审计三轮）：revoke 前置状态回退——review 在广播前已翻成
+      // revoke 前置状态回退——review 在广播前已翻成
       // revoked，广播确定性失败时恢复原状态，避免"库 revoked、链上 binding
       // 仍 active"的分叉。
       if (broadcast.status === "failed" && review && review.status !== "revoked") {
@@ -336,8 +336,8 @@ async function saveReviewFromRecord(options: {
     reviewer: options.principal.adminId,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
-    // 簇 D 修正：哈希材料原文随记录持久化，registerIdentity 重建
-    // descriptor 哈希时不再丢 metadata/policy。
+    // 哈希材料原文随记录持久化，registerIdentity 重建
+    // descriptor 哈希时 metadata/policy 不丢。
     ...(metadataDocument !== undefined ? { metadataDocument } : {}),
     ...(policyDocument !== undefined ? { policyDocument } : {})
   };
@@ -449,7 +449,7 @@ function reviewHashInput(review: GovernanceReviewDTO): GovernanceReviewHashInput
     riskLevel: review.riskLevel,
     riskTags: review.riskTags,
     publicSummary: review.publicSummary,
-    // 簇 D 修正：用持久化的哈希材料原文重建，不再丢 metadata/policy。
+    // 用持久化的哈希材料原文重建，metadata/policy 不丢。
     ...(review.metadataDocument !== undefined ? { metadata: review.metadataDocument } : {}),
     ...(review.policyDocument !== undefined ? { policy: review.policyDocument } : {})
   });

@@ -10,8 +10,8 @@ export class InMemoryStoreZhixuDecorationStore implements StoreZhixuDecorationSt
   readonly #versions = new Map<string, StoreZhixuDecorationVersionRecord>();
 
   async appendVersion(record: StoreZhixuDecorationVersionRecord): Promise<void> {
-    // 簇 N 修正（审计三轮）：与 sqlite/postgres 的 UNIQUE(plan_id, version)
-    // 语义对齐——同 plan 同版本号不可覆盖（此前 Map.set 静默替换最新版本）。
+    // 与 sqlite/postgres 的 UNIQUE(plan_id, version) 语义一致：
+    // 同 plan 同版本号不可覆盖。
     const key = `${record.planId.toLowerCase()}#${record.version}`;
     if (this.#versions.has(key)) {
       throw new Error(
@@ -32,9 +32,9 @@ export class InMemoryStorePublisherDelegationStore implements StorePublisherDele
   readonly #delegations = new Map<string, StorePublisherDelegationRecord>();
 
   async appendDelegation(record: StorePublisherDelegationRecord): Promise<void> {
-    // 簇 N 修正（审计三轮）：与 sqlite 的 ON CONFLICT(delegation_id) DO
-    // UPDATE SET revoked_at/revoked_by_address/reason 语义对齐——追加同 id
-    // 记录只更新撤销字段，不整体替换（此前可静默改写 publisher/member）。
+    // 与 sqlite 的 ON CONFLICT(delegation_id) DO UPDATE SET
+    // revoked_at/revoked_by_address/reason 语义一致：追加同 id
+    // 记录只更新撤销字段，不整体替换。
     const existing = this.#delegations.get(record.delegationId);
     if (existing) {
       const updated: StorePublisherDelegationRecord = {

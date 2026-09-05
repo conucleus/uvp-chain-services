@@ -55,7 +55,7 @@ export interface PreparedSubmissionDTO {
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   /**
-   * Audit #10: the state machine ABI is plan-scoped. The prepared signature
+   * the state machine ABI is plan-scoped. The prepared signature
    * commits to (planId, orderId); the zero placeholder is never stored here.
    */
   readonly planId: Hex;

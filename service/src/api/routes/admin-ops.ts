@@ -14,7 +14,7 @@ type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions
 
 interface AdminOpsRequestContext {
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
-  /** ETH-03：OPS_CONSOLE_ADMIN_IDS 白名单；非空时只放行集合内 admin id。 */
+  /** OPS_CONSOLE_ADMIN_IDS 白名单；非空时只放行集合内 admin id。 */
   readonly opsConsoleAdminIds?: readonly string[];
   readonly actions?: {
     runReconcile?(): Promise<AdminOpsActionEffect | void>;
@@ -61,7 +61,7 @@ async function handleAdminOpsRequest(
       body: { error: "forbidden" }
     };
   }
-  // ETH-03：OPS_CONSOLE_ADMIN_IDS 只在配置了白名单时生效——配置为非空
+  // OPS_CONSOLE_ADMIN_IDS 只在配置了白名单时生效——配置为非空
   // 集合后，governance reviewer 即使通过通用 admin 鉴权也不在 ops 白名单
   // 内，必须 403；未配置（本地开发）回退既有 governance admin 检查。
   if (context.opsConsoleAdminIds && context.opsConsoleAdminIds.length > 0) {
@@ -113,7 +113,7 @@ async function handleAdminOpsRequest(
     });
   }
 
-  // ETH-04：post-commit 失败批次（信号通知/投影自动化）的持久 pending
+  // post-commit 失败批次（信号通知/投影自动化）的持久 pending
   // 队列——列表供研判，重试触发一轮 sweep 直至成功或人工干预。
   if (request.method === "GET" && request.pathname === "/admin/ops/indexer/pending-steps") {
     if (!context.actions?.listPendingPostCommitSteps) {

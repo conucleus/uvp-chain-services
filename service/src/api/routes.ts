@@ -195,7 +195,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.submissionStore ? { store: options.submissionStore } : {}),
     chainId: submissionChainId,
     verifyingContract: submissionVerifyingContract,
-    // 审计 #10：plan 作用域 submitSignal 的 planId 取自索引器投影
+    // plan 作用域 submitSignal 的 planId 取自索引器投影
     // （OrderRegistered/OrderMaterialized 的 indexed planId）。
     resolveOrderPlanId: resolveOrderPlanIdFromStore(store),
     ...(options.submissionBroadcastAdapter ? { broadcastAdapter: options.submissionBroadcastAdapter } : {}),
@@ -203,8 +203,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     audit
   });
   const stageExecutorPatchChainId = options.stageExecutorPatchChainId ?? options.submissionChainId;
-  // 审计 fail-open：patch/docking 模块地址必须显式提供（地址清单），
-  // 不再默认到 submissionVerifyingContract（状态机地址）；缺省时服务不持有
+  // patch/docking 模块地址必须显式提供（地址清单），
+  // 不默认到 submissionVerifyingContract（状态机地址）；缺省时服务不持有
   // 模块地址，patch/docking prepare 按模块地址缺失 fail-closed。
   const stageExecutorPatchVerifyingContract = options.stageExecutorPatchVerifyingContract;
   const productStageExecutorPatchService = options.productStageExecutorPatchService ?? createProductStageExecutorPatchService({
@@ -259,7 +259,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
     ...(storeAuthConfig ? { authConfig: storeAuthConfig } : {})
   });
-  // PRD89：钱包会话叠加层（未启用时原样透传，fail-closed）。
+  // 钱包会话叠加层（未启用时原样透传，fail-closed）。
   const storeIdentityProvider = createWalletSessionStoreIdentityProvider({
     base: baseStoreIdentityProvider,
     sessionService,
@@ -283,7 +283,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     productService,
     supplierService: storeSupplierService,
     publisherAccess: storeDecorationService,
-    // PRD92 红线：加入入口被下架/锚冲突 listing 抑制（服务端强制）。
+    // 红线：加入入口被下架/锚冲突 listing 抑制（服务端强制）。
     listingGate: {
       getListingForPlan: async (planId) => {
         const detail = await listingService.findListingByPlanId(planId);
@@ -460,7 +460,7 @@ function equalHex(left: string, right: string): boolean {
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 /**
- * 审计 #10：plan 作用域 submitSignal 的 planId 从索引器投影读取
+ * plan 作用域 submitSignal 的 planId 从索引器投影读取
  * （OrderRegistered/OrderMaterialized 均带 indexed planId，投影行已存）。
  * 找不到非零 planId 时返回 undefined，由 submission service 拒绝 prepare；
  * 同号订单跨 plan 复用（多命中非零 planId）时歧义即拒

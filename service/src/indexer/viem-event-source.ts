@@ -56,7 +56,7 @@ const orderLinkModuleAbi = parseAbi([
   "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 planId,bytes32 originPlanId,bytes32 originSourceId,bytes32 originSignalId)",
 ]);
 
-// UVPDockingModule v2（uvp.dock.v1 统一委托协议，PRD93-96）。
+// UVPDockingModule v2（uvp.dock.v1 统一委托协议）。
 const dockingModuleAbi = parseAbi([
   "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
   "event DockInputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed inputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 payloadHash,address submitter)",
@@ -158,7 +158,7 @@ export class ViemChainEventSource implements ChainEventSource {
 
   async getFinalizedBlock(config: ChainServicesConfig): Promise<bigint> {
     const latestBlock = await this.#client(config).getBlockNumber();
-    // ETH-02：reorg 安全 = finalityConfirmations 缓冲 + indexer/service.ts
+    // reorg 安全 = finalityConfirmations 缓冲 + indexer/service.ts
     // 的追加前哈希连续性校验与有界共同祖先回滚。超过回滚窗口的深 reorg
     // 仍需 full rebuild；`removed` log 的墓碑/复活过滤在 replay 层完成。
     const confirmations = BigInt(config.network.finalityConfirmations);
@@ -169,7 +169,7 @@ export class ViemChainEventSource implements ChainEventSource {
   }
 
   /**
-   * ETH-02：返回当前 canonical 链上指定高度的区块哈希，供 indexer 在
+   * 返回当前 canonical 链上指定高度的区块哈希，供 indexer 在
    * 追加事件前校验 cursor 连续性、reorg 时定位共同祖先。
    */
   async getBlockHash(

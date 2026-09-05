@@ -4,8 +4,8 @@ import { createApiRouter } from "../src/api/routes.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 
-describe("API route modularization", () => {
-  it("keeps the composed router fallback behavior stable", async () => {
+describe("API router composition", () => {
+  it("returns not_found for unknown routes", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(router.handle({ method: "GET", pathname: "/unknown-route" }))
@@ -15,7 +15,7 @@ describe("API route modularization", () => {
       });
   });
 
-  it("keeps production reads free of demo fallback data", async () => {
+  it("serves production reads without demo fallback data", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "production",
       evidenceStorage: productionSafeEvidenceStorage()
@@ -31,7 +31,7 @@ describe("API route modularization", () => {
     });
   });
 
-  it("keeps route composition in the public factory and not in route modules", () => {
+  it("route modules do not cross-import; composition stays in the public factory", () => {
     const apiDir = new URL("../src/api/", import.meta.url);
     const modulesDir = new URL("routes/", apiDir);
     for (const filename of readdirSync(modulesDir).filter((name) => name.endsWith(".ts"))) {

@@ -264,8 +264,8 @@ export function createStoreSupplierService(
     async reviewSupplier(supplierId, input, principal) {
       const current = await requireMetadata(metadataStore, supplierId);
       const record = mergeReviewMetadata(current, input, now().toISOString());
-      // 簇 D 修正（审计三轮）："先过治理、后改库"——治理 review 落库成功
-      // 之后才写 Store 元数据。此前先改库后过治理，治理失败时两边分叉
+      // "先过治理、后改库"：治理 review 落库成功
+      // 之后才写 Store 元数据，治理失败时两边不分叉
       //（库显示新状态、治理记录不存在）。
       const governance = await options.governanceService.reviewSupplier(
         governanceReviewInput(record, input),
@@ -412,8 +412,8 @@ export function createStoreSupplierService(
           "an active identity binding is required before requesting revocation",
         );
       }
-      // 簇 N 修正（审计三轮）："先过治理、后改库"——撤销广播失败时 Store
-      // 元数据不再预先翻成 revoked（此前失败即分叉：库 revoked、链上
+      // "先过治理、后改库"：撤销广播失败时 Store
+      // 元数据不预先翻成 revoked（否则分叉：库 revoked、链上
       // binding 仍 active）。广播结果非 failed 才落库。
       const governance = await options.governanceService.revokeIdentity(
         supplierRevocationInput(current, input, activeBinding.bindingId),

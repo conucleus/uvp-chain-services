@@ -1,7 +1,7 @@
 import type { Address, Hex } from "../shared/types.js";
 
 /**
- * PRD89 — Store 身份与会话。
+ * Store 身份与会话。
  *
  * 会话配对：Store 登录会话 ↔ 责任主体钱包地址。签名证明（SIWE 式
  * personal_sign challenge）建立"该会话控制该地址"的事实；服务端只保存
@@ -56,7 +56,7 @@ export interface StoreWalletSessionStore {
   listChallengesForAddress(address: Address): Promise<readonly StoreAuthChallengeRecord[]>;
   updateChallenge(record: StoreAuthChallengeRecord): Promise<void>;
   /**
-   * 簇 N 修正（审计三轮）：挑战一次性占位的条件 UPDATE——
+   * 挑战一次性占位的条件 UPDATE——
    * `UPDATE ... SET consumed_at = ? WHERE nonce = ? AND consumed_at IS NULL`，
    * 仅当确实占位成功（行数=1）才返回占位后的记录；并发重放同一 nonce
    * 只有一个请求能通过（burn-on-attempt 原子化）。
