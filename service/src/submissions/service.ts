@@ -427,6 +427,9 @@ export function createProductSubmissionService(options: ProductSubmissionService
         } catch (error) {
           try {
             await audit.record({
+              // 审计 type 即分类载体：evidence_bind_failed 尚无 taxonomy
+              // 条目（taxonomy 在 uvp-protocol 仓登记，超出本编队所有权），
+              // 不引入未登记的 errorCode 字面量。
               type: "relayer.submit.evidence_bind_failed",
               action: prepared.signalName,
               outcome: "failed",
@@ -435,7 +438,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
                 submissionId: submission.submissionId,
                 ...(submission.txHash ? { txHash: submission.txHash } : {})
               },
-              errorCode: "evidence_bind_failed",
               retryable: true,
               metadata: {
                 message: error instanceof Error ? redactErrorMessage(error) : "unknown evidence bind error"
