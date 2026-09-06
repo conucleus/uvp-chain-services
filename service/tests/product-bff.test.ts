@@ -107,21 +107,93 @@ describe("product BFF order drafts and invites", () => {
     const getResponse = await router.handle({
       method: "GET",
       pathname: `/product/order-drafts/${body.draft.draftId}`,
+      headers: creatorHeaders(),
     });
     expect(getResponse.status).toBe(200);
     expect((getResponse.body as DraftResponse).participants).toHaveLength(
       body.participants.length,
     );
 
+    // KEEP：非创建者钱包不可修改他人草稿（越权拒绝）。
+    const strangerPatch = await router.handle({
+      method: "PATCH",
+      pathname: `/product/order-drafts/${body.draft.draftId}`,
+      headers: { "x-uvp-wallet-address": testWallet(9) },
+      body: { title: "Hijacked purchase" },
+    });
+    expect(strangerPatch).toMatchObject({ status: 403, body: { error: "not_draft_creator" } });
+
     const patchResponse = await router.handle({
       method: "PATCH",
       pathname: `/product/order-drafts/${body.draft.draftId}`,
+      headers: creatorHeaders(),
       body: { title: "Updated purchase", goods: ["vehicles"] },
     });
     expect(patchResponse.status).toBe(200);
     expect(
       (patchResponse.body as { draft: ProductOrderDraftDTO }).draft.title,
     ).toBe("Updated purchase");
+  });
+
+  it("restricts draft writes, invites, and participant reads to the anchored creator or accepted participants", async () => {
+    // KEEP（草稿/邀请面鉴权收口）：
+    // - PATCH/createInvite 限创建者（建单时会话锚定地址）；
+    // - 参与者名单（含联系方式）限创建者或已接受参与者；
+    // - 无会话身份的匿名调用一律 401（local 之外同样 fail-closed）。
+    const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
+    const draft = (
+      await createDraft(router).then((response) => response.body as DraftResponse)
+    ).draft;
+    expect(draft.createdBy).toBe(testWallet(0));
+
+    // 匿名读/写一律 401。
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/orders/${draft.draftId}/participants`
+    })).resolves.toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+    await expect(router.handle({
+      method: "PATCH",
+      pathname: `/product/order-drafts/${draft.draftId}`,
+      body: { title: "x" }
+    })).resolves.toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/orders/${draft.draftId}/invites`,
+      body: { roleSlotId: "funds", contact: "x@example.com" }
+    })).resolves.toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+
+    // 无关钱包（未接受任何角色）不得读名单或发邀请。
+    const stranger = { "x-uvp-wallet-address": testWallet(9) };
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/orders/${draft.draftId}/participants`,
+      headers: stranger
+    })).resolves.toMatchObject({ status: 403, body: { error: "draft_access_forbidden" } });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/orders/${draft.draftId}/invites`,
+      headers: stranger,
+      body: { roleSlotId: "funds", contact: "x@example.com" }
+    })).resolves.toMatchObject({ status: 403, body: { error: "not_draft_creator" } });
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/order-drafts/${draft.draftId}`,
+      headers: stranger
+    })).resolves.toMatchObject({ status: 403, body: { error: "draft_access_forbidden" } });
+
+    // 已接受参与者可读名单（invitee 需要看到协同方），但不可发邀请。
+    const accepted = await inviteAndAccept(router, draft.draftId, "funds", 1);
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/orders/${draft.draftId}/participants`,
+      headers: { "x-uvp-wallet-address": accepted.participant.walletAddress ?? testWallet(1) }
+    })).resolves.toMatchObject({ status: 200 });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/orders/${draft.draftId}/invites`,
+      headers: { "x-uvp-wallet-address": accepted.participant.walletAddress ?? testWallet(1) },
+      body: { roleSlotId: "supply", contact: "s@example.com" }
+    })).resolves.toMatchObject({ status: 403, body: { error: "not_draft_creator" } });
   });
 
   it("accepts and rejects participant invites", async () => {
@@ -393,6 +465,7 @@ describe("product BFF order drafts and invites", () => {
       },
       submissionChainId: 84532,
       submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "local",
       productRegistrationAdapter: new MemoryProductOrderTriggerBroadcastAdapter(),
       productBffStore: productStore
     });
@@ -472,6 +545,7 @@ describe("product BFF order drafts and invites", () => {
     const readyDraft = await router.handle({
       method: "GET",
       pathname: `/product/order-drafts/${draft.draftId}`,
+      headers: creatorHeaders(),
     });
     expect((readyDraft.body as DraftResponse).draft.status).toBe(
       "ready_to_trigger",
@@ -997,6 +1071,8 @@ async function createRouterFixture(
   await store.resetFromEvents({ deploymentBlock: 0n, events });
   return {
     router: createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      // local 显式声明：参与者面 dev 自报头仅在该环境可用（fail-closed）。
+      productRuntimeEnvironment: "local",
       productRegistrationAdapter: triggerAdapter,
       productBffStore: productStore,
     }),
@@ -1006,17 +1082,22 @@ async function createRouterFixture(
   };
 }
 
+/** 建单者（运营方）的本地 dev 会话头——草稿创建/修改/邀请/名单读取按此锚定。 */
+function creatorHeaders(): Record<string, string> {
+  return { "x-uvp-wallet-address": testWallet(0) };
+}
+
 async function createDraft(router: ApiRouter) {
   return router.handle({
     method: "POST",
     pathname: "/product/order-drafts",
+    headers: creatorHeaders(),
     body: {
       zhixuId: CROSS_BORDER_ZHIXU_ID,
       title: "A company purchase",
       businessType: "parallel-export",
       totalAmount: "10000",
-      currency: "USDC",
-      createdBy: testWallet(0),
+      currency: "USDC"
     },
   });
 }
@@ -1037,6 +1118,7 @@ async function createReadyDraft(
   const readyResponse = await router.handle({
     method: "GET",
     pathname: `/product/order-drafts/${draft.draftId}`,
+    headers: creatorHeaders(),
   });
   expect(readyResponse.status).toBe(200);
   expect((readyResponse.body as DraftResponse).draft.status).toBe(
@@ -1141,13 +1223,14 @@ async function createInvite(
   const response = await router.handle({
     method: "POST",
     pathname: `/product/orders/${draftId}/invites`,
+    headers: creatorHeaders(),
     body: {
       roleSlotId,
       contact,
       ...(expiresAt ? { expiresAt } : {}),
     },
   });
-  expect(response.status).toBe(201);
+  expect(response.status, JSON.stringify(response.body)).toBe(201);
   return response.body as InviteResponse;
 }
 
@@ -1185,6 +1268,7 @@ async function listParticipants(
   const response = await router.handle({
     method: "GET",
     pathname: `/product/orders/${draftId}/participants`,
+    headers: creatorHeaders(),
   });
   expect(response.status).toBe(200);
   return (response.body as { participants: readonly DraftParticipantDTO[] })

@@ -95,10 +95,14 @@ export interface ProductBffService {
   createDraft(
     input: CreateProductOrderDraftInput,
   ): Promise<DraftWithParticipants>;
-  getDraft(draftId: string): Promise<DraftWithParticipants>;
+  getDraft(
+    draftId: string,
+    readerWallet: Address,
+  ): Promise<DraftWithParticipants>;
   updateDraft(
     draftId: string,
     input: UpdateProductOrderDraftInput,
+    actorWallet: Address,
   ): Promise<ProductOrderDraftDTO>;
   prepareOrderTrigger(
     draftId: string,
@@ -112,6 +116,7 @@ export interface ProductBffService {
   createInvite(
     draftId: string,
     input: CreateProductInviteInput,
+    actorWallet: Address,
   ): Promise<InviteWithDraft>;
   getInvite(
     inviteId: string,
@@ -125,7 +130,10 @@ export interface ProductBffService {
     inviteId: string,
     input: RejectProductInviteInput,
   ): Promise<InviteWithDraft>;
-  listParticipants(draftId: string): Promise<readonly DraftParticipantDTO[]>;
+  listParticipants(
+    draftId: string,
+    readerWallet: Address,
+  ): Promise<readonly DraftParticipantDTO[]>;
   listParticipantAssignments(
     walletAddress: string,
   ): Promise<readonly ProductParticipantAssignmentDTO[]>;
@@ -241,13 +249,16 @@ export function createProductBffService(
       return { draft, participants };
     },
 
-    async getDraft(draftId) {
+    async getDraft(draftId, readerWallet) {
       const draft = await requireDraft(store, draftId);
-      return { draft, participants: await store.listParticipants(draftId) };
+      const participants = await store.listParticipants(draftId);
+      assertDraftAffiliate(draft, participants, readerWallet);
+      return { draft, participants };
     },
 
-    async updateDraft(draftId, input) {
+    async updateDraft(draftId, input, actorWallet) {
       const current = await requireDraft(store, draftId);
+      assertDraftCreator(current, actorWallet);
       const draft: ProductOrderDraftDTO = {
         ...current,
         ...(input.title !== undefined ? { title: input.title } : {}),
@@ -569,8 +580,9 @@ export function createProductBffService(
       });
     },
 
-    async createInvite(draftId, input) {
+    async createInvite(draftId, input, actorWallet) {
       const draft = await requireDraft(store, draftId);
+      assertDraftCreator(draft, actorWallet);
       const participant = await requireRoleParticipant(
         store,
         draftId,
@@ -749,9 +761,11 @@ export function createProductBffService(
       });
     },
 
-    async listParticipants(draftId) {
-      await requireDraft(store, draftId);
-      return store.listParticipants(draftId);
+    async listParticipants(draftId, readerWallet) {
+      const draft = await requireDraft(store, draftId);
+      const participants = await store.listParticipants(draftId);
+      assertDraftAffiliate(draft, participants, readerWallet);
+      return participants;
     },
 
     async listParticipantAssignments(walletAddress) {
@@ -839,6 +853,74 @@ async function requireDraft(
     throw new ProductBffError(404, "draft_not_found", "order draft not found");
   }
   return draft;
+}
+
+/**
+ * 草稿归属校验。createdBy 只信建单时会话锚定地址——非地址值（匿名
+ * 建单兼容路径）或他人的钱包都无权修改/发邀请，fail-closed。
+ */
+function assertDraftCreator(
+  draft: ProductOrderDraftDTO,
+  actorWallet: Address,
+): void {
+  if (isDraftCreator(draft, actorWallet)) {
+    return;
+  }
+  throw new ProductBffError(
+    403,
+    "not_draft_creator",
+    "only the wallet that created this order draft (anchored at creation time) may perform this action",
+    { draftId: draft.draftId },
+  );
+}
+
+/** 参与者名单/草稿读取：创建者或该草稿已接受参与者。 */
+function assertDraftAffiliate(
+  draft: ProductOrderDraftDTO,
+  participants: readonly DraftParticipantDTO[],
+  readerWallet: Address,
+): void {
+  if (
+    isDraftCreator(draft, readerWallet) ||
+    isAcceptedParticipantWallet(participants, readerWallet)
+  ) {
+    return;
+  }
+  throw new ProductBffError(
+    403,
+    "draft_access_forbidden",
+    "only the draft creator or an accepted participant may read this draft",
+    { draftId: draft.draftId },
+  );
+}
+
+function isDraftCreator(
+  draft: ProductOrderDraftDTO,
+  wallet: Address,
+): boolean {
+  if (!draft.createdBy) {
+    return false;
+  }
+  try {
+    return (
+      normalizeAddress(draft.createdBy, "createdBy").toLowerCase() ===
+      wallet.toLowerCase()
+    );
+  } catch {
+    // createdBy 不是合法地址（匿名建单）：无可验证创建者。
+    return false;
+  }
+}
+
+function isAcceptedParticipantWallet(
+  participants: readonly DraftParticipantDTO[],
+  wallet: Address,
+): boolean {
+  return participants.some(
+    (participant) =>
+      participant.status === "accepted" &&
+      participant.walletAddress?.toLowerCase() === wallet.toLowerCase(),
+  );
 }
 
 async function requireRoleParticipant(

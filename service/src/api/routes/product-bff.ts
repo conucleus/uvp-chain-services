@@ -29,7 +29,19 @@ export function createProductBffRouteModule(options: {
       if (request.method === "POST" && request.pathname === "/product/order-drafts") {
         const input = parseCreateDraftBody(request.body);
         return handleProductBffRequest(async () => {
-          const result = await context.productBffService.createDraft(input);
+          // createdBy 不取自 body 自报（可冒充他人建单）——有会话锚定
+          // 钱包时记录锚定地址，无身份时保留匿名建单兼容路径；但匿名
+          // 草稿的修改/邀请/参与者读取全部 fail-closed（见下）。
+          const wallet = await resolveParticipantWalletIdentity(
+            request,
+            context,
+            options.runtimeEnvironment,
+            { includeBodyWallet: false }
+          );
+          const result = await context.productBffService.createDraft({
+            ...input,
+            ...(wallet.ok ? { createdBy: wallet.identity.walletAddress } : {})
+          });
           return {
             status: 201,
             body: result
@@ -77,16 +89,31 @@ export function createProductBffRouteModule(options: {
       if (productOrderDraftMatch) {
         const draftId = decodeURIComponent(productOrderDraftMatch[1] ?? "");
         if (request.method === "GET") {
-          return handleProductBffRequest(async () => ({
-            status: 200,
-            body: await context.productBffService.getDraft(draftId)
-          }), { audit: context.audit });
+          return handleProductBffRequest(async () => {
+            // 草稿读取返回完整参与者名单（含联系方式），与 listParticipants
+            // 同门槛：会话锚定钱包（创建者/已接受参与者由服务端核验）。
+            const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+            if (!wallet.ok) {
+              return wallet.response;
+            }
+            return {
+              status: 200,
+              body: await context.productBffService.getDraft(draftId, wallet.identity.walletAddress)
+            };
+          }, { audit: context.audit });
         }
         if (request.method === "PATCH") {
-          return handleProductBffRequest(async () => ({
-            status: 200,
-            body: { draft: await context.productBffService.updateDraft(draftId, parseUpdateDraftBody(request.body)) }
-          }), { audit: context.audit });
+          return handleProductBffRequest(async () => {
+            // 修改限创建者：会话锚定钱包必须等于建单时记录的 createdBy。
+            const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+            if (!wallet.ok) {
+              return wallet.response;
+            }
+            return {
+              status: 200,
+              body: { draft: await context.productBffService.updateDraft(draftId, parseUpdateDraftBody(request.body), wallet.identity.walletAddress) }
+            };
+          }, { audit: context.audit });
         }
       }
 
@@ -94,7 +121,13 @@ export function createProductBffRouteModule(options: {
       if (request.method === "POST" && productOrderInviteMatch) {
         return handleProductBffRequest(async () => {
           const draftId = decodeURIComponent(productOrderInviteMatch[1] ?? "");
-          const result = await context.productBffService.createInvite(draftId, parseCreateInviteBody(request.body));
+          // 邀请由创建者签发（token 只回到创建响应），任何会话钱包
+          // 不得替他人草稿发邀请。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
+          const result = await context.productBffService.createInvite(draftId, parseCreateInviteBody(request.body), wallet.identity.walletAddress);
           return {
             status: 201,
             body: publicInviteResponse(result)
@@ -161,9 +194,15 @@ export function createProductBffRouteModule(options: {
       if (request.method === "GET" && productOrderParticipantsMatch) {
         return handleProductBffRequest(async () => {
           const draftId = decodeURIComponent(productOrderParticipantsMatch[1] ?? "");
+          // 参与者名单含联系方式，读门槛与 accept 同级证明（会话锚定
+          // 钱包），且仅限创建者或该草稿的已接受参与者（服务端核验）。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
           return {
             status: 200,
-            body: { participants: await context.productBffService.listParticipants(draftId) }
+            body: { participants: await context.productBffService.listParticipants(draftId, wallet.identity.walletAddress) }
           };
         }, { audit: context.audit });
       }
@@ -238,7 +277,12 @@ function parseCreateDraftBody(body: unknown): CreateProductOrderDraftInput {
   const destinationRegion = optionalString(record, "destinationRegion");
   const expectedCompletionDate = optionalString(record, "expectedCompletionDate");
   const notes = optionalString(record, "notes");
-  const createdBy = optionalString(record, "createdBy");
+  // createdBy 由服务端从会话锚定地址派生，不读 body 自报值。
+  for (const field of ["createdBy"]) {
+    if (Object.hasOwn(record, field)) {
+      throw new ProductBffError(400, "immutable_field", `${field} cannot be set by clients`);
+    }
+  }
 
   return {
     zhixuId: requiredString(record, "zhixuId"),
@@ -250,8 +294,7 @@ function parseCreateDraftBody(body: unknown): CreateProductOrderDraftInput {
     ...(exportRegion !== undefined ? { exportRegion } : {}),
     ...(destinationRegion !== undefined ? { destinationRegion } : {}),
     ...(expectedCompletionDate !== undefined ? { expectedCompletionDate } : {}),
-    ...(notes !== undefined ? { notes } : {}),
-    ...(createdBy !== undefined ? { createdBy } : {})
+    ...(notes !== undefined ? { notes } : {})
   };
 }
 
