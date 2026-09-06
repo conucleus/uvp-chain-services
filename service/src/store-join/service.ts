@@ -325,11 +325,13 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
   /**
    * 审批通过后的身份配对链（配对红线）：
    * 1. 双向占用核验（account→subject 与 subject→account，冲突即 409）；
-   * 2. 无供应商元数据则以申请信息创建；
-   * 3. 治理 review 先行（approved_for_broadcast 落 governance 记录）；
-   * 4. 链上身份绑定：地址已有同主体 active binding → 复用其交易证据；
-   *    无绑定 → registerIdentity（要求审批者持有 governance_admin 权威，
-   *    与供应商登记路由的能力门禁同口径——publisher 审批不绕过）。
+   * 2. 门禁前置：无既有 active binding 时，链上登记要求 governance_admin
+   *    权威——在建供应商/翻 approved_for_broadcast 等任何副作用之前
+   *    拒绝，绝不留下"供应商已建、审批却失败"的半提交；
+   * 3. 无供应商元数据则以申请信息创建；
+   * 4. 治理 review 先行（approved_for_broadcast 落 governance 记录）；
+   * 5. 链上身份绑定：地址已有同主体 active binding → 复用其交易证据；
+   *    无绑定 → registerIdentity。
    * 任何一步失败，申请留在 under_review，不落后续状态。
    */
   async function ensureIdentityPairing(
@@ -366,6 +368,29 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         { boundAccount: subjectBinding.account }
       );
     }
+    // 门禁前置：需要链上登记（无 active binding）时先核验 governance
+    // _admin 权威——此前该检查在创建供应商、翻转 approved_for_broadcast、
+    // 落治理 review 之后才执行且不回滚，失败留下半提交状态。
+    if (!activeBinding && !actor.governanceAdmin) {
+      await emitAudit({
+        action: "join.approved",
+        applicationId: application.applicationId,
+        planId: application.planId,
+        ...(actor.anchoredAddress ? { actorAddress: actor.anchoredAddress } : {}),
+        outcome: "blocked",
+        errorCode: "governance_admin_required",
+        createdAt: now().toISOString()
+      });
+      throw new StoreJoinServiceError(
+        403,
+        "governance_admin_required",
+        "on-chain identity registration requires a governance admin (the plan publisher approval alone must not broadcast identity bindings); re-run the approval with a governance-admin session or use the supplier identity-registration endpoint",
+        { applicationId: application.applicationId }
+      );
+    }
+    // principal 只承载真实身份：operatorId 取审批者锚定地址（本函数
+    // 调用前 requireAnchored 已保证存在），role 只在真实持有
+    // governance_admin 时标治理权威——不把 plan publisher 包装成运营方。
     const principal: StoreOperatorPrincipal = {
       operatorId: actor.anchoredAddress ?? actor.principalId ?? "join-reviewer",
       role: actor.governanceAdmin ? "governance_admin" : "store_operator"
@@ -414,18 +439,7 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         principal
       );
     }
-    // 链上身份登记的门禁与
-    // /store/suppliers/:id/request-identity-registration 一致——governance
-    // _admin 权威。publisher 审批到此为止；无权威时申请留在 under_review
-    // 并提示由治理管理员完成登记。
-    if (!actor.governanceAdmin) {
-      throw new StoreJoinServiceError(
-        403,
-        "governance_admin_required",
-        "on-chain identity registration requires a governance admin (the plan publisher approval alone must not broadcast identity bindings); re-run the approval with a governance-admin session or use the supplier identity-registration endpoint",
-        { applicationId: application.applicationId }
-      );
-    }
+    // governance_admin 门禁已前置（副作用之前），此处可直接登记。
     const registration = await options.supplierService.requestIdentityRegistration(
       supplierId!,
       { wallet: application.applicantAddress },

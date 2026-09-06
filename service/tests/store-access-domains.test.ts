@@ -32,11 +32,15 @@ const planId = crossBorderPlanIds.planId as Hex;
 const planHash = crossBorderPlanIds.planHash as Hex;
 const governanceAdminHeaders = {
   "x-uvp-admin-id": "governance-admin-1",
-  "x-uvp-admin-role": "governance_admin"
+  "x-uvp-admin-role": "governance_admin",
+  // 红线：供应商写路由要求会话已锚定地址（本地联调 dev 锚定头）。
+  "x-uvp-store-dev-anchored-address": publisherAddress
 };
 const storeOperatorHeaders = {
   "x-uvp-store-user-id": "store-operator-1",
-  "x-uvp-store-role": "operator"
+  "x-uvp-store-role": "operator",
+  // 红线：listing/供应商写路由要求会话已锚定地址（本地联调 dev 锚定头）。
+  "x-uvp-store-dev-anchored-address": publisherAddress
 };
 const publisherAnchoredHeaders = {
   ...storeOperatorHeaders,
@@ -537,6 +541,58 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const createdSupplier = (suppliers.body as { suppliers: { wallet?: string; reviewStatus: string; identityStatus: string }[] }).suppliers
       .find((supplier) => supplier.wallet?.toLowerCase() === supplierWallet.toLowerCase());
     expect(createdSupplier).toMatchObject({ reviewStatus: "approved_for_broadcast", identityStatus: "active" });
+  });
+
+  it("KEEP: publisher approval without governance admin is rejected before any side effects (G-03/M-2)", async () => {
+    // 无既有 active binding 时，链上身份登记需要 governance_admin 权威：
+    // 门禁前置于建供应商/翻 approved_for_broadcast/落治理 review——
+    // 拒绝后不留半提交（供应商未创建、申请留在 under_review）。
+    const store = new MemoryProjectionStore();
+    await seedPlanProjection(store);
+    const router = createApiRouter(store, routerOptions());
+    const applicantToken = await login(router, supplierWallet);
+
+    const submitted = await router.handle({
+      method: "POST",
+      pathname: "/store/join-applications",
+      headers: { "x-uvp-store-session": applicantToken },
+      body: { planId, roleSlotId, authorizationKind: "signal_submitter" }
+    });
+    const applicationId = (submitted.body as { application: { applicationId: string } }).application.applicationId;
+    await router.handle({
+      method: "POST",
+      pathname: `/store/join-applications/${applicationId}/review-start`,
+      headers: publisherAnchoredHeaders,
+      body: {}
+    });
+
+    const denied = await router.handle({
+      method: "POST",
+      pathname: `/store/join-applications/${applicationId}/approve`,
+      headers: publisherAnchoredHeaders,
+      body: { note: "publisher-only approval" }
+    });
+    expect(denied).toMatchObject({
+      status: 403,
+      body: { error: "governance_admin_required" }
+    });
+
+    // 无半提交：供应商目录里没有该申请人的记录。
+    const suppliers = await router.handle({
+      method: "GET",
+      pathname: "/store/suppliers",
+      headers: governanceAdminHeaders
+    });
+    const rows = (suppliers.body as { suppliers: { wallet?: string }[] }).suppliers;
+    expect(rows.some((row) => row.wallet?.toLowerCase() === supplierWallet.toLowerCase())).toBe(false);
+
+    // 申请仍在 under_review（未被翻成 authorized/失败终态）。
+    const detail = await router.handle({
+      method: "GET",
+      pathname: `/store/join-applications/${applicationId}`,
+      headers: { "x-uvp-store-session": applicantToken }
+    });
+    expect((detail.body as { application: { status: string } }).application.status).toBe("under_review");
   });
 
   it("on-chain authorization event materializes the application to active", async () => {
