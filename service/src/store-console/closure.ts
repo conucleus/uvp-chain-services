@@ -284,11 +284,13 @@ async function checkSearchDetail(
 async function checkDraftImportCompileReview(
   options: StoreClosureDryRunOptions,
 ): Promise<StoreClosureCheckDTO> {
+  // store.draft.review 是治理级能力（submit-review 要求 governance
+  // admin）；operator dry-run 覆盖 import/compile/schema，review 子步骤
+  // 用 dry-run 治理身份在一次性模拟治理服务上演练，不触碰真实治理记录。
   const required = [
     "store.draft.import",
     "store.draft.compile",
     "store.draft.schema.save",
-    "store.draft.review",
   ] as const satisfies readonly StoreCapability[];
   const missing = missingCapabilities(options.access, required);
   if (missing.length > 0) {
@@ -361,7 +363,7 @@ async function checkDraftImportCompileReview(
               status: "approved_for_broadcast",
               publicSummary: "Store closure dry-run review.",
             },
-            governancePrincipalFromAccess(options.access),
+            dryRunGovernancePrincipal(options.access),
           )
         : undefined;
 
@@ -780,13 +782,19 @@ function explicitProductSchema(
   };
 }
 
-function governancePrincipalFromAccess(
+/**
+ * dry-run 的治理 principal：优先沿用会话真实携带的治理身份；否则使用
+ * 显式的 dry-run 标记身份。不再把任意 operator 的 roles[0] 包装成治理
+ * 角色——dry-run 内部使用一次性的模拟治理服务，不触碰真实治理记录，
+ * 但 principal 本身也不得伪装成某个真实运营方。
+ */
+function dryRunGovernancePrincipal(
   access: StoreAccessState,
 ): GovernancePrincipal {
-  return {
-    adminId: access.principalId ?? "store-closure-dry-run",
-    role: access.roles[0] ?? access.level,
-  };
+  if (access.governancePrincipal) {
+    return access.governancePrincipal;
+  }
+  return { adminId: access.principalId ?? "store-closure-dry-run", role: "governance_admin" };
 }
 
 async function safeDiagnostics(

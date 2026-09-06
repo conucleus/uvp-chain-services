@@ -52,6 +52,32 @@ export class GovernanceServiceError extends Error {
   }
 }
 
+// 与 governance/auth.ts 的 ADMIN_ROLES 同口径：治理权威角色集合。
+const GOVERNANCE_ADMIN_ROLES = new Set(["admin", "governance_admin", "governance"]);
+// Store 运营侧角色可以落 supplier review 记录（/store/suppliers 的
+// operator 级审核流），但拿不到 zhixu 审核与链上身份登记/撤销。
+const STORE_OPERATOR_ROLES = new Set(["store_operator", "store_admin"]);
+
+/**
+ * 服务端角色核验（纵深防御）：治理服务不再接受任意 role 的 principal。
+ * zhixu 审核 / 链上身份登记与撤销要求治理管理员角色；supplier review
+ * 记录接受治理或 Store 运营角色（路由层能力门禁为权威，服务端拒绝
+ * 未知/匿名角色，防伪造）。
+ */
+function assertPrincipalRole(
+  principal: GovernancePrincipal,
+  allowed: ReadonlySet<string>
+): void {
+  if (allowed.has(principal.role)) {
+    return;
+  }
+  throw new GovernanceServiceError(
+    403,
+    "governance_role_required",
+    `principal role "${principal.role || "(empty)"}" is not allowed for this governance action`
+  );
+}
+
 export interface GovernanceServiceOptions {
   readonly store?: GovernanceStore;
   readonly adapter?: GovernanceChainAdapter;
@@ -88,6 +114,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
     },
 
     async reviewZhixu(input, principal) {
+      assertPrincipalRole(principal, GOVERNANCE_ADMIN_ROLES);
       return saveReview({
         store,
         subjectType: "zhixu",
@@ -99,6 +126,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
     },
 
     async reviewSupplier(input, principal) {
+      assertPrincipalRole(principal, new Set([...GOVERNANCE_ADMIN_ROLES, ...STORE_OPERATOR_ROLES]));
       return saveReview({
         store,
         subjectType: "supplier",
@@ -110,6 +138,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
     },
 
     async registerIdentity(input, principal) {
+      assertPrincipalRole(principal, GOVERNANCE_ADMIN_ROLES);
       const record = requireBodyRecord(input);
       const subjectId = requiredBytes32(record, "subjectId");
       const account = requiredAddress(record, "account");
@@ -176,6 +205,7 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
     },
 
     async revokeIdentity(input, principal) {
+      assertPrincipalRole(principal, GOVERNANCE_ADMIN_ROLES);
       const record = requireBodyRecord(input);
       const subjectId = requiredBytes32(record, "subjectId");
       const bindingId = requiredBytes32(record, "bindingId");

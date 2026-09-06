@@ -50,7 +50,23 @@ const planId = crossBorderPlanIds.planId as Hex;
 const planHash = crossBorderPlanIds.planHash as Hex;
 const roleSlotId = demoZhixuDetail.roleSlots[0]?.slotId ?? "supplier";
 const adminHeaders = { "x-uvp-admin-id": "governance-admin-1", "x-uvp-admin-role": "governance_admin" };
-const storeAdminHeaders = { "x-uvp-store-user-id": "store-admin-1", "x-uvp-store-role": "admin" };
+const storeAdminHeaders = { "x-uvp-store-user-id": "store-admin-1", "x-uvp-store-role": "admin", "x-uvp-store-dev-anchored-address": publisherAddress };
+
+/** 本地联调的 dev 锚定头开关（仅非严格环境生效）。 */
+const devAnchoredStoreAuth = {
+  mode: "dev_headers" as const,
+  roleClaim: "roles",
+  principalClaim: "sub",
+  clockToleranceSeconds: 60,
+  walletSession: {
+    enabled: true,
+    operatorWallets: [],
+    adminWallets: [],
+    sessionTtlSeconds: 43200,
+    challengeTtlSeconds: 300,
+    devAnchoredAddressHeaderEnabled: true,
+  },
+};
 const publisherAnchoredHeaders = {
   ...storeAdminHeaders,
   "x-uvp-store-dev-anchored-address": publisherAddress
@@ -245,12 +261,14 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const router = createApiRouter(store, {
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
-        submissionVerifyingContract: contractAddress
+        submissionVerifyingContract: contractAddress,
+        productRuntimeEnvironment: "local"
       });
       const draft = await createDraft(router);
       const invite = await router.handle({
         method: "POST",
         pathname: `/product/orders/${draft.draftId}/invites`,
+        headers: bffCreatorHeaders,
         body: { roleSlotId: "funds", contact: "funds@example.com" }
       });
       expect(invite.status).toBe(201);
@@ -708,6 +726,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
+        productRuntimeEnvironment: "local",
         evidenceStorage: new BackupEvidenceStorage({ primary, backup })
       });
       const upload = await router.handle({
@@ -781,7 +800,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const router = createApiRouter(store, {
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
-        submissionVerifyingContract: contractAddress
+        submissionVerifyingContract: contractAddress,
+        storeAuthConfig: devAnchoredStoreAuth
       });
       // 上架后下架同一 plan。
       const imported = await router.handle({
@@ -868,9 +888,10 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const router = createApiRouter(store, {
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
-        submissionVerifyingContract: contractAddress
+        submissionVerifyingContract: contractAddress,
+        storeAuthConfig: devAnchoredStoreAuth
       });
-      const operatorHeaders = { "x-uvp-store-user-id": "operator-1", "x-uvp-store-role": "operator" };
+      const operatorHeaders = { "x-uvp-store-user-id": "operator-1", "x-uvp-store-role": "operator", "x-uvp-store-dev-anchored-address": publisherAddress };
       const importResponse = await router.handle({
         method: "POST",
         pathname: "/store/zhixu-drafts/import",
@@ -894,7 +915,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const unprojectedRouter = createApiRouter(unprojectedStore, {
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
-        submissionVerifyingContract: contractAddress
+        submissionVerifyingContract: contractAddress,
+        storeAuthConfig: devAnchoredStoreAuth
       });
       const unprojectedImport = await unprojectedRouter.handle({
         method: "POST",
@@ -1023,10 +1045,14 @@ async function login(router: ApiRouter, account: ReturnType<typeof privateKeyToA
   return (verify.body as { token: string }).token;
 }
 
+/** 建单者（运营方）本地 dev 会话头：createdBy 由服务端据此锚定。 */
+const bffCreatorHeaders = { "x-uvp-wallet-address": "0x7777777777777777777777777777777777777777" };
+
 async function createDraft(router: ApiRouter): Promise<{ readonly draftId: string }> {
   const response = await router.handle({
     method: "POST",
     pathname: "/product/order-drafts",
+    headers: bffCreatorHeaders,
     body: {
       zhixuId: CROSS_BORDER_ZHIXU_ID,
       title: "audit3 draft",
@@ -1035,7 +1061,7 @@ async function createDraft(router: ApiRouter): Promise<{ readonly draftId: strin
       currency: "USDC"
     }
   });
-  expect(response.status).toBe(201);
+  expect(response.status, JSON.stringify(response.body)).toBe(201);
   return (response.body as { draft: { draftId: string } }).draft;
 }
 

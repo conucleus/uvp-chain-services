@@ -95,7 +95,6 @@ const STORE_OPERATOR_CAPABILITIES = [
   "store.draft.import",
   "store.draft.compile",
   "store.draft.schema.save",
-  "store.draft.review",
   "store.listing.manage",
   "store.supplier.create",
   "store.supplier.review",
@@ -114,12 +113,17 @@ const STORE_ADMIN_CAPABILITIES = [
 
 const GOVERNANCE_ADMIN_CAPABILITIES = [
   ...STORE_ADMIN_CAPABILITIES,
+  "store.draft.review",
   "store.supplier.identity.register",
   "store.supplier.identity.revoke"
 ] as const satisfies readonly StoreCapability[];
 
+// JWT governance_admin 不继承 store_admin 全量——治理权威只映射到治理
+// 动作（zhixu 草稿审核 + 链上身份登记/撤销）与读；store.draft.review
+// 在此补齐，否则 JWT 治理管理员无法执行 submit-review。
 const JWT_GOVERNANCE_ADMIN_CAPABILITIES = [
   ...STORE_READ_CAPABILITIES,
+  "store.draft.review",
   "store.supplier.identity.register",
   "store.supplier.identity.revoke"
 ] as const satisfies readonly StoreCapability[];
@@ -179,6 +183,9 @@ export function storeAccessRequiredLevel(capability: StoreCapability): StoreAcce
   switch (capability) {
     case "store.supplier.identity.register":
     case "store.supplier.identity.revoke":
+    case "store.draft.review":
+      // zhixu 草稿审核是治理动作（governance review 落库），
+      // 不下放给 operator 级——提交者与审核者职责分离。
       return "governance_admin";
     case "store.version.activate":
     case "store.version.deprecate":

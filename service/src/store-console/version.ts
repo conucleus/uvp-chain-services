@@ -330,17 +330,13 @@ async function ensureVersionRecord(input: {
   const planId = normalizeBytes32(input.input.planId, "planId");
   const planHash = normalizeBytes32(input.input.planHash, "planHash");
   const snapshot = await input.projectionStore.getOrderSnapshot();
-  const planProjected = Object.values(snapshot.stateMachinePlans).some(
-    (plan) =>
-      plan.planId.toLowerCase() === planId.toLowerCase() &&
-      plan.planHash.toLowerCase() === planHash.toLowerCase(),
-  );
-  if (!planProjected) {
+  const plan = findFinalizedPlan(snapshot, planId, planHash);
+  if (!plan) {
     throw new StoreZhixuVersionError(
       409,
       "plan_not_projected",
-      "a new Store zhixu version record must anchor to a plan that exists in the chain projection",
-      { seriesId: input.seriesId, versionId: input.versionId, planId },
+      "a new Store zhixu version record must anchor to a plan that is finalized (PlanRegistered) in the chain projection",
+      { seriesId: input.seriesId, versionId: input.versionId, planId }
     );
   }
   return {
@@ -439,6 +435,7 @@ async function effectiveVersionRecords(input: {
   const synthesized = await synthesizeDefaultVersion(
     input.seriesId,
     input.productService,
+    input.projectionStore,
     input.now,
   );
   return synthesized ? [synthesized] : [];
@@ -447,10 +444,20 @@ async function effectiveVersionRecords(input: {
 async function synthesizeDefaultVersion(
   seriesId: string,
   productService: ProductService,
+  projectionStore: ProjectionStore,
   now: () => Date,
 ): Promise<StoreZhixuVersionRecord | undefined> {
   const zhixu = await productService.getZhixu(seriesId);
   if (!zhixu) {
+    return undefined;
+  }
+  // 投影桶在 commitPlan 第一步即建、PlanRegistered 到 finalize 才发：
+  // 默认版本只对"已 finalize"的 plan 合成 active，否则待定计划可被
+  // 直接激活建单（UVP-02）。
+  const snapshot = await projectionStore.getOrderSnapshot();
+  const planId = normalizeBytes32(zhixu.planPublication.planId, "planId");
+  const planHash = normalizeBytes32(zhixu.planPublication.planHash, "planHash");
+  if (!findFinalizedPlan(snapshot, planId, planHash)) {
     return undefined;
   }
   return {
@@ -482,9 +489,10 @@ async function summarizeRecord(
     projectionStore.getOrderSnapshot(),
     productService.listOrders(),
   ]);
-  const plan = Object.values(orderSnapshot.stateMachinePlans).find(
-    (candidate) => candidate.planId === record.planId && candidate.planHash === record.planHash,
-  );
+  // "published" 要求链上已 finalize（PlanFinalized/PlanRegistered 均在
+  // finalize 交易内发出）：投影桶在 commitPlan 即建，仅凭桶存在会把
+  // 待定计划当成已发布（UVP-02）。
+  const plan = findFinalizedPlan(orderSnapshot, record.planId, record.planHash);
   const publicationStatus: PlanPublicationStatus = plan ? "published" : "not_found";
   const artifactHash = record.artifactHash;
   return {
@@ -513,13 +521,57 @@ function assertActivatable(version: StoreZhixuVersionSummaryDTO): void {
     throw new StoreZhixuVersionError(
       409,
       "plan_not_published",
-      "Store zhixu version must be published to the state machine before activation",
+      "Store zhixu version must be finalized and registered on the state machine before activation",
       {
         versionId: version.versionId,
         planId: version.planId,
       },
     );
   }
+}
+
+/**
+ * 已注册（PlanRegistered）的 plan 查找：投影桶在 commitPlan 即建，
+ * registeredAt 初始携带 commit 溯源、PlanRegistered 到达后被 finalize
+ * 交易溯源覆写——以"registeredAt 晚于 committedAt（或无 commit 溯源）
+ * / finalizedAt 已落"作为已注册判据，待定（仅 commit）计划不算。
+ */
+function findFinalizedPlan(
+  snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
+  planId: Hex,
+  planHash: Hex,
+) {
+  return Object.values(snapshot.stateMachinePlans).find(
+    (candidate) =>
+      candidate.planId.toLowerCase() === planId.toLowerCase() &&
+      candidate.planHash.toLowerCase() === planHash.toLowerCase() &&
+      isPlanRegistered(candidate),
+  );
+}
+
+function isPlanRegistered(
+  plan: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>["stateMachinePlans"][string],
+): boolean {
+  if (plan.finalizedAt !== undefined) {
+    return true;
+  }
+  if (plan.committedAt === undefined) {
+    // 只见过 PlanRegistered（截断流建桶）——注册事实已存在。
+    return true;
+  }
+  const committed = plan.committedAt;
+  const registered = plan.registeredAt;
+  return (
+    registered.transactionHash !== committed.transactionHash ||
+    registered.logIndex !== committed.logIndex
+  );
+}
+
+/** 供 listing 锚核验等域复用的"PlanRegistered 已被索引"判据。 */
+export function isPlanRegisteredProjection(
+  plan: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>["stateMachinePlans"][string],
+): boolean {
+  return isPlanRegistered(plan);
 }
 
 function defaultVersionId(seriesId: string, planId: string): string {

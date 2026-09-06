@@ -7,6 +7,7 @@ import {
   type StoreProductSchemaDTO
 } from "@uvp-eth/product-dto";
 import {
+  crossBorderPlanIds,
   customsInitialTriggerSource,
   customsOnchainHookPlanArtifact,
   customsRoleSlotIds,
@@ -30,12 +31,30 @@ import type {
 
 const storeOperatorHeaders = {
   "x-uvp-store-operator-id": "operator-1",
-  "x-uvp-store-operator-role": "store_operator"
+  "x-uvp-store-operator-role": "store_operator",
+  // 红线：草稿流程写操作要求会话已锚定地址（本地联调 dev 锚定头）。
+  "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
+};
+
+const devAnchoredStoreAuth = {
+  mode: "dev_headers" as const,
+  roleClaim: "roles",
+  principalClaim: "sub",
+  clockToleranceSeconds: 60,
+  walletSession: {
+    enabled: true,
+    operatorWallets: [],
+    adminWallets: [],
+    sessionTtlSeconds: 43200,
+    challengeTtlSeconds: 300,
+    devAnchoredAddressHeaderEnabled: true,
+  },
 };
 
 const adminHeaders = {
   "x-uvp-admin-id": "admin-1",
-  "x-uvp-admin-role": "admin"
+  "x-uvp-admin-role": "admin",
+  "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
 };
 
 
@@ -92,8 +111,115 @@ spec:
 `;
 
 describe("Store Zhixu draft workflow", () => {
+  it("KEEP: draft/schema reads and writes fail closed without identity or anchor (G-38/G-39)", async () => {
+    // 匿名读取草稿/完整 Product Schema 一律 401（DTO 含 compilePreview 与
+    // 发布者创作资产）；无锚定地址的 operator 写操作 403（红线）。
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const draft = await importDraft(router);
+
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/store/zhixu-drafts/${draft.draftId}`
+    })).resolves.toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`
+    })).resolves.toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/store/product-schemas/${encodeURIComponent("0x" + "11".repeat(32))}/${encodeURIComponent("0x" + "22".repeat(32))}`
+    })).resolves.toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
+
+    // 能力通过但会话未锚定地址：写路由 403 store_address_anchor_required。
+    const unanchoredOperator = {
+      "x-uvp-store-operator-id": "operator-no-anchor",
+      "x-uvp-store-operator-role": "store_operator"
+    };
+    await expect(router.handle({
+      method: "POST",
+      pathname: "/store/zhixu-drafts/import",
+      headers: unanchoredOperator,
+      body: { sourceKind: "zhixu_yaml", content: validZhixuYaml }
+    })).resolves.toMatchObject({
+      status: 403,
+      body: { error: "store_address_anchor_required" }
+    });
+  });
+
+  it("KEEP: zhixu submit-review is governance-admin gated, not operator level (G-37/L-2)", async () => {
+    // submit-review 要求 governance_admin 能力 + 真实治理身份：
+    // operator 级（即便锚定）被能力门禁拒绝；身份解析不再把
+    // principalId/roles[0] 包装成 GovernancePrincipal。
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const draft = await importDraft(router);
+    await compileDraft(router, draft.draftId);
+    await confirmDraftProductSchema(router, draft.draftId);
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/store/zhixu-drafts/${draft.draftId}/submit-review`,
+      headers: storeOperatorHeaders,
+      body: { status: "approved_for_broadcast" }
+    })).resolves.toMatchObject({
+      status: 403,
+      body: {
+        error: "forbidden",
+        requiredCapability: "store.draft.review",
+        requiredAccess: "governance_admin"
+      }
+    });
+  });
+
+  it("KEEP: version activation confirmation cannot self-confirm via body claims (CS-A3)", async () => {
+    // 期望锚只取服务端可证明的值（版本记录或链投影）；自报 planId 与
+    // confirmation.planId 自我印证、但锚未上链/未注册 → 400 mismatch。
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [{
+        chainId: 31337,
+        contractAddress: "0x1111111111111111111111111111111111111111",
+        blockNumber: 1n,
+        transactionHash: ("0x" + "ab".repeat(32)) as import("../src/shared/types.js").Hex,
+        logIndex: 0,
+        eventName: "PlanRegistered",
+        args: { planId: crossBorderPlanIds.planId, planHash: crossBorderPlanIds.planHash, hookCount: 1n }
+      }]
+    });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const unregisteredPlanId = "0x" + "99".repeat(32);
+    const unregisteredPlanHash = "0x" + "88".repeat(32);
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/store/zhixu-series/series-x/versions/v-x/activate`,
+      headers: adminHeaders,
+      body: {
+        planId: unregisteredPlanId,
+        planHash: unregisteredPlanHash,
+        confirmation: { versionId: "v-x", planId: unregisteredPlanId, planHash: unregisteredPlanHash }
+      }
+    })).resolves.toMatchObject({
+      status: 400,
+      body: { error: "store_confirmation_mismatch" }
+    });
+
+    // 与投影一致的锚 + 正确 confirmation 可通过（期望值经投影证明）。
+    const activated = await router.handle({
+      method: "POST",
+      pathname: `/store/zhixu-series/series-x/versions/v-ok/activate`,
+      headers: adminHeaders,
+      body: {
+        planId: crossBorderPlanIds.planId,
+        planHash: crossBorderPlanIds.planHash,
+        confirmation: { versionId: "v-ok", planId: crossBorderPlanIds.planId, planHash: crossBorderPlanIds.planHash }
+      }
+    });
+    expect(activated.status, JSON.stringify(activated.body)).toBe(200);
+  });
+
   it("imports a Zhixu draft without adding it to the public Product catalog", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
 
     expect(draft).toMatchObject({
@@ -106,12 +232,12 @@ describe("Store Zhixu draft workflow", () => {
     const catalog = await router.handle({ method: "GET", pathname: "/product/zhixus" });
     expect((catalog.body as { zhixus: Array<{ zhixuId: string }> }).zhixus)
       .not.toContainEqual(expect.objectContaining({ zhixuId: "store-draft-demo" }));
-    await expect(router.handle({ method: "GET", pathname: `/store/zhixu-drafts/${draft.draftId}` }))
+    await expect(router.handle({ method: "GET", pathname: `/store/zhixu-drafts/${draft.draftId}`, headers: storeOperatorHeaders }))
       .resolves.toMatchObject({ status: 200, body: { draft: { draftId: draft.draftId, status: "imported" } } });
   });
 
   it("fails Store metadata writes closed when the draft store is unavailable", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       storeZhixuDraftStore: new FailingStoreZhixuDraftStore()
     });
 
@@ -137,7 +263,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("produces deterministic compile previews for DSL and manifest imports", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const yamlDraft = await importDraft(router);
     const first = await compileDraft(router, yamlDraft.draftId);
     const second = await compileDraft(router, yamlDraft.draftId);
@@ -164,14 +290,15 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("generates durable Product Schema Bundle and blocks inferred plugins before review", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
     const compiled = await compileDraft(router, draft.draftId);
     const preview = requirePreview(compiled);
 
     const schemaResponse = await router.handle({
       method: "GET",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`
+      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
+      headers: storeOperatorHeaders
     });
     expect(schemaResponse.status).toBe(200);
     const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
@@ -191,7 +318,7 @@ describe("Store Zhixu draft workflow", () => {
     await expect(router.handle({
       method: "POST",
       pathname: `/store/zhixu-drafts/${draft.draftId}/submit-review`,
-      headers: storeOperatorHeaders,
+      headers: adminHeaders,
       body: { status: "approved_for_broadcast" }
     })).resolves.toMatchObject({
       status: 409,
@@ -218,7 +345,8 @@ describe("Store Zhixu draft workflow", () => {
     });
     await expect(router.handle({
       method: "GET",
-      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.planHash)}`
+      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.planHash)}`,
+      headers: storeOperatorHeaders
     })).resolves.toMatchObject({
       status: 200,
       body: {
@@ -233,12 +361,13 @@ describe("Store Zhixu draft workflow", () => {
   it("preserves publisher evidenceSpec on stages and capability plugins across schema rebuild (evidenceSpec passthrough)", async () => {
     // schema 是发布者拥有的不透明 JSON：从编译产物重建 schema 时，
     // stage / capability plugin 携带的 evidenceSpec 不得被静默丢掉。
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
     const schemaResponse = await router.handle({
       method: "GET",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`
+      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
+      headers: storeOperatorHeaders
     });
     expect(schemaResponse.status).toBe(200);
     const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
@@ -306,12 +435,13 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("validates role-slot add-on manifests before Product Schema review", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
     const schemaResponse = await router.handle({
       method: "GET",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`
+      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
+      headers: storeOperatorHeaders
     });
     expect(schemaResponse.status).toBe(200);
     const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
@@ -400,7 +530,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("accepts the customs Product Schema fixture", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importCustomsDraft(router);
     const compiled = await compileDraft(router, draft.draftId);
     expect(compiled.compilePreview).toMatchObject({
@@ -438,7 +568,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("rejects invalid customs Product Schema inputs", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importCustomsDraft(router);
     await compileDraft(router, draft.draftId);
 
@@ -518,7 +648,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("records compile failures and blocks review submission", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router, { content: invalidZhixuYaml });
     const compiled = await compileDraft(router, draft.draftId);
 
@@ -528,7 +658,7 @@ describe("Store Zhixu draft workflow", () => {
     await expect(router.handle({
       method: "POST",
       pathname: `/store/zhixu-drafts/${draft.draftId}/submit-review`,
-      headers: storeOperatorHeaders,
+      headers: adminHeaders,
       body: { status: "approved_for_broadcast" }
     })).resolves.toMatchObject({
       status: 409,
@@ -537,7 +667,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("persists an approved Store review", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
     await confirmDraftProductSchema(router, draft.draftId);
@@ -545,7 +675,7 @@ describe("Store Zhixu draft workflow", () => {
     const reviewResponse = await router.handle({
       method: "POST",
       pathname: `/store/zhixu-drafts/${draft.draftId}/submit-review`,
-      headers: storeOperatorHeaders,
+      headers: adminHeaders,
       body: {
         status: "approved_for_broadcast",
         publicSummary: "Approved for Store broadcast."
@@ -557,7 +687,7 @@ describe("Store Zhixu draft workflow", () => {
       status: "approved_for_broadcast",
       reviewId: expect.stringMatching(/^review_/)
     });
-    await expect(router.handle({ method: "GET", pathname: `/store/zhixu-drafts/${draft.draftId}` }))
+    await expect(router.handle({ method: "GET", pathname: `/store/zhixu-drafts/${draft.draftId}`, headers: storeOperatorHeaders }))
       .resolves.toMatchObject({ status: 200, body: { draft: { status: "approved_for_broadcast" } } });
   });
 
@@ -660,7 +790,8 @@ async function confirmDraftProductSchema(
 ): Promise<StoreProductSchemaDTO> {
   const schemaResponse = await router.handle({
     method: "GET",
-    pathname: `/store/zhixu-drafts/${draftId}/product-schema`
+    pathname: `/store/zhixu-drafts/${draftId}/product-schema`,
+    headers: storeOperatorHeaders
   });
   expect(schemaResponse.status).toBe(200);
   const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;

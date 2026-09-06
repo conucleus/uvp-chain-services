@@ -134,7 +134,7 @@ describe("Store Console closure dry-run summary", () => {
           expect.objectContaining({
             key: "draft_import_compile_review",
             status: "blocked",
-            missingCapabilities: expect.arrayContaining(["store.draft.import", "store.draft.review"])
+            missingCapabilities: expect.arrayContaining(["store.draft.import", "store.draft.schema.save"])
           }),
           expect.objectContaining({
             key: "supplier_tag_audit_readback",

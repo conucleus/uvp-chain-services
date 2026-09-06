@@ -1,4 +1,5 @@
 import { createPublicClient, http, type PublicClient } from "viem";
+import { isPlanRegisteredProjection } from "../store-console/version.js";
 import type { Address, Hex } from "../shared/types.js";
 import type {
   ListingAnchorChainView,
@@ -74,15 +75,19 @@ export async function verifyListingAnchors(options: {
   const { listing } = options;
   const snapshot = await options.projectionStore.getOrderSnapshot();
   // 投影以 chainId:contract:planId 为键；按 planId 值匹配（大小写不敏感）。
+  // 已注册判据：桶存在只代表 commitPlan 已执行（UVP-02）——须见到
+  // PlanRegistered（registeredAt 被 finalize 交易覆写）或 PlanFinalized。
   const plan = Object.values(snapshot.stateMachinePlans)
-    .find((candidate) => candidate.planId.toLowerCase() === listing.planId.toLowerCase());
+    .find((candidate) =>
+      candidate.planId.toLowerCase() === listing.planId.toLowerCase() &&
+      isPlanRegisteredProjection(candidate));
   const checks: StoreAnchorCheck[] = [];
 
   checks.push({
     id: "plan_projected",
     label: "秩序已在链上注册并被索引（PlanRegistered 投影）",
-    expected: "projected",
-    actual: plan ? "projected" : "missing",
+    expected: "registered",
+    actual: plan ? "registered" : "pending",
     outcome: plan ? "match" : "mismatch"
   });
 
@@ -187,6 +192,8 @@ export async function verifyListingAnchors(options: {
   }
 
   const hasMismatch = checks.some((check) => check.outcome === "mismatch");
+  // 未注册（含"桶已建但 finalize 未索引"）统一 pending_indexing：
+  // 公开被阻断，等索引器追上而不是误报冲突。
   const status = hasMismatch ? "conflict" : plan ? "consistent" : "pending_indexing";
 
   return {

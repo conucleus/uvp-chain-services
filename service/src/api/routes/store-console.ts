@@ -1,16 +1,17 @@
 import { ProductBffError } from "../../product/bff/service.js";
 import { ProductOrderLookupError } from "../../product/service.js";
-import { GovernanceServiceError, type GovernancePrincipal } from "../../governance/index.js";
+import { GovernanceServiceError } from "../../governance/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import type { AuditOutcome } from "../../security/audit.js";
 import { ConfigError } from "../../shared/types.js";
-import { storeSessionFromAccess, type StoreAccessState, type StoreCapability } from "../../store-console/access.js";
+import { storeSessionFromAccess, hasStoreCapability, isStoreAccessAuthenticated, type StoreCapability } from "../../store-console/access.js";
 import type { StoreAuditQuery } from "../../store-console/audit.js";
 import { buildStoreClosureDryRunSummary } from "../../store-console/closure.js";
 import {
   StoreRuntimeError,
   isSupportedStoreOrderFilterStatus
 } from "../../store-console/runtime.js";
+import { isPlanRegisteredProjection } from "../../store-console/version.js";
 import {
   StoreZhixuDraftWorkflowError
 } from "../../store-console/zhixu-drafts.js";
@@ -35,12 +36,16 @@ import type { StoreListingService } from "../../store-listings/index.js";
 import { normalizeBytes32 } from "../../shared/types.js";
 import {
   authorizeStoreCapability,
+  forbiddenStoreCapabilityResponse,
+  isAnchoredStoreAuthorizationResult,
   isStoreAuthorizationResult,
   recordStoreCapabilityFailure,
   recordStoreCapabilitySuccess,
+  requireAnchoredStoreAddress,
   requireStoreConfirmation,
   StoreConfirmationError,
-  storeConfirmationErrorResponse
+  storeConfirmationErrorResponse,
+  unauthorizedStoreCapabilityResponse
 } from "../store-authz.js";
 
 type ParsedStoreAuditQuery =
@@ -76,12 +81,37 @@ export function createStoreConsoleRouteModule(): RouteModule {
       }
 
       if (request.method === "GET" && request.pathname === "/store/search") {
+        // 供应商目录读门槛（与 /store/suppliers 同口径）：供应商命中暴露
+        // 钱包精确匹配与审核状态，匿名不可枚举。type=supplier 显式查询
+        // 未认证即 401/403；all 查询对匿名静默剔除供应商命中。
+        const type = parseStoreSearchType(request.query?.type);
+        const supplierOnly = type === "supplier";
+        const access = await context.storeIdentityProvider.resolve(request.headers);
+        const supplierReadable = hasStoreCapability(access, "store.read") && isStoreAccessAuthenticated(access);
+        if (supplierOnly && !supplierReadable) {
+          const resource = { type: "store_supplier" };
+          if (isStoreAccessAuthenticated(access)) {
+            return forbiddenStoreCapabilityResponse(access, "store.read");
+          }
+          return unauthorizedStoreCapabilityResponse(access, "store.read");
+        }
         const body = await context.storeConsoleService.search(parseStoreSearchQuery(request.query));
         // search 过滤已下架——与 /store/zhixus 的
         // 口径一致（运营方可见，便于治理观察）。
+        const filtered = await filterDelistedSearchResults(request, context, body);
+        const record = filtered as { readonly results?: readonly { readonly resultType?: string }[] };
+        if (!supplierReadable && record?.results?.some((result) => result.resultType === "supplier")) {
+          return {
+            status: 200,
+            body: {
+              ...record,
+              results: record.results.filter((result) => result.resultType !== "supplier")
+            }
+          };
+        }
         return {
           status: 200,
-          body: await filterDelistedSearchResults(request, context, body)
+          body: filtered
         };
       }
 
@@ -156,6 +186,14 @@ export function createStoreConsoleRouteModule(): RouteModule {
 
       const productSchemaMatch = /^\/store\/product-schemas\/([^/]+)\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productSchemaMatch) {
+        // 完整 Product Schema 是发布者创作资产（含能力插件/证据要求），
+        // 匿名不可读——与草稿面同口径要求 operator 级能力。
+        const capability = "store.draft.compile";
+        const resource = { type: "store_zhixu_draft" };
+        const authorization = await authorizeStoreCapability(context, request, capability, resource);
+        if (!isStoreAuthorizationResult(authorization)) {
+          return authorization;
+        }
         const productSchema = await context.storeZhixuDraftWorkflowService.getProductSchemaByPlan(
           decodeURIComponent(productSchemaMatch[1] ?? ""),
           decodeURIComponent(productSchemaMatch[2] ?? ""),
@@ -344,6 +382,11 @@ async function handleStoreZhixuVersionRequest(
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
+      // 红线：版本激活/弃用（敏感写）要求会话已锚定地址。
+      const anchored = await requireAnchoredStoreAddress(context, request, resource);
+      if (!isAnchoredStoreAuthorizationResult(anchored)) {
+        return anchored;
+      }
       const confirmationError = await storeVersionConfirmationError(context, request, seriesId, versionId, action);
       if (confirmationError) {
         await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, confirmationError);
@@ -431,6 +474,11 @@ async function handleStoreZhixuDraftRequest(
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
+      // 红线：草稿流程写操作要求会话已锚定地址（能力通过但无锚定即 403）。
+      const anchored = await requireAnchoredStoreAddress(context, request, { type: "store_zhixu_draft" });
+      if (!isAnchoredStoreAuthorizationResult(anchored)) {
+        return anchored;
+      }
       try {
         const draft = await context.storeZhixuDraftWorkflowService.importDraft(request.body);
         await recordStoreCapabilitySuccess(context, request, authorization.access, "store.draft.import", {
@@ -456,6 +504,13 @@ async function handleStoreZhixuDraftRequest(
       const draftId = decodeURIComponent(productSchemaMatch[1] ?? "");
       const action = productSchemaMatch[2];
       if (request.method === "GET" && !action) {
+        // 完整 Product Schema（DTO 含 compilePreview 材料）匿名不可读。
+        const capability = "store.draft.compile";
+        const resource = { type: "store_zhixu_draft", id: draftId };
+        const authorization = await authorizeStoreCapability(context, request, capability, resource);
+        if (!isStoreAuthorizationResult(authorization)) {
+          return authorization;
+        }
         const productSchema = await context.storeZhixuDraftWorkflowService.getProductSchema(draftId);
         if (!productSchema) {
           return {
@@ -474,6 +529,10 @@ async function handleStoreZhixuDraftRequest(
         const authorization = await authorizeStoreCapability(context, request, capability, resource);
         if (!isStoreAuthorizationResult(authorization)) {
           return authorization;
+        }
+        const anchored = await requireAnchoredStoreAddress(context, request, resource);
+        if (!isAnchoredStoreAuthorizationResult(anchored)) {
+          return anchored;
         }
         try {
           const body = await context.storeZhixuDraftWorkflowService.updateProductSchema(draftId, request.body);
@@ -508,6 +567,13 @@ async function handleStoreZhixuDraftRequest(
     const action = draftMatch[2];
 
     if (request.method === "GET" && !action) {
+      // 草稿 DTO 含 compilePreview 与完整 schema 材料，匿名不可读。
+      const capability = "store.draft.compile";
+      const resource = { type: "store_zhixu_draft", id: draftId };
+      const authorization = await authorizeStoreCapability(context, request, capability, resource);
+      if (!isStoreAuthorizationResult(authorization)) {
+        return authorization;
+      }
       const draft = await context.storeZhixuDraftWorkflowService.getDraft(draftId);
       if (!draft) {
         return {
@@ -527,6 +593,10 @@ async function handleStoreZhixuDraftRequest(
       const authorization = await authorizeStoreCapability(context, request, capability, resource);
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
+      }
+      const anchored = await requireAnchoredStoreAddress(context, request, resource);
+      if (!isAnchoredStoreAuthorizationResult(anchored)) {
+        return anchored;
       }
       try {
         const draft = await context.storeZhixuDraftWorkflowService.compilePreview(draftId);
@@ -548,11 +618,30 @@ async function handleStoreZhixuDraftRequest(
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
+      // 治理身份不可伪造：只有真实携带 governance principal 的会话
+      //（dev admin 头或 JWT governance_admin 角色）可以提交 zhixu 审核；
+      // 不再把 principalId/roles[0] 包装成 GovernancePrincipal。
+      const governancePrincipal = authorization.access.governancePrincipal;
+      if (!governancePrincipal) {
+        await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, new Error("governance_principal_required"));
+        return {
+          status: 403,
+          body: {
+            error: "governance_principal_required",
+            message: "zhixu draft review requires a governance admin identity"
+          }
+        };
+      }
+      // 红线：审核写操作要求会话已锚定地址（治理权威 + 锚定钱包双门槛）。
+      const anchored = await requireAnchoredStoreAddress(context, request, resource);
+      if (!isAnchoredStoreAuthorizationResult(anchored)) {
+        return anchored;
+      }
       try {
         const result = await context.storeZhixuDraftWorkflowService.submitReview(
           draftId,
           request.body,
-          storeAccessGovernancePrincipal(authorization.access)
+          governancePrincipal
         );
         await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
         return {
@@ -622,13 +711,47 @@ async function storeVersionConfirmationError(
   action: string | undefined
 ): Promise<StoreConfirmationError | undefined> {
   try {
+    // 确认期望值只取服务端记录——调用方自报的 planId/planHash 不能
+    // 同时充当期望值与确认值（自我印证）。版本记录尚不存在时（activate
+    // 顺带建版本），期望锚取链投影核对后的值，仍不以 body 为准。
     const body = optionalBodyRecord(request.body);
     const version = (await context.storeZhixuVersionService.listVersions(seriesId))
       .versions.find((item) => item.versionId === versionId);
+    if (version) {
+      requireStoreConfirmation(request.body, {
+        versionId,
+        planId: version.planId,
+        planHash: version.planHash
+      });
+      return undefined;
+    }
+    const claimedPlanId = optionalString(body, "planId");
+    const claimedPlanHash = optionalString(body, "planHash");
+    if (!claimedPlanId || !claimedPlanHash) {
+      throw new StoreConfirmationError(
+        "store_confirmation_required",
+        "version to confirm was not found",
+        { versionId }
+      );
+    }
+    const snapshot = await context.store.getOrderSnapshot();
+    const planProjected = Object.values(snapshot.stateMachinePlans).some((plan) =>
+      plan.planId.toLowerCase() === claimedPlanId.toLowerCase() &&
+      plan.planHash.toLowerCase() === claimedPlanHash.toLowerCase() &&
+      isPlanRegisteredProjection(plan)
+    );
+    if (!planProjected) {
+      // 声称的锚在链投影中不存在（或尚未注册）：期望值无从服务端证明。
+      throw new StoreConfirmationError(
+        "store_confirmation_mismatch",
+        "claimed plan anchors are not registered in the chain projection",
+        { planId: claimedPlanId }
+      );
+    }
     requireStoreConfirmation(request.body, {
       versionId,
-      planId: optionalString(body, "planId") ?? version?.planId,
-      planHash: optionalString(body, "planHash") ?? version?.planHash
+      planId: claimedPlanId,
+      planHash: claimedPlanHash
     });
     return undefined;
   } catch (error) {
@@ -703,13 +826,6 @@ function versionCapability(action: string | undefined): StoreCapability {
     default:
       return "store.version.activate";
   }
-}
-
-function storeAccessGovernancePrincipal(access: StoreAccessState): GovernancePrincipal {
-  return access.governancePrincipal ?? {
-    adminId: access.principalId ?? "unknown-store-principal",
-    role: access.roles[0] ?? access.level
-  };
 }
 
 function parseStoreSearchType(value: string | undefined): StoreSearchQuery["type"] | undefined {
