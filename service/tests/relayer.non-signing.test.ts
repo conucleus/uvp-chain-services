@@ -550,7 +550,6 @@ function deferred<T>(): {
 function request(nonce: string): RelayRequest {
   return {
     business: {
-      action: "approveStage",
       chainId: 31337,
       verifyingContract,
       orderId: "order-1",

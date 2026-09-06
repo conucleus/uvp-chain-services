@@ -894,7 +894,6 @@ function submissionBase(request: RelayRequest): Omit<
 > {
   return {
     id: submissionId(request),
-    action: request.business.action,
     chainId: request.business.chainId,
     verifyingContract: request.business.verifyingContract,
     orderId: request.business.orderId,
@@ -1095,8 +1094,7 @@ function submissionId(request: RelayRequest): string {
     request.business.chainId,
     request.business.verifyingContract.toLowerCase(),
     request.business.signer.toLowerCase(),
-    request.business.nonce,
-    request.business.action
+    request.business.nonce
   ].join(":");
 }
 

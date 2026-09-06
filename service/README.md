@@ -7,7 +7,7 @@ Chain Services 把 UVP 链上事实投影成 Product、Store 和运维接口，�
 - `UVPStateMachine` 及其冻结模块定义 Order、Stage、Signal、Plan 发布、提交授权和资源补丁。
 - `UVPIdentityRegistry` 只记录线下主体标识与链上账户的绑定和撤销。
 - Store 的供应商档案、能力标签、搜索、推荐、审核记录均为链下经营数据，不形成协议级信用或平台担保。
-- Chain Services 可以代付 gas，但业务签名仍由对应参与者产生。
+- Chain Services 可以代付 gas，但业务签名仍由对应参与者产生；广播的唯一交易面是 plan-scoped 的 `submitSignalFor`。
 - 证据正文保存在链下，链上和投影层只保存可校验的哈希与资源句柄。
 
 ## 运行

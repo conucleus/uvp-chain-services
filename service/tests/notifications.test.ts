@@ -768,20 +768,21 @@ describe("signal-routed notifications", () => {
     // KIT 收口：MAC 覆盖 timestamp.nonce.body，三个签名头齐全且可被
     // 对齐方案的 verify + replay guard 端到端校验。
     const headers = requests[0]?.init.headers as Record<string, string>;
-    const timestamp = headers[NOTIFICATION_WEBHOOK_TIMESTAMP_HEADER];
-    const nonce = headers[NOTIFICATION_WEBHOOK_NONCE_HEADER];
+    const timestamp = headers[NOTIFICATION_WEBHOOK_TIMESTAMP_HEADER]!;
+    const nonce = headers[NOTIFICATION_WEBHOOK_NONCE_HEADER]!;
     expect(timestamp).toMatch(/^(0|[1-9][0-9]{0,9})$/);
     expect(nonce).toMatch(/^[0-9a-f]{32}$/);
     const body = requests[0]?.init.body as string;
     const expected = `sha256=${createHmac("sha256", "webhook-secret").update(`${timestamp}.${nonce}.${body}`).digest("hex")}`;
     expect(headers[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER]).toBe(expected);
+    const signature = headers[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER]!;
     const guard = createWebhookReplayGuard();
     const nowMs = Number(timestamp) * 1000;
-    expect(verifyWebhookSignature(body, headers[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER], "webhook-secret", { timestamp, nonce, nowMs: () => nowMs })).toBe(true);
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { timestamp, nonce, nowMs: () => nowMs })).toBe(true);
     expect(guard.observe(nonce, nowMs, nowMs)).toBe(true);
 
     // 同一 (body, 签名头) 立即重放：MAC 与时窗都通过，nonce 单次消费拦下。
-    expect(verifyWebhookSignature(body, headers[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER], "webhook-secret", { timestamp, nonce, nowMs: () => nowMs + 1000 })).toBe(true);
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { timestamp, nonce, nowMs: () => nowMs + 1000 })).toBe(true);
     expect(guard.observe(nonce, nowMs, nowMs + 1000)).toBe(false);
 
     const failing = new WebhookNotificationDispatcher({
