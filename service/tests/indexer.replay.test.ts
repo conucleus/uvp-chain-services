@@ -248,6 +248,63 @@ describe("indexer projection replay", () => {
     });
   });
 
+  it("keeps the earliest matching signal as the submitted proof when a later matching signal arrives", () => {
+    // L-11：任务 submitted 是首个完成事实——后到的匹配信号不得覆盖
+    // 任务的完成证明与 updatedAt（与创建路径取最早证明同口径）。
+    const base: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(2n, 0, "SignalCapabilityRegistered", {
+        planId,
+        stageId,
+        targetSourceId: sourceId,
+        signalId,
+        targetOrderRelation: 0
+      }),
+      chainEvent(3n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      chainEvent(4n, 0, "HookReady", {
+        orderId: stateMachineOrderId,
+        hookId,
+        stageId,
+        hookName
+      }),
+      chainEvent(5n, 0, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signer
+      })
+    ];
+    const snapshot = rebuildOrderProjections([
+      ...base,
+      chainEvent(6n, 0, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey: bytes32Hex("0aaa"),
+        submitter: signer
+      })
+    ]);
+    const task = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
+
+    expect(task).toMatchObject({
+      status: "submitted",
+      proof: expect.objectContaining({
+        eventName: "SignalSubmitted",
+        transactionHash: chainEvent(5n, 0, "SignalSubmitted", {}).transactionHash
+      })
+    });
+  });
+
   it("matches task authorization only against declared submit signals", () => {
     const events: readonly ChainEvent[] = [
       chainEvent(1n, 0, "PlanRegistered", {
@@ -1777,6 +1834,183 @@ describe("indexer projection replay", () => {
       const queuedAfterFailedSweep = await indexer2.listPendingPostCommitSteps();
       expect(queuedAfterFailedSweep.length).toBe(1);
       expect(queuedAfterFailedSweep[0]?.attempts).toBe(2);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses one stable pending row for repeated projection automation failures", async () => {
+    // UVP-12/L-9/CS-P3：无事件批次的 pending 步骤 id 必须稳定——时间戳
+    // id 会让 ON CONFLICT DO NOTHING 永不命中，每次失败新开一行无限堆积。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-automation-pending-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 9n;
+        },
+        async readEvents(range) {
+          return stateMachineEvents().filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        }
+      };
+      const failingAutomation = {
+        async processProjection(): Promise<unknown> {
+          throw new Error("automation outage");
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        projectionAutomationProcessor: failingAutomation
+      });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+      const first = await indexer.listPendingPostCommitSteps();
+      expect(first.length).toBe(1);
+      expect(first[0]).toMatchObject({ kind: "projection_automation", chainId: 31337, attempts: 1 });
+
+      // 第二轮同类失败命中同一 stepId（幂等复用失败行），不新开行。
+      const indexer2 = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        projectionAutomationProcessor: failingAutomation
+      });
+      await indexer2.rebuildFromDeploymentBlockWithSummary();
+      const second = await indexer2.listPendingPostCommitSteps();
+      expect(second.length).toBe(1);
+      expect(second[0]?.stepId).toBe(first[0]?.stepId);
+      expect(second[0]?.attempts).toBe(2);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("creates notification delivery intents before advancing the durable cursor", async () => {
+    // G-29/UVP-09：投递记录创建先于 cursor 推进——游标先落库的窗口内硬
+    // 崩溃会让该批事件永不再被读取、投递记录无从重建。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-notify-order-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    const scope = { chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" as Hex };
+    try {
+      const events = stateMachineEvents();
+      const lateSignal = chainEvent(10n, 0, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        sourceId: bytes32Hex("0606"),
+        signalId: bytes32Hex("0707"),
+        payloadHash,
+        idempotencyKey: bytes32Hex("0bbb"),
+        submitter: signer
+      });
+      let finalizedBlock = 9n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return [...events, lateSignal].filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        }
+      };
+      const cursorNextBlockAtNotification: (bigint | undefined)[] = [];
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents(batch) {
+            if (batch.length > 0) {
+              cursorNextBlockAtNotification.push((await store.getCursor(scope))?.nextBlock);
+            }
+          }
+        }
+      });
+      // 首轮 rebuild：通知处理时 cursor 尚未保存（undefined）。
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+      expect(cursorNextBlockAtNotification).toEqual([undefined]);
+      await expect(store.getCursor(scope)).resolves.toMatchObject({ nextBlock: 10n });
+
+      // 增量刷新携带新 SignalSubmitted：通知处理时游标仍停在旧位置 10n，
+      // 处理完成后才推进到 12n。
+      finalizedBlock = 11n;
+      await indexer.refreshFromCursorWithSummary();
+      expect(cursorNextBlockAtNotification[1]).toBe(10n);
+      await expect(store.getCursor(scope)).resolves.toMatchObject({ nextBlock: 12n });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back to an older consistent anchor when the newest below-window anchor was reorged", async () => {
+    // 0200#15：最新已存锚点恰好被 reorg 触及、更旧锚点仍与 canonical 一致
+    // 时是浅 reorg——回验更旧锚点继续,不得误判要求 full rebuild。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-older-anchor-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const originalEvents = stateMachineEvents().map((event) => ({
+        ...event,
+        blockHash: blockHashHex(`orig-${event.blockNumber}`)
+      }));
+      let finalizedBlock = 3n;
+      let canonicalBlocks = new Map<bigint, Hex>(
+        [1n, 2n, 3n, 4n, 2500n, 2600n].map((block) => [block, blockHashHex(`orig-${block}`)])
+      );
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return originalEvents.filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        },
+        async getBlockHash(blockNumber) {
+          return canonicalBlocks.get(blockNumber) ?? zeroBlockHash();
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store
+      });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      finalizedBlock = 2500n;
+      await indexer.refreshFromCursorWithSummary();
+
+      // reorg 同时触及块 3（最新锚点）与 tip：块 2 仍一致 → 回滚到块 2。
+      canonicalBlocks = new Map<bigint, Hex>([
+        ...canonicalBlocks,
+        [3n, blockHashHex("fork-3")],
+        [2600n, blockHashHex("fork-2600")]
+      ]);
+      finalizedBlock = 2600n;
+      const result = await indexer.refreshFromCursorWithSummary();
+
+      expect(result.summary.syncStatus).toBe("indexed");
+      await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
+        .resolves.toMatchObject({ nextBlock: 2601n, blockHash: blockHashHex("fork-2600") });
     } finally {
       await store.close();
       rmSync(tempDir, { recursive: true, force: true });

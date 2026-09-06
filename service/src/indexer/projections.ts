@@ -2233,8 +2233,13 @@ function markTaskSubmitted(
   task: MutableStateMachineTaskProjection,
   proof: StateMachineProofProjection
 ): boolean {
-  if (task.status === "submitted" && task.proof.eventId === proof.eventId) {
-    return false;
+  if (task.status === "submitted") {
+    // L-11：submitted 是已成立的完成事实。后到的匹配信号不得覆盖首个
+    // 完成证明与 updatedAt（与创建路径取最早证明同口径）；仅当链上位置
+    // 更早时才修正为真正最早的事实（容忍乱序回放）。
+    if (compareProofEvents(proof, task.proof) >= 0) {
+      return false;
+    }
   }
   task.status = "submitted";
   task.updatedAt = proof;

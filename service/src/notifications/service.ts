@@ -16,6 +16,7 @@ import {
 } from "../indexer/projections.js";
 import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "../indexer/events.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
+import { redactErrorMessage } from "../security/redaction.js";
 import { compareChainPointers, type Address, type Hex } from "../shared/types.js";
 import type { ProductSchemaResolver } from "../product/service.js";
 import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store-suppliers/types.js";
@@ -1194,6 +1195,9 @@ type MutableNotificationRunSummary = {
   -readonly [TKey in keyof NotificationRunSummary]: NotificationRunSummary[TKey];
 };
 
+/** M-5：failed 投递的自动重投上限；超过即转 dead_letter（人工可重开）。 */
+const MAX_AUTOMATIC_DELIVERY_ATTEMPTS = 5;
+
 type ReceiverResolution =
   | {
       readonly status: "ok";
@@ -1386,6 +1390,17 @@ async function dispatchSignalTransportDelivery(input: {
   if (existing && existing.status !== "pending" && existing.status !== "failed") {
     return existing;
   }
+  // M-5：自动补投预算。重建/重放会对 failed 行自动重投；无上限的重启
+  // 重投会无界重复外部投递（每次 webhook 最多一个超时周期）。超过预算
+  // 转 dead_letter 终态，人工 retryDelivery 仍可显式重开。
+  if (existing && existing.status === "failed" && existing.attempts >= MAX_AUTOMATIC_DELIVERY_ATTEMPTS) {
+    return input.deliveryStore.saveDelivery({
+      ...existing,
+      status: "dead_letter",
+      reason: "delivery_attempts_exhausted",
+      updatedAt: input.now()
+    });
+  }
 
   const pending = await input.deliveryStore.saveDelivery({
     ...(existing ?? baseSignalDeliveryRecord(
@@ -1443,7 +1458,9 @@ async function dispatchPreparedDelivery(input: {
       attempts: input.pending.attempts + 1,
       ...activationStatusForResult(input.transport, result),
       ...(result.externalReceiptRef ? { externalReceiptRef: result.externalReceiptRef } : {}),
-      ...(result.error ? { lastError: result.error } : {}),
+      // L-10：错误消息先脱敏再持久化（对齐兄弟路径），防 transport 异常
+      // 文本把端点/凭证带进投递台账。
+      ...(result.error ? { lastError: redactErrorMessage(result.error) } : {}),
       updatedAt: input.now()
     });
   } catch (error) {
@@ -1451,7 +1468,7 @@ async function dispatchPreparedDelivery(input: {
       ...input.pending,
       status: "failed",
       attempts: input.pending.attempts + 1,
-      lastError: error instanceof Error ? error.message : "notification dispatch failed",
+      lastError: error instanceof Error ? redactErrorMessage(error) : "notification dispatch failed",
       updatedAt: input.now()
     });
   }

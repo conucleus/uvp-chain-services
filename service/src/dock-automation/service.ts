@@ -200,7 +200,7 @@ export class DockAutomationWorker implements LifecycleService {
           if (dock.inputDeliveries[binding.bindingHash.toLowerCase()]) {
             continue;
           }
-          if (!this.inputHookReady(snapshot, route, binding.localHookId)) {
+          if (!this.inputHookReady(snapshot, route, binding.localHookId, dock.stateMachineAddress)) {
             continue;
           }
           summary.inputCandidates += 1;
@@ -289,14 +289,22 @@ export class DockAutomationWorker implements LifecycleService {
   #orderFor(
     snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
     planId: Hex,
-    orderId: Hex
+    orderId: Hex,
+    stateMachineAddress?: Hex
   ) {
-    return [...new Set(Object.values(snapshot.stateMachineOrders))].find(
+    // CS-P5：订单身份含 stateMachineAddress——裸 (chainId,planId,orderId)
+    // 扫描在同号订单跨部署复用时会多命中；多命中 fail-closed 返回
+    // undefined（对齐同仓不变量），绝不静默取首条。有 dock 上下文时按
+    // 其状态机地址收敛。
+    const matches = [...new Set(Object.values(snapshot.stateMachineOrders))].filter(
       (candidate) =>
         candidate.chainId === this.#chainId &&
         candidate.planId.toLowerCase() === planId.toLowerCase() &&
-        candidate.orderId.toLowerCase() === orderId.toLowerCase()
+        candidate.orderId.toLowerCase() === orderId.toLowerCase() &&
+        (!stateMachineAddress ||
+          candidate.contractAddress.toLowerCase() === stateMachineAddress.toLowerCase())
     );
+    return matches.length === 1 ? matches[0] : undefined;
   }
 
   entranceHookReady(
@@ -310,9 +318,10 @@ export class DockAutomationWorker implements LifecycleService {
   inputHookReady(
     snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
     route: DockRouteRecord,
-    localHookId: Hex
+    localHookId: Hex,
+    stateMachineAddress?: Hex
   ): boolean {
-    const order = this.#orderFor(snapshot, route.localPlanId, route.localOrderId);
+    const order = this.#orderFor(snapshot, route.localPlanId, route.localOrderId, stateMachineAddress);
     return order?.hooks[localHookId.toLowerCase()]?.status === "ready";
   }
 

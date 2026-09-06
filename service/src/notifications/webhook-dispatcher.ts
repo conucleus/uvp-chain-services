@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { redactSecrets } from "../security/redaction.js";
+import { redactErrorMessage, redactSecrets } from "../security/redaction.js";
 import type {
   NotificationDispatcher,
   NotificationDispatchRequest,
@@ -63,7 +63,11 @@ export class WebhookNotificationDispatcher implements NotificationDispatcher {
     } catch (error) {
       return {
         ok: false,
-        error: error instanceof Error ? error.message : "webhook dispatch failed"
+        // L-10：错误消息先脱敏再回写——fetch 异常文本可能携带完整端点
+        // URL（含凭据查询参数），不得原样进入投递台账。
+        error: redactErrorMessage(
+          error instanceof Error ? error.message : "webhook dispatch failed"
+        )
       };
     }
   }

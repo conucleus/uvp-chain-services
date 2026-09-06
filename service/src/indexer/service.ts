@@ -170,6 +170,8 @@ export class IndexerService implements LifecycleService {
       };
       await this.#saveCursor(nextCursor);
       this.#cursor = nextCursor;
+      // 空回放区间不得写出 fromBlock > toBlock 的 rebuild 元数据：按
+      // finalized 锚点收敛为退化空区间（from = to = finalized）。
       const syncState = await this.#store.saveSyncState({
         ...this.#scope,
         syncStatus: "syncing",
@@ -179,7 +181,7 @@ export class IndexerService implements LifecycleService {
         rebuild: {
           status: "idle",
           deploymentBlock,
-          fromBlock: deploymentBlock,
+          fromBlock: finalizedBlock,
           toBlock: finalizedBlock,
           eventCount: 0,
           activeEventCount: 0,
@@ -194,7 +196,7 @@ export class IndexerService implements LifecycleService {
         summary: summaryFromSnapshot({
           chainId: this.#config.network.chainId,
           deploymentBlock,
-          fromBlock: deploymentBlock,
+          fromBlock: finalizedBlock,
           toBlock: finalizedBlock,
           snapshot: createEmptyProjectionSnapshot(),
           identityBindingCount: 0,
@@ -352,11 +354,18 @@ export class IndexerService implements LifecycleService {
     // 回溯窗口内找不到共同祖先则报错要求 full rebuild。
     const effectiveFromBlock = await this.#rollbackOnReorg(fromBlock);
     if (finalizedBlock < effectiveFromBlock) {
+      // finalized 回写防回退：滞后的 finalized 读数不得把已持久化的最终性
+      // 上界写回退（pending 补投的上界过滤与诊断都以它为准）。游标侧保留
+      // 已存最大值；本回合无新事件可索引。
+      const durableFinalizedBlock = maxBlockOf(storedCursor?.finalizedBlock, this.#cursor?.finalizedBlock);
+      const reportedFinalizedBlock = durableFinalizedBlock !== undefined && durableFinalizedBlock > finalizedBlock
+        ? durableFinalizedBlock
+        : finalizedBlock;
       const nextCursor: EventCursor = {
         chainId: this.#config.network.chainId,
         deploymentBlock,
         nextBlock: effectiveFromBlock,
-        finalizedBlock,
+        finalizedBlock: reportedFinalizedBlock,
         ...(effectiveFromBlock > 0n
           ? (await this.#cursorBlockHash(effectiveFromBlock - 1n) ?? {})
           : {})
@@ -365,7 +374,7 @@ export class IndexerService implements LifecycleService {
       this.#cursor = nextCursor;
       const result = await this.#summarizeStoredProjection({
         fromBlock: effectiveFromBlock,
-        toBlock: finalizedBlock,
+        toBlock: reportedFinalizedBlock,
         newEventCount: 0
       });
       await this.#processProjectionAutomation(result.snapshot);
@@ -437,6 +446,11 @@ export class IndexerService implements LifecycleService {
       };
     });
 
+    // G-29/UVP-09：投递记录创建必须先于 cursor 推进。游标一旦先落库，
+    // 窗口内硬崩溃会让该批事件永不再被读取，投递记录无从重建；先按
+    // deliveryId 幂等创建投递记录再推游标，崩溃后重读重投不产生重复。
+    await this.#processSignalNotifications(activeNewEvents);
+
     const nextCursor: EventCursor = {
       chainId: this.#config.network.chainId,
       deploymentBlock,
@@ -446,7 +460,6 @@ export class IndexerService implements LifecycleService {
     };
     await this.#saveCursor(nextCursor);
     this.#cursor = nextCursor;
-    await this.#processSignalNotifications(activeNewEvents);
     await this.#processProjectionAutomation(result.snapshot);
 
     this.#logger.info("indexer incrementally refreshed projections from chain events", {
@@ -592,22 +605,26 @@ export class IndexerService implements LifecycleService {
     }
 
     // 安静链浅 reorg：回溯窗口内没有任何已存事件锚点不代表 reorg 深于窗口，
-    // 只代表这段链上本来就没有事件。回退到全库最新的已存事件锚点（可能低于
-    // 窗口下界）：其哈希仍与 canonical 一致 → reorg 未触及任何已投影数据，
+    // 只代表这段链上本来就没有事件。向更旧的已存锚点逐个回验（全库最新
+    // 优先）：任一锚点仍与 canonical 一致即 reorg 未触及该锚点之前的投影，
     // 正常回滚到该锚点（删除数恒为 0，随后从 canonical 链重读）。
-    const anchorBelowWindow = storedEvents
+    // 0200#15：只验最新锚点即抛"深于投影"会把"最新锚点恰好被 reorg 触及、
+    // 更旧锚点仍一致"的浅重org 误判成 full rebuild。
+    const anchorsBelowWindow = storedEvents
       .filter((event): event is ChainEvent & { readonly blockHash: Hex } =>
         !event.removed &&
         event.blockHash !== undefined &&
         event.blockNumber < fromBlock &&
         event.blockNumber >= deploymentBlock)
-      .sort((left, right) => (right.blockNumber > left.blockNumber ? 1 : right.blockNumber < left.blockNumber ? -1 : 0))[0];
-    if (anchorBelowWindow) {
-      const canonicalHash = await this.#eventSource.getBlockHash?.(anchorBelowWindow.blockNumber, this.#config);
-      if (canonicalHash && isSameBlockHash(canonicalHash, anchorBelowWindow.blockHash)) {
-        return this.#applyReorgRollback(durableStore, anchorBelowWindow.blockNumber, canonicalHash);
+      .sort((left, right) => (right.blockNumber > left.blockNumber ? 1 : right.blockNumber < left.blockNumber ? -1 : 0));
+    for (const anchor of anchorsBelowWindow) {
+      const canonicalHash = await this.#eventSource.getBlockHash?.(anchor.blockNumber, this.#config);
+      if (canonicalHash && isSameBlockHash(canonicalHash, anchor.blockHash)) {
+        return this.#applyReorgRollback(durableStore, anchor.blockNumber, canonicalHash);
       }
-      // 最新已存事件本身已不在 canonical 链上：reorg 深于全部已投影数据。
+    }
+    if (anchorsBelowWindow.length > 0) {
+      // 所有已存锚点都不在 canonical 链上：reorg 深于全部已投影数据。
       throw new ConfigError(
         `chain reorg deeper than the stored projection history; full projection rebuild is required`
       );
@@ -693,6 +710,9 @@ export class IndexerService implements LifecycleService {
     readonly toBlock: bigint;
     readonly newEventCount: number;
   }): Promise<IndexerRebuildResult> {
+    // 0212 P3-3：空批次（finalized 落后于 cursor）不得写出 fromBlock >
+    // toBlock 的 rebuild 元数据，按 finalized 锚点收敛为退化空区间。
+    const metadataFromBlock = input.fromBlock > input.toBlock ? input.toBlock : input.fromBlock;
     const snapshot = await this.#store.getOrderSnapshot?.() ?? createEmptyProjectionSnapshot();
     const identitySnapshot = await this.#store.getIdentitySnapshot();
     const existing = await this.#store.getSyncState(this.#scope);
@@ -708,7 +728,7 @@ export class IndexerService implements LifecycleService {
       rebuild: {
         status: "idle",
         deploymentBlock: this.#config.network.deploymentBlock,
-        fromBlock: input.fromBlock,
+        fromBlock: metadataFromBlock,
         toBlock: input.toBlock,
         eventCount: input.newEventCount,
         activeEventCount: existing?.eventCount ?? 0,
@@ -723,7 +743,7 @@ export class IndexerService implements LifecycleService {
       summary: summaryFromSnapshot({
         chainId: this.#config.network.chainId,
         deploymentBlock: this.#config.network.deploymentBlock,
-        fromBlock: input.fromBlock,
+        fromBlock: metadataFromBlock,
         toBlock: input.toBlock,
         snapshot,
         identityBindingCount: Object.keys(identitySnapshot.bindings).length,
@@ -889,6 +909,21 @@ export class IndexerService implements LifecycleService {
         // 无处理器（部署裁剪）或载荷为空：无法补投，也不应无限滞留。
         throw new Error(`signal notification processor unavailable for pending step ${step.stepId}`);
       }
+      // 0212 P3-3 通知上界跳批补处理：通知服务会按最终性上界过滤掉
+      // 未达上界的事件且不产生投递记录；此时把该步骤按成功出队会永久
+      // 丢失这批补投。保持排队并报错，待最终性追上后下一轮 sweep 再投。
+      const finalizedBlock = (await this.#store.getSyncState(this.#scope))?.finalizedBlock;
+      if (finalizedBlock !== undefined) {
+        const maxEventBlock = events.reduce(
+          (max, event) => (event.blockNumber > max ? event.blockNumber : max),
+          0n
+        );
+        if (maxEventBlock > finalizedBlock) {
+          throw new Error(
+            `pending signal notification batch ${step.stepId} extends to block ${maxEventBlock} above the finalized bound ${finalizedBlock}; it stays queued until finalization catches up`
+          );
+        }
+      }
       await processor.processSignalSubmittedEvents(events);
       return;
     }
@@ -993,6 +1028,16 @@ function minBlock(left: bigint, right: bigint | undefined): bigint {
   return right === undefined || left <= right ? left : right;
 }
 
+function maxBlockOf(left: bigint | undefined, right: bigint | undefined): bigint | undefined {
+  if (left === undefined) {
+    return right;
+  }
+  if (right === undefined) {
+    return left;
+  }
+  return left >= right ? left : right;
+}
+
 const MAX_REORG_BACKTRACK_BLOCKS = 1_000;
 
 function isSameBlockHash(left: Hex, right: Hex): boolean {
@@ -1000,8 +1045,10 @@ function isSameBlockHash(left: Hex, right: Hex): boolean {
 }
 
 /**
- * pending post-commit 步骤 id：按事件批内容（或自动化种类）派生，同一批
- * 失败重复落表是幂等 upsert，不会堆积重复行。
+ * pending post-commit 步骤 id：按事件批内容（或自动化种类）派生。无事件
+ * 批次（projection_automation 是幂等扫描语义）用稳定 kind 派生：同类
+ * 失败重复落表命中同一行（ON CONFLICT DO NOTHING + attempts 累加），
+ * 不会因时间戳每次新开一行导致永不命中、无限堆积。
  */
 function pendingPostCommitStepId(
   kind: PendingPostCommitKind,
@@ -1019,7 +1066,7 @@ function pendingPostCommitStepId(
           ].join(":")
         )
         .join("|")
-    : `${kind}:${new Date().toISOString()}`;
+    : kind;
   const digest = createHash("sha256").update(digestSource).digest("hex").slice(0, 24);
   return `pending_${kind}_${digest}`;
 }

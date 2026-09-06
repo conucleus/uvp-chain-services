@@ -112,9 +112,17 @@ export async function startApiServer(
     })
     : undefined;
 
-  if (indexer) {
-    await indexer.rebuildFromDeploymentBlock();
-  }
+  // M-5：全量重建不得阻塞 listen——通知补投的 webhook 逐条最多一个超时
+  // 周期、串行跟在重建里会把启动拖成 N×超时。改为后台执行；投影轮询等
+  // 重建结束后再启动，避免增量刷新与全量重建并发写同一存储。失败由
+  // indexer 的 degraded 状态与错误日志暴露。
+  const initialProjectionRebuild = indexer
+    ? indexer.rebuildFromDeploymentBlock().catch((error: unknown) => {
+        logger.error("api server background projection rebuild failed", {
+          message: error instanceof Error ? redactErrorMessage(error) : "unknown rebuild error"
+        });
+      })
+    : undefined;
 
   const submissionVerifyingContract = stateMachineAddress(config.network.contracts);
   // stage-patch / docking 模块地址必须显式存在于配置或
@@ -172,10 +180,12 @@ export async function startApiServer(
   // admin recovery actions 从既有 worker/indexer 原语构造，路由
   // 拿不到 ops_dependency_unavailable 的假边界。retrySubmission 复用
   // reconcile 原语（按 receipt 重新推进提交状态）并回报该提交的当前状态。
+  // 人工 rebuild 先等初始后台重建结束，避免与启动重建并发写同一存储。
   const opsRecoveryActions = {
     ...(indexer
       ? {
         rebuildProjections: async () => {
+          await initialProjectionRebuild;
           const { summary } = await indexer.rebuildFromDeploymentBlockWithSummary();
           return {
             status: "completed" as const,
@@ -372,10 +382,15 @@ export async function startApiServer(
     server.listen(config.api.port, config.api.host, resolve);
   });
 
-  const pollInterval = indexer ? startProjectionRefresh(indexer, config, logger) : undefined;
-  if (pollInterval) {
-    server.on("close", () => clearInterval(pollInterval));
-  }
+  // 轮询在初始后台重建结束后启动（见上方 M-5 注释），避免增量刷新与
+  // 全量重建并发写同一投影存储。
+  void (async () => {
+    await initialProjectionRebuild;
+    const pollInterval = indexer ? startProjectionRefresh(indexer, config, logger) : undefined;
+    if (pollInterval) {
+      server.on("close", () => clearInterval(pollInterval));
+    }
+  })();
   await reconcileWorker.start();
   await dockAutomationWorker.start();
   server.on("close", () => {
@@ -525,7 +540,9 @@ const CORS_ALLOWED_ORIGINS = new Set(
 );
 
 function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): void {
-  response.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
+  // UI-1（服务端半）：前端治理写链路使用 PUT，跨源部署下预检会拦
+  // 未列入 allow-methods 的方法，必须显式放行。
+  response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
     "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role, x-uvp-store-session, x-uvp-store-dev-anchored-address"

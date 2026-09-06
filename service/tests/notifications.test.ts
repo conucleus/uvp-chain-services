@@ -321,6 +321,78 @@ describe("signal-routed notifications", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("redacts transport error messages before persisting them as lastError", async () => {
+    // L-10：transport 失败文本（可能携带端点 URL 与凭权查询参数）先过
+    // redactErrorMessage 再落投递台账，对齐兄弟路径。
+    const event = signalEvent(6n, requiredDependency(customsDependencyA));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [event]
+    });
+    const secret = "hunter2secret";
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      dispatcher: {
+        async send() {
+          return { ok: false, error: `fetch failed for https://hooks.example/accept?token=${secret}` };
+        }
+      }
+    });
+
+    const summary = await service.processSignalSubmittedEvents([event]);
+    expect(summary.failed).toBe(1);
+    const [failed] = await service.listDeliveries();
+    expect(failed).toMatchObject({ status: "failed" });
+    expect(failed?.lastError).not.toContain(secret);
+    expect(failed?.lastError).toContain("token=[redacted:secret]");
+  });
+
+  it("dead-letters automatically redelivered failed rows once the attempt budget is exhausted", async () => {
+    // M-5：重建/重放对 failed 行的自动重投必须有预算——无上限的重启重投
+    // 会无界重复外部投递。预算耗尽转 dead_letter 终态（人工可重开）。
+    const event = signalEvent(6n, requiredDependency(customsDependencyA));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [event]
+    });
+    let sends = 0;
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      dispatcher: {
+        async send() {
+          sends += 1;
+          return { ok: false, error: "webhook_http_503" };
+        }
+      }
+    });
+
+    // 连续重放 6 轮：前 5 轮各自动重投一次（attempts 1..5），第 6 轮超
+    // 预算转 dead_letter 且不再调用 dispatcher。
+    for (let round = 0; round < 6; round += 1) {
+      await service.processSignalSubmittedEvents([event]);
+    }
+    const deliveries = await service.listDeliveries();
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).toMatchObject({
+      status: "dead_letter",
+      reason: "delivery_attempts_exhausted",
+      attempts: 5
+    });
+    expect(sends).toBe(5);
+  });
+
   it("builds redacted ready-task and submission recipient evidence only from task projections", async () => {
     const readyHook = requiredHook(resourceHook);
     const submittedHook = requiredHook(customsHook);
