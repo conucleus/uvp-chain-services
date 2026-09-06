@@ -12,9 +12,15 @@ import {
 } from "@uvp-eth/product-dto/fixtures";
 import {
   createNotificationService,
+  createWebhookReplayGuard,
   MemoryNotificationDeliveryStore,
+  newWebhookSignatureFields,
+  NOTIFICATION_WEBHOOK_NONCE_HEADER,
   NOTIFICATION_WEBHOOK_SIGNATURE_HEADER,
+  NOTIFICATION_WEBHOOK_TIMESTAMP_HEADER,
+  signWebhookBody,
   SUPPLIER_NOTIFICATION_PROFILE_VERSION,
+  verifyWebhookSignature,
   WebhookNotificationDispatcher,
   type NotificationDeliveryRecord,
   type NotificationDispatchRequest,
@@ -739,7 +745,7 @@ describe("signal-routed notifications", () => {
     })).resolves.toMatchObject({ status: 404 });
   });
 
-  it("delivers through the generic webhook transport with HMAC signature header (ETH-04)", async () => {
+  it("delivers through the generic webhook transport with timestamp.nonce.body HMAC signature (ETH-04)", async () => {
     const requests: Array<{ readonly url: string; readonly init: RequestInit }> = [];
     const dispatcher = new WebhookNotificationDispatcher({
       url: "https://ops.example/uvp/notify",
@@ -756,11 +762,27 @@ describe("signal-routed notifications", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toBe("https://ops.example/uvp/notify");
     expect(requests[0]?.init.method).toBe("POST");
-    const signatureHeader = (requests[0]?.init.headers as Record<string, string>)?.[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER];
-    const expected = `sha256=${createHmac("sha256", "webhook-secret").update(requests[0]?.init.body as string).digest("hex")}`;
-    expect(signatureHeader).toBe(expected);
     // body 不携带外部端点或 payload 明文。
     expect(requests[0]?.init.body as string).not.toContain("secret://");
+
+    // KIT 收口：MAC 覆盖 timestamp.nonce.body，三个签名头齐全且可被
+    // 对齐方案的 verify + replay guard 端到端校验。
+    const headers = requests[0]?.init.headers as Record<string, string>;
+    const timestamp = headers[NOTIFICATION_WEBHOOK_TIMESTAMP_HEADER];
+    const nonce = headers[NOTIFICATION_WEBHOOK_NONCE_HEADER];
+    expect(timestamp).toMatch(/^(0|[1-9][0-9]{0,9})$/);
+    expect(nonce).toMatch(/^[0-9a-f]{32}$/);
+    const body = requests[0]?.init.body as string;
+    const expected = `sha256=${createHmac("sha256", "webhook-secret").update(`${timestamp}.${nonce}.${body}`).digest("hex")}`;
+    expect(headers[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER]).toBe(expected);
+    const guard = createWebhookReplayGuard();
+    const nowMs = Number(timestamp) * 1000;
+    expect(verifyWebhookSignature(body, headers[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER], "webhook-secret", { timestamp, nonce, nowMs: () => nowMs })).toBe(true);
+    expect(guard.observe(nonce, nowMs, nowMs)).toBe(true);
+
+    // 同一 (body, 签名头) 立即重放：MAC 与时窗都通过，nonce 单次消费拦下。
+    expect(verifyWebhookSignature(body, headers[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER], "webhook-secret", { timestamp, nonce, nowMs: () => nowMs + 1000 })).toBe(true);
+    expect(guard.observe(nonce, nowMs, nowMs + 1000)).toBe(false);
 
     const failing = new WebhookNotificationDispatcher({
       url: "https://ops.example/uvp/notify",
@@ -768,6 +790,33 @@ describe("signal-routed notifications", () => {
     });
     await expect(failing.send({ record: deliveryRecord(), profile: notificationProfile(supplierWallet), transport: notificationProfile(supplierWallet).transports[0] as never }))
       .resolves.toMatchObject({ ok: false, error: "webhook_http_500" });
+  });
+
+  it("fails webhook signature verification closed on stale timestamps, missing fields, and tampering", () => {
+    const nowMs = 1_800_000_000_000;
+    const body = JSON.stringify({ schemaVersion: "uvp.notification-webhook.v1" });
+    const fields = newWebhookSignatureFields(() => nowMs);
+    const signature = signWebhookBody("webhook-secret", body, fields);
+
+    // 5 分钟窗口边界内通过，窗口外拒绝。
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { ...fields, nowMs: () => nowMs + 5 * 60_000 })).toBe(true);
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { ...fields, nowMs: () => nowMs + 5 * 60_000 + 1 })).toBe(false);
+
+    // 缺时间戳/nonce（旧 body-only 形态）与缺签名一律 fail-closed。
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { nonce: fields.nonce, nowMs: () => nowMs })).toBe(false);
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { timestamp: fields.timestamp, nowMs: () => nowMs })).toBe(false);
+    expect(verifyWebhookSignature(body, undefined, "webhook-secret", { ...fields, nowMs: () => nowMs })).toBe(false);
+
+    // 篡改 body / 换 secret / 畸形 nonce 全部拒绝。
+    expect(verifyWebhookSignature(`${body} `, signature, "webhook-secret", { ...fields, nowMs: () => nowMs })).toBe(false);
+    expect(verifyWebhookSignature(body, signWebhookBody("wrong-secret", body, fields), "webhook-secret", { ...fields, nowMs: () => nowMs })).toBe(false);
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { timestamp: fields.timestamp, nonce: "zz", nowMs: () => nowMs })).toBe(false);
+
+    // nonce 窗口内单次消费，窗口过期后可再次出现（随窗口失效）。
+    const guard = createWebhookReplayGuard();
+    expect(guard.observe(fields.nonce, nowMs, nowMs)).toBe(true);
+    expect(guard.observe(fields.nonce, nowMs, nowMs + 1000)).toBe(false);
+    expect(guard.observe(fields.nonce, nowMs, nowMs + 5 * 60_000 + 1)).toBe(true);
   });
 
   it("persists notification delivery and read state across store rebuilds (ETH-04)", async () => {
