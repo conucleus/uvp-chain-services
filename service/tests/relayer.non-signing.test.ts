@@ -188,10 +188,10 @@ describe("relayer non-signing boundary", () => {
     const second = await createRelayerService(options).relay(request("nonce-durable-budget"));
     expect(second).toMatchObject({
       status: "failed",
-      errorCode: "broadcast_retry_exhausted",
-      retryable: false,
-      retryState: "dead_letter",
-      deadLetter: true,
+      errorCode: "rpc_unavailable",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false,
       attemptNumber: 2,
       retryBudgetRemaining: 0
     });
@@ -199,9 +199,13 @@ describe("relayer non-signing boundary", () => {
 
     const third = await createRelayerService(options).relay(request("nonce-durable-budget"));
     expect(third).toMatchObject({
+      status: "failed",
       errorCode: "broadcast_retry_exhausted",
+      retryable: false,
       retryState: "dead_letter",
-      deadLetter: true
+      deadLetter: true,
+      attemptNumber: 2,
+      retryBudgetRemaining: 0
     });
     expect(broadcasts).toBe(2);
     await expect(store.load(first.id)).resolves.toMatchObject({
@@ -336,6 +340,45 @@ describe("relayer non-signing boundary", () => {
     expect(submitter.submit).toHaveBeenCalledOnce();
   });
 
+  it("treats a recorded submitted outcome as terminal and replays it idempotently", async () => {
+    const store = new MemoryRelaySubmissionStore();
+    const retryBudgetStore = new MemoryRelayRetryBudgetStore();
+    let broadcasts = 0;
+    const options = {
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => {
+          broadcasts += 1;
+          return { txHash };
+        }
+      },
+      nonceStore: new MemoryRelayNonceStore(),
+      submissionStore: store,
+      retryBudgetStore,
+      now: () => new Date("2026-01-01T00:00:00Z")
+    } satisfies Parameters<typeof createRelayerService>[0];
+
+    const first = await createRelayerService(options).relay(request("nonce-replay-submitted"));
+    expect(first).toMatchObject({ status: "submitted", txHash });
+
+    // 同载荷重放:成功提交已消费链上 nonce,必须幂等返回原结果,不得因
+    // nonce 仍被占用而把台账覆写成 duplicate_signer_nonce 死信。
+    const replay = await createRelayerService(options).relay(request("nonce-replay-submitted"));
+    expect(replay).toMatchObject({ status: "submitted", txHash });
+    expect(broadcasts).toBe(1);
+
+    await expect(store.load(first.id)).resolves.toMatchObject({
+      status: "submitted",
+      txHash
+    });
+    await expect(retryBudgetStore.load(first.id)).resolves.toMatchObject({
+      failedAttempts: 0,
+      lastSubmission: expect.objectContaining({ status: "submitted", txHash })
+    });
+  });
+
   it("records duplicate signer nonce attempts as dead-letter duplicate failures", async () => {
     const submitStarted = deferred<void>();
     const submitRelease = deferred<void>();
@@ -423,8 +466,9 @@ describe("relayer non-signing boundary", () => {
     const third = await relayer.relay(request("nonce-backoff"));
     expect(third).toMatchObject({ status: "submitted" });
 
+    // 同载荷重放已因 submitted 终态而幂等返回,退避重置由新 nonce 的新提交体现。
     failing = true;
-    const fourth = await relayer.relay(request("nonce-backoff"));
+    const fourth = await relayer.relay(request("nonce-backoff-2"));
     expect(fourth.nextRetryAt).toBe(new Date(baseTime + 250).toISOString());
     expect(recorded).toHaveLength(4);
   });

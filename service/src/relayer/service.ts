@@ -474,8 +474,11 @@ export class RelayerService implements LifecycleService {
     classification: RelayFailureClassification,
     priorFailedAttempts: number
   ): RelayFailureClassification {
-    const attemptNumber = priorFailedAttempts + 1;
-    if (!classification.retryable || !this.retryBudgetExhausted(attemptNumber)) {
+    // Only already-persisted failures count against the budget. The attempt
+    // that just failed is attempt `priorFailedAttempts + 1`, which stays
+    // within the initial + `maxRetryAttempts` allowance, so pre-counting it
+    // would condemn the last permitted retry before its outcome is recorded.
+    if (!classification.retryable || !this.retryBudgetExhausted(priorFailedAttempts)) {
       return classification;
     }
     return retryBudgetExhaustedFailure();
@@ -963,6 +966,13 @@ function normalizeMaxRetryAttempts(value: number | undefined): number {
 }
 
 function isTerminalSubmission(submission: RelaySubmission): boolean {
+  // A successful broadcast is final for this submission id: the nonce is
+  // consumed on chain. A same-payload replay must idempotently return the
+  // recorded outcome instead of failing nonce reservation and overwriting
+  // the ledger with a duplicate_signer_nonce dead letter.
+  if (submission.status === "submitted") {
+    return true;
+  }
   return submission.status === "failed" && (
     submission.deadLetter === true ||
     submission.retryable === false ||
