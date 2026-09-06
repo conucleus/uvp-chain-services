@@ -1,6 +1,5 @@
 import {
-  EvidenceServiceError,
-  principalFromHeaders
+  EvidenceServiceError
 } from "../../evidence/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError } from "../../shared/types.js";
@@ -10,22 +9,31 @@ import {
   type ProductSubmitIntent,
   type SubmitProductTaskInput
 } from "../../submissions/index.js";
+import { resolveEvidencePrincipal } from "../participant-identity.js";
+import type { ChainServicesRuntimeEnv } from "../../config/index.js";
 import type { ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-export function createSubmissionsRouteModule(): RouteModule {
+export function createSubmissionsRouteModule(options: {
+  /** 仅显式 local 允许自报 principal 头；缺省/非 local 无会话身份即 401。 */
+  readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
+} = {}): RouteModule {
   return {
     async handle(request, context) {
       const productTaskPrepareSubmitMatch = /^\/product\/tasks\/([^/]+)\/prepare-submit$/.exec(request.pathname);
       if (request.method === "POST" && productTaskPrepareSubmitMatch) {
         return handleSubmissionRequest(async () => {
           const taskId = decodeURIComponent(productTaskPrepareSubmitMatch[1] ?? "");
+          // prepare-submit 的证据读取主体不取自 x-uvp-principal-* 自报头
+          // （否则可冒充任意参与者读取他人证据）；与 /product/evidence
+          // 同口径：治理 admin 或钱包会话锚定地址，非 local 无身份即 401。
+          const principal = await resolveEvidencePrincipal(request, context, options.runtimeEnvironment);
           return {
             status: 201,
             body: await context.submissionService.prepareSubmit(
               taskId,
               parsePrepareSubmitBody(request.body),
-              principalFromHeaders(request.headers)
+              principal
             )
           };
         });

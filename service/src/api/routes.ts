@@ -353,7 +353,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
         : {})
     }),
     createStagePatchRouteModule(),
-    createSubmissionsRouteModule(),
+    createSubmissionsRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) }),
     createProductBffRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) }),
     createProductReadRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) })
   ];

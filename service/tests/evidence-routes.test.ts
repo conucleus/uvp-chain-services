@@ -30,6 +30,7 @@ describe("evidence API routes", () => {
 
   it("uploads text evidence and serves its proof for an authorized participant", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "local",
       evidenceService: createEvidenceService({
         storage: new InMemoryEvidenceStorage(),
         now: () => new Date("2026-04-28T00:00:00Z")
@@ -192,6 +193,7 @@ describe("evidence API routes", () => {
 
   it("rejects unauthorized evidence reads and returns 404 for missing evidence", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "local",
       evidenceService: createEvidenceService({
         storage: new InMemoryEvidenceStorage(),
         now: () => new Date("2026-04-28T00:00:00Z")
@@ -213,18 +215,37 @@ describe("evidence API routes", () => {
     });
     const upload = uploadResponse.body as { evidence: { evidenceId: string } };
 
+    // KEEP（存在性 oracle 消除）：无权读取与不存在同响应（404），
+    // 未认证在读取前即 401——不再以 403/404 区分泄露证据存在性。
     await expect(router.handle({
       method: "GET",
       pathname: `/product/evidence/${upload.evidence.evidenceId}`,
       headers: { "x-uvp-principal-id": "outsider" }
     })).resolves.toMatchObject({
-      status: 403,
-      body: { error: "forbidden" }
+      status: 404,
+      body: { error: "evidence_not_found" }
     });
 
     await expect(router.handle({
       method: "GET",
-      pathname: "/product/evidence/ev_missing/proof",
+      pathname: `/product/evidence/${upload.evidence.evidenceId}`
+    })).resolves.toMatchObject({
+      status: 401,
+      body: { error: "unauthenticated" }
+    });
+
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/evidence/ev_missing`,
+      headers: { "x-uvp-principal-id": "seller" }
+    })).resolves.toMatchObject({
+      status: 404,
+      body: { error: "evidence_not_found" }
+    });
+
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/evidence/ev_missing/proof`,
       headers: { "x-uvp-principal-id": "seller" }
     })).resolves.toMatchObject({
       status: 404,
@@ -235,6 +256,7 @@ describe("evidence API routes", () => {
   it("audits admin proof reads through the route boundary", async () => {
     const metadataStore = new InMemoryEvidenceMetadataStore();
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "local",
       evidenceService: createEvidenceService({
         metadataStore,
         storage: new InMemoryEvidenceStorage(),

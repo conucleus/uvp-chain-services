@@ -219,12 +219,14 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
     },
 
     async getEvidence(evidenceId, principal) {
+      // 先鉴权后读取：未认证在读库前即 401；已认证但无权读时与
+      // "不存在"同响应（404），不留下 404/403 存在性 oracle。
+      const normalizedPrincipal = normalizePrincipal(principal);
+      requireAuthenticated(normalizedPrincipal);
       const record = await metadataStore.get(evidenceId);
-      if (!record) {
+      if (!record || !canReadEvidence(normalizedPrincipal, record)) {
         return undefined;
       }
-      const normalizedPrincipal = normalizePrincipal(principal);
-      authorizeRead(record, normalizedPrincipal);
       if (normalizedPrincipal.role === "admin") {
         await metadataStore.recordAdminRead({
           evidenceId,
@@ -237,12 +239,13 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
     },
 
     async getProof(evidenceId, principal) {
+      // 同 getEvidence：先鉴权后读取，无权读与不存在不可区分。
+      const normalizedPrincipal = normalizePrincipal(principal);
+      requireAuthenticated(normalizedPrincipal);
       const record = await metadataStore.get(evidenceId);
-      if (!record) {
+      if (!record || !canReadEvidence(normalizedPrincipal, record)) {
         return undefined;
       }
-      const normalizedPrincipal = normalizePrincipal(principal);
-      authorizeRead(record, normalizedPrincipal);
       if (normalizedPrincipal.role === "admin") {
         await metadataStore.recordAdminRead({
           evidenceId,
@@ -286,12 +289,13 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
     },
 
     async verifyEvidenceBackup(evidenceId, principal) {
+      // admin 专用端点同样先鉴权后读取，存在性不泄露。
+      const normalizedPrincipal = normalizePrincipal(principal);
+      requireAuthenticated(normalizedPrincipal);
       const record = await metadataStore.get(evidenceId);
-      if (!record) {
+      if (!record || !canReadEvidence(normalizedPrincipal, record)) {
         return undefined;
       }
-      const normalizedPrincipal = normalizePrincipal(principal);
-      authorizeRead(record, normalizedPrincipal);
       const backupStorage = backupStorageOf(storage);
       if (!backupStorage) {
         return { evidenceId, backupConfigured: false };
@@ -309,12 +313,13 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
     },
 
     async restoreEvidenceBackup(evidenceId, principal) {
+      // 同上：先鉴权后读取。
+      const normalizedPrincipal = normalizePrincipal(principal);
+      requireAuthenticated(normalizedPrincipal);
       const record = await metadataStore.get(evidenceId);
-      if (!record) {
+      if (!record || !canReadEvidence(normalizedPrincipal, record)) {
         return undefined;
       }
-      const normalizedPrincipal = normalizePrincipal(principal);
-      authorizeRead(record, normalizedPrincipal);
       const backupStorage = backupStorageOf(storage);
       if (!backupStorage) {
         throw new EvidenceServiceError("evidence_backup_not_configured", "evidence storage has no backup copy configured", 409);
@@ -409,14 +414,6 @@ async function verifyEvidenceRecord(
   }
 
   return record.evidence.status === "bound" && record.evidence.boundSignalTxHash ? "matched" : "unbound";
-}
-
-function authorizeRead(record: EvidenceMetadataRecord, principal: EvidencePrincipal): void {
-  requireAuthenticated(principal);
-  if (canReadEvidence(principal, record)) {
-    return;
-  }
-  throw new EvidenceServiceError("forbidden", "principal cannot read this evidence", 403);
 }
 
 function normalizeBinding(input: BindEvidenceRequestDTO, now: () => Date): BindEvidenceRequestDTO {

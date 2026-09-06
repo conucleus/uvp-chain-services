@@ -11,8 +11,9 @@ import type { ApiRequest, ApiResponse, ApiRouteContext } from "./route-context.j
  *   dev 锚定头）。自报钱包只允许作为"与锚定地址一致性"的校验对象，
  *   不一致即 403；不得把 query/body/header 自报钱包当作唯一身份，
  *   否则可读任意人活动流、代标已读、代任意 owner 上传证据。
- * - local（或未声明环境）保留自报回退，与 STORE_AUTH_MODE=dev_headers
- *   仅限 local 的口径一致；非 local 无会话即 401。
+ * - local 保留自报回退，且必须显式声明（runtimeEnvironment === "local"）；
+ *   缺省环境不再是 local——组装层未传入运行环境时按 fail-closed 拒绝，
+ *   否则任何漏传配置的调用点都会静默退化为自报身份可信。
  */
 export interface ParticipantWalletIdentity {
   readonly walletAddress: Address;
@@ -83,7 +84,9 @@ export async function resolveParticipantWalletIdentity(
     };
   }
 
-  if (runtimeEnvironment === undefined || runtimeEnvironment === "local") {
+  // 仅显式 local 允许自报钱包；环境缺省（组装层漏传）按 fail-closed
+  // 拒绝，不给"未配置"留宽松兜底。
+  if (runtimeEnvironment === "local") {
     const claimed = selfReportedWalletFromRequest(request, options);
     if (claimed) {
       try {
@@ -139,7 +142,8 @@ export async function resolveEvidencePrincipal(
       role: "participant"
     };
   }
-  if (runtimeEnvironment === undefined || runtimeEnvironment === "local") {
+  // 仅显式 local 允许自报 principal 头；环境缺省 fail-closed（同上）。
+  if (runtimeEnvironment === "local") {
     return principalFromHeaders(request.headers);
   }
   return { role: "anonymous" };

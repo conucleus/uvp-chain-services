@@ -172,10 +172,17 @@ describe("evidence service", () => {
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "ops-admin", role: "admin" })).resolves.toBeDefined();
     await expect(service.getProof(upload.evidence.evidenceId, { id: "ops-admin", role: "admin" }))
       .resolves.toMatchObject({ verificationStatus: "unbound" });
+    // KEEP（存在性 oracle 消除）：无权读取与"不存在"同为 undefined（路由
+    // 层 404 evidence_not_found），不再以 403 泄露证据是否存在。
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "outsider", role: "participant" }))
-      .rejects.toMatchObject({ code: "forbidden", status: 403 });
+      .resolves.toBeUndefined();
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "ops", role: "participant" }))
-      .rejects.toMatchObject({ code: "forbidden", status: 403 });
+      .resolves.toBeUndefined();
+    // 未认证主体在读库前即 401（不因 evidenceId 是否存在而不同）。
+    await expect(service.getEvidence(upload.evidence.evidenceId, { role: "anonymous" }))
+      .rejects.toMatchObject({ code: "unauthenticated", status: 401 });
+    await expect(service.getEvidence("ev_missing", { role: "anonymous" }))
+      .rejects.toMatchObject({ code: "unauthenticated", status: 401 });
     await expect(metadataStore.listAdminReads()).resolves.toEqual([
       expect.objectContaining({ principalId: "ops-admin", route: "evidence" }),
       expect.objectContaining({ principalId: "ops-admin", route: "proof" })
