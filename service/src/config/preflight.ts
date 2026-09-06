@@ -388,11 +388,11 @@ function runStaticPreflight(
       pass(checks, "governance.contract");
     }
     if (!config.governance.signerPrivateKey) {
-      fail(checks, errors, "governance.signer", "GOVERNANCE_SIGNER_PRIVATE_KEY is required when governance broadcast is enabled");
+      fail(checks, errors, "governance.signer", `${config.governance.signerPrivateKeyEnv} is required when governance broadcast is enabled`);
     } else {
       const signer = privateKeyAddress(config.governance.signerPrivateKey, "governance signer");
       if (config.governance.signerAddress && signer && signer !== config.governance.signerAddress) {
-        fail(checks, errors, "governance.signer", "GOVERNANCE_SIGNER_PRIVATE_KEY does not match GOVERNANCE_SIGNER_ADDRESS");
+        fail(checks, errors, "governance.signer", `${config.governance.signerPrivateKeyEnv} does not match GOVERNANCE_SIGNER_ADDRESS`);
       } else {
         pass(checks, "governance.signer");
       }
@@ -975,11 +975,11 @@ function runStagingRolePreflight(
     checks,
     errors,
     name: "operator.governance_signer",
-    envName: "GOVERNANCE_SIGNER_PRIVATE_KEY",
+    envName: config.governance.signerPrivateKeyEnv,
     privateKey: config.governance.signerPrivateKey,
     expectedAddress: config.governance.signerAddress,
-    missingMessage: "GOVERNANCE_SIGNER_PRIVATE_KEY is required in staging",
-    mismatchMessage: "GOVERNANCE_SIGNER_PRIVATE_KEY does not match GOVERNANCE_SIGNER_ADDRESS"
+    missingMessage: `${config.governance.signerPrivateKeyEnv} is required in staging`,
+    mismatchMessage: `${config.governance.signerPrivateKeyEnv} does not match GOVERNANCE_SIGNER_ADDRESS`
   });
   if (config.governance.registryOwnerAddress) {
     pass(checks, "operator.governance_registry_owner");
@@ -1393,7 +1393,7 @@ function operatorRoleDiagnostics(config: ChainServicesConfig, env: Env): ConfigD
       config.operatorRoles.governanceRegistryOwnerAddress ?? config.governance.registryOwnerAddress
     ),
     governanceSigner: privateKeyRoleDiagnostics(
-      "GOVERNANCE_SIGNER_PRIVATE_KEY",
+      config.governance.signerPrivateKeyEnv,
       env,
       config.governance.signerAddress ?? config.operatorRoles.governanceSignerAddress
     ),
@@ -1445,7 +1445,7 @@ function privateKeyAddress(privateKey: string | undefined, label: string): Addre
 function privateKeyEnvNames(config: ChainServicesConfig): readonly string[] {
   return [...new Set([
     config.relayer.stateMachinePrivateKeyEnv,
-    "GOVERNANCE_SIGNER_PRIVATE_KEY",
+    config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv
   ])];

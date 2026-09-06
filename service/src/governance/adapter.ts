@@ -103,7 +103,7 @@ export function createConfiguredGovernanceChainAdapter(config: ChainServicesConf
     throw new ConfigError("UVPIdentityRegistry contract address is required when governance broadcast is enabled");
   }
   if (!config.governance.signerPrivateKey) {
-    throw new ConfigError("GOVERNANCE_SIGNER_PRIVATE_KEY is required when governance broadcast is enabled");
+    throw new ConfigError(`${config.governance.signerPrivateKeyEnv} is required when governance broadcast is enabled`);
   }
 
   return createGovernanceBroadcasterAdapter({

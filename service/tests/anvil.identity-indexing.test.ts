@@ -175,6 +175,7 @@ function testConfig(input: {
     },
     governance: {
       broadcastEnabled: false,
+      signerPrivateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY",
       rpcUrl: input.rpcUrl,
       chainId: input.chainId,
       txConfirmations: 1,

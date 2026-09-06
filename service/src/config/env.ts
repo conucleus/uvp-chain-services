@@ -71,6 +71,8 @@ export interface RelayerConfig {
 
 export interface GovernanceConfig {
   readonly broadcastEnabled: boolean;
+  /** 私钥所在环境变量名：GOVERNANCE_SIGNER_PRIVATE_KEY_ENV 指向的变量名，缺省即值形态默认名。 */
+  readonly signerPrivateKeyEnv: string;
   readonly signerPrivateKey?: Hex;
   readonly signerAddress?: Address;
   readonly registryOwnerAddress?: Address;
@@ -856,10 +858,10 @@ function parseGovernanceConfig(
     "GOVERNANCE_BROADCAST_ENABLED",
     false,
   );
-  const signerPrivateKey = optionalPrivateKeyEnv(
-    env,
-    "GOVERNANCE_SIGNER_PRIVATE_KEY",
-  );
+  const signerPrivateKeyEnv =
+    optionalEnv(env, "GOVERNANCE_SIGNER_PRIVATE_KEY_ENV") ??
+    "GOVERNANCE_SIGNER_PRIVATE_KEY";
+  const signerPrivateKey = optionalPrivateKeyEnv(env, signerPrivateKeyEnv);
   const signerAddress = optionalAddressEnv(env, "GOVERNANCE_SIGNER_ADDRESS");
   const registryOwnerAddress = optionalAddressEnv(
     env,
@@ -868,12 +870,13 @@ function parseGovernanceConfig(
 
   if (broadcastEnabled && !signerPrivateKey) {
     throw new ConfigError(
-      "GOVERNANCE_SIGNER_PRIVATE_KEY is required when GOVERNANCE_BROADCAST_ENABLED=true",
+      `${signerPrivateKeyEnv} is required when GOVERNANCE_BROADCAST_ENABLED=true`,
     );
   }
 
   return {
     broadcastEnabled,
+    signerPrivateKeyEnv,
     ...(signerPrivateKey ? { signerPrivateKey } : {}),
     ...(signerAddress ? { signerAddress } : {}),
     ...(registryOwnerAddress ? { registryOwnerAddress } : {}),
@@ -1318,7 +1321,7 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
 
   const privateKeyEnvNames = new Set([
     config.relayer.stateMachinePrivateKeyEnv,
-    "GOVERNANCE_SIGNER_PRIVATE_KEY",
+    config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
   ]);
@@ -1620,9 +1623,14 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   if (!config.governance.signerAddress) {
     throw new ConfigError("GOVERNANCE_SIGNER_ADDRESS is required in staging");
   }
+  if (!optionalEnv(env, "GOVERNANCE_SIGNER_PRIVATE_KEY_ENV")) {
+    throw new ConfigError(
+      "GOVERNANCE_SIGNER_PRIVATE_KEY_ENV is required in staging",
+    );
+  }
   if (!config.governance.signerPrivateKey) {
     throw new ConfigError(
-      "GOVERNANCE_SIGNER_PRIVATE_KEY is required in staging",
+      `${config.governance.signerPrivateKeyEnv} is required in staging`,
     );
   }
   if (config.operatorRoles.adminReviewers.length === 0) {
@@ -1642,7 +1650,7 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
 
   const privateKeyEnvNames = new Set([
     config.relayer.stateMachinePrivateKeyEnv,
-    "GOVERNANCE_SIGNER_PRIVATE_KEY",
+    config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
   ]);

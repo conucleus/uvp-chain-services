@@ -786,7 +786,7 @@ describe("chain-services config", () => {
           addressMatches: true
         },
         governanceSigner: {
-          privateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY",
+          privateKeyEnv: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY",
           address: stagingGovernanceAddress,
           expectedAddress: stagingGovernanceAddress,
           addressMatches: true
@@ -1167,6 +1167,34 @@ describe("chain-services config", () => {
     expect(() => loadConfigFromEnv(keyEnv)).toThrow(/Anvil default private key/);
   });
 
+  it("resolves the governance signer key via GOVERNANCE_SIGNER_PRIVATE_KEY_ENV and fails loudly when missing", () => {
+    // DEPLOY 依赖：staging 剖面用名引用注入私钥；名/值二选一，广播开启但解析不到值必须点名失败。
+    const namedEnv = loadConfigFromEnv({
+      GOVERNANCE_BROADCAST_ENABLED: "true",
+      GOVERNANCE_SIGNER_PRIVATE_KEY_ENV: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY",
+      UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY: testnetRegistrarPrivateKey
+    });
+    expect(namedEnv.governance.signerPrivateKeyEnv).toBe("UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY");
+    expect(namedEnv.governance.signerPrivateKey).toBe(testnetRegistrarPrivateKey);
+
+    expect(() => loadConfigFromEnv({
+      GOVERNANCE_BROADCAST_ENABLED: "true",
+      GOVERNANCE_SIGNER_PRIVATE_KEY_ENV: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY"
+    })).toThrow(/UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY is required when GOVERNANCE_BROADCAST_ENABLED=true/);
+
+    const defaultValueForm = loadConfigFromEnv({
+      GOVERNANCE_BROADCAST_ENABLED: "true",
+      GOVERNANCE_SIGNER_PRIVATE_KEY: testnetRegistrarPrivateKey
+    });
+    expect(defaultValueForm.governance.signerPrivateKeyEnv).toBe("GOVERNANCE_SIGNER_PRIVATE_KEY");
+    expect(defaultValueForm.governance.signerPrivateKey).toBe(testnetRegistrarPrivateKey);
+
+    const { UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY: _stagingKey, ...missingStagingKey } = stagingEnv(tempDirs);
+    expect(() => loadConfigFromEnv(missingStagingKey)).toThrow(
+      /UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY is required/
+    );
+  });
+
   it("fails strict governance preflight when signer or registry owner does not match chain state", async () => {
     const env = testnetEnv(testnetPostgresConfigUrl(), {
       GOVERNANCE_BROADCAST_ENABLED: "true",
@@ -1482,7 +1510,8 @@ function stagingEnv(tempDirs: string[], overrides: Record<string, string | undef
     GOVERNANCE_BROADCAST_ENABLED: "true",
     GOVERNANCE_REGISTRY_OWNER_ADDRESS: stagingGovernanceAddress,
     GOVERNANCE_SIGNER_ADDRESS: stagingGovernanceAddress,
-    GOVERNANCE_SIGNER_PRIVATE_KEY: testnetRegistrarPrivateKey,
+    GOVERNANCE_SIGNER_PRIVATE_KEY_ENV: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY",
+    UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY: testnetRegistrarPrivateKey,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
     RECONCILE_WORKER_ENABLED: "true",

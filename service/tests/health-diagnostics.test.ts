@@ -766,6 +766,7 @@ function serverTestConfig(): ChainServicesConfig {
     },
     governance: {
       broadcastEnabled: false,
+      signerPrivateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY",
       rpcUrl: "http://127.0.0.1:8545",
       chainId: 31337,
       txConfirmations: 1,
