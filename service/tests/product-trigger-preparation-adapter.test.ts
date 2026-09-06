@@ -201,6 +201,44 @@ describe("Product BFF trigger broadcast adapter", () => {
     });
   });
 
+  it("KEEP: transport envelopes like Invalid JSON RPC response stay retryable (G-30)", async () => {
+    // "Invalid JSON RPC response" 是传输层错误，不是确定性业务拒绝：
+    // 误判成 retryable:false 会把草稿永久卡死在 failed。
+    const walletClient: ProductTriggerBroadcastWalletClient = {
+      account: { address: registrarAddress },
+      writeContract: vi.fn(async () => {
+        throw new Error("Invalid JSON RPC response: expected response body");
+      })
+    };
+    const publicClient: ProductTriggerBroadcastPublicClient = {
+      waitForTransactionReceipt: vi.fn()
+    };
+    const adapter = adapterWithClients(publicClient, walletClient);
+
+    await expect(adapter.broadcastOutsideTrigger({
+      draftId: "draft_1",
+      triggerId: "trigger_1",
+      orderId,
+      planId,
+      creator: registrarAddress,
+      triggerHookId,
+      triggerStageId,
+      sourceId,
+      signalId,
+      stateMachineAddress,
+      payloadHash,
+      idempotencyKey,
+      authorizations: [],
+      submitter: registrarAddress,
+      deadline: "9999999999",
+      signature
+    })).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "trigger_order_broadcast_failed",
+      retryable: true
+    });
+  });
+
   it("marks deterministic write reverts non-retryable", async () => {
     const walletClient: ProductTriggerBroadcastWalletClient = {
       account: { address: registrarAddress },

@@ -244,11 +244,27 @@ export function createProductReadRouteModule(options: {
 
       if (request.method === "GET" && request.pathname === "/product/tasks") {
         return withStorageGuard(async () => {
-          const tasks = await context.productService.listTasks(cleanQuery({
+          // 任务 DTO 携带 assigneeWallet/proofRows 等参与者数据，匿名不可
+          // 枚举：身份取会话锚定钱包；已指派任务只有受理人本人可见，
+          // 未指派（纯链上事实）任务对已认证参与者开放。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
+          const walletAddress = wallet.identity.walletAddress;
+          if (request.query?.assignee && request.query.assignee.toLowerCase() !== walletAddress.toLowerCase()) {
+            return {
+              status: 403,
+              body: { error: "forbidden", message: "assignee filter must match the session-anchored wallet" }
+            };
+          }
+          const tasks = (await context.productService.listTasks(cleanQuery({
             orderId: request.query?.orderId,
-            assignee: request.query?.assignee,
             status: request.query?.status
-          }));
+          }))).filter((task) =>
+            !task.assigneeWallet ||
+            task.assigneeWallet.toLowerCase() === walletAddress.toLowerCase()
+          );
           return {
             status: 200,
             body: { tasks }
@@ -259,9 +275,18 @@ export function createProductReadRouteModule(options: {
       const productTaskMatch = /^\/product\/tasks\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productTaskMatch) {
         return withStorageGuard(async () => {
+          // 任务详情（assigneeWallet/proofRows）要求已认证参与者：已指派
+          // 任务仅受理人本人可读；未指派任务不得区分"不存在"（404）。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
           const taskId = decodeURIComponent(productTaskMatch[1] ?? "");
           const task = await context.productService.getTask(taskId);
-          if (!task) {
+          if (!task || (
+            task.assigneeWallet &&
+            task.assigneeWallet.toLowerCase() !== wallet.identity.walletAddress.toLowerCase()
+          )) {
             return {
               status: 404,
               body: { error: "product_task_not_found" }

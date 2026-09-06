@@ -335,21 +335,26 @@ interface ClassifiedProductTriggerBroadcastError {
   readonly retryable: boolean;
 }
 
+/**
+ * 传输层错误信封（JSON-RPC / HTTP / 网络）。这些错误与链上业务状态
+ * 无关，一律可重试——此前裸 /invalid/ 正则把 "Invalid JSON RPC
+ * response" 误判为确定性拒绝（retryable:false），草稿被永久卡死。
+ */
+function isTransportEnvelopeError(haystack: string): boolean {
+  return /json.?rpc|http request|fetch failed|network|socket|connection|ECONN|ETIMEDOUT|timeout|timed out|AbortError|transport|too many|rate.?limit/i.test(haystack);
+}
+
 function classifyProductTriggerBroadcastError(error: unknown): ClassifiedProductTriggerBroadcastError {
   const message = error instanceof Error ? error.message : "triggerOrderFromOutsideFor broadcast failed";
   const haystack = `${error instanceof Error ? error.name : ""} ${message}`;
-  if (/revert|invalid|expired|deadline|unknown.?order|already.?exists|unauthori[sz]ed|signature/i.test(haystack)) {
+  // 只有确定性业务拒绝（合约 revert/签名/授权/期限类拒绝）才不可重试；
+  // 传输层信封先短路为可重试，其余未知错误也按可重试处理（对账可探测）。
+  if (!isTransportEnvelopeError(haystack) &&
+      /\brevert|unauthori[sz]ed|expired|deadline|unknown.?order|already.?(?:registered|exists|triggered)|signature/i.test(haystack)) {
     return {
       errorCode: "trigger_order_reverted",
       message: "triggerOrderFromOutsideFor transaction was rejected deterministically",
       retryable: false
-    };
-  }
-  if (/timeout|timed out|ETIMEDOUT|AbortError|ECONNRESET|network|socket|transport/i.test(haystack)) {
-    return {
-      errorCode: "trigger_order_broadcast_failed",
-      message,
-      retryable: true
     };
   }
   return {

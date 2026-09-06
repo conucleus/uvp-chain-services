@@ -611,7 +611,7 @@ describe("indexer projection replay", () => {
 
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events });
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const response = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
 
     expect(response.status).toBe(409);
@@ -1338,7 +1338,7 @@ describe("indexer projection replay", () => {
   it("serves state-machine projection through Product API endpoints", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineEvents() });
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
     const ordersResponse = await router.handle({ method: "GET", pathname: "/product/orders" });
@@ -1351,12 +1351,15 @@ describe("indexer projection replay", () => {
       method: "GET",
       pathname: `/product/orders/${stateMachineOrderId}/proof`
     });
+    // 任务读取收口：已认证参与者（锚定钱包）读取任务；该任务未指派
+    // 受理人，纯链上事实对已认证参与者开放。
     const tasksResponse = await router.handle({
       method: "GET",
       pathname: "/product/tasks",
-      query: { orderId: stateMachineOrderId }
+      query: { orderId: stateMachineOrderId },
+      headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" }
     });
-    const taskResponse = await router.handle({ method: "GET", pathname: `/product/tasks/${taskId}` });
+    const taskResponse = await router.handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" } });
 
     expect(ordersResponse.status).toBe(200);
     expect((ordersResponse.body as { orders: Array<{ orderId: string }> }).orders[0]?.orderId).toBe(stateMachineOrderId);
@@ -1459,7 +1462,7 @@ describe("indexer projection replay", () => {
     unblock!();
     await waitForCondition(() => readCount === 2);
 
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const proofResponse = await router.handle({
       method: "GET",
       pathname: `/product/orders/${stateMachineOrderId}/proof`
@@ -1550,7 +1553,7 @@ describe("indexer projection replay", () => {
     unblock!();
     await waitForCondition(() => readCount === 2);
 
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const proofResponse = await router.handle({
       method: "GET",
       pathname: `/product/orders/${queuedOrderId}/proof`

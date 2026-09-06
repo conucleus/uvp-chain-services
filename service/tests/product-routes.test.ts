@@ -32,12 +32,32 @@ const submitter = "0x3333333333333333333333333333333333333333";
 const overlayExecutor = "0x5555555555555555555555555555555555555555";
 const storeOperatorHeaders = {
   "x-uvp-store-user-id": "store-operator-1",
-  "x-uvp-store-role": "operator"
+  "x-uvp-store-role": "operator",
+  // 红线：docking/草稿写路由要求会话已锚定地址（本地联调 dev 锚定头）。
+  "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
 };
 const storeAdminHeaders = {
   "x-uvp-store-user-id": "store-admin-1",
-  "x-uvp-store-role": "admin"
+  "x-uvp-store-role": "admin",
+  "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
 };
+/** 本地联调 dev 锚定头开关（docking 写路由红线门槛）。 */
+const devAnchoredStoreAuth = {
+  mode: "dev_headers" as const,
+  roleClaim: "roles",
+  principalClaim: "sub",
+  clockToleranceSeconds: 60,
+  walletSession: {
+    enabled: true,
+    operatorWallets: [],
+    adminWallets: [],
+    sessionTtlSeconds: 43200,
+    challengeTtlSeconds: 300,
+    devAnchoredAddressHeaderEnabled: true,
+  },
+};
+/** 任务读取收口：/product/tasks* 以会话锚定钱包查看自己的任务。 */
+const assigneeHeaders = { "x-uvp-wallet-address": submitter };
 const metadataHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const nonOfficialDomainId = "0x0000000000000000000000000000000000000000000000000000000000009999";
 const stateMachineOrderId = "0x0000000000000000000000000000000000000000000000000000000000000202";
@@ -53,7 +73,7 @@ const idempotencyKey = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 
 describe("product API routes", () => {
   it("serves an empty projection-only zhixu catalog without indexed plans", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     const listResponse = await router.handle({ method: "GET", pathname: "/product/zhixus" });
     expect(listResponse.status).toBe(200);
@@ -77,7 +97,7 @@ describe("product API routes", () => {
         })
       ]
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     const listResponse = await router.handle({ method: "GET", pathname: "/product/zhixus" });
     expect(listResponse.status).toBe(200);
@@ -102,7 +122,7 @@ describe("product API routes", () => {
   });
 
   it("serves a Store Console zhixu lifecycle view built from registered schemas and chain plans", async () => {
-    const emptyRouter = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const emptyRouter = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     const emptyResponse = await emptyRouter.handle({ method: "GET", pathname: "/store/zhixus" });
     const missingDetailResponse = await emptyRouter.handle({
@@ -122,7 +142,7 @@ describe("product API routes", () => {
 
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
     const listResponse = await router.handle({ method: "GET", pathname: "/store/zhixus" });
     const detailResponse = await router.handle({ method: "GET", pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}` });
 
@@ -176,7 +196,7 @@ describe("product API routes", () => {
   it("filters Store zhixus and searches exact zhixu id", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     const listResponse = await router.handle({
       method: "GET",
@@ -213,7 +233,7 @@ describe("product API routes", () => {
   it("searches exact order id and returns candidate page for ambiguous order ids", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     const directSearch = await router.handle({
       method: "GET",
@@ -250,7 +270,7 @@ describe("product API routes", () => {
         }))
       ]
     });
-    const ambiguousRouter = createApiRouter(ambiguousStore, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const ambiguousRouter = createApiRouter(ambiguousStore, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
     const ambiguousSearch = await ambiguousRouter.handle({
       method: "GET",
       pathname: "/store/search",
@@ -317,17 +337,20 @@ describe("product API routes", () => {
       createdAt: "2026-07-15T00:00:00.000Z",
       updatedAt: "2026-07-15T00:00:00.000Z"
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeSupplierMetadataStore: supplierMetadata });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, storeSupplierMetadataStore: supplierMetadata });
 
+    // 供应商目录读门槛：与 /store/suppliers 同口径要求已认证 Store 读身份。
     const bySubject = await router.handle({
       method: "GET",
       pathname: "/store/search",
-      query: { q: supplierSubjectId, type: "supplier" }
+      query: { q: supplierSubjectId, type: "supplier" },
+      headers: storeOperatorHeaders
     });
     const byWallet = await router.handle({
       method: "GET",
       pathname: "/store/search",
-      query: { q: submitter, type: "supplier" }
+      query: { q: submitter, type: "supplier" },
+      headers: storeOperatorHeaders
     });
 
     expect((bySubject.body as { results: Array<{ resultType: string; id: string; badgeLabel: string; matchedFields: string[] }> }).results[0])
@@ -357,7 +380,7 @@ describe("product API routes", () => {
       eventCount: 0,
       rebuild: { status: "running", fromBlock: 0n, toBlock: 12n }
     });
-    const response = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({
+    const response = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth }).handle({
       method: "GET",
       pathname: "/store/search",
       query: { q: "missing" }
@@ -389,7 +412,7 @@ describe("product API routes", () => {
         })
       ]
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", now: () => new Date("2026-04-29T00:00:00Z") });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, now: () => new Date("2026-04-29T00:00:00Z") });
 
     const detailBefore = await router.handle({ method: "GET", pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}` });
     // STORE-03：docking 必须是两个不同 zhixu 之间的会话。
@@ -473,7 +496,7 @@ describe("product API routes", () => {
   });
 
   it("fails Store docking writes closed without operator access and validates explicit sandbox errors", async () => {
-    const emptyRouter = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const emptyRouter = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
     await expect(emptyRouter.handle({
       method: "POST",
       pathname: "/store/docking-sessions",
@@ -517,7 +540,7 @@ describe("product API routes", () => {
         })
       ]
     });
-    const revokedResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({
+    const revokedResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth }).handle({
       method: "POST",
       pathname: "/store/docking-sessions",
       headers: storeOperatorHeaders,
@@ -566,12 +589,13 @@ describe("product API routes", () => {
       async getProductSchemaByPlan(planId) {
         return planId === crossBorderPlanIds.planId ? schemaWithEvidenceSpec : undefined;
       }
-    }, submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    }, submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
 
     const tasksResponse = await router.handle({
       method: "GET",
       pathname: "/product/tasks",
-      query: { orderId: stateMachineOrderId }
+      query: { orderId: stateMachineOrderId },
+      headers: assigneeHeaders
     });
 
     expect(tasksResponse.status).toBe(200);
@@ -593,7 +617,7 @@ describe("product API routes", () => {
         })
       ]
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     // 路由层快速拦截：source === target → 422 self_docking_forbidden。
     await expect(router.handle({
@@ -641,7 +665,7 @@ describe("product API routes", () => {
         })
       ]
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
     const createResponse = await router.handle({
       method: "POST",
       pathname: "/store/docking-sessions",
@@ -733,13 +757,13 @@ describe("product API routes", () => {
     const events = stateMachineProductEvents();
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
     const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
     const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
     const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` });
-    const tasksResponse = await router.handle({ method: "GET", pathname: "/product/tasks", query: { orderId: stateMachineOrderId } });
+    const tasksResponse = await router.handle({ method: "GET", pathname: "/product/tasks", query: { orderId: stateMachineOrderId }, headers: assigneeHeaders });
 
     expect(orderResponse.status).toBe(200);
     const order = (orderResponse.body as { order: ChainBackedOrder }).order;
@@ -806,13 +830,13 @@ describe("product API routes", () => {
       .resolves.toMatchObject({ body: firstTimelineBody });
     await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` }))
       .resolves.toMatchObject({ body: firstProofBody });
-    await expect(router.handle({ method: "GET", pathname: "/product/tasks", query: { orderId: stateMachineOrderId } }))
+    await expect(router.handle({ method: "GET", pathname: "/product/tasks", query: { orderId: stateMachineOrderId }, headers: assigneeHeaders }))
       .resolves.toMatchObject({ body: firstTasksBody });
   });
 
   it("marks the un-projected registration window as pending instead of a normal registered order", async () => {
     const store = new MemoryProjectionStore();
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
     // 行已建但 OrderRegistered 未投影：去掉注册事件后，SignalSubmitted 等
     // 旁路事件会先建出订单行（status 被乐观提升为 registered，registeredAt
     // 缺席）。读面必须以 projectionStatus: "pending" 诚实暴露该中间态，
@@ -851,7 +875,7 @@ describe("product API routes", () => {
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents({ includeMatchingSignal: true }) });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
-    const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({ method: "GET", pathname: `/product/tasks/${taskId}` });
+    const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth }).handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: assigneeHeaders });
 
     expect(taskResponse.status).toBe(200);
     expect((taskResponse.body as { task: { status: string; chainStatus: string; submittedSignalTxHash: string } }).task)
@@ -907,10 +931,10 @@ describe("product API routes", () => {
         })
       ]
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
-    const taskResponse = await router.handle({ method: "GET", pathname: `/product/tasks/${taskId}` });
+    const taskResponse = await router.handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: { "x-uvp-wallet-address": overlayExecutor } });
     const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
     const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` });
     const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
@@ -1014,7 +1038,7 @@ describe("product API routes", () => {
     });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
-    const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({ method: "GET", pathname: `/product/tasks/${taskId}` });
+    const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth }).handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: assigneeHeaders });
 
     expect(taskResponse.status).toBe(200);
     expect((taskResponse.body as { task: Record<string, unknown> }).task)
@@ -1060,7 +1084,7 @@ describe("product API routes", () => {
     });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
-    const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({ method: "GET", pathname: `/product/tasks/${taskId}` });
+    const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth }).handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: assigneeHeaders });
 
     expect(taskResponse.status).toBe(200);
     expect((taskResponse.body as { task: Record<string, unknown> }).task)
@@ -1099,7 +1123,7 @@ describe("product API routes", () => {
     });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
-    const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({ method: "GET", pathname: `/product/tasks/${taskId}` });
+    const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth }).handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: assigneeHeaders });
 
     expect(taskResponse.status).toBe(200);
     const task = (taskResponse.body as { task: Record<string, unknown> }).task;
@@ -1244,8 +1268,8 @@ describe("product API routes", () => {
     });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
-    const taskResponse = await createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeZhixuDraftStore: storeDraftStore })
-      .handle({ method: "GET", pathname: `/product/tasks/${taskId}` });
+    const taskResponse = await createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeZhixuDraftStore: storeDraftStore })
+      .handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: assigneeHeaders });
 
     expect(taskResponse.status).toBe(200);
     expect((taskResponse.body as { task: Record<string, unknown> }).task).toMatchObject({
@@ -1279,7 +1303,7 @@ describe("product API routes", () => {
         })
       ]
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     const meResponse = await router.handle({
       method: "GET",
@@ -1333,10 +1357,11 @@ describe("product API routes", () => {
         })
       ]
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productBffStore: new MemoryProductBffStore() });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: new MemoryProductBffStore() });
     const draftResponse = await router.handle({
       method: "POST",
       pathname: "/product/order-drafts",
+      headers: assigneeHeaders,
       body: {
         zhixuId: CROSS_BORDER_ZHIXU_ID,
         title: "Accepted participant route",
@@ -1349,6 +1374,7 @@ describe("product API routes", () => {
     const inviteResponse = await router.handle({
       method: "POST",
       pathname: `/product/orders/${draft.draftId}/invites`,
+      headers: assigneeHeaders,
       body: {
         roleSlotId: "delivery",
         contact: "delivery@example.com"
@@ -1406,7 +1432,7 @@ describe("product API routes", () => {
   });
 
   it("does not serve demo order or task DTOs without indexed projection", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     const ordersResponse = await router.handle({
       method: "GET",
@@ -1418,11 +1444,13 @@ describe("product API routes", () => {
     });
     const tasksResponse = await router.handle({
       method: "GET",
-      pathname: "/product/tasks"
+      pathname: "/product/tasks",
+      headers: assigneeHeaders
     });
     const taskResponse = await router.handle({
       method: "GET",
-      pathname: `/product/tasks/${DEMO_TASK_ID}`
+      pathname: `/product/tasks/${DEMO_TASK_ID}`,
+      headers: assigneeHeaders
     });
     const timelineResponse = await router.handle({
       method: "GET",
@@ -1444,7 +1472,7 @@ describe("product API routes", () => {
   });
 
   it("serves projections only in production runtime even if the removed demo fallback is requested", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       productRuntimeEnvironment: "production",
       evidenceService: createEvidenceService({
         storage: objectStorageWithUri("object://private-evidence/product-route-production"),
@@ -1466,7 +1494,7 @@ describe("product API routes", () => {
   it("serves order DTOs from chain facts only now that e2e syncing controls are gone", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` }))
       .resolves.toMatchObject({ status: 200 });
@@ -1517,7 +1545,7 @@ describe("product API routes", () => {
       now: () => new Date(createdAt),
       evidenceIdFactory: () => "ev_product_auth"
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productBffStore, evidenceService });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore, evidenceService });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
     const uploadResponse = await router.handle({
       method: "POST",
@@ -1579,10 +1607,10 @@ describe("product API routes", () => {
     store.listStateMachineOrders = () => { throw unavailableError; };
     store.listStateMachineTasks = () => { throw unavailableError; };
 
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     // /product/tasks hits the store through productService.listTasks; verify it returns a typed error
-    const tasksResponse = await router.handle({ method: "GET", pathname: "/product/tasks" });
+    const tasksResponse = await router.handle({ method: "GET", pathname: "/product/tasks", headers: assigneeHeaders });
     expect(tasksResponse.status).toBe(503);
     expect(tasksResponse.body).toMatchObject({
       error: "product_storage_unavailable",

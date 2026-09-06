@@ -124,7 +124,13 @@ export function createStoreDecorationService(options: StoreDecorationServiceOpti
         note: note?.trim() ? note.trim() : `restored from version ${version}`,
         createdAt: now().toISOString()
       };
-      await decorationStore.appendVersion(record);
+      try {
+        await decorationStore.appendVersion(record);
+      } catch {
+        // 并发 restore/save 撞 UNIQUE(plan_id, version)——与 saveDecoration
+        // 同口径映射 409，而不是把存储错误裸抛成 503。
+        throw new StoreDecorationServiceError(409, "decoration_version_conflict", "concurrent decoration save detected; retry");
+      }
       await emitAudit({
         action: "decoration.restored",
         planId,
