@@ -874,8 +874,9 @@ describe("product API routes", () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents({ includeMatchingSignal: true }) });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
-    const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth }).handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: assigneeHeaders });
+    const taskResponse = await router.handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: assigneeHeaders });
 
     expect(taskResponse.status).toBe(200);
     expect((taskResponse.body as { task: { status: string; chainStatus: string; submittedSignalTxHash: string } }).task)
@@ -884,6 +885,14 @@ describe("product API routes", () => {
         chainStatus: "submitted",
         submittedSignalTxHash: txHash(8n)
       });
+
+    // ORDER-FE 口径:submitted 只是链上确认中,不得计入已完成(completedTaskCount 仅统计 done)。
+    const meResponse = await router.handle({ method: "GET", pathname: "/product/me", headers: assigneeHeaders });
+    expect(meResponse.status).toBe(200);
+    expect((meResponse.body as { summary: { completedTaskCount: number; openTaskCount: number } }).summary).toMatchObject({
+      completedTaskCount: 0,
+      openTaskCount: 0
+    });
   });
 
   it("projects executor activation and resource patch manifests into Product order/task proof", async () => {

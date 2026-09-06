@@ -107,7 +107,8 @@ export function createProductReadRouteModule(options: {
                 orderCount: view.orders.length,
                 openTaskCount: view.tasks.filter((task) => task.status === "open").length,
                 blockedTaskCount: view.tasks.filter((task) => task.status === "blocked").length,
-                completedTaskCount: view.tasks.filter((task) => task.status === "done" || task.status === "submitted").length
+                // ORDER-FE 口径:submitted 是链上确认中,不算已完成;仅 done 计入。
+                completedTaskCount: view.tasks.filter((task) => task.status === "done").length
               }
             }
           };
