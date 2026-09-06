@@ -1157,7 +1157,6 @@ function stablePermissionShape(
   return permissions.map((permission) => ({
     payloadPolicy: permission.payloadPolicy,
     permissionId: permission.permissionId,
-    requiredEvidence: permission.requiredEvidence,
     roleSlotId: permission.roleSlotId,
     signalName: permission.signalName,
     source: permission.source,

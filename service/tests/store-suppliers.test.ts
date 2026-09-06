@@ -636,7 +636,6 @@ function productTaskRecord(input: {
     stageName: "export.customs",
     deadline: "以业务约定为准",
     fundingImpact: "条件满足后进入下一步",
-    requiredEvidence: [],
     status: "open",
     responsibilityStatements: [],
     proofRows: [],

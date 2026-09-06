@@ -367,8 +367,7 @@ function taskMatched(task: ProductTaskApiDTO, normalizedQuery: string): boolean 
     task.subtitle,
     task.assigneeRole,
     task.assigneeWallet,
-    task.stageName,
-    ...task.requiredEvidence
+    task.stageName
   ].some((field) => typeof field === "string" && normalizeSearchText(field).includes(normalizedQuery));
 }
 

@@ -1905,7 +1905,6 @@ function productRegistration(draftId: string): ProductOrderTriggerRecord {
         signalName: "confirm_stage",
         submitterAddress: buyer,
         payloadPolicy: "required",
-        requiredEvidence: [],
       },
     ],
     createdAt: "2026-04-28T00:00:00.000Z",

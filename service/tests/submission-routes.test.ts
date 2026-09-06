@@ -32,7 +32,6 @@ const routeTask: ProductTaskDTO = {
   stageName: "Customs complete",
   deadline: "2026-05-01",
   fundingImpact: "advance workflow",
-  requiredEvidence: ["customs declaration"],
   status: "open",
   responsibilityStatements: [],
   proofRows: []

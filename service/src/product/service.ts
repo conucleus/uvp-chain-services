@@ -759,12 +759,9 @@ async function productTaskFromStateMachineTask(
     capabilityResolution?.submitterWallet ??
     task.assigneeWallet;
   const pluginKind = capabilityResolution?.capabilityPlugin.pluginKind;
-  const requiredEvidence = capabilityResolution
-    ? requiredEvidenceForCapability(capabilityResolution.capabilityPlugin)
-    : (productStage?.evidence ?? []);
-  // evidenceSpec：发布者携带的结构化证据要求（productDto.v1 可选字段）。
-  // schema 是不透明 JSON，按结构化读取逐字段透传，缺失时缺省（消费方
-  // 降级为通用证据槽位），不参与鉴权或状态判定。
+  // evidenceSpec：发布者携带的结构化证据要求（productDto.v1 可选字段），
+  // 任务证据规则的唯一来源；schema 是不透明 JSON，按结构化读取逐字段
+  // 透传，缺失时缺省（消费方不再合成通用槽位），不参与鉴权或状态判定。
   const evidenceSpec = evidenceSpecFromStage(productStage);
   const requiredInputs = capabilityResolution
     ? requiredInputsForCapability(
@@ -825,8 +822,7 @@ async function productTaskFromStateMachineTask(
       : productAddOnKind
         ? fundingImpactForAddOn(productAddOnKind)
         : "缺少履约插槽能力插件元数据，当前只能展示链上证明，不能提交业务动作",
-    requiredEvidence,
-    ...(evidenceSpec ? { evidenceSpec } : {}),
+  ...(evidenceSpec ? { evidenceSpec } : {}),
     status: productStatus,
     ...(capabilityResolution
       ? {
@@ -1295,7 +1291,6 @@ function taskCapabilityPluginFromSlot(
     ...(plugin.primaryActionLabel
       ? { primaryActionLabel: plugin.primaryActionLabel }
       : {}),
-    requiredEvidence: plugin.requiredEvidence,
     ...(plugin.inputPolicy ? { inputPolicy: plugin.inputPolicy } : {}),
   };
 }
@@ -1330,17 +1325,9 @@ function compareTaskCapabilityCandidates(
   return 0;
 }
 
-function requiredEvidenceForCapability(
-  plugin: ProductTaskCapabilityPluginDTO,
-): readonly string[] {
-  return plugin.requiredEvidence.length > 0
-    ? plugin.requiredEvidence
-    : requiredEvidenceForFulfillment(plugin.pluginKind);
-}
-
 /**
  * ProductTaskDTO.evidenceSpec 的本仓结构镜像（productDto.v1 可选字段，
- * 不 import protocol 包，跟随 requiredEvidence 的内联定义方式）。
+ * 不 import protocol 包，跟随任务 DTO 的内联定义方式）。
  */
 export interface ProductTaskEvidenceSpecDTO {
   readonly key: string;
@@ -1406,7 +1393,6 @@ function missingTaskCapabilityPlugin(): ProductTaskCapabilityPluginDTO {
     source: "missing",
     title: "缺少履约插件配置",
     summary: "该链上待办没有匹配到秩序 metadata 中的履约插槽能力插件。",
-    requiredEvidence: [],
   };
 }
 
@@ -1436,26 +1422,6 @@ function primaryActionForFulfillment(kind: FulfillmentPluginKind): string {
       return "提交争议材料";
     case "evidence_submission":
       return "提交阶段凭证";
-  }
-}
-
-function requiredEvidenceForFulfillment(
-  kind: FulfillmentPluginKind,
-): readonly string[] {
-  // 商店框架化约束：兜底文案不得携带具体业务词（单证/行业类型等），
-  // 只描述"阶段凭证/确认"的通用槽位语义；具体业务词由发布者的
-  // evidenceSpec/requiredEvidence 配置携带。
-  switch (kind) {
-    case "payment_placeholder":
-      return ["付款条件确认", "资金凭证指纹"];
-    case "delivery_update":
-      return ["阶段交付凭证", "阶段完成确认"];
-    case "validation_confirm":
-      return ["检验报告", "验收确认"];
-    case "dispute_material":
-      return ["争议说明", "补充凭证"];
-    case "evidence_submission":
-      return ["凭证指纹或阶段完成确认"];
   }
 }
 

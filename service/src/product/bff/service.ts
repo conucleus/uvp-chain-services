@@ -1132,7 +1132,6 @@ function inviteRolePreview(
     roleSlotId: participant.roleSlotId,
     label: roleSlot?.label ?? participant.roleLabel,
     duty: roleSlot?.duty ?? "按订单职责处理待办并提交必要业务凭证。",
-    requiredEvidence: roleSlot?.evidence ?? [],
     ...(evidenceSpec ? { evidenceSpec } : {})
   };
 }

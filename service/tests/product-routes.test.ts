@@ -1059,7 +1059,6 @@ describe("product API routes", () => {
         businessPersonaLabels: ["报关行", "物流/货代"],
         participantRoleLabel: "物流/报关",
         primaryActionLabel: "确认报关完成",
-        requiredEvidence: expect.arrayContaining(["报关单"]),
         requiredInputs: expect.arrayContaining([
           expect.objectContaining({ inputId: "customs-declaration", label: "报关单 PDF" })
         ]),
@@ -1141,7 +1140,6 @@ describe("product API routes", () => {
       chainStatus: "ready",
       assigneeWallet: submitter,
       canSubmit: false,
-      requiredEvidence: [],
       capabilityPlugin: expect.objectContaining({
         source: "missing"
       }),
@@ -1291,7 +1289,6 @@ describe("product API routes", () => {
         pluginKind: "validation_confirm",
         roleSlotId: "export.customs"
       }),
-      requiredEvidence: ["校验报告"],
       canSubmit: true
     });
   });

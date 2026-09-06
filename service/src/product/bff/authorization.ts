@@ -75,7 +75,6 @@ export class ProductAuthorizationBuilder {
         signalName: resolved.entry.signalName,
         submitterAddress: resolved.submitter,
         payloadPolicy: resolved.entry.payloadPolicy,
-        requiredEvidence: resolved.entry.requiredEvidence,
         // 发布者携带的结构化证据要求（schema 不透明 JSON，结构化读取）。
         ...(resolved.evidenceSpec ? { evidenceSpec: resolved.evidenceSpec } : {})
       });
