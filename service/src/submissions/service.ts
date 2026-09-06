@@ -4,6 +4,7 @@ import { buildProductSubmitTypedData, recoverProductSubmitSigner } from "@uvp-et
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
 import { hashCanonicalJson } from "../evidence/index.js";
 import type { TxReconcileFields } from "../reconcile/status.js";
+import { redactErrorMessage } from "../security/redaction.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { assertHex, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import { InMemoryProductSubmissionStore } from "./store.js";
@@ -418,7 +419,32 @@ export function createProductSubmissionService(options: ProductSubmissionService
         retryable: submission.retryable
       });
       if (isEvidenceBindingSubmission(submission)) {
-        await bindSubmittedEvidence(options.evidenceReader, prepared, submission);
+        // CS-A4：链上广播已成功——绑定失败是服务端补账缺口，不得把已成功
+        // 的提交以异常报成 500（违反信封契约）。返回成功提交结果，同时落
+        // 审计事件供对账；prepare 已被消费，绑定补账走人工/reconcile 路径。
+        try {
+          await bindSubmittedEvidence(options.evidenceReader, prepared, submission);
+        } catch (error) {
+          try {
+            await audit.record({
+              type: "relayer.submit.evidence_bind_failed",
+              action: prepared.signalName,
+              outcome: "failed",
+              subject: {
+                ...submissionAuditSubject(prepared),
+                submissionId: submission.submissionId,
+                ...(submission.txHash ? { txHash: submission.txHash } : {})
+              },
+              errorCode: "evidence_bind_failed",
+              retryable: true,
+              metadata: {
+                message: error instanceof Error ? redactErrorMessage(error) : "unknown evidence bind error"
+              }
+            });
+          } catch {
+            // 审计通道不可用不得改变提交响应语义。
+          }
+        }
       }
       return submission;
     },

@@ -60,15 +60,14 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     const timestamp = new Date().toISOString();
     runSqliteWrite(() => {
       this.#database.prepare(
-        `INSERT INTO submission (
-           prepare_id, submission_id, task_id, order_id, onchain_order_id, plan_id, stage_identifier,
+        `INSERT INTO submission_prepare (
+           prepare_id, task_id, order_id, onchain_order_id, plan_id, stage_identifier,
            signal_name, source_id, signal_id, intent, payload_hash, payload_ref,
-           idempotency_key, submitter, nonce, deadline, status, prepared_json,
-           submission_json, used_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           idempotency_key, submitter, nonce, deadline, prepared_json,
+           submission_id, used_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(prepare_id)
          DO UPDATE SET
-           submission_id = excluded.submission_id,
            task_id = excluded.task_id,
            order_id = excluded.order_id,
            onchain_order_id = excluded.onchain_order_id,
@@ -84,14 +83,12 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
            submitter = excluded.submitter,
            nonce = excluded.nonce,
            deadline = excluded.deadline,
-           status = excluded.status,
            prepared_json = excluded.prepared_json,
-           submission_json = excluded.submission_json,
+           submission_id = excluded.submission_id,
            used_at = excluded.used_at,
            updated_at = excluded.updated_at`
       ).run(
         record.prepareId,
-        record.submissionId ?? null,
         record.taskId,
         record.orderId,
         record.onchainOrderId,
@@ -107,9 +104,8 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
         record.submitter,
         record.nonce,
         record.deadline,
-        "prepared",
         stringifyStorageJson(record),
-        null,
+        record.submissionId ?? null,
         record.usedAt ?? null,
         timestamp,
         timestamp
@@ -120,7 +116,7 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
   async getPrepared(prepareId: string): Promise<PreparedSubmissionRecord | undefined> {
     const row = this.#database.prepare(
       `SELECT prepared_json, plan_id, used_at, submission_id
-       FROM submission
+       FROM submission_prepare
        WHERE prepare_id = ?`
     ).get(prepareId);
     if (!row) {
@@ -151,7 +147,7 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
   async markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void> {
     runSqliteWrite(() => {
       this.#database.prepare(
-        `UPDATE submission
+        `UPDATE submission_prepare
          SET submission_id = ?, used_at = ?, updated_at = ?
          WHERE prepare_id = ?`
       ).run(submissionId, usedAt, usedAt, prepareId);
@@ -186,28 +182,19 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
 
   async putSubmission(submission: ProductSubmissionDTO): Promise<void> {
     await this.withTransaction(async () => {
+      // submission 以 submission_id 为主键追加:同一 prepare 的重试历史
+      // 各自留档,不按 prepare_id 收敛覆盖(与内存 store 语义一致)。
       runSqliteWrite(() => {
-        const existing = this.#database.prepare(
-          `SELECT prepared_json, created_at
-           FROM submission
-           WHERE prepare_id = ?`
-        ).get(submission.prepareId);
-        const existingRecord = existing ? rowObject(existing, "submission existing query") : undefined;
-        const preparedJson = existingRecord
-          ? stringColumn(existingRecord, "prepared_json")
-          : stringifyStorageJson(submission);
-        const createdAt = existingRecord ? stringColumn(existingRecord, "created_at") : submission.createdAt;
-
         this.#database.prepare(
         `INSERT INTO submission (
-             prepare_id, submission_id, task_id, order_id, onchain_order_id, plan_id, stage_identifier,
+             submission_id, prepare_id, task_id, order_id, onchain_order_id, plan_id, stage_identifier,
              signal_name, source_id, signal_id, intent, payload_hash, payload_ref,
-             idempotency_key, submitter, nonce, deadline, status, prepared_json,
-             submission_json, used_at, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(prepare_id)
+             idempotency_key, submitter, nonce, deadline, status,
+             submission_json, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(submission_id)
            DO UPDATE SET
-             submission_id = excluded.submission_id,
+             prepare_id = excluded.prepare_id,
              task_id = excluded.task_id,
              order_id = excluded.order_id,
              onchain_order_id = excluded.onchain_order_id,
@@ -224,13 +211,11 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
              nonce = excluded.nonce,
              deadline = excluded.deadline,
              status = excluded.status,
-             prepared_json = excluded.prepared_json,
              submission_json = excluded.submission_json,
-             created_at = excluded.created_at,
              updated_at = excluded.updated_at`
         ).run(
-          submission.prepareId,
           submission.submissionId,
+          submission.prepareId,
           submission.taskId,
           submission.orderId,
           submission.onchainOrderId,
@@ -247,12 +232,8 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
           submission.nonce,
           submission.deadline,
           submission.status,
-          preparedJson,
           stringifyStorageJson(submission),
-          // used_at 只能由 markPreparedUsed 写入（与内存 store 同语义）：
-          // 非广播路径（广播未配置）的 putSubmission 不得消费 prepare。
-          null,
-          createdAt,
+          submission.createdAt,
           submission.updatedAt
         );
 
@@ -331,7 +312,7 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     const rows = this.#database.prepare(
       `SELECT submission_id, submission_json, plan_id
        FROM submission
-       WHERE submission_id IS NOT NULL AND submission_json IS NOT NULL
+       WHERE submission_json IS NOT NULL
        ORDER BY created_at ASC, submission_id ASC`
     ).all();
     const submissions = rows.map((row) => {

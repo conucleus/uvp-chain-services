@@ -86,22 +86,24 @@ export class SqliteBroadcastDedupeStore implements BroadcastDedupeStore {
 
   async claimTxHash(txHash: string, idempotencyKey: string): Promise<string | undefined> {
     const normalizedTxHash = txHash.toLowerCase();
-    const existing = this.#database
-      .prepare("SELECT idempotency_key FROM broadcast_dedupe_tx_owner WHERE tx_hash = ?")
-      .get(normalizedTxHash);
-    if (existing && typeof existing === "object" && typeof (existing as Record<string, unknown>).idempotency_key === "string") {
-      return (existing as Record<string, unknown>).idempotency_key as string;
+    // CS-P1：单语句归属判定。INSERT 抢占,冲突时保留既有归属并原样回读
+    // (DO UPDATE 只刷新 updated_at);并发双方在唯一约束上串行化,后到者
+    // 必然读到先到者的 key,不存在先 SELECT 后 INSERT 的双方都放行窗口。
+    // 契约与 postgres/memory 后端一致:归属属于自己(含本次抢占)返回
+    // undefined,属于他人返回其 idempotencyKey。
+    const row = runSqliteWrite(() =>
+      this.#database.prepare(
+        `INSERT INTO broadcast_dedupe_tx_owner (tx_hash, idempotency_key, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(tx_hash) DO UPDATE SET updated_at = excluded.updated_at
+         RETURNING idempotency_key`
+      ).get(normalizedTxHash, idempotencyKey, this.#now().toISOString())
+    );
+    if (!row || typeof row !== "object") {
+      return undefined;
     }
-    runSqliteWrite(() => {
-      this.#database
-        .prepare(
-          `INSERT INTO broadcast_dedupe_tx_owner (tx_hash, idempotency_key, updated_at)
-           VALUES (?, ?, ?)
-           ON CONFLICT(tx_hash) DO NOTHING`
-        )
-        .run(normalizedTxHash, idempotencyKey, this.#now().toISOString());
-    });
-    return undefined;
+    const owner = (row as Record<string, unknown>).idempotency_key;
+    return typeof owner === "string" && owner !== idempotencyKey ? owner : undefined;
   }
 }
 
