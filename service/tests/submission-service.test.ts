@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
 import { onchainSignalId, onchainSourceId } from "@uvp-eth/compiler";
@@ -8,11 +12,16 @@ import {
   createSecureSubmissionBroadcastAdapter,
   createStateMachineSubmissionBroadcastAdapter,
   createProductSubmissionService,
+  InMemoryProductSubmissionStore,
   permissiveProductProjectionAuthorization,
+  SqliteBroadcastDedupeStore,
+  SqliteSubmissionStore,
   type PreparedSubmissionDTO,
   type ProductSubmissionService,
+  type ProductSubmissionStore,
   type StateMachineSubmitSignalForCall,
   type SubmissionBroadcastAdapter,
+  type SubmissionBroadcastRequest,
   type SubmissionBroadcastResult
 } from "../src/submissions/index.js";
 import {
@@ -29,6 +38,8 @@ const privateKey = "0x1111111111111111111111111111111111111111111111111111111111
 const account = privateKeyToAccount(privateKey);
 const submitter = normalizeAddress(account.address, "account.address");
 const verifyingContract = "0x1111111111111111111111111111111111111111" as Address;
+const planId = "0x7777777777777777777777777777777777777777777777777777777777777777" as Hex;
+const zeroPlanId = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
 const chainId = 31337;
 const owner: EvidencePrincipal = { id: "seller", role: "participant" };
 const baseNow = new Date("2026-04-28T00:00:00Z");
@@ -45,7 +56,6 @@ const task: ProductTaskDTO = {
   stageName: "Customs complete",
   deadline: "2026-05-01",
   fundingImpact: "advance workflow",
-  requiredEvidence: ["customs declaration"],
   status: "open",
   responsibilityStatements: [],
   proofRows: []
@@ -137,12 +147,13 @@ describe("product task submissions", () => {
       typedData: {
         domain: {
           name: "UVPStateMachine",
-          version: "0.8",
+          version: "0.10",
           chainId,
           verifyingContract
         },
         primaryType: "UVPStateMachineSignal",
         message: {
+          planId,
           orderId: prepared.onchainOrderId,
           sourceId: prepared.sourceId,
           signalId: prepared.signalId,
@@ -153,7 +164,9 @@ describe("product task submissions", () => {
         }
       }
     });
+    // 审计 #10：UVPStateMachineSignal 签名域并入 planId，且首字段为 planId。
     expect(prepared.typedData.types.UVPStateMachineSignal.map((field) => field.name)).toEqual([
+      "planId",
       "orderId",
       "sourceId",
       "signalId",
@@ -162,6 +175,54 @@ describe("product task submissions", () => {
       "submitter",
       "deadline"
     ]);
+    expect(prepared.planId).toBe(planId);
+  });
+
+  it("refuses to prepare when the projection cannot supply the order planId", async () => {
+    // 审计 #10 负例：投影无 planId（或为零占位）时不构造签名，prepare 直接失败。
+    const fixture = await submissionFixture({
+      authorization: permissiveProductProjectionAuthorization()
+    });
+    const service = createProductSubmissionService({
+      productTasks: {
+        getTask: async (taskId) => taskId === task.taskId ? task : undefined
+      },
+      evidenceReader: fixture.evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => undefined,
+      authorization: permissiveProductProjectionAuthorization(),
+      now: () => baseNow
+    });
+
+    await expect(service.prepareSubmit(task.taskId, {
+      evidenceIds: [fixture.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "order_plan_unresolved",
+      status: 409
+    });
+
+    const zeroService = createProductSubmissionService({
+      productTasks: {
+        getTask: async (taskId) => taskId === task.taskId ? task : undefined
+      },
+      evidenceReader: fixture.evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => zeroPlanId,
+      authorization: permissiveProductProjectionAuthorization(),
+      now: () => baseNow
+    });
+    await expect(zeroService.prepareSubmit(task.taskId, {
+      evidenceIds: [fixture.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "order_plan_unresolved",
+      status: 409
+    });
   });
 
   it("recovers and verifies the submitter signature without broadcasting by default", async () => {
@@ -243,25 +304,119 @@ describe("product task submissions", () => {
     expect(broadcast.broadcast).not.toHaveBeenCalled();
   });
 
-  it("rejects duplicate submit for the same prepared nonce", async () => {
+  it("keeps the prepared signal reusable when broadcasting is disabled and rejects duplicates when it is not", async () => {
     const fixture = await submissionFixture();
     const prepared = await prepare(fixture);
     const signature = await signPrepared(prepared);
 
-    await fixture.service.submit(task.taskId, {
+    const first = await fixture.service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
       signature
     });
+    expect(first).toMatchObject({
+      status: "signature_received",
+      broadcastStatus: "not_attempted"
+    });
 
+    // Nothing was broadcast, so the prepared signal is deliberately not
+    // consumed: the submitter can retry it later against a configured relayer.
     await expect(fixture.service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
       signature
+    })).resolves.toMatchObject({
+      status: "signature_received",
+      broadcastStatus: "not_attempted"
+    });
+
+    // With a real broadcasting adapter the same reuse is rejected instead.
+    const broadcastingFixture = await submissionFixture({
+      broadcastAdapter: {
+        async broadcast() {
+          return { status: "submitted" as const, txHash: txHash("9"), blockNumber: "1" };
+        }
+      }
+    });
+    const broadcastingPrepared = await prepare(broadcastingFixture);
+    const broadcastingSignature = await signPrepared(broadcastingPrepared);
+    await broadcastingFixture.service.submit(task.taskId, {
+      prepareId: broadcastingPrepared.prepareId,
+      walletAddress: submitter,
+      signature: broadcastingSignature
+    });
+    await expect(broadcastingFixture.service.submit(task.taskId, {
+      prepareId: broadcastingPrepared.prepareId,
+      walletAddress: submitter,
+      signature: broadcastingSignature
     })).rejects.toMatchObject({
       code: "prepare_already_used",
       status: 409
     });
+  });
+
+  it("keeps the prepared signal reusable on the durable sqlite store when broadcasting is disabled", async () => {
+    // 与上一条用例同语义，落到持久驱动：非广播路径不消费 prepare，
+    // 广播路径标记 used 后拒绝复用。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-submission-sqlite-"));
+    const store = new SqliteSubmissionStore({
+      databaseUrl: `sqlite://${join(tempDir, "submissions.sqlite")}`,
+      migrations: {
+        autoRun: true,
+        directory: fileURLToPath(new URL("../migrations", import.meta.url))
+      }
+    });
+    try {
+      const fixture = await submissionFixture({ store });
+      const prepared = await prepare(fixture);
+      const signature = await signPrepared(prepared);
+
+      const first = await fixture.service.submit(task.taskId, {
+        prepareId: prepared.prepareId,
+        walletAddress: submitter,
+        signature
+      });
+      expect(first).toMatchObject({
+        status: "signature_received",
+        broadcastStatus: "not_attempted"
+      });
+
+      await expect(fixture.service.submit(task.taskId, {
+        prepareId: prepared.prepareId,
+        walletAddress: submitter,
+        signature
+      })).resolves.toMatchObject({
+        status: "signature_received",
+        broadcastStatus: "not_attempted"
+      });
+
+      const broadcastingFixture = await submissionFixture({
+        store,
+        broadcastAdapter: {
+          async broadcast() {
+            return { status: "submitted" as const, txHash: txHash("10"), blockNumber: "1" };
+          }
+        }
+      });
+      const broadcastingPrepared = await prepare(broadcastingFixture);
+      const broadcastingSignature = await signPrepared(broadcastingPrepared);
+      await broadcastingFixture.service.submit(task.taskId, {
+        prepareId: broadcastingPrepared.prepareId,
+        walletAddress: submitter,
+        signature: broadcastingSignature
+      });
+      await expect(broadcastingFixture.service.submit(task.taskId, {
+        prepareId: broadcastingPrepared.prepareId,
+        walletAddress: submitter,
+        signature: broadcastingSignature
+      })).rejects.toMatchObject({
+        code: "prepare_already_used",
+        status: 409
+      });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("rejects a submitter that is not authorized for the task signal", async () => {
@@ -524,6 +679,211 @@ describe("product task submissions", () => {
     });
   });
 
+  it("reopens the same prepare after a retryable broadcast result without txHash", async () => {
+    let broadcastCalls = 0;
+    const broadcast: SubmissionBroadcastAdapter = {
+      attemptsBroadcast: true,
+      async broadcast(): Promise<SubmissionBroadcastResult> {
+        broadcastCalls += 1;
+        return broadcastCalls === 1
+          ? {
+              status: "failed",
+              errorCode: "rpc_timeout",
+              message: "RPC request timed out while broadcasting the signal",
+              retryable: true,
+            }
+          : { status: "submitted", txHash: txHash("23") };
+      },
+    };
+    const fixture = await submissionFixture({ broadcastAdapter: broadcast });
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+    const input = {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature,
+    };
+
+    await expect(fixture.service.submit(task.taskId, input)).resolves.toMatchObject({
+      status: "failed",
+      retryable: true,
+    });
+    await expect(fixture.service.submit(task.taskId, input)).resolves.toMatchObject({
+      status: "submitted",
+      txHash: txHash("23"),
+    });
+    expect(broadcastCalls).toBe(2);
+  });
+
+  it("releases the reserved nonce when broadcast throws so the same prepareId stays retryable", async () => {
+    let broadcastCalls = 0;
+    const broadcast: SubmissionBroadcastAdapter = {
+      attemptsBroadcast: true,
+      async broadcast(): Promise<SubmissionBroadcastResult> {
+        broadcastCalls += 1;
+        if (broadcastCalls === 1) {
+          throw new Error("rpc connection reset before writeContract");
+        }
+        return { status: "submitted" as const, txHash: txHash("30"), blockNumber: "7" };
+      }
+    };
+    const fixture = await submissionFixture({ broadcastAdapter: broadcast });
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+
+    // First attempt throws after the nonce was reserved: nothing was
+    // broadcast and no submission exists, so the error must propagate.
+    await expect(fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toThrow("rpc connection reset before writeContract");
+
+    // The nonce was released, so retrying the same prepareId succeeds instead
+    // of reporting a false duplicate_submit.
+    const retried = await fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    });
+
+    expect(retried).toMatchObject({
+      submissionId: "sub_1",
+      status: "submitted",
+      txHash: txHash("30")
+    });
+    expect(broadcastCalls).toBe(2);
+    await expect(fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toMatchObject({
+      code: "prepare_already_used",
+      status: 409
+    });
+  });
+
+  it("records persist_failed with txHash and keeps the nonce when the store write fails after a successful broadcast", async () => {
+    // 广播已成功（拿到 txHash）但持久化失败：必须尽力落一条 failed
+    // （persist_failed，回执未知）档案，且不释放 nonce（链上可能已占用）；
+    // 只有广播本身抛错（未拿到 txHash）才释放 nonce。
+    const inner = new InMemoryProductSubmissionStore();
+    const releasedKeys: string[] = [];
+    let putSubmissionCalls = 0;
+    const flakyStore: ProductSubmissionStore = {
+      withTransaction: (operation) => (inner as ProductSubmissionStore).withTransaction?.(operation) ?? operation(),
+      putPrepared: (record) => inner.putPrepared(record),
+      getPrepared: (prepareId) => inner.getPrepared(prepareId),
+      markPreparedUsed: (prepareId, submissionId, usedAt) => inner.markPreparedUsed(prepareId, submissionId, usedAt),
+      reserveNonce: (key) => inner.reserveNonce(key),
+      releaseNonce: (key) => {
+        releasedKeys.push(key);
+        return inner.releaseNonce(key);
+      },
+      putSubmission: async (submission) => {
+        putSubmissionCalls += 1;
+        if (putSubmissionCalls === 1) {
+          throw new Error("simulated durable store outage");
+        }
+        return inner.putSubmission(submission);
+      },
+      getSubmission: (submissionId) => inner.getSubmission(submissionId),
+      listSubmissions: () => inner.listSubmissions()
+    };
+    const broadcast: SubmissionBroadcastAdapter = {
+      attemptsBroadcast: true,
+      async broadcast(): Promise<SubmissionBroadcastResult> {
+        return { status: "submitted" as const, txHash: txHash("31") };
+      }
+    };
+    const fixture = await submissionFixture({ broadcastAdapter: broadcast });
+    const service = createProductSubmissionService({
+      productTasks: { getTask: async (taskId) => taskId === task.taskId ? task : undefined },
+      evidenceReader: fixture.evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => planId,
+      authorization: allowListedSubmissionAuthorization([{
+        orderId: task.orderId,
+        stageIdentifier: task.stageId,
+        signalName: "confirm_stage",
+        submitter
+      }]),
+      broadcastAdapter: broadcast,
+      store: flakyStore,
+      now: () => baseNow,
+      prepareIdFactory: () => "prep_1",
+      submissionIdFactory: () => "sub_1",
+      nonceFactory: () => "42"
+    });
+    const prepared = await prepare({ service, evidence: fixture.evidence, task });
+    const signature = await signPrepared(prepared);
+
+    await expect(service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toThrow("simulated durable store outage");
+
+    // 第一次 putSubmission 抛错；第二次是 catch 中的尽力落档。
+    expect(putSubmissionCalls).toBe(2);
+    await expect(inner.getSubmission("sub_1")).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "persist_failed",
+      txHash: txHash("31"),
+      deadLetter: true,
+      receiptStatus: "not_checked"
+    });
+    // nonce 不释放。
+    expect(releasedKeys).toHaveLength(0);
+
+    // nonce 仍被占用：重试同一 prepare 被 duplicate_submit 拒绝而不是双花。
+    await expect(service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toMatchObject({
+      code: "duplicate_submit",
+      status: 409
+    });
+  });
+
+  it("classifies getChainId RPC failures as failed broadcast results instead of throwing", async () => {
+    const walletClient = {
+      account: { address: "0x9999999999999999999999999999999999999999" },
+      writeContract: vi.fn(async () => txHash("32"))
+    };
+    const adapter = createStateMachineSubmissionBroadcastAdapter({
+      stateMachineAddress: verifyingContract,
+      chainId,
+      publicClient: {
+        getChainId: async () => {
+          throw new Error("RPC read timed out");
+        }
+      },
+      walletClient,
+      waitForReceipt: false,
+      now: () => baseNow
+    });
+    const fixture = await submissionFixture();
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+
+    await expect(adapter.broadcast({
+      prepared,
+      signature,
+      recoveredSubmitter: submitter,
+      evidence: []
+    })).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "rpc_timeout",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false
+    });
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
+  });
+
   it("broadcasts submitSignalFor with the state-machine ABI arguments", async () => {
     const taskStateMachine = "0x8888888888888888888888888888888888888888" as Address;
     const chainTask = {
@@ -574,6 +934,7 @@ describe("product task submissions", () => {
     });
     expect((calls[0] as StateMachineSubmitSignalForCall & { readonly data?: string }).data).toMatch(/^0x[0-9a-f]+$/);
     expect(calls[0]!.args).toEqual([
+      prepared.planId,
       prepared.onchainOrderId,
       prepared.sourceId,
       prepared.signalId,
@@ -603,6 +964,50 @@ describe("product task submissions", () => {
       retryState: "not_applicable",
       deadLetter: false
     });
+  });
+
+  it("refuses to broadcast a prepared submission whose planId is missing or zero", async () => {
+    // 审计 #10 负例：零占位 planId 无法通过链上 (planId, orderId) 存在性校验，
+    // broadcast 适配器必须拒绝构造调用而不是发一笔注定 revert 的交易。
+    const walletClient = {
+      account: { address: "0x9999999999999999999999999999999999999999" as Address },
+      writeContract: vi.fn(async () => txHash("79"))
+    };
+    const adapter = createStateMachineSubmissionBroadcastAdapter({
+      stateMachineAddress: verifyingContract,
+      chainId,
+      publicClient: { getChainId: async () => chainId },
+      walletClient,
+      waitForReceipt: false,
+      now: () => baseNow
+    });
+    const fixture = await submissionFixture();
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+    const zeroPrepared: PreparedSubmissionDTO = {
+      ...prepared,
+      planId: zeroPlanId,
+      typedData: {
+        ...prepared.typedData,
+        message: {
+          ...prepared.typedData.message,
+          planId: zeroPlanId
+        }
+      }
+    };
+
+    await expect(adapter.broadcast({
+      prepared: zeroPrepared,
+      signature,
+      recoveredSubmitter: submitter,
+      evidence: []
+    })).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "order_plan_unresolved",
+      retryable: false,
+      deadLetter: true
+    });
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
   });
 
   it("refuses recovered submitter mismatches before submitSignalFor", async () => {
@@ -797,9 +1202,11 @@ describe("product task submissions", () => {
       status: "failed",
       errorCode: "relayer_insufficient_funds",
       errorLabel: "Relayer gas payer needs funds",
-      retryable: false,
-      retryState: "dead_letter",
-      deadLetter: true,
+      // 0653 L-10：与 relayer 口径统一——充值是运营可修复条件，同签名
+      // 载荷可重试（submitter 未产生 txHash，nonce 未消费），不烧死信。
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false,
       attemptCount: 1
     });
   });
@@ -845,7 +1252,9 @@ describe("product task submissions", () => {
       txHash: txHash("21"),
       retryable: true,
       retryState: "retryable",
-      deadLetter: false
+      deadLetter: false,
+      // 回执未知（等待回执抛错）：不得虚报 failed，如实报 not_checked。
+      receiptStatus: "not_checked"
     });
     expect(submission.attempts[0]).toMatchObject({
       status: "failed",
@@ -890,7 +1299,9 @@ describe("product task submissions", () => {
       blockNumber: "456",
       retryable: false,
       retryState: "dead_letter",
-      deadLetter: true
+      deadLetter: true,
+      // 回执确实为 reverted：如实报 failed。
+      receiptStatus: "failed"
     });
     expect(submission.attempts[0]).toMatchObject({
       txHash: txHash("22"),
@@ -1096,6 +1507,7 @@ async function submissionFixture(options: {
   readonly authorizedSubmitter?: Address;
   readonly authorization?: Parameters<typeof createProductSubmissionService>[0]["authorization"];
   readonly task?: ProductTaskDTO;
+  readonly store?: ProductSubmissionStore;
 } = {}): Promise<{
   readonly service: ProductSubmissionService;
   readonly evidenceService: EvidenceService;
@@ -1135,8 +1547,10 @@ async function submissionFixture(options: {
     evidenceReader: evidenceService,
     chainId,
     verifyingContract,
+    resolveOrderPlanId: async () => planId,
     authorization,
     ...(options.broadcastAdapter ? { broadcastAdapter: options.broadcastAdapter } : {}),
+    ...(options.store ? { store: options.store } : {}),
     now,
     prepareIdFactory: () => "prep_1",
     submissionIdFactory: () => "sub_1",
@@ -1153,6 +1567,7 @@ function submissionServiceForEvidence(evidenceService: EvidenceService): Product
     evidenceReader: evidenceService,
     chainId,
     verifyingContract,
+    resolveOrderPlanId: async () => planId,
     authorization: allowListedSubmissionAuthorization([{
       orderId: task.orderId,
       stageIdentifier: task.stageId,
@@ -1211,3 +1626,85 @@ async function signPrepared(prepared: PreparedSubmissionDTO): Promise<Hex> {
 function txHash(value: string): Hex {
   return `0x${value.padStart(64, "0")}`;
 }
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const signatureHex = ("0x" + "cd".repeat(65)) as Hex;
+const onchainOrderId = txHash("order-dedupe") as Address;
+
+function idempotencyKeyHex(value: string): Hex {
+  return `0x${Buffer.from(value, "utf8").toString("hex").padStart(64, "0")}` as Hex;
+}
+
+describe("secure broadcast durable dedupe (ETH-07)", () => {
+  it("dedupes the same submission through a rebuilt adapter backed by the durable store", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-broadcast-dedupe-"));
+    const databaseUrl = `sqlite://${join(tempDir, "dedupe.sqlite3")}`;
+    const migrations = { autoRun: true, directory: resolve(__dirname, "../migrations") };
+    try {
+      let broadcastCalls = 0;
+      const inner: SubmissionBroadcastAdapter = {
+        attemptsBroadcast: true,
+        async broadcast(): Promise<SubmissionBroadcastResult> {
+          broadcastCalls += 1;
+          return {
+            status: "submitted",
+            txHash: txHash("31"),
+            attempt: { status: "submitted", txHash: txHash("31") }
+          };
+        }
+      };
+      const request: SubmissionBroadcastRequest = {
+        prepared: {
+          prepareId: "prep_dedupe",
+          taskId: "task-dedupe",
+          orderId: "order-dedupe",
+          onchainOrderId: onchainOrderId,
+          signalName: "confirm_stage",
+          idempotencyKey: idempotencyKeyHex("dedupe-1"),
+          submitter
+        } as unknown as PreparedSubmissionDTO,
+        signature: signatureHex,
+        recoveredSubmitter: submitter,
+        evidence: []
+      };
+
+      const first = createSecureSubmissionBroadcastAdapter({
+        adapter: inner,
+        dedupeStore: new SqliteBroadcastDedupeStore({ databaseUrl, migrations })
+      });
+      await expect(first.broadcast(request)).resolves.toMatchObject({ status: "submitted" });
+      expect(broadcastCalls).toBe(1);
+
+      // 进程重启：重建 adapter 实例，同一 idempotencyKey 仍被去重。
+      const second = createSecureSubmissionBroadcastAdapter({
+        adapter: inner,
+        dedupeStore: new SqliteBroadcastDedupeStore({ databaseUrl, migrations })
+      });
+      await expect(second.broadcast(request)).resolves.toMatchObject({
+        status: "submitted",
+        txHash: txHash("31")
+      });
+      expect(broadcastCalls).toBe(1);
+
+      // txHash 归属持久化：另一个 idempotencyKey 复用同一 txHash 会被拒绝。
+      const third = createSecureSubmissionBroadcastAdapter({
+        adapter: inner,
+        dedupeStore: new SqliteBroadcastDedupeStore({ databaseUrl, migrations })
+      });
+      await expect(third.broadcast({
+        ...request,
+        prepared: {
+          ...request.prepared,
+          prepareId: "prep_dedupe_2",
+          idempotencyKey: idempotencyKeyHex("dedupe-2")
+        } as unknown as PreparedSubmissionDTO
+      })).resolves.toMatchObject({
+        status: "failed",
+        errorCode: "duplicate_tx_hash"
+      });
+      expect(broadcastCalls).toBe(2);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});

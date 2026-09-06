@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { onchainStageId } from "@uvp-eth/compiler";
 import {
   type StoreZhixuVersionSummaryDTO,
@@ -6,6 +6,7 @@ import {
 } from "@uvp-eth/product-dto";
 import {
   buildTriggerOrderFromOutsideTypedData,
+  deriveTriggerOrderId,
   recoverTriggerOrderFromOutsideSigner,
   type TriggerOrderFromOutsideTypedData,
 } from "@uvp-eth/protocol-bindings";
@@ -17,7 +18,7 @@ import {
   type Hex,
 } from "../../shared/types.js";
 import type { TxReconcileFields } from "../../reconcile/status.js";
-import type { ProductService } from "../service.js";
+import { normalizeEvidenceSpec, type ProductService } from "../service.js";
 import {
   ProductAuthorizationBuilder,
   ProductAuthorizationBuilderError,
@@ -80,7 +81,7 @@ export interface ProductBffServiceOptions {
   readonly versionResolver?: ProductDraftVersionResolver;
   readonly registrationCreatorAddress?: Address;
   readonly registrarAddress?: Address;
-  readonly triggerChainId?: number;
+  readonly triggerChainId: number;
   readonly now?: () => Date;
 }
 
@@ -94,10 +95,14 @@ export interface ProductBffService {
   createDraft(
     input: CreateProductOrderDraftInput,
   ): Promise<DraftWithParticipants>;
-  getDraft(draftId: string): Promise<DraftWithParticipants>;
+  getDraft(
+    draftId: string,
+    readerWallet: Address,
+  ): Promise<DraftWithParticipants>;
   updateDraft(
     draftId: string,
     input: UpdateProductOrderDraftInput,
+    actorWallet: Address,
   ): Promise<ProductOrderDraftDTO>;
   prepareOrderTrigger(
     draftId: string,
@@ -111,6 +116,7 @@ export interface ProductBffService {
   createInvite(
     draftId: string,
     input: CreateProductInviteInput,
+    actorWallet: Address,
   ): Promise<InviteWithDraft>;
   getInvite(
     inviteId: string,
@@ -124,7 +130,10 @@ export interface ProductBffService {
     inviteId: string,
     input: RejectProductInviteInput,
   ): Promise<InviteWithDraft>;
-  listParticipants(draftId: string): Promise<readonly DraftParticipantDTO[]>;
+  listParticipants(
+    draftId: string,
+    readerWallet: Address,
+  ): Promise<readonly DraftParticipantDTO[]>;
   listParticipantAssignments(
     walletAddress: string,
   ): Promise<readonly ProductParticipantAssignmentDTO[]>;
@@ -163,10 +172,36 @@ export function createProductBffService(
         "registrationCreatorAddress",
       )
     : undefined;
-  const triggerChainId = options.triggerChainId ?? 31337;
+  if (!Number.isInteger(options.triggerChainId)) {
+    throw new Error("triggerChainId is required to create the Product BFF service");
+  }
+  const triggerChainId = options.triggerChainId;
   const now = options.now ?? (() => new Date());
   const idScope = randomUUID().replaceAll("-", "").slice(0, 8);
   let sequence = 1;
+
+  // BFF 建单触发 per-order 互斥：triggerOrder 的状态检查（status ===
+  // "prepared"）与"置 submitted + 广播"之间隔了 await，同一 draft 的并发
+  // 提交会双双通过检查并各自广播同一触发交易。以 draftId（↔registration
+  // ↔orderId 一一对应）为键串行化；进入临界区后重读 registration，第二个
+  // 调用者自然得到 409 trigger_not_prepared。进程内互斥即可：BFF 服务单实例
+  // 写者，store 无跨实例 CAS 原语。
+  const triggerOrderLocks = new Map<string, Promise<unknown>>();
+
+  function withTriggerOrderLock<T>(
+    draftId: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const previous = triggerOrderLocks.get(draftId) ?? Promise.resolve();
+    const next = previous.then(run, run);
+    triggerOrderLocks.set(draftId, next);
+    void next.catch(() => undefined);
+    return next.finally(() => {
+      if (triggerOrderLocks.get(draftId) === next) {
+        triggerOrderLocks.delete(draftId);
+      }
+    });
+  }
 
   return {
     async createDraft(input) {
@@ -214,13 +249,16 @@ export function createProductBffService(
       return { draft, participants };
     },
 
-    async getDraft(draftId) {
+    async getDraft(draftId, readerWallet) {
       const draft = await requireDraft(store, draftId);
-      return { draft, participants: await store.listParticipants(draftId) };
+      const participants = await store.listParticipants(draftId);
+      assertDraftAffiliate(draft, participants, readerWallet);
+      return { draft, participants };
     },
 
-    async updateDraft(draftId, input) {
+    async updateDraft(draftId, input, actorWallet) {
       const current = await requireDraft(store, draftId);
+      assertDraftCreator(current, actorWallet);
       const draft: ProductOrderDraftDTO = {
         ...current,
         ...(input.title !== undefined ? { title: input.title } : {}),
@@ -362,6 +400,15 @@ export function createProductBffService(
       const idempotencyKey = hashHex(
         `uvp:product-bff:trigger:idempotency:v2:${draftId}:${orderId}:${prepareId}`,
       );
+      // 一事一单：链上订单 id 不由调用方自报——按合约 triggerOrderIdFor 同公式
+      // 派生（同一 plan+事实恒定同 id，重放幂等）。本地随机 orderId 仍作为
+      // 产品侧关联 id 参与 payload/idempotency 派生，不进链上请求。
+      const chainOrderId = deriveTriggerOrderId(
+        normalizeBytes32(draft.planId, "draft.planId"),
+        sourceId,
+        signalId,
+        payloadHash,
+      );
       const triggerHookId = normalizeBytes32(
         createOrderTrigger.triggerHookId,
         "createOrderTrigger.triggerHookId",
@@ -373,7 +420,6 @@ export function createProductBffService(
       const typedData = buildTriggerOrderFromOutsideTypedData({
         chainId: triggerChainId,
         verifyingContract: stateMachineAddress,
-        orderId,
         planId: draft.planId,
         creator,
         triggerHookId,
@@ -390,7 +436,7 @@ export function createProductBffService(
         triggerId,
         prepareId,
         draftId,
-        orderId,
+        orderId: chainOrderId,
         stateMachineAddress,
         deploymentId,
         planId: draft.planId,
@@ -439,6 +485,7 @@ export function createProductBffService(
     },
 
     async triggerOrder(draftId, input) {
+      return withTriggerOrderLock(draftId, async () => {
       const draft = await requireDraft(store, draftId);
       const participants = await store.listParticipants(draftId);
       const registration = await requireRegistrationByDraft(store, draftId);
@@ -530,10 +577,12 @@ export function createProductBffService(
         participants,
         broadcasted.registration,
       );
+      });
     },
 
-    async createInvite(draftId, input) {
+    async createInvite(draftId, input, actorWallet) {
       const draft = await requireDraft(store, draftId);
+      assertDraftCreator(draft, actorWallet);
       const participant = await requireRoleParticipant(
         store,
         draftId,
@@ -578,14 +627,16 @@ export function createProductBffService(
         contact: input.contact,
         status: "invited",
       };
+      // tokenHash 为随机 token 的哈希——库中只存哈希，明文只在
+      // createInvite 响应出现一次；accept/reject 强制回呈 token 做哈希比对。
+      // inviteId 追加随机熵，不可枚举。
+      const inviteToken = randomBytes(32).toString("hex");
       const invite: ProductInviteDTO = {
-        inviteId: nextId("invite", idScope, sequence++),
+        inviteId: `${nextId("invite", idScope, sequence++)}_${randomBytes(8).toString("hex")}`,
         draftId,
         participantId: participant.participantId,
         roleSlotId: participant.roleSlotId,
-        tokenHash: hashHex(
-          `${draftId}:${participant.participantId}:${input.contact}`,
-        ),
+        tokenHash: inviteTokenHash(inviteToken),
         status: "active",
         expiresAt: input.expiresAt ?? oneWeekFrom(now()),
         createdAt: now().toISOString(),
@@ -594,7 +645,7 @@ export function createProductBffService(
         await store.updateParticipant(invited);
         await store.createInvite(invite);
         const nextDraft = await refreshDraftStatus(store, draft, now);
-        return { invite, participant: invited, draft: nextDraft };
+        return { invite, participant: invited, draft: nextDraft, inviteToken };
       });
     },
 
@@ -627,27 +678,29 @@ export function createProductBffService(
 
     async acceptInvite(inviteId, input) {
       const invite = await requireAcceptableInvite(store, inviteId, now);
+      // token 哈希比对——inviteId 是弱凭据，不足以占角色槽。
+      assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const acceptedWalletAddress = normalizeAddress(
         input.walletAddress,
         "walletAddress",
       );
-      if (input.sessionWalletAddress) {
-        const sessionWalletAddress = normalizeAddress(
-          input.sessionWalletAddress,
-          "sessionWalletAddress",
+      // sessionWalletAddress 由路由层从会话锚定地址解析（钱包
+      // 会话签名证明或 local dev 锚定头），不取自自报头。
+      const sessionWalletAddress = normalizeAddress(
+        input.sessionWalletAddress,
+        "sessionWalletAddress",
+      );
+      if (sessionWalletAddress !== acceptedWalletAddress) {
+        throw new ProductBffError(
+          403,
+          "wrong_wallet",
+          "connected wallet does not match invite acceptance wallet",
+          {
+            connectedWalletAddress: sessionWalletAddress,
+            walletAddress: acceptedWalletAddress,
+          },
         );
-        if (sessionWalletAddress !== acceptedWalletAddress) {
-          throw new ProductBffError(
-            403,
-            "wrong_wallet",
-            "connected wallet does not match invite acceptance wallet",
-            {
-              connectedWalletAddress: sessionWalletAddress,
-              walletAddress: acceptedWalletAddress,
-            },
-          );
-        }
       }
       await assertWalletCanAcceptInvite(
         store,
@@ -682,6 +735,8 @@ export function createProductBffService(
 
     async rejectInvite(inviteId, input) {
       const invite = await requireAcceptableInvite(store, inviteId, now);
+      // reject 同样强制携带 token。
+      assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const rejected: DraftParticipantDTO = {
         ...participant,
@@ -706,9 +761,11 @@ export function createProductBffService(
       });
     },
 
-    async listParticipants(draftId) {
-      await requireDraft(store, draftId);
-      return store.listParticipants(draftId);
+    async listParticipants(draftId, readerWallet) {
+      const draft = await requireDraft(store, draftId);
+      const participants = await store.listParticipants(draftId);
+      assertDraftAffiliate(draft, participants, readerWallet);
+      return participants;
     },
 
     async listParticipantAssignments(walletAddress) {
@@ -796,6 +853,74 @@ async function requireDraft(
     throw new ProductBffError(404, "draft_not_found", "order draft not found");
   }
   return draft;
+}
+
+/**
+ * 草稿归属校验。createdBy 只信建单时会话锚定地址——非地址值（匿名
+ * 建单兼容路径）或他人的钱包都无权修改/发邀请，fail-closed。
+ */
+function assertDraftCreator(
+  draft: ProductOrderDraftDTO,
+  actorWallet: Address,
+): void {
+  if (isDraftCreator(draft, actorWallet)) {
+    return;
+  }
+  throw new ProductBffError(
+    403,
+    "not_draft_creator",
+    "only the wallet that created this order draft (anchored at creation time) may perform this action",
+    { draftId: draft.draftId },
+  );
+}
+
+/** 参与者名单/草稿读取：创建者或该草稿已接受参与者。 */
+function assertDraftAffiliate(
+  draft: ProductOrderDraftDTO,
+  participants: readonly DraftParticipantDTO[],
+  readerWallet: Address,
+): void {
+  if (
+    isDraftCreator(draft, readerWallet) ||
+    isAcceptedParticipantWallet(participants, readerWallet)
+  ) {
+    return;
+  }
+  throw new ProductBffError(
+    403,
+    "draft_access_forbidden",
+    "only the draft creator or an accepted participant may read this draft",
+    { draftId: draft.draftId },
+  );
+}
+
+function isDraftCreator(
+  draft: ProductOrderDraftDTO,
+  wallet: Address,
+): boolean {
+  if (!draft.createdBy) {
+    return false;
+  }
+  try {
+    return (
+      normalizeAddress(draft.createdBy, "createdBy").toLowerCase() ===
+      wallet.toLowerCase()
+    );
+  } catch {
+    // createdBy 不是合法地址（匿名建单）：无可验证创建者。
+    return false;
+  }
+}
+
+function isAcceptedParticipantWallet(
+  participants: readonly DraftParticipantDTO[],
+  wallet: Address,
+): boolean {
+  return participants.some(
+    (participant) =>
+      participant.status === "accepted" &&
+      participant.walletAddress?.toLowerCase() === wallet.toLowerCase(),
+  );
 }
 
 async function requireRoleParticipant(
@@ -913,6 +1038,22 @@ function isInviteExpired(invite: ProductInviteDTO, now: Date): boolean {
   return Date.parse(invite.expiresAt) <= now.getTime();
 }
 
+/** invite token 的哈希口径（与 createInvite 一致）。 */
+function inviteTokenHash(token: string): `0x${string}` {
+  return hashHex(`uvp:product-bff:invite:v2:${token}`);
+}
+
+function assertInviteToken(invite: ProductInviteDTO, token: string | undefined): void {
+  if (!token || inviteTokenHash(token) !== invite.tokenHash.toLowerCase()) {
+    throw new ProductBffError(
+      403,
+      "invite_token_mismatch",
+      "a valid invite token is required (delivered once with the create-invite response)",
+      { inviteId: invite.inviteId }
+    );
+  }
+}
+
 function requireValidInviteExpiry(expiresAt: string): void {
   if (Number.isNaN(Date.parse(expiresAt))) {
     throw new ProductBffError(
@@ -983,11 +1124,15 @@ function inviteRolePreview(
   const roleSlot = zhixu?.roleSlots.find(
     (slot) => slot.slotId === participant.roleSlotId,
   );
+  // 发布者携带的结构化证据要求（schema roleSlot 不透明 JSON，结构化读取）。
+  const evidenceSpec = normalizeEvidenceSpec(
+    (roleSlot as { readonly evidenceSpec?: unknown } | undefined)?.evidenceSpec,
+  );
   return {
     roleSlotId: participant.roleSlotId,
     label: roleSlot?.label ?? participant.roleLabel,
     duty: roleSlot?.duty ?? "按订单职责处理待办并提交必要业务凭证。",
-    requiredEvidence: roleSlot?.evidence ?? [],
+    ...(evidenceSpec ? { evidenceSpec } : {})
   };
 }
 
@@ -1734,7 +1879,11 @@ function defaultRegistrationReconcileFields(
       projectionStatus: "missing",
     };
   }
-  if (registration.status === "prepared" || registration.status === "expired") {
+  if (
+    registration.status === "pending" ||
+    registration.status === "prepared" ||
+    registration.status === "expired"
+  ) {
     return {
       receiptStatus: "not_checked",
       projectionStatus: "not_checked",

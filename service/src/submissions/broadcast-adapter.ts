@@ -10,14 +10,14 @@ export interface StateMachineSubmissionPublicClient {
   waitForTransactionReceipt?(args: { readonly hash: Hex; readonly timeout?: number }): Promise<{
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
-  }>;
+  } | undefined>;
 }
 
 export interface StateMachineSubmitSignalForCall {
   readonly address: Address;
   readonly abi: typeof STATE_MACHINE_ABI;
   readonly functionName: "submitSignalFor";
-  readonly args: readonly [Hex, Hex, Hex, Hex, Hex, Address, bigint, Hex];
+  readonly args: readonly [Hex, Hex, Hex, Hex, Hex, Hex, Address, bigint, Hex];
   readonly data?: Hex;
   readonly chainId?: number;
 }
@@ -55,6 +55,7 @@ export interface ClassifiedStateMachineBroadcastError {
 
 const DEFAULT_RELAYER_PRIVATE_KEY_ENV = "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 export function createStateMachineSubmissionBroadcastAdapter(
   options: StateMachineSubmissionBroadcastAdapterOptions
@@ -80,6 +81,19 @@ export function createStateMachineSubmissionBroadcastAdapter(
 
   return {
     async broadcast(request): Promise<SubmissionBroadcastResult> {
+      // submitSignalFor is plan-scoped. A prepared submission
+      // without a non-zero planId can only produce a transaction that fails the
+      // on-chain (planId, orderId) existence check — refuse to construct the
+      // call instead of broadcasting a doomed tx.
+      const planId = normalizePlanId(request.prepared.planId);
+      if (!planId) {
+        return failedResult(
+          "order_plan_unresolved",
+          "prepared submission has no non-zero planId for the plan-scoped submitSignalFor ABI",
+          false,
+          gasPayer
+        );
+      }
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(request.prepared.deadline) < currentSeconds) {
         return failedResult("expired_signal_signature", "signature deadline has expired", false, gasPayer);
@@ -103,11 +117,27 @@ export function createStateMachineSubmissionBroadcastAdapter(
         );
       }
 
-      const chainId = await publicClient.getChainId?.();
-      if (chainId !== undefined && chainId !== options.chainId) {
+      // The chain-id preflight is an RPC round trip like any other: a
+      // transport failure must be classified into a failed broadcast result,
+      // never thrown past the caller (an escaping throw would consume the
+      // reserved nonce without recording any submission).
+      let rpcChainId: number | undefined;
+      try {
+        rpcChainId = await publicClient.getChainId?.();
+      } catch (error) {
+        const classified = classifyStateMachineBroadcastError(error);
+        return failedResult(
+          classified.errorCode,
+          classified.message,
+          classified.retryable,
+          gasPayer,
+          classified.revertReason
+        );
+      }
+      if (rpcChainId !== undefined && rpcChainId !== options.chainId) {
         return failedResult(
           "chain_id_mismatch",
-          `configured chainId ${options.chainId} does not match RPC chainId ${chainId}`,
+          `configured chainId ${options.chainId} does not match RPC chainId ${rpcChainId}`,
           false,
           gasPayer
         );
@@ -119,6 +149,7 @@ export function createStateMachineSubmissionBroadcastAdapter(
           stateMachineAddress: request.prepared.typedData.domain.verifyingContract ?? stateMachineAddress,
           chainId: options.chainId
         }, {
+          planId,
           orderId: request.prepared.onchainOrderId,
           sourceId: request.prepared.sourceId,
           signalId: request.prepared.signalId,
@@ -160,7 +191,7 @@ export function createStateMachineSubmissionBroadcastAdapter(
           hash: txHash,
           ...(options.receiptTimeoutMs && options.receiptTimeoutMs > 0 ? { timeout: options.receiptTimeoutMs } : {})
         });
-        if (receipt?.status === "reverted") {
+        if (receipt?.status === "reverted" || receipt?.status === "failed") {
           return failedResult(
             "transaction_reverted",
             "transaction reverted",
@@ -169,6 +200,22 @@ export function createStateMachineSubmissionBroadcastAdapter(
             "transaction_reverted",
             txHash,
             receipt.blockNumber?.toString()
+          );
+        }
+        // A receipt is only authoritative when its status is one of the
+        // protocol's closed-set values.  A missing receipt (for example when
+        // an injected client has no wait method) or an RPC/client extension
+        // status is an unknown outcome: preserve the tx hash and keep it in
+        // the reconcile lane instead of claiming submitted/confirmed.
+        if (receipt?.status !== "success") {
+          return failedResult(
+            "transaction_receipt_unknown",
+            "transaction receipt is missing or has an unknown status",
+            true,
+            gasPayer,
+            "transaction_receipt_unknown",
+            txHash,
+            receipt?.blockNumber?.toString()
           );
         }
         const status = options.confirmOnReceipt ? "confirmed" : "submitted";
@@ -255,7 +302,9 @@ export function classifyStateMachineBroadcastError(error: unknown): ClassifiedSt
     return classifiedBroadcastError(
       "relayer_insufficient_funds",
       "relayer gas payer has insufficient funds",
-      false,
+      // 与 relayer 口径统一：给 gas payer 充值是运营可修复条件，同签名
+      // 载荷可重试；不消费 prepare/nonce（submitter 未产生 txHash）。
+      true,
       text
     );
   }
@@ -354,6 +403,8 @@ function errorLabelForBroadcastError(errorCode: string): string {
       return "RPC request timed out";
     case "transaction_reverted":
       return "Transaction reverted";
+    case "transaction_receipt_unknown":
+      return "Transaction receipt is unknown";
     case "state_machine_broadcast_failed":
       return "Broadcast failed";
     default:
@@ -369,8 +420,8 @@ function deadLetterForBroadcastError(errorCode: string, retryable: boolean): boo
     case "chain_id_mismatch":
     case "expired_signal_signature":
     case "invalid_signal_signature":
+    case "order_plan_unresolved":
     case "relayer_business_signer_reuse":
-    case "relayer_insufficient_funds":
     case "signal_already_exists":
     case "transaction_reverted":
     case "unauthorized_signal_submitter":
@@ -394,6 +445,14 @@ function loadRelayerPrivateKey(options: StateMachineSubmissionBroadcastAdapterOp
   return privateKey.toLowerCase() as Hex;
 }
 
+function normalizePlanId(value: Hex | string | undefined): Hex | undefined {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    return undefined;
+  }
+  const normalized = value.toLowerCase() as Hex;
+  return normalized === ZERO_BYTES32 ? undefined : normalized;
+}
+
 function normalizeGasPayer(value: string | undefined): Address {
   if (!value) {
     throw new ConfigError("relayer gas payer address is required");
@@ -406,8 +465,10 @@ function normalizeGasPayer(value: string | undefined): Address {
 }
 
 function requiredRpcUrl(rpcUrl: string | undefined): string {
+  // fail-closed：无显式 RPC 配置即抛错，不回落 127.0.0.1:8545（本地环境
+  // 也必须显式传 UVP_RPC_URL）。
   if (!rpcUrl) {
-    return "http://127.0.0.1:8545";
+    throw new ConfigError("UVP_RPC_URL is required for state-machine submission broadcast; refusing to fall back to a default RPC endpoint");
   }
   return rpcUrl;
 }

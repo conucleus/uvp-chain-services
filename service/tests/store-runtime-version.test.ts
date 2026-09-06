@@ -9,6 +9,7 @@ import {
   type StoreZhixuVersionRecord,
 } from "../src/store-console/version.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { crossBorderSchemaResolver } from "./cross-border-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const stateMachine = "0x1111111111111111111111111111111111111111" as Address;
@@ -60,7 +61,9 @@ describe("Store runtime and version selection", () => {
     });
 
     const summary = await createStoreRuntimeService({
-      productService: createProductService(store),
+      productService: createProductService(store, {
+        productSchemaResolver: crossBorderSchemaResolver()
+      }),
       store,
     }).getSummary();
 
@@ -121,6 +124,47 @@ describe("Store runtime and version selection", () => {
 
     await expect(service.activate("series-1", "v2")).rejects.toMatchObject({
       code: "plan_not_published",
+      status: 409,
+    });
+  });
+
+  it("KEEP: a committed-but-not-registered plan bucket is not activatable (UVP-02)", async () => {
+    // 投影桶在 commitPlan 第一步即建、PlanRegistered 到 finalize 才发：
+    // 只有 PlanCommitted 的"待定计划"不得激活建单。
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        event(1n, "PlanCommitted", {
+          planId: planIdV2,
+          planHash: planHashV2,
+          publisher: stateMachine,
+          hookCount: 1n,
+          hooksHash: bytes32("3001"),
+          metadataHash: bytes32("3002"),
+          dockRoutesRoot: bytes32("3003"),
+          dockInterfaceRoot: bytes32("3004"),
+        }),
+      ],
+    });
+    const metadata = new MemoryStoreZhixuVersionMetadataStore();
+    await metadata.upsertVersion(version("v2", "candidate", planIdV2, planHashV2));
+    const service = createStoreZhixuVersionService({
+      productService: createProductService(store),
+      projectionStore: store,
+      metadataStore: metadata,
+    });
+
+    await expect(service.activate("series-1", "v2")).rejects.toMatchObject({
+      code: "plan_not_published",
+      status: 409,
+    });
+    // 新建版本记录同样要求已注册锚：committed-only 计划不可登记版本。
+    await expect(service.activate("series-1", "v3", {
+      planId: planIdV2,
+      planHash: planHashV2,
+    })).rejects.toMatchObject({
+      code: "plan_not_projected",
       status: 409,
     });
   });

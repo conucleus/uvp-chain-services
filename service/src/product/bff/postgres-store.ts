@@ -151,6 +151,7 @@ export class PostgresProductBffStore implements ProductBffStore {
     const result = await this.#database.query(
       `SELECT
          *,
+         typed_data_json::text AS typed_data_json,
          authorizations_json::text AS authorizations_json,
          permissions_json::text AS permissions_json
        FROM product_order_trigger
@@ -164,6 +165,7 @@ export class PostgresProductBffStore implements ProductBffStore {
     const result = await this.#database.query(
       `SELECT
          *,
+         typed_data_json::text AS typed_data_json,
          authorizations_json::text AS authorizations_json,
          permissions_json::text AS permissions_json
        FROM product_order_trigger
@@ -177,6 +179,7 @@ export class PostgresProductBffStore implements ProductBffStore {
     const result = await this.#database.query(
       `SELECT
          *,
+         typed_data_json::text AS typed_data_json,
          authorizations_json::text AS authorizations_json,
          permissions_json::text AS permissions_json
        FROM product_order_trigger

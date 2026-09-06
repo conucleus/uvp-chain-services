@@ -5,6 +5,7 @@ import type {
   SubmissionBroadcastRequest,
   SubmissionBroadcastResult
 } from "./types.js";
+import type { BroadcastDedupeStore } from "./broadcast-dedupe-sqlite-store.js";
 
 type FailedSubmissionBroadcastResult = Extract<SubmissionBroadcastResult, { readonly status: "failed" }>;
 
@@ -18,6 +19,11 @@ export interface SecureSubmissionBroadcastAdapterOptions {
   readonly retryMaxMs?: number;
   readonly now?: () => Date;
   readonly audit?: AuditSink;
+  /**
+   * 可选持久化去重存储。进程内 Map 仍是主缓存（语义不变），
+   * 持久层保证重启后同一 idempotencyKey / txHash 依旧被去重。
+   */
+  readonly dedupeStore?: BroadcastDedupeStore;
 }
 
 interface BroadcastState {
@@ -45,13 +51,18 @@ export function createSecureSubmissionBroadcastAdapter(
   const inFlightByOrder = new Map<string, number>();
   const inFlightBySubmitter = new Map<string, number>();
   const txHashOwners = new Map<string, string>();
+  const dedupeStore = options.dedupeStore;
+
+  const currentStateFor = async (idempotencyKey: string): Promise<BroadcastState | undefined> =>
+    states.get(idempotencyKey) ?? (dedupeStore ? await dedupeStore.load(idempotencyKey) : undefined);
 
   return {
+    attemptsBroadcast: options.adapter.attemptsBroadcast !== false,
     async broadcast(request) {
       const idempotencyKey = request.prepared.idempotencyKey;
       const orderKey = request.prepared.onchainOrderId;
       const submitterKey = request.prepared.submitter;
-      const currentState = states.get(idempotencyKey);
+      const currentState = await currentStateFor(idempotencyKey);
       const duplicate = duplicateResult(currentState, maxRetry);
       if (duplicate) {
         const duplicateFailure = duplicate.status === "failed" ? duplicate : undefined;
@@ -68,77 +79,83 @@ export function createSecureSubmissionBroadcastAdapter(
         return duplicate;
       }
 
-      const inFlight = inFlightByOrder.get(orderKey) ?? 0;
-      if (inFlight >= maxInFlightPerOrder) {
-        const result = failedBroadcastResult(
-          "broadcast_rate_limited",
-          "another broadcast is already in flight for this order",
-          true,
-          currentState?.attempts ?? 0,
-          retrySchedule(currentState?.attempts ?? 0, { now, retryBaseMs, retryMaxMs })
-        );
-        await audit.record({
-          type: "relayer.broadcast.rate_limited",
-          action: request.prepared.signalName,
-          outcome: "blocked",
-          subject: auditSubject(request),
-          errorCode: result.errorCode,
-          retryable: result.retryable
-        });
-        return result;
-      }
-      const submitterInFlight = inFlightBySubmitter.get(submitterKey) ?? 0;
-      if (submitterInFlight >= maxInFlightPerSubmitter) {
-        const result = failedBroadcastResult(
-          "broadcast_rate_limited",
-          "another broadcast is already in flight for this submitter",
-          true,
-          currentState?.attempts ?? 0,
-          retrySchedule(currentState?.attempts ?? 0, { now, retryBaseMs, retryMaxMs })
-        );
-        await audit.record({
-          type: "relayer.broadcast.rate_limited",
-          action: request.prepared.signalName,
-          outcome: "blocked",
-          subject: auditSubject(request),
-          errorCode: result.errorCode,
-          retryable: result.retryable
-        });
-        return result;
-      }
-
-      const attemptNumber = (currentState?.attempts ?? 0) + 1;
-      if (attemptNumber > 1) {
-        await audit.record({
-          type: "relayer.broadcast.retry",
-          action: request.prepared.signalName,
-          outcome: "retry",
-          subject: auditSubject(request),
-          metadata: { attemptNumber }
-        });
-      } else {
-        await audit.record({
-          type: "relayer.submit.request",
-          action: request.prepared.signalName,
-          outcome: "accepted",
-          subject: auditSubject(request)
-        });
-      }
-
-      inFlightByOrder.set(orderKey, inFlight + 1);
-      inFlightBySubmitter.set(submitterKey, submitterInFlight + 1);
+      // TOCTOU 防护：在任何 await 之前同步占位（先占后查），并发进入的
+      // 同单/同人广播各自拿到递增的占位数，超额者立即释放并限流返回，
+      // 避免"双方都读到 0、双双放行"的穿透窗口。
+      const acquiredOrderInFlight = (inFlightByOrder.get(orderKey) ?? 0) + 1;
+      inFlightByOrder.set(orderKey, acquiredOrderInFlight);
+      const acquiredSubmitterInFlight = (inFlightBySubmitter.get(submitterKey) ?? 0) + 1;
+      inFlightBySubmitter.set(submitterKey, acquiredSubmitterInFlight);
       try {
+        if (acquiredOrderInFlight > maxInFlightPerOrder) {
+          const result = failedBroadcastResult(
+            "broadcast_rate_limited",
+            "another broadcast is already in flight for this order",
+            true,
+            currentState?.attempts ?? 0,
+            retrySchedule(currentState?.attempts ?? 0, { now, retryBaseMs, retryMaxMs })
+          );
+          await audit.record({
+            type: "relayer.broadcast.rate_limited",
+            action: request.prepared.signalName,
+            outcome: "blocked",
+            subject: auditSubject(request),
+            errorCode: result.errorCode,
+            retryable: result.retryable
+          });
+          return result;
+        }
+        if (acquiredSubmitterInFlight > maxInFlightPerSubmitter) {
+          const result = failedBroadcastResult(
+            "broadcast_rate_limited",
+            "another broadcast is already in flight for this submitter",
+            true,
+            currentState?.attempts ?? 0,
+            retrySchedule(currentState?.attempts ?? 0, { now, retryBaseMs, retryMaxMs })
+          );
+          await audit.record({
+            type: "relayer.broadcast.rate_limited",
+            action: request.prepared.signalName,
+            outcome: "blocked",
+            subject: auditSubject(request),
+            errorCode: result.errorCode,
+            retryable: result.retryable
+          });
+          return result;
+        }
+
+        const attemptNumber = (currentState?.attempts ?? 0) + 1;
+        if (attemptNumber > 1) {
+          await audit.record({
+            type: "relayer.broadcast.retry",
+            action: request.prepared.signalName,
+            outcome: "retry",
+            subject: auditSubject(request),
+            metadata: { attemptNumber }
+          });
+        } else {
+          await audit.record({
+            type: "relayer.submit.request",
+            action: request.prepared.signalName,
+            outcome: "accepted",
+            subject: auditSubject(request)
+          });
+        }
+
         const broadcast = withAttemptMetadata(await options.adapter.broadcast(request), attemptNumber, {
           now,
           retryBaseMs,
           retryMaxMs
         });
-        const duplicateTxHash = duplicateTxHashResult(idempotencyKey, broadcast, txHashOwners, attemptNumber);
+        const duplicateTxHash = await duplicateTxHashResult(idempotencyKey, broadcast, txHashOwners, attemptNumber, dedupeStore);
         const result = duplicateTxHash ?? broadcast;
-        states.set(idempotencyKey, {
+        const newState = {
           attempts: attemptNumber,
           lastResult: result
-        });
+        };
+        states.set(idempotencyKey, newState);
+        // 写穿持久层；失败不吞——与内存路径同等严格。
+        await dedupeStore?.save(idempotencyKey, newState);
 
         if (result.status === "failed") {
           await audit.record({
@@ -157,21 +174,20 @@ export function createSecureSubmissionBroadcastAdapter(
         }
         return result;
       } finally {
-        const nextInFlight = (inFlightByOrder.get(orderKey) ?? 1) - 1;
-        if (nextInFlight <= 0) {
-          inFlightByOrder.delete(orderKey);
-        } else {
-          inFlightByOrder.set(orderKey, nextInFlight);
-        }
-        const nextSubmitterInFlight = (inFlightBySubmitter.get(submitterKey) ?? 1) - 1;
-        if (nextSubmitterInFlight <= 0) {
-          inFlightBySubmitter.delete(submitterKey);
-        } else {
-          inFlightBySubmitter.set(submitterKey, nextSubmitterInFlight);
-        }
+        releaseInFlight(inFlightByOrder, orderKey);
+        releaseInFlight(inFlightBySubmitter, submitterKey);
       }
     }
   };
+}
+
+function releaseInFlight(counts: Map<string, number>, key: string): void {
+  const next = (counts.get(key) ?? 1) - 1;
+  if (next <= 0) {
+    counts.delete(key);
+  } else {
+    counts.set(key, next);
+  }
 }
 
 function duplicateResult(
@@ -200,12 +216,13 @@ function duplicateResult(
   return lastResult;
 }
 
-function duplicateTxHashResult(
+async function duplicateTxHashResult(
   idempotencyKey: string,
   result: SubmissionBroadcastResult,
   txHashOwners: Map<string, string>,
-  attemptNumber: number
-): SubmissionBroadcastResult | undefined {
+  attemptNumber: number,
+  dedupeStore: BroadcastDedupeStore | undefined
+): Promise<SubmissionBroadcastResult | undefined> {
   const txHash = result.status === "submitted" || result.status === "confirmed" || result.status === "broadcasting"
     ? result.txHash
     : result.status === "failed"
@@ -215,9 +232,14 @@ function duplicateTxHashResult(
     return undefined;
   }
 
-  const owner = txHashOwners.get(txHash);
+  const normalizedTxHash = txHash.toLowerCase();
+  let owner = txHashOwners.get(normalizedTxHash);
+  if (!owner && dedupeStore) {
+    // 内存未命中时问持久层；无归属则登记归属。
+    owner = await dedupeStore.claimTxHash(normalizedTxHash, idempotencyKey);
+  }
   if (!owner) {
-    txHashOwners.set(txHash, idempotencyKey);
+    txHashOwners.set(normalizedTxHash, idempotencyKey);
     return undefined;
   }
   if (owner === idempotencyKey) {

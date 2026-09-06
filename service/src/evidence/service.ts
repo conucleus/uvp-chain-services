@@ -6,6 +6,7 @@ import { InMemoryEvidenceMetadataStore, type EvidenceMetadataRecord, type Eviden
 import {
   assertEvidenceStorageProductionBoundary,
   assertProductionStorageURI,
+  BackupEvidenceStorage,
   InMemoryEvidenceStorage,
   LocalEvidenceStorage,
   type EvidenceStorage,
@@ -41,9 +42,11 @@ const SUPPORTED_MIME_TYPES = new Set([
 export type EvidenceServiceErrorCode =
   | "evidence_not_found"
   | "evidence_already_bound"
+  | "evidence_backup_not_configured"
   | "forbidden"
   | "invalid_request"
   | "payload_too_large"
+  | "pdf_magic_mismatch"
   | "unauthenticated"
   | "unsupported_mime_type";
 
@@ -73,6 +76,20 @@ export interface EvidenceService {
   getEvidence(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceRecordDTO | undefined>;
   getProof(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceProofDTO | undefined>;
   bindEvidence(input: BindEvidenceRequestDTO): Promise<EvidenceRecordDTO | undefined>;
+  /**
+   * 第二副本 verify 的服务端接线（admin 专用）。
+   */
+  verifyEvidenceBackup(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceBackupStatusDTO | undefined>;
+  /** 主对象损坏/缺失时从第二副本恢复（admin 专用）。 */
+  restoreEvidenceBackup(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceBackupStatusDTO | undefined>;
+}
+
+export interface EvidenceBackupStatusDTO {
+  readonly evidenceId: string;
+  readonly backupConfigured: boolean;
+  readonly backupPresent?: boolean;
+  readonly hashMatches?: boolean;
+  readonly restored?: boolean;
 }
 
 export function createEvidenceService(options: EvidenceServiceOptions = {}): EvidenceService {
@@ -98,6 +115,11 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
       const taskId = optionalNonEmptyString(input.taskId, "taskId");
       const stageIdentifier = requiredNonEmptyString(input.stageIdentifier, "stageIdentifier");
       const documentType = requiredNonEmptyString(input.documentType, "documentType");
+      // Evidence ownership is a server-side derivation. The request
+      // body cannot attribute a record to another participant: canWriteEvidence
+      // only accepts the authenticated principal itself (or an admin acting on
+      // behalf), and a request-supplied access policy can never vouch for the
+      // requester because it comes from the same untrusted body.
       const ownerParticipantId = normalizeParticipantId(
         optionalNonEmptyString(input.ownerParticipantId, "ownerParticipantId") ?? normalizedPrincipal.id
       );
@@ -108,17 +130,18 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
       if (!SUPPORTED_MIME_TYPES.has(mimeType)) {
         throw new EvidenceServiceError("unsupported_mime_type", `${mimeType} is not supported by Evidence Service v1`, 415);
       }
+      // STORE-02：声明为 PDF 的证据必须以 %PDF- 魔数开头；服务端是权威校验，
+      // 客户端拦截只是快速提示。非 PDF accept 不受影响。
+      if (mimeType === "application/pdf" && !isPdfBytes(content.bytes)) {
+        throw new EvidenceServiceError("pdf_magic_mismatch", "declared application/pdf payload does not start with the %PDF- magic header", 400);
+      }
       if (content.bytes.byteLength > maxPayloadBytes) {
         throw new EvidenceServiceError("payload_too_large", "evidence payload exceeds the configured size limit", 413);
       }
 
-      const provisionalAccessPolicy = normalizeAccessPolicy({
-        evidenceId: "pending",
-        ownerParticipantId,
-        ...(orderId ? { orderId } : {}),
-        ...(input.accessPolicy ? { input: input.accessPolicy } : {})
-      });
-      if (!canWriteEvidence(normalizedPrincipal, ownerParticipantId, provisionalAccessPolicy)) {
+      // The provisional policy is not built here anymore: write authorization
+      // is derived from the principal and the derived owner only (audit #16).
+      if (!canWriteEvidence(normalizedPrincipal, ownerParticipantId)) {
         throw new EvidenceServiceError("forbidden", "principal cannot upload evidence for this owner", 403);
       }
 
@@ -134,6 +157,19 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
         ...(orderId ? { orderId } : {}),
         stageIdentifier
       });
+      // 重复上传幂等：同一 owner 再次提交完全相同
+      // 的证据载荷（content+metadata+order+stage 全等）时返回既有记录，
+      // 不追加内容完全相同的副本。
+      const existing = await metadataStore.findOwnedByPayloadHash?.(payloadHash, ownerParticipantId);
+      if (existing) {
+        return {
+          evidence: existing.evidence,
+          metadata: existing.metadata,
+          accessPolicy: existing.accessPolicy,
+          payloadHash: existing.evidence.payloadHash,
+          payloadRef: existing.evidence.payloadRef
+        };
+      }
       const stored = await storage.put({ evidenceId, bytes: content.bytes });
       if (runtimeEnvironment !== "local") {
         assertProductionStorageURI(stored.storageURI);
@@ -183,12 +219,14 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
     },
 
     async getEvidence(evidenceId, principal) {
+      // 先鉴权后读取：未认证在读库前即 401；已认证但无权读时与
+      // "不存在"同响应（404），不留下 404/403 存在性 oracle。
+      const normalizedPrincipal = normalizePrincipal(principal);
+      requireAuthenticated(normalizedPrincipal);
       const record = await metadataStore.get(evidenceId);
-      if (!record) {
+      if (!record || !canReadEvidence(normalizedPrincipal, record)) {
         return undefined;
       }
-      const normalizedPrincipal = normalizePrincipal(principal);
-      authorizeRead(record, normalizedPrincipal);
       if (normalizedPrincipal.role === "admin") {
         await metadataStore.recordAdminRead({
           evidenceId,
@@ -201,12 +239,13 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
     },
 
     async getProof(evidenceId, principal) {
+      // 同 getEvidence：先鉴权后读取，无权读与不存在不可区分。
+      const normalizedPrincipal = normalizePrincipal(principal);
+      requireAuthenticated(normalizedPrincipal);
       const record = await metadataStore.get(evidenceId);
-      if (!record) {
+      if (!record || !canReadEvidence(normalizedPrincipal, record)) {
         return undefined;
       }
-      const normalizedPrincipal = normalizePrincipal(principal);
-      authorizeRead(record, normalizedPrincipal);
       if (normalizedPrincipal.role === "admin") {
         await metadataStore.recordAdminRead({
           evidenceId,
@@ -247,8 +286,66 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
         ? await metadataStore.markBound(binding)
         : await putBoundRecord(metadataStore, record, binding);
       return updated ? recordToDto(updated) : undefined;
+    },
+
+    async verifyEvidenceBackup(evidenceId, principal) {
+      // admin 专用端点同样先鉴权后读取，存在性不泄露。
+      const normalizedPrincipal = normalizePrincipal(principal);
+      requireAuthenticated(normalizedPrincipal);
+      const record = await metadataStore.get(evidenceId);
+      if (!record || !canReadEvidence(normalizedPrincipal, record)) {
+        return undefined;
+      }
+      const backupStorage = backupStorageOf(storage);
+      if (!backupStorage) {
+        return { evidenceId, backupConfigured: false };
+      }
+      const verification = await backupStorage.verifyBackup(
+        record.evidence.storageURI,
+        record.evidence.contentHash
+      );
+      return {
+        evidenceId,
+        backupConfigured: true,
+        backupPresent: verification.backupPresent,
+        hashMatches: verification.hashMatches
+      };
+    },
+
+    async restoreEvidenceBackup(evidenceId, principal) {
+      // 同上：先鉴权后读取。
+      const normalizedPrincipal = normalizePrincipal(principal);
+      requireAuthenticated(normalizedPrincipal);
+      const record = await metadataStore.get(evidenceId);
+      if (!record || !canReadEvidence(normalizedPrincipal, record)) {
+        return undefined;
+      }
+      const backupStorage = backupStorageOf(storage);
+      if (!backupStorage) {
+        throw new EvidenceServiceError("evidence_backup_not_configured", "evidence storage has no backup copy configured", 409);
+      }
+      const restored = await backupStorage.restoreFromBackup(
+        record.evidence.storageURI,
+        record.evidence.evidenceId,
+        record.evidence.contentHash
+      );
+      const verification = await backupStorage.verifyBackup(
+        record.evidence.storageURI,
+        record.evidence.contentHash
+      );
+      return {
+        evidenceId,
+        backupConfigured: true,
+        backupPresent: verification.backupPresent,
+        hashMatches: verification.hashMatches,
+        restored
+      };
     }
   };
+}
+
+function backupStorageOf(storage: EvidenceStorage): BackupEvidenceStorage | undefined {
+  return storage instanceof BackupEvidenceStorage ? storage : undefined;
 }
 
 export function createDefaultEvidenceService(): EvidenceService {
@@ -319,14 +416,6 @@ async function verifyEvidenceRecord(
   return record.evidence.status === "bound" && record.evidence.boundSignalTxHash ? "matched" : "unbound";
 }
 
-function authorizeRead(record: EvidenceMetadataRecord, principal: EvidencePrincipal): void {
-  requireAuthenticated(principal);
-  if (canReadEvidence(principal, record)) {
-    return;
-  }
-  throw new EvidenceServiceError("forbidden", "principal cannot read this evidence", 403);
-}
-
 function normalizeBinding(input: BindEvidenceRequestDTO, now: () => Date): BindEvidenceRequestDTO {
   const submissionId = optionalNonEmptyString(input.submissionId, "submissionId");
   return {
@@ -355,15 +444,23 @@ function assertBindable(record: EvidenceMetadataRecord, binding: BindEvidenceReq
 
 function requireAuthenticated(principal: EvidencePrincipal): void {
   if (!principal.id) {
-    throw new EvidenceServiceError("unauthenticated", "x-uvp-principal-id header is required", 401);
+    throw new EvidenceServiceError(
+      "unauthenticated",
+      "an authenticated participant identity is required (store wallet session or governance admin; self-reported principal headers only work in local development)",
+      401
+    );
   }
 }
 
 function canWriteEvidence(
   principal: EvidencePrincipal,
-  ownerParticipantId: string,
-  accessPolicy: EvidenceAccessPolicyDTO
+  ownerParticipantId: string
 ): boolean {
+  // Membership in a request-supplied `writers` list must never
+  // authorize an upload — the list arrives in the same request body that is
+  // trying to claim ownership, so it cannot vouch for the requester. Write
+  // authority over a new record is derived from the authenticated principal
+  // alone (owner = self, or admin on behalf).
   if (principal.role === "admin") {
     return true;
   }
@@ -371,7 +468,7 @@ function canWriteEvidence(
   if (!principalId) {
     return false;
   }
-  return principalId === ownerParticipantId || accessPolicy.writers.includes(principalId);
+  return principalId === ownerParticipantId;
 }
 
 function canReadEvidence(principal: EvidencePrincipal, record: EvidenceMetadataRecord): boolean {
@@ -492,6 +589,19 @@ function decodeBase64(value: string): Uint8Array {
     throw invalidRequest("base64 evidence content is malformed");
   }
   return Buffer.from(compact, "base64");
+}
+
+function isPdfBytes(bytes: Uint8Array): boolean {
+  const header = "%PDF-";
+  if (bytes.byteLength < header.length) {
+    return false;
+  }
+  for (let index = 0; index < header.length; index += 1) {
+    if (bytes[index] !== header.charCodeAt(index)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function normalizePrincipal(principal: EvidencePrincipal): EvidencePrincipal {

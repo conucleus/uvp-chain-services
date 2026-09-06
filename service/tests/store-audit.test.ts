@@ -11,12 +11,30 @@ import type { Address, Hex } from "../src/shared/types.js";
 
 const operatorHeaders = {
   "x-uvp-store-operator-id": "operator-1",
-  "x-uvp-store-operator-role": "store_operator"
+  "x-uvp-store-operator-role": "store_operator",
+  // 红线：草稿/供应商写路由要求会话已锚定地址（本地联调 dev 锚定头）。
+  "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
+};
+
+const devAnchoredStoreAuth = {
+  mode: "dev_headers" as const,
+  roleClaim: "roles",
+  principalClaim: "sub",
+  clockToleranceSeconds: 60,
+  walletSession: {
+    enabled: true,
+    operatorWallets: [],
+    adminWallets: [],
+    sessionTtlSeconds: 43200,
+    challengeTtlSeconds: 300,
+    devAnchoredAddressHeaderEnabled: true,
+  },
 };
 
 const governanceAdminHeaders = {
   "x-uvp-admin-id": "governance-admin-1",
-  "x-uvp-admin-role": "admin"
+  "x-uvp-admin-role": "admin",
+  "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
 };
 
 const registryAddress = "0x5555555555555555555555555555555555555555" as Address;
@@ -28,7 +46,7 @@ const signer = "0x3333333333333333333333333333333333333333" as Address;
 describe("Store operator audit events", () => {
   it("audits blocked Store writes with actor, capability, resource, and request id", async () => {
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), { audit });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, audit });
 
     const response = await router.handle({
       method: "POST",
@@ -60,7 +78,7 @@ describe("Store operator audit events", () => {
 
   it("audits successful Store metadata mutations", async () => {
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), { audit });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, audit });
 
     const response = await router.handle({
       method: "POST",
@@ -105,7 +123,7 @@ describe("Store operator audit events", () => {
       }
     };
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       audit,
       governanceService: createGovernanceService({ adapter })
     });

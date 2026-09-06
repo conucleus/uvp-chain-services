@@ -1,6 +1,7 @@
 import { parseStorageJson, stringifyStorageJson } from "../storage/json.js";
 import { PostgresDatabase } from "../storage/postgres-client.js";
 import {
+  optionalStringColumn,
   rowObject,
   stringColumn
 } from "../storage/postgres-rows.js";
@@ -65,7 +66,9 @@ export class PostgresGovernanceStore implements GovernanceStore {
     }
 
     const result = await this.#database.query(
-      `SELECT *, risk_tags_json::text AS risk_tags_json
+      `SELECT *, risk_tags_json::text AS risk_tags_json,
+              metadata_document_json::text AS metadata_document_json,
+              policy_document_json::text AS policy_document_json
        FROM governance_review
        ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
        ORDER BY updated_at DESC, review_id DESC`,
@@ -76,7 +79,9 @@ export class PostgresGovernanceStore implements GovernanceStore {
 
   async getReview(reviewId: string): Promise<GovernanceReviewDTO | undefined> {
     const result = await this.#database.query(
-      `SELECT *, risk_tags_json::text AS risk_tags_json
+      `SELECT *, risk_tags_json::text AS risk_tags_json,
+              metadata_document_json::text AS metadata_document_json,
+              policy_document_json::text AS policy_document_json
        FROM governance_review
        WHERE review_id = $1`,
       [reviewId]
@@ -89,8 +94,8 @@ export class PostgresGovernanceStore implements GovernanceStore {
       `INSERT INTO governance_review (
          review_id, subject_type, subject_id, status, risk_level, risk_tags_json,
          public_summary, internal_notes, policy_hash, metadata_hash, metadata_uri,
-         reviewer, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14)
+         reviewer, created_at, updated_at, metadata_document_json, policy_document_json
+       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb)
        ON CONFLICT(review_id)
        DO UPDATE SET
          subject_type = excluded.subject_type,
@@ -104,8 +109,9 @@ export class PostgresGovernanceStore implements GovernanceStore {
          metadata_hash = excluded.metadata_hash,
          metadata_uri = excluded.metadata_uri,
          reviewer = excluded.reviewer,
-         created_at = excluded.created_at,
-         updated_at = excluded.updated_at`,
+         updated_at = excluded.updated_at,
+         metadata_document_json = excluded.metadata_document_json,
+         policy_document_json = excluded.policy_document_json`,
       [
         review.reviewId,
         review.subjectType,
@@ -120,7 +126,9 @@ export class PostgresGovernanceStore implements GovernanceStore {
         review.metadataURI,
         review.reviewer,
         review.createdAt,
-        review.updatedAt
+        review.updatedAt,
+        review.metadataDocument !== undefined ? stringifyStorageJson(review.metadataDocument) : null,
+        review.policyDocument !== undefined ? stringifyStorageJson(review.policyDocument) : null
       ]
     );
   }
@@ -222,6 +230,8 @@ export class PostgresGovernanceStore implements GovernanceStore {
 
 function reviewRow(row: unknown): GovernanceReviewDTO {
   const record = rowObject(row, "governance_review query");
+  const metadataDocumentJson = optionalStringColumn(record, "metadata_document_json");
+  const policyDocumentJson = optionalStringColumn(record, "policy_document_json");
   return {
     reviewId: stringColumn(record, "review_id"),
     subjectType: stringColumn(record, "subject_type") as GovernanceReviewDTO["subjectType"],
@@ -236,7 +246,9 @@ function reviewRow(row: unknown): GovernanceReviewDTO {
     metadataURI: stringColumn(record, "metadata_uri"),
     reviewer: stringColumn(record, "reviewer"),
     createdAt: stringColumn(record, "created_at"),
-    updatedAt: stringColumn(record, "updated_at")
+    updatedAt: stringColumn(record, "updated_at"),
+    ...(metadataDocumentJson !== undefined ? { metadataDocument: parseStorageJson(metadataDocumentJson) } : {}),
+    ...(policyDocumentJson !== undefined ? { policyDocument: parseStorageJson(policyDocumentJson) } : {})
   };
 }
 

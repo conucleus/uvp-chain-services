@@ -30,6 +30,11 @@ interface NodeSqliteModule {
 
 const require = createRequire(import.meta.url);
 
+// CS-P2：各 store 独立开连接写同一库文件。不设 busy_timeout 时并发写立刻
+// SQLITE_BUSY,统一在连接层给等待预算,写路径再叠加有界重试兜底。
+const SQLITE_BUSY_TIMEOUT_MS = 5_000;
+const SQLITE_WRITE_BUSY_RETRY_DELAYS_MS = [25, 100, 400] as const;
+
 export function openSqliteDatabase(databaseUrl: string): SqliteDatabase {
   const databasePath = sqlitePathFromUrl(databaseUrl);
   if (databasePath !== ":memory:") {
@@ -41,6 +46,7 @@ export function openSqliteDatabase(databaseUrl: string): SqliteDatabase {
     const database = new sqlite.DatabaseSync(databasePath);
     database.exec("PRAGMA foreign_keys = ON;");
     database.exec("PRAGMA journal_mode = WAL;");
+    database.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
     return database;
   } catch (error) {
     if (isMissingNodeSqlite(error)) {
@@ -89,10 +95,19 @@ export function sqlitePathFromUrl(databaseUrl: string): string {
 }
 
 export function runSqliteWrite<T>(operation: () => T): T {
-  try {
-    return operation();
-  } catch (error) {
-    throw normalizeSqliteError(error);
+  let attempt = 0;
+  for (;;) {
+    try {
+      return operation();
+    } catch (error) {
+      // busy_timeout 之外的偶发锁竞争(如事务边界的 BEGIN IMMEDIATE)按
+      // 有界次数同步退避重试;重试耗尽或非 busy 错误原样归一化上抛。
+      if (!isSqliteBusyError(error) || attempt >= SQLITE_WRITE_BUSY_RETRY_DELAYS_MS.length) {
+        throw normalizeSqliteError(error);
+      }
+      sleepSync(SQLITE_WRITE_BUSY_RETRY_DELAYS_MS[attempt]!);
+      attempt += 1;
+    }
   }
 }
 
@@ -104,6 +119,21 @@ export function normalizeSqliteError(error: unknown): Error {
     return error;
   }
   return new StorageError("unknown SQLite storage error");
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function isSqliteBusyError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as Error & { readonly code?: unknown }).code;
+  return (
+    (typeof code === "string" && code.startsWith("SQLITE_BUSY")) ||
+    /database is locked|database table is locked/i.test(error.message)
+  );
 }
 
 function isMissingNodeSqlite(error: unknown): boolean {

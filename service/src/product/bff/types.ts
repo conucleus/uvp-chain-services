@@ -14,6 +14,7 @@ export type DraftParticipantStatus = "missing" | "invited" | "accepted" | "rejec
 export type ProductInviteStatus = "active" | "accepted" | "rejected" | "expired" | "revoked";
 export type PermissionPayloadPolicy = "required" | "optional";
 export type ProductOrderTriggerStatus =
+  | "pending"
   | "prepared"
   | "submitted"
   | "indexing"
@@ -80,8 +81,25 @@ export interface ParticipantPermissionDTO {
   readonly signalName: string;
   readonly submitterAddress: string;
   readonly payloadPolicy: PermissionPayloadPolicy;
-  readonly requiredEvidence: readonly string[];
+  /**
+   * 发布者携带的结构化证据要求（镜像 productDto.v1 ProductTaskDTO.evidenceSpec，
+   * schema 为不透明 JSON，结构化读取；缺省即无凭证槽位）。
+   */
+  readonly evidenceSpec?: readonly ProductEvidenceSpecDTO[];
   readonly deadlinePolicy?: string;
+}
+
+/**
+ * evidenceSpec 槽位的局部结构镜像：key/label 必填，其余为发布者可选的
+ * 渲染/上传约束。不 import protocol 包，跟随任务 DTO 的内联定义方式。
+ */
+export interface ProductEvidenceSpecDTO {
+  readonly key: string;
+  readonly label: string;
+  readonly inputKind?: "file" | "text" | "date";
+  readonly accept?: readonly string[];
+  readonly required?: boolean;
+  readonly description?: string;
 }
 
 export interface SignalAuthorizationDTO {
@@ -139,7 +157,6 @@ export interface CreateProductOrderDraftInput {
   readonly expectedCompletionDate?: string;
   readonly notes?: string;
   readonly createdBy?: string;
-  readonly allowDemoPlanFallback?: boolean;
 }
 
 export interface UpdateProductOrderDraftInput {
@@ -165,10 +182,19 @@ export interface AcceptProductInviteInput {
   readonly displayName: string;
   readonly walletAddress: string;
   readonly contact: string;
-  readonly sessionWalletAddress?: string;
+  /**
+   * accept/reject 必须携带 invite token——token 只
+   * 在 createInvite 响应中出现一次，库中仅存哈希；inviteId 是弱凭据，
+   * 不足以占角色槽。
+   */
+  readonly token: string;
+  /** 会话锚定地址（路由层解析；钱包会话签名证明或 local dev 锚定头）。 */
+  readonly sessionWalletAddress: string;
 }
 
 export interface RejectProductInviteInput {
+  /** reject 同样强制携带 token（哈希比对）。 */
+  readonly token: string;
   readonly displayName?: string;
   readonly contact?: string;
 }
@@ -196,6 +222,11 @@ export interface ProductInviteResponse {
   readonly invite: ProductInviteDTO;
   readonly participant: DraftParticipantDTO;
   readonly draft: ProductOrderDraftDTO;
+  /**
+   * createInvite 的响应额外携带一次性明文 token
+   *（库中只存 tokenHash）。后续 accept/reject 必须回呈该 token。
+   */
+  readonly inviteToken?: string;
 }
 
 export interface ProductInviteWalletBindingDTO {
@@ -223,7 +254,8 @@ export interface ProductInviteRolePreviewDTO {
   readonly roleSlotId: string;
   readonly label: string;
   readonly duty: string;
-  readonly requiredEvidence: readonly string[];
+  /** 发布者携带的结构化证据要求；缺省即无凭证槽位。 */
+  readonly evidenceSpec?: readonly ProductEvidenceSpecDTO[];
 }
 
 export interface ProductInvitePreviewResponse extends ProductInviteResponse {

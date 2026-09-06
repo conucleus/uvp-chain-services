@@ -6,7 +6,7 @@ export type TxReconcileStatus =
   | "failed"
   | "stale_pending";
 
-export type TxReceiptStatus = "not_checked" | "missing" | "success" | "failed" | "timeout";
+export type TxReceiptStatus = "not_checked" | "missing" | "unknown" | "success" | "failed" | "timeout";
 
 export type TxProjectionStatus = "not_checked" | "missing" | "present";
 

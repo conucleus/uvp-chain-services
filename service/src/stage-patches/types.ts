@@ -23,6 +23,7 @@ export interface StageExecutorPatchTypedData {
   };
   readonly primaryType: "UVPStagePatchModuleStageExecutorPatch";
   readonly message: {
+    readonly planId: Hex;
     readonly orderId: Hex;
     readonly selectorStageId: Hex;
     readonly targetStageId: Hex;
@@ -53,6 +54,7 @@ export interface StageResourcePatchTypedData {
   };
   readonly primaryType: "UVPStagePatchModuleStageResourcePatch";
   readonly message: {
+    readonly planId: Hex;
     readonly orderId: Hex;
     readonly selectorStageId: Hex;
     readonly targetStageId: Hex;
@@ -65,39 +67,6 @@ export interface StageResourcePatchTypedData {
     readonly selector: Address;
     readonly deadline: string;
   };
-}
-
-export interface DockedOrderLinkTypedData {
-  readonly domain: {
-    readonly name: "UVPDockingModule";
-    readonly version: "0.1";
-    readonly chainId: number;
-    readonly verifyingContract: Address;
-  };
-  readonly types: {
-    readonly UVPDockingModuleDockedOrderLink: readonly StagePatchTypedDataField[];
-  };
-  readonly primaryType: "UVPDockingModuleDockedOrderLink";
-  readonly message: {
-    readonly localOrderId: Hex;
-    readonly selectorStageId: Hex;
-    readonly localSourceId: Hex;
-    readonly linkedOrderId: Hex;
-    readonly linkedPlanId: Hex;
-    readonly linkHash: Hex;
-    readonly linkNonce: string;
-    readonly signalBindingsHash: Hex;
-    readonly metadataURI: string;
-    readonly selector: Address;
-    readonly deadline: string;
-  };
-}
-
-export interface DockedSignalBindingDTO {
-  readonly localSourceId: Hex;
-  readonly localSignalId: Hex;
-  readonly linkedSourceId: Hex;
-  readonly linkedSignalId: Hex;
 }
 
 export interface PrepareProductStageExecutorPatchInput {
@@ -124,20 +93,6 @@ export interface PrepareProductStageResourcePatchInput {
   readonly manifestURI: string;
 }
 
-export interface PrepareProductDockedOrderLinkInput {
-  readonly selectorWallet: string;
-  readonly localSourceId: string;
-  readonly linkedOrderId: string;
-  readonly linkedPlanId: string;
-  readonly signalBindings: readonly {
-    readonly localSourceId: string;
-    readonly localSignalId: string;
-    readonly linkedSourceId: string;
-    readonly linkedSignalId: string;
-  }[];
-  readonly metadataURI: string;
-}
-
 export interface SubmitProductStageExecutorPatchInput {
   readonly prepareId?: string;
   readonly selectorWallet: string;
@@ -153,14 +108,6 @@ export interface SubmitProductStageResourcePatchInput {
   readonly typedData?: unknown;
   readonly signature: string;
   readonly patch?: PreparedStageResourcePatchDTO;
-}
-
-export interface SubmitProductDockedOrderLinkInput {
-  readonly prepareId?: string;
-  readonly selectorWallet: string;
-  readonly typedData?: unknown;
-  readonly signature: string;
-  readonly link?: PreparedDockedOrderLinkDTO;
 }
 
 export interface StageExecutorPatchHumanSummaryDTO {
@@ -204,30 +151,14 @@ export interface StageResourcePatchHumanSummaryDTO {
   readonly verifyingContract: Address;
 }
 
-export interface DockedOrderLinkHumanSummaryDTO {
-  readonly purpose: string;
-  readonly localOrderId: string;
-  readonly selectorTaskId: string;
-  readonly selectorStageId: Hex;
-  readonly localSourceId: Hex;
-  readonly linkedOrderId: Hex;
-  readonly linkedPlanId: Hex;
-  readonly linkHash: Hex;
-  readonly linkNonce: string;
-  readonly metadataURI: string;
-  readonly selectorWallet: Address;
-  readonly signalBindings: readonly DockedSignalBindingDTO[];
-  readonly validUntil: string;
-  readonly chainId: number;
-  readonly verifyingContract: Address;
-}
-
 export interface PreparedStageExecutorPatchDTO {
   readonly prepareId: string;
   readonly taskId: string;
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   readonly stateMachineAddress: Address;
+  /** plan-scoped 补丁身份：applyStageExecutorPatchFor 首参，必填。 */
+  readonly planId: Hex;
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
   readonly selectorWallet: Address;
@@ -255,6 +186,8 @@ export interface PreparedStageResourcePatchDTO {
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   readonly stateMachineAddress: Address;
+  /** plan-scoped 补丁身份：applyStageResourcePatchFor 首参，必填。 */
+  readonly planId: Hex;
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
   readonly resourceKey: Hex;
@@ -269,28 +202,6 @@ export interface PreparedStageResourcePatchDTO {
   readonly status: "prepared";
   readonly typedData: StageResourcePatchTypedData;
   readonly humanSummary: StageResourcePatchHumanSummaryDTO;
-}
-
-export interface PreparedDockedOrderLinkDTO {
-  readonly prepareId: string;
-  readonly taskId: string;
-  readonly localOrderId: string;
-  readonly onchainLocalOrderId: Hex;
-  readonly stateMachineAddress: Address;
-  readonly selectorStageId: Hex;
-  readonly localSourceId: Hex;
-  readonly linkedOrderId: Hex;
-  readonly linkedPlanId: Hex;
-  readonly selectorWallet: Address;
-  readonly linkHash: Hex;
-  readonly linkNonce: string;
-  readonly metadataURI: string;
-  readonly signalBindings: readonly DockedSignalBindingDTO[];
-  readonly deadline: string;
-  readonly expiresAt: string;
-  readonly status: "prepared";
-  readonly typedData: DockedOrderLinkTypedData;
-  readonly humanSummary: DockedOrderLinkHumanSummaryDTO;
 }
 
 export type StagePatchSubmissionStatus =
@@ -386,38 +297,6 @@ export interface StageResourcePatchSubmissionDTO {
   readonly updatedAt: string;
 }
 
-export interface DockedOrderLinkSubmissionDTO {
-  readonly submissionId: string;
-  readonly prepareId: string;
-  readonly taskId: string;
-  readonly localOrderId: string;
-  readonly onchainLocalOrderId: Hex;
-  readonly stateMachineAddress: Address;
-  readonly selectorStageId: Hex;
-  readonly localSourceId: Hex;
-  readonly linkedOrderId: Hex;
-  readonly linkedPlanId: Hex;
-  readonly selectorWallet: Address;
-  readonly linkHash: Hex;
-  readonly linkNonce: string;
-  readonly metadataURI: string;
-  readonly signalBindings: readonly DockedSignalBindingDTO[];
-  readonly deadline: string;
-  readonly status: StagePatchSubmissionStatus;
-  readonly signatureStatus: "not_verified" | "signature_verified";
-  readonly signatureHash?: Hex;
-  readonly recoveredSelector?: Address;
-  readonly broadcastStatus: StagePatchBroadcastStatus;
-  readonly txHash?: Hex;
-  readonly blockNumber?: string;
-  readonly errorCode?: string;
-  readonly errorMessage?: string;
-  readonly retryable: boolean;
-  readonly proofRows: readonly StagePatchProofRowDTO[];
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
 export interface PreparedPatchRecordBase {
   readonly nonceKey: string;
   readonly prepareId: string;
@@ -428,8 +307,6 @@ export interface PreparedPatchRecordBase {
 export interface PreparedStageExecutorPatchRecord extends PreparedStageExecutorPatchDTO, PreparedPatchRecordBase {}
 
 export interface PreparedStageResourcePatchRecord extends PreparedStageResourcePatchDTO, PreparedPatchRecordBase {}
-
-export interface PreparedDockedOrderLinkRecord extends PreparedDockedOrderLinkDTO, PreparedPatchRecordBase {}
 
 export interface StagePatchBroadcastAttemptResult {
   readonly status: "broadcasting" | "submitted" | "confirmed" | "failed";
@@ -488,22 +365,12 @@ export interface StageResourcePatchBroadcastRequest {
   readonly recoveredSelector: Address;
 }
 
-export interface DockedOrderLinkBroadcastRequest {
-  readonly prepared: PreparedDockedOrderLinkDTO;
-  readonly signature: Hex;
-  readonly recoveredSelector: Address;
-}
-
 export interface StageExecutorPatchBroadcastAdapter {
   broadcast(request: StageExecutorPatchBroadcastRequest): Promise<StagePatchBroadcastResult>;
 }
 
 export interface StageResourcePatchBroadcastAdapter {
   broadcast(request: StageResourcePatchBroadcastRequest): Promise<StagePatchBroadcastResult>;
-}
-
-export interface DockedOrderLinkBroadcastAdapter {
-  broadcast(request: DockedOrderLinkBroadcastRequest): Promise<StagePatchBroadcastResult>;
 }
 
 export interface StagePatchSubmissionBase {
@@ -518,6 +385,13 @@ export interface ProductStagePatchStore<
   getPrepared(prepareId: string): Promise<TPrepared | undefined>;
   markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void>;
   reserveNonce(key: string): Promise<boolean>;
+  /**
+   * reserve 之后的 broadcast/存储写入抛错时，提交服务会先释放
+   * nonce 再 rethrow，保证同一 prepareId 在瞬时 RPC/存储失败后仍可重试。
+   * 与 ProductSubmissionStore.releaseNonce 相同的可选能力语义：实现缺失时
+   * patch 服务按 nonce 已消费处理（fail-closed，不重试）。
+   */
+  releaseNonce?(key: string): Promise<void>;
   putSubmission(submission: TSubmission): Promise<void>;
   getSubmission(submissionId: string): Promise<TSubmission | undefined>;
 }
@@ -531,8 +405,4 @@ export type ProductStageResourcePatchStore = ProductStagePatchStore<
   PreparedStageResourcePatchRecord,
   StageResourcePatchSubmissionDTO
 >;
-
-export type ProductDockedOrderLinkStore = ProductStagePatchStore<
-  PreparedDockedOrderLinkRecord,
-  DockedOrderLinkSubmissionDTO
->;
+;

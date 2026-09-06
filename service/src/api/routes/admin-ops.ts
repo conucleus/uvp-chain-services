@@ -10,10 +10,12 @@ import type { AdminOpsActionEffect, ApiRequest, ApiResponse } from "../route-con
 import { readApiHeader } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions.retry";
+type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions.retry" | "indexer.sweep_pending";
 
 interface AdminOpsRequestContext {
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
+  /** OPS_CONSOLE_ADMIN_IDS 白名单；非空时只放行集合内 admin id。 */
+  readonly opsConsoleAdminIds?: readonly string[];
   readonly actions?: {
     runReconcile?(): Promise<AdminOpsActionEffect | void>;
     rebuildProjections?(): Promise<AdminOpsActionEffect | void>;
@@ -21,6 +23,8 @@ interface AdminOpsRequestContext {
       readonly submissionId: string;
       readonly submission?: ProductSubmissionDTO;
     }): Promise<AdminOpsActionEffect | void>;
+    sweepPendingPostCommitSteps?(): Promise<AdminOpsActionEffect | void>;
+    listPendingPostCommitSteps?(): Promise<unknown>;
   };
   readonly submissionStore?: {
     getSubmission(submissionId: string): Promise<ProductSubmissionDTO | undefined>;
@@ -33,6 +37,7 @@ export function createAdminOpsRouteModule(): RouteModule {
     async handle(request, context) {
       return handleAdminOpsRequest(request, {
         buildDiagnostics: context.buildDiagnostics,
+        ...(context.opsConsoleAdminIds ? { opsConsoleAdminIds: context.opsConsoleAdminIds } : {}),
         ...(context.opsRecoveryActions ? { actions: context.opsRecoveryActions } : {}),
         ...(context.submissionStore ? { submissionStore: context.submissionStore } : {}),
         now: context.now
@@ -55,6 +60,18 @@ async function handleAdminOpsRequest(
       status: 403,
       body: { error: "forbidden" }
     };
+  }
+  // OPS_CONSOLE_ADMIN_IDS 只在配置了白名单时生效——配置为非空
+  // 集合后，governance reviewer 即使通过通用 admin 鉴权也不在 ops 白名单
+  // 内，必须 403；未配置（本地开发）回退既有 governance admin 检查。
+  if (context.opsConsoleAdminIds && context.opsConsoleAdminIds.length > 0) {
+    const allowList = new Set(context.opsConsoleAdminIds.map((id) => id.trim()).filter(Boolean));
+    if (!allowList.has(principal.adminId)) {
+      return {
+        status: 403,
+        body: { error: "forbidden", reason: "ops_console_admin_allowlist" }
+      };
+    }
   }
 
   if (request.method === "GET" && request.pathname === "/admin/ops/status") {
@@ -93,6 +110,29 @@ async function handleAdminOpsRequest(
     return runAdminOpsAction(request, context, {
       action: "projections.rebuild",
       run: context.actions?.rebuildProjections
+    });
+  }
+
+  // post-commit 失败批次（信号通知/投影自动化）的持久 pending
+  // 队列——列表供研判，重试触发一轮 sweep 直至成功或人工干预。
+  if (request.method === "GET" && request.pathname === "/admin/ops/indexer/pending-steps") {
+    if (!context.actions?.listPendingPostCommitSteps) {
+      return {
+        status: 503,
+        body: { ok: false, error: "ops_dependency_unavailable" }
+      };
+    }
+    const pendingSteps = await context.actions.listPendingPostCommitSteps();
+    return {
+      status: 200,
+      body: redactSecrets({ ok: true, pendingSteps })
+    };
+  }
+
+  if (request.method === "POST" && request.pathname === "/admin/ops/indexer/pending-steps/retry") {
+    return runAdminOpsAction(request, context, {
+      action: "indexer.sweep_pending",
+      run: context.actions?.sweepPendingPostCommitSteps
     });
   }
 

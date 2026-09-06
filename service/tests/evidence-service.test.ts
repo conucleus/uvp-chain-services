@@ -3,17 +3,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  BackupEvidenceStorage,
   buildPayloadHashDocument,
   createEvidenceService,
   EvidenceServiceError,
   EvidenceStorageConfigurationError,
+  hashEvidenceBytes,
   hashEvidencePayload,
   InMemoryEvidenceMetadataStore,
   InMemoryEvidenceStorage,
   LocalEvidenceStorage,
   ObjectEvidenceStorage,
   RehearsalObjectEvidenceStorage,
+  defaultRehearsalObjectStorageRoot,
   S3EvidenceStorageClient,
+  type EvidenceStorage,
   type S3CompatibleObjectClient,
   type S3ObjectOperationInput,
   type S3ObjectPutOperationInput,
@@ -47,8 +51,11 @@ describe("evidence service", () => {
     expect(first.evidence.contentHash).toBe(second.evidence.contentHash);
     expect(first.evidence.metadataHash).toBe(second.evidence.metadataHash);
     expect(first.evidence.payloadHash).toBe(second.evidence.payloadHash);
-    expect(first.evidence.evidenceId).not.toBe(second.evidence.evidenceId);
-    expect(first.evidence.fileName).not.toBe(second.evidence.fileName);
+    // 簇 N 修正（审计三轮）：同一 owner 重复上传完全相同的载荷幂等返回既有
+    // 记录——payloadHash 覆盖 content+metadata+order+stage（fileName 不参与
+    // 哈希），重命名文件重传不再追加内容副本。
+    expect(second.evidence.evidenceId).toBe(first.evidence.evidenceId);
+    expect(second.evidence.fileName).toBe(first.evidence.fileName);
     expect(first.evidence.payloadHash).toBe(hashEvidencePayload({
       contentHash: first.evidence.contentHash,
       metadataHash: first.evidence.metadataHash,
@@ -165,14 +172,92 @@ describe("evidence service", () => {
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "ops-admin", role: "admin" })).resolves.toBeDefined();
     await expect(service.getProof(upload.evidence.evidenceId, { id: "ops-admin", role: "admin" }))
       .resolves.toMatchObject({ verificationStatus: "unbound" });
+    // KEEP（存在性 oracle 消除）：无权读取与"不存在"同为 undefined（路由
+    // 层 404 evidence_not_found），不再以 403 泄露证据是否存在。
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "outsider", role: "participant" }))
-      .rejects.toMatchObject({ code: "forbidden", status: 403 });
+      .resolves.toBeUndefined();
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "ops", role: "participant" }))
-      .rejects.toMatchObject({ code: "forbidden", status: 403 });
+      .resolves.toBeUndefined();
+    // 未认证主体在读库前即 401（不因 evidenceId 是否存在而不同）。
+    await expect(service.getEvidence(upload.evidence.evidenceId, { role: "anonymous" }))
+      .rejects.toMatchObject({ code: "unauthenticated", status: 401 });
+    await expect(service.getEvidence("ev_missing", { role: "anonymous" }))
+      .rejects.toMatchObject({ code: "unauthenticated", status: 401 });
     await expect(metadataStore.listAdminReads()).resolves.toEqual([
       expect.objectContaining({ principalId: "ops-admin", route: "evidence" }),
       expect.objectContaining({ principalId: "ops-admin", route: "proof" })
     ]);
+  });
+
+  it("rejects attributing uploaded evidence to another participant via ownerParticipantId or request writers", async () => {
+    const metadataStore = new InMemoryEvidenceMetadataStore();
+    const service = createEvidenceService({
+      metadataStore,
+      storage: new InMemoryEvidenceStorage(),
+      now: () => new Date("2026-04-28T00:00:00Z"),
+      evidenceIdFactory: () => "ev_forge"
+    });
+    const attacker: EvidencePrincipal = { id: "attacker", role: "participant" };
+
+    // A self-asserted writers list in the same request body must not vouch
+    // for attributing the record to someone else.
+    await expect(service.uploadEvidence({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "forged invoice",
+      ownerParticipantId: "seller",
+      accessPolicy: { writers: ["attacker"] }
+    }, attacker)).rejects.toMatchObject({ code: "forbidden", status: 403 });
+
+    await expect(metadataStore.get("ev_forge")).resolves.toBeUndefined();
+
+    // A plain writers grant without the owner claim is equally rejected: the
+    // request body cannot create evidence owned by another participant.
+    await expect(service.uploadEvidence({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "forged invoice",
+      ownerParticipantId: "seller",
+      accessPolicy: { writers: ["attacker"], readers: ["seller"] }
+    }, attacker)).rejects.toMatchObject({ code: "forbidden", status: 403 });
+    await expect(metadataStore.get("ev_forge")).resolves.toBeUndefined();
+
+    // The principal can still declare itself as owner explicitly.
+    const own = await service.uploadEvidence({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "own invoice",
+      ownerParticipantId: "attacker",
+      accessPolicy: { writers: ["attacker"] }
+    }, attacker);
+    expect(own.evidence.ownerParticipantId).toBe("attacker");
+
+    // Admin keeps the existing on-behalf ability, and an omitted owner
+    // defaults to the authenticated principal.
+    const onBehalf = await service.uploadEvidence({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "admin invoice",
+      ownerParticipantId: "seller"
+    }, { id: "ops-admin", role: "admin" });
+    expect(onBehalf.evidence.ownerParticipantId).toBe("seller");
+
+    const defaulted = await service.uploadEvidence({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "default owner invoice"
+    }, owner);
+    expect(defaulted.evidence.ownerParticipantId).toBe("seller");
   });
 
   it("returns proof and reports missing_file or mismatch without deleting evidence metadata", async () => {
@@ -308,8 +393,7 @@ describe("evidence service", () => {
     const rootDir = tempDir();
     const storage = new RehearsalObjectEvidenceStorage({
       rootDir,
-      namespace: "uvp-rehearsal-test",
-      runId: "run-1"
+      namespace: "uvp-rehearsal-test"
     });
     const service = createEvidenceService({
       storage,
@@ -325,6 +409,18 @@ describe("evidence service", () => {
     await expect(service.getProof(upload.evidence.evidenceId, owner)).resolves.toMatchObject({
       verificationStatus: "unbound"
     });
+  });
+
+  it("keeps the default rehearsal object root stable across process restarts", () => {
+    // Audit #20: stored metadata references bytes under this root, so the
+    // default must never embed a timestamp or pid that changes on restart.
+    const first = new RehearsalObjectEvidenceStorage();
+    const second = new RehearsalObjectEvidenceStorage();
+    const expected = join(process.cwd(), "data", "evidence-object", "ev_restart.bin");
+
+    expect(first.pathForStorageURI("object://uvp-rehearsal/ev_restart")).toBe(expected);
+    expect(second.pathForStorageURI("object://uvp-rehearsal/ev_restart")).toBe(expected);
+    expect(defaultRehearsalObjectStorageRoot()).toBe(join(process.cwd(), "data", "evidence-object"));
   });
 
   it("accepts production-like object storage but rejects public or credential-bearing storage URIs", async () => {
@@ -468,6 +564,34 @@ describe("evidence service", () => {
     }
   });
 
+  it("resolves a configured STS session token env at construction time", () => {
+    // Audit #19: the session token must reach the S3 client when configured,
+    // and a configured-but-empty token env must fail construction instead of
+    // producing a client that passes preflight and 403s on first use.
+    expect(() => new S3EvidenceStorageClient({
+      bucket: "private-evidence-bucket",
+      region: "us-east-1",
+      accessKeyIdEnv: "S3_ACCESS_KEY_ID",
+      secretAccessKeyEnv: "S3_SECRET_ACCESS_KEY",
+      sessionTokenEnv: "S3_SESSION_TOKEN",
+      env: {
+        ...s3CredentialEnv(),
+        S3_SESSION_TOKEN: "sts-session-token-value"
+      },
+      objectClient: new MockS3CompatibleObjectClient()
+    })).not.toThrow();
+
+    expect(() => new S3EvidenceStorageClient({
+      bucket: "private-evidence-bucket",
+      region: "us-east-1",
+      accessKeyIdEnv: "S3_ACCESS_KEY_ID",
+      secretAccessKeyEnv: "S3_SECRET_ACCESS_KEY",
+      sessionTokenEnv: "S3_SESSION_TOKEN",
+      env: s3CredentialEnv(),
+      objectClient: new MockS3CompatibleObjectClient()
+    })).toThrow(EvidenceStorageConfigurationError);
+  });
+
   it("returns undefined for missing evidence records", async () => {
     const service = testEvidenceService();
 
@@ -599,3 +723,113 @@ async function uploadTextEvidence(
     throw error;
   });
 }
+
+describe("evidence backup storage (ETH-05)", () => {
+  it("writes a second copy on put and restores the primary object from the verified backup", async () => {
+    const primary = new InMemoryEvidenceStorage();
+    const backup = new InMemoryEvidenceStorage();
+    const storage = new BackupEvidenceStorage({ primary, backup });
+    const evidenceId = "ev_backup_1";
+    const bytes = new TextEncoder().encode("evidence-bytes-for-backup");
+
+    await storage.put({ evidenceId, bytes });
+
+    const primaryURI = `memory://evidence/${evidenceId}`;
+    await expect(backup.exists(primaryURI)).resolves.toBe(true);
+    const storedHash = hashEvidenceBytes(bytes);
+
+    // 主对象被"损坏"：内容被替换，hash 不再匹配。
+    await primary.put({ evidenceId, bytes: new TextEncoder().encode("corrupted-bytes") });
+    await expect(storage.verifyBackup(primaryURI, storedHash)).resolves.toEqual({
+      backupPresent: true,
+      hashMatches: true
+    });
+
+    await expect(storage.restoreFromBackup(primaryURI, evidenceId, storedHash)).resolves.toBe(true);
+    await expect(primary.get(primaryURI)).resolves.toEqual(bytes);
+
+    // 副本 hash 不匹配时拒绝恢复。
+    await backup.put({ evidenceId, bytes: new TextEncoder().encode("tampered-backup") });
+    await expect(storage.restoreFromBackup(primaryURI, evidenceId, storedHash)).resolves.toBe(false);
+
+    // 缺失副本时报告不可用。
+    await backup.delete(primaryURI);
+    await expect(storage.verifyBackup(primaryURI, storedHash)).resolves.toEqual({
+      backupPresent: false,
+      hashMatches: false
+    });
+  });
+
+  it("propagates backup write failures instead of pretending a copy exists", async () => {
+    const primary = new InMemoryEvidenceStorage();
+    const failingBackup: EvidenceStorage = {
+      adapterKind: "memory",
+      productionSafe: false,
+      put: async () => {
+        throw new Error("backup bucket unavailable");
+      },
+      get: async () => undefined,
+      exists: async () => false
+    };
+    const storage = new BackupEvidenceStorage({ primary, backup: failingBackup });
+
+    await expect(storage.put({
+      evidenceId: "ev_backup_fail",
+      bytes: new TextEncoder().encode("payload")
+    })).rejects.toThrow(/backup bucket unavailable/);
+  });
+});
+
+describe("evidence PDF magic validation (STORE-02)", () => {
+  it("rejects a declared application/pdf payload without the %PDF- magic header", async () => {
+    const service = testEvidenceService();
+
+    await expect(service.uploadEvidence({
+      orderId: "order-1",
+      stageIdentifier: "export-documents",
+      documentType: "customs-declaration",
+      fileName: "fake.pdf",
+      mimeType: "application/pdf",
+      content: { encoding: "base64", value: Buffer.from("this is not a pdf document").toString("base64") }
+    }, owner)).rejects.toMatchObject({
+      code: "pdf_magic_mismatch",
+      status: 400
+    });
+
+    await expect(service.uploadEvidence({
+      orderId: "order-1",
+      stageIdentifier: "export-documents",
+      documentType: "customs-declaration",
+      fileName: "truncated.pdf",
+      mimeType: "application/pdf",
+      content: { encoding: "base64", value: Buffer.from("%PD").toString("base64") }
+    }, owner)).rejects.toMatchObject({
+      code: "pdf_magic_mismatch",
+      status: 400
+    });
+
+    // 真实 %PDF- 魔数通过。
+    const accepted = await service.uploadEvidence({
+      orderId: "order-1",
+      stageIdentifier: "export-documents",
+      documentType: "customs-declaration",
+      fileName: "real.pdf",
+      mimeType: "application/pdf",
+      content: { encoding: "base64", value: Buffer.from("%PDF-1.7 real payload").toString("base64") }
+    }, owner);
+    expect(accepted.evidence.mimeType).toBe("application/pdf");
+  });
+
+  it("does not apply PDF magic validation to non-PDF evidence accepts", async () => {
+    const service = testEvidenceService();
+    const uploaded = await service.uploadEvidence({
+      orderId: "order-1",
+      stageIdentifier: "export-documents",
+      documentType: "customs-declaration",
+      fileName: "notes.txt",
+      mimeType: "text/plain",
+      content: { encoding: "text", value: "%PDF- is not required here" }
+    }, owner);
+    expect(uploaded.evidence.mimeType).toBe("text/plain");
+  });
+});

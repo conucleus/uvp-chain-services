@@ -20,10 +20,6 @@ import {
   type ZhixuDetailDTO,
   type ZhixuSummaryDTO
 } from "@uvp-eth/product-dto";
-import {
-  CROSS_BORDER_ZHIXU_ID,
-  crossBorderPlanIds
-} from "@uvp-eth/product-dto/fixtures";
 import type { StateMachineOrderProjection } from "../indexer/projections.js";
 import type { ProductOrderApiDTO, ProductService, ProductTaskApiDTO } from "../product/service.js";
 import type { ProjectionStore, ProjectionSyncState } from "../storage/projection-store.js";
@@ -263,7 +259,7 @@ async function listOrderCandidates(
     options.store.getSyncState()
   ]);
   const candidates = [
-    ...stateMachineOrders.map(orderCandidateFromStateMachine)
+    ...await Promise.all(stateMachineOrders.map((order) => orderCandidateZhixuId(options, order).then((zhixuId) => orderCandidateFromStateMachine(order, zhixuId))))
   ].sort((left, right) =>
     (left.chainId ?? 0) - (right.chainId ?? 0) ||
     (left.stateMachineAddress ?? "").localeCompare(right.stateMachineAddress ?? "") ||
@@ -371,8 +367,7 @@ function taskMatched(task: ProductTaskApiDTO, normalizedQuery: string): boolean 
     task.subtitle,
     task.assigneeRole,
     task.assigneeWallet,
-    task.stageName,
-    ...task.requiredEvidence
+    task.stageName
   ].some((field) => typeof field === "string" && normalizeSearchText(field).includes(normalizedQuery));
 }
 
@@ -506,12 +501,15 @@ function supplierSearchResult(
   };
 }
 
-function orderCandidateFromStateMachine(order: StateMachineOrderProjection): StoreOrderCandidateDTO {
+function orderCandidateFromStateMachine(
+  order: StateMachineOrderProjection,
+  zhixuId: string
+): StoreOrderCandidateDTO {
   return {
     orderId: order.orderId,
     title: `链上订单 ${shortHash(order.orderId)}`,
     statusLabel: stateMachineOrderStatusLabel(order.status),
-    zhixuId: zhixuIdForPlan(order.planId, order.planHash),
+    zhixuId,
     primaryHref: `/product/orders/${encodeURIComponent(order.orderId)}`,
     sourceOfTruth: "chain",
     chainId: order.chainId,
@@ -520,6 +518,26 @@ function orderCandidateFromStateMachine(order: StateMachineOrderProjection): Sto
     proofHint: `${shortHash(order.updatedAt.transactionHash)} @ block ${order.updatedAt.blockNumber.toString()}`,
     updatedAt: `block ${order.updatedAt.blockNumber.toString()}`
   };
+}
+
+/**
+ * Order candidates reuse the Product API's zhixu id for the same order so the
+ * Store Console never derives a second, divergent id for one plan. The Product
+ * API itself resolves schema-registered ids and falls back to the plan-derived
+ * id; ambiguity across deployments falls back to that derived id as well.
+ */
+async function orderCandidateZhixuId(options: {
+  readonly productService: ProductService;
+}, order: StateMachineOrderProjection): Promise<string> {
+  try {
+    const dto = await options.productService.getOrder(order.orderId);
+    if (dto && dto.stateMachineAddress === order.contractAddress) {
+      return dto.zhixuId;
+    }
+  } catch {
+    // Ambiguous or missing projection: keep going, fall back below.
+  }
+  return zhixuIdForPlan(order.planId);
 }
 
 function projectionStatusFromSyncState(syncState: ProjectionSyncState | undefined): StoreProjectionStatusDTO | undefined {
@@ -627,10 +645,8 @@ function supplierReviewLabel(status: StoreSupplierMetadataRecord["reviewStatus"]
   }
 }
 
-function zhixuIdForPlan(planId: string, planHash: string | undefined): string {
-  return planId === crossBorderPlanIds.planId || planHash === crossBorderPlanIds.planHash
-    ? CROSS_BORDER_ZHIXU_ID
-    : `plan-${shortHash(planId)}`;
+function zhixuIdForPlan(planId: string): string {
+  return `plan-${shortHash(planId)}`;
 }
 
 function stateMachineOrderStatusLabel(status: StateMachineOrderProjection["status"]): string {

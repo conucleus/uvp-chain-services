@@ -1,4 +1,8 @@
+import type { Server } from "node:http";
 import { describe, expect, it } from "vitest";
+import { startApiServer } from "../src/api/server.js";
+import type { ChainServicesConfig } from "../src/config/index.js";
+import type { ChainEventSource } from "../src/indexer/service.js";
 import { buildConfigDiagnostics, loadConfigFromEnv } from "../src/config/index.js";
 import {
   InMemoryEvidenceStorage,
@@ -66,7 +70,7 @@ describe("ops health diagnostics", () => {
     const governanceStore = new InMemoryGovernanceStore();
     await governanceStore.appendIdentityTxLog(pendingGovernanceLog());
 
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: buildConfigDiagnostics(testConfig()),
       submissionStore,
       governanceStore,
@@ -91,9 +95,22 @@ describe("ops health diagnostics", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/healthz" });
 
+    // 簇 N 修正（审计三轮）：healthz 收口——只回聚合健康位；诊断明细走
+    // /admin/diagnostics（治理白名单 admin）。
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       sourceOfTruth: "contracts-and-chain-events",
+      status: expect.any(String)
+    });
+    expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
+
+    const detailResponse = await router.handle({
+      method: "GET",
+      pathname: "/admin/diagnostics",
+      headers: { "x-uvp-admin-id": "ops-admin-1", "x-uvp-admin-role": "governance_admin" }
+    });
+    expect(detailResponse.status).toBe(200);
+    expect(detailResponse.body).toMatchObject({
       diagnostics: {
         backendAuthority: false,
         environment: "local",
@@ -144,11 +161,11 @@ describe("ops health diagnostics", () => {
         }
       }
     });
-    expect(JSON.stringify(response.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
+    expect(JSON.stringify(detailResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
   });
 
   it("requires admin headers for operator console routes", async () => {
-    const router = createApiRouter(new MemoryProjectionStore());
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     for (const request of [
       { method: "GET", pathname: "/admin/ops/status" },
@@ -160,6 +177,98 @@ describe("ops health diagnostics", () => {
       const response = await router.handle(request);
       expect(response.status).toBe(403);
       expect(response.body).toEqual({ error: "forbidden" });
+    }
+  });
+
+  it("enforces the OPS_CONSOLE_ADMIN_IDS allowlist when configured (ETH-03)", async () => {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      opsConsoleAdminIds: ["ops-admin-1", "ops-admin-2"]
+    });
+
+    // 白名单内：放行（governance admin 检查之后命中 ops 白名单）。
+    const allowed = await router.handle({
+      method: "GET",
+      pathname: "/admin/ops/status",
+      headers: adminHeaders
+    });
+    expect(allowed.status).toBe(200);
+
+    // governance admin 身份合法但不在 ops 白名单内：403。
+    const outsideGovernanceAdmin = await router.handle({
+      method: "GET",
+      pathname: "/admin/ops/status",
+      headers: { "x-uvp-admin-id": "governance-reviewer-9", "x-uvp-admin-role": "governance_admin" }
+    });
+    expect(outsideGovernanceAdmin.status).toBe(403);
+    expect(outsideGovernanceAdmin.body).toMatchObject({
+      error: "forbidden",
+      reason: "ops_console_admin_allowlist"
+    });
+  });
+
+  it("falls back to the governance admin check when no ops allowlist is configured (ETH-03)", async () => {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+
+    const response = await router.handle({
+      method: "GET",
+      pathname: "/admin/ops/status",
+      headers: { "x-uvp-admin-id": "governance-reviewer-9", "x-uvp-admin-role": "governance_admin" }
+    });
+    expect(response.status).toBe(200);
+  });
+
+  it("assembles real admin recovery actions in the running server (ETH-06)", async () => {
+    let server: Server | undefined;
+    try {
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 0n;
+        },
+        async readEvents() {
+          return [];
+        }
+      };
+      server = await startApiServer({
+        config: serverTestConfig(),
+        store: new MemoryProjectionStore(),
+        eventSource
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("expected TCP server address");
+      }
+      const base = `http://127.0.0.1:${address.port}`;
+      const headers = { "content-type": "application/json", ...adminHeaders, "x-request-id": "req-eth06-1" };
+
+      const reconcile = await fetch(`${base}/admin/ops/reconcile/run`, {
+        method: "POST",
+        headers
+      });
+      expect(reconcile.status).toBe(202);
+      expect(await reconcile.json()).toMatchObject({
+        ok: true,
+        action: "reconcile.run",
+        status: "completed",
+        summary: { registrationsChecked: 0, submissionsChecked: 0, governanceLogsChecked: 0 }
+      });
+
+      const rebuild = await fetch(`${base}/admin/ops/projections/rebuild`, {
+        method: "POST",
+        headers
+      });
+      expect(rebuild.status).toBe(202);
+      expect(await rebuild.json()).toMatchObject({
+        ok: true,
+        action: "projections.rebuild",
+        status: "completed",
+        summary: { eventCount: 0, syncStatus: "indexed" }
+      });
+    } finally {
+      if (server) {
+        await new Promise<void>((resolvePromise, reject) => {
+          server!.close((error) => (error ? reject(error) : resolvePromise()));
+        });
+      }
     }
   });
 
@@ -175,7 +284,7 @@ describe("ops health diagnostics", () => {
       eventCount: 4,
       rebuild: { status: "completed", toBlock: 12n, eventCount: 4 }
     });
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: buildConfigDiagnostics(testConfig()),
       evidenceStorage: new InMemoryEvidenceStorage(),
       now: () => new Date(now)
@@ -260,7 +369,7 @@ describe("ops health diagnostics", () => {
     const submissionStore = new InMemoryProductSubmissionStore();
     await submissionStore.putSubmission(retryableSubmission());
     const seenRetries: string[] = [];
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       submissionStore,
       now: () => new Date(now),
       opsRecoveryActions: {
@@ -355,7 +464,7 @@ describe("ops health diagnostics", () => {
         }]
       }
     };
-    const preflightFailedRouter = createApiRouter(new MemoryProjectionStore(), {
+    const preflightFailedRouter = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: failedDiagnostics,
       opsRecoveryActions: {
         async runReconcile() {
@@ -364,7 +473,7 @@ describe("ops health diagnostics", () => {
         }
       }
     });
-    const missingDependencyRouter = createApiRouter(new MemoryProjectionStore());
+    const missingDependencyRouter = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const failedResponse = await preflightFailedRouter.handle({
       method: "POST",
@@ -410,7 +519,7 @@ describe("ops health diagnostics", () => {
       degradedReason: "RPC timeout token=secret"
     });
 
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceService: noopEvidenceService(),
       evidenceStorage: new InMemoryEvidenceStorage(),
       evidenceRuntimeEnvironment: "production",
@@ -426,11 +535,23 @@ describe("ops health diagnostics", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/readyz" });
 
+    // 簇 N 修正（审计三轮）：readyz 收口——只回 ready 位与 reasons；脱敏
+    // 后的诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
       ready: false,
       status: "not_ready",
-      reasons: expect.arrayContaining(["indexer_degraded", "reconcile_error", "evidence_storage_degraded"]),
+      reasons: expect.arrayContaining(["indexer_degraded", "reconcile_error", "evidence_storage_degraded"])
+    });
+    expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
+
+    const detailResponse = await router.handle({
+      method: "GET",
+      pathname: "/admin/diagnostics",
+      headers: { "x-uvp-admin-id": "ops-admin-1", "x-uvp-admin-role": "governance_admin" }
+    });
+    expect(detailResponse.status).toBe(200);
+    expect(detailResponse.body).toMatchObject({
       diagnostics: {
         indexer: {
           syncStatus: "degraded",
@@ -467,6 +588,9 @@ describe("ops health diagnostics", () => {
 
 function testConfig() {
   return loadConfigFromEnv({
+    CHAIN_SERVICES_DATABASE_DRIVER: "memory",
+    CHAIN_SERVICES_DATABASE_URL: "memory://projection-store",
+    UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger",
     UVP_CHAIN_ID: "31337",
     UVP_CONTRACTS_JSON: JSON.stringify({
       UVPStateMachine: stateMachine,
@@ -483,6 +607,7 @@ function deadLetterSubmission(): ProductSubmissionDTO {
     taskId: "task_dead",
     orderId: "order-dead",
     onchainOrderId: orderId,
+    planId,
     stageIdentifier: "customs",
     signalName: "confirm_stage",
     sourceId,
@@ -596,6 +721,12 @@ function noopEvidenceService(): EvidenceService {
     async getProof(_evidenceId: string, _principal: EvidencePrincipal) {
       return undefined;
     },
+    async verifyEvidenceBackup() {
+      return undefined;
+    },
+    async restoreEvidenceBackup() {
+      return undefined;
+    },
     async bindEvidence() {
       return undefined;
     }
@@ -604,4 +735,81 @@ function noopEvidenceService(): EvidenceService {
 
 function bytes32(value: string): Hex {
   return `0x${value.padStart(64, "0")}` as Hex;
+}
+
+function serverTestConfig(): ChainServicesConfig {
+  return {
+    network: {
+      chainId: 31337,
+      rpcUrl: "http://127.0.0.1:8545",
+      deploymentBlock: 0n,
+      finalityConfirmations: 2,
+      contracts: {
+        UVPStateMachine: "0x1111111111111111111111111111111111111111"
+      }
+    },
+    database: {
+      driver: "memory",
+      url: "memory://projection-store",
+      migrationsAutoRun: false
+    },
+    api: {
+      host: "127.0.0.1",
+      port: 0,
+      indexerPollIntervalMs: 0
+    },
+    relayer: {
+      businessSigning: "forbidden",
+      broadcastEnabled: false,
+      stateMachinePrivateKeyEnv: "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY",
+      maxRetries: 0
+    },
+    governance: {
+      broadcastEnabled: false,
+      signerPrivateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY",
+      rpcUrl: "http://127.0.0.1:8545",
+      chainId: 31337,
+      txConfirmations: 1,
+      allowedOperators: []
+    },
+    productBff: {
+      registrationAdapter: "memory-trigger",
+      registrarPrivateKeyEnv: "UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY",
+      waitForReceipt: false
+    },
+    operatorRoles: {
+      deployerPrivateKeyEnv: "UVP_ETH_DEPLOYER_PRIVATE_KEY",
+      participantWallets: [],
+      adminReviewers: []
+    },
+    reconcile: {
+      enabled: false,
+      pollIntervalMs: 0,
+      txTimeoutMs: 60_000
+    },
+    dockAutomation: {
+      enabled: false,
+      pollIntervalMs: 5_000,
+      maxCandidatesPerRun: 4,
+      maxGasPerTx: 500_000n,
+      redeliveryWindowMs: 120_000
+    },
+    evidenceStorage: {
+      adapter: "local",
+      objectNamespace: "uvp-rehearsal"
+    },
+    notifications: {
+      webhookSecretConfigured: false
+    },
+    security: {
+      environment: "local",
+      preflightStrict: false,
+      logRedactionEnabled: true,
+      broadcastMaxInFlightPerOrder: 1,
+      broadcastMaxRetry: 0,
+      broadcastRetryBaseMs: 250,
+      broadcastRetryMaxMs: 5_000,
+      broadcastReceiptTimeoutMs: 0
+    }
+  };
 }

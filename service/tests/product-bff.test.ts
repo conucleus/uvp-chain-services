@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
+import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
   CROSS_BORDER_ZHIXU_ID,
   crossBorderPlanIds,
@@ -15,7 +16,16 @@ import {
   ProductAuthorizationBuilder,
   ProductAuthorizationBuilderError,
 } from "../src/product/bff/authorization.js";
+import {
+  crossBorderSchemaResolver,
+  crossBorderStoreProductSchema,
+} from "./cross-border-schema.js";
 import { MemoryProductOrderTriggerBroadcastAdapter } from "../src/product/bff/trigger.js";
+import type {
+  ProductBroadcastOutsideTriggerInput,
+  ProductOrderTriggerBroadcastAdapter,
+  ProductOrderTriggerBroadcastResult,
+} from "../src/product/bff/trigger.js";
 import { MemoryStoreZhixuVersionMetadataStore } from "../src/store-console/version.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { MemoryProductBffStore } from "../src/product/bff/store.js";
@@ -32,6 +42,7 @@ import type {
   SubmitProductOrderDraftResult,
 } from "../src/product/bff/types.js";
 import type { Hex } from "../src/shared/types.js";
+import type { Address } from "../src/shared/types.js";
 
 const contractAddress = "0x1111111111111111111111111111111111111111";
 const activeStateMachineAddress = "0x9999999999999999999999999999999999999999";
@@ -40,6 +51,34 @@ const activeDeploymentId =
   "0x0000000000000000000000000000000000000000000000000000000000000d02";
 const metadataHash =
   "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+/**
+ * Test-only trigger adapter that records attempts exactly like the
+ * memory-trigger adapter but returns an explicitly scripted broadcast outcome.
+ * The production memory-trigger adapter can never claim a chain result, so any
+ * test that needs a confirmed outcome must assemble this fake itself.
+ */
+class ScriptedOutcomeTriggerAdapter implements ProductOrderTriggerBroadcastAdapter {
+  readonly #memory = new MemoryProductOrderTriggerBroadcastAdapter();
+  readonly registrarAddress: Address;
+  readonly #outcome: ProductOrderTriggerBroadcastResult;
+
+  constructor(outcome: ProductOrderTriggerBroadcastResult) {
+    this.#outcome = outcome;
+    this.registrarAddress = this.#memory.registrarAddress;
+  }
+
+  listAttempts(): readonly ProductBroadcastOutsideTriggerInput[] {
+    return this.#memory.listAttempts();
+  }
+
+  async broadcastOutsideTrigger(
+    input: ProductBroadcastOutsideTriggerInput,
+  ): Promise<ProductOrderTriggerBroadcastResult> {
+    await this.#memory.broadcastOutsideTrigger(input);
+    return this.#outcome;
+  }
+}
 
 describe("product BFF order drafts and invites", () => {
   it("creates an order draft from a published plan and exposes draft participants", async () => {
@@ -68,21 +107,93 @@ describe("product BFF order drafts and invites", () => {
     const getResponse = await router.handle({
       method: "GET",
       pathname: `/product/order-drafts/${body.draft.draftId}`,
+      headers: creatorHeaders(),
     });
     expect(getResponse.status).toBe(200);
     expect((getResponse.body as DraftResponse).participants).toHaveLength(
       body.participants.length,
     );
 
+    // KEEP：非创建者钱包不可修改他人草稿（越权拒绝）。
+    const strangerPatch = await router.handle({
+      method: "PATCH",
+      pathname: `/product/order-drafts/${body.draft.draftId}`,
+      headers: { "x-uvp-wallet-address": testWallet(9) },
+      body: { title: "Hijacked purchase" },
+    });
+    expect(strangerPatch).toMatchObject({ status: 403, body: { error: "not_draft_creator" } });
+
     const patchResponse = await router.handle({
       method: "PATCH",
       pathname: `/product/order-drafts/${body.draft.draftId}`,
+      headers: creatorHeaders(),
       body: { title: "Updated purchase", goods: ["vehicles"] },
     });
     expect(patchResponse.status).toBe(200);
     expect(
       (patchResponse.body as { draft: ProductOrderDraftDTO }).draft.title,
     ).toBe("Updated purchase");
+  });
+
+  it("restricts draft writes, invites, and participant reads to the anchored creator or accepted participants", async () => {
+    // KEEP（草稿/邀请面鉴权收口）：
+    // - PATCH/createInvite 限创建者（建单时会话锚定地址）；
+    // - 参与者名单（含联系方式）限创建者或已接受参与者；
+    // - 无会话身份的匿名调用一律 401（local 之外同样 fail-closed）。
+    const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
+    const draft = (
+      await createDraft(router).then((response) => response.body as DraftResponse)
+    ).draft;
+    expect(draft.createdBy).toBe(testWallet(0));
+
+    // 匿名读/写一律 401。
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/orders/${draft.draftId}/participants`
+    })).resolves.toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+    await expect(router.handle({
+      method: "PATCH",
+      pathname: `/product/order-drafts/${draft.draftId}`,
+      body: { title: "x" }
+    })).resolves.toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/orders/${draft.draftId}/invites`,
+      body: { roleSlotId: "funds", contact: "x@example.com" }
+    })).resolves.toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+
+    // 无关钱包（未接受任何角色）不得读名单或发邀请。
+    const stranger = { "x-uvp-wallet-address": testWallet(9) };
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/orders/${draft.draftId}/participants`,
+      headers: stranger
+    })).resolves.toMatchObject({ status: 403, body: { error: "draft_access_forbidden" } });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/orders/${draft.draftId}/invites`,
+      headers: stranger,
+      body: { roleSlotId: "funds", contact: "x@example.com" }
+    })).resolves.toMatchObject({ status: 403, body: { error: "not_draft_creator" } });
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/order-drafts/${draft.draftId}`,
+      headers: stranger
+    })).resolves.toMatchObject({ status: 403, body: { error: "draft_access_forbidden" } });
+
+    // 已接受参与者可读名单（invitee 需要看到协同方），但不可发邀请。
+    const accepted = await inviteAndAccept(router, draft.draftId, "funds", 1);
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/orders/${draft.draftId}/participants`,
+      headers: { "x-uvp-wallet-address": accepted.participant.walletAddress ?? testWallet(1) }
+    })).resolves.toMatchObject({ status: 200 });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/orders/${draft.draftId}/invites`,
+      headers: { "x-uvp-wallet-address": accepted.participant.walletAddress ?? testWallet(1) },
+      body: { roleSlotId: "supply", contact: "s@example.com" }
+    })).resolves.toMatchObject({ status: 403, body: { error: "not_draft_creator" } });
   });
 
   it("accepts and rejects participant invites", async () => {
@@ -105,10 +216,13 @@ describe("product BFF order drafts and invites", () => {
     const acceptResponse = await router.handle({
       method: "POST",
       pathname: `/product/invites/${fundsInvite.invite.inviteId}/accept`,
+      // 簇 C 修正：接受方的钱包声明来自 header/query/会话，不再读 body。
+      headers: { "x-uvp-wallet-address": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
       body: {
         displayName: "Buyer Finance",
         walletAddress: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         contact: "buyer@example.com",
+        token: fundsInvite.inviteToken,
       },
     });
     expect(acceptResponse.status).toBe(200);
@@ -129,7 +243,7 @@ describe("product BFF order drafts and invites", () => {
     const rejectResponse = await router.handle({
       method: "POST",
       pathname: `/product/invites/${supplyInvite.invite.inviteId}/reject`,
-      body: { displayName: "Supplier", contact: "supply@example.com" },
+      body: { displayName: "Supplier", contact: "supply@example.com", token: supplyInvite.inviteToken },
     });
     expect(rejectResponse.status).toBe(200);
     const rejected = rejectResponse.body as InviteResponse;
@@ -183,6 +297,7 @@ describe("product BFF order drafts and invites", () => {
         displayName: "Buyer Finance",
         walletAddress: acceptedWallet,
         contact: "buyer@example.com",
+        token: fundsInvite.inviteToken,
       },
     });
     expect(wrongWalletResponse).toMatchObject({
@@ -198,6 +313,7 @@ describe("product BFF order drafts and invites", () => {
         displayName: "Buyer Finance",
         walletAddress: acceptedWallet,
         contact: "buyer@example.com",
+        token: fundsInvite.inviteToken,
       },
     });
     expect(acceptResponse.status).toBe(200);
@@ -230,6 +346,7 @@ describe("product BFF order drafts and invites", () => {
         displayName: "Buyer Finance",
         walletAddress: acceptedWallet,
         contact: "buyer@example.com",
+        token: fundsInvite.inviteToken,
       },
     });
     expect(alreadyAcceptedResponse).toMatchObject({
@@ -261,6 +378,7 @@ describe("product BFF order drafts and invites", () => {
         displayName: "Delivery",
         walletAddress: testWallet(0),
         contact: "delivery@example.com",
+        token: duplicateInvite.inviteToken,
       },
     });
     expect(duplicateAcceptResponse).toMatchObject({
@@ -296,12 +414,87 @@ describe("product BFF order drafts and invites", () => {
         displayName: "Supplier",
         walletAddress: testWallet(2),
         contact: "supply@example.com",
+        token: expiredInvite.inviteToken,
       },
     });
     expect(expiredAcceptResponse).toMatchObject({
       status: 410,
       body: { error: "invite_expired" },
     });
+  });
+
+  it("carries publisher evidenceSpec into invite previews and prepared permissions (evidenceSpec passthrough)", async () => {
+    // schema stage / roleSlot 上发布者携带的 evidenceSpec 不在 protocol DTO
+    // 类型上；invite 预览与权限投影必须结构化透传而不是静默丢弃。
+    const stageEvidenceSpec = [
+      {
+        key: "stage-evidence",
+        label: "阶段交付凭证",
+        inputKind: "file",
+        accept: ["application/pdf"],
+        required: true
+      }
+    ];
+    const slotEvidenceSpec = [
+      { key: "funds-confirmed-at", label: "完成日期", inputKind: "date", required: true }
+    ];
+    const schemaWithEvidenceSpec = {
+      ...crossBorderStoreProductSchema,
+      stages: crossBorderStoreProductSchema.stages.map((stage) =>
+        stage.stageId === "customs-complete"
+          ? { ...stage, evidenceSpec: stageEvidenceSpec }
+          : stage
+      ),
+      roleSlots: crossBorderStoreProductSchema.roleSlots.map((slot) =>
+        slot.slotId === "funds"
+          ? { ...slot, evidenceSpec: slotEvidenceSpec }
+          : slot
+      )
+    } as unknown as StoreProductSchemaDTO;
+    const store = new MemoryProjectionStore();
+    const productStore = new MemoryProductBffStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [...activeDeploymentEvents(), planRegisteredEvent(11n)]
+    });
+    const router = createApiRouter(store, {
+      productSchemaResolver: {
+        async getProductSchemaByPlan(planId) {
+          return planId === crossBorderPlanIds.planId ? schemaWithEvidenceSpec : undefined;
+        }
+      },
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "local",
+      productRegistrationAdapter: new MemoryProductOrderTriggerBroadcastAdapter(),
+      productBffStore: productStore
+    });
+
+    // invite role preview：roleSlot 的 evidenceSpec 透传。
+    const draft = (
+      await createDraft(router).then((response) => response.body as DraftResponse)
+    ).draft;
+    const invite = await createInvite(router, draft.draftId, "funds", "funds-contact@example");
+    const preview = await router.handle({
+      method: "GET",
+      pathname: `/product/invites/${invite.invite.inviteId}`
+    });
+    expect(preview.status).toBe(200);
+    expect((preview.body as { role: { evidenceSpec?: unknown } }).role.evidenceSpec)
+      .toEqual(slotEvidenceSpec);
+
+    // prepared permissions：schema stage 的 evidenceSpec 透传到权限行。
+    const readyDraft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(
+      router,
+      readyDraft.draftId,
+      testWallet(0)
+    );
+    const customsPermission = prepared.permissions.find(
+      (permission) => permission.stageIdentifier === "customs-complete"
+    );
+    expect(customsPermission).toBeDefined();
+    expect(customsPermission?.evidenceSpec).toEqual(stageEvidenceSpec);
   });
 
   it("prepares signed trigger typed data after required participants accept", async () => {
@@ -352,6 +545,7 @@ describe("product BFF order drafts and invites", () => {
     const readyDraft = await router.handle({
       method: "GET",
       pathname: `/product/order-drafts/${draft.draftId}`,
+      headers: creatorHeaders(),
     });
     expect((readyDraft.body as DraftResponse).draft.status).toBe(
       "ready_to_trigger",
@@ -468,8 +662,9 @@ describe("product BFF order drafts and invites", () => {
   });
 
   it("triggers the order atomically from signed outside trigger data", async () => {
-    const triggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter({
+    const triggerAdapter = new ScriptedOutcomeTriggerAdapter({
       status: "confirmed",
+      txHash: "0x4242424242424242424242424242424242424242424242424242424242424242",
       blockNumber: "42",
       retryable: false,
     });
@@ -512,6 +707,73 @@ describe("product BFF order drafts and invites", () => {
       signature: expect.stringMatching(/^0x[0-9a-f]+$/),
     });
     expect(attempt!.authorizations).toHaveLength(trigger.permissions.length);
+  });
+
+  it("serializes concurrent trigger submissions per order so the broadcast fires exactly once", async () => {
+    // 簇 N（BFF 建单触发 per-order 互斥）：triggerOrder 的状态检查与
+    // "置 submitted + 广播"之间隔了 await——并发提交同一 draft 会双双通过
+    // 检查并各自广播同一触发交易。per-order 互斥串行化后，第二个调用者
+    // 在临界区内重读 registration，自然得到 409 trigger_not_prepared。
+    let releaseBroadcast: (() => void) | undefined;
+    const broadcastCalls: ProductBroadcastOutsideTriggerInput[] = [];
+    const gatingAdapter = new (class extends MemoryProductOrderTriggerBroadcastAdapter {
+      override async broadcastOutsideTrigger(
+        input: ProductBroadcastOutsideTriggerInput,
+      ): Promise<ProductOrderTriggerBroadcastResult> {
+        broadcastCalls.push(input);
+        await new Promise<void>((resolve) => {
+          releaseBroadcast = resolve;
+        });
+        return {
+          status: "confirmed",
+          txHash:
+            "0x4242424242424242424242424242424242424242424242424242424242424242",
+          blockNumber: "42",
+          retryable: false,
+        };
+      }
+    })();
+    const { router } = await createRouterFixture(
+      [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+      gatingAdapter,
+    );
+    const draft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    const account = privateKeyToAccount(
+      testPrivateKey(walletAddressIndex(testWallet(0))),
+    );
+    const signature = await account.signTypedData(
+      prepared.prepared.typedData as Parameters<typeof account.signTypedData>[0],
+    );
+    const triggerBody = {
+      prepareId: prepared.prepared.prepareId,
+      walletAddress: testWallet(0),
+      signature,
+    };
+
+    // 两个并发提交：第一个进入广播并挂起，第二个被互斥挡在临界区外。
+    const firstCall = router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/trigger`,
+      body: triggerBody,
+    });
+    for (let attempt = 0; attempt < 100 && broadcastCalls.length < 1; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(broadcastCalls).toHaveLength(1);
+    const secondCall = router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/trigger`,
+      body: triggerBody,
+    });
+    releaseBroadcast?.();
+
+    const [first, second] = await Promise.all([firstCall, secondCall]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(409);
+    expect(second.body).toMatchObject({ error: "trigger_not_prepared" });
+    // 广播只发生一次：没有第二次链上触发交易。
+    expect(broadcastCalls).toHaveLength(1);
   });
 
   it("rejects client-supplied authorization tables in prepare and trigger", async () => {
@@ -770,39 +1032,47 @@ interface InviteResponse {
   readonly invite: ProductInviteDTO;
   readonly participant: DraftParticipantDTO;
   readonly draft: ProductOrderDraftDTO;
+  /** 簇 D 修正：createInvite 一次性下发的 invite token。 */
+  readonly inviteToken?: string;
 }
+
+type RouterFixtureTriggerAdapter =
+  | MemoryProductOrderTriggerBroadcastAdapter
+  | ScriptedOutcomeTriggerAdapter;
 
 function createRouterFixture(events: readonly ChainEvent[]): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
   readonly productStore: MemoryProductBffStore;
-  readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
+  readonly triggerAdapter: RouterFixtureTriggerAdapter;
 }>;
 
 function createRouterFixture(
   events: readonly ChainEvent[],
-  triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter,
+  triggerAdapter: RouterFixtureTriggerAdapter,
 ): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
   readonly productStore: MemoryProductBffStore;
-  readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
+  readonly triggerAdapter: RouterFixtureTriggerAdapter;
 }>;
 
 async function createRouterFixture(
   events: readonly ChainEvent[],
-  triggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter(),
+  triggerAdapter: RouterFixtureTriggerAdapter = new MemoryProductOrderTriggerBroadcastAdapter(),
 ): Promise<{
   readonly router: ApiRouter;
   readonly store: MemoryProjectionStore;
   readonly productStore: MemoryProductBffStore;
-  readonly triggerAdapter: MemoryProductOrderTriggerBroadcastAdapter;
+  readonly triggerAdapter: RouterFixtureTriggerAdapter;
 }> {
   const store = new MemoryProjectionStore();
   const productStore = new MemoryProductBffStore();
   await store.resetFromEvents({ deploymentBlock: 0n, events });
   return {
-    router: createApiRouter(store, {
+    router: createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      // local 显式声明：参与者面 dev 自报头仅在该环境可用（fail-closed）。
+      productRuntimeEnvironment: "local",
       productRegistrationAdapter: triggerAdapter,
       productBffStore: productStore,
     }),
@@ -812,17 +1082,22 @@ async function createRouterFixture(
   };
 }
 
+/** 建单者（运营方）的本地 dev 会话头——草稿创建/修改/邀请/名单读取按此锚定。 */
+function creatorHeaders(): Record<string, string> {
+  return { "x-uvp-wallet-address": testWallet(0) };
+}
+
 async function createDraft(router: ApiRouter) {
   return router.handle({
     method: "POST",
     pathname: "/product/order-drafts",
+    headers: creatorHeaders(),
     body: {
       zhixuId: CROSS_BORDER_ZHIXU_ID,
       title: "A company purchase",
       businessType: "parallel-export",
       totalAmount: "10000",
-      currency: "USDC",
-      createdBy: testWallet(0),
+      currency: "USDC"
     },
   });
 }
@@ -843,6 +1118,7 @@ async function createReadyDraft(
   const readyResponse = await router.handle({
     method: "GET",
     pathname: `/product/order-drafts/${draft.draftId}`,
+    headers: creatorHeaders(),
   });
   expect(readyResponse.status).toBe(200);
   expect((readyResponse.body as DraftResponse).draft.status).toBe(
@@ -881,7 +1157,6 @@ function stablePermissionShape(
   return permissions.map((permission) => ({
     payloadPolicy: permission.payloadPolicy,
     permissionId: permission.permissionId,
-    requiredEvidence: permission.requiredEvidence,
     roleSlotId: permission.roleSlotId,
     signalName: permission.signalName,
     source: permission.source,
@@ -947,13 +1222,14 @@ async function createInvite(
   const response = await router.handle({
     method: "POST",
     pathname: `/product/orders/${draftId}/invites`,
+    headers: creatorHeaders(),
     body: {
       roleSlotId,
       contact,
       ...(expiresAt ? { expiresAt } : {}),
     },
   });
-  expect(response.status).toBe(201);
+  expect(response.status, JSON.stringify(response.body)).toBe(201);
   return response.body as InviteResponse;
 }
 
@@ -972,10 +1248,12 @@ async function inviteAndAccept(
   const response = await router.handle({
     method: "POST",
     pathname: `/product/invites/${invitation.invite.inviteId}/accept`,
+    headers: { "x-uvp-wallet-address": testWallet(index) },
     body: {
       displayName: `${roleSlotId} participant`,
       walletAddress: testWallet(index),
       contact: `${roleSlotId}@example.com`,
+      token: invitation.inviteToken,
     },
   });
   expect(response.status).toBe(200);
@@ -989,6 +1267,7 @@ async function listParticipants(
   const response = await router.handle({
     method: "GET",
     pathname: `/product/orders/${draftId}/participants`,
+    headers: creatorHeaders(),
   });
   expect(response.status).toBe(200);
   return (response.body as { participants: readonly DraftParticipantDTO[] })

@@ -28,10 +28,13 @@ import {
 } from "./projection-store.js";
 import type {
   DurableProjectionStore,
+  PendingPostCommitKind,
+  PendingPostCommitStep,
   ProjectionRebuildInput,
   ProjectionScope,
   ProjectionSyncState,
   ProjectionSnapshotKind,
+  SavePendingPostCommitStepInput,
   StoredProjectionCursor,
   StoredProjectionSnapshot,
 } from "./projection-store.js";
@@ -42,6 +45,7 @@ import {
   type SqliteDatabase,
   type SqliteValue,
 } from "./sqlite.js";
+import { optionalNumberColumn } from "./sqlite-rows.js";
 
 export interface SqliteProjectionStoreOptions {
   readonly databaseUrl: string;
@@ -235,13 +239,14 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       this.#database
         .prepare(
           `INSERT INTO chain_index_cursor (
-           chain_id, contract_address, deployment_block, next_block, finalized_block, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?)
+           chain_id, contract_address, deployment_block, next_block, finalized_block, block_hash, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(chain_id, contract_address)
          DO UPDATE SET
            deployment_block = excluded.deployment_block,
            next_block = excluded.next_block,
            finalized_block = excluded.finalized_block,
+           block_hash = excluded.block_hash,
            updated_at = excluded.updated_at`,
         )
         .run(
@@ -250,6 +255,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
           cursor.deploymentBlock.toString(),
           cursor.nextBlock.toString(),
           cursor.finalizedBlock?.toString() ?? null,
+          cursor.blockHash?.toLowerCase() ?? null,
           updatedAt,
         );
     });
@@ -262,6 +268,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       ...(cursor.finalizedBlock !== undefined
         ? { finalizedBlock: cursor.finalizedBlock }
         : {}),
+      ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {}),
       updatedAt,
     };
   }
@@ -277,6 +284,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
          deployment_block AS deploymentBlock,
          next_block AS nextBlock,
          finalized_block AS finalizedBlock,
+         block_hash AS blockHash,
          updated_at AS updatedAt
        FROM chain_index_cursor
        WHERE chain_id = ? AND contract_address = ?`,
@@ -286,6 +294,103 @@ export class SqliteProjectionStore implements DurableProjectionStore {
         normalizeAddress(scope.contractAddress, "cursor.contractAddress"),
       );
     return row ? cursorRow(row) : undefined;
+  }
+
+  async deleteEventsAfterBlock(
+    scope: { readonly chainId: number; readonly contractAddress?: Address },
+    blockNumber: bigint,
+  ): Promise<number> {
+    // chainId 必填：无链范围的删除会跨链误删其他链的已投影事件。
+    const clauses: string[] = ["CAST(block_number AS INTEGER) > ?", "chain_id = ?"];
+    const values: SqliteValue[] = [blockNumber.toString(), scope.chainId];
+    if (scope.contractAddress) {
+      clauses.push("contract_address = ?");
+      values.push(
+        normalizeAddress(scope.contractAddress, "event.contractAddress"),
+      );
+    }
+    return runSqliteWrite(() => {
+      const result = this.#database
+        .prepare(`DELETE FROM chain_event_log WHERE ${clauses.join(" AND ")}`)
+        .run(...values);
+      return result.changes;
+    });
+  }
+
+  async savePendingPostCommitStep(
+    input: SavePendingPostCommitStepInput,
+  ): Promise<PendingPostCommitStep> {
+    const now = new Date().toISOString();
+    runSqliteWrite(() => {
+      this.#database
+        .prepare(
+          `INSERT INTO indexer_pending_post_commit (
+           step_id, chain_id, kind, events_json, attempts, last_error, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
+         ON CONFLICT(step_id) DO NOTHING`,
+        )
+        .run(
+          input.stepId,
+          input.chainId,
+          input.kind,
+          input.events ? stringifyStorageJson(input.events) : null,
+          now,
+          now,
+        );
+    });
+    const saved = await this.#pendingStepRow(input.stepId);
+    if (!saved) {
+      throw new Error("sqlite pending post-commit step disappeared after save");
+    }
+    return saved;
+  }
+
+  async listPendingPostCommitSteps(
+    scope: { readonly chainId: number },
+  ): Promise<readonly PendingPostCommitStep[]> {
+    const rows = this.#database
+      .prepare(
+        `SELECT step_id AS stepId, chain_id AS chainId, kind, events_json AS eventsJson,
+           attempts, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt
+         FROM indexer_pending_post_commit
+         WHERE chain_id = ?
+         ORDER BY created_at ASC, step_id ASC`,
+      )
+      .all(scope.chainId);
+    return rows.map((row) => pendingPostCommitRow(row));
+  }
+
+  async recordPendingPostCommitAttempt(stepId: string, error: string): Promise<void> {
+    const updatedAt = new Date().toISOString();
+    runSqliteWrite(() => {
+      this.#database
+        .prepare(
+          `UPDATE indexer_pending_post_commit
+         SET attempts = attempts + 1, last_error = ?, updated_at = ?
+         WHERE step_id = ?`,
+        )
+        .run(error, updatedAt, stepId);
+    });
+  }
+
+  async deletePendingPostCommitStep(stepId: string): Promise<void> {
+    runSqliteWrite(() => {
+      this.#database
+        .prepare("DELETE FROM indexer_pending_post_commit WHERE step_id = ?")
+        .run(stepId);
+    });
+  }
+
+  async #pendingStepRow(stepId: string): Promise<PendingPostCommitStep | undefined> {
+    const row = this.#database
+      .prepare(
+        `SELECT step_id AS stepId, chain_id AS chainId, kind, events_json AS eventsJson,
+           attempts, last_error AS lastError, created_at AS createdAt, updated_at AS updatedAt
+         FROM indexer_pending_post_commit
+         WHERE step_id = ?`,
+      )
+      .get(stepId);
+    return row ? pendingPostCommitRow(row) : undefined;
   }
 
   async appendEvent(event: ChainEvent): Promise<void> {
@@ -314,19 +419,45 @@ export class SqliteProjectionStore implements DurableProjectionStore {
         if (result.changes > 0) {
           return;
         }
+      } else {
+        // 复活：同主键（chain/contract/block/txHash/logIndex）的事件此前
+        // 因 reorg 被打上 removed 墓碑，canonical 链重新出现同一位日志时
+        // 必须解除墓碑；INSERT OR IGNORE 只会忽略主键冲突、保留 removed=1，
+        // 导致复活事件被永久跳过。
+        const revival = this.#database
+          .prepare(
+            `UPDATE chain_event_log
+           SET removed = 0, event_name = ?, args_json = ?, block_hash = COALESCE(?, block_hash)
+           WHERE chain_id = ? AND contract_address = ? AND block_number = ?
+             AND transaction_hash = ? AND log_index = ? AND removed = 1`,
+          )
+          .run(
+            event.eventName,
+            stringifyStorageJson(event.args),
+            event.blockHash?.toLowerCase() ?? null,
+            event.chainId,
+            normalizedContract,
+            event.blockNumber.toString(),
+            event.transactionHash.toLowerCase(),
+            event.logIndex,
+          );
+        if (revival.changes > 0) {
+          return;
+        }
       }
       this.#database
         .prepare(
-          `INSERT INTO chain_event_log (
-           chain_id, contract_address, block_number, transaction_hash, log_index,
+          `INSERT OR IGNORE INTO chain_event_log (
+           chain_id, contract_address, block_number, transaction_hash, transaction_index, log_index,
            event_id, event_name, args_json, removed, block_hash, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           event.chainId,
           normalizedContract,
           event.blockNumber.toString(),
           event.transactionHash.toLowerCase(),
+          event.transactionIndex ?? null,
           event.logIndex,
           chainEventKey({ ...event, contractAddress: normalizedContract }),
           event.eventName,
@@ -361,14 +492,16 @@ export class SqliteProjectionStore implements DurableProjectionStore {
          contract_address AS contractAddress,
          block_number AS blockNumber,
          transaction_hash AS transactionHash,
+         transaction_index AS transactionIndex,
          log_index AS logIndex,
          event_name AS eventName,
          args_json AS argsJson,
          removed,
          block_hash AS blockHash
        FROM chain_event_log
-       ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
-       ORDER BY chain_id ASC, CAST(block_number AS INTEGER) ASC, log_index ASC`,
+         ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
+       ORDER BY chain_id ASC, CAST(block_number AS INTEGER) ASC,
+         transaction_index IS NULL ASC, transaction_index ASC, log_index ASC`,
       )
       .all(...values);
 
@@ -453,19 +586,26 @@ export class SqliteProjectionStore implements DurableProjectionStore {
   async listStateMachineOrders(): Promise<
     readonly StateMachineOrderProjection[]
   > {
-    return Object.values(
+    return uniqueProjectionValues(
       (await this.#currentOrderSnapshot()).stateMachineOrders,
     );
   }
 
   async getStateMachineOrder(
     orderId: string,
+    planId?: string,
   ): Promise<StateMachineOrderProjection | undefined> {
     const snapshot = await this.#currentOrderSnapshot();
+    const orders = uniqueProjectionValues(snapshot.stateMachineOrders);
+    if (planId) {
+      // 订单身份是 (planId, orderId)：带 planId 的查询只匹配同 plan 投影，
+      // 不做裸键回退，跨 plan 复用同号订单时绝不串单。
+      return uniqueOrderByBareId(orders, orderId, planId);
+    }
     return (
       snapshot.stateMachineOrders[orderId.toLowerCase()] ??
       snapshot.stateMachineOrders[orderId] ??
-      uniqueOrderByBareId(Object.values(snapshot.stateMachineOrders), orderId)
+      uniqueOrderByBareId(orders, orderId)
     );
   }
 
@@ -473,7 +613,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
     orderId: string,
   ): Promise<readonly StateMachineOrderProjection[]> {
     const snapshot = await this.#currentOrderSnapshot();
-    return Object.values(snapshot.stateMachineOrders).filter(
+    return uniqueProjectionValues(snapshot.stateMachineOrders).filter(
       (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
     );
   }
@@ -481,7 +621,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
   async listStateMachineTasks(): Promise<
     readonly StateMachineTaskProjection[]
   > {
-    return Object.values(
+    return uniqueProjectionValues(
       (await this.#currentOrderSnapshot()).stateMachineTasks,
     );
   }
@@ -489,7 +629,12 @@ export class SqliteProjectionStore implements DurableProjectionStore {
   async getStateMachineTask(
     taskId: string,
   ): Promise<StateMachineTaskProjection | undefined> {
-    return (await this.#currentOrderSnapshot()).stateMachineTasks[taskId];
+    const tasks = (await this.#currentOrderSnapshot()).stateMachineTasks;
+    return (
+      tasks[taskId.toLowerCase()] ??
+      tasks[taskId] ??
+      uniqueTaskByBareId(uniqueProjectionValues(tasks), taskId)
+    );
   }
 
   async listIdentityBindings(
@@ -527,6 +672,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
 function cursorRow(row: unknown): StoredProjectionCursor {
   const record = rowObject(row);
   const finalizedBlock = nullableStringColumn(record, "finalizedBlock");
+  const blockHash = nullableStringColumn(record, "blockHash");
   return {
     chainId: numberColumn(record, "chainId"),
     contractAddress: normalizeAddress(
@@ -538,6 +684,7 @@ function cursorRow(row: unknown): StoredProjectionCursor {
     ...(finalizedBlock !== null
       ? { finalizedBlock: BigInt(finalizedBlock) }
       : {}),
+    ...(blockHash !== null ? { blockHash: blockHash as Hex } : {}),
     updatedAt: stringColumn(record, "updatedAt"),
   };
 }
@@ -546,6 +693,7 @@ function eventRow(row: unknown): ChainEvent {
   const record = rowObject(row);
   const blockHash = nullableStringColumn(record, "blockHash");
   const removed = numberColumn(record, "removed") === 1;
+  const transactionIndex = optionalNumberColumn(record, "transactionIndex");
   return {
     chainId: numberColumn(record, "chainId"),
     contractAddress: normalizeAddress(
@@ -554,6 +702,7 @@ function eventRow(row: unknown): ChainEvent {
     ),
     blockNumber: BigInt(stringColumn(record, "blockNumber")),
     transactionHash: stringColumn(record, "transactionHash") as Hex,
+    ...(transactionIndex !== undefined ? { transactionIndex } : {}),
     logIndex: numberColumn(record, "logIndex"),
     eventName: stringColumn(record, "eventName"),
     args: parseStorageJson<Record<string, unknown>>(
@@ -579,6 +728,33 @@ function snapshotRow<TSnapshot>(
     snapshot: parseStorageJson<TSnapshot>(stringColumn(record, "snapshotJson")),
     updatedAt: stringColumn(record, "updatedAt"),
   };
+}
+
+function pendingPostCommitRow(row: unknown): PendingPostCommitStep {
+  const record = rowObject(row);
+  const eventsJson = nullableStringColumn(record, "eventsJson");
+  const lastError = nullableStringColumn(record, "lastError");
+  return {
+    stepId: stringColumn(record, "stepId"),
+    chainId: numberColumn(record, "chainId"),
+    kind: pendingPostCommitKindColumn(record, "kind"),
+    ...(eventsJson !== null ? { events: parseStorageJson<readonly ChainEvent[]>(eventsJson) } : {}),
+    attempts: numberColumn(record, "attempts"),
+    ...(lastError !== null ? { lastError } : {}),
+    createdAt: stringColumn(record, "createdAt"),
+    updatedAt: stringColumn(record, "updatedAt"),
+  };
+}
+
+function pendingPostCommitKindColumn(
+  record: Record<string, unknown>,
+  key: string,
+): PendingPostCommitKind {
+  const value = stringColumn(record, key);
+  if (value !== "signal_notification" && value !== "projection_automation") {
+    throw new Error(`SQLite column ${key} must be a known pending post-commit kind`);
+  }
+  return value;
 }
 
 function syncStateRow(row: unknown): ProjectionSyncState {
@@ -619,11 +795,27 @@ function syncStateRow(row: unknown): ProjectionSyncState {
 function uniqueOrderByBareId(
   orders: readonly StateMachineOrderProjection[],
   orderId: string,
+  planId?: string,
 ): StateMachineOrderProjection | undefined {
   const matches = orders.filter(
-    (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
+    (order) =>
+      order.orderId.toLowerCase() === orderId.toLowerCase() &&
+      (!planId || order.planId.toLowerCase() === planId.toLowerCase()),
   );
   return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueTaskByBareId(
+  tasks: readonly StateMachineTaskProjection[],
+  taskId: string,
+): StateMachineTaskProjection | undefined {
+  const normalizedTaskId = taskId.toLowerCase();
+  const matches = tasks.filter((task) => task.taskId.toLowerCase() === normalizedTaskId);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueProjectionValues<TValue>(record: Readonly<Record<string, TValue>>): TValue[] {
+  return [...new Set(Object.values(record))];
 }
 
 function rowObject(row: unknown): Record<string, unknown> {

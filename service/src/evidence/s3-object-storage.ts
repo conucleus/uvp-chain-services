@@ -24,6 +24,8 @@ export interface S3EvidenceStorageClientOptions {
   readonly forcePathStyle?: boolean;
   readonly accessKeyIdEnv: string;
   readonly secretAccessKeyEnv: string;
+  /** Optional name of the env variable holding an STS session token; required to be populated when set (audit #19). */
+  readonly sessionTokenEnv?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly objectClient?: S3CompatibleObjectClient;
   readonly uriMode?: S3EvidenceStorageURIMode;
@@ -69,6 +71,16 @@ export class S3EvidenceStorageClient implements ObjectEvidenceStorageClient {
     const env = options.env ?? process.env;
     const accessKeyId = readCredentialValue(env, accessKeyIdEnv, "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV");
     const secretAccessKey = readCredentialValue(env, secretAccessKeyEnv, "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV");
+    // A configured STS session-token env must resolve here, at construction
+    // time: a credential that only fails at first upload/read surfaces as a
+    // 403 far from the misconfiguration that caused it.
+    const sessionToken = options.sessionTokenEnv
+      ? readCredentialValue(
+          env,
+          normalizeCredentialEnvName(options.sessionTokenEnv, "UVP_EVIDENCE_S3_SESSION_TOKEN_ENV"),
+          "UVP_EVIDENCE_S3_SESSION_TOKEN_ENV"
+        )
+      : undefined;
     this.#uriMode = options.uriMode ?? "s3";
     this.#objectNamespace = this.#uriMode === "object"
       ? normalizeObjectNamespace(options.objectNamespace)
@@ -78,7 +90,8 @@ export class S3EvidenceStorageClient implements ObjectEvidenceStorageClient {
       ...(endpoint ? { endpoint } : {}),
       forcePathStyle: options.forcePathStyle ?? false,
       accessKeyId,
-      secretAccessKey
+      secretAccessKey,
+      ...(sessionToken ? { sessionToken } : {})
     });
     assertProductionStorageURI(this.storageURIForKey(this.objectKeyForEvidenceId("ev_probe")));
   }
@@ -129,6 +142,27 @@ export class S3EvidenceStorageClient implements ObjectEvidenceStorageClient {
     return this.#prefix ? `${this.#prefix}/${evidenceId}` : evidenceId;
   }
 
+  /** evidenceId↔storageURI 双向翻译（BackupEvidenceStorage 用）。 */
+  storageURIForEvidenceId(evidenceId: string): string {
+    return this.storageURIForKey(this.objectKeyForEvidenceId(evidenceId));
+  }
+
+  evidenceIdForStorageURI(storageURI: string): string {
+    assertProductionStorageURI(storageURI);
+    const prefix = this.#uriMode === "object"
+      ? `object://${this.#objectNamespace}/`
+      : `s3://${this.#bucket}/`;
+    if (!storageURI.startsWith(prefix)) {
+      throw new Error("storageURI is not managed by S3EvidenceStorageClient");
+    }
+    const key = storageURI.slice(prefix.length);
+    if (this.#prefix && !key.startsWith(`${this.#prefix}/`)) {
+      throw new Error("storageURI is not managed by S3EvidenceStorageClient");
+    }
+    const evidenceId = this.#prefix ? key.slice(this.#prefix.length + 1) : key;
+    return normalizeEvidenceObjectId(evidenceId);
+  }
+
   private storageURIForKey(key: string): string {
     if (this.#uriMode === "object") {
       return `object://${this.#objectNamespace}/${key}`;
@@ -160,6 +194,7 @@ export interface AwsS3CompatibleObjectClientOptions {
   readonly forcePathStyle: boolean;
   readonly accessKeyId: string;
   readonly secretAccessKey: string;
+  readonly sessionToken?: string;
 }
 
 export class AwsS3CompatibleObjectClient implements S3CompatibleObjectClient {
@@ -172,7 +207,8 @@ export class AwsS3CompatibleObjectClient implements S3CompatibleObjectClient {
       forcePathStyle: options.forcePathStyle,
       credentials: {
         accessKeyId: options.accessKeyId,
-        secretAccessKey: options.secretAccessKey
+        secretAccessKey: options.secretAccessKey,
+        ...(options.sessionToken ? { sessionToken: options.sessionToken } : {})
       }
     });
   }

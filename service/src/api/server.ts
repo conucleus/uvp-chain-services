@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { loadConfigFromEnv, runConfigPreflight, type ChainServicesConfig } from "../config/index.js";
+import { selectActiveStateMachineDeployment } from "../config/preflight.js";
 import {
+  BackupEvidenceStorage,
   LocalEvidenceStorage,
   ObjectEvidenceStorage,
   RehearsalObjectEvidenceStorage,
@@ -11,19 +13,14 @@ import {
 import { createConfiguredGovernanceChainAdapter, createGovernanceService } from "../governance/index.js";
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
-import {
-  createDockedSignalAutomationService,
-  createStateMachineDockedSignalBroadcastAdapter,
-  notSupportedDockedSignalBroadcastAdapter,
-  type DockedSignalBroadcastAdapter
-} from "../docked-signals/index.js";
-import { createNotificationService } from "../notifications/index.js";
+import { createNotificationService, WebhookNotificationDispatcher } from "../notifications/index.js";
 import {
   AnvilProductOrderTriggerBroadcastAdapter,
   MemoryProductOrderTriggerBroadcastAdapter,
   type ProductOrderTriggerBroadcastAdapter
 } from "../product/bff/trigger.js";
 import { createViemReconcileReceiptClient, TxReconcileWorker } from "../reconcile/index.js";
+import { DockAutomationWorker } from "../dock-automation/index.js";
 import { createChainServicesStores } from "../storage/factory.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import {
@@ -32,10 +29,8 @@ import {
   type SubmissionBroadcastAdapter
 } from "../submissions/index.js";
 import {
-  createStateMachineDockedOrderLinkBroadcastAdapter,
   createStateMachineStageExecutorPatchBroadcastAdapter,
   createStateMachineStageResourcePatchBroadcastAdapter,
-  type DockedOrderLinkBroadcastAdapter,
   type StageExecutorPatchBroadcastAdapter,
   type StageResourcePatchBroadcastAdapter
 } from "../stage-patches/index.js";
@@ -44,6 +39,7 @@ import { createRedactingLogger, redactErrorMessage, redactSecrets } from "../sec
 import { isDirectRun } from "../shared/runtime.js";
 import { ConfigError, consoleLogger, type Address, type Logger } from "../shared/types.js";
 import { createApiRouter } from "./routes.js";
+import { createListingAnchorChainView } from "../store-listings/index.js";
 
 export interface StartApiServerOptions {
   readonly config?: ChainServicesConfig;
@@ -67,7 +63,9 @@ export async function startApiServer(
   const logger = createRedactingLogger(options.logger ?? consoleLogger, config.security.logRedactionEnabled);
   const audit = createLoggerAuditSink(logger);
   const configDiagnostics = await runConfigPreflight(config);
-  const eventSource = options.eventSource === undefined ? createChainEventSourceForTarget(config) : options.eventSource;
+  const eventSource = options.eventSource === undefined
+    ? createChainEventSourceForTarget(config, { logger })
+    : options.eventSource;
   const productBffStore = stores.productBffStore;
   const submissionStore = stores.submissionStore;
   const governanceStore = stores.governanceStore;
@@ -75,46 +73,87 @@ export async function startApiServer(
     getProductSchemaByPlan: (planId: string, planHash: string, artifactHash?: string) =>
       stores.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash, artifactHash)
   };
+  // 通用 webhook transport。产品渠道决策仍未做，默认关闭——
+  // 只在显式配置 UVP_NOTIFY_WEBHOOK_URL 时装配 dispatcher；未配置时保持
+  // 现状（delivery 记为 transport_adapter_missing），并给出一次性启动警告。
+  const notificationDispatcher = config.notifications?.webhookUrl
+    ? new WebhookNotificationDispatcher({
+      url: config.notifications.webhookUrl,
+      ...(config.notifications.webhookSecretConfigured && process.env.UVP_NOTIFY_WEBHOOK_SECRET?.trim()
+        ? { secret: process.env.UVP_NOTIFY_WEBHOOK_SECRET.trim() }
+        : {})
+    })
+    : undefined;
+  if (!notificationDispatcher) {
+    logger.warn("NOTIFICATION DELIVERY IS NOT CONFIGURED: set UVP_NOTIFY_WEBHOOK_URL to enable the generic webhook transport; until then every delivery is recorded as failed (transport_adapter_missing) and no external channel is notified");
+  }
   const notificationService = createNotificationService({
     store,
     supplierMetadataStore: stores.storeSupplierMetadataStore,
-    productSchemaResolver
+    productSchemaResolver,
+    // delivery / read 状态落 sqlite（memory 驱动保持内存语义）。
+    ...(stores.notificationStateStore
+      ? {
+        deliveryStore: stores.notificationStateStore,
+        participantReadStateStore: stores.notificationStateStore
+      }
+      : {}),
+    ...(notificationDispatcher ? { dispatcher: notificationDispatcher } : {})
   });
-  const dockingVerifyingContract = dockingModuleAddress(config);
-  const dockedSignalBroadcastAdapter = createConfiguredDockedSignalBroadcastAdapter(config, dockingVerifyingContract);
-  const dockedSignalAutomationService = createDockedSignalAutomationService({
-    config: config.dockedSignalAutomation,
-    ...(dockingVerifyingContract ? { dockingModuleAddress: dockingVerifyingContract } : {}),
-    broadcastAdapter: dockedSignalBroadcastAdapter ?? notSupportedDockedSignalBroadcastAdapter(),
-    logger
-  });
+  // open/input/output 的 dock 活性自动化（keeper 只提供活性）
+  // 由 DockAutomationWorker 按显式 route source 承担。
   const indexer = eventSource
     ? new IndexerService({
       config,
       eventSource,
       store,
       notificationProcessor: notificationService,
-      projectionAutomationProcessor: dockedSignalAutomationService,
       logger
     })
     : undefined;
 
-  if (indexer) {
-    await indexer.rebuildFromDeploymentBlock();
-  }
+  // M-5：全量重建不得阻塞 listen——通知补投的 webhook 逐条最多一个超时
+  // 周期、串行跟在重建里会把启动拖成 N×超时。改为后台执行；投影轮询等
+  // 重建结束后再启动，避免增量刷新与全量重建并发写同一存储。失败由
+  // indexer 的 degraded 状态与错误日志暴露。
+  const initialProjectionRebuild = indexer
+    ? indexer.rebuildFromDeploymentBlock().catch((error: unknown) => {
+        logger.error("api server background projection rebuild failed", {
+          message: error instanceof Error ? redactErrorMessage(error) : "unknown rebuild error"
+        });
+      })
+    : undefined;
 
   const submissionVerifyingContract = stateMachineAddress(config.network.contracts);
-  const stagePatchVerifyingContract = stagePatchModuleAddress(config) ?? submissionVerifyingContract;
-  const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(config, submissionVerifyingContract, audit);
+  // stage-patch / docking 模块地址必须显式存在于配置或
+  // 地址清单；缺失时不回退到状态机地址（strict preflight 亦会对清单
+  // 缺项 fail-fast），未配置即不装配对应 patch/docking 服务地址。
+  const stagePatchVerifyingContract = stagePatchModuleAddress(config);
+  const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(
+    config,
+    submissionVerifyingContract,
+    audit,
+    // sqlite 驱动下 broadcast 去重状态持久化，重启后仍可去重。
+    stores.broadcastDedupeStore
+  );
+  if (!submissionBroadcastAdapter && (config.security.environment !== "local" || config.relayer.broadcastEnabled)) {
+    throw new ConfigError(
+      `state-machine signal broadcast is not configured: UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED=true and a non-empty ${config.relayer.stateMachinePrivateKeyEnv} are required when the runtime is not local or broadcast was explicitly enabled`,
+    );
+  }
   const stageExecutorPatchBroadcastAdapter = createConfiguredStageExecutorPatchBroadcastAdapter(config, stagePatchVerifyingContract);
   const stageResourcePatchBroadcastAdapter = createConfiguredStageResourcePatchBroadcastAdapter(config, stagePatchVerifyingContract);
-  const dockedOrderLinkBroadcastAdapter = createConfiguredDockedOrderLinkBroadcastAdapter(config, dockingVerifyingContract);
   const productRegistrationAdapter = productRegistrationAdapterFromConfig(config);
   const evidenceStorage = createConfiguredEvidenceStorage(config);
   const governanceService = createGovernanceService({
     store: governanceStore,
     adapter: createConfiguredGovernanceChainAdapter(config),
-    audit
+    audit,
+    // descriptor 托管：注册时快照被哈希原文，descriptorURI 指向公开端点。
+    descriptorSnapshotStore: stores.identityDescriptorSnapshots,
+    ...(config.api.identityDescriptorPublicBaseUrl
+      ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
+      : {})
   });
   const reconcileWorker = new TxReconcileWorker({
     config: config.reconcile,
@@ -128,6 +167,69 @@ export async function startApiServer(
     governanceStore,
     logger
   });
+  // dock liveness worker。routeSource/submitter 未装配时为
+  // 显式 no-op（候选扫描归零），装配点由云编译 route 数据库接入方提供。
+  const dockingModuleAddressValue = moduleAddress(config, "docking", "UVPDockingModule");
+  const dockAutomationWorker = new DockAutomationWorker({
+    config: config.dockAutomation,
+    projectionStore: store,
+    dockingAddress: dockingModuleAddressValue ?? "0x0000000000000000000000000000000000000000",
+    chainId: config.network.chainId,
+    logger
+  });
+  // admin recovery actions 从既有 worker/indexer 原语构造，路由
+  // 拿不到 ops_dependency_unavailable 的假边界。retrySubmission 复用
+  // reconcile 原语（按 receipt 重新推进提交状态）并回报该提交的当前状态。
+  // 人工 rebuild 先等初始后台重建结束，避免与启动重建并发写同一存储。
+  const opsRecoveryActions = {
+    ...(indexer
+      ? {
+        rebuildProjections: async () => {
+          await initialProjectionRebuild;
+          const { summary } = await indexer.rebuildFromDeploymentBlockWithSummary();
+          return {
+            status: "completed" as const,
+            summary: {
+              eventCount: summary.eventCount,
+              activeEventCount: summary.activeEventCount,
+              mismatchCount: summary.mismatchCount,
+              finalizedBlock: summary.finalizedBlock,
+              syncStatus: summary.syncStatus
+            }
+          };
+        },
+        // post-commit 失败批次（游标已前进）的人工补投入口。
+        sweepPendingPostCommitSteps: async () => {
+          const summary = await indexer.sweepPendingPostCommitSteps();
+          return { status: "completed" as const, summary };
+        },
+        listPendingPostCommitSteps: async () => indexer.listPendingPostCommitSteps()
+      }
+      : {}),
+    runReconcile: async () => {
+      const summary = await reconcileWorker.runOnce();
+      return { status: "completed" as const, summary };
+    },
+    ...(stores.submissionStore
+      ? {
+        retrySubmission: async (input: { readonly submissionId: string }) => {
+          const reconcileSummary = await reconcileWorker.runOnce();
+          const submission = await stores.submissionStore!.getSubmission(input.submissionId);
+          return {
+            status: "completed" as const,
+            summary: {
+              reconcile: reconcileSummary,
+              submissionId: input.submissionId,
+              ...(submission
+                ? { status: submission.status, retryState: submission.retryState }
+                : { found: false })
+            }
+          };
+        }
+      }
+      : {})
+  };
+  const opsConsoleAdminIds = config.operatorRoles.opsConsoleAdmins ?? [];
   const router = createApiRouter(store, {
     productBffStore,
     evidenceMetadataStore: stores.evidenceMetadataStore,
@@ -136,28 +238,45 @@ export async function startApiServer(
     governanceStore,
     governanceService,
     productSchemaResolver,
+    // ops 控制台白名单进入鉴权；未配置时回退 governance admin 检查。
+    ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
+    opsRecoveryActions,
     storeZhixuDraftStore: stores.storeZhixuDraftStore,
     storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
     storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
     storeDockingSessionStore: stores.storeDockingSessionStore,
     storeAuditStore: stores.storeAuditStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    ...(config.api.identityDescriptorPublicBaseUrl
+      ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
+      : {}),
+    // 锚核验链直读：RPC + 状态机地址齐备时提供第二证据源。
+    ...(config.network.rpcUrl && submissionVerifyingContract
+      ? {
+        listingAnchorChainView: createListingAnchorChainView({
+          rpcUrl: config.network.rpcUrl,
+          stateMachineAddress: submissionVerifyingContract
+        })
+      }
+      : {}),
     notificationService,
     submissionChainId: config.network.chainId,
     ...(submissionVerifyingContract ? { submissionVerifyingContract } : {}),
     ...(stagePatchVerifyingContract ? { stageExecutorPatchVerifyingContract: stagePatchVerifyingContract } : {}),
     ...(stagePatchVerifyingContract ? { stageResourcePatchVerifyingContract: stagePatchVerifyingContract } : {}),
-    ...(dockingVerifyingContract ? { dockedOrderLinkVerifyingContract: dockingVerifyingContract } : {}),
     ...(submissionBroadcastAdapter ? { submissionBroadcastAdapter } : {}),
     ...(stageExecutorPatchBroadcastAdapter ? { stageExecutorPatchBroadcastAdapter } : {}),
     ...(stageResourcePatchBroadcastAdapter ? { stageResourcePatchBroadcastAdapter } : {}),
-    ...(dockedOrderLinkBroadcastAdapter ? { dockedOrderLinkBroadcastAdapter } : {}),
     productRegistrationAdapter,
     productTriggerChainId: config.network.chainId,
     ...(config.productBff.registrationCreatorAddress
       ? { productRegistrationCreatorAddress: config.productBff.registrationCreatorAddress }
       : {}),
-    productE2eControlsEnabled: config.security.environment === "local" && process.env.UVP_PRODUCT_E2E_FIXTURES === "1",
-    productDemoMode: process.env.UVP_PRODUCT_DEMO_MODE === "1",
     productRuntimeEnvironment: config.security.environment,
     ...(config.storeAuth ? { storeAuthConfig: config.storeAuth } : {}),
     evidenceRuntimeEnvironment: config.security.environment,
@@ -175,7 +294,7 @@ export async function startApiServer(
     const runId = runIdFromHeaders(request);
     void (async () => {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-      setCorsHeaders(response);
+      setCorsHeaders(response, request);
       response.setHeader("x-request-id", requestId);
       if (runId) {
         response.setHeader("x-uvp-run-id", runId);
@@ -263,13 +382,20 @@ export async function startApiServer(
     server.listen(config.api.port, config.api.host, resolve);
   });
 
-  const pollInterval = indexer ? startProjectionRefresh(indexer, config, logger) : undefined;
-  if (pollInterval) {
-    server.on("close", () => clearInterval(pollInterval));
-  }
+  // 轮询在初始后台重建结束后启动（见上方 M-5 注释），避免增量刷新与
+  // 全量重建并发写同一投影存储。
+  void (async () => {
+    await initialProjectionRebuild;
+    const pollInterval = indexer ? startProjectionRefresh(indexer, config, logger) : undefined;
+    if (pollInterval) {
+      server.on("close", () => clearInterval(pollInterval));
+    }
+  })();
   await reconcileWorker.start();
+  await dockAutomationWorker.start();
   server.on("close", () => {
     void (async () => {
+      await dockAutomationWorker.stop();
       await reconcileWorker.stop();
       await stores.close();
     })();
@@ -289,15 +415,41 @@ export async function startApiServer(
 export function createConfiguredEvidenceStorage(config: ChainServicesConfig): EvidenceStorage {
   const evidenceStorageConfig = config.evidenceStorage;
   if (evidenceStorageConfig.adapter === "s3") {
-    return new ObjectEvidenceStorage({
+    if (!evidenceStorageConfig.s3Bucket) {
+      throw new ConfigError(
+        "UVP_EVIDENCE_S3_BUCKET is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
+      );
+    }
+    if (!evidenceStorageConfig.s3Region) {
+      throw new ConfigError(
+        "UVP_EVIDENCE_S3_REGION is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
+      );
+    }
+    if (!evidenceStorageConfig.s3AccessKeyIdEnv) {
+      throw new ConfigError(
+        "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
+      );
+    }
+    if (!evidenceStorageConfig.s3SecretAccessKeyEnv) {
+      throw new ConfigError(
+        "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
+      );
+    }
+    const primary = new ObjectEvidenceStorage({
       client: new S3EvidenceStorageClient({
-        bucket: evidenceStorageConfig.s3Bucket ?? "",
+        bucket: evidenceStorageConfig.s3Bucket,
         ...(evidenceStorageConfig.s3Prefix ? { prefix: evidenceStorageConfig.s3Prefix } : {}),
-        region: evidenceStorageConfig.s3Region ?? "",
+        region: evidenceStorageConfig.s3Region,
         ...(evidenceStorageConfig.s3Endpoint ? { endpoint: evidenceStorageConfig.s3Endpoint } : {}),
         forcePathStyle: evidenceStorageConfig.s3ForcePathStyle ?? false,
-        accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv ?? "",
-        secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv ?? "",
+        accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv,
+        secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv,
+        // forward the optional STS session-token env so temporary
+        // credentials actually reach the S3 client instead of dying at the
+        // first upload/read with a 403 that preflight never saw.
+        ...(evidenceStorageConfig.s3SessionTokenEnv
+          ? { sessionTokenEnv: evidenceStorageConfig.s3SessionTokenEnv }
+          : {}),
         ...(evidenceStorageConfig.s3UriMode === "object"
           ? {
               uriMode: evidenceStorageConfig.s3UriMode,
@@ -306,6 +458,34 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
           : {})
       })
     });
+    // 配置了第二副本 bucket 时，put 同步写第二副本并提供
+    // 按 hash 校验/恢复能力；未配置时保持单副本（preflight 警告）。
+    if (evidenceStorageConfig.s3BackupBucket) {
+      const backup = new ObjectEvidenceStorage({
+        client: new S3EvidenceStorageClient({
+          bucket: evidenceStorageConfig.s3BackupBucket,
+          region: evidenceStorageConfig.s3Region,
+          ...(evidenceStorageConfig.s3Endpoint ? { endpoint: evidenceStorageConfig.s3Endpoint } : {}),
+          forcePathStyle: evidenceStorageConfig.s3ForcePathStyle ?? false,
+          accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv,
+          secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv,
+          ...(evidenceStorageConfig.s3SessionTokenEnv
+            ? { sessionTokenEnv: evidenceStorageConfig.s3SessionTokenEnv }
+            : {}),
+          // 备份客户端必须沿用主存储的 uriMode/
+          // objectNamespace——object:// URI 空间下两边不一致会让 verify/
+          // restore 的 URI 翻译失效。
+          ...(evidenceStorageConfig.s3UriMode === "object"
+            ? {
+                uriMode: evidenceStorageConfig.s3UriMode,
+                ...(evidenceStorageConfig.s3ObjectNamespace ? { objectNamespace: evidenceStorageConfig.s3ObjectNamespace } : {})
+              }
+            : {})
+        })
+      });
+      return new BackupEvidenceStorage({ primary, backup });
+    }
+    return primary;
   }
   if (evidenceStorageConfig.adapter === "rehearsal-object") {
     return new RehearsalObjectEvidenceStorage({
@@ -321,7 +501,11 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
 function startProjectionRefresh(indexer: IndexerService, config: ChainServicesConfig, logger: Logger): NodeJS.Timeout | undefined {
   const pollIntervalMs = config.api.indexerPollIntervalMs;
   if (pollIntervalMs <= 0) {
-    logger.info("api indexer polling disabled");
+    // poll=0 意味着外部参与方事件永不入投影、reconcile 永卡，只能
+    // 人工 rebuild——必须响亮提示，不允许静默。
+    logger.warn(
+      "INDEXER POLLING IS DISABLED (UVP_INDEXER_POLL_INTERVAL_MS=0): chain events from external participants will never enter the projection, reconcile will stall at indexing, and recovery requires a manual projection rebuild"
+    );
     return undefined;
   }
 
@@ -345,14 +529,30 @@ function normalizeStartOptions(
   return configOrOptions;
 }
 
-function setCorsHeaders(response: ServerResponse): void {
-  response.setHeader("access-control-allow-origin", "*");
-  response.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
+// 跨源默认关闭（不回 allow-origin，浏览器跨源读写被拦）；
+// 显式配置 UVP_API_CORS_ALLOWED_ORIGINS（逗号分隔）后按 Origin 精确回显。
+// 通配 "*" + 放行 x-uvp-* 身份头会让任意网页伪造管理员调用，禁止使用。
+const CORS_ALLOWED_ORIGINS = new Set(
+  (process.env.UVP_API_CORS_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+);
+
+function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): void {
+  // UI-1（服务端半）：前端治理写链路使用 PUT，跨源部署下预检会拦
+  // 未列入 allow-methods 的方法，必须显式放行。
+  response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
-    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role"
+    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role, x-uvp-store-session, x-uvp-store-dev-anchored-address"
   );
   response.setHeader("access-control-max-age", "86400");
+  const origin = request?.headers.origin?.trim() ?? "";
+  if (origin !== "" && CORS_ALLOWED_ORIGINS.has(origin)) {
+    response.setHeader("access-control-allow-origin", origin);
+    response.setHeader("vary", "Origin");
+  }
 }
 
 function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
@@ -376,15 +576,14 @@ function moduleAddress(
   if (configuredAddress) {
     return configuredAddress;
   }
-  const activeDeployment = config.network.stateMachineDeployments?.find((deployment) =>
-    (config.network.activeDeploymentId && deployment.deploymentId === config.network.activeDeploymentId) ||
-    deployment.status === "active"
-  );
+  // D16：与 preflight 共用同一选择口径（精确 activeDeploymentId 优先，
+  // 其次 status=active）——OR 谓词首中曾在两处口径漂移时取错部署。
+  const activeDeployment = selectActiveStateMachineDeployment(config);
   return activeDeployment?.modules?.[key];
 }
 
 function productRegistrationAdapterFromConfig(config: ChainServicesConfig): ProductOrderTriggerBroadcastAdapter {
-  if (config.productBff.registrationAdapter === "memory") {
+  if (config.productBff.registrationAdapter === "memory-trigger") {
     return new MemoryProductOrderTriggerBroadcastAdapter();
   }
 
@@ -408,7 +607,8 @@ function productRegistrationAdapterFromConfig(config: ChainServicesConfig): Prod
 function createConfiguredSubmissionBroadcastAdapter(
   config: ChainServicesConfig,
   stateMachine: Address | undefined,
-  audit: AuditSink
+  audit: AuditSink,
+  dedupeStore?: import("../submissions/index.js").BroadcastDedupeStore
 ): SubmissionBroadcastAdapter | undefined {
   if (!config.relayer.broadcastEnabled) {
     return undefined;
@@ -434,6 +634,7 @@ function createConfiguredSubmissionBroadcastAdapter(
     maxRetryAttempts: config.security.broadcastMaxRetry,
     retryBaseMs: config.security.broadcastRetryBaseMs,
     retryMaxMs: config.security.broadcastRetryMaxMs,
+    ...(dedupeStore ? { dedupeStore } : {}),
     audit
   });
 }
@@ -485,58 +686,6 @@ function createConfiguredStageResourcePatchBroadcastAdapter(
     waitForReceipt: true,
     rejectGasPayerAsSelector: config.security.environment !== "local",
     receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
-  });
-}
-
-function createConfiguredDockedOrderLinkBroadcastAdapter(
-  config: ChainServicesConfig,
-  stateMachine: Address | undefined
-): DockedOrderLinkBroadcastAdapter | undefined {
-  if (!config.relayer.broadcastEnabled) {
-    return undefined;
-  }
-  if (!stateMachine) {
-    return undefined;
-  }
-  const privateKeyEnv = config.relayer.stateMachinePrivateKeyEnv;
-  if (!process.env[privateKeyEnv]?.trim()) {
-    return undefined;
-  }
-  return createStateMachineDockedOrderLinkBroadcastAdapter({
-    stateMachineAddress: stateMachine,
-    chainId: config.network.chainId,
-    rpcUrl: config.network.rpcUrl,
-    relayerPrivateKeyEnv: privateKeyEnv,
-    waitForReceipt: true,
-    rejectGasPayerAsSelector: config.security.environment !== "local",
-    receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
-  });
-}
-
-function createConfiguredDockedSignalBroadcastAdapter(
-  config: ChainServicesConfig,
-  dockingModule: Address | undefined
-): DockedSignalBroadcastAdapter | undefined {
-  if (!config.relayer.broadcastEnabled || !config.dockedSignalAutomation.enabled) {
-    return undefined;
-  }
-  if (!dockingModule) {
-    return undefined;
-  }
-  const privateKeyEnv = config.relayer.stateMachinePrivateKeyEnv;
-  if (!process.env[privateKeyEnv]?.trim()) {
-    return undefined;
-  }
-  return createStateMachineDockedSignalBroadcastAdapter({
-    chainId: config.network.chainId,
-    rpcUrl: config.network.rpcUrl,
-    relayerPrivateKeyEnv: privateKeyEnv,
-    waitForReceipt: config.dockedSignalAutomation.waitForReceipt,
-    confirmOnReceipt: true,
-    receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs,
-    ...(config.dockedSignalAutomation.maxGasPerTx !== undefined
-      ? { maxGasPerTx: config.dockedSignalAutomation.maxGasPerTx }
-      : {})
   });
 }
 

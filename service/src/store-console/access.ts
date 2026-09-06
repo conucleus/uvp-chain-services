@@ -3,6 +3,7 @@ import { adminPrincipalFromHeaders } from "../governance/index.js";
 import type { ChainServicesRuntimeEnv, StoreAuthConfig } from "../config/index.js";
 import { assessStoreAuthEvidence } from "../config/index.js";
 import type { GovernancePrincipal } from "../governance/index.js";
+import type { Address } from "../shared/types.js";
 
 export type StoreAccessLevel = "anonymous_read" | "store_read" | "store_operator" | "store_admin";
 
@@ -24,14 +25,22 @@ export type StoreCapability =
   | "store.draft.review"
   | "store.version.activate"
   | "store.version.deprecate"
+  | "store.listing.manage"
   | "store.supplier.create"
   | "store.supplier.review"
   | "store.supplier.tags.update"
   | "store.supplier.identity.register"
   | "store.supplier.identity.revoke"
+  | "store.supplier.notification_profile.update"
   | "store.docking.create"
   | "store.docking.validate"
   | "store.docking.save";
+
+/**
+ * 会话锚定地址。锚定来源只能是钱包会话（签名证明）或
+ * local 开发头（devAnchoredAddressHeaderEnabled，staging/prod 拒绝）。
+ */
+export type StoreAnchorSource = "wallet_session" | "dev_header";
 
 export interface StoreAccessState {
   readonly level: StoreAccessLevel;
@@ -44,6 +53,11 @@ export interface StoreAccessState {
   readonly governancePrincipal?: GovernancePrincipal;
   readonly canWrite: boolean;
   readonly canAdmin: boolean;
+  /** 会话已证明控制的钱包地址（会话配对）。 */
+  readonly anchoredAddress?: Address;
+  readonly anchorSource?: StoreAnchorSource;
+  readonly walletAccountId?: string;
+  readonly walletSessionId?: string;
 }
 
 export interface StoreAuthenticationFailure {
@@ -81,10 +95,11 @@ const STORE_OPERATOR_CAPABILITIES = [
   "store.draft.import",
   "store.draft.compile",
   "store.draft.schema.save",
-  "store.draft.review",
+  "store.listing.manage",
   "store.supplier.create",
   "store.supplier.review",
   "store.supplier.tags.update",
+  "store.supplier.notification_profile.update",
   "store.docking.create",
   "store.docking.validate",
   "store.docking.save"
@@ -98,12 +113,17 @@ const STORE_ADMIN_CAPABILITIES = [
 
 const GOVERNANCE_ADMIN_CAPABILITIES = [
   ...STORE_ADMIN_CAPABILITIES,
+  "store.draft.review",
   "store.supplier.identity.register",
   "store.supplier.identity.revoke"
 ] as const satisfies readonly StoreCapability[];
 
+// JWT governance_admin 不继承 store_admin 全量——治理权威只映射到治理
+// 动作（zhixu 草稿审核 + 链上身份登记/撤销）与读；store.draft.review
+// 在此补齐，否则 JWT 治理管理员无法执行 submit-review。
 const JWT_GOVERNANCE_ADMIN_CAPABILITIES = [
   ...STORE_READ_CAPABILITIES,
+  "store.draft.review",
   "store.supplier.identity.register",
   "store.supplier.identity.revoke"
 ] as const satisfies readonly StoreCapability[];
@@ -163,10 +183,15 @@ export function storeAccessRequiredLevel(capability: StoreCapability): StoreAcce
   switch (capability) {
     case "store.supplier.identity.register":
     case "store.supplier.identity.revoke":
+    case "store.draft.review":
+      // zhixu 草稿审核是治理动作（governance review 落库），
+      // 不下放给 operator 级——提交者与审核者职责分离。
       return "governance_admin";
     case "store.version.activate":
     case "store.version.deprecate":
       return "store_admin";
+    case "store.listing.manage":
+      return "store_operator";
     case "store.read":
     case "store.audit.read":
       return "store_read";
@@ -383,7 +408,13 @@ function canonicalStoreRoles(roles: readonly string[]): readonly StoreRole[] {
 }
 
 function capabilitiesForStoreRoles(roles: readonly StoreRole[]): readonly StoreCapability[] {
-  const capabilities = new Set<StoreCapability>(STORE_READ_CAPABILITIES);
+  // 零角色 JWT 不并入 store.audit.read——匿名
+  // 语义的 token 只拿到公共读（store.read）；audit.read 随 store_reader
+  // 及以上角色授予。
+  const capabilities = new Set<StoreCapability>(STORE_PUBLIC_READ_CAPABILITIES);
+  if (roles.includes("store_reader")) {
+    addCapabilities(capabilities, STORE_READ_CAPABILITIES);
+  }
   if (roles.includes("store_operator")) {
     addCapabilities(capabilities, STORE_OPERATOR_CAPABILITIES);
   }

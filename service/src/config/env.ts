@@ -15,8 +15,12 @@ export interface NetworkConfig {
   readonly chainId: number;
   readonly rpcUrl: string;
   readonly deploymentBlock: bigint;
+  /**
+   * Finality buffer used before an event range is indexed. The indexer also
+   * persists block hashes and rolls back to a common ancestor when a reorg is
+   * detected; this value bounds the normal exposure window.
+   */
   readonly finalityConfirmations: number;
-  readonly reorgBufferBlocks: number;
   readonly contracts: Readonly<Record<string, Address>>;
   readonly stateMachineDeployments?: readonly StateMachineDeploymentConfig[];
   readonly activeDeploymentId?: Hex;
@@ -49,6 +53,8 @@ export interface DatabaseConfig {
 }
 
 export interface ApiConfig {
+  /** Descriptor 托管公网基址（配置后 descriptorURI 指向 /identity/descriptors/...）。 */
+  readonly identityDescriptorPublicBaseUrl?: string;
   readonly host: string;
   readonly port: number;
   readonly indexerPollIntervalMs: number;
@@ -65,6 +71,8 @@ export interface RelayerConfig {
 
 export interface GovernanceConfig {
   readonly broadcastEnabled: boolean;
+  /** 私钥所在环境变量名：GOVERNANCE_SIGNER_PRIVATE_KEY_ENV 指向的变量名，缺省即值形态默认名。 */
+  readonly signerPrivateKeyEnv: string;
   readonly signerPrivateKey?: Hex;
   readonly signerAddress?: Address;
   readonly registryOwnerAddress?: Address;
@@ -75,7 +83,7 @@ export interface GovernanceConfig {
 }
 
 export interface ProductBffConfig {
-  readonly registrationAdapter: "memory" | "anvil";
+  readonly registrationAdapter: "memory-trigger" | "anvil";
   readonly registrarPrivateKeyEnv: string;
   readonly registrarAddress?: Address;
   readonly waitForReceipt: boolean;
@@ -102,11 +110,18 @@ export interface ReconcileConfig {
   readonly txTimeoutMs: number;
 }
 
-export interface DockedSignalAutomationConfig {
+export interface DockAutomationConfig {
   readonly enabled: boolean;
+  readonly pollIntervalMs: number;
   readonly maxCandidatesPerRun: number;
   readonly maxGasPerTx?: bigint;
-  readonly waitForReceipt: boolean;
+  /**
+   * 最终性窗口去重：同一 binding 广播成功后，在该窗口内
+   * 不重复广播——投影要等链事件 finalize+索引后才呈现 delivery，逐轮
+   * 重发是纯 gas 浪费的 no-op 交易。窗口过后仍未投影为已投递才会重试
+   * （覆盖交易丢失的情形）。
+   */
+  readonly redeliveryWindowMs: number;
 }
 
 export interface EvidenceStorageConfig {
@@ -124,6 +139,8 @@ export interface EvidenceStorageConfig {
   readonly s3SessionTokenEnv?: string;
   readonly s3UriMode?: "s3" | "object";
   readonly s3ObjectNamespace?: string;
+  /** 可选第二副本 bucket（UVP_EVIDENCE_BACKUP_BUCKET）。 */
+  readonly s3BackupBucket?: string;
 }
 
 export type ChainServicesRuntimeEnv =
@@ -144,6 +161,25 @@ export interface StoreAuthConfig {
   readonly principalClaim: string;
   readonly displayNameClaim?: string;
   readonly clockToleranceSeconds: number;
+  /** 钱包会话（SIWE 式登录 + 地址锚定）子配置。 */
+  readonly walletSession?: StoreWalletSessionConfig;
+}
+
+/**
+ * 钱包会话配置：
+ * - enabled：local/testnet 默认开；staging/production 必须显式开启。
+ * - operatorWallets/adminWallets：MVP 单运营方地址清单——会话锚定地址
+ *   命中清单即获得对应 Store 角色能力（会话能力继承所锚地址的链上角色
+ *   与 Store 委托关系的运营方子集；plan 级权限另行按 planPublisher 核验）。
+ * - devAnchoredAddressHeaderEnabled：仅 local 开发头锚定，生产拒绝。
+ */
+export interface StoreWalletSessionConfig {
+  readonly enabled: boolean;
+  readonly operatorWallets: readonly Address[];
+  readonly adminWallets: readonly Address[];
+  readonly sessionTtlSeconds: number;
+  readonly challengeTtlSeconds: number;
+  readonly devAnchoredAddressHeaderEnabled: boolean;
 }
 
 export interface SecurityConfig {
@@ -157,6 +193,12 @@ export interface SecurityConfig {
   readonly broadcastReceiptTimeoutMs: number;
 }
 
+export interface NotificationsConfig {
+  /** 通用 webhook transport；未配置时不装配 dispatcher（默认关）。 */
+  readonly webhookUrl?: string;
+  readonly webhookSecretConfigured: boolean;
+}
+
 export interface ChainServicesConfig {
   readonly network: NetworkConfig;
   readonly database: DatabaseConfig;
@@ -166,8 +208,9 @@ export interface ChainServicesConfig {
   readonly productBff: ProductBffConfig;
   readonly operatorRoles: OperatorRoleConfig;
   readonly reconcile: ReconcileConfig;
-  readonly dockedSignalAutomation: DockedSignalAutomationConfig;
+  readonly dockAutomation: DockAutomationConfig;
   readonly evidenceStorage: EvidenceStorageConfig;
+  readonly notifications?: NotificationsConfig;
   readonly storeAuth?: StoreAuthConfig;
   readonly security: SecurityConfig;
 }
@@ -204,11 +247,10 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
   };
   const chainId = parseInteger(env, "UVP_CHAIN_ID", manifest.chainId ?? 31337);
   const rpcUrl = resolveRpcUrl(env, manifest.rpcUrlEnv);
-  const explicitDatabaseUrl = optionalEnv(env, "CHAIN_SERVICES_DATABASE_URL");
   const databaseDriver = parseStorageDriver(
     optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER"),
-    explicitDatabaseUrl,
   );
+  const databaseUrl = requiredEnv(env, "CHAIN_SERVICES_DATABASE_URL");
   const registrationCreatorAddress = optionalAddressEnv(
     env,
     "UVP_PRODUCT_BFF_CREATOR_ADDRESS",
@@ -226,8 +268,9 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         "UVP_DEPLOYMENT_BLOCK",
         manifest.deploymentBlock ?? 0n,
       ),
+      // 默认 1 仅供本地/测试网；production 预检要求显式配置
+      // （validateProductionSafety / runProductionSafetyPreflight）。
       finalityConfirmations: parseInteger(env, "UVP_FINALITY_CONFIRMATIONS", 1),
-      reorgBufferBlocks: parseInteger(env, "UVP_REORG_BUFFER_BLOCKS", 8),
       contracts,
       stateMachineDeployments: manifest.stateMachineDeployments,
       ...(manifest.activeDeploymentId
@@ -236,7 +279,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     },
     database: {
       driver: databaseDriver,
-      url: explicitDatabaseUrl ?? defaultDatabaseUrl(databaseDriver),
+      url: databaseUrl,
       migrationsAutoRun: parseBoolean(env, "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN", false),
     },
     api: {
@@ -247,6 +290,9 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         "UVP_INDEXER_POLL_INTERVAL_MS",
         5_000,
       ),
+      ...(optionalEnv(env, "STORE_IDENTITY_DESCRIPTOR_PUBLIC_BASE_URL")
+        ? { identityDescriptorPublicBaseUrl: optionalEnv(env, "STORE_IDENTITY_DESCRIPTOR_PUBLIC_BASE_URL")!.replace(/\/+$/, "") }
+        : {}),
     },
     relayer: {
       businessSigning: "forbidden",
@@ -282,25 +328,27 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
       pollIntervalMs: parseInteger(env, "RECONCILE_POLL_INTERVAL_MS", 5_000),
       txTimeoutMs: parseInteger(env, "RECONCILE_TX_TIMEOUT_MS", 30 * 60 * 1000),
     },
-    dockedSignalAutomation: {
+    dockAutomation: {
       enabled: parseBoolean(
         env,
-        "UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED",
-        environment === "local",
+        "UVP_DOCK_AUTOMATION_ENABLED",
+        false,
       ),
+      pollIntervalMs: parseInteger(env, "UVP_DOCK_AUTOMATION_POLL_INTERVAL_MS", 5_000),
       maxCandidatesPerRun: parseInteger(
         env,
-        "UVP_DOCKED_SIGNAL_MAX_CANDIDATES_PER_RUN",
+        "UVP_DOCK_AUTOMATION_MAX_CANDIDATES_PER_RUN",
         4,
       ),
-      ...optionalGasCap(env, "UVP_DOCKED_SIGNAL_MAX_GAS_PER_TX", 500_000n),
-      waitForReceipt: parseBoolean(
+      ...optionalGasCap(env, "UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX", 500_000n),
+      redeliveryWindowMs: parseInteger(
         env,
-        "UVP_DOCKED_SIGNAL_WAIT_FOR_RECEIPT",
-        true,
+        "UVP_DOCK_AUTOMATION_REDELIVERY_WINDOW_MS",
+        120_000,
       ),
     },
     evidenceStorage: parseEvidenceStorageConfig(env),
+    notifications: parseNotificationsConfig(env),
     storeAuth: parseStoreAuthConfig(env, environment),
     security: {
       environment,
@@ -411,13 +459,17 @@ function parseRuntimeEnv(env: Env): ChainServicesRuntimeEnv {
 function parseProductRegistrationAdapter(
   env: Env,
 ): ProductBffConfig["registrationAdapter"] {
-  const rawValue =
-    optionalEnv(env, "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER") ?? "memory";
-  if (rawValue === "memory" || rawValue === "anvil") {
+  const rawValue = optionalEnv(env, "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER");
+  if (!rawValue) {
+    throw new ConfigError(
+      "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER is required (memory-trigger or anvil)",
+    );
+  }
+  if (rawValue === "memory-trigger" || rawValue === "anvil") {
     return rawValue;
   }
   throw new ConfigError(
-    "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER must be memory or anvil",
+    "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER must be memory-trigger or anvil",
   );
 }
 
@@ -452,6 +504,8 @@ function parseEvidenceStorageConfig(env: Env): EvidenceStorageConfig {
     env,
     "UVP_EVIDENCE_S3_OBJECT_NAMESPACE",
   );
+  // 可选的第二副本 bucket；未配置时 preflight 警告。
+  const s3BackupBucket = optionalEnv(env, "UVP_EVIDENCE_BACKUP_BUCKET");
 
   return {
     adapter,
@@ -467,6 +521,15 @@ function parseEvidenceStorageConfig(env: Env): EvidenceStorageConfig {
     ...(s3SecretAccessKeyEnv ? { s3SecretAccessKeyEnv } : {}),
     ...(s3SessionTokenEnv ? { s3SessionTokenEnv } : {}),
     ...(s3ObjectNamespace ? { s3ObjectNamespace } : {}),
+    ...(s3BackupBucket ? { s3BackupBucket } : {}),
+  };
+}
+
+function parseNotificationsConfig(env: Env): NotificationsConfig {
+  const webhookUrl = optionalEnv(env, "UVP_NOTIFY_WEBHOOK_URL");
+  return {
+    ...(webhookUrl ? { webhookUrl } : {}),
+    webhookSecretConfigured: Boolean(optionalEnv(env, "UVP_NOTIFY_WEBHOOK_SECRET"))
   };
 }
 
@@ -598,22 +661,98 @@ function parseStoreAuthConfig(
     principalClaim,
     ...(displayNameClaim ? { displayNameClaim } : {}),
     clockToleranceSeconds,
+    walletSession: parseStoreWalletSessionConfig(env, environment),
   };
+}
+
+function parseStoreWalletSessionConfig(
+  env: Env,
+  environment: ChainServicesRuntimeEnv,
+): StoreWalletSessionConfig {
+  const strict = environment === "staging" || environment === "production";
+  const enabledRaw = optionalEnv(env, "STORE_AUTH_WALLET_SESSION_ENABLED");
+  const enabled = enabledRaw !== undefined
+    ? parseBooleanFlag(enabledRaw, "STORE_AUTH_WALLET_SESSION_ENABLED")
+    : !strict;
+  const operatorWallets = parseWalletAddressList(env, "STORE_AUTH_OPERATOR_WALLETS");
+  const adminWallets = parseWalletAddressList(env, "STORE_AUTH_ADMIN_WALLETS");
+  const sessionTtlSeconds = parseInteger(
+    env,
+    "STORE_AUTH_WALLET_SESSION_TTL_SECONDS",
+    43200,
+  );
+  const challengeTtlSeconds = parseInteger(
+    env,
+    "STORE_AUTH_CHALLENGE_TTL_SECONDS",
+    300,
+  );
+  const devHeaderRaw = optionalEnv(env, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER");
+  return {
+    enabled,
+    operatorWallets,
+    adminWallets,
+    sessionTtlSeconds,
+    challengeTtlSeconds,
+    // dev 锚定地址头缺省仅 local 开：非 local 环境自报地址锚定等于
+    // 伪造身份。非 local 环境必须显式开启才生效（生产语义上仍会被
+    // strict runtime 拒绝）。
+    devAnchoredAddressHeaderEnabled: devHeaderRaw !== undefined
+      ? parseBooleanFlag(devHeaderRaw, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")
+      : !strict && environment === "local"
+  };
+}
+
+function parseWalletAddressList(env: Env, name: string): readonly Address[] {
+  const raw = optionalEnv(env, name);
+  if (!raw) {
+    return [];
+  }
+  const wallets = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .map((item) => normalizeAddress(item, name));
+  return [...new Set(wallets.map((wallet) => wallet.toLowerCase()))] as readonly Address[];
+}
+
+function parseBooleanFlag(value: string, name: string): boolean {
+  if (value === "true" || value === "1") {
+    return true;
+  }
+  if (value === "false" || value === "0") {
+    return false;
+  }
+  throw new ConfigError(`${name} must be true or false`);
 }
 
 function parseStoreAuthMode(
   env: Env,
   environment: ChainServicesRuntimeEnv,
 ): StoreAuthConfigMode {
-  const rawValue =
-    optionalEnv(env, "STORE_AUTH_MODE") ??
-    (environment === "staging" || environment === "production"
-      ? "jwt"
-      : "dev_headers");
-  if (rawValue === "dev_headers" || rawValue === "jwt") {
-    return rawValue;
+  // 缺省档收紧——只有 local 允许缺省 dev_headers。
+  // testnet 未显式配置 STORE_AUTH_MODE 即启动失败（静默回落 dev_headers
+  // 等于任何人自报 store 头即可获得运营方能力）；显式配置
+  // dev_headers 在 local 之外同样拒绝。staging/production 保持必须 jwt。
+  const rawValue = optionalEnv(env, "STORE_AUTH_MODE");
+  if (!rawValue) {
+    if (environment === "local") {
+      return "dev_headers";
+    }
+    throw new ConfigError(
+      environment === "staging" || environment === "production"
+        ? "STORE_AUTH_MODE=jwt is required in staging and production"
+        : "STORE_AUTH_MODE must be explicitly configured in testnet (jwt)",
+    );
   }
-  throw new ConfigError("STORE_AUTH_MODE must be dev_headers or jwt");
+  if (rawValue !== "dev_headers" && rawValue !== "jwt") {
+    throw new ConfigError("STORE_AUTH_MODE must be dev_headers or jwt");
+  }
+  if (rawValue === "dev_headers" && environment !== "local") {
+    throw new ConfigError(
+      "STORE_AUTH_MODE=dev_headers is only allowed in local development",
+    );
+  }
+  return rawValue;
 }
 
 function validateStoreAuthUrl(value: string, envName: string): void {
@@ -655,57 +794,30 @@ function discoveryUrlFromIssuer(issuer: string): string {
   return `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
 }
 
-function parseStorageDriver(
-  rawDriver: string | undefined,
-  databaseUrl: string | undefined,
-): StorageDriver {
-  if (rawDriver) {
-    if (
-      rawDriver === "memory" ||
-      rawDriver === "sqlite" ||
-      rawDriver === "postgres"
-    ) {
-      return rawDriver;
-    }
+function requiredEnv(env: Env, name: string): string {
+  const value = optionalEnv(env, name);
+  if (!value) {
+    throw new ConfigError(`${name} is required`);
+  }
+  return value;
+}
+
+function parseStorageDriver(rawDriver: string | undefined): StorageDriver {
+  if (!rawDriver) {
     throw new ConfigError(
-      "CHAIN_SERVICES_DATABASE_DRIVER must be memory, sqlite, or postgres",
+      "CHAIN_SERVICES_DATABASE_DRIVER is required (memory, sqlite, or postgres)",
     );
   }
-  return inferStorageDriver(databaseUrl) ?? "memory";
-}
-
-function inferStorageDriver(
-  databaseUrl: string | undefined,
-): StorageDriver | undefined {
-  if (!databaseUrl) {
-    return undefined;
-  }
-  if (databaseUrl.startsWith("memory:")) {
-    return "memory";
-  }
-  if (databaseUrl.startsWith("sqlite:") || databaseUrl.startsWith("file:")) {
-    return "sqlite";
-  }
   if (
-    databaseUrl.startsWith("postgres:") ||
-    databaseUrl.startsWith("postgresql:")
+    rawDriver === "memory" ||
+    rawDriver === "sqlite" ||
+    rawDriver === "postgres"
   ) {
-    return "postgres";
+    return rawDriver;
   }
-  return undefined;
-}
-
-function defaultDatabaseUrl(driver: StorageDriver): string {
-  switch (driver) {
-    case "memory":
-      return "memory://projection-store";
-    case "sqlite":
-      return "sqlite://./chain-services.sqlite3";
-    case "postgres":
-      throw new ConfigError(
-        "CHAIN_SERVICES_DATABASE_URL is required when CHAIN_SERVICES_DATABASE_DRIVER=postgres",
-      );
-  }
+  throw new ConfigError(
+    "CHAIN_SERVICES_DATABASE_DRIVER must be memory, sqlite, or postgres",
+  );
 }
 
 function parseBigIntValue(env: Env, name: string, fallback: bigint): bigint {
@@ -746,10 +858,10 @@ function parseGovernanceConfig(
     "GOVERNANCE_BROADCAST_ENABLED",
     false,
   );
-  const signerPrivateKey = optionalPrivateKeyEnv(
-    env,
-    "GOVERNANCE_SIGNER_PRIVATE_KEY",
-  );
+  const signerPrivateKeyEnv =
+    optionalEnv(env, "GOVERNANCE_SIGNER_PRIVATE_KEY_ENV") ??
+    "GOVERNANCE_SIGNER_PRIVATE_KEY";
+  const signerPrivateKey = optionalPrivateKeyEnv(env, signerPrivateKeyEnv);
   const signerAddress = optionalAddressEnv(env, "GOVERNANCE_SIGNER_ADDRESS");
   const registryOwnerAddress = optionalAddressEnv(
     env,
@@ -758,12 +870,13 @@ function parseGovernanceConfig(
 
   if (broadcastEnabled && !signerPrivateKey) {
     throw new ConfigError(
-      "GOVERNANCE_SIGNER_PRIVATE_KEY is required when GOVERNANCE_BROADCAST_ENABLED=true",
+      `${signerPrivateKeyEnv} is required when GOVERNANCE_BROADCAST_ENABLED=true`,
     );
   }
 
   return {
     broadcastEnabled,
+    signerPrivateKeyEnv,
     ...(signerPrivateKey ? { signerPrivateKey } : {}),
     ...(signerAddress ? { signerAddress } : {}),
     ...(registryOwnerAddress ? { registryOwnerAddress } : {}),
@@ -936,6 +1049,14 @@ function parseAddressManifest(env: Env): ParsedAddressManifest {
   }
 
   const manifest = parsed as Record<string, unknown>;
+  // 地址清单是输入不是猜想：schemaVersion 不符直接拒绝，避免按已作废的
+  // 清单版本（如 v5）解析出口径漂移的部署记录。
+  const schemaVersion = stringValue(manifest.schemaVersion);
+  if (schemaVersion !== "uvp-eth.addresses.v1") {
+    throw new ConfigError(
+      `address manifest schemaVersion must be "uvp-eth.addresses.v1", got: ${schemaVersion || "(missing)"}`,
+    );
+  }
   const network = objectValue(manifest.network);
   const deployment = objectValue(manifest.deployment);
   const rawContracts = objectValue(manifest.contracts);
@@ -1145,11 +1266,43 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   }
 
   if (
-    optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER") !== "postgres" ||
+    !optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER") ||
     config.database.driver !== "postgres"
   ) {
     throw new ConfigError(
       "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production",
+    );
+  }
+  // production 必须显式配置 UVP_RPC_URL 且拒绝本地/回环地址——静默回落
+  // 127.0.0.1:8545 会把生产指向不存在的节点（staging/testnet 同样强检）。
+  if (!optionalEnv(env, "UVP_RPC_URL")) {
+    throw new ConfigError("UVP_RPC_URL is required in production");
+  }
+  if (isLocalRpcUrl(config.network.rpcUrl, "production")) {
+    throw new ConfigError(
+      "UVP_RPC_URL must point to a non-local RPC endpoint in production",
+    );
+  }
+  // admin 白名单在 production 必须显式非空——
+  // 空白名单意味着任意 x-uvp-admin-id 自报即管理员（governance/auth.ts
+  // 是 fail-closed 的，这里把配置错误拦在启动前）。
+  if (config.operatorRoles.adminReviewers.length === 0) {
+    throw new ConfigError(
+      "GOVERNANCE_ADMIN_REVIEWER_IDS is required in production",
+    );
+  }
+  if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
+    throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in production");
+  }
+  // production 禁止静默使用 env 默认值 1。finality 确认数是索引器
+  // reorg 缓冲必须显式配置为正整数；非生产保持默认 1 不变。追加前的
+  // block-hash continuity check 与有界共同祖先回滚由 indexer 一并执行。
+  if (
+    !optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
+    config.network.finalityConfirmations <= 0
+  ) {
+    throw new ConfigError(
+      "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production",
     );
   }
   if (!optionalEnv(env, "CHAIN_SERVICES_DATABASE_URL")) {
@@ -1168,7 +1321,7 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
 
   const privateKeyEnvNames = new Set([
     config.relayer.stateMachinePrivateKeyEnv,
-    "GOVERNANCE_SIGNER_PRIVATE_KEY",
+    config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
   ]);
@@ -1196,9 +1349,6 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
       "GOVERNANCE_BROADCAST_ENABLED=true uses env private-key governance and is forbidden in production",
     );
   }
-  if (parseBoolean(env, "UVP_PRODUCT_DEMO_MODE", false)) {
-    throw new ConfigError("UVP_PRODUCT_DEMO_MODE=1 is forbidden in production");
-  }
   if (parseBoolean(env, "UVP_PRODUCT_E2E_FIXTURES", false)) {
     throw new ConfigError(
       "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in production",
@@ -1212,9 +1362,9 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
       "permissive Product submission authorization is forbidden in production",
     );
   }
-  if (config.productBff.registrationAdapter === "memory") {
+  if (config.productBff.registrationAdapter !== "anvil") {
     throw new ConfigError(
-      "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=memory is forbidden in production",
+      "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production",
     );
   }
   if (!stateMachineAddress(config.network.contracts)) {
@@ -1238,6 +1388,28 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   ) {
     throw new ConfigError(
       `${config.productBff.registrarPrivateKeyEnv} is required when Product BFF registration adapter is anvil`,
+    );
+  }
+
+  if (config.evidenceStorage.adapter !== "s3") {
+    throw new ConfigError(
+      "UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in production",
+    );
+  }
+  if (!config.evidenceStorage.s3Bucket) {
+    throw new ConfigError("UVP_EVIDENCE_S3_BUCKET is required in production");
+  }
+  if (!config.evidenceStorage.s3Region) {
+    throw new ConfigError("UVP_EVIDENCE_S3_REGION is required in production");
+  }
+  if (!config.evidenceStorage.s3AccessKeyIdEnv) {
+    throw new ConfigError(
+      "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV is required in production",
+    );
+  }
+  if (!config.evidenceStorage.s3SecretAccessKeyEnv) {
+    throw new ConfigError(
+      "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV is required in production",
     );
   }
 }
@@ -1309,14 +1481,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_FINALITY_CONFIRMATIONS must be an explicit positive integer in staging",
     );
   }
-  if (
-    !optionalEnv(env, "UVP_REORG_BUFFER_BLOCKS") ||
-    config.network.reorgBufferBlocks <= 0
-  ) {
-    throw new ConfigError(
-      "UVP_REORG_BUFFER_BLOCKS must be an explicit positive integer in staging",
-    );
-  }
   if (!stateMachineAddress(config.network.contracts)) {
     throw new ConfigError(
       "UVPStateMachine contract address is required in staging",
@@ -1328,9 +1492,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
     );
   }
 
-  if (parseBoolean(env, "UVP_PRODUCT_DEMO_MODE", false)) {
-    throw new ConfigError("UVP_PRODUCT_DEMO_MODE=1 is forbidden in staging");
-  }
   if (parseBoolean(env, "UVP_PRODUCT_E2E_FIXTURES", false)) {
     throw new ConfigError("UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in staging");
   }
@@ -1462,9 +1623,14 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   if (!config.governance.signerAddress) {
     throw new ConfigError("GOVERNANCE_SIGNER_ADDRESS is required in staging");
   }
+  if (!optionalEnv(env, "GOVERNANCE_SIGNER_PRIVATE_KEY_ENV")) {
+    throw new ConfigError(
+      "GOVERNANCE_SIGNER_PRIVATE_KEY_ENV is required in staging",
+    );
+  }
   if (!config.governance.signerPrivateKey) {
     throw new ConfigError(
-      "GOVERNANCE_SIGNER_PRIVATE_KEY is required in staging",
+      `${config.governance.signerPrivateKeyEnv} is required in staging`,
     );
   }
   if (config.operatorRoles.adminReviewers.length === 0) {
@@ -1480,11 +1646,11 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
       "RECONCILE_WORKER_ENABLED=true is required in staging",
     );
   }
-  validateManagedDatabaseCostSafety(config, "staging");
+  validateManagedDatabaseCostSafety(config, env, "staging");
 
   const privateKeyEnvNames = new Set([
     config.relayer.stateMachinePrivateKeyEnv,
-    "GOVERNANCE_SIGNER_PRIVATE_KEY",
+    config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
   ]);
@@ -1552,6 +1718,15 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "UVPIdentityRegistry contract address is required in testnet",
     );
   }
+  // testnet 同样强制 admin 白名单非空——空白名单等于任意自报 admin 通过。
+  if (config.operatorRoles.adminReviewers.length === 0) {
+    throw new ConfigError(
+      "GOVERNANCE_ADMIN_REVIEWER_IDS is required in testnet",
+    );
+  }
+  if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
+    throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in testnet");
+  }
 
   if (!config.security.preflightStrict) {
     throw new ConfigError(
@@ -1562,9 +1737,6 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
     throw new ConfigError(
       "LOG_REDACTION_ENABLED=false is forbidden in testnet",
     );
-  }
-  if (parseBoolean(env, "UVP_PRODUCT_DEMO_MODE", false)) {
-    throw new ConfigError("UVP_PRODUCT_DEMO_MODE=1 is forbidden in testnet");
   }
   if (parseBoolean(env, "UVP_PRODUCT_E2E_FIXTURES", false)) {
     throw new ConfigError("UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in testnet");
@@ -1577,9 +1749,9 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "permissive Product submission authorization is forbidden in testnet",
     );
   }
-  if (config.productBff.registrationAdapter === "memory") {
+  if (config.productBff.registrationAdapter !== "anvil") {
     throw new ConfigError(
-      "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=memory is forbidden in testnet",
+      "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in testnet",
     );
   }
   if (config.evidenceStorage.adapter !== "rehearsal-object") {
@@ -1626,11 +1798,12 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "GOVERNANCE_CHAIN_ID=84532 is required in testnet when governance broadcast is enabled",
     );
   }
-  validateManagedDatabaseCostSafety(config, "testnet");
+  validateManagedDatabaseCostSafety(config, env, "testnet");
 }
 
 function validateManagedDatabaseCostSafety(
   config: ChainServicesConfig,
+  env: Env,
   environment: "staging" | "testnet",
 ): void {
   if (config.database.driver !== "postgres") {
@@ -1641,9 +1814,21 @@ function validateManagedDatabaseCostSafety(
     return;
   }
   const host = classification.redactedHost ?? "non-local Postgres";
-  if (config.api.indexerPollIntervalMs > 0) {
+  // 受管 PG 上不强制 poll=0（那会让外部参与方事件永不入投影、
+  // reconcile 永卡，只能人工 rebuild）。要求 poll 间隔显式配置；允许 0，
+  // 但 =0 必须同时显式确认知情键 UVP_INDEXER_POLL_DISABLED_ACK=1。
+  const pollExplicit = env.UVP_INDEXER_POLL_INTERVAL_MS?.trim() !== undefined && env.UVP_INDEXER_POLL_INTERVAL_MS?.trim() !== "";
+  if (!pollExplicit) {
     throw new ConfigError(
-      `UVP_INDEXER_POLL_INTERVAL_MS=0 is required when CHAIN_SERVICES_DATABASE_URL points to ${host} in ${environment}`,
+      `UVP_INDEXER_POLL_INTERVAL_MS must be explicitly configured when CHAIN_SERVICES_DATABASE_URL points to ${host} in ${environment} (a mild positive interval such as 5000 is recommended)`,
+    );
+  }
+  if (
+    config.api.indexerPollIntervalMs <= 0 &&
+    env.UVP_INDEXER_POLL_DISABLED_ACK?.trim() !== "1"
+  ) {
+    throw new ConfigError(
+      `UVP_INDEXER_POLL_DISABLED_ACK=1 is required to acknowledge the consequences of UVP_INDEXER_POLL_INTERVAL_MS=0 (external participants' events will never enter the projection; reconcile stalls; recovery needs a manual rebuild) when CHAIN_SERVICES_DATABASE_URL points to ${host} in ${environment}`,
     );
   }
   if (

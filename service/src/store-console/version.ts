@@ -64,6 +64,12 @@ export interface StoreZhixuVersionMetadataStore {
     versionId: string,
   ): Promise<StoreZhixuVersionRecord | undefined>;
   upsertVersion(record: StoreZhixuVersionRecord): Promise<void>;
+  /**
+   * activate 的"旧 active 批量 deprecated + 新
+   * active 落库"必须事务化，中途失败不得留下无 active 或双 active 的
+   * 中间态。持久后端提供；内存后端顺序执行即可。
+   */
+  withTransaction?<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 export class MemoryStoreZhixuVersionMetadataStore
@@ -110,7 +116,7 @@ export function createStoreZhixuVersionService(options: {
   readonly metadataStore?: StoreZhixuVersionMetadataStore;
   readonly now?: () => Date;
 }): StoreZhixuVersionService {
-  const metadataStore =
+  const metadataStore: StoreZhixuVersionMetadataStore =
     options.metadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
   const now = options.now ?? (() => new Date());
 
@@ -144,6 +150,9 @@ export function createStoreZhixuVersionService(options: {
         options.productService,
         options.projectionStore,
       );
+      // 激活确认取服务端记录——publicationStatus 由
+      // 链投影（stateMachinePlans）判定，调用方自报的 planId/planHash 不是
+      // 激活的依据；记录锚不可改（patchVersionRecord 拒绝）。
       assertActivatable(summary);
       const cutoverAt = now().toISOString();
       const existing = await effectiveVersionRecords({
@@ -153,30 +162,38 @@ export function createStoreZhixuVersionService(options: {
         projectionStore: options.projectionStore,
         now,
       });
-      for (const item of existing) {
-        if (item.versionId === record.versionId) {
-          continue;
+      // cutover（旧 active 批量 deprecated + 新 active 落库）
+      // 事务化；持久后端中途失败整体回滚，不留双 active/无 active 中间态。
+      const applyCutover = async (): Promise<StoreZhixuVersionRecord> => {
+        for (const item of existing) {
+          if (item.versionId === record.versionId) {
+            continue;
+          }
+          if (item.status === "active") {
+            await metadataStore.upsertVersion({
+              ...item,
+              status: "deprecated",
+              cutoverAt,
+              cutoverReason: "Superseded by active Store version.",
+            });
+          }
         }
-        if (item.status === "active") {
-          await metadataStore.upsertVersion({
-            ...item,
-            status: "deprecated",
-            cutoverAt,
-            cutoverReason: "Superseded by active Store version.",
-          });
-        }
-      }
-      const active: StoreZhixuVersionRecord = {
-        ...record,
-        status: "active",
-        cutoverAt,
-        ...(input.cutoverReason
-          ? { cutoverReason: input.cutoverReason }
-          : record.cutoverReason
-            ? { cutoverReason: record.cutoverReason }
-            : {}),
+        const active: StoreZhixuVersionRecord = {
+          ...record,
+          status: "active",
+          cutoverAt,
+          ...(input.cutoverReason
+            ? { cutoverReason: input.cutoverReason }
+            : record.cutoverReason
+              ? { cutoverReason: record.cutoverReason }
+              : {}),
+        };
+        await metadataStore.upsertVersion(active);
+        return active;
       };
-      await metadataStore.upsertVersion(active);
+      const active = metadataStore.withTransaction
+        ? await metadataStore.withTransaction(applyCutover)
+        : await applyCutover();
       return mutationResult(
         seriesId,
         active,
@@ -308,14 +325,28 @@ async function ensureVersionRecord(input: {
       },
     );
   }
+  // 新建版本记录的锚（planId/planHash）必须在
+  // 链投影中真实存在——否则可凭空登记任意 plan 的"版本"再激活。
+  const planId = normalizeBytes32(input.input.planId, "planId");
+  const planHash = normalizeBytes32(input.input.planHash, "planHash");
+  const snapshot = await input.projectionStore.getOrderSnapshot();
+  const plan = findFinalizedPlan(snapshot, planId, planHash);
+  if (!plan) {
+    throw new StoreZhixuVersionError(
+      409,
+      "plan_not_projected",
+      "a new Store zhixu version record must anchor to a plan that is finalized (PlanRegistered) in the chain projection",
+      { seriesId: input.seriesId, versionId: input.versionId, planId }
+    );
+  }
   return {
     versionId: input.versionId,
     zhixuId: input.input.zhixuId ?? input.seriesId,
     seriesId: input.seriesId,
     versionLabel: input.input.versionLabel ?? input.versionId,
     status: "candidate",
-    planId: normalizeBytes32(input.input.planId, "planId"),
-    planHash: normalizeBytes32(input.input.planHash, "planHash"),
+    planId,
+    planHash,
     ...(input.input.artifactHash
       ? {
           artifactHash: normalizeBytes32(
@@ -335,6 +366,28 @@ function patchVersionRecord(
   record: StoreZhixuVersionRecord,
   input: StoreZhixuVersionMutationInput,
 ): StoreZhixuVersionRecord {
+  // 版本记录的链锚不可改——planId/planHash/
+  // artifactHash 只能在创建时给定；调用方在其后携带不同锚即 409，
+  // 防止"改锚任意 plan"把既有版本偷换到另一个 plan 上。
+  for (const [field, rawValue] of [
+    ["planId", input.planId],
+    ["planHash", input.planHash],
+    ["artifactHash", input.artifactHash],
+  ] as const) {
+    if (rawValue === undefined) {
+      continue;
+    }
+    const normalized = normalizeBytes32(rawValue, field);
+    const current = (record as unknown as { readonly [key: string]: string | undefined })[field];
+    if (current && current.toLowerCase() !== normalized.toLowerCase()) {
+      throw new StoreZhixuVersionError(
+        409,
+        "version_anchor_immutable",
+        `version ${field} is immutable once the version record exists`,
+        { versionId: record.versionId, field },
+      );
+    }
+  }
   return {
     ...record,
     ...(input.zhixuId ? { zhixuId: input.zhixuId } : {}),
@@ -382,6 +435,7 @@ async function effectiveVersionRecords(input: {
   const synthesized = await synthesizeDefaultVersion(
     input.seriesId,
     input.productService,
+    input.projectionStore,
     input.now,
   );
   return synthesized ? [synthesized] : [];
@@ -390,10 +444,20 @@ async function effectiveVersionRecords(input: {
 async function synthesizeDefaultVersion(
   seriesId: string,
   productService: ProductService,
+  projectionStore: ProjectionStore,
   now: () => Date,
 ): Promise<StoreZhixuVersionRecord | undefined> {
   const zhixu = await productService.getZhixu(seriesId);
   if (!zhixu) {
+    return undefined;
+  }
+  // 投影桶在 commitPlan 第一步即建、PlanRegistered 到 finalize 才发：
+  // 默认版本只对"已 finalize"的 plan 合成 active，否则待定计划可被
+  // 直接激活建单（UVP-02）。
+  const snapshot = await projectionStore.getOrderSnapshot();
+  const planId = normalizeBytes32(zhixu.planPublication.planId, "planId");
+  const planHash = normalizeBytes32(zhixu.planPublication.planHash, "planHash");
+  if (!findFinalizedPlan(snapshot, planId, planHash)) {
     return undefined;
   }
   return {
@@ -425,9 +489,10 @@ async function summarizeRecord(
     projectionStore.getOrderSnapshot(),
     productService.listOrders(),
   ]);
-  const plan = Object.values(orderSnapshot.stateMachinePlans).find(
-    (candidate) => candidate.planId === record.planId && candidate.planHash === record.planHash,
-  );
+  // "published" 要求链上已 finalize（PlanFinalized/PlanRegistered 均在
+  // finalize 交易内发出）：投影桶在 commitPlan 即建，仅凭桶存在会把
+  // 待定计划当成已发布（UVP-02）。
+  const plan = findFinalizedPlan(orderSnapshot, record.planId, record.planHash);
   const publicationStatus: PlanPublicationStatus = plan ? "published" : "not_found";
   const artifactHash = record.artifactHash;
   return {
@@ -456,13 +521,57 @@ function assertActivatable(version: StoreZhixuVersionSummaryDTO): void {
     throw new StoreZhixuVersionError(
       409,
       "plan_not_published",
-      "Store zhixu version must be published to the state machine before activation",
+      "Store zhixu version must be finalized and registered on the state machine before activation",
       {
         versionId: version.versionId,
         planId: version.planId,
       },
     );
   }
+}
+
+/**
+ * 已注册（PlanRegistered）的 plan 查找：投影桶在 commitPlan 即建，
+ * registeredAt 初始携带 commit 溯源、PlanRegistered 到达后被 finalize
+ * 交易溯源覆写——以"registeredAt 晚于 committedAt（或无 commit 溯源）
+ * / finalizedAt 已落"作为已注册判据，待定（仅 commit）计划不算。
+ */
+function findFinalizedPlan(
+  snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
+  planId: Hex,
+  planHash: Hex,
+) {
+  return Object.values(snapshot.stateMachinePlans).find(
+    (candidate) =>
+      candidate.planId.toLowerCase() === planId.toLowerCase() &&
+      candidate.planHash.toLowerCase() === planHash.toLowerCase() &&
+      isPlanRegistered(candidate),
+  );
+}
+
+function isPlanRegistered(
+  plan: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>["stateMachinePlans"][string],
+): boolean {
+  if (plan.finalizedAt !== undefined) {
+    return true;
+  }
+  if (plan.committedAt === undefined) {
+    // 只见过 PlanRegistered（截断流建桶）——注册事实已存在。
+    return true;
+  }
+  const committed = plan.committedAt;
+  const registered = plan.registeredAt;
+  return (
+    registered.transactionHash !== committed.transactionHash ||
+    registered.logIndex !== committed.logIndex
+  );
+}
+
+/** 供 listing 锚核验等域复用的"PlanRegistered 已被索引"判据。 */
+export function isPlanRegisteredProjection(
+  plan: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>["stateMachinePlans"][string],
+): boolean {
+  return isPlanRegistered(plan);
 }
 
 function defaultVersionId(seriesId: string, planId: string): string {

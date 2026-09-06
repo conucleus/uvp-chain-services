@@ -11,9 +11,11 @@ import {
   STAGE_EXECUTOR_PATCH_SIGNAL_ID,
   STAGE_RESOURCE_PATCH_SIGNAL_ID
 } from "../../shared/protocol-constants.js";
+import { normalizeEvidenceSpec } from "../service.js";
 import type {
   DraftParticipantDTO,
   ParticipantPermissionDTO,
+  ProductEvidenceSpecDTO,
   ProductOrderDraftDTO,
   SignalAuthorizationDTO
 } from "./types.js";
@@ -73,7 +75,8 @@ export class ProductAuthorizationBuilder {
         signalName: resolved.entry.signalName,
         submitterAddress: resolved.submitter,
         payloadPolicy: resolved.entry.payloadPolicy,
-        requiredEvidence: resolved.entry.requiredEvidence
+        // 发布者携带的结构化证据要求（schema 不透明 JSON，结构化读取）。
+        ...(resolved.evidenceSpec ? { evidenceSpec: resolved.evidenceSpec } : {})
       });
     }
     for (const authorization of stagePatchAuthorizations(input, duplicateAuthorizations)) {
@@ -93,6 +96,7 @@ interface ResolvedPermission {
   readonly participantId: string;
   readonly stageIndex: number;
   readonly system: boolean;
+  readonly evidenceSpec?: readonly ProductEvidenceSpecDTO[];
 }
 
 function resolvePermissions(
@@ -166,12 +170,18 @@ function resolvePermissions(
         participantId: participant.participantId
       });
     }
+    // STORE 框架化透传：schema stage 上发布者携带的 evidenceSpec 不在
+    // protocol ZhixuStageDTO 类型上，按结构化读取并最小形状过滤。
+    const stageEvidenceSpec = normalizeEvidenceSpec(
+      (stage as { readonly evidenceSpec?: unknown }).evidenceSpec,
+    );
     resolved.push({
       entry,
       submitter: normalizeAddress(participant.walletAddress, "participant.walletAddress"),
       participantId: participant.participantId,
       stageIndex: stage.index,
-      system: false
+      system: false,
+      ...(stageEvidenceSpec ? { evidenceSpec: stageEvidenceSpec } : {})
     });
   }
 

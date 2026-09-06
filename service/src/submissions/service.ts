@@ -4,6 +4,7 @@ import { buildProductSubmitTypedData, recoverProductSubmitSigner } from "@uvp-et
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
 import { hashCanonicalJson } from "../evidence/index.js";
 import type { TxReconcileFields } from "../reconcile/status.js";
+import { redactErrorMessage } from "../security/redaction.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { assertHex, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import { InMemoryProductSubmissionStore } from "./store.js";
@@ -31,9 +32,9 @@ import type {
   PrepareProductTaskSubmitInput
 } from "./types.js";
 import type { EvidencePrincipal, EvidenceRecordDTO } from "../evidence/index.js";
+import { ProductOrderLookupError } from "../product/service.js";
 
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const PRODUCT_SIGNAL_SOURCE = "product";
 
 export class ProductSubmissionError extends Error {
@@ -52,11 +53,18 @@ export class ProductSubmissionError extends Error {
 export interface ProductSubmissionServiceOptions {
   readonly productTasks: ProductTaskReader;
   readonly evidenceReader: ProductSubmissionEvidenceReader;
-  readonly chainId?: number;
-  readonly verifyingContract?: Address;
+  readonly chainId: number;
+  readonly verifyingContract: Address;
   readonly authorization?: SubmissionAuthorizationAdapter;
   readonly broadcastAdapter?: SubmissionBroadcastAdapter;
   readonly store?: ProductSubmissionStore;
+  /**
+   * resolves the order planId for the on-chain order id from the
+   * indexer projection (OrderRegistered/OrderMaterialized carry the indexed
+   * planId). prepareSubmit refuses to build the plan-scoped signature when the
+   * projection cannot supply a non-zero planId.
+   */
+  readonly resolveOrderPlanId?: (onchainOrderId: Hex) => Promise<Hex | undefined>;
   readonly now?: () => Date;
   readonly prepareTtlSeconds?: number;
   readonly prepareIdFactory?: () => string;
@@ -82,11 +90,17 @@ export function createProductSubmissionService(options: ProductSubmissionService
   const prepareIdFactory = options.prepareIdFactory ?? (() => `prep_${randomUUID()}`);
   const submissionIdFactory = options.submissionIdFactory ?? (() => `sub_${randomUUID()}`);
   const nonceFactory = options.nonceFactory ?? randomNonce;
-      const authorization = options.authorization ?? denyByDefaultSubmissionAuthorization();
+  const authorization = options.authorization ?? denyByDefaultSubmissionAuthorization();
   const broadcastAdapter = options.broadcastAdapter ?? notSupportedSubmissionBroadcastAdapter();
   const audit = options.audit ?? noopAuditSink;
-      const chainId = options.chainId ?? 31337;
-  const defaultVerifyingContract = options.verifyingContract ?? ZERO_ADDRESS;
+  if (!Number.isInteger(options.chainId)) {
+    throw new Error("chainId is required to create the product submission service");
+  }
+  if (!options.verifyingContract) {
+    throw new Error("verifyingContract is required to create the product submission service");
+  }
+  const chainId = options.chainId;
+  const defaultVerifyingContract = options.verifyingContract;
 
   return {
     async prepareSubmit(taskId, input, principal) {
@@ -135,6 +149,38 @@ export function createProductSubmissionService(options: ProductSubmissionService
         });
       }
 
+      // submitSignal is plan-scoped and the signature commits to
+      // (planId, orderId). The planId comes from the indexer projection, never
+      // from local fabrication; a missing planId must fail the prepare instead
+      // of producing a signature that can only be rejected on chain. An
+      // ambiguous bare order id (same orderId reused across plans) is rejected
+      // as ambiguous_order_id instead of silently picking one plan.
+      let resolvedPlanId: Hex | undefined;
+      try {
+        resolvedPlanId = options.resolveOrderPlanId
+          ? await options.resolveOrderPlanId(chainSignal.orderId)
+          : undefined;
+      } catch (error) {
+        if (error instanceof ProductOrderLookupError) {
+          throw new ProductSubmissionError(
+            409,
+            "ambiguous_order_id",
+            error.message,
+            { orderId: chainSignal.orderId, details: error.details }
+          );
+        }
+        throw error;
+      }
+      const planId = normalizeResolvedPlanId(resolvedPlanId);
+      if (!planId) {
+        throw new ProductSubmissionError(
+          409,
+          "order_plan_unresolved",
+          "state-machine projection has no planId for this order; refusing to prepare a plan-scoped signal signature",
+          { orderId: chainSignal.orderId }
+        );
+      }
+
       const createdAt = now();
       const deadlineSeconds = Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const nonce = normalizeNonce(nonceFactory());
@@ -150,6 +196,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
       const typedData = buildProductSubmitTypedData({
         chainId,
         verifyingContract,
+        planId,
         orderId: chainSignal.orderId,
         sourceId: chainSignal.sourceId,
         signalId: chainSignal.signalId,
@@ -164,6 +211,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
         taskId,
         orderId: task.orderId,
         onchainOrderId: chainSignal.orderId,
+        planId,
         stageIdentifier: task.stageId,
         signalName,
         sourceId: chainSignal.sourceId,
@@ -240,6 +288,41 @@ export function createProductSubmissionService(options: ProductSubmissionService
         });
       }
 
+      // Adapters that cannot broadcast must not consume the prepared
+      // submission or its nonce: the signature is received and reported,
+      // but no chain transaction was attempted and nothing is marked used.
+      if (broadcastAdapter.attemptsBroadcast === false) {
+        const submissionId = submissionIdFactory();
+        const createdAt = now().toISOString();
+        const signatureHash = signatureHashFor(signature);
+        const broadcast = await broadcastAdapter.broadcast({
+          prepared: dtoFromPreparedRecord(prepared),
+          signature,
+          recoveredSubmitter,
+          evidence: prepared.evidenceRecords
+        });
+        const submission = withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
+          submissionId,
+          recoveredSubmitter,
+          signatureHash,
+          createdAt,
+          broadcast
+        }));
+        await store.putSubmission(submission);
+        await audit.record({
+          type: "relayer.submit.result",
+          action: prepared.signalName,
+          outcome: "skipped",
+          subject: {
+            ...submissionAuditSubject(prepared),
+            submissionId
+          },
+          ...(submission.errorCode ? { errorCode: submission.errorCode } : {}),
+          retryable: false
+        });
+        return submission;
+      }
+
       const nonceKey = submissionNonceKey(prepared);
       const reserved = await store.reserveNonce(nonceKey);
       if (!reserved) {
@@ -254,40 +337,116 @@ export function createProductSubmissionService(options: ProductSubmissionService
         throw new ProductSubmissionError(409, "duplicate_submit", "submission nonce has already been used");
       }
 
-      const submissionId = submissionIdFactory();
-      const createdAt = now().toISOString();
-      const signatureHash = signatureHashFor(signature);
-      const broadcast = await broadcastAdapter.broadcast({
-        prepared: dtoFromPreparedRecord(prepared),
-        signature,
-        recoveredSubmitter,
-        evidence: prepared.evidenceRecords
-      });
-      const submission = withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
-        submissionId,
-        recoveredSubmitter,
-        signatureHash,
-        createdAt,
-        broadcast
-      }));
-      await withSubmissionStoreTransaction(store, async () => {
-        await store.putSubmission(submission);
-        await store.markPreparedUsed(prepared.prepareId, submissionId, submission.updatedAt);
-      });
+      // From here the nonce reservation is held. If the broadcast or durable
+      // store write throws before a submission record exists, release it and
+      // rethrow. A returned retryable failure without a txHash is likewise a
+      // pre-broadcast observation: record the attempt, release the nonce, and
+      // leave the prepare reusable. Any result carrying a txHash keeps the
+      // reservation because the chain may already own that nonce.
+      let submission: ProductSubmissionDTO;
+      let broadcastSubmissionId: string | undefined;
+      let broadcastTxHash: Hex | undefined;
+      try {
+        const submissionId = submissionIdFactory();
+        const createdAt = now().toISOString();
+        const signatureHash = signatureHashFor(signature);
+        const broadcast = await broadcastAdapter.broadcast({
+          prepared: dtoFromPreparedRecord(prepared),
+          signature,
+          recoveredSubmitter,
+          evidence: prepared.evidenceRecords
+        });
+        submission = withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
+          submissionId,
+          recoveredSubmitter,
+          signatureHash,
+          createdAt,
+          broadcast
+        }));
+        broadcastSubmissionId = submissionId;
+        broadcastTxHash = submission.txHash;
+        await withSubmissionStoreTransaction(store, async () => {
+          await store.putSubmission(submission);
+          if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
+            return;
+          }
+          await store.markPreparedUsed(prepared.prepareId, submissionId, submission.updatedAt);
+        });
+        if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
+          await store.releaseNonce?.(nonceKey);
+        }
+      } catch (error) {
+        if (broadcastSubmissionId && broadcastTxHash) {
+          // 广播已成功（拿到 txHash）但持久化失败：链上交易可能已占用
+          // nonce，不得释放。先尽力落一条 failed（persist_failed，带 txHash、
+          // 回执未知如实报 not_checked）的提交档案保证台账可追溯，再上抛
+          // 原始错误；落档本身失败也不能掩盖原始错误。
+          try {
+            await store.putSubmission(withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
+              submissionId: broadcastSubmissionId,
+              recoveredSubmitter,
+              signatureHash: signatureHashFor(signature),
+              createdAt: now().toISOString(),
+              broadcast: {
+                status: "failed",
+                txHash: broadcastTxHash,
+                errorCode: "persist_failed",
+                message: "broadcast succeeded but persisting the submission failed; the receipt is unknown and the nonce stays consumed",
+                retryable: false,
+                deadLetter: true
+              }
+            })));
+          } catch {
+            // 尽力而为：落档失败时保持原始错误继续上抛。
+          }
+          throw error;
+        }
+        // 广播本身抛错（未拿到 txHash）：未上链、未落档，释放 nonce 让同一
+        // prepareId 保持可重试（基线 c64f4e8 行为）。
+        await store.releaseNonce?.(nonceKey);
+        throw error;
+      }
       await audit.record({
         type: "relayer.submit.result",
         action: prepared.signalName,
         outcome: submission.status === "failed" ? "failed" : "succeeded",
         subject: {
           ...submissionAuditSubject(prepared),
-          submissionId
+          submissionId: submission.submissionId
         },
         ...(submission.txHash ? { txHash: submission.txHash } : {}),
         ...(submission.errorCode ? { errorCode: submission.errorCode } : {}),
         retryable: submission.retryable
       });
       if (isEvidenceBindingSubmission(submission)) {
-        await bindSubmittedEvidence(options.evidenceReader, prepared, submission);
+        // CS-A4：链上广播已成功——绑定失败是服务端补账缺口，不得把已成功
+        // 的提交以异常报成 500（违反信封契约）。返回成功提交结果，同时落
+        // 审计事件供对账；prepare 已被消费，绑定补账走人工/reconcile 路径。
+        try {
+          await bindSubmittedEvidence(options.evidenceReader, prepared, submission);
+        } catch (error) {
+          try {
+            await audit.record({
+              // 审计 type 即分类载体：evidence_bind_failed 尚无 taxonomy
+              // 条目（taxonomy 在 uvp-protocol 仓登记，超出本编队所有权），
+              // 不引入未登记的 errorCode 字面量。
+              type: "relayer.submit.evidence_bind_failed",
+              action: prepared.signalName,
+              outcome: "failed",
+              subject: {
+                ...submissionAuditSubject(prepared),
+                submissionId: submission.submissionId,
+                ...(submission.txHash ? { txHash: submission.txHash } : {})
+              },
+              retryable: true,
+              metadata: {
+                message: error instanceof Error ? redactErrorMessage(error) : "unknown evidence bind error"
+              }
+            });
+          } catch {
+            // 审计通道不可用不得改变提交响应语义。
+          }
+        }
       }
       return submission;
     },
@@ -428,8 +587,24 @@ function normalizeBytes32OrHash(value: string, fieldName: string): Hex {
   return keccak256Hex(value) as Hex;
 }
 
+const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+/**
+ * the projection must supply a real, non-zero planId. Anything else
+ * (undefined, malformed, or the zero placeholder) is treated as "unresolved" so
+ * the zero placeholder can never be signed or broadcast.
+ */
+function normalizeResolvedPlanId(value: Hex | string | undefined): Hex | undefined {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    return undefined;
+  }
+  const normalized = value.toLowerCase() as Hex;
+  return normalized === ZERO_BYTES32 ? undefined : normalized;
+}
+
 export function notSupportedSubmissionBroadcastAdapter(): SubmissionBroadcastAdapter {
   return {
+    attemptsBroadcast: false,
     async broadcast() {
       return {
         status: "not_attempted",
@@ -871,9 +1046,19 @@ function defaultSubmissionReconcileFields(submission: ProductSubmissionDTO): TxR
     };
   }
   if (submission.status === "failed") {
+    // failed + txHash ≠ 回执失败：只有广播适配器确认回执 reverted
+    // （errorCode = transaction_reverted）才如实报 failed；其余带 txHash 的
+    // 失败（回执未复核/回执等待抛错）回执未知，如实报 not_checked，
+    // 交给 reconcile worker 复核。
+    const receiptVerifiedFailed = submission.txHash !== undefined
+      && submission.errorCode === "transaction_reverted";
     return {
       reconcileStatus: "failed",
-      receiptStatus: submission.txHash ? "failed" : "not_checked",
+      receiptStatus: receiptVerifiedFailed
+        ? "failed"
+        : submission.txHash && submission.errorCode === "transaction_receipt_unknown"
+          ? "unknown"
+          : "not_checked",
       projectionStatus: "not_checked"
     };
   }
@@ -916,6 +1101,7 @@ function submissionCommon(
     taskId: prepared.taskId,
     orderId: prepared.orderId,
     onchainOrderId: prepared.onchainOrderId,
+    planId: prepared.planId,
     stageIdentifier: prepared.stageIdentifier,
     signalName: prepared.signalName,
     sourceId: prepared.sourceId,

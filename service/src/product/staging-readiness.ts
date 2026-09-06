@@ -1,4 +1,5 @@
 import { redactSecrets } from "../security/redaction.js";
+import { compareChainPointers } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type {
   ProductChainProofDTO,
@@ -111,9 +112,6 @@ function readinessReasons(input: {
   if (input.profile.preflightStrict !== true || input.profile.preflightStatus !== "passed") {
     reasons.push("staging_preflight_not_passed");
   }
-  if (input.profile.demoMode === true) {
-    reasons.push("product_demo_mode_enabled");
-  }
   if (input.profile.e2eControls === true) {
     reasons.push("product_e2e_fixtures_enabled");
   }
@@ -164,7 +162,6 @@ function profileSummary(diagnostics: JsonRecord): JsonRecord {
     environment: stringOf(diagnostics.environment) ?? stringOf(recordOf(diagnostics.runtime)?.environment) ?? "unknown",
     preflightStrict: preflight?.strict === true,
     preflightStatus: stringOf(preflight?.status) ?? "unknown",
-    demoMode: product?.demoMode === true || diagnostics.demoMode === true,
     e2eControls: product?.e2eControls === true || diagnostics.e2eControls === true,
     registrationAdapter: stringOf(product?.registrationAdapter) ?? "unknown",
     permissiveAuthorizationRequested: product?.permissiveAuthorizationRequested === true,
@@ -218,7 +215,9 @@ function indexerSummary(diagnostics: JsonRecord): JsonRecord {
     eventCount: numberOf(indexer?.eventCount),
     lastEventName: stringOrNull(indexer?.lastEventName),
     rebuildStatus,
-    rebuildReady: rebuildStatus === "completed" || rebuildStatus === "idle" || rebuildStatus === "unknown",
+    // staging readiness 的 rebuild "unknown" 不视为就绪——重建状态未知的
+    // 部署不得宣告 ready，只有 completed/idle 算就绪。
+    rebuildReady: rebuildStatus === "completed" || rebuildStatus === "idle",
     rebuild: {
       status: rebuildStatus,
       deploymentBlock: stringOrNull(rebuild?.deploymentBlock),
@@ -334,8 +333,10 @@ function roleInputSummary(diagnostics: JsonRecord): JsonRecord {
   const governanceSigner = recordOf(operatorRoles?.governanceSigner);
   const governanceAdminReviewer = recordOf(operatorRoles?.governanceAdminReviewer);
   const opsConsoleAdmin = recordOf(operatorRoles?.opsConsoleAdmin);
+  const governanceSimulated = governance?.broadcastEnabled !== true;
   const ready = relayer?.configured === true &&
     governance?.configured === true &&
+    !governanceSimulated &&
     privateKeyRoleReady(deployer) &&
     addressRoleReady(stateMachineOwner) &&
     addressRoleReady(planPublisher) &&
@@ -351,6 +352,7 @@ function roleInputSummary(diagnostics: JsonRecord): JsonRecord {
     ready,
     relayerConfigured: relayer?.configured === true,
     governanceConfigured: governance?.configured === true,
+    governanceSimulatedIdentityRegistration: governanceSimulated,
     deployerConfigured: privateKeyRoleReady(deployer),
     stateMachineOwnerConfigured: addressRoleReady(stateMachineOwner),
     planPublisherConfigured: addressRoleReady(planPublisher),
@@ -378,7 +380,7 @@ function publishedPlanForOrder(
 
 function latestProof(proofs: readonly ProductChainProofDTO[]): JsonRecord | null {
   const proof = [...proofs].sort((left, right) =>
-    Number(BigInt(right.blockNumber) - BigInt(left.blockNumber)) || right.logIndex - left.logIndex
+    compareChainPointers(productProofPointer(right), productProofPointer(left))
   )[0];
   return proof
     ? {
@@ -387,6 +389,18 @@ function latestProof(proofs: readonly ProductChainProofDTO[]): JsonRecord | null
         transactionHash: proof.transactionHash
       }
     : null;
+}
+
+function productProofPointer(proof: ProductChainProofDTO) {
+  return {
+    chainId: proof.chainId,
+    blockNumber: BigInt(proof.blockNumber),
+    ...(proof.transactionIndex !== undefined
+      ? { transactionIndex: proof.transactionIndex }
+      : {}),
+    transactionHash: proof.transactionHash as `0x${string}`,
+    logIndex: proof.logIndex
+  };
 }
 
 function privateKeyRoleReady(value: JsonRecord | undefined): boolean {

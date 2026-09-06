@@ -18,6 +18,10 @@ export interface IdentityDescriptorHashInput {
   readonly account: string;
   readonly review?: GovernanceReviewHashInput;
   readonly metadata?: unknown;
+  /** 供应商档案主体必须进 descriptor 哈希。 */
+  readonly profile?: unknown;
+  readonly capability?: unknown;
+  readonly reputation?: unknown;
 }
 
 export function hashGovernanceReviewMetadata(input: GovernanceReviewHashInput): Hex {
@@ -29,13 +33,18 @@ export function hashGovernanceReviewPolicy(input: GovernanceReviewHashInput): He
 }
 
 export function hashIdentityDescriptor(input: IdentityDescriptorHashInput): Hex {
+  // descriptor 哈希必须覆盖 profile/capability/reputation 全部三块档案，
+  // 否则档案可在不改变 descriptorHash 的情况下被替换，链上指纹形同虚设。
   return hashGovernanceCanonicalJson({
     version: 1,
     kind: "identityDescriptor",
     subjectId: input.subjectId,
     account: input.account.toLowerCase(),
     review: input.review ? buildGovernanceReviewMetadataDocument(input.review) : null,
-    metadata: input.metadata ?? null
+    metadata: input.metadata ?? null,
+    profile: input.profile ?? null,
+    capability: input.capability ?? null,
+    reputation: input.reputation ?? null
   }, "descriptorHash");
 }
 

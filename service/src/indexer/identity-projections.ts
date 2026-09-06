@@ -12,6 +12,7 @@ export interface IdentityProjectionProvenance {
   readonly chainId: number;
   readonly contractAddress: Address;
   readonly blockNumber: bigint;
+  readonly transactionIndex?: number;
   readonly transactionHash: Hex;
   readonly logIndex: number;
 }
@@ -172,6 +173,9 @@ function provenanceOf(pointer: ChainPointer): IdentityProjectionProvenance {
     chainId: pointer.chainId,
     contractAddress: pointer.contractAddress,
     blockNumber: pointer.blockNumber,
+    ...(pointer.transactionIndex !== undefined
+      ? { transactionIndex: pointer.transactionIndex }
+      : {}),
     transactionHash: pointer.transactionHash,
     logIndex: pointer.logIndex,
   };

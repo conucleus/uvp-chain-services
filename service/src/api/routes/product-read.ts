@@ -6,17 +6,21 @@ import {
   type ProductParticipantViewQuery
 } from "../../product/service.js";
 import { buildProductApiStagingReadiness } from "../../product/staging-readiness.js";
-import { normalizeAddress } from "../../shared/types.js";
+import { redactErrorMessage } from "../../security/redaction.js";
+import type { ProjectionSyncState } from "../../storage/projection-store.js";
 import { StorageUnavailableError } from "../../storage/errors.js";
-import { cleanQuery, readApiHeader, type ApiRequest, type ApiResponse, type ApiRouteContext } from "../route-context.js";
+import { cleanQuery, type ApiRequest, type ApiResponse, type ApiRouteContext } from "../route-context.js";
+import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { RouteModule } from "../route-module.js";
 
 type ParsedParticipantViewQuery =
   | { readonly ok: true; readonly query: ProductParticipantViewQuery }
   | { readonly ok: false; readonly response: ApiResponse };
 
-export function createProductReadRouteModule(): RouteModule {
-  return {
+export function createProductReadRouteModule(options: {
+  readonly runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2];
+} = {}): RouteModule {
+  const routeModule: RouteModule = {
     async handle(request, context) {
       if (request.method === "GET" && request.pathname === "/product/staging/readiness") {
         return withStorageGuard(async () => {
@@ -40,7 +44,7 @@ export function createProductReadRouteModule(): RouteModule {
       const participantTaskMatch = /^\/product\/me\/tasks\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && participantTaskMatch) {
         return withStorageGuard(async () => {
-          const participantQuery = await parseParticipantViewQuery(request, context);
+          const participantQuery = await parseParticipantViewQuery(request, context, options.runtimeEnvironment);
           if (!participantQuery.ok) {
             return participantQuery.response;
           }
@@ -62,35 +66,35 @@ export function createProductReadRouteModule(): RouteModule {
 
       if (request.method === "GET" && request.pathname === "/product/me/tasks") {
         return withStorageGuard(async () => {
-          const participantQuery = await parseParticipantViewQuery(request, context);
+          const participantQuery = await parseParticipantViewQuery(request, context, options.runtimeEnvironment);
           if (!participantQuery.ok) {
             return participantQuery.response;
           }
           const view = await context.productService.getParticipantView(participantQuery.query);
           return {
             status: 200,
-            body: { participant: view.participant, tasks: context.productE2eControls.listTasks(view.tasks) }
+            body: { participant: view.participant, tasks: view.tasks }
           };
         });
       }
 
       if (request.method === "GET" && request.pathname === "/product/me/orders") {
         return withStorageGuard(async () => {
-          const participantQuery = await parseParticipantViewQuery(request, context);
+          const participantQuery = await parseParticipantViewQuery(request, context, options.runtimeEnvironment);
           if (!participantQuery.ok) {
             return participantQuery.response;
           }
           const view = await context.productService.getParticipantView(participantQuery.query);
           return {
             status: 200,
-            body: { participant: view.participant, orders: context.productE2eControls.listOrders(view.orders) }
+            body: { participant: view.participant, orders: view.orders }
           };
         });
       }
 
       if (request.method === "GET" && request.pathname === "/product/me") {
         return withStorageGuard(async () => {
-          const participantQuery = await parseParticipantViewQuery(request, context);
+          const participantQuery = await parseParticipantViewQuery(request, context, options.runtimeEnvironment);
           if (!participantQuery.ok) {
             return participantQuery.response;
           }
@@ -103,7 +107,8 @@ export function createProductReadRouteModule(): RouteModule {
                 orderCount: view.orders.length,
                 openTaskCount: view.tasks.filter((task) => task.status === "open").length,
                 blockedTaskCount: view.tasks.filter((task) => task.status === "blocked").length,
-                completedTaskCount: view.tasks.filter((task) => task.status === "done" || task.status === "submitted").length
+                // ORDER-FE 口径:submitted 是链上确认中,不算已完成;仅 done 计入。
+                completedTaskCount: view.tasks.filter((task) => task.status === "done").length
               }
             }
           };
@@ -112,17 +117,10 @@ export function createProductReadRouteModule(): RouteModule {
 
       if (request.method === "GET" && request.pathname === "/product/zhixus") {
         return withStorageGuard(async () => {
-          const demoFallbackRequested = isDemoFallbackRequested(request.query);
-          if (demoFallbackRequested && !context.productDemoMode) {
-            return {
-              status: 403,
-              body: { error: "demo_mode_disabled" }
-            };
-          }
           const zhixus = await context.productService.listZhixu();
           return {
             status: 200,
-            body: { zhixus: context.productE2eControls.listZhixu(zhixus) }
+            body: { zhixus }
           };
         });
       }
@@ -132,7 +130,7 @@ export function createProductReadRouteModule(): RouteModule {
           const orders = await context.productService.listOrders();
           return {
             status: 200,
-            body: { orders: context.productE2eControls.listOrders(orders) }
+            body: { orders }
           };
         });
       }
@@ -141,7 +139,7 @@ export function createProductReadRouteModule(): RouteModule {
       if (request.method === "GET" && productZhixuMatch) {
         return withStorageGuard(async () => {
           const zhixuId = decodeURIComponent(productZhixuMatch[1] ?? "");
-          const zhixu = context.productE2eControls.getZhixu(zhixuId) ?? await context.productService.getZhixu(zhixuId);
+          const zhixu = await context.productService.getZhixu(zhixuId);
           if (!zhixu) {
             return {
               status: 404,
@@ -159,7 +157,18 @@ export function createProductReadRouteModule(): RouteModule {
       if (request.method === "GET" && productOrderTimelineMatch) {
         return withStorageGuard(async () => {
           const orderId = decodeURIComponent(productOrderTimelineMatch[1] ?? "");
-          const timeline = await context.productService.listOrderTimeline(orderId);
+          let timeline;
+          try {
+            timeline = await context.productService.listOrderTimeline(orderId);
+          } catch (error) {
+            if (error instanceof ProductOrderLookupError) {
+              return {
+                status: 409,
+                body: { error: error.code, details: error.details }
+              };
+            }
+            throw error;
+          }
           if (!timeline) {
             return {
               status: 404,
@@ -177,7 +186,18 @@ export function createProductReadRouteModule(): RouteModule {
       if (request.method === "GET" && productOrderProofMatch) {
         return withStorageGuard(async () => {
           const orderId = decodeURIComponent(productOrderProofMatch[1] ?? "");
-          const proof = await context.productService.listOrderProof(orderId);
+          let proof;
+          try {
+            proof = await context.productService.listOrderProof(orderId);
+          } catch (error) {
+            if (error instanceof ProductOrderLookupError) {
+              return {
+                status: 409,
+                body: { error: error.code, details: error.details }
+              };
+            }
+            throw error;
+          }
           if (!proof) {
             return {
               status: 404,
@@ -197,7 +217,7 @@ export function createProductReadRouteModule(): RouteModule {
           const orderId = decodeURIComponent(productOrderMatch[1] ?? "");
           let order: ProductOrderDTO | undefined;
           try {
-            order = context.productE2eControls.order(await context.productService.getOrder(orderId));
+            order = await context.productService.getOrder(orderId);
           } catch (error) {
             if (error instanceof ProductOrderLookupError) {
               return {
@@ -225,14 +245,30 @@ export function createProductReadRouteModule(): RouteModule {
 
       if (request.method === "GET" && request.pathname === "/product/tasks") {
         return withStorageGuard(async () => {
-          const tasks = await context.productService.listTasks(cleanQuery({
+          // 任务 DTO 携带 assigneeWallet/proofRows 等参与者数据，匿名不可
+          // 枚举：身份取会话锚定钱包；已指派任务只有受理人本人可见，
+          // 未指派（纯链上事实）任务对已认证参与者开放。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
+          const walletAddress = wallet.identity.walletAddress;
+          if (request.query?.assignee && request.query.assignee.toLowerCase() !== walletAddress.toLowerCase()) {
+            return {
+              status: 403,
+              body: { error: "forbidden", message: "assignee filter must match the session-anchored wallet" }
+            };
+          }
+          const tasks = (await context.productService.listTasks(cleanQuery({
             orderId: request.query?.orderId,
-            assignee: request.query?.assignee,
             status: request.query?.status
-          }));
+          }))).filter((task) =>
+            !task.assigneeWallet ||
+            task.assigneeWallet.toLowerCase() === walletAddress.toLowerCase()
+          );
           return {
             status: 200,
-            body: { tasks: context.productE2eControls.listTasks(tasks) }
+            body: { tasks }
           };
         });
       }
@@ -240,9 +276,18 @@ export function createProductReadRouteModule(): RouteModule {
       const productTaskMatch = /^\/product\/tasks\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productTaskMatch) {
         return withStorageGuard(async () => {
+          // 任务详情（assigneeWallet/proofRows）要求已认证参与者：已指派
+          // 任务仅受理人本人可读；未指派任务不得区分"不存在"（404）。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
           const taskId = decodeURIComponent(productTaskMatch[1] ?? "");
-          const task = context.productE2eControls.task(await context.productService.getTask(taskId));
-          if (!task) {
+          const task = await context.productService.getTask(taskId);
+          if (!task || (
+            task.assigneeWallet &&
+            task.assigneeWallet.toLowerCase() !== wallet.identity.walletAddress.toLowerCase()
+          )) {
             return {
               status: 404,
               body: { error: "product_task_not_found" }
@@ -258,22 +303,66 @@ export function createProductReadRouteModule(): RouteModule {
       return undefined;
     }
   };
+  return withProjectionDegradationMeta(routeModule);
+}
+
+/**
+ * Product reads are projections of chain events. When the indexer marked the
+ * projection degraded (background refresh failed), every successful read
+ * response carries a meta.projectionSync marker so callers can see the
+ * projection may lag or be incomplete instead of silently trusting it.
+ */
+function withProjectionDegradationMeta(module: RouteModule): RouteModule {
+  return {
+    async handle(request, context) {
+      const response = await module.handle(request, context);
+      if (!response || response.status !== 200 || !isJsonRecord(response.body)) {
+        return response;
+      }
+      let syncState: ProjectionSyncState | undefined;
+      try {
+        syncState = await context.store.getSyncState();
+      } catch {
+        return response;
+      }
+      if (syncState?.syncStatus !== "degraded") {
+        return response;
+      }
+      return {
+        ...response,
+        body: {
+          ...response.body,
+          meta: {
+            projectionSync: {
+              status: "degraded",
+              ...(syncState.degradedReason ? { reason: redactErrorMessage(syncState.degradedReason) } : {})
+            }
+          }
+        }
+      };
+    }
+  };
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function parseParticipantViewQuery(
   request: ApiRequest,
-  context: ApiRouteContext
+  context: ApiRouteContext,
+  runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2]
 ): Promise<ParsedParticipantViewQuery> {
-  const rawWallet = request.query?.wallet ??
-    request.query?.walletAddress ??
-    readApiHeader(request.headers, "x-uvp-wallet-address") ??
-    readApiHeader(request.headers, "x-uvp-session-wallet-address") ??
-    readApiHeader(request.headers, "x-wallet-address");
-  if (!rawWallet) {
-    return { ok: true, query: {} };
+  // /product/me* 的身份 = 会话锚定地址（钱包会话
+  // 签名证明或 local dev 锚定头）。自报 query/header 钱包只做一致性核验
+  //（不一致即 403），不是身份来源——否则 ?wallet= 可读任意人任务与
+  // 订单视图。local 之外无会话即 401。
+  const wallet = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment);
+  if (!wallet.ok) {
+    return { ok: false, response: wallet.response };
   }
+  const walletAddress = wallet.identity.walletAddress;
   try {
-    const walletAddress = normalizeAddress(rawWallet, "wallet");
     const acceptedParticipants = (await context.productBffService.listParticipantAssignments(walletAddress))
       .map(productParticipantIdentityFromAssignment);
     return {
@@ -309,10 +398,6 @@ function productParticipantIdentityFromAssignment(assignment: ProductParticipant
     draftTitle: assignment.draft.title,
     ...(orderId ? { orderId } : {})
   };
-}
-
-function isDemoFallbackRequested(query: ApiRequest["query"]): boolean {
-  return query?.fallback === "demo" || query?.demo === "1" || query?.demo === "true";
 }
 
 async function withStorageGuard(action: () => Promise<ApiResponse>): Promise<ApiResponse> {

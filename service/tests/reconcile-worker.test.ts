@@ -40,7 +40,8 @@ describe("tx/indexer reconcile worker", () => {
       status: "submitted",
       reconcileStatus: "submitted",
       receiptStatus: "missing",
-      projectionStatus: "not_checked"
+      projectionStatus: "not_checked",
+      retryable: true
     });
 
     receipts.set(txHash, { status: "success", blockNumber: 10n });
@@ -105,17 +106,94 @@ describe("tx/indexer reconcile worker", () => {
     });
   });
 
+  it("isolates a broken registration record instead of stalling the whole reconcile round", async () => {
+    // 簇 E-3（2349 #8）：单条坏记录（缺字段/存储写失败）只计失败并继续，
+    // 不再把整轮（含 /admin/ops/reconcile/run）拖成 500。
+    const projectionStore = new MemoryProjectionStore();
+    const txHash = bytes32("a333");
+    const brokenTxHash = bytes32("a444");
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(11n, txHash, 0, "OrderRegistered", { orderId, planId }),
+        chainEvent(12n, brokenTxHash, 0, "OrderRegistered", { orderId: bytes32("0e0e"), planId })
+      ]
+    });
+    const productStore = new class extends MemoryProductBffStore {
+      override async updateRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
+        if (registration.triggerId === "registration_broken") {
+          throw new TypeError("broken record without planId");
+        }
+        return super.updateRegistration(registration);
+      }
+    }();
+    await productStore.createDraft({ ...draftFixture(), draftId: "draft_1" }, []);
+    await productStore.createDraft({ ...draftFixture(), draftId: "draft_broken" }, []);
+    await productStore.createRegistration(registrationFixture({ txHash }));
+    await productStore.createRegistration({
+      ...registrationFixture({ triggerId: "registration_broken", txHash: brokenTxHash }),
+      draftId: "draft_broken",
+      orderId: bytes32("0e0e")
+    });
+    const worker = workerFixture({ projectionStore, productStore, receipts: new Map() });
+
+    const summary = await worker.runOnce();
+
+    // 坏记录计失败，好记录照常确认，整轮不被拖死。
+    expect(summary).toMatchObject({ registrationsChecked: 2, failed: 1 });
+    await expect(productStore.getRegistration("registration_1")).resolves.toMatchObject({
+      status: "confirmed",
+      reconcileStatus: "confirmed"
+    });
+  });
+
+  it("confirms registrations through the (planId, orderId) composite key when two plans reuse an order id", async () => {
+    // 簇 E-3（0132 P2-11/0630 M-5/0632 CS-7）：裸 orderId 在同号订单跨 plan
+    // 复用时永远查不中 → registration 永卡 indexing；复合键查询必须命中
+    // 本 plan 的投影。
+    const otherPlanId = bytes32("0f0f");
+    const projectionStore = new MemoryProjectionStore();
+    const txHash = bytes32("a555");
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(10n, bytes32("a556"), 0, "OrderRegistered", { orderId, planId: otherPlanId }),
+        chainEvent(11n, txHash, 0, "OrderRegistered", { orderId, planId })
+      ]
+    });
+    const productStore = new MemoryProductBffStore();
+    await productStore.createDraft(draftFixture(), []);
+    await productStore.createRegistration(registrationFixture({ txHash }));
+    const worker = workerFixture({
+      projectionStore,
+      productStore,
+      receipts: new Map([[txHash, { status: "success", blockNumber: 11n }]])
+    });
+
+    await worker.runOnce();
+
+    await expect(productStore.getRegistration("registration_1")).resolves.toMatchObject({
+      status: "confirmed",
+      blockNumber: "11",
+      reconcileStatus: "confirmed",
+      projectionStatus: "present"
+    });
+  });
+
   it("moves submissions through indexing, confirmed, and failed receipt states", async () => {
     const projectionStore = new MemoryProjectionStore();
     const submissionStore = new InMemoryProductSubmissionStore();
     const successTx = bytes32("bbbb");
     const failedTx = bytes32("cccc");
+    const unknownTx = bytes32("dddd");
     const receipts = new Map<Hex, ReconcileReceipt | undefined>([
       [successTx, { status: "success", blockNumber: 20n }],
-      [failedTx, { status: "reverted", blockNumber: 21n }]
+      [failedTx, { status: "reverted", blockNumber: 21n }],
+      [unknownTx, { status: "pending", blockNumber: 22n }]
     ]);
     await submissionStore.putSubmission(submissionFixture({ submissionId: "sub_success", txHash: successTx }));
     await submissionStore.putSubmission(submissionFixture({ submissionId: "sub_failed", txHash: failedTx }));
+    await submissionStore.putSubmission(submissionFixture({ submissionId: "sub_unknown", txHash: unknownTx }));
     const worker = workerFixture({ projectionStore, submissionStore, receipts });
 
     await worker.runOnce();
@@ -132,10 +210,19 @@ describe("tx/indexer reconcile worker", () => {
       errorCode: "transaction_reverted",
       receiptStatus: "failed"
     });
+    await expect(submissionStore.getSubmission("sub_unknown")).resolves.toMatchObject({
+      status: "submitted",
+      blockNumber: "22",
+      receiptStatus: "unknown",
+      reconcileStatus: "submitted",
+      retryable: true,
+      deadLetter: false
+    });
 
     await projectionStore.resetFromEvents({
       deploymentBlock: 0n,
       events: [chainEvent(20n, successTx, 0, "SignalSubmitted", {
+        planId,
         orderId,
         sourceId,
         signalId,
@@ -218,6 +305,82 @@ describe("tx/indexer reconcile worker", () => {
       reconcileStatus: "stale_pending",
       receiptStatus: "timeout",
       errorCode: "tx_reconcile_timeout"
+    });
+  });
+
+  it("keeps tx-less pending submissions in broadcasting instead of relabeling them submitted", async () => {
+    // pending（无 txHash）= 仍在广播、回执未知：不得硬编码改标 submitted。
+    const projectionStore = new MemoryProjectionStore();
+    const submissionStore = new InMemoryProductSubmissionStore();
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_broadcasting",
+      status: "broadcasting",
+      broadcastStatus: "broadcasting"
+    }));
+    const worker = workerFixture({ projectionStore, submissionStore, receipts: new Map() });
+
+    const summary = await worker.runOnce();
+
+    expect(summary.submissionsChecked).toBe(1);
+    await expect(submissionStore.getSubmission("sub_broadcasting")).resolves.toMatchObject({
+      status: "broadcasting",
+      broadcastStatus: "broadcasting",
+      reconcileStatus: "broadcasting",
+      receiptStatus: "not_checked"
+    });
+  });
+
+  it("re-checks failed submissions that carry a txHash and self-heals on a successful receipt plus projection", async () => {
+    // 带 txHash 的 failed 必须复核回执：链上真相（回执成功 + 投影呈现）
+    // 推翻本地失败标记 → confirmed；无 txHash 的 failed 不进复扫。
+    const projectionStore = new MemoryProjectionStore();
+    const submissionStore = new InMemoryProductSubmissionStore();
+    const healedTx = bytes32("bbbb");
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_failed_with_tx",
+      txHash: healedTx,
+      status: "failed",
+      broadcastStatus: "failed"
+    }));
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_failed_without_tx",
+      status: "failed",
+      broadcastStatus: "failed"
+    }));
+    const receipts = new Map<Hex, ReconcileReceipt | undefined>([
+      [healedTx, { status: "success", blockNumber: 20n }]
+    ]);
+    const worker = workerFixture({ projectionStore, submissionStore, receipts });
+
+    const summary = await worker.runOnce();
+    // 只有带 txHash 的 failed 进复扫。
+    expect(summary.submissionsChecked).toBe(1);
+
+    // 回执未落地（map 命中前）时保持 failed，不虚报 submitted —— 这里直接
+    // 推进到投影确认后断言自愈结果。
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [chainEvent(20n, healedTx, 0, "SignalSubmitted", {
+        planId,
+        orderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter
+      })]
+    });
+    await worker.runOnce();
+
+    await expect(submissionStore.getSubmission("sub_failed_with_tx")).resolves.toMatchObject({
+      status: "confirmed",
+      broadcastStatus: "confirmed",
+      reconcileStatus: "confirmed",
+      receiptStatus: "success",
+      projectionStatus: "present"
+    });
+    await expect(submissionStore.getSubmission("sub_failed_without_tx")).resolves.toMatchObject({
+      status: "failed"
     });
   });
 });
@@ -305,14 +468,18 @@ function registrationFixture(input: {
 
 function submissionFixture(input: {
   readonly submissionId: string;
-  readonly txHash: Hex;
+  readonly txHash?: Hex;
+  readonly status?: ProductSubmissionDTO["status"];
+  readonly broadcastStatus?: ProductSubmissionDTO["broadcastStatus"];
 }): ProductSubmissionDTO {
+  const status = input.status ?? "submitted";
   return {
     submissionId: input.submissionId,
     prepareId: `${input.submissionId}_prepare`,
     taskId: `${orderId}:${sourceId}`,
     orderId,
     onchainOrderId: orderId,
+    planId,
     stageIdentifier: "stage",
     signalName: "confirm_stage",
     sourceId,
@@ -324,33 +491,37 @@ function submissionFixture(input: {
     submitter,
     nonce: "1",
     deadline: "1770000000",
-    status: "submitted",
+    status,
     signatureStatus: "signature_verified",
     signatureHash: bytes32("5001"),
     recoveredSubmitter: submitter,
-    broadcastStatus: "submitted",
-    txHash: input.txHash,
+    broadcastStatus: input.broadcastStatus ?? (input.txHash ? "submitted" : "broadcasting"),
+    ...(input.txHash ? { txHash: input.txHash } : {}),
     retryable: false,
     retryState: "not_applicable",
     deadLetter: false,
-    attempts: [{
-      attemptId: `${input.submissionId}:1`,
-      submissionId: input.submissionId,
-      orderId,
-      sourceId,
-      signalId,
-      submitter,
-      txHash: input.txHash,
-      status: "submitted",
-      gasPayer,
-      attemptNumber: 1,
-      retryable: false,
-      retryState: "not_applicable",
-      deadLetter: false,
-      createdAt: baseNow.toISOString(),
-      updatedAt: baseNow.toISOString()
-    }],
-    attemptCount: 1,
+    ...(input.txHash
+      ? {
+          attempts: [{
+            attemptId: `${input.submissionId}:1`,
+            submissionId: input.submissionId,
+            orderId,
+            sourceId,
+            signalId,
+            submitter,
+            txHash: input.txHash,
+            status: "submitted",
+            gasPayer,
+            attemptNumber: 1,
+            retryable: false,
+            retryState: "not_applicable",
+            deadLetter: false,
+            createdAt: baseNow.toISOString(),
+            updatedAt: baseNow.toISOString()
+          }],
+          attemptCount: 1
+        }
+      : { attempts: [], attemptCount: 0 }),
     proofRows: [],
     createdAt: baseNow.toISOString(),
     updatedAt: baseNow.toISOString()

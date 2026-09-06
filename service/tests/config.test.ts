@@ -2,7 +2,20 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildConfigDiagnostics, loadConfigFromEnv, runConfigPreflight } from "../src/config/index.js";
+import { buildConfigDiagnostics, loadConfigFromEnv as loadRawConfigFromEnv, runConfigPreflight } from "../src/config/index.js";
+
+// Storage driver/URL and the registration adapter are mandatory in every
+// environment now; tests that do not assert those failures get explicit
+// defaults injected here.
+const MANDATORY_STORAGE_AND_REGISTRATION_ENV = {
+  CHAIN_SERVICES_DATABASE_DRIVER: "memory",
+  CHAIN_SERVICES_DATABASE_URL: "memory://projection-store",
+  UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+} as const;
+
+function loadConfigFromEnv(env: Record<string, string | undefined> = {}): ReturnType<typeof loadRawConfigFromEnv> {
+  return loadRawConfigFromEnv({ ...MANDATORY_STORAGE_AND_REGISTRATION_ENV, ...env });
+}
 import { createApiRouter } from "../src/api/routes.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
@@ -52,6 +65,7 @@ describe("chain-services config", () => {
     tempDirs.push(dir);
     const manifestPath = join(dir, "addresses.json");
     writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
       network: {
         chainId: 31337,
         rpcUrlEnv: "ANVIL_RPC_URL"
@@ -86,13 +100,13 @@ describe("chain-services config", () => {
     expect(config.network.contracts.UVPIdentityRegistry).toBe("0x3333333333333333333333333333333333333333");
   });
 
-  it("loads v5 deployment registry manifests with modules", () => {
+  it("loads v1 deployment registry manifests with modules", () => {
     const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-"));
     tempDirs.push(dir);
-    const manifestPath = join(dir, "addresses.v5.json");
+    const manifestPath = join(dir, "addresses.v1.json");
     const deploymentId = `0x${"01".repeat(32)}`;
     writeFileSync(manifestPath, JSON.stringify({
-      schemaVersion: "uvp-eth.addresses.v5",
+      schemaVersion: "uvp-eth.addresses.v1",
       activeDeploymentId: deploymentId,
       stateMachineDeployments: [
         {
@@ -150,11 +164,28 @@ describe("chain-services config", () => {
     ]);
   });
 
+  it("rejects address manifests with a missing or unsupported schemaVersion", () => {
+    const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-"));
+    tempDirs.push(dir);
+    const missingPath = join(dir, "missing-schema.json");
+    writeFileSync(missingPath, JSON.stringify({ contracts: {} }));
+    expect(() => loadConfigFromEnv({ UVP_ADDRESS_MANIFEST: missingPath })).toThrow(
+      /schemaVersion must be "uvp-eth.addresses.v1"/,
+    );
+
+    const stalePath = join(dir, "stale-schema.json");
+    writeFileSync(stalePath, JSON.stringify({ schemaVersion: "uvp-eth.addresses.v5", contracts: {} }));
+    expect(() => loadConfigFromEnv({ UVP_ADDRESS_MANIFEST: stalePath })).toThrow(
+      /schemaVersion must be "uvp-eth.addresses.v1"/,
+    );
+  });
+
   it("does not let zero-address manual overrides erase manifest contracts", () => {
     const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-"));
     tempDirs.push(dir);
     const manifestPath = join(dir, "addresses.json");
     writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
       contracts: {
         UVPIdentityRegistry: {
           address: "0x2222222222222222222222222222222222222222"
@@ -172,9 +203,14 @@ describe("chain-services config", () => {
     expect(config.network.contracts.UVPIdentityRegistry).toBe("0x2222222222222222222222222222222222222222");
   });
 
-  it("defaults durable storage to the memory driver", () => {
-    const config = loadConfigFromEnv({});
+  it("requires the durable storage driver and URL to be declared explicitly", () => {
+    expect(() => loadRawConfigFromEnv({})).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
 
+    expect(() => loadRawConfigFromEnv({
+      CHAIN_SERVICES_DATABASE_DRIVER: "memory"
+    })).toThrow(/CHAIN_SERVICES_DATABASE_URL is required/);
+
+    const config = loadConfigFromEnv({});
     expect(config.database).toEqual({
       driver: "memory",
       url: "memory://projection-store",
@@ -210,29 +246,28 @@ describe("chain-services config", () => {
     });
   });
 
-  it("loads docked signal automation config and gas cap", () => {
+  it("loads dock automation config and gas cap", () => {
     const config = loadConfigFromEnv({
-      UVP_DOCKED_SIGNAL_AUTOMATION_ENABLED: "true",
-      UVP_DOCKED_SIGNAL_MAX_CANDIDATES_PER_RUN: "2",
-      UVP_DOCKED_SIGNAL_MAX_GAS_PER_TX: "250000",
-      UVP_DOCKED_SIGNAL_WAIT_FOR_RECEIPT: "false"
+      UVP_DOCK_AUTOMATION_ENABLED: "true",
+      UVP_DOCK_AUTOMATION_POLL_INTERVAL_MS: "250",
+      UVP_DOCK_AUTOMATION_MAX_CANDIDATES_PER_RUN: "2",
+      UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX: "250000",
+      UVP_DOCK_AUTOMATION_REDELIVERY_WINDOW_MS: "60000"
     });
 
-    expect(config.dockedSignalAutomation).toEqual({
+    expect(config.dockAutomation).toEqual({
       enabled: true,
+      pollIntervalMs: 250,
       maxCandidatesPerRun: 2,
       maxGasPerTx: 250_000n,
-      waitForReceipt: false
+      redeliveryWindowMs: 60_000
     });
   });
 
-  it("infers postgres driver from database URL", () => {
-    const config = loadConfigFromEnv({
+  it("does not infer a storage driver from the database URL", () => {
+    expect(() => loadRawConfigFromEnv({
       CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:uvp@127.0.0.1:5432/uvp"
-    });
-
-    expect(config.database.driver).toBe("postgres");
-    expect(config.database.url).toBe("postgres://uvp:uvp@127.0.0.1:5432/uvp");
+    })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
   });
 
   it("loads security hardening config", () => {
@@ -266,7 +301,15 @@ describe("chain-services config", () => {
       roleClaim: "roles",
       principalClaim: "sub",
       displayNameClaim: "name",
-      clockToleranceSeconds: 60
+      clockToleranceSeconds: 60,
+      walletSession: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: true
+      }
     });
 
     expect(loadConfigFromEnv(storeAuthJwtEnv).storeAuth).toEqual({
@@ -277,7 +320,15 @@ describe("chain-services config", () => {
       roleClaim: "roles",
       principalClaim: "sub",
       displayNameClaim: "name",
-      clockToleranceSeconds: 30
+      clockToleranceSeconds: 30,
+      walletSession: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: true
+      }
     });
   });
 
@@ -304,16 +355,27 @@ describe("chain-services config", () => {
     }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in testnet/);
 
     const { CHAIN_SERVICES_DATABASE_URL: _databaseUrl, ...missingDatabaseUrl } = testnetEnv(databaseUrl);
-    expect(() => loadConfigFromEnv(missingDatabaseUrl)).toThrow(/CHAIN_SERVICES_DATABASE_URL is required/);
+    expect(() => loadRawConfigFromEnv(missingDatabaseUrl)).toThrow(/CHAIN_SERVICES_DATABASE_URL is required/);
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       CHAIN_SERVICES_DATABASE_DRIVER: "sqlite",
       CHAIN_SERVICES_DATABASE_URL: sqliteConfigUrl(tempDirs)
     }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in testnet/);
 
+    // D18 裁决：受管 PG 上 poll 间隔必须显式配置（推荐温和正值）；
+    // 显式 0 需 UVP_INDEXER_POLL_DISABLED_ACK=1 知情确认。
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
-      UVP_INDEXER_POLL_INTERVAL_MS: "1000"
-    }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS=0/);
+      UVP_INDEXER_POLL_INTERVAL_MS: undefined
+    }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS must be explicitly configured/);
+
+    expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
+      UVP_INDEXER_POLL_INTERVAL_MS: "0"
+    }))).toThrow(/UVP_INDEXER_POLL_DISABLED_ACK=1/);
+
+    expect(loadConfigFromEnv(testnetEnv(databaseUrl, {
+      UVP_INDEXER_POLL_INTERVAL_MS: "0",
+      UVP_INDEXER_POLL_DISABLED_ACK: "1"
+    })).api.indexerPollIntervalMs).toBe(0);
   });
 
   it("rejects testnet missing RPC, wrong chain id, local RPC, or incomplete contracts", () => {
@@ -345,9 +407,11 @@ describe("chain-services config", () => {
   it("rejects testnet demo controls, permissive auth, memory registration, and unsafe keys", () => {
     const databaseUrl = testnetPostgresConfigUrl();
 
-    expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
+    // UVP_PRODUCT_DEMO_MODE is not a known key: unknown keys are ignored and no
+    // demo fallback can be enabled anywhere.
+    expect(loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_PRODUCT_DEMO_MODE: "1"
-    }))).toThrow(/UVP_PRODUCT_DEMO_MODE/);
+    })).security.environment).toBe("testnet");
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_PRODUCT_E2E_FIXTURES: "1"
@@ -359,7 +423,11 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory"
-    }))).toThrow(/REGISTRATION_ADAPTER=memory/);
+    }))).toThrow(/UVP_PRODUCT_BFF_REGISTRATION_ADAPTER must be memory-trigger or anvil/);
+
+    expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
+      UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+    }))).toThrow(/REGISTRATION_ADAPTER=anvil is required in testnet/);
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED: "false"
@@ -387,7 +455,9 @@ describe("chain-services config", () => {
 
   it("runs safe strict preflight diagnostics for the testnet profile", async () => {
     const env = testnetEnv(testnetPostgresConfigUrl(), {
-      UVP_RPC_URL: "https://base-sepolia.example/rpc?api_key=rpc-secret"
+      UVP_RPC_URL: "https://base-sepolia.example/rpc?api_key=rpc-secret",
+      // strict 环境的模块清单 fail-closed 预检需要带 modules 的 deployment。
+      UVP_ADDRESS_MANIFEST: stagingManifestPath(tempDirs, "testnet.addresses.json")
     });
     const config = loadConfigFromEnv(env);
 
@@ -411,25 +481,26 @@ describe("chain-services config", () => {
         identityRegistryConfigured: true
       },
       product: {
-        demoMode: false,
         e2eControls: false,
         registrationAdapter: "anvil",
         permissiveAuthorizationRequested: false
       },
       storeAuth: {
-        mode: "dev_headers",
-        jwtConfigured: false,
-        externalIdentityEvidence: false,
-        evidenceClassification: "prototype",
-        evidenceReasons: ["store_auth_dev_headers"],
-        keySource: "missing",
-        jwksUrlConfigured: false,
-        issuerConfigured: false,
-        audienceConfigured: false,
+        // 簇 C 修正（审计三轮）：testnet 不再缺省 dev_headers——基线 env
+        // 显式 jwt + 外部 OIDC 证据。
+        mode: "jwt",
+        jwtConfigured: true,
+        externalIdentityEvidence: true,
+        evidenceClassification: "external_oidc",
+        evidenceReasons: [],
+        keySource: "jwks_url",
+        jwksUrlConfigured: true,
+        issuerConfigured: true,
+        audienceConfigured: true,
         roleClaim: "roles",
         principalClaim: "sub",
         displayNameClaimConfigured: true,
-        clockToleranceSeconds: 60
+        clockToleranceSeconds: 30
       },
       preflight: { strict: true, status: "passed" }
     });
@@ -516,15 +587,25 @@ describe("chain-services config", () => {
     }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres/);
 
     const { CHAIN_SERVICES_DATABASE_URL: _databaseUrl, ...missingDatabaseUrl } = stagingEnv(tempDirs);
-    expect(() => loadConfigFromEnv(missingDatabaseUrl)).toThrow(/CHAIN_SERVICES_DATABASE_URL/);
+    expect(() => loadRawConfigFromEnv(missingDatabaseUrl)).toThrow(/CHAIN_SERVICES_DATABASE_URL/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "true"
     }))).toThrow(/UVP_STAGING_ALLOW_AUTO_MIGRATIONS/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
-      UVP_INDEXER_POLL_INTERVAL_MS: "5000"
-    }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS=0/);
+      UVP_INDEXER_POLL_INTERVAL_MS: undefined
+    }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS must be explicitly configured/);
+
+    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+      UVP_INDEXER_POLL_INTERVAL_MS: "0"
+    }))).toThrow(/UVP_INDEXER_POLL_DISABLED_ACK=1/);
+
+    // D18 裁决：poll=0 带显式知情确认即可加载；温和正值是推荐缺省。
+    expect(loadConfigFromEnv(stagingEnv(tempDirs, {
+      UVP_INDEXER_POLL_INTERVAL_MS: "0",
+      UVP_INDEXER_POLL_DISABLED_ACK: "1"
+    })).api.indexerPollIntervalMs).toBe(0);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       RECONCILE_POLL_INTERVAL_MS: "5000"
@@ -538,9 +619,11 @@ describe("chain-services config", () => {
       UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object"
     }))).toThrow(/UVP_EVIDENCE_STORAGE_ADAPTER=s3/);
 
-    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+    // UVP_PRODUCT_DEMO_MODE is not a known key: unknown keys are ignored and no
+    // demo fallback can be enabled anywhere.
+    expect(loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_DEMO_MODE: "1"
-    }))).toThrow(/UVP_PRODUCT_DEMO_MODE/);
+    })).security.environment).toBe("staging");
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_E2E_FIXTURES: "1"
@@ -552,7 +635,11 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory"
-    }))).toThrow(/REGISTRATION_ADAPTER=anvil/);
+    }))).toThrow(/UVP_PRODUCT_BFF_REGISTRATION_ADAPTER must be memory-trigger or anvil/);
+
+    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+      UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+    }))).toThrow(/REGISTRATION_ADAPTER=anvil is required in staging/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: "false"
@@ -564,7 +651,7 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       STORE_AUTH_MODE: "dev_headers"
-    }))).toThrow(/STORE_AUTH_MODE=jwt/);
+    }))).toThrow(/dev_headers is only allowed in local/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       STORE_AUTH_JWKS_URL: "http://127.0.0.1:8789/.well-known/jwks.json"
@@ -648,16 +735,7 @@ describe("chain-services config", () => {
 
     const diagnostics = await runConfigPreflight(config, {
       env,
-      clients: {
-        network: {
-          getChainId: async () => 84532,
-          getBytecode: async () => "0x01"
-        },
-        governance: {
-          getChainId: async () => 84532,
-          readContract: async () => stagingGovernanceAddress
-        }
-      }
+      clients: stagingPreflightClients()
     });
 
     expect(diagnostics).toMatchObject({
@@ -708,7 +786,7 @@ describe("chain-services config", () => {
           addressMatches: true
         },
         governanceSigner: {
-          privateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY",
+          privateKeyEnv: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY",
           address: stagingGovernanceAddress,
           expectedAddress: stagingGovernanceAddress,
           addressMatches: true
@@ -717,7 +795,6 @@ describe("chain-services config", () => {
         opsConsoleAdmin: { configuredCount: 1 }
       },
       product: {
-        demoMode: false,
         e2eControls: false,
         registrationAdapter: "anvil",
         permissiveAuthorizationRequested: false
@@ -756,6 +833,53 @@ describe("chain-services config", () => {
     expect(serialized).not.toContain(productionRegistrarPrivateKey.slice(2));
     expect(serialized).not.toContain(testnetRelayerPrivateKey.slice(2));
     expect(serialized).not.toContain(testnetRegistrarPrivateKey.slice(2));
+  });
+
+  it("fails strict preflight closed when the active deployment manifest is missing modules", async () => {
+    // 簇 N：manifest 缺 modules 必须启动失败——扁平合约地址写法会让索引器
+    // 静默丢弃全部 patch/dock/派生信号模块事件投影。
+    const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-modules-"));
+    tempDirs.push(manifestDir);
+    const manifestPath = join(manifestDir, "flat.addresses.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
+      network: { chainId: 84532, rpcUrlEnv: "UVP_RPC_URL" },
+      deployment: { blockNumber: 100 },
+      contracts: {
+        UVPStateMachine: {
+          address: "0x1111111111111111111111111111111111111111",
+          deployment: { blockNumber: 110 }
+        },
+        UVPIdentityRegistry: {
+          address: "0x2222222222222222222222222222222222222222",
+          deployment: { blockNumber: 111 }
+        }
+      }
+    }));
+    const env = stagingEnv(tempDirs, {
+      UVP_ADDRESS_MANIFEST: manifestPath
+    });
+    const config = loadConfigFromEnv(env);
+    await expect(runConfigPreflight(config, {
+      env,
+      clients: stagingPreflightClients()
+    })).rejects.toThrow(/stateMachineDeployments with modules are required/);
+
+    // local 环境豁免：模块清单不是本地最小路径的硬门槛。
+    const localConfig = loadConfigFromEnv({
+      UVP_ADDRESS_MANIFEST: manifestPath,
+      UVP_RPC_URL: "http://127.0.0.1:8545"
+    });
+    const localDiagnostics = await runConfigPreflight(localConfig, {
+      env: { UVP_ADDRESS_MANIFEST: manifestPath },
+      clients: stagingPreflightClients()
+    });
+    expect(localDiagnostics.preflight.checks).toContainEqual(
+      expect.objectContaining({
+        name: "contracts.state_machine_modules_manifest",
+        status: "skipped"
+      })
+    );
   });
 
   it("fails staging preflight on signer mismatch, missing bytecode reads, or governance owner mismatch", async () => {
@@ -804,10 +928,10 @@ describe("chain-services config", () => {
   });
 
   it("rejects production non-Postgres storage, unsafe migrations, and Anvil default private keys", () => {
-    expect(() => loadConfigFromEnv({
+    expect(() => loadRawConfigFromEnv({
       CHAIN_SERVICES_RUNTIME_ENV: "production",
       ...storeAuthJwtEnv
-    })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production/);
+    })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
 
     expect(() => loadConfigFromEnv(productionEnv({
       CHAIN_SERVICES_DATABASE_DRIVER: "sqlite",
@@ -823,12 +947,69 @@ describe("chain-services config", () => {
     }))).toThrow(/Anvil default private key/);
   });
 
+  it("requires an explicit UVP_FINALITY_CONFIRMATIONS in production but keeps the default elsewhere", () => {
+    // ETH-11：production 不允许静默落到默认值 1（reorg 防线必须显式配置）。
+    const { UVP_FINALITY_CONFIRMATIONS: _finality, ...missingFinality } = productionEnv();
+    expect(() => loadConfigFromEnv(missingFinality)).toThrow(
+      /UVP_FINALITY_CONFIRMATIONS must be explicitly configured/
+    );
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_FINALITY_CONFIRMATIONS: "0"
+    }))).toThrow(/UVP_FINALITY_CONFIRMATIONS must be explicitly configured/);
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_FINALITY_CONFIRMATIONS: "-2"
+    }))).toThrow(/UVP_FINALITY_CONFIRMATIONS must be a non-negative safe integer/);
+
+    // 非生产保持默认 1 不变。
+    expect(loadConfigFromEnv(stagingEnv(tempDirs)).network.finalityConfirmations).toBe(12);
+    expect(loadConfigFromEnv().network.finalityConfirmations).toBe(1);
+  });
+
+  it("requires fully configured s3 evidence storage in production", () => {
+    const { UVP_EVIDENCE_STORAGE_ADAPTER: _adapter, ...missingAdapter } = productionEnv();
+    expect(() => loadConfigFromEnv(missingAdapter)).toThrow(
+      /UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in production/
+    );
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_EVIDENCE_STORAGE_ADAPTER: "local"
+    }))).toThrow(/UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in production/);
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object"
+    }))).toThrow(/UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in production/);
+
+    const { UVP_EVIDENCE_S3_BUCKET: _bucket, ...missingBucket } = productionEnv();
+    expect(() => loadConfigFromEnv(missingBucket)).toThrow(
+      /UVP_EVIDENCE_S3_BUCKET is required in production/
+    );
+
+    const { UVP_EVIDENCE_S3_REGION: _region, ...missingRegion } = productionEnv();
+    expect(() => loadConfigFromEnv(missingRegion)).toThrow(
+      /UVP_EVIDENCE_S3_REGION is required in production/
+    );
+
+    const { UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV: _accessKeyEnv, ...missingAccessKeyEnv } = productionEnv();
+    expect(() => loadConfigFromEnv(missingAccessKeyEnv)).toThrow(
+      /UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV is required in production/
+    );
+
+    const { UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV: _secretKeyEnv, ...missingSecretKeyEnv } = productionEnv();
+    expect(() => loadConfigFromEnv(missingSecretKeyEnv)).toThrow(
+      /UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV is required in production/
+    );
+  });
+
   it("rejects production demo, test controls, permissive auth, redaction gaps, and mock registration", () => {
     expect(loadConfigFromEnv(productionEnv()).security.environment).toBe("production");
 
-    expect(() => loadConfigFromEnv(productionEnv({
+    // UVP_PRODUCT_DEMO_MODE is not a known key: unknown keys are ignored and no
+    // demo fallback can be enabled anywhere.
+    expect(loadConfigFromEnv(productionEnv({
       UVP_PRODUCT_DEMO_MODE: "1"
-    }))).toThrow(/UVP_PRODUCT_DEMO_MODE/);
+    })).security.environment).toBe("production");
 
     expect(() => loadConfigFromEnv(productionEnv({
       UVP_PRODUCT_E2E_FIXTURES: "1"
@@ -848,7 +1029,7 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(productionEnv({
       STORE_AUTH_MODE: "dev_headers"
-    }))).toThrow(/STORE_AUTH_MODE=jwt/);
+    }))).toThrow(/dev_headers is only allowed in local/);
 
     expect(() => loadConfigFromEnv(productionEnv({
       STORE_AUTH_ISSUER: "http://localhost:8789/"
@@ -859,7 +1040,11 @@ describe("chain-services config", () => {
 
     expect(() => loadConfigFromEnv(productionEnv({
       UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory"
-    }))).toThrow(/REGISTRATION_ADAPTER=memory/);
+    }))).toThrow(/UVP_PRODUCT_BFF_REGISTRATION_ADAPTER must be memory-trigger or anvil/);
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+    }))).toThrow(/REGISTRATION_ADAPTER=anvil is required in production/);
 
     expect(() => loadConfigFromEnv(productionEnv({
       GOVERNANCE_BROADCAST_ENABLED: "true",
@@ -982,6 +1167,34 @@ describe("chain-services config", () => {
     expect(() => loadConfigFromEnv(keyEnv)).toThrow(/Anvil default private key/);
   });
 
+  it("resolves the governance signer key via GOVERNANCE_SIGNER_PRIVATE_KEY_ENV and fails loudly when missing", () => {
+    // DEPLOY 依赖：staging 剖面用名引用注入私钥；名/值二选一，广播开启但解析不到值必须点名失败。
+    const namedEnv = loadConfigFromEnv({
+      GOVERNANCE_BROADCAST_ENABLED: "true",
+      GOVERNANCE_SIGNER_PRIVATE_KEY_ENV: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY",
+      UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY: testnetRegistrarPrivateKey
+    });
+    expect(namedEnv.governance.signerPrivateKeyEnv).toBe("UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY");
+    expect(namedEnv.governance.signerPrivateKey).toBe(testnetRegistrarPrivateKey);
+
+    expect(() => loadConfigFromEnv({
+      GOVERNANCE_BROADCAST_ENABLED: "true",
+      GOVERNANCE_SIGNER_PRIVATE_KEY_ENV: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY"
+    })).toThrow(/UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY is required when GOVERNANCE_BROADCAST_ENABLED=true/);
+
+    const defaultValueForm = loadConfigFromEnv({
+      GOVERNANCE_BROADCAST_ENABLED: "true",
+      GOVERNANCE_SIGNER_PRIVATE_KEY: testnetRegistrarPrivateKey
+    });
+    expect(defaultValueForm.governance.signerPrivateKeyEnv).toBe("GOVERNANCE_SIGNER_PRIVATE_KEY");
+    expect(defaultValueForm.governance.signerPrivateKey).toBe(testnetRegistrarPrivateKey);
+
+    const { UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY: _stagingKey, ...missingStagingKey } = stagingEnv(tempDirs);
+    expect(() => loadConfigFromEnv(missingStagingKey)).toThrow(
+      /UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY is required/
+    );
+  });
+
   it("fails strict governance preflight when signer or registry owner does not match chain state", async () => {
     const env = testnetEnv(testnetPostgresConfigUrl(), {
       GOVERNANCE_BROADCAST_ENABLED: "true",
@@ -1003,6 +1216,46 @@ describe("chain-services config", () => {
         }
       }
     })).rejects.toThrow(/on-chain governance registry owner does not match GOVERNANCE_REGISTRY_OWNER_ADDRESS/);
+  });
+
+  it("drops the query string when a logged URL cannot be parsed", () => {
+    const malformed = "https://exa mple.com/path?token=raw-secret-value";
+    const redacted = redactSecrets({ url: malformed });
+    expect(redacted.url).toBe("https://exa mple.com/path?[redacted]");
+  });
+
+  it("keeps 64-hex business identifiers and only redacts secrets by key name or labeled text", () => {
+    // ETH-10：64-hex（bytes32）是业务标识，按键名驱动脱敏后必须保留原值。
+    const orderId = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const prepareId = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const redacted = redactSecrets({
+      planId: orderId,
+      message: `order ${orderId} prepared as ${prepareId} is ready`,
+      nested: { orderId, hookId: prepareId }
+    }) as { planId: string; message: string; nested: { orderId: string; hookId: string } };
+
+    expect(redacted.planId).toBe(orderId);
+    expect(redacted.message).toContain(orderId);
+    expect(redacted.message).toContain(prepareId);
+    expect(redacted.nested.orderId).toBe(orderId);
+    expect(redacted.nested.hookId).toBe(prepareId);
+
+    // 私钥/签名不能漏：键名匹配 secret 模式仍打码；错误消息里带标签的
+    // 私钥、裸 130-hex 签名同样打码。
+    const secretsRedacted = redactSecrets({
+      private_key: "0x1111111111111111111111111111111111111111111111111111111111111111",
+      signature: `0x${"aa".repeat(65)}`,
+      auth_token: "token-value",
+      errorText: `signing failed: private key 0x2222222222222222222222222222222222222222222222222222222222222222 is invalid`,
+      signatureText: `broadcast returned sig 0x${"bb".repeat(65)}`
+    }) as { private_key: string; signature: string; auth_token: string; errorText: string; signatureText: string };
+
+    expect(secretsRedacted.private_key).toBe("[redacted:secret]");
+    expect(secretsRedacted.signature).toBe("[redacted:secret]");
+    expect(secretsRedacted.auth_token).toBe("[redacted:secret]");
+    expect(secretsRedacted.errorText).not.toContain("22222222222222222222222222222222");
+    expect(secretsRedacted.errorText).toContain("[redacted:secret]");
+    expect(secretsRedacted.signatureText).not.toContain("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
   });
 
   it("redacts secrets and exposes safe health diagnostics", async () => {
@@ -1040,14 +1293,28 @@ describe("chain-services config", () => {
         UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222"
       }
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { configDiagnostics: diagnostics });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", configDiagnostics: diagnostics });
     const response = await router.handle({ method: "GET", pathname: "/healthz" });
 
+    // 簇 N 修正（审计三轮）：公共探针收口——healthz 只回聚合健康位，
+    // 诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
+      ok: true,
+      status: "ok",
+      sourceOfTruth: "contracts-and-chain-events"
+    });
+    expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
+
+    const adminResponse = await router.handle({
+      method: "GET",
+      pathname: "/admin/diagnostics",
+      headers: { "x-uvp-admin-id": "local-admin", "x-uvp-admin-role": "governance_admin" }
+    });
+    expect(adminResponse.status).toBe(200);
+    expect(adminResponse.body).toMatchObject({
       diagnostics: {
         environment: "local",
-        demoMode: false,
         e2eControls: false,
         storageDriver: "sqlite",
         relayerConfigured: true,
@@ -1055,9 +1322,8 @@ describe("chain-services config", () => {
         governance: { broadcastEnabled: false },
         storage: { driver: "sqlite", durable: true },
         product: {
-          demoMode: false,
           e2eControls: false,
-          registrationAdapter: "memory",
+          registrationAdapter: "memory-trigger",
           permissiveAuthorizationRequested: false
         },
         security: {
@@ -1078,7 +1344,7 @@ describe("chain-services config", () => {
         }
       }
     });
-    expect(JSON.stringify(response.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
+    expect(JSON.stringify(adminResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
   });
 
   it("marks non-local readiness degraded when Store metadata wiring falls back to memory", async () => {
@@ -1090,7 +1356,7 @@ describe("chain-services config", () => {
         checks: [{ name: "store_metadata.durable", status: "passed" }]
       }
     });
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: diagnostics,
       productRuntimeEnvironment: "production",
       evidenceStorage: productionSafeEvidenceStorage()
@@ -1098,11 +1364,23 @@ describe("chain-services config", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/readyz" });
 
+    // 簇 N 修正（审计三轮）：readyz 收口——只回 ready 位与 reasons，
+    // 诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
       ok: false,
       ready: false,
-      reasons: expect.arrayContaining(["store_metadata_degraded"]),
+      reasons: expect.arrayContaining(["store_metadata_degraded"])
+    });
+    expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
+
+    const adminResponse = await router.handle({
+      method: "GET",
+      pathname: "/admin/diagnostics",
+      headers: { "x-uvp-admin-id": "gov-reviewer-1", "x-uvp-admin-role": "governance_admin" }
+    });
+    expect(adminResponse.status).toBe(200);
+    expect(adminResponse.body).toMatchObject({
       diagnostics: {
         storeMetadata: {
           readiness: "degraded",
@@ -1128,9 +1406,21 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Reco
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
     ...storeAuthJwtEnv,
     UVP_CONTRACTS_JSON: productionContracts,
+    UVP_EVIDENCE_STORAGE_ADAPTER: "s3",
+    UVP_EVIDENCE_S3_BUCKET: "uvp-production-evidence",
+    UVP_EVIDENCE_S3_REGION: "us-east-1",
+    UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV: "UVP_PRODUCTION_EVIDENCE_S3_ACCESS_KEY_ID",
+    UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV: "UVP_PRODUCTION_EVIDENCE_S3_SECRET_ACCESS_KEY",
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: productionRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: productionRelayerPrivateKey,
+    // ETH-11：production 要求显式配置 finality 确认数，基线 env 一并带上。
+    UVP_FINALITY_CONFIRMATIONS: "12",
+    // 簇 C 修正（审计三轮）：production 强制显式非本地 RPC + admin 白名单
+    // 非空——静默回落 127.0.0.1:8545 与空白名单 fail-open 已废除。
+    UVP_RPC_URL: "https://base-mainnet.example/rpc",
+    GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
+    OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
     ...storeAuthJwtEnv,
     ...overrides
   };
@@ -1161,7 +1451,7 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: databaseUrl,
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "true",
-    UVP_INDEXER_POLL_INTERVAL_MS: "0",
+    UVP_INDEXER_POLL_INTERVAL_MS: "5000",
     UVP_CHAIN_ID: "84532",
     UVP_RPC_URL: "https://base-sepolia.example/rpc",
     UVP_CONTRACTS_JSON: productionContracts,
@@ -1169,6 +1459,11 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: testnetRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: testnetRelayerPrivateKey,
     UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
+    // 簇 C 修正（审计三轮）：testnet 必须显式 STORE_AUTH_MODE=jwt 且
+    // admin 白名单非空——缺省 dev_headers/空白名单的 fail-open 已废除。
+    ...storeAuthJwtEnv,
+    GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
+    OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
     ...overrides
   };
 }
@@ -1181,13 +1476,12 @@ function stagingEnv(tempDirs: string[], overrides: Record<string, string | undef
     CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:db-secret@staging-db.internal:5432/uvp",
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
-    UVP_INDEXER_POLL_INTERVAL_MS: "0",
+    UVP_INDEXER_POLL_INTERVAL_MS: "5000",
     ...storeAuthJwtEnv,
     UVP_CHAIN_ID: "84532",
     UVP_RPC_URL: "https://base-sepolia.example/rpc?api_key=rpc-secret",
     UVP_ADDRESS_MANIFEST: stagingManifestPath(tempDirs),
     UVP_FINALITY_CONFIRMATIONS: "12",
-    UVP_REORG_BUFFER_BLOCKS: "24",
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY_ENV: "UVP_STAGING_ORDER_REGISTRAR_PRIVATE_KEY",
     UVP_STAGING_ORDER_REGISTRAR_PRIVATE_KEY: productionRegistrarPrivateKey,
@@ -1216,7 +1510,8 @@ function stagingEnv(tempDirs: string[], overrides: Record<string, string | undef
     GOVERNANCE_BROADCAST_ENABLED: "true",
     GOVERNANCE_REGISTRY_OWNER_ADDRESS: stagingGovernanceAddress,
     GOVERNANCE_SIGNER_ADDRESS: stagingGovernanceAddress,
-    GOVERNANCE_SIGNER_PRIVATE_KEY: testnetRegistrarPrivateKey,
+    GOVERNANCE_SIGNER_PRIVATE_KEY_ENV: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY",
+    UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY: testnetRegistrarPrivateKey,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
     RECONCILE_WORKER_ENABLED: "true",
@@ -1234,7 +1529,7 @@ function stagingManifestPath(tempDirs: string[], filename = "staging.addresses.j
   tempDirs.push(dir);
   const manifestPath = join(dir, filename);
   writeFileSync(manifestPath, JSON.stringify({
-    schemaVersion: "uvp-eth.addresses.v5",
+    schemaVersion: "uvp-eth.addresses.v1",
     network: {
       chainId: 84532,
       rpcUrlEnv: "UVP_RPC_URL"
@@ -1251,16 +1546,46 @@ function stagingManifestPath(tempDirs: string[], filename = "staging.addresses.j
         address: "0x2222222222222222222222222222222222222222",
         deployment: { blockNumber: 111 }
       }
-    }
+    },
+    // strict 环境（production/testnet/staging）要求 active deployment 携带
+    // 全量模块清单：模块地址只经 deployment.modules 进索引器，扁平写法会
+    // 静默丢失全部 patch/dock 投影（fail-closed 预检）。
+    stateMachineDeployments: [
+      {
+        deploymentId: "0x" + "ab".repeat(32),
+        stateMachineAddress: "0x1111111111111111111111111111111111111111",
+        status: "active",
+        deploymentBlock: 110,
+        modules: {
+          stagePatch: "0x1212121212121212121212121212121212121212",
+          derivedSignal: "0x1313131313131313131313131313131313131313",
+          docking: "0x1414141414141414141414141414141414141414",
+          planMetadata: "0x1515151515151515151515151515151515151515",
+          orderLink: "0x1616161616161616161616161616161616161616",
+          lens: "0x1717171717171717171717171717171717171717"
+        }
+      }
+    ]
   }));
   return manifestPath;
 }
 
 function stagingPreflightClients() {
+  const manifestModuleByGetter: Record<string, string> = {
+    stagePatchModule: "0x1212121212121212121212121212121212121212",
+    derivedSignalModule: "0x1313131313131313131313131313131313131313",
+    dockingModule: "0x1414141414141414141414141414141414141414",
+    planMetadataModule: "0x1515151515151515151515151515151515151515",
+    orderLinkModule: "0x1616161616161616161616161616161616161616",
+    lens: "0x1717171717171717171717171717171717171717"
+  };
   return {
     network: {
       getChainId: async () => 84532,
-      getBytecode: async () => "0x01" as const
+      getBytecode: async () => "0x01" as const,
+      // 模块 getter 预检：返回与 stagingManifestPath 清单一致的模块地址。
+      readContract: async (call: { functionName: string }) =>
+        manifestModuleByGetter[call.functionName] ?? "0x0000000000000000000000000000000000000000"
     },
     governance: {
       getChainId: async () => 84532,

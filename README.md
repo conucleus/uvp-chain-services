@@ -23,11 +23,13 @@ requires the protocol packages to be published or linked into an equivalent loca
 workspace.
 
 Services may cache, project, relay, and translate chain facts, but they must not
-become the source of truth for plans, orders, signals, hooks, identity bindings, funds,
-approvals, releases, refunds, or disputes. Rebuildability from contract events is
-the default rule.
+become the source of truth for plans, orders, signals, hooks, or identity
+bindings. The only relayed transaction surface is the plan-scoped
+`submitSignalFor` broadcast of participant-signed signals; relayers pay gas and
+carry no business-action vocabulary of their own. Rebuildability from contract
+events is the default rule.
 
-Before repo split, this domain follows PRD109 as the service-side convergence
-gate for Product Schema v1, dynamic stage executor authority, docked Zhixu
-projection language, resource manifest/access state, Store authoring, proof/read models,
-operator audit, and signal-container producer APIs.
+This domain implements the service-side convergence gate for Product Schema v1,
+dynamic stage executor authority, docked Zhixu projection language, resource
+manifest/access state, Store authoring, proof/read models, operator audit, and
+signal-container producer APIs.

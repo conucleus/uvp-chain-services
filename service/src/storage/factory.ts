@@ -12,7 +12,15 @@ import type { Address } from "../shared/types.js";
 import { InMemoryProductSubmissionStore } from "../submissions/store.js";
 import { PostgresSubmissionStore } from "../submissions/postgres-store.js";
 import { SqliteSubmissionStore } from "../submissions/sqlite-store.js";
+import { SqliteBroadcastDedupeStore, type BroadcastDedupeStore } from "../submissions/broadcast-dedupe-sqlite-store.js";
+import { PostgresBroadcastDedupeStore } from "../submissions/broadcast-dedupe-postgres-store.js";
 import type { ProductSubmissionStore } from "../submissions/types.js";
+import { SqliteNotificationStateStore } from "../notifications/sqlite-store.js";
+import { PostgresNotificationStateStore } from "../notifications/postgres-store.js";
+import type {
+  NotificationDeliveryStore,
+  ParticipantNotificationReadStateStore
+} from "../notifications/service.js";
 import {
   InMemoryStoreSupplierMetadataStore,
   PostgresStoreSupplierMetadataStore,
@@ -42,6 +50,42 @@ import {
 import { MemoryStoreZhixuDraftStore, type StoreZhixuDraftStore } from "../store-console/zhixu-drafts.js";
 import { MemoryStoreZhixuVersionMetadataStore, type StoreZhixuVersionMetadataStore } from "../store-console/version.js";
 import { SqliteEvidenceStore } from "../evidence/sqlite-store.js";
+import {
+  InMemoryStoreWalletSessionStore,
+  SqliteStoreWalletSessionStore,
+  type StoreWalletSessionStore
+} from "../store-sessions/index.js";
+import {
+  InMemoryStorePublisherDelegationStore,
+  InMemoryStoreZhixuDecorationStore,
+  SqliteStorePublisherDelegationStore,
+  SqliteStoreZhixuDecorationStore,
+  type StorePublisherDelegationStore,
+  type StoreZhixuDecorationStore
+} from "../store-decoration/index.js";
+import {
+  InMemoryStoreIdentityDescriptorSnapshotStore,
+  SqliteStoreIdentityDescriptorSnapshotStore
+} from "../governance/descriptors.js";
+import {
+  InMemoryStoreListingStore,
+  SqliteStoreListingStore,
+  type StoreListingStore
+} from "../store-listings/index.js";
+import {
+  InMemoryStoreJoinApplicationStore,
+  SqliteStoreJoinApplicationStore,
+  type StoreJoinApplicationStore
+} from "../store-join/index.js";
+import {
+  PostgresStoreIdentityDescriptorSnapshotStore,
+  PostgresStoreJoinApplicationStore,
+  PostgresStoreListingStore,
+  PostgresStorePublisherDelegationStore,
+  PostgresStoreZhixuDecorationStore
+} from "../store-access-postgres-stores.js";
+import { PostgresStoreWalletSessionStore } from "../store-sessions/index.js";
+import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
 import { PostgresDatabase } from "./postgres-client.js";
 import { PostgresProjectionStore } from "./postgres.js";
 import { MemoryProjectionStore, type ProjectionStore } from "./projection-store.js";
@@ -66,6 +110,17 @@ export interface ChainServicesStores {
   readonly storeSupplierMetadataStore: StoreSupplierMetadataStore;
   readonly storeDockingSessionStore: StoreDockingSessionStore;
   readonly storeAuditStore: StoreAuditStore;
+  /** 钱包会话 / descriptor 快照 / 装修与委托 / 上架 / 加入申请的持久化 store。 */
+  readonly storeWalletSessionStore: StoreWalletSessionStore;
+  readonly identityDescriptorSnapshots: StoreIdentityDescriptorSnapshotStore;
+  readonly storeDecorationStore: StoreZhixuDecorationStore;
+  readonly storePublisherDelegationStore: StorePublisherDelegationStore;
+  readonly storeListingStore: StoreListingStore;
+  readonly storeJoinApplicationStore: StoreJoinApplicationStore;
+  /** sqlite/postgres 驱动下提供持久化通知状态；其余驱动为 undefined（内存）。 */
+  readonly notificationStateStore?: NotificationDeliveryStore & ParticipantNotificationReadStateStore;
+  /** sqlite/postgres 驱动下提供持久化 broadcast 去重状态；其余驱动为 undefined。 */
+  readonly broadcastDedupeStore?: BroadcastDedupeStore;
   close(): Promise<void>;
 }
 
@@ -116,6 +171,12 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         storeSupplierMetadataStore: new InMemoryStoreSupplierMetadataStore(),
         storeDockingSessionStore: new MemoryStoreDockingSessionStore(),
         storeAuditStore: new MemoryStoreAuditStore(),
+        storeWalletSessionStore: new InMemoryStoreWalletSessionStore(),
+        identityDescriptorSnapshots: new InMemoryStoreIdentityDescriptorSnapshotStore(),
+        storeDecorationStore: new InMemoryStoreZhixuDecorationStore(),
+        storePublisherDelegationStore: new InMemoryStorePublisherDelegationStore(),
+        storeListingStore: new InMemoryStoreListingStore(),
+        storeJoinApplicationStore: new InMemoryStoreJoinApplicationStore(),
         async close() {
           return undefined;
         }
@@ -170,6 +231,39 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         storeAuditStore: new SqliteStoreAuditStore({
           databaseUrl: options.database.url,
           migrations
+        }),
+        storeWalletSessionStore: new SqliteStoreWalletSessionStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        identityDescriptorSnapshots: new SqliteStoreIdentityDescriptorSnapshotStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        storeDecorationStore: new SqliteStoreZhixuDecorationStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        storePublisherDelegationStore: new SqliteStorePublisherDelegationStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        storeListingStore: new SqliteStoreListingStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        storeJoinApplicationStore: new SqliteStoreJoinApplicationStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        // 通知状态与 broadcast 去重状态落 sqlite。
+        notificationStateStore: new SqliteNotificationStateStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        broadcastDedupeStore: new SqliteBroadcastDedupeStore({
+          databaseUrl: options.database.url,
+          migrations
         })
       };
       return {
@@ -185,7 +279,15 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
             stores.storeZhixuVersionMetadataStore,
             stores.storeSupplierMetadataStore,
             stores.storeDockingSessionStore,
-            stores.storeAuditStore
+            stores.storeAuditStore,
+            stores.storeWalletSessionStore,
+            stores.identityDescriptorSnapshots,
+            stores.storeDecorationStore,
+            stores.storePublisherDelegationStore,
+            stores.storeListingStore,
+            stores.storeJoinApplicationStore,
+            stores.notificationStateStore,
+            stores.broadcastDedupeStore
           ]);
         }
       };
@@ -216,7 +318,18 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         storeZhixuVersionMetadataStore: new PostgresStoreZhixuVersionMetadataStore({ database }),
         storeSupplierMetadataStore: new PostgresStoreSupplierMetadataStore({ database }),
         storeDockingSessionStore: new PostgresStoreDockingSessionStore({ database }),
-        storeAuditStore: new PostgresStoreAuditStore({ database })
+        storeAuditStore: new PostgresStoreAuditStore({ database }),
+        storeWalletSessionStore: new PostgresStoreWalletSessionStore({ database }),
+        identityDescriptorSnapshots: new PostgresStoreIdentityDescriptorSnapshotStore({ database }),
+        storeDecorationStore: new PostgresStoreZhixuDecorationStore({ database }),
+        storePublisherDelegationStore: new PostgresStorePublisherDelegationStore({ database }),
+        storeListingStore: new PostgresStoreListingStore({ database }),
+        storeJoinApplicationStore: new PostgresStoreJoinApplicationStore({ database }),
+        // 通知状态与 broadcast 去重状态在生产拓扑（postgres）
+        // 同样持久化；表迁移见 migrations/postgres/0013。共享 database 连接，
+        // close 由 database.close() 统一负责。
+        notificationStateStore: new PostgresNotificationStateStore({ database }),
+        broadcastDedupeStore: new PostgresBroadcastDedupeStore({ database })
       };
       return {
         ...stores,

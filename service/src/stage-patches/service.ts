@@ -4,12 +4,12 @@ import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import type { ChainServicesRuntimeEnv } from "../config/index.js";
 import { canonicalJson } from "../shared/canonical-json.js";
 import {
-  DOCKED_ORDER_LINK_SIGNAL_ID,
   STAGE_EXECUTOR_PATCH_SIGNAL_ID,
   STAGE_RESOURCE_PATCH_SIGNAL_ID,
 } from "../shared/protocol-constants.js";
 import {
   ConfigError,
+  compareChainPointers,
   normalizeAddress,
   normalizeBytes32,
   type Address,
@@ -25,39 +25,28 @@ import type { ProjectionStore } from "../storage/projection-store.js";
 import type { ProductSchemaResolver } from "../product/service.js";
 import { InMemoryProductStagePatchStore } from "./store.js";
 import {
-  buildDockedOrderLinkTypedData,
   buildStageExecutorPatchTypedData,
   buildStageResourcePatchTypedData,
   executorPatchModeHash,
-  hashDockedOrderLinkPayload,
   hashStageExecutorPatchPayload,
   hashStageResourcePatchPayload,
   normalizeSignature,
-  recoverDockedOrderLinkSigner,
   recoverStageExecutorPatchSigner,
   recoverStageResourcePatchSigner,
   signatureHashFor,
   textHash,
 } from "./typed-data.js";
 import {
-  notSupportedDockedOrderLinkBroadcastAdapter,
   notSupportedStageExecutorPatchBroadcastAdapter,
   notSupportedStageResourcePatchBroadcastAdapter,
 } from "./broadcast-adapter.js";
 import type {
-  DockedOrderLinkBroadcastAdapter,
-  DockedOrderLinkSubmissionDTO,
-  DockedSignalBindingDTO,
-  PrepareProductDockedOrderLinkInput,
   PrepareProductStageExecutorPatchInput,
   PrepareProductStageResourcePatchInput,
-  PreparedDockedOrderLinkDTO,
-  PreparedDockedOrderLinkRecord,
   PreparedStageExecutorPatchDTO,
   PreparedStageExecutorPatchRecord,
   PreparedStageResourcePatchDTO,
   PreparedStageResourcePatchRecord,
-  ProductDockedOrderLinkStore,
   ProductStageExecutorPatchStore,
   ProductStageResourcePatchStore,
   StageExecutorPatchMode,
@@ -67,7 +56,6 @@ import type {
   StagePatchBroadcastResult,
   StageResourcePatchBroadcastAdapter,
   StageResourcePatchSubmissionDTO,
-  SubmitProductDockedOrderLinkInput,
   SubmitProductStageExecutorPatchInput,
   SubmitProductStageResourcePatchInput,
 } from "./types.js";
@@ -80,7 +68,6 @@ const EXECUTOR_PATCH_SIGNAL_ID = STAGE_EXECUTOR_PATCH_SIGNAL_ID;
 const RESOURCE_PATCH_SIGNAL_ID = STAGE_RESOURCE_PATCH_SIGNAL_ID;
 
 export {
-  DOCKED_ORDER_LINK_SIGNAL_ID,
   STAGE_EXECUTOR_PATCH_SIGNAL_ID,
   STAGE_RESOURCE_PATCH_SIGNAL_ID,
 } from "../shared/protocol-constants.js";
@@ -125,11 +112,6 @@ export interface ProductStageResourcePatchServiceOptions
   readonly broadcastAdapter?: StageResourcePatchBroadcastAdapter;
 }
 
-export interface ProductDockedOrderLinkServiceOptions
-  extends ProductStagePatchServiceOptions {
-  readonly dockedOrderLinkStore?: ProductDockedOrderLinkStore;
-  readonly broadcastAdapter?: DockedOrderLinkBroadcastAdapter;
-}
 
 export interface StagePatchProductBffPort {
   listRegistrations(): Promise<
@@ -177,19 +159,6 @@ export interface ProductStageResourcePatchService {
   ): Promise<StageResourcePatchSubmissionDTO | undefined>;
 }
 
-export interface ProductDockedOrderLinkService {
-  prepareDockedOrderLink(
-    taskId: string,
-    input: PrepareProductDockedOrderLinkInput,
-  ): Promise<PreparedDockedOrderLinkDTO>;
-  submitDockedOrderLink(
-    taskId: string,
-    input: SubmitProductDockedOrderLinkInput,
-  ): Promise<DockedOrderLinkSubmissionDTO>;
-  getDockedOrderLinkSubmission(
-    submissionId: string,
-  ): Promise<DockedOrderLinkSubmissionDTO | undefined>;
-}
 
 export function createProductStageExecutorPatchService(
   options: ProductStageExecutorPatchServiceOptions,
@@ -273,13 +242,11 @@ export function createProductStageExecutorPatchService(
         Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
       const stateMachineAddress = stateMachineAddressFor(context, options);
-      const stagePatchModuleAddress = stagePatchModuleAddressFor(
-        context,
-        options,
-      );
+      const stagePatchModuleAddress = stagePatchModuleAddressFor(options);
       const typedData = buildStageExecutorPatchTypedData({
         chainId,
         verifyingContract: stagePatchModuleAddress,
+        planId: context.order.planId,
         orderId: context.order.orderId,
         selectorStageId: context.task.stageIdentifier,
         targetStageId: context.targetStageId,
@@ -303,6 +270,7 @@ export function createProductStageExecutorPatchService(
         orderId: context.order.orderId,
         onchainOrderId: context.order.orderId,
         stateMachineAddress,
+        planId: context.order.planId,
         selectorStageId: context.task.stageIdentifier,
         targetStageId: context.targetStageId,
         selectorWallet: context.selectorWallet,
@@ -454,37 +422,65 @@ export function createProductStageExecutorPatchService(
         );
       }
 
-      const broadcast = await broadcastAdapter.broadcast({
-        prepared: executorDtoFromPrepared(prepared),
-        signature,
-        ...(previousSignature
-          ? { previousExecutorSignature: previousSignature }
-          : {}),
-        recoveredSelector,
-        ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
-      });
-      const timestamp = now().toISOString();
-      const submission = executorSubmissionFromBroadcast(prepared, {
-        submissionId: submissionIdFactory(),
-        signatureHash: signatureHashFor(signature),
-        ...(previousSignature
-          ? {
+      // nonce 已被占用。若 broadcast 或存储写入在落库前抛错且
+      // 尚未拿到 txHash，先释放 nonce 再 rethrow：同一 prepareId 在瞬时
+      // RPC/存储失败后仍可重试。广播已返回 txHash 后的落库失败不释放——
+      // 链上交易可能已占用 nonce（对齐 submissions 主路径：只有确认失败
+      // 才释放）。broadcast 返回失败结果视为已消费。
+      let broadcastTxHash: Hex | undefined;
+      try {
+        const broadcast = await broadcastAdapter.broadcast({
+          prepared: executorDtoFromPrepared(prepared),
+          signature,
+          ...(previousSignature
+            ? { previousExecutorSignature: previousSignature }
+            : {}),
+          recoveredSelector,
+          ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
+        });
+        broadcastTxHash = broadcast.status === "failed"
+          ? broadcast.attempt?.txHash
+          : broadcast.status === "not_attempted"
+            ? undefined
+            : broadcast.txHash;
+        const timestamp = now().toISOString();
+        const submission = executorSubmissionFromBroadcast(prepared, {
+          submissionId: submissionIdFactory(),
+          signatureHash: signatureHashFor(signature),
+          ...(previousSignature
+            ? {
               previousExecutorSignatureHash:
                 signatureHashFor(previousSignature),
             }
-          : {}),
-        recoveredSelector,
-        ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
-        broadcast,
-        timestamp,
-      });
-      await stageExecutorPatchStore.putSubmission(submission);
-      await stageExecutorPatchStore.markPreparedUsed(
-        prepared.prepareId,
-        submission.submissionId,
-        submission.updatedAt,
-      );
-      return submission;
+            : {}),
+          recoveredSelector,
+          ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
+          broadcast,
+          timestamp,
+        });
+        await stageExecutorPatchStore.putSubmission(submission);
+        // A retryable failure without a transaction hash means the relayer
+        // never obtained a chain transaction. Keep the prepare reusable and
+        // release the reservation after recording the attempt. A retryable
+        // result that carries a txHash is different: the chain may already
+        // own the nonce, so it remains consumed and is reconciled instead of
+        // being broadcast a second time.
+        if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
+          await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
+          return submission;
+        }
+        await stageExecutorPatchStore.markPreparedUsed(
+          prepared.prepareId,
+          submission.submissionId,
+          submission.updatedAt,
+        );
+        return submission;
+      } catch (error) {
+        if (!broadcastTxHash) {
+          await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
+        }
+        throw error;
+      }
     },
 
     async getStageExecutorPatchSubmission(submissionId) {
@@ -557,13 +553,11 @@ export function createProductStageResourcePatchService(
         Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
       const stateMachineAddress = stateMachineAddressFor(context, options);
-      const stagePatchModuleAddress = stagePatchModuleAddressFor(
-        context,
-        options,
-      );
+      const stagePatchModuleAddress = stagePatchModuleAddressFor(options);
       const typedData = buildStageResourcePatchTypedData({
         chainId,
         verifyingContract: stagePatchModuleAddress,
+        planId: context.order.planId,
         orderId: context.order.orderId,
         selectorStageId: context.task.stageIdentifier,
         targetStageId: context.targetStageId,
@@ -583,6 +577,7 @@ export function createProductStageResourcePatchService(
         orderId: context.order.orderId,
         onchainOrderId: context.order.orderId,
         stateMachineAddress,
+        planId: context.order.planId,
         selectorStageId: context.task.stageIdentifier,
         targetStageId: context.targetStageId,
         resourceKey,
@@ -694,26 +689,48 @@ export function createProductStageResourcePatchService(
         );
       }
 
-      const broadcast = await broadcastAdapter.broadcast({
-        prepared: resourceDtoFromPrepared(prepared),
-        signature,
-        recoveredSelector,
-      });
-      const timestamp = now().toISOString();
-      const submission = resourceSubmissionFromBroadcast(prepared, {
-        submissionId: submissionIdFactory(),
-        signatureHash: signatureHashFor(signature),
-        recoveredSelector,
-        broadcast,
-        timestamp,
-      });
-      await stageResourcePatchStore.putSubmission(submission);
-      await stageResourcePatchStore.markPreparedUsed(
-        prepared.prepareId,
-        submission.submissionId,
-        submission.updatedAt,
-      );
-      return submission;
+      // 同 executor patch 路径——尚未拿到 txHash 的失败先释放
+      // nonce；广播已返回 txHash 后的落库失败不释放（链上可能已占用
+      // nonce，对齐 submissions 主路径语义）。
+      let broadcastTxHash: Hex | undefined;
+      try {
+        const broadcast = await broadcastAdapter.broadcast({
+          prepared: resourceDtoFromPrepared(prepared),
+          signature,
+          recoveredSelector,
+        });
+        broadcastTxHash = broadcast.status === "failed"
+          ? broadcast.attempt?.txHash
+          : broadcast.status === "not_attempted"
+            ? undefined
+            : broadcast.txHash;
+        const timestamp = now().toISOString();
+        const submission = resourceSubmissionFromBroadcast(prepared, {
+          submissionId: submissionIdFactory(),
+          signatureHash: signatureHashFor(signature),
+          recoveredSelector,
+          broadcast,
+          timestamp,
+        });
+        await stageResourcePatchStore.putSubmission(submission);
+        // See the executor-patch path above: only a retryable failure with no
+        // txHash is safe to reopen for the same prepareId.
+        if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
+          await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
+          return submission;
+        }
+        await stageResourcePatchStore.markPreparedUsed(
+          prepared.prepareId,
+          submission.submissionId,
+          submission.updatedAt,
+        );
+        return submission;
+      } catch (error) {
+        if (!broadcastTxHash) {
+          await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
+        }
+        throw error;
+      }
     },
 
     async getStageResourcePatchSubmission(submissionId) {
@@ -722,237 +739,6 @@ export function createProductStageResourcePatchService(
   };
 }
 
-export function createProductDockedOrderLinkService(
-  options: ProductDockedOrderLinkServiceOptions,
-): ProductDockedOrderLinkService {
-  const dockedOrderLinkStore =
-    options.dockedOrderLinkStore ??
-    new InMemoryProductStagePatchStore<
-      PreparedDockedOrderLinkRecord,
-      DockedOrderLinkSubmissionDTO
-    >();
-  const now = options.now ?? (() => new Date());
-  const ttlSeconds = options.prepareTtlSeconds ?? DEFAULT_PREPARE_TTL_SECONDS;
-  const prepareIdFactory =
-    options.prepareIdFactory ??
-    (() => `docked_order_link_prep_${randomUUID()}`);
-  const submissionIdFactory =
-    options.submissionIdFactory ??
-    (() => `docked_order_link_sub_${randomUUID()}`);
-  const broadcastAdapter =
-    options.broadcastAdapter ?? notSupportedDockedOrderLinkBroadcastAdapter();
-  const chainId = options.chainId ?? 31337;
-
-  return {
-    async prepareDockedOrderLink(taskId, input) {
-      const context = await resolveSelectorPatchContext(options, taskId, {
-        selectorWallet: input.selectorWallet,
-        targetStageId: input.localSourceId,
-        patchLabel: "docked order link",
-        patchSignalId: DOCKED_ORDER_LINK_SIGNAL_ID,
-        allowSubmittedTargetSignals: true,
-      });
-      const linkedOrderId = normalizeNonZeroBytes32(
-        input.linkedOrderId,
-        "linkedOrderId",
-      );
-      const linkedPlanId = normalizeNonZeroBytes32(
-        input.linkedPlanId,
-        "linkedPlanId",
-      );
-      const linkedOrder = await ensureLinkedOrderExists(
-        options.store,
-        context.order,
-        linkedOrderId,
-        linkedPlanId,
-      );
-      const signalBindings = normalizeDockedSignalBindings(
-        input.signalBindings,
-      );
-      const metadataURI = normalizedMetadataURI(input.metadataURI);
-      const linkNonce = nextDockedOrderLinkNonce(context.order, linkedOrderId);
-      const linkHash = hashDockedOrderLinkPayload({
-        localOrderId: context.order.orderId,
-        selectorStageId: context.task.stageIdentifier,
-        localSourceId: context.targetStageId,
-        linkedOrderId,
-        linkedPlanId,
-        linkNonce,
-        metadataURI,
-        signalBindings,
-      });
-      const createdAt = now();
-      const deadlineSeconds =
-        Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
-      const deadline = deadlineSeconds.toString();
-      const stateMachineAddress = stateMachineAddressFor(context, options);
-      const dockingModuleAddress = dockingModuleAddressFor(context, options);
-      const typedData = buildDockedOrderLinkTypedData({
-        chainId,
-        verifyingContract: dockingModuleAddress,
-        localOrderId: context.order.orderId,
-        selectorStageId: context.task.stageIdentifier,
-        localSourceId: context.targetStageId,
-        linkedOrderId,
-        linkedPlanId,
-        linkHash,
-        linkNonce,
-        metadataURI,
-        signalBindings,
-        selector: context.selectorWallet,
-        deadline,
-      });
-      const prepareId = prepareIdFactory();
-      const prepared: PreparedDockedOrderLinkRecord = {
-        prepareId,
-        taskId,
-        localOrderId: context.order.orderId,
-        onchainLocalOrderId: context.order.orderId,
-        stateMachineAddress,
-        selectorStageId: context.task.stageIdentifier,
-        localSourceId: context.targetStageId,
-        linkedOrderId,
-        linkedPlanId,
-        selectorWallet: context.selectorWallet,
-        linkHash,
-        linkNonce,
-        metadataURI,
-        signalBindings,
-        deadline,
-        expiresAt: new Date(deadlineSeconds * 1000).toISOString(),
-        status: "prepared",
-        typedData,
-        humanSummary: {
-          purpose: "UVP docked order link selector authorization",
-          localOrderId: context.order.orderId,
-          selectorTaskId: taskId,
-          selectorStageId: context.task.stageIdentifier,
-          localSourceId: context.targetStageId,
-          linkedOrderId,
-          linkedPlanId,
-          linkHash,
-          linkNonce,
-          metadataURI,
-          selectorWallet: context.selectorWallet,
-          signalBindings,
-          validUntil: new Date(deadlineSeconds * 1000).toISOString(),
-          chainId,
-          verifyingContract: dockingModuleAddress,
-        },
-        nonceKey: stagePatchNonceKey({
-          kind: "docked_order_link",
-          chainId,
-          stateMachineAddress,
-          orderId: context.order.orderId,
-          targetStageId: context.targetStageId,
-          linkedOrderId,
-          patchNonce: linkNonce,
-        }),
-      };
-      await dockedOrderLinkStore.putPrepared(prepared);
-      return dockedDtoFromPrepared(prepared);
-    },
-
-    async submitDockedOrderLink(taskId, input) {
-      const prepareId = prepareIdForSubmit(input, "docked order link");
-      const prepared = await dockedOrderLinkStore.getPrepared(prepareId);
-      if (!prepared) {
-        throw new ProductStagePatchError(
-          404,
-          "prepare_not_found",
-          "prepared docked order link was not found",
-        );
-      }
-      validateSubmittedPreparedEnvelope(
-        input,
-        dockedDtoFromPrepared(prepared),
-        "docked order link",
-      );
-      validatePreparedForSubmit(
-        prepared,
-        taskId,
-        input.selectorWallet,
-        "docked order link",
-      );
-
-      const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
-      if (BigInt(prepared.deadline) < currentSeconds) {
-        const submission = expiredDockedSubmission(
-          prepared,
-          submissionIdFactory(),
-          now().toISOString(),
-        );
-        await dockedOrderLinkStore.putSubmission(submission);
-        await dockedOrderLinkStore.markPreparedUsed(
-          prepared.prepareId,
-          submission.submissionId,
-          submission.updatedAt,
-        );
-        return submission;
-      }
-
-      const context = await resolveSelectorTaskContext(options.store, taskId);
-      ensureDockedPreparedStillCurrent(context.order, prepared);
-      const linkedOrder = await ensureLinkedOrderExists(
-        options.store,
-        context.order,
-        prepared.linkedOrderId,
-        prepared.linkedPlanId,
-      );
-
-      const signature = normalizeSignature(input.signature);
-      const recoveredSelector = await recoverDockedSelector(
-        prepared,
-        signature,
-      );
-      if (recoveredSelector !== prepared.selectorWallet) {
-        throw new ProductStagePatchError(
-          400,
-          "invalid_signature",
-          "signature recovery did not match prepared selector",
-          {
-            recoveredSelector,
-          },
-        );
-      }
-      const reserved = await dockedOrderLinkStore.reserveNonce(
-        prepared.nonceKey,
-      );
-      if (!reserved) {
-        throw new ProductStagePatchError(
-          409,
-          "duplicate_docked_order_link_nonce",
-          "docked order link nonce has already been used",
-        );
-      }
-
-      const broadcast = await broadcastAdapter.broadcast({
-        prepared: dockedDtoFromPrepared(prepared),
-        signature,
-        recoveredSelector,
-      });
-      const timestamp = now().toISOString();
-      const submission = dockedSubmissionFromBroadcast(prepared, {
-        submissionId: submissionIdFactory(),
-        signatureHash: signatureHashFor(signature),
-        recoveredSelector,
-        broadcast,
-        timestamp,
-      });
-      await dockedOrderLinkStore.putSubmission(submission);
-      await dockedOrderLinkStore.markPreparedUsed(
-        prepared.prepareId,
-        submission.submissionId,
-        submission.updatedAt,
-      );
-      return submission;
-    },
-
-    async getDockedOrderLinkSubmission(submissionId) {
-      return dockedOrderLinkStore.getSubmission(submissionId);
-    },
-  };
-}
 
 interface SelectorTaskContext {
   readonly task: StateMachineTaskProjection;
@@ -1167,44 +953,6 @@ async function resolveSelectorTaskContext(
   return { task, order };
 }
 
-async function ensureLinkedOrderExists(
-  store: ProjectionStore,
-  localOrder: StateMachineOrderProjection,
-  linkedOrderId: Hex,
-  linkedPlanId: Hex,
-): Promise<StateMachineOrderProjection> {
-  const orders = await store.listStateMachineOrders();
-  const linkedOrder = orders.find(
-    (order) =>
-      order.orderId.toLowerCase() === linkedOrderId.toLowerCase() &&
-      order.chainId === localOrder.chainId &&
-      order.contractAddress.toLowerCase() ===
-        localOrder.contractAddress.toLowerCase(),
-  );
-  if (!linkedOrder) {
-    throw new ProductStagePatchError(
-      404,
-      "linked_order_not_found",
-      "linked order for docked zhixu link was not found",
-      {
-        linkedOrderId,
-      },
-    );
-  }
-  if (linkedOrder.planId.toLowerCase() !== linkedPlanId.toLowerCase()) {
-    throw new ProductStagePatchError(
-      409,
-      "linked_plan_mismatch",
-      "linked order plan does not match linkedPlanId",
-      {
-        linkedOrderId,
-        expectedPlanId: linkedOrder.planId,
-        linkedPlanId,
-      },
-    );
-  }
-  return linkedOrder;
-}
 
 async function findAllowedSelectorBinding(
   store: ProjectionStore,
@@ -1418,35 +1166,6 @@ function normalizeOptionalBytes32(
   return normalizeBytes32(value, fieldName);
 }
 
-function normalizeDockedSignalBindings(
-  bindings: PrepareProductDockedOrderLinkInput["signalBindings"],
-): readonly DockedSignalBindingDTO[] {
-  if (!Array.isArray(bindings) || bindings.length === 0) {
-    throw new ProductStagePatchError(
-      400,
-      "invalid_body",
-      "signalBindings must contain at least one mapping",
-    );
-  }
-  return bindings.map((binding, index) => ({
-    localSourceId: normalizeNonZeroBytes32(
-      binding.localSourceId,
-      `signalBindings.${index}.localSourceId`,
-    ),
-    localSignalId: normalizeNonZeroBytes32(
-      binding.localSignalId,
-      `signalBindings.${index}.localSignalId`,
-    ),
-    linkedSourceId: normalizeNonZeroBytes32(
-      binding.linkedSourceId,
-      `signalBindings.${index}.linkedSourceId`,
-    ),
-    linkedSignalId: normalizeNonZeroBytes32(
-      binding.linkedSignalId,
-      `signalBindings.${index}.linkedSignalId`,
-    ),
-  }));
-}
 
 function normalizeNonZeroAddress(value: string, fieldName: string): Address {
   const address = normalizeAddress(value, fieldName);
@@ -1768,23 +1487,24 @@ function expectedPreviousExecutorForPatch(
 function compareSignalSubmissionOrder(
   left: {
     readonly submittedAt: {
+      readonly chainId: number;
       readonly blockNumber: bigint;
+      readonly transactionIndex?: number;
+      readonly transactionHash: Hex;
       readonly logIndex: number;
     };
   },
   right: {
     readonly submittedAt: {
+      readonly chainId: number;
       readonly blockNumber: bigint;
+      readonly transactionIndex?: number;
+      readonly transactionHash: Hex;
       readonly logIndex: number;
     };
   },
 ): number {
-  if (left.submittedAt.blockNumber !== right.submittedAt.blockNumber) {
-    return left.submittedAt.blockNumber < right.submittedAt.blockNumber
-      ? -1
-      : 1;
-  }
-  return left.submittedAt.logIndex - right.submittedAt.logIndex;
+  return compareChainPointers(left.submittedAt, right.submittedAt);
 }
 
 function nextStageExecutorPatchNonce(
@@ -1808,14 +1528,6 @@ function nextStageResourcePatchNonce(
   return ((current ? BigInt(current) : 0n) + 1n).toString();
 }
 
-function nextDockedOrderLinkNonce(
-  order: StateMachineOrderProjection,
-  linkedOrderId: Hex,
-): string {
-  const current =
-    dockedOrderLinkRecord(order)[linkedOrderId.toLowerCase()]?.linkNonce;
-  return ((current ? BigInt(current) : 0n) + 1n).toString();
-}
 
 function ensureExecutorPreparedStillCurrent(
   order: StateMachineOrderProjection,
@@ -1849,25 +1561,6 @@ function ensureExecutorPreparedStillCurrent(
   }
 }
 
-function ensureDockedPreparedStillCurrent(
-  order: StateMachineOrderProjection,
-  prepared: PreparedDockedOrderLinkRecord,
-): void {
-  const currentNonce =
-    dockedOrderLinkRecord(order)[prepared.linkedOrderId.toLowerCase()]
-      ?.linkNonce;
-  if (currentNonce && BigInt(currentNonce) >= BigInt(prepared.linkNonce)) {
-    throw new ProductStagePatchError(
-      409,
-      "stale_docked_order_link_nonce",
-      "prepared docked order link nonce is no longer current",
-      {
-        currentNonce,
-        preparedNonce: prepared.linkNonce,
-      },
-    );
-  }
-}
 
 function ensureResourcePreparedStillCurrent(
   order: StateMachineOrderProjection,
@@ -1922,60 +1615,43 @@ function stateMachineAddressFor(
 }
 
 function stagePatchModuleAddressFor(
-  context: SelectorTaskContext,
   options: ProductStagePatchServiceOptions,
 ): Address {
-  return moduleAddressFor(
-    context,
-    options,
-    options.stagePatchModuleAddress,
-    "stagePatchModuleAddress",
-  );
+  return moduleAddressFor(options.stagePatchModuleAddress, "stagePatchModuleAddress");
 }
 
 function dockingModuleAddressFor(
-  context: SelectorTaskContext,
   options: ProductStagePatchServiceOptions,
 ): Address {
-  return moduleAddressFor(
-    context,
-    options,
-    options.dockingModuleAddress,
-    "dockingModuleAddress",
-  );
+  return moduleAddressFor(options.dockingModuleAddress, "dockingModuleAddress");
 }
 
 function moduleAddressFor(
-  context: SelectorTaskContext,
-  options: ProductStagePatchServiceOptions,
   configured: Address | undefined,
-  label: string,
+  label: string
 ): Address {
-  const moduleAddress = normalizeAddress(
-    configured ??
-      options.verifyingContract ??
-      stateMachineAddressFor(context, options),
-    label,
-  );
-  if (moduleAddress === ZERO_ADDRESS) {
+  // 模块地址必须显式存在于选项/地址清单中，
+  // 不静默回退到状态机地址（options.verifyingContract /
+  // stateMachineAddressFor 派生）——用错误 verifyingContract 域签出的
+  // typed data 无法通过链上域校验，等于把签名发给错误合约。缺失即 fail-closed。
+  if (!configured) {
     throw new ProductStagePatchError(
       409,
       "module_address_missing",
       `${label} is required for stage patch typed data`,
     );
   }
-  return moduleAddress;
+  return normalizeAddress(configured, label);
 }
 
 function stagePatchNonceKey(input: {
-  readonly kind: "executor" | "resource" | "docked_order_link";
+  readonly kind: "executor" | "resource";
   readonly chainId: number;
   readonly stateMachineAddress: Address;
   readonly orderId: Hex;
   readonly targetStageId: Hex;
   readonly targetSignalId?: Hex;
   readonly resourceKey?: Hex;
-  readonly linkedOrderId?: Hex;
   readonly patchNonce: string;
 }): string {
   return [
@@ -1986,7 +1662,6 @@ function stagePatchNonceKey(input: {
     input.targetStageId,
     input.targetSignalId ?? "",
     input.resourceKey ?? "",
-    input.linkedOrderId ?? "",
     input.patchNonce,
   ].join(":");
 }
@@ -1996,20 +1671,6 @@ function stageResourceOverlayProjectionKey(
   resourceKey: Hex,
 ): string {
   return `${targetStageId.toLowerCase()}:${resourceKey.toLowerCase()}`;
-}
-
-function dockedOrderLinkRecord(
-  order: StateMachineOrderProjection,
-): Readonly<Record<string, { readonly linkNonce: string }>> {
-  return (
-    (
-      order as StateMachineOrderProjection & {
-        readonly dockedOrderLinks?: Readonly<
-          Record<string, { readonly linkNonce: string }>
-        >;
-      }
-    ).dockedOrderLinks ?? {}
-  );
 }
 
 function validatePreparedForSubmit(
@@ -2076,8 +1737,7 @@ function prepareIdForSubmit(
 function validateSubmittedPreparedEnvelope<
   TPrepared extends
     | PreparedStageExecutorPatchDTO
-    | PreparedStageResourcePatchDTO
-    | PreparedDockedOrderLinkDTO,
+    | PreparedStageResourcePatchDTO,
 >(
   input: {
     readonly typedData?: unknown;
@@ -2172,20 +1832,6 @@ async function recoverResourceSelector(
   }
 }
 
-async function recoverDockedSelector(
-  prepared: PreparedDockedOrderLinkRecord,
-  signature: Hex,
-): Promise<Address> {
-  try {
-    return await recoverDockedOrderLinkSigner(prepared.typedData, signature);
-  } catch (error) {
-    throw new ProductStagePatchError(
-      400,
-      "invalid_signature",
-      error instanceof Error ? error.message : "invalid signature",
-    );
-  }
-}
 
 function executorDtoFromPrepared(
   record: PreparedStageExecutorPatchRecord,
@@ -2202,18 +1848,6 @@ function executorDtoFromPrepared(
 function resourceDtoFromPrepared(
   record: PreparedStageResourcePatchRecord,
 ): PreparedStageResourcePatchDTO {
-  const {
-    nonceKey: _nonceKey,
-    usedAt: _usedAt,
-    submissionId: _submissionId,
-    ...dto
-  } = record;
-  return dto;
-}
-
-function dockedDtoFromPrepared(
-  record: PreparedDockedOrderLinkRecord,
-): PreparedDockedOrderLinkDTO {
   const {
     nonceKey: _nonceKey,
     usedAt: _usedAt,
@@ -2296,32 +1930,6 @@ function expiredResourceSubmission(
   };
 }
 
-function expiredDockedSubmission(
-  prepared: PreparedDockedOrderLinkRecord,
-  submissionId: string,
-  timestamp: string,
-): DockedOrderLinkSubmissionDTO {
-  return {
-    ...dockedSubmissionCommon(prepared, {
-      submissionId,
-      createdAt: timestamp,
-    }),
-    status: "expired",
-    signatureStatus: "not_verified",
-    broadcastStatus: "not_attempted",
-    errorCode: "docked_order_link_expired",
-    errorMessage: "prepared docked order link deadline has expired",
-    retryable: false,
-    proofRows: proofRows({
-      label: "Docked order link status",
-      status: "expired",
-      selector: prepared.selectorWallet,
-      patchHash: prepared.linkHash,
-      errorCode: "docked_order_link_expired",
-    }),
-  };
-}
-
 function executorSubmissionFromBroadcast(
   prepared: PreparedStageExecutorPatchRecord,
   input: {
@@ -2376,34 +1984,10 @@ function resourceSubmissionFromBroadcast(
   );
 }
 
-function dockedSubmissionFromBroadcast(
-  prepared: PreparedDockedOrderLinkRecord,
-  input: {
-    readonly submissionId: string;
-    readonly signatureHash: Hex;
-    readonly recoveredSelector: Address;
-    readonly broadcast: StagePatchBroadcastResult;
-    readonly timestamp: string;
-  },
-): DockedOrderLinkSubmissionDTO {
-  const common = dockedSubmissionCommon(prepared, {
-    submissionId: input.submissionId,
-    signatureHash: input.signatureHash,
-    recoveredSelector: input.recoveredSelector,
-    createdAt: input.timestamp,
-  });
-  return submissionFromBroadcastCommon(
-    common,
-    input.broadcast,
-    "Docked order link status",
-  );
-}
-
 function submissionFromBroadcastCommon<
   TSubmission extends
     | StageExecutorPatchSubmissionDTO
-    | StageResourcePatchSubmissionDTO
-    | DockedOrderLinkSubmissionDTO,
+    | StageResourcePatchSubmissionDTO,
 >(
   common: Omit<
     TSubmission,
@@ -2570,44 +2154,6 @@ function resourceSubmissionCommon(
     patchHash: prepared.patchHash,
     patchNonce: prepared.patchNonce,
     manifestURI: prepared.manifestURI,
-    deadline: prepared.deadline,
-    ...(input.signatureHash ? { signatureHash: input.signatureHash } : {}),
-    ...(input.recoveredSelector
-      ? { recoveredSelector: input.recoveredSelector }
-      : {}),
-    createdAt: input.createdAt,
-    updatedAt: input.createdAt,
-  };
-}
-
-function dockedSubmissionCommon(
-  prepared: PreparedDockedOrderLinkRecord,
-  input: {
-    readonly submissionId: string;
-    readonly signatureHash?: Hex;
-    readonly recoveredSelector?: Address;
-    readonly createdAt: string;
-  },
-): Omit<
-  DockedOrderLinkSubmissionDTO,
-  "status" | "signatureStatus" | "broadcastStatus" | "retryable" | "proofRows"
-> {
-  return {
-    submissionId: input.submissionId,
-    prepareId: prepared.prepareId,
-    taskId: prepared.taskId,
-    localOrderId: prepared.localOrderId,
-    onchainLocalOrderId: prepared.onchainLocalOrderId,
-    stateMachineAddress: prepared.stateMachineAddress,
-    selectorStageId: prepared.selectorStageId,
-    localSourceId: prepared.localSourceId,
-    linkedOrderId: prepared.linkedOrderId,
-    linkedPlanId: prepared.linkedPlanId,
-    selectorWallet: prepared.selectorWallet,
-    linkHash: prepared.linkHash,
-    linkNonce: prepared.linkNonce,
-    metadataURI: prepared.metadataURI,
-    signalBindings: prepared.signalBindings,
     deadline: prepared.deadline,
     ...(input.signatureHash ? { signatureHash: input.signatureHash } : {}),
     ...(input.recoveredSelector

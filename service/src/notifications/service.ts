@@ -8,6 +8,7 @@ import {
 } from "@uvp-eth/compiler";
 import {
   signalAuthorizationMatchesHook,
+  stateMachineOrderProjectionKey,
   type StateMachineOrderProjection,
   type StateMachineSignalAuthorizationProjection,
   type StateMachineSignalProjection,
@@ -15,7 +16,8 @@ import {
 } from "../indexer/projections.js";
 import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "../indexer/events.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
-import type { Address, Hex } from "../shared/types.js";
+import { redactErrorMessage } from "../security/redaction.js";
+import { compareChainPointers, type Address, type Hex } from "../shared/types.js";
 import type { ProductSchemaResolver } from "../product/service.js";
 import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store-suppliers/types.js";
 import {
@@ -62,6 +64,7 @@ export interface SignalNotificationProof {
   readonly chainId: number;
   readonly contractAddress: Address;
   readonly blockNumber: string;
+  readonly transactionIndex?: number;
   readonly transactionHash: Hex;
   readonly logIndex: number;
   readonly blockHash?: Hex;
@@ -122,6 +125,7 @@ export interface ParticipantNotificationProof {
   readonly chainId: number;
   readonly contractAddress: Address;
   readonly blockNumber: string;
+  readonly transactionIndex?: number;
   readonly transactionHash: Hex;
   readonly logIndex: number;
 }
@@ -349,9 +353,20 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       const signalEvents = finalizedSignalSubmittedEvents(events, finalizedBlock);
       for (const event of signalEvents) {
         const orderId = bytes32Arg(event, "orderId");
+        const planId = bytes32Arg(event, "planId");
         const sourceId = bytes32Arg(event, "sourceId");
         const signalId = bytes32Arg(event, "signalId");
-        const order = orderId ? await options.store.getStateMachineOrder(orderId) : undefined;
+        // SignalSubmitted is plan-scoped on the frozen state-machine ABI.
+        // An event without a decodable planId is isolated like the indexer's
+        // undecodable logs (skipped without a delivery record): bare order
+        // ids never resolve, so two plans reusing the same orderId cannot
+        // receive each other's notification.
+        if (!planId || !orderId) {
+          continue;
+        }
+        const order = await options.store.getStateMachineOrder(
+          stateMachineOrderProjectionKey(event.chainId, event.contractAddress, planId, orderId)
+        );
         if (!order) {
           updateIntentSummary(summary, await saveSkippedSignalDelivery({
             deliveryStore,
@@ -513,7 +528,10 @@ export function createNotificationService(options: CreateNotificationServiceOpti
 
     async retryDelivery(deliveryId) {
       const existing = await deliveryStore.getDelivery(deliveryId);
-      if (!existing || existing.status === "sent") {
+      // Sent and dead-lettered rows are terminal until an operator explicitly
+      // reopens them; a skipped row (for example, no configured dispatcher)
+      // is safe to retry after the missing dependency is restored.
+      if (!existing || existing.status === "sent" || existing.status === "dead_letter") {
         return existing;
       }
       const { reason: _reason, lastError: _lastError, ...rest } = existing;
@@ -609,7 +627,6 @@ async function buildNotificationRedactedEvidence(input: {
     input.store.listStateMachineTasks(),
     input.deliveryStore.listDeliveries()
   ]);
-  const taskById = new Map(tasks.map((task) => [task.taskId, task]));
   const matchingTasks = tasks
     .filter((task) => taskMatchesNotificationEvidenceQuery(task, input.query, participantKey))
     .sort(compareTasksForParticipantNotifications);
@@ -631,7 +648,9 @@ async function buildNotificationRedactedEvidence(input: {
     if (!deliveryMatchesNotificationEvidenceQuery(delivery, input.query, participantKey)) {
       continue;
     }
-    const task = delivery.taskId ? taskById.get(delivery.taskId) : undefined;
+    const task = delivery.taskId
+      ? uniqueTaskForDelivery(tasks, delivery)
+      : undefined;
     if (!task || !taskMatchesNotificationEvidenceQuery(task, input.query, participantKey)) {
       deliveryRowsWithoutTaskProjection += 1;
       continue;
@@ -775,13 +794,16 @@ async function buildParticipantNotificationList(input: {
     input.store.listStateMachineOrders(),
     input.deliveryStore.listDeliveries({ supplier: participantKey })
   ]);
-  const visibleTasks = tasks
-    .filter((task) => task.assigneeWallet?.toLowerCase() === participantKey)
-    .sort(compareTasksForParticipantNotifications);
+  const taskRows = tasks.map((task) => ({
+    task,
+    order: findOrderForTask(orders, task)
+  }));
+  const visibleTaskRows = taskRows
+    .filter(({ task }) => task.assigneeWallet?.toLowerCase() === participantKey)
+    .sort((left, right) => compareTasksForParticipantNotifications(left.task, right.task));
   const notifications = new Map<Hex, ParticipantNotificationRecord>();
 
-  for (const task of visibleTasks) {
-    const order = findOrderForTask(orders, task);
+  for (const { task, order } of visibleTaskRows) {
     const taskNotification = participantTaskNotification(task, order, input.now());
     if (taskNotification) {
       notifications.set(taskNotification.notificationId, taskNotification);
@@ -799,8 +821,10 @@ async function buildParticipantNotificationList(input: {
     if (delivery.status !== "failed") {
       continue;
     }
-    const task = tasks.find((item) => item.taskId === delivery.taskId);
-    const order = task ? findOrderForTask(orders, task) : orders.find((item) => item.orderId === delivery.orderId);
+    const task = delivery.taskId ? uniqueTaskForDelivery(tasks, delivery) : undefined;
+    const order = task
+      ? findOrderForTask(orders, task)
+      : uniqueOrderForDelivery(orders, delivery);
     const failed = participantDeliveryFailedNotification(delivery, task, order);
     notifications.set(failed.notificationId, failed);
   }
@@ -1040,6 +1064,7 @@ function notificationProof(proof: StateMachineTaskProjection["proof"]): Particip
     chainId: proof.chainId,
     contractAddress: proof.contractAddress,
     blockNumber: proof.blockNumber.toString(),
+    ...(proof.transactionIndex !== undefined ? { transactionIndex: proof.transactionIndex } : {}),
     transactionHash: proof.transactionHash,
     logIndex: proof.logIndex
   };
@@ -1051,6 +1076,7 @@ function signalNotificationProof(proof: StateMachineSignalProjection["proof"]): 
     chainId: proof.chainId,
     contractAddress: proof.contractAddress,
     blockNumber: proof.blockNumber.toString(),
+    ...(proof.transactionIndex !== undefined ? { transactionIndex: proof.transactionIndex } : {}),
     transactionHash: proof.transactionHash,
     logIndex: proof.logIndex
   };
@@ -1062,6 +1088,7 @@ function signalPayloadNotificationProof(proof: SignalNotificationProof): Partici
     chainId: proof.chainId,
     contractAddress: proof.contractAddress,
     blockNumber: proof.blockNumber,
+    ...(proof.transactionIndex !== undefined ? { transactionIndex: proof.transactionIndex } : {}),
     transactionHash: proof.transactionHash,
     logIndex: proof.logIndex
   };
@@ -1167,6 +1194,9 @@ function severityRank(severity: ParticipantNotificationSeverity): number {
 type MutableNotificationRunSummary = {
   -readonly [TKey in keyof NotificationRunSummary]: NotificationRunSummary[TKey];
 };
+
+/** M-5：failed 投递的自动重投上限；超过即转 dead_letter（人工可重开）。 */
+const MAX_AUTOMATIC_DELIVERY_ATTEMPTS = 5;
 
 type ReceiverResolution =
   | {
@@ -1360,6 +1390,17 @@ async function dispatchSignalTransportDelivery(input: {
   if (existing && existing.status !== "pending" && existing.status !== "failed") {
     return existing;
   }
+  // M-5：自动补投预算。重建/重放会对 failed 行自动重投；无上限的重启
+  // 重投会无界重复外部投递（每次 webhook 最多一个超时周期）。超过预算
+  // 转 dead_letter 终态，人工 retryDelivery 仍可显式重开。
+  if (existing && existing.status === "failed" && existing.attempts >= MAX_AUTOMATIC_DELIVERY_ATTEMPTS) {
+    return input.deliveryStore.saveDelivery({
+      ...existing,
+      status: "dead_letter",
+      reason: "delivery_attempts_exhausted",
+      updatedAt: input.now()
+    });
+  }
 
   const pending = await input.deliveryStore.saveDelivery({
     ...(existing ?? baseSignalDeliveryRecord(
@@ -1396,7 +1437,10 @@ async function dispatchPreparedDelivery(input: {
   if (!input.dispatcher) {
     return input.deliveryStore.saveDelivery({
       ...input.pending,
-      status: "failed",
+      // No delivery attempt was made. Keep this distinct from a transport
+      // failure so retry budgets and operator evidence do not count a missing
+      // adapter as an exhausted send attempt.
+      status: "skipped",
       reason: "transport_adapter_missing",
       updatedAt: input.now()
     });
@@ -1414,7 +1458,9 @@ async function dispatchPreparedDelivery(input: {
       attempts: input.pending.attempts + 1,
       ...activationStatusForResult(input.transport, result),
       ...(result.externalReceiptRef ? { externalReceiptRef: result.externalReceiptRef } : {}),
-      ...(result.error ? { lastError: result.error } : {}),
+      // L-10：错误消息先脱敏再持久化（对齐兄弟路径），防 transport 异常
+      // 文本把端点/凭证带进投递台账。
+      ...(result.error ? { lastError: redactErrorMessage(result.error) } : {}),
       updatedAt: input.now()
     });
   } catch (error) {
@@ -1422,7 +1468,7 @@ async function dispatchPreparedDelivery(input: {
       ...input.pending,
       status: "failed",
       attempts: input.pending.attempts + 1,
-      lastError: error instanceof Error ? error.message : "notification dispatch failed",
+      lastError: error instanceof Error ? redactErrorMessage(error) : "notification dispatch failed",
       updatedAt: input.now()
     });
   }
@@ -1586,6 +1632,7 @@ function payloadForSignal(
       chainId: event.chainId,
       contractAddress: event.contractAddress,
       blockNumber: event.blockNumber.toString(),
+      ...(event.transactionIndex !== undefined ? { transactionIndex: event.transactionIndex } : {}),
       transactionHash: event.transactionHash,
       logIndex: event.logIndex,
       ...(event.blockHash ? { blockHash: event.blockHash } : {})
@@ -1648,11 +1695,43 @@ function findOrderForTask(
   orders: readonly StateMachineOrderProjection[],
   task: StateMachineTaskProjection
 ): StateMachineOrderProjection | undefined {
-  return orders.find((order) =>
-    order.orderId === task.orderId &&
-    order.contractAddress === task.stateMachineAddress &&
+  const matches = orders.filter((order) =>
+    order.chainId === task.createdAt.chainId &&
+    order.orderId.toLowerCase() === task.orderId.toLowerCase() &&
+    order.contractAddress.toLowerCase() === task.stateMachineAddress.toLowerCase() &&
+    (!task.planId || order.planId.toLowerCase() === task.planId.toLowerCase()) &&
     Object.hasOwn(order.tasks, task.taskId)
   );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueTaskForDelivery(
+  tasks: readonly StateMachineTaskProjection[],
+  delivery: NotificationDeliveryRecord
+): StateMachineTaskProjection | undefined {
+  if (!delivery.taskId) {
+    return undefined;
+  }
+  const normalizedTaskId = delivery.taskId.toLowerCase();
+  const matches = tasks.filter((task) =>
+    task.taskId.toLowerCase() === normalizedTaskId &&
+    task.orderId.toLowerCase() === delivery.orderId.toLowerCase() &&
+    task.stateMachineAddress.toLowerCase() === delivery.stateMachineAddress.toLowerCase() &&
+    task.createdAt.chainId === delivery.chainId
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueOrderForDelivery(
+  orders: readonly StateMachineOrderProjection[],
+  delivery: NotificationDeliveryRecord
+): StateMachineOrderProjection | undefined {
+  const matches = orders.filter((order) =>
+    order.chainId === delivery.chainId &&
+    order.orderId.toLowerCase() === delivery.orderId.toLowerCase() &&
+    order.contractAddress.toLowerCase() === delivery.stateMachineAddress.toLowerCase()
+  );
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 function taskForReceiverHook(
@@ -1681,6 +1760,7 @@ function signalDeliveryIdFor(
     "uvp:signal-received-notification-delivery:v1",
     event.chainId.toString(),
     (order?.contractAddress ?? event.contractAddress).toLowerCase(),
+    order?.planId ?? bytes32Arg(event, "planId") ?? "unknown-plan",
     signal?.orderId ?? bytes32Arg(event, "orderId") ?? "unknown-order",
     signal?.sourceId ?? bytes32Arg(event, "sourceId") ?? "unknown-source",
     signal?.signalId ?? bytes32Arg(event, "signalId") ?? "unknown-signal",
@@ -1735,11 +1815,9 @@ function compareSignalAuthorizationsForDelivery(
   left: StateMachineSignalAuthorizationProjection,
   right: StateMachineSignalAuthorizationProjection
 ): number {
-  if (left.authorizedAt.blockNumber !== right.authorizedAt.blockNumber) {
-    return left.authorizedAt.blockNumber < right.authorizedAt.blockNumber ? -1 : 1;
-  }
-  if (left.authorizedAt.logIndex !== right.authorizedAt.logIndex) {
-    return left.authorizedAt.logIndex - right.authorizedAt.logIndex;
+  const position = compareChainPointers(left.authorizedAt, right.authorizedAt);
+  if (position !== 0) {
+    return position;
   }
   return left.submitter.localeCompare(right.submitter);
 }

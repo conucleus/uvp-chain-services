@@ -1,3 +1,8 @@
+import { createHmac } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import {
@@ -7,17 +12,29 @@ import {
 } from "@uvp-eth/product-dto/fixtures";
 import {
   createNotificationService,
+  createWebhookReplayGuard,
   MemoryNotificationDeliveryStore,
+  newWebhookSignatureFields,
+  NOTIFICATION_WEBHOOK_NONCE_HEADER,
+  NOTIFICATION_WEBHOOK_SIGNATURE_HEADER,
+  NOTIFICATION_WEBHOOK_TIMESTAMP_HEADER,
+  signWebhookBody,
   SUPPLIER_NOTIFICATION_PROFILE_VERSION,
+  verifyWebhookSignature,
+  WebhookNotificationDispatcher,
+  type NotificationDeliveryRecord,
   type NotificationDispatchRequest,
   type NotificationDispatcher,
   type SupplierNotificationProfile
 } from "../src/notifications/index.js";
+import { SqliteNotificationStateStore } from "../src/notifications/sqlite-store.js";
 import { createApiRouter } from "../src/api/routes.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { InMemoryStoreSupplierMetadataStore } from "../src/store-suppliers/service.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { Address, Hex } from "../src/shared/types.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const stateMachineAddress = "0x1111111111111111111111111111111111111111" as Address;
 const identityRegistryAddress = "0x2222222222222222222222222222222222222222" as Address;
@@ -33,12 +50,117 @@ const resourceHook = customsOnchainHookPlanArtifact.compiledHooks[0];
 const customsHook = customsOnchainHookPlanArtifact.compiledHooks.find((hook) => hook.hookName === "customs_ready");
 const customsDependencyA = customsHook?.dependencies[0];
 const customsDependencyB = customsHook?.dependencies[1];
+
+/** 本地联调 dev 锚定头开关（通知配置写路由红线门槛）。 */
+const devAnchoredStoreAuth = {
+  mode: "dev_headers" as const,
+  roleClaim: "roles",
+  principalClaim: "sub",
+  clockToleranceSeconds: 60,
+  walletSession: {
+    enabled: true,
+    operatorWallets: [],
+    adminWallets: [],
+    sessionTtlSeconds: 43200,
+    challengeTtlSeconds: 300,
+    devAnchoredAddressHeaderEnabled: true,
+  },
+};
+
 const adminHeaders = {
   "x-uvp-admin-id": "admin-1",
   "x-uvp-admin-role": "admin"
 };
 
 describe("signal-routed notifications", () => {
+  it("consumes SignalSubmitted.planId when the same order id exists in two plans", async () => {
+    const sent: NotificationDispatchRequest[] = [];
+    const planA = bytes32Hex("9101");
+    const planB = bytes32Hex("9102");
+    const dependency = requiredDependency(registeredDependency);
+    const signalA = chainEvent(6n, "SignalSubmitted", {
+      planId: planA,
+      orderId,
+      sourceId: dependency.sourceId,
+      signalId: dependency.signalId,
+      payloadHash: bytes32Hex("a701"),
+      idempotencyKey: bytes32Hex("a702"),
+      submitter: signalSubmitter
+    });
+    const signalB = chainEvent(7n, "SignalSubmitted", {
+      planId: planB,
+      orderId,
+      sourceId: dependency.sourceId,
+      signalId: dependency.signalId,
+      payloadHash: bytes32Hex("b701"),
+      idempotencyKey: bytes32Hex("b702"),
+      submitter: signalSubmitter
+    });
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: customsOnchainHookPlanArtifact.compiledHooks
+        .filter((hook) => hook.dependencies.some((candidate) => candidate.signalId === dependency.signalId))
+        .map((hook) => hook.stageId),
+      finalizedBlock: 7n,
+      events: [
+        chainEvent(1n, "PlanRegistered", {
+          planId: planA,
+          planHash: customsPlanIds.planHash,
+          hookCount: BigInt(customsOnchainHookPlanArtifact.compiledHooks.length)
+        }),
+        chainEvent(2n, "PlanRegistered", {
+          planId: planB,
+          planHash: customsPlanIds.planHash,
+          hookCount: BigInt(customsOnchainHookPlanArtifact.compiledHooks.length)
+        }),
+        chainEvent(3n, "OrderRegistered", { orderId, planId: planA }),
+        chainEvent(4n, "OrderRegistered", { orderId, planId: planB }),
+        signalA,
+        signalB
+      ]
+    });
+    const service = serviceFor(store, supplierStore, sent);
+
+    const summary = await service.processSignalSubmittedEvents([signalB]);
+    const deliveries = await service.listDeliveries();
+
+    expect(summary.signalsProcessed).toBe(1);
+    expect(deliveries.length).toBeGreaterThan(0);
+    expect(deliveries.every((delivery) => delivery.payloadHash === bytes32Hex("b701"))).toBe(true);
+    expect(sent.every((request) => request.record.payload.payloadHash === bytes32Hex("b701"))).toBe(true);
+  });
+
+  it("isolates SignalSubmitted events without a decodable planId instead of resolving them by bare order id", async () => {
+    const sent: NotificationDispatchRequest[] = [];
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: []
+    });
+    const service = serviceFor(store, supplierStore, sent);
+
+    // 冻结 ABI 事件恒带 planId；缺 planId 的事件与索引器"不可解码日志"同
+    // 口径：直接隔离，不落投递记录，也绝不按裸 orderId 解析。
+    const summary = await service.processSignalSubmittedEvents([
+      chainEvent(6n, "SignalSubmitted", {
+        orderId,
+        sourceId: requiredDependency(customsDependencyA).sourceId,
+        signalId: requiredDependency(customsDependencyA).signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signalSubmitter
+      })
+    ]);
+    const deliveries = await service.listDeliveries();
+
+    expect(summary).toMatchObject({
+      signalsProcessed: 0,
+      deliveryIntents: 0,
+      sent: 0,
+      skipped: 0
+    });
+    expect(deliveries).toEqual([]);
+    expect(sent).toEqual([]);
+  });
+
   it("delivers finalized SignalSubmitted to every receive hook depending on that signal", async () => {
     const sent: NotificationDispatchRequest[] = [];
     const event = signalEvent(6n, requiredDependency(registeredDependency));
@@ -175,6 +297,125 @@ describe("signal-routed notifications", () => {
     ]);
   });
 
+  it("keeps a missing dispatcher skipped and retries it after the adapter is configured", async () => {
+    const event = signalEvent(6n, requiredDependency(customsDependencyA));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [event]
+    });
+    const deliveryStore = new MemoryNotificationDeliveryStore();
+    const common = {
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      deliveryStore
+    } as const;
+    const withoutDispatcher = createNotificationService(common);
+
+    await withoutDispatcher.processSignalSubmittedEvents([event]);
+    const [skipped] = await withoutDispatcher.listDeliveries();
+    expect(skipped).toMatchObject({
+      status: "skipped",
+      reason: "transport_adapter_missing",
+      attempts: 0
+    });
+
+    const sent: NotificationDispatchRequest[] = [];
+    const withDispatcher = createNotificationService({
+      ...common,
+      dispatcher: {
+        async send(request) {
+          sent.push(request);
+          return { ok: true, externalReceiptRef: "receipt:webhook" };
+        }
+      }
+    });
+    const retried = await withDispatcher.retryDelivery(skipped!.deliveryId);
+
+    expect(retried).toMatchObject({
+      status: "sent",
+      attempts: 1,
+      externalReceiptRef: "receipt:webhook"
+    });
+    expect(sent).toHaveLength(1);
+  });
+
+  it("redacts transport error messages before persisting them as lastError", async () => {
+    // L-10：transport 失败文本（可能携带端点 URL 与凭权查询参数）先过
+    // redactErrorMessage 再落投递台账，对齐兄弟路径。
+    const event = signalEvent(6n, requiredDependency(customsDependencyA));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [event]
+    });
+    const secret = "hunter2secret";
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      dispatcher: {
+        async send() {
+          return { ok: false, error: `fetch failed for https://hooks.example/accept?token=${secret}` };
+        }
+      }
+    });
+
+    const summary = await service.processSignalSubmittedEvents([event]);
+    expect(summary.failed).toBe(1);
+    const [failed] = await service.listDeliveries();
+    expect(failed).toMatchObject({ status: "failed" });
+    expect(failed?.lastError).not.toContain(secret);
+    expect(failed?.lastError).toContain("token=[redacted:secret]");
+  });
+
+  it("dead-letters automatically redelivered failed rows once the attempt budget is exhausted", async () => {
+    // M-5：重建/重放对 failed 行的自动重投必须有预算——无上限的重启重投
+    // 会无界重复外部投递。预算耗尽转 dead_letter 终态（人工可重开）。
+    const event = signalEvent(6n, requiredDependency(customsDependencyA));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [event]
+    });
+    let sends = 0;
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      dispatcher: {
+        async send() {
+          sends += 1;
+          return { ok: false, error: "webhook_http_503" };
+        }
+      }
+    });
+
+    // 连续重放 6 轮：前 5 轮各自动重投一次（attempts 1..5），第 6 轮超
+    // 预算转 dead_letter 且不再调用 dispatcher。
+    for (let round = 0; round < 6; round += 1) {
+      await service.processSignalSubmittedEvents([event]);
+    }
+    const deliveries = await service.listDeliveries();
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]).toMatchObject({
+      status: "dead_letter",
+      reason: "delivery_attempts_exhausted",
+      attempts: 5
+    });
+    expect(sends).toBe(5);
+  });
+
   it("builds redacted ready-task and submission recipient evidence only from task projections", async () => {
     const readyHook = requiredHook(resourceHook);
     const submittedHook = requiredHook(customsHook);
@@ -245,8 +486,9 @@ describe("signal-routed notifications", () => {
     await service.processSignalSubmittedEvents([signalEvent(6n, requiredDependency(customsDependencyA))]);
     const [delivery] = await service.listDeliveries();
     expect(delivery).toMatchObject({
-      status: "failed",
+      status: "skipped",
       reason: "transport_adapter_missing",
+      attempts: 0,
       taskId: expect.stringContaining(orderId)
     });
 
@@ -263,11 +505,11 @@ describe("signal-routed notifications", () => {
     expect(blocked.classifications).toContainEqual(expect.objectContaining({
       kind: "blocked",
       source: "notification_delivery_with_product_task_projection",
-      deliveryStatus: "failed",
+      deliveryStatus: "skipped",
       deliveryReasonCode: "transport_adapter_missing"
     }));
 
-    const router = createApiRouter(store, { notificationService: service, storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService: service, storeSupplierMetadataStore: supplierStore });
     await expect(router.handle({
       method: "GET",
       pathname: "/admin/notifications/redacted-evidence",
@@ -285,6 +527,11 @@ describe("signal-routed notifications", () => {
     });
 
     await service.deadLetterDelivery(delivery!.deliveryId, "operator pasted sensitive review details");
+    await expect(service.retryDelivery(delivery!.deliveryId)).resolves.toMatchObject({
+      status: "dead_letter",
+      reason: "operator pasted sensitive review details",
+      attempts: 0
+    });
     const deadLetter = await service.buildRedactedEvidence({ walletAddress: supplierWallet, orderId });
     const serialized = JSON.stringify(deadLetter);
 
@@ -339,7 +586,7 @@ describe("signal-routed notifications", () => {
         }
       }
     });
-    const router = createApiRouter(store, { notificationService, storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService, storeSupplierMetadataStore: supplierStore });
 
     const deliveriesResponse = await router.handle({
       method: "GET",
@@ -395,7 +642,8 @@ describe("signal-routed notifications", () => {
         signalEvent(6n, requiredDependency(customsDependencyA))
       ]
     });
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "local",
       notificationService: serviceFor(store, supplierStore),
       storeSupplierMetadataStore: supplierStore
     });
@@ -439,16 +687,25 @@ describe("signal-routed notifications", () => {
       createdAt: "2026-05-01T00:00:00.000Z",
       updatedAt: "2026-05-01T00:00:00.000Z"
     });
-    const router = createApiRouter(store, { storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, storeSupplierMetadataStore: supplierStore });
     const notification = notificationProfile(account.address.toLowerCase() as Address);
     const body = {
       wallet: account.address,
       notification
     };
 
+    // 通知配置写路由已挂 store capability 鉴权（模-5）：请求需携带
+    // operator 身份头。
+    // 红线：通知配置落库要求会话已锚定地址（本地联调 dev 锚定头）。
+    const operatorHeaders = {
+      "x-uvp-store-operator-id": "store-operator-1",
+      "x-uvp-store-operator-role": "store_operator",
+      "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
+    };
     const prepareResponse = await router.handle({
       method: "POST",
       pathname: "/store/suppliers/supplier-a/notification-profile/prepare",
+      headers: operatorHeaders,
       body
     });
     expect(prepareResponse.status).toBe(200);
@@ -458,6 +715,7 @@ describe("signal-routed notifications", () => {
     const saveResponse = await router.handle({
       method: "POST",
       pathname: "/store/suppliers/supplier-a/notification-profile",
+      headers: operatorHeaders,
       body: {
         ...body,
         walletProof: {
@@ -485,6 +743,115 @@ describe("signal-routed notifications", () => {
       pathname: "/supplier/notifications/profile/prepare",
       body
     })).resolves.toMatchObject({ status: 404 });
+  });
+
+  it("delivers through the generic webhook transport with timestamp.nonce.body HMAC signature (ETH-04)", async () => {
+    const requests: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+    const dispatcher = new WebhookNotificationDispatcher({
+      url: "https://ops.example/uvp/notify",
+      secret: "webhook-secret",
+      fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+        requests.push({ url: String(url), init: init ?? {} });
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch
+    });
+
+    const result = await dispatcher.send({ record: deliveryRecord(), profile: notificationProfile(supplierWallet), transport: notificationProfile(supplierWallet).transports[0] as never });
+
+    expect(result.ok).toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("https://ops.example/uvp/notify");
+    expect(requests[0]?.init.method).toBe("POST");
+    // body 不携带外部端点或 payload 明文。
+    expect(requests[0]?.init.body as string).not.toContain("secret://");
+
+    // KIT 收口：MAC 覆盖 timestamp.nonce.body，三个签名头齐全且可被
+    // 对齐方案的 verify + replay guard 端到端校验。
+    const headers = requests[0]?.init.headers as Record<string, string>;
+    const timestamp = headers[NOTIFICATION_WEBHOOK_TIMESTAMP_HEADER]!;
+    const nonce = headers[NOTIFICATION_WEBHOOK_NONCE_HEADER]!;
+    expect(timestamp).toMatch(/^(0|[1-9][0-9]{0,9})$/);
+    expect(nonce).toMatch(/^[0-9a-f]{32}$/);
+    const body = requests[0]?.init.body as string;
+    const expected = `sha256=${createHmac("sha256", "webhook-secret").update(`${timestamp}.${nonce}.${body}`).digest("hex")}`;
+    expect(headers[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER]).toBe(expected);
+    const signature = headers[NOTIFICATION_WEBHOOK_SIGNATURE_HEADER]!;
+    const guard = createWebhookReplayGuard();
+    const nowMs = Number(timestamp) * 1000;
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { timestamp, nonce, nowMs: () => nowMs })).toBe(true);
+    expect(guard.observe(nonce, nowMs, nowMs)).toBe(true);
+
+    // 同一 (body, 签名头) 立即重放：MAC 与时窗都通过，nonce 单次消费拦下。
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { timestamp, nonce, nowMs: () => nowMs + 1000 })).toBe(true);
+    expect(guard.observe(nonce, nowMs, nowMs + 1000)).toBe(false);
+
+    const failing = new WebhookNotificationDispatcher({
+      url: "https://ops.example/uvp/notify",
+      fetchImpl: (async () => new Response("nope", { status: 500 })) as typeof fetch
+    });
+    await expect(failing.send({ record: deliveryRecord(), profile: notificationProfile(supplierWallet), transport: notificationProfile(supplierWallet).transports[0] as never }))
+      .resolves.toMatchObject({ ok: false, error: "webhook_http_500" });
+  });
+
+  it("fails webhook signature verification closed on stale timestamps, missing fields, and tampering", () => {
+    const nowMs = 1_800_000_000_000;
+    const body = JSON.stringify({ schemaVersion: "uvp.notification-webhook.v1" });
+    const fields = newWebhookSignatureFields(() => nowMs);
+    const signature = signWebhookBody("webhook-secret", body, fields);
+
+    // 5 分钟窗口边界内通过，窗口外拒绝。
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { ...fields, nowMs: () => nowMs + 5 * 60_000 })).toBe(true);
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { ...fields, nowMs: () => nowMs + 5 * 60_000 + 1 })).toBe(false);
+
+    // 缺时间戳/nonce（旧 body-only 形态）与缺签名一律 fail-closed。
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { nonce: fields.nonce, nowMs: () => nowMs })).toBe(false);
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { timestamp: fields.timestamp, nowMs: () => nowMs })).toBe(false);
+    expect(verifyWebhookSignature(body, undefined, "webhook-secret", { ...fields, nowMs: () => nowMs })).toBe(false);
+
+    // 篡改 body / 换 secret / 畸形 nonce 全部拒绝。
+    expect(verifyWebhookSignature(`${body} `, signature, "webhook-secret", { ...fields, nowMs: () => nowMs })).toBe(false);
+    expect(verifyWebhookSignature(body, signWebhookBody("wrong-secret", body, fields), "webhook-secret", { ...fields, nowMs: () => nowMs })).toBe(false);
+    expect(verifyWebhookSignature(body, signature, "webhook-secret", { timestamp: fields.timestamp, nonce: "zz", nowMs: () => nowMs })).toBe(false);
+
+    // nonce 窗口内单次消费，窗口过期后可再次出现（随窗口失效）。
+    const guard = createWebhookReplayGuard();
+    expect(guard.observe(fields.nonce, nowMs, nowMs)).toBe(true);
+    expect(guard.observe(fields.nonce, nowMs, nowMs + 1000)).toBe(false);
+    expect(guard.observe(fields.nonce, nowMs, nowMs + 5 * 60_000 + 1)).toBe(true);
+  });
+
+  it("persists notification delivery and read state across store rebuilds (ETH-04)", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-notification-state-"));
+    const databaseUrl = `sqlite://${join(tempDir, "state.sqlite3")}`;
+    const migrations = { autoRun: true, directory: resolve(__dirname, "../migrations") };
+    try {
+      const first = new SqliteNotificationStateStore({ databaseUrl, migrations });
+      await first.saveDelivery(deliveryRecord());
+      await first.markRead({
+        participantKey: "wallet:0xabc",
+        notificationId: deliveryRecord().deliveryId,
+        readAt: "2026-05-01T10:00:00.000Z"
+      });
+      await first.close();
+
+      const second = new SqliteNotificationStateStore({ databaseUrl, migrations });
+      const delivery = await second.getDelivery(deliveryRecord().deliveryId);
+      expect(delivery).toMatchObject({
+        deliveryId: deliveryRecord().deliveryId,
+        status: "sent",
+        attempts: 2,
+        taskId: "task-1"
+      });
+      expect(delivery?.payload.proof.eventName).toBe("SignalSubmitted");
+      const deliveries = await second.listDeliveries({ orderId });
+      expect(deliveries).toHaveLength(1);
+      await expect(second.getReadState("wallet:0xabc", deliveryRecord().deliveryId)).resolves.toMatchObject({
+        readAt: "2026-05-01T10:00:00.000Z"
+      });
+      await second.close();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -580,6 +947,7 @@ function signalEvent(
   key: Hex = idempotencyKey
 ): ChainEvent {
   return chainEvent(blockNumber, "SignalSubmitted", {
+    planId: customsPlanIds.planId,
     orderId,
     sourceId: dependency.sourceId,
     signalId: dependency.signalId,
@@ -690,4 +1058,51 @@ function bytes32Hex(suffix: string): Hex {
 
 function bytes32Text(value: string): Hex {
   return `0x${Buffer.from(value, "utf8").toString("hex").padEnd(64, "0")}`;
+}
+
+function deliveryRecord(): NotificationDeliveryRecord {
+  return {
+    deliveryId: bytes32Hex("9001"),
+    kind: "signal_received",
+    status: "sent",
+    taskId: "task-1",
+    orderId,
+    receiverHookId: bytes32Hex("303"),
+    sourceId: bytes32Hex("404"),
+    signalId: bytes32Hex("505"),
+    payloadHash,
+    idempotencyKey,
+    chainId: 31337,
+    stateMachineAddress,
+    submitter: signalSubmitter,
+    supplierSubjectId,
+    supplierWallet,
+    transportType: "webhook",
+    attempts: 2,
+    createdAt: "2026-05-01T00:00:00.000Z",
+    updatedAt: "2026-05-01T00:01:00.000Z",
+    payload: {
+      version: "uvp.signalReceivedNotification.v1",
+      chainId: 31337,
+      stateMachineAddress,
+      orderId,
+      sourceId: bytes32Hex("404"),
+      signalId: bytes32Hex("505"),
+      payloadHash,
+      idempotencyKey,
+      signalSubmitter: signalSubmitter,
+      receiverHookId: bytes32Hex("303"),
+      receiverStageId: bytes32Hex("target.stage"),
+      receiverSupplierSubjectId: supplierSubjectId,
+      receiverWallet: supplierWallet,
+      proof: {
+        eventName: "SignalSubmitted",
+        chainId: 31337,
+        contractAddress: stateMachineAddress,
+        blockNumber: "6",
+        transactionHash: txHash(6n),
+        logIndex: 0
+      }
+    }
+  };
 }

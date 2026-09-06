@@ -36,6 +36,10 @@ export class InMemoryProductStagePatchStore<
     return true;
   }
 
+  async releaseNonce(key: string): Promise<void> {
+    this.#reservedNonceKeys.delete(key);
+  }
+
   async putSubmission(submission: TSubmission): Promise<void> {
     this.#submissions.set(submission.submissionId, submission);
   }

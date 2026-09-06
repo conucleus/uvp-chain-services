@@ -14,12 +14,6 @@ import {
   type ZhixuStageDTO,
   type ZhixuSummaryDTO,
 } from "@uvp-eth/product-dto";
-import {
-  CROSS_BORDER_ZHIXU_ID,
-  crossBorderPlanIds,
-  demoOrder,
-  demoProductCatalog,
-} from "@uvp-eth/product-dto/fixtures";
 import { keccak256, stringToBytes, type Hex } from "viem";
 import type {
   EventProofArgs,
@@ -36,16 +30,19 @@ import type {
   StateMachineTaskStatus,
   StateMachineTimelineEventProjection,
 } from "../indexer/projections.js";
+import { stateMachineOrderProjectionKey } from "../indexer/projections.js";
 import type {
   ProjectionStore,
   ProjectionSyncState,
 } from "../storage/projection-store.js";
+import { compareChainPointers } from "../shared/types.js";
 
 export interface ProductChainProofDTO {
   readonly eventId: string;
   readonly chainId: number;
   readonly contractAddress: string;
   readonly blockNumber: string;
+  readonly transactionIndex?: number;
   readonly transactionHash: string;
   readonly logIndex: number;
   readonly eventName: string;
@@ -154,10 +151,21 @@ export interface ProductProjectionMetadataDTO {
   readonly degradedReason?: string;
 }
 
+/**
+ * 订单读面的投影完整性。协议包 OrderStatus 是冻结的单值类型（忠实于合约
+ * 词表），"store 行已建但 OrderRegistered 事件尚未投影"的中间态由本字段
+ * 诚实表达，避免读面看起来"一切正常已注册"：
+ * - "projected"：OrderRegistered 事件已投影（registeredAt 在场）；
+ * - "pending"：订单行已被其他事件建出，但注册投影尚未到达（最终一致
+ *   窗口，不是错误——因此用字段而不是 404/错误码表达）。
+ */
+export type ProductOrderProjectionStatus = "projected" | "pending";
+
 export type ProductOrderApiDTO = ProductOrderDTO & {
   readonly planId?: string;
   readonly planHash?: string;
   readonly chainStatus?: StateMachineOrderStatus;
+  readonly projectionStatus?: ProductOrderProjectionStatus;
   readonly paymentConditionSummary?: string;
   readonly tasks?: readonly ProductTaskApiDTO[];
   readonly stageExecutorOverlays?: Readonly<
@@ -266,6 +274,33 @@ export class ProductOrderLookupError extends Error {
   }
 }
 
+/**
+ * Resolves a Product order through the same deployment-aware boundary for
+ * detail, timeline, and proof reads. A bare order id is not an identity when
+ * several state-machine deployments contain it.
+ */
+async function resolveProductOrder(
+  store: ProjectionStore,
+  orderId: string,
+): Promise<StateMachineOrderProjection | undefined> {
+  const matches = await store.findStateMachineOrdersByOrderId(orderId);
+  if (matches.length > 1 && !orderId.includes(":")) {
+    throw new ProductOrderLookupError(
+      "ambiguous_order_id",
+      "order id exists on multiple state machine deployments",
+      {
+        orderId,
+        candidates: matches.map((order) => ({
+          chainId: order.chainId,
+          stateMachineAddress: order.contractAddress,
+          deploymentId: order.deploymentId ?? null,
+        })),
+      },
+    );
+  }
+  return matches[0] ?? store.getStateMachineOrder(orderId);
+}
+
 export function createProductService(
   store: ProjectionStore,
   options: ProductServiceOptions = {},
@@ -274,20 +309,27 @@ export function createProductService(
   return {
     async listZhixu() {
       const snapshot = await store.getOrderSnapshot();
-      return demoProductCatalog.zhixus.map((zhixu) =>
-        summarizeZhixu(withPlanPublication(zhixu, snapshot.stateMachinePlans)),
+      const rows = await Promise.all(
+        Object.values(snapshot.stateMachinePlans).map(async (plan) => {
+          const schema = await explicitStoreSchemaForPlan(plan, productSchemaResolver);
+          const detail = schema ? zhixuDetailFromProductSchema(schema) : zhixuDetailFromPlan(plan);
+          return summarizeZhixu(overlayPlanPublication(detail, plan));
+        }),
       );
+      return rows.sort((left, right) => left.zhixuId.localeCompare(right.zhixuId));
     },
 
     async getZhixu(zhixuId) {
-      const zhixu = demoProductCatalog.zhixus.find(
-        (item) => item.zhixuId === zhixuId,
-      );
-      if (!zhixu) {
-        return undefined;
-      }
       const snapshot = await store.getOrderSnapshot();
-      return withPlanPublication(zhixu, snapshot.stateMachinePlans);
+      for (const plan of Object.values(snapshot.stateMachinePlans)) {
+        const schema = await explicitStoreSchemaForPlan(plan, productSchemaResolver);
+        const candidateZhixuId = schema?.zhixuId ?? zhixuIdFromPlanId(plan.planId);
+        if (candidateZhixuId === zhixuId) {
+          const detail = schema ? zhixuDetailFromProductSchema(schema) : zhixuDetailFromPlan(plan);
+          return overlayPlanPublication(detail, plan);
+        }
+      }
+      return undefined;
     },
 
     async listOrders() {
@@ -310,23 +352,7 @@ export function createProductService(
 
     async getOrder(orderId) {
       const syncState = await store.getSyncState();
-      const matches = await store.findStateMachineOrdersByOrderId(orderId);
-      if (matches.length > 1 && !orderId.includes(":")) {
-        throw new ProductOrderLookupError(
-          "ambiguous_order_id",
-          "order id exists on multiple state machine deployments",
-          {
-            orderId,
-            candidates: matches.map((order) => ({
-              chainId: order.chainId,
-              stateMachineAddress: order.contractAddress,
-              deploymentId: order.deploymentId ?? null,
-            })),
-          },
-        );
-      }
-      const stateMachineOrder =
-        matches[0] ?? (await store.getStateMachineOrder(orderId));
+      const stateMachineOrder = await resolveProductOrder(store, orderId);
       if (stateMachineOrder) {
         return await productOrderFromStateMachine(
           stateMachineOrder,
@@ -339,11 +365,7 @@ export function createProductService(
     },
 
     async listOrderTimeline(orderId) {
-      const matches = await store.findStateMachineOrdersByOrderId(orderId);
-      const order =
-        matches.length === 1
-          ? matches[0]
-          : await store.getStateMachineOrder(orderId);
+      const order = await resolveProductOrder(store, orderId);
       if (!order) {
         return undefined;
       }
@@ -351,11 +373,7 @@ export function createProductService(
     },
 
     async listOrderProof(orderId) {
-      const matches = await store.findStateMachineOrdersByOrderId(orderId);
-      const order =
-        matches.length === 1
-          ? matches[0]
-          : await store.getStateMachineOrder(orderId);
+      const order = await resolveProductOrder(store, orderId);
       if (!order) {
         return undefined;
       }
@@ -365,13 +383,12 @@ export function createProductService(
     async listTasks(query = {}) {
       const syncState = await store.getSyncState();
       const orders = await store.listStateMachineOrders();
-      const ordersByTaskId = stateMachineOrdersByTaskId(orders);
       const stateMachineTasks = await store.listStateMachineTasks();
       const tasks = await Promise.all(
         stateMachineTasks.map((task) =>
           productTaskFromStateMachineTask(
             task,
-            ordersByTaskId.get(task.taskId),
+            findStateMachineOrderForTask(orders, task),
             syncState,
             productSchemaResolver,
           ),
@@ -408,38 +425,68 @@ export function createProductService(
         : [];
       const syncState = await store.getSyncState();
       const orders = await store.listStateMachineOrders();
-      const ordersByTaskId = stateMachineOrdersByTaskId(orders);
-      const allTasks = (
-        await Promise.all(
-          (await store.listStateMachineTasks()).map((task) =>
-            productTaskFromStateMachineTask(
-              task,
-              ordersByTaskId.get(task.taskId),
-              syncState,
-              productSchemaResolver,
-            ),
-          ),
-        )
-      ).filter((task) =>
-        matchesTaskQuery(
+      const taskRows = await Promise.all(
+        (await store.listStateMachineTasks()).map(async (task) => ({
           task,
-          walletAddress ? { assignee: walletAddress } : {},
-        ),
+          order: findStateMachineOrderForTask(orders, task),
+          dto: await productTaskFromStateMachineTask(
+            task,
+            findStateMachineOrderForTask(orders, task),
+            syncState,
+            productSchemaResolver,
+          ),
+        })),
+      );
+      const visibleTaskRows = taskRows.filter(({ dto }) =>
+        matchesTaskQuery(dto, walletAddress ? { assignee: walletAddress } : {}),
       );
       const tasks = walletAddress
-        ? allTasks.filter(
-            (task) => task.assigneeWallet?.toLowerCase() === walletAddress,
-          )
+        ? visibleTaskRows
+            .filter(({ dto }) => dto.assigneeWallet?.toLowerCase() === walletAddress)
+            .map(({ dto }) => dto)
         : [];
-      const visibleOrderIds = new Set([
-        ...tasks.map((task) => task.orderId),
-        ...acceptedParticipants
-          .map((participant) => participant.orderId)
-          .filter((orderId): orderId is string => Boolean(orderId)),
-      ]);
+      const visibleOrderKeys = new Set<string>();
+      for (const { task, order } of visibleTaskRows) {
+        if (walletAddress && task.assigneeWallet?.toLowerCase() === walletAddress && order) {
+          visibleOrderKeys.add(stateMachineOrderProjectionKey(
+            order.chainId,
+            order.contractAddress,
+            order.planId,
+            order.orderId,
+          ));
+        }
+      }
+      for (const participant of acceptedParticipants) {
+        if (!participant.orderId) {
+          continue;
+        }
+        const matchingOrders = orders.filter((order) =>
+          orderIdentifierMatches(order, participant.orderId!),
+        );
+        // A bare order id is intentionally not enough to expose one of two
+        // plans.  The accepted participant record must carry a canonical key
+        // in that case, otherwise no order is returned.
+        if (matchingOrders.length === 1) {
+          const order = matchingOrders[0];
+          if (!order) {
+            continue;
+          }
+          visibleOrderKeys.add(stateMachineOrderProjectionKey(
+            order.chainId,
+            order.contractAddress,
+            order.planId,
+            order.orderId,
+          ));
+        }
+      }
       const visibleOrders = await Promise.all(
         orders
-          .filter((order) => visibleOrderIds.has(order.orderId))
+          .filter((order) => visibleOrderKeys.has(stateMachineOrderProjectionKey(
+            order.chainId,
+            order.contractAddress,
+            order.planId,
+            order.orderId,
+          )))
           .map((order) =>
             productOrderFromStateMachine(
               order,
@@ -500,29 +547,42 @@ export function createProductService(
   };
 }
 
-function withPlanPublication<TZhixu extends ZhixuDetailDTO>(
-  zhixu: TZhixu,
-  plans: ProjectionSnapshot["stateMachinePlans"],
-): TZhixu {
-  const plan = Object.values(plans).find(
-    (candidate) =>
-      hexStringEquals(candidate.planId, zhixu.planPublication.planId) &&
-      hexStringEquals(candidate.planHash, zhixu.planPublication.planHash),
-  );
-  if (!plan) {
-    return zhixu;
-  }
+function zhixuDetailFromPlan(
+  plan: ProjectionSnapshot["stateMachinePlans"][string],
+): ZhixuDetailDTO {
+  const zhixuId = zhixuIdFromPlanId(plan.planId);
   return {
-    ...zhixu,
+    zhixuId,
+    title: `链上秩序 ${shortId(plan.planId)}`,
+    subtitle:
+      "该秩序由链上 Plan 事件重建；业务 schema 未在 Store 登记前不提供阶段与角色解释。",
+    reviewStatus: "unreviewed",
+    reviewLabel: "Store 审核未登记",
+    riskLevel: "以 Store 审核记录为准",
+    applicableBusiness: [],
+    excludedBusiness: [],
+    stageCount: 0,
+    roleSlotCount: 0,
+    supportedPaymentMethods: [],
+    maintainer: plan.publisher ?? "未登记",
+    updatedAt: `block ${plan.updatedAt.blockNumber.toString()}`,
     planPublication: {
-      ...zhixu.planPublication,
       status: "published",
       label: "Plan 已发布",
       stateMachineLabel: plan.stateMachineAddress,
+      planId: plan.planId,
+      planHash: plan.planHash,
       txHash: plan.proof.transactionHash,
       blockNumber: plan.proof.blockNumber.toString(),
       ...(plan.publisher ? { publisher: plan.publisher } : {}),
     },
+    roleSlots: [],
+    dockableModules: [],
+    stages: [],
+    orderPermissionTable: [],
+    proofRows: proofRowsFromProof(proofFromStateMachineProof(plan.proof)),
+    createOrderHint:
+      "订单创建必须使用链上 planId/planHash，并由 Product API 按该 schema 解释普通用户任务。",
   };
 }
 
@@ -557,15 +617,18 @@ async function productOrderFromStateMachine(
     activeTask?.stageName ??
     stages.find((stage) => stage.stageId === currentStageId)?.name ??
     displayBytes32(order.currentStage, "当前阶段");
+  const orderZhixuId = await zhixuIdForOrderProjection(order, productSchemaResolver);
+  const projected = orderProjectionComplete(order);
 
   return {
     orderId: order.orderId,
     stateMachineAddress: order.contractAddress,
     ...(order.deploymentId ? { deploymentId: order.deploymentId } : {}),
-    zhixuId: zhixuIdForPlan(order),
+    zhixuId: orderZhixuId,
     title: `链上订单 ${shortId(order.orderId)}`,
     status: mapStateMachineOrderStatus(order.status),
-    statusLabel: mapStateMachineOrderStatusLabel(order.status),
+    statusLabel: orderProjectionStatusLabel(order.status, projected),
+    projectionStatus: projected ? "projected" : "pending",
     totalAmount: {
       amount: "0",
       currency: "N/A",
@@ -582,10 +645,7 @@ async function productOrderFromStateMachine(
     ...(Object.keys(resourceRequirements).length > 0
       ? { resourceRequirements }
       : {}),
-    participants:
-      zhixuIdForPlan(order) === CROSS_BORDER_ZHIXU_ID
-        ? demoOrder.participants
-        : [],
+    participants: [],
     recentEvents: timeline
       .slice(-3)
       .reverse()
@@ -622,27 +682,35 @@ async function productOrderFromStateMachine(
   };
 }
 
-function stateMachineOrdersByTaskId(
-  orders: readonly StateMachineOrderProjection[],
-): ReadonlyMap<string, StateMachineOrderProjection> {
-  const byTaskId = new Map<string, StateMachineOrderProjection>();
-  for (const order of orders) {
-    for (const taskId of Object.keys(order.tasks)) {
-      byTaskId.set(taskId, order);
-    }
-  }
-  return byTaskId;
-}
-
 function findStateMachineOrderForTask(
   orders: readonly StateMachineOrderProjection[],
   task: StateMachineTaskProjection,
 ): StateMachineOrderProjection | undefined {
-  return orders.find(
+  const matches = orders.filter(
     (order) =>
+      order.chainId === task.proof.chainId &&
       order.orderId.toLowerCase() === task.orderId.toLowerCase() &&
+      order.contractAddress.toLowerCase() === task.stateMachineAddress.toLowerCase() &&
+      (!task.planId || order.planId.toLowerCase() === task.planId.toLowerCase()) &&
       Object.prototype.hasOwnProperty.call(order.tasks, task.taskId),
   );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function orderIdentifierMatches(
+  order: StateMachineOrderProjection,
+  identifier: string,
+): boolean {
+  if (order.orderId.toLowerCase() === identifier.toLowerCase()) {
+    return true;
+  }
+  return stateMachineOrderProjectionKey(
+    order.chainId,
+    order.contractAddress,
+    order.planId,
+    order.orderId,
+  ).toLowerCase() === identifier.toLowerCase() ||
+    `${order.chainId}:${order.contractAddress.toLowerCase()}:${order.orderId.toLowerCase()}` === identifier.toLowerCase();
 }
 
 async function productTaskFromStateMachineTask(
@@ -691,9 +759,10 @@ async function productTaskFromStateMachineTask(
     capabilityResolution?.submitterWallet ??
     task.assigneeWallet;
   const pluginKind = capabilityResolution?.capabilityPlugin.pluginKind;
-  const requiredEvidence = capabilityResolution
-    ? requiredEvidenceForCapability(capabilityResolution.capabilityPlugin)
-    : (productStage?.evidence ?? []);
+  // evidenceSpec：发布者携带的结构化证据要求（productDto.v1 可选字段），
+  // 任务证据规则的唯一来源；schema 是不透明 JSON，按结构化读取逐字段
+  // 透传，缺失时缺省（消费方不再合成通用槽位），不参与鉴权或状态判定。
+  const evidenceSpec = evidenceSpecFromStage(productStage);
   const requiredInputs = capabilityResolution
     ? requiredInputsForCapability(
         capabilityResolution.capabilityPlugin,
@@ -738,7 +807,7 @@ async function productTaskFromStateMachineTask(
     stateMachineAddress: task.stateMachineAddress,
     ...(task.deploymentId ? { deploymentId: task.deploymentId } : {}),
     orderTitle,
-    zhixuId: order ? zhixuIdForPlan(order) : CROSS_BORDER_ZHIXU_ID,
+    zhixuId: order ? await zhixuIdForOrderProjection(order, productSchemaResolver) : "not_found",
     title: hookLabel === "链上待办" ? "处理链上待办" : `处理${hookLabel}`,
     subtitle: `${stageName} 已满足链上触发条件，需要继续处理。`,
     assigneeRole: displayAssigneeRole(task.assigneeRole),
@@ -753,7 +822,7 @@ async function productTaskFromStateMachineTask(
       : productAddOnKind
         ? fundingImpactForAddOn(productAddOnKind)
         : "缺少履约插槽能力插件元数据，当前只能展示链上证明，不能提交业务动作",
-    requiredEvidence,
+  ...(evidenceSpec ? { evidenceSpec } : {}),
     status: productStatus,
     ...(capabilityResolution
       ? {
@@ -1106,13 +1175,7 @@ async function zhixuDetailForOrder(
     return zhixuDetailFromProductSchema(storeSchema);
   }
 
-  const catalogZhixu = demoProductCatalog.zhixus.find((zhixu) =>
-    zhixuMatchesOrderPlan(zhixu, order),
-  );
-  if (catalogZhixu) {
-    return catalogZhixu;
-  }
-
+  // Schema 未登记时不回退到任何内置目录；调用方按显式缺失处理。
   return undefined;
 }
 
@@ -1209,21 +1272,8 @@ function zhixuIdFromPlanIdentity(planId: string, planHash: string): string {
   return `plan-${shortId(planId)}-${shortId(planHash)}`;
 }
 
-function zhixuMatchesOrderPlan(
-  zhixu: ZhixuDetailDTO,
-  order: StateMachineOrderProjection,
-): boolean {
-  if (!hexStringEquals(zhixu.planPublication.planId, order.planId)) {
-    return false;
-  }
-  return (
-    order.planHash === undefined ||
-    hexStringEquals(zhixu.planPublication.planHash, order.planHash)
-  );
-}
-
-function hexStringEquals(left: string, right: string): boolean {
-  return left.toLowerCase() === right.toLowerCase();
+function zhixuIdFromPlanId(planId: string): string {
+  return `plan-${shortId(planId)}`;
 }
 
 function taskCapabilityPluginFromSlot(
@@ -1241,7 +1291,6 @@ function taskCapabilityPluginFromSlot(
     ...(plugin.primaryActionLabel
       ? { primaryActionLabel: plugin.primaryActionLabel }
       : {}),
-    requiredEvidence: plugin.requiredEvidence,
     ...(plugin.inputPolicy ? { inputPolicy: plugin.inputPolicy } : {}),
   };
 }
@@ -1276,12 +1325,53 @@ function compareTaskCapabilityCandidates(
   return 0;
 }
 
-function requiredEvidenceForCapability(
-  plugin: ProductTaskCapabilityPluginDTO,
-): readonly string[] {
-  return plugin.requiredEvidence.length > 0
-    ? plugin.requiredEvidence
-    : requiredEvidenceForFulfillment(plugin.pluginKind);
+/**
+ * ProductTaskDTO.evidenceSpec 的本仓结构镜像（productDto.v1 可选字段，
+ * 不 import protocol 包，跟随任务 DTO 的内联定义方式）。
+ */
+export interface ProductTaskEvidenceSpecDTO {
+  readonly key: string;
+  readonly label: string;
+  readonly inputKind?: "file" | "text" | "date";
+  readonly accept?: readonly string[];
+  readonly required?: boolean;
+  readonly description?: string;
+}
+
+/**
+ * schema 是不透明 JSON，发布者携带的 evidenceSpec 不在 protocol DTO 类型上；
+ * 按结构化读取并做最小形状过滤（key/label 非空字符串的条目保留），
+ * 避免逐字段投影静默丢掉发布者数据。
+ */
+export function normalizeEvidenceSpec(
+  value: unknown,
+): readonly ProductTaskEvidenceSpecDTO[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const entries = value.filter(isEvidenceSpecEntry) as readonly ProductTaskEvidenceSpecDTO[];
+  return entries.length > 0 ? entries : undefined;
+}
+
+function isEvidenceSpecEntry(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.key === "string" &&
+    record.key.trim().length > 0 &&
+    typeof record.label === "string" &&
+    record.label.trim().length > 0
+  );
+}
+
+function evidenceSpecFromStage(
+  stage: ZhixuStageDTO | undefined,
+): readonly ProductTaskEvidenceSpecDTO[] | undefined {
+  return normalizeEvidenceSpec(
+    (stage as { readonly evidenceSpec?: unknown } | undefined)?.evidenceSpec,
+  );
 }
 
 function requiredInputsForCapability(
@@ -1303,7 +1393,6 @@ function missingTaskCapabilityPlugin(): ProductTaskCapabilityPluginDTO {
     source: "missing",
     title: "缺少履约插件配置",
     summary: "该链上待办没有匹配到秩序 metadata 中的履约插槽能力插件。",
-    requiredEvidence: [],
   };
 }
 
@@ -1333,23 +1422,6 @@ function primaryActionForFulfillment(kind: FulfillmentPluginKind): string {
       return "提交争议材料";
     case "evidence_submission":
       return "提交阶段凭证";
-  }
-}
-
-function requiredEvidenceForFulfillment(
-  kind: FulfillmentPluginKind,
-): readonly string[] {
-  switch (kind) {
-    case "payment_placeholder":
-      return ["付款条件确认", "资金凭证指纹"];
-    case "delivery_update":
-      return ["交付/报关凭证", "业务确认"];
-    case "validation_confirm":
-      return ["检验报告", "验收确认"];
-    case "dispute_material":
-      return ["争议说明", "补充凭证"];
-    case "evidence_submission":
-      return ["凭证指纹或业务确认"];
   }
 }
 
@@ -1434,7 +1506,7 @@ function requiredInputsForFulfillment(
       return [
         {
           inputId: "stage-evidence",
-          label: kind === "delivery_update" ? "交付/报关凭证" : "阶段凭证",
+          label: kind === "delivery_update" ? "阶段交付凭证" : "阶段凭证",
           inputType: "evidence",
           required: true,
           completed,
@@ -1813,6 +1885,9 @@ function proofFromStateMachineProof(
     chainId: proof.chainId,
     contractAddress: proof.contractAddress,
     blockNumber: proof.blockNumber.toString(),
+    ...(proof.transactionIndex !== undefined
+      ? { transactionIndex: proof.transactionIndex }
+      : {}),
     transactionHash: proof.transactionHash,
     logIndex: proof.logIndex,
     eventName: proof.eventName,
@@ -1928,11 +2003,73 @@ function paymentConditionSummaryFromStateMachine(
 }
 
 function zhixuIdForPlan(order: StateMachineOrderProjection): string {
-  return order.planId === crossBorderPlanIds.planId ||
-    (order.planHash !== undefined &&
-      order.planHash === crossBorderPlanIds.planHash)
-    ? CROSS_BORDER_ZHIXU_ID
-    : `plan-${shortId(order.planId)}`;
+  return zhixuIdFromPlanId(order.planId);
+}
+
+/**
+ * The zhixu id of an order/task follows the Store-registered schema for its
+ * plan when one exists; otherwise it falls back to the plan-derived id so the
+ * id always points at a real catalog entry built from the same projection.
+ */
+async function zhixuIdForOrderProjection(
+  order: StateMachineOrderProjection,
+  productSchemaResolver?: ProductSchemaResolver,
+): Promise<string> {
+  const schema = await explicitStoreSchemaForPlanId(order.planId, order.planHash, productSchemaResolver);
+  return schema?.zhixuId ?? zhixuIdForPlan(order);
+}
+
+/**
+ * Catalog entries describe the same plan the chain published. When the plan
+ * projection exists, its publication evidence overrides the schema bundle's
+ * "not yet synced" placeholder.
+ */
+function overlayPlanPublication(
+  detail: ZhixuDetailDTO,
+  plan: ProjectionSnapshot["stateMachinePlans"][string] | undefined,
+): ZhixuDetailDTO {
+  if (!plan) {
+    return detail;
+  }
+  return {
+    ...detail,
+    planPublication: {
+      status: "published",
+      label: "Plan 已发布",
+      stateMachineLabel: plan.stateMachineAddress,
+      planId: plan.planId,
+      planHash: plan.planHash,
+      txHash: plan.proof.transactionHash,
+      blockNumber: plan.proof.blockNumber.toString(),
+      ...(plan.publisher ? { publisher: plan.publisher } : {}),
+      ...(detail.planPublication.artifactHash
+        ? { artifactHash: detail.planPublication.artifactHash }
+        : {}),
+    },
+  };
+}
+
+async function explicitStoreSchemaForPlan(
+  plan: ProjectionSnapshot["stateMachinePlans"][string],
+  productSchemaResolver?: ProductSchemaResolver,
+): Promise<StoreProductSchemaDTO | undefined> {
+  if (!productSchemaResolver || !plan.planHash) {
+    return undefined;
+  }
+  const schema = await productSchemaResolver.getProductSchemaByPlan(plan.planId, plan.planHash);
+  return schema && isExplicitStoreProductSchema(schema) ? schema : undefined;
+}
+
+async function explicitStoreSchemaForPlanId(
+  planId: string,
+  planHash: string | undefined,
+  productSchemaResolver?: ProductSchemaResolver,
+): Promise<StoreProductSchemaDTO | undefined> {
+  if (!productSchemaResolver || !planHash) {
+    return undefined;
+  }
+  const schema = await productSchemaResolver.getProductSchemaByPlan(planId, planHash);
+  return schema && isExplicitStoreProductSchema(schema) ? schema : undefined;
 }
 
 function planKey(planId: string, planHash: string): string {
@@ -1964,11 +2101,42 @@ function taskStatusMatchesQuery(
   );
 }
 
+/**
+ * 协议包 OrderStatus 是冻结的单值类型（合约词表只有 registered），投影侧的
+ * "unknown"/乐观提升在这里被归一为 "registered"。诚实性由 projectionStatus
+ * （机器可读）与 statusLabel（pending 时"同步中"）承担，二者都以
+ * registeredAt 为判据，见 orderProjectionComplete。
+ */
 function mapStateMachineOrderStatus(
   status: StateMachineOrderStatus,
 ): ProductOrderDTO["status"] {
   void status;
   return "registered";
+}
+
+/**
+ * 投影完整性判据：订单行存在 ≠ 注册事件已投影。行可被任意引用该 orderId
+ * 的事件先建出（SignalSubmitted/HookStatusChanged 等还会把 status 乐观提升
+ * 为 "registered"），而 registeredAt 只由 OrderRegistered 事件写入——与
+ * reconcile worker 判定注册投影在场的判据一致。
+ */
+function orderProjectionComplete(
+  order: StateMachineOrderProjection,
+): boolean {
+  return Boolean(order.registeredAt);
+}
+
+/**
+ * statusLabel 跟投影完整性走：行已建但注册投影未到时显示"同步中"，即使
+ * status 字段已被乐观提升为 registered——避免读面渲染成"已注册"。
+ */
+function orderProjectionStatusLabel(
+  status: StateMachineOrderStatus,
+  projected: boolean,
+): string {
+  return projected
+    ? mapStateMachineOrderStatusLabel(status)
+    : mapStateMachineOrderStatusLabel("unknown");
 }
 
 function mapStateMachineOrderStatusLabel(
@@ -2126,18 +2294,25 @@ function compareProductProof(
   left: ProductChainProofDTO,
   right: ProductChainProofDTO,
 ): number {
-  if (left.chainId !== right.chainId) {
-    return left.chainId - right.chainId;
-  }
-  const blockCompare = compareNumericStrings(
-    left.blockNumber,
-    right.blockNumber,
-  );
-  if (blockCompare !== 0) {
-    return blockCompare;
-  }
-  if (left.logIndex !== right.logIndex) {
-    return left.logIndex - right.logIndex;
+  const position = compareChainPointers({
+    chainId: left.chainId,
+    blockNumber: BigInt(left.blockNumber),
+    ...(left.transactionIndex !== undefined
+      ? { transactionIndex: left.transactionIndex }
+      : {}),
+    transactionHash: left.transactionHash as `0x${string}`,
+    logIndex: left.logIndex,
+  }, {
+    chainId: right.chainId,
+    blockNumber: BigInt(right.blockNumber),
+    ...(right.transactionIndex !== undefined
+      ? { transactionIndex: right.transactionIndex }
+      : {}),
+    transactionHash: right.transactionHash as `0x${string}`,
+    logIndex: right.logIndex,
+  });
+  if (position !== 0) {
+    return position;
   }
   return left.eventId.localeCompare(right.eventId);
 }
@@ -2146,25 +2321,7 @@ function compareProvenance(
   left: ProjectionProvenance,
   right: ProjectionProvenance,
 ): number {
-  if (left.chainId !== right.chainId) {
-    return left.chainId - right.chainId;
-  }
-  if (left.blockNumber !== right.blockNumber) {
-    return left.blockNumber < right.blockNumber ? -1 : 1;
-  }
-  if (left.logIndex !== right.logIndex) {
-    return left.logIndex - right.logIndex;
-  }
-  return left.transactionHash.localeCompare(right.transactionHash);
-}
-
-function compareNumericStrings(left: string, right: string): number {
-  if (!/^\d+$/.test(left) || !/^\d+$/.test(right)) {
-    return left.localeCompare(right);
-  }
-  const leftValue = BigInt(left);
-  const rightValue = BigInt(right);
-  return leftValue === rightValue ? 0 : leftValue < rightValue ? -1 : 1;
+  return compareChainPointers(left, right);
 }
 
 function displayStageId(value: string): string {

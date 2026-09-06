@@ -258,7 +258,7 @@ export function createStoreZhixuDraftWorkflowService(options: {
 
     async updateProductSchema(draftId, input) {
       const draft = await requireDraft(draftStore, draftId);
-      assertDraftSchemaMutable(draft);
+      await assertDraftSchemaMutable(draft, options.projectionStore);
       const timestamp = now().toISOString();
       const productSchema = normalizeProductSchemaInput(input, draft, timestamp);
       const updated: StoreZhixuDraftRecord = {
@@ -367,12 +367,29 @@ function assertDraftCompiledForReview(
   }
 }
 
-function assertDraftSchemaMutable(draft: StoreZhixuDraftRecord): void {
+/**
+ * active schema 守卫：草稿状态机不落 "active"，
+ * 不能以 `draft.status === "active"` 判定，否则已发布 plan 的 schema
+ * 仍可原地改写。守卫用发布状态判定：compile
+ * preview 的 (planId, planHash) 已出现在链投影（stateMachinePlans）即
+ * 视为已发布，schema 必须走新版本草稿。
+ */
+async function assertDraftSchemaMutable(
+  draft: StoreZhixuDraftRecord,
+  projectionStore: ProjectionStore
+): Promise<void> {
   if (draft.status === "active") {
     throw new StoreZhixuDraftWorkflowError(
       409,
       "product_schema_new_version_required",
       "active product schema cannot be changed in place; create a new draft version"
+    );
+  }
+  if (await hasPublishedPlan(draft, projectionStore)) {
+    throw new StoreZhixuDraftWorkflowError(
+      409,
+      "product_schema_new_version_required",
+      "this draft anchors a published plan; its product schema cannot be changed in place (create a new draft version)"
     );
   }
 }
@@ -479,6 +496,9 @@ function previewFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreCom
       }
     }
   }
+  for (const route of artifact.executorRoutes) {
+    stages.add(route.stageId);
+  }
 
   return {
     planId: artifact.planId,
@@ -498,19 +518,34 @@ function buildSuggestedProductSchema(
   timestamp: string
 ): StoreProductSchemaDTO {
   const preview = previewFromOnchainArtifact(artifact);
-  const stages = stagesFromOnchainArtifact(artifact);
+  // evidenceSpec 保留：schema 是发布者拥有的不透明 JSON，重建（从编译产物
+  // 重新推断 stage/plugin）不得丢掉上一版 schema 携带的结构化证据要求。
+  const evidenceSpecByStage = previousEvidenceSpecByStageId(draft.productSchema);
+  const evidenceSpecByPlugin = previousPluginEvidenceSpecBySlotId(draft.productSchema);
+  const stages = stagesFromOnchainArtifact(artifact).map((stage) => {
+    const evidenceSpec = evidenceSpecByStage.get(stage.stageId);
+    return {
+      ...stage,
+      ...(evidenceSpec !== undefined ? { evidenceSpec } : {})
+    };
+  });
   const stageIds = new Set(stages.map((stage) => stage.stageId));
   const routeByStage = new Map(artifact.executorRoutes.map((route) => [route.stageIdentifier, route]));
   const roleSlots: RoleSlotDTO[] = stages.map((stage) => {
     const route = routeByStage.get(stage.stageId);
-    const plugin = suggestedPluginForStage(stage.stageId);
     const slotId = stage.stageId;
+    const plugin = withPreservedPluginEvidenceSpec(
+      suggestedPluginForStage(stage.stageId),
+      evidenceSpecByPlugin.get(slotId),
+    );
+    const stageEvidenceSpec = evidenceSpecByStage.get(stage.stageId);
     return {
       slotId,
       title: route?.executorId ? `${stage.name}执行方` : `${stage.name}履约者`,
       label: route?.executorId ?? stage.ownerRole,
       duty: `负责 ${stage.name} 阶段的链下履约、凭证提交和签名确认。`,
       evidence: stage.evidence,
+      ...(stageEvidenceSpec !== undefined ? { evidenceSpec: stageEvidenceSpec } : {}),
       status: "required",
       tone: "info",
       required: true,
@@ -597,11 +632,21 @@ function createOrderTriggerFromOnchainArtifact(
   stages: readonly ZhixuStageDTO[],
   roleSlots: readonly RoleSlotDTO[]
 ): StoreProductSchemaDTO["createOrderTrigger"] {
+  // uvp-semantic/0.7 + dock v1：入口表退役。mint 出生阶段的订阅已可上链
+  // （编译为 SIGNAL 指令、orderTriggerKind=mint，现实成立后经
+  // triggerOrderFrom* 开放提交）；非 mint 阶段的订阅不上链。这里为 Store
+  // 产品 schema 选择 createOrderTrigger：首条携带正依赖的 receive hook
+  // （注册者的 bootstrap 入口）。dock 委托 hook（orderTriggerKind=dock）是
+  // 目标出生入口，不属于本定义的开单路径；依赖按 kind 字典序排序，必须
+  // 显式取正依赖，负依赖不能用于构造开单 typed data。
+  // ORDER_TRIGGER_MINT 是冻结合约 triggerOrderFrom* 的硬门槛：缺失时用户
+  // 签名后链上 InvalidTriggerHook revert，draft 永久无法开单。
   const hook = artifact.compiledHooks.find((item) =>
-    item.isTrigger &&
-    item.dependencies.some((dependency) => dependency.source === "order" && dependency.signalName === "registered")
-  ) ?? artifact.compiledHooks.find((item) => item.isTrigger && item.dependencies.length > 0);
-  const dependency = hook?.dependencies[0];
+    item.orderTriggerKind === "mint" &&
+    item.kind === "receive" &&
+    item.dependencies.some((dependency) => dependency.kind === "positive")
+  );
+  const dependency = hook?.dependencies.find((item) => item.kind === "positive");
   if (!hook || !dependency) {
     return undefined;
   }
@@ -663,6 +708,52 @@ function suggestedPluginForStage(stageId: string): SlotCapabilityPluginDTO {
   };
 }
 
+/**
+ * evidenceSpec 不在 protocol 的 ZhixuStageDTO / SlotCapabilityPluginDTO
+ * 类型上（发布者经不透明 schema JSON 携带）；重建按 stageId / slotId
+ * 结构化找回并原样保留，缺失时不合成。
+ */
+function previousEvidenceSpecByStageId(
+  previous: StoreProductSchemaDTO | undefined
+): ReadonlyMap<string, unknown> {
+  const byStageId = new Map<string, unknown>();
+  for (const stage of previous?.stages ?? []) {
+    const evidenceSpec = (stage as { readonly evidenceSpec?: unknown }).evidenceSpec;
+    if (evidenceSpec !== undefined) {
+      byStageId.set(stage.stageId, evidenceSpec);
+    }
+  }
+  return byStageId;
+}
+
+function previousPluginEvidenceSpecBySlotId(
+  previous: StoreProductSchemaDTO | undefined
+): ReadonlyMap<string, unknown> {
+  const bySlotId = new Map<string, unknown>();
+  for (const slot of previous?.roleSlots ?? []) {
+    for (const plugin of slot.capabilityPlugins ?? []) {
+      const evidenceSpec = (plugin as { readonly evidenceSpec?: unknown }).evidenceSpec;
+      if (evidenceSpec !== undefined && !bySlotId.has(slot.slotId)) {
+        bySlotId.set(slot.slotId, evidenceSpec);
+      }
+    }
+  }
+  return bySlotId;
+}
+
+function withPreservedPluginEvidenceSpec(
+  plugin: SlotCapabilityPluginDTO,
+  evidenceSpec: unknown
+): SlotCapabilityPluginDTO {
+  if (evidenceSpec === undefined) {
+    return plugin;
+  }
+  return {
+    ...plugin,
+    ...(evidenceSpec !== undefined ? { evidenceSpec } : {})
+  };
+}
+
 function suggestedAddOnManifestForSlot(
   roleSlotId: string,
   stageName: string,
@@ -702,7 +793,11 @@ function suggestedAddOnManifestForSlot(
                 componentKind: "evidence_refs",
                 inputId: evidenceInputId,
                 label: plugin.requiredEvidence[0] ?? defaultEvidenceLabel(roleSlotId),
-                required: true
+                required: true,
+                // 发布者携带的结构化证据要求原样透传给参与方页面渲染。
+                ...((plugin as { readonly evidenceSpec?: unknown }).evidenceSpec !== undefined
+                  ? { evidenceSpec: (plugin as { readonly evidenceSpec?: unknown }).evidenceSpec }
+                  : {})
               },
               {
                 componentId: "confirmation",
@@ -750,9 +845,18 @@ function normalizeProductSchemaInput(
   if (!preview) {
     throw new StoreZhixuDraftWorkflowError(409, "compile_preview_required", "compile preview is required before product schema update");
   }
-  const roleSlots = arrayField<RoleSlotDTO>(schemaRecord, "roleSlots");
-  const orderPermissionTable = arrayField<OrderPermissionTableEntryDTO>(schemaRecord, "orderPermissionTable");
-  const stages = arrayField<ZhixuStageDTO>(schemaRecord, "stages");
+  const roleSlots = validatedRoleSlots(
+    arrayField<RoleSlotDTO>(schemaRecord, "roleSlots"),
+    "roleSlots"
+  );
+  const orderPermissionTable = validatedPermissionRows(
+    arrayField<OrderPermissionTableEntryDTO>(schemaRecord, "orderPermissionTable"),
+    "orderPermissionTable"
+  );
+  const stages = validatedStageRows(
+    arrayField<ZhixuStageDTO>(schemaRecord, "stages"),
+    "stages"
+  );
   const selectorBindings = arrayField<StoreProductSchemaSelectorBindingDTO>(schemaRecord, "selectorBindings", () =>
     draft.productSchema?.selectorBindings ?? []
   );
@@ -826,6 +930,10 @@ function productSchemaHashPayload(
     planId: schema.planId,
     planHash: schema.planHash,
     artifactHash: schema.artifactHash,
+    // schema 携带的 onchain hook plan 产物主体必须进
+    // 哈希——否则该对象可被替换而不改变 schemaHash（artifactHash 字段
+    // 单独存在，产物本体与摘要字段可能不同步地被篡改）。
+    onchainHookPlanArtifact: schema.onchainHookPlanArtifact ?? null,
     createOrderTrigger: schema.createOrderTrigger ?? null,
     roleSlots: schema.roleSlots,
     orderPermissionTable: schema.orderPermissionTable,
@@ -1549,6 +1657,72 @@ function arrayField<TValue>(
     throw new StoreZhixuDraftWorkflowError(400, "invalid_product_schema", `${key} must be an array`);
   }
   return value as readonly TValue[];
+}
+
+/**
+ * roleSlots 类型校验：arrayField 只做受控转型，
+ * 非对象条目（字符串/数字/null）必须在结构校验层拒绝，
+ * 否则会在后续语义校验里以 TypeError 崩成 500。
+ */
+function validatedRoleSlots(values: readonly unknown[], field: string): readonly RoleSlotDTO[] {
+  return values.map((slot, index) => {
+    if (!isRecord(slot)) {
+      throw invalidSchemaType(`${field}[${index}] must be an object`);
+    }
+    if (typeof slot.slotId !== "string" || slot.slotId.trim().length === 0) {
+      throw invalidSchemaType(`${field}[${index}].slotId must be a non-empty string`);
+    }
+    if (slot.capabilityPlugins !== undefined) {
+      if (!Array.isArray(slot.capabilityPlugins)) {
+        throw invalidSchemaType(`${field}[${index}].capabilityPlugins must be an array`);
+      }
+      slot.capabilityPlugins.forEach((plugin, pluginIndex) => {
+        if (!isRecord(plugin)) {
+          throw invalidSchemaType(`${field}[${index}].capabilityPlugins[${pluginIndex}] must be an object`);
+        }
+        if (
+          !Array.isArray(plugin.stageIds) ||
+          !plugin.stageIds.every((stageId) => typeof stageId === "string")
+        ) {
+          throw invalidSchemaType(
+            `${field}[${index}].capabilityPlugins[${pluginIndex}].stageIds must be an array of strings`
+          );
+        }
+      });
+    }
+    return slot as unknown as RoleSlotDTO;
+  });
+}
+
+function validatedPermissionRows(values: readonly unknown[], field: string): readonly OrderPermissionTableEntryDTO[] {
+  return values.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw invalidSchemaType(`${field}[${index}] must be an object`);
+    }
+    if (typeof entry.permissionId !== "string" || entry.permissionId.trim().length === 0) {
+      throw invalidSchemaType(`${field}[${index}].permissionId must be a non-empty string`);
+    }
+    if (typeof entry.roleSlotId !== "string" || entry.roleSlotId.trim().length === 0) {
+      throw invalidSchemaType(`${field}[${index}].roleSlotId must be a non-empty string`);
+    }
+    return entry as unknown as OrderPermissionTableEntryDTO;
+  });
+}
+
+function validatedStageRows(values: readonly unknown[], field: string): readonly ZhixuStageDTO[] {
+  return values.map((stage, index) => {
+    if (!isRecord(stage)) {
+      throw invalidSchemaType(`${field}[${index}] must be an object`);
+    }
+    if (typeof stage.stageId !== "string" || stage.stageId.trim().length === 0) {
+      throw invalidSchemaType(`${field}[${index}].stageId must be a non-empty string`);
+    }
+    return stage as unknown as ZhixuStageDTO;
+  });
+}
+
+function invalidSchemaType(message: string): StoreZhixuDraftWorkflowError {
+  return new StoreZhixuDraftWorkflowError(400, "invalid_product_schema", message);
 }
 
 function numberField(record: Record<string, unknown>, key: string): number | undefined {

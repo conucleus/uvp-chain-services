@@ -33,6 +33,10 @@ export class InMemoryProductSubmissionStore implements ProductSubmissionStore {
     return true;
   }
 
+  async releaseNonce(key: string): Promise<void> {
+    this.#reservedNonceKeys.delete(key);
+  }
+
   async putSubmission(submission: ProductSubmissionDTO): Promise<void> {
     this.#submissions.set(submission.submissionId, submission);
   }

@@ -95,7 +95,9 @@ CREATE TABLE IF NOT EXISTS evidence_object (
   storage_uri TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   metadata_hash TEXT NOT NULL,
-  payload_hash TEXT NOT NULL UNIQUE,
+  -- G-07/L-3：去重按 owner 维度——同凭证不同参与者各自落档，第二参与者
+  -- 上传同 payload_hash 不再撞全局唯一约束变成不可重试的 500。
+  payload_hash TEXT NOT NULL,
   payload_ref TEXT NOT NULL,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -106,7 +108,8 @@ CREATE TABLE IF NOT EXISTS evidence_object (
   bound_signal_id TEXT,
   bound_at TEXT,
   metadata_json JSONB NOT NULL,
-  canonical_metadata_json JSONB NOT NULL
+  canonical_metadata_json JSONB NOT NULL,
+  UNIQUE (owner_participant_id, payload_hash)
 );
 
 CREATE INDEX IF NOT EXISTS evidence_object_order_idx
@@ -133,12 +136,46 @@ CREATE TABLE IF NOT EXISTS evidence_admin_read_audit (
 CREATE INDEX IF NOT EXISTS evidence_admin_read_evidence_idx
   ON evidence_admin_read_audit (evidence_id, accessed_at);
 
-CREATE TABLE IF NOT EXISTS submission (
+-- CS-P5：prepare 与 submission 拆表。submission 以 submission_id 为主键
+-- 追加保留历史（同一 prepare 的可重试失败重提不得覆盖先前提交档案，
+-- 与内存 store 语义一致）；business key 唯一性收敛到 prepare 一侧。
+CREATE TABLE IF NOT EXISTS submission_prepare (
   prepare_id TEXT PRIMARY KEY,
-  submission_id TEXT UNIQUE,
   task_id TEXT NOT NULL,
   order_id TEXT NOT NULL,
   onchain_order_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  stage_identifier TEXT NOT NULL,
+  signal_name TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  signal_id TEXT NOT NULL,
+  intent TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  payload_ref TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  submitter TEXT NOT NULL,
+  nonce TEXT NOT NULL,
+  deadline TEXT NOT NULL,
+  prepared_json JSONB NOT NULL,
+  submission_id TEXT,
+  used_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS submission_business_key_idx
+  ON submission_prepare (plan_id, order_id, task_id, submitter, signal_name, nonce);
+
+CREATE INDEX IF NOT EXISTS submission_prepare_plan_order_idx
+  ON submission_prepare (plan_id, onchain_order_id);
+
+CREATE TABLE IF NOT EXISTS submission (
+  submission_id TEXT PRIMARY KEY,
+  prepare_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  order_id TEXT NOT NULL,
+  onchain_order_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
   stage_identifier TEXT NOT NULL,
   signal_name TEXT NOT NULL,
   source_id TEXT NOT NULL,
@@ -151,18 +188,13 @@ CREATE TABLE IF NOT EXISTS submission (
   nonce TEXT NOT NULL,
   deadline TEXT NOT NULL,
   status TEXT NOT NULL,
-  prepared_json JSONB NOT NULL,
   submission_json JSONB,
-  used_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS submission_submission_id_idx
-  ON submission (submission_id);
-
-CREATE UNIQUE INDEX IF NOT EXISTS submission_business_key_idx
-  ON submission (order_id, task_id, submitter, signal_name, nonce);
+CREATE INDEX IF NOT EXISTS submission_prepare_id_idx
+  ON submission (prepare_id);
 
 CREATE TABLE IF NOT EXISTS submission_attempt (
   attempt_id TEXT PRIMARY KEY,

@@ -4,43 +4,64 @@ import {
   http,
   parseAbi,
   type Abi,
+  type AbiEvent,
   type Address as ViemAddress,
   type Log,
 } from "viem";
 import type { ChainServicesConfig } from "../config/index.js";
-import { ConfigError, type Address, type Hex } from "../shared/types.js";
+import { ConfigError, noopLogger, type Address, type Hex, type Logger } from "../shared/types.js";
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
+// UVPStateMachine v0.9（SM ABI fixture：uvp-state-machine.v0.9.json）：
+// 订单维度事件全部 plan-scoped；patch/metadata/derived/link/dock 事件由
+// 各模块合约发出，按 deployment.modules 分地址挂 ABI。
 const stateMachineAbi = parseAbi([
   "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
   "event StateMachineModuleSet(bytes32 indexed moduleId,address indexed previousModule,address indexed newModule)",
   "event StateMachineModulesFrozen(bytes32 indexed moduleSetHash)",
-  "event PlanCommitted(bytes32 indexed planId,bytes32 indexed planHash,address indexed publisher,bytes32 hooksHash,bytes32 metadataHash,uint256 hookCount)",
+  "event PlanCommitted(bytes32 indexed planId,bytes32 indexed planHash,address indexed publisher,bytes32 hooksHash,bytes32 metadataHash,uint256 hookCount,bytes32 dockRoutesRoot,bytes32 dockInterfaceRoot)",
   "event PlanFinalized(bytes32 indexed planId,bytes32 indexed planHash,bytes32 metadataHash)",
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",
   "event PlanPublisherRecorded(bytes32 indexed planId,address indexed publisher)",
   "event OrderRegistered(bytes32 indexed orderId,bytes32 indexed planId)",
   "event OrderMaterialized(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed stageId)",
-  "event OrderRelayerRecorded(bytes32 indexed orderId,address indexed relayer,address indexed creator)",
-  "event SignalSubmitterAuthorized(bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 indexed signalId,address submitter,bytes32 role,bytes32 metadataHash)",
-  "event SignalSubmitted(bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 indexed signalId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
-  "event StageMaterialized(bytes32 indexed orderId,bytes32 indexed stageId,bytes32 indexed triggerHookId,bytes32 sourceId,bytes32 signalId)",
-  "event SignalCapabilityRegistered(bytes32 indexed planId,bytes32 indexed stageId,bytes32 indexed targetSourceId,bytes32 signalId,uint8 targetOrderRelation)",
+  "event OrderRelayerRecorded(bytes32 indexed planId,bytes32 indexed orderId,address indexed relayer,address creator)",
+  "event SignalSubmitterAuthorized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,address submitter,bytes32 role,bytes32 metadataHash)",
+  "event SignalSubmitted(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
+  "event StageMaterialized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed stageId,bytes32 triggerHookId,bytes32 sourceId,bytes32 signalId)",
   "event OrderTriggered(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed triggerStageId,bytes32 sourceId,bytes32 signalId,address submitter)",
-  "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 originSourceId,bytes32 originSignalId)",
+  "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)",
+  "event StageExecutorSignalDelegated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,bytes32 sourceId,bytes32 signalId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce)",
+  "event HookStatusChanged(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint8 previousStatus,uint8 newStatus,uint64 dueAt)",
+  "event HookReady(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,bytes32 stageId,bytes32 hookName)",
+  "event TimerPoked(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint64 dueAt)",
+]);
+
+const stagePatchModuleAbi = parseAbi([
+  "event StageExecutorPatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,bytes32 planId,address selector,address executor,bytes32 role,bytes32 executorMetadataHash,bytes32 mode,address previousExecutor,bytes32 approvalSourceId,bytes32 approvalSignalId,bytes32 patchHash,uint256 patchNonce,string metadataURI)",
+  "event StageResourcePatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,bytes32 planId,address selector,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI)",
+]);
+
+const planMetadataModuleAbi = parseAbi([
   "event StageSelectorBindingRegistered(bytes32 indexed planId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId)",
-  "event StageExecutorPatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,address selector,address executor,bytes32 role,bytes32 executorMetadataHash,bytes32 mode,address previousExecutor,bytes32 approvalSourceId,bytes32 approvalSignalId,bytes32 patchHash,uint256 patchNonce,string metadataURI)",
-  "event StageResourcePatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,address selector,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI)",
-  "event StageExecutorActivated(bytes32 indexed orderId,bytes32 indexed targetStageId,address indexed executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)",
-  "event StageExecutorSignalDelegated(bytes32 indexed orderId,bytes32 indexed targetStageId,bytes32 indexed sourceId,bytes32 signalId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce)",
-  "event DockedOrderLinked(bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 indexed localSourceId,bytes32 selectorStageId,bytes32 linkedPlanId,address selector,bytes32 linkHash,uint256 linkNonce,string metadataURI)",
-  "event DockedSignalMapped(bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 indexed linkedSourceId,bytes32 linkedSignalId,bytes32 localSourceId,bytes32 localSignalId)",
-  "event DockedSignalSubmitted(bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 indexed linkedSourceId,bytes32 linkedSignalId,bytes32 localSourceId,bytes32 localSignalId,bytes32 payloadHash,address submitter)",
-  "event DerivedSignalSubmitted(bytes32 indexed fromOrderId,bytes32 indexed targetOrderId,bytes32 indexed signalId,bytes32 fromStageId,bytes32 targetSourceId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
-  "event HookStatusChanged(bytes32 indexed orderId,bytes32 indexed hookId,uint8 previousStatus,uint8 newStatus,uint64 dueAt)",
-  "event HookReady(bytes32 indexed orderId,bytes32 indexed hookId,bytes32 indexed stageId,bytes32 hookName)",
-  "event TimerPoked(bytes32 indexed orderId,bytes32 indexed hookId,uint64 dueAt)",
+  "event SignalCapabilityRegistered(bytes32 indexed planId,bytes32 indexed stageId,bytes32 indexed targetSourceId,bytes32 signalId,uint8 relation)",
+]);
+
+const derivedSignalModuleAbi = parseAbi([
+  "event DerivedSignalSubmitted(bytes32 indexed fromOrderId,bytes32 indexed targetOrderId,bytes32 indexed signalId,bytes32 fromPlanId,bytes32 targetPlanId,bytes32 fromStageId,bytes32 targetSourceId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
+]);
+
+const orderLinkModuleAbi = parseAbi([
+  "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 planId,bytes32 originPlanId,bytes32 originSourceId,bytes32 originSignalId)",
+]);
+
+// UVPDockingModule v2（uvp.dock.v1 统一委托协议）。
+const dockingModuleAbi = parseAbi([
+  "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
+  "event DockInputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed inputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 payloadHash,address submitter)",
+  "event DockOutputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed outputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 localSignalId,bytes32 payloadHash,address submitter)",
+  "event DockTerminal(bytes32 indexed dockInstanceId,uint8 terminal)",
 ]);
 
 const identityRegistryAbi = parseAbi([
@@ -50,6 +71,7 @@ const identityRegistryAbi = parseAbi([
 ]);
 
 const deploymentRegistryAbi = parseAbi([
+  "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
   "event DeploymentRegistered(bytes32 indexed deploymentId,address indexed stateMachine,bytes32 artifactHash,bytes32 abiHash,uint64 deploymentBlock,string metadataURI)",
   "event DeploymentCanaryMarked(bytes32 indexed deploymentId,bytes32 evidenceHash,string evidenceURI)",
   "event DeploymentActivated(bytes32 indexed previousDeploymentId,bytes32 indexed newDeploymentId,bytes32 evidenceHash,string evidenceURI)",
@@ -57,12 +79,34 @@ const deploymentRegistryAbi = parseAbi([
   "event DeploymentRetired(bytes32 indexed deploymentId,bytes32 reasonHash,string reasonURI)",
 ]);
 
+/**
+ * Event-only ABI surface consumed by the indexer. Keep this exported so the
+ * decoder can be regression-tested against the frozen protocol ABI fixtures;
+ * a fixture topic mismatch is a build failure instead of a silent empty
+ * projection.
+ */
+export const INDEXER_EVENT_ABIS = {
+  UVPStateMachine: stateMachineAbi,
+  UVPIdentityRegistry: identityRegistryAbi,
+  UVPDeploymentRegistry: deploymentRegistryAbi,
+  UVPStagePatchModule: stagePatchModuleAbi,
+  UVPPlanMetadataModule: planMetadataModuleAbi,
+  UVPDerivedSignalModule: derivedSignalModuleAbi,
+  UVPOrderLinkModule: orderLinkModuleAbi,
+  UVPDockingModule: dockingModuleAbi
+} as const;
+
 const maxGetLogsBlockSpan = 9_999n;
 
 type IndexedContractName =
   | "UVPStateMachine"
   | "UVPIdentityRegistry"
-  | "UVPDeploymentRegistry";
+  | "UVPDeploymentRegistry"
+  | "UVPStagePatchModule"
+  | "UVPPlanMetadataModule"
+  | "UVPDerivedSignalModule"
+  | "UVPOrderLinkModule"
+  | "UVPDockingModule";
 
 interface IndexedContract {
   readonly name: IndexedContractName;
@@ -77,26 +121,67 @@ interface ViemLogReader {
     readonly fromBlock: bigint;
     readonly toBlock: bigint;
   }): Promise<readonly Log[]>;
+  getBlock?(input: { readonly blockNumber: bigint }): Promise<{ readonly hash: Hex }>;
 }
 
 export interface ViemChainEventSourceOptions {
   readonly publicClient?: ViemLogReader;
+  /** 不可解码日志的留痕出口；缺省为静默（计数仍可经实例读取）。 */
+  readonly logger?: Logger;
 }
 
 export class ViemChainEventSource implements ChainEventSource {
   readonly #publicClient: ViemLogReader | undefined;
+  readonly #logger: Logger;
+  #unresolvedLogCount = 0;
 
   constructor(options: ViemChainEventSourceOptions = {}) {
     this.#publicClient = options.publicClient;
+    this.#logger = options.logger ?? noopLogger;
+  }
+
+  /**
+   * 单条不可解码日志的累计计数（跳过留痕）。游标照常前进：不可解码的
+   * 日志无法投影，阻塞整轮只会让索引器永久 degraded 并反复重撞同一批
+   * 日志；计数由索引器服务在每轮刷新时取走并入日志/指标。
+   */
+  get unresolvedLogCount(): number {
+    return this.#unresolvedLogCount;
+  }
+
+  /** 取走自上次调用以来的累计计数并清零（索引器服务每轮刷新消费）。 */
+  consumeUnresolvedLogCount(): number {
+    const count = this.#unresolvedLogCount;
+    this.#unresolvedLogCount = 0;
+    return count;
   }
 
   async getFinalizedBlock(config: ChainServicesConfig): Promise<bigint> {
     const latestBlock = await this.#client(config).getBlockNumber();
+    // reorg 安全 = finalityConfirmations 缓冲 + indexer/service.ts
+    // 的追加前哈希连续性校验与有界共同祖先回滚。超过回滚窗口的深 reorg
+    // 仍需 full rebuild；`removed` log 的墓碑/复活过滤在 replay 层完成。
     const confirmations = BigInt(config.network.finalityConfirmations);
     if (latestBlock <= confirmations) {
       return 0n;
     }
     return latestBlock - confirmations;
+  }
+
+  /**
+   * 返回当前 canonical 链上指定高度的区块哈希，供 indexer 在
+   * 追加事件前校验 cursor 连续性、reorg 时定位共同祖先。
+   */
+  async getBlockHash(
+    blockNumber: bigint,
+    config: ChainServicesConfig,
+  ): Promise<Hex> {
+    const client = this.#client(config);
+    if (!client.getBlock) {
+      throw new ConfigError("configured RPC client does not support getBlock; reorg detection is unavailable");
+    }
+    const block = await client.getBlock({ blockNumber });
+    return block.hash.toLowerCase() as Hex;
   }
 
   async readEvents(
@@ -126,9 +211,26 @@ export class ViemChainEventSource implements ChainEventSource {
             ),
           )
         ).flat();
-        return logs.map((log) =>
-          decodeChainEventLog(log, range.chainId, contract),
-        );
+        const decoded: ChainEvent[] = [];
+        for (const log of logs) {
+          // 不可解码日志跳过留痕（计数 + warn），游标前进；不阻塞整轮。
+          const event = decodeChainEventLog(log, range.chainId, contract);
+          if (event) {
+            decoded.push(event);
+          } else {
+            this.#unresolvedLogCount += 1;
+            this.#logger.warn("skipped undecodable chain log; cursor still advances", {
+              chainId: range.chainId,
+              contract: contract.name,
+              address: contract.address,
+              blockNumber: log.blockNumber?.toString(),
+              transactionHash: log.transactionHash,
+              logIndex: log.logIndex?.toString(),
+              unresolvedLogCount: this.#unresolvedLogCount,
+            });
+          }
+        }
+        return decoded;
       }),
     );
 
@@ -177,20 +279,34 @@ function indexedContracts(
       config.network.contracts,
       deploymentRegistryAbi,
     ),
-    ...stateMachineDeployments.flatMap((deployment) => [
-      {
-        name: "UVPStateMachine" as const,
-        address: deployment.stateMachineAddress,
-        abi: stateMachineAbi,
-      },
-      ...Object.values(deployment.modules ?? {})
-        .filter((address): address is Address => Boolean(address))
-        .map((address) => ({
+    ...stateMachineDeployments.flatMap((deployment) => {
+      const modules = deployment.modules ?? {};
+      const moduleContracts = [
+        modules.stagePatch
+          ? moduleContract("UVPStagePatchModule", modules.stagePatch, stagePatchModuleAbi)
+          : undefined,
+        modules.planMetadata
+          ? moduleContract("UVPPlanMetadataModule", modules.planMetadata, planMetadataModuleAbi)
+          : undefined,
+        modules.derivedSignal
+          ? moduleContract("UVPDerivedSignalModule", modules.derivedSignal, derivedSignalModuleAbi)
+          : undefined,
+        modules.orderLink
+          ? moduleContract("UVPOrderLinkModule", modules.orderLink, orderLinkModuleAbi)
+          : undefined,
+        modules.docking
+          ? moduleContract("UVPDockingModule", modules.docking, dockingModuleAbi)
+          : undefined,
+      ].filter((contract): contract is IndexedContract => Boolean(contract));
+      return [
+        {
           name: "UVPStateMachine" as const,
-          address,
+          address: deployment.stateMachineAddress,
           abi: stateMachineAbi,
-        })),
-    ]),
+        },
+        ...moduleContracts,
+      ];
+    }),
   ].filter((contract): contract is IndexedContract => Boolean(contract));
   const seen = new Set<string>();
   return contracts.filter((contract) => {
@@ -201,6 +317,17 @@ function indexedContracts(
     seen.add(key);
     return true;
   });
+}
+
+function moduleContract(
+  name: IndexedContractName,
+  address: Address,
+  abi: Abi,
+): IndexedContract | undefined {
+  if (!address || isZeroAddress(address)) {
+    return undefined;
+  }
+  return { name, address, abi };
 }
 
 function indexedContract(
@@ -228,11 +355,16 @@ function blockRanges(
   return ranges;
 }
 
+/**
+ * 解码单条日志。解码失败（ABI 不匹配 / 未知事件 / 畸形 data）返回
+ * undefined 由调用方跳过并计数；日志元数据不完整仍抛错——那是 RPC 层
+ * 故障，不是单条日志问题。
+ */
 function decodeChainEventLog(
   log: Log,
   chainId: number,
   contract: IndexedContract,
-): ChainEvent {
+): ChainEvent | undefined {
   if (
     log.blockNumber == null ||
     !log.transactionHash ||
@@ -244,40 +376,43 @@ function decodeChainEventLog(
     );
   }
 
+  let event: ChainEvent | undefined;
   try {
     const decoded = decodeEventLog({
       abi: contract.abi,
       data: log.data,
       topics: log.topics,
     });
-
     const eventName = decoded.eventName;
-    if (!eventName) {
-      throw new Error("decoded event has no name");
-    }
-
-    return {
-      chainId,
-      contractAddress: normalizeLogAddress(log.address),
-      blockNumber: log.blockNumber,
-      transactionHash: log.transactionHash.toLowerCase() as Hex,
-      logIndex: Number(log.logIndex),
-      ...(log.blockHash
-        ? { blockHash: log.blockHash.toLowerCase() as Hex }
-        : {}),
-      ...(logRemoved(log) ? { removed: true } : {}),
-      eventName,
-      args: normalizeEventArgs(decoded.args),
-    };
-  } catch (error) {
-    throw new Error(
-      `failed to decode ${contract.name} event at block ${log.blockNumber.toString()}, tx ${log.transactionHash}, log ${log.logIndex.toString()}`,
-      { cause: error },
-    );
+    event = eventName
+      ? {
+        chainId,
+        contractAddress: normalizeLogAddress(log.address),
+        blockNumber: log.blockNumber,
+        transactionHash: log.transactionHash.toLowerCase() as Hex,
+        logIndex: Number(log.logIndex),
+        ...(log.blockHash
+          ? { blockHash: log.blockHash.toLowerCase() as Hex }
+          : {}),
+        ...(log.transactionIndex != null
+          ? { transactionIndex: Number(log.transactionIndex) }
+          : {}),
+        ...(logRemoved(log) ? { removed: true } : {}),
+        eventName,
+        args: normalizeEventArgs(decoded.args, eventInputTypes(contract.abi, eventName)),
+      }
+      : undefined;
+  } catch {
+    return undefined;
   }
+  return event;
 }
 
-function normalizeEventArgs(args: unknown): EventArgs {
+/**
+ * string 参数（URI 等）保持原文：整体小写化只允许用于 bytes/address 类型，
+ * 否则 0x 开头的 URI/标识串会被破坏。
+ */
+function normalizeEventArgs(args: unknown, inputTypes: ReadonlyMap<string, string>): EventArgs {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     return {};
   }
@@ -285,7 +420,7 @@ function normalizeEventArgs(args: unknown): EventArgs {
   return Object.fromEntries(
     Object.entries(args as Record<string, unknown>).map(([key, value]) => [
       key,
-      normalizeEventArg(value),
+      normalizeEventArg(value, inputTypes.get(key)),
     ]),
   );
 }
@@ -294,14 +429,41 @@ function logRemoved(log: Log): boolean {
   return (log as { readonly removed?: boolean }).removed === true;
 }
 
-function normalizeEventArg(value: unknown): unknown {
+function normalizeEventArg(value: unknown, abiType: string | undefined): unknown {
+  if (abiType === "string") {
+    return value;
+  }
   if (typeof value === "string" && value.startsWith("0x")) {
     return value.toLowerCase();
   }
   if (Array.isArray(value)) {
-    return value.map(normalizeEventArg);
+    const itemType = arrayItemType(abiType);
+    return value.map((item) => normalizeEventArg(item, itemType));
   }
   return value;
+}
+
+function arrayItemType(abiType: string | undefined): string | undefined {
+  if (!abiType || !abiType.endsWith("[]")) {
+    return undefined;
+  }
+  return abiType.slice(0, -2);
+}
+
+/** 事件名 → 参数名 → ABI 类型（bytes/address/string/uint…）。 */
+function eventInputTypes(abi: Abi, eventName: string): ReadonlyMap<string, string> {
+  const types = new Map<string, string>();
+  for (const entry of abi) {
+    if (entry.type !== "event" || entry.name !== eventName) {
+      continue;
+    }
+    for (const input of (entry as AbiEvent).inputs) {
+      if (input.name) {
+        types.set(input.name, input.type);
+      }
+    }
+  }
+  return types;
 }
 
 function normalizeLogAddress(address: string): Address {

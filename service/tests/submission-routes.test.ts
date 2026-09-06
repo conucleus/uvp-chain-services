@@ -18,6 +18,7 @@ const privateKey = "0x1111111111111111111111111111111111111111111111111111111111
 const account = privateKeyToAccount(privateKey);
 const submitter = normalizeAddress(account.address, "account.address");
 const verifyingContract = "0x1111111111111111111111111111111111111111" as Address;
+const routePlanId = "0x7777777777777777777777777777777777777777777777777777777777777777" as Hex;
 
 const routeTask: ProductTaskDTO = {
   taskId: "task-route",
@@ -31,7 +32,6 @@ const routeTask: ProductTaskDTO = {
   stageName: "Customs complete",
   deadline: "2026-05-01",
   fundingImpact: "advance workflow",
-  requiredEvidence: ["customs declaration"],
   status: "open",
   responsibilityStatements: [],
   proofRows: []
@@ -49,6 +49,7 @@ describe("submission API routes", () => {
       evidenceReader: evidenceService,
       chainId: 31337,
       verifyingContract,
+      resolveOrderPlanId: async () => routePlanId,
       authorization: allowListedSubmissionAuthorization([{
         orderId: routeTask.orderId,
         stageIdentifier: routeTask.stageId,
@@ -60,7 +61,7 @@ describe("submission API routes", () => {
       submissionIdFactory: () => "sub_route",
       nonceFactory: () => "7"
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { evidenceService, submissionService });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
 
     const uploadResponse = await router.handle({
       method: "POST",
@@ -149,6 +150,7 @@ describe("submission API routes", () => {
       evidenceReader: evidenceService,
       chainId: 31337,
       verifyingContract,
+      resolveOrderPlanId: async () => routePlanId,
       authorization: allowListedSubmissionAuthorization([{
         orderId: routeTask.orderId,
         stageIdentifier: routeTask.stageId,
@@ -161,7 +163,7 @@ describe("submission API routes", () => {
       submissionIdFactory: () => "sub_broadcast",
       nonceFactory: () => "8"
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { evidenceService, submissionService });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
 
     const uploadResponse = await router.handle({
       method: "POST",
@@ -258,6 +260,7 @@ describe("submission API routes", () => {
       evidenceReader: evidenceService,
       chainId: 31337,
       verifyingContract,
+      resolveOrderPlanId: async () => routePlanId,
       authorization: allowListedSubmissionAuthorization([{
         orderId: projectedTask.orderId,
         stageIdentifier: projectedTask.stageId,
@@ -278,7 +281,7 @@ describe("submission API routes", () => {
     await projectionStore.resetFromEvents({ deploymentBlock: 0n, events: baseEvents });
     let preparedForRefresh: PreparedSubmissionDTO | undefined;
     let refresh: Promise<unknown> | undefined;
-    const router = createApiRouter(projectionStore, {
+    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local",
       evidenceService,
       submissionService,
       onTxMined: () => {

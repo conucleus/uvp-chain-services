@@ -54,6 +54,11 @@ export interface PreparedSubmissionDTO {
   readonly taskId: string;
   readonly orderId: string;
   readonly onchainOrderId: Hex;
+  /**
+   * the state machine ABI is plan-scoped. The prepared signature
+   * commits to (planId, orderId); the zero placeholder is never stored here.
+   */
+  readonly planId: Hex;
   readonly stageIdentifier: string;
   readonly signalName: string;
   readonly sourceId: Hex;
@@ -124,6 +129,8 @@ export interface ProductSubmissionDTO extends TxReconcileFields {
   readonly taskId: string;
   readonly orderId: string;
   readonly onchainOrderId: Hex;
+  /** The plan-scoped identity committed by the prepared EIP-712 signature. */
+  readonly planId: Hex;
   readonly stageIdentifier: string;
   readonly signalName: string;
   readonly sourceId: Hex;
@@ -248,6 +255,13 @@ export type SubmissionBroadcastResult =
     };
 
 export interface SubmissionBroadcastAdapter {
+  /**
+   * Capability flag: does this adapter actually broadcast to chain?
+   * Adapters that cannot broadcast must declare `attemptsBroadcast: false`
+   * so callers never reserve nonces or consume prepared submissions for
+   * transactions that will never be sent.
+   */
+  readonly attemptsBroadcast?: boolean;
   broadcast(request: SubmissionBroadcastRequest): Promise<SubmissionBroadcastResult>;
 }
 
@@ -257,6 +271,14 @@ export interface ProductSubmissionStore {
   getPrepared(prepareId: string): Promise<PreparedSubmissionRecord | undefined>;
   markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void>;
   reserveNonce(key: string): Promise<boolean>;
+  /**
+   * Release a previously reserved nonce so the same prepared submission can be
+   * retried after a failure that consumed the reservation without ever
+   * recording a submission (transient RPC or store failure). Optional store
+   * capability: submission-service treats a missing releaseNonce as
+   * best-effort.
+   */
+  releaseNonce?(key: string): Promise<void>;
   putSubmission(submission: ProductSubmissionDTO): Promise<void>;
   getSubmission(submissionId: string): Promise<ProductSubmissionDTO | undefined>;
   listSubmissions(): Promise<readonly ProductSubmissionDTO[]>;

@@ -138,15 +138,27 @@ export class TxReconcileWorker implements LifecycleService {
       failed: 0
     };
 
+    // 每条记录独立 try/catch：单条坏记录（缺字段/投影查询异常）只计失败
+    // 并继续，不把整轮（以及 /admin/ops/reconcile/run、retrySubmission）
+    // 一起拖成 500。
     if (this.#productStore) {
       for (const registration of (await this.#productStore.listRegistrations()).filter(isReconcileableRegistration)) {
         summary.registrationsChecked += 1;
-        const updated = await this.#reconcileRegistration(registration);
-        if (updated) {
-          summary.updated += 1;
-          if (updated.status === "failed") {
-            summary.failed += 1;
+        try {
+          const updated = await this.#reconcileRegistration(registration);
+          if (updated) {
+            summary.updated += 1;
+            if (updated.status === "failed") {
+              summary.failed += 1;
+            }
           }
+        } catch (error) {
+          summary.failed += 1;
+          this.#logger.warn("reconcile worker skipped a broken registration record", {
+            triggerId: registration.triggerId,
+            orderId: registration.orderId,
+            message: redactErrorMessage(error)
+          });
         }
       }
     }
@@ -154,12 +166,21 @@ export class TxReconcileWorker implements LifecycleService {
     if (this.#submissionStore) {
       for (const submission of (await this.#submissionStore.listSubmissions()).filter(isReconcileableSubmission)) {
         summary.submissionsChecked += 1;
-        const updated = await this.#reconcileSubmission(submission);
-        if (updated) {
-          summary.updated += 1;
-          if (updated.status === "failed") {
-            summary.failed += 1;
+        try {
+          const updated = await this.#reconcileSubmission(submission);
+          if (updated) {
+            summary.updated += 1;
+            if (updated.status === "failed") {
+              summary.failed += 1;
+            }
           }
+        } catch (error) {
+          summary.failed += 1;
+          this.#logger.warn("reconcile worker skipped a broken submission record", {
+            submissionId: submission.submissionId,
+            orderId: submission.orderId,
+            message: redactErrorMessage(error)
+          });
         }
       }
     }
@@ -167,14 +188,29 @@ export class TxReconcileWorker implements LifecycleService {
     if (this.#governanceStore) {
       const logs = (await this.#governanceStore.listIdentityTxLogs())
         .filter(isReconcileableGovernanceLog);
-      for (const log of logs) {
+      const actionable = logs.filter((log) => !isSimulatedGovernanceLog(log));
+      const skippedSimulatedCount = logs.length - actionable.length;
+      if (skippedSimulatedCount > 0) {
+        this.#logger.warn("reconcile worker skipped simulated governance ledger entries; they never hit chain and cannot be reconciled", {
+          skippedSimulatedCount
+        });
+      }
+      for (const log of actionable) {
         summary.governanceLogsChecked += 1;
-        const updated = await this.#reconcileGovernanceLog(log);
-        if (updated) {
-          summary.updated += 1;
-          if (updated.status === "failed") {
-            summary.failed += 1;
+        try {
+          const updated = await this.#reconcileGovernanceLog(log);
+          if (updated) {
+            summary.updated += 1;
+            if (updated.status === "failed") {
+              summary.failed += 1;
+            }
           }
+        } catch (error) {
+          summary.failed += 1;
+          this.#logger.warn("reconcile worker skipped a broken governance ledger record", {
+            logId: log.logId,
+            message: redactErrorMessage(error)
+          });
         }
       }
     }
@@ -244,7 +280,7 @@ export class TxReconcileWorker implements LifecycleService {
       return undefined;
     }
 
-    const submissionStatus = submissionStatusFromOutcome(outcome);
+    const submissionStatus = submissionStatusFromOutcome(outcome, submission);
     const deadLetter = submissionDeadLetterFromOutcome(outcome, submissionStatus);
     const updated: ProductSubmissionDTO = {
       ...submission,
@@ -310,7 +346,11 @@ export class TxReconcileWorker implements LifecycleService {
             receiptStatus: "not_checked",
             projectionStatus: "not_checked"
           },
-          retryable: retryableOf(record)
+          // No transaction hash means no chain fact has been observed yet;
+          // this is a pending/reconcile condition regardless of the adapter's
+          // original retry flag. It must not be dead-lettered as a permanent
+          // broadcast failure.
+          retryable: true
         };
       }
       return staleOutcome(checkedAt);
@@ -336,12 +376,14 @@ export class TxReconcileWorker implements LifecycleService {
           receiptStatus: "missing",
           projectionStatus: "not_checked"
         },
-        retryable: retryableOf(record)
+        // A missing receipt is a temporary observation gap, not a reverted
+        // transaction. Keep probing until the timeout lane takes over.
+        retryable: true
       };
     }
 
     const blockNumber = normalizeBlockNumber(receipt.blockNumber);
-    if (receipt.status !== "success") {
+    if (receipt.status === "reverted" || receipt.status === "failed") {
       return {
         kind: "failed",
         registrationStatus: "failed",
@@ -356,6 +398,25 @@ export class TxReconcileWorker implements LifecycleService {
         errorCode: "transaction_reverted",
         errorMessage: `transaction receipt status ${receipt.status ?? "failed"}`,
         retryable: false
+      };
+    }
+    if (receipt.status !== "success") {
+      // Receipt status is an open input at the RPC boundary. Unknown,
+      // pending, or omitted values must remain pending/retryable; treating
+      // them as a revert can isolate a transaction which is actually still
+      // mining (or already successful on the canonical chain).
+      return {
+        kind: "pending",
+        registrationStatus: record.status as ProductOrderTriggerStatus,
+        checkedAt,
+        fields: {
+          reconcileStatus: "submitted",
+          lastCheckedAt: checkedAt,
+          receiptStatus: "unknown",
+          projectionStatus: "not_checked"
+        },
+        ...(blockNumber ? { blockNumber } : {}),
+        retryable: true
       };
     }
 
@@ -483,6 +544,12 @@ function isReconcileableRegistration(registration: ProductOrderTriggerRecord): b
 }
 
 function isReconcileableSubmission(submission: ProductSubmissionDTO): boolean {
+  // 带 txHash 的 failed 必须复核回执：链上真相可能推翻本地失败标记
+  // （回执成功且投影已呈现 → 自愈为 confirmed）。无 txHash 的 failed
+  // 从未上链，没有回执可查。
+  if (submission.status === "failed") {
+    return Boolean(submission.txHash);
+  }
   return submission.status === "broadcasting" || submission.status === "submitted" || submission.status === "indexing";
 }
 
@@ -490,12 +557,22 @@ function isReconcileableGovernanceLog(log: GovernanceTxLogDTO): boolean {
   return log.status === "pending" || log.status === "broadcasting" || log.status === "indexing";
 }
 
+function isSimulatedGovernanceLog(log: GovernanceTxLogDTO): boolean {
+  return log.executionMode === "simulated" || log.broadcastStatus === "simulated_tx";
+}
+
 async function registrationProjectionConfirmation(
   projectionStore: ProjectionStore,
   registration: ProductOrderTriggerRecord
 ): Promise<ProjectionConfirmation | undefined> {
-  const order = await projectionStore.getStateMachineOrder(registration.orderId);
-  if (!order?.registeredAt || order.planId.toLowerCase() !== registration.planId.toLowerCase()) {
+  // 订单身份是 (planId, orderId)：registration.planId 必填（schema NOT
+  // NULL），必须走复合键查询——裸 orderId 在同号订单跨 plan
+  // 复用时永远查不中，registration 会永卡 indexing。
+  const order = await projectionStore.getStateMachineOrder(
+    registration.orderId,
+    registration.planId
+  );
+  if (!order?.registeredAt) {
     return undefined;
   }
   if (
@@ -511,7 +588,13 @@ async function submissionProjectionConfirmation(
   projectionStore: ProjectionStore,
   submission: ProductSubmissionDTO
 ): Promise<ProjectionConfirmation | undefined> {
-  const order = await projectionStore.getStateMachineOrder(submission.onchainOrderId);
+  // The state-machine identity is (planId, orderId), not bare orderId. The
+  // composite lookup never returns another plan's projection for this signed
+  // submission.
+  const order = await projectionStore.getStateMachineOrder(submission.onchainOrderId, submission.planId);
+  if (!order) {
+    return undefined;
+  }
   const signal = order?.signals[`${submission.sourceId}:${submission.signalId}`];
   const matches = Boolean(
     signal &&
@@ -577,7 +660,10 @@ function draftFromReconciledRegistration(
   };
 }
 
-function submissionStatusFromOutcome(outcome: ResolvedReconcileOutcome): ProductSubmissionDTO["status"] {
+function submissionStatusFromOutcome(
+  outcome: ResolvedReconcileOutcome,
+  submission: ProductSubmissionDTO
+): ProductSubmissionDTO["status"] {
   switch (outcome.kind) {
     case "confirmed":
       return "confirmed";
@@ -587,7 +673,10 @@ function submissionStatusFromOutcome(outcome: ResolvedReconcileOutcome): Product
     case "indexing":
       return "indexing";
     case "pending":
-      return "submitted";
+      // pending + 无 txHash = 仍在广播、回执未知：不得虚标 submitted
+      // （投影不得替链说话），保持原状态（broadcasting）。有 txHash 的
+      // pending 表示已广播、回执未落地，标 submitted 是如实的。
+      return submission.txHash ? "submitted" : submission.status;
   }
 }
 

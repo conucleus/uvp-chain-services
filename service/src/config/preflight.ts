@@ -17,7 +17,6 @@ export interface ConfigDiagnosticCheck {
 
 export interface ConfigDiagnostics {
   readonly environment: ChainServicesConfig["security"]["environment"];
-  readonly demoMode: boolean;
   readonly e2eControls: boolean;
   readonly storageDriver: string;
   readonly relayerConfigured: boolean;
@@ -25,7 +24,6 @@ export interface ConfigDiagnostics {
     readonly chainId: number;
     readonly deploymentBlock: string;
     readonly finalityConfirmations: number;
-    readonly reorgBufferBlocks: number;
     readonly contracts: Readonly<Record<string, Address>>;
     readonly stateMachineConfigured: boolean;
     readonly identityRegistryConfigured: boolean;
@@ -112,7 +110,6 @@ export interface ConfigDiagnostics {
     readonly clockToleranceSeconds: number;
   };
   readonly product: {
-    readonly demoMode: boolean;
     readonly e2eControls: boolean;
     readonly registrationAdapter: ChainServicesConfig["productBff"]["registrationAdapter"];
     readonly permissiveAuthorizationRequested: boolean;
@@ -222,7 +219,6 @@ export function buildConfigDiagnostics(
     ? privateKeyAddress(config.governance.signerPrivateKey, "governance signer")
     : undefined;
   const governanceContractConfigured = Boolean(identityRegistry);
-  const demoMode = enabledEnv(env, "UVP_PRODUCT_DEMO_MODE");
   const e2eControls = enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES");
   const permissiveAuthorizationRequested = enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") ||
     isPermissiveAuthorizationRequested(env);
@@ -235,7 +231,6 @@ export function buildConfigDiagnostics(
 
   return {
     environment: config.security.environment,
-    demoMode,
     e2eControls,
     storageDriver: config.database.driver,
     relayerConfigured,
@@ -243,7 +238,6 @@ export function buildConfigDiagnostics(
       chainId: config.network.chainId,
       deploymentBlock: config.network.deploymentBlock.toString(),
       finalityConfirmations: config.network.finalityConfirmations,
-      reorgBufferBlocks: config.network.reorgBufferBlocks,
       contracts: config.network.contracts,
       stateMachineConfigured: Boolean(stateMachine),
       identityRegistryConfigured: Boolean(identityRegistry)
@@ -251,7 +245,6 @@ export function buildConfigDiagnostics(
     warnings: diagnosticWarnings(config, {
       relayerConfigured,
       relayerPrivateKeyConfigured,
-      demoMode,
       e2eControls,
       permissiveAuthorizationRequested
     }),
@@ -326,7 +319,6 @@ export function buildConfigDiagnostics(
       clockToleranceSeconds: storeAuth.clockToleranceSeconds
     },
     product: {
-      demoMode,
       e2eControls,
       registrationAdapter: config.productBff.registrationAdapter,
       permissiveAuthorizationRequested
@@ -352,6 +344,7 @@ function runStaticPreflight(
   runStagingSafetyPreflight(config, env, checks, errors);
   runStoreAuthPreflight(config, env, checks, errors);
   runNonLocalRoleSafetyPreflight(config, env, checks, errors);
+  runStateMachineModulesManifestPreflight(config, checks, errors);
 
   if (config.relayer.broadcastEnabled) {
     if (!stateMachine) {
@@ -395,11 +388,11 @@ function runStaticPreflight(
       pass(checks, "governance.contract");
     }
     if (!config.governance.signerPrivateKey) {
-      fail(checks, errors, "governance.signer", "GOVERNANCE_SIGNER_PRIVATE_KEY is required when governance broadcast is enabled");
+      fail(checks, errors, "governance.signer", `${config.governance.signerPrivateKeyEnv} is required when governance broadcast is enabled`);
     } else {
       const signer = privateKeyAddress(config.governance.signerPrivateKey, "governance signer");
       if (config.governance.signerAddress && signer && signer !== config.governance.signerAddress) {
-        fail(checks, errors, "governance.signer", "GOVERNANCE_SIGNER_PRIVATE_KEY does not match GOVERNANCE_SIGNER_ADDRESS");
+        fail(checks, errors, "governance.signer", `${config.governance.signerPrivateKeyEnv} does not match GOVERNANCE_SIGNER_ADDRESS`);
       } else {
         pass(checks, "governance.signer");
       }
@@ -419,10 +412,15 @@ function runStoreAuthPreflight(
   const storeAuth = effectiveStoreAuthConfig(config);
   const mode = envMode === "dev_headers" || envMode === "jwt" ? envMode : storeAuth.mode;
   const strictRuntime = config.security.environment === "staging" || config.security.environment === "production";
+  // testnet 不允许 dev_headers——自报 store 头不是 testnet 的身份证明；
+  // STORE_AUTH_MODE 必须显式配置。
+  const devHeadersAllowed = config.security.environment === "local";
   const evidence = assessStoreAuthEvidence(storeAuth, config.security.environment);
 
-  if (strictRuntime && mode !== "jwt") {
-    fail(checks, errors, "store_auth.mode", "STORE_AUTH_MODE=jwt is required in staging and production");
+  if (!devHeadersAllowed && !envMode) {
+    fail(checks, errors, "store_auth.mode", `STORE_AUTH_MODE must be explicitly configured in ${config.security.environment}`);
+  } else if (!devHeadersAllowed && mode !== "jwt") {
+    fail(checks, errors, "store_auth.mode", `STORE_AUTH_MODE=jwt is required in ${config.security.environment}`);
   } else if (mode === "jwt") {
     pass(checks, "store_auth.mode");
   } else {
@@ -499,6 +497,25 @@ function runProductionSafetyPreflight(
   } else {
     fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production");
   }
+  // production 的 RPC 必须显式且非本地——env 缺省会静默回落
+  // 127.0.0.1:8545。与 staging/testnet 同口径。
+  if (isNonLocalRpcUrl(config.network.rpcUrl)) {
+    pass(checks, "network.rpc_url_configured");
+  } else {
+    fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must be explicitly configured to a non-local RPC endpoint in production");
+  }
+  // production 强制 admin 白名单非空（空=任意自报
+  // admin 通过的 fail-open 已在 governance/auth.ts 收口，这里拦配置）。
+  if (config.operatorRoles.adminReviewers.length > 0) {
+    pass(checks, "operator.governance_admin_reviewer");
+  } else {
+    fail(checks, errors, "operator.governance_admin_reviewer", "GOVERNANCE_ADMIN_REVIEWER_IDS is required in production");
+  }
+  if ((config.operatorRoles.opsConsoleAdmins ?? []).length > 0) {
+    pass(checks, "operator.ops_console_admin");
+  } else {
+    fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in production");
+  }
   requireDurableStoreMetadata(config, checks, errors, "production");
   if (config.database.migrationsAutoRun && env.UVP_PRODUCTION_ALLOW_AUTO_MIGRATIONS?.trim() !== "1") {
     fail(checks, errors, "storage.migrations_auto_run", "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN=true is forbidden in production without UVP_PRODUCTION_ALLOW_AUTO_MIGRATIONS=1");
@@ -506,16 +523,19 @@ function runProductionSafetyPreflight(
     pass(checks, "storage.migrations_auto_run");
   }
 
-  if (config.productBff.registrationAdapter === "memory") {
-    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=memory is forbidden in production");
+  // production 不允许静默落到 env 默认值 1。finality 确认数是
+  // 索引器 reorg 缓冲必须显式配置；追加前哈希连续性校验与有界共同祖先
+  // 回滚由 indexer/service.ts 执行，非生产环境保持默认 1。
+  if (env.UVP_FINALITY_CONFIRMATIONS?.trim() && config.network.finalityConfirmations > 0) {
+    pass(checks, "network.finality_confirmations_explicit");
   } else {
-    pass(checks, "product.registration_adapter");
+    fail(checks, errors, "network.finality_confirmations_explicit", "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production");
   }
 
-  if (enabledEnv(env, "UVP_PRODUCT_DEMO_MODE")) {
-    fail(checks, errors, "product.demo_mode", "UVP_PRODUCT_DEMO_MODE=1 is forbidden in production");
+  if (config.productBff.registrationAdapter !== "anvil") {
+    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production");
   } else {
-    pass(checks, "product.demo_mode");
+    pass(checks, "product.registration_adapter");
   }
 
   if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
@@ -612,6 +632,19 @@ function runTestnetSafetyPreflight(
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia RPC in testnet");
   }
 
+  // testnet 强制 admin 白名单非空 + STORE_AUTH_MODE
+  // 显式配置（dev_headers 仅限 local）。
+  if (config.operatorRoles.adminReviewers.length > 0) {
+    pass(checks, "operator.governance_admin_reviewer");
+  } else {
+    fail(checks, errors, "operator.governance_admin_reviewer", "GOVERNANCE_ADMIN_REVIEWER_IDS is required in testnet");
+  }
+  if ((config.operatorRoles.opsConsoleAdmins ?? []).length > 0) {
+    pass(checks, "operator.ops_console_admin");
+  } else {
+    fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in testnet");
+  }
+
   if (stateMachine) {
     pass(checks, "contracts.state_machine");
   } else {
@@ -624,8 +657,8 @@ function runTestnetSafetyPreflight(
     fail(checks, errors, "contracts.identity_registry", "UVPIdentityRegistry contract address is required in testnet");
   }
 
-  if (config.productBff.registrationAdapter === "memory") {
-    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=memory is forbidden in testnet");
+  if (config.productBff.registrationAdapter !== "anvil") {
+    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in testnet");
   } else {
     pass(checks, "product.registration_adapter");
   }
@@ -640,12 +673,6 @@ function runTestnetSafetyPreflight(
     pass(checks, "evidence.storage_adapter");
   } else {
     fail(checks, errors, "evidence.storage_adapter", "UVP_EVIDENCE_STORAGE_ADAPTER=rehearsal-object is required in testnet");
-  }
-
-  if (enabledEnv(env, "UVP_PRODUCT_DEMO_MODE")) {
-    fail(checks, errors, "product.demo_mode", "UVP_PRODUCT_DEMO_MODE=1 is forbidden in testnet");
-  } else {
-    pass(checks, "product.demo_mode");
   }
 
   if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
@@ -719,15 +746,14 @@ function runStagingSafetyPreflight(
   } else {
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia or staging RPC in staging");
   }
+  // finalityConfirmations controls the normal indexing buffer. The indexer
+  // additionally verifies block-hash continuity and performs a bounded
+  // common-ancestor rollback when a reorg is observed. The former
+  // UVP_REORG_BUFFER_BLOCKS check was a ghost config nothing consumed.
   if (config.network.finalityConfirmations > 0) {
     pass(checks, "network.finality_confirmations");
   } else {
     fail(checks, errors, "network.finality_confirmations", "UVP_FINALITY_CONFIRMATIONS must be positive in staging");
-  }
-  if (config.network.reorgBufferBlocks > 0) {
-    pass(checks, "network.reorg_buffer_blocks");
-  } else {
-    fail(checks, errors, "network.reorg_buffer_blocks", "UVP_REORG_BUFFER_BLOCKS must be positive in staging");
   }
   if (stateMachine) {
     pass(checks, "contracts.state_machine");
@@ -781,11 +807,6 @@ function runStagingSafetyPreflight(
     pass(checks, "evidence.s3_object_namespace");
   }
 
-  if (enabledEnv(env, "UVP_PRODUCT_DEMO_MODE")) {
-    fail(checks, errors, "product.demo_mode", "UVP_PRODUCT_DEMO_MODE=1 is forbidden in staging");
-  } else {
-    pass(checks, "product.demo_mode");
-  }
   if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
     fail(checks, errors, "product.e2e_controls", "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in staging");
   } else {
@@ -798,6 +819,83 @@ function runStagingSafetyPreflight(
   }
 
   runStagingRolePreflight(config, env, checks, errors);
+}
+
+const REQUIRED_STATE_MACHINE_MODULE_KEYS = [
+  "stagePatch",
+  "derivedSignal",
+  "docking",
+  "planMetadata",
+  "orderLink",
+  "lens"
+] as const;
+
+/**
+ * 模块清单 fail-closed：索引器只从 deployment.modules（嵌套写法）取模块
+ * 地址，扁平写法会静默丢失全部 patch/dock 投影，常规配置校验发现不了。
+ * strict 环境
+ * （production/testnet/staging）必须有 stateMachineDeployments，且 active
+ * deployment 的 modules 含全部必填模块；缺失即启动失败。local 保持豁免
+ * （skip），因为本地开发可以只配状态机地址跑最小路径。
+ */
+function runStateMachineModulesManifestPreflight(
+  config: ChainServicesConfig,
+  checks: ConfigDiagnosticCheck[],
+  errors: string[]
+): void {
+  const strictRuntime =
+    config.security.environment === "production" ||
+    config.security.environment === "testnet" ||
+    config.security.environment === "staging";
+  if (!strictRuntime) {
+    skip(checks, "contracts.state_machine_modules_manifest", "module manifest completeness is not required in local mode");
+    return;
+  }
+
+  const deployments = config.network.stateMachineDeployments ?? [];
+  if (deployments.length === 0) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_modules_manifest",
+      "stateMachineDeployments with modules are required in production/testnet/staging; the flat contract-address form silently drops all module-event projections"
+    );
+    return;
+  }
+
+  const active = selectActiveStateMachineDeployment(config);
+  if (!active) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_modules_manifest",
+      "no state-machine deployment could be selected; configure activeDeploymentId or mark one deployment active"
+    );
+    return;
+  }
+
+  const modules = active.modules;
+  if (!modules) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_modules_manifest",
+      `active deployment ${active.deploymentId} is missing the modules manifest; module addresses must be explicit`
+    );
+    return;
+  }
+
+  const missing = REQUIRED_STATE_MACHINE_MODULE_KEYS.filter((key) => !modules[key]);
+  if (missing.length > 0) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_modules_manifest",
+      `active deployment ${active.deploymentId} is missing required modules: ${missing.join(", ")}`
+    );
+    return;
+  }
+  pass(checks, "contracts.state_machine_modules_manifest");
 }
 
 function runNonLocalRoleSafetyPreflight(
@@ -877,11 +975,11 @@ function runStagingRolePreflight(
     checks,
     errors,
     name: "operator.governance_signer",
-    envName: "GOVERNANCE_SIGNER_PRIVATE_KEY",
+    envName: config.governance.signerPrivateKeyEnv,
     privateKey: config.governance.signerPrivateKey,
     expectedAddress: config.governance.signerAddress,
-    missingMessage: "GOVERNANCE_SIGNER_PRIVATE_KEY is required in staging",
-    mismatchMessage: "GOVERNANCE_SIGNER_PRIVATE_KEY does not match GOVERNANCE_SIGNER_ADDRESS"
+    missingMessage: `${config.governance.signerPrivateKeyEnv} is required in staging`,
+    mismatchMessage: `${config.governance.signerPrivateKeyEnv} does not match GOVERNANCE_SIGNER_ADDRESS`
   });
   if (config.governance.registryOwnerAddress) {
     pass(checks, "operator.governance_registry_owner");
@@ -945,8 +1043,8 @@ function runProductRegistrationPreflight(
   checks: ConfigDiagnosticCheck[],
   errors: string[]
 ): void {
-  if (config.productBff.registrationAdapter === "memory") {
-    skip(checks, "product.registration_configured", "Product BFF registration adapter is memory");
+  if (config.productBff.registrationAdapter === "memory-trigger") {
+    skip(checks, "product.registration_configured", "Product BFF registration adapter is memory-trigger");
     return;
   }
 
@@ -1067,7 +1165,7 @@ async function checkStateMachineModules(input: {
   readonly checks: ConfigDiagnosticCheck[];
   readonly errors: string[];
 }): Promise<void> {
-  const deployment = activeStateMachineDeployment(input.config);
+  const deployment = selectActiveStateMachineDeployment(input.config);
   if (!deployment?.modules) {
     skip(input.checks, "contracts.state_machine_modules", "no state-machine module manifest entries configured");
     return;
@@ -1094,7 +1192,15 @@ async function checkStateMachineModules(input: {
     for (const key of Object.keys(getterByKey) as Array<keyof typeof getterByKey>) {
       const expected = deployment.modules[key];
       if (!expected) {
-        continue;
+        // fail-closed：模块地址必须在配置/地址清单中显式存在，
+        // stage-patch / docking 等模块地址缺失不得跳过。
+        fail(
+          input.checks,
+          input.errors,
+          "contracts.state_machine_modules",
+          `state-machine module manifest is missing ${key} (${getterByKey[key]}); module addresses must be explicit`
+        );
+        return;
       }
       const actual = normalizeAddress(String(await input.client.readContract({
         address: deployment.stateMachineAddress as ViemAddress,
@@ -1180,7 +1286,14 @@ function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Addr
     : undefined;
 }
 
-function activeStateMachineDeployment(config: ChainServicesConfig): NonNullable<ChainServicesConfig["network"]["stateMachineDeployments"]>[number] | undefined {
+/**
+ * 统一的 active deployment 选择口径：精确 activeDeploymentId 优先，其次
+ * status=active，最后唯一回退首项。server.ts（模块地址解析）与
+ * preflight（模块校验）共用，避免两处谓词漂移。
+ */
+export function selectActiveStateMachineDeployment(
+  config: ChainServicesConfig
+): NonNullable<ChainServicesConfig["network"]["stateMachineDeployments"]>[number] | undefined {
   const deployments = config.network.stateMachineDeployments ?? [];
   if (config.network.activeDeploymentId) {
     const active = deployments.find((deployment) => deployment.deploymentId === config.network.activeDeploymentId);
@@ -1203,7 +1316,6 @@ function diagnosticWarnings(
   values: {
     readonly relayerConfigured: boolean;
     readonly relayerPrivateKeyConfigured: boolean;
-    readonly demoMode: boolean;
     readonly e2eControls: boolean;
     readonly permissiveAuthorizationRequested: boolean;
   }
@@ -1212,11 +1324,8 @@ function diagnosticWarnings(
   if (config.database.driver === "memory") {
     warnings.push("memory storage is non-durable");
   }
-  if (config.productBff.registrationAdapter === "memory") {
-    warnings.push("Product BFF registration uses the memory adapter");
-  }
-  if (values.demoMode) {
-    warnings.push("Product demo mode is enabled");
+  if (config.productBff.registrationAdapter === "memory-trigger") {
+    warnings.push("Product BFF registration uses the memory-trigger adapter");
   }
   if (values.e2eControls) {
     warnings.push("Product E2E controls are requested");
@@ -1235,6 +1344,15 @@ function diagnosticWarnings(
   }
   if (config.governance.broadcastEnabled && config.security.environment !== "testnet" && config.security.environment !== "staging") {
     warnings.push("env-key governance broadcaster is for testnet/staging rehearsal only and is not production governance");
+  }
+  // 产品通知渠道决策未做，webhook transport 默认关闭；未配置时
+  // 所有投递按 transport_adapter_missing 记录失败，这里给出可见提醒。
+  if (!config.notifications?.webhookUrl) {
+    warnings.push("UVP_NOTIFY_WEBHOOK_URL is not configured; notification delivery will be recorded as failed (transport_adapter_missing)");
+  }
+  // 证据只有单副本时提醒配置第二副本 bucket。
+  if (config.evidenceStorage.adapter === "s3" && !config.evidenceStorage.s3BackupBucket) {
+    warnings.push("UVP_EVIDENCE_BACKUP_BUCKET is not configured; evidence objects have no code-level backup copy");
   }
   return warnings;
 }
@@ -1275,7 +1393,7 @@ function operatorRoleDiagnostics(config: ChainServicesConfig, env: Env): ConfigD
       config.operatorRoles.governanceRegistryOwnerAddress ?? config.governance.registryOwnerAddress
     ),
     governanceSigner: privateKeyRoleDiagnostics(
-      "GOVERNANCE_SIGNER_PRIVATE_KEY",
+      config.governance.signerPrivateKeyEnv,
       env,
       config.governance.signerAddress ?? config.operatorRoles.governanceSignerAddress
     ),
@@ -1327,7 +1445,7 @@ function privateKeyAddress(privateKey: string | undefined, label: string): Addre
 function privateKeyEnvNames(config: ChainServicesConfig): readonly string[] {
   return [...new Set([
     config.relayer.stateMachinePrivateKeyEnv,
-    "GOVERNANCE_SIGNER_PRIVATE_KEY",
+    config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv
   ])];

@@ -17,6 +17,7 @@ import {
 import type { ProductService, ProductTaskApiDTO } from "../product/service.js";
 import {
   ConfigError,
+  compareChainPointers,
   normalizeAddress,
   normalizeBytes32,
   type Address,
@@ -26,26 +27,21 @@ import type { ProjectionStore } from "../storage/projection-store.js";
 import type {
   StoreOperatorPrincipal,
   StoreSupplierAuditAction,
+  StoreSupplierAuditInput,
   StoreSupplierAuditRecord,
   StoreSupplierMetadataRecord,
   StoreSupplierMetadataStore,
 } from "./types.js";
+import { randomUUID } from "node:crypto";
 
 export type {
   StoreOperatorPrincipal,
   StoreSupplierAuditAction,
+  StoreSupplierAuditInput,
   StoreSupplierAuditRecord,
   StoreSupplierMetadataRecord,
   StoreSupplierMetadataStore,
 } from "./types.js";
-
-const STORE_OPERATOR_ROLES = new Set([
-  "admin",
-  "store_admin",
-  "store_operator",
-  "governance_admin",
-  "governance",
-]);
 
 export class StoreSupplierServiceError extends Error {
   override readonly name = "StoreSupplierServiceError";
@@ -88,8 +84,9 @@ export class InMemoryStoreSupplierMetadataStore
     this.#suppliers.set(record.supplierId, record);
   }
 
-  async appendAudit(record: StoreSupplierAuditRecord): Promise<void> {
-    this.#audits.push(record);
+  async appendAudit(record: StoreSupplierAuditInput): Promise<void> {
+    // auditId 由存储端生成（单实例内存后端用 UUID），不接进程内序号。
+    this.#audits.push({ ...record, auditId: record.auditId ?? `audit_${randomUUID()}` });
   }
 
   async listAudits(
@@ -187,7 +184,6 @@ export function createStoreSupplierService(
   const metadataStore =
     options.metadataStore ?? new InMemoryStoreSupplierMetadataStore();
   const now = options.now ?? (() => new Date());
-  let sequence = 1;
 
   return {
     async listSuppliers(query = {}) {
@@ -254,10 +250,12 @@ export function createStoreSupplierService(
           },
         );
       }
-      await metadataStore.putSupplier(record);
-      await metadataStore.appendAudit(
-        auditRecord("audit", sequence++, record, "create", principal, now),
-      );
+      await withSupplierStoreTransaction(metadataStore, async () => {
+        await metadataStore.putSupplier(record);
+        await metadataStore.appendAudit(
+          auditRecord(record, "create", principal, now),
+        );
+      });
       return {
         supplier: await requireBuiltSupplier(
           record.supplierId,
@@ -271,36 +269,33 @@ export function createStoreSupplierService(
     async reviewSupplier(supplierId, input, principal) {
       const current = await requireMetadata(metadataStore, supplierId);
       const record = mergeReviewMetadata(current, input, now().toISOString());
-      await metadataStore.putSupplier(record);
-      await metadataStore.appendAudit(
-        auditRecord("audit", sequence++, record, "review", principal, now, {
-          reviewStatus: record.reviewStatus,
-        }),
+      // "先过治理、后改库"：治理 review 落库成功
+      // 之后才写 Store 元数据，治理失败时两边不分叉
+      //（库显示新状态、治理记录不存在）。
+      const governance = await options.governanceService.reviewSupplier(
+        governanceReviewInput(record, input),
+        governancePrincipal(principal),
       );
-      if (supplierCapabilitiesChanged(current, record)) {
+      await withSupplierStoreTransaction(metadataStore, async () => {
+        await metadataStore.putSupplier(record);
         await metadataStore.appendAudit(
-          auditRecord(
-            "audit",
-            sequence++,
-            record,
-            "tags_updated",
-            principal,
-            now,
-            {
+          auditRecord(record, "review", principal, now, {
+            reviewStatus: record.reviewStatus,
+          }),
+        );
+        if (supplierCapabilitiesChanged(current, record)) {
+          await metadataStore.appendAudit(
+            auditRecord(record, "tags_updated", principal, now, {
               beforeTags: current.capabilityTags,
               afterTags: record.capabilityTags,
               beforeSupportedRoleSlotIds: current.supportedRoleSlotIds,
               afterSupportedRoleSlotIds: record.supportedRoleSlotIds,
               beforeSupportedStageIds: current.supportedStageIds,
               afterSupportedStageIds: record.supportedStageIds,
-            },
-          ),
-        );
-      }
-      const governance = await options.governanceService.reviewSupplier(
-        governanceReviewInput(record, input),
-        governancePrincipal(principal),
-      );
+            }),
+          );
+        }
+      });
       return {
         supplier: await requireBuiltSupplier(
           record.supplierId,
@@ -328,17 +323,17 @@ export function createStoreSupplierService(
         supplierIdentityRegistrationInput(record, wallet),
         governancePrincipal(principal),
       );
-      await metadataStore.putSupplier(record);
-      await metadataStore.appendAudit(
-        auditRecord(
-          "audit",
-          sequence++,
-          record,
-          "request_identity_registration",
-          principal,
-          now,
-        ),
-      );
+      await withSupplierStoreTransaction(metadataStore, async () => {
+        await metadataStore.putSupplier(record);
+        await metadataStore.appendAudit(
+          auditRecord(
+            record,
+            "request_identity_registration",
+            principal,
+            now,
+          ),
+        );
+      });
       return {
         supplier: await requireBuiltSupplier(
           record.supplierId,
@@ -376,20 +371,20 @@ export function createStoreSupplierService(
         notificationUpdatedAt: timestamp,
         updatedAt: timestamp,
       };
-      await metadataStore.putSupplier(updated);
-      await metadataStore.appendAudit(
-        auditRecord(
-          "audit",
-          sequence++,
-          updated,
-          "notification_profile_updated",
-          {
-            operatorId: `wallet:${profileConfig.wallet}`,
-            role: "supplier",
-          },
-          now,
-        ),
-      );
+      await withSupplierStoreTransaction(metadataStore, async () => {
+        await metadataStore.putSupplier(updated);
+        await metadataStore.appendAudit(
+          auditRecord(
+            updated,
+            "notification_profile_updated",
+            {
+              operatorId: `wallet:${profileConfig.wallet}`,
+              role: "supplier",
+            },
+            now,
+          ),
+        );
+      });
       return {
         supplier: await requireBuiltSupplier(
           updated.supplierId,
@@ -416,32 +411,37 @@ export function createStoreSupplierService(
           "an active identity binding is required before requesting revocation",
         );
       }
-      const updated: StoreSupplierMetadataRecord = {
-        ...current,
-        reviewStatus: "revoked",
-        updatedAt: now().toISOString(),
-      };
+      // "先过治理、后改库"：撤销广播失败时 Store
+      // 元数据不预先翻成 revoked（否则分叉：库 revoked、链上
+      // binding 仍 active）。广播结果非 failed 才落库。
       const governance = await options.governanceService.revokeIdentity(
-        supplierRevocationInput(updated, input, activeBinding.bindingId),
+        supplierRevocationInput(current, input, activeBinding.bindingId),
         governancePrincipal(principal),
       );
-      await metadataStore.putSupplier(updated);
-      await metadataStore.appendAudit(
-        auditRecord(
-          "audit",
-          sequence++,
-          updated,
-          "request_identity_revocation",
-          principal,
-          now,
-          {
-            reviewStatus: "revoked",
-          },
-        ),
-      );
+      if (!isFailedGovernanceBroadcast(governance)) {
+        const updated: StoreSupplierMetadataRecord = {
+          ...current,
+          reviewStatus: "revoked",
+          updatedAt: now().toISOString(),
+        };
+        await withSupplierStoreTransaction(metadataStore, async () => {
+          await metadataStore.putSupplier(updated);
+          await metadataStore.appendAudit(
+            auditRecord(
+              updated,
+              "request_identity_revocation",
+              principal,
+              now,
+              {
+                reviewStatus: "revoked",
+              },
+            ),
+          );
+        });
+      }
       return {
         supplier: await requireBuiltSupplier(
-          updated.supplierId,
+          current.supplierId,
           metadataStore,
           options.store,
           options.productService,
@@ -452,28 +452,9 @@ export function createStoreSupplierService(
   };
 }
 
-export function storeOperatorPrincipalFromHeaders(
-  headers: Readonly<Record<string, string | undefined>> | undefined,
-): StoreOperatorPrincipal | undefined {
-  const storeOperatorId = readHeader(
-    headers,
-    "x-uvp-store-operator-id",
-  )?.trim();
-  const storeRole = readHeader(headers, "x-uvp-store-operator-role")
-    ?.trim()
-    .toLowerCase();
-  if (storeOperatorId && storeRole && STORE_OPERATOR_ROLES.has(storeRole)) {
-    return { operatorId: storeOperatorId, role: storeRole };
-  }
-
-  const adminId = readHeader(headers, "x-uvp-admin-id")?.trim();
-  const adminRole = readHeader(headers, "x-uvp-admin-role")
-    ?.trim()
-    .toLowerCase();
-  if (adminId && adminRole && STORE_OPERATOR_ROLES.has(adminRole)) {
-    return { operatorId: adminId, role: adminRole };
-  }
-  return undefined;
+function isFailedGovernanceBroadcast(governance: unknown): boolean {
+  const broadcast = (governance as { readonly broadcast?: { readonly status?: string } } | undefined)?.broadcast;
+  return broadcast?.status === "failed";
 }
 
 async function buildStoreSupplierRows(input: {
@@ -855,16 +836,15 @@ function supplierRevocationInput(
 }
 
 function auditRecord(
-  prefix: string,
-  sequence: number,
   supplier: StoreSupplierMetadataRecord,
   action: StoreSupplierAuditAction,
   principal: StoreOperatorPrincipal,
   now: () => Date,
   extra: Partial<StoreSupplierAuditRecord> = {},
-): StoreSupplierAuditRecord {
+): StoreSupplierAuditInput {
+  // auditId 不在此生成——存储端负责（库端唯一），进程内序号会在
+  // 重启/多实例下反复撞 audit_id 唯一索引。
   return {
-    auditId: `${prefix}_${sequence.toString().padStart(6, "0")}`,
     supplierId: supplier.supplierId,
     supplierSubjectId: supplier.supplierSubjectId,
     action,
@@ -872,6 +852,19 @@ function auditRecord(
     ...extra,
     createdAt: now().toISOString(),
   };
+}
+
+/**
+ * 业务写 + 审计行同事务：持久后端提供 withTransaction 时整体提交/回滚，
+ * 审计不再落在业务写入之后的裸 append（半提交窗口）。
+ */
+async function withSupplierStoreTransaction<T>(
+  metadataStore: StoreSupplierMetadataStore,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return metadataStore.withTransaction
+    ? metadataStore.withTransaction(operation)
+    : operation();
 }
 
 function governancePrincipal(
@@ -1258,11 +1251,9 @@ function compareIdentityUpdatedDesc(
   left: IdentityBindingProjection,
   right: IdentityBindingProjection,
 ): number {
-  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
-    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
-  }
-  if (left.updatedAt.logIndex !== right.updatedAt.logIndex) {
-    return right.updatedAt.logIndex - left.updatedAt.logIndex;
+  const position = compareChainPointers(right.updatedAt, left.updatedAt);
+  if (position !== 0) {
+    return position;
   }
   return left.registryAddress.localeCompare(right.registryAddress);
 }
@@ -1281,22 +1272,6 @@ function shortHex(value: string): string {
   return value.length > 18
     ? `${value.slice(0, 8)}...${value.slice(-8)}`
     : value;
-}
-
-function readHeader(
-  headers: Readonly<Record<string, string | undefined>> | undefined,
-  name: string,
-): string | undefined {
-  if (!headers) {
-    return undefined;
-  }
-  return (
-    headers[name] ??
-    headers[name.toLowerCase()] ??
-    Object.entries(headers).find(
-      ([key]) => key.toLowerCase() === name.toLowerCase(),
-    )?.[1]
-  );
 }
 
 export function storeSupplierErrorFromConfigError(

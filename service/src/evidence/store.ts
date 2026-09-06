@@ -26,6 +26,12 @@ export interface EvidenceMetadataStore {
   markBound?(input: BindEvidenceRequestDTO): Promise<EvidenceMetadataRecord | undefined>;
   recordAdminRead(entry: EvidenceAdminReadAuditDTO): Promise<void>;
   listAdminReads?(): Promise<readonly EvidenceAdminReadAuditDTO[]>;
+  /**
+   * 证据重复上传幂等——同一 owner 再次上传相同
+   * payload（content+metadata+order+stage 全等，即 payloadHash 相同）时
+   * 返回既有记录，而不是落一条内容完全相同的副本。
+   */
+  findOwnedByPayloadHash?(payloadHash: string, ownerParticipantId: string): Promise<EvidenceMetadataRecord | undefined>;
 }
 
 export class InMemoryEvidenceMetadataStore implements EvidenceMetadataStore {
@@ -38,6 +44,17 @@ export class InMemoryEvidenceMetadataStore implements EvidenceMetadataStore {
 
   async get(evidenceId: string): Promise<EvidenceMetadataRecord | undefined> {
     return this.#records.get(evidenceId);
+  }
+
+  async findOwnedByPayloadHash(payloadHash: string, ownerParticipantId: string): Promise<EvidenceMetadataRecord | undefined> {
+    const matches = [...this.#records.values()]
+      .filter((record) =>
+        record.evidence.payloadHash.toLowerCase() === payloadHash.toLowerCase() &&
+        record.evidence.ownerParticipantId.toLowerCase() === ownerParticipantId.toLowerCase())
+      .sort((left, right) =>
+        left.evidence.createdAt.localeCompare(right.evidence.createdAt) ||
+        left.evidence.evidenceId.localeCompare(right.evidence.evidenceId));
+    return matches[0];
   }
 
   async markBound(input: BindEvidenceRequestDTO): Promise<EvidenceMetadataRecord | undefined> {

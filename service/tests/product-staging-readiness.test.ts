@@ -8,6 +8,7 @@ import { createApiRouter } from "../src/api/routes.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { crossBorderSchemaResolver } from "./cross-border-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const chainId = 84532;
@@ -70,7 +71,7 @@ describe("Product API staging readiness", () => {
         mismatchCount: 0
       }
     });
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: stagingDiagnostics(tempDirs),
       productRuntimeEnvironment: "staging",
       evidenceStorage: productionSafeEvidenceStorage(),
@@ -92,7 +93,6 @@ describe("Product API staging readiness", () => {
         environment: "staging",
         preflightStrict: true,
         preflightStatus: "passed",
-        demoMode: false,
         e2eControls: false,
         registrationAdapter: "anvil",
         storageDriver: "postgres",
@@ -183,26 +183,22 @@ describe("Product API staging readiness", () => {
     expect(serialized).not.toContain(stagingGovernancePrivateKey.slice(2));
   });
 
-  it("fails closed when demo or fixture controls are presented as staging evidence", async () => {
+  it("fails closed when fixture controls are presented as staging evidence", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents({ includeActiveDeployment: false }) });
     const baseDiagnostics = stagingDiagnostics(tempDirs);
     const unsafeDiagnostics: ConfigDiagnostics = {
       ...baseDiagnostics,
-      demoMode: true,
       e2eControls: true,
       product: {
         ...baseDiagnostics.product,
-        demoMode: true,
         e2eControls: true,
         permissiveAuthorizationRequested: true
       }
     };
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
-      productDemoMode: true,
-      productE2eControlsEnabled: true,
       evidenceStorage: productionSafeEvidenceStorage(),
       now: () => new Date(generatedAt)
     });
@@ -215,7 +211,6 @@ describe("Product API staging readiness", () => {
       ready: false,
       status: "not_ready",
       reasons: expect.arrayContaining([
-        "product_demo_mode_enabled",
         "product_e2e_fixtures_enabled",
         "permissive_product_authorization_requested",
         "no_active_deployment"
@@ -240,7 +235,7 @@ describe("Product API staging readiness", () => {
         }]
       }
     };
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: failedDiagnostics,
       productRuntimeEnvironment: "staging",
       evidenceStorage: productionSafeEvidenceStorage(),
@@ -280,7 +275,7 @@ describe("Product API staging readiness", () => {
     };
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents() });
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
       evidenceStorage: productionSafeEvidenceStorage(),
@@ -329,7 +324,7 @@ function stagingEnv(tempDirs: string[]): Record<string, string | undefined> {
     CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:db-secret@staging-db.internal:5432/uvp",
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
-    UVP_INDEXER_POLL_INTERVAL_MS: "0",
+    UVP_INDEXER_POLL_INTERVAL_MS: "5000",
     STORE_AUTH_MODE: "jwt",
     STORE_AUTH_JWKS_URL: "https://identity.example/.well-known/jwks.json",
     STORE_AUTH_ISSUER: "https://identity.example/",
@@ -342,7 +337,6 @@ function stagingEnv(tempDirs: string[]): Record<string, string | undefined> {
     UVP_RPC_URL: "https://base-sepolia.example/rpc?api_key=rpc-secret",
     UVP_ADDRESS_MANIFEST: stagingManifestPath(tempDirs),
     UVP_FINALITY_CONFIRMATIONS: "12",
-    UVP_REORG_BUFFER_BLOCKS: "24",
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY_ENV: "UVP_STAGING_ORDER_REGISTRAR_PRIVATE_KEY",
     UVP_STAGING_ORDER_REGISTRAR_PRIVATE_KEY: productionRegistrarPrivateKey,
@@ -371,7 +365,8 @@ function stagingEnv(tempDirs: string[]): Record<string, string | undefined> {
     GOVERNANCE_BROADCAST_ENABLED: "true",
     GOVERNANCE_REGISTRY_OWNER_ADDRESS: stagingGovernanceAddress,
     GOVERNANCE_SIGNER_ADDRESS: stagingGovernanceAddress,
-    GOVERNANCE_SIGNER_PRIVATE_KEY: stagingGovernancePrivateKey,
+    GOVERNANCE_SIGNER_PRIVATE_KEY_ENV: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY",
+    UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY: stagingGovernancePrivateKey,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
     RECONCILE_WORKER_ENABLED: "true",
@@ -387,7 +382,7 @@ function stagingManifestPath(tempDirs: string[]): string {
   tempDirs.push(dir);
   const manifestPath = join(dir, "staging.addresses.json");
   writeFileSync(manifestPath, JSON.stringify({
-    schemaVersion: "uvp-eth.addresses.v5",
+    schemaVersion: "uvp-eth.addresses.v1",
     network: {
       chainId,
       rpcUrlEnv: "UVP_RPC_URL"

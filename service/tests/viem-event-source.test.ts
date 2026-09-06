@@ -1,11 +1,75 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { encodeAbiParameters, encodeEventTopics, parseAbi, type Hex, type Log } from "viem";
-import { ViemChainEventSource } from "../src/indexer/viem-event-source.js";
+import { encodeAbiParameters, encodeEventTopics, getEventSelector, parseAbi, type Hex, type Log } from "viem";
+import { INDEXER_EVENT_ABIS, ViemChainEventSource } from "../src/indexer/viem-event-source.js";
 import { createChainEventSourceForTarget } from "../src/chain-adapters/events.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import { UnsupportedChainTargetError } from "../src/shared/types.js";
 
 describe("ViemChainEventSource", () => {
+  it("binds every indexed event topic to the frozen protocol ABI fixtures", () => {
+    const fixtures: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
+      UVPStateMachine: "uvp-state-machine.v0.10.json",
+      UVPIdentityRegistry: "uvp-identity-registry.v0.1.json",
+      UVPDeploymentRegistry: "uvp-deployment-registry.v0.2.json",
+      UVPStagePatchModule: "uvp-stage-patch-module.v0.2.json",
+      UVPPlanMetadataModule: "uvp-plan-metadata-module.v0.3.json",
+      UVPDerivedSignalModule: "uvp-derived-signal-module.v0.2.json",
+      UVPOrderLinkModule: "uvp-order-link-module.v0.2.json",
+      UVPDockingModule: "uvp-docking-module.v2.1.json"
+    };
+    const artifacts: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
+      UVPStateMachine: "UVPStateMachine.sol/UVPStateMachine.json",
+      UVPIdentityRegistry: "UVPIdentityRegistry.sol/UVPIdentityRegistry.json",
+      UVPDeploymentRegistry: "UVPDeploymentRegistry.sol/UVPDeploymentRegistry.json",
+      UVPStagePatchModule: "UVPStagePatchModule.sol/UVPStagePatchModule.json",
+      UVPPlanMetadataModule: "UVPPlanMetadataModule.sol/UVPPlanMetadataModule.json",
+      UVPDerivedSignalModule: "UVPDerivedSignalModule.sol/UVPDerivedSignalModule.json",
+      UVPOrderLinkModule: "UVPOrderLinkModule.sol/UVPOrderLinkModule.json",
+      UVPDockingModule: "UVPDockingModule.sol/UVPDockingModule.json"
+    };
+
+    for (const [contractName, fixtureName] of Object.entries(fixtures)) {
+      const fixture = JSON.parse(readFileSync(
+        new URL(`../../../uvp-protocol/contracts/uvp-contracts/fixtures/${fixtureName}`, import.meta.url),
+        "utf8"
+      )) as {
+        readonly events: Readonly<Record<string, { readonly topic: Hex }>>;
+      };
+      const abi = INDEXER_EVENT_ABIS[contractName as keyof typeof INDEXER_EVENT_ABIS];
+      const actualTopics = Object.fromEntries(
+        abi
+          .filter((item) => item.type === "event")
+          .map((item) => [item.name, getEventSelector(item)])
+      );
+      const expectedTopics = Object.fromEntries(
+        Object.entries(fixture.events).map(([eventName, event]) => [eventName, event.topic])
+      );
+      expect(actualTopics, contractName).toEqual(expectedTopics);
+
+      // A topic alone cannot reveal an indexed/non-indexed layout drift. Read
+      // the compiled Solidity artifact as a second protocol source, so the
+      // decoder cannot pass when its hand-written ABI and log encoder share a
+      // mistaken indexed layout.
+      const artifact = JSON.parse(readFileSync(
+        new URL(
+          `../../../uvp-protocol/contracts/uvp-contracts/out/${artifacts[contractName as keyof typeof INDEXER_EVENT_ABIS]}`,
+          import.meta.url,
+        ),
+        "utf8",
+      )) as { readonly abi: readonly AbiEvent[] };
+      const actualEvents = abi
+        .filter((item) => item.type === "event")
+        .map(eventShape)
+        .sort(compareEventShape);
+      const artifactEvents = artifact.abi
+        .filter((item) => item.type === "event")
+        .map(eventShape)
+        .sort(compareEventShape);
+      expect(actualEvents, `${contractName} event ABI`).toEqual(artifactEvents);
+    }
+  });
+
   it("routes the default chain event source through the EVM adapter boundary", () => {
     expect(createChainEventSourceForTarget(chainServicesConfig())).toBeInstanceOf(ViemChainEventSource);
     expect(() =>
@@ -123,12 +187,16 @@ describe("ViemChainEventSource", () => {
     ]);
   });
 
-  it("fails the index range when a configured contract emits an undecodable log", async () => {
+  it("skips an undecodable log with an explicit count instead of failing the index range", async () => {
+    // 0132 P2-12：单条不可解码日志不得让索引器永久 degraded——跳过留痕
+    // （计数 + warn），游标照常前进。
     const invalidLog = {
       ...planRegisteredLog(),
       data: "0x01" as Hex
     } as Log;
+    const logger = new CapturingLogger();
     const eventSource = new ViemChainEventSource({
+      logger,
       publicClient: {
         async getBlockNumber() {
           return 0n;
@@ -139,20 +207,106 @@ describe("ViemChainEventSource", () => {
       }
     });
 
-    await expect(eventSource.readEvents(
+    const events = await eventSource.readEvents(
       {
         chainId: 84532,
         fromBlock: 100n,
         toBlock: 100n
       },
       chainServicesConfig()
-    )).rejects.toThrow(/failed to decode UVPStateMachine event at block 100/);
+    );
+
+    expect(events).toEqual([]);
+    expect(eventSource.unresolvedLogCount).toBe(1);
+    expect(eventSource.consumeUnresolvedLogCount()).toBe(1);
+    expect(eventSource.unresolvedLogCount).toBe(0);
+    expect(logger.warns.some((line) => line.includes("skipped undecodable chain log"))).toBe(true);
+  });
+
+  it("keeps 0x-prefixed string event args verbatim while lowercasing bytes args", async () => {
+    // CS-9/L-8：0x 小写化只允许作用于 bytes/address 类型；string 参数
+    //（URI 等）大小写敏感，必须保持链上原文。
+    const eventSource = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 0n;
+        },
+        async getLogs() {
+          return [stageExecutorActivatedLog({ metadataURI: "ipfs://Stage-Executor-Patch/0XAb" })];
+        }
+      }
+    });
+
+    const events = await eventSource.readEvents(
+      {
+        chainId: 84532,
+        fromBlock: 100n,
+        toBlock: 100n
+      },
+      chainServicesConfig()
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        eventName: "StageExecutorActivated",
+        args: expect.objectContaining({
+          metadataURI: "ipfs://Stage-Executor-Patch/0XAb"
+        })
+      })
+    ]);
   });
 });
 
+class CapturingLogger {
+  readonly warns: string[] = [];
+
+  warn(message: string): void {
+    this.warns.push(message);
+  }
+
+  info(): void {
+  }
+
+  error(): void {
+  }
+
+  debug(): void {
+  }
+}
+
+type AbiEvent = {
+  readonly type: "event";
+  readonly name: string;
+  readonly anonymous?: boolean;
+  readonly inputs: readonly {
+    readonly name?: string;
+    readonly type: string;
+    readonly indexed?: boolean;
+  }[];
+};
+
+function eventShape(event: AbiEvent) {
+  return {
+    name: event.name,
+    anonymous: event.anonymous === true,
+    inputs: event.inputs.map((input) => ({
+      name: input.name ?? "",
+      type: input.type,
+      indexed: input.indexed === true
+    }))
+  };
+}
+
+function compareEventShape(
+  left: ReturnType<typeof eventShape>,
+  right: ReturnType<typeof eventShape>
+): number {
+  return left.name.localeCompare(right.name);
+}
+
 const stateMachineTestAbi = parseAbi([
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",
-  "event StageExecutorActivated(bytes32 indexed orderId,bytes32 indexed targetStageId,address indexed executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)"
+  "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)"
 ]);
 
 function planRegisteredLog(input: { readonly removed?: boolean } = {}): Log {
@@ -178,7 +332,10 @@ function planRegisteredLog(input: { readonly removed?: boolean } = {}): Log {
   } as Log;
 }
 
-function stageExecutorActivatedLog(): Log {
+function stageExecutorActivatedLog(
+  input: { readonly metadataURI?: string } = {}
+): Log {
+  const planId = "0x0000000000000000000000000000000000000000000000000000000000000303";
   const orderId = "0x0000000000000000000000000000000000000000000000000000000000000101";
   const targetStageId = "0x0000000000000000000000000000000000000000000000000000000000000202";
   const executor = "0x2222222222222222222222222222222222222222";
@@ -191,17 +348,24 @@ function stageExecutorActivatedLog(): Log {
     logIndex: 0,
     data: encodeAbiParameters(
       [
+        { type: "address" },
         { type: "bytes32" },
         { type: "bytes32" },
         { type: "uint256" },
         { type: "string" }
       ],
-      [bytes32Hex("01"), bytes32Hex("02"), 1n, "ipfs://stage-executor-patch/1"]
+      [
+        executor,
+        bytes32Hex("01"),
+        bytes32Hex("02"),
+        1n,
+        input.metadataURI ?? "ipfs://stage-executor-patch/1"
+      ]
     ),
     topics: encodeEventTopics({
       abi: stateMachineTestAbi,
       eventName: "StageExecutorActivated",
-      args: { orderId, targetStageId, executor }
+      args: { planId, orderId, targetStageId }
     }),
     removed: false
   } as Log;
@@ -218,7 +382,6 @@ function chainServicesConfig(): ChainServicesConfig {
       rpcUrl: "https://sepolia.base.org",
       deploymentBlock: 100n,
       finalityConfirmations: 2,
-      reorgBufferBlocks: 12,
       contracts: {
         UVPStateMachine: "0x1111111111111111111111111111111111111111"
       }

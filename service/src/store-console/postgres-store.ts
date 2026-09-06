@@ -239,6 +239,10 @@ export class PostgresStoreZhixuVersionMetadataStore implements StoreZhixuVersion
       versionValues(record)
     );
   }
+
+  async withTransaction<T>(operation: () => Promise<T>): Promise<T> {
+    return this.#database.withTransaction(operation);
+  }
 }
 
 export class PostgresStoreDockingSessionStore implements StoreDockingSessionStore {

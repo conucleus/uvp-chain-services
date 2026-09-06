@@ -16,7 +16,7 @@ import {
   type IdentityBindingQuery,
   type IdentityProjectionSnapshot,
 } from "../indexer/identity-projections.js";
-import type { Address } from "../shared/types.js";
+import type { Address, Hex } from "../shared/types.js";
 import type { StorageAdapterLifecycle, TransactionalStorage } from "./types.js";
 
 export const projectionScopeContractAddress =
@@ -77,10 +77,38 @@ export interface StoredProjectionCursor extends ProjectionScope {
   readonly deploymentBlock: bigint;
   readonly nextBlock: bigint;
   readonly finalizedBlock?: bigint;
+  /** nextBlock - 1 高度区块哈希，用于追加前的哈希连续性校验。 */
+  readonly blockHash?: Hex;
   readonly updatedAt: string;
 }
 
 export type ProjectionSnapshotKind = "order" | "identity";
+
+/**
+ * Post-commit steps（信号通知 / 投影自动化）在投影与 cursor 落库之后执行；
+ * 处理失败且进程内重试耗尽时必须持久化，否则 cursor 已前进、增量永不再
+ * 处理，通知永久丢失。后台 sweep 持续补投直至成功或人工干预。
+ */
+export type PendingPostCommitKind = "signal_notification" | "projection_automation";
+
+export interface PendingPostCommitStep {
+  readonly stepId: string;
+  readonly chainId: number;
+  readonly kind: PendingPostCommitKind;
+  /** signal_notification：处理失败的那批链上事件（回放补投的载荷）。 */
+  readonly events?: readonly ChainEvent[];
+  readonly attempts: number;
+  readonly lastError?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface SavePendingPostCommitStepInput {
+  readonly stepId: string;
+  readonly chainId: number;
+  readonly kind: PendingPostCommitKind;
+  readonly events?: readonly ChainEvent[];
+}
 
 export interface StoredProjectionSnapshot<TSnapshot> extends ProjectionScope {
   readonly kind: ProjectionSnapshotKind;
@@ -101,8 +129,14 @@ export interface ProjectionStore {
   listOrders(): Promise<readonly OrderProjection[]>;
   getOrder(orderId: string): Promise<OrderProjection | undefined>;
   listStateMachineOrders(): Promise<readonly StateMachineOrderProjection[]>;
+  /**
+   * 订单身份是 (planId, orderId) 复合键。调用方持有 planId 时必须传入：
+   * 同号订单跨 plan 复用时裸 orderId 查询按"唯一才返回"处理，多命中即
+   * undefined（fail-closed），绝不猜第一个。
+   */
   getStateMachineOrder(
     orderId: string,
+    planId?: string,
   ): Promise<StateMachineOrderProjection | undefined>;
   findStateMachineOrdersByOrderId(
     orderId: string,
@@ -129,6 +163,15 @@ export interface DurableProjectionStore
   ): Promise<StoredProjectionCursor | undefined>;
   appendEvent(event: ChainEvent): Promise<void>;
   listEvents(scope: Partial<ProjectionScope>): Promise<readonly ChainEvent[]>;
+  /**
+   * 删除 blockNumber > block 的已投影事件（reorg 回滚），
+   * 返回删除行数。调用方随后必须从剩余事件重建快照并回退 cursor。
+   * chainId 必填：无链范围的整库删除会跨链误删。
+   */
+  deleteEventsAfterBlock(
+    scope: { readonly chainId: number; readonly contractAddress?: Address },
+    blockNumber: bigint,
+  ): Promise<number>;
   saveSnapshot<TSnapshot>(
     scope: ProjectionScope,
     kind: ProjectionSnapshotKind,
@@ -139,6 +182,14 @@ export interface DurableProjectionStore
     scope: ProjectionScope,
     kind: ProjectionSnapshotKind,
   ): Promise<StoredProjectionSnapshot<TSnapshot> | undefined>;
+  /**
+   * post-commit 步骤失败后的持久补投队列。游标在通知处理前已
+   * 保存，失败批次必须落表由后台 sweep 补投，而不是静默丢弃。
+   */
+  savePendingPostCommitStep(input: SavePendingPostCommitStepInput): Promise<PendingPostCommitStep>;
+  listPendingPostCommitSteps(scope: { readonly chainId: number }): Promise<readonly PendingPostCommitStep[]>;
+  recordPendingPostCommitAttempt(stepId: string, error: string): Promise<void>;
+  deletePendingPostCommitStep(stepId: string): Promise<void>;
 }
 
 export class MemoryProjectionStore implements ProjectionStore {
@@ -190,26 +241,30 @@ export class MemoryProjectionStore implements ProjectionStore {
   async listStateMachineOrders(): Promise<
     readonly StateMachineOrderProjection[]
   > {
-    return Object.values(this.#snapshot.stateMachineOrders);
+    return uniqueProjectionValues(this.#snapshot.stateMachineOrders);
   }
 
   async getStateMachineOrder(
     orderId: string,
+    planId?: string,
   ): Promise<StateMachineOrderProjection | undefined> {
+    const orders = uniqueProjectionValues(this.#snapshot.stateMachineOrders);
+    if (planId) {
+      // 订单身份是 (planId, orderId)：带 planId 的查询只匹配同 plan 投影，
+      // 不做裸键回退，跨 plan 复用同号订单时绝不串单。
+      return uniqueOrderByBareId(orders, orderId, planId);
+    }
     return (
       this.#snapshot.stateMachineOrders[orderId.toLowerCase()] ??
       this.#snapshot.stateMachineOrders[orderId] ??
-      uniqueOrderByBareId(
-        Object.values(this.#snapshot.stateMachineOrders),
-        orderId,
-      )
+      uniqueOrderByBareId(orders, orderId)
     );
   }
 
   async findStateMachineOrdersByOrderId(
     orderId: string,
   ): Promise<readonly StateMachineOrderProjection[]> {
-    return Object.values(this.#snapshot.stateMachineOrders).filter(
+    return uniqueProjectionValues(this.#snapshot.stateMachineOrders).filter(
       (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
     );
   }
@@ -217,13 +272,18 @@ export class MemoryProjectionStore implements ProjectionStore {
   async listStateMachineTasks(): Promise<
     readonly StateMachineTaskProjection[]
   > {
-    return Object.values(this.#snapshot.stateMachineTasks);
+    return uniqueProjectionValues(this.#snapshot.stateMachineTasks);
   }
 
   async getStateMachineTask(
     taskId: string,
   ): Promise<StateMachineTaskProjection | undefined> {
-    return this.#snapshot.stateMachineTasks[taskId];
+    const normalizedTaskId = taskId.toLowerCase();
+    return (
+      this.#snapshot.stateMachineTasks[normalizedTaskId] ??
+      this.#snapshot.stateMachineTasks[taskId] ??
+      uniqueTaskByBareId(uniqueProjectionValues(this.#snapshot.stateMachineTasks), taskId)
+    );
   }
 
   async listIdentityBindings(
@@ -293,9 +353,25 @@ function latestBlockNumber(events: readonly ChainEvent[]): bigint | undefined {
 function uniqueOrderByBareId(
   orders: readonly StateMachineOrderProjection[],
   orderId: string,
+  planId?: string,
 ): StateMachineOrderProjection | undefined {
   const matches = orders.filter(
-    (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
+    (order) =>
+      order.orderId.toLowerCase() === orderId.toLowerCase() &&
+      (!planId || order.planId.toLowerCase() === planId.toLowerCase()),
   );
   return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueTaskByBareId(
+  tasks: readonly StateMachineTaskProjection[],
+  taskId: string,
+): StateMachineTaskProjection | undefined {
+  const normalizedTaskId = taskId.toLowerCase();
+  const matches = tasks.filter((task) => task.taskId.toLowerCase() === normalizedTaskId);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function uniqueProjectionValues<TValue>(record: Readonly<Record<string, TValue>>): TValue[] {
+  return [...new Set(Object.values(record))];
 }

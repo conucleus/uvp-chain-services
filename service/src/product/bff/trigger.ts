@@ -4,18 +4,22 @@ import {
   defineChain,
   http,
   keccak256,
-  stringToBytes
+  stringToBytes,
+  decodeAbiParameters
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   STATE_MACHINE_ABI,
-  buildTriggerOrderFromOutsideForCall
+  buildTriggerOrderFromOutsideForCall,
+  deriveTriggerOrderId
 } from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../../shared/types.js";
 import type { ProductOrderTriggerStatus, SignalAuthorizationDTO } from "./types.js";
 
 export const DEFAULT_PRODUCT_REGISTRAR_ADDRESS = "0x000000000000000000000000000000000000bff1" as const;
-const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,address)"));
+// UVPStateMachine v0.9: planId/orderId/sourceId are indexed; signalId is the
+// first value in the data payload (not a fourth topic).
+const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,address)"));
 
 export function productSignalSourceId(source: string): Hex {
   return keccak256(stringToBytes(source)) as Hex;
@@ -61,26 +65,20 @@ export interface ProductOrderTriggerBroadcastAdapter {
 
 export interface MemoryProductTriggerBroadcastAdapterOptions {
   readonly registrarAddress?: Address;
-  readonly status?: ProductOrderTriggerStatus;
-  readonly txHash?: Hex;
-  readonly blockNumber?: string;
-  readonly errorCode?: string;
-  readonly errorMessage?: string;
-  readonly retryable?: boolean;
 }
 
+/**
+ * memory-trigger adapter: records the trigger attempt in process memory only.
+ * It never broadcasts and never claims an on-chain outcome, so it always
+ * reports status "pending" with no transaction hash. Drafts stay out of the
+ * "triggered" state until a real chain adapter confirms the order.
+ */
 export class MemoryProductOrderTriggerBroadcastAdapter implements ProductOrderTriggerBroadcastAdapter {
   readonly registrarAddress: Address;
   readonly #attempts: ProductBroadcastOutsideTriggerInput[] = [];
-  #result: ProductOrderTriggerBroadcastResult;
 
   constructor(options: MemoryProductTriggerBroadcastAdapterOptions = {}) {
     this.registrarAddress = normalizeAddress(options.registrarAddress ?? DEFAULT_PRODUCT_REGISTRAR_ADDRESS, "registrarAddress");
-    this.#result = triggerResultFromOptions(options);
-  }
-
-  setResult(options: Omit<MemoryProductTriggerBroadcastAdapterOptions, "registrarAddress">): void {
-    this.#result = triggerResultFromOptions(options);
   }
 
   listAttempts(): readonly ProductBroadcastOutsideTriggerInput[] {
@@ -95,13 +93,10 @@ export class MemoryProductOrderTriggerBroadcastAdapter implements ProductOrderTr
       ...input,
       authorizations: [...input.authorizations]
     });
-    if (shouldGenerateMemoryTriggerTxHash(this.#result)) {
-      return {
-        ...this.#result,
-        txHash: keccak256(stringToBytes(`uvp:product-bff:memory-trigger:${input.triggerId}`))
-      };
-    }
-    return this.#result;
+    return {
+      status: "pending",
+      retryable: false
+    };
   }
 }
 
@@ -121,16 +116,17 @@ export interface AnvilProductTriggerBroadcastAdapterOptions {
 export interface ProductTriggerBroadcastReceiptLog {
   readonly address?: Address;
   readonly topics: readonly Hex[];
+  readonly data?: Hex;
 }
 
 export interface ProductTriggerBroadcastReceipt {
   readonly status?: "success" | "reverted" | "failed" | string;
-  readonly blockNumber: bigint;
+  readonly blockNumber?: bigint;
   readonly logs: readonly ProductTriggerBroadcastReceiptLog[];
 }
 
 export interface ProductTriggerBroadcastPublicClient {
-  waitForTransactionReceipt(parameters: { readonly hash: Hex; readonly timeout?: number }): Promise<ProductTriggerBroadcastReceipt>;
+  waitForTransactionReceipt(parameters: { readonly hash: Hex; readonly timeout?: number }): Promise<ProductTriggerBroadcastReceipt | undefined>;
 }
 
 export interface ProductTriggerBroadcastWalletClient {
@@ -167,6 +163,10 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
   }
 
   async broadcastOutsideTrigger(input: ProductBroadcastOutsideTriggerInput): Promise<ProductOrderTriggerBroadcastResult> {
+    // 已广播的 txHash 必须穿越 catch：writeContract 成功后等待回执/解析回执
+    // 抛错时，链上交易已经存在，failed 结果不得丢失 txHash（对齐
+    // submissions/broadcast-adapter 的 failedResult 携带方式）。
+    let txHash: Hex | undefined;
     try {
       const { publicClient, wallet } = this.#clients();
       const stateMachineAddress = input.stateMachineAddress ?? this.#options.stateMachineAddress;
@@ -174,7 +174,6 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
         stateMachineAddress,
         chainId: this.#options.chainId
       }, {
-        orderId: input.orderId,
         planId: input.planId,
         creator: input.creator,
         triggerHookId: input.triggerHookId,
@@ -188,7 +187,7 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
         authorizations: input.authorizations,
         signature: input.signature
       });
-      const txHash = await wallet.writeContract({
+      txHash = await wallet.writeContract({
         address: call.address,
         abi: call.abi,
         functionName: call.functionName,
@@ -202,36 +201,56 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
         };
       }
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-      if (receipt.status === "success" && hasSignalSubmittedEvent(receipt.logs, input.orderId, input.sourceId, input.signalId)) {
+      // 一事一单：链上订单 id 由合约从事实派生——本地镜像同一公式做回执
+      // 事件匹配（input.orderId 是产品侧关联 id，不进链上请求）。
+      const chainOrderId = deriveTriggerOrderId(input.planId, input.sourceId, input.signalId, input.payloadHash);
+      if (receipt?.status === "success" && hasSignalSubmittedEvent(receipt.logs, input.planId, chainOrderId, input.sourceId, input.signalId)) {
         return {
           status: "confirmed",
           txHash,
-          blockNumber: receipt.blockNumber.toString(),
+          ...(receipt.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
           retryable: false
         };
       }
-      if (receipt.status === "success") {
+      if (receipt?.status === "success") {
         return {
           status: "indexing",
           txHash,
-          blockNumber: receipt.blockNumber.toString(),
+          ...(receipt.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
           retryable: false
         };
       }
+      if (receipt?.status === "reverted" || receipt?.status === "failed") {
+        return {
+          status: "failed",
+          txHash,
+          ...(receipt.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
+          errorCode: "trigger_order_reverted",
+          errorMessage: `triggerOrderFromOutsideFor transaction receipt status ${receipt.status}`,
+          retryable: false
+        };
+      }
+      // A missing receipt or an RPC/client-specific status is neither a
+      // success nor a deterministic revert. Keep the known tx in indexing so
+      // reconcile can probe it later; callers must not rebroadcast it.
       return {
-        status: "failed",
+        status: "indexing",
         txHash,
-        blockNumber: receipt.blockNumber.toString(),
-        errorCode: "trigger_order_reverted",
-        errorMessage: `triggerOrderFromOutsideFor transaction receipt status ${receipt.status}`,
+        ...(receipt?.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
+        errorCode: "transaction_receipt_unknown",
+        errorMessage: "trigger transaction receipt is missing or has an unknown status",
         retryable: true
       };
     } catch (error) {
+      const classified = classifyProductTriggerBroadcastError(error);
       return {
-        status: "failed",
-        errorCode: "trigger_order_broadcast_failed",
-        errorMessage: error instanceof Error ? error.message : "triggerOrderFromOutsideFor broadcast failed",
-        retryable: true
+        status: txHash && classified.retryable ? "indexing" : "failed",
+        ...(txHash ? { txHash } : {}),
+        errorCode: txHash && classified.retryable ? "transaction_receipt_unknown" : classified.errorCode,
+        errorMessage: txHash && classified.retryable
+          ? "trigger transaction receipt could not be verified"
+          : classified.message,
+        retryable: classified.retryable
       };
     }
   }
@@ -265,22 +284,6 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
   }
 }
 
-function triggerResultFromOptions(options: Omit<MemoryProductTriggerBroadcastAdapterOptions, "registrarAddress">): ProductOrderTriggerBroadcastResult {
-  const status = options.status ?? "confirmed";
-  return {
-    status,
-    ...(options.txHash ? { txHash: options.txHash } : {}),
-    ...(options.blockNumber ? { blockNumber: options.blockNumber } : {}),
-    ...(options.errorCode ? { errorCode: options.errorCode } : {}),
-    ...(options.errorMessage ? { errorMessage: options.errorMessage } : {}),
-    retryable: options.retryable ?? status === "failed"
-  };
-}
-
-function shouldGenerateMemoryTriggerTxHash(result: ProductOrderTriggerBroadcastResult): boolean {
-  return result.status !== "prepared" && result.status !== "failed" && result.status !== "expired" && !result.txHash;
-}
-
 function normalizePrivateKey(value: Hex | string, fieldName: string): Hex {
   if (!/^0x[0-9a-fA-F]{64}$/.test(value)) {
     throw new ConfigError(`${fieldName} must be a 32-byte private key hex string`);
@@ -289,18 +292,76 @@ function normalizePrivateKey(value: Hex | string, fieldName: string): Hex {
 }
 
 function hasSignalSubmittedEvent(
-  logs: readonly { readonly topics: readonly Hex[] }[],
+  logs: readonly ProductTriggerBroadcastReceiptLog[],
+  planId: Hex,
   orderId: Hex,
   sourceId: Hex,
   signalId: Hex
 ): boolean {
+  const normalizedPlanId = planId.toLowerCase();
   const normalizedOrderId = orderId.toLowerCase();
   return logs.some((log) =>
     log.topics[0]?.toLowerCase() === signalSubmittedTopic &&
-    log.topics[1]?.toLowerCase() === normalizedOrderId &&
-    log.topics[2]?.toLowerCase() === sourceId.toLowerCase() &&
-    log.topics[3]?.toLowerCase() === signalId.toLowerCase()
+    log.topics[1]?.toLowerCase() === normalizedPlanId &&
+    log.topics[2]?.toLowerCase() === normalizedOrderId &&
+    log.topics[3]?.toLowerCase() === sourceId.toLowerCase() &&
+    signalIdFromEventData(log.data) === signalId.toLowerCase()
   );
+}
+
+function signalIdFromEventData(data: Hex | undefined): string | undefined {
+  if (!data) {
+    return undefined;
+  }
+  try {
+    const [signalId] = decodeAbiParameters(
+      [
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "address" }
+      ],
+      data
+    );
+    return typeof signalId === "string" ? signalId.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface ClassifiedProductTriggerBroadcastError {
+  readonly errorCode: string;
+  readonly message: string;
+  readonly retryable: boolean;
+}
+
+/**
+ * 传输层错误信封（JSON-RPC / HTTP / 网络）。这些错误与链上业务状态
+ * 无关，一律可重试——此前裸 /invalid/ 正则把 "Invalid JSON RPC
+ * response" 误判为确定性拒绝（retryable:false），草稿被永久卡死。
+ */
+function isTransportEnvelopeError(haystack: string): boolean {
+  return /json.?rpc|http request|fetch failed|network|socket|connection|ECONN|ETIMEDOUT|timeout|timed out|AbortError|transport|too many|rate.?limit/i.test(haystack);
+}
+
+function classifyProductTriggerBroadcastError(error: unknown): ClassifiedProductTriggerBroadcastError {
+  const message = error instanceof Error ? error.message : "triggerOrderFromOutsideFor broadcast failed";
+  const haystack = `${error instanceof Error ? error.name : ""} ${message}`;
+  // 只有确定性业务拒绝（合约 revert/签名/授权/期限类拒绝）才不可重试；
+  // 传输层信封先短路为可重试，其余未知错误也按可重试处理（对账可探测）。
+  if (!isTransportEnvelopeError(haystack) &&
+      /\brevert|unauthori[sz]ed|expired|deadline|unknown.?order|already.?(?:registered|exists|triggered)|signature/i.test(haystack)) {
+    return {
+      errorCode: "trigger_order_reverted",
+      message: "triggerOrderFromOutsideFor transaction was rejected deterministically",
+      retryable: false
+    };
+  }
+  return {
+    errorCode: "trigger_order_broadcast_failed",
+    message,
+    retryable: true
+  };
 }
 
 export type ProductOrderTriggerResult = ProductOrderTriggerBroadcastResult;

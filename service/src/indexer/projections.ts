@@ -3,6 +3,7 @@ import {
   ProjectionError,
   normalizeAddress,
   normalizeBytes32,
+  compareChainPointers,
   type Address,
   type ChainPointer,
   type Hex
@@ -20,6 +21,7 @@ export interface ProjectionProvenance {
   readonly chainId: number;
   readonly contractAddress: Address;
   readonly blockNumber: bigint;
+  readonly transactionIndex?: number;
   readonly transactionHash: Hex;
   readonly logIndex: number;
 }
@@ -80,13 +82,32 @@ export interface StateMachinePlanProjection {
   readonly planHash: Hex;
   readonly hookCount: string;
   readonly publisher?: Address;
+  /**
+   * Commit-phase facts (PlanCommitted). The contract publishes plans in two
+   * steps: commitPlan emits PlanCommitted + PlanPublisherRecorded, finalizePlan
+   * calls the metadata module (module events with lower logIndex) and then
+   * emits PlanFinalized + PlanRegistered. The bucket is created at commit so
+   * the finalize-transaction module events always find their plan.
+   */
+  readonly hooksHash?: Hex;
+  readonly metadataHash?: Hex;
+  readonly dockRoutesRoot?: Hex;
+  readonly dockInterfaceRoot?: Hex;
+  readonly committedAt?: ProjectionProvenance;
+  readonly finalizedAt?: ProjectionProvenance;
   readonly selectorBindings: readonly StateMachineStageSelectorBindingProjection[];
   readonly signalCapabilities: readonly StateMachineSignalCapabilityProjection[];
+  /**
+   * Commit provenance until PlanRegistered arrives, finalize provenance after.
+   * Consumers that need to distinguish the phases read committedAt/finalizedAt.
+   */
   readonly registeredAt: ProjectionProvenance;
   readonly publisherRecordedAt?: ProjectionProvenance;
   readonly updatedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
   readonly publisherProof?: StateMachineProofProjection;
+  readonly commitProof?: StateMachineProofProjection;
+  readonly finalizationProof?: StateMachineProofProjection;
 }
 
 export interface StateMachineStageSelectorBindingProjection {
@@ -130,6 +151,25 @@ export interface StateMachineSignalAuthorizationProjection {
   readonly proof: StateMachineProofProjection;
 }
 
+/**
+ * StageExecutorSignalDelegated 事实：delegateStageExecutorSignalFromModule 在
+ * 链上把 (sourceId, signalId) 的提交权委派给 executor，并显式携带
+ * targetStageId——这是词表外授权唯一的链上阶段绑定。任务投影用它把授权
+ * 信号挂到对应阶段的任务上（见 refreshTaskSubmitSignals）。
+ */
+export interface StateMachineSignalDelegationProjection {
+  readonly orderId: Hex;
+  readonly targetStageId: Hex;
+  readonly sourceId: Hex;
+  readonly signalId: Hex;
+  readonly executor: Address;
+  readonly roleHash: Hex;
+  readonly metadataHash: Hex;
+  readonly patchNonce: string;
+  readonly delegatedAt: ProjectionProvenance;
+  readonly proof: StateMachineProofProjection;
+}
+
 export interface StateMachineStageExecutorOverlayProjection {
   readonly orderId: Hex;
   readonly selectorStageId: Hex;
@@ -167,30 +207,63 @@ export interface StateMachineStageResourceOverlayProjection {
   readonly proof: StateMachineProofProjection;
 }
 
-export interface StateMachineDockedSignalBindingProjection {
+/**
+ * uvp.dock.v1 统一委托协议投影。dock 实例身份由
+ * dockInstanceId 唯一确定（哈希 preimage 覆盖双方 plan/order/route），
+ * 投影键为 (chainId, stateMachineAddress, dockInstanceId)；binding 细节
+ * （portKey/localHookId/kind/terminal 全量 word）来自 DockingModule
+ * 事件可见字段，事件不携带的补全由 keeper 通过 lens 视图按需读取。
+ */
+export type StateMachineDockStatus = "open" | "terminal";
+
+export interface StateMachineDockInputDeliveryProjection {
+  readonly inputBindingHash: Hex;
+  readonly localPlanId: Hex;
   readonly localOrderId: Hex;
+  readonly targetPlanId: Hex;
   readonly linkedOrderId: Hex;
-  readonly localSourceId: Hex;
-  readonly localSignalId: Hex;
-  readonly linkedSourceId: Hex;
-  readonly linkedSignalId: Hex;
-  readonly updatedAt: ProjectionProvenance;
+  readonly targetSignalId: Hex;
+  readonly payloadHash: Hex;
+  readonly submitter: Address;
+  readonly deliveredAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
 }
 
-export interface StateMachineDockedOrderLinkProjection {
+export interface StateMachineDockOutputDeliveryProjection {
+  readonly outputBindingHash: Hex;
+  readonly localPlanId: Hex;
   readonly localOrderId: Hex;
-  readonly selectorStageId: Hex;
-  readonly localSourceId: Hex;
+  readonly targetPlanId: Hex;
   readonly linkedOrderId: Hex;
-  readonly linkedPlanId: Hex;
-  readonly selectorWallet: Address;
-  readonly linkHash: Hex;
-  readonly linkNonce: string;
-  readonly metadataURI: string;
-  readonly signalBindings: Readonly<Record<string, StateMachineDockedSignalBindingProjection>>;
+  readonly targetSignalId: Hex;
+  readonly localSignalId: Hex;
+  readonly payloadHash: Hex;
+  readonly submitter: Address;
+  readonly deliveredAt: ProjectionProvenance;
+  readonly proof: StateMachineProofProjection;
+}
+
+export interface StateMachineDockProjection {
+  readonly dockInstanceId: Hex;
+  readonly chainId: number;
+  readonly stateMachineAddress: Address;
+  readonly localPlanId: Hex;
+  readonly localOrderId: Hex;
+  readonly routeId: Hex;
+  readonly routeHash: Hex;
+  readonly targetPlanId: Hex;
+  readonly linkedOrderId: Hex;
+  readonly depth: number;
+  readonly opener: Address;
+  readonly status: StateMachineDockStatus;
+  readonly inputDeliveries: Readonly<Record<string, StateMachineDockInputDeliveryProjection>>;
+  readonly outputDeliveries: Readonly<Record<string, StateMachineDockOutputDeliveryProjection>>;
+  readonly openedAt: ProjectionProvenance;
+  readonly terminalAt?: ProjectionProvenance;
+  readonly terminalCode?: number;
   readonly updatedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
+  readonly terminalProof?: StateMachineProofProjection;
 }
 
 export interface StateMachineOrderTriggerLinkProjection {
@@ -219,6 +292,13 @@ export interface StateMachineTaskProjection {
   readonly taskId: string;
   readonly orderId: Hex;
   readonly stateMachineAddress: Address;
+  /**
+   * Stable API-facing identifier (hook/order), while the projection itself is
+   * plan-scoped.  Keeping the plan id on the flattened row lets consumers join
+   * a task back to the right order when two plans intentionally reuse the same
+   * orderId and hookId.
+   */
+  readonly planId?: Hex;
   readonly deploymentId?: Hex;
   readonly hookId: Hex;
   readonly stageIdentifier: Hex;
@@ -257,24 +337,23 @@ export interface StateMachineOrderProjection {
   readonly deploymentId?: Hex;
   readonly planId: Hex;
   readonly planHash?: Hex;
-  readonly registrar?: Address;
-  readonly creator?: Address;
   readonly status: StateMachineOrderStatus;
   readonly currentStage?: Hex;
+  /** OrderRelayerRecorded 事实：订单中继方与创建者。 */
+  readonly relayer?: Address;
+  readonly creator?: Address;
   readonly authorizations: Readonly<Record<string, StateMachineSignalAuthorizationProjection>>;
   readonly signals: Readonly<Record<string, StateMachineSignalProjection>>;
+  readonly signalDelegations: Readonly<Record<string, StateMachineSignalDelegationProjection>>;
   readonly stageExecutorOverlays: Readonly<Record<string, StateMachineStageExecutorOverlayProjection>>;
   readonly stageResourceOverlays: Readonly<Record<string, StateMachineStageResourceOverlayProjection>>;
-  readonly dockedOrderLinks: Readonly<Record<string, StateMachineDockedOrderLinkProjection>>;
   readonly triggerLink?: StateMachineOrderTriggerLinkProjection;
   readonly hooks: Readonly<Record<string, StateMachineHookProjection>>;
   readonly tasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly timeline: readonly StateMachineTimelineEventProjection[];
   readonly proof: readonly StateMachineProofProjection[];
   readonly registeredAt?: ProjectionProvenance;
-  readonly registrarRecordedAt?: ProjectionProvenance;
   readonly updatedAt: ProjectionProvenance;
-  readonly registrarProof?: StateMachineProofProjection;
 }
 
 export interface StateMachineModuleProjection {
@@ -311,8 +390,27 @@ export interface ProjectionSnapshot {
   readonly stateMachineModules: Readonly<Record<string, StateMachineModuleProjection>>;
   readonly stateMachinePlans: Readonly<Record<string, StateMachinePlanProjection>>;
   readonly stateMachineOrders: Readonly<Record<string, StateMachineOrderProjection>>;
+  readonly stateMachineDocks: Readonly<Record<string, StateMachineDockProjection>>;
   readonly stateMachineTasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly lastEvent?: ProjectionProvenance;
+  /**
+   * P0 幻影订单诊断计数：订单维度事件（patch/dock/link/derived）本应由已
+   * 登记的模块合约发出，但 replay 时其 emitting 地址无法通过
+   * stateMachineModules 唯一归因到所属状态机（模块未登记/replay 顺序中
+   * StateMachineModuleSet 尚未出现/一址多机）。这类事件保持事件自带地址
+   * 建桶（现状），但必须在此显式计数，不允许静默。
+   */
+  readonly unresolvedModuleOrderEventCount?: number;
+  /**
+   * Dock 事件（input/output/terminal）无法定位已开启 dock 桶的显式计数
+   * （dock 未开启 / 模块未登记 / 回放顺序中 DockOpened 缺失）。不允许静默。
+   */
+  readonly unresolvedDockEventCount?: number;
+  /**
+   * StageExecutorActivated 到达时目标 stage 没有既有 overlay 的显式计数
+   * （激活前补丁事件缺失）。不允许静默。
+   */
+  readonly unresolvedStageActivationEventCount?: number;
 }
 
 type Writable<TValue> = {
@@ -327,9 +425,9 @@ type MutableStateMachineOrderProjection = Writable<
     StateMachineOrderProjection,
     | "authorizations"
     | "signals"
+    | "signalDelegations"
     | "stageExecutorOverlays"
     | "stageResourceOverlays"
-    | "dockedOrderLinks"
     | "triggerLink"
     | "hooks"
     | "tasks"
@@ -339,16 +437,24 @@ type MutableStateMachineOrderProjection = Writable<
 > & {
   authorizations: Record<string, StateMachineSignalAuthorizationProjection>;
   signals: Record<string, StateMachineSignalProjection>;
+  signalDelegations: Record<string, StateMachineSignalDelegationProjection>;
   stageExecutorOverlays: Record<string, StateMachineStageExecutorOverlayProjection>;
   stageResourceOverlays: Record<string, StateMachineStageResourceOverlayProjection>;
-  dockedOrderLinks: Record<string, Writable<Omit<StateMachineDockedOrderLinkProjection, "signalBindings">> & {
-    signalBindings: Record<string, StateMachineDockedSignalBindingProjection>;
-  }>;
   triggerLink?: StateMachineOrderTriggerLinkProjection;
   hooks: Record<string, MutableStateMachineHookProjection>;
   tasks: Record<string, MutableStateMachineTaskProjection>;
   timeline: StateMachineTimelineEventProjection[];
   proof: StateMachineProofProjection[];
+};
+
+type MutableStateMachineDockProjection = Writable<
+  Omit<
+    StateMachineDockProjection,
+    "inputDeliveries" | "outputDeliveries"
+  >
+> & {
+  inputDeliveries: Record<string, StateMachineDockInputDeliveryProjection>;
+  outputDeliveries: Record<string, StateMachineDockOutputDeliveryProjection>;
 };
 
 type MutableStateMachinePlanProjection = Writable<StateMachinePlanProjection>;
@@ -361,6 +467,15 @@ const EXECUTOR_PATCH_MODE_VALUES = {
   replacement: EXECUTOR_PATCH_MODE_REPLACEMENT
 } as const satisfies Record<StateMachineStageExecutorPatchMode, Hex>;
 
+/** P0 幻影订单：单次 replay 内累计的显式诊断计数。 */
+interface ProjectionReplayDiagnostics {
+  unresolvedModuleOrderEventCount: number;
+  unresolvedDockEventCount: number;
+  unresolvedStageActivationEventCount: number;
+}
+
+type StateMachineModuleIndex = ReadonlyMap<string, MutableStateMachineModuleProjection>;
+
 export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
   return {
     rebuildable: true,
@@ -370,8 +485,47 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     stateMachineModules: {},
     stateMachinePlans: {},
     stateMachineOrders: {},
-    stateMachineTasks: {}
+    stateMachineDocks: {},
+    stateMachineTasks: {},
+    unresolvedModuleOrderEventCount: 0,
+    unresolvedDockEventCount: 0,
+    unresolvedStageActivationEventCount: 0
   };
+}
+
+/**
+ * rebuild summary 的 mismatchCount 必须反映真实 replay 异常，而不是
+ * 硬编码 0。这里统计两类可观测异常：
+ * 1. 重复/矛盾投递 —— 同一事件键（chain/contract/block/tx/log）作为活跃
+ *    事件出现多次（replay 会静默去重，但这是真实异常，必须计数）；
+ * 2. 投影 apply 失败 —— 事件流引用未知 plan 等导致 rebuildOrderProjections
+ *    抛错（调用方随后按 degraded 处理，异常本身计为 1）。
+ *
+ * 已调查 uvp-protocol 的 @uvp-eth/statemachine 语义 replay oracle
+ * （replayChainEvents）：它要求带 compiledHooks/dependencyIndex 的完整
+ * plan 编译产物与 zhixuId 富化事件，索引器投影的事件流不携带这些数据，
+ * 且依赖 @uvp-eth/hook-core 的原生 uvp-core 运行时；在索引器内接通属于
+ * 独立集成任务，此处先用真实可观测异常计数。
+ */
+export function countReplayAnomalies(events: readonly ChainEvent[]): number {
+  let anomalies = 0;
+  const seenActive = new Set<string>();
+  for (const event of events) {
+    if (event.removed === true) {
+      continue;
+    }
+    const key = chainEventKey(event);
+    if (seenActive.has(key)) {
+      anomalies += 1;
+    }
+    seenActive.add(key);
+  }
+  try {
+    rebuildOrderProjections(events);
+  } catch {
+    anomalies += 1;
+  }
+  return anomalies;
 }
 
 export function rebuildOrderProjections(events: readonly ChainEvent[]): ProjectionSnapshot {
@@ -379,6 +533,12 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
   const stateMachineModules = new Map<string, MutableStateMachineModuleProjection>();
   const stateMachinePlans = new Map<string, MutableStateMachinePlanProjection>();
   const stateMachineOrders = new Map<string, MutableStateMachineOrderProjection>();
+  const stateMachineDocks = new Map<string, MutableStateMachineDockProjection>();
+  const diagnostics: ProjectionReplayDiagnostics = {
+    unresolvedModuleOrderEventCount: 0,
+    unresolvedDockEventCount: 0,
+    unresolvedStageActivationEventCount: 0
+  };
   let activeStateMachineDeploymentId: Hex | undefined;
   let eventCount = 0;
   let lastEvent: ProjectionProvenance | undefined;
@@ -389,7 +549,9 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
       deployments: stateMachineDeployments,
       modules: stateMachineModules,
       plans: stateMachinePlans,
-      orders: stateMachineOrders
+      orders: stateMachineOrders,
+      docks: stateMachineDocks,
+      diagnostics
     }, event);
     eventCount += 1;
     lastEvent = provenanceOf(event);
@@ -397,6 +559,14 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
 
   const stateMachineOrderRecord: Record<string, StateMachineOrderProjection> = {};
   const stateMachineTaskRecord: Record<string, StateMachineTaskProjection> = {};
+  const stateMachineDockRecord: Record<string, StateMachineDockProjection> = {};
+  for (const [dockKey, dock] of stateMachineDocks) {
+    stateMachineDockRecord[dockKey] = {
+      ...dock,
+      inputDeliveries: { ...dock.inputDeliveries },
+      outputDeliveries: { ...dock.outputDeliveries }
+    };
+  }
   for (const [orderId, order] of stateMachineOrders) {
     const readonlyTasks: Record<string, StateMachineTaskProjection> = {};
     for (const [taskId, task] of Object.entries(order.tasks)) {
@@ -405,28 +575,30 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
         ...(task.submitSignals ? { submitSignals: [...task.submitSignals] } : {})
       };
       readonlyTasks[taskId] = readonlyTask;
-      stateMachineTaskRecord[taskId] = readonlyTask;
+      stateMachineTaskRecord[stateMachineTaskProjectionKey(
+        order.chainId,
+        order.contractAddress,
+        order.planId,
+        order.orderId,
+        task.hookId
+      )] = readonlyTask;
     }
-    const readonlyDockedLinks: Record<string, StateMachineDockedOrderLinkProjection> = {};
-    for (const [linkedOrderId, link] of Object.entries(order.dockedOrderLinks)) {
-      readonlyDockedLinks[linkedOrderId] = {
-        ...link,
-        signalBindings: { ...link.signalBindings }
-      };
-    }
-    stateMachineOrderRecord[orderId] = {
+    const readonlyOrder = {
       ...order,
       authorizations: { ...order.authorizations },
       signals: { ...order.signals },
+      signalDelegations: { ...order.signalDelegations },
       stageExecutorOverlays: { ...order.stageExecutorOverlays },
       stageResourceOverlays: { ...order.stageResourceOverlays },
-      dockedOrderLinks: readonlyDockedLinks,
       ...(order.triggerLink ? { triggerLink: order.triggerLink } : {}),
       hooks: Object.fromEntries(Object.entries(order.hooks).map(([hookId, hook]) => [hookId, { ...hook }])),
       tasks: readonlyTasks,
       timeline: [...order.timeline].sort(compareTimelineEvents),
       proof: [...order.proof].sort(compareProofEvents)
     };
+    // 快照只暴露 plan 作用域的复合键：每条订单/任务恰好一个键，
+    // 裸 orderId 必须走 fail-closed 扫描（uniqueOrderByBareId），绝不静默命中。
+    stateMachineOrderRecord[orderId] = readonlyOrder;
   }
 
   return {
@@ -438,7 +610,11 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
     stateMachineModules: Object.fromEntries(stateMachineModules),
     stateMachinePlans: Object.fromEntries(stateMachinePlans),
     stateMachineOrders: stateMachineOrderRecord,
+    stateMachineDocks: stateMachineDockRecord,
     stateMachineTasks: stateMachineTaskRecord,
+    unresolvedModuleOrderEventCount: diagnostics.unresolvedModuleOrderEventCount,
+    unresolvedDockEventCount: diagnostics.unresolvedDockEventCount,
+    unresolvedStageActivationEventCount: diagnostics.unresolvedStageActivationEventCount,
     ...(lastEvent ? { lastEvent } : {})
   };
 }
@@ -449,12 +625,20 @@ function applyStateMachineEvent(
     modules: Map<string, MutableStateMachineModuleProjection>;
     plans: Map<string, MutableStateMachinePlanProjection>;
     orders: Map<string, MutableStateMachineOrderProjection>;
+    docks: Map<string, MutableStateMachineDockProjection>;
+    diagnostics: ProjectionReplayDiagnostics;
   },
   event: ChainEvent
 ): void {
   switch (event.eventName) {
     case "StateMachineModuleSet":
       applyStateMachineModuleSet(state.modules, event);
+      return;
+    case "PlanCommitted":
+      applyPlanCommitted(state, event);
+      return;
+    case "PlanFinalized":
+      applyPlanFinalized(state, event);
       return;
     case "PlanRegistered":
       applyPlanRegistered(state, event);
@@ -465,11 +649,11 @@ function applyStateMachineEvent(
     case "OrderRegistered":
       applyOrderRegistered(state, event);
       return;
-    case "OrderRegistrarRecorded":
-      applyOrderRegistrarRecorded(state, event);
-      return;
     case "OrderMaterialized":
       applyOrderMaterialized(state, event);
+      return;
+    case "OrderRelayerRecorded":
+      applyOrderRelayerRecorded(state, event);
       return;
     case "SignalSubmitterAuthorized":
       applySignalSubmitterAuthorized(state, event);
@@ -501,14 +685,20 @@ function applyStateMachineEvent(
     case "StageExecutorActivated":
       applyStageExecutorActivated(state, event);
       return;
-    case "DockedOrderLinked":
-      applyDockedOrderLinked(state, event);
+    case "StageExecutorSignalDelegated":
+      applyStageExecutorSignalDelegated(state, event);
       return;
-    case "DockedSignalMapped":
-      applyDockedSignalMapped(state, event);
+    case "DockOpened":
+      applyDockOpened(state, event);
       return;
-    case "DockedSignalSubmitted":
-      applyDockedSignalSubmitted(state, event);
+    case "DockInputSubmitted":
+      applyDockInputSubmitted(state, event);
+      return;
+    case "DockOutputSubmitted":
+      applyDockOutputSubmitted(state, event);
+      return;
+    case "DockTerminal":
+      applyDockTerminal(state, event);
       return;
     case "DerivedSignalSubmitted":
       applyDerivedSignalSubmitted(state, event);
@@ -623,6 +813,169 @@ function applyStateMachineModuleSet(
   });
 }
 
+/**
+ * P0 幻影订单：订单/计划维度事件可能由模块合约发出（UVPStagePatchModule、
+ * UVPDockingModule、UVPOrderLinkModule、UVPDerivedSignalModule、
+ * UVPPlanMetadataModule），此时 event.contractAddress 是模块地址。订单必须
+ * 按所属状态机地址分桶，否则同一订单会在模块地址下分裂出 planId=0 的
+ * unknown 幻影桶。这里用 StateMachineModuleSet 建立的 stateMachineModules
+ * 投影做 module → state machine 反向归一化：
+ * - 唯一命中 → 返回所属状态机地址（resolved）；
+ * - 无法唯一归因（模块未登记 / replay 顺序中 StateMachineModuleSet 尚未
+ *   出现 / 同一模块地址被多个状态机登记）→ 返回事件自带地址（resolved:
+ *   false），调用方保持现状建桶并计入显式诊断计数，不允许静默。
+ */
+function resolveStateMachineAddressForModuleEvent(
+  modules: StateMachineModuleIndex,
+  event: ChainEvent
+): { stateMachineAddress: Address; resolved: boolean } {
+  const emitter = event.contractAddress.toLowerCase();
+  const matches = [...modules.values()].filter((module) =>
+    module.chainId === event.chainId && module.moduleAddress.toLowerCase() === emitter
+  );
+  if (matches.length === 1) {
+    const match = matches[0];
+    if (match) {
+      return { stateMachineAddress: match.stateMachineAddress, resolved: true };
+    }
+  }
+  return { stateMachineAddress: event.contractAddress, resolved: false };
+}
+
+/**
+ * P0 幻影订单：订单维度事件（7 类）建桶前的统一归一化入口——解析失败的
+ * 事件保持事件地址建桶（现状）并累计 unresolvedModuleOrderEventCount。
+ */
+function stateMachineAddressForOrderEvent(
+  state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
+  },
+  event: ChainEvent
+): Address {
+  const resolution = resolveStateMachineAddressForModuleEvent(state.modules, event);
+  if (!resolution.resolved) {
+    state.diagnostics.unresolvedModuleOrderEventCount += 1;
+  }
+  return resolution.stateMachineAddress;
+}
+
+/** 订单维度事件专用：先归一化到状态机地址，再建/取订单桶。 */
+function ensureStateMachineOrderFromModuleEvent(
+  state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent,
+  orderId: Hex,
+  planId?: Hex,
+  deploymentId?: Hex
+): MutableStateMachineOrderProjection {
+  return ensureStateMachineOrder(
+    state.orders,
+    event,
+    orderId,
+    planId,
+    deploymentId,
+    stateMachineAddressForOrderEvent(state, event)
+  );
+}
+
+/**
+ * 真实事件顺序（UVPStateMachine v0.10）：commitPlan 同一交易先发
+ * PlanCommitted 再发 PlanPublisherRecorded；finalizePlan 内先调用 plan
+ * metadata 模块（SignalCapabilityRegistered 等，logIndex 更小），随后才发
+ * PlanFinalized + PlanRegistered。投影必须在 PlanCommitted 建 plan 桶，
+ * 否则 finalize 交易内的模块事件全部撞"unknown plan"→ ProjectionError →
+ * 索引器永久 degraded。
+ */
+function applyPlanCommitted(
+  state: {
+    deployments: Map<string, MutableStateMachineDeploymentProjection>;
+    plans: Map<string, MutableStateMachinePlanProjection>;
+  },
+  event: ChainEvent
+): void {
+  const planId = requiredBytes32Arg(event, "planId");
+  const planHash = requiredBytes32Arg(event, "planHash");
+  const publisher = requiredAddressArg(event, "publisher");
+  const proof = proofOf(event, { planId, planHash, submitter: publisher });
+  const key = stateMachineScopedKey(event.chainId, event.contractAddress, planId);
+  const existing = state.plans.get(key);
+  if (existing) {
+    // 合约对同一 planId 二次 commitPlan 会 revert（PlanAlreadyRegistered）；
+    // 回放流中出现重复时保留首见事实，不覆盖。
+    return;
+  }
+  const deployment = findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress);
+  const plan: MutableStateMachinePlanProjection = {
+    planId,
+    ...(deployment ? { deploymentId: deployment.deploymentId } : {}),
+    stateMachineAddress: event.contractAddress,
+    planHash,
+    hookCount: uintArgAsString(event, "hookCount"),
+    publisher,
+    hooksHash: requiredBytes32Arg(event, "hooksHash"),
+    metadataHash: requiredBytes32Arg(event, "metadataHash"),
+    dockRoutesRoot: requiredBytes32Arg(event, "dockRoutesRoot"),
+    dockInterfaceRoot: requiredBytes32Arg(event, "dockInterfaceRoot"),
+    committedAt: provenanceOf(event),
+    selectorBindings: [],
+    signalCapabilities: [],
+    registeredAt: provenanceOf(event),
+    updatedAt: provenanceOf(event),
+    proof,
+    commitProof: proof
+  };
+  state.plans.set(key, plan);
+}
+
+function applyPlanFinalized(
+  state: {
+    deployments: Map<string, MutableStateMachineDeploymentProjection>;
+    plans: Map<string, MutableStateMachinePlanProjection>;
+  },
+  event: ChainEvent
+): void {
+  const planId = requiredBytes32Arg(event, "planId");
+  const planHash = requiredBytes32Arg(event, "planHash");
+  const metadataHash = requiredBytes32Arg(event, "metadataHash");
+  const proof = proofOf(event, { planId, planHash });
+  const key = stateMachineScopedKey(event.chainId, event.contractAddress, planId);
+  const existing = state.plans.get(key);
+  if (existing) {
+    if (!existing.finalizedAt) {
+      existing.finalizedAt = provenanceOf(event);
+      existing.finalizationProof = proof;
+      existing.metadataHash = metadataHash;
+      existing.updatedAt = provenanceOf(event);
+    }
+    return;
+  }
+  // 合约路径下 PlanFinalized 必然跟在 PlanCommitted 之后（finalizePlan
+  // 前置检查 plan.committed）；桶缺失说明事件流被截断，仍按链上事实建桶
+  //（finalize 已发生），不抛错阻塞索引。
+  const deployment = findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress);
+  const plan: MutableStateMachinePlanProjection = {
+    planId,
+    ...(deployment ? { deploymentId: deployment.deploymentId } : {}),
+    stateMachineAddress: event.contractAddress,
+    planHash,
+    hookCount: "0",
+    metadataHash,
+    committedAt: provenanceOf(event),
+    finalizedAt: provenanceOf(event),
+    selectorBindings: [],
+    signalCapabilities: [],
+    registeredAt: provenanceOf(event),
+    updatedAt: provenanceOf(event),
+    proof,
+    finalizationProof: proof
+  };
+  state.plans.set(key, plan);
+}
+
 function applyPlanRegistered(
   state: {
     deployments: Map<string, MutableStateMachineDeploymentProjection>;
@@ -635,19 +988,45 @@ function applyPlanRegistered(
   const planHash = requiredBytes32Arg(event, "planHash");
   const deployment = findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress);
   const proof = proofOf(event, { planId, planHash });
-  const plan: MutableStateMachinePlanProjection = {
-    planId,
-    ...(deployment ? { deploymentId: deployment.deploymentId } : {}),
-    stateMachineAddress: event.contractAddress,
-    planHash,
-    hookCount: uintArgAsString(event, "hookCount"),
-    selectorBindings: selectorBindingsArg(event),
-    signalCapabilities: signalCapabilitiesArg(event),
-    registeredAt: provenanceOf(event),
-    updatedAt: provenanceOf(event),
-    proof
-  };
-  state.plans.set(stateMachineScopedKey(event.chainId, event.contractAddress, planId), plan);
+  const key = stateMachineScopedKey(event.chainId, event.contractAddress, planId);
+  const existing = state.plans.get(key);
+  // 真实链序（finalizePlan）：模块元数据事件先于 PlanRegistered 落日志，
+  // 词表在此前已并入桶。PlanRegistered 的 ABI 本身不携带
+  // selectorBindings/signalCapabilities——合并而非覆写，否则 finalize 交易
+  // 内模块事件登记的词表会被空数组清空。
+  const mergedSelectorBindings = mergeSelectorBindings(
+    existing?.selectorBindings ?? [],
+    selectorBindingsArg(event)
+  );
+  const mergedSignalCapabilities = mergeSignalCapabilities(
+    existing?.signalCapabilities ?? [],
+    signalCapabilitiesArg(event)
+  );
+  const plan: MutableStateMachinePlanProjection = existing
+    ? {
+      ...existing,
+      planHash,
+      hookCount: uintArgAsString(event, "hookCount"),
+      selectorBindings: mergedSelectorBindings,
+      signalCapabilities: mergedSignalCapabilities,
+      // PlanRegistered 在 finalize 交易末尾发出：这是"已注册"的权威时点。
+      registeredAt: provenanceOf(event),
+      updatedAt: provenanceOf(event),
+      proof
+    }
+    : {
+      planId,
+      ...(deployment ? { deploymentId: deployment.deploymentId } : {}),
+      stateMachineAddress: event.contractAddress,
+      planHash,
+      hookCount: uintArgAsString(event, "hookCount"),
+      selectorBindings: mergedSelectorBindings,
+      signalCapabilities: mergedSignalCapabilities,
+      registeredAt: provenanceOf(event),
+      updatedAt: provenanceOf(event),
+      proof
+    };
+  state.plans.set(key, plan);
 
   for (const order of state.orders.values()) {
     if (order.contractAddress !== event.contractAddress || order.planId !== planId) {
@@ -665,12 +1044,13 @@ function applyPlanRegistered(
 
 function applyPlanPublisherRecorded(
   state: {
+    modules: StateMachineModuleIndex;
     plans: Map<string, MutableStateMachinePlanProjection>;
   },
   event: ChainEvent
 ): void {
   const planId = requiredBytes32Arg(event, "planId");
-  const plan = findPlanForEvent(state.plans, event, planId);
+  const plan = findPlanForEvent(state.plans, state.modules, event, planId);
   if (!plan) {
     throw new ProjectionError(`${event.eventName} references unknown plan ${planId}`);
   }
@@ -709,31 +1089,6 @@ function applyOrderRegistered(
   appendOrderTimeline(order, timelineOf(event, "订单已创建", proof, { orderId, planId }));
 }
 
-function applyOrderRegistrarRecorded(
-  state: {
-    orders: Map<string, MutableStateMachineOrderProjection>;
-  },
-  event: ChainEvent
-): void {
-  const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
-  const registrar = requiredAddressArg(event, "registrar");
-  const creator = requiredAddressArg(event, "creator");
-  const proof = proofOf(event, {
-    orderId,
-    planId: order.planId,
-    planHash: order.planHash,
-    submitter: registrar
-  });
-  order.registrar = registrar;
-  order.creator = creator;
-  order.registrarRecordedAt = provenanceOf(event);
-  order.registrarProof = proof;
-  order.updatedAt = provenanceOf(event);
-  appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "订单注册来源已记录", proof, { orderId, planId: order.planId }));
-}
-
 function applyOrderMaterialized(
   state: {
     deployments: Map<string, MutableStateMachineDeploymentProjection>;
@@ -766,8 +1121,34 @@ function applyOrderMaterialized(
   appendOrderTimeline(order, timelineOf(event, "订单已实体化", proof, { orderId, planId }));
 }
 
+function applyOrderRelayerRecorded(
+  state: {
+    deployments: Map<string, MutableStateMachineDeploymentProjection>;
+    plans: Map<string, MutableStateMachinePlanProjection>;
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent
+): void {
+  const orderId = requiredBytes32Arg(event, "orderId");
+  const planId = requiredBytes32Arg(event, "planId");
+  const relayer = requiredAddressArg(event, "relayer");
+  const creator = requiredAddressArg(event, "creator");
+  const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
+  const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
+  // _createOrder 同一交易内先发 OrderRegistered 再发 OrderRelayerRecorded：
+  // 桶通常已存在，缺失时按复合键补建（链上事实：订单已注册）。
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId, deploymentId);
+  const proof = proofOf(event, { orderId, planId, planHash: order.planHash, submitter: relayer });
+  order.relayer = relayer;
+  order.creator = creator;
+  order.updatedAt = provenanceOf(event);
+  appendOrderProof(order, proof);
+  appendOrderTimeline(order, timelineOf(event, "订单中继方已记录", proof, { orderId, planId }));
+}
+
 function applyStageSelectorBindingRegistered(
   state: {
+    modules: StateMachineModuleIndex;
     plans: Map<string, MutableStateMachinePlanProjection>;
   },
   event: ChainEvent
@@ -775,7 +1156,9 @@ function applyStageSelectorBindingRegistered(
   const planId = requiredBytes32Arg(event, "planId");
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
-  const plan = findPlanForEvent(state.plans, event, planId);
+  // P0 幻影订单同病：StageSelectorBindingRegistered 由 UVPPlanMetadataModule
+  // 发出，plan 事件同样先归一化到状态机地址再查 plan。
+  const plan = findPlanForEvent(state.plans, state.modules, event, planId);
   if (!plan) {
     throw new ProjectionError(`${event.eventName} references unknown plan ${planId}`);
   }
@@ -790,6 +1173,7 @@ function applyStageSelectorBindingRegistered(
 
 function applySignalCapabilityRegistered(
   state: {
+    modules: StateMachineModuleIndex;
     plans: Map<string, MutableStateMachinePlanProjection>;
     orders: Map<string, MutableStateMachineOrderProjection>;
   },
@@ -797,7 +1181,10 @@ function applySignalCapabilityRegistered(
 ): void {
   const planId = requiredBytes32Arg(event, "planId");
   const capability = signalCapabilityFromEvent(event);
-  const plan = findPlanForEvent(state.plans, event, planId);
+  // P0 幻影订单同病：SignalCapabilityRegistered 由 UVPPlanMetadataModule
+  // 发出，plan 事件同样先归一化到状态机地址再查 plan，避免同 planId 跨
+  // 部署时回退扫描歧义 → ProjectionError → 索引器永久 degraded。
+  const plan = findPlanForEvent(state.plans, state.modules, event, planId);
   if (!plan) {
     throw new ProjectionError(`${event.eventName} references unknown plan ${planId}`);
   }
@@ -829,7 +1216,8 @@ function applySignalSubmitterAuthorized(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const sourceId = requiredBytes32Arg(event, "sourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
   const submitter = requiredAddressArg(event, "submitter");
@@ -859,7 +1247,8 @@ function applySignalSubmitted(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const sourceId = requiredBytes32Arg(event, "sourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
   const submitter = requiredAddressArg(event, "submitter");
@@ -889,7 +1278,8 @@ function applyStageMaterialized(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const stageId = requiredBytes32Arg(event, "stageId");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash });
   order.currentStage = stageId;
@@ -936,6 +1326,8 @@ function applyOrderTriggered(
 function applyOrderLinked(
   state: {
     deployments: Map<string, MutableStateMachineDeploymentProjection>;
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
     orders: Map<string, MutableStateMachineOrderProjection>;
   },
   event: ChainEvent
@@ -945,12 +1337,17 @@ function applyOrderLinked(
   const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
   const originSourceId = requiredBytes32Arg(event, "originSourceId");
   const originSignalId = requiredBytes32Arg(event, "originSignalId");
+  const planId = optionalBytes32Arg(event, "planId");
+  // P0 幻影订单：OrderLinked 由 UVPOrderLinkModule 发出，先归一化到所属
+  // 状态机地址再做部署归属与建桶。
+  const stateMachineAddress = stateMachineAddressForOrderEvent(state, event);
   const childOrder = ensureStateMachineOrder(
     state.orders,
     event,
     triggeredOrderId,
-    undefined,
-    findDeploymentByStateMachine(state.deployments, event.chainId, event.contractAddress)?.deploymentId
+    planId,
+    findDeploymentByStateMachine(state.deployments, event.chainId, stateMachineAddress)?.deploymentId,
+    stateMachineAddress
   );
   const proof = proofOf(event, {
     orderId: triggeredOrderId,
@@ -980,12 +1377,16 @@ function applyOrderLinked(
 
 function applyStageExecutorPatchApplied(
   state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
     orders: Map<string, MutableStateMachineOrderProjection>;
   },
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  // P0 幻影订单：StageExecutorPatchApplied 由 UVPStagePatchModule 发出。
+  const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId, planId);
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
   const selectorWallet = requiredAddressArg(event, "selector");
@@ -1032,12 +1433,16 @@ function applyStageExecutorPatchApplied(
 
 function applyStageResourcePatchApplied(
   state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
     orders: Map<string, MutableStateMachineOrderProjection>;
   },
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  // P0 幻影订单：StageResourcePatchApplied 由 UVPStagePatchModule 发出。
+  const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId, planId);
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
   const resourceKey = requiredBytes32Arg(event, "resourceKey");
@@ -1075,11 +1480,13 @@ function applyStageResourcePatchApplied(
 function applyStageExecutorActivated(
   state: {
     orders: Map<string, MutableStateMachineOrderProjection>;
+    diagnostics: ProjectionReplayDiagnostics;
   },
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
   const executor = requiredAddressArg(event, "executor");
   const patchNonce = uintArgAsString(event, "patchNonce");
@@ -1091,6 +1498,11 @@ function applyStageExecutorActivated(
   });
   const key = stageExecutorOverlayProjectionKey(targetStageId);
   const existing = order.stageExecutorOverlays[key];
+  if (!existing) {
+    // StageExecutorActivated 之前必须有 StageExecutorPatchApplied 建 overlay；
+    // 缺失说明补丁事件未入流。计数显式暴露，不允许静默丢弃。
+    state.diagnostics.unresolvedStageActivationEventCount += 1;
+  }
   if (existing && compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
     const overlay: StateMachineStageExecutorOverlayProjection = {
       ...existing,
@@ -1111,117 +1523,311 @@ function applyStageExecutorActivated(
   appendOrderTimeline(order, timelineOf(event, "阶段执行方已激活", proof, { orderId, planId: order.planId }));
 }
 
-function applyDockedOrderLinked(
+/**
+ * delegateStageExecutorSignalFromModule 在链上把 (sourceId, signalId) 的
+ * 提交权委派给 executor，并携带 targetStageId 阶段绑定。同一交易内先发
+ * SignalSubmitterAuthorized（order.authorizations 已有记录）再发本事件；
+ * 投影用本事件补齐阶段归属，供任务 submitSignals 挂接（F25）。
+ */
+function applyStageExecutorSignalDelegated(
   state: {
     orders: Map<string, MutableStateMachineOrderProjection>;
   },
   event: ChainEvent
 ): void {
-  const localOrderId = requiredBytes32Arg(event, "localOrderId");
-  const order = ensureStateMachineOrder(state.orders, event, localOrderId);
-  const linkedOrderId = requiredBytes32Arg(event, "linkedOrderId");
-  const selectorWallet = requiredAddressArg(event, "selector");
+  const orderId = requiredBytes32Arg(event, "orderId");
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
+  const targetStageId = requiredBytes32Arg(event, "targetStageId");
+  const sourceId = requiredBytes32Arg(event, "sourceId");
+  const signalId = requiredBytes32Arg(event, "signalId");
+  const executor = requiredAddressArg(event, "executor");
+  const patchNonce = uintArgAsString(event, "patchNonce");
   const proof = proofOf(event, {
-    orderId: localOrderId,
+    orderId,
     planId: order.planId,
     planHash: order.planHash,
-    submitter: selectorWallet
+    submitter: executor
   });
-  const existing = order.dockedOrderLinks[linkedOrderId.toLowerCase()];
-  const signalBindings = existing?.signalBindings ?? {};
-  const link: MutableStateMachineOrderProjection["dockedOrderLinks"][string] = {
-    localOrderId,
-    selectorStageId: requiredBytes32Arg(event, "selectorStageId"),
-    localSourceId: requiredBytes32Arg(event, "localSourceId"),
-    linkedOrderId,
-    linkedPlanId: requiredBytes32Arg(event, "linkedPlanId"),
-    selectorWallet,
-    linkHash: requiredBytes32Arg(event, "linkHash"),
-    linkNonce: uintArgAsString(event, "linkNonce"),
-    metadataURI: optionalStringArg(event, "metadataURI") ?? "",
-    signalBindings,
-    updatedAt: provenanceOf(event),
+  const delegation: StateMachineSignalDelegationProjection = {
+    orderId,
+    targetStageId,
+    sourceId,
+    signalId,
+    executor,
+    roleHash: requiredBytes32Arg(event, "role"),
+    metadataHash: requiredBytes32Arg(event, "metadataHash"),
+    patchNonce,
+    delegatedAt: provenanceOf(event),
     proof
   };
-  order.dockedOrderLinks[linkedOrderId.toLowerCase()] = link;
+  const key = signalProjectionKey(sourceId, signalId);
+  const existing = order.signalDelegations[key];
+  if (!existing || compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
+    order.signalDelegations[key] = delegation;
+    markTargetStageTasksAssignedFromDelegation(order, delegation);
+  }
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "关联秩序已 dock 到本地秩序", proof, { orderId: localOrderId, planId: order.planId }));
+  appendOrderTimeline(order, timelineOf(event, "阶段信号已委派执行方", proof, { orderId, planId: order.planId }));
 }
 
-function applyDockedSignalMapped(
+function applyDockOpened(
   state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
     orders: Map<string, MutableStateMachineOrderProjection>;
+    docks: Map<string, MutableStateMachineDockProjection>;
   },
   event: ChainEvent
 ): void {
+  const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
+  // DockOpened 由 UVPDockingModule 发出：先归一化到所属状态机地址。
+  const stateMachineAddress = stateMachineAddressForOrderEvent(state, event);
+  const localPlanId = requiredBytes32Arg(event, "localPlanId");
   const localOrderId = requiredBytes32Arg(event, "localOrderId");
-  const order = ensureStateMachineOrder(state.orders, event, localOrderId);
   const linkedOrderId = requiredBytes32Arg(event, "linkedOrderId");
-  const linkedSourceId = requiredBytes32Arg(event, "linkedSourceId");
-  const linkedSignalId = requiredBytes32Arg(event, "linkedSignalId");
+  const opener = requiredAddressArg(event, "opener");
+  const depth = Number(event.args["depth"] ?? 0);
   const proof = proofOf(event, {
     orderId: localOrderId,
-    planId: order.planId,
-    planHash: order.planHash
+    planId: localPlanId,
+    submitter: opener
   });
-  const link = order.dockedOrderLinks[linkedOrderId.toLowerCase()] ?? {
-    localOrderId,
-    selectorStageId: ZERO_BYTES32,
-    localSourceId: requiredBytes32Arg(event, "localSourceId"),
+
+  // 父订单与子订单各自补事件轨迹（订单本体由 OrderRegistered 等建桶）。
+  const localOrder = ensureStateMachineOrder(state.orders, event, localOrderId, localPlanId, undefined, stateMachineAddress);
+  localOrder.updatedAt = provenanceOf(event);
+  appendOrderProof(localOrder, proof);
+  appendOrderTimeline(localOrder, timelineOf(event, "委托 dock 已开启", proof, {
+    orderId: localOrderId,
+    planId: localPlanId,
+    linkedOrderId
+  }));
+  const linkedOrder = ensureStateMachineOrder(
+    state.orders,
+    event,
     linkedOrderId,
-    linkedPlanId: ZERO_BYTES32,
-    selectorWallet: "0x0000000000000000000000000000000000000000" as Address,
-    linkHash: ZERO_BYTES32,
-    linkNonce: "0",
-    metadataURI: "",
-    signalBindings: {},
+    requiredBytes32Arg(event, "targetPlanId"),
+    undefined,
+    stateMachineAddress
+  );
+  linkedOrder.updatedAt = provenanceOf(event);
+  appendOrderProof(linkedOrder, proof);
+  appendOrderTimeline(linkedOrder, timelineOf(event, "独立子订单已由 dock 创建", proof, {
+    orderId: linkedOrderId,
+    planId: requiredBytes32Arg(event, "targetPlanId")
+  }));
+
+  const dock: MutableStateMachineDockProjection = {
+    dockInstanceId,
+    chainId: event.chainId,
+    stateMachineAddress,
+    localPlanId,
+    localOrderId,
+    routeId: requiredBytes32Arg(event, "routeId"),
+    routeHash: requiredBytes32Arg(event, "routeHash"),
+    targetPlanId: requiredBytes32Arg(event, "targetPlanId"),
+    linkedOrderId,
+    depth,
+    opener,
+    status: "open",
+    inputDeliveries: {},
+    outputDeliveries: {},
+    openedAt: provenanceOf(event),
     updatedAt: provenanceOf(event),
     proof
   };
-  link.signalBindings[dockedSignalBindingProjectionKey(linkedSourceId, linkedSignalId)] = {
-    localOrderId,
-    linkedOrderId,
-    localSourceId: requiredBytes32Arg(event, "localSourceId"),
+  state.docks.set(dockProjectionKey(event.chainId, stateMachineAddress, dockInstanceId), dock);
+}
+
+function applyDockInputSubmitted(
+  state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
+    orders: Map<string, MutableStateMachineOrderProjection>;
+    docks: Map<string, MutableStateMachineDockProjection>;
+  },
+  event: ChainEvent
+): void {
+  const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
+  const dock = findDockForEvent(state, event, dockInstanceId);
+  if (!dock) {
+    // dock 未开启（或模块归属无法解析）：显式计数，不允许静默丢弃。
+    state.diagnostics.unresolvedDockEventCount += 1;
+    return;
+  }
+  const inputBindingHash = requiredBytes32Arg(event, "inputBindingHash");
+  const submitter = requiredAddressArg(event, "submitter");
+  const proof = proofOf(event, {
+    orderId: dock.localOrderId,
+    planId: dock.localPlanId,
+    submitter
+  });
+  dock.inputDeliveries[inputBindingHash.toLowerCase()] = {
+    inputBindingHash,
+    localPlanId: requiredBytes32Arg(event, "localPlanId"),
+    localOrderId: requiredBytes32Arg(event, "localOrderId"),
+    targetPlanId: requiredBytes32Arg(event, "targetPlanId"),
+    linkedOrderId: requiredBytes32Arg(event, "linkedOrderId"),
+    targetSignalId: requiredBytes32Arg(event, "targetSignalId"),
+    payloadHash: requiredBytes32Arg(event, "payloadHash"),
+    submitter,
+    deliveredAt: provenanceOf(event),
+    proof
+  };
+  dock.updatedAt = provenanceOf(event);
+
+  // 跨订单事件：父侧记录投递轨迹，子订单侧记录输入事实写入。
+  const localOrder = ensureStateMachineOrder(
+    state.orders,
+    event,
+    dock.localOrderId,
+    dock.localPlanId,
+    undefined,
+    dock.stateMachineAddress
+  );
+  localOrder.updatedAt = provenanceOf(event);
+  appendOrderProof(localOrder, proof);
+  appendOrderTimeline(localOrder, timelineOf(event, "dock 输入已投递", proof, {
+    orderId: dock.localOrderId,
+    planId: dock.localPlanId
+  }));
+  const linkedOrder = ensureStateMachineOrder(
+    state.orders,
+    event,
+    dock.linkedOrderId,
+    dock.targetPlanId,
+    undefined,
+    dock.stateMachineAddress
+  );
+  linkedOrder.updatedAt = provenanceOf(event);
+  appendOrderProof(linkedOrder, proof);
+  appendOrderTimeline(linkedOrder, timelineOf(event, "dock 输入事实已投递到子订单", proof, {
+    orderId: dock.linkedOrderId,
+    planId: dock.targetPlanId
+  }));
+}
+
+function applyDockOutputSubmitted(
+  state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
+    orders: Map<string, MutableStateMachineOrderProjection>;
+    docks: Map<string, MutableStateMachineDockProjection>;
+  },
+  event: ChainEvent
+): void {
+  const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
+  const dock = findDockForEvent(state, event, dockInstanceId);
+  if (!dock) {
+    // dock 未开启（或模块归属无法解析）：显式计数，不允许静默丢弃。
+    state.diagnostics.unresolvedDockEventCount += 1;
+    return;
+  }
+  const outputBindingHash = requiredBytes32Arg(event, "outputBindingHash");
+  const submitter = requiredAddressArg(event, "submitter");
+  const proof = proofOf(event, {
+    orderId: dock.localOrderId,
+    planId: dock.localPlanId,
+    submitter
+  });
+  dock.outputDeliveries[outputBindingHash.toLowerCase()] = {
+    outputBindingHash,
+    localPlanId: requiredBytes32Arg(event, "localPlanId"),
+    localOrderId: requiredBytes32Arg(event, "localOrderId"),
+    targetPlanId: requiredBytes32Arg(event, "targetPlanId"),
+    linkedOrderId: requiredBytes32Arg(event, "linkedOrderId"),
+    targetSignalId: requiredBytes32Arg(event, "targetSignalId"),
     localSignalId: requiredBytes32Arg(event, "localSignalId"),
-    linkedSourceId,
-    linkedSignalId,
-    updatedAt: provenanceOf(event),
+    payloadHash: requiredBytes32Arg(event, "payloadHash"),
+    submitter,
+    deliveredAt: provenanceOf(event),
     proof
   };
-  order.dockedOrderLinks[linkedOrderId.toLowerCase()] = link;
-  order.updatedAt = provenanceOf(event);
-  appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "跨秩序信号映射已登记", proof, { orderId: localOrderId, planId: order.planId }));
+  dock.updatedAt = provenanceOf(event);
+
+  // 跨订单事件：子侧记录输出已回写，父侧记录映射事实落账。
+  const linkedOrder = ensureStateMachineOrder(
+    state.orders,
+    event,
+    dock.linkedOrderId,
+    dock.targetPlanId,
+    undefined,
+    dock.stateMachineAddress
+  );
+  linkedOrder.updatedAt = provenanceOf(event);
+  appendOrderProof(linkedOrder, proof);
+  appendOrderTimeline(linkedOrder, timelineOf(event, "子订单事实已由 dock 回写", proof, {
+    orderId: dock.linkedOrderId,
+    planId: dock.targetPlanId
+  }));
+  const localOrder = ensureStateMachineOrder(
+    state.orders,
+    event,
+    dock.localOrderId,
+    dock.localPlanId,
+    undefined,
+    dock.stateMachineAddress
+  );
+  localOrder.updatedAt = provenanceOf(event);
+  appendOrderProof(localOrder, proof);
+  appendOrderTimeline(localOrder, timelineOf(event, "子订单事实已映射回父订单", proof, {
+    orderId: dock.localOrderId,
+    planId: dock.localPlanId
+  }));
 }
 
-function applyDockedSignalSubmitted(
+function applyDockTerminal(
   state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
     orders: Map<string, MutableStateMachineOrderProjection>;
+    docks: Map<string, MutableStateMachineDockProjection>;
   },
   event: ChainEvent
 ): void {
-  const localOrderId = requiredBytes32Arg(event, "localOrderId");
-  const order = ensureStateMachineOrder(state.orders, event, localOrderId);
-  const proof = proofOf(event, {
-    orderId: localOrderId,
-    planId: order.planId,
-    planHash: order.planHash,
-    submitter: optionalAddressArg(event, "submitter")
-  });
-  order.updatedAt = provenanceOf(event);
-  appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "关联秩序信号已触发本地信号", proof, { orderId: localOrderId, planId: order.planId }));
+  const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
+  const dock = findDockForEvent(state, event, dockInstanceId);
+  if (!dock) {
+    // dock 未开启（或模块归属无法解析）：显式计数，不允许静默丢弃。
+    state.diagnostics.unresolvedDockEventCount += 1;
+    return;
+  }
+  const terminalCode = Number(event.args["terminal"] ?? 0);
+  dock.status = "terminal";
+  dock.terminalCode = terminalCode;
+  dock.terminalAt = provenanceOf(event);
+  dock.terminalProof = proofOf(event, { planId: dock.localPlanId });
+  dock.updatedAt = provenanceOf(event);
+}
+
+/** dock 事件桶定位：模块地址归一化 + dockInstanceId 键；未开启的 dock 事件忽略。 */
+function findDockForEvent(
+  state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
+    docks: Map<string, MutableStateMachineDockProjection>;
+  },
+  event: ChainEvent,
+  dockInstanceId: Hex
+): MutableStateMachineDockProjection | undefined {
+  const stateMachineAddress = stateMachineAddressForOrderEvent(state, event);
+  return state.docks.get(dockProjectionKey(event.chainId, stateMachineAddress, dockInstanceId));
 }
 
 function applyDerivedSignalSubmitted(
   state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
     orders: Map<string, MutableStateMachineOrderProjection>;
   },
   event: ChainEvent
 ): void {
   const targetOrderId = requiredBytes32Arg(event, "targetOrderId");
-  const order = ensureStateMachineOrder(state.orders, event, targetOrderId);
+  const planId = optionalBytes32Arg(event, "targetPlanId") ?? optionalBytes32Arg(event, "planId");
+  // P0 幻影订单：DerivedSignalSubmitted 由 UVPDerivedSignalModule 发出。
+  const order = ensureStateMachineOrderFromModuleEvent(state, event, targetOrderId, planId);
   const proof = proofOf(event, {
     orderId: targetOrderId,
     planId: order.planId,
@@ -1241,7 +1847,8 @@ function applyHookStatusChanged(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const hookId = requiredBytes32Arg(event, "hookId");
   const hookStatus = hookStatusFromArg(event.args["newStatus"]);
   const dueAt = optionalUintArgAsString(event, "dueAt");
@@ -1272,7 +1879,8 @@ function applyHookReady(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const hookId = requiredBytes32Arg(event, "hookId");
   const stageIdentifier = requiredBytes32Arg(event, "stageId");
   const hookName = requiredBytes32Arg(event, "hookName");
@@ -1304,6 +1912,7 @@ function applyHookReady(
     taskId,
     orderId,
     stateMachineAddress: order.contractAddress,
+    planId: order.planId,
     ...(order.deploymentId ? { deploymentId: order.deploymentId } : {}),
     hookId,
     stageIdentifier,
@@ -1341,7 +1950,8 @@ function applyTimerPoked(
   event: ChainEvent
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId);
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const hookId = requiredBytes32Arg(event, "hookId");
   const dueAt = optionalUintArgAsString(event, "dueAt");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash });
@@ -1361,13 +1971,65 @@ function ensureStateMachineOrder(
   event: ChainEvent,
   orderId: Hex,
   planId?: Hex,
-  deploymentId?: Hex
+  deploymentId?: Hex,
+  /**
+   * P0 幻影订单：订单维度事件由模块合约发出时，桶与订单本体必须归一到
+   * 所属状态机地址；缺省保持事件自带地址（状态机直发事件的现状）。
+   */
+  bucketStateMachineAddress?: Address
 ): MutableStateMachineOrderProjection {
-  const orderKey = stateMachineScopedKey(event.chainId, event.contractAddress, orderId);
-  const existing = orders.get(orderKey);
+  const contractAddress = bucketStateMachineAddress ?? event.contractAddress;
+  const normalizedContractAddress = contractAddress.toLowerCase() as Address;
+  const candidates = [...orders.values()].filter((candidate) =>
+    candidate.chainId === event.chainId &&
+    candidate.contractAddress.toLowerCase() === normalizedContractAddress &&
+    candidate.orderId.toLowerCase() === orderId.toLowerCase()
+  );
+  const explicitPlanId = planId;
+  const orderKey = stateMachineOrderProjectionKey(
+    event.chainId,
+    normalizedContractAddress,
+    explicitPlanId ?? ZERO_BYTES32,
+    orderId
+  );
+  let existing = explicitPlanId ? orders.get(orderKey) : undefined;
+
+  if (!existing && explicitPlanId) {
+    const unknown = candidates.filter((candidate) => candidate.planId === ZERO_BYTES32);
+    if (unknown.length > 1) {
+      throw new ProjectionError(
+        `${event.eventName} has multiple unknown projections for ${normalizedContractAddress}:${orderId}; planId is required`
+      );
+    }
+    const unknownOrder = unknown[0];
+    if (unknownOrder) {
+      const unknownKey = stateMachineOrderProjectionKey(
+        event.chainId,
+        normalizedContractAddress,
+        ZERO_BYTES32,
+        orderId
+      );
+      orders.delete(unknownKey);
+      unknownOrder.planId = explicitPlanId;
+      existing = unknownOrder;
+      orders.set(orderKey, existing);
+    }
+  }
+
+  if (!existing && !explicitPlanId) {
+    if (candidates.length > 1) {
+      throw new ProjectionError(
+        `${event.eventName} has ambiguous order ${orderId}; planId is required`
+      );
+    }
+    existing = candidates[0];
+  }
+
   if (existing) {
-    if (planId && existing.planId === ZERO_BYTES32) {
-      existing.planId = planId;
+    if (explicitPlanId && existing.planId !== explicitPlanId) {
+      throw new ProjectionError(
+        `${event.eventName} order ${orderId} belongs to plan ${existing.planId}, not ${explicitPlanId}`
+      );
     }
     if (deploymentId && !existing.deploymentId) {
       existing.deploymentId = deploymentId;
@@ -1379,15 +2041,15 @@ function ensureStateMachineOrder(
   const created: MutableStateMachineOrderProjection = {
     orderId,
     chainId: event.chainId,
-    contractAddress: event.contractAddress,
+    contractAddress,
     ...(deploymentId ? { deploymentId } : {}),
     planId: planId ?? ZERO_BYTES32,
     status: planId ? "registered" : "unknown",
     authorizations: {},
     signals: {},
+    signalDelegations: {},
     stageExecutorOverlays: {},
     stageResourceOverlays: {},
-    dockedOrderLinks: {},
     hooks: {},
     tasks: {},
     timeline: [],
@@ -1470,6 +2132,29 @@ function refreshTaskSubmitSignals(
       source: "authorization"
     });
   }
+  // F25：合约 _authorizeSignalSubmitter 不校验 plan 能力词表——授权可以
+  // 落链在词表之外。任务完成判定以链上事实为准：词表外授权通过两个链上
+  // 绑定键挂到任务：sourceId/signalId 即任务 hookId（既有回退键），或
+  // StageExecutorSignalDelegated 显式携带的 targetStageId 阶段归属。
+  // 否则 SignalSubmitted 落链后任务永远停在 ready。
+  for (const authorization of Object.values(order.authorizations)) {
+    if (task.hookId === authorization.sourceId || task.hookId === authorization.signalId) {
+      signals.push({
+        sourceId: authorization.sourceId,
+        signalId: authorization.signalId,
+        source: "authorization"
+      });
+    }
+  }
+  for (const delegation of Object.values(order.signalDelegations)) {
+    if (delegation.targetStageId === task.stageIdentifier) {
+      signals.push({
+        sourceId: delegation.sourceId,
+        signalId: delegation.signalId,
+        source: "authorization"
+      });
+    }
+  }
   task.submitSignals = dedupeTaskSubmitSignals(signals);
   if (task.submitSignals.length === 0) {
     delete task.submitSignals;
@@ -1548,8 +2233,13 @@ function markTaskSubmitted(
   task: MutableStateMachineTaskProjection,
   proof: StateMachineProofProjection
 ): boolean {
-  if (task.status === "submitted" && task.proof.eventId === proof.eventId) {
-    return false;
+  if (task.status === "submitted") {
+    // L-11：submitted 是已成立的完成事实。后到的匹配信号不得覆盖首个
+    // 完成证明与 updatedAt（与创建路径取最早证明同口径）；仅当链上位置
+    // 更早时才修正为真正最早的事实（容忍乱序回放）。
+    if (compareProofEvents(proof, task.proof) >= 0) {
+      return false;
+    }
   }
   task.status = "submitted";
   task.updatedAt = proof;
@@ -1600,6 +2290,33 @@ function markTargetStageTasksAssignedFromOverlay(
   }
 }
 
+/**
+ * F25：StageExecutorSignalDelegated 的阶段绑定把委派信号挂到目标阶段的
+ * 任务上（submitSignals + 指派委派执行方），使词表外已授权/已提交的信号
+ * 能把任务推进到 submitted——投影忠于链上事实。
+ */
+function markTargetStageTasksAssignedFromDelegation(
+  order: MutableStateMachineOrderProjection,
+  delegation: StateMachineSignalDelegationProjection
+): void {
+  for (const task of Object.values(order.tasks)) {
+    if (task.stageIdentifier !== delegation.targetStageId) {
+      continue;
+    }
+    task.assigneeRole = "delegated_stage_executor";
+    task.assigneeWallet = delegation.executor;
+    task.assigneeRoleHash = delegation.roleHash;
+    task.authorizationMetadataHash = delegation.metadataHash;
+    task.updatedAt = delegation.delegatedAt;
+    addTaskSubmitSignal(task, {
+      sourceId: delegation.sourceId,
+      signalId: delegation.signalId,
+      source: "authorization"
+    });
+    markTaskSubmittedFromExistingSignals(order, task);
+  }
+}
+
 function cancelTask(
   order: MutableStateMachineOrderProjection,
   hookId: Hex,
@@ -1630,6 +2347,7 @@ function proofOf(event: ChainEvent, metadata: StateMachineProofMetadata = {}): S
 
 interface StateMachineProofMetadata {
   readonly orderId?: Hex | undefined;
+  readonly linkedOrderId?: Hex | undefined;
   readonly triggerOriginOrderId?: Hex | undefined;
   readonly originSourceId?: Hex | undefined;
   readonly originSignalId?: Hex | undefined;
@@ -1651,7 +2369,10 @@ function normalizeProofArg(value: unknown): string | number | boolean | null {
     return value.toString();
   }
   if (typeof value === "string") {
-    return value.startsWith("0x") ? value.toLowerCase() : value;
+    // 事件源解码边界已按 ABI 类型归一化（bytes/address 小写、
+    // string 保持原文）。这里不对 0x 开头的字符串二次小写化——
+    // metadataURI 等 string 参数大小写敏感，改写不可逆。
+    return value;
   }
   if (typeof value === "number" || typeof value === "boolean" || value === null) {
     return value;
@@ -1683,6 +2404,31 @@ function taskProjectionId(orderId: Hex, hookId: Hex, stateMachineAddress?: Addre
   return stateMachineAddress ? `${stateMachineAddress}:${orderId}:${hookId}` : `${orderId}:${hookId}`;
 }
 
+/**
+ * Canonical identity for an order projection.  `orderId` is only unique inside
+ * a plan, so every storage/read path must use this four-part key when it has
+ * plan context available.
+ */
+export function stateMachineOrderProjectionKey(
+  chainId: number,
+  stateMachineAddress: Address,
+  planId: Hex,
+  orderId: Hex
+): string {
+  return `${chainId}:${stateMachineAddress.toLowerCase()}:${planId.toLowerCase()}:${orderId.toLowerCase()}`;
+}
+
+/** Canonical identity for a task projection under a plan-scoped order. */
+export function stateMachineTaskProjectionKey(
+  chainId: number,
+  stateMachineAddress: Address,
+  planId: Hex,
+  orderId: Hex,
+  hookId: Hex
+): string {
+  return `${stateMachineOrderProjectionKey(chainId, stateMachineAddress, planId, orderId)}:${hookId.toLowerCase()}`;
+}
+
 function signalProjectionKey(sourceId: Hex, signalId: Hex): string {
   return `${sourceId}:${signalId}`;
 }
@@ -1699,8 +2445,8 @@ function stageResourceOverlayProjectionKey(targetStageId: Hex, resourceKey: Hex)
   return `${targetStageId.toLowerCase()}:${resourceKey.toLowerCase()}`;
 }
 
-function dockedSignalBindingProjectionKey(linkedSourceId: Hex, linkedSignalId: Hex): string {
-  return `${linkedSourceId.toLowerCase()}:${linkedSignalId.toLowerCase()}`;
+function dockProjectionKey(chainId: number, stateMachineAddress: Address, dockInstanceId: Hex): string {
+  return stateMachineScopedKey(chainId, stateMachineAddress, dockInstanceId);
 }
 
 function findActiveStageOverlayForHook(
@@ -1746,6 +2492,11 @@ export function signalAuthorizationMatchesHook(
   authorization: StateMachineSignalAuthorizationProjection,
   hook: SignalAuthorizationHookMatchInput
 ): boolean {
+  // F25：除 plan 词表外，sourceId/signalId 即 hookId 是链上授权与任务的
+  // 另一个事实绑定键（taskMatchesSubmittedSignal 的既有回退口径一致）。
+  if (hook.hookId === authorization.sourceId || hook.hookId === authorization.signalId) {
+    return true;
+  }
   return authorizationMatchesSubmitSignals(authorization, hook.submitSignals ?? []);
 }
 
@@ -1758,8 +2509,27 @@ function authorizationMatchesSubmitSignals(
   );
 }
 
-export function stateMachineScopedKey(chainId: number, stateMachineAddress: Address, id: Hex): string {
-  return `${chainId}:${stateMachineAddress.toLowerCase()}:${id.toLowerCase()}`;
+/**
+ * Plan/module/dock scope key: `chainId:stateMachineAddress:id`.  The
+ * four-argument overload resolves to the plan-scoped order projection key so
+ * order callers share one helper without changing plan/module key shapes.
+ */
+export function stateMachineScopedKey(chainId: number, stateMachineAddress: Address, id: Hex): string;
+export function stateMachineScopedKey(
+  chainId: number,
+  stateMachineAddress: Address,
+  planId: Hex,
+  orderId: Hex,
+): string;
+export function stateMachineScopedKey(
+  chainId: number,
+  stateMachineAddress: Address,
+  idOrPlanId: Hex,
+  orderId?: Hex,
+): string {
+  return orderId === undefined
+    ? `${chainId}:${stateMachineAddress.toLowerCase()}:${idOrPlanId.toLowerCase()}`
+    : stateMachineOrderProjectionKey(chainId, stateMachineAddress, idOrPlanId, orderId);
 }
 
 function deploymentProjectionKey(chainId: number, registryAddress: Address, deploymentId: Hex): string {
@@ -1804,11 +2574,9 @@ function compareDeploymentSelection(
   if (status !== 0) {
     return status;
   }
-  if (left.updatedAt.blockNumber !== right.updatedAt.blockNumber) {
-    return left.updatedAt.blockNumber > right.updatedAt.blockNumber ? -1 : 1;
-  }
-  if (left.updatedAt.logIndex !== right.updatedAt.logIndex) {
-    return right.updatedAt.logIndex - left.updatedAt.logIndex;
+  const position = compareChainPointers(right.updatedAt, left.updatedAt);
+  if (position !== 0) {
+    return position;
   }
   return left.deploymentId.localeCompare(right.deploymentId);
 }
@@ -1832,10 +2600,16 @@ function deploymentStatusPriority(status: StateMachineDeploymentStatus): number 
 
 function findPlanForEvent(
   plans: Map<string, MutableStateMachinePlanProjection>,
+  modules: StateMachineModuleIndex,
   event: ChainEvent,
   planId: Hex
 ): MutableStateMachinePlanProjection | undefined {
-  const exact = plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
+  // P0 幻影订单同病：plan 维度事件可能由模块合约发出；先用
+  // stateMachineModules 归一化到所属状态机地址再查 exact key，消除同
+  // planId 跨部署时回退扫描歧义（matches.length !== 1）→ ProjectionError
+  // → 索引器永久 degraded 的路径。
+  const { stateMachineAddress } = resolveStateMachineAddressForModuleEvent(modules, event);
+  const exact = plans.get(stateMachineScopedKey(event.chainId, stateMachineAddress, planId));
   if (exact) {
     return exact;
   }
@@ -1891,14 +2665,9 @@ function compareTimelineEvents(
 }
 
 function compareProofEvents(left: StateMachineProofProjection, right: StateMachineProofProjection): number {
-  if (left.chainId !== right.chainId) {
-    return left.chainId - right.chainId;
-  }
-  if (left.blockNumber !== right.blockNumber) {
-    return left.blockNumber < right.blockNumber ? -1 : 1;
-  }
-  if (left.logIndex !== right.logIndex) {
-    return left.logIndex - right.logIndex;
+  const position = compareChainPointers(left, right);
+  if (position !== 0) {
+    return position;
   }
   return left.eventId.localeCompare(right.eventId);
 }
@@ -1921,6 +2690,7 @@ function provenanceOf(pointer: ChainPointer): ProjectionProvenance {
     chainId: pointer.chainId,
     contractAddress: pointer.contractAddress,
     blockNumber: pointer.blockNumber,
+    ...(pointer.transactionIndex !== undefined ? { transactionIndex: pointer.transactionIndex } : {}),
     transactionHash: pointer.transactionHash,
     logIndex: pointer.logIndex
   };
@@ -2042,6 +2812,33 @@ function signalCapabilityEquals(
     left.targetSourceId === right.targetSourceId &&
     left.signalId === right.signalId &&
     left.targetOrderRelation === right.targetOrderRelation;
+}
+
+/** PlanRegistered 合并语义：finalize 模块事件与事件 args 的并集（去重）。 */
+function mergeSignalCapabilities(
+  existing: readonly StateMachineSignalCapabilityProjection[],
+  incoming: readonly StateMachineSignalCapabilityProjection[]
+): StateMachineSignalCapabilityProjection[] {
+  const merged = [...existing];
+  for (const capability of incoming) {
+    if (!merged.some((item) => signalCapabilityEquals(item, capability))) {
+      merged.push(capability);
+    }
+  }
+  return merged.sort(compareSignalCapabilities);
+}
+
+function mergeSelectorBindings(
+  existing: readonly StateMachineStageSelectorBindingProjection[],
+  incoming: readonly StateMachineStageSelectorBindingProjection[]
+): StateMachineStageSelectorBindingProjection[] {
+  const merged = [...existing];
+  for (const binding of incoming) {
+    if (!merged.some((item) => item.selectorStageId === binding.selectorStageId && item.targetStageId === binding.targetStageId)) {
+      merged.push(binding);
+    }
+  }
+  return merged;
 }
 
 function compareSignalCapabilities(

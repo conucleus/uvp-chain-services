@@ -6,6 +6,7 @@ import {
   stringColumn
 } from "../storage/postgres-rows.js";
 import type {
+  StoreSupplierAuditInput,
   StoreSupplierAuditRecord,
   StoreSupplierMetadataRecord,
   StoreSupplierMetadataStore
@@ -119,7 +120,7 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
     );
   }
 
-  async appendAudit(record: StoreSupplierAuditRecord): Promise<void> {
+  async appendAudit(record: StoreSupplierAuditInput): Promise<void> {
     await this.#database.query(
       `INSERT INTO store_supplier_audit (
          audit_id, supplier_id, supplier_subject_id, action, actor,
@@ -127,9 +128,16 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
          before_supported_role_slot_ids_json, after_supported_role_slot_ids_json,
          before_supported_stage_ids_json, after_supported_stage_ids_json,
          review_status, created_at
-       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13)`,
-      auditValues(record)
+       ) VALUES (
+         -- auditId 库端生成（跨实例/重启唯一），不接调用方进程内序号
+         COALESCE($1, 'audit_' || gen_random_uuid()::text),
+         $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13)`,
+      [record.auditId ?? null, ...auditValues(withoutAuditId(record))]
     );
+  }
+
+  async withTransaction<T>(operation: () => Promise<T>): Promise<T> {
+    return this.#database.withTransaction(operation);
   }
 
   async listAudits(supplierId?: string): Promise<readonly StoreSupplierAuditRecord[]> {
@@ -210,9 +218,13 @@ function supplierRow(row: unknown): StoreSupplierMetadataRecord {
   };
 }
 
-function auditValues(record: StoreSupplierAuditRecord): readonly unknown[] {
+function withoutAuditId(record: StoreSupplierAuditInput): Omit<StoreSupplierAuditRecord, "auditId"> {
+  const { auditId: _auditId, ...rest } = record;
+  return rest;
+}
+
+function auditValues(record: Omit<StoreSupplierAuditRecord, "auditId">): readonly unknown[] {
   return [
-    record.auditId,
     record.supplierId,
     record.supplierSubjectId,
     record.action,

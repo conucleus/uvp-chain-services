@@ -247,7 +247,7 @@ function createJwtRouter(
   fixture: JwksFixture,
   overrides: JwtRouterOverrides = {}
 ): ReturnType<typeof createApiRouter> {
-  return createApiRouter(new MemoryProjectionStore(), {
+  return createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
     productRuntimeEnvironment: overrides.runtimeEnvironment ?? "local",
     evidenceRuntimeEnvironment: "local",
     storeAuthConfig: {

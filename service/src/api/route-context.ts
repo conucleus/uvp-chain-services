@@ -22,8 +22,6 @@ import type {
   SubmissionBroadcastAdapter
 } from "../submissions/index.js";
 import type {
-  DockedOrderLinkBroadcastAdapter,
-  ProductDockedOrderLinkService,
   ProductStageExecutorPatchService,
   ProductStageResourcePatchService,
   StageExecutorPatchBroadcastAdapter,
@@ -61,7 +59,11 @@ import type {
   StoreSupplierMetadataStore,
   StoreSupplierService
 } from "../store-suppliers/service.js";
-import type { ProductOrderDTO, ProductTaskDTO, ZhixuDetailDTO, ZhixuSummaryDTO } from "@uvp-eth/product-dto";
+import type { StoreSessionService, StoreWalletSessionStore } from "../store-sessions/index.js";
+import type { StoreDecorationService, StoreZhixuDecorationStore, StorePublisherDelegationStore } from "../store-decoration/index.js";
+import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
+import type { ListingAnchorChainView, StoreListingService, StoreListingStore } from "../store-listings/index.js";
+import type { StoreJoinService, StoreJoinApplicationStore } from "../store-join/index.js";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
 export interface ApiRequest {
@@ -101,10 +103,6 @@ export interface CreateApiRouterOptions {
   readonly stageResourcePatchBroadcastAdapter?: StageResourcePatchBroadcastAdapter;
   readonly stageResourcePatchChainId?: number;
   readonly stageResourcePatchVerifyingContract?: Address;
-  readonly productDockedOrderLinkService?: ProductDockedOrderLinkService;
-  readonly dockedOrderLinkBroadcastAdapter?: DockedOrderLinkBroadcastAdapter;
-  readonly dockedOrderLinkChainId?: number;
-  readonly dockedOrderLinkVerifyingContract?: Address;
   readonly productBffStore?: ProductBffStore;
   readonly productRegistrationAdapter?: ProductOrderTriggerBroadcastAdapter;
   readonly productTriggerAdapter?: ProductOrderTriggerBroadcastAdapter;
@@ -112,8 +110,6 @@ export interface CreateApiRouterOptions {
   readonly productRegistrationCreatorAddress?: Address;
   readonly productRegistrarAddress?: Address;
   readonly productRuntimeEnvironment?: ChainServicesRuntimeEnv;
-  readonly productE2eControlsEnabled?: boolean;
-  readonly productDemoMode?: boolean;
   readonly audit?: AuditSink;
   readonly configDiagnostics?: ConfigDiagnostics;
   readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
@@ -131,7 +127,25 @@ export interface CreateApiRouterOptions {
   readonly storeAuditStore?: StoreAuditStore;
   readonly storeIdentityProvider?: StoreIdentityProvider;
   readonly storeAuthConfig?: StoreAuthConfig;
+  readonly storeWalletSessionStore?: StoreWalletSessionStore;
+  readonly storeSessionService?: StoreSessionService;
+  readonly storeDecorationStore?: StoreZhixuDecorationStore;
+  readonly storePublisherDelegationStore?: StorePublisherDelegationStore;
+  readonly storeDecorationService?: StoreDecorationService;
+  readonly identityDescriptorSnapshots?: StoreIdentityDescriptorSnapshotStore;
+  readonly descriptorPublicBaseUrl?: string;
+  readonly storeListingStore?: StoreListingStore;
+  readonly storeListingService?: StoreListingService;
+  readonly listingAnchorChainView?: ListingAnchorChainView;
+  readonly storeJoinService?: StoreJoinService;
+  readonly storeJoinApplicationStore?: StoreJoinApplicationStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
+  /**
+   * OPS_CONSOLE_ADMIN_IDS 白名单（去空格后的 id 列表）。非空时
+   * /admin/ops 只放行集合内的 admin id；未配置时回退到既有 governance
+   * admin 鉴权（adminPrincipalFromHeaders），保持本地开发兼容。
+   */
+  readonly opsConsoleAdminIds?: readonly string[];
   readonly onTxMined?: () => void;
   readonly now?: () => Date;
 }
@@ -151,17 +165,10 @@ export interface AdminOpsRecoveryActions {
   runReconcile?(): Promise<AdminOpsActionEffect | void>;
   rebuildProjections?(): Promise<AdminOpsActionEffect | void>;
   retrySubmission?(input: AdminOpsRetrySubmissionInput): Promise<AdminOpsActionEffect | void>;
-}
-
-export interface ProductE2EControls {
-  readonly enabled: boolean;
-  setSyncing(enabled: boolean): void;
-  listZhixu(zhixus: readonly ZhixuSummaryDTO[]): readonly ZhixuSummaryDTO[];
-  getZhixu(zhixuId: string): ZhixuDetailDTO | undefined;
-  listOrders(orders: readonly ProductOrderDTO[]): readonly ProductOrderDTO[];
-  order(order: ProductOrderDTO | undefined): ProductOrderDTO | undefined;
-  listTasks(tasks: readonly ProductTaskDTO[]): readonly ProductTaskDTO[];
-  task(task: ProductTaskDTO | undefined): ProductTaskDTO | undefined;
+  /** 补投 post-commit 失败批次（游标已前进的持久 pending 队列）。 */
+  sweepPendingPostCommitSteps?(): Promise<AdminOpsActionEffect | void>;
+  /** 列出 pending 队列（人工研判）。 */
+  listPendingPostCommitSteps?(): Promise<unknown>;
 }
 
 export interface ApiRouteContext {
@@ -176,6 +183,11 @@ export interface ApiRouteContext {
   readonly storeSupplierService: StoreSupplierService;
   readonly storeAuditStore: StoreAuditStore;
   readonly storeIdentityProvider: StoreIdentityProvider;
+  readonly sessionService?: StoreSessionService;
+  readonly decorationService?: StoreDecorationService;
+  readonly listingService?: StoreListingService;
+  readonly joinService?: StoreJoinService;
+  readonly identityDescriptorSnapshots?: StoreIdentityDescriptorSnapshotStore;
   readonly governanceService: GovernanceService;
   readonly complianceService: ComplianceService;
   readonly riskGraphService: RiskGraphService;
@@ -185,11 +197,10 @@ export interface ApiRouteContext {
   readonly submissionService: ProductSubmissionService;
   readonly productStageExecutorPatchService: ProductStageExecutorPatchService;
   readonly productStageResourcePatchService: ProductStageResourcePatchService;
-  readonly productDockedOrderLinkService: ProductDockedOrderLinkService;
   readonly submissionStore?: ProductSubmissionStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
-  readonly productE2eControls: ProductE2EControls;
-  readonly productDemoMode: boolean;
+  /** 见 CreateApiRouterOptions.opsConsoleAdminIds。 */
+  readonly opsConsoleAdminIds?: readonly string[];
   readonly audit: AuditSink;
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
   readonly onTxMined?: () => void;

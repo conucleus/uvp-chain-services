@@ -115,7 +115,9 @@ describe("anvil identity registry indexing", () => {
       method: "OPTIONS"
     });
     expect(optionsResponse.status).toBe(204);
-    expect(optionsResponse.headers.get("access-control-allow-origin")).toBe("*");
+    // 模-5 裁决：跨源默认关闭。未配置 UVP_API_CORS_ALLOWED_ORIGINS 时不回
+    // allow-origin 头（通配 "*" 已废除）。
+    expect(optionsResponse.headers.get("access-control-allow-origin")).toBeNull();
   }, 120_000);
 });
 
@@ -150,9 +152,9 @@ function testConfig(input: {
       rpcUrl: input.rpcUrl,
       deploymentBlock: input.deploymentBlock,
       finalityConfirmations: 0,
-      reorgBufferBlocks: 0,
       contracts: {
-        UVPIdentityRegistry: input.registry
+        UVPIdentityRegistry: input.registry,
+        UVPStateMachine: "0x1111111111111111111111111111111111111111"
       }
     },
     database: {
@@ -173,13 +175,14 @@ function testConfig(input: {
     },
     governance: {
       broadcastEnabled: false,
+      signerPrivateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY",
       rpcUrl: input.rpcUrl,
       chainId: input.chainId,
       txConfirmations: 1,
       allowedOperators: []
     },
     productBff: {
-      registrationAdapter: "memory",
+      registrationAdapter: "memory-trigger",
       registrarPrivateKeyEnv: "UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY",
       waitForReceipt: false
     },
@@ -193,11 +196,12 @@ function testConfig(input: {
       pollIntervalMs: 50,
       txTimeoutMs: 60_000
     },
-    dockedSignalAutomation: {
+    dockAutomation: {
       enabled: false,
+      pollIntervalMs: 5_000,
       maxCandidatesPerRun: 4,
       maxGasPerTx: 500_000n,
-      waitForReceipt: true
+      redeliveryWindowMs: 120_000
     },
     evidenceStorage: {
       adapter: "local",

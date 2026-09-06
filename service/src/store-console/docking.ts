@@ -145,6 +145,16 @@ export function createStoreDockingService(options: {
 
   return {
     async createSession(input) {
+      // STORE-03：self-docking 无业务意义且会绕过信号映射校验的 source/target
+      // 前提；服务层为权威校验，路由层另做同规则快速拦截。
+      if (input.sourceZhixuId.trim() === input.targetZhixuId.trim()) {
+        throw new StoreDockingServiceError(
+          422,
+          "self_docking_forbidden",
+          "sourceZhixuId and targetZhixuId must be different zhixu definitions",
+          { sourceZhixuId: input.sourceZhixuId, targetZhixuId: input.targetZhixuId }
+        );
+      }
       const sourceDetail = await requireZhixu(options.productService, input.sourceZhixuId, "sourceZhixuId");
       const targetDetail = await requireZhixu(options.productService, input.targetZhixuId, "targetZhixuId");
       const createdAt = now().toISOString();
@@ -351,9 +361,26 @@ function versionErrors(
   ref: StoreDockingZhixuRefDTO,
   side: "source" | "target"
 ): readonly StoreDockingValidationErrorDTO[] {
-  void ref;
-  void side;
-  return [];
+  const errors: StoreDockingValidationErrorDTO[] = [];
+  const prefix = side === "source" ? "source" : "target";
+
+  // A docking session is review material only, but it must never claim that
+  // an unpublished or revoked plan can participate in a valid composition.
+  // Keep both checks explicit: a revoked definition is terminal even if a
+  // stale projection still reports its old publication marker.
+  if (ref.publicationStatus !== "published") {
+    errors.push(validationError(
+      `${prefix}_version_not_published` as const,
+      `${prefix} version ${ref.versionId ?? ref.planId} is not published on the state machine`
+    ));
+  }
+  if (ref.lifecycleStatus === "revoked") {
+    errors.push(validationError(
+      `${prefix}_version_revoked` as const,
+      `${prefix} version ${ref.versionId ?? ref.planId} has been revoked`
+    ));
+  }
+  return errors;
 }
 
 function validationError(
@@ -429,7 +456,6 @@ function sourceOutputPorts(zhixu: ZhixuDetailDTO): readonly StoreDockingSignalPo
 
 function targetInputPorts(zhixu: ZhixuDetailDTO): readonly StoreDockingSignalPortDTO[] {
   return zhixu.orderPermissionTable
-    .filter((entry) => entry.signalName !== "OUTSIDE")
     .map((entry) => inputPortFromPermission(zhixu, entry));
 }
 
@@ -477,7 +503,7 @@ function signalPort(input: {
 }
 
 function roleSlotIdForStage(zhixu: ZhixuDetailDTO, stage: ZhixuStageDTO): string {
-  return zhixu.orderPermissionTable.find((entry) => entry.stageId === stage.stageId && entry.signalName !== "OUTSIDE")?.roleSlotId ??
+  return zhixu.orderPermissionTable.find((entry) => entry.stageId === stage.stageId)?.roleSlotId ??
     stage.ownerRole;
 }
 

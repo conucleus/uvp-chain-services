@@ -113,9 +113,6 @@ spec:
       stages:
         - name: intake
           source: buyer
-          trigger: ["TRIGGER"]
-          receiveSignals:
-            TRIGGER: "::OUTSIDE"
           sendSignals: ["cmp"]
           executor:
             supplierType: organization
@@ -287,11 +284,13 @@ async function checkSearchDetail(
 async function checkDraftImportCompileReview(
   options: StoreClosureDryRunOptions,
 ): Promise<StoreClosureCheckDTO> {
+  // store.draft.review 是治理级能力（submit-review 要求 governance
+  // admin）；operator dry-run 覆盖 import/compile/schema，review 子步骤
+  // 用 dry-run 治理身份在一次性模拟治理服务上演练，不触碰真实治理记录。
   const required = [
     "store.draft.import",
     "store.draft.compile",
     "store.draft.schema.save",
-    "store.draft.review",
   ] as const satisfies readonly StoreCapability[];
   const missing = missingCapabilities(options.access, required);
   if (missing.length > 0) {
@@ -364,7 +363,7 @@ async function checkDraftImportCompileReview(
               status: "approved_for_broadcast",
               publicSummary: "Store closure dry-run review.",
             },
-            governancePrincipalFromAccess(options.access),
+            dryRunGovernancePrincipal(options.access),
           )
         : undefined;
 
@@ -513,10 +512,16 @@ async function checkDockingCreateValidateSave(
         review: "all",
         publication: "published",
       });
-      const source = list.zhixus.find(
+      // STORE-03：docking 禁止 self-docking，dry-run 需要两个不同的已发布
+      // zhixu 分别充当 source 与 target。
+      const published = list.zhixus.filter(
         (zhixu) => zhixu.planPublication.status === "published",
       );
-      if (!source) {
+      const source = published[0];
+      const target = source
+        ? published.find((zhixu) => zhixu.zhixuId !== source.zhixuId)
+        : undefined;
+      if (!source || !target) {
         return check({
           key: "docking_create_validate_save",
           label: "Docking sandbox create/validate/save",
@@ -525,9 +530,10 @@ async function checkDockingCreateValidateSave(
           sourceOfTruth: "store-workflow-metadata",
           requiredCapabilities: required,
           message:
-            "No published zhixu projection is available for docking sandbox validation.",
+            "Docking sandbox validation needs two distinct published zhixu projections (self-docking is forbidden).",
           details: {
             totalZhixus: list.summary.totalZhixus,
+            publishedZhixus: published.length,
             nonPublishing: true,
           },
         });
@@ -539,7 +545,7 @@ async function checkDockingCreateValidateSave(
       });
       const created = await docking.createSession({
         sourceZhixuId: source.zhixuId,
-        targetZhixuId: source.zhixuId,
+        targetZhixuId: target.zhixuId,
       });
       const candidate = created.candidateMappings[0];
       if (!candidate) {
@@ -584,6 +590,7 @@ async function checkDockingCreateValidateSave(
         details: {
           sessionId: created.sessionId,
           sourceZhixuId: source.zhixuId,
+          targetZhixuId: target.zhixuId,
           candidateMappingCount: created.candidateMappings.length,
           validateStatus: validated.status,
           saveStatus: saved.status,
@@ -775,13 +782,19 @@ function explicitProductSchema(
   };
 }
 
-function governancePrincipalFromAccess(
+/**
+ * dry-run 的治理 principal：优先沿用会话真实携带的治理身份；否则使用
+ * 显式的 dry-run 标记身份。不再把任意 operator 的 roles[0] 包装成治理
+ * 角色——dry-run 内部使用一次性的模拟治理服务，不触碰真实治理记录，
+ * 但 principal 本身也不得伪装成某个真实运营方。
+ */
+function dryRunGovernancePrincipal(
   access: StoreAccessState,
 ): GovernancePrincipal {
-  return {
-    adminId: access.principalId ?? "store-closure-dry-run",
-    role: access.roles[0] ?? access.level,
-  };
+  if (access.governancePrincipal) {
+    return access.governancePrincipal;
+  }
+  return { adminId: access.principalId ?? "store-closure-dry-run", role: "governance_admin" };
 }
 
 async function safeDiagnostics(
