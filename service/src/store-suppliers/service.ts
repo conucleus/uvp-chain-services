@@ -27,14 +27,17 @@ import type { ProjectionStore } from "../storage/projection-store.js";
 import type {
   StoreOperatorPrincipal,
   StoreSupplierAuditAction,
+  StoreSupplierAuditInput,
   StoreSupplierAuditRecord,
   StoreSupplierMetadataRecord,
   StoreSupplierMetadataStore,
 } from "./types.js";
+import { randomUUID } from "node:crypto";
 
 export type {
   StoreOperatorPrincipal,
   StoreSupplierAuditAction,
+  StoreSupplierAuditInput,
   StoreSupplierAuditRecord,
   StoreSupplierMetadataRecord,
   StoreSupplierMetadataStore,
@@ -81,8 +84,9 @@ export class InMemoryStoreSupplierMetadataStore
     this.#suppliers.set(record.supplierId, record);
   }
 
-  async appendAudit(record: StoreSupplierAuditRecord): Promise<void> {
-    this.#audits.push(record);
+  async appendAudit(record: StoreSupplierAuditInput): Promise<void> {
+    // auditId 由存储端生成（单实例内存后端用 UUID），不接进程内序号。
+    this.#audits.push({ ...record, auditId: record.auditId ?? `audit_${randomUUID()}` });
   }
 
   async listAudits(
@@ -180,7 +184,6 @@ export function createStoreSupplierService(
   const metadataStore =
     options.metadataStore ?? new InMemoryStoreSupplierMetadataStore();
   const now = options.now ?? (() => new Date());
-  let sequence = 1;
 
   return {
     async listSuppliers(query = {}) {
@@ -247,10 +250,12 @@ export function createStoreSupplierService(
           },
         );
       }
-      await metadataStore.putSupplier(record);
-      await metadataStore.appendAudit(
-        auditRecord("audit", sequence++, record, "create", principal, now),
-      );
+      await withSupplierStoreTransaction(metadataStore, async () => {
+        await metadataStore.putSupplier(record);
+        await metadataStore.appendAudit(
+          auditRecord(record, "create", principal, now),
+        );
+      });
       return {
         supplier: await requireBuiltSupplier(
           record.supplierId,
@@ -271,32 +276,26 @@ export function createStoreSupplierService(
         governanceReviewInput(record, input),
         governancePrincipal(principal),
       );
-      await metadataStore.putSupplier(record);
-      await metadataStore.appendAudit(
-        auditRecord("audit", sequence++, record, "review", principal, now, {
-          reviewStatus: record.reviewStatus,
-        }),
-      );
-      if (supplierCapabilitiesChanged(current, record)) {
+      await withSupplierStoreTransaction(metadataStore, async () => {
+        await metadataStore.putSupplier(record);
         await metadataStore.appendAudit(
-          auditRecord(
-            "audit",
-            sequence++,
-            record,
-            "tags_updated",
-            principal,
-            now,
-            {
+          auditRecord(record, "review", principal, now, {
+            reviewStatus: record.reviewStatus,
+          }),
+        );
+        if (supplierCapabilitiesChanged(current, record)) {
+          await metadataStore.appendAudit(
+            auditRecord(record, "tags_updated", principal, now, {
               beforeTags: current.capabilityTags,
               afterTags: record.capabilityTags,
               beforeSupportedRoleSlotIds: current.supportedRoleSlotIds,
               afterSupportedRoleSlotIds: record.supportedRoleSlotIds,
               beforeSupportedStageIds: current.supportedStageIds,
               afterSupportedStageIds: record.supportedStageIds,
-            },
-          ),
-        );
-      }
+            }),
+          );
+        }
+      });
       return {
         supplier: await requireBuiltSupplier(
           record.supplierId,
@@ -324,17 +323,17 @@ export function createStoreSupplierService(
         supplierIdentityRegistrationInput(record, wallet),
         governancePrincipal(principal),
       );
-      await metadataStore.putSupplier(record);
-      await metadataStore.appendAudit(
-        auditRecord(
-          "audit",
-          sequence++,
-          record,
-          "request_identity_registration",
-          principal,
-          now,
-        ),
-      );
+      await withSupplierStoreTransaction(metadataStore, async () => {
+        await metadataStore.putSupplier(record);
+        await metadataStore.appendAudit(
+          auditRecord(
+            record,
+            "request_identity_registration",
+            principal,
+            now,
+          ),
+        );
+      });
       return {
         supplier: await requireBuiltSupplier(
           record.supplierId,
@@ -372,20 +371,20 @@ export function createStoreSupplierService(
         notificationUpdatedAt: timestamp,
         updatedAt: timestamp,
       };
-      await metadataStore.putSupplier(updated);
-      await metadataStore.appendAudit(
-        auditRecord(
-          "audit",
-          sequence++,
-          updated,
-          "notification_profile_updated",
-          {
-            operatorId: `wallet:${profileConfig.wallet}`,
-            role: "supplier",
-          },
-          now,
-        ),
-      );
+      await withSupplierStoreTransaction(metadataStore, async () => {
+        await metadataStore.putSupplier(updated);
+        await metadataStore.appendAudit(
+          auditRecord(
+            updated,
+            "notification_profile_updated",
+            {
+              operatorId: `wallet:${profileConfig.wallet}`,
+              role: "supplier",
+            },
+            now,
+          ),
+        );
+      });
       return {
         supplier: await requireBuiltSupplier(
           updated.supplierId,
@@ -425,20 +424,20 @@ export function createStoreSupplierService(
           reviewStatus: "revoked",
           updatedAt: now().toISOString(),
         };
-        await metadataStore.putSupplier(updated);
-        await metadataStore.appendAudit(
-          auditRecord(
-            "audit",
-            sequence++,
-            updated,
-            "request_identity_revocation",
-            principal,
-            now,
-            {
-              reviewStatus: "revoked",
-            },
-          ),
-        );
+        await withSupplierStoreTransaction(metadataStore, async () => {
+          await metadataStore.putSupplier(updated);
+          await metadataStore.appendAudit(
+            auditRecord(
+              updated,
+              "request_identity_revocation",
+              principal,
+              now,
+              {
+                reviewStatus: "revoked",
+              },
+            ),
+          );
+        });
       }
       return {
         supplier: await requireBuiltSupplier(
@@ -837,16 +836,15 @@ function supplierRevocationInput(
 }
 
 function auditRecord(
-  prefix: string,
-  sequence: number,
   supplier: StoreSupplierMetadataRecord,
   action: StoreSupplierAuditAction,
   principal: StoreOperatorPrincipal,
   now: () => Date,
   extra: Partial<StoreSupplierAuditRecord> = {},
-): StoreSupplierAuditRecord {
+): StoreSupplierAuditInput {
+  // auditId 不在此生成——存储端负责（库端唯一），进程内序号会在
+  // 重启/多实例下反复撞 audit_id 唯一索引。
   return {
-    auditId: `${prefix}_${sequence.toString().padStart(6, "0")}`,
     supplierId: supplier.supplierId,
     supplierSubjectId: supplier.supplierSubjectId,
     action,
@@ -854,6 +852,19 @@ function auditRecord(
     ...extra,
     createdAt: now().toISOString(),
   };
+}
+
+/**
+ * 业务写 + 审计行同事务：持久后端提供 withTransaction 时整体提交/回滚，
+ * 审计不再落在业务写入之后的裸 append（半提交窗口）。
+ */
+async function withSupplierStoreTransaction<T>(
+  metadataStore: StoreSupplierMetadataStore,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return metadataStore.withTransaction
+    ? metadataStore.withTransaction(operation)
+    : operation();
 }
 
 function governancePrincipal(

@@ -81,6 +81,8 @@ const seller = "0x3333333333333333333333333333333333333333";
 const adminHeaders = {
   "x-uvp-admin-id": "store-admin",
   "x-uvp-admin-role": "admin",
+  // 红线：草稿/供应商写路由要求会话已锚定地址（本地联调 dev 锚定头）。
+  "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
 };
 const planId =
   "0x0000000000000000000000000000000000000000000000000000000000000101";
@@ -974,6 +976,7 @@ describe("durable storage", () => {
       reopenedRouter.handle({
         method: "GET",
         pathname: `/store/zhixu-drafts/${draftId}`,
+        headers: adminHeaders,
       }),
     ).resolves.toMatchObject({
       status: 200,
@@ -1559,6 +1562,7 @@ describePostgres(
         reopenedRouter.handle({
           method: "GET",
           pathname: `/store/zhixu-drafts/${imported.draftId}`,
+          headers: adminHeaders,
         }),
       ).resolves.toMatchObject({
         status: 200,
@@ -1577,6 +1581,7 @@ describePostgres(
         reopenedRouter.handle({
           method: "GET",
           pathname: `/store/zhixu-drafts/${imported.draftId}/product-schema`,
+          headers: adminHeaders,
         }),
       ).resolves.toMatchObject({
         status: 200,
@@ -1698,6 +1703,20 @@ function openGovernanceStore(databaseUrl: string): SqliteGovernanceStore {
 
 function createStoreMetadataRouter(stores: ChainServicesStores): ApiRouter {
   return createApiRouter(stores.projectionStore, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    storeAuthConfig: {
+      mode: "dev_headers" as const,
+      roleClaim: "roles",
+      principalClaim: "sub",
+      clockToleranceSeconds: 60,
+      walletSession: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: true,
+      },
+    },
     productBffStore: stores.productBffStore,
     evidenceMetadataStore: stores.evidenceMetadataStore,
     submissionStore: stores.submissionStore,

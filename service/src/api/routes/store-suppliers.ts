@@ -13,9 +13,11 @@ import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.
 import type { RouteModule } from "../route-module.js";
 import {
   authorizeStoreCapability,
+  isAnchoredStoreAuthorizationResult,
   isStoreAuthorizationResult,
   recordStoreCapabilityFailure,
   recordStoreCapabilitySuccess,
+  requireAnchoredStoreAddress,
   requireStoreConfirmation,
   StoreConfirmationError,
   storeConfirmationErrorResponse,
@@ -59,9 +61,15 @@ export function createStoreSuppliersRouteModule(): RouteModule {
 
         if (request.method === "POST" && request.pathname === "/store/suppliers") {
           const capability = "store.supplier.create";
-          const authorization = await authorizeStoreCapability(context, request, capability, { type: "store_supplier" });
+          const resource = { type: "store_supplier" };
+          const authorization = await authorizeStoreCapability(context, request, capability, resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
+          }
+          // 红线：供应商写操作要求会话已锚定地址。
+          const anchored = await requireAnchoredStoreAddress(context, request, resource);
+          if (!isAnchoredStoreAuthorizationResult(anchored)) {
+            return anchored;
           }
           try {
             const body = await context.storeSupplierService.createSupplier(
@@ -121,6 +129,11 @@ export function createStoreSuppliersRouteModule(): RouteModule {
               body: await context.storeSupplierService.prepareNotificationProfile(supplierId, request.body)
             };
           }
+          // 红线：通知配置落库（可改写供应商钱包/webhook）要求锚定地址。
+          const profileAnchored = await requireAnchoredStoreAddress(context, request, profileResource);
+          if (!isAnchoredStoreAuthorizationResult(profileAnchored)) {
+            return profileAnchored;
+          }
           return {
             status: 201,
             body: await context.storeSupplierService.saveNotificationProfile(supplierId, request.body)
@@ -166,6 +179,11 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           const authorization = await authorizeStoreCapability(context, request, capability, resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
+          }
+          // 红线：供应商审核/身份登记/撤销（敏感写）要求会话已锚定地址。
+          const anchored = await requireAnchoredStoreAddress(context, request, resource);
+          if (!isAnchoredStoreAuthorizationResult(anchored)) {
+            return anchored;
           }
           if (action === "review" && bodyHasSupplierCapabilityEditField(request.body)) {
             const tagAuthorization = await authorizeStoreCapability(context, request, "store.supplier.tags.update", resource);
@@ -345,8 +363,10 @@ function isSensitiveReviewStatus(status: string | undefined): boolean {
 }
 
 function storeOperatorPrincipalFromAccess(access: StoreAccessState): StoreOperatorPrincipal {
+  // operatorId 只取真实身份（principalId 或锚定钱包），不再兜底
+  // "unknown-store-principal"——审计行的 actor 必须可归属。
   return {
-    operatorId: access.principalId ?? "unknown-store-principal",
+    operatorId: access.principalId ?? (access.anchoredAddress ? `wallet:${access.anchoredAddress}` : "unauthenticated"),
     role: access.roles.includes("governance_admin") ? "governance_admin" : access.level
   };
 }

@@ -44,6 +44,23 @@ const resourceHook = customsOnchainHookPlanArtifact.compiledHooks[0];
 const customsHook = customsOnchainHookPlanArtifact.compiledHooks.find((hook) => hook.hookName === "customs_ready");
 const customsDependencyA = customsHook?.dependencies[0];
 const customsDependencyB = customsHook?.dependencies[1];
+
+/** 本地联调 dev 锚定头开关（通知配置写路由红线门槛）。 */
+const devAnchoredStoreAuth = {
+  mode: "dev_headers" as const,
+  roleClaim: "roles",
+  principalClaim: "sub",
+  clockToleranceSeconds: 60,
+  walletSession: {
+    enabled: true,
+    operatorWallets: [],
+    adminWallets: [],
+    sessionTtlSeconds: 43200,
+    challengeTtlSeconds: 300,
+    devAnchoredAddressHeaderEnabled: true,
+  },
+};
+
 const adminHeaders = {
   "x-uvp-admin-id": "admin-1",
   "x-uvp-admin-role": "admin"
@@ -620,6 +637,7 @@ describe("signal-routed notifications", () => {
       ]
     });
     const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "local",
       notificationService: serviceFor(store, supplierStore),
       storeSupplierMetadataStore: supplierStore
     });
@@ -663,7 +681,7 @@ describe("signal-routed notifications", () => {
       createdAt: "2026-05-01T00:00:00.000Z",
       updatedAt: "2026-05-01T00:00:00.000Z"
     });
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, storeSupplierMetadataStore: supplierStore });
     const notification = notificationProfile(account.address.toLowerCase() as Address);
     const body = {
       wallet: account.address,
@@ -672,9 +690,11 @@ describe("signal-routed notifications", () => {
 
     // 通知配置写路由已挂 store capability 鉴权（模-5）：请求需携带
     // operator 身份头。
+    // 红线：通知配置落库要求会话已锚定地址（本地联调 dev 锚定头）。
     const operatorHeaders = {
       "x-uvp-store-operator-id": "store-operator-1",
-      "x-uvp-store-operator-role": "store_operator"
+      "x-uvp-store-operator-role": "store_operator",
+      "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
     };
     const prepareResponse = await router.handle({
       method: "POST",

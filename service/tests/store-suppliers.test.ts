@@ -27,14 +27,35 @@ import type {
 import type { Address, Hex } from "../src/shared/types.js";
 import type { ProductOrderDraftDTO } from "../src/product/bff/types.js";
 
+const operatorWallet = "0x1234567890123456789012345678901234567890" as Address;
+
 const storeHeaders = {
   "x-uvp-store-operator-id": "store-operator-1",
   "x-uvp-store-operator-role": "store_operator",
+  // 红线：供应商写路由要求会话已锚定地址（本地联调走 dev 锚定头）。
+  "x-uvp-store-dev-anchored-address": operatorWallet,
 };
 
 const adminHeaders = {
   "x-uvp-admin-id": "store-admin-1",
   "x-uvp-admin-role": "admin",
+  "x-uvp-store-dev-anchored-address": operatorWallet,
+};
+
+/** 本地联调的 dev 锚定头开关（仅非严格环境生效）。 */
+const devAnchoredStoreAuth = {
+  mode: "dev_headers" as const,
+  roleClaim: "roles",
+  principalClaim: "sub",
+  clockToleranceSeconds: 60,
+  walletSession: {
+    enabled: true,
+    operatorWallets: [],
+    adminWallets: [],
+    sessionTtlSeconds: 43200,
+    challengeTtlSeconds: 300,
+    devAnchoredAddressHeaderEnabled: true,
+  },
 };
 
 const contractAddress = "0x1111111111111111111111111111111111111111";
@@ -81,6 +102,61 @@ const bindingId =
   "0xabababababababababababababababababababababababababababababababab" as Hex;
 
 describe("Store supplier directory API", () => {
+  it("KEEP: /store/search supplier facet requires authenticated store readers (G-38/L-1)", async () => {
+    // 供应商命中暴露钱包精确匹配与审核状态：type=supplier 未认证即 401；
+    // all 查询对匿名静默剔除供应商命中；已认证 store 读身份可查。
+    const { router } = await createRouter([]);
+    await createSupplier(router, { reviewStatus: "approved_for_broadcast" });
+
+    const anonymousSupplierSearch = await router.handle({
+      method: "GET",
+      pathname: "/store/search",
+      query: { q: supplierWallet, type: "supplier" },
+    });
+    expect(anonymousSupplierSearch).toMatchObject({
+      status: 401,
+      body: { error: "store_identity_missing" }
+    });
+
+    const anonymousAllSearch = await router.handle({
+      method: "GET",
+      pathname: "/store/search",
+      query: { q: supplierWallet },
+    });
+    expect(anonymousAllSearch.status).toBe(200);
+    const anonymousResults = (anonymousAllSearch.body as { results: { resultType: string }[] }).results;
+    expect(anonymousResults.some((result) => result.resultType === "supplier")).toBe(false);
+
+    const authenticatedSearch = await router.handle({
+      method: "GET",
+      pathname: "/store/search",
+      query: { q: supplierWallet, type: "supplier" },
+      headers: storeHeaders,
+    });
+    expect(authenticatedSearch.status).toBe(200);
+    const results = (authenticatedSearch.body as { results: { resultType: string; matchedFields: string[] }[] }).results;
+    expect(results.some((result) => result.resultType === "supplier" && result.matchedFields.includes("wallet"))).toBe(true);
+  });
+
+  it("KEEP: supplier audit ids are store-generated and unique across service instances (G-30)", async () => {
+    // 审计 ID 由存储端生成（audit_<uuid>），两个服务实例（模拟重启/
+    // 多实例）写入不冲突，不再依赖进程内 audit_000001 序号。
+    const metadataStore = new InMemoryStoreSupplierMetadataStore();
+    const buildRouter = () => createApiRouter(new MemoryProjectionStore(), {
+      productSchemaResolver: crossBorderSchemaResolver(),
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      storeAuthConfig: devAnchoredStoreAuth,
+      storeSupplierMetadataStore: metadataStore,
+    });
+    await createSupplier(buildRouter(), { supplierId: "supplier-a", supplierSubjectId, displayName: "A" });
+    await createSupplier(buildRouter(), { supplierId: "supplier-b", supplierSubjectId: revokedSupplierSubjectId, displayName: "B" });
+    const audits = await metadataStore.listAudits();
+    expect(audits).toHaveLength(2);
+    expect(audits.every((audit) => /^audit_[0-9a-f-]{36}$/.test(audit.auditId))).toBe(true);
+    expect(new Set(audits.map((audit) => audit.auditId)).size).toBe(2);
+  });
+
   it("combines Store metadata, capability tags, and identity projection", async () => {
     const { router } = await createRouter([identityRegisteredEvent(2n)]);
 
@@ -115,7 +191,7 @@ describe("Store supplier directory API", () => {
   it("projects identity status across registration and revocation replay", async () => {
     const store = new MemoryProjectionStore();
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
-    let router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    let router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
     await createSupplier(router);
@@ -134,7 +210,7 @@ describe("Store supplier directory API", () => {
       deploymentBlock: 0n,
       events: [identityRegisteredEvent(2n), identityRevokedEvent(3n)],
     });
-    router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
     const revoked = await getSupplier(router, "supplier-shenzhen-logistics");
@@ -185,7 +261,7 @@ describe("Store supplier directory API", () => {
     };
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
     const projectionStore = new MemoryProjectionStore();
-    const router = createApiRouter(projectionStore, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(projectionStore, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
       governanceService: createGovernanceService({ adapter }),
     });
@@ -345,7 +421,7 @@ describe("Store supplier directory API", () => {
         }),
       ],
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
 
@@ -430,12 +506,12 @@ describe("Store supplier directory API", () => {
   it("requires store.supplier.tags.update for role-slot and stage support edits", async () => {
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
     const store = new MemoryProjectionStore();
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
     await createSupplier(router);
 
-    const reviewOnlyRouter = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const reviewOnlyRouter = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
       storeIdentityProvider: reviewOnlyStoreIdentityProvider(),
     });
@@ -467,7 +543,7 @@ async function createRouter(events: readonly ChainEvent[]): Promise<{
   const store = new MemoryProjectionStore();
   await store.resetFromEvents({ deploymentBlock: 0n, events });
   return {
-    router: createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }),
+    router: createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const }),
     store,
   };
 }
@@ -501,6 +577,8 @@ function reviewOnlyStoreIdentityProvider(): StoreIdentityProvider {
           "store.supplier.review",
         ],
         authMode: "jwt",
+        // 锚定地址已具备（红线门槛通过），本测试断言的是能力差集。
+        anchoredAddress: operatorWallet,
         canWrite: true,
         canAdmin: false,
       };
@@ -603,17 +681,20 @@ async function getSupplier(
   return (response.body as { supplier: StoreSupplierDTO }).supplier;
 }
 
+/** 建单者会话头：createdBy 服务端派生（会话锚定），不再自报 body。 */
+const creatorHeaders = { "x-uvp-wallet-address": operatorWallet };
+
 async function createDraft(router: ApiRouter): Promise<ProductOrderDraftDTO> {
   const response = await router.handle({
     method: "POST",
     pathname: "/product/order-drafts",
+    headers: creatorHeaders,
     body: {
       zhixuId: CROSS_BORDER_ZHIXU_ID,
       title: "A company purchase",
       businessType: "parallel-export",
       totalAmount: "10000",
       currency: "USDC",
-      createdBy: "creator-wallet",
     },
   });
   expect(response.status).toBe(201);
@@ -627,6 +708,7 @@ async function createReadyDraft(
   const participantsResponse = await router.handle({
     method: "GET",
     pathname: `/product/orders/${draft.draftId}/participants`,
+    headers: creatorHeaders,
   });
   const participants = (
     participantsResponse.body as {
@@ -641,6 +723,7 @@ async function createReadyDraft(
     const inviteResponse = await router.handle({
       method: "POST",
       pathname: `/product/orders/${draft.draftId}/invites`,
+      headers: creatorHeaders,
       body: {
         roleSlotId: participant.roleSlotId,
         contact: `${participant.roleSlotId}@example.com`,
@@ -668,6 +751,7 @@ async function createReadyDraft(
   const readyResponse = await router.handle({
     method: "GET",
     pathname: `/product/order-drafts/${draft.draftId}`,
+    headers: creatorHeaders,
   });
   expect(
     (readyResponse.body as { draft: ProductOrderDraftDTO }).draft.status,

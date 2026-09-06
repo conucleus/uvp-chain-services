@@ -6,9 +6,11 @@ import {
 } from "../../store-console/docking.js";
 import {
   authorizeStoreCapability,
+  isAnchoredStoreAuthorizationResult,
   isStoreAuthorizationResult,
   recordStoreCapabilityFailure,
-  recordStoreCapabilitySuccess
+  recordStoreCapabilitySuccess,
+  requireAnchoredStoreAddress
 } from "../store-authz.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 
@@ -25,6 +27,11 @@ export function createStoreDockingRouteModule(): RouteModule {
           const authorization = await authorizeStoreCapability(context, request, capability, { type: "store_docking_session" });
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
+          }
+          // 红线：对接草案写操作要求会话已锚定地址。
+          const anchored = await requireAnchoredStoreAddress(context, request, { type: "store_docking_session" });
+          if (!isAnchoredStoreAuthorizationResult(anchored)) {
+            return anchored;
           }
           try {
             const session = await context.storeDockingService.createSession(parseStoreDockingCreateBody(request.body));
@@ -69,6 +76,10 @@ export function createStoreDockingRouteModule(): RouteModule {
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
+          const anchored = await requireAnchoredStoreAddress(context, request, resource);
+          if (!isAnchoredStoreAuthorizationResult(anchored)) {
+            return anchored;
+          }
           try {
             const session = await context.storeDockingService.validateSession(
               sessionId,
@@ -93,6 +104,10 @@ export function createStoreDockingRouteModule(): RouteModule {
           const authorization = await authorizeStoreCapability(context, request, capability, resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
+          }
+          const anchored = await requireAnchoredStoreAddress(context, request, resource);
+          if (!isAnchoredStoreAuthorizationResult(anchored)) {
+            return anchored;
           }
           try {
             const session = await context.storeDockingService.saveDraftMap(

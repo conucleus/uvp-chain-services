@@ -5,12 +5,30 @@ import type { Address, Hex } from "../src/shared/types.js";
 
 const operatorHeaders = {
   "x-uvp-store-operator-id": "operator-confirm",
-  "x-uvp-store-operator-role": "store_operator"
+  "x-uvp-store-operator-role": "store_operator",
+  // 红线：供应商写路由要求会话已锚定地址（本地联调 dev 锚定头）。
+  "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
 };
 
 const adminHeaders = {
   "x-uvp-admin-id": "governance-confirm",
-  "x-uvp-admin-role": "admin"
+  "x-uvp-admin-role": "admin",
+  "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
+};
+
+const devAnchoredStoreAuth = {
+  mode: "dev_headers" as const,
+  roleClaim: "roles",
+  principalClaim: "sub",
+  clockToleranceSeconds: 60,
+  walletSession: {
+    enabled: true,
+    operatorWallets: [],
+    adminWallets: [],
+    sessionTtlSeconds: 43200,
+    challengeTtlSeconds: 300,
+    devAnchoredAddressHeaderEnabled: true,
+  },
 };
 
 const registryAddress = "0x5555555555555555555555555555555555555555" as Address;
@@ -19,7 +37,7 @@ const supplierWallet = "0x4444444444444444444444444444444444444444" as Address;
 
 describe("Store sensitive action confirmation", () => {
   it("requires exact confirmation before supplier approval and governance handoff side effects", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
 
     await expect(router.handle({
       method: "POST",

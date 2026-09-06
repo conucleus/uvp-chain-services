@@ -29,8 +29,13 @@ export function createStoreListingsRouteModule(options: {
           const capability = "store.listing.manage";
           const authorization = await authorizeStoreCapability(context, request, capability, { type: "store_listing" });
           if (isStoreAuthorizationResult(authorization)) {
+            // 红线：导入是敏感写——运营方路径同样要求会话已锚定地址。
+            const anchored = await requireAnchoredStoreAddress(context, request, { type: "store_listing" });
+            if (!isAnchoredStoreAuthorizationResult(anchored)) {
+              return anchored;
+            }
             try {
-              const body = await options.listingService.importListing(request.body, listingActor(authorization.access));
+              const body = await options.listingService.importListing(request.body, listingActor(anchored.access));
               await recordStoreCapabilitySuccess(context, request, authorization.access, capability, {
                 type: "store_listing",
                 id: body.listing.listingId
@@ -113,17 +118,22 @@ export function createStoreListingsRouteModule(options: {
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
+          // 红线：上架审核/下架/重新上架是敏感治理写，要求会话已锚定地址。
+          const anchored = await requireAnchoredStoreAddress(context, request, resource);
+          if (!isAnchoredStoreAuthorizationResult(anchored)) {
+            return anchored;
+          }
           try {
             let body: Awaited<ReturnType<StoreListingService["getListing"]>>;
             switch (action) {
               case "review":
-                body = await options.listingService.reviewListing(listingId, request.body, listingActor(authorization.access));
+                body = await options.listingService.reviewListing(listingId, request.body, listingActor(anchored.access));
                 break;
               case "delist":
-                body = await options.listingService.delistListing(listingId, request.body, listingActor(authorization.access));
+                body = await options.listingService.delistListing(listingId, request.body, listingActor(anchored.access));
                 break;
               case "relist":
-                body = await options.listingService.relistListing(listingId, listingActor(authorization.access));
+                body = await options.listingService.relistListing(listingId, listingActor(anchored.access));
                 break;
               default:
                 return { status: 404, body: { error: "not_found" } };

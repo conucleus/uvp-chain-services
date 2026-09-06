@@ -12,6 +12,7 @@ import {
   stringColumn
 } from "../storage/sqlite-rows.js";
 import type {
+  StoreSupplierAuditInput,
   StoreSupplierAuditRecord,
   StoreSupplierMetadataRecord,
   StoreSupplierMetadataStore
@@ -106,7 +107,7 @@ export class SqliteStoreSupplierMetadataStore implements StoreSupplierMetadataSt
     });
   }
 
-  async appendAudit(record: StoreSupplierAuditRecord): Promise<void> {
+  async appendAudit(record: StoreSupplierAuditInput): Promise<void> {
     runSqliteWrite(() => {
       this.#database.prepare(
         `INSERT INTO store_supplier_audit (
@@ -115,8 +116,11 @@ export class SqliteStoreSupplierMetadataStore implements StoreSupplierMetadataSt
            before_supported_role_slot_ids_json, after_supported_role_slot_ids_json,
            before_supported_stage_ids_json, after_supported_stage_ids_json,
            review_status, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(...auditValues(record));
+         ) VALUES (
+           -- auditId 库端生成（跨实例/重启唯一），不接调用方进程内序号
+           COALESCE(?, 'audit_' || lower(hex(randomblob(16)))),
+           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(record.auditId ?? null, ...auditValues(withoutAuditId(record)));
     });
   }
 
@@ -183,9 +187,13 @@ function supplierRow(row: unknown): StoreSupplierMetadataRecord {
   };
 }
 
-function auditValues(record: StoreSupplierAuditRecord): readonly SqliteValue[] {
+function withoutAuditId(record: StoreSupplierAuditInput): Omit<StoreSupplierAuditRecord, "auditId"> {
+  const { auditId: _auditId, ...rest } = record;
+  return rest;
+}
+
+function auditValues(record: Omit<StoreSupplierAuditRecord, "auditId">): readonly SqliteValue[] {
   return [
-    record.auditId,
     record.supplierId,
     record.supplierSubjectId,
     record.action,
