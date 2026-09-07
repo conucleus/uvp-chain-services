@@ -58,12 +58,12 @@ const orderLinkModuleAbi = parseAbi([
   "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 planId,bytes32 originPlanId,bytes32 originSourceId,bytes32 originSignalId)",
 ]);
 
-// UVPDockingModule v2（uvp.dock.v1 统一委托协议）。
+// UVPDockingModule v3.0（具名接口 dock v2）。终态不由链上事件驱动，
+// 事件面只有 open/input/output 三类。
 const dockingModuleAbi = parseAbi([
-  "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
+  "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 interfaceNameId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
   "event DockInputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed inputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 payloadHash,address submitter)",
   "event DockOutputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed outputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 localSignalId,bytes32 payloadHash,address submitter)",
-  "event DockTerminal(bytes32 indexed dockInstanceId,uint8 terminal)",
 ]);
 
 const identityRegistryAbi = parseAbi([

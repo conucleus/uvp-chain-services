@@ -15,17 +15,20 @@ export interface DockAutomationConfig {
   readonly redeliveryWindowMs: number;
 }
 
+/** dock 下单模式（PRD_100：{new, existing}；链轨仅支持 new）。 */
+export type DockOrderMode = "new" | "existing";
+
 /**
  * 解析后的 dock route 记录（来源：云编译产物 zhixu_dock_route +
- * resolution manifest）。binding 全集只能来自链下 route 数据——链上事件
- * 只暴露已投递的 binding，未投递 binding 的发现依赖这里。
+ * resolution manifest，uvp.dockRoute.v2）。binding 全集只能来自链下
+ * route 数据——链上事件只暴露已投递的 binding，未投递 binding 的发现
+ * 依赖这里。
  */
 export interface DockRouteInputBinding {
   readonly bindingHash: Hex;
   readonly localHookId: Hex;
   readonly targetSourceId: Hex;
   readonly targetSignalId: Hex;
-  readonly kind: "entrance" | "signal";
 }
 
 export interface DockRouteOutputBinding {
@@ -34,7 +37,6 @@ export interface DockRouteOutputBinding {
   readonly localSignalId: Hex;
   readonly targetSourceId: Hex;
   readonly targetSignalId: Hex;
-  readonly terminal: "none" | "success" | "failure" | "cancelled";
 }
 
 export interface DockRouteRecord {
@@ -45,14 +47,14 @@ export interface DockRouteRecord {
   readonly linkedOrderId: Hex;
   readonly routeId: Hex;
   readonly routeHash: Hex;
-  readonly accessPolicy: "open" | "permit";
-  readonly entranceHookId: Hex;
+  readonly interfaceName: string;
+  readonly orderMode: DockOrderMode;
   readonly inputs: readonly DockRouteInputBinding[];
   readonly outputs: readonly DockRouteOutputBinding[];
   /**
-   * openDockedOrder 的完整 calldata（request/routeProof/interfaceLeaf/
-   * bindings 全部 word 由 route 来源按编译产物组装；permit 路由由
-   * publisher 离线签名后同样在此携带）。keeper 不组装、不补签。
+   * openDockedOrder 的完整 calldata（request/routeProof/interfaceProof/
+   * bindings/permit 全部 word 由 route 来源按编译产物组装；entrance
+   * permit 必须已含 publisher 签名）。keeper 不组装、不补签。
    */
   readonly openCalldata?: Hex;
 }

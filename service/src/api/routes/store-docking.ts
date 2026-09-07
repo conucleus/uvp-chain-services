@@ -154,8 +154,6 @@ export function createStoreDockingRouteModule(): RouteModule {
 
 function parseStoreDockingCreateBody(body: unknown): StoreDockingSessionCreateDTO {
   const record = requireStoreDockingBodyRecord(body);
-  const sourceVersionId = optionalStoreDockingString(record, "sourceVersionId");
-  const targetVersionId = optionalStoreDockingString(record, "targetVersionId");
   const sourceZhixuId = requiredStoreDockingString(record, "sourceZhixuId");
   const targetZhixuId = requiredStoreDockingString(record, "targetZhixuId");
   // STORE-03：路由层快速拦截 self-docking（服务层为权威校验）。
@@ -167,12 +165,25 @@ function parseStoreDockingCreateBody(body: unknown): StoreDockingSessionCreateDT
       { sourceZhixuId, targetZhixuId }
     );
   }
+  const targetInterfaceName = optionalStoreDockingString(record, "targetInterfaceName");
+  const orderMode = optionalStoreDockingOrderMode(record);
   return {
     sourceZhixuId,
     targetZhixuId,
-    ...(sourceVersionId !== undefined ? { sourceVersionId } : {}),
-    ...(targetVersionId !== undefined ? { targetVersionId } : {})
+    ...(targetInterfaceName !== undefined ? { targetInterfaceName } : {}),
+    ...(orderMode !== undefined ? { orderMode } : {})
   };
+}
+
+function optionalStoreDockingOrderMode(record: Record<string, unknown>): "new" | "existing" | undefined {
+  if (!Object.hasOwn(record, "orderMode") || record.orderMode === null) {
+    return undefined;
+  }
+  const value = record.orderMode;
+  if (value !== "new" && value !== "existing") {
+    throw new StoreDockingServiceError(400, "invalid_body", "orderMode must be \"new\" or \"existing\"");
+  }
+  return value;
 }
 
 function parseStoreDraftSignalMapBody(body: unknown): readonly StoreDraftSignalMapEntryDTO[] {
@@ -188,8 +199,17 @@ function parseStoreDraftSignalMapBody(body: unknown): readonly StoreDraftSignalM
     const entry = item as Record<string, unknown>;
     const note = optionalStoreDockingString(entry, "note");
     const entryId = optionalStoreDockingString(entry, "entryId");
+    const bindingKind = entry.bindingKind;
+    if (bindingKind !== "input" && bindingKind !== "output") {
+      throw new StoreDockingServiceError(
+        400,
+        "invalid_body",
+        `draftSignalMap[${index}].bindingKind must be "input" or "output"`
+      );
+    }
     return {
       ...(entryId !== undefined ? { entryId } : {}),
+      bindingKind,
       sourceSignalId: requiredStoreDockingString(entry, "sourceSignalId"),
       targetSignalId: requiredStoreDockingString(entry, "targetSignalId"),
       ...(note !== undefined ? { note } : {})

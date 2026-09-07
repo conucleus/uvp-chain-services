@@ -208,14 +208,13 @@ export interface StateMachineStageResourceOverlayProjection {
 }
 
 /**
- * uvp.dock.v1 统一委托协议投影。dock 实例身份由
- * dockInstanceId 唯一确定（哈希 preimage 覆盖双方 plan/order/route），
- * 投影键为 (chainId, stateMachineAddress, dockInstanceId)；binding 细节
- * （portKey/localHookId/kind/terminal 全量 word）来自 DockingModule
- * 事件可见字段，事件不携带的补全由 keeper 通过 lens 视图按需读取。
+ * uvp.dock.v2 具名接口委托协议投影。dock 实例身份由
+ * dockInstanceId 唯一确定（哈希 preimage 覆盖双方 plan/order/route +
+ * 接口/mode），投影键为 (chainId, stateMachineAddress, dockInstanceId)；
+ * binding 细节（portKey/localHookId）来自 DockingModule 事件可见字段，
+ * 事件不携带的补全由 keeper 通过 lens 视图按需读取。终态不由链上事件
+ * 驱动（PRD_100 §13.4）：投影只记录开启与投递事实。
  */
-export type StateMachineDockStatus = "open" | "terminal";
-
 export interface StateMachineDockInputDeliveryProjection {
   readonly inputBindingHash: Hex;
   readonly localPlanId: Hex;
@@ -251,19 +250,17 @@ export interface StateMachineDockProjection {
   readonly localOrderId: Hex;
   readonly routeId: Hex;
   readonly routeHash: Hex;
+  /** keccak(interfaceName)：具名接口的链上 word 形态。 */
+  readonly interfaceNameId: Hex;
   readonly targetPlanId: Hex;
   readonly linkedOrderId: Hex;
   readonly depth: number;
   readonly opener: Address;
-  readonly status: StateMachineDockStatus;
   readonly inputDeliveries: Readonly<Record<string, StateMachineDockInputDeliveryProjection>>;
   readonly outputDeliveries: Readonly<Record<string, StateMachineDockOutputDeliveryProjection>>;
   readonly openedAt: ProjectionProvenance;
-  readonly terminalAt?: ProjectionProvenance;
-  readonly terminalCode?: number;
   readonly updatedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
-  readonly terminalProof?: StateMachineProofProjection;
 }
 
 export interface StateMachineOrderTriggerLinkProjection {
@@ -402,7 +399,7 @@ export interface ProjectionSnapshot {
    */
   readonly unresolvedModuleOrderEventCount?: number;
   /**
-   * Dock 事件（input/output/terminal）无法定位已开启 dock 桶的显式计数
+   * Dock 事件（input/output）无法定位已开启 dock 桶的显式计数
    * （dock 未开启 / 模块未登记 / 回放顺序中 DockOpened 缺失）。不允许静默。
    */
   readonly unresolvedDockEventCount?: number;
@@ -696,9 +693,6 @@ function applyStateMachineEvent(
       return;
     case "DockOutputSubmitted":
       applyDockOutputSubmitted(state, event);
-      return;
-    case "DockTerminal":
-      applyDockTerminal(state, event);
       return;
     case "DerivedSignalSubmitted":
       applyDerivedSignalSubmitted(state, event);
@@ -1635,11 +1629,11 @@ function applyDockOpened(
     localOrderId,
     routeId: requiredBytes32Arg(event, "routeId"),
     routeHash: requiredBytes32Arg(event, "routeHash"),
+    interfaceNameId: requiredBytes32Arg(event, "interfaceNameId"),
     targetPlanId: requiredBytes32Arg(event, "targetPlanId"),
     linkedOrderId,
     depth,
     opener,
-    status: "open",
     inputDeliveries: {},
     outputDeliveries: {},
     openedAt: provenanceOf(event),
@@ -1784,30 +1778,6 @@ function applyDockOutputSubmitted(
     orderId: dock.localOrderId,
     planId: dock.localPlanId
   }));
-}
-
-function applyDockTerminal(
-  state: {
-    modules: StateMachineModuleIndex;
-    diagnostics: ProjectionReplayDiagnostics;
-    orders: Map<string, MutableStateMachineOrderProjection>;
-    docks: Map<string, MutableStateMachineDockProjection>;
-  },
-  event: ChainEvent
-): void {
-  const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
-  const dock = findDockForEvent(state, event, dockInstanceId);
-  if (!dock) {
-    // dock 未开启（或模块归属无法解析）：显式计数，不允许静默丢弃。
-    state.diagnostics.unresolvedDockEventCount += 1;
-    return;
-  }
-  const terminalCode = Number(event.args["terminal"] ?? 0);
-  dock.status = "terminal";
-  dock.terminalCode = terminalCode;
-  dock.terminalAt = provenanceOf(event);
-  dock.terminalProof = proofOf(event, { planId: dock.localPlanId });
-  dock.updatedAt = provenanceOf(event);
 }
 
 /** dock 事件桶定位：模块地址归一化 + dockInstanceId 键；未开启的 dock 事件忽略。 */

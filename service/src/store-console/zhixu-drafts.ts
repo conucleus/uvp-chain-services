@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   assertOnchainHookPlanArtifact,
   compileZhixuOnchainHookPlan,
+  displayIdentity,
   hashCanonical,
   parseZhixuDefinition,
   type OnchainHookPlanArtifact,
@@ -72,7 +73,10 @@ export interface StoreCompilePreviewDTO {
 export interface StoreZhixuDraftDTO {
   readonly draftId: string;
   readonly status: StoreZhixuDraftStatus;
+  /** 定义派生身份（编译产物 zhixuId）。 */
   readonly zhixuId?: string;
+  /** N6 显示口径：name(uid 去 zx- 后前 8 hex)。 */
+  readonly zhixuDisplay?: string;
   readonly title: string;
   readonly maintainer: string;
   readonly compilePreview?: StoreCompilePreviewDTO;
@@ -242,6 +246,7 @@ export function createStoreZhixuDraftWorkflowService(options: {
             ...draft,
             status: "compiled",
             zhixuId: compiled.zhixuId,
+            zhixuDisplay: compiled.zhixuDisplay,
             title: draft.title === "未命名秩序草稿" ? compiled.title : draft.title,
             compilePreview: compiled.preview,
             productSchema: buildSuggestedProductSchema(draft, compiled.artifact, timestamp),
@@ -447,6 +452,7 @@ function compileDraftContent(
 ): {
   readonly ok: true;
   readonly zhixuId: string;
+  readonly zhixuDisplay: string;
   readonly title: string;
   readonly preview: StoreCompilePreviewDTO;
   readonly artifact: OnchainHookPlanArtifact;
@@ -458,7 +464,9 @@ function compileDraftContent(
       : compileManifest(draft.content);
     return {
       ok: true,
+      // 身份一律取编译产物 zhixuId（内容派生），无名称回退。
       zhixuId: onchain.zhixuId,
+      zhixuDisplay: displayIdentity(onchain.zhixuName, onchain.zhixuId),
       title: onchain.zhixuName,
       preview: previewFromOnchainArtifact(onchain),
       artifact: onchain
@@ -1492,6 +1500,7 @@ async function toDraftDTO(
     draftId: draft.draftId,
     status,
     ...(draft.zhixuId ? { zhixuId: draft.zhixuId } : {}),
+    ...(draft.zhixuDisplay ? { zhixuDisplay: draft.zhixuDisplay } : {}),
     title: draft.title,
     maintainer: draft.maintainer,
     ...(draft.compilePreview ? { compilePreview: draft.compilePreview } : {}),

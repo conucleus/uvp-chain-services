@@ -63,7 +63,6 @@ apiVersion: uvp/v0
 kind: Zhixu
 metadata:
   name: store-draft-demo
-  uid: store-draft-demo-001
   annotations:
     version: "1"
 spec:

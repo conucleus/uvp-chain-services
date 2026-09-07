@@ -13,10 +13,10 @@ describe("ViemChainEventSource", () => {
       UVPIdentityRegistry: "uvp-identity-registry.v0.1.json",
       UVPDeploymentRegistry: "uvp-deployment-registry.v0.2.json",
       UVPStagePatchModule: "uvp-stage-patch-module.v0.2.json",
-      UVPPlanMetadataModule: "uvp-plan-metadata-module.v0.3.json",
+      UVPPlanMetadataModule: "uvp-plan-metadata-module.v0.4.json",
       UVPDerivedSignalModule: "uvp-derived-signal-module.v0.2.json",
       UVPOrderLinkModule: "uvp-order-link-module.v0.2.json",
-      UVPDockingModule: "uvp-docking-module.v2.1.json"
+      UVPDockingModule: "uvp-docking-module.v3.0.json"
     };
     const artifacts: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
       UVPStateMachine: "UVPStateMachine.sol/UVPStateMachine.json",

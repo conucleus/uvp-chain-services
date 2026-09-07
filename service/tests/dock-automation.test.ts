@@ -13,14 +13,17 @@ const planId = bytes32Hex("0101");
 const planHash = bytes32Hex("0a0a");
 const orderId = bytes32Hex("0202");
 const hookId = bytes32Hex("0303");
+const amendHookId = bytes32Hex("0808");
 const linkedOrderId = bytes32Hex("0303");
 const targetPlanId = bytes32Hex("0404");
 const routeId = bytes32Hex("0505");
 const dockInstanceId = bytes32Hex("0900");
-const inputBindingHash = bytes32Hex("0606");
+const entranceBindingHash = bytes32Hex("0606");
+const amendBindingHash = bytes32Hex("0707");
 const payloadHash = bytes32Hex("0b0b");
 const signalId = bytes32Hex("0505");
 const sourceId = bytes32Hex("0404");
+const interfaceNameId = bytes32Text("production_service");
 
 describe("dock liveness keeper", () => {
   it("does not re-broadcast the same binding inside the finality window and retries after it", async () => {
@@ -76,7 +79,7 @@ describe("dock liveness keeper", () => {
       chainEvent(6n, 0, "DockInputSubmitted", {
         dockInstanceId,
         linkedOrderId,
-        inputBindingHash,
+        inputBindingHash: amendBindingHash,
         localPlanId: planId,
         localOrderId: orderId,
         targetPlanId,
@@ -123,15 +126,21 @@ function dockRoute(): DockRouteRecord {
     linkedOrderId,
     routeId,
     routeHash: planHash,
-    accessPolicy: "open",
-    entranceHookId: hookId,
+    interfaceName: "production_service",
+    orderMode: "new",
     inputs: [
       {
-        bindingHash: inputBindingHash,
+        // entrance（new 模式唯一 input 绑定，open 原子投递）。
+        bindingHash: entranceBindingHash,
         localHookId: hookId,
         targetSourceId: sourceId,
-        targetSignalId: signalId,
-        kind: "signal"
+        targetSignalId: signalId
+      },
+      {
+        bindingHash: amendBindingHash,
+        localHookId: amendHookId,
+        targetSourceId: sourceId,
+        targetSignalId: signalId
       }
     ],
     outputs: []
@@ -157,7 +166,7 @@ function dockEvents(): readonly ChainEvent[] {
     chainEvent(4n, 0, "HookStatusChanged", {
       orderId,
       planId,
-      hookId,
+      hookId: amendHookId,
       previousStatus: 0,
       newStatus: 2,
       dueAt: 0n
@@ -166,6 +175,7 @@ function dockEvents(): readonly ChainEvent[] {
       dockInstanceId,
       localOrderId: orderId,
       linkedOrderId,
+      interfaceNameId,
       localPlanId: planId,
       targetPlanId,
       routeId,

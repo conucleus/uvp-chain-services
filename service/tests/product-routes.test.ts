@@ -435,6 +435,7 @@ describe("product API routes", () => {
         status: string;
         validation: { ok: boolean; nonPublishing: boolean; errors: unknown[] };
         candidateMappings: Array<{
+          bindingKind: "input" | "output";
           sourceSignal: { signalId: string };
           targetSignal: { signalId: string };
         }>;
@@ -451,6 +452,7 @@ describe("product API routes", () => {
     expect(created.candidateMappings.length).toBeGreaterThan(0);
     const candidate = created.candidateMappings[0]!;
     const draftSignalMap = [{
+      bindingKind: candidate.bindingKind,
       sourceSignalId: candidate.sourceSignal.signalId,
       targetSignalId: candidate.targetSignal.signalId,
       note: "same stage candidate"
@@ -681,6 +683,7 @@ describe("product API routes", () => {
       session: {
         sessionId: string;
         candidateMappings: Array<{
+          bindingKind: "input" | "output";
           sourceSignal: { signalId: string };
           targetSignal: { signalId: string };
         }>;
@@ -695,10 +698,12 @@ describe("product API routes", () => {
       body: {
         draftSignalMap: [
           {
+            bindingKind: candidate.bindingKind,
             sourceSignalId: "missing.output",
             targetSignalId: candidate.targetSignal.signalId
           },
           {
+            bindingKind: candidate.bindingKind,
             sourceSignalId: candidate.sourceSignal.signalId,
             targetSignalId: "missing.input"
           }
@@ -714,8 +719,8 @@ describe("product API routes", () => {
       validation: {
         ok: false,
         errors: expect.arrayContaining([
-          expect.objectContaining({ code: "source_output_not_found" }),
-          expect.objectContaining({ code: "target_input_not_found" })
+          expect.objectContaining({ code: "source_port_not_found" }),
+          expect.objectContaining({ code: "target_port_not_found" })
         ])
       }
     });
@@ -749,8 +754,8 @@ describe("product API routes", () => {
     expect(session.validation).toMatchObject({
       ok: false,
       errors: expect.arrayContaining([
-        expect.objectContaining({ code: "source_version_not_published" }),
-        expect.objectContaining({ code: "target_version_revoked" })
+        expect.objectContaining({ code: "source_zhixu_not_published" }),
+        expect.objectContaining({ code: "target_zhixu_revoked" })
       ])
     });
   });

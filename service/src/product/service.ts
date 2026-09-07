@@ -1,6 +1,8 @@
 import {
   summarizeZhixu,
   type ChainProofRowDTO,
+  type DockableZhixuModuleDTO,
+  type DockableZhixuModulePortDTO,
   type FulfillmentPluginKind,
   type ProductExecutorOverlayDTO,
   type ProductOrderDTO,
@@ -1250,7 +1252,7 @@ function zhixuDetailFromProductSchema(
     updatedAt: schema.updatedAt,
     planPublication,
     roleSlots: schema.roleSlots,
-    dockableModules: [],
+    dockableModules: dockableModulesFromArtifact(schema.onchainHookPlanArtifact),
     stages: schema.stages,
     orderPermissionTable: schema.orderPermissionTable,
     ...(schema.createOrderTrigger
@@ -1276,6 +1278,79 @@ function zhixuIdFromPlanIdentity(planId: string, planHash: string): string {
 
 function zhixuIdFromPlanId(planId: string): string {
   return `plan-${shortId(planId)}`;
+}
+
+/**
+ * 具名 dock 接口的展示面唯一来源是编译制品的 dockInterface 承诺
+ * （uvp.dockInterfaceArtifact.v2）——Store 不发明接口，只镜像发布者
+ * 已承诺的接口形状。schema 携带的制品是不透明 JSON，这里做结构化读取。
+ */
+function dockableModulesFromArtifact(
+  artifact: unknown
+): readonly DockableZhixuModuleDTO[] {
+  const dockInterface = recordField(artifact, "dockInterface");
+  const interfaces = dockInterface ? arrayField(dockInterface, "interfaces") : [];
+  return interfaces.flatMap((entry) => {
+    if (!isRecordValue(entry)) {
+      return [];
+    }
+    const interfaceName = entry.name;
+    const orderModes = entry.orderModes;
+    if (
+      typeof interfaceName !== "string" ||
+      !Array.isArray(orderModes) ||
+      !orderModes.every((mode) => mode === "new" || mode === "existing") ||
+      orderModes.length === 0
+    ) {
+      return [];
+    }
+    return [{
+      interfaceName,
+      orderModes: orderModes as readonly ("new" | "existing")[],
+      title: interfaceName,
+      desc: `发布者承诺的具名接口（下单模式：${orderModes.join("、")}）`,
+      inputs: portList(entry.inputs, "hookId"),
+      outputs: portList(entry.outputs, "canonicalOutputSignal"),
+      status: "available"
+    }];
+  });
+}
+
+function portList(
+  value: unknown,
+  refKey: "hookId" | "canonicalOutputSignal"
+): readonly DockableZhixuModulePortDTO[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((port): readonly DockableZhixuModulePortDTO[] => {
+    if (!isRecordValue(port) || typeof port.port !== "string" || port.port.length === 0) {
+      return [];
+    }
+    const ref = port[refKey];
+    return [{
+      portName: port.port,
+      label: typeof ref === "string" && ref.length > 0 ? ref : port.port,
+      ...(typeof ref === "string" && ref.length > 0
+        ? refKey === "hookId" ? { hook: ref } : { signal: ref }
+        : {})
+    }];
+  });
+}
+
+function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
+  return isRecordValue(value) && isRecordValue(value[key])
+    ? (value[key] as Record<string, unknown>)
+    : undefined;
+}
+
+function arrayField(record: Record<string, unknown>, key: string): readonly unknown[] {
+  const value = record[key];
+  return Array.isArray(value) ? value : [];
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function taskCapabilityPluginFromSlot(

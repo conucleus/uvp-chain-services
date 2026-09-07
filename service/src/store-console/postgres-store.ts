@@ -266,8 +266,8 @@ export class PostgresStoreDockingSessionStore implements StoreDockingSessionStor
   async createSession(session: StoreDockingSessionDTO): Promise<void> {
     await this.#database.query(
       `INSERT INTO store_docking_session (
-         session_id, source_zhixu_id, target_zhixu_id, source_version_id,
-         target_version_id, status, draft_signal_map_json, validation_json,
+         session_id, source_zhixu_id, target_zhixu_id, selected_interface_name,
+         order_mode, status, draft_signal_map_json, validation_json,
          session_json, created_at, updated_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11)`,
       dockingSessionValues(session)
@@ -287,16 +287,16 @@ export class PostgresStoreDockingSessionStore implements StoreDockingSessionStor
   async updateSession(session: StoreDockingSessionDTO): Promise<void> {
     await this.#database.query(
       `INSERT INTO store_docking_session (
-         session_id, source_zhixu_id, target_zhixu_id, source_version_id,
-         target_version_id, status, draft_signal_map_json, validation_json,
+         session_id, source_zhixu_id, target_zhixu_id, selected_interface_name,
+         order_mode, status, draft_signal_map_json, validation_json,
          session_json, created_at, updated_at
        ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11)
        ON CONFLICT(session_id)
        DO UPDATE SET
          source_zhixu_id = excluded.source_zhixu_id,
          target_zhixu_id = excluded.target_zhixu_id,
-         source_version_id = excluded.source_version_id,
-         target_version_id = excluded.target_version_id,
+         selected_interface_name = excluded.selected_interface_name,
+         order_mode = excluded.order_mode,
          status = excluded.status,
          draft_signal_map_json = excluded.draft_signal_map_json,
          validation_json = excluded.validation_json,
@@ -466,8 +466,8 @@ function dockingSessionValues(session: StoreDockingSessionDTO): readonly unknown
     session.sessionId,
     session.source.zhixuId,
     session.target.zhixuId,
-    session.source.versionId ?? null,
-    session.target.versionId ?? null,
+    session.selectedInterfaceName,
+    session.orderMode,
     session.status,
     stringifyStorageJson(session.draftSignalMap),
     stringifyStorageJson(session.validation),

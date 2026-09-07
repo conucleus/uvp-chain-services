@@ -271,8 +271,8 @@ export class SqliteStoreDockingSessionStore implements StoreDockingSessionStore 
     runSqliteWrite(() => {
       this.#database.prepare(
         `INSERT INTO store_docking_session (
-           session_id, source_zhixu_id, target_zhixu_id, source_version_id,
-           target_version_id, status, draft_signal_map_json, validation_json,
+           session_id, source_zhixu_id, target_zhixu_id, selected_interface_name,
+           order_mode, status, draft_signal_map_json, validation_json,
            session_json, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(...dockingSessionValues(session));
@@ -292,16 +292,16 @@ export class SqliteStoreDockingSessionStore implements StoreDockingSessionStore 
     runSqliteWrite(() => {
       this.#database.prepare(
         `INSERT INTO store_docking_session (
-           session_id, source_zhixu_id, target_zhixu_id, source_version_id,
-           target_version_id, status, draft_signal_map_json, validation_json,
+           session_id, source_zhixu_id, target_zhixu_id, selected_interface_name,
+           order_mode, status, draft_signal_map_json, validation_json,
            session_json, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id)
          DO UPDATE SET
            source_zhixu_id = excluded.source_zhixu_id,
            target_zhixu_id = excluded.target_zhixu_id,
-           source_version_id = excluded.source_version_id,
-           target_version_id = excluded.target_version_id,
+           selected_interface_name = excluded.selected_interface_name,
+           order_mode = excluded.order_mode,
            status = excluded.status,
            draft_signal_map_json = excluded.draft_signal_map_json,
            validation_json = excluded.validation_json,
@@ -464,8 +464,8 @@ function dockingSessionValues(session: StoreDockingSessionDTO): readonly SqliteV
     session.sessionId,
     session.source.zhixuId,
     session.target.zhixuId,
-    session.source.versionId ?? null,
-    session.target.versionId ?? null,
+    session.selectedInterfaceName,
+    session.orderMode,
     session.status,
     stringifyStorageJson(session.draftSignalMap),
     stringifyStorageJson(session.validation),

@@ -717,6 +717,7 @@ describe("indexer projection replay", () => {
         dockInstanceId: dockInstanceId,
         localOrderId: stateMachineOrderId,
         linkedOrderId: bytes32Hex("303"),
+        interfaceNameId: bytes32Text("production_service"),
         localPlanId: planId,
         targetPlanId: bytes32Hex("404"),
         routeId: bytes32Hex("505"),
@@ -768,7 +769,7 @@ describe("indexer projection replay", () => {
       localOrderId: stateMachineOrderId,
       linkedOrderId: bytes32Hex("303"),
       targetPlanId: bytes32Hex("404"),
-      status: "open"
+      interfaceNameId: bytes32Text("production_service")
     });
     expect(Object.keys(snapshot.stateMachineDocks[dockKey]?.inputDeliveries ?? {})).toEqual([
       bytes32Hex("606")

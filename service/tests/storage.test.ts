@@ -2336,8 +2336,6 @@ function storeDockingSession(): StoreDockingSessionDTO {
     source: {
       zhixuId: "source-zhixu",
       title: "Source Zhixu",
-      versionId: "source-v1",
-      versionLabel: "Source v1",
       lifecycleStatus: "active",
       publicationStatus: "published",
       planId,
@@ -2346,8 +2344,6 @@ function storeDockingSession(): StoreDockingSessionDTO {
     target: {
       zhixuId: "target-zhixu",
       title: "Target Zhixu",
-      versionId: "target-v1",
-      versionLabel: "Target v1",
       lifecycleStatus: "active",
       publicationStatus: "published",
       planId:
@@ -2355,10 +2351,21 @@ function storeDockingSession(): StoreDockingSessionDTO {
       planHash:
         "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     },
+    interfaces: [
+      {
+        interfaceName: "fulfillment_service",
+        orderModes: ["new"],
+        inputs: [{ portName: "execute", label: "执行入口", hook: "target.intake#EXECUTE" }],
+        outputs: [{ portName: "completed", label: "完成", signal: "target::target.intake.cmp" }],
+      },
+    ],
+    selectedInterfaceName: "fulfillment_service",
+    orderMode: "new",
     candidateMappings: [],
     draftSignalMap: [
       {
         entryId: "map_1",
+        bindingKind: "input",
         sourceSignalId: "source.done",
         targetSignalId: "target.start",
         note: "Durable draft map",
