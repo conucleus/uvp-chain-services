@@ -100,8 +100,6 @@ kind: Zhixu
 metadata:
   name: store-closure-dry-run
   uid: store-closure-dry-run-001
-  annotations:
-    version: "1"
 spec:
   platform:
     type: blockchain
