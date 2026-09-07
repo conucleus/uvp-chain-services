@@ -139,6 +139,26 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(session.capabilities).toContain("store.listing.manage");
   });
 
+  it("wallet sessions never receive store.draft.review (governance-only capability)", async () => {
+    // 职责分离（store-console/access.ts 口径）：zhixu 草稿审核是治理动作，
+    // 专属 governance_admin——钱包会话的 operator/store_admin 能力表都
+    // 不得下放（JWT 侧同样刻意不映射）。
+    const router = await buildRouter({ operatorWallets: [operatorWallet], adminWallets: [teamDerivedWallet] });
+    const operatorToken = await login(router, operatorWallet);
+    const adminToken = await login(router, teamDerivedWallet);
+
+    for (const token of [operatorToken, adminToken]) {
+      const sessionResponse = await router.handle({
+        method: "GET",
+        pathname: "/store/session",
+        headers: { "x-uvp-store-session": token }
+      });
+      const session = (sessionResponse.body as { session: { accessLevel: string; capabilities: readonly string[] } }).session;
+      expect(["store_operator", "store_admin"]).toContain(session.accessLevel);
+      expect(session.capabilities).not.toContain("store.draft.review");
+    }
+  });
+
   it("anchoring an additional address links it to the same account; revocation removes it", async () => {
     const router = await buildRouter();
     const firstToken = await login(router, supplierWallet);
@@ -413,12 +433,21 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const zhixusAfter = (catalogAfter.body as { zhixus: { planId: string }[] }).zhixus;
     expect(zhixusAfter.some((row) => row.planId.toLowerCase() === planId.toLowerCase())).toBe(false);
 
+    // 详情与列表/search 同口径：delisted 对非运营方 404（不泄露存在），
+    // 运营方保留治理可见性（下架状态经 overlay 可见）。
     const detailAfter = await router.handle({
       method: "GET",
       pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}`
     });
-    expect(detailAfter.status).toBe(200);
-    expect((detailAfter.body as { storeOverlay?: { listing?: { status: string } } }).storeOverlay?.listing?.status).toBe("delisted");
+    expect(detailAfter.status).toBe(404);
+    expect(detailAfter.body).toMatchObject({ error: "store_zhixu_not_found" });
+    const operatorDetailAfter = await router.handle({
+      method: "GET",
+      pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}`,
+      headers: storeOperatorHeaders
+    });
+    expect(operatorDetailAfter.status).toBe(200);
+    expect((operatorDetailAfter.body as { storeOverlay?: { listing?: { status: string } } }).storeOverlay?.listing?.status).toBe("delisted");
 
     const hiddenAnchorVerification = await router.handle({
       method: "GET",
@@ -595,8 +624,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect((detail.body as { application: { status: string } }).application.status).toBe("under_review");
   });
 
-  it("on-chain authorization event materializes the application to active", async () => {
-    const store = new MemoryProjectionStore();
+  it("on-chain authorization event materializes the application to active", async () => {    const store = new MemoryProjectionStore();
     await seedPlanProjection(store, { withSupplierBinding: true });
     const router = createApiRouter(store, routerOptions());
     const applicantToken = await login(router, supplierWallet);
@@ -633,6 +661,51 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(detailBody.application.status).toBe("active");
     expect(detailBody.application.txEvidence.some((entry) => entry.kind === "signal_submitter" && entry.status === "materialized" && entry.txHash)).toBe(true);
     expect(detailBody.events.map((event) => event.type)).toContain("activated");
+  });
+
+  it("order reads require identity and hide orders assigned to other participants", async () => {
+    // 订单 DTO 内嵌全部任务（assigneeWallet/proofRows 等参与者数据）：
+    // 与任务读同口径——匿名不可枚举；已指派参与者的订单只有参与者本人
+    // 可见（404/列表过滤）。
+    const store = new MemoryProjectionStore();
+    await seedPlanProjection(store, { withSupplierBinding: true });
+    const router = createApiRouter(store, routerOptions());
+
+    // 匿名 → 401。
+    await expect(router.handle({ method: "GET", pathname: "/product/orders" }))
+      .resolves.toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+    await expect(router.handle({ method: "GET", pathname: "/product/orders/0x0000000000000000000000000000000000000000000000000000000000000909" }))
+      .resolves.toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+
+    // 订单出现指派参与者：任务就绪（HookReady）+ 槽位权限上的
+    // SignalSubmitterAuthorized（submitter=supplierWallet）。
+    const orderId = "0x0000000000000000000000000000000000000000000000000000000000000909" as Hex;
+    const permission = demoZhixuDetail.orderPermissionTable.find((entry) => entry.roleSlotId === roleSlotId)
+      ?? demoZhixuDetail.orderPermissionTable[0]!;
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...seedOrderWithAuthorizationEvents(orderId, supplierWallet, permission.stageId)
+      ]
+    });
+    const supplierHeaders = { "x-uvp-store-dev-anchored-address": supplierWallet };
+    const outsiderHeaders = { "x-uvp-store-dev-anchored-address": outsiderWallet };
+
+    // 参与者本人可见。
+    const supplierList = await router.handle({ method: "GET", pathname: "/product/orders", headers: supplierHeaders });
+    expect(supplierList.status).toBe(200);
+    expect(((supplierList.body as { orders: { orderId: string }[] }).orders)
+      .some((order) => order.orderId.toLowerCase() === orderId.toLowerCase())).toBe(true);
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${orderId}`, headers: supplierHeaders }))
+      .resolves.toMatchObject({ status: 200 });
+
+    // 无关参与者：列表不含该订单，详情 404（不可区分不存在）。
+    const outsiderList = await router.handle({ method: "GET", pathname: "/product/orders", headers: outsiderHeaders });
+    expect(outsiderList.status).toBe(200);
+    expect(((outsiderList.body as { orders: { orderId: string }[] }).orders)
+      .some((order) => order.orderId.toLowerCase() === orderId.toLowerCase())).toBe(false);
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${orderId}`, headers: outsiderHeaders }))
+      .resolves.toMatchObject({ status: 404, body: { error: "product_order_not_found" } });
   });
 
 it("revoking an anchored address immediately invalidates sessions for it", async () => {
@@ -710,6 +783,18 @@ it("revoking an anchored address immediately invalidates sessions for it", async
       body: { decision: "approve" }
     });
     expect(publishDenied.status).toBe(403);
+
+    // 未公开 listing（imported，上架审核未完成）服务端一律拦截加入——
+    // 前端被抑制的入口不得可直调 API 绕过。
+    const applicantTokenEarly = await login(router, supplierWallet);
+    const joinWhileImported = await router.handle({
+      method: "POST",
+      pathname: "/store/join-applications",
+      headers: { "x-uvp-store-session": applicantTokenEarly },
+      body: { planId, roleSlotId, authorizationKind: "signal_submitter" }
+    });
+    expect(joinWhileImported.status).toBe(409);
+    expect(joinWhileImported.body).toMatchObject({ error: "join_entry_suppressed" });
 
     // 公开 → 下架后加入入口被服务端抑制（红线）。
     await router.handle({
@@ -914,13 +999,13 @@ function decorationBody(overrides: Record<string, unknown> = {}): Record<string,
   };
 }
 
-async function buildRouter(options: { readonly operatorWallets?: readonly Address[] } = {}): Promise<ApiRouter> {
+async function buildRouter(options: { readonly operatorWallets?: readonly Address[]; readonly adminWallets?: readonly Address[] } = {}): Promise<ApiRouter> {
   const store = new MemoryProjectionStore();
   await seedPlanProjection(store);
   return createApiRouter(store, routerOptions(options));
 }
 
-function routerOptions(options: { readonly operatorWallets?: readonly Address[] } = {}) {
+function routerOptions(options: { readonly operatorWallets?: readonly Address[]; readonly adminWallets?: readonly Address[] } = {}) {
   return {
     productSchemaResolver: crossBorderSchemaResolver(),
     submissionChainId: 31337,
@@ -933,7 +1018,7 @@ function routerOptions(options: { readonly operatorWallets?: readonly Address[] 
       walletSession: {
         enabled: true,
         operatorWallets: options.operatorWallets ?? [],
-        adminWallets: [],
+        adminWallets: options.adminWallets ?? [],
         sessionTtlSeconds: 43200,
         challengeTtlSeconds: 300,
         devAnchoredAddressHeaderEnabled: true
@@ -981,30 +1066,50 @@ async function seedOrderWithAuthorization(store: MemoryProjectionStore, submitte
   const orderId = "0x0000000000000000000000000000000000000000000000000000000000000909" as Hex;
   await store.resetFromEvents({
     deploymentBlock: 0n,
-    events: [
-      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 2n }),
-      chainEvent(1n, 1, "PlanPublisherRecorded", { planId, publisher: publisherAddress }),
-      chainEvent(2n, 0, "IdentityBindingRegistered", {
-        bindingId: `0x${"aa".repeat(32)}`,
-        subjectId: derivedJoinSubject(supplierWallet),
-        account: supplierWallet,
-        descriptorHash: `0x${"bb".repeat(32)}`,
-        descriptorURI: "uvp-governance://metadata/test",
-        registrar: publisherAddress
-      }),
-      chainEvent(3n, 0, "OrderRegistered", { orderId, planId }),
-      // 簇 D 修正（审计三轮）：授权事件的 (sourceId, signalId) 必须落在
-      // 申请槽位的 orderPermissionTable 能力集合内——激活判定不再接受
-      // "同 plan 任意信号"。
-      chainEvent(4n, 0, "SignalSubmitterAuthorized", {
-        orderId,
-        ...slotPermissionKeyForRoleSlot(roleSlotId),
-        submitter,
-        role: `0x${"33".repeat(32)}`,
-        metadataHash: `0x${"44".repeat(32)}`
-      })
-    ]
+    events: seedOrderWithAuthorizationEvents(orderId, submitter)
   });
+}
+
+/** 订单 + 槽位权限授权 + 任务就绪（任务由此携带 submitter 的 assigneeWallet）。 */
+function seedOrderWithAuthorizationEvents(orderId: Hex, submitter: Address, hookStageId?: string): readonly ChainEvent[] {
+  const permissionStageId = hookStageId
+    ?? (demoZhixuDetail.orderPermissionTable.find((entry) => entry.roleSlotId === roleSlotId)
+      ?? demoZhixuDetail.orderPermissionTable[0]!).stageId;
+  return [
+    chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 2n }),
+    chainEvent(1n, 1, "PlanPublisherRecorded", { planId, publisher: publisherAddress }),
+    chainEvent(2n, 0, "IdentityBindingRegistered", {
+      bindingId: `0x${"aa".repeat(32)}`,
+      subjectId: derivedJoinSubject(supplierWallet),
+      account: supplierWallet,
+      descriptorHash: `0x${"bb".repeat(32)}`,
+      descriptorURI: "uvp-governance://metadata/test",
+      registrar: publisherAddress
+    }),
+    chainEvent(3n, 0, "OrderRegistered", { orderId, planId }),
+    // 簇 D 修正（审计三轮）：授权事件的 (sourceId, signalId) 必须落在
+    // 申请槽位的 orderPermissionTable 能力集合内——激活判定不再接受
+    // "同 plan 任意信号"。
+    chainEvent(4n, 0, "SignalSubmitterAuthorized", {
+      orderId,
+      ...slotPermissionKeyForRoleSlot(roleSlotId),
+      submitter,
+      role: `0x${"33".repeat(32)}`,
+      metadataHash: `0x${"44".repeat(32)}`
+    }),
+    // 任务就绪（capability 解析按 stage 匹配槽位权限 → assigneeWallet）。
+    // stageId 以 utf8 填充 bytes32 播种（decodedStageId 可还原显示名）。
+    chainEvent(5n, 0, "HookReady", {
+      orderId,
+      hookId: `0x${"cc".repeat(32)}`,
+      stageId: bytes32Text(permissionStageId),
+      hookName: bytes32Text("confirm_stage")
+    })
+  ];
+}
+
+function bytes32Text(value: string): Hex {
+  return `0x${Buffer.from(value, "utf8").toString("hex").padEnd(64, "0")}` as Hex;
 }
 
 async function login(router: ApiRouter, address: Address): Promise<string> {

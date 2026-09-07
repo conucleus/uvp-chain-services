@@ -359,6 +359,25 @@ export function createProductStageExecutorPatchService(
         "stage executor patch",
       );
 
+      const signature = normalizeSignature(input.signature);
+      const recoveredSelector = await recoverExecutorSelector(
+        prepared,
+        signature,
+      );
+      if (recoveredSelector !== prepared.selectorWallet) {
+        throw new ProductStagePatchError(
+          400,
+          "invalid_signature",
+          "signature recovery did not match prepared selector",
+          {
+            recoveredSelector,
+          },
+        );
+      }
+
+      // 过期检查必须在签名恢复之后：消费 prepare（落 expired 档案 +
+      // markPreparedUsed）是写操作，任何持有 prepareId 的人都能触发——
+      // 未验签就烧毁他人的已过期 prepare 等于让无关方替持有人做决定。
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(prepared.deadline) < currentSeconds) {
         const submission = expiredExecutorSubmission(
@@ -378,21 +397,6 @@ export function createProductStageExecutorPatchService(
       const context = await resolveSelectorTaskContext(options.store, taskId);
       ensureExecutorPreparedStillCurrent(context.order, prepared);
 
-      const signature = normalizeSignature(input.signature);
-      const recoveredSelector = await recoverExecutorSelector(
-        prepared,
-        signature,
-      );
-      if (recoveredSelector !== prepared.selectorWallet) {
-        throw new ProductStagePatchError(
-          400,
-          "invalid_signature",
-          "signature recovery did not match prepared selector",
-          {
-            recoveredSelector,
-          },
-        );
-      }
       const previousSignature = signatureForPreviousExecutor(
         prepared,
         input.previousExecutorSignature,
@@ -644,6 +648,25 @@ export function createProductStageResourcePatchService(
         "stage resource patch",
       );
 
+      const signature = normalizeSignature(input.signature);
+      const recoveredSelector = await recoverResourceSelector(
+        prepared,
+        signature,
+      );
+      if (recoveredSelector !== prepared.selectorWallet) {
+        throw new ProductStagePatchError(
+          400,
+          "invalid_signature",
+          "signature recovery did not match prepared selector",
+          {
+            recoveredSelector,
+          },
+        );
+      }
+
+      // 过期检查必须在签名恢复之后：消费 prepare（落 expired 档案 +
+      // markPreparedUsed）是写操作，任何持有 prepareId 的人都能触发——
+      // 未验签就烧毁他人的已过期 prepare 等于让无关方替持有人做决定。
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(prepared.deadline) < currentSeconds) {
         const submission = expiredResourceSubmission(
@@ -662,22 +685,6 @@ export function createProductStageResourcePatchService(
 
       const context = await resolveSelectorTaskContext(options.store, taskId);
       ensureResourcePreparedStillCurrent(context.order, prepared);
-
-      const signature = normalizeSignature(input.signature);
-      const recoveredSelector = await recoverResourceSelector(
-        prepared,
-        signature,
-      );
-      if (recoveredSelector !== prepared.selectorWallet) {
-        throw new ProductStagePatchError(
-          400,
-          "invalid_signature",
-          "signature recovery did not match prepared selector",
-          {
-            recoveredSelector,
-          },
-        );
-      }
       const reserved = await stageResourcePatchStore.reserveNonce(
         prepared.nonceKey,
       );

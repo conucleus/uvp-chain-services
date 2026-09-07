@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { loadConfigFromEnv } from "../config/index.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
@@ -206,10 +207,12 @@ export class RelayerService implements LifecycleService {
           classifyRelaySubmitterError(error, this.retrySchedule(priorFailedAttempts)),
           priorFailedAttempts
         );
-        if (classification.retryable) {
-          // A submitter rejection carries no txHash, so the nonce is safe to
-          // retry. This includes operator-recoverable insufficient-funds
-          // failures; a funded relayer can retry the same signed payload.
+        // nonce store 只是服务侧防双发去重，链从未接受该业务 nonce 的
+        // submitter 抛错路径（预检拒绝、revert、重试预算耗尽）都不构成
+        // "链上已消费"；继续占用会让同 (signer,nonce) 的合法重签永久
+        // duplicate_signer_nonce 死信。唯一例外是 duplicate_transaction：
+        // 候选 txHash 可能仍在池中/已上链，回执未裁决前不得释放。
+        if (classification.errorCode !== "duplicate_transaction") {
           await this.releaseNonce(request);
         }
 
@@ -1090,12 +1093,49 @@ function freezeRelayRequest(request: RelayRequest): Readonly<RelayRequest> {
 }
 
 function submissionId(request: RelayRequest): string {
+  // 幂等键必须包含载荷身份：只按 (signer,nonce) 收敛会让同 nonce 的
+  // 不同载荷互相顶替——旧载荷的台账被覆盖、永不再广播，新调用却拿到
+  // 旧载荷的 txHash。指纹覆盖 typedData 全部签名字段（domain/types/
+  // primaryType/message），排除 signature 本身（ECDSA 每次重签不同，
+  // 纳入会破坏同载荷幂等）。不同载荷 → 不同 submissionId 并行记账；
+  // 同 (signer,nonce) 的互斥由 nonce store 承担（链上已消费时第二个
+  // 载荷 reserve 失败，按 duplicate_signer_nonce 拒绝，不顶替前者）。
   return [
     request.business.chainId,
     request.business.verifyingContract.toLowerCase(),
     request.business.signer.toLowerCase(),
-    request.business.nonce
+    request.business.nonce,
+    relayPayloadFingerprint(request)
   ].join(":");
+}
+
+function relayPayloadFingerprint(request: RelayRequest): string {
+  return `0x${createHash("sha256")
+    .update(canonicalRelayPayload({
+      domain: request.typedData.domain,
+      types: request.typedData.types,
+      primaryType: request.typedData.primaryType,
+      message: request.typedData.message
+    }))
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+/** 稳定序列化：键排序、过滤 undefined、bigint 显式标记，同一逻辑载荷恒等。 */
+function canonicalRelayPayload(value: unknown): string {
+  if (typeof value === "bigint") {
+    return `${value.toString()}n`;
+  }
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value ?? null) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalRelayPayload).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, entryValue]) => entryValue !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${canonicalRelayPayload(entryValue)}`).join(",")}}`;
 }
 
 function orderKey(request: RelayRequest): string {

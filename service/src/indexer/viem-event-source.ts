@@ -13,7 +13,7 @@ import { ConfigError, noopLogger, type Address, type Hex, type Logger } from "..
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
-// UVPStateMachine v0.9（SM ABI fixture：uvp-state-machine.v0.9.json）：
+// UVPStateMachine v0.10（SM ABI fixture：uvp-state-machine.v0.10.json）：
 // 订单维度事件全部 plan-scoped；patch/metadata/derived/link/dock 事件由
 // 各模块合约发出，按 deployment.modules 分地址挂 ABI。
 const stateMachineAbi = parseAbi([
@@ -30,7 +30,9 @@ const stateMachineAbi = parseAbi([
   "event SignalSubmitterAuthorized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,address submitter,bytes32 role,bytes32 metadataHash)",
   "event SignalSubmitted(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
   "event StageMaterialized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed stageId,bytes32 triggerHookId,bytes32 sourceId,bytes32 signalId)",
-  "event OrderTriggered(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed triggerStageId,bytes32 sourceId,bytes32 signalId,address submitter)",
+  // v0.10：OrderTriggered 增加 triggerHookId——回放方不必反查 plan 即可
+  // 定位出生 hook（多 hook 阶段下 stageId 不足以定位求值语义）。
+  "event OrderTriggered(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed triggerStageId,bytes32 triggerHookId,bytes32 sourceId,bytes32 signalId,address submitter)",
   "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)",
   "event StageExecutorSignalDelegated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,bytes32 sourceId,bytes32 signalId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce)",
   "event HookStatusChanged(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint8 previousStatus,uint8 newStatus,uint64 dueAt)",

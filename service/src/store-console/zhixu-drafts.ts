@@ -29,6 +29,7 @@ import type {
   GovernanceService
 } from "../governance/index.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
+import { isPlanRegisteredProjection } from "./version.js";
 
 export type StoreZhixuDraftSourceKind = "zhixu_yaml" | "onchain_hook_plan_manifest";
 
@@ -230,6 +231,12 @@ export function createStoreZhixuDraftWorkflowService(options: {
       const draft = await requireDraft(draftStore, draftId);
       const timestamp = now().toISOString();
       const compiled = compileDraftContent(draft);
+      if (compiled.ok) {
+        // 重编译会以 inferred schema 覆写既有 schema，与 PUT 同门：
+        // 以编译前的草稿锚定状态判定，否则"改内容→重编译刷新 preview→
+        // 再编译"两步即可绕过发布不可变（新 preview 不再命中已发布 plan）。
+        await assertDraftSchemaMutable(draft, options.projectionStore);
+      }
       const updated: StoreZhixuDraftRecord = compiled.ok
         ? {
             ...draft,
@@ -1504,10 +1511,13 @@ async function hasPublishedPlan(
     return false;
   }
   const snapshot = await projectionStore.getOrderSnapshot();
+  // 发布权威是 PlanRegistered(finalize)：桶存在只代表 commitPlan（UVP-02），
+  // 仅 commit 的 plan 不能把草稿置 active/锁 schema。
   return Object.values(snapshot.stateMachinePlans).some(
     (plan) =>
       plan.planId === draft.compilePreview?.planId &&
-      plan.planHash === draft.compilePreview.planHash
+      plan.planHash === draft.compilePreview.planHash &&
+      isPlanRegisteredProjection(plan)
   );
 }
 

@@ -540,6 +540,13 @@ function staleOutcome(checkedAt: string): ResolvedReconcileOutcome {
 }
 
 function isReconcileableRegistration(registration: ProductOrderTriggerRecord): boolean {
+  // 与 submissions/governance 口径对齐：failed + txHash 必须继续复核——
+  // 链上真相可能推翻本地失败标记（迟到成功自愈为 confirmed）。此前只认
+  // submitted/indexing，超时置 failed 后永不再复核，product 侧重试只能
+  // 开新单，同一稿产生两个 orderId。无 txHash 的 failed 从未上链，无回执可查。
+  if (registration.status === "failed") {
+    return Boolean(registration.txHash);
+  }
   return registration.status === "submitted" || registration.status === "indexing";
 }
 
@@ -554,6 +561,10 @@ function isReconcileableSubmission(submission: ProductSubmissionDTO): boolean {
 }
 
 function isReconcileableGovernanceLog(log: GovernanceTxLogDTO): boolean {
+  // 同 registration 口径：failed + txHash 继续复核，迟到成功自愈。
+  if (log.status === "failed") {
+    return Boolean(log.txHash);
+  }
   return log.status === "pending" || log.status === "broadcasting" || log.status === "indexing";
 }
 
@@ -780,10 +791,6 @@ function attemptRetryStateFromOutcome(
     return "not_retryable";
   }
   return "not_applicable";
-}
-
-function retryableOf(record: ReconcileableTxRecord): boolean {
-  return "retryable" in record && typeof record.retryable === "boolean" ? record.retryable : false;
 }
 
 function timedOut(record: ReconcileableTxRecord, timeoutMs: number, now: Date): boolean {

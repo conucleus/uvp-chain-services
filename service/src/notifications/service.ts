@@ -29,7 +29,6 @@ export type NotificationDeliveryStatus = "pending" | "sent" | "failed" | "skippe
 export type NotificationActivationStatus = "accepted" | "started" | "rejected";
 
 export type NotificationSkippedReason =
-  | "not_finalized"
   | "order_projection_missing"
   | "signal_projection_missing"
   | "artifact_mapping_missing"
@@ -40,7 +39,11 @@ export type NotificationSkippedReason =
   | "notification_profile_missing"
   | "transport_not_supported"
   | "executor_watch_self_managed"
-  | "transport_adapter_missing";
+  | "transport_adapter_missing"
+  // dead_letter 终态的原因码（自动补投预算耗尽）：与 skipped 原因共用
+  // reason 词表，不入枚举会在 evidence 视图被统一掩成
+  // redacted_operator_reason，自动耗尽终态不可归因。
+  | "delivery_attempts_exhausted";
 
 export interface SignalNotificationPayload {
   readonly version: "uvp.signalReceivedNotification.v1";
@@ -762,7 +765,6 @@ function redactedDeliveryReasonCode(reason: string): string {
 
 function isNotificationSkippedReason(reason: string): reason is NotificationSkippedReason {
   return [
-    "not_finalized",
     "order_projection_missing",
     "signal_projection_missing",
     "artifact_mapping_missing",
@@ -773,7 +775,8 @@ function isNotificationSkippedReason(reason: string): reason is NotificationSkip
     "notification_profile_missing",
     "transport_not_supported",
     "executor_watch_self_managed",
-    "transport_adapter_missing"
+    "transport_adapter_missing",
+    "delivery_attempts_exhausted"
   ].includes(reason);
 }
 
@@ -1310,12 +1313,11 @@ function supplierMetadataByWallet(
   if (matches.length === 0) {
     return { status: "skipped", reason: "store_supplier_not_found" };
   }
-  const first = matches[0];
   if (matches.length > 1) {
-    return first
-      ? { status: "skipped", reason: "store_supplier_ambiguous", supplierMetadata: first }
-      : { status: "skipped", reason: "store_supplier_ambiguous" };
+    // 歧义不带主体：带第一个命中会把别人的通知记到/投给任意首位供应商。
+    return { status: "skipped", reason: "store_supplier_ambiguous" };
   }
+  const first = matches[0];
   return first
     ? { status: "ok", supplierMetadata: first }
     : { status: "skipped", reason: "store_supplier_not_found" };
@@ -1334,12 +1336,11 @@ function supplierMetadataByStage(
   if (matches.length === 0) {
     return { status: "skipped", reason: "receiver_not_found" };
   }
-  const first = matches[0];
   if (matches.length > 1) {
-    return first
-      ? { status: "skipped", reason: "receiver_ambiguous", supplierMetadata: first }
-      : { status: "skipped", reason: "receiver_ambiguous" };
+    // 同上：歧义不带第一个命中。
+    return { status: "skipped", reason: "receiver_ambiguous" };
   }
+  const first = matches[0];
   return first
     ? { status: "ok", supplierMetadata: first }
     : { status: "skipped", reason: "receiver_not_found" };
@@ -1489,6 +1490,12 @@ async function resolveRetryTransport(
   options: CreateNotificationServiceOptions,
   delivery: NotificationDeliveryRecord
 ): Promise<RetryTransportResolution> {
+  // 无 supplier 定位字段的记录（投影缺失类 skip、歧义未携带主体）不得
+  // 投给任何供应商——空字段过滤对全部供应商恒真，会把含
+  // orderId/payloadHash 的通知投给无关方并标 sent。
+  if (!delivery.supplierSubjectId && !delivery.supplierWallet) {
+    return { status: "skipped", reason: "store_supplier_not_found" };
+  }
   const supplierRows = await options.supplierMetadataStore?.listSuppliers() ?? [];
   const matches = supplierRows.filter((supplier) =>
     (!delivery.supplierSubjectId || supplier.supplierSubjectId === delivery.supplierSubjectId) &&

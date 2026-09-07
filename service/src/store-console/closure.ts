@@ -113,7 +113,11 @@ spec:
       stages:
         - name: intake
           source: buyer
-          sendSignals: ["cmp"]
+          # 自发种子入口（uvp-core 物化门：零 hook 阶段永不可物化，其
+          # sendSignals 无钩子可挂，编译器拒绝该形状）。
+          receiveSignals:
+            START: "buyer::order.intake.seed"
+          sendSignals: ["cmp", "seed"]
           executor:
             supplierType: organization
             supplierID: closure-ops

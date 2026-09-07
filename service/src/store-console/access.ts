@@ -61,7 +61,7 @@ export interface StoreAccessState {
 }
 
 export interface StoreAuthenticationFailure {
-  readonly code: "store_identity_missing" | "store_identity_invalid";
+  readonly code: "store_identity_missing" | "store_identity_invalid" | "store_identity_unavailable";
   readonly message: string;
 }
 
@@ -277,7 +277,8 @@ function resolveStoreAccessFromHeaders(
 interface JwtVerifier {
   readonly config: RequiredJwtStoreAuthConfig;
   jwks?: ReturnType<typeof createRemoteJWKSet>;
-  jwksPromise?: Promise<ReturnType<typeof createRemoteJWKSet>>;
+  // discovery 失败时清空重试，类型显式含 undefined。
+  jwksPromise?: Promise<ReturnType<typeof createRemoteJWKSet>> | undefined;
 }
 
 interface RequiredJwtStoreAuthConfig extends StoreAuthConfig {
@@ -319,7 +320,15 @@ async function resolveStoreAccessFromJwt(
       clockTolerance: verifier.config.clockToleranceSeconds
     });
     return storeAccessFromJwtPayload(result.payload, verifier.config);
-  } catch {
+  } catch (error) {
+    // discovery/JWKS 故障不是 token 无效：token 本身可能合法，
+    // 标成 unavailable 才能区分"换 token 也没用"与"身份源瞬断"。
+    if (isJwksDiscoveryFailure(error)) {
+      return anonymousAccess("jwt", {
+        code: "store_identity_unavailable",
+        message: `Store identity provider discovery failed: ${error instanceof Error ? error.message : String(error)}`
+      });
+    }
     return anonymousAccess("jwt", {
       code: "store_identity_invalid",
       message: "Authorization Bearer token is invalid"
@@ -327,35 +336,71 @@ async function resolveStoreAccessFromJwt(
   }
 }
 
+const JWKS_DISCOVERY_FAILURE = "StoreAuthJwksDiscoveryFailure";
+
 async function jwksForVerifier(verifier: JwtVerifier): Promise<ReturnType<typeof createRemoteJWKSet>> {
   if (verifier.jwks) {
     return verifier.jwks;
   }
-  verifier.jwksPromise ??= discoverStoreAuthJwks(verifier.config);
-  verifier.jwks = await verifier.jwksPromise;
+  if (!verifier.jwksPromise) {
+    verifier.jwksPromise = discoverStoreAuthJwks(verifier.config);
+  }
+  try {
+    verifier.jwks = await verifier.jwksPromise;
+  } catch (error) {
+    // ??= 只在 undefined 时赋值：rejected promise 若留在缓存里，
+    // 一次 discovery 瞬断会让 jwt 模式所有 Bearer 请求 403 到重启。
+    // 失败即清缓存，下次请求重新 discovery。
+    verifier.jwksPromise = undefined;
+    throw error;
+  }
   return verifier.jwks;
+}
+
+function isJwksDiscoveryFailure(error: unknown): boolean {
+  return error instanceof Error && error.name === JWKS_DISCOVERY_FAILURE;
 }
 
 async function discoverStoreAuthJwks(config: RequiredJwtStoreAuthConfig): Promise<ReturnType<typeof createRemoteJWKSet>> {
   const discoveryUrl = config.oidcDiscoveryUrl ?? `${config.issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
-  const response = await fetch(discoveryUrl, {
-    headers: { accept: "application/json" }
-  });
-  if (!response.ok) {
-    throw new Error("OIDC discovery request failed");
+  let response: Response;
+  try {
+    response = await fetch(discoveryUrl, {
+      headers: { accept: "application/json" }
+    });
+  } catch (cause) {
+    throw namedDiscoveryError("OIDC discovery request failed", cause);
   }
-  const metadata = await response.json() as unknown;
+  if (!response.ok) {
+    throw namedDiscoveryError(`OIDC discovery request failed with status ${response.status}`);
+  }
+  let metadata: unknown;
+  try {
+    metadata = await response.json() as unknown;
+  } catch (cause) {
+    throw namedDiscoveryError("OIDC discovery response is not valid JSON", cause);
+  }
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    throw new Error("OIDC discovery response must be a JSON object");
+    throw namedDiscoveryError("OIDC discovery response must be a JSON object");
   }
   const record = metadata as Record<string, unknown>;
   if (typeof record.issuer === "string" && record.issuer !== config.issuer) {
-    throw new Error("OIDC discovery issuer does not match STORE_AUTH_ISSUER");
+    throw namedDiscoveryError("OIDC discovery issuer does not match STORE_AUTH_ISSUER");
   }
   if (typeof record.jwks_uri !== "string" || record.jwks_uri.trim().length === 0) {
-    throw new Error("OIDC discovery response is missing jwks_uri");
+    throw namedDiscoveryError("OIDC discovery response is missing jwks_uri");
   }
-  return createRemoteJWKSet(new URL(record.jwks_uri));
+  try {
+    return createRemoteJWKSet(new URL(record.jwks_uri));
+  } catch (cause) {
+    throw namedDiscoveryError("OIDC discovery jwks_uri is invalid", cause);
+  }
+}
+
+function namedDiscoveryError(message: string, cause?: unknown): Error {
+  const error = new Error(message, cause === undefined ? undefined : { cause });
+  error.name = JWKS_DISCOVERY_FAILURE;
+  return error;
 }
 
 function storeAccessFromJwtPayload(payload: JWTPayload, config: RequiredJwtStoreAuthConfig): StoreAccessState {

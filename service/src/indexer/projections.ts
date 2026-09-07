@@ -1300,6 +1300,8 @@ function applyOrderTriggered(
   const orderId = requiredBytes32Arg(event, "orderId");
   const planId = requiredBytes32Arg(event, "planId");
   const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
+  // v0.10 起携带 triggerHookId（出生 hook 定位）；旧事件无此字段按可选处理。
+  const triggerHookId = optionalBytes32Arg(event, "triggerHookId");
   const sourceId = requiredBytes32Arg(event, "sourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
   const submitter = requiredAddressArg(event, "submitter");
@@ -1320,7 +1322,13 @@ function applyOrderTriggered(
   order.status = order.status === "unknown" ? "registered" : order.status;
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "触发信号已启动订单", proof, { orderId, planId, sourceId, signalId }));
+  appendOrderTimeline(order, timelineOf(event, "触发信号已启动订单", proof, {
+    orderId,
+    planId,
+    sourceId,
+    signalId,
+    ...(triggerHookId !== undefined ? { triggerHookId } : {})
+  }));
 }
 
 function applyOrderLinked(

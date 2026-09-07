@@ -947,8 +947,9 @@ describe("chain-services config", () => {
     }))).toThrow(/Anvil default private key/);
   });
 
-  it("requires an explicit UVP_FINALITY_CONFIRMATIONS in production but keeps the default elsewhere", () => {
-    // ETH-11：production 不允许静默落到默认值 1（reorg 防线必须显式配置）。
+  it("requires an explicit UVP_FINALITY_CONFIRMATIONS in production, staging and testnet; local keeps the default", () => {
+    // ETH-11 + 0124 F11：非 local 公网环境一律不允许静默落到默认值 1
+    // （reorg 防线必须显式配置），testnet 与 production/staging 同口径。
     const { UVP_FINALITY_CONFIRMATIONS: _finality, ...missingFinality } = productionEnv();
     expect(() => loadConfigFromEnv(missingFinality)).toThrow(
       /UVP_FINALITY_CONFIRMATIONS must be explicitly configured/
@@ -962,8 +963,18 @@ describe("chain-services config", () => {
       UVP_FINALITY_CONFIRMATIONS: "-2"
     }))).toThrow(/UVP_FINALITY_CONFIRMATIONS must be a non-negative safe integer/);
 
-    // 非生产保持默认 1 不变。
     expect(loadConfigFromEnv(stagingEnv(tempDirs)).network.finalityConfirmations).toBe(12);
+
+    const { UVP_FINALITY_CONFIRMATIONS: _testnetFinality, ...missingTestnetFinality } =
+      testnetEnv(testnetPostgresConfigUrl());
+    expect(() => loadConfigFromEnv(missingTestnetFinality)).toThrow(
+      /UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in testnet/
+    );
+    expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
+      UVP_FINALITY_CONFIRMATIONS: "0"
+    }))).toThrow(/UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in testnet/);
+
+    // local 保持默认 1 不变。
     expect(loadConfigFromEnv().network.finalityConfirmations).toBe(1);
   });
 
@@ -1459,6 +1470,8 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: testnetRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: testnetRelayerPrivateKey,
     UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
+    // 0124 F11：testnet 强制显式 finality 确认数。
+    UVP_FINALITY_CONFIRMATIONS: "12",
     // 簇 C 修正（审计三轮）：testnet 必须显式 STORE_AUTH_MODE=jwt 且
     // admin 白名单非空——缺省 dev_headers/空白名单的 fail-open 已废除。
     ...storeAuthJwtEnv,

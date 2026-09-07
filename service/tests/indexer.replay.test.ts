@@ -612,7 +612,12 @@ describe("indexer projection replay", () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events });
     const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
-    const response = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
+    // 订单读有身份门（匿名 401 先于歧义判定）；歧义判定对已认证参与者仍 409。
+    const response = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${stateMachineOrderId}`,
+      headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" }
+    });
 
     expect(response.status).toBe(409);
     expect(response.body).toMatchObject({
@@ -1341,8 +1346,9 @@ describe("indexer projection replay", () => {
     const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
-    const ordersResponse = await router.handle({ method: "GET", pathname: "/product/orders" });
-    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
+    const orderHeaders = { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" };
+    const ordersResponse = await router.handle({ method: "GET", pathname: "/product/orders", headers: orderHeaders });
+    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: orderHeaders });
     const timelineResponse = await router.handle({
       method: "GET",
       pathname: `/product/orders/${stateMachineOrderId}/timeline`
@@ -1943,9 +1949,11 @@ describe("indexer projection replay", () => {
           }
         }
       });
-      // 首轮 rebuild：通知处理时 cursor 尚未保存（undefined）。
+      // 首轮 rebuild（0042 F-01 契约）：游标与"整库事件替换"同事务收敛，
+      // 通知处理发生在事务提交之后——此时持久游标已就位（10n）。重建提
+      // 交后、通知前崩溃不再可能留下越过重建覆盖区间的旧游标。
       await indexer.rebuildFromDeploymentBlockWithSummary();
-      expect(cursorNextBlockAtNotification).toEqual([undefined]);
+      expect(cursorNextBlockAtNotification).toEqual([10n]);
       await expect(store.getCursor(scope)).resolves.toMatchObject({ nextBlock: 10n });
 
       // 增量刷新携带新 SignalSubmitted：通知处理时游标仍停在旧位置 10n，

@@ -91,7 +91,10 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       const nonce = randomBytes(16).toString("hex");
       const issuedAt = timestamp.toISOString();
       const expiresAt = new Date(timestamp.getTime() + config.challengeTtlSeconds * 1000).toISOString();
-      const chainId = optionalString(record, "chainId");
+      // challenge 入口完全未鉴权且 message 会被整段落库：chainId 是唯一
+      // 由调用方提供并拼进 message 的自由文本字段，必须限长+字符集白名单，
+      // 否则任意长度写入直接放大成存储/内存 DoS（memory 驱动是无界 Map）。
+      const chainId = boundedOptionalString(record, "chainId", CHALLENGE_CHAIN_ID_PATTERN, CHALLENGE_INPUT_MAX_LENGTH);
       const message = buildStoreLoginMessage({
         address,
         intent,
@@ -125,8 +128,11 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
         throw new StoreSessionServiceError(403, "store_wallet_session_disabled", "wallet sessions are not enabled for this deployment");
       }
       const record = requireBodyRecord(input);
-      const nonce = requiredString(record, "nonce");
-      const signature = requiredString(record, "signature") as Hex;
+      // 入口字段全部限长：nonce 由本服务铸造（32 位小写 hex），签名是
+      // 0x 前缀 hex——超长值在触达存储/验签前按 400 拒绝，不给未鉴权
+      // 调用方任何放大面。
+      const nonce = boundedRequiredString(record, "nonce", /^[0-9a-f]+$/, CHALLENGE_INPUT_MAX_LENGTH);
+      const signature = boundedRequiredString(record, "signature", /^0x[0-9a-fA-F]+$/, 132) as Hex;
       const challenge = await store.getChallenge(nonce);
       if (!challenge || challenge.consumedAt) {
         throw new StoreSessionServiceError(401, "store_challenge_invalid", "challenge is unknown or already used");
@@ -195,6 +201,11 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
     },
 
     async resolveSessionFromToken(token) {
+      // 停用开关半关收敛：challenge/verify 都按 disabled 拒绝，存量
+      // token 不能在 TTL 内继续生效。
+      if (!config.enabled) {
+        return undefined;
+      }
       if (!token || !token.startsWith(STORE_SESSION_TOKEN_PREFIX)) {
         return undefined;
       }
@@ -374,7 +385,6 @@ function capabilitiesForAccessLevel(level: StoreAccessLevel): readonly StoreCapa
         "store.draft.import",
         "store.draft.compile",
         "store.draft.schema.save",
-        "store.draft.review",
         "store.supplier.create",
         "store.supplier.review",
         "store.supplier.tags.update",
@@ -392,7 +402,6 @@ function capabilitiesForAccessLevel(level: StoreAccessLevel): readonly StoreCapa
         "store.draft.import",
         "store.draft.compile",
         "store.draft.schema.save",
-        "store.draft.review",
         "store.supplier.create",
         "store.supplier.review",
         "store.supplier.tags.update",
@@ -407,6 +416,9 @@ function capabilitiesForAccessLevel(level: StoreAccessLevel): readonly StoreCapa
     case "anonymous_read":
       return ["store.read"];
   }
+  // store.draft.review 不下放：zhixu 草稿审核是治理动作（governance
+  // review 落库），提交者与审核者职责分离，专属 governance_admin
+  // （store-console/access.ts 口径；JWT 侧同样刻意不映射给运营级）。
 }
 
 function storeReadCapabilities(): readonly StoreCapability[] {
@@ -547,6 +559,44 @@ function optionalString(record: Record<string, unknown>, field: string): string 
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** 未鉴权入口的字符串上限（防存储/内存放大，128 字符足够任何标识符）。 */
+const CHALLENGE_INPUT_MAX_LENGTH = 128;
+/** chainId 在签名 message 中只是展示性标识，收窄到安全子集即可。 */
+const CHALLENGE_CHAIN_ID_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._:-]*$/;
+
+function boundedOptionalString(
+  record: Record<string, unknown>,
+  field: string,
+  pattern: RegExp,
+  maxLength: number
+): string | undefined {
+  const value = optionalString(record, field);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value.length > maxLength || !pattern.test(value)) {
+    throw new StoreSessionServiceError(
+      400,
+      "invalid_body",
+      `${field} must match ${String(pattern)} and be at most ${maxLength} characters`
+    );
+  }
+  return value;
+}
+
+function boundedRequiredString(
+  record: Record<string, unknown>,
+  field: string,
+  pattern: RegExp,
+  maxLength: number
+): string {
+  const value = boundedOptionalString(record, field, pattern, maxLength);
+  if (!value) {
+    throw new StoreSessionServiceError(400, "invalid_body", `${field} must be a non-empty string`);
+  }
+  return value;
 }
 
 function parseOptionalAddress(value: string | undefined): Address | undefined {

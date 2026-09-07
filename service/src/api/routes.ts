@@ -377,11 +377,10 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
 export function productBffStoreSubmissionAuthorization(store: ProductBffStore): SubmissionAuthorizationAdapter {
   return {
     async authorize(request) {
-      const overlayAuthorization = productBffActiveStageExecutorAuthorization(request);
-      if (overlayAuthorization) {
-        return overlayAuthorization;
-      }
-
+      // 《授权与签名规则》§五：执行者变更/委任不抹除既有的显式订单级
+      // 授权——先看显式 trigger 授权，命中即放行；未命中再看阶段委任的
+      // 在任执行者（overlay）。此前 overlay 存在时一票否决显式授权者，
+      // 与合约口径（显式优先）相反。
       const registrations = await store.listRegistrations();
       const matches = registrations.filter((item) =>
         equalHex(item.orderId, request.onchainOrderId) || item.orderId.toLowerCase() === request.orderId.toLowerCase()
@@ -397,22 +396,26 @@ export function productBffStoreSubmissionAuthorization(store: ProductBffStore): 
         };
       }
       const registration = matches[0];
-      if (!registration) {
-        return {
-          authorized: false,
-          source: "product_bff_trigger",
-          reason: "order trigger authorization was not found"
-        };
+      if (registration) {
+        const authorized = registration.authorizations.some((authorization) =>
+          equalHex(authorization.sourceId, request.sourceId) &&
+          equalHex(authorization.signalId, request.signalId) &&
+          authorization.submitter.toLowerCase() === request.submitter.toLowerCase()
+        );
+        if (authorized) {
+          return { authorized: true, source: "product_bff_trigger" };
+        }
       }
-      const authorized = registration.authorizations.some((authorization) =>
-        equalHex(authorization.sourceId, request.sourceId) &&
-        equalHex(authorization.signalId, request.signalId) &&
-        authorization.submitter.toLowerCase() === request.submitter.toLowerCase()
-      );
+      const overlayAuthorization = productBffActiveStageExecutorAuthorization(request);
+      if (overlayAuthorization) {
+        return overlayAuthorization;
+      }
       return {
-        authorized,
+        authorized: false,
         source: "product_bff_trigger",
-        ...(authorized ? {} : { reason: "submitter is not present in order trigger authorizations" })
+        reason: registration
+          ? "submitter is not present in order trigger authorizations"
+          : "order trigger authorization was not found"
       };
     }
   };

@@ -77,7 +77,11 @@ spec:
       stages:
         - name: gate
           source: buyer
-          sendSignals: ["ready"]
+          # 自发种子入口（uvp-core 物化门：零 hook 阶段永不可物化，其
+          # sendSignals 无钩子可挂，编译器拒绝该形状）。
+          receiveSignals:
+            START: "buyer::selector.gate.seed"
+          sendSignals: ["ready", "seed"]
           executor:
             supplierType: organization
             supplierID: selector-ops
@@ -334,9 +338,16 @@ describe("Store Zhixu draft workflow", () => {
     });
 
     const explicit = await confirmDraftProductSchema(router, draft.draftId);
+    // validate 回显草稿结构（stageId/roleSlotId/path）——与 GET/PUT 同门
+    //（能力 + 锚定），匿名调用 401。
     await expect(router.handle({
       method: "POST",
       pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema/validate`
+    })).resolves.toMatchObject({ status: 401 });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema/validate`,
+      headers: storeOperatorHeaders
     })).resolves.toMatchObject({
       status: 200,
       body: {

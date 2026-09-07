@@ -1382,6 +1382,9 @@ function requireTriggerSubmitter(
     "participant.walletAddress",
   );
   if (authorityWallet !== submitter) {
+    // details 不携带 expectedWalletAddress：自报比对的年代先打 403 拿到
+    // 执行者钱包再冒名重放即可绕过；钱包由会话锚定后错误响应也不得
+    // 再泄露执行者地址。
     throw new ProductBffError(
       403,
       "trigger_submitter_not_authorized",
@@ -1389,8 +1392,6 @@ function requireTriggerSubmitter(
       {
         roleSlotId: authority.roleSlotId,
         roleLabel: authority.roleLabel,
-        expectedWalletAddress: authorityWallet,
-        walletAddress: submitter,
         ...(authority.stageId ? { stageId: authority.stageId } : {}),
       },
     );

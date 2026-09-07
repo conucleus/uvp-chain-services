@@ -75,7 +75,8 @@ export interface EvidenceService {
   uploadEvidence(input: CreateEvidenceRequestDTO, principal: EvidencePrincipal): Promise<EvidenceUploadResponseDTO>;
   getEvidence(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceRecordDTO | undefined>;
   getProof(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceProofDTO | undefined>;
-  bindEvidence(input: BindEvidenceRequestDTO): Promise<EvidenceRecordDTO | undefined>;
+  /** 调用方主体必须显式传入（业务签名者/admin），匿名绑定被拒。 */
+  bindEvidence(input: BindEvidenceRequestDTO, principal: EvidencePrincipal): Promise<EvidenceRecordDTO | undefined>;
   /**
    * 第二副本 verify 的服务端接线（admin 专用）。
    */
@@ -155,11 +156,13 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
         metadataHash,
         documentType,
         ...(orderId ? { orderId } : {}),
+        ...(orderId ? {} : draftId ? { draftId } : {}),
         stageIdentifier
       });
       // 重复上传幂等：同一 owner 再次提交完全相同
-      // 的证据载荷（content+metadata+order+stage 全等）时返回既有记录，
-      // 不追加内容完全相同的副本。
+      // 的证据载荷（content+metadata+order/draft+stage 全等，draftId 参与
+      // 指纹）时返回既有记录，不追加内容完全相同的副本，也不会把另一
+      // 草稿的同内容凭证错记到本草稿名下。
       const existing = await metadataStore.findOwnedByPayloadHash?.(payloadHash, ownerParticipantId);
       if (existing) {
         return {
@@ -272,7 +275,13 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
       };
     },
 
-    async bindEvidence(input) {
+    async bindEvidence(input, principal) {
+      // 调用方主体显式传入并校验：bind 是状态迁移写（uploaded→bound +
+      // 链上定位落档），不允许匿名触发；内部调用方（submission 广播后的
+      // 绑定）传业务签名者。防回潮：将来任何 HTTP 暴露都必须先回答
+      // "谁在绑"。
+      const bindingPrincipal = normalizePrincipal(principal);
+      requireAuthenticated(bindingPrincipal);
       const binding = normalizeBinding(input, now);
       const record = await metadataStore.get(binding.evidenceId);
       if (!record) {
@@ -289,11 +298,14 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
     },
 
     async verifyEvidenceBackup(evidenceId, principal) {
-      // admin 专用端点同样先鉴权后读取，存在性不泄露。
+      // admin 专用（接口注释即契约）：verify 虽是读，但暴露副本布局与
+      // 存储定位——与 restore 同门，不给读级主体探测面。角色先于存在性
+      // 判定，非 admin 一律 403，不泄露 evidence 存在与否。
       const normalizedPrincipal = normalizePrincipal(principal);
       requireAuthenticated(normalizedPrincipal);
+      requireAdminPrincipal(normalizedPrincipal);
       const record = await metadataStore.get(evidenceId);
-      if (!record || !canReadEvidence(normalizedPrincipal, record)) {
+      if (!record) {
         return undefined;
       }
       const backupStorage = backupStorageOf(storage);
@@ -313,11 +325,13 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
     },
 
     async restoreEvidenceBackup(evidenceId, principal) {
-      // 同上：先鉴权后读取。
+      // admin 专用：restore 会向主存储写回对象——读级主体（owner/策略
+      // reader/ adjudicator）一律 403，角色先于存在性判定。
       const normalizedPrincipal = normalizePrincipal(principal);
       requireAuthenticated(normalizedPrincipal);
+      requireAdminPrincipal(normalizedPrincipal);
       const record = await metadataStore.get(evidenceId);
-      if (!record || !canReadEvidence(normalizedPrincipal, record)) {
+      if (!record) {
         return undefined;
       }
       const backupStorage = backupStorageOf(storage);
@@ -342,6 +356,16 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
       };
     }
   };
+}
+
+function requireAdminPrincipal(principal: EvidencePrincipal): void {
+  if (principal.role !== "admin") {
+    throw new EvidenceServiceError(
+      "forbidden",
+      "evidence backup verify/restore is admin-only; read-level principals cannot trigger primary-store writes or backup probing",
+      403
+    );
+  }
 }
 
 function backupStorageOf(storage: EvidenceStorage): BackupEvidenceStorage | undefined {

@@ -296,9 +296,11 @@ describe("product API routes", () => {
       });
 
     for (const suffix of ["", "/timeline", "/proof"]) {
+      // 订单读有身份门（匿名 401 先于歧义判定）；timeline/proof 同请求。
       const response = await ambiguousRouter.handle({
         method: "GET",
-        pathname: `/product/orders/${stateMachineOrderId}${suffix}`
+        pathname: `/product/orders/${stateMachineOrderId}${suffix}`,
+        headers: assigneeHeaders
       });
       expect(response).toMatchObject({
         status: 409,
@@ -760,7 +762,7 @@ describe("product API routes", () => {
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
-    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
+    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders });
     const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
     const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` });
     const tasksResponse = await router.handle({ method: "GET", pathname: "/product/tasks", query: { orderId: stateMachineOrderId }, headers: assigneeHeaders });
@@ -824,7 +826,7 @@ describe("product API routes", () => {
     await store.resetFromEvents({ deploymentBlock: 0n, events: [] });
     await store.resetFromEvents({ deploymentBlock: 0n, events });
 
-    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` }))
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders }))
       .resolves.toMatchObject({ body: firstOrderBody });
     await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` }))
       .resolves.toMatchObject({ body: firstTimelineBody });
@@ -844,7 +846,7 @@ describe("product API routes", () => {
     const eventsWithoutRegistration = stateMachineProductEvents().filter((event) => event.eventName !== "OrderRegistered");
     await store.resetFromEvents({ deploymentBlock: 0n, events: eventsWithoutRegistration });
 
-    const pendingResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
+    const pendingResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders });
     expect(pendingResponse.status).toBe(200);
     expect((pendingResponse.body as { order: ChainBackedOrder }).order).toMatchObject({
       orderId: stateMachineOrderId,
@@ -853,7 +855,7 @@ describe("product API routes", () => {
       statusLabel: "同步中"
     });
 
-    const pendingListResponse = await router.handle({ method: "GET", pathname: "/product/orders" });
+    const pendingListResponse = await router.handle({ method: "GET", pathname: "/product/orders", headers: assigneeHeaders });
     expect(pendingListResponse.status).toBe(200);
     expect((pendingListResponse.body as { orders: ChainBackedOrder[] }).orders)
       .toContainEqual(expect.objectContaining({
@@ -864,7 +866,7 @@ describe("product API routes", () => {
     // OrderRegistered 投影到达后，同一读面翻转为 projected——字段表达的是
     // 可自愈的短暂窗口，不是持久错误。
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
-    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` }))
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders }))
       .resolves.toMatchObject({
         body: { order: { orderId: stateMachineOrderId, projectionStatus: "projected", statusLabel: "已注册" } }
       });
@@ -944,7 +946,8 @@ describe("product API routes", () => {
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
     const taskResponse = await router.handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: { "x-uvp-wallet-address": overlayExecutor } });
-    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
+    // 订单内嵌任务的 assigneeWallet=overlayExecutor——订单读按参与者过滤。
+    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: { "x-uvp-wallet-address": overlayExecutor } });
     const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` });
     const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
 
@@ -1442,11 +1445,13 @@ describe("product API routes", () => {
 
     const ordersResponse = await router.handle({
       method: "GET",
-      pathname: "/product/orders"
+      pathname: "/product/orders",
+      headers: assigneeHeaders
     });
     const orderResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${DEMO_ORDER_ID}`
+      pathname: `/product/orders/${DEMO_ORDER_ID}`,
+      headers: assigneeHeaders
     });
     const tasksResponse = await router.handle({
       method: "GET",
@@ -1502,7 +1507,7 @@ describe("product API routes", () => {
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
-    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` }))
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders }))
       .resolves.toMatchObject({ status: 200 });
     await expect(router.handle({ method: "POST", pathname: "/product/e2e/controls/syncing" }))
       .resolves.toMatchObject({ status: 404, body: { error: "not_found" } });
@@ -1625,7 +1630,8 @@ describe("product API routes", () => {
     });
 
     // /product/orders should also return a typed error when the store is unavailable
-    const ordersResponse = await router.handle({ method: "GET", pathname: "/product/orders" });
+    //（身份门先行：无身份时 401 先于存储访问）。
+    const ordersResponse = await router.handle({ method: "GET", pathname: "/product/orders", headers: assigneeHeaders });
     expect(ordersResponse.status).toBe(503);
     expect(ordersResponse.body).toMatchObject({
       error: "product_storage_unavailable",

@@ -85,7 +85,9 @@ export async function startApiServer(
     })
     : undefined;
   if (!notificationDispatcher) {
-    logger.warn("NOTIFICATION DELIVERY IS NOT CONFIGURED: set UVP_NOTIFY_WEBHOOK_URL to enable the generic webhook transport; until then every delivery is recorded as failed (transport_adapter_missing) and no external channel is notified");
+    // 文案以代码为准：未装配 dispatcher 时 delivery 落 skipped
+    //（reason=transport_adapter_missing，可重投），不是 failed。
+    logger.warn("NOTIFICATION DELIVERY IS NOT CONFIGURED: set UVP_NOTIFY_WEBHOOK_URL to enable the generic webhook transport; until then every delivery is recorded as skipped (transport_adapter_missing) and no external channel is notified");
   }
   const notificationService = createNotificationService({
     store,

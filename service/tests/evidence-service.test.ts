@@ -124,6 +124,44 @@ describe("evidence service", () => {
     expect(first.evidence.payloadHash).not.toBe(differentStage.evidence.payloadHash);
   });
 
+  it("separates draft evidence fingerprints by draftId (先存后绑)", async () => {
+    const service = testEvidenceService();
+    const uploadDraft = async (draftId: string) => service.uploadEvidence({
+      draftId,
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      fileName: "invoice.txt",
+      textPayload: "invoice payload",
+      metadata: {
+        businessLabel: "Commercial invoice",
+        fields: { invoice: "INV-1" }
+      }
+    }, owner);
+
+    const draftA = await uploadDraft("draft-1");
+    const draftB = await uploadDraft("draft-2");
+    // 《证据与存证规则》二.4：草稿期以 draftId 替代订单成分参与指纹——
+    // 同 owner 同内容的不同草稿不再共享 payloadHash，(owner, payload_hash)
+    // 幂等归并不会把 B 草稿的凭证错记到 A 草稿名下。
+    expect(draftA.evidence.payloadHash).not.toBe(draftB.evidence.payloadHash);
+    expect(draftB.evidence.evidenceId).not.toBe(draftA.evidence.evidenceId);
+    expect(draftB.evidence.draftId).toBe("draft-2");
+
+    // 同一草稿重复上传仍幂等返回既有记录。
+    const draftAgain = await uploadDraft("draft-1");
+    expect(draftAgain.evidence.evidenceId).toBe(draftA.evidence.evidenceId);
+
+    // 订单存在时（orderId 提给）文档不含 draftId 成分，四元组结构不变。
+    expect(buildPayloadHashDocument({
+      contentHash: draftA.evidence.contentHash,
+      metadataHash: draftA.evidence.metadataHash,
+      documentType: draftA.metadata.documentType,
+      orderId: "order-9",
+      draftId: "draft-1",
+      stageIdentifier: draftA.evidence.stageIdentifier
+    })).not.toHaveProperty("draftId");
+  });
+
   it("changes contentHash and payloadHash when file bytes change", async () => {
     const service = testEvidenceService();
     const first = await uploadTextEvidence(service, { invoice: "INV-1" });
@@ -326,7 +364,7 @@ describe("evidence service", () => {
       boundAt: "2026-04-28T00:00:01.000Z"
     };
 
-    await expect(service.bindEvidence(binding)).resolves.toMatchObject({
+    await expect(service.bindEvidence(binding, owner)).resolves.toMatchObject({
       evidence: {
         status: "bound",
         boundSignalTxHash: txHash("1"),
@@ -341,7 +379,7 @@ describe("evidence service", () => {
       verificationStatus: "matched",
       boundSignalTxHash: txHash("1")
     });
-    await expect(service.bindEvidence({ ...binding, txHash: txHash("5"), signalId: txHash("5") }))
+    await expect(service.bindEvidence({ ...binding, txHash: txHash("5"), signalId: txHash("5") }, owner))
       .resolves.toMatchObject({
         evidence: {
           status: "bound",

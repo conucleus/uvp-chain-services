@@ -140,6 +140,14 @@ export interface StoreSupplierNotificationProfileResult
 export interface StoreSupplierService {
   listSuppliers(query?: StoreSupplierListQuery): Promise<StoreSupplierListDTO>;
   getSupplier(supplierId: string): Promise<StoreSupplierDTO | undefined>;
+  /**
+   * 以 Store 元数据（非 DTO 行）判断 subject 是否已有供应商记录。
+   * DTO 行对只有 revoked binding 的 subject 也生成一行，把"存在性"
+   * 建在其上会让 join 配对的创建分支永不可达（reviewSupplier 404）。
+   */
+  findSupplierMetadataBySubjectId(
+    supplierSubjectId: Hex,
+  ): Promise<StoreSupplierMetadataRecord | undefined>;
   listSupplierAudits(supplierId: string): Promise<StoreSupplierAuditListDTO>;
   createSupplier(
     input: unknown,
@@ -212,6 +220,12 @@ export function createStoreSupplierService(
         (supplier) =>
           supplier.supplierId.toLowerCase() === normalized ||
           supplier.supplierSubjectId.toLowerCase() === normalized,
+      );
+    },
+
+    async findSupplierMetadataBySubjectId(supplierSubjectId) {
+      return metadataStore.findSupplierBySubjectId(
+        supplierSubjectId.toLowerCase() as Hex,
       );
     },
 

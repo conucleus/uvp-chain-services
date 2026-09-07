@@ -106,15 +106,36 @@ async function buildStoreConsoleZhixus(options: {
     options.productService.listTasks(),
     options.supplierMetadataStore.listSuppliers()
   ]);
-  const activeSupplierCount = suppliers.filter(
-    (supplier) => supplier.reviewStatus !== "rejected" && supplier.reviewStatus !== "revoked"
-  ).length;
+  // supplierCount 与 orderCount/openTaskCount 同行按 zhixu 过滤：此前把
+  // 全局供应商总数逐行投影成每条秩序的属性。zhixu 维度的供应商参与
+  // 事实 = 该秩序任务上出现过的受派钱包命中的在册供应商。
+  const activeSupplierWallets = new Set(
+    suppliers
+      .filter((supplier) =>
+        supplier.reviewStatus !== "rejected" &&
+        supplier.reviewStatus !== "revoked" &&
+        supplier.wallet
+      )
+      .map((supplier) => supplier.wallet!.toLowerCase())
+  );
+  const assigneeWalletsByZhixu = new Map<string, Set<string>>();
+  for (const task of tasks) {
+    if (!task.assigneeWallet) {
+      continue;
+    }
+    const wallets = assigneeWalletsByZhixu.get(task.zhixuId) ?? new Set<string>();
+    wallets.add(task.assigneeWallet.toLowerCase());
+    assigneeWalletsByZhixu.set(task.zhixuId, wallets);
+  }
   const rows = listedZhixus
-    .map((zhixu) => consoleRowFromSummary(zhixu, {
-      activeSupplierCount,
-      openTaskCount: tasks.filter((task) => task.zhixuId === zhixu.zhixuId && task.status === "open").length,
-      orderCount: orders.filter((order) => order.zhixuId === zhixu.zhixuId).length
-    }));
+    .map((zhixu) => {
+      const assignees = assigneeWalletsByZhixu.get(zhixu.zhixuId) ?? new Set<string>();
+      return consoleRowFromSummary(zhixu, {
+        activeSupplierCount: [...activeSupplierWallets].filter((wallet) => assignees.has(wallet)).length,
+        openTaskCount: tasks.filter((task) => task.zhixuId === zhixu.zhixuId && task.status === "open").length,
+        orderCount: orders.filter((order) => order.zhixuId === zhixu.zhixuId).length
+      });
+    });
 
   return rows.sort((left, right) =>
     lifecycleRank(left.lifecycleStatus) - lifecycleRank(right.lifecycleStatus) ||

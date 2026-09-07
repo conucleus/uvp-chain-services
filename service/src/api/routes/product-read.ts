@@ -1,5 +1,5 @@
-import type { ProductOrderDTO } from "@uvp-eth/product-dto";
 import type { ProductParticipantAssignmentDTO } from "../../product/bff/types.js";
+import type { ProductOrderApiDTO } from "../../product/service.js";
 import {
   ProductOrderLookupError,
   type ProductParticipantIdentityDTO,
@@ -127,7 +127,17 @@ export function createProductReadRouteModule(options: {
 
       if (request.method === "GET" && request.pathname === "/product/orders") {
         return withStorageGuard(async () => {
-          const orders = await context.productService.listOrders();
+          // 订单 DTO 内嵌全部任务（assigneeWallet/proofRows 等参与者数据），
+          // 匿名不可枚举——与任务读同口径身份门：身份取会话锚定钱包；
+          // 已有指派参与者的订单只有参与者本人可见，无指派（纯链上
+          // 事实）订单对已认证参与者开放。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
+          const walletAddress = wallet.identity.walletAddress.toLowerCase();
+          const orders = (await context.productService.listOrders())
+            .filter((order) => orderVisibleToParticipant(order, walletAddress));
           return {
             status: 200,
             body: { orders }
@@ -214,8 +224,14 @@ export function createProductReadRouteModule(options: {
       const productOrderMatch = /^\/product\/orders\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productOrderMatch) {
         return withStorageGuard(async () => {
+          // 订单详情与列表同口径：内嵌任务携带 assigneeWallet/proofRows，
+          // 已指派给他人的订单对非参与者不得区分"不存在"（404）。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
           const orderId = decodeURIComponent(productOrderMatch[1] ?? "");
-          let order: ProductOrderDTO | undefined;
+          let order: ProductOrderApiDTO | undefined;
           try {
             order = await context.productService.getOrder(orderId);
           } catch (error) {
@@ -230,7 +246,7 @@ export function createProductReadRouteModule(options: {
             }
             throw error;
           }
-          if (!order) {
+          if (!order || !orderVisibleToParticipant(order, wallet.identity.walletAddress.toLowerCase())) {
             return {
               status: 404,
               body: { error: "product_order_not_found" }
@@ -398,6 +414,37 @@ function productParticipantIdentityFromAssignment(assignment: ProductParticipant
     draftTitle: assignment.draft.title,
     ...(orderId ? { orderId } : {})
   };
+}
+
+/**
+ * 订单读可见性（与任务读同口径）：订单 DTO 内嵌全部任务，任务的
+ * assigneeWallet/执行者 overlay 是参与者数据。无任何指派钱包的订单
+ * 是纯链上事实（同"未指派任务"），对已认证参与者开放；有指派钱包
+ * 的订单只有参与者本人可见。
+ */
+function orderVisibleToParticipant(
+  order: ProductOrderApiDTO,
+  walletAddress: string
+): boolean {
+  const participants = new Set<string>();
+  for (const task of order.tasks ?? []) {
+    if (task.assigneeWallet) {
+      participants.add(task.assigneeWallet.toLowerCase());
+    }
+    const overlayWallet = task.stageExecutorOverlay?.activeExecutorWallet;
+    if (overlayWallet) {
+      participants.add(overlayWallet.toLowerCase());
+    }
+  }
+  for (const overlay of Object.values(order.stageExecutorOverlays ?? {})) {
+    participants.add(overlay.activeExecutorWallet.toLowerCase());
+  }
+  for (const overlay of Object.values(order.executorOverlays ?? {})) {
+    if (overlay.activeExecutorWallet) {
+      participants.add(overlay.activeExecutorWallet.toLowerCase());
+    }
+  }
+  return participants.size === 0 || participants.has(walletAddress);
 }
 
 async function withStorageGuard(action: () => Promise<ApiResponse>): Promise<ApiResponse> {

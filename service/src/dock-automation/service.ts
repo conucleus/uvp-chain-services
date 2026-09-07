@@ -161,10 +161,14 @@ export class DockAutomationWorker implements LifecycleService {
         if (summary.submitted >= this.#config.maxCandidatesPerRun) {
           break;
         }
+        // dock 实例身份是 (routeId, localPlanId, localOrderId)：同 plan
+        // 复用同一 routeId 时每个订单各有一个 dock 实例，忽略 localOrderId
+        // 会把 binding 提交到别的订单的实例上。
         const dock = docks.find(
           (candidate) =>
             candidate.routeId.toLowerCase() === route.routeId.toLowerCase() &&
-            candidate.localPlanId.toLowerCase() === route.localPlanId.toLowerCase()
+            candidate.localPlanId.toLowerCase() === route.localPlanId.toLowerCase() &&
+            candidate.localOrderId.toLowerCase() === route.localOrderId.toLowerCase()
         );
 
         if (!dock) {
@@ -179,7 +183,9 @@ export class DockAutomationWorker implements LifecycleService {
               route.openCalldata,
               summary,
               "open",
-              `open:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}`
+              // 去重键与实例身份同构（含 localOrderId）：同 route 不同订单
+              // 的 open 各自独立，不得互相吃掉对方的广播窗口。
+              `open:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}:${route.localOrderId.toLowerCase()}`
             );
           }
           continue;

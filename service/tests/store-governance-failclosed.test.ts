@@ -85,8 +85,17 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     const originalEnv = { ...process.env };
 
     afterEach(() => {
-      process.env.CHAIN_SERVICES_RUNTIME_ENV = originalEnv.CHAIN_SERVICES_RUNTIME_ENV;
-      process.env.GOVERNANCE_ADMIN_REVIEWER_IDS = originalEnv.GOVERNANCE_ADMIN_REVIEWER_IDS;
+      // 恢复要区分"未设置"与"空串"：直接赋 undefined 会留下字符串
+      // "undefined"，让后续测试的运行时判定变成 non-local（自报 admin
+      // 头被误关）。未设置的键必须删除。
+      for (const key of ["CHAIN_SERVICES_RUNTIME_ENV", "GOVERNANCE_ADMIN_REVIEWER_IDS"] as const) {
+        const value = originalEnv[key];
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
     });
 
     it("rejects self-reported governance admin headers outside local when the whitelist is empty", () => {
@@ -133,7 +142,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
         UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222",
         UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222",
-        UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object"
+        UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
+        UVP_FINALITY_CONFIRMATIONS: "12"
       };
       // STORE_AUTH_MODE 缺省（此前静默 dev_headers）→ 启动失败。
       expect(() => loadConfigFromEnv(base)).toThrow(/STORE_AUTH_MODE/);
@@ -744,21 +754,40 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const evidenceId = (upload.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
       const contentHash = (upload.body as { evidence: { contentHash: string } }).evidence.contentHash;
 
-      // owner（非 admin）读自己的备份状态：verify 端点允许 reader 读。
+      // owner（非 admin）不得触发 verify/restore：restore 向主存储写回，
+      // verify 暴露副本布局——读级主体一律 403（角色先于存在性判定）。
       const ownerVerify = await router.handle({
         method: "POST",
         pathname: `/product/evidence/${evidenceId}/backup-verify`,
         headers: { "x-uvp-principal-id": "seller" }
       });
-      expect(ownerVerify.status).toBe(200);
-      expect(ownerVerify.body).toMatchObject({
+      expect(ownerVerify.status).toBe(403);
+      expect(ownerVerify.body).toMatchObject({ error: "forbidden" });
+
+      const ownerRestore = await router.handle({
+        method: "POST",
+        pathname: `/product/evidence/${evidenceId}/backup-restore`,
+        headers: { "x-uvp-principal-id": "seller" }
+      });
+      expect(ownerRestore.status).toBe(403);
+      expect(ownerRestore.body).toMatchObject({ error: "forbidden" });
+
+      // admin 会话：verify/restore 正常（接口注释即契约：admin 专用）。
+      const adminHeaders = { "x-uvp-admin-id": "audit-admin", "x-uvp-admin-role": "admin" };
+      const adminVerify = await router.handle({
+        method: "POST",
+        pathname: `/product/evidence/${evidenceId}/backup-verify`,
+        headers: adminHeaders
+      });
+      expect(adminVerify.status).toBe(200);
+      expect(adminVerify.body).toMatchObject({
         backup: { backupConfigured: true, backupPresent: true, hashMatches: true }
       });
 
       const restore = await router.handle({
         method: "POST",
         pathname: `/product/evidence/${evidenceId}/backup-restore`,
-        headers: { "x-uvp-principal-id": "seller" }
+        headers: adminHeaders
       });
       expect(restore.status).toBe(200);
       expect(restore.body).toMatchObject({
@@ -908,6 +937,15 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       expect(compiled.status).toBe(200);
       const schema = (compiled.body as { draft: { productSchema?: StoreProductSchemaDTO } }).draft.productSchema;
       expect(schema).toBeDefined();
+
+      // 2128 R1-2：重编译会以 inferred schema 覆写既有 schema——已发布
+      // plan 的草稿重跑 compile 同样命中 409 不可变门（与 PUT 同口径）。
+      const recompiled = await router.handle({
+        method: "POST",
+        pathname: `/store/zhixu-drafts/${draftId}/compile-preview`,
+        headers: operatorHeaders
+      });
+      expect(recompiled).toMatchObject({ status: 409, body: { error: "product_schema_new_version_required" } });
 
       // roleSlots 类型校验：非对象条目 400（此前 TypeError 500）。用未发布
       // plan 的草稿验证（已发布 plan 的草稿先命中 409 守卫）。

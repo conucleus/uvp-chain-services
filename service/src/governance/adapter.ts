@@ -95,7 +95,15 @@ function simulatedBroadcast(request: unknown): GovernanceBroadcastResultDTO {
 
 export function createConfiguredGovernanceChainAdapter(config: ChainServicesConfig): GovernanceChainAdapter {
   if (!config.governance.broadcastEnabled) {
-    return createSimulatedGovernanceChainAdapter();
+    // simulated 适配器只允许 local：任何非 local 环境回落 simulated 意味着
+    // 治理写操作"成功"返回却永不上链（静默假广播）。缺省/漏配必须启动
+    // 失败，而不是安静降级。
+    if (config.security.environment === "local") {
+      return createSimulatedGovernanceChainAdapter();
+    }
+    throw new ConfigError(
+      `GOVERNANCE_BROADCAST_ENABLED=true is required in ${config.security.environment}; the simulated governance adapter is only available in local`
+    );
   }
 
   const contractAddress = identityRegistryAddress(config.network.contracts);

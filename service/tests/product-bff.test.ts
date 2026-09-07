@@ -609,14 +609,17 @@ describe("product BFF order drafts and invites", () => {
       body: { walletAddress: testWallet(1) },
     });
     expect(wrongExecutorResponse.status).toBe(403);
+    // details 不携带 expectedWalletAddress/walletAddress：403 回显执行者
+    // 钱包曾是"先打 403 拿地址再冒名重放"的绕过面（钱包身份现由会话锚定）。
     expect(wrongExecutorResponse.body).toMatchObject({
       error: "trigger_submitter_not_authorized",
       details: {
         roleSlotId: "funds",
-        expectedWalletAddress: testWallet(0),
-        walletAddress: testWallet(1),
       },
     });
+    const wrongDetails = (wrongExecutorResponse.body as { details: Record<string, unknown> }).details;
+    expect(wrongDetails).not.toHaveProperty("expectedWalletAddress");
+    expect(wrongDetails).not.toHaveProperty("walletAddress");
 
     const executorResponse = await router.handle({
       method: "POST",

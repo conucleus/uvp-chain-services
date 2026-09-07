@@ -8,6 +8,10 @@ import {
   type Hex,
 } from "../shared/types.js";
 import type { StorageDriver } from "../storage/types.js";
+import {
+  ANVIL_DEFAULT_ADDRESSES,
+  ANVIL_DEFAULT_PRIVATE_KEYS,
+} from "./anvil-defaults.js";
 import { storeAuthUrlEvidenceFailure } from "./store-auth-evidence.js";
 
 export interface NetworkConfig {
@@ -1509,11 +1513,10 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in staging",
     );
   }
-  if (!optionalEnv(env, "UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY_ENV")) {
-    throw new ConfigError(
-      "UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY_ENV is required in staging",
-    );
-  }
+  // 私钥变量名统一走可配置 *_ENV 解析（对齐 production）：直接名或间接名
+  // 二选一注入，只要解析出的变量名持有私钥即合法；不再强制要求间接变量
+  // 本身必须显式出现（该字面量要求曾使 production 可启动的合法配置在
+  // staging 被拒）。私钥存在性由下方按解析名强制。
   if (!optionalEnv(env, config.productBff.registrarPrivateKeyEnv)) {
     throw new ConfigError(
       `${config.productBff.registrarPrivateKeyEnv} is required when Product BFF registration adapter is anvil`,
@@ -1531,11 +1534,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   if (!config.relayer.broadcastEnabled) {
     throw new ConfigError(
       "UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED=true is required in staging",
-    );
-  }
-  if (!optionalEnv(env, "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY_ENV")) {
-    throw new ConfigError(
-      "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY_ENV is required in staging",
     );
   }
   if (!optionalEnv(env, config.relayer.stateMachinePrivateKeyEnv)) {
@@ -1589,11 +1587,8 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
     );
   }
 
-  if (!optionalEnv(env, "UVP_ETH_DEPLOYER_PRIVATE_KEY_ENV")) {
-    throw new ConfigError(
-      "UVP_ETH_DEPLOYER_PRIVATE_KEY_ENV is required in staging",
-    );
-  }
+  // 私钥名走可配置 UVP_ETH_DEPLOYER_PRIVATE_KEY_ENV 解析（对齐 production）；
+  // 存在性由下方按解析名强制。
   if (!optionalEnv(env, config.operatorRoles.deployerPrivateKeyEnv)) {
     throw new ConfigError(
       `${config.operatorRoles.deployerPrivateKeyEnv} is required in staging`,
@@ -1623,9 +1618,11 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   if (!config.governance.signerAddress) {
     throw new ConfigError("GOVERNANCE_SIGNER_ADDRESS is required in staging");
   }
-  if (!optionalEnv(env, "GOVERNANCE_SIGNER_PRIVATE_KEY_ENV")) {
+  // 治理广播在 staging 必须显式开启：缺省 false 会让治理写操作静默落
+  // simulated 适配器、永不上链（对照 relayer 广播的 staging 强制口径）。
+  if (!config.governance.broadcastEnabled) {
     throw new ConfigError(
-      "GOVERNANCE_SIGNER_PRIVATE_KEY_ENV is required in staging",
+      "GOVERNANCE_BROADCAST_ENABLED=true is required in staging",
     );
   }
   if (!config.governance.signerPrivateKey) {
@@ -1718,6 +1715,16 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "UVPIdentityRegistry contract address is required in testnet",
     );
   }
+  // 公网测试网缺省 depth=1 等于几乎无 reorg 缓冲：finality 确认数必须
+  // 显式配置为正整数（production/staging 同口径）。
+  if (
+    !optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
+    config.network.finalityConfirmations <= 0
+  ) {
+    throw new ConfigError(
+      "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in testnet",
+    );
+  }
   // testnet 同样强制 admin 白名单非空——空白名单等于任意自报 admin 通过。
   if (config.operatorRoles.adminReviewers.length === 0) {
     throw new ConfigError(
@@ -1762,7 +1769,7 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
 
   const privateKeyEnvNames = new Set([
     config.relayer.stateMachinePrivateKeyEnv,
-    "GOVERNANCE_SIGNER_PRIVATE_KEY",
+    config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
   ]);
@@ -1956,31 +1963,4 @@ function isLocalRpcUrl(
     hostname.endsWith(".local")
   );
 }
-
-const ANVIL_DEFAULT_PRIVATE_KEYS = new Set([
-  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-  "0x59c6995e998f97a5a0044966f094538864e17c8b7e37a2c115d7e4cc795fb0c1",
-  "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
-  "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
-  "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
-  "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a",
-  "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba",
-  "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e",
-  "0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356",
-  "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97",
-  "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6",
-]);
-
-const ANVIL_DEFAULT_ADDRESSES = new Set<Address>([
-  "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
-  "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-  "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
-  "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
-  "0x15d34aaf54267db7d7c367839aaf71a00a2c6a65",
-  "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc",
-  "0x976ea74026e726554db657fa54763abd0c3a0aa9",
-  "0x14dc79964da2c08b23698b3d3cc7ca32193d9955",
-  "0x23618e81e3f5cdf7f54c3d65f7fbc0abf5b21e8f",
-  "0xa0ee7a142d267c1f36714e4a8f75612f20a79720",
-  "0xbcd4042de499d14e55001ccbb24a551f3b954096",
-]);
+// Anvil 开发账户黑名单的单一来源在 anvil-defaults.ts（与 preflight.ts 共享）。

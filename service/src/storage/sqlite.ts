@@ -58,22 +58,54 @@ export function openSqliteDatabase(databaseUrl: string): SqliteDatabase {
   }
 }
 
+// node:sqlite 的 database.isTransaction 是 Node 22.16/24+ 才有的属性，
+// 而 engines 声明 >=20——旧运行时上该属性为 undefined（falsy），嵌套调用
+// 会再次 BEGIN（"cannot start a transaction within a transaction"），随后
+// catch 里的 ROLLBACK 还会把外层事务一并回滚。无该属性时退回按连接
+// 追踪（本模块是连接上唯一的事务入口），语义与 isTransaction 一致：
+// 嵌套调用直接并入外层事务（扁平事务，由外层负责提交/回滚）。
+const connectionsInTransaction = new WeakSet<object>();
+
+function isConnectionInTransaction(database: SqliteDatabase): boolean {
+  if (typeof database.isTransaction === "boolean") {
+    return database.isTransaction;
+  }
+  return connectionsInTransaction.has(database);
+}
+
 export async function withSqliteTransaction<T>(
   database: SqliteDatabase,
   operation: () => Promise<T>
 ): Promise<T> {
-  if (database.isTransaction) {
+  if (isConnectionInTransaction(database)) {
     return operation();
   }
 
   database.exec("BEGIN IMMEDIATE;");
+  const trackConnection = typeof database.isTransaction !== "boolean";
+  if (trackConnection) {
+    connectionsInTransaction.add(database);
+  }
   try {
     const result = await operation();
     database.exec("COMMIT;");
     return result;
   } catch (error) {
-    database.exec("ROLLBACK;");
+    safeRollback(database);
     throw error;
+  } finally {
+    if (trackConnection) {
+      connectionsInTransaction.delete(database);
+    }
+  }
+}
+
+function safeRollback(database: SqliteDatabase): void {
+  try {
+    database.exec("ROLLBACK;");
+  } catch {
+    // 回滚失败不得掩盖原始错误：连接可能已中断或事务已不在开启状态，
+    // 原始错误优先上抛，残留状态由下一次事务边界的报错如实暴露。
   }
 }
 

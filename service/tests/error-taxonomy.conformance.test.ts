@@ -31,7 +31,7 @@ import { classifyStateMachineBroadcastError } from '../src/submissions/broadcast
  */
 
 const TAXONOMY_VERSION = 'uvp.error-taxonomy.v1';
-const TAXONOMY_SHA256 = 'b742667c145f4e14db428405af64b004a6379f46cc440f9fafe2114fc19d30fc';
+const TAXONOMY_SHA256 = '496ef2232cfdf5a2b3177b33eb040d4970c0dc60079233daaa9c4d12c4d99d1e';
 
 interface TaxonomyErrorEntry {
   readonly code: string;
@@ -180,7 +180,6 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'product_order_not_found',
   'selector_wallet_not_authorized',
   'state_machine_address_missing',
-  'submitter_wallet_not_active_executor',
   'target_stage_locked',
   'target_stage_not_started',
   'target_stage_started_assign_rejected',

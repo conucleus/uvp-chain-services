@@ -434,7 +434,11 @@ describe("product task submissions", () => {
     });
   });
 
-  it("requires signal submissions to come from the active stage executor", async () => {
+  it("lets an explicitly authorized submitter pass even when an overlay names another active executor", async () => {
+    // 《授权与签名规则》§五：先看显式订单级授权、再看阶段委任的在任
+    // 执行者——显式授权者在任执行者变更后不失去提交权（合约按同一
+    // 口径接受）。此前 service 层前置拦截显式授权者
+    // （submitter_wallet_not_active_executor），与合约相反。
     const targetStageId = txHash("515");
     const overlayTask = {
       ...task,
@@ -448,15 +452,17 @@ describe("product task submissions", () => {
     } as ProductTaskDTO;
     const fixture = await submissionFixture({ task: overlayTask });
 
+    // submitter 在显式授权清单内（allow list），overlay 指向别人 → 放行。
     await expect(fixture.service.prepareSubmit(overlayTask.taskId, {
       evidenceIds: [fixture.evidence.evidence.evidenceId],
       walletAddress: submitter,
       intent: "confirm_stage"
-    }, owner)).rejects.toMatchObject({
-      code: "submitter_wallet_not_active_executor",
-      status: 403
+    }, owner)).resolves.toMatchObject({
+      submitter,
+      sourceId: targetStageId
     });
 
+    // 在任执行者提交：既被显式授权（fixture 允许）也是 active executor。
     const activeExecutor = "0x2222222222222222222222222222222222222222" as Address;
     const activeFixture = await submissionFixture({
       task: overlayTask,
@@ -469,6 +475,21 @@ describe("product task submissions", () => {
     }, owner)).resolves.toMatchObject({
       submitter: activeExecutor,
       sourceId: targetStageId
+    });
+
+    // 既无显式授权、也不是在任执行者 → 拒绝（由授权适配器裁决）。
+    const unauthorized = "0x3333333333333333333333333333333333333333" as Address;
+    const unauthorizedFixture = await submissionFixture({
+      task: overlayTask,
+      authorizedSubmitter: activeExecutor
+    });
+    await expect(unauthorizedFixture.service.prepareSubmit(overlayTask.taskId, {
+      evidenceIds: [unauthorizedFixture.evidence.evidence.evidenceId],
+      walletAddress: unauthorized,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "submitter_not_authorized",
+      status: 403
     });
   });
 

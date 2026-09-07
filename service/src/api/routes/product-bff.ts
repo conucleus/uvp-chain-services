@@ -53,7 +53,17 @@ export function createProductBffRouteModule(options: {
       if (request.method === "POST" && productOrderDraftPrepareTriggerMatch) {
         return handleProductBffRequest(async () => {
           const draftId = decodeURIComponent(productOrderDraftPrepareTriggerMatch[1] ?? "");
-          const body = await context.productBffService.prepareOrderTrigger(draftId, parsePrepareTriggerBody(request.body));
+          // prepare-trigger 返回完整草稿/参与者联系方式，且 submitter 是
+          // 后续签名的身份根——不取 body 自报钱包：会话锚定地址为身份，
+          // body 自报值仅作一致性核验（不一致即 403）。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
+          const body = await context.productBffService.prepareOrderTrigger(draftId, {
+            ...parsePrepareTriggerBody(request.body),
+            walletAddress: wallet.identity.walletAddress
+          });
           return {
             status: 200,
             body

@@ -36,6 +36,8 @@ import type {
   ProjectionSyncState,
 } from "../storage/projection-store.js";
 import { compareChainPointers } from "../shared/types.js";
+// PlanRegistered(finalize) 才是发布权威时点：桶存在只代表 commitPlan 已执行。
+import { isPlanRegisteredProjection } from "../store-console/version.js";
 
 export interface ProductChainProofDTO {
   readonly eventId: string;
@@ -567,8 +569,8 @@ function zhixuDetailFromPlan(
     maintainer: plan.publisher ?? "未登记",
     updatedAt: `block ${plan.updatedAt.blockNumber.toString()}`,
     planPublication: {
-      status: "published",
-      label: "Plan 已发布",
+      status: isPlanRegisteredProjection(plan) ? "published" : "not_found",
+      label: isPlanRegisteredProjection(plan) ? "Plan 已发布" : "Plan 已提交，待注册（finalize）确认",
       stateMachineLabel: plan.stateMachineAddress,
       planId: plan.planId,
       planHash: plan.planHash,
@@ -2029,6 +2031,11 @@ function overlayPlanPublication(
   plan: ProjectionSnapshot["stateMachinePlans"][string] | undefined,
 ): ZhixuDetailDTO {
   if (!plan) {
+    return detail;
+  }
+  // 只有用 PlanRegistered(finalize) 覆写占位状态；commit-only 桶保留
+  // "not_found/等待发布同步" 占位——发布权威在 finalize，不在桶存在。
+  if (!isPlanRegisteredProjection(plan)) {
     return detail;
   }
   return {

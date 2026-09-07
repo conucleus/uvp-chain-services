@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
   hashResourceManifest as hashProtocolResourceManifest,
+  hashStageExecutorPatchPayload as hashProtocolStageExecutorPatchPayload,
+  hashStageResourcePatchPayload as hashProtocolStageResourcePatchPayload,
+  EXECUTOR_PATCH_MODE_ASSIGN,
   type ResourceManifestV1
 } from "@uvp-eth/protocol-bindings";
 import { privateKeyToAccount } from "viem/accounts";
@@ -16,6 +19,8 @@ import {
   createProductStageExecutorPatchService,
   createProductStageResourcePatchService,
   hashResourceManifest,
+  hashStageExecutorPatchPayload,
+  hashStageResourcePatchPayload,
   InMemoryProductStagePatchStore,
   type PreparedStageExecutorPatchDTO,
   type PreparedStageExecutorPatchRecord,
@@ -1510,3 +1515,41 @@ function bytes32Text(value: string): Hex {
 function bytes32Hex(value: string): Hex {
   return `0x${value.padStart(64, "0")}` as Hex;
 }
+
+describe("stage patch payload hash parity with protocol-bindings", () => {
+  it("executor patch patchHash equals protocol-bindings preimage (domain first slot)", () => {
+    const payload = {
+      orderId,
+      selectorStageId,
+      targetStageId,
+      executor: contractAddress,
+      role: bytes32Text("role"),
+      executorMetadataHash: bytes32Text("executor-metadata"),
+      mode: EXECUTOR_PATCH_MODE_ASSIGN,
+      previousExecutor: stateMachineAddress,
+      approvalSourceId: bytes32Hex("0"),
+      approvalSignalId: bytes32Text("approval-signal"),
+      patchNonce: "7",
+      metadataURI: "ipfs://executor-patch",
+    };
+    expect(hashStageExecutorPatchPayload(payload)).toBe(
+      hashProtocolStageExecutorPatchPayload(payload),
+    );
+  });
+
+  it("resource patch patchHash equals protocol-bindings preimage (domain first slot)", () => {
+    const payload = {
+      orderId,
+      selectorStageId,
+      targetStageId,
+      resourceKey: bytes32Text("resource.key"),
+      manifestHash: bytes32Text("manifest"),
+      policyHash: bytes32Text("policy"),
+      patchNonce: "9",
+      manifestURI: "ipfs://resource-patch",
+    };
+    expect(hashStageResourcePatchPayload(payload)).toBe(
+      hashProtocolStageResourcePatchPayload(payload),
+    );
+  });
+});

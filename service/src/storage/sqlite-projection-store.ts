@@ -111,6 +111,15 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       }
       await this.saveSnapshot(scope, "order", orderSnapshot);
       await this.saveSnapshot(scope, "identity", identitySnapshot);
+      // 游标与"整库事件替换"同事务收敛：重建覆盖区间之外的旧游标
+      // 不允许在崩溃窗口内越过事件表。
+      if (input.cursor) {
+        await this.saveCursor({
+          ...input.cursor,
+          chainId: scope.chainId,
+          contractAddress: scope.contractAddress,
+        });
+      }
       await this.saveSyncState(
         input.syncState
           ? {
@@ -229,12 +238,50 @@ export class SqliteProjectionStore implements DurableProjectionStore {
 
   async saveCursor(
     cursor: Omit<StoredProjectionCursor, "updatedAt">,
-  ): Promise<StoredProjectionCursor> {
+    options?: { readonly expectNextBlock?: bigint },
+  ): Promise<StoredProjectionCursor | undefined> {
     const updatedAt = new Date().toISOString();
     const normalizedContract = normalizeAddress(
       cursor.contractAddress,
       "cursor.contractAddress",
     );
+
+    if (options?.expectNextBlock !== undefined) {
+      // CAS：本轮回读基于 expectNextBlock，持久游标已被其他写者移动时
+      // 拒绝推进（返回 undefined），防止把游标写到事件表覆盖区间之外。
+      const expectNextBlock = options.expectNextBlock;
+      const updated = runSqliteWrite(() =>
+        this.#database
+          .prepare(
+            `UPDATE chain_index_cursor
+             SET deployment_block = ?, next_block = ?, finalized_block = ?, block_hash = ?, updated_at = ?
+             WHERE chain_id = ? AND contract_address = ? AND CAST(next_block AS INTEGER) = ?`,
+          )
+          .run(
+            cursor.deploymentBlock.toString(),
+            cursor.nextBlock.toString(),
+            cursor.finalizedBlock?.toString() ?? null,
+            cursor.blockHash?.toLowerCase() ?? null,
+            updatedAt,
+            cursor.chainId,
+            normalizedContract,
+            expectNextBlock.toString(),
+          ),
+      );
+      if (updated.changes > 0) {
+        return cursorResult(cursor, normalizedContract, updatedAt);
+      }
+      const existing = this.#database
+        .prepare(
+          "SELECT 1 FROM chain_index_cursor WHERE chain_id = ? AND contract_address = ?",
+        )
+        .get(cursor.chainId, normalizedContract);
+      if (existing) {
+        return undefined;
+      }
+      // 行不存在：首条游标，直接插入。
+    }
+
     runSqliteWrite(() => {
       this.#database
         .prepare(
@@ -260,17 +307,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
         );
     });
 
-    return {
-      chainId: cursor.chainId,
-      contractAddress: normalizedContract,
-      deploymentBlock: cursor.deploymentBlock,
-      nextBlock: cursor.nextBlock,
-      ...(cursor.finalizedBlock !== undefined
-        ? { finalizedBlock: cursor.finalizedBlock }
-        : {}),
-      ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {}),
-      updatedAt,
-    };
+    return cursorResult(cursor, normalizedContract, updatedAt);
   }
 
   async getCursor(
@@ -667,6 +704,24 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       contractAddress: this.#snapshotScope.contractAddress,
     };
   }
+}
+
+function cursorResult(
+  cursor: Omit<StoredProjectionCursor, "updatedAt">,
+  normalizedContract: Address,
+  updatedAt: string,
+): StoredProjectionCursor {
+  return {
+    chainId: cursor.chainId,
+    contractAddress: normalizedContract,
+    deploymentBlock: cursor.deploymentBlock,
+    nextBlock: cursor.nextBlock,
+    ...(cursor.finalizedBlock !== undefined
+      ? { finalizedBlock: cursor.finalizedBlock }
+      : {}),
+    ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {}),
+    updatedAt,
+  };
 }
 
 function cursorRow(row: unknown): StoredProjectionCursor {

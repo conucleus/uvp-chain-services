@@ -341,7 +341,11 @@ interface ClassifiedProductTriggerBroadcastError {
  * response" 误判为确定性拒绝（retryable:false），草稿被永久卡死。
  */
 function isTransportEnvelopeError(haystack: string): boolean {
-  return /json.?rpc|http request|fetch failed|network|socket|connection|ECONN|ETIMEDOUT|timeout|timed out|AbortError|transport|too many|rate.?limit/i.test(haystack);
+  // "context deadline exceeded" 是传输层超时信封（代理/网关侧截止），
+  // 不入传输正则会被确定性分支的 /deadline/ 吞掉：判成
+  // trigger_order_reverted retryable:false（无 txHash 无从复核），
+  // 单草稿触发死锁（重触发只接受 failed&&retryable）。
+  return /json.?rpc|http request|fetch failed|network|socket|connection|ECONN|ETIMEDOUT|timeout|timed out|deadline exceeded|AbortError|transport|too many|rate.?limit/i.test(haystack);
 }
 
 function classifyProductTriggerBroadcastError(error: unknown): ClassifiedProductTriggerBroadcastError {

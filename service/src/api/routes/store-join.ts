@@ -1,5 +1,5 @@
 import { redactErrorMessage } from "../../security/redaction.js";
-import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../../shared/types.js";
+import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../../shared/types.js";
 import type { StoreJoinService } from "../../store-join/index.js";
 import { StoreJoinServiceError, type StoreJoinActor } from "../../store-join/index.js";
 import {
@@ -97,6 +97,14 @@ export function createStoreJoinRouteModule(options: {
               message: redactErrorMessage(error),
               ...(error.details !== undefined ? { details: error.details } : {})
             }
+          };
+        }
+        // 非法 query（planId/applicantAddress 形制错误）是可修正的 4xx，
+        // 不得漏进 503 污染可用性监控。
+        if (error instanceof ConfigError) {
+          return {
+            status: 400,
+            body: { error: "invalid_query", message: redactErrorMessage(error) }
           };
         }
         return {

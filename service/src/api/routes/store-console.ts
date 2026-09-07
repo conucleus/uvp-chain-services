@@ -236,6 +236,14 @@ export function createStoreConsoleRouteModule(): RouteModule {
             body: { error: "store_zhixu_not_found" }
           };
         }
+        // 下架抑制与列表/search 同口径：delisted 对非运营方 404
+        //（不泄露存在），运营方保留治理可见性。
+        if (await zhixuDelistedForRequester(request, context, zhixu.planId)) {
+          return {
+            status: 404,
+            body: { error: "store_zhixu_not_found" }
+          };
+        }
         // 详情页叠加锚核验 + listing 状态 + 装修数据。
         const overlay = await buildStoreZhixuOverlay(request, context, zhixu.planId);
         return {
@@ -544,12 +552,29 @@ async function handleStoreZhixuDraftRequest(
         }
       }
       if (request.method === "POST" && action === "validate") {
-        return {
-          status: 200,
-          body: {
-            validation: await context.storeZhixuDraftWorkflowService.validateProductSchema(draftId, request.body)
-          }
-        };
+        // validate 无 body 时校验已存草稿并回显 stageId/roleSlotId/path——
+        // 与 GET/PUT 同资源同门（能力 + 锚定），否则匿名可枚举草稿结构。
+        const validateCapability: StoreCapability = "store.draft.compile";
+        const validateResource = { type: "store_zhixu_draft", id: draftId };
+        const validateAuthorization = await authorizeStoreCapability(context, request, validateCapability, validateResource);
+        if (!isStoreAuthorizationResult(validateAuthorization)) {
+          return validateAuthorization;
+        }
+        const validateAnchored = await requireAnchoredStoreAddress(context, request, validateResource);
+        if (!isAnchoredStoreAuthorizationResult(validateAnchored)) {
+          return validateAnchored;
+        }
+        try {
+          const validation = await context.storeZhixuDraftWorkflowService.validateProductSchema(draftId, request.body);
+          await recordStoreCapabilitySuccess(context, request, validateAuthorization.access, validateCapability, validateResource);
+          return {
+            status: 200,
+            body: { validation }
+          };
+        } catch (error) {
+          await recordStoreCapabilityFailure(context, request, validateAuthorization.access, validateCapability, validateResource, error);
+          throw error;
+        }
       }
     }
 
@@ -993,6 +1018,23 @@ async function filterDelistedSearchResults(
     return !planId || !delisted.has(planId);
   });
   return { ...record, results };
+}
+
+/** zhixu 详情端点与列表/search 同口径的下架抑制：非运营方 404。 */
+async function zhixuDelistedForRequester(
+  request: ApiRequest,
+  context: Parameters<RouteModule["handle"]>[1],
+  planId: string
+): Promise<boolean> {
+  if (!context.listingService) {
+    return false;
+  }
+  const access = await context.storeIdentityProvider.resolve(request.headers);
+  if (access.level === "store_operator" || access.level === "store_admin") {
+    return false;
+  }
+  return (await context.listingService.listListings("delisted"))
+    .some((listing) => listing.planId.toLowerCase() === planId.toLowerCase());
 }
 
 function isPlanNotProjectedError(error: unknown): boolean {

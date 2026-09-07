@@ -118,6 +118,15 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       }
       await this.saveSnapshot(scope, "order", orderSnapshot);
       await this.saveSnapshot(scope, "identity", identitySnapshot);
+      // 游标与"整库事件替换"同事务收敛：重建覆盖区间 [deploymentBlock,
+      // finalizedBlock] 之外的旧游标不允许在崩溃窗口内越过事件表。
+      if (input.cursor) {
+        await this.saveCursor({
+          ...input.cursor,
+          chainId: scope.chainId,
+          contractAddress: scope.contractAddress,
+        });
+      }
       await this.saveSyncState(
         input.syncState
           ? {
@@ -232,12 +241,45 @@ export class PostgresProjectionStore implements DurableProjectionStore {
 
   async saveCursor(
     cursor: Omit<StoredProjectionCursor, "updatedAt">,
-  ): Promise<StoredProjectionCursor> {
+    options?: { readonly expectNextBlock?: bigint },
+  ): Promise<StoredProjectionCursor | undefined> {
     const updatedAt = new Date().toISOString();
     const normalizedContract = normalizeAddress(
       cursor.contractAddress,
       "cursor.contractAddress",
     );
+
+    if (options?.expectNextBlock !== undefined) {
+      // CAS：本轮回读基于 expectNextBlock，持久游标已被其他写者移动时
+      // 拒绝推进（返回 undefined），防止把游标写到事件表覆盖区间之外。
+      const updated = await this.#database.query(
+        `UPDATE chain_index_cursor
+         SET deployment_block = $3, next_block = $4, finalized_block = $5, block_hash = $6, updated_at = $7
+         WHERE chain_id = $1 AND contract_address = $2 AND next_block = $8`,
+        [
+          cursor.chainId,
+          normalizedContract,
+          cursor.deploymentBlock.toString(),
+          cursor.nextBlock.toString(),
+          cursor.finalizedBlock?.toString() ?? null,
+          cursor.blockHash?.toLowerCase() ?? null,
+          updatedAt,
+          options.expectNextBlock.toString(),
+        ],
+      );
+      if ((updated.rowCount ?? 0) > 0) {
+        return cursorResult(cursor, normalizedContract, updatedAt);
+      }
+      const existing = await this.#database.query(
+        "SELECT 1 FROM chain_index_cursor WHERE chain_id = $1 AND contract_address = $2",
+        [cursor.chainId, normalizedContract],
+      );
+      if (existing.rows.length > 0) {
+        return undefined;
+      }
+      // 行不存在：首条游标，直接插入。
+    }
+
     await this.#database.query(
       `INSERT INTO chain_index_cursor (
          chain_id, contract_address, deployment_block, next_block, finalized_block, block_hash, updated_at
@@ -260,17 +302,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       ],
     );
 
-    return {
-      chainId: cursor.chainId,
-      contractAddress: normalizedContract,
-      deploymentBlock: cursor.deploymentBlock,
-      nextBlock: cursor.nextBlock,
-      ...(cursor.finalizedBlock !== undefined
-        ? { finalizedBlock: cursor.finalizedBlock }
-        : {}),
-      ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {}),
-      updatedAt,
-    };
+    return cursorResult(cursor, normalizedContract, updatedAt);
   }
 
   async getCursor(
@@ -632,6 +664,24 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       contractAddress: this.#snapshotScope.contractAddress,
     };
   }
+}
+
+function cursorResult(
+  cursor: Omit<StoredProjectionCursor, "updatedAt">,
+  normalizedContract: Address,
+  updatedAt: string,
+): StoredProjectionCursor {
+  return {
+    chainId: cursor.chainId,
+    contractAddress: normalizedContract,
+    deploymentBlock: cursor.deploymentBlock,
+    nextBlock: cursor.nextBlock,
+    ...(cursor.finalizedBlock !== undefined
+      ? { finalizedBlock: cursor.finalizedBlock }
+      : {}),
+    ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {}),
+    updatedAt,
+  };
 }
 
 function cursorRow(row: unknown): StoredProjectionCursor {
