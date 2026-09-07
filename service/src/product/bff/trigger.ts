@@ -337,7 +337,7 @@ interface ClassifiedProductTriggerBroadcastError {
 
 /**
  * 传输层错误信封（JSON-RPC / HTTP / 网络）。这些错误与链上业务状态
- * 无关，一律可重试——此前裸 /invalid/ 正则把 "Invalid JSON RPC
+ * 无关，一律可重试——裸 /invalid/ 正则会把 "Invalid JSON RPC
  * response" 误判为确定性拒绝（retryable:false），草稿被永久卡死。
  */
 function isTransportEnvelopeError(haystack: string): boolean {

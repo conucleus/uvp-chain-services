@@ -111,8 +111,8 @@ export class IndexerService implements LifecycleService {
   #running = false;
   // 全量重建与增量轮询共享同一个互斥守卫：重建以自身读到的 finalized 为
   // 上界整库替换事件表，若与进行中的增量刷新交错，会把刷新已写的事件删
-  // 掉而刷新随后仍推进游标，形成确定性丢事件缺口。此前互斥只覆盖
-  // refreshIfIdle，admin 重建入口完全绕过——两条路径必须串行。
+  // 掉而刷新随后仍推进游标，形成确定性丢事件缺口。互斥必须同时覆盖
+  // refreshIfIdle 与 admin 重建入口——两条路径都要串行。
   #exclusive: Promise<unknown> = Promise.resolve();
   #draining = false;
   #refreshQueued = false;

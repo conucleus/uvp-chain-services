@@ -546,8 +546,8 @@ function chainSignalForTask(task: ProductTaskDTO, signalName: string): {
 }
 
 // 《授权与签名规则》§五：授权检查先看显式订单级授权、再看阶段委任的
-// 在任执行者——overlay 不再在 service 层前置拦截（此前显式授权者会被
-// submitter_wallet_not_active_executor 一票否决，与合约口径相反）；
+// 在任执行者——service 层不得用 submitter_wallet_not_active_executor
+// 前置一票否决（显式授权者会因此失去合约口径内的提交权）；
 // overlay 委任判定由 SubmissionAuthorizationAdapter（默认
 // productBffStoreSubmissionAuthorization）按同一顺序执行。
 

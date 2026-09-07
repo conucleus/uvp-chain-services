@@ -437,8 +437,8 @@ describe("product task submissions", () => {
   it("lets an explicitly authorized submitter pass even when an overlay names another active executor", async () => {
     // 《授权与签名规则》§五：先看显式订单级授权、再看阶段委任的在任
     // 执行者——显式授权者在任执行者变更后不失去提交权（合约按同一
-    // 口径接受）。此前 service 层前置拦截显式授权者
-    // （submitter_wallet_not_active_executor），与合约相反。
+    // 口径接受）；service 层若以 submitter_wallet_not_active_executor
+    // 前置拦截，即与合约相反。
     const targetStageId = txHash("515");
     const overlayTask = {
       ...task,

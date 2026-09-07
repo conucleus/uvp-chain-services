@@ -379,7 +379,7 @@ export function productBffStoreSubmissionAuthorization(store: ProductBffStore): 
     async authorize(request) {
       // 《授权与签名规则》§五：执行者变更/委任不抹除既有的显式订单级
       // 授权——先看显式 trigger 授权，命中即放行；未命中再看阶段委任的
-      // 在任执行者（overlay）。此前 overlay 存在时一票否决显式授权者，
+      // 在任执行者（overlay）。overlay 优先会一票否决显式授权者，
       // 与合约口径（显式优先）相反。
       const registrations = await store.listRegistrations();
       const matches = registrations.filter((item) =>

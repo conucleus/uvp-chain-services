@@ -106,8 +106,9 @@ async function buildStoreConsoleZhixus(options: {
     options.productService.listTasks(),
     options.supplierMetadataStore.listSuppliers()
   ]);
-  // supplierCount 与 orderCount/openTaskCount 同行按 zhixu 过滤：此前把
-  // 全局供应商总数逐行投影成每条秩序的属性。zhixu 维度的供应商参与
+  // supplierCount 与 orderCount/openTaskCount 同行按 zhixu 过滤：全局
+  // 供应商总数不是任何单条秩序的属性，逐行投影会把同一计数虚增成每条
+  // 秩序的参与事实。zhixu 维度的供应商参与
   // 事实 = 该秩序任务上出现过的受派钱包命中的在册供应商。
   const activeSupplierWallets = new Set(
     suppliers

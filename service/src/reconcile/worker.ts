@@ -541,9 +541,10 @@ function staleOutcome(checkedAt: string): ResolvedReconcileOutcome {
 
 function isReconcileableRegistration(registration: ProductOrderTriggerRecord): boolean {
   // 与 submissions/governance 口径对齐：failed + txHash 必须继续复核——
-  // 链上真相可能推翻本地失败标记（迟到成功自愈为 confirmed）。此前只认
-  // submitted/indexing，超时置 failed 后永不再复核，product 侧重试只能
-  // 开新单，同一稿产生两个 orderId。无 txHash 的 failed 从未上链，无回执可查。
+  // 链上真相可能推翻本地失败标记（迟到成功自愈为 confirmed）；只认
+  // submitted/indexing 会让超时置 failed 的注册永不再复核，product 侧重试
+  // 只能开新单，同一稿产生两个 orderId。无 txHash 的 failed 从未上链，
+  // 无回执可查。
   if (registration.status === "failed") {
     return Boolean(registration.txHash);
   }

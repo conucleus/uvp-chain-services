@@ -382,8 +382,9 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
       );
     }
     // 门禁前置：需要链上登记（无 active binding）时先核验 governance
-    // _admin 权威——此前该检查在创建供应商、翻转 approved_for_broadcast、
-    // 落治理 review 之后才执行且不回滚，失败留下半提交状态。
+    // _admin 权威——门禁必须先于任何写库动作（创建供应商、翻转
+    // approved_for_broadcast、落治理 review）执行，事后才拒会留下
+    // 无法回滚的半提交状态。
     if (!activeBinding && !actor.governanceAdmin) {
       await emitAudit({
         action: "join.approved",
