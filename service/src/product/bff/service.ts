@@ -44,6 +44,8 @@ import type {
   PreviewProductInviteInput,
   ProductInviteAcceptanceDTO,
   ProductInviteDTO,
+  ProductInvitePreviewDraftDTO,
+  ProductInvitePreviewParticipantDTO,
   ProductInvitePreviewResponse,
   ProductInviteRolePreviewDTO,
   ProductInviteWalletBindingDTO,
@@ -388,9 +390,12 @@ export function createProductBffService(
       const deadline = Math.floor(
         prepareNow.getTime() / 1000 + 3600,
       ).toString();
+      // triggerId 追加 128 位随机熵（bug_audit #22）：会话门已就位，
+      // 顺序段（scope 内自增）是残余枚举面——GET /product/order-triggers/:id
+      // 的路径键不得可被顺序猜测。与 inviteId 同款"结构前缀 + 随机后缀"。
       const triggerId =
         existingRegistration?.triggerId ??
-        nextId("trigger", idScope, sequence++);
+        `${nextId("trigger", idScope, sequence++)}_${randomBytes(16).toString("hex")}`;
       const prepareId = nextId("prepare", idScope, sequence++);
       const sourceId = productSignalSourceId(createOrderTrigger.source);
       const signalId = productSignalId(createOrderTrigger.signalName);
@@ -678,10 +683,16 @@ export function createProductBffService(
             walletAddress,
           )
         : undefined;
+      // 响应字段最小集（bug_audit #23）：联系方式脱敏、金额按可见范围
+      // 收敛——totalAmount 只对创建者/已接受参与者（会话钱包）可见，
+      // notes/createdBy/planId 等运营字段不进预览。
+      const amountVisible = walletAddress
+        ? await isDraftAmountVisible(store, draft, walletAddress)
+        : false;
       return {
         invite: previewInvite,
-        participant,
-        draft,
+        participant: invitePreviewParticipant(participant),
+        draft: invitePreviewDraft(draft, amountVisible),
         role: inviteRolePreview(zhixu, participant),
         acceptance: inviteAcceptance(previewInvite, participant, walletBinding),
         ...(walletBinding ? { walletBinding } : {}),
@@ -1134,6 +1145,81 @@ function inviteAcceptance(
     return { canAccept: false, status: "wallet_already_bound" };
   }
   return { canAccept: true, status: "can_accept" };
+}
+
+/**
+ * 预览金额可见范围（bug_audit #23）：与 getDraft 的草稿归属同口径——
+ * 创建者或已接受参与者的会话钱包可见 totalAmount；纯 token 持有者
+ *（尚未接受邀请）不在金额可见范围。
+ */
+async function isDraftAmountVisible(
+  store: ProductBffStore,
+  draft: ProductOrderDraftDTO,
+  wallet: Address,
+): Promise<boolean> {
+  if (isDraftCreator(draft, wallet)) {
+    return true;
+  }
+  return isAcceptedParticipantWallet(
+    await store.listParticipants(draft.draftId),
+    wallet,
+  );
+}
+
+/** 预览参与者最小投影：联系方式脱敏，不回传钱包地址。 */
+function invitePreviewParticipant(
+  participant: DraftParticipantDTO,
+): ProductInvitePreviewParticipantDTO {
+  return {
+    participantId: participant.participantId,
+    draftId: participant.draftId,
+    roleSlotId: participant.roleSlotId,
+    roleLabel: participant.roleLabel,
+    displayName: participant.displayName,
+    ...(participant.contact ? { maskedContact: maskContact(participant.contact) } : {}),
+    status: participant.status,
+    required: participant.required,
+  };
+}
+
+/** 预览草稿最小投影：金额按可见范围收敛，notes/planId 等不进预览。 */
+function invitePreviewDraft(
+  draft: ProductOrderDraftDTO,
+  amountVisible: boolean,
+): ProductInvitePreviewDraftDTO {
+  return {
+    draftId: draft.draftId,
+    zhixuId: draft.zhixuId,
+    title: draft.title,
+    businessType: draft.businessType,
+    currency: draft.currency,
+    ...(draft.exportRegion ? { exportRegion: draft.exportRegion } : {}),
+    ...(draft.destinationRegion ? { destinationRegion: draft.destinationRegion } : {}),
+    ...(draft.expectedCompletionDate ? { expectedCompletionDate: draft.expectedCompletionDate } : {}),
+    ...(amountVisible ? { totalAmount: draft.totalAmount } : {}),
+  };
+}
+
+/**
+ * 联系方式脱敏（bug_audit #23）：邮箱保留本地部分前 2 位 + 域名；
+ * 电话/其他文本保留前 3 后 2；过短或空值整段遮蔽。预览只证明
+ * "邀请发到了这个联系方式"，不回传原文。
+ */
+function maskContact(contact: string): string {
+  const trimmed = contact.trim();
+  if (!trimmed) {
+    return "***";
+  }
+  const atIndex = trimmed.lastIndexOf("@");
+  if (atIndex > 0 && trimmed.indexOf(".", atIndex) > atIndex) {
+    const localPart = trimmed.slice(0, atIndex);
+    const domain = trimmed.slice(atIndex);
+    return `${localPart.slice(0, 2)}***${domain}`;
+  }
+  if (trimmed.length >= 7) {
+    return `${trimmed.slice(0, 3)}****${trimmed.slice(-2)}`;
+  }
+  return "***";
 }
 
 function inviteRolePreview(

@@ -281,7 +281,8 @@ describe("product BFF order drafts and invites", () => {
     ).not.toHaveProperty("tokenHash");
     expect(previewResponse.body).toMatchObject({
       invite: { inviteId: fundsInvite.invite.inviteId, status: "active" },
-      participant: { roleSlotId: "funds" },
+      // bug_audit #23：预览联系方式脱敏，不回传原文/钱包地址。
+      participant: { roleSlotId: "funds", maskedContact: "fu***@example.com" },
       acceptance: { canAccept: true, status: "can_accept" },
       walletBinding: {
         walletAddress: acceptedWallet,
@@ -289,6 +290,45 @@ describe("product BFF order drafts and invites", () => {
         canAccept: true,
       },
     });
+    const previewParticipant = (previewResponse.body as {
+      participant: Record<string, unknown>;
+    }).participant;
+    expect(previewParticipant).not.toHaveProperty("contact");
+    expect(previewParticipant).not.toHaveProperty("walletAddress");
+    const previewDraft = (previewResponse.body as {
+      draft: Record<string, unknown>;
+    }).draft;
+    // bug_audit #23：金额按可见范围收敛 + 运营字段不进预览
+    //（notes/planId/planHash/createdBy/goods 一律不回传）。
+    expect(previewDraft).not.toHaveProperty("notes");
+    expect(previewDraft).not.toHaveProperty("planId");
+    expect(previewDraft).not.toHaveProperty("planHash");
+    expect(previewDraft).not.toHaveProperty("createdBy");
+    expect(previewDraft).not.toHaveProperty("goods");
+    expect(previewDraft).not.toHaveProperty("status");
+    // 查看者是建单者（createdBy=testWallet(0)）→ 金额可见。
+    expect(previewDraft).toMatchObject({ totalAmount: "10000", currency: "USDC" });
+
+    // 纯 token 持有者（无会话钱包）不在金额可见范围。
+    const anonymousPreview = await router.handle({
+      method: "GET",
+      pathname: `/product/invites/${fundsInvite.invite.inviteId}`,
+      query: { token: fundsInvite.inviteToken! },
+    });
+    expect(anonymousPreview.status).toBe(200);
+    expect((anonymousPreview.body as { draft: Record<string, unknown> }).draft)
+      .not.toHaveProperty("totalAmount");
+
+    // 无关钱包（未接受参与、非创建者）同样不可见金额。
+    const strangerPreview = await router.handle({
+      method: "GET",
+      pathname: `/product/invites/${fundsInvite.invite.inviteId}`,
+      query: { token: fundsInvite.inviteToken! },
+      headers: { "x-uvp-wallet-address": testWallet(9) },
+    });
+    expect(strangerPreview.status).toBe(200);
+    expect((strangerPreview.body as { draft: Record<string, unknown> }).draft)
+      .not.toHaveProperty("totalAmount");
 
     const wrongWalletResponse = await router.handle({
       method: "POST",
@@ -651,7 +691,9 @@ describe("product BFF order drafts and invites", () => {
       status: "prepared",
       retryable: false,
     });
-    expect(prepared.trigger.triggerId).toMatch(/^trigger_/);
+    // bug_audit #22：triggerId 不可枚举——结构前缀 + 128 位随机熵后缀，
+    // 顺序段不可被猜测（会话门之外的第二道收敛）。
+    expect(prepared.trigger.triggerId).toMatch(/^trigger_[0-9a-f]{8}_\d{6}_[0-9a-f]{32}$/);
     expect(prepared.trigger.orderId).toMatch(/^0x[0-9a-f]{64}$/);
     expect(prepared.trigger.txHash).toBeUndefined();
     expect(prepared.permissions.length).toBeGreaterThan(0);
@@ -674,6 +716,31 @@ describe("product BFF order drafts and invites", () => {
       (registrationResponse.body as { trigger: ProductOrderTriggerDTO })
         .trigger,
     ).toEqual(prepared.trigger);
+  });
+
+  it("issues non-enumerable trigger ids (bug_audit #22)", async () => {
+    // 会话门已就位，id 熵是残余面：triggerId 必须携带 128 位随机后缀，
+    // 相邻草稿的两个 id 之间不存在顺序推导关系。
+    const { router } = await createRouterFixture([
+      ...activeDeploymentEvents(),
+      planRegisteredEvent(11n),
+    ]);
+    const triggerIds: string[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const draft = await createReadyDraft(router);
+      const prepareResponse = await router.handle({
+        method: "POST",
+        pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+        body: { walletAddress: testWallet(0) },
+      });
+      expect(prepareResponse.status, JSON.stringify(prepareResponse.body)).toBe(200);
+      const trigger = (prepareResponse.body as SubmitProductOrderDraftResult).trigger;
+      expect(trigger.triggerId).toMatch(/^trigger_[0-9a-f]{8}_\d{6}_[0-9a-f]{32}$/);
+      triggerIds.push(trigger.triggerId);
+    }
+    // 两个 id 的随机后缀互不相同——顺序段（scope 内自增）不可枚举。
+    const suffix = (id: string) => id.split("_").at(-1);
+    expect(suffix(triggerIds[0]!)).not.toBe(suffix(triggerIds[1]!));
   });
 
   it("only lets the trigger stage executor prepare outside trigger typed data", async () => {
