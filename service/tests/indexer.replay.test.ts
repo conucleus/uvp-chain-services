@@ -1432,6 +1432,116 @@ describe("indexer projection replay", () => {
     expect(readCount).toBe(2);
   });
 
+  it("serializes a background incremental refresh with an in-flight full rebuild on the durable store", async () => {
+    // F132 回归：refreshIfIdle 的后台出队曾直调 #refreshFromCursor 绕过
+    // #withExclusiveGuard——重建进行中时并发刷新会与整库替换交错（重复
+    // 通知补投、SQLITE_BUSY 风暴，配合旧无条件游标写即静默丢事件）。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-guard-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const events = stateMachineEvents();
+      const readLog: string[] = [];
+      let unblockRebuild: (() => void) | undefined;
+      const rebuildBlocked = new Promise<void>((resolve) => { unblockRebuild = resolve; });
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 7n;
+        },
+        async readEvents(range) {
+          readLog.push(`${range.fromBlock}-${range.toBlock}`);
+          if (range.fromBlock === 0n) {
+            // 全量重建悬停在事件读取处，模拟 admin 重建进行中。
+            await rebuildBlocked;
+          }
+          return events.filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        }
+      };
+      const indexer = new IndexerService({ config: testConfig(), eventSource, store });
+
+      const rebuildPromise = indexer.rebuildFromDeploymentBlockWithSummary();
+      await waitForCondition(() => readLog.length === 1);
+
+      indexer.refreshIfIdle();
+      // 重建未结束：后台刷新必须仍在守卫队列中等待，不得并发发起读取。
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(readLog).toEqual(["0-7"]);
+
+      unblockRebuild!();
+      const { summary } = await rebuildPromise;
+      expect(summary.syncStatus).toBe("indexed");
+
+      // 重建提交后队列里的刷新出队：游标已到 8（finalized 7），空批次
+      // 收敛，不越过事件表覆盖区间。
+      await waitForCondition(() => indexer.cursor !== undefined);
+      await expect(store.listEvents({ chainId: 31337 })).resolves.toHaveLength(9);
+      await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
+        .resolves.toMatchObject({ nextBlock: 8n, finalizedBlock: 7n });
+      expect(readLog).toEqual(["0-7"]);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed after the durable cursor is repeatedly moved by another writer", async () => {
+    // F169：所有触发路径已过互斥守卫后，持久游标连续 CAS 失败只能来自
+    // 第二个索引器进程——按多实例部署错误显式失败，而不是无限顶替。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-cas-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const events = stateMachineEvents();
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 7n;
+        },
+        async readEvents(range) {
+          // 读事件与游标 CAS 落库之间的窗口里，"另一进程"再次移动持久游标。
+          await store.saveCursor({ ...scope, deploymentBlock: 0n, nextBlock: 50n + BigInt(counter) });
+          counter += 1;
+          return events.filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        }
+      };
+      const scope = { chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" as Hex };
+      let counter = 1;
+      const indexer = new IndexerService({ config: testConfig(), eventSource, store });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      // 模拟外部写者连续移动持久游标（守卫内无竞争写者，只能是另一进程）：
+      // 前两次 CAS 失败优雅让位，第三次按多实例部署错误显式失败。
+      for (let round = 1; round <= 3; round += 1) {
+        await store.saveCursor({ ...scope, deploymentBlock: 0n, nextBlock: 4n });
+        if (round < 3) {
+          await indexer.refreshFromCursorWithSummary();
+        } else {
+          await expect(indexer.refreshFromCursorWithSummary()).rejects.toThrow(
+            /run exactly one indexer process per chain scope/
+          );
+        }
+      }
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("queued projection refresh includes the final submit signal in Product proof", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: [] });

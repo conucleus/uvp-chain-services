@@ -505,6 +505,22 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
  * 独立集成任务，此处先用真实可观测异常计数。
  */
 export function countReplayAnomalies(events: readonly ChainEvent[]): number {
+  let anomalies = countDuplicateActiveEventAnomalies(events);
+  try {
+    rebuildOrderProjections(events);
+  } catch {
+    anomalies += 1;
+  }
+  return anomalies;
+}
+
+/**
+ * 重复/矛盾投递计数（countReplayAnomalies 的第一类异常）。调用方在同一
+ * 路径里已自行执行 rebuildOrderProjections（apply 失败会直接抛出走向
+ * degraded，无需在此再全量重放一遍）时使用本函数，避免每轮增量触发
+ * 一次冗余的 O(全历史) 投影重放。
+ */
+export function countDuplicateActiveEventAnomalies(events: readonly ChainEvent[]): number {
   let anomalies = 0;
   const seenActive = new Set<string>();
   for (const event of events) {
@@ -516,11 +532,6 @@ export function countReplayAnomalies(events: readonly ChainEvent[]): number {
       anomalies += 1;
     }
     seenActive.add(key);
-  }
-  try {
-    rebuildOrderProjections(events);
-  } catch {
-    anomalies += 1;
   }
   return anomalies;
 }

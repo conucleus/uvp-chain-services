@@ -168,6 +168,15 @@ function isSqliteBusyError(error: unknown): boolean {
   );
 }
 
+/**
+ * 供存储调用方区分"跨连接写竞争的瞬态锁错误"与真实存储故障：
+ * SQLITE_BUSY 经 busy_timeout + 有界重试仍溢出时是竞争信号，不是数据
+ * 损坏，调用方不得据此把投影标成 degraded。
+ */
+export function isTransientSqliteBusyError(error: unknown): boolean {
+  return isSqliteBusyError(error);
+}
+
 function isMissingNodeSqlite(error: unknown): boolean {
   return error instanceof Error && /node:sqlite|Cannot find module/.test(error.message);
 }

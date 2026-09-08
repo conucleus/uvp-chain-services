@@ -8,9 +8,14 @@ import {
   sortChainEvents
 } from "./events.js";
 import type { ProjectionSnapshot } from "./projections.js";
-import { countReplayAnomalies, createEmptyProjectionSnapshot, rebuildOrderProjections } from "./projections.js";
+import {
+  countDuplicateActiveEventAnomalies,
+  createEmptyProjectionSnapshot,
+  rebuildOrderProjections
+} from "./projections.js";
 import { rebuildIdentityProjections } from "./identity-projections.js";
 import { createProjectionStore } from "../storage/factory.js";
+import { isTransientSqliteBusyError } from "../storage/sqlite.js";
 import {
   defaultProjectionScope,
   type DurableProjectionStore,
@@ -20,7 +25,7 @@ import {
   type ProjectionStore,
   type ProjectionSyncState
 } from "../storage/projection-store.js";
-import { consoleLogger, noopLogger, ConfigError, type Hex, type LifecycleService, type Logger } from "../shared/types.js";
+import { consoleLogger, noopLogger, ConfigError, ProjectionError, type Hex, type LifecycleService, type Logger } from "../shared/types.js";
 import { redactErrorMessage, redactSecrets } from "../security/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
 
@@ -108,15 +113,21 @@ type MutablePendingPostCommitSweepSummary = Writable<PendingPostCommitSweepSumma
 export class IndexerService implements LifecycleService {
   readonly name = "indexer";
 
+  // 单写者不变量：durable 游标 CAS 与 reorg 哈希连续性校验都以"本进程是
+  // 唯一索引器写者"为前提；同一 (chainId, scope) 部署第二个索引器进程会
+  // 造成持续游标竞争与伪 reorg 回滚。持久游标被外部写者连续移动达到
+  // 阈值时按多实例部署错误 fail-closed（见 #saveCursorAdvancingFrom）。
   #running = false;
   // 全量重建与增量轮询共享同一个互斥守卫：重建以自身读到的 finalized 为
   // 上界整库替换事件表，若与进行中的增量刷新交错，会把刷新已写的事件删
   // 掉而刷新随后仍推进游标，形成确定性丢事件缺口。互斥必须同时覆盖
-  // refreshIfIdle 与 admin 重建入口——两条路径都要串行。
+  // refreshIfIdle（含 #drainRefreshQueue 的后台出队路径）与 admin 重建
+  // 入口——所有触发路径都要经 #withExclusiveGuard 串行。
   #exclusive: Promise<unknown> = Promise.resolve();
   #draining = false;
   #refreshQueued = false;
   #cursor: EventCursor | undefined;
+  #consecutiveCursorCasFailures = 0;
   readonly #config: ChainServicesConfig;
   readonly #eventSource: ChainEventSource;
   readonly #store: ProjectionStore;
@@ -259,8 +270,9 @@ export class IndexerService implements LifecycleService {
         this.#config
       );
       // mismatchCount 反映真实 replay 异常（重复/矛盾投递、投影
-      // apply 失败），不得硬编码 0。
-      mismatchCount = countReplayAnomalies(events);
+      // apply 失败），不得硬编码 0。apply 失败由 resetFromEvents 内的
+      // 重建直接抛出走向 degraded，这里只数重复投递，不再全量重放一遍。
+      mismatchCount = countDuplicateActiveEventAnomalies(events);
       const replaySummary = buildActiveChainEventReplaySummary(events);
       const activeEvents = [...replaySummary.activeEvents];
       const lastEvent = sortChainEvents(activeEvents).at(-1);
@@ -349,9 +361,10 @@ export class IndexerService implements LifecycleService {
 
       return { snapshot, summary };
     } catch (error) {
-      // 投影 apply 失败（如未知 plan 引用）时把已统计到的真实
-      // 异常数带入 degraded 状态，而不是回退为旧值/0。
-      await this.#markDegraded(finalizedBlock, error, mismatchCount);
+      // 投影 apply 失败（如未知 plan 引用）时把已统计到的真实异常数带入
+      // degraded 状态，而不是回退为旧值/0；apply 失败本身计为 1 个异常。
+      const applyFailureCount = error instanceof ProjectionError ? 1 : 0;
+      await this.#markDegraded(finalizedBlock, error, mismatchCount + applyFailureCount);
       throw error;
     }
   }
@@ -443,8 +456,9 @@ export class IndexerService implements LifecycleService {
       const identitySnapshot = rebuildIdentityProjections(allEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
-      // mismatchCount 反映真实 replay 异常，不得硬编码 0。
-      const mismatchCount = countReplayAnomalies(allEvents);
+      // 重复/矛盾投递计数：投影重建已在上面同一事务内执行（apply 失败
+      // 会直接中止本事务），这里不得再为计数触发一次 O(全历史) 重放。
+      const mismatchCount = countDuplicateActiveEventAnomalies(allEvents);
       const syncState = await durableStore.saveSyncState({
         ...this.#scope,
         syncStatus: "indexed",
@@ -539,8 +553,20 @@ export class IndexerService implements LifecycleService {
     try {
       while (this.#refreshQueued) {
         this.#refreshQueued = false;
-        await this.#refreshFromCursor()
+        // 后台出队是增量刷新的触发路径之一，必须与 admin 重建共用
+        // #withExclusiveGuard：直调 #refreshFromCursor 会绕过互斥，与
+        // 并发的全量重建交错时刷新推进的游标越过重建删掉的事件区间，
+        // 形成静默丢事件缺口。
+        await this.#withExclusiveGuard(() => this.#refreshFromCursor())
           .catch((error: unknown) => {
+            if (isTransientSqliteBusyError(error)) {
+              // SQLITE_BUSY 是跨连接写竞争的瞬态缺锁，不是投影损坏：
+              // 不得把整库标成 degraded（误标降级）。下一轮刷新重试。
+              this.#logger.warn("indexer background refresh deferred by transient storage lock contention", {
+                message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+              });
+              return;
+            }
             void this.#markDegraded(undefined, error).catch((markError: unknown) => {
               this.#logger.warn("indexer failed to mark background refresh degraded", {
                 message: markError instanceof Error ? redactErrorMessage(markError) : "unknown error"
@@ -607,12 +633,23 @@ export class IndexerService implements LifecycleService {
           ...(current.blockHash !== undefined ? { blockHash: current.blockHash } : {})
         }
         : cursor;
+      this.#consecutiveCursorCasFailures += 1;
+      if (this.#consecutiveCursorCasFailures >= CURSOR_CAS_FAILURE_LIMIT) {
+        // 所有触发路径已过 #withExclusiveGuard，进程内不存在竞争写者；
+        // 持久游标被连续移动只剩一种解释——同一 scope 部署了第二个索引器
+        // 进程。按多实例部署错误 fail-closed，而不是无限互相顶替游标。
+        throw new ConfigError(
+          "durable projection cursor keeps being moved by another writer; run exactly one indexer process per chain scope (single-writer invariant)"
+        );
+      }
       this.#logger.warn("indexer cursor moved by another writer during refresh; deferring to the durable cursor and re-reading next round", {
         expectedNextBlock: expectNextBlock.toString(),
-        durableNextBlock: current?.nextBlock.toString()
+        durableNextBlock: current?.nextBlock.toString(),
+        consecutiveDeferrals: this.#consecutiveCursorCasFailures
       });
       return;
     }
+    this.#consecutiveCursorCasFailures = 0;
     this.#cursor = cursor;
   }
 
@@ -753,7 +790,7 @@ export class IndexerService implements LifecycleService {
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
       const replaySummary = buildActiveChainEventReplaySummary(remainingEvents);
-      const mismatchCount = countReplayAnomalies(remainingEvents);
+      const mismatchCount = countDuplicateActiveEventAnomalies(remainingEvents);
       const existing = await durableStore.getSyncState(this.#scope).catch(() => undefined);
       await durableStore.saveSyncState({
         ...this.#scope,
@@ -813,7 +850,9 @@ export class IndexerService implements LifecycleService {
     const snapshot = await this.#store.getOrderSnapshot?.() ?? createEmptyProjectionSnapshot();
     const identitySnapshot = await this.#store.getIdentitySnapshot();
     const existing = await this.#store.getSyncState(this.#scope);
-    const mismatchCount = await this.#storedMismatchCount(existing);
+    // 空批次不改变事件表：mismatchCount 沿用最近一次事件变更轮持久化的
+    // 计数，不为每个稳态轮触发一次 O(全历史) 的 listEvents+重放。
+    const mismatchCount = existing?.rebuild?.mismatchCount ?? 0;
     const syncState = await this.#store.saveSyncState({
       ...this.#scope,
       syncStatus: "indexed",
@@ -1163,6 +1202,9 @@ function maxBlockOf(left: bigint | undefined, right: bigint | undefined): bigint
 }
 
 const MAX_REORG_BACKTRACK_BLOCKS = 1_000;
+
+/** 连续 CAS 失败达到该次数即判定为多实例部署错误（fail-closed）。 */
+const CURSOR_CAS_FAILURE_LIMIT = 3;
 
 function isSameBlockHash(left: Hex, right: Hex): boolean {
   return left.toLowerCase() === right.toLowerCase();
