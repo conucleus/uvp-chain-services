@@ -882,6 +882,68 @@ describe("chain-services config", () => {
     );
   });
 
+  it("fails strict preflight when activeDeploymentId matches no deployment in the manifest", async () => {
+    // F154：activeDeploymentId 与清单不匹配时不得静默回退到另一个部署——
+    // 拼错的部署 id 必须在启动期显式失败。
+    const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-active-id-"));
+    tempDirs.push(manifestDir);
+    const manifestPath = join(manifestDir, "addresses.mismatch.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
+      activeDeploymentId: `0x${"ff".repeat(32)}`,
+      stateMachineDeployments: [
+        {
+          deploymentId: `0x${"01".repeat(32)}`,
+          stateMachineAddress: "0x1111111111111111111111111111111111111111",
+          modules: {
+            stagePatch: "0x4444444444444444444444444444444444444444",
+            derivedSignal: "0x5555555555555555555555555555555555555555",
+            docking: "0x6666666666666666666666666666666666666666",
+            planMetadata: "0x8888888888888888888888888888888888888888",
+            orderLink: "0x9999999999999999999999999999999999999999",
+            lens: "0x7777777777777777777777777777777777777777"
+          },
+          status: "active",
+          deploymentBlock: "20"
+        }
+      ],
+      contracts: {
+        UVPDeploymentRegistry: {
+          address: "0x3333333333333333333333333333333333333333",
+          deployment: { blockNumber: 19 }
+        },
+        UVPStateMachine: {
+          address: "0x1111111111111111111111111111111111111111",
+          deployment: { blockNumber: 20 }
+        },
+        UVPIdentityRegistry: {
+          address: "0x2222222222222222222222222222222222222222",
+          deployment: { blockNumber: 18 }
+        }
+      }
+    }));
+    const env = stagingEnv(tempDirs, {
+      UVP_ADDRESS_MANIFEST: manifestPath
+    });
+    const config = loadConfigFromEnv(env);
+    await expect(runConfigPreflight(config, {
+      env,
+      clients: stagingPreflightClients()
+    })).rejects.toThrow(/activeDeploymentId .* does not match any deployment/);
+  });
+
+  it("enforces a finality confirmation floor of 2 in production preflight", async () => {
+    // F163：确认数是 reorg 缓冲，配 1 形同虚设——单块重组即可穿透
+    // 最终性窗口；生产下限 2，启动期显式失败。（达标面由既有生产
+    // preflight 用例以 12 确认覆盖。）
+    const floorEnv = productionEnv({
+      UVP_FINALITY_CONFIRMATIONS: "1"
+    });
+    await expect(runConfigPreflight(loadConfigFromEnv(floorEnv), {
+      env: floorEnv
+    })).rejects.toThrow(/UVP_FINALITY_CONFIRMATIONS must be at least 2 in production/);
+  });
+
   it("fails staging preflight on signer mismatch, missing bytecode reads, or governance owner mismatch", async () => {
     const relayerMismatchEnv = stagingEnv(tempDirs, {
       UVP_RELAYER_GAS_PAYER_ADDRESS: "0x9999999999999999999999999999999999999999"

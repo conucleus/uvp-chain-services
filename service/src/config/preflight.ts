@@ -538,6 +538,20 @@ function runProductionSafetyPreflight(
     fail(checks, errors, "network.finality_confirmations_explicit", "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production");
   }
 
+  // F163：生产最终性下限。确认数是 reorg 缓冲——配 1 时边界块自身的
+  // 单块重组即可穿透缓冲（哈希连续性校验只能事后补救），形同虚设；
+  // 生产至少 2 个确认。
+  if (config.network.finalityConfirmations >= 2) {
+    pass(checks, "network.finality_confirmations_floor");
+  } else {
+    fail(
+      checks,
+      errors,
+      "network.finality_confirmations_floor",
+      "UVP_FINALITY_CONFIRMATIONS must be at least 2 in production; a 1-block buffer lets a single-block reorg slip past the finality window"
+    );
+  }
+
   if (config.productBff.registrationAdapter !== "anvil") {
     fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production");
   } else {
@@ -865,6 +879,22 @@ function runStateMachineModulesManifestPreflight(
       errors,
       "contracts.state_machine_modules_manifest",
       "stateMachineDeployments with modules are required in production/testnet/staging; the flat contract-address form silently drops all module-event projections"
+    );
+    return;
+  }
+
+  // F154：activeDeploymentId 与清单不匹配时 selectActiveStateMachineDeployment
+  // 会静默回退（status=active / 首项），拼错的部署 id 因此永远不会暴露——
+  // 运行时用的是另一个部署。不匹配即显式失败。
+  if (
+    config.network.activeDeploymentId &&
+    !deployments.some((deployment) => deployment.deploymentId === config.network.activeDeploymentId)
+  ) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_modules_manifest",
+      `activeDeploymentId ${config.network.activeDeploymentId} does not match any deployment in stateMachineDeployments; refusing to silently fall back to another deployment`
     );
     return;
   }
