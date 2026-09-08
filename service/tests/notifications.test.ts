@@ -335,12 +335,14 @@ describe("signal-routed notifications", () => {
       }
     });
     const retried = await withDispatcher.retryDelivery(skipped!.deliveryId);
-
-    expect(retried).toMatchObject({
-      status: "sent",
-      attempts: 1,
-      externalReceiptRef: "receipt:webhook"
-    });
+    expect(retried.outcome).toBe("retried");
+    if (retried.outcome === "retried") {
+      expect(retried.delivery).toMatchObject({
+        status: "sent",
+        attempts: 1,
+        externalReceiptRef: "receipt:webhook"
+      });
+    }
     expect(sent).toHaveLength(1);
   });
 
@@ -375,7 +377,8 @@ describe("signal-routed notifications", () => {
 
     // retry 对 dead_letter 是无操作（路由层据此返回 409 而非 200 假成功）。
     await expect(service.retryDelivery(delivery!.deliveryId)).resolves.toMatchObject({
-      status: "dead_letter"
+      outcome: "terminal",
+      delivery: expect.objectContaining({ status: "dead_letter" })
     });
     expect(sent).toHaveLength(1);
 
@@ -434,7 +437,8 @@ describe("signal-routed notifications", () => {
 
     // invalidated 是终态：retry 不再重投该载荷。
     await expect(service.retryDelivery(staleRow!.deliveryId)).resolves.toMatchObject({
-      status: "invalidated"
+      outcome: "terminal",
+      delivery: expect.objectContaining({ status: "invalidated" })
     });
     // 幂等：重复失效不重复计数。
     await expect(service.invalidateDeliveriesAboveBlock({ chainId: 31337, blockNumber: 7n })).resolves.toBe(0);
@@ -624,9 +628,12 @@ describe("signal-routed notifications", () => {
 
     await service.deadLetterDelivery(delivery!.deliveryId, "operator pasted sensitive review details");
     await expect(service.retryDelivery(delivery!.deliveryId)).resolves.toMatchObject({
-      status: "dead_letter",
-      reason: "operator pasted sensitive review details",
-      attempts: 0
+      outcome: "terminal",
+      delivery: expect.objectContaining({
+        status: "dead_letter",
+        reason: "operator pasted sensitive review details",
+        attempts: 0
+      })
     });
     const deadLetter = await service.buildRedactedEvidence({ walletAddress: supplierWallet, orderId });
     const serialized = JSON.stringify(deadLetter);

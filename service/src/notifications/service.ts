@@ -287,11 +287,17 @@ export type NotificationDeliveryReopenOutcome =
   | { readonly outcome: "not_dead_letter"; readonly delivery: NotificationDeliveryRecord }
   | { readonly outcome: "reopened"; readonly delivery: NotificationDeliveryRecord };
 
+/** retry 结果（F153）：终态行是 no-op，路由层据此返回非 200 而非假成功。 */
+export type NotificationDeliveryRetryOutcome =
+  | { readonly outcome: "not_found" }
+  | { readonly outcome: "terminal"; readonly delivery: NotificationDeliveryRecord }
+  | { readonly outcome: "retried"; readonly delivery: NotificationDeliveryRecord };
+
 export interface NotificationService {
   processSignalSubmittedEvents(events: readonly ChainEvent[]): Promise<NotificationProcessSummary>;
   listProfiles(): Promise<readonly NotificationProfileResolution[]>;
   listDeliveries(query?: NotificationDeliveryQuery): Promise<readonly NotificationDeliveryRecord[]>;
-  retryDelivery(deliveryId: Hex): Promise<NotificationDeliveryRecord | undefined>;
+  retryDelivery(deliveryId: Hex): Promise<NotificationDeliveryRetryOutcome>;
   deadLetterDelivery(deliveryId: Hex, reason?: string): Promise<NotificationDeliveryRecord | undefined>;
   reopenDelivery(deliveryId: Hex): Promise<NotificationDeliveryReopenOutcome>;
   /**
@@ -558,8 +564,11 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       // dead_letter 只能经显式重开（reopenDelivery），invalidated 的载荷
       // 定位已被 reorg 回滚删除、重投必是伪造通知。非终态（failed/skipped/
       // pending）照常重试。
-      if (!existing || existing.status === "sent" || existing.status === "dead_letter" || existing.status === "invalidated") {
-        return existing;
+      if (!existing) {
+        return { outcome: "not_found" };
+      }
+      if (existing.status === "sent" || existing.status === "dead_letter" || existing.status === "invalidated") {
+        return { outcome: "terminal", delivery: existing };
       }
       const { reason: _reason, lastError: _lastError, ...rest } = existing;
       const pending = await deliveryStore.saveDelivery({
@@ -569,21 +578,27 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       });
       const resolved = await resolveRetryTransport(options, pending);
       if (resolved.status !== "ok") {
-        return deliveryStore.saveDelivery({
-          ...pending,
-          status: "skipped",
-          reason: resolved.reason,
-          updatedAt: now()
-        });
+        return {
+          outcome: "retried",
+          delivery: await deliveryStore.saveDelivery({
+            ...pending,
+            status: "skipped",
+            reason: resolved.reason,
+            updatedAt: now()
+          })
+        };
       }
-      return dispatchPreparedDelivery({
-        deliveryStore,
-        ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
-        pending,
-        profile: resolved.profile,
-        transport: resolved.transport,
-        now
-      });
+      return {
+        outcome: "retried",
+        delivery: await dispatchPreparedDelivery({
+          deliveryStore,
+          ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+          pending,
+          profile: resolved.profile,
+          transport: resolved.transport,
+          now
+        })
+      };
     },
 
     async reopenDelivery(deliveryId) {

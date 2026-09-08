@@ -139,8 +139,8 @@ async function handleNotificationRequest(
     if (!deliveryId.ok) {
       return deliveryId.response;
     }
-    const delivery = await context.notificationService.retryDelivery(deliveryId.deliveryId);
-    if (!delivery) {
+    const outcome = await context.notificationService.retryDelivery(deliveryId.deliveryId);
+    if (outcome.outcome === "not_found") {
       return {
         status: 404,
         body: { error: "notification_delivery_not_found" }
@@ -148,21 +148,21 @@ async function handleNotificationRequest(
     }
     // F153：终态行 retry 是无操作，不得返回 200 假成功。sent/invalidated
     // 不可重开；dead_letter 需经显式 reopen 端点。
-    if (delivery.status === "sent" || delivery.status === "dead_letter" || delivery.status === "invalidated") {
+    if (outcome.outcome === "terminal") {
       return {
         status: 409,
         body: {
           error: "notification_delivery_terminal",
-          message: delivery.status === "dead_letter"
+          message: outcome.delivery.status === "dead_letter"
             ? "delivery is dead-lettered; use the reopen endpoint to explicitly reopen it"
-            : `delivery status ${delivery.status} is terminal and cannot be retried`,
-          delivery
+            : `delivery status ${outcome.delivery.status} is terminal and cannot be retried`,
+          delivery: outcome.delivery
         }
       };
     }
     return {
       status: 200,
-      body: { delivery }
+      body: { delivery: outcome.delivery }
     };
   }
 
