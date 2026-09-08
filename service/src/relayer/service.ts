@@ -152,7 +152,7 @@ export class RelayerService implements LifecycleService {
       // A persisted final outcome is authoritative for this submission id. In
       // particular, do not turn a durable DLQ into duplicate_signer_nonce or
       // broadcast it again after a process restart.
-      this.#terminalSubmissionIds.add(submissionKey);
+      this.#rememberTerminalSubmission(submissionKey);
       return prior.lastSubmission;
     }
     if (this.retryBudgetExhausted(priorFailedAttempts)) {
@@ -163,24 +163,28 @@ export class RelayerService implements LifecycleService {
         priorFailedAttempts,
         this.retryBudgetRemaining(priorFailedAttempts)
       );
-      await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
-      this.#terminalSubmissionIds.add(submissionKey);
-      return submission;
+      const persisted = await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
+      if (persisted.deadLetter) {
+        this.#rememberTerminalSubmission(submissionKey);
+      }
+      return persisted;
     }
 
     const reserved = await this.reserveNonce(request);
     if (!reserved) {
+      // 预留失败不是终态：并发/在途的同 (signer,nonce) 提交结果未知——
+      // 持有者可能随后成功上链，也可能失败并释放 nonce 让本轮重试。
+      // 钉成 dead_letter 会让 nonce 释放后的合法重试被终态台账永久拒绝。
       const classification = relayFailure({
         errorCode: "duplicate_signer_nonce",
         message: "duplicate signer nonce",
         failureCategory: "duplicate",
-        retryable: false,
-        deadLetter: true
+        retryable: true,
+        deadLetter: false,
+        ...this.retrySchedule(priorFailedAttempts)
       });
       const submission = failedSubmission(request, classification, undefined, priorFailedAttempts, this.retryBudgetRemaining(priorFailedAttempts));
-      await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
-      this.#terminalSubmissionIds.add(submissionKey);
-      return submission;
+      return this.persistOutcome(submissionKey, submission, priorFailedAttempts);
     }
 
     if (!this.acquireOrder(request)) {
@@ -194,8 +198,7 @@ export class RelayerService implements LifecycleService {
         ...this.retrySchedule(priorFailedAttempts)
       });
       const submission = failedSubmission(request, classification, undefined, priorFailedAttempts, this.retryBudgetRemaining(priorFailedAttempts));
-      await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
-      return submission;
+      return this.persistOutcome(submissionKey, submission, priorFailedAttempts);
     }
 
     try {
@@ -251,10 +254,12 @@ export class RelayerService implements LifecycleService {
           classification.retryable || classification.errorCode === "broadcast_retry_exhausted"
             ? attemptNumber
             : priorFailedAttempts
-        );
-        if (submission.deadLetter) {
-          this.#terminalSubmissionIds.add(submissionKey);
-        }
+        ).then((persisted) => {
+          if (persisted.deadLetter) {
+            this.#rememberTerminalSubmission(submissionKey);
+          }
+          return persisted;
+        });
         return submission;
       }
 
@@ -271,7 +276,7 @@ export class RelayerService implements LifecycleService {
           lastSubmission: submission
         });
         this.#failedAttemptsBySubmission.delete(submissionKey);
-        this.#lastSubmissionById.set(submissionKey, submission);
+        this.#rememberLastSubmission(submissionKey, submission);
         this.#terminalSubmissionIds.delete(submissionKey);
         return submission;
       } catch (error) {
@@ -292,8 +297,8 @@ export class RelayerService implements LifecycleService {
           attemptNumber,
           this.retryBudgetRemaining(0)
         );
-        this.#lastSubmissionById.set(submissionKey, persistFailure);
-        this.#terminalSubmissionIds.add(submissionKey);
+        this.#rememberLastSubmission(submissionKey, persistFailure);
+        this.#rememberTerminalSubmission(submissionKey);
         this.#failedAttemptsBySubmission.delete(submissionKey);
         await this.bestEffortPersistAfterBroadcast(submissionKey, persistFailure, attemptNumber, error);
         throw error;
@@ -305,6 +310,28 @@ export class RelayerService implements LifecycleService {
 
   get running(): boolean {
     return this.#running;
+  }
+
+
+  /**
+   * F151：进程内台账有界——写入按插入序 FIFO 淘汰最旧条目，长生命周期
+   * 进程不随提交数无界增长。淘汰只影响无持久 store 时的内存回退精度，
+   * 持久 submissionStore/retryBudgetStore 始终是完整真源。
+   */
+  #rememberLastSubmission(submissionKey: string, submission: RelaySubmission): void {
+    this.#lastSubmissionById.delete(submissionKey);
+    this.#lastSubmissionById.set(submissionKey, submission);
+    evictOldestMapEntries(this.#lastSubmissionById, IN_FLIGHT_LEDGER_MAX_ENTRIES);
+  }
+
+  #rememberFailedAttempts(submissionKey: string, failedAttempts: number): void {
+    this.#failedAttemptsBySubmission.set(submissionKey, failedAttempts);
+    evictOldestMapEntries(this.#failedAttemptsBySubmission, IN_FLIGHT_LEDGER_MAX_ENTRIES);
+  }
+
+  #rememberTerminalSubmission(submissionKey: string): void {
+    this.#terminalSubmissionIds.add(submissionKey);
+    evictOldestSetEntries(this.#terminalSubmissionIds, IN_FLIGHT_LEDGER_MAX_ENTRIES);
   }
 
   private async reserveNonce(request: RelayRequest): Promise<boolean> {
@@ -362,7 +389,7 @@ export class RelayerService implements LifecycleService {
             lastSubmission: submission
           });
           this.#failedAttemptsBySubmission.delete(submissionKey);
-          this.#lastSubmissionById.set(submissionKey, submission);
+          this.#rememberLastSubmission(submissionKey, submission);
           this.#terminalSubmissionIds.delete(submissionKey);
         } catch (persistError) {
           this.#logger.warn("relayer resolved duplicate transaction but persisting the outcome failed; the nonce stays consumed", {
@@ -425,15 +452,34 @@ export class RelayerService implements LifecycleService {
     submissionKey: string,
     submission: RelaySubmission,
     failedAttempts: number
-  ): Promise<void> {
-    this.#lastSubmissionById.set(submissionKey, submission);
+  ): Promise<RelaySubmission> {
+    // 状态守卫：并发同 (signer,nonce) 的失败结果不得覆盖已 submitted 的
+    // 成功台账——nonce 链上已消费，submitted 是该提交的最终真相。胜者的
+    // record 已落库（budget 尚未跟上）时以胜者为准返回，不写失败行。
+    if (submission.status === "failed") {
+      const [persistedSubmission, persistedBudget] = await Promise.all([
+        this.loadSubmission(submissionKey),
+        this.#retryBudgetStore ? this.#retryBudgetStore.load(submissionKey) : Promise.resolve(undefined)
+      ]);
+      const winner = persistedSubmission?.status === "submitted"
+        ? persistedSubmission
+        : persistedBudget?.lastSubmission?.status === "submitted"
+          ? persistedBudget.lastSubmission
+          : undefined;
+      if (winner) {
+        this.#rememberLastSubmission(submissionKey, winner);
+        return winner;
+      }
+    }
+    this.#rememberLastSubmission(submissionKey, submission);
     if (failedAttempts > 0) {
-      this.#failedAttemptsBySubmission.set(submissionKey, failedAttempts);
+      this.#rememberFailedAttempts(submissionKey, failedAttempts);
     } else {
       this.#failedAttemptsBySubmission.delete(submissionKey);
     }
     await this.record(submission);
     await this.saveRetryState(submissionKey, { failedAttempts, lastSubmission: submission });
+    return submission;
   }
 
   private async saveRetryState(submissionKey: string, snapshot: RelayRetryBudgetSnapshot): Promise<void> {
@@ -521,6 +567,30 @@ export class RelayerService implements LifecycleService {
     return {
       nextRetryAt: new Date(this.#now().getTime() + delayMs).toISOString()
     };
+  }
+}
+
+
+/** F151：进程内台账容量上限（FIFO 淘汰最旧）。 */
+const IN_FLIGHT_LEDGER_MAX_ENTRIES = 10_000;
+
+function evictOldestMapEntries<K, V>(map: Map<K, V>, maxEntries: number): void {
+  while (map.size > maxEntries) {
+    const oldest = map.keys().next();
+    if (oldest.done) {
+      return;
+    }
+    map.delete(oldest.value);
+  }
+}
+
+function evictOldestSetEntries<V>(set: Set<V>, maxEntries: number): void {
+  while (set.size > maxEntries) {
+    const oldest = set.values().next();
+    if (oldest.done) {
+      return;
+    }
+    set.delete(oldest.value);
   }
 }
 
