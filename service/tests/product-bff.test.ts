@@ -381,6 +381,37 @@ describe("product BFF order drafts and invites", () => {
     expect(wrongToken).toMatchObject({ status: 403, body: { error: "invite_token_mismatch" } });
   });
 
+  it("creates at most one active invite per participant even under racing createInvite calls (F173)", async () => {
+    // F173：createInvite 的前置检查（listInvites 查活跃）是 check-then-act，
+    // 并发双双通过会落两条 active；条件插入把判定原子化到存储层
+    // （跨进程由单语句承担）。
+    const store = new MemoryProductBffStore();
+    const base = {
+      draftId: "draft_f173",
+      participantId: "participant_f173",
+      roleSlotId: "slot_customs",
+      tokenHash: "0x" + "11".repeat(32),
+      status: "active" as const,
+      expiresAt: "2026-02-01T00:00:00.000Z",
+      createdAt: "2026-01-01T00:00:00.000Z"
+    };
+
+    await expect(store.createInviteIfNoneActive(
+      { ...base, inviteId: "invite_f173_a", tokenHash: "0x" + "21".repeat(32) },
+      "2026-01-02T00:00:00.000Z"
+    )).resolves.toBe(true);
+    // 同 participant 的第二条 active（前置检查双双通过的并发方）必须被拒。
+    await expect(store.createInviteIfNoneActive(
+      { ...base, inviteId: "invite_f173_b", tokenHash: "0x" + "22".repeat(32) },
+      "2026-01-02T00:00:00.000Z"
+    )).resolves.toBe(false);
+    // 已过期的 active 不再占用：可再发新邀请。
+    await expect(store.createInviteIfNoneActive(
+      { ...base, inviteId: "invite_f173_c", tokenHash: "0x" + "23".repeat(32), expiresAt: "2026-03-01T00:00:00.000Z" },
+      "2026-02-02T00:00:00.000Z"
+    )).resolves.toBe(true);
+  });
+
   it("invite status transitions are conditional on status=active (F141)", async () => {
     const store = new MemoryProductBffStore();
     const invite: ProductInviteDTO = {
@@ -393,7 +424,7 @@ describe("product BFF order drafts and invites", () => {
       expiresAt: "2100-01-01T00:00:00.000Z",
       createdAt: "2026-01-01T00:00:00.000Z"
     };
-    await store.createInvite(invite);
+    await store.createInviteIfNoneActive(invite, "2026-01-01T00:00:00.000Z");
     await expect(store.updateInviteIfActive({ ...invite, status: "accepted" })).resolves.toBe(true);
     // 已接受的 invite 不再满足 WHERE status='active'：并发方的覆写被拒。
     await expect(store.updateInviteIfActive({ ...invite, status: "rejected" })).resolves.toBe(false);

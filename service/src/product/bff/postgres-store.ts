@@ -114,8 +114,21 @@ export class PostgresProductBffStore implements ProductBffStore {
     await this.#upsertParticipant(participant);
   }
 
-  async createInvite(invite: ProductInviteDTO): Promise<void> {
-    await this.#insertInvite(invite);
+  async createInviteIfNoneActive(invite: ProductInviteDTO, nowIso: string): Promise<boolean> {
+    // 单语句条件插入：expires_at::timestamptz 归一化解析（含时区偏移），
+    // check-then-act 由语句原子性承担，READ COMMITTED 下并发也不会双 active。
+    const result = await this.#database.query(
+      `INSERT INTO product_invite (
+         invite_id, draft_id, participant_id, role_slot_id, token_hash, status,
+         expires_at, created_at, accepted_wallet_address
+       ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+       WHERE NOT EXISTS (
+         SELECT 1 FROM product_invite
+         WHERE participant_id = $10 AND status = 'active' AND expires_at::timestamptz > $11::timestamptz
+       )`,
+      [...inviteValues(invite), invite.participantId, nowIso]
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async getInvite(inviteId: string): Promise<ProductInviteDTO | undefined> {

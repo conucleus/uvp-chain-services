@@ -14,7 +14,12 @@ export interface ProductBffStore {
   listAcceptedParticipantsByWallet(walletAddress: string): Promise<readonly DraftParticipantDTO[]>;
   getParticipant(participantId: string): Promise<DraftParticipantDTO | undefined>;
   updateParticipant(participant: DraftParticipantDTO): Promise<void>;
-  createInvite(invite: ProductInviteDTO): Promise<void>;
+  /**
+   * 条件插入（F173）：participant 已有 active 且未过期的 invite 时拒绝
+   * （返回 false），单语句原子判定防并发双 active（跨进程由数据库承担
+   * check-then-act 的原子性，内存实现由单线程临界区承担）。
+   */
+  createInviteIfNoneActive(invite: ProductInviteDTO, nowIso: string): Promise<boolean>;
   getInvite(inviteId: string): Promise<ProductInviteDTO | undefined>;
   updateInvite(invite: ProductInviteDTO): Promise<void>;
   /**
@@ -74,8 +79,17 @@ export class MemoryProductBffStore implements ProductBffStore {
     this.#participants.set(participant.participantId, participant);
   }
 
-  async createInvite(invite: ProductInviteDTO): Promise<void> {
+  async createInviteIfNoneActive(invite: ProductInviteDTO, nowIso: string): Promise<boolean> {
+    const hasActive = [...this.#invites.values()].some((existing) =>
+      existing.participantId === invite.participantId &&
+      existing.status === "active" &&
+      Date.parse(existing.expiresAt) > Date.parse(nowIso)
+    );
+    if (hasActive) {
+      return false;
+    }
     this.#invites.set(invite.inviteId, invite);
+    return true;
   }
 
   async getInvite(inviteId: string): Promise<ProductInviteDTO | undefined> {

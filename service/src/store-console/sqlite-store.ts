@@ -150,12 +150,16 @@ export class SqliteStoreZhixuDraftStore implements StoreZhixuDraftStore {
     planHash: string,
     artifactHash?: string
   ): Promise<StoreProductSchemaDTO | undefined> {
+    // F173：planId 前置下推到 SQL（json_extract 大小写归一），只反序列化
+    // 同 plan 候选行，不再每轮全表捞取解析全部 schema；精确匹配
+    // （planHash/artifactHash、字段形状）仍由 JS 侧统一判定。
     const rows = this.#database.prepare(
       `SELECT product_schema_json
        FROM store_zhixu_draft
        WHERE product_schema_json IS NOT NULL
+         AND lower(json_extract(product_schema_json, '$.planId')) = lower(?)
        ORDER BY updated_at DESC, draft_id DESC`
-    ).all();
+    ).all(planId);
     return productSchemaRowsByPlan(rows, planId, planHash, artifactHash)[0];
   }
 

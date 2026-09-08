@@ -141,11 +141,15 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
     planHash: string,
     artifactHash?: string
   ): Promise<StoreProductSchemaDTO | undefined> {
+    // F173：planId 前置下推到 SQL，只反序列化同 plan 候选行；精确匹配
+    // （planHash/artifactHash、字段形状）仍由 JS 侧统一判定。
     const result = await this.#database.query(
       `SELECT product_schema_json::text AS product_schema_json
        FROM store_zhixu_draft
        WHERE product_schema_json IS NOT NULL
-       ORDER BY updated_at DESC, draft_id DESC`
+         AND lower(product_schema_json->>'planId') = lower($1)
+       ORDER BY updated_at DESC, draft_id DESC`,
+      [planId]
     );
     return productSchemaRowsByPlan(result.rows, planId, planHash, artifactHash)[0];
   }

@@ -119,8 +119,20 @@ export class SqliteProductBffStore implements ProductBffStore {
     runSqliteWrite(() => this.#upsertParticipant(participant));
   }
 
-  async createInvite(invite: ProductInviteDTO): Promise<void> {
-    runSqliteWrite(() => this.#insertInvite(invite));
+  async createInviteIfNoneActive(invite: ProductInviteDTO, nowIso: string): Promise<boolean> {
+    // 单语句条件插入：julianday 归一化解析 ISO8601（含时区偏移写法），
+    // check-then-act 由语句原子性承担，跨进程并发不会双 active。
+    const result = runSqliteWrite(() => this.#database.prepare(
+      `INSERT INTO product_invite (
+         invite_id, draft_id, participant_id, role_slot_id, token_hash, status,
+         expires_at, created_at, accepted_wallet_address
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE NOT EXISTS (
+         SELECT 1 FROM product_invite
+         WHERE participant_id = ? AND status = 'active' AND julianday(expires_at) > julianday(?)
+       )`
+    ).run(...inviteValues(invite), invite.participantId, nowIso));
+    return result.changes > 0;
   }
 
   async getInvite(inviteId: string): Promise<ProductInviteDTO | undefined> {
@@ -264,15 +276,6 @@ export class SqliteProductBffStore implements ProductBffStore {
       participant.acceptedAt ?? null,
       participant.rejectedAt ?? null
     );
-  }
-
-  #insertInvite(invite: ProductInviteDTO): void {
-    this.#database.prepare(
-      `INSERT INTO product_invite (
-         invite_id, draft_id, participant_id, role_slot_id, token_hash, status,
-         expires_at, created_at, accepted_wallet_address
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(...inviteValues(invite));
   }
 
   #upsertInvite(invite: ProductInviteDTO): void {
