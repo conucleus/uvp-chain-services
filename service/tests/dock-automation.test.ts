@@ -35,6 +35,7 @@ describe("dock liveness keeper", () => {
     const logger = {
       warn: (message: string) => warnings.push(message),
       info: (message: string) => infos.push(message),
+      debug: () => undefined,
       error: () => undefined
     };
     const worker = new DockAutomationWorker({
