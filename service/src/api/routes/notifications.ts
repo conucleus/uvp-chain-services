@@ -146,9 +146,52 @@ async function handleNotificationRequest(
         body: { error: "notification_delivery_not_found" }
       };
     }
+    // F153：终态行 retry 是无操作，不得返回 200 假成功。sent/invalidated
+    // 不可重开；dead_letter 需经显式 reopen 端点。
+    if (delivery.status === "sent" || delivery.status === "dead_letter" || delivery.status === "invalidated") {
+      return {
+        status: 409,
+        body: {
+          error: "notification_delivery_terminal",
+          message: delivery.status === "dead_letter"
+            ? "delivery is dead-lettered; use the reopen endpoint to explicitly reopen it"
+            : `delivery status ${delivery.status} is terminal and cannot be retried`,
+          delivery
+        }
+      };
+    }
     return {
       status: 200,
       body: { delivery }
+    };
+  }
+
+  const reopenMatch = /^\/admin\/notifications\/deliveries\/([^/]+)\/reopen$/.exec(request.pathname);
+  if (request.method === "POST" && reopenMatch) {
+    const deliveryId = parseDeliveryId(reopenMatch[1] ?? "");
+    if (!deliveryId.ok) {
+      return deliveryId.response;
+    }
+    const outcome = await context.notificationService.reopenDelivery(deliveryId.deliveryId);
+    if (outcome.outcome === "not_found") {
+      return {
+        status: 404,
+        body: { error: "notification_delivery_not_found" }
+      };
+    }
+    if (outcome.outcome === "not_dead_letter") {
+      return {
+        status: 409,
+        body: {
+          error: "notification_delivery_not_dead_letter",
+          message: "only dead-lettered deliveries can be reopened",
+          delivery: outcome.delivery
+        }
+      };
+    }
+    return {
+      status: 200,
+      body: { delivery: outcome.delivery }
     };
   }
 
@@ -219,7 +262,7 @@ function parseNotificationDeliveryQuery(query: ApiRequest["query"]): ParsedNotif
     return {
       response: {
         status: 400,
-        body: { error: "invalid_query", message: "status must be pending, sent, failed, skipped, or dead_letter" }
+        body: { error: "invalid_query", message: "status must be pending, sent, failed, skipped, dead_letter, or invalidated" }
       }
     };
   }
@@ -255,5 +298,5 @@ function optionalReason(body: unknown): string | undefined {
 }
 
 function isNotificationDeliveryStatus(value: string): value is NotificationDeliveryStatus {
-  return value === "pending" || value === "sent" || value === "failed" || value === "skipped" || value === "dead_letter";
+  return value === "pending" || value === "sent" || value === "failed" || value === "skipped" || value === "dead_letter" || value === "invalidated";
 }

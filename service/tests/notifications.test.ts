@@ -344,6 +344,102 @@ describe("signal-routed notifications", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("reopens a dead-lettered delivery explicitly and refuses reopen for other statuses", async () => {
+    // F153：dead_letter 必须有重开路径；retry 对 dead_letter 是无操作，
+    // 由路由层返回非 200。
+    const event = signalEvent(6n, requiredDependency(customsDependencyA));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [event]
+    });
+    const sent: NotificationDispatchRequest[] = [];
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      dispatcher: {
+        async send(request) {
+          sent.push(request);
+          return { ok: true, externalReceiptRef: "receipt:webhook" };
+        }
+      }
+    });
+
+    await service.processSignalSubmittedEvents([event]);
+    const [delivery] = await service.listDeliveries();
+    await service.deadLetterDelivery(delivery!.deliveryId, "operator review");
+
+    // retry 对 dead_letter 是无操作（路由层据此返回 409 而非 200 假成功）。
+    await expect(service.retryDelivery(delivery!.deliveryId)).resolves.toMatchObject({
+      status: "dead_letter"
+    });
+    expect(sent).toHaveLength(1);
+
+    const reopened = await service.reopenDelivery(delivery!.deliveryId);
+    expect(reopened.outcome).toBe("reopened");
+    if (reopened.outcome === "reopened") {
+      expect(reopened.delivery).toMatchObject({ status: "sent", attempts: 2 });
+    }
+    expect(sent).toHaveLength(2);
+
+    // 非 dead_letter 行不可重开。
+    const notDeadLetter = await service.reopenDelivery(delivery!.deliveryId);
+    expect(notDeadLetter.outcome).toBe("not_dead_letter");
+    const notFound = await service.reopenDelivery("0x0000000000000000000000000000000000000000000000000000000000000001");
+    expect(notFound.outcome).toBe("not_found");
+  });
+
+  it("invalidates deliveries whose proof blocks were reorged out and leaves the rest intact", async () => {
+    // F136：reorg 回滚删除 blockNumber > ancestor 的事件后，已生成投递
+    // （含 sent）指向已消失定位，必须联动失效留痕。
+    const lowEvent = signalEvent(5n, requiredDependency(customsDependencyA));
+    const highEvent = signalEvent(9n, requiredDependency(customsDependencyB), bytes32Hex("6009"));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [lowEvent, highEvent],
+      finalizedBlock: 10n
+    });
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      dispatcher: {
+        async send() {
+          return { ok: true };
+        }
+      }
+    });
+
+    await service.processSignalSubmittedEvents([lowEvent, highEvent]);
+    await expect(service.listDeliveries()).resolves.toHaveLength(2);
+    await expect(service.listDeliveries({ status: "sent" })).resolves.toHaveLength(2);
+
+    const invalidated = await service.invalidateDeliveriesAboveBlock({ chainId: 31337, blockNumber: 7n });
+    expect(invalidated).toBe(1);
+    const remaining = await service.listDeliveries();
+    expect(remaining).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "invalidated", reason: "reorg_rolled_back" }),
+      expect.objectContaining({ status: "sent" })
+    ]));
+    const staleRow = remaining.find((row) => row.status === "invalidated");
+    expect(BigInt(staleRow!.payload.proof.blockNumber)).toBeGreaterThan(7n);
+
+    // invalidated 是终态：retry 不再重投该载荷。
+    await expect(service.retryDelivery(staleRow!.deliveryId)).resolves.toMatchObject({
+      status: "invalidated"
+    });
+    // 幂等：重复失效不重复计数。
+    await expect(service.invalidateDeliveriesAboveBlock({ chainId: 31337, blockNumber: 7n })).resolves.toBe(0);
+  });
+
   it("redacts transport error messages before persisting them as lastError", async () => {
     // L-10：transport 失败文本（可能携带端点 URL 与凭权查询参数）先过
     // redactErrorMessage 再落投递台账，对齐兄弟路径。

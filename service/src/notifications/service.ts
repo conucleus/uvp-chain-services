@@ -25,7 +25,15 @@ import {
   type SupplierNotificationTransport
 } from "./profile.js";
 
-export type NotificationDeliveryStatus = "pending" | "sent" | "failed" | "skipped" | "dead_letter";
+export type NotificationDeliveryStatus =
+  | "pending"
+  | "sent"
+  | "failed"
+  | "skipped"
+  | "dead_letter"
+  // reorg 回滚联动失效：载荷指向的链上定位已被回滚删除，记录保留为
+  // 排障证据，不再是可重试/可重开的投递。
+  | "invalidated";
 export type NotificationActivationStatus = "accepted" | "started" | "rejected";
 
 export type NotificationSkippedReason =
@@ -43,7 +51,9 @@ export type NotificationSkippedReason =
   // dead_letter 终态的原因码（自动补投预算耗尽）：与 skipped 原因共用
   // reason 词表，不入枚举会在 evidence 视图被统一掩成
   // redacted_operator_reason，自动耗尽终态不可归因。
-  | "delivery_attempts_exhausted";
+  | "delivery_attempts_exhausted"
+  // reorg 回滚联动的失效原因码（status=invalidated 行）。
+  | "reorg_rolled_back";
 
 export interface SignalNotificationPayload {
   readonly version: "uvp.signalReceivedNotification.v1";
@@ -271,12 +281,25 @@ export interface NotificationRunSummary {
 
 export type NotificationProcessSummary = NotificationRunSummary;
 
+/** dead_letter 显式重开（F153）：只允许 dead_letter 行，其余终态/非终态均拒绝。 */
+export type NotificationDeliveryReopenOutcome =
+  | { readonly outcome: "not_found" }
+  | { readonly outcome: "not_dead_letter"; readonly delivery: NotificationDeliveryRecord }
+  | { readonly outcome: "reopened"; readonly delivery: NotificationDeliveryRecord };
+
 export interface NotificationService {
   processSignalSubmittedEvents(events: readonly ChainEvent[]): Promise<NotificationProcessSummary>;
   listProfiles(): Promise<readonly NotificationProfileResolution[]>;
   listDeliveries(query?: NotificationDeliveryQuery): Promise<readonly NotificationDeliveryRecord[]>;
   retryDelivery(deliveryId: Hex): Promise<NotificationDeliveryRecord | undefined>;
   deadLetterDelivery(deliveryId: Hex, reason?: string): Promise<NotificationDeliveryRecord | undefined>;
+  reopenDelivery(deliveryId: Hex): Promise<NotificationDeliveryReopenOutcome>;
+  /**
+   * reorg 回滚联动（F136）：把 proof 定位高于 blockNumber 的投递标记为
+   * invalidated——回滚删除了这些事件，已生成的投递（含 sent）从此指向
+   * 已消失的链上定位，必须失效留痕而不是继续呈现为有效通知。
+   */
+  invalidateDeliveriesAboveBlock(input: { readonly chainId: number; readonly blockNumber: bigint }): Promise<number>;
   listParticipantNotifications(query?: ParticipantNotificationQuery): Promise<ParticipantNotificationList>;
   markParticipantNotificationRead(input: ParticipantNotificationReadInput): Promise<ParticipantNotificationRecord | undefined>;
   buildRedactedEvidence(query?: NotificationRedactedEvidenceQuery): Promise<NotificationRedactedEvidence>;
@@ -531,10 +554,11 @@ export function createNotificationService(options: CreateNotificationServiceOpti
 
     async retryDelivery(deliveryId) {
       const existing = await deliveryStore.getDelivery(deliveryId);
-      // Sent and dead-lettered rows are terminal until an operator explicitly
-      // reopens them; a skipped row (for example, no configured dispatcher)
-      // is safe to retry after the missing dependency is restored.
-      if (!existing || existing.status === "sent" || existing.status === "dead_letter") {
+      // Sent, dead-lettered and invalidated rows are terminal: sent 永不重投，
+      // dead_letter 只能经显式重开（reopenDelivery），invalidated 的载荷
+      // 定位已被 reorg 回滚删除、重投必是伪造通知。非终态（failed/skipped/
+      // pending）照常重试。
+      if (!existing || existing.status === "sent" || existing.status === "dead_letter" || existing.status === "invalidated") {
         return existing;
       }
       const { reason: _reason, lastError: _lastError, ...rest } = existing;
@@ -560,6 +584,67 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         transport: resolved.transport,
         now
       });
+    },
+
+    async reopenDelivery(deliveryId) {
+      const existing = await deliveryStore.getDelivery(deliveryId);
+      if (!existing) {
+        return { outcome: "not_found" };
+      }
+      if (existing.status !== "dead_letter") {
+        return { outcome: "not_dead_letter", delivery: existing };
+      }
+      const { reason: _reason, lastError: _lastError, ...rest } = existing;
+      const pending = await deliveryStore.saveDelivery({
+        ...rest,
+        status: "pending",
+        updatedAt: now()
+      });
+      const resolved = await resolveRetryTransport(options, pending);
+      if (resolved.status !== "ok") {
+        return {
+          outcome: "reopened",
+          delivery: await deliveryStore.saveDelivery({
+            ...pending,
+            status: "skipped",
+            reason: resolved.reason,
+            updatedAt: now()
+          })
+        };
+      }
+      return {
+        outcome: "reopened",
+        delivery: await dispatchPreparedDelivery({
+          deliveryStore,
+          ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+          pending,
+          profile: resolved.profile,
+          transport: resolved.transport,
+          now
+        })
+      };
+    },
+
+    async invalidateDeliveriesAboveBlock(input) {
+      const deliveries = await deliveryStore.listDeliveries();
+      let invalidated = 0;
+      for (const delivery of deliveries) {
+        if (delivery.status === "invalidated" || delivery.chainId !== input.chainId) {
+          continue;
+        }
+        const proofBlock = BigInt(delivery.payload.proof.blockNumber);
+        if (proofBlock <= input.blockNumber) {
+          continue;
+        }
+        await deliveryStore.saveDelivery({
+          ...delivery,
+          status: "invalidated",
+          reason: "reorg_rolled_back",
+          updatedAt: now()
+        });
+        invalidated += 1;
+      }
+      return invalidated;
     },
 
     async deadLetterDelivery(deliveryId, reason) {
@@ -756,7 +841,7 @@ function deliveryMatchesNotificationEvidenceQuery(
 }
 
 function deliveryStatusRequiresRecipientEvidence(status: NotificationDeliveryStatus): boolean {
-  return status === "failed" || status === "skipped" || status === "dead_letter";
+  return status === "failed" || status === "skipped" || status === "dead_letter" || status === "invalidated";
 }
 
 function redactedDeliveryReasonCode(reason: string): string {
@@ -776,7 +861,8 @@ function isNotificationSkippedReason(reason: string): reason is NotificationSkip
     "transport_not_supported",
     "executor_watch_self_managed",
     "transport_adapter_missing",
-    "delivery_attempts_exhausted"
+    "delivery_attempts_exhausted",
+    "reorg_rolled_back"
   ].includes(reason);
 }
 

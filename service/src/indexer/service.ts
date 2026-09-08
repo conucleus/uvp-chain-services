@@ -10,6 +10,7 @@ import {
 import type { ProjectionSnapshot } from "./projections.js";
 import {
   countDuplicateActiveEventAnomalies,
+  countReplayAnomalies,
   createEmptyProjectionSnapshot,
   rebuildOrderProjections
 } from "./projections.js";
@@ -58,6 +59,12 @@ export interface ChainEventSource {
 
 export interface ChainEventNotificationProcessor {
   processSignalSubmittedEvents(events: readonly ChainEvent[]): Promise<unknown>;
+  /**
+   * reorg 回滚联动：blockNumber 之后的事件已被删除，处理器须把指向这些
+   * 定位的已生成通知投递标记失效（sent 也一样——载荷指向已消失的链上
+   * 位置）。可选方法缺失时索引器只记警告。
+   */
+  invalidateDeliveriesAboveBlock?(input: { readonly chainId: number; readonly blockNumber: bigint }): Promise<unknown>;
 }
 
 export interface ProjectionAutomationProcessor {
@@ -836,7 +843,37 @@ export class IndexerService implements LifecycleService {
       finalizedBlock: ancestorBlock,
       blockHash: ancestorHash
     };
+    await this.#invalidateNotificationsAfterReorg(ancestorBlock);
     return nextBlock;
+  }
+
+  /**
+   * reorg 回滚的事务提交后联动失效通知投递：已删除事件之上的 sent/
+   * failed/skipped 投递从此指向消失的链上定位。标记幂等（invalidated 行
+   * 跳过），失败只响亮记录——回滚路径再次触发时重标，不留静默缺口。
+   */
+  async #invalidateNotificationsAfterReorg(ancestorBlock: bigint): Promise<void> {
+    const invalidate = this.#notificationProcessor?.invalidateDeliveriesAboveBlock;
+    if (!invalidate) {
+      return;
+    }
+    try {
+      const invalidated = await invalidate({
+        chainId: this.#scope.chainId,
+        blockNumber: ancestorBlock
+      });
+      if (invalidated !== undefined && Number(invalidated) > 0) {
+        this.#logger.warn("indexer invalidated notification deliveries targeting reorged-out blocks", {
+          ancestorBlock: ancestorBlock.toString(),
+          invalidated: Number(invalidated)
+        });
+      }
+    } catch (error) {
+      this.#logger.error("indexer failed to invalidate notification deliveries after reorg rollback; stale deliveries may reference reorged-out blocks until the next rollback", {
+        ancestorBlock: ancestorBlock.toString(),
+        message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+      });
+    }
   }
 
   async #summarizeStoredProjection(input: {
