@@ -26,6 +26,32 @@ const sourceId = bytes32Hex("0404");
 const interfaceNameId = bytes32Text("production_service");
 
 describe("dock liveness keeper", () => {
+
+  it("stays idle with a loud warning when enabled but no route source/submitter is wired", async () => {
+    // F156：交付形态未装配 routeSource/submitter——enabled 时不得空转
+    // 轮询并宣称 started。
+    const warnings: string[] = [];
+    const infos: string[] = [];
+    const logger = {
+      warn: (message: string) => warnings.push(message),
+      info: (message: string) => infos.push(message),
+      error: () => undefined
+    };
+    const worker = new DockAutomationWorker({
+      config: { enabled: true, pollIntervalMs: 5, redeliveryWindowMs: 60_000, maxCandidatesPerRun: 5 },
+      projectionStore: new MemoryProjectionStore(),
+      dockingAddress: "0x6666666666666666666666666666666666666666",
+      chainId: 31337,
+      logger
+    });
+
+    await worker.start();
+    expect(warnings.some((message) => message.includes("no route source/submitter"))).toBe(true);
+    expect(infos).toEqual([]);
+    // 未启动轮询：等待一个以上轮询周期后仍是 idle。
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(worker.getLastSummary()).toBeUndefined();
+  });
   it("does not re-broadcast the same binding inside the finality window and retries after it", async () => {
     // 0620 L-7：最终性窗口内同一 binding 每轮（默认 5s）重复广播 no-op
     // 交易是纯 gas 浪费。窗口内去重跳过（计数 deduplicated）；窗口过后

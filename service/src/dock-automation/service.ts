@@ -96,6 +96,15 @@ export class DockAutomationWorker implements LifecycleService {
     if (!this.#config.enabled || this.#running) {
       return;
     }
+    // enabled 但 routeSource/submitter 未装配：runOnce 的候选扫描恒归零，
+    // keeper 永远不会提交任何交易——不启动空转轮询，也不宣称 started，
+    // 响亮声明装配缺口（交付形态当前就是未装配，见 api/server.ts）。
+    if (!this.#routeSource || !this.#submitter) {
+      this.#logger.warn(
+        "dock automation is enabled but no route source/submitter is wired; the keeper stays idle until the assembly provides them"
+      );
+      return;
+    }
     this.#running = true;
     this.#timer = setInterval(() => {
       void this.runOnce().catch((error) => {
