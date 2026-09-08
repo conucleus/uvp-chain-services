@@ -4,7 +4,6 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
-import { onchainSignalId, onchainSourceId } from "@uvp-eth/compiler";
 import { STATE_MACHINE_ABI } from "@uvp-eth/protocol-bindings";
 import { privateKeyToAccount } from "viem/accounts";
 import {
@@ -41,12 +40,20 @@ const verifyingContract = "0x1111111111111111111111111111111111111111" as Addres
 const planId = "0x7777777777777777777777777777777777777777777777777777777777777777" as Hex;
 const zeroPlanId = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
 const chainId = 31337;
-const owner: EvidencePrincipal = { id: "seller", role: "participant" };
+// 证据归属=业务签名者本人（会话锚定上传者 principal id 即小写钱包地址，
+// prepare-submit 的签名者同锚定地址）——bind 归属校验按此判定。
+const owner: EvidencePrincipal = { id: submitter.toLowerCase(), role: "participant" };
 const baseNow = new Date("2026-04-28T00:00:00Z");
 
-const task: ProductTaskDTO = {
+// 链上身份常量：orderId/sourceId/signalId 必须是真实的 bytes32 链上身份
+// （F161 后 prepare 不再本地捏造回退）。
+const fixtureOnchainOrderId = "0x0000000000000000000000000000000000000000000000000000000000000301" as Hex;
+const fixtureSourceId = "0x0000000000000000000000000000000000000000000000000000000000000401" as Hex;
+const fixtureSignalId = "0x0000000000000000000000000000000000000000000000000000000000000501" as Hex;
+
+const task = {
   taskId: "task-1",
-  orderId: "order-1",
+  orderId: fixtureOnchainOrderId,
   orderTitle: "Order 1",
   zhixuId: "zhixu-1",
   title: "Confirm customs",
@@ -58,10 +65,56 @@ const task: ProductTaskDTO = {
   fundingImpact: "advance workflow",
   status: "open",
   responsibilityStatements: [],
-  proofRows: []
-};
+  proofRows: [],
+  proof: {
+    eventId: `${verifyingContract}:10:0`,
+    chainId,
+    contractAddress: verifyingContract,
+    blockNumber: "10",
+    transactionHash: "0x0000000000000000000000000000000000000000000000000000000000000021",
+    logIndex: 0,
+    eventName: "HookReady",
+    proofKind: "chain",
+    args: {},
+    sourceId: fixtureSourceId,
+    signalId: fixtureSignalId,
+    stageIdentifier: "customs-complete"
+  }
+} as unknown as ProductTaskDTO;
 
 describe("product task submissions", () => {
+  it("refuses to prepare when the projection supplies no chain signal identity instead of fabricating one", async () => {
+    // F161（对齐 planId"绝不捏造"纪律）：sourceId/signalId/orderId 缺失时
+    // 不得按命名约定本地推导——推导出的链上身份不存在，签出的 typedData
+    // 只会被链上拒绝。
+    const strippedTask = { ...task, proof: undefined, orderId: "business-order-1" } as unknown as ProductTaskDTO;
+    const fixture = await submissionFixture({ task: strippedTask });
+
+    await expect(fixture.service.prepareSubmit(strippedTask.taskId, {
+      evidenceIds: [fixture.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "order_plan_unresolved",
+      status: 409
+    });
+
+    // sourceId 可由 overlay 解析，但 signalId 缺失同样拒签。
+    const overlayOnlyTask = {
+      ...task,
+      proof: { stageIdentifier: txHash("516") }
+    } as unknown as ProductTaskDTO;
+    const overlayFixture = await submissionFixture({ task: overlayOnlyTask });
+    await expect(overlayFixture.service.prepareSubmit(overlayOnlyTask.taskId, {
+      evidenceIds: [overlayFixture.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "order_plan_unresolved",
+      status: 409
+    });
+  });
+
   it("does not authorize permissively when no authorization adapter is configured", async () => {
     const evidenceService = createEvidenceService({
     runtimeEnvironment: "local",
@@ -137,8 +190,8 @@ describe("product task submissions", () => {
       onchainOrderId: prepared.typedData.message.orderId,
       stageIdentifier: task.stageId,
       signalName: "confirm_stage",
-      sourceId: onchainSourceId("product"),
-      signalId: onchainSignalId(`${task.stageId}.confirm_stage`),
+      sourceId: fixtureSourceId,
+      signalId: fixtureSignalId,
       payloadHash: fixture.evidence.evidence.payloadHash,
       payloadRef: fixture.evidence.evidence.payloadRef,
       idempotencyKey: prepared.typedData.message.idempotencyKey,
@@ -448,7 +501,10 @@ describe("product task submissions", () => {
         activeExecutorWallet: "0x2222222222222222222222222222222222222222"
       },
       proof: {
-        stageIdentifier: targetStageId
+        stageIdentifier: targetStageId,
+        // F161 后 prepare 不再捏造 signalId——overlay 场景的链上信号身份
+        // 仍须由投影 proof 提供（sourceId 由 overlay 目标阶段解析）。
+        signalId: fixtureSignalId
       }
     } as ProductTaskDTO;
     const fixture = await submissionFixture({ task: overlayTask });

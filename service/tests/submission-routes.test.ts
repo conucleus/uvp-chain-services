@@ -20,9 +20,15 @@ const submitter = normalizeAddress(account.address, "account.address");
 const verifyingContract = "0x1111111111111111111111111111111111111111" as Address;
 const routePlanId = "0x7777777777777777777777777777777777777777777777777777777777777777" as Hex;
 
-const routeTask: ProductTaskDTO = {
+// F161 后 prepare 不再本地捏造链上身份：orderId/sourceId/signalId 必须
+// 是真实 bytes32 链上身份。
+const routeOnchainOrderId = "0x0000000000000000000000000000000000000000000000000000000000000311" as Hex;
+const routeSourceId = "0x0000000000000000000000000000000000000000000000000000000000000411" as Hex;
+const routeSignalId = "0x0000000000000000000000000000000000000000000000000000000000000511" as Hex;
+
+const routeTask = {
   taskId: "task-route",
-  orderId: "order-route",
+  orderId: routeOnchainOrderId,
   orderTitle: "Route order",
   zhixuId: "zhixu-route",
   title: "Route submit",
@@ -34,12 +40,26 @@ const routeTask: ProductTaskDTO = {
   fundingImpact: "advance workflow",
   status: "open",
   responsibilityStatements: [],
-  proofRows: []
-};
+  proofRows: [],
+  proof: {
+    eventId: "route-proof",
+    chainId: 31337,
+    contractAddress: verifyingContract,
+    blockNumber: "10",
+    transactionHash: "0x0000000000000000000000000000000000000000000000000000000000000021",
+    logIndex: 0,
+    eventName: "HookReady",
+    proofKind: "chain",
+    args: {},
+    sourceId: routeSourceId,
+    signalId: routeSignalId
+  }
+} as unknown as ProductTaskDTO;
 
 describe("submission API routes", () => {
   it("prepares, accepts a wallet signature, and serves submission status", async () => {
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => new Date("2026-04-28T00:00:00Z"),
       evidenceIdFactory: () => "ev_route"
@@ -117,7 +137,8 @@ describe("submission API routes", () => {
 
     await expect(router.handle({
       method: "GET",
-      pathname: "/product/submissions/sub_route"
+      pathname: "/product/submissions/sub_route",
+      headers: { "x-uvp-wallet-address": submitter }
     })).resolves.toMatchObject({
       status: 200,
       body: {
@@ -129,6 +150,7 @@ describe("submission API routes", () => {
 
   it("returns txHash when the injected submission broadcaster submits on-chain", async () => {
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => new Date("2026-04-28T00:00:00Z"),
       evidenceIdFactory: () => "ev_broadcast"
@@ -237,6 +259,7 @@ describe("submission API routes", () => {
       stateMachineAddress: verifyingContract
     } as ProductTaskDTO;
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => new Date("2026-04-28T00:00:00Z"),
       evidenceIdFactory: () => "ev_projected_submit"
@@ -358,6 +381,91 @@ describe("submission API routes", () => {
         eventName: "SignalSubmitted",
         transactionHash: submitTxHash
       }));
+  });
+
+  it("prepare-submit ties the business signer to the session-anchored wallet (F142)", async () => {
+    const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => new Date("2026-04-28T00:00:00Z"),
+      evidenceIdFactory: () => "ev_oracle"
+    });
+    const submissionService = createProductSubmissionService({
+      productTasks: { getTask: async (taskId) => taskId === routeTask.taskId ? routeTask : undefined },
+      evidenceReader: evidenceService,
+      chainId: 31337,
+      verifyingContract,
+      resolveOrderPlanId: async () => routePlanId,
+      authorization: allowListedSubmissionAuthorization([{
+        orderId: routeTask.orderId,
+        stageIdentifier: routeTask.stageId,
+        signalName: "confirm_stage",
+        submitter
+      }]),
+      now: () => new Date("2026-04-28T00:00:00Z"),
+      prepareIdFactory: () => "prep_oracle",
+      submissionIdFactory: () => "sub_oracle",
+      nonceFactory: () => "9"
+    });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService,
+      storeAuthConfig: {
+        mode: "dev_headers" as const,
+        roleClaim: "roles",
+        principalClaim: "sub",
+        clockToleranceSeconds: 60,
+        walletSession: {
+          enabled: true,
+          operatorWallets: [],
+          adminWallets: [],
+          sessionTtlSeconds: 43200,
+          challengeTtlSeconds: 300,
+          devAnchoredAddressHeaderEnabled: true
+        }
+      }
+    });
+
+    const uploadResponse = await router.handle({
+      method: "POST",
+      pathname: "/product/evidence",
+      headers: { "x-uvp-principal-id": submitter.toLowerCase() },
+      body: {
+        orderId: routeTask.orderId,
+        taskId: routeTask.taskId,
+        stageIdentifier: routeTask.stageId,
+        documentType: "customs-declaration",
+        textPayload: "customs declaration",
+        metadata: { fields: { declarationNo: "CD-3" } }
+      }
+    });
+    const evidenceId = (uploadResponse.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
+
+    // 锚定钱包（local dev 锚定头）与 body 自报签名者不一致：403 一致性
+    // 核验，不落入 201/403 授权探测 oracle。
+    const otherWallet = "0x9999999999999999999999999999999999999999";
+    const mismatch = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${routeTask.taskId}/prepare-submit`,
+      headers: { "x-uvp-principal-id": submitter.toLowerCase(), "x-uvp-store-dev-anchored-address": otherWallet },
+      body: {
+        evidenceIds: [evidenceId],
+        walletAddress: submitter,
+        intent: "confirm_stage"
+      }
+    });
+    expect(mismatch).toMatchObject({ status: 403, body: { error: "wrong_wallet" } });
+
+    // 锚定一致时按锚定钱包求值授权，正常 201。
+    const aligned = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${routeTask.taskId}/prepare-submit`,
+      headers: { "x-uvp-principal-id": submitter.toLowerCase(), "x-uvp-store-dev-anchored-address": submitter },
+      body: {
+        evidenceIds: [evidenceId],
+        walletAddress: submitter,
+        intent: "confirm_stage"
+      }
+    });
+    expect(aligned.status).toBe(201);
   });
 });
 

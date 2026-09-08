@@ -1,5 +1,4 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { keccak256Hex, onchainSignalId, onchainSourceId } from "@uvp-eth/compiler";
 import { buildProductSubmitTypedData, recoverProductSubmitSigner } from "@uvp-eth/protocol-bindings";
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
 import { hashCanonicalJson } from "../evidence/index.js";
@@ -36,7 +35,6 @@ import type { EvidencePrincipal, EvidenceRecordDTO } from "../evidence/index.js"
 import { ProductOrderLookupError } from "../product/service.js";
 
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
-const PRODUCT_SIGNAL_SOURCE = "product";
 
 export class ProductSubmissionError extends Error {
   override readonly name = "ProductSubmissionError";
@@ -555,12 +553,38 @@ function chainSignalForTask(task: ProductTaskDTO, signalName: string): {
   readonly signalId: Hex;
 } {
   const chainTask = task as ProductTaskChainFields;
+  // 与 planId"绝不捏造"同纪律（F161）：sourceId/signalId/orderId 三层链上
+  // 身份必须来自投影——本地按常量/命名约定推导出的 id 在链上不存在，
+  // 签出的 typedData 只会被链上拒绝。缺失即拒签并显式报错。
   const sourceId = firstBytes32(chainTask.proof?.sourceId) ??
-    activeStageExecutorSourceIdForTask(chainTask) ??
-    (onchainSourceId(PRODUCT_SIGNAL_SOURCE) as Hex);
-  const signalId = firstBytes32(chainTask.proof?.signalId) ?? (onchainSignalId(`${task.stageId}.${signalName}`) as Hex);
+    activeStageExecutorSourceIdForTask(chainTask);
+  if (!sourceId) {
+    throw new ProductSubmissionError(
+      409,
+      "order_plan_unresolved",
+      "state-machine projection has no chain sourceId for this task's submit signal; refusing to fabricate one for a plan-scoped signal signature",
+      { taskId: task.taskId }
+    );
+  }
+  const signalId = firstBytes32(chainTask.proof?.signalId);
+  if (!signalId) {
+    throw new ProductSubmissionError(
+      409,
+      "order_plan_unresolved",
+      `state-machine projection has no chain signalId for this task's ${signalName} signal; refusing to fabricate one for a plan-scoped signal signature`,
+      { taskId: task.taskId }
+    );
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(task.orderId)) {
+    throw new ProductSubmissionError(
+      409,
+      "order_plan_unresolved",
+      "task does not carry an on-chain (bytes32) order id; refusing to sign a locally-derived order identity",
+      { taskId: task.taskId, orderId: task.orderId }
+    );
+  }
   return {
-    orderId: normalizeBytes32OrHash(task.orderId, "orderId"),
+    orderId: normalizeBytes32(task.orderId, "orderId"),
     sourceId,
     signalId
   };
@@ -595,16 +619,6 @@ function firstBytes32(...values: readonly (string | undefined)[]): Hex | undefin
     }
   }
   return undefined;
-}
-
-function normalizeBytes32OrHash(value: string, fieldName: string): Hex {
-  if (/^0x[0-9a-fA-F]{64}$/.test(value)) {
-    return normalizeBytes32(value, fieldName);
-  }
-  if (value.trim().length === 0) {
-    throw new ProductSubmissionError(400, "invalid_chain_identifier", `${fieldName} is required`);
-  }
-  return keccak256Hex(value) as Hex;
 }
 
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
