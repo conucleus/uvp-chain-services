@@ -1380,8 +1380,8 @@ describe("product API routes", () => {
     await productStore.createDraft({
       draftId: "draft-accepted-1",
       zhixuId: CROSS_BORDER_ZHIXU_ID,
-      planId: "0x" + "5".repeat(64),
-      planHash: "0x" + "6".repeat(64),
+      planId: ("0x" + "5".repeat(64)) as Hex,
+      planHash: ("0x" + "6".repeat(64)) as Hex,
       title: "Accepted participant order",
       businessType: "parallel-export",
       goods: [],
