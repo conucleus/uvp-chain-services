@@ -111,6 +111,7 @@ const expectedMigrationVersions = [
   "0016_submission_plan_id",
   "0017_indexer_pending_post_commit",
   "0018_store_governance_audit_constraints",
+  "0019_stage_patch_state",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -518,7 +519,7 @@ describe("durable storage", () => {
     const registration = productRegistration(draft.draftId);
 
     await store.createDraft(draft, [participant]);
-    await store.createInvite(invite);
+    await store.createInviteIfNoneActive(invite, "2026-01-01T00:00:00.000Z");
     await store.createRegistration(registration);
     await store.close();
     stores.splice(stores.indexOf(store), 1);
@@ -1319,8 +1320,9 @@ describePostgres(
         ],
       });
       await first.productBffStore.createDraft(draft, [participant]);
-      await first.productBffStore.createInvite(
+      await first.productBffStore.createInviteIfNoneActive(
         productInvite(draft.draftId, participant.participantId),
+        "2026-01-01T00:00:00.000Z",
       );
       await first.productBffStore.createRegistration(registration);
       await first.evidenceMetadataStore.put(evidence);

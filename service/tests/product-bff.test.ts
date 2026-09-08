@@ -397,17 +397,17 @@ describe("product BFF order drafts and invites", () => {
     };
 
     await expect(store.createInviteIfNoneActive(
-      { ...base, inviteId: "invite_f173_a", tokenHash: "0x" + "21".repeat(32) },
+      { ...base, inviteId: "invite_f173_a", tokenHash: ("0x" + "21".repeat(32)) as Hex },
       "2026-01-02T00:00:00.000Z"
     )).resolves.toBe(true);
     // 同 participant 的第二条 active（前置检查双双通过的并发方）必须被拒。
     await expect(store.createInviteIfNoneActive(
-      { ...base, inviteId: "invite_f173_b", tokenHash: "0x" + "22".repeat(32) },
+      { ...base, inviteId: "invite_f173_b", tokenHash: ("0x" + "22".repeat(32)) as Hex },
       "2026-01-02T00:00:00.000Z"
     )).resolves.toBe(false);
     // 已过期的 active 不再占用：可再发新邀请。
     await expect(store.createInviteIfNoneActive(
-      { ...base, inviteId: "invite_f173_c", tokenHash: "0x" + "23".repeat(32), expiresAt: "2026-03-01T00:00:00.000Z" },
+      { ...base, inviteId: "invite_f173_c", tokenHash: ("0x" + "23".repeat(32)) as Hex, expiresAt: "2026-03-01T00:00:00.000Z" },
       "2026-02-02T00:00:00.000Z"
     )).resolves.toBe(true);
   });

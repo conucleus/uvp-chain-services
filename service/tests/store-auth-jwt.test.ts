@@ -202,7 +202,7 @@ describe("Store JWT/JWKS operator identity", () => {
     // local 开发允许本地 IdP。
     const originalFetch = globalThis.fetch;
     const discoveryCalls: string[] = [];
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
       discoveryCalls.push(String(input));
       return new Response(JSON.stringify({
         issuer,
