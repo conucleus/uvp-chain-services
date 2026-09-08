@@ -86,6 +86,12 @@ export interface StoreIdentityProviderOptions {
   readonly authConfig?: StoreAuthConfig;
   /** GOVERNANCE_ADMIN_REVIEWER_IDS：JWT governance_admin 与 dev admin 头共用同一白名单核验。 */
   readonly governanceAdminIds?: readonly string[];
+  /**
+   * GOVERNANCE_ADMIN_TOKEN_HASHES：dev admin 自报头的口令因子
+   *（非 local 必须；JWT governance_admin 的凭据是外部 IdP 签名，
+   * 不叠加口令因子）。
+   */
+  readonly governanceAdminTokenHashes?: readonly string[];
 }
 
 const STORE_PUBLIC_READ_CAPABILITIES = ["store.read"] as const satisfies readonly StoreCapability[];
@@ -140,7 +146,10 @@ export function createStoreIdentityProvider(options: StoreIdentityProviderOption
   const strictRuntime = runtimeEnvironment !== "local";
   const governanceAdminPolicy: GovernanceAdminAuthPolicy = {
     runtimeEnvironment,
-    allowedAdminIds: options.governanceAdminIds ?? []
+    allowedAdminIds: options.governanceAdminIds ?? [],
+    ...(options.governanceAdminTokenHashes && options.governanceAdminTokenHashes.length > 0
+      ? { adminTokenHashes: options.governanceAdminTokenHashes }
+      : {})
   };
   const authEvidence = assessStoreAuthEvidence(authConfig, runtimeEnvironment);
   const jwtConfigBlocked = authConfig.mode === "jwt" && strictRuntime && !authEvidence.externalIdentityEvidence;

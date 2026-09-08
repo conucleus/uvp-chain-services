@@ -106,6 +106,11 @@ export interface OperatorRoleConfig {
   readonly governanceSignerAddress?: Address;
   readonly adminReviewers: readonly string[];
   readonly opsConsoleAdmins?: readonly string[];
+  /**
+   * GOVERNANCE_ADMIN_TOKEN_HASHES（sha256 hex 列表）：非 local 管理面
+   * 口令因子——明文白名单自报头仅限 local 档（管理面生产基线）。
+   */
+  readonly adminTokenHashes?: readonly string[];
 }
 
 export interface ReconcileConfig {
@@ -950,7 +955,26 @@ function parseOperatorRoleConfig(env: Env): OperatorRoleConfig {
     ...(governanceSignerAddress ? { governanceSignerAddress } : {}),
     adminReviewers: parseStringList(env, "GOVERNANCE_ADMIN_REVIEWER_IDS"),
     opsConsoleAdmins: parseStringList(env, "OPS_CONSOLE_ADMIN_IDS"),
+    adminTokenHashes: parseAdminTokenHashes(env),
   };
+}
+
+/**
+ * GOVERNANCE_ADMIN_TOKEN_HASHES：sha256 hex（64 位十六进制）逗号
+ * 分隔列表。格式不合法即启动失败——半截哈希会把口令因子静默退化成
+ * "永远不匹配"，管理面在非 local 直接锁死还难排查。
+ */
+function parseAdminTokenHashes(env: Env): readonly string[] {
+  const hashes = parseStringList(env, "GOVERNANCE_ADMIN_TOKEN_HASHES")
+    .map((hash) => hash.toLowerCase());
+  for (const hash of hashes) {
+    if (!/^[0-9a-f]{64}$/.test(hash)) {
+      throw new ConfigError(
+        "GOVERNANCE_ADMIN_TOKEN_HASHES entries must be 64-character sha256 hex strings",
+      );
+    }
+  }
+  return hashes;
 }
 
 function optionalAddressEnv(env: Env, name: string): Address | undefined {
@@ -1321,6 +1345,12 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in production");
   }
+  // 管理面生产基线（bug_audit #12）：非 local 的运营面访问要求口令或
+  // 签名因子——白名单命中只是身份允许，不是凭据。缺口令哈希即拒绝
+  // 启动（governance/auth.ts 运行时同步 fail-closed）。
+  if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
+    throw new ConfigError("GOVERNANCE_ADMIN_TOKEN_HASHES is required in production");
+  }
   // production 禁止静默使用 env 默认值 1。finality 确认数是索引器
   // reorg 缓冲必须显式配置为正整数；非生产保持默认 1 不变。追加前的
   // block-hash continuity check 与有界共同祖先回滚由 indexer 一并执行。
@@ -1653,6 +1683,11 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in staging");
   }
+  // 管理面生产基线（bug_audit #12）：staging 与 production/testnet 同
+  // 口径要求口令因子，明文白名单自报头仅限 local 档。
+  if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
+    throw new ConfigError("GOVERNANCE_ADMIN_TOKEN_HASHES is required in staging");
+  }
   if (!config.reconcile.enabled) {
     throw new ConfigError(
       "RECONCILE_WORKER_ENABLED=true is required in staging",
@@ -1748,6 +1783,11 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
   }
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in testnet");
+  }
+  // 管理面生产基线（bug_audit #12）：testnet 是公开测试网，与
+  // staging/production 同口径要求口令因子。
+  if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
+    throw new ConfigError("GOVERNANCE_ADMIN_TOKEN_HASHES is required in testnet");
   }
 
   if (!config.security.preflightStrict) {

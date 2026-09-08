@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
+import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import {
   createGovernanceBroadcasterAdapter,
   createGovernanceService,
@@ -15,6 +16,8 @@ const adminHeaders = {
   "x-uvp-admin-id": "admin-1",
   "x-uvp-admin-role": "admin",
 };
+/** 管理面口令因子：sha256("test-admin-password")。 */
+const adminTokenHash = "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d";
 const subjectId = "0x0000000000000000000000000000000000000000000000000000000000003001" as Hex;
 const bindingId = "0x0000000000000000000000000000000000000000000000000000000000004001" as Hex;
 const wallet = "0x4444444444444444444444444444444444444444" as Address;
@@ -41,6 +44,75 @@ describe("identity governance API", () => {
       status: 200,
       body: { review: { subjectType: "supplier", status: "approved_for_broadcast" } },
     });
+  });
+
+  it("requires a password factor for the admin surface outside local (bug_audit #12)", async () => {
+    const routerOptions = {
+      productRuntimeEnvironment: "staging" as const,
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111" as Address,
+      governanceAdminIds: ["admin-1"],
+      opsConsoleAdminIds: ["admin-1"],
+      governanceAdminTokenHashes: [adminTokenHash],
+      // staging/production 边界要求 production-safe 对象存储适配器。
+      evidenceStorage: new ObjectEvidenceStorage({ client: memoryObjectClient() }),
+    };
+    const router = createApiRouter(new MemoryProjectionStore(), routerOptions);
+
+    // staging：白名单命中的明文自报头不再是完整凭据 → 403。
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/governance/reviews",
+      headers: adminHeaders,
+    })).resolves.toMatchObject({ status: 403 });
+
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/ops/status",
+      headers: adminHeaders,
+    })).resolves.toMatchObject({ status: 403 });
+
+    // 口令因子命中（x-uvp-admin-token 哈希比对）→ 放行。
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/governance/reviews",
+      headers: { ...adminHeaders, "x-uvp-admin-token": "test-admin-password" },
+    })).resolves.toMatchObject({ status: 200 });
+
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/ops/status",
+      headers: { ...adminHeaders, "x-uvp-admin-token": "test-admin-password" },
+    })).resolves.toMatchObject({ status: 200, body: { ok: true } });
+
+    // 口令错误 → 403。
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/governance/reviews",
+      headers: { ...adminHeaders, "x-uvp-admin-token": "wrong-password" },
+    })).resolves.toMatchObject({ status: 403 });
+
+    // production 同口径拒绝明文自报头。
+    const productionRouter = createApiRouter(new MemoryProjectionStore(), {
+      ...routerOptions,
+      productRuntimeEnvironment: "production" as const,
+    });
+    await expect(productionRouter.handle({
+      method: "GET",
+      pathname: "/admin/governance/reviews",
+      headers: adminHeaders,
+    })).resolves.toMatchObject({ status: 403 });
+
+    // local 档保持明文白名单自报头（dev 便利）。
+    const localRouter = createApiRouter(new MemoryProjectionStore(), {
+      ...routerOptions,
+      productRuntimeEnvironment: "local" as const,
+    });
+    await expect(localRouter.handle({
+      method: "GET",
+      pathname: "/admin/governance/reviews",
+      headers: adminHeaders,
+    })).resolves.toMatchObject({ status: 200 });
   });
 
   it("registers and revokes a concrete identity binding without capability or reputation fields", async () => {
@@ -181,3 +253,28 @@ describe("identity governance API", () => {
     }));
   });
 });
+
+/** 非 local 边界可接受的内存对象存储客户端（production-safe 适配器用）。 */
+function memoryObjectClient() {
+  const objects = new Map<string, Uint8Array>();
+  return {
+    async put(input: { readonly evidenceId: string; readonly bytes: Uint8Array }) {
+      const storageURI = `object://governance-admin/${encodeURIComponent(input.evidenceId)}`;
+      objects.set(storageURI, input.bytes);
+      return { storageURI, size: input.bytes.byteLength };
+    },
+    async get(storageURI: string) {
+      return objects.get(storageURI);
+    },
+    async exists(storageURI: string) {
+      return objects.has(storageURI);
+    },
+    storageURIForEvidenceId: (evidenceId: string) => `object://governance-admin/${encodeURIComponent(evidenceId)}`,
+    evidenceIdForStorageURI: (storageURI: string) => {
+      if (!storageURI.startsWith("object://governance-admin/")) {
+        throw new Error("storageURI is not managed by memoryObjectClient");
+      }
+      return decodeURIComponent(storageURI.slice("object://governance-admin/".length));
+    }
+  };
+}

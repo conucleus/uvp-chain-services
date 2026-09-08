@@ -238,6 +238,11 @@ export async function startApiServer(
     ...(config.operatorRoles.adminReviewers.length > 0
       ? { governanceAdminIds: config.operatorRoles.adminReviewers }
       : {}),
+    // 管理面口令因子（bug_audit #12）：非 local 的自报 admin 头必须
+    // 叠加 x-uvp-admin-token 才构成完整凭据。
+    ...((config.operatorRoles.adminTokenHashes ?? []).length > 0
+      ? { governanceAdminTokenHashes: config.operatorRoles.adminTokenHashes }
+      : {}),
     evidenceMetadataStore: stores.evidenceMetadataStore,
     evidenceStorage,
     submissionStore,

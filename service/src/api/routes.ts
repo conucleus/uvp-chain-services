@@ -102,7 +102,10 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   }
   const governanceAdminPolicy = {
     runtimeEnvironment: productRuntimeEnvironment,
-    allowedAdminIds: options.governanceAdminIds ?? []
+    allowedAdminIds: options.governanceAdminIds ?? [],
+    ...(options.governanceAdminTokenHashes && options.governanceAdminTokenHashes.length > 0
+      ? { adminTokenHashes: options.governanceAdminTokenHashes }
+      : {})
   };
   const storeZhixuDraftStore = options.storeZhixuDraftStore ?? new MemoryStoreZhixuDraftStore();
   const storeZhixuVersionMetadataStore = options.storeZhixuVersionMetadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
@@ -270,7 +273,10 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const baseStoreIdentityProvider = options.storeIdentityProvider ?? createStoreIdentityProvider({
     runtimeEnvironment: productRuntimeEnvironment,
     ...(storeAuthConfig ? { authConfig: storeAuthConfig } : {}),
-    ...(options.governanceAdminIds ? { governanceAdminIds: options.governanceAdminIds } : {})
+    ...(options.governanceAdminIds ? { governanceAdminIds: options.governanceAdminIds } : {}),
+    ...(options.governanceAdminTokenHashes && options.governanceAdminTokenHashes.length > 0
+      ? { governanceAdminTokenHashes: options.governanceAdminTokenHashes }
+      : {})
   });
   // 钱包会话叠加层（未启用时原样透传，fail-closed）。
   const storeIdentityProvider = createWalletSessionStoreIdentityProvider({

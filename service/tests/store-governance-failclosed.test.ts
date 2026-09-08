@@ -51,6 +51,9 @@ const planHash = crossBorderPlanIds.planHash as Hex;
 const roleSlotId = demoZhixuDetail.roleSlots[0]?.slotId ?? "supplier";
 const adminHeaders = { "x-uvp-admin-id": "governance-admin-1", "x-uvp-admin-role": "governance_admin" };
 const storeAdminHeaders = { "x-uvp-store-user-id": "store-admin-1", "x-uvp-store-role": "admin", "x-uvp-store-dev-anchored-address": publisherAddress };
+/** 管理面口令因子测试材料：sha256(adminTokenPlaintext) = adminTokenHash。 */
+const adminTokenPlaintext = "test-admin-password";
+const adminTokenHash = "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d";
 
 /** 本地联调的 dev 锚定头开关（仅非严格环境生效）。 */
 const devAnchoredStoreAuth = {
@@ -105,16 +108,51 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         "x-uvp-admin-id": "attacker",
         "x-uvp-admin-role": "governance_admin"
       }, { runtimeEnvironment: "testnet", allowedAdminIds: [] })).toBeUndefined();
-      // 白名单非空：命中放行、未命中拒绝。
+      // 白名单非空但未配置口令因子（bug_audit #12：明文白名单自报头
+      // 仅限 local 档）——非 local 命中白名单也不放行。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "gov-reviewer-1",
         "x-uvp-admin-role": "governance_admin"
-      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"] })).toMatchObject({ adminId: "gov-reviewer-1" });
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"] })).toBeUndefined();
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "attacker",
         "x-uvp-admin-role": "governance_admin"
-      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"] })).toBeUndefined();
-      // local 保持自报（dev 便利）。
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toBeUndefined();
+      // 白名单 + 口令因子（x-uvp-admin-token 哈希命中）才是非 local 的
+      // 完整凭据；口令错误/缺失都拒绝。
+      expect(adminPrincipalFromHeaders({
+        "x-uvp-admin-id": "gov-reviewer-1",
+        "x-uvp-admin-role": "governance_admin",
+        "x-uvp-admin-token": "wrong-password"
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toBeUndefined();
+      expect(adminPrincipalFromHeaders({
+        "x-uvp-admin-id": "gov-reviewer-1",
+        "x-uvp-admin-role": "governance_admin",
+        "x-uvp-admin-token": adminTokenPlaintext
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toMatchObject({ adminId: "gov-reviewer-1" });
+      // 白名单外 admin id 即使口令正确也拒绝（白名单仍是身份允许清单）。
+      expect(adminPrincipalFromHeaders({
+        "x-uvp-admin-id": "attacker",
+        "x-uvp-admin-role": "governance_admin",
+        "x-uvp-admin-token": adminTokenPlaintext
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toBeUndefined();
+      // staging/production 与 testnet 同口径：白名单命中而无口令因子
+      // 一律拒绝（明文自报头仅限 local）。
+      expect(adminPrincipalFromHeaders({
+        "x-uvp-admin-id": "gov-reviewer-1",
+        "x-uvp-admin-role": "governance_admin"
+      }, { runtimeEnvironment: "staging", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toBeUndefined();
+      expect(adminPrincipalFromHeaders({
+        "x-uvp-admin-id": "gov-reviewer-1",
+        "x-uvp-admin-role": "governance_admin"
+      }, { runtimeEnvironment: "production", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toBeUndefined();
+      // local 保持自报（dev 便利），口令因子不强制。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "dev-admin",
         "x-uvp-admin-role": "governance_admin"
@@ -160,13 +198,20 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1"
       };
       expect(() => loadConfigFromEnv(withWhitelists)).toThrow(/OPS_CONSOLE_ADMIN_IDS is required in testnet/);
+      // 管理面生产基线（bug_audit #12）：testnet 同样要求口令因子配置。
       expect(() => loadConfigFromEnv({
         ...withWhitelists,
         OPS_CONSOLE_ADMIN_IDS: "ops-admin-1"
+      })).toThrow(/GOVERNANCE_ADMIN_TOKEN_HASHES is required in testnet/);
+      expect(() => loadConfigFromEnv({
+        ...withWhitelists,
+        OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
+        GOVERNANCE_ADMIN_TOKEN_HASHES: adminTokenHash
       })).not.toThrow();
       expect(loadConfigFromEnv({
         ...withWhitelists,
-        OPS_CONSOLE_ADMIN_IDS: "ops-admin-1"
+        OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
+        GOVERNANCE_ADMIN_TOKEN_HASHES: adminTokenHash
       }).storeAuth?.walletSession?.devAnchoredAddressHeaderEnabled).toBe(false);
     });
 
@@ -196,7 +241,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222",
         UVP_FINALITY_CONFIRMATIONS: "12",
         GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
-        OPS_CONSOLE_ADMIN_IDS: "ops-admin-1"
+        OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
+        GOVERNANCE_ADMIN_TOKEN_HASHES: adminTokenHash
       };
       // 无 UVP_RPC_URL：不再静默回落 127.0.0.1:8545。
       expect(() => loadConfigFromEnv(base)).toThrow(/UVP_RPC_URL is required in production/);
@@ -210,6 +256,12 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         UVP_RPC_URL: "https://base-mainnet.example/rpc",
         GOVERNANCE_ADMIN_REVIEWER_IDS: ""
       })).toThrow(/GOVERNANCE_ADMIN_REVIEWER_IDS is required in production/);
+      // 缺口令因子（明文白名单自报头仅限 local 档）在 production 拦截。
+      const productionReady = { ...base, UVP_RPC_URL: "https://base-mainnet.example/rpc" };
+      const { GOVERNANCE_ADMIN_TOKEN_HASHES: _tokenHashes, ...withoutAdminToken } = productionReady;
+      expect(() => loadConfigFromEnv(withoutAdminToken)).toThrow(/GOVERNANCE_ADMIN_TOKEN_HASHES is required in production/);
+      expect(() => loadConfigFromEnv({ ...withoutAdminToken, GOVERNANCE_ADMIN_TOKEN_HASHES: "not-hex" }))
+        .toThrow(/sha256 hex/);
     });
   });
 

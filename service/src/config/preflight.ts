@@ -69,6 +69,8 @@ export interface ConfigDiagnostics {
     readonly governanceSigner: PrivateKeyRoleDiagnostics;
     readonly governanceAdminReviewer: {
       readonly configuredCount: number;
+      /** GOVERNANCE_ADMIN_TOKEN_HASHES 是否配置（非 local 口令因子）。 */
+      readonly adminTokenConfigured: boolean;
       readonly publicTrustAuthority: false;
     };
     readonly opsConsoleAdmin: {
@@ -525,6 +527,14 @@ function runProductionSafetyPreflight(
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in production");
   }
+  // 管理面生产基线（bug_audit #12）：非 local 要求口令/签名因子——
+  // 明文白名单自报头不是完整凭据（governance/auth.ts 同口径拒
+  // 绝），缺口令哈希直接拦截启动。
+  if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
+    pass(checks, "operator.governance_admin_token");
+  } else {
+    fail(checks, errors, "operator.governance_admin_token", "GOVERNANCE_ADMIN_TOKEN_HASHES is required in production");
+  }
   requireDurableStoreMetadata(config, checks, errors, "production");
   if (config.database.migrationsAutoRun && env.UVP_PRODUCTION_ALLOW_AUTO_MIGRATIONS?.trim() !== "1") {
     fail(checks, errors, "storage.migrations_auto_run", "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN=true is forbidden in production without UVP_PRODUCTION_ALLOW_AUTO_MIGRATIONS=1");
@@ -660,6 +670,13 @@ function runTestnetSafetyPreflight(
     pass(checks, "operator.ops_console_admin");
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in testnet");
+  }
+  // 管理面生产基线（bug_audit #12）：testnet 同按非 local 口径要求
+  // 管理面口令因子。
+  if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
+    pass(checks, "operator.governance_admin_token");
+  } else {
+    fail(checks, errors, "operator.governance_admin_token", "GOVERNANCE_ADMIN_TOKEN_HASHES is required in testnet");
   }
 
   if (stateMachine) {
@@ -1017,6 +1034,13 @@ function runStagingRolePreflight(
     pass(checks, "operator.ops_console_admin");
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in staging");
+  }
+  // 管理面生产基线（bug_audit #12）：staging gate 前置项——运营面
+  // 访问要求口令或签名因子，明文白名单自报头仅限 local 档。
+  if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
+    pass(checks, "operator.governance_admin_token");
+  } else {
+    fail(checks, errors, "operator.governance_admin_token", "GOVERNANCE_ADMIN_TOKEN_HASHES is required in staging");
   }
 }
 
@@ -1417,6 +1441,7 @@ function operatorRoleDiagnostics(config: ChainServicesConfig, env: Env): ConfigD
     ),
     governanceAdminReviewer: {
       configuredCount: config.operatorRoles.adminReviewers.length,
+      adminTokenConfigured: (config.operatorRoles.adminTokenHashes ?? []).length > 0,
       publicTrustAuthority: false
     },
     opsConsoleAdmin: {

@@ -155,6 +155,11 @@ export interface CreateApiRouterOptions {
    * admin 鉴权的唯一注入通道——路由不再读 process.env。
    */
   readonly governanceAdminIds?: readonly string[];
+  /**
+   * GOVERNANCE_ADMIN_TOKEN_HASHES（sha256 hex）：非 local 管理面口令
+   * 因子（管理面生产基线：明文白名单自报头仅限 local 档）。
+   */
+  readonly governanceAdminTokenHashes?: readonly string[];
   readonly onTxMined?: () => void;
   readonly now?: () => Date;
 }

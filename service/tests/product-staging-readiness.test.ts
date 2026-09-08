@@ -365,6 +365,7 @@ function stagingEnv(tempDirs: string[]): Record<string, string | undefined> {
     UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY: stagingGovernancePrivateKey,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
+    GOVERNANCE_ADMIN_TOKEN_HASHES: "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d",
     RECONCILE_WORKER_ENABLED: "true",
     RECONCILE_POLL_INTERVAL_MS: "30000",
     UVP_PRODUCT_DEMO_MODE: "0",

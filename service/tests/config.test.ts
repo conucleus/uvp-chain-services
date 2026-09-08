@@ -26,6 +26,8 @@ const anvilPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784
 const productionRelayerPrivateKey = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const productionRelayerAddress = "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a";
 const productionRegistrarPrivateKey = "0x2222222222222222222222222222222222222222222222222222222222222222";
+/** 管理面口令因子测试材料：sha256("test-admin-password")。 */
+const productionAdminTokenHash = "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d";
 const productionRegistrarAddress = "0x1563915e194d8cfba1943570603f7606a3115508";
 const productionContracts = JSON.stringify({
   UVPStateMachine: "0x1111111111111111111111111111111111111111",
@@ -758,6 +760,14 @@ describe("chain-services config", () => {
 
     const { OPS_CONSOLE_ADMIN_IDS: _opsAdmins, ...missingOpsAdmins } = stagingEnv(tempDirs);
     expect(() => loadConfigFromEnv(missingOpsAdmins)).toThrow(/OPS_CONSOLE_ADMIN_IDS/);
+
+    // 管理面生产基线（bug_audit #12）：staging 要求管理面口令因子，
+    // 明文白名单自报头仅限 local 档。
+    const { GOVERNANCE_ADMIN_TOKEN_HASHES: _adminTokens, ...missingAdminTokens } = stagingEnv(tempDirs);
+    expect(() => loadConfigFromEnv(missingAdminTokens)).toThrow(/GOVERNANCE_ADMIN_TOKEN_HASHES is required in staging/);
+    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+      GOVERNANCE_ADMIN_TOKEN_HASHES: "zz-not-hex"
+    }))).toThrow(/sha256 hex/);
   });
 
   it("runs safe strict preflight diagnostics for the staging profile", async () => {
@@ -1457,6 +1467,7 @@ describe("chain-services config", () => {
       configDiagnostics: diagnostics,
       productRuntimeEnvironment: "production",
       governanceAdminIds: ["gov-reviewer-1"],
+      governanceAdminTokenHashes: [productionAdminTokenHash],
       evidenceStorage: productionSafeEvidenceStorage()
     });
 
@@ -1475,7 +1486,7 @@ describe("chain-services config", () => {
     const adminResponse = await router.handle({
       method: "GET",
       pathname: "/admin/diagnostics",
-      headers: { "x-uvp-admin-id": "gov-reviewer-1", "x-uvp-admin-role": "governance_admin" }
+      headers: { "x-uvp-admin-id": "gov-reviewer-1", "x-uvp-admin-role": "governance_admin", "x-uvp-admin-token": "test-admin-password" }
     });
     expect(adminResponse.status).toBe(200);
     expect(adminResponse.body).toMatchObject({
@@ -1519,6 +1530,8 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Reco
     UVP_RPC_URL: "https://base-mainnet.example/rpc",
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
+    // 管理面生产基线：非 local 要求口令因子（sha256("test-admin-password")）。
+    GOVERNANCE_ADMIN_TOKEN_HASHES: "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d",
     ...storeAuthJwtEnv,
     ...overrides
   };
@@ -1564,6 +1577,7 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     ...storeAuthJwtEnv,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
+    GOVERNANCE_ADMIN_TOKEN_HASHES: "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d",
     ...overrides
   };
 }
@@ -1614,6 +1628,7 @@ function stagingEnv(tempDirs: string[], overrides: Record<string, string | undef
     UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY: testnetRegistrarPrivateKey,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
+    GOVERNANCE_ADMIN_TOKEN_HASHES: "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d",
     RECONCILE_WORKER_ENABLED: "true",
     RECONCILE_POLL_INTERVAL_MS: "30000",
     UVP_PRODUCT_DEMO_MODE: "0",
