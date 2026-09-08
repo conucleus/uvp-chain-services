@@ -5,7 +5,7 @@ import type {
   EvidenceService,
   EvidenceStorage
 } from "../evidence/index.js";
-import type { GovernanceService, GovernanceStore } from "../governance/index.js";
+import type { GovernanceAdminAuthPolicy, GovernanceService, GovernanceStore } from "../governance/index.js";
 import type { ProductBffService } from "../product/bff/service.js";
 import type { ProductOrderTriggerBroadcastAdapter } from "../product/bff/trigger.js";
 import type { ProductBffStore } from "../product/bff/store.js";
@@ -150,6 +150,11 @@ export interface CreateApiRouterOptions {
    * admin 鉴权（adminPrincipalFromHeaders），保持本地开发兼容。
    */
   readonly opsConsoleAdminIds?: readonly string[];
+  /**
+   * GOVERNANCE_ADMIN_REVIEWER_IDS 白名单（config.operatorRoles.adminReviewers）。
+   * admin 鉴权的唯一注入通道——路由不再读 process.env。
+   */
+  readonly governanceAdminIds?: readonly string[];
   readonly onTxMined?: () => void;
   readonly now?: () => Date;
 }
@@ -205,6 +210,8 @@ export interface ApiRouteContext {
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   /** 见 CreateApiRouterOptions.opsConsoleAdminIds。 */
   readonly opsConsoleAdminIds?: readonly string[];
+  /** 治理 admin 鉴权策略（环境档位 + 白名单，装配层注入）。 */
+  readonly governanceAdminPolicy: GovernanceAdminAuthPolicy;
   readonly audit: AuditSink;
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
   readonly onTxMined?: () => void;
@@ -215,6 +222,37 @@ export function cleanQuery<TQuery extends Readonly<Record<string, string | undef
   return Object.fromEntries(
     Object.entries(query).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)
   );
+}
+
+/**
+ * 路径参数解码：畸形百分号编码是调用方可修正的请求错误（400），
+ * 裸 decodeURIComponent 抛 URIError 会落进兜底 catch 变 500。
+ */
+export class InvalidPathParameterError extends Error {
+  override readonly name = "InvalidPathParameterError";
+  readonly status = 400;
+
+  constructor(readonly rawValue: string) {
+    super("path parameter is not a valid percent-encoded value");
+  }
+}
+
+export function decodePathParameter(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch (error) {
+    if (error instanceof URIError) {
+      throw new InvalidPathParameterError(value);
+    }
+    throw error;
+  }
+}
+
+export function invalidPathParameterResponse(): ApiResponse {
+  return {
+    status: 400,
+    body: { error: "invalid_path_parameter", message: "path parameter is not a valid percent-encoded value" }
+  };
 }
 
 export function readApiHeader(headers: ApiRequest["headers"], name: string): string | undefined {

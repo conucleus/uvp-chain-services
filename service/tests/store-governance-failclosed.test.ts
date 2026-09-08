@@ -99,30 +99,26 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("rejects self-reported governance admin headers outside local when the whitelist is empty", () => {
-      delete process.env.GOVERNANCE_ADMIN_REVIEWER_IDS;
-      process.env.CHAIN_SERVICES_RUNTIME_ENV = "testnet";
+      // 鉴权策略由装配层显式注入（governance/auth.ts 不读 process.env）。
       // 空白名单 + 非 local：自报 admin 头 fail-closed。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "attacker",
         "x-uvp-admin-role": "governance_admin"
-      })).toBeUndefined();
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: [] })).toBeUndefined();
       // 白名单非空：命中放行、未命中拒绝。
-      process.env.GOVERNANCE_ADMIN_REVIEWER_IDS = "gov-reviewer-1";
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "gov-reviewer-1",
         "x-uvp-admin-role": "governance_admin"
-      })).toMatchObject({ adminId: "gov-reviewer-1" });
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"] })).toMatchObject({ adminId: "gov-reviewer-1" });
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "attacker",
         "x-uvp-admin-role": "governance_admin"
-      })).toBeUndefined();
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"] })).toBeUndefined();
       // local 保持自报（dev 便利）。
-      process.env.CHAIN_SERVICES_RUNTIME_ENV = "local";
-      delete process.env.GOVERNANCE_ADMIN_REVIEWER_IDS;
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "dev-admin",
         "x-uvp-admin-role": "governance_admin"
-      })).toMatchObject({ adminId: "dev-admin" });
+      }, { runtimeEnvironment: "local", allowedAdminIds: [] })).toMatchObject({ adminId: "dev-admin" });
     });
 
     it("rejects testnet config without admin whitelists or an explicit auth mode", () => {
@@ -808,7 +804,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("requires store.read for /store/suppliers reads", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress
@@ -826,7 +823,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("filters delisted zhixus from store search for non-operators", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
@@ -878,22 +876,47 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("rejects unsupported store order filter status values", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
-        submissionVerifyingContract: contractAddress
+        submissionVerifyingContract: contractAddress,
+        storeAuthConfig: {
+          mode: "dev_headers" as const,
+          roleClaim: "roles",
+          principalClaim: "sub",
+          clockToleranceSeconds: 60,
+          walletSession: {
+            enabled: true,
+            operatorWallets: [],
+            adminWallets: [],
+            sessionTtlSeconds: 43200,
+            challengeTtlSeconds: 300,
+            devAnchoredAddressHeaderEnabled: true
+          }
+        }
       });
-      // 死词 "disputed" 已从词表移除：400 而不是静默空集。
+      // 运行时订单读要求会话锚定钱包（匿名 401）；锚定后死词 "disputed"
+      // 仍按 400 拒绝，不静默空集。
+      const anchoredHeaders = { "x-uvp-store-dev-anchored-address": publisherAddress };
       const disputed = await router.handle({
         method: "GET",
         pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
-        query: { status: "disputed" }
+        query: { status: "disputed" },
+        headers: anchoredHeaders
       });
       expect(disputed).toMatchObject({ status: 400, body: { error: "invalid_query" } });
-      const registered = await router.handle({
+      const anonymous = await router.handle({
         method: "GET",
         pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
         query: { status: "registered" }
+      });
+      expect(anonymous).toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+      const registered = await router.handle({
+        method: "GET",
+        pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+        query: { status: "registered" },
+        headers: anchoredHeaders
       });
       expect(registered.status).toBe(200);
     });
@@ -914,7 +937,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
           chainEvent(1n, 1, "PlanPublisherRecorded", { planId: customsPlanIds.planId, publisher: publisherAddress })
         ]
       });
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
@@ -950,7 +974,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       // roleSlots 类型校验：非对象条目 400（此前 TypeError 500）。用未发布
       // plan 的草稿验证（已发布 plan 的草稿先命中 409 守卫）。
       const unprojectedStore = new MemoryProjectionStore();
-      const unprojectedRouter = createApiRouter(unprojectedStore, {
+      const unprojectedRouter = createApiRouter(unprojectedStore, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
@@ -1027,7 +1052,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("does not treat an unknown rebuild status as ready", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress
@@ -1045,6 +1071,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
 function joinRouterOptions() {
   return {
+    productRuntimeEnvironment: "local" as const,
     productSchemaResolver: crossBorderSchemaResolver(),
     submissionChainId: 31337,
     submissionVerifyingContract: contractAddress,

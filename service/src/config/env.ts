@@ -175,7 +175,7 @@ export interface StoreAuthConfig {
  * - operatorWallets/adminWallets：MVP 单运营方地址清单——会话锚定地址
  *   命中清单即获得对应 Store 角色能力（会话能力继承所锚地址的链上角色
  *   与 Store 委托关系的运营方子集；plan 级权限另行按 planPublisher 核验）。
- * - devAnchoredAddressHeaderEnabled：仅 local 开发头锚定，生产拒绝。
+ * - devAnchoredAddressHeaderEnabled：仅 local 开发头锚定，非 local 直接拒绝启动。
  */
 export interface StoreWalletSessionConfig {
   readonly enabled: boolean;
@@ -250,7 +250,8 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     ...parseContracts(env),
   };
   const chainId = parseInteger(env, "UVP_CHAIN_ID", manifest.chainId ?? 31337);
-  const rpcUrl = resolveRpcUrl(env, manifest.rpcUrlEnv);
+  const environment = parseRuntimeEnv(env);
+  const rpcUrl = resolveRpcUrl(env, manifest.rpcUrlEnv, environment);
   const databaseDriver = parseStorageDriver(
     optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER"),
   );
@@ -259,7 +260,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     env,
     "UVP_PRODUCT_BFF_CREATOR_ADDRESS",
   );
-  const environment = parseRuntimeEnv(env);
   const broadcastMaxRetry = parseInteger(env, "BROADCAST_MAX_RETRY_ATTEMPTS", 3);
 
   const config: ChainServicesConfig = {
@@ -446,7 +446,13 @@ function parseChainTarget(env: Env): ChainTarget {
 }
 
 function parseRuntimeEnv(env: Env): ChainServicesRuntimeEnv {
-  const rawValue = optionalEnv(env, "CHAIN_SERVICES_RUNTIME_ENV") ?? "local";
+  // 环境档位是整套 fail-closed 门禁（白名单/finality/禁自报 admin/
+  // postgres）的根开关：缺省即启动失败并报键名，不给"漏配即 local"
+  // 留任何降级路径。local 也必须显式声明。
+  const rawValue = optionalEnv(env, "CHAIN_SERVICES_RUNTIME_ENV");
+  if (!rawValue) {
+    throw new ConfigError("CHAIN_SERVICES_RUNTIME_ENV is required (local, testnet, staging, or production)");
+  }
   if (
     rawValue === "local" ||
     rawValue === "testnet" ||
@@ -641,7 +647,7 @@ function parseStoreAuthConfig(
         "STORE_AUTH_PRINCIPAL_CLAIM is required when STORE_AUTH_MODE=jwt",
       );
     }
-    if (environment === "staging" || environment === "production") {
+    if (environment !== "local") {
       validateNonLocalHttpsStoreAuthUrl(issuer, "STORE_AUTH_ISSUER");
       validateNonLocalHttpsStoreAuthUrl(
         jwksUrl ?? oidcDiscoveryUrl!,
@@ -673,11 +679,11 @@ function parseStoreWalletSessionConfig(
   env: Env,
   environment: ChainServicesRuntimeEnv,
 ): StoreWalletSessionConfig {
-  const strict = environment === "staging" || environment === "production";
+  const strict = environment !== "local";
   const enabledRaw = optionalEnv(env, "STORE_AUTH_WALLET_SESSION_ENABLED");
   const enabled = enabledRaw !== undefined
     ? parseBooleanFlag(enabledRaw, "STORE_AUTH_WALLET_SESSION_ENABLED")
-    : !strict;
+    : environment === "local" || environment === "testnet";
   const operatorWallets = parseWalletAddressList(env, "STORE_AUTH_OPERATOR_WALLETS");
   const adminWallets = parseWalletAddressList(env, "STORE_AUTH_ADMIN_WALLETS");
   const sessionTtlSeconds = parseInteger(
@@ -691,18 +697,24 @@ function parseStoreWalletSessionConfig(
     300,
   );
   const devHeaderRaw = optionalEnv(env, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER");
+  // dev 锚定地址头 local-only：非 local 环境自报地址锚定等于伪造身份，
+  // 显式开启也直接拒绝（testnet 是公开测试网，不比 staging 更宽松），
+  // 不留"配置打开、运行时才拦"的双层缝隙。
+  const devAnchoredAddressHeaderEnabled = devHeaderRaw !== undefined
+    ? parseBooleanFlag(devHeaderRaw, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")
+    : !strict;
+  if (strict && devAnchoredAddressHeaderEnabled) {
+    throw new ConfigError(
+      "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER=true is only allowed in local development",
+    );
+  }
   return {
     enabled,
     operatorWallets,
     adminWallets,
     sessionTtlSeconds,
     challengeTtlSeconds,
-    // dev 锚定地址头缺省仅 local 开：非 local 环境自报地址锚定等于
-    // 伪造身份。非 local 环境必须显式开启才生效（生产语义上仍会被
-    // strict runtime 拒绝）。
-    devAnchoredAddressHeaderEnabled: devHeaderRaw !== undefined
-      ? parseBooleanFlag(devHeaderRaw, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")
-      : !strict && environment === "local"
+    devAnchoredAddressHeaderEnabled
   };
 }
 
@@ -782,15 +794,15 @@ function validateNonLocalHttpsStoreAuthUrl(
     throw new ConfigError(`${envName} must be a valid URL`);
   }
   if (failure === "not_https") {
-    throw new ConfigError(`${envName} must be HTTPS in staging and production`);
+    throw new ConfigError(`${envName} must be HTTPS outside local development`);
   }
   if (failure === "local_or_private") {
     throw new ConfigError(
-      `${envName} must not use localhost or private network hosts in staging and production`,
+      `${envName} must not use localhost or private network hosts outside local development`,
     );
   }
   if (failure === "missing") {
-    throw new ConfigError(`${envName} is required in staging and production`);
+    throw new ConfigError(`${envName} is required outside local development`);
   }
 }
 
@@ -1206,7 +1218,11 @@ function parseStateMachineDeploymentModules(
   return Object.keys(modules).length > 0 ? modules : undefined;
 }
 
-function resolveRpcUrl(env: Env, manifestRpcUrlEnv?: string): string {
+function resolveRpcUrl(
+  env: Env,
+  manifestRpcUrlEnv: string | undefined,
+  environment: ChainServicesRuntimeEnv
+): string {
   const explicit = optionalEnv(env, "UVP_RPC_URL");
   if (explicit) {
     return explicit;
@@ -1216,6 +1232,13 @@ function resolveRpcUrl(env: Env, manifestRpcUrlEnv?: string): string {
     if (manifestRpcUrl) {
       return manifestRpcUrl;
     }
+  }
+  // 非 local 环境的显式 RPC 强检在 validateProductionSafety 稍后执行；
+  // 能走到这里回落的只有 local。回落必须响亮，不允许静默指向默认节点。
+  if (environment === "local") {
+    console.warn(
+      "[chain-services config] UVP_RPC_URL is not set; falling back to http://127.0.0.1:8545 (local Anvil default)"
+    );
   }
   return "http://127.0.0.1:8545";
 }
@@ -1351,11 +1374,6 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   if (config.governance.broadcastEnabled) {
     throw new ConfigError(
       "GOVERNANCE_BROADCAST_ENABLED=true uses env private-key governance and is forbidden in production",
-    );
-  }
-  if (parseBoolean(env, "UVP_PRODUCT_E2E_FIXTURES", false)) {
-    throw new ConfigError(
-      "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in production",
     );
   }
   if (
@@ -1496,9 +1514,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
     );
   }
 
-  if (parseBoolean(env, "UVP_PRODUCT_E2E_FIXTURES", false)) {
-    throw new ConfigError("UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in staging");
-  }
   if (
     parseBoolean(env, "UVP_PRODUCT_PERMISSIVE_AUTH", false) ||
     isPermissiveAuthorizationRequested(env)
@@ -1744,9 +1759,6 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
     throw new ConfigError(
       "LOG_REDACTION_ENABLED=false is forbidden in testnet",
     );
-  }
-  if (parseBoolean(env, "UVP_PRODUCT_E2E_FIXTURES", false)) {
-    throw new ConfigError("UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in testnet");
   }
   if (
     parseBoolean(env, "UVP_PRODUCT_PERMISSIVE_AUTH", false) ||

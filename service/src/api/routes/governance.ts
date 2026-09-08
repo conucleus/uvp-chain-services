@@ -7,7 +7,7 @@ import {
 } from "../../governance/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError, normalizeAddress, normalizeBytes32 } from "../../shared/types.js";
-import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { cleanQuery, decodePathParameter, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 type ParsedIdentityQuery =
@@ -34,7 +34,7 @@ async function handleGovernanceRequest(
     return undefined;
   }
 
-  const principal = adminPrincipalFromHeaders(request.headers);
+  const principal = adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
   if (!principal) {
     return {
       status: 403,
@@ -52,7 +52,7 @@ async function handleGovernanceRequest(
 
     const txMatch = /^\/admin\/governance\/tx\/([^/]+)$/.exec(request.pathname);
     if (request.method === "GET" && txMatch) {
-      const txLogId = decodeURIComponent(txMatch[1] ?? "");
+      const txLogId = decodePathParameter(txMatch[1] ?? "");
       const txLog = await context.governanceService.getTxLog(txLogId);
       if (!txLog) {
         return {
@@ -121,8 +121,8 @@ async function handleIdentityProjectionRequest(
   const descriptorMatch = /^\/identity\/descriptors\/([^/]+)(?:\/([^/]+))?$/.exec(request.pathname);
   if (request.method === "GET" && descriptorMatch && context.identityDescriptorSnapshots) {
     try {
-      const subjectId = decodeURIComponent(descriptorMatch[1] ?? "");
-      const descriptorHash = descriptorMatch[2] ? decodeURIComponent(descriptorMatch[2]) : undefined;
+      const subjectId = decodePathParameter(descriptorMatch[1] ?? "");
+      const descriptorHash = descriptorMatch[2] ? decodePathParameter(descriptorMatch[2]) : undefined;
       if (!descriptorHash) {
         return {
           status: 200,

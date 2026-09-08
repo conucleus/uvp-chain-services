@@ -17,6 +17,12 @@ export interface ProductBffStore {
   createInvite(invite: ProductInviteDTO): Promise<void>;
   getInvite(inviteId: string): Promise<ProductInviteDTO | undefined>;
   updateInvite(invite: ProductInviteDTO): Promise<void>;
+  /**
+   * 条件状态迁移：仅当现行状态仍是 active 时落档（UPDATE ... WHERE
+   * status='active'）。返回 false 表示并发方已先完成 accept/reject——
+   * accept/reject 的 check-then-act 竞态以条件更新收口。
+   */
+  updateInviteIfActive(invite: ProductInviteDTO): Promise<boolean>;
   listInvitesByDraft(draftId: string): Promise<readonly ProductInviteDTO[]>;
   createRegistration(registration: ProductOrderTriggerRecord): Promise<void>;
   getRegistration(triggerId: string): Promise<ProductOrderTriggerRecord | undefined>;
@@ -78,6 +84,15 @@ export class MemoryProductBffStore implements ProductBffStore {
 
   async updateInvite(invite: ProductInviteDTO): Promise<void> {
     this.#invites.set(invite.inviteId, invite);
+  }
+
+  async updateInviteIfActive(invite: ProductInviteDTO): Promise<boolean> {
+    const existing = this.#invites.get(invite.inviteId);
+    if (!existing || existing.status !== "active") {
+      return false;
+    }
+    this.#invites.set(invite.inviteId, invite);
+    return true;
   }
 
   async listInvitesByDraft(draftId: string): Promise<readonly ProductInviteDTO[]> {

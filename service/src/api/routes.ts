@@ -93,7 +93,17 @@ export type {
 
 export function createApiRouter(store: ProjectionStore, options: CreateApiRouterOptions = {}): ApiRouter {
   const audit = options.audit ?? noopAuditSink;
+  // 运行环境只接受显式注入（config.security.environment 或等价的
+  // configDiagnostics.environment），绝不缺省 local——身份门/证据边界/
+  // 诊断全部以该档位定宽严，漏传即 fail-closed 拒绝装配。
   const productRuntimeEnvironment = options.productRuntimeEnvironment ?? options.configDiagnostics?.environment;
+  if (!productRuntimeEnvironment) {
+    throw new Error("productRuntimeEnvironment (or configDiagnostics.environment) is required to create the API router");
+  }
+  const governanceAdminPolicy = {
+    runtimeEnvironment: productRuntimeEnvironment,
+    allowedAdminIds: options.governanceAdminIds ?? []
+  };
   const storeZhixuDraftStore = options.storeZhixuDraftStore ?? new MemoryStoreZhixuDraftStore();
   const storeZhixuVersionMetadataStore = options.storeZhixuVersionMetadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
   const storeSupplierMetadataStore = options.storeSupplierMetadataStore ?? new InMemoryStoreSupplierMetadataStore();
@@ -158,7 +168,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createEvidenceService({
       ...(options.evidenceMetadataStore ? { metadataStore: options.evidenceMetadataStore } : {}),
       storage: defaultEvidenceStorage ?? new LocalEvidenceStorage(),
-      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment ?? "local"
+      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
     })
   );
   const storeZhixuDraftWorkflowService = options.storeZhixuDraftWorkflowService ??
@@ -235,7 +245,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const buildDiagnostics = () => buildOperationalDiagnostics({
     store,
     ...(options.configDiagnostics ? { configDiagnostics: options.configDiagnostics } : {}),
-    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
+    runtimeEnvironment: productRuntimeEnvironment,
     ...(options.indexerDiagnostics ? { indexer: options.indexerDiagnostics } : {}),
     ...(options.reconcileDiagnostics ? { reconcile: options.reconcileDiagnostics } : {}),
     ...(options.submissionStore ? { submissionStore: options.submissionStore } : {}),
@@ -247,9 +257,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       docking: storeDockingSessionStore
     },
     ...(defaultEvidenceStorage ? { evidenceStorage: defaultEvidenceStorage } : {}),
-    ...(options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
-      ? { evidenceRuntimeEnvironment: (options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment)! }
-      : {})
+    evidenceRuntimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
   });
   const now = options.now ?? (() => new Date());
   const storeWalletSessionStore = options.storeWalletSessionStore ?? new InMemoryStoreWalletSessionStore();
@@ -260,15 +268,16 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.now ? { now: options.now } : {})
   });
   const baseStoreIdentityProvider = options.storeIdentityProvider ?? createStoreIdentityProvider({
-    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
-    ...(storeAuthConfig ? { authConfig: storeAuthConfig } : {})
+    runtimeEnvironment: productRuntimeEnvironment,
+    ...(storeAuthConfig ? { authConfig: storeAuthConfig } : {}),
+    ...(options.governanceAdminIds ? { governanceAdminIds: options.governanceAdminIds } : {})
   });
   // 钱包会话叠加层（未启用时原样透传，fail-closed）。
   const storeIdentityProvider = createWalletSessionStoreIdentityProvider({
     base: baseStoreIdentityProvider,
     sessionService,
     ...(storeAuthConfig?.walletSession ? { config: storeAuthConfig.walletSession } : {}),
-    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {})
+    runtimeEnvironment: productRuntimeEnvironment
   });
   const storeDecorationService = options.storeDecorationService ?? createStoreDecorationService({
     projectionStore: store,
@@ -334,6 +343,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.opsConsoleAdminIds ? { opsConsoleAdminIds: options.opsConsoleAdminIds } : {}),
     audit,
     buildDiagnostics,
+    governanceAdminPolicy,
     ...(options.onTxMined ? { onTxMined: options.onTxMined } : {}),
     now
   };
@@ -341,7 +351,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createDiagnosticsRouteModule(),
     createAdminOpsRouteModule(),
     createStoreAuthRouteModule({ sessionService }),
-    createStoreConsoleRouteModule(),
+    createStoreConsoleRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createStoreDecorationRouteModule({ decorationService: storeDecorationService }),
     createStoreJoinRouteModule({ joinService }),
     createStoreListingsRouteModule({ listingService }),
@@ -350,16 +360,14 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createStoreRiskRouteModule(),
     createStoreSuppliersRouteModule(),
     createGovernanceRouteModule(),
-    createNotificationsRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) }),
+    createNotificationsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createEvidenceRouteModule({
-      ...((options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment)
-        ? { runtimeEnvironment: (options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment)! }
-        : {})
+      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
     }),
     createStagePatchRouteModule(),
-    createSubmissionsRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) }),
-    createProductBffRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) }),
-    createProductReadRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) })
+    createSubmissionsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
+    createProductBffRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
+    createProductReadRouteModule({ runtimeEnvironment: productRuntimeEnvironment })
   ];
 
   return {
@@ -428,6 +436,9 @@ export function productBffStoreSubmissionAuthorization(store: ProductBffStore): 
 type ProductTaskWithExecutorOverlay = {
   readonly executorOverlay?: ProductTaskExecutorOverlay;
   readonly stageExecutorOverlay?: ProductTaskExecutorOverlay;
+  readonly proof?: {
+    readonly signalId?: string;
+  };
 };
 
 type ProductTaskExecutorOverlay = {
@@ -440,7 +451,7 @@ function productBffActiveStageExecutorAuthorization(
 ): SubmissionAuthorizationResult | undefined {
   const task = request.task as ProductTaskWithExecutorOverlay;
   const executorOverlay = task.stageExecutorOverlay ?? task.executorOverlay;
-  if (!executorOverlay?.targetStageId || !executorOverlay.activeExecutorWallet) {
+  if (!executorOverlay?.targetStageId || !executorOverlay?.activeExecutorWallet) {
     return undefined;
   }
 
@@ -449,6 +460,19 @@ function productBffActiveStageExecutorAuthorization(
       authorized: false,
       source: "active_stage_executor_overlay",
       reason: "active executor overlay does not target the submitted source"
+    };
+  }
+
+  // overlay 委任只覆盖目标阶段已记录的真实提交信号（proof.signalId 来自
+  // 投影 submitSignals）。signalId 是推导值（proof 缺signalId 时按
+  // stageId+intent 拼出）意味着无法证明链上存在该信号——为必 revert 的
+  // 签名完成授权并广播，必须在授权层拒绝。
+  const recordedSignalId = task.proof?.signalId;
+  if (!recordedSignalId || !equalHex(recordedSignalId, request.signalId)) {
+    return {
+      authorized: false,
+      source: "active_stage_executor_overlay",
+      reason: "active executor overlay only covers the task's recorded submit signal; refusing to authorize a derived signal that has no chain counterpart"
     };
   }
 

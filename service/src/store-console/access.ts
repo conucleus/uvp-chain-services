@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
-import { adminPrincipalFromHeaders } from "../governance/index.js";
+import { adminPrincipalFromHeaders, governanceAdminAllowed, type GovernanceAdminAuthPolicy } from "../governance/index.js";
 import type { ChainServicesRuntimeEnv, StoreAuthConfig } from "../config/index.js";
 import { assessStoreAuthEvidence } from "../config/index.js";
 import type { GovernancePrincipal } from "../governance/index.js";
@@ -80,8 +80,11 @@ export interface StoreIdentityProvider {
 }
 
 export interface StoreIdentityProviderOptions {
-  readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
+  /** 必填：环境档位由装配层注入，漏传即构造失败，不回退 local。 */
+  readonly runtimeEnvironment: ChainServicesRuntimeEnv;
   readonly authConfig?: StoreAuthConfig;
+  /** GOVERNANCE_ADMIN_REVIEWER_IDS：JWT governance_admin 与 dev admin 头共用同一白名单核验。 */
+  readonly governanceAdminIds?: readonly string[];
 }
 
 const STORE_PUBLIC_READ_CAPABILITIES = ["store.read"] as const satisfies readonly StoreCapability[];
@@ -128,16 +131,16 @@ const JWT_GOVERNANCE_ADMIN_CAPABILITIES = [
   "store.supplier.identity.revoke"
 ] as const satisfies readonly StoreCapability[];
 
-export async function storeAccessFromHeaders(
-  headers: Readonly<Record<string, string | undefined>> | undefined
-): Promise<StoreAccessState> {
-  return createStoreIdentityProvider().resolve(headers);
-}
-
-export function createStoreIdentityProvider(options: StoreIdentityProviderOptions = {}): StoreIdentityProvider {
-  const runtimeEnvironment = options.runtimeEnvironment ?? "local";
+export function createStoreIdentityProvider(options: StoreIdentityProviderOptions): StoreIdentityProvider {
+  const runtimeEnvironment = options.runtimeEnvironment;
   const authConfig = options.authConfig ?? defaultStoreAuthConfig();
-  const strictRuntime = runtimeEnvironment === "staging" || runtimeEnvironment === "production";
+  // testnet 是公开测试网（Base Sepolia），与 staging/production 同按
+  // strict runtime 处理：dev 自报身份形态一律硬拒。
+  const strictRuntime = runtimeEnvironment !== "local";
+  const governanceAdminPolicy: GovernanceAdminAuthPolicy = {
+    runtimeEnvironment,
+    allowedAdminIds: options.governanceAdminIds ?? []
+  };
   const authEvidence = assessStoreAuthEvidence(authConfig, runtimeEnvironment);
   const jwtConfigBlocked = authConfig.mode === "jwt" && strictRuntime && !authEvidence.externalIdentityEvidence;
   const devHeaderAuthEnabled = authConfig.mode === "dev_headers" &&
@@ -148,13 +151,13 @@ export function createStoreIdentityProvider(options: StoreIdentityProviderOption
       if (jwtConfigBlocked) {
         return anonymousAccess("jwt", {
           code: "store_identity_invalid",
-          message: "External HTTPS OIDC/JWKS Store identity configuration is required in staging and production"
+          message: "External HTTPS OIDC/JWKS Store identity configuration is required outside local development"
         });
       }
       if (jwtVerifier) {
-        return resolveStoreAccessFromJwt(headers, jwtVerifier);
+        return resolveStoreAccessFromJwt(headers, jwtVerifier, governanceAdminPolicy);
       }
-      return resolveStoreAccessFromHeaders(headers, devHeaderAuthEnabled);
+      return resolveStoreAccessFromHeaders(headers, devHeaderAuthEnabled, governanceAdminPolicy);
     }
   };
 }
@@ -202,7 +205,8 @@ export function storeAccessRequiredLevel(capability: StoreCapability): StoreAcce
 
 function resolveStoreAccessFromHeaders(
   headers: Readonly<Record<string, string | undefined>> | undefined,
-  devHeaderAuthEnabled: boolean
+  devHeaderAuthEnabled: boolean,
+  governanceAdminPolicy: GovernanceAdminAuthPolicy
 ): StoreAccessState {
   if (!devHeaderAuthEnabled) {
     const headerPresent = Boolean(
@@ -213,7 +217,7 @@ function resolveStoreAccessFromHeaders(
     return anonymousAccess(headerPresent ? "dev_headers_disabled" : "anonymous");
   }
 
-  const admin = adminPrincipalFromHeaders(headers);
+  const admin = adminPrincipalFromHeaders(headers, governanceAdminPolicy);
   if (admin) {
     return {
       level: "store_admin",
@@ -303,7 +307,8 @@ function requireJwtStoreAuthConfig(config: StoreAuthConfig): RequiredJwtStoreAut
 
 async function resolveStoreAccessFromJwt(
   headers: Readonly<Record<string, string | undefined>> | undefined,
-  verifier: JwtVerifier
+  verifier: JwtVerifier,
+  governanceAdminPolicy: GovernanceAdminAuthPolicy
 ): Promise<StoreAccessState> {
   const token = bearerTokenFromHeaders(headers);
   if (!token) {
@@ -319,7 +324,7 @@ async function resolveStoreAccessFromJwt(
       audience: verifier.config.audience,
       clockTolerance: verifier.config.clockToleranceSeconds
     });
-    return storeAccessFromJwtPayload(result.payload, verifier.config);
+    return storeAccessFromJwtPayload(result.payload, verifier.config, governanceAdminPolicy);
   } catch (error) {
     // discovery/JWKS 故障不是 token 无效：token 本身可能合法，
     // 标成 unavailable 才能区分"换 token 也没用"与"身份源瞬断"。
@@ -403,7 +408,11 @@ function namedDiscoveryError(message: string, cause?: unknown): Error {
   return error;
 }
 
-function storeAccessFromJwtPayload(payload: JWTPayload, config: RequiredJwtStoreAuthConfig): StoreAccessState {
+function storeAccessFromJwtPayload(
+  payload: JWTPayload,
+  config: RequiredJwtStoreAuthConfig,
+  governanceAdminPolicy: GovernanceAdminAuthPolicy
+): StoreAccessState {
   const principalId = stringClaim(payload, config.principalClaim);
   if (!principalId) {
     return anonymousAccess("jwt", {
@@ -413,7 +422,12 @@ function storeAccessFromJwtPayload(payload: JWTPayload, config: RequiredJwtStore
   }
 
   const jwtRoles = normalizeJwtRoles(claimValue(payload, config.roleClaim));
-  const roles = canonicalStoreRoles(jwtRoles);
+  const roles = canonicalStoreRoles(jwtRoles).filter((role) =>
+    // JWT governance_admin 不是治理权威本身：与自报 admin 头同门，必须
+    // 命中 GOVERNANCE_ADMIN_REVIEWER_IDS 白名单才映射治理主体与治理
+    // 能力，否则 IdP 的角色声明即可绕过白名单冒充治理管理员。
+    role !== "governance_admin" || governanceAdminAllowed(principalId, governanceAdminPolicy)
+  );
   const capabilities = capabilitiesForStoreRoles(roles);
   const level = accessLevelForStoreRoles(roles);
   const displayName = stringClaim(payload, config.displayNameClaim);

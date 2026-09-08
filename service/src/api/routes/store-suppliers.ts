@@ -9,7 +9,7 @@ import {
 } from "../../store-suppliers/service.js";
 import type { StoreAccessState, StoreCapability } from "../../store-console/access.js";
 import { isStoreAccessAuthenticated } from "../../store-console/access.js";
-import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { cleanQuery, decodePathParameter, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {
   authorizeStoreCapability,
@@ -93,7 +93,7 @@ export function createStoreSuppliersRouteModule(): RouteModule {
 
         const supplierAuditMatch = /^\/store\/suppliers\/([^/]+)\/audits$/.exec(request.pathname);
         if (request.method === "GET" && supplierAuditMatch) {
-          const supplierId = decodeURIComponent(supplierAuditMatch[1] ?? "");
+          const supplierId = decodePathParameter(supplierAuditMatch[1] ?? "");
           const capability = "store.audit.read";
           const resource = { type: "store_supplier", id: supplierId };
           const authorization = await authorizeStoreCapability(context, request, capability, resource);
@@ -112,7 +112,7 @@ export function createStoreSuppliersRouteModule(): RouteModule {
 
         const notificationProfileMatch = /^\/store\/suppliers\/([^/]+)\/notification-profile(?:\/(prepare))?$/.exec(request.pathname);
         if (request.method === "POST" && notificationProfileMatch) {
-          const supplierId = decodeURIComponent(notificationProfileMatch[1] ?? "");
+          const supplierId = decodePathParameter(notificationProfileMatch[1] ?? "");
           const action = notificationProfileMatch[2];
           // 与同模块其余写路由同口径：通知配置可改写供应商钱包与 webhook，
           // 必须走 store capability 鉴权——裸 wallet 证明只证明"签名者控制
@@ -148,7 +148,7 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           };
         }
 
-        const supplierId = decodeURIComponent(supplierMatch[1] ?? "");
+        const supplierId = decodePathParameter(supplierMatch[1] ?? "");
         const action = supplierMatch[2];
 
         if (request.method === "GET" && !action) {

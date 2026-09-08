@@ -136,6 +136,20 @@ export class SqliteProductBffStore implements ProductBffStore {
     runSqliteWrite(() => this.#upsertInvite(invite));
   }
 
+  async updateInviteIfActive(invite: ProductInviteDTO): Promise<boolean> {
+    const result = runSqliteWrite(() => this.#database.prepare(
+      `UPDATE product_invite
+       SET status = ?, expires_at = ?, accepted_wallet_address = ?
+       WHERE invite_id = ? AND status = 'active'`
+    ).run(
+      invite.status,
+      invite.expiresAt,
+      invite.acceptedWalletAddress ?? null,
+      invite.inviteId
+    ));
+    return result.changes > 0;
+  }
+
   async listInvitesByDraft(draftId: string): Promise<readonly ProductInviteDTO[]> {
     return this.#database.prepare(
       `SELECT *

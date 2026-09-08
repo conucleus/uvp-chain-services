@@ -242,7 +242,8 @@ describe("product API routes", () => {
     });
     const directCandidates = await router.handle({
       method: "GET",
-      pathname: `/store/orders/${stateMachineOrderId}/candidates`
+      pathname: `/store/orders/${stateMachineOrderId}/candidates`,
+      headers: assigneeHeaders
     });
 
     expect((directSearch.body as { results: Array<{ resultType: string; id: string; primaryHref: string }> }).results[0])
@@ -278,7 +279,8 @@ describe("product API routes", () => {
     });
     const ambiguousCandidates = await ambiguousRouter.handle({
       method: "GET",
-      pathname: `/store/orders/${stateMachineOrderId}/candidates`
+      pathname: `/store/orders/${stateMachineOrderId}/candidates`,
+      headers: assigneeHeaders
     });
 
     expect((ambiguousSearch.body as { results: Array<{ badgeLabel: string; primaryHref: string }> }).results[0])
@@ -1355,6 +1357,80 @@ describe("product API routes", () => {
     expect((unauthorizedResponse.body as { tasks: unknown[] }).tasks).toEqual([]);
   });
 
+  it("accepted participants see the order detail under the same visibility rule as /product/me/orders (F144)", async () => {
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineProductEvents(),
+        chainEvent(8n, "SignalSubmitterAuthorized", {
+          orderId: stateMachineOrderId,
+          sourceId: stageId,
+          signalId: hookName,
+          submitter,
+          role: bytes32Text("customs-broker"),
+          metadataHash
+        })
+      ]
+    });
+    // 已接受参与（链下 product-bff 记录）绑定到投影订单：draft 已触发，
+    // participant.status=accepted，acceptedWallet ≠ 链上 assignee。
+    const acceptedWallet = "0x7777777777777777777777777777777777777777";
+    const productStore = new MemoryProductBffStore();
+    await productStore.createDraft({
+      draftId: "draft-accepted-1",
+      zhixuId: CROSS_BORDER_ZHIXU_ID,
+      planId: "0x" + "5".repeat(64),
+      planHash: "0x" + "6".repeat(64),
+      title: "Accepted participant order",
+      businessType: "parallel-export",
+      goods: [],
+      totalAmount: "10000",
+      currency: "USDC",
+      status: "triggered",
+      triggeredOrderId: stateMachineOrderId,
+      createdAt: "2026-04-28T00:00:00.000Z",
+      updatedAt: "2026-04-28T00:00:00.000Z"
+    }, [{
+      participantId: "participant-accepted-1",
+      draftId: "draft-accepted-1",
+      roleSlotId: "delivery",
+      roleLabel: "物流/报关",
+      displayName: "Delivery Operator",
+      walletAddress: acceptedWallet,
+      contact: "delivery@example.com",
+      status: "accepted",
+      required: true,
+      acceptedAt: "2026-04-28T01:00:00.000Z"
+    }]);
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: productStore });
+
+    // /product/me/orders 与 /product/orders/:id 同判据：已接受参与者在
+    // 两边都可见，不再"列表可见、详情 404"。
+    const meOrders = await router.handle({
+      method: "GET",
+      pathname: "/product/me/orders",
+      headers: { "x-uvp-wallet-address": acceptedWallet }
+    });
+    expect(meOrders.status).toBe(200);
+    expect(JSON.stringify(meOrders.body)).toContain(stateMachineOrderId);
+
+    const detail = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${stateMachineOrderId}`,
+      headers: { "x-uvp-wallet-address": acceptedWallet }
+    });
+    expect(detail.status).toBe(200);
+
+    // 无关钱包（非链上 assignee、非已接受参与）仍不可见（404 不泄露存在）。
+    const outsider = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${stateMachineOrderId}`,
+      headers: { "x-uvp-wallet-address": "0x2777777777777777777777777777777777777777" }
+    });
+    expect(outsider).toMatchObject({ status: 404, body: { error: "product_order_not_found" } });
+  });
+
   it("uses accepted participant records for /product/me identity while filtering tasks by wallet authorization", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
@@ -1557,6 +1633,7 @@ describe("product API routes", () => {
       permissions: []
     });
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => new Date(createdAt),
       evidenceIdFactory: () => "ev_product_auth"

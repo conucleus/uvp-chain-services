@@ -6,7 +6,7 @@ import {
   isAnchoredStoreAuthorizationResult,
   requireAnchoredStoreAddress
 } from "../store-authz.js";
-import type { ApiResponse } from "../route-context.js";
+import { decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 /** 加入闭环路由。提交/读取要求锚定会话；审核要求 publisher/委托。 */
@@ -54,7 +54,7 @@ export function createStoreJoinRouteModule(options: {
         if (!applicationMatch) {
           return { status: 404, body: { error: "not_found" } };
         }
-        const applicationId = decodeURIComponent(applicationMatch[1] ?? "");
+        const applicationId = decodePathParameter(applicationMatch[1] ?? "");
         const action = applicationMatch[2];
 
         if (request.method === "GET" && !action) {
@@ -98,6 +98,9 @@ export function createStoreJoinRouteModule(options: {
               ...(error.details !== undefined ? { details: error.details } : {})
             }
           };
+        }
+        if (error instanceof InvalidPathParameterError) {
+          return invalidPathParameterResponse();
         }
         // 非法 query（planId/applicantAddress 形制错误）是可修正的 4xx，
         // 不得漏进 503 污染可用性监控。

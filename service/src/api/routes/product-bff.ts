@@ -17,7 +17,7 @@ import type {
 import type { AuditSink } from "../../security/audit.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError } from "../../shared/types.js";
-import type { ApiRequest, ApiResponse, ApiRouteContext } from "../route-context.js";
+import { decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiRequest, type ApiResponse, type ApiRouteContext } from "../route-context.js";
 import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { RouteModule } from "../route-module.js";
 
@@ -52,7 +52,7 @@ export function createProductBffRouteModule(options: {
       const productOrderDraftPrepareTriggerMatch = /^\/product\/order-drafts\/([^/]+)\/prepare-trigger$/.exec(request.pathname);
       if (request.method === "POST" && productOrderDraftPrepareTriggerMatch) {
         return handleProductBffRequest(async () => {
-          const draftId = decodeURIComponent(productOrderDraftPrepareTriggerMatch[1] ?? "");
+          const draftId = decodePathParameter(productOrderDraftPrepareTriggerMatch[1] ?? "");
           // prepare-trigger 返回完整草稿/参与者联系方式，且 submitter 是
           // 后续签名的身份根——不取 body 自报钱包：会话锚定地址为身份，
           // body 自报值仅作一致性核验（不一致即 403）。
@@ -74,7 +74,7 @@ export function createProductBffRouteModule(options: {
       const productOrderDraftTriggerMatch = /^\/product\/order-drafts\/([^/]+)\/trigger$/.exec(request.pathname);
       if (request.method === "POST" && productOrderDraftTriggerMatch) {
         return handleProductBffRequest(async () => {
-          const draftId = decodeURIComponent(productOrderDraftTriggerMatch[1] ?? "");
+          const draftId = decodePathParameter(productOrderDraftTriggerMatch[1] ?? "");
           const body = await context.productBffService.triggerOrder(draftId, parseTriggerBody(request.body));
           context.onTxMined?.();
           return {
@@ -87,7 +87,13 @@ export function createProductBffRouteModule(options: {
       const productOrderRegistrationMatch = /^\/product\/order-triggers\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productOrderRegistrationMatch) {
         return handleProductBffRequest(async () => {
-          const triggerId = decodeURIComponent(productOrderRegistrationMatch[1] ?? "");
+          // trigger 档案携带草稿、签名者与授权明细，匿名不可按 id 枚举——
+          // 与 product-read 订单/任务读同款会话身份门。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
+          const triggerId = decodePathParameter(productOrderRegistrationMatch[1] ?? "");
           return {
             status: 200,
             body: { trigger: await context.productBffService.getRegistration(triggerId) }
@@ -97,7 +103,7 @@ export function createProductBffRouteModule(options: {
 
       const productOrderDraftMatch = /^\/product\/order-drafts\/([^/]+)$/.exec(request.pathname);
       if (productOrderDraftMatch) {
-        const draftId = decodeURIComponent(productOrderDraftMatch[1] ?? "");
+        const draftId = decodePathParameter(productOrderDraftMatch[1] ?? "");
         if (request.method === "GET") {
           return handleProductBffRequest(async () => {
             // 草稿读取返回完整参与者名单（含联系方式），与 listParticipants
@@ -130,7 +136,7 @@ export function createProductBffRouteModule(options: {
       const productOrderInviteMatch = /^\/product\/orders\/([^/]+)\/invites$/.exec(request.pathname);
       if (request.method === "POST" && productOrderInviteMatch) {
         return handleProductBffRequest(async () => {
-          const draftId = decodeURIComponent(productOrderInviteMatch[1] ?? "");
+          const draftId = decodePathParameter(productOrderInviteMatch[1] ?? "");
           // 邀请由创建者签发（token 只回到创建响应），任何会话钱包
           // 不得替他人草稿发邀请。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
@@ -148,13 +154,16 @@ export function createProductBffRouteModule(options: {
       const productInvitePreviewMatch = /^\/product\/invites\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productInvitePreviewMatch) {
         return handleProductBffRequest(async () => {
-          const inviteId = decodeURIComponent(productInvitePreviewMatch[1] ?? "");
-          // 预览页的钱包视角取会话锚定地址（自报 query/header
-          // 仅做一致性核验）；无会话时仍可预览角色信息，但不携带钱包绑定
-          // 判定（真正占位需要 accept 的会话 + token）。
+          const inviteId = decodePathParameter(productInvitePreviewMatch[1] ?? "");
+          // 预览同样强制 invite token（哈希比对）：inviteId 是弱凭据，
+          // 仅凭 id 即可读受邀人联系方式与草稿金额等于邀请面全员可枚举。
+          // 会话钱包仍可选（用于钱包绑定判定）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           const walletAddress = wallet.ok ? wallet.identity.walletAddress : undefined;
-          const result = await context.productBffService.getInvite(inviteId, walletAddress ? { walletAddress } : {});
+          const result = await context.productBffService.getInvite(inviteId, {
+            ...(request.query?.token !== undefined ? { token: request.query.token } : {}),
+            ...(walletAddress ? { walletAddress } : {})
+          });
           return {
             status: 200,
             body: publicInvitePreviewResponse(result)
@@ -165,7 +174,7 @@ export function createProductBffRouteModule(options: {
       const productInviteAcceptMatch = /^\/product\/invites\/([^/]+)\/accept$/.exec(request.pathname);
       if (request.method === "POST" && productInviteAcceptMatch) {
         return handleProductBffRequest(async () => {
-          const inviteId = decodeURIComponent(productInviteAcceptMatch[1] ?? "");
+          const inviteId = decodePathParameter(productInviteAcceptMatch[1] ?? "");
           // accept 必须是已证明钱包控制的会话（钱包会话签名
           // 或 local dev 锚定头），自报钱包头不算数；且必须携带 invite
           // token（哈希比对）——inviteId 是弱凭据，不足以占角色槽。钱包声明
@@ -192,7 +201,7 @@ export function createProductBffRouteModule(options: {
       const productInviteRejectMatch = /^\/product\/invites\/([^/]+)\/reject$/.exec(request.pathname);
       if (request.method === "POST" && productInviteRejectMatch) {
         return handleProductBffRequest(async () => {
-          const inviteId = decodeURIComponent(productInviteRejectMatch[1] ?? "");
+          const inviteId = decodePathParameter(productInviteRejectMatch[1] ?? "");
           return {
             status: 200,
             body: publicInviteResponse(await context.productBffService.rejectInvite(inviteId, parseRejectInviteBody(request.body)))
@@ -203,7 +212,7 @@ export function createProductBffRouteModule(options: {
       const productOrderParticipantsMatch = /^\/product\/orders\/([^/]+)\/participants$/.exec(request.pathname);
       if (request.method === "GET" && productOrderParticipantsMatch) {
         return handleProductBffRequest(async () => {
-          const draftId = decodeURIComponent(productOrderParticipantsMatch[1] ?? "");
+          const draftId = decodePathParameter(productOrderParticipantsMatch[1] ?? "");
           // 参与者名单含联系方式，读门槛与 accept 同级证明（会话锚定
           // 钱包），且仅限创建者或该草稿的已接受参与者（服务端核验）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
@@ -245,6 +254,9 @@ async function handleProductBffRequest(
           ...(error.details !== undefined ? { details: error.details } : {})
         }
       };
+    }
+    if (error instanceof InvalidPathParameterError) {
+      return invalidPathParameterResponse();
     }
     if (error instanceof ConfigError) {
       return {

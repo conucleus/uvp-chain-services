@@ -132,6 +132,21 @@ export class PostgresProductBffStore implements ProductBffStore {
     await this.#upsertInvite(invite);
   }
 
+  async updateInviteIfActive(invite: ProductInviteDTO): Promise<boolean> {
+    const result = await this.#database.query(
+      `UPDATE product_invite
+       SET status = $2, expires_at = $3, accepted_wallet_address = $4
+       WHERE invite_id = $1 AND status = 'active'`,
+      [
+        invite.inviteId,
+        invite.status,
+        invite.expiresAt,
+        invite.acceptedWalletAddress ?? null
+      ]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async listInvitesByDraft(draftId: string): Promise<readonly ProductInviteDTO[]> {
     const result = await this.#database.query(
       `SELECT *

@@ -43,7 +43,7 @@ describe("Store Console closure dry-run summary", () => {
       }
     });
     const storeAuditStore = new MemoryStoreAuditStore();
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeAuditStore,
       now: () => new Date("2026-05-06T00:00:00.000Z")
     });
@@ -113,7 +113,7 @@ describe("Store Console closure dry-run summary", () => {
   it("lets read-only Store principals view the summary while write steps fail closed", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineOrderEvents() });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       now: () => new Date("2026-05-06T00:00:00.000Z")
     });
 
@@ -157,7 +157,7 @@ describe("Store Console closure dry-run summary", () => {
   });
 
   it("requires an authenticated Store audit reader", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(router.handle({
       method: "GET",

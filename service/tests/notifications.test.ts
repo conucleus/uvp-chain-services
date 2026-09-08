@@ -605,7 +605,7 @@ describe("signal-routed notifications", () => {
       deliveryReasonCode: "transport_adapter_missing"
     }));
 
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService: service, storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService: service, storeSupplierMetadataStore: supplierStore });
     await expect(router.handle({
       method: "GET",
       pathname: "/admin/notifications/redacted-evidence",
@@ -682,7 +682,7 @@ describe("signal-routed notifications", () => {
         }
       }
     });
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService, storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService, storeSupplierMetadataStore: supplierStore });
 
     const deliveriesResponse = await router.handle({
       method: "GET",
@@ -783,7 +783,7 @@ describe("signal-routed notifications", () => {
       createdAt: "2026-05-01T00:00:00.000Z",
       updatedAt: "2026-05-01T00:00:00.000Z"
     });
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, storeSupplierMetadataStore: supplierStore });
     const notification = notificationProfile(account.address.toLowerCase() as Address);
     const body = {
       wallet: account.address,

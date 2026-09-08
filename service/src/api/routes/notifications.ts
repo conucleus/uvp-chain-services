@@ -1,7 +1,7 @@
 import { adminPrincipalFromHeaders } from "../../governance/index.js";
 import type { NotificationDeliveryStatus, NotificationRedactedEvidenceQuery } from "../../notifications/index.js";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address } from "../../shared/types.js";
-import { cleanQuery, readApiHeader, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { cleanQuery, decodePathParameter, readApiHeader, type ApiRequest, type ApiResponse } from "../route-context.js";
 import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { RouteModule } from "../route-module.js";
 
@@ -96,7 +96,7 @@ async function handleNotificationRequest(
     return undefined;
   }
 
-  const principal = adminPrincipalFromHeaders(request.headers);
+  const principal = adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
   if (!principal) {
     return {
       status: 403,
@@ -271,7 +271,7 @@ function parseNotificationDeliveryQuery(query: ApiRequest["query"]): ParsedNotif
 
 function parseDeliveryId(value: string): { readonly ok: true; readonly deliveryId: `0x${string}` } | { readonly ok: false; readonly response: ApiResponse } {
   try {
-    return { ok: true, deliveryId: normalizeBytes32(decodeURIComponent(value), "deliveryId") };
+    return { ok: true, deliveryId: normalizeBytes32(decodePathParameter(value), "deliveryId") };
   } catch (error) {
     if (error instanceof ConfigError) {
       return {

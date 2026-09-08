@@ -7,13 +7,15 @@ import {
   buildOperatorOpsSummary
 } from "../diagnostics.js";
 import type { AdminOpsActionEffect, ApiRequest, ApiResponse } from "../route-context.js";
-import { readApiHeader } from "../route-context.js";
+import { decodePathParameter, readApiHeader } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions.retry" | "indexer.sweep_pending";
 
 interface AdminOpsRequestContext {
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
+  /** 治理 admin 鉴权策略（环境档位 + 白名单，装配层注入）。 */
+  readonly governanceAdminPolicy: Parameters<RouteModule["handle"]>[1]["governanceAdminPolicy"];
   /** OPS_CONSOLE_ADMIN_IDS 白名单；非空时只放行集合内 admin id。 */
   readonly opsConsoleAdminIds?: readonly string[];
   readonly actions?: {
@@ -37,6 +39,7 @@ export function createAdminOpsRouteModule(): RouteModule {
     async handle(request, context) {
       return handleAdminOpsRequest(request, {
         buildDiagnostics: context.buildDiagnostics,
+        governanceAdminPolicy: context.governanceAdminPolicy,
         ...(context.opsConsoleAdminIds ? { opsConsoleAdminIds: context.opsConsoleAdminIds } : {}),
         ...(context.opsRecoveryActions ? { actions: context.opsRecoveryActions } : {}),
         ...(context.submissionStore ? { submissionStore: context.submissionStore } : {}),
@@ -54,7 +57,7 @@ async function handleAdminOpsRequest(
     return undefined;
   }
 
-  const principal = adminPrincipalFromHeaders(request.headers);
+  const principal = adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
   if (!principal) {
     return {
       status: 403,
@@ -138,7 +141,7 @@ async function handleAdminOpsRequest(
 
   const retrySubmissionMatch = /^\/admin\/ops\/submissions\/([^/]+)\/retry$/.exec(request.pathname);
   if (request.method === "POST" && retrySubmissionMatch) {
-    const submissionId = decodeURIComponent(retrySubmissionMatch[1] ?? "").trim();
+    const submissionId = decodePathParameter(retrySubmissionMatch[1] ?? "").trim();
     if (!submissionId) {
       return {
         status: 400,

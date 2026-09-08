@@ -1,3 +1,4 @@
+import { decodePathParameter } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {
   StoreDockingServiceError,
@@ -53,7 +54,7 @@ export function createStoreDockingRouteModule(): RouteModule {
 
         const sessionMatch = /^\/store\/docking-sessions\/([^/]+)$/.exec(request.pathname);
         if (request.method === "GET" && sessionMatch) {
-          const sessionId = decodeURIComponent(sessionMatch[1] ?? "");
+          const sessionId = decodePathParameter(sessionMatch[1] ?? "");
           const session = await context.storeDockingService.getSession(sessionId);
           if (!session) {
             return {
@@ -69,7 +70,7 @@ export function createStoreDockingRouteModule(): RouteModule {
 
         const validateMatch = /^\/store\/docking-sessions\/([^/]+)\/validate$/.exec(request.pathname);
         if (request.method === "POST" && validateMatch) {
-          const sessionId = decodeURIComponent(validateMatch[1] ?? "");
+          const sessionId = decodePathParameter(validateMatch[1] ?? "");
           const capability = "store.docking.validate";
           const resource = { type: "store_docking_session", id: sessionId };
           const authorization = await authorizeStoreCapability(context, request, capability, resource);
@@ -98,7 +99,7 @@ export function createStoreDockingRouteModule(): RouteModule {
 
         const saveMatch = /^\/store\/docking-sessions\/([^/]+)\/save-draft-map$/.exec(request.pathname);
         if (request.method === "POST" && saveMatch) {
-          const sessionId = decodeURIComponent(saveMatch[1] ?? "");
+          const sessionId = decodePathParameter(saveMatch[1] ?? "");
           const capability = "store.docking.save";
           const resource = { type: "store_docking_session", id: sessionId };
           const authorization = await authorizeStoreCapability(context, request, capability, resource);

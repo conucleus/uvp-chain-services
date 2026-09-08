@@ -165,7 +165,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("requires admin headers for operator console routes", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     for (const request of [
       { method: "GET", pathname: "/admin/ops/status" },
@@ -181,7 +181,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("enforces the OPS_CONSOLE_ADMIN_IDS allowlist when configured (ETH-03)", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       opsConsoleAdminIds: ["ops-admin-1", "ops-admin-2"]
     });
 
@@ -207,7 +207,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("falls back to the governance admin check when no ops allowlist is configured (ETH-03)", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const response = await router.handle({
       method: "GET",
@@ -369,7 +369,7 @@ describe("ops health diagnostics", () => {
     const submissionStore = new InMemoryProductSubmissionStore();
     await submissionStore.putSubmission(retryableSubmission());
     const seenRetries: string[] = [];
-    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       submissionStore,
       now: () => new Date(now),
       opsRecoveryActions: {
@@ -473,7 +473,7 @@ describe("ops health diagnostics", () => {
         }
       }
     });
-    const missingDependencyRouter = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const missingDependencyRouter = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const failedResponse = await preflightFailedRouter.handle({
       method: "POST",
@@ -519,7 +519,7 @@ describe("ops health diagnostics", () => {
       degradedReason: "RPC timeout token=secret"
     });
 
-    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceService: noopEvidenceService(),
       evidenceStorage: new InMemoryEvidenceStorage(),
       evidenceRuntimeEnvironment: "production",
@@ -588,6 +588,7 @@ describe("ops health diagnostics", () => {
 
 function testConfig() {
   return loadConfigFromEnv({
+    CHAIN_SERVICES_RUNTIME_ENV: "local",
     CHAIN_SERVICES_DATABASE_DRIVER: "memory",
     CHAIN_SERVICES_DATABASE_URL: "memory://projection-store",
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger",

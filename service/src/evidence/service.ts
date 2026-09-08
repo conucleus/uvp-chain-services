@@ -68,7 +68,8 @@ export interface EvidenceServiceOptions {
   readonly now?: () => Date;
   readonly evidenceIdFactory?: () => string;
   readonly maxPayloadBytes?: number;
-  readonly runtimeEnvironment?: EvidenceStorageRuntimeEnvironment;
+  /** 必填：生产存储边界断言按环境档位定宽严，缺省 local 是 fail-open。 */
+  readonly runtimeEnvironment: EvidenceStorageRuntimeEnvironment;
 }
 
 export interface EvidenceService {
@@ -93,13 +94,13 @@ export interface EvidenceBackupStatusDTO {
   readonly restored?: boolean;
 }
 
-export function createEvidenceService(options: EvidenceServiceOptions = {}): EvidenceService {
+export function createEvidenceService(options: EvidenceServiceOptions): EvidenceService {
   const metadataStore = options.metadataStore ?? new InMemoryEvidenceMetadataStore();
   const storage = options.storage ?? new InMemoryEvidenceStorage();
   const now = options.now ?? (() => new Date());
   const evidenceIdFactory = options.evidenceIdFactory ?? (() => `ev_${randomUUID()}`);
   const maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
-  const runtimeEnvironment = options.runtimeEnvironment ?? "local";
+  const runtimeEnvironment = options.runtimeEnvironment;
   assertEvidenceStorageProductionBoundary(storage, runtimeEnvironment);
 
   return {
@@ -157,12 +158,13 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
         documentType,
         ...(orderId ? { orderId } : {}),
         ...(orderId ? {} : draftId ? { draftId } : {}),
+        ...(taskId ? { taskId } : {}),
         stageIdentifier
       });
       // 重复上传幂等：同一 owner 再次提交完全相同
-      // 的证据载荷（content+metadata+order/draft+stage 全等，draftId 参与
-      // 指纹）时返回既有记录，不追加内容完全相同的副本，也不会把另一
-      // 草稿的同内容凭证错记到本草稿名下。
+      // 的证据载荷（content+metadata+order/draft+task+stage 全等，
+      // draftId/taskId 参与指纹）时返回既有记录，不追加内容完全相同的
+      // 副本，也不会把另一草稿/任务的同内容凭证错记到本名下。
       const existing = await metadataStore.findOwnedByPayloadHash?.(payloadHash, ownerParticipantId);
       if (existing) {
         return {
@@ -278,8 +280,8 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
     async bindEvidence(input, principal) {
       // 调用方主体显式传入并校验：bind 是状态迁移写（uploaded→bound +
       // 链上定位落档），不允许匿名触发；内部调用方（submission 广播后的
-      // 绑定）传业务签名者。防回潮：将来任何 HTTP 暴露都必须先回答
-      // "谁在绑"。
+      // 绑定）传业务签名者。归属校验与 upload 同判据（owner 本人或
+      // admin）——防线不依赖"该入口暂无 HTTP 暴露"的约定。
       const bindingPrincipal = normalizePrincipal(principal);
       requireAuthenticated(bindingPrincipal);
       const binding = normalizeBinding(input, now);
@@ -288,6 +290,13 @@ export function createEvidenceService(options: EvidenceServiceOptions = {}): Evi
         return undefined;
       }
       assertBindable(record, binding);
+      if (!canWriteEvidence(bindingPrincipal, record.evidence.ownerParticipantId)) {
+        throw new EvidenceServiceError(
+          "forbidden",
+          "principal cannot bind evidence owned by another participant",
+          403
+        );
+      }
       if (record.evidence.status === "bound") {
         return recordToDto(record);
       }
@@ -375,7 +384,8 @@ function backupStorageOf(storage: EvidenceStorage): BackupEvidenceStorage | unde
 export function createDefaultEvidenceService(): EvidenceService {
   return createEvidenceService({
     metadataStore: new InMemoryEvidenceMetadataStore(),
-    storage: new LocalEvidenceStorage()
+    storage: new LocalEvidenceStorage(),
+    runtimeEnvironment: "local"
   });
 }
 

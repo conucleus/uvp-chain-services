@@ -139,6 +139,79 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(session.capabilities).toContain("store.listing.manage");
   });
 
+  it("plain wallet sessions only get the public read capability, not store.audit.read (F146)", async () => {
+    // 未命中运营方/管理员清单的钱包登录只证明钱包控制权——运营审计
+    // （store.audit.read）是运营数据面，不得随登录默认授予。
+    const router = await buildRouter({ operatorWallets: [operatorWallet] });
+    const plainToken = await login(router, supplierWallet);
+    const operatorToken = await login(router, operatorWallet);
+
+    const plainSession = (await router.handle({
+      method: "GET",
+      pathname: "/store/session",
+      headers: { "x-uvp-store-session": plainToken }
+    })).body as { session: { accessLevel: string; capabilities: readonly string[] } };
+    expect(plainSession.session.accessLevel).toBe("store_read");
+    expect(plainSession.session.capabilities).toContain("store.read");
+    expect(plainSession.session.capabilities).not.toContain("store.audit.read");
+
+    const operatorSession = (await router.handle({
+      method: "GET",
+      pathname: "/store/session",
+      headers: { "x-uvp-store-session": operatorToken }
+    })).body as { session: { capabilities: readonly string[] } };
+    expect(operatorSession.session.capabilities).toContain("store.audit.read");
+  });
+
+  it("ignores the dev anchored address header outside local runtime (F131)", async () => {
+    const { createWalletSessionStoreIdentityProvider } = await import("../src/store-sessions/index.js");
+    const { createStoreSessionService } = await import("../src/store-sessions/index.js");
+    const sessionService = createStoreSessionService();
+    const base = {
+      async resolve() {
+        return {
+          level: "anonymous_read" as const,
+          roles: ["anonymous_read" as const],
+          capabilities: ["store.read" as const],
+          authMode: "anonymous" as const,
+          canWrite: false,
+          canAdmin: false
+        };
+      }
+    };
+    const headers = { "x-uvp-store-dev-anchored-address": supplierWallet };
+    const localProvider = createWalletSessionStoreIdentityProvider({
+      base,
+      sessionService,
+      config: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: true
+      },
+      runtimeEnvironment: "local"
+    });
+    expect((await localProvider.resolve(headers))?.anchoredAddress?.toLowerCase()).toBe(supplierWallet.toLowerCase());
+
+    const testnetProvider = createWalletSessionStoreIdentityProvider({
+      base,
+      sessionService,
+      config: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: true
+      },
+      runtimeEnvironment: "testnet"
+    });
+    // testnet 是公开测试网：自报地址头不构成身份锚定。
+    expect((await testnetProvider.resolve(headers)).anchoredAddress).toBeUndefined();
+  });
+
   it("wallet sessions never receive store.draft.review (governance-only capability)", async () => {
     // 职责分离（store-console/access.ts 口径）：zhixu 草稿审核是治理动作，
     // 专属 governance_admin——钱包会话的 operator/store_admin 能力表都
@@ -1007,6 +1080,7 @@ async function buildRouter(options: { readonly operatorWallets?: readonly Addres
 
 function routerOptions(options: { readonly operatorWallets?: readonly Address[]; readonly adminWallets?: readonly Address[] } = {}) {
   return {
+    productRuntimeEnvironment: "local" as const,
     productSchemaResolver: crossBorderSchemaResolver(),
     submissionChainId: 31337,
     submissionVerifyingContract: contractAddress,

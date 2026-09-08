@@ -93,7 +93,6 @@ describe("Product API staging readiness", () => {
         environment: "staging",
         preflightStrict: true,
         preflightStatus: "passed",
-        e2eControls: false,
         registrationAdapter: "anvil",
         storageDriver: "postgres",
         storageDurable: true,
@@ -183,16 +182,14 @@ describe("Product API staging readiness", () => {
     expect(serialized).not.toContain(stagingGovernancePrivateKey.slice(2));
   });
 
-  it("fails closed when fixture controls are presented as staging evidence", async () => {
+  it("fails closed when permissive authorization is presented as staging evidence", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents({ includeActiveDeployment: false }) });
     const baseDiagnostics = stagingDiagnostics(tempDirs);
     const unsafeDiagnostics: ConfigDiagnostics = {
       ...baseDiagnostics,
-      e2eControls: true,
       product: {
         ...baseDiagnostics.product,
-        e2eControls: true,
         permissiveAuthorizationRequested: true
       }
     };
@@ -211,7 +208,6 @@ describe("Product API staging readiness", () => {
       ready: false,
       status: "not_ready",
       reasons: expect.arrayContaining([
-        "product_e2e_fixtures_enabled",
         "permissive_product_authorization_requested",
         "no_active_deployment"
       ]),
@@ -372,7 +368,6 @@ function stagingEnv(tempDirs: string[]): Record<string, string | undefined> {
     RECONCILE_WORKER_ENABLED: "true",
     RECONCILE_POLL_INTERVAL_MS: "30000",
     UVP_PRODUCT_DEMO_MODE: "0",
-    UVP_PRODUCT_E2E_FIXTURES: "0",
     UVP_PRODUCT_PERMISSIVE_AUTH: "0"
   };
 }

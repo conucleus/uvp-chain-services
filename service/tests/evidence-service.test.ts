@@ -61,6 +61,7 @@ describe("evidence service", () => {
       metadataHash: first.evidence.metadataHash,
       documentType: first.metadata.documentType,
       ...(first.evidence.orderId ? { orderId: first.evidence.orderId } : {}),
+      ...(first.evidence.taskId ? { taskId: first.evidence.taskId } : {}),
       stageIdentifier: first.evidence.stageIdentifier
     }));
     expect(buildPayloadHashDocument({
@@ -77,6 +78,64 @@ describe("evidence service", () => {
       ...(first.evidence.orderId ? { orderId: first.evidence.orderId } : {}),
       stageIdentifier: first.evidence.stageIdentifier
     })).not.toHaveProperty("evidenceId");
+  });
+
+  it("keeps same-owner evidence on different tasks distinct via the taskId fingerprint component (F145)", async () => {
+    const service = testEvidenceService();
+    const base = {
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      fileName: "invoice.json",
+      content: { encoding: "json" as const, value: { amount: 100 } },
+      metadata: { businessLabel: "Invoice", fields: { invoice: "INV-9" } }
+    };
+    const taskA = await service.uploadEvidence({ orderId: "order-1", taskId: "task-a", ...base }, owner);
+    const taskB = await service.uploadEvidence({ orderId: "order-1", taskId: "task-b", ...base }, owner);
+    expect(taskA.evidence.taskId).toBe("task-a");
+    expect(taskB.evidence.taskId).toBe("task-b");
+    // (owner, payloadHash) 幂等不得跨任务错带：taskId 入指纹后两份记录
+    // 指纹不同，各自成档。
+    expect(taskA.evidence.payloadHash).not.toBe(taskB.evidence.payloadHash);
+    expect(taskB.evidence.evidenceId).not.toBe(taskA.evidence.evidenceId);
+  });
+
+  it("rejects bindEvidence from a principal that does not own the evidence (F147)", async () => {
+    const service = testEvidenceService();
+    const uploaded = await uploadJsonEvidence(service, {
+      fileName: "customs.txt",
+      content: { note: "declaration" },
+      metadataFields: { invoice: "INV-2" }
+    });
+    await expect(service.bindEvidence({
+      evidenceId: uploaded.evidence.evidenceId,
+      txHash: txHash("21"),
+      orderId: "order-1",
+      onchainOrderId: txHash("aa"),
+      sourceId: txHash("bb"),
+      signalId: txHash("cc")
+    }, { id: "another-participant", role: "participant" })).rejects.toMatchObject({
+      code: "forbidden",
+      status: 403
+    });
+    // owner 本人仍可绑定；admin 代绑不受影响。
+    const bound = await service.bindEvidence({
+      evidenceId: uploaded.evidence.evidenceId,
+      txHash: txHash("21"),
+      orderId: "order-1",
+      onchainOrderId: txHash("aa"),
+      sourceId: txHash("bb"),
+      signalId: txHash("cc")
+    }, owner);
+    expect(bound?.evidence.status).toBe("bound");
+    const second = await service.bindEvidence({
+      evidenceId: uploaded.evidence.evidenceId,
+      txHash: txHash("21"),
+      orderId: "order-1",
+      onchainOrderId: txHash("aa"),
+      sourceId: txHash("bb"),
+      signalId: txHash("cc")
+    }, { id: "admin-1", role: "admin" });
+    expect(second?.evidence.status).toBe("bound");
   });
 
   it("changes metadataHash and payloadHash when canonical metadata changes", async () => {
@@ -186,6 +245,7 @@ describe("evidence service", () => {
   it("enforces owner, participant, adjudicator, admin, and outsider read rules", async () => {
     const metadataStore = new InMemoryEvidenceMetadataStore();
     const service = createEvidenceService({
+    runtimeEnvironment: "local",
       metadataStore,
       storage: new InMemoryEvidenceStorage(),
       now: () => new Date("2026-04-28T00:00:00Z")
@@ -230,6 +290,7 @@ describe("evidence service", () => {
   it("rejects attributing uploaded evidence to another participant via ownerParticipantId or request writers", async () => {
     const metadataStore = new InMemoryEvidenceMetadataStore();
     const service = createEvidenceService({
+    runtimeEnvironment: "local",
       metadataStore,
       storage: new InMemoryEvidenceStorage(),
       now: () => new Date("2026-04-28T00:00:00Z"),
@@ -301,6 +362,7 @@ describe("evidence service", () => {
   it("returns proof and reports missing_file or mismatch without deleting evidence metadata", async () => {
     const storage = new InMemoryEvidenceStorage();
     const service = createEvidenceService({
+    runtimeEnvironment: "local",
       storage,
       now: () => new Date("2026-04-28T00:00:00Z")
     });
@@ -335,6 +397,7 @@ describe("evidence service", () => {
 
   it("rejects oversized payloads and unsupported MIME types", async () => {
     const service = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       maxPayloadBytes: 4
     });
@@ -702,6 +765,7 @@ function s3CredentialEnv(): Record<string, string> {
 
 function testEvidenceService() {
   return createEvidenceService({
+    runtimeEnvironment: "local",
     storage: new InMemoryEvidenceStorage(),
     now: () => new Date("2026-04-28T00:00:00Z")
   });

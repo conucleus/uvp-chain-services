@@ -1730,7 +1730,7 @@ function openGovernanceStore(databaseUrl: string): SqliteGovernanceStore {
 }
 
 function createStoreMetadataRouter(stores: ChainServicesStores): ApiRouter {
-  return createApiRouter(stores.projectionStore, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+  return createApiRouter(stores.projectionStore, { productRuntimeEnvironment: "local", productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
     storeAuthConfig: {
       mode: "dev_headers" as const,
       roleClaim: "roles",

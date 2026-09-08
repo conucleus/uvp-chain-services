@@ -107,6 +107,8 @@ export interface AnvilProductTriggerBroadcastAdapterOptions {
   readonly privateKey?: Hex | string;
   readonly registrarAddress?: Address;
   readonly waitForReceipt?: boolean;
+  /** 非 local 默认开：代付 gas 的注册器不得同时是业务签名者（同族 submissions/stage-patch 防线）。 */
+  readonly rejectGasPayerAsSubmitter?: boolean;
   readonly publicClient?: ProductTriggerBroadcastPublicClient;
   readonly walletClient?: ProductTriggerBroadcastWalletClient;
   readonly unknownOrderRetryDelayMs?: number;
@@ -163,6 +165,18 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
   }
 
   async broadcastOutsideTrigger(input: ProductBroadcastOutsideTriggerInput): Promise<ProductOrderTriggerBroadcastResult> {
+    // 与 submissions/stage-patch 广播同防线：registrar（gas 付费方）
+    // 不得同时是业务签名者——代付通道自己签名自己提交会让"服务不生成
+    // 业务签名"的边界名存实亡。确定性拒绝，不产生任何链上交易。
+    if (this.#options.rejectGasPayerAsSubmitter &&
+        this.registrarAddress.toLowerCase() === input.submitter.toLowerCase()) {
+      return {
+        status: "failed",
+        errorCode: "relayer_business_signer_reuse",
+        errorMessage: "relayer gas payer must not be the participant business signer",
+        retryable: false
+      };
+    }
     // 已广播的 txHash 必须穿越 catch：writeContract 成功后等待回执/解析回执
     // 抛错时，链上交易已经存在，failed 结果不得丢失 txHash（对齐
     // submissions/broadcast-adapter 的 failedResult 携带方式）。

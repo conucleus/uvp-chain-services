@@ -142,7 +142,8 @@ describe("Store supplier directory API", () => {
     // 审计 ID 由存储端生成（audit_<uuid>），两个服务实例（模拟重启/
     // 多实例）写入不冲突，不再依赖进程内 audit_000001 序号。
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
-    const buildRouter = () => createApiRouter(new MemoryProjectionStore(), {
+    const buildRouter = () => createApiRouter(new MemoryProjectionStore(), {  productRuntimeEnvironment: "local",
+
       productSchemaResolver: crossBorderSchemaResolver(),
       submissionChainId: 84532,
       submissionVerifyingContract: "0x1111111111111111111111111111111111111111",

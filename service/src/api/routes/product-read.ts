@@ -9,7 +9,7 @@ import { buildProductApiStagingReadiness } from "../../product/staging-readiness
 import { redactErrorMessage } from "../../security/redaction.js";
 import type { ProjectionSyncState } from "../../storage/projection-store.js";
 import { StorageUnavailableError } from "../../storage/errors.js";
-import { cleanQuery, type ApiRequest, type ApiResponse, type ApiRouteContext } from "../route-context.js";
+import { cleanQuery, decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiRequest, type ApiResponse, type ApiRouteContext } from "../route-context.js";
 import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { RouteModule } from "../route-module.js";
 
@@ -48,7 +48,7 @@ export function createProductReadRouteModule(options: {
           if (!participantQuery.ok) {
             return participantQuery.response;
           }
-          const taskId = decodeURIComponent(participantTaskMatch[1] ?? "");
+          const taskId = decodePathParameter(participantTaskMatch[1] ?? "");
           const view = await context.productService.getParticipantView(participantQuery.query);
           const task = view.tasks.find((item) => item.taskId === taskId);
           if (!task) {
@@ -136,8 +136,9 @@ export function createProductReadRouteModule(options: {
             return wallet.response;
           }
           const walletAddress = wallet.identity.walletAddress.toLowerCase();
+          const acceptedOrderIds = await acceptedParticipantOrderIds(context, wallet.identity.walletAddress);
           const orders = (await context.productService.listOrders())
-            .filter((order) => orderVisibleToParticipant(order, walletAddress));
+            .filter((order) => orderVisibleToParticipant(order, walletAddress, acceptedOrderIds));
           return {
             status: 200,
             body: { orders }
@@ -148,7 +149,7 @@ export function createProductReadRouteModule(options: {
       const productZhixuMatch = /^\/product\/zhixu(?:s)?\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productZhixuMatch) {
         return withStorageGuard(async () => {
-          const zhixuId = decodeURIComponent(productZhixuMatch[1] ?? "");
+          const zhixuId = decodePathParameter(productZhixuMatch[1] ?? "");
           const zhixu = await context.productService.getZhixu(zhixuId);
           if (!zhixu) {
             return {
@@ -166,7 +167,7 @@ export function createProductReadRouteModule(options: {
       const productOrderTimelineMatch = /^\/product\/orders\/([^/]+)\/timeline$/.exec(request.pathname);
       if (request.method === "GET" && productOrderTimelineMatch) {
         return withStorageGuard(async () => {
-          const orderId = decodeURIComponent(productOrderTimelineMatch[1] ?? "");
+          const orderId = decodePathParameter(productOrderTimelineMatch[1] ?? "");
           let timeline;
           try {
             timeline = await context.productService.listOrderTimeline(orderId);
@@ -195,7 +196,7 @@ export function createProductReadRouteModule(options: {
       const productOrderProofMatch = /^\/product\/orders\/([^/]+)\/proof$/.exec(request.pathname);
       if (request.method === "GET" && productOrderProofMatch) {
         return withStorageGuard(async () => {
-          const orderId = decodeURIComponent(productOrderProofMatch[1] ?? "");
+          const orderId = decodePathParameter(productOrderProofMatch[1] ?? "");
           let proof;
           try {
             proof = await context.productService.listOrderProof(orderId);
@@ -230,7 +231,7 @@ export function createProductReadRouteModule(options: {
           if (!wallet.ok) {
             return wallet.response;
           }
-          const orderId = decodeURIComponent(productOrderMatch[1] ?? "");
+          const orderId = decodePathParameter(productOrderMatch[1] ?? "");
           let order: ProductOrderApiDTO | undefined;
           try {
             order = await context.productService.getOrder(orderId);
@@ -246,7 +247,11 @@ export function createProductReadRouteModule(options: {
             }
             throw error;
           }
-          if (!order || !orderVisibleToParticipant(order, wallet.identity.walletAddress.toLowerCase())) {
+          if (!order || !orderVisibleToParticipant(
+            order,
+            wallet.identity.walletAddress.toLowerCase(),
+            await acceptedParticipantOrderIds(context, wallet.identity.walletAddress)
+          )) {
             return {
               status: 404,
               body: { error: "product_order_not_found" }
@@ -298,7 +303,7 @@ export function createProductReadRouteModule(options: {
           if (!wallet.ok) {
             return wallet.response;
           }
-          const taskId = decodeURIComponent(productTaskMatch[1] ?? "");
+          const taskId = decodePathParameter(productTaskMatch[1] ?? "");
           const task = await context.productService.getTask(taskId);
           if (!task || (
             task.assigneeWallet &&
@@ -417,14 +422,31 @@ function productParticipantIdentityFromAssignment(assignment: ProductParticipant
 }
 
 /**
+ * 已接受参与（草稿 accept 带来的订单归属）——/product/me/orders 与
+ * /product/orders(:id) 共用同一判据：受邀并 accept 的钱包在链上指派
+ * 落定前就该看到订单，列表与详情不得一边可见一边 404。
+ */
+async function acceptedParticipantOrderIds(
+  context: Parameters<RouteModule["handle"]>[1],
+  walletAddress: string
+): Promise<Set<string>> {
+  const assignments = await context.productBffService.listParticipantAssignments(walletAddress);
+  return new Set(assignments.flatMap((assignment) => {
+    const orderId = assignment.trigger?.orderId ?? assignment.draft.triggeredOrderId;
+    return orderId ? [orderId.toLowerCase()] : [];
+  }));
+}
+
+/**
  * 订单读可见性（与任务读同口径）：订单 DTO 内嵌全部任务，任务的
  * assigneeWallet/执行者 overlay 是参与者数据。无任何指派钱包的订单
  * 是纯链上事实（同"未指派任务"），对已认证参与者开放；有指派钱包
- * 的订单只有参与者本人可见。
+ * 的订单只有参与者本人（链上指派或已接受参与的订单归属）可见。
  */
 function orderVisibleToParticipant(
   order: ProductOrderApiDTO,
-  walletAddress: string
+  walletAddress: string,
+  acceptedOrderIds: ReadonlySet<string>
 ): boolean {
   const participants = new Set<string>();
   for (const task of order.tasks ?? []) {
@@ -444,13 +466,18 @@ function orderVisibleToParticipant(
       participants.add(overlay.activeExecutorWallet.toLowerCase());
     }
   }
-  return participants.size === 0 || participants.has(walletAddress);
+  return participants.size === 0 ||
+    participants.has(walletAddress) ||
+    (order.orderId ? acceptedOrderIds.has(order.orderId.toLowerCase()) : false);
 }
 
 async function withStorageGuard(action: () => Promise<ApiResponse>): Promise<ApiResponse> {
   try {
     return await action();
   } catch (error) {
+    if (error instanceof InvalidPathParameterError) {
+      return invalidPathParameterResponse();
+    }
     if (error instanceof StorageUnavailableError) {
       return {
         status: 503,

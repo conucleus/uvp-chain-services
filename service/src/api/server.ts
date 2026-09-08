@@ -39,6 +39,7 @@ import { createRedactingLogger, redactErrorMessage, redactSecrets } from "../sec
 import { isDirectRun } from "../shared/runtime.js";
 import { ConfigError, consoleLogger, type Address, type Logger } from "../shared/types.js";
 import { createApiRouter } from "./routes.js";
+import { InvalidPathParameterError, invalidPathParameterResponse } from "./route-context.js";
 import { createListingAnchorChainView } from "../store-listings/index.js";
 
 export interface StartApiServerOptions {
@@ -234,6 +235,9 @@ export async function startApiServer(
   const opsConsoleAdminIds = config.operatorRoles.opsConsoleAdmins ?? [];
   const router = createApiRouter(store, {
     productBffStore,
+    ...(config.operatorRoles.adminReviewers.length > 0
+      ? { governanceAdminIds: config.operatorRoles.adminReviewers }
+      : {}),
     evidenceMetadataStore: stores.evidenceMetadataStore,
     evidenceStorage,
     submissionStore,
@@ -358,6 +362,14 @@ export async function startApiServer(
       });
       response.end(JSON.stringify(safeBody, jsonReplacer));
     })().catch((error: unknown) => {
+      // 畸形路径参数是调用方可修正的 400，不落入兜底 500。
+      if (error instanceof InvalidPathParameterError) {
+        const body400 = withErrorMetadata(invalidPathParameterResponse().body, requestId, runId);
+        response.statusCode = 400;
+        response.setHeader("content-type", "application/json; charset=utf-8");
+        response.end(JSON.stringify(body400));
+        return;
+      }
       response.statusCode = 500;
       setCorsHeaders(response);
       response.setHeader("x-request-id", requestId);
@@ -606,7 +618,8 @@ function productRegistrationAdapterFromConfig(config: ChainServicesConfig): Prod
     rpcUrl: config.network.rpcUrl,
     chainId: config.network.chainId,
     privateKey,
-    waitForReceipt: config.productBff.waitForReceipt
+    waitForReceipt: config.productBff.waitForReceipt,
+    rejectGasPayerAsSubmitter: config.security.environment !== "local"
   });
 }
 

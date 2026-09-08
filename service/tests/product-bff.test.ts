@@ -272,6 +272,7 @@ describe("product BFF order drafts and invites", () => {
     const previewResponse = await router.handle({
       method: "GET",
       pathname: `/product/invites/${fundsInvite.invite.inviteId}`,
+      query: { token: fundsInvite.inviteToken! },
       headers: { "x-uvp-wallet-address": acceptedWallet },
     });
     expect(previewResponse.status).toBe(200);
@@ -355,6 +356,51 @@ describe("product BFF order drafts and invites", () => {
     });
   });
 
+  it("requires the invite token for invite previews (F140)", async () => {
+    const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
+    const draft = (
+      await createDraft(router).then(
+        (response) => response.body as DraftResponse,
+      )
+    ).draft;
+    const invite = await createInvite(router, draft.draftId, "funds", "funds@example.com");
+
+    // inviteId 是弱凭据：无 token 的预览按 403 拒绝，不泄露受邀人
+    // 联系方式与草稿金额。
+    const noToken = await router.handle({
+      method: "GET",
+      pathname: `/product/invites/${invite.invite.inviteId}`
+    });
+    expect(noToken).toMatchObject({ status: 403, body: { error: "invite_token_mismatch" } });
+
+    const wrongToken = await router.handle({
+      method: "GET",
+      pathname: `/product/invites/${invite.invite.inviteId}`,
+      query: { token: "not-the-invite-token" }
+    });
+    expect(wrongToken).toMatchObject({ status: 403, body: { error: "invite_token_mismatch" } });
+  });
+
+  it("invite status transitions are conditional on status=active (F141)", async () => {
+    const store = new MemoryProductBffStore();
+    const invite: ProductInviteDTO = {
+      inviteId: "invite_conditional_1",
+      draftId: "draft-1",
+      participantId: "participant-1",
+      roleSlotId: "funds",
+      tokenHash: ("0x" + "a".repeat(64)) as ProductInviteDTO["tokenHash"],
+      status: "active",
+      expiresAt: "2100-01-01T00:00:00.000Z",
+      createdAt: "2026-01-01T00:00:00.000Z"
+    };
+    await store.createInvite(invite);
+    await expect(store.updateInviteIfActive({ ...invite, status: "accepted" })).resolves.toBe(true);
+    // 已接受的 invite 不再满足 WHERE status='active'：并发方的覆写被拒。
+    await expect(store.updateInviteIfActive({ ...invite, status: "rejected" })).resolves.toBe(false);
+    const reloaded = await store.getInvite(invite.inviteId);
+    expect(reloaded?.status).toBe("accepted");
+  });
+
   it("blocks expired invites and duplicate participant wallet binding", async () => {
     const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
     const draft = (
@@ -396,6 +442,7 @@ describe("product BFF order drafts and invites", () => {
     const expiredPreviewResponse = await router.handle({
       method: "GET",
       pathname: `/product/invites/${expiredInvite.invite.inviteId}`,
+      query: { token: expiredInvite.inviteToken! },
       headers: { "x-uvp-wallet-address": testWallet(2) },
     });
     expect(expiredPreviewResponse).toMatchObject({
@@ -477,7 +524,8 @@ describe("product BFF order drafts and invites", () => {
     const invite = await createInvite(router, draft.draftId, "funds", "funds-contact@example");
     const preview = await router.handle({
       method: "GET",
-      pathname: `/product/invites/${invite.invite.inviteId}`
+      pathname: `/product/invites/${invite.invite.inviteId}`,
+      query: { token: invite.inviteToken! }
     });
     expect(preview.status).toBe(200);
     expect((preview.body as { role: { evidenceSpec?: unknown } }).role.evidenceSpec)
@@ -588,6 +636,7 @@ describe("product BFF order drafts and invites", () => {
     const registrationResponse = await router.handle({
       method: "GET",
       pathname: `/product/order-triggers/${prepared.trigger.triggerId}`,
+      headers: creatorHeaders(),
     });
     expect(registrationResponse.status).toBe(200);
     expect(

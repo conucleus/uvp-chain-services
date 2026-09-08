@@ -291,17 +291,19 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
  * 把钱包会话叠加到既有 StoreAccessState 上：
  * - 未配置/未启用时原样返回（fail-closed，不放大权限）。
  * - 钱包地址命中运营方/管理员清单时提升 level；否则至少 store_read。
- * - local + dev_headers 模式允许 dev 锚定地址头（显式仅供本地联调，staging/prod 拒绝）。
+ * - dev 锚定地址头仅 local 生效（testnet 是公开测试网，与 staging/prod
+ *   同按 strict runtime 硬拒自报地址锚定）。
  */
 export function createWalletSessionStoreIdentityProvider(options: {
   readonly base: StoreIdentityProvider;
   readonly sessionService: StoreSessionService;
   readonly config?: StoreWalletSessionConfig;
-  readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
+  /** 必填：环境档位由装配层注入，漏传即构造失败，不回退 local。 */
+  readonly runtimeEnvironment: ChainServicesRuntimeEnv;
 }): StoreIdentityProvider {
   const config = options.config ?? defaultWalletSessionConfig();
-  const runtimeEnvironment = options.runtimeEnvironment ?? "local";
-  const strictRuntime = runtimeEnvironment === "staging" || runtimeEnvironment === "production";
+  const runtimeEnvironment = options.runtimeEnvironment;
+  const strictRuntime = runtimeEnvironment !== "local";
   return {
     async resolve(headers) {
       const base = await options.base.resolve(headers);
@@ -412,7 +414,10 @@ function capabilitiesForAccessLevel(level: StoreAccessLevel): readonly StoreCapa
         "store.listing.manage"
       ];
     case "store_read":
-      return storeReadCapabilities();
+      // 钱包会话对未命中运营方/管理员清单的地址只授公共读——
+      // store.audit.read 是运营审计面，任意钱包登录即可读全量运营
+      // 审计等于把运营数据开放给所有人。
+      return ["store.read"];
     case "anonymous_read":
       return ["store.read"];
   }

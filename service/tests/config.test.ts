@@ -8,6 +8,7 @@ import { buildConfigDiagnostics, loadConfigFromEnv as loadRawConfigFromEnv, runC
 // environment now; tests that do not assert those failures get explicit
 // defaults injected here.
 const MANDATORY_STORAGE_AND_REGISTRATION_ENV = {
+  CHAIN_SERVICES_RUNTIME_ENV: "local",
   CHAIN_SERVICES_DATABASE_DRIVER: "memory",
   CHAIN_SERVICES_DATABASE_URL: "memory://projection-store",
   UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
@@ -203,10 +204,52 @@ describe("chain-services config", () => {
     expect(config.network.contracts.UVPIdentityRegistry).toBe("0x2222222222222222222222222222222222222222");
   });
 
+  it("refuses to start without an explicit runtime environment (F129)", () => {
+    // 环境档位是 fail-closed 门禁的根开关：缺省即拒绝启动并报键名，
+    // 不回退 local——local 也必须显式声明。
+    expect(() => loadRawConfigFromEnv({
+      CHAIN_SERVICES_DATABASE_DRIVER: "memory",
+      CHAIN_SERVICES_DATABASE_URL: "memory://projection-store",
+      UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+    })).toThrow(/CHAIN_SERVICES_RUNTIME_ENV is required/);
+    expect(loadConfigFromEnv({ CHAIN_SERVICES_RUNTIME_ENV: "local" }).security.environment).toBe("local");
+  });
+
+  it("warns loudly when the local RPC URL falls back to the Anvil default (F158)", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => {
+      warnings.push(String(message));
+    };
+    try {
+      const config = loadConfigFromEnv({});
+      expect(config.network.rpcUrl).toBe("http://127.0.0.1:8545");
+      expect(warnings.some((message) => message.includes("UVP_RPC_URL"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+    // 显式配置 UVP_RPC_URL 时不告警。
+    const quiet: string[] = [];
+    console.warn = (message?: unknown) => {
+      quiet.push(String(message));
+    };
+    try {
+      loadConfigFromEnv({ UVP_RPC_URL: "http://127.0.0.1:8545" });
+      expect(quiet).toHaveLength(0);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
   it("requires the durable storage driver and URL to be declared explicitly", () => {
-    expect(() => loadRawConfigFromEnv({})).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
+    expect(() => loadRawConfigFromEnv({})).toThrow(/CHAIN_SERVICES_RUNTIME_ENV is required/);
 
     expect(() => loadRawConfigFromEnv({
+      CHAIN_SERVICES_RUNTIME_ENV: "local"
+    })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
+
+    expect(() => loadRawConfigFromEnv({
+      CHAIN_SERVICES_RUNTIME_ENV: "local",
       CHAIN_SERVICES_DATABASE_DRIVER: "memory"
     })).toThrow(/CHAIN_SERVICES_DATABASE_URL is required/);
 
@@ -266,6 +309,7 @@ describe("chain-services config", () => {
 
   it("does not infer a storage driver from the database URL", () => {
     expect(() => loadRawConfigFromEnv({
+      CHAIN_SERVICES_RUNTIME_ENV: "local",
       CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:uvp@127.0.0.1:5432/uvp"
     })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
   });
@@ -414,10 +458,6 @@ describe("chain-services config", () => {
     })).security.environment).toBe("testnet");
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
-      UVP_PRODUCT_E2E_FIXTURES: "1"
-    }))).toThrow(/UVP_PRODUCT_E2E_FIXTURES/);
-
-    expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_PRODUCT_SUBMISSION_AUTHORIZATION: "product_projection_demo"
     }))).toThrow(/permissive Product submission authorization/);
 
@@ -481,7 +521,6 @@ describe("chain-services config", () => {
         identityRegistryConfigured: true
       },
       product: {
-        e2eControls: false,
         registrationAdapter: "anvil",
         permissiveAuthorizationRequested: false
       },
@@ -518,15 +557,11 @@ describe("chain-services config", () => {
     const env = testnetEnv(testnetPostgresConfigUrl());
     const config = loadConfigFromEnv(env);
 
-    await expect(runConfigPreflight(config, {
-      env: {
-        ...env,
-        UVP_PRODUCT_E2E_FIXTURES: "1"
-      },
-      clients: {
-        network: { getChainId: async () => 84532 }
-      }
-    })).rejects.toThrow(/UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in testnet/);
+    // F131：testnet 显式开启 dev 锚定地址头即拒绝启动（自报地址锚定
+    // 等于伪造身份，公开测试网不比 staging 宽松）。
+    expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
+      STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER: "true"
+    }))).toThrow(/STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER=true is only allowed in local development/);
   });
 
   it("loads the staging runtime profile with Postgres, S3, strict preflight, and role env names", () => {
@@ -624,10 +659,6 @@ describe("chain-services config", () => {
     expect(loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_DEMO_MODE: "1"
     })).security.environment).toBe("staging");
-
-    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
-      UVP_PRODUCT_E2E_FIXTURES: "1"
-    }))).toThrow(/UVP_PRODUCT_E2E_FIXTURES/);
 
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_PERMISSIVE_AUTH: "1"
@@ -795,7 +826,6 @@ describe("chain-services config", () => {
         opsConsoleAdmin: { configuredCount: 1 }
       },
       product: {
-        e2eControls: false,
         registrationAdapter: "anvil",
         permissiveAuthorizationRequested: false
       },
@@ -1085,10 +1115,6 @@ describe("chain-services config", () => {
     })).security.environment).toBe("production");
 
     expect(() => loadConfigFromEnv(productionEnv({
-      UVP_PRODUCT_E2E_FIXTURES: "1"
-    }))).toThrow(/UVP_PRODUCT_E2E_FIXTURES/);
-
-    expect(() => loadConfigFromEnv(productionEnv({
       UVP_PRODUCT_SUBMISSION_AUTHORIZATION: "permissive"
     }))).toThrow(/permissive Product submission authorization/);
 
@@ -1161,11 +1187,11 @@ describe("chain-services config", () => {
     const config = loadConfigFromEnv(productionEnv());
 
     await expect(runConfigPreflight(config, {
-      env: productionEnv({ UVP_PRODUCT_E2E_FIXTURES: "1" }),
+      env: productionEnv({ UVP_PRODUCT_PERMISSIVE_AUTH: "1" }),
       clients: {
         network: { getChainId: async () => 31337 }
       }
-    })).rejects.toThrow(/UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in production/);
+    })).rejects.toThrow(/permissive Product submission authorization/);
   });
 
   it("fails strict preflight on RPC chainId mismatch before serving traffic", async () => {
@@ -1388,14 +1414,12 @@ describe("chain-services config", () => {
     expect(adminResponse.body).toMatchObject({
       diagnostics: {
         environment: "local",
-        e2eControls: false,
         storageDriver: "sqlite",
         relayerConfigured: true,
         relayer: { configured: true },
         governance: { broadcastEnabled: false },
         storage: { driver: "sqlite", durable: true },
         product: {
-          e2eControls: false,
           registrationAdapter: "memory-trigger",
           permissiveAuthorizationRequested: false
         },
@@ -1432,6 +1456,7 @@ describe("chain-services config", () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: diagnostics,
       productRuntimeEnvironment: "production",
+      governanceAdminIds: ["gov-reviewer-1"],
       evidenceStorage: productionSafeEvidenceStorage()
     });
 
@@ -1592,7 +1617,6 @@ function stagingEnv(tempDirs: string[], overrides: Record<string, string | undef
     RECONCILE_WORKER_ENABLED: "true",
     RECONCILE_POLL_INTERVAL_MS: "30000",
     UVP_PRODUCT_DEMO_MODE: "0",
-    UVP_PRODUCT_E2E_FIXTURES: "0",
     UVP_PRODUCT_PERMISSIVE_AUTH: "0",
     ...storeAuthJwtEnv,
     ...overrides

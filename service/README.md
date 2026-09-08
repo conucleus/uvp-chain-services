@@ -61,6 +61,12 @@ Store：
 - `/store/docking-sessions` 下的凝结核工作流
 - `GET /store/search`、`GET /store/audit`、`GET /store/runtime/summary`
 - `GET /store/closure/dry-run`
+- Store 运行时读端点（订单/任务/钱包映射的运营视图，要求会话锚定钱包，匿名不可枚举）：
+  - `GET /store/zhixus/:zhixuId/orders`
+  - `GET /store/orders/:orderId/candidates`
+  - `GET /store/orders/:orderId/observation`
+  - `GET /store/orders/:orderId/replay`
+  - `GET /store/orders/:orderId/audit-summary`
 
 治理与身份：
 

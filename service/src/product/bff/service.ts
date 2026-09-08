@@ -651,6 +651,9 @@ export function createProductBffService(
 
     async getInvite(inviteId, input = {}) {
       const invite = await requireInvite(store, inviteId);
+      // 预览读取受邀人联系方式与草稿金额，凭据口径与 accept/reject 一致：
+      // token 哈希比对（inviteId 是弱凭据，不可单独作为预览凭据）。
+      assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const draft = await requireDraft(store, invite.draftId);
       const zhixu = await options.productService.getZhixu(draft.zhixuId);
@@ -722,8 +725,12 @@ export function createProductBffService(
         acceptedWalletAddress,
       };
       return withProductStoreTransaction(store, async () => {
+        // 条件状态迁移（WHERE status='active'）：并发双 accept 只有一个
+        // 能落档，败者按现行状态返回冲突，不再相互覆写。
+        if (!(await store.updateInviteIfActive(acceptedInvite))) {
+          throw inactiveInviteError(await requireInvite(store, inviteId));
+        }
         await store.updateParticipant(accepted);
-        await store.updateInvite(acceptedInvite);
         const draft = await refreshDraftStatus(
           store,
           await requireDraft(store, invite.draftId),
@@ -750,8 +757,11 @@ export function createProductBffService(
         status: "rejected",
       };
       return withProductStoreTransaction(store, async () => {
+        // 同 accept：条件状态迁移收口并发 accept/reject 竞态。
+        if (!(await store.updateInviteIfActive(rejectedInvite))) {
+          throw inactiveInviteError(await requireInvite(store, inviteId));
+        }
         await store.updateParticipant(rejected);
-        await store.updateInvite(rejectedInvite);
         const draft = await refreshDraftStatus(
           store,
           await requireDraft(store, invite.draftId),

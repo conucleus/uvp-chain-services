@@ -21,7 +21,6 @@ export interface ConfigDiagnosticCheck {
 
 export interface ConfigDiagnostics {
   readonly environment: ChainServicesConfig["security"]["environment"];
-  readonly e2eControls: boolean;
   readonly storageDriver: string;
   readonly relayerConfigured: boolean;
   readonly network: {
@@ -114,7 +113,6 @@ export interface ConfigDiagnostics {
     readonly clockToleranceSeconds: number;
   };
   readonly product: {
-    readonly e2eControls: boolean;
     readonly registrationAdapter: ChainServicesConfig["productBff"]["registrationAdapter"];
     readonly permissiveAuthorizationRequested: boolean;
   };
@@ -223,7 +221,6 @@ export function buildConfigDiagnostics(
     ? privateKeyAddress(config.governance.signerPrivateKey, "governance signer")
     : undefined;
   const governanceContractConfigured = Boolean(identityRegistry);
-  const e2eControls = enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES");
   const permissiveAuthorizationRequested = enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") ||
     isPermissiveAuthorizationRequested(env);
   const storeAuth = effectiveStoreAuthConfig(config);
@@ -237,7 +234,6 @@ export function buildConfigDiagnostics(
 
   return {
     environment: config.security.environment,
-    e2eControls,
     storageDriver: config.database.driver,
     relayerConfigured,
     network: {
@@ -251,7 +247,6 @@ export function buildConfigDiagnostics(
     warnings: diagnosticWarnings(config, {
       relayerConfigured,
       relayerPrivateKeyConfigured,
-      e2eControls,
       permissiveAuthorizationRequested
     }),
     preflight: {
@@ -325,7 +320,6 @@ export function buildConfigDiagnostics(
       clockToleranceSeconds: storeAuth.clockToleranceSeconds
     },
     product: {
-      e2eControls,
       registrationAdapter: config.productBff.registrationAdapter,
       permissiveAuthorizationRequested
     },
@@ -417,7 +411,8 @@ function runStoreAuthPreflight(
   const envMode = env.STORE_AUTH_MODE?.trim();
   const storeAuth = effectiveStoreAuthConfig(config);
   const mode = envMode === "dev_headers" || envMode === "jwt" ? envMode : storeAuth.mode;
-  const strictRuntime = config.security.environment === "staging" || config.security.environment === "production";
+  // testnet 是公开测试网，与 staging/production 同按 strict runtime 收口。
+  const strictRuntime = config.security.environment !== "local";
   // testnet 不允许 dev_headers——自报 store 头不是 testnet 的身份证明；
   // STORE_AUTH_MODE 必须显式配置。
   const devHeadersAllowed = config.security.environment === "local";
@@ -433,6 +428,14 @@ function runStoreAuthPreflight(
     pass(checks, "store_auth.dev_headers");
   }
 
+  // dev 锚定地址头 local-only：非 local 自报地址锚定等于伪造身份
+  //（env 解析层已拒绝，这里是纵深防御）。
+  if (strictRuntime && enabledEnv(env, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")) {
+    fail(checks, errors, "store_auth.dev_anchored_header", "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER is only allowed in local development");
+  } else {
+    pass(checks, "store_auth.dev_anchored_header");
+  }
+
   if (mode !== "jwt") {
     return;
   }
@@ -446,9 +449,9 @@ function runStoreAuthPreflight(
   if (evidence.externalIdentityEvidence) {
     pass(checks, "store_auth.external_oidc");
   } else if (strictRuntime) {
-    fail(checks, errors, "store_auth.external_oidc", `Store staging identity must use external HTTPS OIDC/JWKS evidence; rejected reasons: ${evidence.reasons.join(", ")}`);
+    fail(checks, errors, "store_auth.external_oidc", `Store identity outside local development must use external HTTPS OIDC/JWKS evidence; rejected reasons: ${evidence.reasons.join(", ")}`);
   } else {
-    skip(checks, "store_auth.external_oidc", "external Store OIDC/JWKS evidence is not required outside staging and production");
+    skip(checks, "store_auth.external_oidc", "external Store OIDC/JWKS evidence is not required in local development");
   }
 }
 
@@ -556,12 +559,6 @@ function runProductionSafetyPreflight(
     fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production");
   } else {
     pass(checks, "product.registration_adapter");
-  }
-
-  if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
-    fail(checks, errors, "product.e2e_controls", "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in production");
-  } else {
-    pass(checks, "product.e2e_controls");
   }
 
   if (enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") || isPermissiveAuthorizationRequested(env)) {
@@ -695,12 +692,6 @@ function runTestnetSafetyPreflight(
     fail(checks, errors, "evidence.storage_adapter", "UVP_EVIDENCE_STORAGE_ADAPTER=rehearsal-object is required in testnet");
   }
 
-  if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
-    fail(checks, errors, "product.e2e_controls", "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in testnet");
-  } else {
-    pass(checks, "product.e2e_controls");
-  }
-
   if (enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") || isPermissiveAuthorizationRequested(env)) {
     fail(checks, errors, "product.permissive_authorization", "permissive Product submission authorization is forbidden in testnet");
   } else {
@@ -827,11 +818,6 @@ function runStagingSafetyPreflight(
     pass(checks, "evidence.s3_object_namespace");
   }
 
-  if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
-    fail(checks, errors, "product.e2e_controls", "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in staging");
-  } else {
-    pass(checks, "product.e2e_controls");
-  }
   if (enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") || isPermissiveAuthorizationRequested(env)) {
     fail(checks, errors, "product.permissive_authorization", "permissive Product submission authorization is forbidden in staging");
   } else {
@@ -1352,7 +1338,6 @@ function diagnosticWarnings(
   values: {
     readonly relayerConfigured: boolean;
     readonly relayerPrivateKeyConfigured: boolean;
-    readonly e2eControls: boolean;
     readonly permissiveAuthorizationRequested: boolean;
   }
 ): readonly string[] {
@@ -1362,9 +1347,6 @@ function diagnosticWarnings(
   }
   if (config.productBff.registrationAdapter === "memory-trigger") {
     warnings.push("Product BFF registration uses the memory-trigger adapter");
-  }
-  if (values.e2eControls) {
-    warnings.push("Product E2E controls are requested");
   }
   if (values.permissiveAuthorizationRequested) {
     warnings.push("permissive Product authorization is requested");

@@ -9,7 +9,7 @@ import {
   type SubmitProductStageResourcePatchInput
 } from "../../stage-patches/index.js";
 import { ConfigError } from "../../shared/types.js";
-import type { ApiResponse } from "../route-context.js";
+import { decodePathParameter, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 export function createStagePatchRouteModule(): RouteModule {
@@ -18,7 +18,7 @@ export function createStagePatchRouteModule(): RouteModule {
       const prepareExecutorMatch = /^\/product\/tasks\/([^/]+)\/prepare-stage-executor-patch$/.exec(request.pathname);
       if (request.method === "POST" && prepareExecutorMatch) {
         return handleStagePatchRequest(async () => {
-          const taskId = decodeURIComponent(prepareExecutorMatch[1] ?? "");
+          const taskId = decodePathParameter(prepareExecutorMatch[1] ?? "");
           return {
             status: 201,
             body: await context.productStageExecutorPatchService.prepareStageExecutorPatch(
@@ -32,7 +32,7 @@ export function createStagePatchRouteModule(): RouteModule {
       const submitExecutorMatch = /^\/product\/tasks\/([^/]+)\/submit-stage-executor-patch$/.exec(request.pathname);
       if (request.method === "POST" && submitExecutorMatch) {
         return handleStagePatchRequest(async () => {
-          const taskId = decodeURIComponent(submitExecutorMatch[1] ?? "");
+          const taskId = decodePathParameter(submitExecutorMatch[1] ?? "");
           return {
             status: 200,
             body: await context.productStageExecutorPatchService.submitStageExecutorPatch(
@@ -46,7 +46,7 @@ export function createStagePatchRouteModule(): RouteModule {
       const prepareResourceMatch = /^\/product\/tasks\/([^/]+)\/prepare-stage-resource-patch$/.exec(request.pathname);
       if (request.method === "POST" && prepareResourceMatch) {
         return handleStagePatchRequest(async () => {
-          const taskId = decodeURIComponent(prepareResourceMatch[1] ?? "");
+          const taskId = decodePathParameter(prepareResourceMatch[1] ?? "");
           return {
             status: 201,
             body: await context.productStageResourcePatchService.prepareStageResourcePatch(
@@ -60,7 +60,7 @@ export function createStagePatchRouteModule(): RouteModule {
       const submitResourceMatch = /^\/product\/tasks\/([^/]+)\/submit-stage-resource-patch$/.exec(request.pathname);
       if (request.method === "POST" && submitResourceMatch) {
         return handleStagePatchRequest(async () => {
-          const taskId = decodeURIComponent(submitResourceMatch[1] ?? "");
+          const taskId = decodePathParameter(submitResourceMatch[1] ?? "");
           return {
             status: 200,
             body: await context.productStageResourcePatchService.submitStageResourcePatch(

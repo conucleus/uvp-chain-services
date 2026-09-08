@@ -75,6 +75,28 @@ describe("Store JWT/JWKS operator identity", () => {
     expect(governanceAdmin.capabilities).not.toContain("store.version.activate");
   });
 
+  it("requires JWT governance_admin principals to pass the governance whitelist (F137)", async () => {
+    const fixture = await createJwksFixture(servers);
+    // 白名单注入后，IdP 声明的 governance_admin 角色不再直接映射治理权威：
+    // 未命中 GOVERNANCE_ADMIN_REVIEWER_IDS 的 principal 只保留公共读。
+    const router = createJwtRouter(fixture, { governanceAdminIds: ["gov-reviewer-1"] });
+    const unlisted = await storeSession(router, await signStoreToken(fixture, {
+      sub: "idp-claims-admin",
+      roles: ["governance_admin"]
+    }));
+    expect(unlisted.roles).not.toContain("governance_admin");
+    expect(unlisted.capabilities).not.toContain("store.supplier.identity.register");
+    expect(unlisted.capabilities).not.toContain("store.draft.review");
+    expect(unlisted.capabilities).toEqual(["store.read"]);
+
+    const listed = await storeSession(router, await signStoreToken(fixture, {
+      sub: "gov-reviewer-1",
+      roles: ["governance_admin"]
+    }));
+    expect(listed.roles).toContain("governance_admin");
+    expect(listed.capabilities).toContain("store.supplier.identity.register");
+  });
+
   it("returns 401 for missing or invalid JWT identity and 403 for underprivileged JWT identity", async () => {
     const fixture = await createJwksFixture(servers);
     const router = createJwtRouter(fixture);
@@ -241,6 +263,7 @@ async function createJwksFixture(servers: Server[]) {
 type JwtRouterOverrides = Partial<Pick<StoreAuthConfig, "roleClaim" | "principalClaim" | "displayNameClaim" | "oidcDiscoveryUrl">> & {
   readonly jwksUrl?: string | null;
   readonly runtimeEnvironment?: "local" | "testnet" | "staging" | "production";
+  readonly governanceAdminIds?: readonly string[];
 };
 
 function createJwtRouter(
@@ -249,6 +272,7 @@ function createJwtRouter(
 ): ReturnType<typeof createApiRouter> {
   return createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
     productRuntimeEnvironment: overrides.runtimeEnvironment ?? "local",
+    ...(overrides.governanceAdminIds ? { governanceAdminIds: overrides.governanceAdminIds } : {}),
     evidenceRuntimeEnvironment: "local",
     storeAuthConfig: {
       mode: "jwt",

@@ -30,7 +30,8 @@ export interface IndexerRuntimeDiagnostics {
 export interface BuildOperationalDiagnosticsOptions {
   readonly store: ProjectionStore;
   readonly configDiagnostics?: ConfigDiagnostics;
-  readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
+  /** 必填：环境档位由装配层注入，不提供缺省 local 回退。 */
+  readonly runtimeEnvironment: ChainServicesRuntimeEnv;
   readonly indexer?: IndexerRuntimeDiagnostics;
   readonly reconcile?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
   readonly submissionStore?: ProductSubmissionStore;
@@ -61,9 +62,9 @@ export async function buildOperationalDiagnostics(
   const governanceTxs = await buildGovernanceTxDiagnostics(options.governanceStore);
   const evidenceStorage = buildEvidenceStorageDiagnostics({
     source: options.evidenceStorage,
-    runtimeEnvironment: options.evidenceRuntimeEnvironment ?? options.runtimeEnvironment ?? "local"
+    runtimeEnvironment: options.evidenceRuntimeEnvironment ?? options.runtimeEnvironment
   });
-  const runtimeEnvironment = options.configDiagnostics?.environment ?? options.runtimeEnvironment ?? "local";
+  const runtimeEnvironment = options.configDiagnostics?.environment ?? options.runtimeEnvironment;
   const storeMetadata = buildStoreMetadataDiagnostics({
     stores: options.storeMetadataStores,
     runtimeEnvironment
@@ -72,12 +73,12 @@ export async function buildOperationalDiagnostics(
   const indexer = buildIndexerDiagnostics(syncStateResult, options.indexer);
 
   const diagnostics = {
-    ...(options.configDiagnostics ?? fallbackConfigDiagnostics(options.runtimeEnvironment ?? "local")),
+    ...(options.configDiagnostics ?? fallbackConfigDiagnostics(options.runtimeEnvironment)),
     generatedAt,
     sourceOfTruth: "contracts-and-chain-events",
     backendAuthority: false,
     runtime: {
-      environment: options.configDiagnostics?.environment ?? options.runtimeEnvironment ?? "local",
+      environment: runtimeEnvironment,
       chainId: options.configDiagnostics?.network.chainId ?? null,
       contracts: options.configDiagnostics?.network.contracts ?? {}
     },
@@ -603,7 +604,6 @@ function arrayCount(value: unknown): number {
 function fallbackConfigDiagnostics(environment: ChainServicesRuntimeEnv): Record<string, unknown> {
   return {
     environment,
-    e2eControls: false,
     storageDriver: "unknown",
     relayerConfigured: false,
     network: {

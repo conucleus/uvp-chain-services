@@ -61,7 +61,7 @@ describe("durable Store operator audit", () => {
     const audit = new InMemoryAuditSink();
     const databaseUrl = sqliteUrl(tempDirs);
     const first = openStores(databaseUrl, openedStores);
-    const router = createApiRouter(first.projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
+    const router = createApiRouter(first.projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       audit,
       storeAuditStore: first.storeAuditStore,
       storeZhixuDraftStore: first.storeZhixuDraftStore
@@ -85,7 +85,7 @@ describe("durable Store operator audit", () => {
     openedStores.splice(openedStores.indexOf(first), 1);
 
     const reopened = openStores(databaseUrl, openedStores);
-    const reopenedRouter = createApiRouter(reopened.projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
+    const reopenedRouter = createApiRouter(reopened.projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       storeAuditStore: reopened.storeAuditStore
     });
     const auditResponse = await reopenedRouter.handle({
@@ -161,7 +161,7 @@ describe("durable Store operator audit", () => {
 
   it("classifies duplicate and rejected Store outcomes in durable audit", async () => {
     const stores = openStores(sqliteUrl(tempDirs), openedStores);
-    const router = createApiRouter(stores.projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
+    const router = createApiRouter(stores.projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       storeAuditStore: stores.storeAuditStore,
       storeSupplierMetadataStore: stores.storeSupplierMetadataStore
     });

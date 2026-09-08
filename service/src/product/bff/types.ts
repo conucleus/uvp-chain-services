@@ -200,6 +200,8 @@ export interface RejectProductInviteInput {
 }
 
 export interface PreviewProductInviteInput {
+  /** 预览与 accept/reject 同门：inviteId 是弱凭据，token 哈希比对是强凭据。 */
+  readonly token?: string;
   readonly walletAddress?: string;
 }
 
