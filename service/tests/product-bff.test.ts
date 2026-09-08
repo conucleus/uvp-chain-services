@@ -356,7 +356,7 @@ describe("product BFF order drafts and invites", () => {
     });
   });
 
-  it("requires the invite token for invite previews (F140)", async () => {
+  it("requires the invite token for invite previews", async () => {
     const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
     const draft = (
       await createDraft(router).then(
@@ -381,14 +381,14 @@ describe("product BFF order drafts and invites", () => {
     expect(wrongToken).toMatchObject({ status: 403, body: { error: "invite_token_mismatch" } });
   });
 
-  it("creates at most one active invite per participant even under racing createInvite calls (F173)", async () => {
-    // F173：createInvite 的前置检查（listInvites 查活跃）是 check-then-act，
+  it("creates at most one active invite per participant even under racing createInvite calls", async () => {
+    // createInvite 的前置检查（listInvites 查活跃）是 check-then-act，
     // 并发双双通过会落两条 active；条件插入把判定原子化到存储层
     // （跨进程由单语句承担）。
     const store = new MemoryProductBffStore();
     const base = {
-      draftId: "draft_f173",
-      participantId: "participant_f173",
+      draftId: "draft_invite_race",
+      participantId: "participant_invite_race",
       roleSlotId: "slot_customs",
       tokenHash: "0x" + "11".repeat(32),
       status: "active" as const,
@@ -397,22 +397,22 @@ describe("product BFF order drafts and invites", () => {
     };
 
     await expect(store.createInviteIfNoneActive(
-      { ...base, inviteId: "invite_f173_a", tokenHash: ("0x" + "21".repeat(32)) as Hex },
+      { ...base, inviteId: "invite_race_a", tokenHash: ("0x" + "21".repeat(32)) as Hex },
       "2026-01-02T00:00:00.000Z"
     )).resolves.toBe(true);
     // 同 participant 的第二条 active（前置检查双双通过的并发方）必须被拒。
     await expect(store.createInviteIfNoneActive(
-      { ...base, inviteId: "invite_f173_b", tokenHash: ("0x" + "22".repeat(32)) as Hex },
+      { ...base, inviteId: "invite_race_b", tokenHash: ("0x" + "22".repeat(32)) as Hex },
       "2026-01-02T00:00:00.000Z"
     )).resolves.toBe(false);
     // 已过期的 active 不再占用：可再发新邀请。
     await expect(store.createInviteIfNoneActive(
-      { ...base, inviteId: "invite_f173_c", tokenHash: ("0x" + "23".repeat(32)) as Hex, expiresAt: "2026-03-01T00:00:00.000Z" },
+      { ...base, inviteId: "invite_race_c", tokenHash: ("0x" + "23".repeat(32)) as Hex, expiresAt: "2026-03-01T00:00:00.000Z" },
       "2026-02-02T00:00:00.000Z"
     )).resolves.toBe(true);
   });
 
-  it("invite status transitions are conditional on status=active (F141)", async () => {
+  it("invite status transitions are conditional on status=active", async () => {
     const store = new MemoryProductBffStore();
     const invite: ProductInviteDTO = {
       inviteId: "invite_conditional_1",

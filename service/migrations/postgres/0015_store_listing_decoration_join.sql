@@ -1,4 +1,4 @@
--- PRD89/90/91/92: descriptor 快照、装修与委托、上架、加入申请
+-- descriptor 快照、装修与委托、上架、加入申请
 CREATE TABLE IF NOT EXISTS store_identity_descriptor_snapshot (
   snapshot_id TEXT PRIMARY KEY,
   subject_id TEXT NOT NULL,

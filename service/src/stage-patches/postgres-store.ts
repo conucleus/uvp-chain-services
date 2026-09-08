@@ -16,7 +16,7 @@ export interface PostgresProductStagePatchStoreOptions {
 }
 
 /**
- * stage-patch 状态的 postgres 持久化（F148，表结构见
+ * stage-patch 状态的 postgres 持久化（表结构见
  * migrations/postgres/0019_stage_patch_state.sql）：nonce 预留靠
  * stage_patch_nonce 主键的 ON CONFLICT DO NOTHING 提供跨实例 CAS，
  * 多实例共享库不双播同一 patchNonce。

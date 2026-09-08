@@ -1433,7 +1433,7 @@ describe("indexer projection replay", () => {
   });
 
   it("serializes a background incremental refresh with an in-flight full rebuild on the durable store", async () => {
-    // F132 回归：refreshIfIdle 的后台出队曾直调 #refreshFromCursor 绕过
+    // 回归：refreshIfIdle 的后台出队曾直调 #refreshFromCursor 绕过
     // #withExclusiveGuard——重建进行中时并发刷新会与整库替换交错（重复
     // 通知补投、SQLITE_BUSY 风暴，配合旧无条件游标写即静默丢事件）。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-guard-"));
@@ -1493,7 +1493,7 @@ describe("indexer projection replay", () => {
   });
 
   it("fails closed after the durable cursor is repeatedly moved by another writer", async () => {
-    // F169：所有触发路径已过互斥守卫后，持久游标连续 CAS 失败只能来自
+    // 所有触发路径已过互斥守卫后，持久游标连续 CAS 失败只能来自
     // 第二个索引器进程——按多实例部署错误显式失败，而不是无限顶替。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-cas-"));
     const store = new SqliteProjectionStore({

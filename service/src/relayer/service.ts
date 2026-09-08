@@ -314,7 +314,7 @@ export class RelayerService implements LifecycleService {
 
 
   /**
-   * F151：进程内台账有界——写入按插入序 FIFO 淘汰最旧条目，长生命周期
+   * 进程内台账有界——写入按插入序 FIFO 淘汰最旧条目，长生命周期
    * 进程不随提交数无界增长。淘汰只影响无持久 store 时的内存回退精度，
    * 持久 submissionStore/retryBudgetStore 始终是完整真源。
    */
@@ -571,7 +571,7 @@ export class RelayerService implements LifecycleService {
 }
 
 
-/** F151：进程内台账容量上限（FIFO 淘汰最旧）。 */
+/** 进程内台账容量上限（FIFO 淘汰最旧）。 */
 const IN_FLIGHT_LEDGER_MAX_ENTRIES = 10_000;
 
 function evictOldestMapEntries<K, V>(map: Map<K, V>, maxEntries: number): void {

@@ -380,7 +380,7 @@ describe("relayer non-signing boundary", () => {
   });
 
   it("records duplicate signer nonce attempts as retryable pending failures, never terminal dead letters", async () => {
-    // F150：预留失败不是终态——并发/在途的同 nonce 提交结果未知，钉成
+    // 预留失败不是终态——并发/在途的同 nonce 提交结果未知，钉成
     // dead_letter 会让 nonce 释放后的合法重试被终态台账永久拒绝。
     const submitStarted = deferred<void>();
     const submitRelease = deferred<void>();
@@ -426,7 +426,7 @@ describe("relayer non-signing boundary", () => {
   });
 
   it("does not let a concurrent duplicate failure overwrite the winner's submitted ledger entry", async () => {
-    // F150 状态守卫：胜者 record 已落库（budget 尚未跟上）时，败者的
+    // 状态守卫：胜者 record 已落库（budget 尚未跟上）时，败者的
     // duplicate_signer_nonce 失败行不得覆盖 submitted 成功台账。
     const duplicateEnteredReserve = deferred<void>();
     const winnerRecorded = deferred<void>();

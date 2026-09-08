@@ -139,7 +139,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(session.capabilities).toContain("store.listing.manage");
   });
 
-  it("plain wallet sessions only get the public read capability, not store.audit.read (F146)", async () => {
+  it("plain wallet sessions only get the public read capability, not store.audit.read", async () => {
     // 未命中运营方/管理员清单的钱包登录只证明钱包控制权——运营审计
     // （store.audit.read）是运营数据面，不得随登录默认授予。
     const router = await buildRouter({ operatorWallets: [operatorWallet] });
@@ -163,7 +163,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(operatorSession.session.capabilities).toContain("store.audit.read");
   });
 
-  it("ignores the dev anchored address header outside local runtime (F131)", async () => {
+  it("ignores the dev anchored address header outside local runtime", async () => {
     const { createWalletSessionStoreIdentityProvider } = await import("../src/store-sessions/index.js");
     const { createStoreSessionService } = await import("../src/store-sessions/index.js");
     const sessionService = createStoreSessionService();

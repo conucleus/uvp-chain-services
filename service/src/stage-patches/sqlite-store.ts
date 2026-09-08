@@ -24,7 +24,7 @@ export interface SqliteProductStagePatchStoreOptions {
 }
 
 /**
- * stage-patch 状态的 sqlite 持久化（F148）：prepared 记录与 submission
+ * stage-patch 状态的 sqlite 持久化：prepared 记录与 submission
  * 台账按 JSON 记录整行存取（DTO 面宽、只按 id 点查），nonce 预留靠
  * stage_patch_nonce 主键的 INSERT ON CONFLICT DO NOTHING 提供跨实例
  * CAS——重启不丢已签名 prepare，多实例不双播同一 nonce。

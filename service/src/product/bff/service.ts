@@ -643,7 +643,7 @@ export function createProductBffService(
       };
       return withProductStoreTransaction(store, async () => {
         await store.updateParticipant(invited);
-        // F173：并发 createInvite 双双通过前置检查时，条件插入保证只有
+        // 并发 createInvite 双双通过前置检查时，条件插入保证只有
         // 一个 active invite 落库（跨进程原子性由单语句承担）。
         if (!(await store.createInviteIfNoneActive(invite, now().toISOString()))) {
           throw new ProductBffError(

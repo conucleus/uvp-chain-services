@@ -75,7 +75,7 @@ describe("Store JWT/JWKS operator identity", () => {
     expect(governanceAdmin.capabilities).not.toContain("store.version.activate");
   });
 
-  it("requires JWT governance_admin principals to pass the governance whitelist (F137)", async () => {
+  it("requires JWT governance_admin principals to pass the governance whitelist", async () => {
     const fixture = await createJwksFixture(servers);
     // 白名单注入后，IdP 声明的 governance_admin 角色不再直接映射治理权威：
     // 未命中 GOVERNANCE_ADMIN_REVIEWER_IDS 的 principal 只保留公共读。
@@ -197,7 +197,7 @@ describe("Store JWT/JWKS operator identity", () => {
   });
 
   it("rejects a discovery-advertised jwks_uri that is not HTTPS or points at a private host in strict runtimes", async () => {
-    // F167：discovery 响应是外部输入，其 jwks_uri 可把密钥拉取指向内网
+    // discovery 响应是外部输入，其 jwks_uri 可把密钥拉取指向内网
     // 端点/明文信道（受限 SSRF 纵深）。非 local 复用配置层同款校验；
     // local 开发允许本地 IdP。
     const originalFetch = globalThis.fetch;

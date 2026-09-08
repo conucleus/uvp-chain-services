@@ -146,7 +146,7 @@ async function handleNotificationRequest(
         body: { error: "notification_delivery_not_found" }
       };
     }
-    // F153：终态行 retry 是无操作，不得返回 200 假成功。sent/invalidated
+    // 终态行 retry 是无操作，不得返回 200 假成功。sent/invalidated
     // 不可重开；dead_letter 需经显式 reopen 端点。
     if (outcome.outcome === "terminal") {
       return {

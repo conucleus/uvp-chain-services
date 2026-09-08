@@ -27,7 +27,7 @@ const idempotencyKey = bytes32("3004");
 
 describe("tx/indexer reconcile worker", () => {
   it("serializes concurrent manual and scheduled runs through the runOnce reentry guard", async () => {
-    // F134 回归：admin runReconcile / retrySubmission 与定时轮询并发触达
+    // 回归：admin runReconcile / retrySubmission 与定时轮询并发触达
     // runOnce，防重入必须在 runOnce 本体（只在 #runOnceSafely 挡不住手动
     // 入口）。进行中的一轮未结束时，后到触发返回空汇总而不双跑。
     const projectionStore = new MemoryProjectionStore();

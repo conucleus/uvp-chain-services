@@ -20,7 +20,7 @@ const submitter = normalizeAddress(account.address, "account.address");
 const verifyingContract = "0x1111111111111111111111111111111111111111" as Address;
 const routePlanId = "0x7777777777777777777777777777777777777777777777777777777777777777" as Hex;
 
-// F161 后 prepare 不再本地捏造链上身份：orderId/sourceId/signalId 必须
+// prepare 绝不本地捏造链上身份：orderId/sourceId/signalId 必须
 // 是真实 bytes32 链上身份。
 const routeOnchainOrderId = "0x0000000000000000000000000000000000000000000000000000000000000311" as Hex;
 const routeSourceId = "0x0000000000000000000000000000000000000000000000000000000000000411" as Hex;
@@ -383,7 +383,7 @@ describe("submission API routes", () => {
       }));
   });
 
-  it("prepare-submit ties the business signer to the session-anchored wallet (F142)", async () => {
+  it("prepare-submit ties the business signer to the session-anchored wallet", async () => {
     const evidenceService = createEvidenceService({
     runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),

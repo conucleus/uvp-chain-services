@@ -276,7 +276,7 @@ describe("Product BFF trigger broadcast adapter", () => {
   });
 });
 
-  it("rejects the registrar wallet as the business submitter when the guard is enabled (F171)", async () => {
+  it("rejects the registrar wallet as the business submitter when the guard is enabled", async () => {
     const walletClient: ProductTriggerBroadcastWalletClient = {
       account: { address: registrarAddress },
       writeContract: vi.fn(async () => {

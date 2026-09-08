@@ -31,7 +31,7 @@ describe("API router composition", () => {
     });
   });
 
-  it("rejects malformed percent-encoded path parameters with 400 instead of 500 (F157)", async () => {
+  it("rejects malformed percent-encoded path parameters with 400 instead of 500", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
 
     // "%ZZ" 不是合法的百分号编码：decodeURIComponent 抛 URIError，
@@ -51,7 +51,7 @@ describe("API router composition", () => {
     expect(storeOrder).toMatchObject({ status: 400, body: { error: "invalid_path_parameter" } });
   });
 
-  it("store runtime reads and submission/trigger reads require session identity (F138/F139)", async () => {
+  it("store runtime reads and submission/trigger reads require session identity", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
 
     for (const pathname of [
@@ -66,7 +66,7 @@ describe("API router composition", () => {
     }
   });
 
-  it("active-executor overlay authorization only covers the task's recorded submit signal (F143)", async () => {
+  it("active-executor overlay authorization only covers the task's recorded submit signal", async () => {
     const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
     const { MemoryProductBffStore } = await import("../src/product/bff/store.js");
     const authorization = productBffStoreSubmissionAuthorization(new MemoryProductBffStore());

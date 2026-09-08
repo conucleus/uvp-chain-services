@@ -15,7 +15,7 @@ export interface ProductBffStore {
   getParticipant(participantId: string): Promise<DraftParticipantDTO | undefined>;
   updateParticipant(participant: DraftParticipantDTO): Promise<void>;
   /**
-   * 条件插入（F173）：participant 已有 active 且未过期的 invite 时拒绝
+   * 条件插入：participant 已有 active 且未过期的 invite 时拒绝
    * （返回 false），单语句原子判定防并发双 active（跨进程由数据库承担
    * check-then-act 的原子性，内存实现由单线程临界区承担）。
    */

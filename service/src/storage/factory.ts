@@ -282,7 +282,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
           databaseUrl: options.database.url,
           migrations
         }),
-        // stage-patch prepared/submission/nonce 状态落 sqlite（F148）：
+        // stage-patch prepared/submission/nonce 状态落 sqlite：
         // 重启不丢已签名 prepare，nonce 预留跨实例由唯一键承担。
         stageExecutorPatchStore: new SqliteProductStagePatchStore<
           PreparedStageExecutorPatchRecord,

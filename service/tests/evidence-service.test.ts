@@ -80,7 +80,7 @@ describe("evidence service", () => {
     })).not.toHaveProperty("evidenceId");
   });
 
-  it("keeps same-owner evidence on different tasks distinct via the taskId fingerprint component (F145)", async () => {
+  it("keeps same-owner evidence on different tasks distinct via the taskId fingerprint component", async () => {
     const service = testEvidenceService();
     const base = {
       stageIdentifier: "export-documents",
@@ -99,7 +99,7 @@ describe("evidence service", () => {
     expect(taskB.evidence.evidenceId).not.toBe(taskA.evidence.evidenceId);
   });
 
-  it("rejects bindEvidence from a principal that does not own the evidence (F147)", async () => {
+  it("rejects bindEvidence from a principal that does not own the evidence", async () => {
     const service = testEvidenceService();
     const uploaded = await uploadJsonEvidence(service, {
       fileName: "customs.txt",

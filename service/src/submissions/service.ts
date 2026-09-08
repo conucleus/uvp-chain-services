@@ -450,7 +450,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
           try {
             await audit.record({
               // 审计 type 即分类载体：evidence_bind_failed 尚无 taxonomy
-              // 条目（taxonomy 在 uvp-protocol 仓登记，超出本编队所有权），
+              // 条目（taxonomy 在 uvp-protocol 仓登记，不在本仓职权内），
               // 不引入未登记的 errorCode 字面量。
               type: "relayer.submit.evidence_bind_failed",
               action: prepared.signalName,
@@ -553,7 +553,7 @@ function chainSignalForTask(task: ProductTaskDTO, signalName: string): {
   readonly signalId: Hex;
 } {
   const chainTask = task as ProductTaskChainFields;
-  // 与 planId"绝不捏造"同纪律（F161）：sourceId/signalId/orderId 三层链上
+  // 与 planId"绝不捏造"同纪律：sourceId/signalId/orderId 三层链上
   // 身份必须来自投影——本地按常量/命名约定推导出的 id 在链上不存在，
   // 签出的 typedData 只会被链上拒绝。缺失即拒签并显式报错。
   const sourceId = firstBytes32(chainTask.proof?.sourceId) ??

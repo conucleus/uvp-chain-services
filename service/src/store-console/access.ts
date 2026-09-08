@@ -399,7 +399,7 @@ async function discoverStoreAuthJwks(config: RequiredJwtStoreAuthConfig, strictR
   if (typeof record.jwks_uri !== "string" || record.jwks_uri.trim().length === 0) {
     throw namedDiscoveryError("OIDC discovery response is missing jwks_uri");
   }
-  // F167：discovery 响应是外部输入，其 jwks_uri 可把密钥拉取指向内网端点
+  // discovery 响应是外部输入，其 jwks_uri 可把密钥拉取指向内网端点
   // 或明文信道（受限 SSRF 纵深）。非 local 环境复用配置层同款
   // HTTPS/非私网校验；local 开发允许本地 IdP 的 http/localhost。
   if (strictRuntime && storeAuthUrlEvidenceFailure(record.jwks_uri)) {

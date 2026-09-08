@@ -420,7 +420,7 @@ function validateSignalMap(input: {
       ));
       continue;
     }
-    // 同一目标端口在一条 route 内至多绑定一次（PRD_100 §10.1）。
+    // 同一目标端口在一条 route 内至多绑定一次。
     const targetPortKey = `${entry.bindingKind}:${entry.targetSignalId}`;
     if (boundTargetPorts.has(targetPortKey)) {
       errors.push(validationError(

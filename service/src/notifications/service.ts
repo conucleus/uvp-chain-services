@@ -281,13 +281,13 @@ export interface NotificationRunSummary {
 
 export type NotificationProcessSummary = NotificationRunSummary;
 
-/** dead_letter 显式重开（F153）：只允许 dead_letter 行，其余终态/非终态均拒绝。 */
+/** dead_letter 显式重开：只允许 dead_letter 行，其余终态/非终态均拒绝。 */
 export type NotificationDeliveryReopenOutcome =
   | { readonly outcome: "not_found" }
   | { readonly outcome: "not_dead_letter"; readonly delivery: NotificationDeliveryRecord }
   | { readonly outcome: "reopened"; readonly delivery: NotificationDeliveryRecord };
 
-/** retry 结果（F153）：终态行是 no-op，路由层据此返回非 200 而非假成功。 */
+/** retry 结果：终态行是 no-op，路由层据此返回非 200 而非假成功。 */
 export type NotificationDeliveryRetryOutcome =
   | { readonly outcome: "not_found" }
   | { readonly outcome: "terminal"; readonly delivery: NotificationDeliveryRecord }
@@ -301,7 +301,7 @@ export interface NotificationService {
   deadLetterDelivery(deliveryId: Hex, reason?: string): Promise<NotificationDeliveryRecord | undefined>;
   reopenDelivery(deliveryId: Hex): Promise<NotificationDeliveryReopenOutcome>;
   /**
-   * reorg 回滚联动（F136）：把 proof 定位高于 blockNumber 的投递标记为
+   * reorg 回滚联动：把 proof 定位高于 blockNumber 的投递标记为
    * invalidated——回滚删除了这些事件，已生成的投递（含 sent）从此指向
    * 已消失的链上定位，必须失效留痕而不是继续呈现为有效通知。
    */

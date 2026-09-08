@@ -28,7 +28,7 @@ const interfaceNameId = bytes32Text("production_service");
 describe("dock liveness keeper", () => {
 
   it("stays idle with a loud warning when enabled but no route source/submitter is wired", async () => {
-    // F156：交付形态未装配 routeSource/submitter——enabled 时不得空转
+    // 交付形态未装配 routeSource/submitter——enabled 时不得空转
     // 轮询并宣称 started。
     const warnings: string[] = [];
     const infos: string[] = [];

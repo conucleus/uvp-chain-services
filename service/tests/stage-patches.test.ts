@@ -1580,7 +1580,7 @@ describe("stage patch durable store (sqlite)", () => {
   }
 
   it("persists prepared/submission/nonce state across restarts and reserves nonces cross-instance", async () => {
-    // F148：prepared 签名载荷与 nonce 预留不得依赖进程内存——重启后已签名
+    // prepared 签名载荷与 nonce 预留不得依赖进程内存——重启后已签名
     // prepare 仍可提交；多实例共享库时 nonce 预留由唯一键承担。
     const first = openStore();
     const prepared: PreparedStageExecutorPatchRecord = {

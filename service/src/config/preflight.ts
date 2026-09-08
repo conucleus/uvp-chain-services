@@ -541,7 +541,7 @@ function runProductionSafetyPreflight(
     fail(checks, errors, "network.finality_confirmations_explicit", "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production");
   }
 
-  // F163：生产最终性下限。确认数是 reorg 缓冲——配 1 时边界块自身的
+  // 生产最终性下限。确认数是 reorg 缓冲——配 1 时边界块自身的
   // 单块重组即可穿透缓冲（哈希连续性校验只能事后补救），形同虚设；
   // 生产至少 2 个确认。
   if (config.network.finalityConfirmations >= 2) {
@@ -869,7 +869,7 @@ function runStateMachineModulesManifestPreflight(
     return;
   }
 
-  // F154：activeDeploymentId 与清单不匹配时 selectActiveStateMachineDeployment
+  // activeDeploymentId 与清单不匹配时 selectActiveStateMachineDeployment
   // 会静默回退（status=active / 首项），拼错的部署 id 因此永远不会暴露——
   // 运行时用的是另一个部署。不匹配即显式失败。
   if (

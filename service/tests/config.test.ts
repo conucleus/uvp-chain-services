@@ -204,7 +204,7 @@ describe("chain-services config", () => {
     expect(config.network.contracts.UVPIdentityRegistry).toBe("0x2222222222222222222222222222222222222222");
   });
 
-  it("refuses to start without an explicit runtime environment (F129)", () => {
+  it("refuses to start without an explicit runtime environment", () => {
     // 环境档位是 fail-closed 门禁的根开关：缺省即拒绝启动并报键名，
     // 不回退 local——local 也必须显式声明。
     expect(() => loadRawConfigFromEnv({
@@ -215,7 +215,7 @@ describe("chain-services config", () => {
     expect(loadConfigFromEnv({ CHAIN_SERVICES_RUNTIME_ENV: "local" }).security.environment).toBe("local");
   });
 
-  it("warns loudly when the local RPC URL falls back to the Anvil default (F158)", () => {
+  it("warns loudly when the local RPC URL falls back to the Anvil default", () => {
     const warnings: string[] = [];
     const originalWarn = console.warn;
     console.warn = (message?: unknown) => {
@@ -557,7 +557,7 @@ describe("chain-services config", () => {
     const env = testnetEnv(testnetPostgresConfigUrl());
     const config = loadConfigFromEnv(env);
 
-    // F131：testnet 显式开启 dev 锚定地址头即拒绝启动（自报地址锚定
+    // testnet 显式开启 dev 锚定地址头即拒绝启动（自报地址锚定
     // 等于伪造身份，公开测试网不比 staging 宽松）。
     expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
       STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER: "true"
@@ -913,7 +913,7 @@ describe("chain-services config", () => {
   });
 
   it("fails strict preflight when activeDeploymentId matches no deployment in the manifest", async () => {
-    // F154：activeDeploymentId 与清单不匹配时不得静默回退到另一个部署——
+    // activeDeploymentId 与清单不匹配时不得静默回退到另一个部署——
     // 拼错的部署 id 必须在启动期显式失败。
     const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-active-id-"));
     tempDirs.push(manifestDir);
@@ -963,7 +963,7 @@ describe("chain-services config", () => {
   });
 
   it("enforces a finality confirmation floor of 2 in production preflight", async () => {
-    // F163：确认数是 reorg 缓冲，配 1 形同虚设——单块重组即可穿透
+    // 确认数是 reorg 缓冲，配 1 形同虚设——单块重组即可穿透
     // 最终性窗口；生产下限 2，启动期显式失败。（达标面由既有生产
     // preflight 用例以 12 确认覆盖。）
     const floorEnv = productionEnv({

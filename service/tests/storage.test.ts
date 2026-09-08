@@ -261,7 +261,7 @@ describe("durable storage", () => {
   });
 
   it("backfills a missing transaction_index when reviving a tombstoned event", async () => {
-    // F170：墓碑行不带 transaction_index（初始插入时事件源未提供），
+    // 墓碑行不带 transaction_index（初始插入时事件源未提供），
     // 复活时携带的序号必须写回；已有序号的墓碑行复活时保留原值。
     const store = openStore(tempDirs);
     stores.push(store);

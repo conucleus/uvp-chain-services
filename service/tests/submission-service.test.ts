@@ -46,7 +46,7 @@ const owner: EvidencePrincipal = { id: submitter.toLowerCase(), role: "participa
 const baseNow = new Date("2026-04-28T00:00:00Z");
 
 // 链上身份常量：orderId/sourceId/signalId 必须是真实的 bytes32 链上身份
-// （F161 后 prepare 不再本地捏造回退）。
+// （prepare 绝不本地捏造回退）。
 const fixtureOnchainOrderId = "0x0000000000000000000000000000000000000000000000000000000000000301" as Hex;
 const fixtureSourceId = "0x0000000000000000000000000000000000000000000000000000000000000401" as Hex;
 const fixtureSignalId = "0x0000000000000000000000000000000000000000000000000000000000000501" as Hex;
@@ -84,7 +84,7 @@ const task = {
 
 describe("product task submissions", () => {
   it("refuses to prepare when the projection supplies no chain signal identity instead of fabricating one", async () => {
-    // F161（对齐 planId"绝不捏造"纪律）：sourceId/signalId/orderId 缺失时
+    // （对齐 planId"绝不捏造"纪律）：sourceId/signalId/orderId 缺失时
     // 不得按命名约定本地推导——推导出的链上身份不存在，签出的 typedData
     // 只会被链上拒绝。
     const strippedTask = { ...task, proof: undefined, orderId: "business-order-1" } as unknown as ProductTaskDTO;
@@ -502,7 +502,7 @@ describe("product task submissions", () => {
       },
       proof: {
         stageIdentifier: targetStageId,
-        // F161 后 prepare 不再捏造 signalId——overlay 场景的链上信号身份
+        // prepare 绝不捏造 signalId——overlay 场景的链上信号身份
         // 仍须由投影 proof 提供（sourceId 由 overlay 目标阶段解析）。
         signalId: fixtureSignalId
       }
@@ -820,7 +820,7 @@ describe("product task submissions", () => {
       signature
     })).rejects.toThrow("rpc connection reset before writeContract");
 
-    // F149：逃逸异常必须留下一致的持久状态——失败档案（按适配器同款
+    // 逃逸异常必须留下一致的持久状态——失败档案（按适配器同款
     // 分类器归档）与 nonce 释放在同一落档事务内，档案保留证据、释放保证
     // 同一 prepareId 可重试。（fixture 的 submissionId 工厂是常量，重试
     // 档案覆盖失败档案；断言在抛错后立即执行。）

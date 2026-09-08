@@ -1357,7 +1357,7 @@ describe("product API routes", () => {
     expect((unauthorizedResponse.body as { tasks: unknown[] }).tasks).toEqual([]);
   });
 
-  it("accepted participants see the order detail under the same visibility rule as /product/me/orders (F144)", async () => {
+  it("accepted participants see the order detail under the same visibility rule as /product/me/orders", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
       deploymentBlock: 0n,

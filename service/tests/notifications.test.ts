@@ -347,7 +347,7 @@ describe("signal-routed notifications", () => {
   });
 
   it("reopens a dead-lettered delivery explicitly and refuses reopen for other statuses", async () => {
-    // F153：dead_letter 必须有重开路径；retry 对 dead_letter 是无操作，
+    // dead_letter 必须有重开路径；retry 对 dead_letter 是无操作，
     // 由路由层返回非 200。
     const event = signalEvent(6n, requiredDependency(customsDependencyA));
     const { store, supplierStore } = await notificationStore({
@@ -397,7 +397,7 @@ describe("signal-routed notifications", () => {
   });
 
   it("invalidates deliveries whose proof blocks were reorged out and leaves the rest intact", async () => {
-    // F136：reorg 回滚删除 blockNumber > ancestor 的事件后，已生成投递
+    // reorg 回滚删除 blockNumber > ancestor 的事件后，已生成投递
     // （含 sent）指向已消失定位，必须联动失效留痕。
     const lowEvent = signalEvent(5n, requiredDependency(customsDependencyA));
     const highEvent = signalEvent(9n, requiredDependency(customsDependencyB), bytes32Hex("6009"));

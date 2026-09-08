@@ -213,7 +213,7 @@ export interface StateMachineStageResourceOverlayProjection {
  * 接口/mode），投影键为 (chainId, stateMachineAddress, dockInstanceId)；
  * binding 细节（portKey/localHookId）来自 DockingModule 事件可见字段，
  * 事件不携带的补全由 keeper 通过 lens 视图按需读取。终态不由链上事件
- * 驱动（PRD_100 §13.4）：投影只记录开启与投递事实。
+ * 驱动：投影只记录开启与投递事实。
  */
 export interface StateMachineDockInputDeliveryProjection {
   readonly inputBindingHash: Hex;

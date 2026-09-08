@@ -15,7 +15,7 @@ export interface DockAutomationConfig {
   readonly redeliveryWindowMs: number;
 }
 
-/** dock 下单模式（PRD_100：{new, existing}；链轨仅支持 new）。 */
+/** dock 下单模式（{new, existing}；链轨仅支持 new）。 */
 export type DockOrderMode = "new" | "existing";
 
 /**
