@@ -23,7 +23,9 @@ import type {
 } from "../submissions/index.js";
 import type {
   ProductStageExecutorPatchService,
+  ProductStageExecutorPatchStore,
   ProductStageResourcePatchService,
+  ProductStageResourcePatchStore,
   StageExecutorPatchBroadcastAdapter,
   StageResourcePatchBroadcastAdapter
 } from "../stage-patches/index.js";
@@ -99,10 +101,12 @@ export interface CreateApiRouterOptions {
   readonly stageExecutorPatchBroadcastAdapter?: StageExecutorPatchBroadcastAdapter;
   readonly stageExecutorPatchChainId?: number;
   readonly stageExecutorPatchVerifyingContract?: Address;
+  readonly stageExecutorPatchStore?: ProductStageExecutorPatchStore;
   readonly productStageResourcePatchService?: ProductStageResourcePatchService;
   readonly stageResourcePatchBroadcastAdapter?: StageResourcePatchBroadcastAdapter;
   readonly stageResourcePatchChainId?: number;
   readonly stageResourcePatchVerifyingContract?: Address;
+  readonly stageResourcePatchStore?: ProductStageResourcePatchStore;
   readonly productBffStore?: ProductBffStore;
   readonly productRegistrationAdapter?: ProductOrderTriggerBroadcastAdapter;
   readonly productTriggerAdapter?: ProductOrderTriggerBroadcastAdapter;

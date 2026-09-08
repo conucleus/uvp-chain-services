@@ -214,6 +214,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(stageExecutorPatchChainId !== undefined ? { chainId: stageExecutorPatchChainId } : {}),
     ...(stageExecutorPatchVerifyingContract ? { stagePatchModuleAddress: stageExecutorPatchVerifyingContract } : {}),
     ...(options.stageExecutorPatchBroadcastAdapter ? { broadcastAdapter: options.stageExecutorPatchBroadcastAdapter } : {}),
+    // 持久驱动（sqlite/postgres）注入持久化 stage-patch store；未注入
+    // （memory）时服务内部回落内存 store。
+    ...(options.stageExecutorPatchStore ? { stageExecutorPatchStore: options.stageExecutorPatchStore } : {}),
     ...(options.now ? { now: options.now } : {})
   });
   const stageResourcePatchChainId = options.stageResourcePatchChainId ?? options.submissionChainId;
@@ -225,6 +228,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(stageResourcePatchChainId !== undefined ? { chainId: stageResourcePatchChainId } : {}),
     ...(stageResourcePatchVerifyingContract ? { stagePatchModuleAddress: stageResourcePatchVerifyingContract } : {}),
     ...(options.stageResourcePatchBroadcastAdapter ? { broadcastAdapter: options.stageResourcePatchBroadcastAdapter } : {}),
+    ...(options.stageResourcePatchStore ? { stageResourcePatchStore: options.stageResourcePatchStore } : {}),
     ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
     ...(options.now ? { now: options.now } : {})
   });

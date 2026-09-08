@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
   hashResourceManifest as hashProtocolResourceManifest,
@@ -29,6 +33,7 @@ import {
   type StageExecutorPatchSubmissionDTO,
   type StagePatchBroadcastResult,
   type StageResourcePatchBroadcastAdapter,
+  SqliteProductStagePatchStore,
 } from "../src/stage-patches/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import {
@@ -859,7 +864,8 @@ describe("stage executor/resource patch Product API", () => {
       stageExecutorPatchStore: failingStore,
       broadcastAdapter: innerBroadcast,
     });
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
       submissionChainId: 84532,
       submissionVerifyingContract:
         "0x1111111111111111111111111111111111111111",
@@ -931,7 +937,8 @@ describe("stage executor/resource patch Product API", () => {
       >(),
       broadcastAdapter: innerBroadcast,
     });
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
       submissionChainId: 84532,
       submissionVerifyingContract:
         "0x1111111111111111111111111111111111111111",
@@ -1041,7 +1048,7 @@ async function routerFixture(
   });
   return {
     store,
-    router: createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    router: createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productStageExecutorPatchService: executorService,
       productStageResourcePatchService: resourceService,
     }),
@@ -1551,5 +1558,67 @@ describe("stage patch payload hash parity with protocol-bindings", () => {
     expect(hashStageResourcePatchPayload(payload)).toBe(
       hashProtocolStageResourcePatchPayload(payload),
     );
+  });
+});
+
+describe("stage patch durable store (sqlite)", () => {
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const tempDir = mkdtempSync(join(tmpdir(), "uvp-stage-patch-store-"));
+  afterAll(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function openStore() {
+    return new SqliteProductStagePatchStore<
+      PreparedStageExecutorPatchRecord,
+      StageExecutorPatchSubmissionDTO
+    >({
+      databaseUrl: `sqlite://${join(tempDir, "stage-patch.sqlite3")}`,
+      patchKind: "executor",
+      migrations: { autoRun: true, directory: resolve(__dirname, "../migrations") }
+    });
+  }
+
+  it("persists prepared/submission/nonce state across restarts and reserves nonces cross-instance", async () => {
+    // F148：prepared 签名载荷与 nonce 预留不得依赖进程内存——重启后已签名
+    // prepare 仍可提交；多实例共享库时 nonce 预留由唯一键承担。
+    const first = openStore();
+    const prepared: PreparedStageExecutorPatchRecord = {
+      prepareId: "prep_restart_1",
+      nonceKey: "executor:31337:0xabc:1",
+      taskId: "task_1",
+      patchHash: "0x" + "11".repeat(32),
+      status: "prepared"
+    } as unknown as PreparedStageExecutorPatchRecord;
+    await first.putPrepared(prepared);
+    expect(await first.reserveNonce(prepared.nonceKey)).toBe(true);
+    // 同一 nonce 第二次预留（另一实例视角）必须失败。
+    expect(await first.reserveNonce(prepared.nonceKey)).toBe(false);
+    await first.putSubmission({
+      submissionId: "sub_restart_1",
+      status: "signature_received"
+    } as unknown as StageExecutorPatchSubmissionDTO);
+    await first.markPreparedUsed(prepared.prepareId, "sub_restart_1", "2026-09-08T00:00:00Z");
+    await first.close();
+
+    // "重启"：新连接同一库文件，状态必须仍在。
+    const second = openStore();
+    try {
+      const restored = await second.getPrepared("prep_restart_1");
+      expect(restored).toMatchObject({
+        prepareId: "prep_restart_1",
+        submissionId: "sub_restart_1",
+        usedAt: "2026-09-08T00:00:00Z"
+      });
+      await expect(second.getSubmission("sub_restart_1")).resolves.toMatchObject({
+        submissionId: "sub_restart_1"
+      });
+      // nonce 预留跨实例仍生效；释放后可再预留。
+      await expect(second.reserveNonce("executor:31337:0xabc:1")).resolves.toBe(false);
+      await second.releaseNonce("executor:31337:0xabc:1");
+      await expect(second.reserveNonce("executor:31337:0xabc:1")).resolves.toBe(true);
+    } finally {
+      await second.close();
+    }
   });
 });

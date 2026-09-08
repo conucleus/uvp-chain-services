@@ -22,6 +22,20 @@ import type {
   ParticipantNotificationReadStateStore
 } from "../notifications/service.js";
 import {
+  SqliteProductStagePatchStore
+} from "../stage-patches/sqlite-store.js";
+import {
+  PostgresProductStagePatchStore
+} from "../stage-patches/postgres-store.js";
+import type {
+  PreparedStageExecutorPatchRecord,
+  PreparedStageResourcePatchRecord,
+  ProductStageExecutorPatchStore,
+  ProductStageResourcePatchStore,
+  StageExecutorPatchSubmissionDTO,
+  StageResourcePatchSubmissionDTO
+} from "../stage-patches/types.js";
+import {
   InMemoryStoreSupplierMetadataStore,
   PostgresStoreSupplierMetadataStore,
   SqliteStoreSupplierMetadataStore,
@@ -121,6 +135,9 @@ export interface ChainServicesStores {
   readonly notificationStateStore?: NotificationDeliveryStore & ParticipantNotificationReadStateStore;
   /** sqlite/postgres 驱动下提供持久化 broadcast 去重状态；其余驱动为 undefined。 */
   readonly broadcastDedupeStore?: BroadcastDedupeStore;
+  /** sqlite/postgres 驱动下提供持久化 stage-patch 状态；其余驱动为 undefined（内存）。 */
+  readonly stageExecutorPatchStore?: ProductStageExecutorPatchStore;
+  readonly stageResourcePatchStore?: ProductStageResourcePatchStore;
   close(): Promise<void>;
 }
 
@@ -264,7 +281,17 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         broadcastDedupeStore: new SqliteBroadcastDedupeStore({
           databaseUrl: options.database.url,
           migrations
-        })
+        }),
+        // stage-patch prepared/submission/nonce 状态落 sqlite（F148）：
+        // 重启不丢已签名 prepare，nonce 预留跨实例由唯一键承担。
+        stageExecutorPatchStore: new SqliteProductStagePatchStore<
+          PreparedStageExecutorPatchRecord,
+          StageExecutorPatchSubmissionDTO
+        >({ databaseUrl: options.database.url, migrations, patchKind: "executor" }),
+        stageResourcePatchStore: new SqliteProductStagePatchStore<
+          PreparedStageResourcePatchRecord,
+          StageResourcePatchSubmissionDTO
+        >({ databaseUrl: options.database.url, migrations, patchKind: "resource" })
       };
       return {
         ...stores,
@@ -287,7 +314,9 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
             stores.storeListingStore,
             stores.storeJoinApplicationStore,
             stores.notificationStateStore,
-            stores.broadcastDedupeStore
+            stores.broadcastDedupeStore,
+            stores.stageExecutorPatchStore,
+            stores.stageResourcePatchStore
           ]);
         }
       };
@@ -329,7 +358,17 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         // 同样持久化；表迁移见 migrations/postgres/0013。共享 database 连接，
         // close 由 database.close() 统一负责。
         notificationStateStore: new PostgresNotificationStateStore({ database }),
-        broadcastDedupeStore: new PostgresBroadcastDedupeStore({ database })
+        broadcastDedupeStore: new PostgresBroadcastDedupeStore({ database }),
+        // stage-patch 状态在生产拓扑同样持久化（migrations/postgres/0019），
+        // 共享 database 连接。
+        stageExecutorPatchStore: new PostgresProductStagePatchStore<
+          PreparedStageExecutorPatchRecord,
+          StageExecutorPatchSubmissionDTO
+        >({ database, patchKind: "executor" }),
+        stageResourcePatchStore: new PostgresProductStagePatchStore<
+          PreparedStageResourcePatchRecord,
+          StageResourcePatchSubmissionDTO
+        >({ database, patchKind: "resource" })
       };
       return {
         ...stores,

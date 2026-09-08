@@ -274,6 +274,10 @@ export async function startApiServer(
     ...(submissionBroadcastAdapter ? { submissionBroadcastAdapter } : {}),
     ...(stageExecutorPatchBroadcastAdapter ? { stageExecutorPatchBroadcastAdapter } : {}),
     ...(stageResourcePatchBroadcastAdapter ? { stageResourcePatchBroadcastAdapter } : {}),
+    // 持久驱动（sqlite/postgres）下注入持久化 stage-patch store（F148）；
+    // memory 驱动不注入，服务内部用内存 store。
+    ...(stores.stageExecutorPatchStore ? { stageExecutorPatchStore: stores.stageExecutorPatchStore } : {}),
+    ...(stores.stageResourcePatchStore ? { stageResourcePatchStore: stores.stageResourcePatchStore } : {}),
     productRegistrationAdapter,
     productTriggerChainId: config.network.chainId,
     ...(config.productBff.registrationCreatorAddress
