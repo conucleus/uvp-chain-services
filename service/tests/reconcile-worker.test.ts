@@ -26,6 +26,48 @@ const payloadHash = bytes32("3003");
 const idempotencyKey = bytes32("3004");
 
 describe("tx/indexer reconcile worker", () => {
+  it("serializes concurrent manual and scheduled runs through the runOnce reentry guard", async () => {
+    // F134 回归：admin runReconcile / retrySubmission 与定时轮询并发触达
+    // runOnce，防重入必须在 runOnce 本体（只在 #runOnceSafely 挡不住手动
+    // 入口）。进行中的一轮未结束时，后到触发返回空汇总而不双跑。
+    const projectionStore = new MemoryProjectionStore();
+    const productStore = new MemoryProductBffStore();
+    const receipts = new Map<Hex, ReconcileReceipt | undefined>();
+    const txHash = bytes32("aaaa");
+    await productStore.createDraft(draftFixture(), []);
+    await productStore.createRegistration(registrationFixture({ txHash }));
+    let releaseFirstRun: (() => void) | undefined;
+    const firstRunBlocked = new Promise<void>((resolve) => { releaseFirstRun = resolve; });
+    const client = receiptClient(receipts);
+    const worker = new TxReconcileWorker({
+      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000 },
+      receiptClient: {
+        async getTransactionReceipt(hash) {
+          await firstRunBlocked;
+          return client.getTransactionReceipt(hash);
+        }
+      },
+      projectionStore,
+      productStore,
+      now: () => baseNow
+    });
+
+    const firstRun = worker.runOnce();
+    // 首轮悬停在回执查询处：并发的第二轮（手动入口）必须被守卫挡下。
+    const secondRun = await worker.runOnce();
+    expect(secondRun).toEqual({
+      registrationsChecked: 0,
+      submissionsChecked: 0,
+      governanceLogsChecked: 0,
+      updated: 0,
+      failed: 0
+    });
+
+    releaseFirstRun!();
+    const firstSummary = await firstRun;
+    expect(firstSummary.registrationsChecked).toBe(1);
+  });
+
   it("keeps receipt-missing registrations pending, then confirms after OrderRegistered projection appears", async () => {
     const projectionStore = new MemoryProjectionStore();
     const productStore = new MemoryProductBffStore();

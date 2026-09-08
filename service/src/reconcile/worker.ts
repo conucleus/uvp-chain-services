@@ -130,6 +130,28 @@ export class TxReconcileWorker implements LifecycleService {
   }
 
   async runOnce(): Promise<ReconcileRunSummary> {
+    // 防重入守卫必须在 runOnce 本体：定时轮询（#runOnceSafely）、admin
+    // 手动 runReconcile、retrySubmission 都会并发触达本方法，只在
+    // #runOnceSafely 里挡 #checking 挡不住手动入口（对齐 dock-automation
+    // 的守卫位置）。已在跑的一轮进行中时，后到触发直接返回空汇总。
+    if (this.#checking) {
+      return {
+        registrationsChecked: 0,
+        submissionsChecked: 0,
+        governanceLogsChecked: 0,
+        updated: 0,
+        failed: 0
+      };
+    }
+    this.#checking = true;
+    try {
+      return await this.#runReconcilePass();
+    } finally {
+      this.#checking = false;
+    }
+  }
+
+  async #runReconcilePass(): Promise<ReconcileRunSummary> {
     const summary = {
       registrationsChecked: 0,
       submissionsChecked: 0,
@@ -222,10 +244,7 @@ export class TxReconcileWorker implements LifecycleService {
   }
 
   async #runOnceSafely(): Promise<void> {
-    if (this.#checking) {
-      return;
-    }
-    this.#checking = true;
+    // 防重入由 runOnce 本体的 #checking 承担（定时/手动/重试入口共用）。
     try {
       const summary = await this.runOnce();
       this.#logger.info("reconcile worker run completed", { ...summary });
@@ -235,8 +254,6 @@ export class TxReconcileWorker implements LifecycleService {
       this.#logger.warn("reconcile worker run failed", {
         message: this.#lastError
       });
-    } finally {
-      this.#checking = false;
     }
   }
 
