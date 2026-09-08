@@ -64,6 +64,7 @@ const task: ProductTaskDTO = {
 describe("product task submissions", () => {
   it("does not authorize permissively when no authorization adapter is configured", async () => {
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => baseNow,
       evidenceIdFactory: () => "ev_no_auth"
@@ -495,6 +496,7 @@ describe("product task submissions", () => {
 
   it("rejects missing evidence before preparing a signed payload", async () => {
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => baseNow
     });
@@ -527,6 +529,7 @@ describe("product task submissions", () => {
   it("rejects hash-mismatched evidence before preparing a signed payload", async () => {
     const storage = new InMemoryEvidenceStorage();
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage,
       now: () => baseNow,
       evidenceIdFactory: () => "ev_mismatch"
@@ -555,6 +558,7 @@ describe("product task submissions", () => {
 
   it("builds deterministic payload bundle hashes regardless of evidence id order", async () => {
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => baseNow,
       evidenceIdFactory: sequentialIds(["ev_b", "ev_a"])
@@ -759,6 +763,17 @@ describe("product task submissions", () => {
       walletAddress: submitter,
       signature
     })).rejects.toThrow("rpc connection reset before writeContract");
+
+    // F149：逃逸异常必须留下一致的持久状态——失败档案（按适配器同款
+    // 分类器归档）与 nonce 释放在同一落档事务内，档案保留证据、释放保证
+    // 同一 prepareId 可重试。（fixture 的 submissionId 工厂是常量，重试
+    // 档案覆盖失败档案；断言在抛错后立即执行。）
+    const failedAttempt = await fixture.service.getSubmission("sub_1");
+    expect(failedAttempt).toMatchObject({
+      status: "failed",
+      retryable: true
+    });
+    expect(typeof failedAttempt?.errorCode).toBe("string");
 
     // The nonce was released, so retrying the same prepareId succeeds instead
     // of reporting a false duplicate_submit.
@@ -1538,6 +1553,7 @@ async function submissionFixture(options: {
   const now = options.now ?? (() => baseNow);
   const fixtureTask = options.task ?? task;
   const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
     storage: new InMemoryEvidenceStorage(),
     now,
     evidenceIdFactory: () => "ev_1"

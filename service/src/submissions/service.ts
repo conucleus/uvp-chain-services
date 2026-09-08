@@ -31,6 +31,7 @@ import type {
   SubmitProductTaskInput,
   PrepareProductTaskSubmitInput
 } from "./types.js";
+import { classifyStateMachineBroadcastError } from "./broadcast-adapter.js";
 import type { EvidencePrincipal, EvidenceRecordDTO } from "../evidence/index.js";
 import { ProductOrderLookupError } from "../product/service.js";
 
@@ -404,9 +405,29 @@ export function createProductSubmissionService(options: ProductSubmissionService
           }
           throw error;
         }
-        // 广播本身抛错（未拿到 txHash）：未上链、未落档，释放 nonce 让同一
-        // prepareId 保持可重试（基线 c64f4e8 行为）。
-        await store.releaseNonce?.(nonceKey);
+        // 广播本身抛错（未拿到 txHash）：未上链。逃逸异常违反适配器
+        // "分类为 failed 结果、绝不抛穿"的契约，但仍必须留下一致的持久
+        // 状态——失败档案（按适配器同款分类器归档，错误码走已登记词表）
+        // 与 nonce 释放写进同一个落档事务：事务提交后崩溃不得留下
+        // "nonce 行已插、无档案、prepare 未标 used"的组合，否则同
+        // prepareId 的合法重试会永久 409 duplicate_submit（全库无其他
+        // 释放口）。
+        const classifiedThrow = classifyStateMachineBroadcastError(error);
+        await withSubmissionStoreTransaction(store, async () => {
+          await store.putSubmission(withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
+            submissionId: submissionIdFactory(),
+            recoveredSubmitter,
+            signatureHash: signatureHashFor(signature),
+            createdAt: now().toISOString(),
+            broadcast: {
+              status: "failed",
+              errorCode: classifiedThrow.errorCode,
+              message: classifiedThrow.message,
+              retryable: classifiedThrow.retryable
+            }
+          })));
+          await store.releaseNonce?.(nonceKey);
+        });
         throw error;
       }
       await audit.record({
