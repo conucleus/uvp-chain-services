@@ -2,6 +2,7 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { adminPrincipalFromHeaders, governanceAdminAllowed, type GovernanceAdminAuthPolicy } from "../governance/index.js";
 import type { ChainServicesRuntimeEnv, StoreAuthConfig } from "../config/index.js";
 import { assessStoreAuthEvidence } from "../config/index.js";
+import { storeAuthUrlEvidenceFailure } from "../config/store-auth-evidence.js";
 import type { GovernancePrincipal } from "../governance/index.js";
 import type { Address } from "../shared/types.js";
 
@@ -145,7 +146,7 @@ export function createStoreIdentityProvider(options: StoreIdentityProviderOption
   const jwtConfigBlocked = authConfig.mode === "jwt" && strictRuntime && !authEvidence.externalIdentityEvidence;
   const devHeaderAuthEnabled = authConfig.mode === "dev_headers" &&
     !strictRuntime;
-  const jwtVerifier = authConfig.mode === "jwt" && !jwtConfigBlocked ? createJwtVerifier(authConfig) : undefined;
+  const jwtVerifier = authConfig.mode === "jwt" && !jwtConfigBlocked ? createJwtVerifier(authConfig, strictRuntime) : undefined;
   return {
     async resolve(headers) {
       if (jwtConfigBlocked) {
@@ -280,6 +281,8 @@ function resolveStoreAccessFromHeaders(
 
 interface JwtVerifier {
   readonly config: RequiredJwtStoreAuthConfig;
+  /** 非 local：discovery 回传的 jwks_uri 必须过 HTTPS/非私网校验（SSRF 纵深）。 */
+  readonly strictRuntime: boolean;
   jwks?: ReturnType<typeof createRemoteJWKSet>;
   // discovery 失败时清空重试，类型显式含 undefined。
   jwksPromise?: Promise<ReturnType<typeof createRemoteJWKSet>> | undefined;
@@ -290,10 +293,11 @@ interface RequiredJwtStoreAuthConfig extends StoreAuthConfig {
   readonly audience: string;
 }
 
-function createJwtVerifier(config: StoreAuthConfig): JwtVerifier {
+function createJwtVerifier(config: StoreAuthConfig, strictRuntime: boolean): JwtVerifier {
   const jwtConfig = requireJwtStoreAuthConfig(config);
   return {
     config: jwtConfig,
+    strictRuntime,
     ...(jwtConfig.jwksUrl ? { jwks: createRemoteJWKSet(new URL(jwtConfig.jwksUrl)) } : {})
   };
 }
@@ -348,7 +352,7 @@ async function jwksForVerifier(verifier: JwtVerifier): Promise<ReturnType<typeof
     return verifier.jwks;
   }
   if (!verifier.jwksPromise) {
-    verifier.jwksPromise = discoverStoreAuthJwks(verifier.config);
+    verifier.jwksPromise = discoverStoreAuthJwks(verifier.config, verifier.strictRuntime);
   }
   try {
     verifier.jwks = await verifier.jwksPromise;
@@ -366,7 +370,7 @@ function isJwksDiscoveryFailure(error: unknown): boolean {
   return error instanceof Error && error.name === JWKS_DISCOVERY_FAILURE;
 }
 
-async function discoverStoreAuthJwks(config: RequiredJwtStoreAuthConfig): Promise<ReturnType<typeof createRemoteJWKSet>> {
+async function discoverStoreAuthJwks(config: RequiredJwtStoreAuthConfig, strictRuntime: boolean): Promise<ReturnType<typeof createRemoteJWKSet>> {
   const discoveryUrl = config.oidcDiscoveryUrl ?? `${config.issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
   let response: Response;
   try {
@@ -394,6 +398,12 @@ async function discoverStoreAuthJwks(config: RequiredJwtStoreAuthConfig): Promis
   }
   if (typeof record.jwks_uri !== "string" || record.jwks_uri.trim().length === 0) {
     throw namedDiscoveryError("OIDC discovery response is missing jwks_uri");
+  }
+  // F167：discovery 响应是外部输入，其 jwks_uri 可把密钥拉取指向内网端点
+  // 或明文信道（受限 SSRF 纵深）。非 local 环境复用配置层同款
+  // HTTPS/非私网校验；local 开发允许本地 IdP 的 http/localhost。
+  if (strictRuntime && storeAuthUrlEvidenceFailure(record.jwks_uri)) {
+    throw namedDiscoveryError("OIDC discovery jwks_uri must be HTTPS on a non-private host outside local development");
   }
   try {
     return createRemoteJWKSet(new URL(record.jwks_uri));

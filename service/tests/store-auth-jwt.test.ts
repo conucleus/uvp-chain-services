@@ -5,7 +5,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { createApiRouter } from "../src/api/routes.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { StoreAuthConfig } from "../src/config/index.js";
-import type { StoreSessionDTO } from "../src/store-console/access.js";
+import { createStoreIdentityProvider, type StoreSessionDTO } from "../src/store-console/access.js";
 
 const issuer = "https://identity.example/";
 const audience = "uvp-store";
@@ -194,6 +194,50 @@ describe("Store JWT/JWKS operator identity", () => {
       accessLevel: "store_admin",
       roles: ["store_admin"]
     });
+  });
+
+  it("rejects a discovery-advertised jwks_uri that is not HTTPS or points at a private host in strict runtimes", async () => {
+    // F167：discovery 响应是外部输入，其 jwks_uri 可把密钥拉取指向内网
+    // 端点/明文信道（受限 SSRF 纵深）。非 local 复用配置层同款校验；
+    // local 开发允许本地 IdP。
+    const originalFetch = globalThis.fetch;
+    const discoveryCalls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      discoveryCalls.push(String(input));
+      return new Response(JSON.stringify({
+        issuer,
+        jwks_uri: "http://127.0.0.1:8443/.well-known/jwks.json"
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    try {
+      const strictConfig: StoreAuthConfig = {
+        mode: "jwt",
+        oidcDiscoveryUrl: `${issuer}.well-known/openid-configuration`,
+        issuer,
+        audience,
+        roleClaim: "roles",
+        principalClaim: "sub",
+        clockToleranceSeconds: 60
+      };
+      const provider = createStoreIdentityProvider({
+        runtimeEnvironment: "staging",
+        authConfig: strictConfig
+      });
+      const access = await provider.resolve({ authorization: "Bearer some.jwt.token" });
+      expect(access.authenticationFailure?.code).toBe("store_identity_unavailable");
+      expect(access.authenticationFailure?.message).toContain("jwks_uri must be HTTPS on a non-private host");
+      expect(discoveryCalls).toHaveLength(1);
+
+      const localProvider = createStoreIdentityProvider({
+        runtimeEnvironment: "local",
+        authConfig: strictConfig
+      });
+      const localAccess = await localProvider.resolve({ authorization: "Bearer some.jwt.token" });
+      expect(localAccess.authenticationFailure?.message ?? "").not.toContain("jwks_uri must be HTTPS");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("discovers the JWKS URI from vendor-neutral OIDC metadata", async () => {
