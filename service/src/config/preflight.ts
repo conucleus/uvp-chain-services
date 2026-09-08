@@ -1366,7 +1366,7 @@ function diagnosticWarnings(
   // 产品通知渠道决策未做，webhook transport 默认关闭；未配置时
   // 所有投递按 transport_adapter_missing 记录失败，这里给出可见提醒。
   if (!config.notifications?.webhookUrl) {
-    warnings.push("UVP_NOTIFY_WEBHOOK_URL is not configured; notification delivery will be recorded as failed (transport_adapter_missing)");
+    warnings.push("UVP_NOTIFY_WEBHOOK_URL is not configured; notification delivery will be recorded as skipped (transport_adapter_missing)");
   }
   // 证据只有单副本时提醒配置第二副本 bucket。
   if (config.evidenceStorage.adapter === "s3" && !config.evidenceStorage.s3BackupBucket) {
