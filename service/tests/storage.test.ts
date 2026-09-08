@@ -250,11 +250,39 @@ describe("durable storage", () => {
     expect(afterTombstone).toHaveLength(1);
     expect(afterTombstone[0]).toMatchObject({ removed: true });
 
-    await store.appendEvent(event);
+    // 复活载荷携带 transaction_index：墓碑行缺失该排序键时必须回填，
+    // 否则复活事件在同块事件全序里错位。
+    await store.appendEvent({ ...event, transactionIndex: 4 });
     const revived = await store.listEvents({ chainId, contractAddress });
     expect(revived).toHaveLength(1);
     expect(revived[0]?.removed).toBeUndefined();
-    expect(revived[0]).toMatchObject({ eventName: "OrderCreated" });
+    expect(revived[0]).toMatchObject({ eventName: "OrderCreated", transactionIndex: 4 });
+  });
+
+  it("backfills a missing transaction_index when reviving a tombstoned event", async () => {
+    // F170：墓碑行不带 transaction_index（初始插入时事件源未提供），
+    // 复活时携带的序号必须写回；已有序号的墓碑行复活时保留原值。
+    const store = openStore(tempDirs);
+    stores.push(store);
+    const base = chainEvent(11n, 1, "SignalSubmitted", {
+      orderId: "order-revive-index",
+    });
+
+    await store.appendEvent(base);
+    await store.appendEvent({ ...base, removed: true as const });
+    await store.appendEvent({ ...base, transactionIndex: 2 });
+    const revived = await store.listEvents({ chainId, contractAddress });
+    expect(revived).toHaveLength(1);
+    expect(revived[0]?.removed).toBeUndefined();
+    expect(revived[0]).toMatchObject({ transactionIndex: 2 });
+
+    const preserved = chainEvent(12n, 0, "HookReady", { orderId: "order-revive-keep" });
+    await store.appendEvent({ ...preserved, transactionIndex: 7 });
+    await store.appendEvent({ ...preserved, transactionIndex: 7, removed: true as const });
+    await store.appendEvent({ ...preserved });
+    const kept = (await store.listEvents({ chainId, contractAddress }))
+      .find((event) => event.eventName === "HookReady");
+    expect(kept).toMatchObject({ transactionIndex: 7 });
   });
 
   it("claims broadcast txHash ownership with the same contract on SQLite as on Postgres", async () => {

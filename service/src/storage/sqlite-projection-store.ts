@@ -460,11 +460,14 @@ export class SqliteProjectionStore implements DurableProjectionStore {
         // 复活：同主键（chain/contract/block/txHash/logIndex）的事件此前
         // 因 reorg 被打上 removed 墓碑，canonical 链重新出现同一位日志时
         // 必须解除墓碑；INSERT OR IGNORE 只会忽略主键冲突、保留 removed=1，
-        // 导致复活事件被永久跳过。
+        // 导致复活事件被永久跳过。transaction_index 随复活回填：墓碑行可能
+        // 在交易哈希之外缺该列（同块内交易重排后同位日志的序号可变），
+        // 排序键缺失会让复活事件在 listEvents 的全序里错位。
         const revival = this.#database
           .prepare(
             `UPDATE chain_event_log
-           SET removed = 0, event_name = ?, args_json = ?, block_hash = COALESCE(?, block_hash)
+           SET removed = 0, event_name = ?, args_json = ?, block_hash = COALESCE(?, block_hash),
+             transaction_index = COALESCE(transaction_index, ?)
            WHERE chain_id = ? AND contract_address = ? AND block_number = ?
              AND transaction_hash = ? AND log_index = ? AND removed = 1`,
           )
@@ -472,6 +475,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
             event.eventName,
             stringifyStorageJson(event.args),
             event.blockHash?.toLowerCase() ?? null,
+            event.transactionIndex ?? null,
             event.chainId,
             normalizedContract,
             event.blockNumber.toString(),

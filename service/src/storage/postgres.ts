@@ -426,10 +426,12 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       // 复活：同主键（chain/contract/block/txHash/logIndex）的事件此前因
       // reorg 被打上 removed 墓碑，canonical 链重新出现同一位日志时必须
       // 解除墓碑；ON CONFLICT DO NOTHING 只会忽略主键冲突、保留 removed=TRUE，
-      // 导致复活事件被永久跳过。
+      // 导致复活事件被永久跳过。transaction_index 随复活回填（墓碑行可能
+      // 缺该列，排序键缺失会让复活事件在 listEvents 的全序里错位）。
       const revival = await this.#database.query(
         `UPDATE chain_event_log
-         SET removed = FALSE, event_name = $1, args_json = $2::jsonb, block_hash = COALESCE($3, block_hash)
+         SET removed = FALSE, event_name = $1, args_json = $2::jsonb, block_hash = COALESCE($3, block_hash),
+           transaction_index = COALESCE(transaction_index, $9)
          WHERE chain_id = $4 AND contract_address = $5 AND block_number = $6
            AND transaction_hash = $7 AND log_index = $8 AND removed = TRUE`,
         [
@@ -441,6 +443,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
           event.blockNumber.toString(),
           event.transactionHash.toLowerCase(),
           event.logIndex,
+          event.transactionIndex ?? null,
         ],
       );
       if ((revival.rowCount ?? 0) > 0) {
