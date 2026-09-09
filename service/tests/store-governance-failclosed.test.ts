@@ -1014,7 +1014,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const schema = (compiled.body as { draft: { productSchema?: StoreProductSchemaDTO } }).draft.productSchema;
       expect(schema).toBeDefined();
 
-      // 2128 R1-2：重编译会以 inferred schema 覆写既有 schema——已发布
+      // 重编译会以 inferred schema 覆写既有 schema——已发布
       // plan 的草稿重跑 compile 同样命中 409 不可变门（与 PUT 同口径）。
       const recompiled = await router.handle({
         method: "POST",

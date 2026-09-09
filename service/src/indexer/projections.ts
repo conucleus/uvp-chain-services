@@ -1540,7 +1540,7 @@ function applyStageExecutorActivated(
  * delegateStageExecutorSignalFromModule 在链上把 (sourceId, signalId) 的
  * 提交权委派给 executor，并携带 targetStageId 阶段绑定。同一交易内先发
  * SignalSubmitterAuthorized（order.authorizations 已有记录）再发本事件；
- * 投影用本事件补齐阶段归属，供任务 submitSignals 挂接（F25）。
+ * 投影用本事件补齐阶段归属，供任务 submitSignals 挂接。
  */
 function applyStageExecutorSignalDelegated(
   state: {
@@ -2121,7 +2121,7 @@ function refreshTaskSubmitSignals(
       source: "authorization"
     });
   }
-  // F25：合约 _authorizeSignalSubmitter 不校验 plan 能力词表——授权可以
+  // 合约 _authorizeSignalSubmitter 不校验 plan 能力词表——授权可以
   // 落链在词表之外。任务完成判定以链上事实为准：词表外授权通过两个链上
   // 绑定键挂到任务：sourceId/signalId 即任务 hookId（既有回退键），或
   // StageExecutorSignalDelegated 显式携带的 targetStageId 阶段归属。
@@ -2287,7 +2287,7 @@ function markTargetStageTasksAssignedFromOverlay(
 }
 
 /**
- * F25：StageExecutorSignalDelegated 的阶段绑定把委派信号挂到目标阶段的
+ * StageExecutorSignalDelegated 的阶段绑定把委派信号挂到目标阶段的
  * 任务上（submitSignals + 指派委派执行方），使词表外已授权/已提交的信号
  * 能把任务推进到 submitted——投影忠于链上事实。
  */
@@ -2488,7 +2488,7 @@ export function signalAuthorizationMatchesHook(
   authorization: StateMachineSignalAuthorizationProjection,
   hook: SignalAuthorizationHookMatchInput
 ): boolean {
-  // F25：除 plan 词表外，sourceId/signalId 即 hookId 是链上授权与任务的
+  // 除 plan 词表外，sourceId/signalId 即 hookId 是链上授权与任务的
   // 另一个事实绑定键（taskMatchesSubmittedSignal 的既有回退口径一致）。
   if (hook.hookId === authorization.sourceId || hook.hookId === authorization.signalId) {
     return true;

@@ -1157,7 +1157,7 @@ describe("chain-services config", () => {
   });
 
   it("requires an explicit UVP_FINALITY_CONFIRMATIONS in production, staging and testnet; local keeps the default", () => {
-    // ETH-11 + 0124 F11：非 local 公网环境一律不允许静默落到默认值 1
+    // 非 local 公网环境一律不允许静默落到默认值 1
     // （reorg 防线必须显式配置），testnet 与 production/staging 同口径。
     const { UVP_FINALITY_CONFIRMATIONS: _finality, ...missingFinality } = productionEnv();
     expect(() => loadConfigFromEnv(missingFinality)).toThrow(
@@ -1677,7 +1677,7 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: testnetRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: testnetRelayerPrivateKey,
     UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
-    // 0124 F11：testnet 强制显式 finality 确认数。
+    // testnet 强制显式 finality 确认数。
     UVP_FINALITY_CONFIRMATIONS: "12",
     // testnet 必须显式 STORE_AUTH_MODE=jwt 且
     // admin 白名单非空——缺省 dev_headers/空白名单的 fail-open 已废除。
