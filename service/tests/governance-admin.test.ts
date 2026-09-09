@@ -46,7 +46,7 @@ describe("identity governance API", () => {
     });
   });
 
-  it("requires a password factor for the admin surface outside local (bug_audit #12)", async () => {
+  it("requires a password factor for the admin surface outside local", async () => {
     const routerOptions = {
       productRuntimeEnvironment: "staging" as const,
       submissionChainId: 84532,

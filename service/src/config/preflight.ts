@@ -528,7 +528,7 @@ function runProductionSafetyPreflight(
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in production");
   }
-  // 管理面生产基线（bug_audit #12）：非 local 要求口令/签名因子——
+  // 管理面生产基线：非 local 要求口令/签名因子——
   // 明文白名单自报头不是完整凭据（governance/auth.ts 同口径拒
   // 绝），缺口令哈希直接拦截启动。
   if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
@@ -672,7 +672,7 @@ function runTestnetSafetyPreflight(
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in testnet");
   }
-  // 管理面生产基线（bug_audit #12）：testnet 同按非 local 口径要求
+  // 管理面生产基线：testnet 同按非 local 口径要求
   // 管理面口令因子。
   if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
     pass(checks, "operator.governance_admin_token");
@@ -1103,7 +1103,7 @@ function runStagingRolePreflight(
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in staging");
   }
-  // 管理面生产基线（bug_audit #12）：staging gate 前置项——运营面
+  // 管理面生产基线：staging gate 前置项——运营面
   // 访问要求口令或签名因子，明文白名单自报头仅限 local 档。
   if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
     pass(checks, "operator.governance_admin_token");

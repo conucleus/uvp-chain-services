@@ -108,7 +108,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         "x-uvp-admin-id": "attacker",
         "x-uvp-admin-role": "governance_admin"
       }, { runtimeEnvironment: "testnet", allowedAdminIds: [] })).toBeUndefined();
-      // 白名单非空但未配置口令因子（bug_audit #12：明文白名单自报头
+      // 白名单非空但未配置口令因子（明文白名单自报头
       // 仅限 local 档）——非 local 命中白名单也不放行。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "gov-reviewer-1",
@@ -198,7 +198,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1"
       };
       expect(() => loadConfigFromEnv(withWhitelists)).toThrow(/OPS_CONSOLE_ADMIN_IDS is required in testnet/);
-      // 管理面生产基线（bug_audit #12）：testnet 同样要求口令因子配置。
+      // 管理面生产基线：testnet 同样要求口令因子配置。
       expect(() => loadConfigFromEnv({
         ...withWhitelists,
         OPS_CONSOLE_ADMIN_IDS: "ops-admin-1"
@@ -1060,7 +1060,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       });
       expect(malformed).toMatchObject({ status: 400, body: { error: "invalid_product_schema" } });
 
-      // 簇 N 修正（审计三轮）：onchainHookPlanArtifact 主体进 schemaHash——
+      // onchainHookPlanArtifact 主体进 schemaHash——
       // 只改产物内部字段（不镜像到 planId/planHash/artifactHash 字段）也必须
       // 改变 schemaHash，否则产物本体可被无感替换。
       const tamperedArtifact = {

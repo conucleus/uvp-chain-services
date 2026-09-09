@@ -577,7 +577,7 @@ describe("durable storage", () => {
       }),
     ).rejects.toBeInstanceOf(StorageConstraintError);
     // 上传路径的条件插入对同 (owner, payloadHash) 幂等收口：返回既有
-    // 记录而不是撞 UNIQUE（N-188——并发重复上传不再以存储错误泄露）。
+    // 记录而不是撞 UNIQUE（并发重复上传不再以存储错误泄露）。
     await expect(
       store.insertIfPayloadHashAbsent({
         ...record,

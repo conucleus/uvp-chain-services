@@ -18,7 +18,7 @@ export interface GovernanceAdminAuthPolicy {
   readonly allowedAdminIds: readonly string[];
   /**
    * GOVERNANCE_ADMIN_TOKEN_HASHES（sha256 hex）：非 local 管理面的
-   * 口令因子。管理面生产基线（bug_audit #12）：明文白名单自报头仅限
+   * 口令因子。管理面生产基线：明文白名单自报头仅限
    * local 档，非 local 的自报 admin 头必须叠加口令因子才是完整凭据。
    */
   readonly adminTokenHashes?: readonly string[];
@@ -52,7 +52,7 @@ export function adminPrincipalFromHeaders(
   if (!governanceAdminAllowed(adminId, policy)) {
     return undefined;
   }
-  // 管理面生产基线（bug_audit #12）：明文白名单自报头仅限 local 档。
+  // 管理面生产基线：明文白名单自报头仅限 local 档。
   // 非 local 的自报 admin 头不是完整凭据——必须携带口令因子
   //（x-uvp-admin-token，sha256 哈希 + timingSafeEqual 比对）。未配置
   // 口令哈希的非 local 一律 fail-closed（env 校验/preflight 已拦截

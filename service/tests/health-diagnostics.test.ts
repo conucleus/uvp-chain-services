@@ -95,7 +95,7 @@ describe("ops health diagnostics", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/healthz" });
 
-    // 簇 N 修正（审计三轮）：healthz 收口——只回聚合健康位；诊断明细走
+    // healthz 收口——只回聚合健康位；诊断明细走
     // /admin/diagnostics（治理白名单 admin）。
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
@@ -180,7 +180,7 @@ describe("ops health diagnostics", () => {
     }
   });
 
-  it("enforces the OPS_CONSOLE_ADMIN_IDS allowlist when configured (ETH-03)", async () => {
+  it("enforces the OPS_CONSOLE_ADMIN_IDS allowlist when configured", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       opsConsoleAdminIds: ["ops-admin-1", "ops-admin-2"]
     });
@@ -206,7 +206,7 @@ describe("ops health diagnostics", () => {
     });
   });
 
-  it("falls back to the governance admin check when no ops allowlist is configured (ETH-03)", async () => {
+  it("falls back to the governance admin check when no ops allowlist is configured", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const response = await router.handle({
@@ -217,7 +217,7 @@ describe("ops health diagnostics", () => {
     expect(response.status).toBe(200);
   });
 
-  it("assembles real admin recovery actions in the running server (ETH-06)", async () => {
+  it("assembles real admin recovery actions in the running server", async () => {
     let server: Server | undefined;
     try {
       const eventSource: ChainEventSource = {
@@ -535,7 +535,7 @@ describe("ops health diagnostics", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/readyz" });
 
-    // 簇 N 修正（审计三轮）：readyz 收口——只回 ready 位与 reasons；脱敏
+    // readyz 收口——只回 ready 位与 reasons；脱敏
     // 后的诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({

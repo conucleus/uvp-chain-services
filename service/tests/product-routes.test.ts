@@ -372,7 +372,7 @@ describe("product API routes", () => {
       });
   });
 
-  it("excludes assignee-wallet order matching from anonymous /store/search (N-72)", async () => {
+  it("excludes assignee-wallet order matching from anonymous /store/search", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
       deploymentBlock: 0n,
@@ -695,7 +695,7 @@ describe("product API routes", () => {
   });
 
   it("requires Store identity to read a docking session by id", async () => {
-    // 会话档案含草稿信号映射，与 create/validate/save 同门（bug_audit #5：
+    // 会话档案含草稿信号映射，与 create/validate/save 同门（
     // 业务档案端点一律要求会话身份）——匿名按 id 读不可枚举。
     const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
@@ -1538,7 +1538,7 @@ describe("product API routes", () => {
       }
     });
     const inviteId = (inviteResponse.body as { invite: { inviteId: string } }).invite.inviteId;
-    // 簇 D 修正：accept 必须携带 createInvite 一次性下发的 token。
+    // accept 必须携带 createInvite 一次性下发的 token。
     const inviteToken = (inviteResponse.body as { inviteToken?: string }).inviteToken;
     expect(typeof inviteToken).toBe("string");
     await expect(router.handle({

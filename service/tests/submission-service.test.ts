@@ -218,7 +218,7 @@ describe("product task submissions", () => {
         }
       }
     });
-    // 审计 #10：UVPStateMachineSignal 签名域并入 planId，且首字段为 planId。
+    // UVPStateMachineSignal 签名域并入 planId，且首字段为 planId。
     expect(prepared.typedData.types.UVPStateMachineSignal.map((field) => field.name)).toEqual([
       "planId",
       "orderId",
@@ -233,7 +233,7 @@ describe("product task submissions", () => {
   });
 
   it("refuses to prepare when the projection cannot supply the order planId", async () => {
-    // 审计 #10 负例：投影无 planId（或为零占位）时不构造签名，prepare 直接失败。
+    // 负例：投影无 planId（或为零占位）时不构造签名，prepare 直接失败。
     const fixture = await submissionFixture({
       authorization: permissiveProductProjectionAuthorization()
     });
@@ -1063,7 +1063,7 @@ describe("product task submissions", () => {
   });
 
   it("refuses to broadcast a prepared submission whose planId is missing or zero", async () => {
-    // 审计 #10 负例：零占位 planId 无法通过链上 (planId, orderId) 存在性校验，
+    // 负例：零占位 planId 无法通过链上 (planId, orderId) 存在性校验，
     // broadcast 适配器必须拒绝构造调用而不是发一笔注定 revert 的交易。
     const walletClient = {
       account: { address: "0x9999999999999999999999999999999999999999" as Address },
@@ -1298,7 +1298,7 @@ describe("product task submissions", () => {
       status: "failed",
       errorCode: "relayer_insufficient_funds",
       errorLabel: "Relayer gas payer needs funds",
-      // 0653 L-10：与 relayer 口径统一——充值是运营可修复条件，同签名
+      // 与 relayer 口径统一——充值是运营可修复条件，同签名
       // 载荷可重试（submitter 未产生 txHash，nonce 未消费），不烧死信。
       retryable: true,
       retryState: "retryable",
@@ -1732,7 +1732,7 @@ function idempotencyKeyHex(value: string): Hex {
   return `0x${Buffer.from(value, "utf8").toString("hex").padStart(64, "0")}` as Hex;
 }
 
-describe("secure broadcast durable dedupe (ETH-07)", () => {
+describe("secure broadcast durable dedupe", () => {
   it("dedupes the same submission through a rebuilt adapter backed by the durable store", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-broadcast-dedupe-"));
     const databaseUrl = `sqlite://${join(tempDir, "dedupe.sqlite3")}`;

@@ -305,7 +305,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const suppliers = await router.handle({
       method: "GET",
       pathname: "/store/suppliers",
-      // 簇 N 修正：读面鉴权——用已认证 store 头读取。
+      // 读面鉴权——用已认证 store 头读取。
       headers: governanceAdminHeaders
     });
     const supplierId = (suppliers.body as { suppliers: { supplierId: string }[] }).suppliers[0]!.supplierId;
@@ -637,7 +637,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const suppliers = await router.handle({
       method: "GET",
       pathname: "/store/suppliers",
-      // 簇 N 修正：读面鉴权——用已认证 store 头读取。
+      // 读面鉴权——用已认证 store 头读取。
       headers: governanceAdminHeaders
     });
     const createdSupplier = (suppliers.body as { suppliers: { wallet?: string; reviewStatus: string; identityStatus: string }[] }).suppliers
@@ -645,7 +645,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(createdSupplier).toMatchObject({ reviewStatus: "approved_for_broadcast", identityStatus: "active" });
   });
 
-  it("KEEP: publisher approval without governance admin is rejected before any side effects (G-03/M-2)", async () => {
+  it("publisher approval without governance admin is rejected before any side effects", async () => {
     // 无既有 active binding 时，链上身份登记需要 governance_admin 权威：
     // 门禁前置于建供应商/翻 approved_for_broadcast/落治理 review——
     // 拒绝后不留半提交（供应商未创建、申请留在 under_review）。
@@ -781,7 +781,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       .resolves.toMatchObject({ status: 404, body: { error: "product_order_not_found" } });
   });
 
-  it("order creators read their own orders without a task assignment (N-79)", async () => {
+  it("order creators read their own orders without a task assignment", async () => {
     // OrderRelayerRecorded 的 creator 是订单参与者：任务全部指派给他人
     // 时，创建者无任务指派也必须读得到自己建的单（列表/详情/me 视图）。
     const store = new MemoryProjectionStore();
@@ -1203,7 +1203,7 @@ function seedOrderWithAuthorizationEvents(orderId: Hex, submitter: Address, hook
       registrar: publisherAddress
     }),
     chainEvent(3n, 0, "OrderRegistered", { orderId, planId }),
-    // 簇 D 修正（审计三轮）：授权事件的 (sourceId, signalId) 必须落在
+    // 授权事件的 (sourceId, signalId) 必须落在
     // 申请槽位的 orderPermissionTable 能力集合内——激活判定不再接受
     // "同 plan 任意信号"。
     chainEvent(4n, 0, "SignalSubmitterAuthorized", {

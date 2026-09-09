@@ -261,7 +261,7 @@ export interface ProductInviteRolePreviewDTO {
 }
 
 /**
- * 邀请预览的参与者最小投影（bug_audit #23）：联系方式脱敏、不回传
+ * 邀请预览的参与者最小投影：联系方式脱敏、不回传
  * 钱包地址——预览只需要证明"邀请发给了哪个角色槽/哪位受邀人"。
  */
 export interface ProductInvitePreviewParticipantDTO {
@@ -294,7 +294,7 @@ export interface ProductInvitePreviewDraftDTO {
 }
 
 /**
- * 邀请预览响应字段最小集（bug_audit #23）：token 门已就位，本响应
+ * 邀请预览响应字段最小集：token 门已就位，本响应
  * 只保留决定是否接受邀请所需的最小字段。
  */
 export interface ProductInvitePreviewResponse {

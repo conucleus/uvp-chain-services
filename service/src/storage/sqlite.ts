@@ -30,7 +30,7 @@ interface NodeSqliteModule {
 
 const require = createRequire(import.meta.url);
 
-// CS-P2：各 store 独立开连接写同一库文件。不设 busy_timeout 时并发写立刻
+// 各 store 独立开连接写同一库文件。不设 busy_timeout 时并发写立刻
 // SQLITE_BUSY,统一在连接层给等待预算,写路径再叠加有界重试兜底。
 const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_WRITE_BUSY_RETRY_DELAYS_MS = [25, 100, 400] as const;

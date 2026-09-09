@@ -453,7 +453,7 @@ async function synthesizeDefaultVersion(
   }
   // 投影桶在 commitPlan 第一步即建、PlanRegistered 到 finalize 才发：
   // 默认版本只对"已 finalize"的 plan 合成 active，否则待定计划可被
-  // 直接激活建单（UVP-02）。
+  // 直接激活建单。
   const snapshot = await projectionStore.getOrderSnapshot();
   const planId = normalizeBytes32(zhixu.planPublication.planId, "planId");
   const planHash = normalizeBytes32(zhixu.planPublication.planHash, "planHash");
@@ -491,7 +491,7 @@ async function summarizeRecord(
   ]);
   // "published" 要求链上已 finalize（PlanFinalized/PlanRegistered 均在
   // finalize 交易内发出）：投影桶在 commitPlan 即建，仅凭桶存在会把
-  // 待定计划当成已发布（UVP-02）。
+  // 待定计划当成已发布。
   const plan = findFinalizedPlan(orderSnapshot, record.planId, record.planHash);
   const publicationStatus: PlanPublicationStatus = plan ? "published" : "not_found";
   const artifactHash = record.artifactHash;

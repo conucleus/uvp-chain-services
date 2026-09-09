@@ -54,7 +54,7 @@ export function crossBorderSchemaResolver(): ProductSchemaResolver {
 }
 
 /**
- * STORE-03 之后 docking 禁止 self-docking：docking 测试需要一个与 cross-border
+ * docking 禁止 self-docking：docking 测试需要一个与 cross-border
  * 不同的第二个 zhixu 作为 target，形状与 cross-border schema 一致以便
  * 产生候选信号映射。
  */

@@ -390,7 +390,7 @@ export function createProductBffService(
       const deadline = Math.floor(
         prepareNow.getTime() / 1000 + 3600,
       ).toString();
-      // triggerId 追加 128 位随机熵（bug_audit #22）：会话门已就位，
+      // triggerId 追加 128 位随机熵：会话门已就位，
       // 顺序段（scope 内自增）是残余枚举面——GET /product/order-triggers/:id
       // 的路径键不得可被顺序猜测。与 inviteId 同款"结构前缀 + 随机后缀"。
       const triggerId =
@@ -710,7 +710,7 @@ export function createProductBffService(
             walletAddress,
           )
         : undefined;
-      // 响应字段最小集（bug_audit #23）：联系方式脱敏、金额按可见范围
+      // 响应字段最小集：联系方式脱敏、金额按可见范围
       // 收敛——totalAmount 只对创建者/已接受参与者（会话钱包）可见，
       // notes/createdBy/planId 等运营字段不进预览。
       const amountVisible = walletAddress
@@ -1175,7 +1175,7 @@ function inviteAcceptance(
 }
 
 /**
- * 预览金额可见范围（bug_audit #23）：与 getDraft 的草稿归属同口径——
+ * 预览金额可见范围：与 getDraft 的草稿归属同口径——
  * 创建者或已接受参与者的会话钱包可见 totalAmount；纯 token 持有者
  *（尚未接受邀请）不在金额可见范围。
  */
@@ -1228,7 +1228,7 @@ function invitePreviewDraft(
 }
 
 /**
- * 联系方式脱敏（bug_audit #23）：邮箱保留本地部分前 2 位 + 域名；
+ * 联系方式脱敏：邮箱保留本地部分前 2 位 + 域名；
  * 电话/其他文本保留前 3 后 2；过短或空值整段遮蔽。预览只证明
  * "邀请发到了这个联系方式"，不回传原文。
  */

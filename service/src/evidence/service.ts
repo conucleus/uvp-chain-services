@@ -142,7 +142,7 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
       }
 
       // The provisional policy is not built here anymore: write authorization
-      // is derived from the principal and the derived owner only (audit #16).
+      // is derived from the principal and the derived owner only.
       if (!canWriteEvidence(normalizedPrincipal, ownerParticipantId)) {
         throw new EvidenceServiceError("forbidden", "principal cannot upload evidence for this owner", 403);
       }

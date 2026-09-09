@@ -201,7 +201,7 @@ describe("Product BFF trigger broadcast adapter", () => {
     });
   });
 
-  it("KEEP: transport envelopes like Invalid JSON RPC response stay retryable (G-30)", async () => {
+  it("transport envelopes like Invalid JSON RPC response stay retryable", async () => {
     // "Invalid JSON RPC response" 是传输层错误，不是确定性业务拒绝：
     // 误判成 retryable:false 会把草稿永久卡死在 failed。
     const walletClient: ProductTriggerBroadcastWalletClient = {

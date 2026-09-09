@@ -86,7 +86,7 @@ export class SqliteBroadcastDedupeStore implements BroadcastDedupeStore {
 
   async claimTxHash(txHash: string, idempotencyKey: string): Promise<string | undefined> {
     const normalizedTxHash = txHash.toLowerCase();
-    // CS-P1：单语句归属判定。INSERT 抢占,冲突时保留既有归属并原样回读
+    // 单语句归属判定。INSERT 抢占,冲突时保留既有归属并原样回读
     // (DO UPDATE 只刷新 updated_at);并发双方在唯一约束上串行化,后到者
     // 必然读到先到者的 key,不存在先 SELECT 后 INSERT 的双方都放行窗口。
     // 契约与 postgres/memory 后端一致:归属属于自己(含本次抢占)返回

@@ -97,7 +97,7 @@ const baseNow = new Date("2026-04-30T00:00:00Z");
 
 describe("stage executor/resource patch Product API", () => {
   it("hashes resource manifests deterministically with the protocol canonical hash", () => {
-    // ETH-08：两栈必须对同一 manifest 算出同一 hash——chain-services 的
+    // 两栈必须对同一 manifest 算出同一 hash——chain-services 的
     // helper 直接委托 protocol-bindings 的 canonical 实现（domain + normalization）。
     const manifest: ResourceManifestV1 = {
       schemaVersion: "uvp-resource-manifest-v1",
@@ -735,7 +735,7 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("releases the reserved patch nonce when broadcast throws so the same prepareId stays retryable", async () => {
-    // ETH-01：broadcast 在 nonce 已 reserve 后抛错（模拟瞬时 RPC 故障），
+    // broadcast 在 nonce 已 reserve 后抛错（模拟瞬时 RPC 故障），
     // nonce 必须被释放，否则同一 prepareId 重试会永久 409 duplicate nonce。
     let broadcastCalls = 0;
     const broadcast: StageExecutorPatchBroadcastAdapter = {
@@ -775,7 +775,7 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("reopens the same prepare after a retryable broadcast result without txHash", async () => {
-    // U-008：failed(retryable=true) 代表尚未拿到链上交易，不能消费
+    // failed(retryable=true) 代表尚未拿到链上交易，不能消费
     // prepareId；第二次提交应复用原签名和 nonce，而不是 409。
     let broadcastCalls = 0;
     const broadcast: StageExecutorPatchBroadcastAdapter = {
@@ -828,7 +828,7 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("keeps the patch nonce consumed when a broadcast already returned a txHash and the store write fails", async () => {
-    // 0653 L-9：广播已返回 txHash 后的落库失败不得释放 nonce——链上交易
+    // 广播已返回 txHash 后的落库失败不得释放 nonce——链上交易
     // 可能已占用该 nonce，重试会二次广播同一 patch；对齐 submissions 主
     // 路径语义（只有确认失败且无 txHash 才释放）。
     const innerBroadcast: StageExecutorPatchBroadcastAdapter = {
@@ -907,7 +907,7 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("releases the reserved patch nonce when the broadcast throws before producing a txHash so the same prepareId stays retryable", async () => {
-    // ETH-01：尚未拿到 txHash 的失败（RPC 抛错/存储写入抛错）必须释放
+    // 尚未拿到 txHash 的失败（RPC 抛错/存储写入抛错）必须释放
     // nonce，同一 prepareId 在瞬时故障后仍可重试。
     const broadcastCalls = { count: 0 };
     const innerBroadcast: StageExecutorPatchBroadcastAdapter = {

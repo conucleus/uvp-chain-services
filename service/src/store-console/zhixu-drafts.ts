@@ -1520,7 +1520,7 @@ async function hasPublishedPlan(
     return false;
   }
   const snapshot = await projectionStore.getOrderSnapshot();
-  // 发布权威是 PlanRegistered(finalize)：桶存在只代表 commitPlan（UVP-02），
+  // 发布权威是 PlanRegistered(finalize)：桶存在只代表 commitPlan，
   // 仅 commit 的 plan 不能把草稿置 active/锁 schema。
   return Object.values(snapshot.stateMachinePlans).some(
     (plan) =>

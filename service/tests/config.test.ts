@@ -527,7 +527,7 @@ describe("chain-services config", () => {
         permissiveAuthorizationRequested: false
       },
       storeAuth: {
-        // 簇 C 修正（审计三轮）：testnet 不再缺省 dev_headers——基线 env
+        // testnet 不再缺省 dev_headers——基线 env
         // 显式 jwt + 外部 OIDC 证据。
         mode: "jwt",
         jwtConfigured: true,
@@ -761,7 +761,7 @@ describe("chain-services config", () => {
     const { OPS_CONSOLE_ADMIN_IDS: _opsAdmins, ...missingOpsAdmins } = stagingEnv(tempDirs);
     expect(() => loadConfigFromEnv(missingOpsAdmins)).toThrow(/OPS_CONSOLE_ADMIN_IDS/);
 
-    // 管理面生产基线（bug_audit #12）：staging 要求管理面口令因子，
+    // 管理面生产基线：staging 要求管理面口令因子，
     // 明文白名单自报头仅限 local 档。
     const { GOVERNANCE_ADMIN_TOKEN_HASHES: _adminTokens, ...missingAdminTokens } = stagingEnv(tempDirs);
     expect(() => loadConfigFromEnv(missingAdminTokens)).toThrow(/GOVERNANCE_ADMIN_TOKEN_HASHES is required in staging/);
@@ -876,7 +876,7 @@ describe("chain-services config", () => {
   });
 
   it("fails strict preflight closed when the active deployment manifest is missing modules", async () => {
-    // 簇 N：manifest 缺 modules 必须启动失败——扁平合约地址写法会让索引器
+    // manifest 缺 modules 必须启动失败——扁平合约地址写法会让索引器
     // 静默丢弃全部 patch/dock/派生信号模块事件投影。
     const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-modules-"));
     tempDirs.push(manifestDir);
@@ -1441,7 +1441,7 @@ describe("chain-services config", () => {
   });
 
   it("keeps 64-hex business identifiers and only redacts secrets by key name or labeled text", () => {
-    // ETH-10：64-hex（bytes32）是业务标识，按键名驱动脱敏后必须保留原值。
+    // 64-hex（bytes32）是业务标识，按键名驱动脱敏后必须保留原值。
     const orderId = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const prepareId = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const redacted = redactSecrets({
@@ -1512,7 +1512,7 @@ describe("chain-services config", () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", configDiagnostics: diagnostics });
     const response = await router.handle({ method: "GET", pathname: "/healthz" });
 
-    // 簇 N 修正（审计三轮）：公共探针收口——healthz 只回聚合健康位，
+    // 公共探针收口——healthz 只回聚合健康位，
     // 诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
@@ -1580,7 +1580,7 @@ describe("chain-services config", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/readyz" });
 
-    // 簇 N 修正（审计三轮）：readyz 收口——只回 ready 位与 reasons，
+    // readyz 收口——只回 ready 位与 reasons，
     // 诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
@@ -1630,9 +1630,9 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Reco
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: productionRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: productionRelayerPrivateKey,
-    // ETH-11：production 要求显式配置 finality 确认数，基线 env 一并带上。
+    // production 要求显式配置 finality 确认数，基线 env 一并带上。
     UVP_FINALITY_CONFIRMATIONS: "12",
-    // 簇 C 修正（审计三轮）：production 强制显式非本地 RPC + admin 白名单
+    // production 强制显式非本地 RPC + admin 白名单
     // 非空——静默回落 127.0.0.1:8545 与空白名单 fail-open 已废除。
     UVP_RPC_URL: "https://base-mainnet.example/rpc",
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
@@ -1679,7 +1679,7 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
     // 0124 F11：testnet 强制显式 finality 确认数。
     UVP_FINALITY_CONFIRMATIONS: "12",
-    // 簇 C 修正（审计三轮）：testnet 必须显式 STORE_AUTH_MODE=jwt 且
+    // testnet 必须显式 STORE_AUTH_MODE=jwt 且
     // admin 白名单非空——缺省 dev_headers/空白名单的 fail-open 已废除。
     ...storeAuthJwtEnv,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",

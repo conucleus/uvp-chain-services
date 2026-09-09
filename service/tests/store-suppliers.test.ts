@@ -102,7 +102,7 @@ const bindingId =
   "0xabababababababababababababababababababababababababababababababab" as Hex;
 
 describe("Store supplier directory API", () => {
-  it("KEEP: /store/search supplier facet requires authenticated store readers (G-38/L-1)", async () => {
+  it("/store/search supplier facet requires authenticated store readers", async () => {
     // 供应商命中暴露钱包精确匹配与审核状态：type=supplier 未认证即 401；
     // all 查询对匿名静默剔除供应商命中；已认证 store 读身份可查。
     const { router } = await createRouter([]);
@@ -138,7 +138,7 @@ describe("Store supplier directory API", () => {
     expect(results.some((result) => result.resultType === "supplier" && result.matchedFields.includes("wallet"))).toBe(true);
   });
 
-  it("KEEP: supplier audit ids are store-generated and unique across service instances (G-30)", async () => {
+  it("supplier audit ids are store-generated and unique across service instances", async () => {
     // 审计 ID 由存储端生成（audit_<uuid>），两个服务实例（模拟重启/
     // 多实例）写入不冲突，不再依赖进程内 audit_000001 序号。
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
@@ -671,7 +671,7 @@ async function getSupplier(
   router: ApiRouter,
   supplierId: string,
 ): Promise<StoreSupplierDTO> {
-  // 簇 N 修正：读面鉴权——测试请求带上已认证的 store 头。
+  // 读面鉴权——测试请求带上已认证的 store 头。
   const response = await router.handle({
     method: "GET",
     pathname: `/store/suppliers/${supplierId}`,

@@ -115,7 +115,7 @@ export async function startApiServer(
     })
     : undefined;
 
-  // M-5：全量重建不得阻塞 listen——通知补投的 webhook 逐条最多一个超时
+  // 全量重建不得阻塞 listen——通知补投的 webhook 逐条最多一个超时
   // 周期、串行跟在重建里会把启动拖成 N×超时。改为后台执行；投影轮询等
   // 重建结束后再启动，避免增量刷新与全量重建并发写同一存储。失败由
   // indexer 的 degraded 状态与错误日志暴露。
@@ -238,7 +238,7 @@ export async function startApiServer(
     ...(config.operatorRoles.adminReviewers.length > 0
       ? { governanceAdminIds: config.operatorRoles.adminReviewers }
       : {}),
-    // 管理面口令因子（bug_audit #12）：非 local 的自报 admin 头必须
+    // 管理面口令因子：非 local 的自报 admin 头必须
     // 叠加 x-uvp-admin-token 才构成完整凭据。
     ...((config.operatorRoles.adminTokenHashes ?? []).length > 0
       ? { governanceAdminTokenHashes: config.operatorRoles.adminTokenHashes }
@@ -408,7 +408,7 @@ export async function startApiServer(
     server.listen(config.api.port, config.api.host, resolve);
   });
 
-  // 轮询在初始后台重建结束后启动（见上方 M-5 注释），避免增量刷新与
+  // 轮询在初始后台重建结束后启动（见上方注释），避免增量刷新与
   // 全量重建并发写同一投影存储。reconcile/dock-automation 首轮同门：重建
   // 进行中读投影会把本应 confirmed 的记录误标 indexing（下一轮自愈，但
   // 状态与外部通知面失真一轮）。
@@ -568,7 +568,7 @@ const CORS_ALLOWED_ORIGINS = new Set(
 );
 
 function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): void {
-  // UI-1（服务端半）：前端治理写链路使用 PUT，跨源部署下预检会拦
+  // 服务端半：前端治理写链路使用 PUT，跨源部署下预检会拦
   // 未列入 allow-methods 的方法，必须显式放行。
   response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   response.setHeader(

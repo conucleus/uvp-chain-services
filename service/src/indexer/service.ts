@@ -506,7 +506,7 @@ export class IndexerService implements LifecycleService {
       };
     });
 
-    // G-29/UVP-09：投递记录创建必须先于 cursor 推进。游标一旦先落库，
+    // 投递记录创建必须先于 cursor 推进。游标一旦先落库，
     // 窗口内硬崩溃会让该批事件永不再被读取，投递记录无从重建；先按
     // deliveryId 幂等创建投递记录再推游标，崩溃后重读重投不产生重复。
     await this.#processSignalNotifications(activeNewEvents);
@@ -741,7 +741,7 @@ export class IndexerService implements LifecycleService {
     // 只代表这段链上本来就没有事件。向更旧的已存锚点逐个回验（全库最新
     // 优先）：任一锚点仍与 canonical 一致即 reorg 未触及该锚点之前的投影，
     // 正常回滚到该锚点（删除数恒为 0，随后从 canonical 链重读）。
-    // 0200#15：只验最新锚点即抛"深于投影"会把"最新锚点恰好被 reorg 触及、
+    // 只验最新锚点即抛"深于投影"会把"最新锚点恰好被 reorg 触及、
     // 更旧锚点仍一致"的浅重org 误判成 full rebuild。
     const anchorsBelowWindow = storedEvents
       .filter((event): event is ChainEvent & { readonly blockHash: Hex } =>

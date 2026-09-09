@@ -301,7 +301,7 @@ describe("ViemChainEventSource", () => {
   });
 
   it("keeps 0x-prefixed string event args verbatim while lowercasing bytes args", async () => {
-    // CS-9/L-8：0x 小写化只允许作用于 bytes/address 类型；string 参数
+    // 0x 小写化只允许作用于 bytes/address 类型；string 参数
     //（URI 等）大小写敏感，必须保持链上原文。
     const eventSource = new ViemChainEventSource({
       publicClient: {

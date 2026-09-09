@@ -1345,7 +1345,7 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in production");
   }
-  // 管理面生产基线（bug_audit #12）：非 local 的运营面访问要求口令或
+  // 管理面生产基线：非 local 的运营面访问要求口令或
   // 签名因子——白名单命中只是身份允许，不是凭据。缺口令哈希即拒绝
   // 启动（governance/auth.ts 运行时同步 fail-closed）。
   if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
@@ -1683,7 +1683,7 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in staging");
   }
-  // 管理面生产基线（bug_audit #12）：staging 与 production/testnet 同
+  // 管理面生产基线：staging 与 production/testnet 同
   // 口径要求口令因子，明文白名单自报头仅限 local 档。
   if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
     throw new ConfigError("GOVERNANCE_ADMIN_TOKEN_HASHES is required in staging");
@@ -1784,7 +1784,7 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in testnet");
   }
-  // 管理面生产基线（bug_audit #12）：testnet 是公开测试网，与
+  // 管理面生产基线：testnet 是公开测试网，与
   // staging/production 同口径要求口令因子。
   if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
     throw new ConfigError("GOVERNANCE_ADMIN_TOKEN_HASHES is required in testnet");

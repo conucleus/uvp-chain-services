@@ -513,7 +513,7 @@ async function checkDockingCreateValidateSave(
         review: "all",
         publication: "published",
       });
-      // STORE-03 + dock v2：target 必须是发布过具名接口的不同 zhixu；
+      // dock v2：target 必须是发布过具名接口的不同 zhixu；
       // 列表行不携带接口信息，逐个用 detail 验证可拼性。
       const published = list.zhixus.filter(
         (zhixu) => zhixu.planPublication.status === "published",

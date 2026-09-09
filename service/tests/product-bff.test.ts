@@ -216,7 +216,7 @@ describe("product BFF order drafts and invites", () => {
     const acceptResponse = await router.handle({
       method: "POST",
       pathname: `/product/invites/${fundsInvite.invite.inviteId}/accept`,
-      // 簇 C 修正：接受方的钱包声明来自 header/query/会话，不再读 body。
+      // 接受方的钱包声明来自 header/query/会话，不再读 body。
       headers: { "x-uvp-wallet-address": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
       body: {
         displayName: "Buyer Finance",
@@ -281,7 +281,7 @@ describe("product BFF order drafts and invites", () => {
     ).not.toHaveProperty("tokenHash");
     expect(previewResponse.body).toMatchObject({
       invite: { inviteId: fundsInvite.invite.inviteId, status: "active" },
-      // bug_audit #23：预览联系方式脱敏，不回传原文/钱包地址。
+      // 预览联系方式脱敏，不回传原文/钱包地址。
       participant: { roleSlotId: "funds", maskedContact: "fu***@example.com" },
       acceptance: { canAccept: true, status: "can_accept" },
       walletBinding: {
@@ -298,7 +298,7 @@ describe("product BFF order drafts and invites", () => {
     const previewDraft = (previewResponse.body as {
       draft: Record<string, unknown>;
     }).draft;
-    // bug_audit #23：金额按可见范围收敛 + 运营字段不进预览
+    // 金额按可见范围收敛 + 运营字段不进预览
     //（notes/planId/planHash/createdBy/goods 一律不回传）。
     expect(previewDraft).not.toHaveProperty("notes");
     expect(previewDraft).not.toHaveProperty("planId");
@@ -691,7 +691,7 @@ describe("product BFF order drafts and invites", () => {
       status: "prepared",
       retryable: false,
     });
-    // bug_audit #22：triggerId 不可枚举——结构前缀 + 128 位随机熵后缀，
+    // triggerId 不可枚举——结构前缀 + 128 位随机熵后缀，
     // 顺序段不可被猜测（会话门之外的第二道收敛）。
     expect(prepared.trigger.triggerId).toMatch(/^trigger_[0-9a-f]{8}_\d{6}_[0-9a-f]{32}$/);
     expect(prepared.trigger.orderId).toMatch(/^0x[0-9a-f]{64}$/);
@@ -718,7 +718,7 @@ describe("product BFF order drafts and invites", () => {
     ).toEqual(prepared.trigger);
   });
 
-  it("settles concurrent prepare-trigger on one record (N-77)", async () => {
+  it("settles concurrent prepare-trigger on one record", async () => {
     // 并发双 prepare：前置检查双双通过后，draft_id 一事一单条件插入
     // 只允许一条落库；败者按赢家记录幂等返回，不得撞 UNIQUE 变 500。
     const { router, productStore } = await createRouterFixture([
@@ -748,7 +748,7 @@ describe("product BFF order drafts and invites", () => {
     await expect(productStore.listRegistrations()).resolves.toHaveLength(1);
   });
 
-  it("issues non-enumerable trigger ids (bug_audit #22)", async () => {    // 会话门已就位，id 熵是残余面：triggerId 必须携带 128 位随机后缀，
+  it("issues non-enumerable trigger ids", async () => {    // 会话门已就位，id 熵是残余面：triggerId 必须携带 128 位随机后缀，
     // 相邻草稿的两个 id 之间不存在顺序推导关系。
     const { router } = await createRouterFixture([
       ...activeDeploymentEvents(),
@@ -889,7 +889,7 @@ describe("product BFF order drafts and invites", () => {
   });
 
   it("serializes concurrent trigger submissions per order so the broadcast fires exactly once", async () => {
-    // 簇 N（BFF 建单触发 per-order 互斥）：triggerOrder 的状态检查与
+    // triggerOrder 的状态检查与
     // "置 submitted + 广播"之间隔了 await——并发提交同一 draft 会双双通过
     // 检查并各自广播同一触发交易。per-order 互斥串行化后，第二个调用者
     // 在临界区内重读 registration，自然得到 409 trigger_not_prepared。
@@ -1211,7 +1211,7 @@ interface InviteResponse {
   readonly invite: ProductInviteDTO;
   readonly participant: DraftParticipantDTO;
   readonly draft: ProductOrderDraftDTO;
-  /** 簇 D 修正：createInvite 一次性下发的 invite token。 */
+  /** createInvite 一次性下发的 invite token。 */
   readonly inviteToken?: string;
 }
 

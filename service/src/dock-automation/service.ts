@@ -311,7 +311,7 @@ export class DockAutomationWorker implements LifecycleService {
     orderId: Hex,
     stateMachineAddress?: Hex
   ) {
-    // CS-P5：订单身份含 stateMachineAddress——裸 (chainId,planId,orderId)
+    // 订单身份含 stateMachineAddress——裸 (chainId,planId,orderId)
     // 扫描在同号订单跨部署复用时会多命中；多命中 fail-closed 返回
     // undefined（对齐同仓不变量），绝不静默取首条。有 dock 上下文时按
     // 其状态机地址收敛。

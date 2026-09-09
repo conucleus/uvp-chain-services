@@ -249,7 +249,7 @@ describe("indexer projection replay", () => {
   });
 
   it("keeps the earliest matching signal as the submitted proof when a later matching signal arrives", () => {
-    // L-11：任务 submitted 是首个完成事实——后到的匹配信号不得覆盖
+    // 任务 submitted 是首个完成事实——后到的匹配信号不得覆盖
     // 任务的完成证明与 updatedAt（与创建路径取最早证明同口径）。
     const base: readonly ChainEvent[] = [
       chainEvent(1n, 0, "PlanRegistered", {
@@ -1151,7 +1151,7 @@ describe("indexer projection replay", () => {
   });
 
   it("rolls back stored events and replays the canonical fork when a reorg breaks cursor hash continuity", async () => {
-    // ETH-02：模拟 fork——block 3 之后链被替换。cursor 哈希校验发现断链，
+    // 模拟 fork——block 3 之后链被替换。cursor 哈希校验发现断链，
     // 共同祖先定位到 block 2，删除 block 3 的旧事件，从 fork 链重放。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-"));
     const store = new SqliteProjectionStore({
@@ -1377,7 +1377,7 @@ describe("indexer projection replay", () => {
   });
 
   it("fails with a full-rebuild demand when a reorg erases every known block hash", async () => {
-    // ETH-02：整条已知链都被替换时，回溯窗口内找不到共同祖先 → 报错。
+    // 整条已知链都被替换时，回溯窗口内找不到共同祖先 → 报错。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-deep-"));
     const store = new SqliteProjectionStore({
       databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
@@ -1432,7 +1432,7 @@ describe("indexer projection replay", () => {
   });
 
   it("reports real replay anomalies in rebuild mismatchCount instead of a hardcoded zero", async () => {
-    // ETH-09：同一事件键作为活跃事件重复投递（矛盾投递）必须计入
+    // 同一事件键作为活跃事件重复投递（矛盾投递）必须计入
     // mismatchCount；正常流保持 0。
     const events = stateMachineEvents();
     const duplicated = [...events, events[2]!];
@@ -1868,7 +1868,7 @@ describe("indexer projection replay", () => {
   });
 
   it("replays the real two-step plan publish transaction log order without a ProjectionError", () => {
-    // 簇 E-1（0620 H-1/0630 C-1）：真实链序 commitPlan 先发 PlanCommitted →
+    // 真实链序 commitPlan 先发 PlanCommitted →
     // PlanPublisherRecorded；finalizePlan 内先调 plan metadata 模块（模块
     // 事件 logIndex 更小），随后才发 PlanFinalized + PlanRegistered。投影
     // 若只认 PlanRegistered 建桶，首次两步发布即在 finalize 交易内撞
@@ -1954,7 +1954,7 @@ describe("indexer projection replay", () => {
   });
 
   it("recovers from a shallow reorg on a quiet chain whose stored events are far below the backtrack window", async () => {
-    // 簇 E-2（0620 M-6）：安静链上浅 reorg——回溯窗口内没有任何已存事件
+    // 安静链上浅 reorg——回溯窗口内没有任何已存事件
     // 锚点不代表 reorg 深于窗口，只代表这段链上本来就没有事件。回退到全库
     // 最新已存事件锚点核对 canonical 哈希，一致即正常继续，不误判要求人工
     // full rebuild。
@@ -2021,7 +2021,7 @@ describe("indexer projection replay", () => {
   });
 
   it("persists exhausted post-commit notification batches and redelivers them from the durable sweep", async () => {
-    // 簇 E-4（0630 C-8/0632 CS-4/0653 M-10）：通知 post-commit 3 次进程内
+    // 通知 post-commit 3 次进程内
     // 重试耗尽且 cursor 已越过——失败批次必须落持久 pending 表（0017）由
     // 后台 sweep 补投，不允许静默丢。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-pending-"));
@@ -2106,7 +2106,7 @@ describe("indexer projection replay", () => {
   });
 
   it("reuses one stable pending row for repeated projection automation failures", async () => {
-    // UVP-12/L-9/CS-P3：无事件批次的 pending 步骤 id 必须稳定——时间戳
+    // 无事件批次的 pending 步骤 id 必须稳定——时间戳
     // id 会让 ON CONFLICT DO NOTHING 永不命中，每次失败新开一行无限堆积。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-automation-pending-"));
     const store = new SqliteProjectionStore({
@@ -2161,7 +2161,7 @@ describe("indexer projection replay", () => {
   });
 
   it("creates notification delivery intents before advancing the durable cursor", async () => {
-    // G-29/UVP-09：投递记录创建先于 cursor 推进——游标先落库的窗口内硬
+    // 投递记录创建先于 cursor 推进——游标先落库的窗口内硬
     // 崩溃会让该批事件永不再被读取、投递记录无从重建。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-notify-order-"));
     const store = new SqliteProjectionStore({
@@ -2205,7 +2205,7 @@ describe("indexer projection replay", () => {
           }
         }
       });
-      // 首轮 rebuild（0042 F-01 契约）：游标与"整库事件替换"同事务收敛，
+      // 首轮 rebuild：游标与"整库事件替换"同事务收敛，
       // 通知处理发生在事务提交之后——此时持久游标已就位（10n）。重建提
       // 交后、通知前崩溃不再可能留下越过重建覆盖区间的旧游标。
       await indexer.rebuildFromDeploymentBlockWithSummary();
@@ -2225,7 +2225,7 @@ describe("indexer projection replay", () => {
   });
 
   it("rolls back to an older consistent anchor when the newest below-window anchor was reorged", async () => {
-    // 0200#15：最新已存锚点恰好被 reorg 触及、更旧锚点仍与 canonical 一致
+    // 最新已存锚点恰好被 reorg 触及、更旧锚点仍与 canonical 一致
     // 时是浅 reorg——回验更旧锚点继续,不得误判要求 full rebuild。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-older-anchor-"));
     const store = new SqliteProjectionStore({
@@ -2285,7 +2285,7 @@ describe("indexer projection replay", () => {
   });
 
   it("moves a task off ready when an out-of-vocabulary explicit authorization submits on chain", () => {
-    // 簇 N（0653 M-8）：合约 _authorizeSignalSubmitter 不校验 plan 能力词表
+    // 合约 _authorizeSignalSubmitter 不校验 plan 能力词表
     // ——显式授权可以落在词表之外。SignalSubmitted 落链后任务匹配必须以
     // 链上事实为准（StageExecutorSignalDelegated 的 targetStageId 阶段归属
     // + hookId===sourceId/signalId 绑定键），否则任务永远停在 ready，与链
@@ -2360,7 +2360,7 @@ describe("indexer projection replay", () => {
   });
 
   it("resolves state-machine orders by the (planId, orderId) composite key and fails closed on bare-id ambiguity", async () => {
-    // 簇 E-3/簇 N（0630 M-5/0632 CS-7）：订单身份是 (planId, orderId)。裸
+    // 订单身份是 (planId, orderId)。裸
     // orderId 多命中必须 fail-closed 返回 undefined（绝不取第一个），带
     // planId 的复合键查询必须命中正确的 plan。
     const otherPlanId = bytes32Hex("8101");

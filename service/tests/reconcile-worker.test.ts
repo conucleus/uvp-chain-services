@@ -155,7 +155,7 @@ describe("tx/indexer reconcile worker", () => {
   });
 
   it("isolates a broken registration record instead of stalling the whole reconcile round", async () => {
-    // 簇 E-3（2349 #8）：单条坏记录（缺字段/存储写失败）只计失败并继续，
+    // 单条坏记录（缺字段/存储写失败）只计失败并继续，
     // 不再把整轮（含 /admin/ops/reconcile/run）拖成 500。
     const projectionStore = new MemoryProjectionStore();
     const txHash = bytes32("a333");
@@ -196,7 +196,7 @@ describe("tx/indexer reconcile worker", () => {
   });
 
   it("confirms registrations through the (planId, orderId) composite key when two plans reuse an order id", async () => {
-    // 簇 E-3（0132 P2-11/0630 M-5/0632 CS-7）：裸 orderId 在同号订单跨 plan
+    // 裸 orderId 在同号订单跨 plan
     // 复用时永远查不中 → registration 永卡 indexing；复合键查询必须命中
     // 本 plan 的投影。
     const otherPlanId = bytes32("0f0f");

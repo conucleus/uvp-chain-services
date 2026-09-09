@@ -444,7 +444,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
         retryable: submission.retryable
       });
       if (isEvidenceBindingSubmission(submission)) {
-        // CS-A4：链上广播已成功——绑定失败是服务端补账缺口，不得把已成功
+        // 链上广播已成功——绑定失败是服务端补账缺口，不得把已成功
         // 的提交以异常报成 500（违反信封契约）。返回成功提交结果，同时落
         // 审计事件供对账；prepare 已被消费，绑定补账走人工/reconcile 路径。
         try {

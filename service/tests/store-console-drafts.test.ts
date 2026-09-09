@@ -114,7 +114,7 @@ spec:
 `;
 
 describe("Store Zhixu draft workflow", () => {
-  it("KEEP: draft/schema reads and writes fail closed without identity or anchor (G-38/G-39)", async () => {
+  it("draft/schema reads and writes fail closed without identity or anchor", async () => {
     // 匿名读取草稿/完整 Product Schema 一律 401（DTO 含 compilePreview 与
     // 发布者创作资产）；无锚定地址的 operator 写操作 403（红线）。
     const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
@@ -149,7 +149,7 @@ describe("Store Zhixu draft workflow", () => {
     });
   });
 
-  it("KEEP: zhixu submit-review is governance-admin gated, not operator level (G-37/L-2)", async () => {
+  it("zhixu submit-review is governance-admin gated, not operator level", async () => {
     // submit-review 要求 governance_admin 能力 + 真实治理身份：
     // operator 级（即便锚定）被能力门禁拒绝；身份解析不再把
     // principalId/roles[0] 包装成 GovernancePrincipal。
@@ -173,7 +173,7 @@ describe("Store Zhixu draft workflow", () => {
     });
   });
 
-  it("KEEP: version activation confirmation cannot self-confirm via body claims (CS-A3)", async () => {
+  it("version activation confirmation cannot self-confirm via body claims", async () => {
     // 期望锚只取服务端可证明的值（版本记录或链投影）；自报 planId 与
     // confirmation.planId 自我印证、但锚未上链/未注册 → 400 mismatch。
     const store = new MemoryProjectionStore();

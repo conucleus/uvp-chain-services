@@ -35,7 +35,7 @@ describe("evidence service", () => {
     }
   });
 
-  it("settles concurrent same-payload uploads idempotently (N-188)", async () => {
+  it("settles concurrent same-payload uploads idempotently", async () => {
     // 并发同 (owner, payload) 上传：前置 find 各自未命中时，条件插入
     // 只允许一条落库，败者按既有记录幂等返回——不撞 UNIQUE 变存储错误。
     const service = testEvidenceService();
@@ -75,7 +75,7 @@ describe("evidence service", () => {
     expect(first.evidence.contentHash).toBe(second.evidence.contentHash);
     expect(first.evidence.metadataHash).toBe(second.evidence.metadataHash);
     expect(first.evidence.payloadHash).toBe(second.evidence.payloadHash);
-    // 簇 N 修正（审计三轮）：同一 owner 重复上传完全相同的载荷幂等返回既有
+    // 同一 owner 重复上传完全相同的载荷幂等返回既有
     // 记录——payloadHash 覆盖 content+metadata+order+stage（fileName 不参与
     // 哈希），重命名文件重传不再追加内容副本。
     expect(second.evidence.evidenceId).toBe(first.evidence.evidenceId);
@@ -537,7 +537,7 @@ describe("evidence service", () => {
   });
 
   it("keeps the default rehearsal object root stable across process restarts", () => {
-    // Audit #20: stored metadata references bytes under this root, so the
+    // Stored metadata references bytes under this root, so the
     // default must never embed a timestamp or pid that changes on restart.
     const first = new RehearsalObjectEvidenceStorage();
     const second = new RehearsalObjectEvidenceStorage();
@@ -690,7 +690,7 @@ describe("evidence service", () => {
   });
 
   it("resolves a configured STS session token env at construction time", () => {
-    // Audit #19: the session token must reach the S3 client when configured,
+    // The session token must reach the S3 client when configured,
     // and a configured-but-empty token env must fail construction instead of
     // producing a client that passes preflight and 403s on first use.
     expect(() => new S3EvidenceStorageClient({
@@ -850,7 +850,7 @@ async function uploadTextEvidence(
   });
 }
 
-describe("evidence backup storage (ETH-05)", () => {
+describe("evidence backup storage", () => {
   it("writes a second copy on put and restores the primary object from the verified backup", async () => {
     const primary = new InMemoryEvidenceStorage();
     const backup = new InMemoryEvidenceStorage();

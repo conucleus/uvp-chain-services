@@ -38,8 +38,8 @@ const stagingGovernancePrivateKey = "0x44444444444444444444444444444444444444444
 const stagingGovernanceAddress = "0x7564105e977516c53be337314c7e53838967bdac";
 const generatedAt = "2026-05-01T00:00:00.000Z";
 /**
- * 就绪探针是治理 admin 门（N-72）：运营细节匿名不可读。staging 档的
- * admin 凭据按 #12 基线叠加口令因子（sha256 哈希比对）。
+ * 就绪探针是治理 admin 门：运营细节匿名不可读。staging 档的
+ * admin 凭据叠加口令因子（sha256 哈希比对）。
  */
 const stagingOpsAdminToken = "staging-ops-readiness-token";
 const stagingOpsAdminHeaders = {
@@ -63,7 +63,7 @@ describe("Product API staging readiness", () => {
     }
   });
 
-  it("rejects anonymous staging readiness probes with 403 (N-72)", async () => {
+  it("rejects anonymous staging readiness probes with 403", async () => {
     const store = new MemoryProjectionStore();
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "staging",

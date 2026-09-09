@@ -115,7 +115,7 @@ describe("API router composition", () => {
     expect(recorded).toMatchObject({ authorized: true, source: "active_stage_executor_overlay" });
   });
 
-  it("submission authorization honors on-chain SignalSubmitterAuthorized projections (N-74)", async () => {
+  it("submission authorization honors on-chain SignalSubmitterAuthorized projections", async () => {
     const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
     const { MemoryProductBffStore } = await import("../src/product/bff/store.js");
     const { MemoryProjectionStore } = await import("../src/storage/projection-store.js");

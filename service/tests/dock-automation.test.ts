@@ -54,7 +54,7 @@ describe("dock liveness keeper", () => {
     expect(worker.getLastSummary()).toBeUndefined();
   });
   it("does not re-broadcast the same binding inside the finality window and retries after it", async () => {
-    // 0620 L-7：最终性窗口内同一 binding 每轮（默认 5s）重复广播 no-op
+    // 最终性窗口内同一 binding 每轮（默认 5s）重复广播 no-op
     // 交易是纯 gas 浪费。窗口内去重跳过（计数 deduplicated）；窗口过后
     // 投影仍未呈现 delivery 才重试（覆盖交易丢失）。
     const store = new MemoryProjectionStore();
@@ -100,7 +100,7 @@ describe("dock liveness keeper", () => {
     expect(submitted.length).toBe(2);
   });
 
-  it("rate-bounds failed broadcasts with the same finality window (N-80)", async () => {
+  it("rate-bounds failed broadcasts with the same finality window", async () => {
     // 持续失败的绑定若不占窗会每轮重发，gas 燃烧无速率上限；成败同占
     // 窗口后，每绑定每窗口至多一次尝试，失败仍在 summary.skipped 可见。
     const store = new MemoryProjectionStore();

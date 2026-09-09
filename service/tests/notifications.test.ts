@@ -450,7 +450,7 @@ describe("signal-routed notifications", () => {
     // 幂等：重复失效不重复计数。
     await expect(service.invalidateDeliveriesAboveBlock({ chainId: 31337, blockNumber: 7n })).resolves.toBe(0);
 
-    // 参与者活动流以结构化状态呈现失效通知（bug_audit #25）：附操作指引，
+    // 参与者活动流以结构化状态呈现失效通知：附操作指引，
     // 前端不解析文案即可识别 invalidation.status。
     const feed = await service.listParticipantNotifications({ walletAddress: supplierWallet });
     const invalidatedFeedItem = feed.notifications.find((item) => item.kind === "notification_invalidated");
@@ -464,7 +464,7 @@ describe("signal-routed notifications", () => {
   });
 
   it("redacts transport error messages before persisting them as lastError", async () => {
-    // L-10：transport 失败文本（可能携带端点 URL 与凭权查询参数）先过
+    // transport 失败文本（可能携带端点 URL 与凭权查询参数）先过
     // redactErrorMessage 再落投递台账，对齐兄弟路径。
     const event = signalEvent(6n, requiredDependency(customsDependencyA));
     const { store, supplierStore } = await notificationStore({
@@ -496,7 +496,7 @@ describe("signal-routed notifications", () => {
   });
 
   it("dead-letters automatically redelivered failed rows once the attempt budget is exhausted", async () => {
-    // M-5：重建/重放对 failed 行的自动重投必须有预算——无上限的重启重投
+    // 重建/重放对 failed 行的自动重投必须有预算——无上限的重启重投
     // 会无界重复外部投递。预算耗尽转 dead_letter 终态（人工可重开）。
     const event = signalEvent(6n, requiredDependency(customsDependencyA));
     const { store, supplierStore } = await notificationStore({
@@ -867,7 +867,7 @@ describe("signal-routed notifications", () => {
     })).resolves.toMatchObject({ status: 404 });
   });
 
-  it("delivers through the generic webhook transport with timestamp.nonce.body HMAC signature (ETH-04)", async () => {
+  it("delivers through the generic webhook transport with timestamp.nonce.body HMAC signature", async () => {
     const requests: Array<{ readonly url: string; readonly init: RequestInit }> = [];
     const dispatcher = new WebhookNotificationDispatcher({
       url: "https://ops.example/uvp/notify",
@@ -942,7 +942,7 @@ describe("signal-routed notifications", () => {
     expect(guard.observe(fields.nonce, nowMs, nowMs + 5 * 60_000 + 1)).toBe(true);
   });
 
-  it("persists notification delivery and read state across store rebuilds (ETH-04)", async () => {
+  it("persists notification delivery and read state across store rebuilds", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-notification-state-"));
     const databaseUrl = `sqlite://${join(tempDir, "state.sqlite3")}`;
     const migrations = { autoRun: true, directory: resolve(__dirname, "../migrations") };
