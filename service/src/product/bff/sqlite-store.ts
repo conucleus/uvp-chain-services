@@ -171,8 +171,8 @@ export class SqliteProductBffStore implements ProductBffStore {
     ).all(draftId).map((row) => inviteRow(row));
   }
 
-  async createRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
-    runSqliteWrite(() => this.#insertRegistration(registration));
+  async createRegistrationIfNoneForDraft(registration: ProductOrderTriggerRecord): Promise<boolean> {
+    return runSqliteWrite(() => this.#insertRegistrationIfNoneForDraft(registration));
   }
 
   async getRegistration(triggerId: string): Promise<ProductOrderTriggerRecord | undefined> {
@@ -297,16 +297,18 @@ export class SqliteProductBffStore implements ProductBffStore {
     ).run(...inviteValues(invite));
   }
 
-  #insertRegistration(registration: ProductOrderTriggerRecord): void {
-    this.#database.prepare(
+  #insertRegistrationIfNoneForDraft(registration: ProductOrderTriggerRecord): boolean {
+    const result = this.#database.prepare(
       `INSERT INTO product_order_trigger (
          trigger_id, prepare_id, draft_id, order_id, plan_id, plan_hash, status, tx_hash,
          block_number, source_id, signal_id, trigger_hook_id, trigger_stage_id, submitter,
          payload_hash, idempotency_key, deadline, typed_data_json, signature,
          error_code, error_message, retryable, creator, authorizations_json, permissions_json,
          reconcile_status, last_checked_at, receipt_status, projection_status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(...registrationValues(registration));
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM product_order_trigger WHERE draft_id = ?)`
+    ).run(...registrationValues(registration), registration.draftId);
+    return result.changes > 0;
   }
 
   #upsertRegistration(registration: ProductOrderTriggerRecord): void {

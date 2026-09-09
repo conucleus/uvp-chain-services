@@ -29,7 +29,13 @@ export interface ProductBffStore {
    */
   updateInviteIfActive(invite: ProductInviteDTO): Promise<boolean>;
   listInvitesByDraft(draftId: string): Promise<readonly ProductInviteDTO[]>;
-  createRegistration(registration: ProductOrderTriggerRecord): Promise<void>;
+  /**
+   * 条件插入：draft 已有 trigger 记录（一事一单，draft_id UNIQUE）时
+   * 拒绝（返回 false）。并发 prepare-trigger 双双通过前置检查时，跨
+   * 进程原子性由单语句 NOT EXISTS 承担（内存实现由同步临界区承担），
+   * 败者回读既有记录按幂等/409 收口，不再以存储错误 500 泄露。
+   */
+  createRegistrationIfNoneForDraft(registration: ProductOrderTriggerRecord): Promise<boolean>;
   getRegistration(triggerId: string): Promise<ProductOrderTriggerRecord | undefined>;
   getRegistrationByDraft(draftId: string): Promise<ProductOrderTriggerRecord | undefined>;
   listRegistrations(): Promise<readonly ProductOrderTriggerRecord[]>;
@@ -113,8 +119,16 @@ export class MemoryProductBffStore implements ProductBffStore {
     return [...this.#invites.values()].filter((invite) => invite.draftId === draftId);
   }
 
-  async createRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
+  async createRegistrationIfNoneForDraft(registration: ProductOrderTriggerRecord): Promise<boolean> {
+    // 检查与写入必须同一同步段完成：中途 await 会让并发调用在微任务
+    // 边界各自通过检查，双双插入（内存实现的"临界区"就靠这段同步代码）。
+    const existing = [...this.#registrations.values()]
+      .some((candidate) => candidate.draftId === registration.draftId);
+    if (existing) {
+      return false;
+    }
     this.#registrations.set(registration.triggerId, registration);
+    return true;
   }
 
   async getRegistration(triggerId: string): Promise<ProductOrderTriggerRecord | undefined> {

@@ -520,7 +520,7 @@ describe("durable storage", () => {
 
     await store.createDraft(draft, [participant]);
     await store.createInviteIfNoneActive(invite, "2026-01-01T00:00:00.000Z");
-    await store.createRegistration(registration);
+    await store.createRegistrationIfNoneForDraft(registration);
     await store.close();
     stores.splice(stores.indexOf(store), 1);
 
@@ -1326,7 +1326,7 @@ describePostgres(
         productInvite(draft.draftId, participant.participantId),
         "2026-01-01T00:00:00.000Z",
       );
-      await first.productBffStore.createRegistration(registration);
+      await first.productBffStore.createRegistrationIfNoneForDraft(registration);
       await first.evidenceMetadataStore.put(evidence);
       await first.evidenceMetadataStore.markBound?.({
         evidenceId: evidence.evidence.evidenceId,

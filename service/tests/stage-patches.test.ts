@@ -1191,7 +1191,7 @@ async function productStoreFixture(
       acceptedAt: baseNow.toISOString(),
     })),
   );
-  await store.createRegistration({
+  await store.createRegistrationIfNoneForDraft({
     triggerId: "registration_stage_patch_1",
     prepareId: "prepare_stage_patch_1",
     draftId: "draft_stage_patch_1",

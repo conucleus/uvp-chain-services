@@ -1668,7 +1668,7 @@ describe("product API routes", () => {
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
     const productBffStore = new MemoryProductBffStore();
     const createdAt = "2026-04-29T00:00:00.000Z";
-    await productBffStore.createRegistration({
+    await productBffStore.createRegistrationIfNoneForDraft({
       triggerId: "registration-auth-route",
       prepareId: "prepare-auth-route",
       draftId: "draft-auth-route",

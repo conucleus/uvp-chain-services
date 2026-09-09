@@ -36,7 +36,7 @@ describe("tx/indexer reconcile worker", () => {
     const receipts = new Map<Hex, ReconcileReceipt | undefined>();
     const txHash = bytes32("aaaa");
     await productStore.createDraft(draftFixture(), []);
-    await productStore.createRegistration(registrationFixture({ txHash }));
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ txHash }));
     let releaseFirstRun: (() => void) | undefined;
     const firstRunBlocked = new Promise<void>((resolve) => { releaseFirstRun = resolve; });
     const client = receiptClient(receipts);
@@ -75,7 +75,7 @@ describe("tx/indexer reconcile worker", () => {
     const receipts = new Map<Hex, ReconcileReceipt | undefined>();
     const txHash = bytes32("aaaa");
     await productStore.createDraft(draftFixture(), []);
-    await productStore.createRegistration(registrationFixture({ txHash }));
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ txHash }));
     const worker = workerFixture({ projectionStore, productStore, receipts });
 
     await worker.runOnce();
@@ -120,11 +120,16 @@ describe("tx/indexer reconcile worker", () => {
     const txHash = bytes32("a111");
     const mismatchedTxHash = bytes32("a222");
     await productStore.createDraft(draftFixture(), []);
-    await productStore.createRegistration(registrationFixture({ txHash }));
-    await productStore.createRegistration(registrationFixture({
-      triggerId: "registration_mismatch",
-      txHash: mismatchedTxHash
-    }));
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ txHash }));
+    await productStore.createRegistrationIfNoneForDraft({
+      ...registrationFixture({
+        triggerId: "registration_mismatch",
+        txHash: mismatchedTxHash
+      }),
+      // draft_id 一事一单（UNIQUE）：第二条记录必须落在自己的 draft 上，
+      // 同 draft 双记录在持久驱动里本来就插不进去。
+      draftId: "draft_mismatch"
+    });
     await projectionStore.resetFromEvents({
       deploymentBlock: 0n,
       events: [chainEvent(11n, txHash, 0, "OrderRegistered", { orderId, planId })]
@@ -172,8 +177,8 @@ describe("tx/indexer reconcile worker", () => {
     }();
     await productStore.createDraft({ ...draftFixture(), draftId: "draft_1" }, []);
     await productStore.createDraft({ ...draftFixture(), draftId: "draft_broken" }, []);
-    await productStore.createRegistration(registrationFixture({ txHash }));
-    await productStore.createRegistration({
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ txHash }));
+    await productStore.createRegistrationIfNoneForDraft({
       ...registrationFixture({ triggerId: "registration_broken", txHash: brokenTxHash }),
       draftId: "draft_broken",
       orderId: bytes32("0e0e")
@@ -206,7 +211,7 @@ describe("tx/indexer reconcile worker", () => {
     });
     const productStore = new MemoryProductBffStore();
     await productStore.createDraft(draftFixture(), []);
-    await productStore.createRegistration(registrationFixture({ txHash }));
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ txHash }));
     const worker = workerFixture({
       projectionStore,
       productStore,
@@ -328,7 +333,7 @@ describe("tx/indexer reconcile worker", () => {
   it("marks stale pending txs failed without deleting unknown records", async () => {
     const productStore = new MemoryProductBffStore();
     const projectionStore = new MemoryProjectionStore();
-    await productStore.createRegistration(registrationFixture({
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({
       triggerId: "registration_stale",
       txHash: bytes32("eeee"),
       createdAt: "2026-04-27T23:00:00Z"
@@ -434,7 +439,7 @@ describe("tx/indexer reconcile worker", () => {
     const productStore = new MemoryProductBffStore();
     const projectionStore = new MemoryProjectionStore();
     const gatewayTx = bytes32("aaaa");
-    await productStore.createRegistration(registrationFixture({ triggerId: "registration_gateway", txHash: gatewayTx }));
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ triggerId: "registration_gateway", txHash: gatewayTx }));
     const worker = new TxReconcileWorker({
       config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000 },
       receiptClient: {

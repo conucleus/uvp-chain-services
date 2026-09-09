@@ -468,14 +468,41 @@ export function createProductBffService(
         status: "ready_to_trigger",
         updatedAt: createdAt,
       };
+      let idempotentWinner: ProductOrderTriggerRecord | undefined;
       await withProductStoreTransaction(store, async () => {
         if (existingRegistration) {
           await store.updateRegistration(registration);
-        } else {
-          await store.createRegistration(registration);
+        } else if (!(await store.createRegistrationIfNoneForDraft(registration))) {
+          // 并发 prepare-trigger 败者：draft_id 一事一单条件插入落败，
+          // 回读赢家记录——同一提交人的未过期 prepare 幂等返回，
+          // 其余情形 409，不以 draft_id UNIQUE 存储错误 500 泄露。
+          const winner = await store.getRegistrationByDraft(draftId);
+          if (
+            winner &&
+            winner.status === "prepared" &&
+            winner.submitter === walletAddress &&
+            !isPrepareExpired(winner, prepareNow)
+          ) {
+            idempotentWinner = winner;
+            return;
+          }
+          throw new ProductBffError(
+            409,
+            "trigger_already_exists",
+            "order draft already has a trigger record",
+            {
+              triggerId: winner?.triggerId,
+              ...(winner ? { status: winner.status } : {}),
+            },
+          );
         }
         await store.updateDraft(readyDraft);
       });
+      if (idempotentWinner) {
+        // 赢家事务已把草稿置 ready_to_trigger；回读避免返回过期状态。
+        const winnerDraft = (await store.getDraft(draftId)) ?? readyDraft;
+        return prepareResultFromRegistration(winnerDraft, participants, idempotentWinner);
+      }
       return prepareResultFromRegistration(
         readyDraft,
         participants,

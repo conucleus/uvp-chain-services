@@ -718,8 +718,37 @@ describe("product BFF order drafts and invites", () => {
     ).toEqual(prepared.trigger);
   });
 
-  it("issues non-enumerable trigger ids (bug_audit #22)", async () => {
-    // 会话门已就位，id 熵是残余面：triggerId 必须携带 128 位随机后缀，
+  it("settles concurrent prepare-trigger on one record (N-77)", async () => {
+    // 并发双 prepare：前置检查双双通过后，draft_id 一事一单条件插入
+    // 只允许一条落库；败者按赢家记录幂等返回，不得撞 UNIQUE 变 500。
+    const { router, productStore } = await createRouterFixture([
+      ...activeDeploymentEvents(),
+      planRegisteredEvent(11n),
+    ]);
+    const draft = await createReadyDraft(router);
+
+    const [first, second] = await Promise.all([
+      router.handle({
+        method: "POST",
+        pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+        body: { walletAddress: testWallet(0) }
+      }),
+      router.handle({
+        method: "POST",
+        pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+        body: { walletAddress: testWallet(0) }
+      })
+    ]);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    const firstTrigger = (first.body as PreparedTriggerResponse).trigger;
+    const secondTrigger = (second.body as PreparedTriggerResponse).trigger;
+    expect(secondTrigger.triggerId).toBe(firstTrigger.triggerId);
+    await expect(productStore.listRegistrations()).resolves.toHaveLength(1);
+  });
+
+  it("issues non-enumerable trigger ids (bug_audit #22)", async () => {    // 会话门已就位，id 熵是残余面：triggerId 必须携带 128 位随机后缀，
     // 相邻草稿的两个 id 之间不存在顺序推导关系。
     const { router } = await createRouterFixture([
       ...activeDeploymentEvents(),

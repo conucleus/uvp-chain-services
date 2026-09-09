@@ -171,8 +171,20 @@ export class PostgresProductBffStore implements ProductBffStore {
     return result.rows.map((row) => inviteRow(row));
   }
 
-  async createRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
-    await this.#insertRegistration(registration);
+  async createRegistrationIfNoneForDraft(registration: ProductOrderTriggerRecord): Promise<boolean> {
+    const result = await this.#database.query(
+      `INSERT INTO product_order_trigger (
+         trigger_id, prepare_id, draft_id, order_id, state_machine_address, deployment_id,
+         plan_id, plan_hash, status, tx_hash, block_number, source_id, signal_id,
+         trigger_hook_id, trigger_stage_id, submitter, payload_hash, idempotency_key,
+         deadline, typed_data_json, signature, error_code, error_message, retryable,
+         creator, authorizations_json, permissions_json, reconcile_status, last_checked_at,
+         receipt_status, projection_status, created_at, updated_at
+       ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33
+       WHERE NOT EXISTS (SELECT 1 FROM product_order_trigger WHERE draft_id = $3)`,
+      registrationValues(registration)
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async getRegistration(triggerId: string): Promise<ProductOrderTriggerRecord | undefined> {
@@ -323,20 +335,6 @@ export class PostgresProductBffStore implements ProductBffStore {
          created_at = excluded.created_at,
          accepted_wallet_address = excluded.accepted_wallet_address`,
       inviteValues(invite)
-    );
-  }
-
-  async #insertRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
-    await this.#database.query(
-      `INSERT INTO product_order_trigger (
-         trigger_id, prepare_id, draft_id, order_id, state_machine_address, deployment_id,
-         plan_id, plan_hash, status, tx_hash, block_number, source_id, signal_id,
-         trigger_hook_id, trigger_stage_id, submitter, payload_hash, idempotency_key,
-         deadline, typed_data_json, signature, error_code, error_message, retryable,
-         creator, authorizations_json, permissions_json, reconcile_status, last_checked_at,
-         receipt_status, projection_status, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33)`,
-      registrationValues(registration)
     );
   }
 
