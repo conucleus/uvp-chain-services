@@ -279,7 +279,8 @@ export function createProductReadRouteModule(options: {
         return withStorageGuard(async () => {
           // 任务 DTO 携带 assigneeWallet/proofRows 等参与者数据，匿名不可
           // 枚举：身份取会话锚定钱包；已指派任务只有受理人本人可见，
-          // 未指派（纯链上事实）任务对已认证参与者开放。
+          // 未指派任务随其订单走参与者判定（与订单读同口径），无关钱包
+          // 不可见。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -291,12 +292,21 @@ export function createProductReadRouteModule(options: {
               body: { error: "forbidden", message: "assignee filter must match the session-anchored wallet" }
             };
           }
+          const acceptedOrderIds = await acceptedParticipantOrderIds(context, wallet.identity.walletAddress);
+          const orders = await context.productService.listOrders();
+          const visibleOrderIds = new Set(
+            orders
+              .filter((order) => orderVisibleToParticipant(order, walletAddress.toLowerCase(), acceptedOrderIds))
+              .map((order) => order.orderId?.toLowerCase())
+              .filter((orderId): orderId is string => Boolean(orderId))
+          );
           const tasks = (await context.productService.listTasks(cleanQuery({
             orderId: request.query?.orderId,
             status: request.query?.status
           }))).filter((task) =>
-            !task.assigneeWallet ||
-            task.assigneeWallet.toLowerCase() === walletAddress.toLowerCase()
+            task.assigneeWallet
+              ? task.assigneeWallet.toLowerCase() === walletAddress.toLowerCase()
+              : visibleOrderIds.has(task.orderId.toLowerCase())
           );
           return {
             status: 200,
@@ -309,21 +319,43 @@ export function createProductReadRouteModule(options: {
       if (request.method === "GET" && productTaskMatch) {
         return withStorageGuard(async () => {
           // 任务详情（assigneeWallet/proofRows）要求已认证参与者：已指派
-          // 任务仅受理人本人可读；未指派任务不得区分"不存在"（404）。
+          // 任务仅受理人本人可读；未指派任务随订单走参与者判定，不可见
+          // 与"不存在"同响应（404），不泄露存在性。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
           }
           const taskId = decodePathParameter(productTaskMatch[1] ?? "");
           const task = await context.productService.getTask(taskId);
-          if (!task || (
-            task.assigneeWallet &&
-            task.assigneeWallet.toLowerCase() !== wallet.identity.walletAddress.toLowerCase()
-          )) {
+          if (!task) {
+            return taskNotFound();
+          }
+          const walletAddress = wallet.identity.walletAddress.toLowerCase();
+          if (task.assigneeWallet) {
+            if (task.assigneeWallet.toLowerCase() !== walletAddress) {
+              return taskNotFound();
+            }
             return {
-              status: 404,
-              body: { error: "product_task_not_found" }
+              status: 200,
+              body: { task }
             };
+          }
+          let order: ProductOrderApiDTO | undefined;
+          try {
+            order = await context.productService.getOrder(task.orderId);
+          } catch (error) {
+            if (error instanceof ProductOrderLookupError) {
+              // 订单身份无法唯一定位时参与者判定无从建立，按不可见收口。
+              return taskNotFound();
+            }
+            throw error;
+          }
+          if (!order || !orderVisibleToParticipant(
+            order,
+            walletAddress,
+            await acceptedParticipantOrderIds(context, wallet.identity.walletAddress)
+          )) {
+            return taskNotFound();
           }
           return {
             status: 200,
@@ -485,6 +517,13 @@ function orderVisibleToParticipant(
   return participants.size === 0 ||
     participants.has(walletAddress) ||
     (order.orderId ? acceptedOrderIds.has(order.orderId.toLowerCase()) : false);
+}
+
+function taskNotFound(): ApiResponse {
+  return {
+    status: 404,
+    body: { error: "product_task_not_found" }
+  };
 }
 
 async function withStorageGuard(action: () => Promise<ApiResponse>): Promise<ApiResponse> {

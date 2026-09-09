@@ -1106,6 +1106,89 @@ describe("product API routes", () => {
       }));
   });
 
+  it("hides unassigned on-chain tasks from authenticated wallets outside the order participants", async () => {
+    // 读面收紧：未指派任务随订单走参与者判定（参与者集合含链上指派、
+    // overlay 委任与订单创建者）——无关认证钱包不可见（列表不出现、
+    // 详情 404 不泄露存在性）；订单参与者照常可见；已指派任务的
+    // "仅受理人本人"语义不变。
+    const unassignedHookId = bytes32Hex("0304");
+    const unassignedStageId = bytes32Text("buyer.sign-contract");
+    const unassignedHookName = bytes32Text("sign-contract");
+    const creatorWallet = routeTestWallet(5);
+    const outsiderHeaders = { "x-uvp-wallet-address": routeTestWallet(7) };
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineProductEvents(),
+        // 基础 fixture 的任务经 overlay 委任指派给 overlayExecutor，
+        // 订单因此带参与者集合；另建一个无任何指派的未指派任务。
+        chainEvent(8n, "StageExecutorPatchApplied", {
+          orderId: stateMachineOrderId,
+          selectorStageId,
+          targetStageId: stageId,
+          selector: submitter,
+          executor: overlayExecutor,
+          role: bytes32Text("customs-executor"),
+          executorMetadataHash: metadataHash,
+          patchHash: bytes32Hex("9201"),
+          patchNonce: 1n,
+          metadataURI: "ipfs://stage-executor/customs-1"
+        }),
+        chainEvent(9n, "StageExecutorActivated", {
+          orderId: stateMachineOrderId,
+          targetStageId: stageId,
+          executor: overlayExecutor,
+          role: bytes32Text("customs-executor"),
+          metadataHash,
+          patchNonce: 1n
+        }),
+        chainEvent(10n, "OrderRelayerRecorded", {
+          orderId: stateMachineOrderId,
+          planId: crossBorderPlanIds.planId,
+          relayer: routeTestWallet(6),
+          creator: creatorWallet
+        }),
+        chainEvent(11n, "HookReady", {
+          orderId: stateMachineOrderId,
+          hookId: unassignedHookId,
+          stageId: unassignedStageId,
+          hookName: unassignedHookName
+        })
+      ]
+    });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
+    const assignedTaskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
+    const unassignedTaskId = `${contractAddress}:${stateMachineOrderId}:${unassignedHookId}`;
+
+    // 无关认证钱包：未指派任务列表不可见、详情 404；已指派任务保持
+    // 仅受理人可见（404）。
+    const outsiderList = await router.handle({ method: "GET", pathname: "/product/tasks", headers: outsiderHeaders });
+    expect((outsiderList.body as { tasks: Array<{ taskId: string }> }).tasks.map((task) => task.taskId))
+      .not.toContain(unassignedTaskId);
+    const outsiderDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${unassignedTaskId}`, headers: outsiderHeaders });
+    expect(outsiderDetail.status).toBe(404);
+    expect((outsiderList.body as { tasks: Array<{ taskId: string }> }).tasks.map((task) => task.taskId))
+      .not.toContain(assignedTaskId);
+    const outsiderAssignedDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${assignedTaskId}`, headers: outsiderHeaders });
+    expect(outsiderAssignedDetail.status).toBe(404);
+
+    // 订单参与者（overlay 委任执行者）：未指派任务列表可见、详情 200。
+    const participantList = await router.handle({ method: "GET", pathname: "/product/tasks", headers: { "x-uvp-wallet-address": overlayExecutor } });
+    expect((participantList.body as { tasks: Array<{ taskId: string }> }).tasks.map((task) => task.taskId))
+      .toContain(unassignedTaskId);
+    const participantDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${unassignedTaskId}`, headers: { "x-uvp-wallet-address": overlayExecutor } });
+    expect(participantDetail.status).toBe(200);
+
+    // 订单创建者：无任务指派也属于订单参与者，未指派任务详情可读。
+    const creatorDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${unassignedTaskId}`, headers: { "x-uvp-wallet-address": creatorWallet } });
+    expect(creatorDetail.status).toBe(200);
+    expect((creatorDetail.body as { task: Record<string, unknown> }).task).toMatchObject({
+      taskId: unassignedTaskId
+    });
+    expect((creatorDetail.body as { task: Record<string, unknown> }).task.assigneeWallet).toBeUndefined();
+  });
+
   it("selects task plugins from explicit slot capability metadata for generic authorized roles", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
