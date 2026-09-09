@@ -128,7 +128,9 @@ export type ParticipantNotificationKind =
   | "signal_submitted"
   | "submission_confirmed"
   | "submission_failed"
-  | "task_revoked";
+  | "task_revoked"
+  // 载荷指向的链上定位已被 reorg 回滚：通知内容不可信，需引导查证最新链上状态。
+  | "notification_invalidated";
 
 export type ParticipantNotificationSeverity = "info" | "action" | "warning" | "critical" | "success";
 export type ParticipantNotificationReadStatus = "read" | "unread";
@@ -160,6 +162,11 @@ export interface ParticipantNotificationRecord {
   readonly actionHref: string;
   readonly proofHref?: string;
   readonly proof?: ParticipantNotificationProof;
+  /** kind=notification_invalidated 时的结构化失效状态：前端按状态呈现操作指引，不解析文案。 */
+  readonly invalidation?: {
+    readonly status: "invalidated";
+    readonly reason?: string;
+  };
   readonly createdAt: string;
   readonly readAt?: string;
   readonly source: "chain_projection" | "notification_delivery";
@@ -922,15 +929,17 @@ async function buildParticipantNotificationList(input: {
   }
 
   for (const delivery of deliveries) {
-    if (delivery.status !== "failed") {
+    if (delivery.status !== "failed" && delivery.status !== "invalidated") {
       continue;
     }
     const task = delivery.taskId ? uniqueTaskForDelivery(tasks, delivery) : undefined;
     const order = task
       ? findOrderForTask(orders, task)
       : uniqueOrderForDelivery(orders, delivery);
-    const failed = participantDeliveryFailedNotification(delivery, task, order);
-    notifications.set(failed.notificationId, failed);
+    const record = delivery.status === "invalidated"
+      ? participantDeliveryInvalidatedNotification(delivery, task, order)
+      : participantDeliveryFailedNotification(delivery, task, order);
+    notifications.set(record.notificationId, record);
   }
 
   const withReadState: ParticipantNotificationRecord[] = [];
@@ -1085,6 +1094,30 @@ function participantDeliveryFailedNotification(
     severity: "warning",
     eventLabel: "外部通知失败",
     message: "外部渠道未确认收到提醒；任务和订单状态仍以链上索引为准。",
+    createdAt: delivery.updatedAt,
+    source: "notification_delivery"
+  };
+}
+
+function participantDeliveryInvalidatedNotification(
+  delivery: NotificationDeliveryRecord,
+  task: StateMachineTaskProjection | undefined,
+  order: StateMachineOrderProjection | undefined
+): ParticipantNotificationRecord {
+  const base = task
+    ? participantNotificationBase(task, order)
+    : participantNotificationBaseFromDelivery(delivery, order);
+  return {
+    ...base,
+    notificationId: participantNotificationId("notification_invalidated", delivery.deliveryId),
+    kind: "notification_invalidated",
+    severity: "warning",
+    eventLabel: "通知已失效",
+    message: "该提醒指向的链上记录已被重组回滚，内容不再可信。请打开订单证明核对最新链上状态；若任务仍待处理，以最新状态为准操作。",
+    invalidation: {
+      status: "invalidated",
+      ...(delivery.reason ? { reason: delivery.reason } : {})
+    },
     createdAt: delivery.updatedAt,
     source: "notification_delivery"
   };

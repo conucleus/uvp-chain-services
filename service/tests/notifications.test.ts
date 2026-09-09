@@ -442,6 +442,18 @@ describe("signal-routed notifications", () => {
     });
     // 幂等：重复失效不重复计数。
     await expect(service.invalidateDeliveriesAboveBlock({ chainId: 31337, blockNumber: 7n })).resolves.toBe(0);
+
+    // 参与者活动流以结构化状态呈现失效通知（bug_audit #25）：附操作指引，
+    // 前端不解析文案即可识别 invalidation.status。
+    const feed = await service.listParticipantNotifications({ walletAddress: supplierWallet });
+    const invalidatedFeedItem = feed.notifications.find((item) => item.kind === "notification_invalidated");
+    expect(invalidatedFeedItem).toMatchObject({
+      severity: "warning",
+      source: "notification_delivery",
+      invalidation: { status: "invalidated", reason: "reorg_rolled_back" },
+      proofHref: expect.stringContaining("/proof")
+    });
+    expect(invalidatedFeedItem?.message).toContain("订单证明");
   });
 
   it("redacts transport error messages before persisting them as lastError", async () => {
