@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import { InMemoryGovernanceStore, type IdentityTxLogDTO } from "../src/governance/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
@@ -6,7 +7,7 @@ import type {
   ProductOrderDraftDTO,
   ProductOrderTriggerRecord
 } from "../src/product/bff/types.js";
-import { TxReconcileWorker, type ReconcileReceipt, type ReconcileReceiptClient } from "../src/reconcile/index.js";
+import { TxReconcileWorker, createViemReconcileReceiptClient, type ReconcileReceipt, type ReconcileReceiptClient } from "../src/reconcile/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { InMemoryProductSubmissionStore, type ProductSubmissionDTO } from "../src/submissions/index.js";
 import type { Address, Hex } from "../src/shared/types.js";
@@ -423,6 +424,102 @@ describe("tx/indexer reconcile worker", () => {
     });
     await expect(submissionStore.getSubmission("sub_failed_without_tx")).resolves.toMatchObject({
       status: "failed"
+    });
+  });
+
+  it("surfaces gateway-style not-found transport errors as per-record failures instead of pending", async () => {
+    // 网关错误文本里的 "not found" 不代表回执缺失：吞成 pending 会在超时
+    // 车道把真实在链的交易误判成 tx_reconcile_timeout 失败。传输错误必须
+    // 响亮上抛（逐记录 catch 计 failed），记录保持原状等待下一轮。
+    const productStore = new MemoryProductBffStore();
+    const projectionStore = new MemoryProjectionStore();
+    const gatewayTx = bytes32("aaaa");
+    await productStore.createRegistration(registrationFixture({ triggerId: "registration_gateway", txHash: gatewayTx }));
+    const worker = new TxReconcileWorker({
+      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000 },
+      receiptClient: {
+        async getTransactionReceipt() {
+          throw new Error("upstream not found");
+        }
+      },
+      projectionStore,
+      productStore,
+      now: () => baseNow
+    });
+
+    const summary = await worker.runOnce();
+
+    expect(summary).toMatchObject({ registrationsChecked: 1, updated: 0, failed: 1 });
+    const untouched = await productStore.getRegistration("registration_gateway");
+    expect(untouched?.status).toBe("submitted");
+    expect(untouched).not.toHaveProperty("reconcileStatus");
+  });
+
+  it("classifies RPC receipt errors through the viem client boundary", async () => {
+    // 回执缺失判别收敛在 createViemReconcileReceiptClient 包装层：只有
+    // 明确指向交易/回执的 not found（geth "transaction not found"）才视为
+    // 缺失返回 undefined；网关类 "upstream not found" 原样上抛。
+    let rpcErrorMessage = "transaction not found";
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        error: { code: -32000, message: rpcErrorMessage }
+      }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    try {
+      const client = createViemReconcileReceiptClient({
+        rpcUrl: `http://127.0.0.1:${port}`,
+        chainId: 31337
+      });
+      await expect(client.getTransactionReceipt(bytes32("bbbb"))).resolves.toBeUndefined();
+
+      rpcErrorMessage = "upstream not found";
+      await expect(client.getTransactionReceipt(bytes32("cccc"))).rejects.toThrow(/not found/i);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("confirms governance logs whose txHash or account casing differs from the projection", async () => {
+    // 台账侧 EIP-55 混合大小写、投影侧事件解码小写：精确 === 比对会让
+    // 回执永远 miss、记录永卡 indexing。比对口径与其余路径一致 toLowerCase。
+    const projectionStore = new MemoryProjectionStore();
+    const governanceStore = new InMemoryGovernanceStore();
+    const lowercaseTx = bytes32("dddd");
+    const mixedCaseTx = `0x${"0".repeat(60)}dDdD` as Hex;
+    const mixedCaseAccount = "0x0000000000000000000000000000000000000AbC" as Address;
+    const lowercaseAccount = "0x0000000000000000000000000000000000000abc" as Address;
+    const receipts = new Map<Hex, ReconcileReceipt | undefined>([
+      [mixedCaseTx, { status: "success", blockNumber: 30n }]
+    ]);
+    await governanceStore.appendIdentityTxLog({
+      ...identityLogFixture({ txHash: mixedCaseTx }),
+      account: mixedCaseAccount
+    });
+    const worker = workerFixture({ projectionStore, governanceStore, receipts });
+
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [chainEvent(30n, lowercaseTx, 0, "IdentityBindingRegistered", {
+        bindingId: bytes32("2006"),
+        subjectId: planId,
+        account: lowercaseAccount,
+        descriptorHash: metadataHash,
+        descriptorURI: "uvp-store://identities/acme",
+        registrar: creator
+      })]
+    });
+    await worker.runOnce();
+
+    await expect(governanceStore.getTxLog("identity_log_1")).resolves.toMatchObject({
+      status: "confirmed",
+      receiptStatus: "success",
+      projectionStatus: "present"
     });
   });
 });

@@ -648,15 +648,15 @@ async function governanceProjectionConfirmation(
   if (log.action === "register_identity") {
     const identity = identities.find((item) =>
       item.subjectId === log.subjectId &&
-      (!log.account || item.account === log.account) &&
-      (!log.txHash || item.registeredAt.transactionHash === log.txHash)
+      (!log.account || item.account.toLowerCase() === log.account.toLowerCase()) &&
+      (!log.txHash || item.registeredAt.transactionHash.toLowerCase() === log.txHash.toLowerCase())
     );
     return projectionConfirmationFromProvenance(identity?.registeredAt, log.txHash);
   }
   const identity = identities.find((item) =>
     item.bindingId === log.bindingId &&
     item.status === "revoked" &&
-    (!log.txHash || item.revokedAt?.transactionHash === log.txHash)
+    (!log.txHash || item.revokedAt?.transactionHash.toLowerCase() === log.txHash.toLowerCase())
   );
   return projectionConfirmationFromProvenance(identity?.revokedAt, log.txHash);
 }
@@ -831,5 +831,15 @@ function isReceiptMissingError(error: unknown): boolean {
     return false;
   }
   const name = "name" in error ? String(error.name) : "";
-  return /ReceiptNotFound|TransactionReceiptNotFound|not found/i.test(`${name} ${error.message}`);
+  if (/ReceiptNotFound|TransactionReceiptNotFound/i.test(name)) {
+    return true;
+  }
+  // 泛 "not found" 会把网关类传输错误（"upstream/resource not found"）吞成
+  // "回执缺失"→pending：真回执被误判缺失，超时车道随后把它标成
+  // tx_reconcile_timeout 失败。viem 的错误文本必然包含方法名
+  // eth_getTransactionReceipt，不能拿方法名当语境——not found 必须紧跟
+  // transaction/receipt 词（geth "transaction not found"、viem "Transaction
+  // receipt with hash … could not be found"）。其余传输错误原样上抛，
+  // 由逐记录 catch 计失败并响亮记录。
+  return /\b(?:transaction|receipt)\s+(?:with\s+hash\s+\S+\s+)?(?:could\s+not\s+be\s+found|not\s+found)/i.test(error.message);
 }
