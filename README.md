@@ -33,3 +33,16 @@ This domain implements the service-side convergence gate for Product Schema v1,
 dynamic stage executor authority, docked Zhixu projection language, resource
 manifest/access state, Store authoring, proof/read models, operator audit, and
 signal-container producer APIs.
+
+## API Access Policy
+
+Pure on-chain fact projections are public by design: `GET
+/product/orders/:orderId/timeline` and `GET /product/orders/:orderId/proof` are
+anonymous-readable (chain events are the publicly replayable truth). In
+contrast, business-record endpoints (`GET /product/submissions/:submissionId`,
+`GET /product/order-triggers/:triggerId`, and the invite preview `GET
+/product/invites/:inviteId`) always require a session identity (the invite
+preview additionally requires the one-time invite token). Outside the `local`
+runtime profile, admin/ops surfaces additionally require a password factor
+(`x-uvp-admin-token`); plaintext whitelisted self-declared admin headers are a
+local-only development mode.
