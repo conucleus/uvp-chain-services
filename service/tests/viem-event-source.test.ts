@@ -83,6 +83,83 @@ describe("ViemChainEventSource", () => {
     ).toThrow(UnsupportedChainTargetError);
   });
 
+  it("indexes module contracts configured through flat contract keys", async () => {
+    // 写路径（server.ts moduleAddress）对模块地址扁平键优先：索引器也必须
+    // watch 扁平模块键，否则只配扁平键时 patch/dock 写入有事件无投影。
+    const dockingModuleAddress = "0x6666666666666666666666666666666666666666";
+    const dockInstanceId = "0x0000000000000000000000000000000000000000000000000000000000000901";
+    const localOrderId = "0x0000000000000000000000000000000000000000000000000000000000000902";
+    const linkedOrderId = "0x0000000000000000000000000000000000000000000000000000000000000903";
+    const dockOpenedLog = {
+      address: dockingModuleAddress,
+      blockNumber: 100n,
+      blockHash: bytes32Hex("ab"),
+      transactionHash: bytes32Hex("cf"),
+      transactionIndex: 0,
+      logIndex: 0,
+      data: encodeAbiParameters(
+        [
+          { type: "bytes32" },
+          { type: "bytes32" },
+          { type: "bytes32" },
+          { type: "bytes32" },
+          { type: "bytes32" },
+          { type: "uint8" },
+          { type: "address" }
+        ],
+        [
+          "0x0000000000000000000000000000000000000000000000000000000000000904",
+          "0x0000000000000000000000000000000000000000000000000000000000000905",
+          "0x0000000000000000000000000000000000000000000000000000000000000906",
+          "0x0000000000000000000000000000000000000000000000000000000000000907",
+          "0x0000000000000000000000000000000000000000000000000000000000000908",
+          1,
+          "0x2222222222222222222222222222222222222222"
+        ]
+      ),
+      topics: encodeEventTopics({
+        abi: INDEXER_EVENT_ABIS.UVPDockingModule,
+        eventName: "DockOpened",
+        args: { dockInstanceId, localOrderId, linkedOrderId }
+      }),
+      removed: false
+    } as Log;
+    const queriedAddresses: string[] = [];
+    const eventSource = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 0n;
+        },
+        async getLogs(input) {
+          queriedAddresses.push(input.address);
+          return input.address === dockingModuleAddress ? [dockOpenedLog] : [];
+        }
+      }
+    });
+
+    const events = await eventSource.readEvents(
+      { chainId: 84532, fromBlock: 100n, toBlock: 100n },
+      {
+        ...chainServicesConfig(),
+        network: {
+          ...chainServicesConfig().network,
+          contracts: {
+            UVPStateMachine: "0x1111111111111111111111111111111111111111",
+            UVPDockingModule: dockingModuleAddress
+          }
+        }
+      } as unknown as ChainServicesConfig
+    );
+
+    expect(queriedAddresses).toContain(dockingModuleAddress);
+    expect(events).toEqual([
+      expect.objectContaining({
+        eventName: "DockOpened",
+        contractAddress: dockingModuleAddress
+      })
+    ]);
+  });
+
   it("chunks getLogs requests under public RPC range limits", async () => {
     const calls: Array<{ address: string; fromBlock: bigint; toBlock: bigint }> = [];
     const eventSource = new ViemChainEventSource({

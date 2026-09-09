@@ -281,6 +281,34 @@ function indexedContracts(
       config.network.contracts,
       deploymentRegistryAbi,
     ),
+    // 扁平模块键与写路径（server.ts moduleAddress）同源：patch/dock 服务
+    // 只配扁平键时写入的模块事件也必须入投影，否则有写入无投影。双轨
+    // 同配且一致时按 name:address 去重；漂移由 preflight fail-closed。
+    indexedContract(
+      "UVPStagePatchModule",
+      config.network.contracts,
+      stagePatchModuleAbi,
+    ),
+    indexedContract(
+      "UVPPlanMetadataModule",
+      config.network.contracts,
+      planMetadataModuleAbi,
+    ),
+    indexedContract(
+      "UVPDerivedSignalModule",
+      config.network.contracts,
+      derivedSignalModuleAbi,
+    ),
+    indexedContract(
+      "UVPOrderLinkModule",
+      config.network.contracts,
+      orderLinkModuleAbi,
+    ),
+    indexedContract(
+      "UVPDockingModule",
+      config.network.contracts,
+      dockingModuleAbi,
+    ),
     ...stateMachineDeployments.flatMap((deployment) => {
       const modules = deployment.modules ?? {};
       const moduleContracts = [

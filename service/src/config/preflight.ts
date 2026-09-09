@@ -347,6 +347,7 @@ function runStaticPreflight(
   runStoreAuthPreflight(config, env, checks, errors);
   runNonLocalRoleSafetyPreflight(config, env, checks, errors);
   runStateMachineModulesManifestPreflight(config, checks, errors);
+  runModuleAddressDriftPreflight(config, checks, errors);
 
   if (config.relayer.broadcastEnabled) {
     if (!stateMachine) {
@@ -902,6 +903,22 @@ function runStateMachineModulesManifestPreflight(
     return;
   }
 
+  // 首项静默回退在 strict 环境同样必须消除：无 activeDeploymentId 且
+  // status=active 的部署不唯一（零个或多个）时，运行时用的是"碰巧排在
+  // 清单第一"的部署——canary/candidate 排前面就会整环境跑错部署。
+  if (!config.network.activeDeploymentId) {
+    const activeCount = deployments.filter((deployment) => deployment.status === "active").length;
+    if (activeCount !== 1) {
+      fail(
+        checks,
+        errors,
+        "contracts.state_machine_modules_manifest",
+        `stateMachineDeployments must contain exactly one status=active deployment (or an explicit activeDeploymentId) in production/testnet/staging; found ${activeCount}; refusing to silently use the first entry`
+      );
+      return;
+    }
+  }
+
   const active = selectActiveStateMachineDeployment(config);
   if (!active) {
     fail(
@@ -935,6 +952,57 @@ function runStateMachineModulesManifestPreflight(
     return;
   }
   pass(checks, "contracts.state_machine_modules_manifest");
+}
+
+const FLAT_CONTRACT_BY_MODULE_KEY = {
+  stagePatch: "UVPStagePatchModule",
+  derivedSignal: "UVPDerivedSignalModule",
+  docking: "UVPDockingModule",
+  planMetadata: "UVPPlanMetadataModule",
+  orderLink: "UVPOrderLinkModule"
+} as const;
+
+type ModuleManifestKey = keyof typeof FLAT_CONTRACT_BY_MODULE_KEY;
+
+/**
+ * 模块地址双轨一致性：扁平 contracts 键（server.ts moduleAddress 写路径
+ * 优先取、索引器也 watch）与 deployment.modules（预检对链核验）同时配置
+ * 且地址不一致时，写入与投影会指向不同合约——有写入无投影。任何环境都
+ * 不允许静默漂移；只配单轨（或两轨一致）不受影响。
+ */
+function runModuleAddressDriftPreflight(
+  config: ChainServicesConfig,
+  checks: ConfigDiagnosticCheck[],
+  errors: string[]
+): void {
+  const deployments = config.network.stateMachineDeployments ?? [];
+  if (deployments.length === 0) {
+    skip(checks, "contracts.module_address_consistency", "no nested deployment module manifest configured");
+    return;
+  }
+  const drifts: string[] = [];
+  for (const [moduleKey, contractName] of Object.entries(FLAT_CONTRACT_BY_MODULE_KEY) as readonly [ModuleManifestKey, string][]) {
+    const flat = config.network.contracts[contractName];
+    if (!flat) {
+      continue;
+    }
+    for (const deployment of deployments) {
+      const nested = deployment.modules?.[moduleKey];
+      if (nested && nested.toLowerCase() !== flat.toLowerCase()) {
+        drifts.push(`${contractName}=${flat} conflicts with deployment ${deployment.deploymentId} modules.${moduleKey}=${nested}`);
+      }
+    }
+  }
+  if (drifts.length > 0) {
+    fail(
+      checks,
+      errors,
+      "contracts.module_address_consistency",
+      `flat module contract addresses diverge from deployment module manifests: ${drifts.join("; ")}`
+    );
+    return;
+  }
+  pass(checks, "contracts.module_address_consistency");
 }
 
 function runNonLocalRoleSafetyPreflight(
@@ -1334,8 +1402,10 @@ function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Addr
 
 /**
  * 统一的 active deployment 选择口径：精确 activeDeploymentId 优先，其次
- * status=active，最后唯一回退首项。server.ts（模块地址解析）与
- * preflight（模块校验）共用，避免两处谓词漂移。
+ * status=active，最后唯一回退首项。server.ts（模块地址解析）与 preflight
+ * （模块校验）共用，避免两处谓词漂移。首项回退仅供 local 最小配置：
+ * strict 环境由 runStateMachineModulesManifestPreflight 强制显式选择
+ * （activeDeploymentId 或唯一 status=active），回退在那里不可达。
  */
 export function selectActiveStateMachineDeployment(
   config: ChainServicesConfig

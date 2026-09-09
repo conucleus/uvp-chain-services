@@ -972,6 +972,113 @@ describe("chain-services config", () => {
     })).rejects.toThrow(/activeDeploymentId .* does not match any deployment/);
   });
 
+  it("fails strict preflight when no deployment is explicitly active", async () => {
+    // 无 activeDeploymentId 且 status=active 不唯一时，select 首项回退会让
+    // "碰巧排第一"的部署（如 canary/candidate）成为整环境运行时——strict
+    // 环境必须显式选择。
+    const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-no-active-"));
+    tempDirs.push(manifestDir);
+    const manifestPath = join(manifestDir, "addresses.no-active.json");
+    const modules = {
+      stagePatch: "0x4444444444444444444444444444444444444444",
+      derivedSignal: "0x5555555555555555555555555555555555555555",
+      docking: "0x6666666666666666666666666666666666666666",
+      planMetadata: "0x8888888888888888888888888888888888888888",
+      orderLink: "0x9999999999999999999999999999999999999999",
+      lens: "0x7777777777777777777777777777777777777777"
+    };
+    writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
+      stateMachineDeployments: [
+        {
+          deploymentId: `0x${"01".repeat(32)}`,
+          stateMachineAddress: "0x1111111111111111111111111111111111111111",
+          modules,
+          deploymentBlock: "20"
+        },
+        {
+          deploymentId: `0x${"02".repeat(32)}`,
+          stateMachineAddress: "0x1212121212121212121212121212121212121212",
+          modules,
+          deploymentBlock: "30"
+        }
+      ],
+      contracts: {
+        UVPStateMachine: {
+          address: "0x1111111111111111111111111111111111111111",
+          deployment: { blockNumber: 20 }
+        },
+        UVPIdentityRegistry: {
+          address: "0x2222222222222222222222222222222222222222",
+          deployment: { blockNumber: 18 }
+        }
+      }
+    }));
+    const env = stagingEnv(tempDirs, {
+      UVP_ADDRESS_MANIFEST: manifestPath
+    });
+    await expect(runConfigPreflight(loadConfigFromEnv(env), {
+      env,
+      clients: stagingPreflightClients()
+    })).rejects.toThrow(/must contain exactly one status=active deployment/);
+  });
+
+  it("rejects flat module contract keys that diverge from deployment module manifests", async () => {
+    // 双轨同配且漂移时，写路径取扁平键、索引器/预检取 deployment.modules
+    // ——写入与投影指向不同合约。任何环境（含 local）都不得静默放行。
+    const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-drift-"));
+    tempDirs.push(manifestDir);
+    const manifestPath = join(manifestDir, "addresses.drift.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
+      stateMachineDeployments: [
+        {
+          deploymentId: `0x${"01".repeat(32)}`,
+          stateMachineAddress: "0x1111111111111111111111111111111111111111",
+          status: "active",
+          deploymentBlock: "20",
+          modules: {
+            stagePatch: "0x4444444444444444444444444444444444444444",
+            derivedSignal: "0x5555555555555555555555555555555555555555",
+            docking: "0x6666666666666666666666666666666666666666",
+            planMetadata: "0x8888888888888888888888888888888888888888",
+            orderLink: "0x9999999999999999999999999999999999999999",
+            lens: "0x7777777777777777777777777777777777777777"
+          }
+        }
+      ],
+      contracts: {
+        UVPStateMachine: {
+          address: "0x1111111111111111111111111111111111111111",
+          deployment: { blockNumber: 20 }
+        },
+        UVPIdentityRegistry: {
+          address: "0x2222222222222222222222222222222222222222",
+          deployment: { blockNumber: 18 }
+        },
+        // 与 deployment.modules.stagePatch 漂移的扁平键。
+        UVPStagePatchModule: {
+          address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          deployment: { blockNumber: 21 }
+        }
+      }
+    }));
+
+    const env = stagingEnv(tempDirs, { UVP_ADDRESS_MANIFEST: manifestPath });
+    await expect(runConfigPreflight(loadConfigFromEnv(env), {
+      env,
+      clients: stagingPreflightClients()
+    })).rejects.toThrow(/flat module contract addresses diverge from deployment module manifests/);
+
+    const localConfig = loadConfigFromEnv({
+      UVP_ADDRESS_MANIFEST: manifestPath,
+      UVP_RPC_URL: "http://127.0.0.1:8545"
+    });
+    await expect(runConfigPreflight(localConfig, {
+      env: { UVP_ADDRESS_MANIFEST: manifestPath }
+    })).rejects.toThrow(/UVPStagePatchModule=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa conflicts with deployment/);
+  });
+
   it("enforces a finality confirmation floor of 2 in production preflight", async () => {
     // 确认数是 reorg 缓冲，配 1 形同虚设——单块重组即可穿透
     // 最终性窗口；生产下限 2，启动期显式失败。（达标面由既有生产
