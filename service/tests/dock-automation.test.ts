@@ -100,6 +100,54 @@ describe("dock liveness keeper", () => {
     expect(submitted.length).toBe(2);
   });
 
+  it("rate-bounds failed broadcasts with the same finality window (N-80)", async () => {
+    // 持续失败的绑定若不占窗会每轮重发，gas 燃烧无速率上限；成败同占
+    // 窗口后，每绑定每窗口至多一次尝试，失败仍在 summary.skipped 可见。
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({ deploymentBlock: 0n, events: dockEvents() });
+
+    let nowMs = 1_000_000;
+    let submitCalls = 0;
+    const worker = new DockAutomationWorker({
+      config: {
+        enabled: true,
+        pollIntervalMs: 5_000,
+        maxCandidatesPerRun: 4,
+        redeliveryWindowMs: 60_000
+      },
+      projectionStore: store,
+      dockingAddress: dockingModuleAddress,
+      chainId,
+      routeSource: { listRoutes: async () => [dockRoute()] },
+      submitter: {
+        submit: async () => {
+          submitCalls += 1;
+          throw new Error("reverted: binding hash mismatch");
+        }
+      },
+      now: () => new Date(nowMs)
+    });
+
+    const first = await worker.runOnce();
+    expect(first).toMatchObject({ inputCandidates: 1, submitted: 0, deduplicated: 0 });
+    expect(first.skipped.length).toBe(1);
+    expect(submitCalls).toBe(1);
+
+    // 窗口内的后续轮次不再重发失败的绑定。
+    nowMs += 10_000;
+    const second = await worker.runOnce();
+    expect(second).toMatchObject({ inputCandidates: 1, submitted: 0, deduplicated: 1 });
+    expect(second.skipped.length).toBe(0);
+    expect(submitCalls).toBe(1);
+
+    // 窗口过后允许重试一次（投影仍未呈现 delivery）。
+    nowMs += 60_000;
+    const third = await worker.runOnce();
+    expect(third).toMatchObject({ inputCandidates: 1, submitted: 0, deduplicated: 0 });
+    expect(third.skipped.length).toBe(1);
+    expect(submitCalls).toBe(2);
+  });
+
   it("stops submitting once the projection reflects the delivery", async () => {
     const events = [
       ...dockEvents(),

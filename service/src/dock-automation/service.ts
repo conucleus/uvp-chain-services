@@ -65,10 +65,13 @@ export class DockAutomationWorker implements LifecycleService {
   #checking = false;
   #lastSummary: DockAutomationRunSummary | undefined;
   /**
-   * 最终性窗口去重：key → 最近一次成功广播时刻。投影要等
-   * 链事件 finalize+索引后才呈现 delivery，窗口内逐轮重发同一 binding 是
-   * 纯 gas 浪费的 no-op 交易；窗口过后仍未投递才允许重试（覆盖交易
-   * 丢失）。进程内状态即可：keeper 是单实例写者。
+   * 广播 + 最终性窗口去重：同一 key 在 redeliveryWindowMs 内已尝试过
+   * （无论成败）则本轮跳过。成功后窗口防的是 finalize+索引延迟内的
+   * 纯 gas 浪费；失败后同样占窗——否则持续 revert 的绑定每轮重发，
+   * gas 燃烧没有任何速率上限。窗口过后投影仍未呈现 delivery 才重试
+   * （覆盖交易丢失），每次重试的失败照常进 summary.skipped 可见。
+   * 进程内状态即可：keeper 是单实例写者，重启多发的最坏情形是窗口内
+   * 每绑定一条冗余交易（投递事实以投影为准，重启后仍收敛）。
    */
   readonly #lastBroadcastAt = new Map<string, number>();
 
@@ -268,9 +271,8 @@ export class DockAutomationWorker implements LifecycleService {
   }
 
   /**
-   * 广播 + 最终性窗口去重：同一 key 在 redeliveryWindowMs 内
-   * 已成功广播过则本轮跳过（计数 deduplicated，不静默）；窗口过后投影
-   * 仍未呈现 delivery 才会重试，覆盖交易丢失的情形。
+   * 广播 + 最终性窗口去重：同一 key 在 redeliveryWindowMs 内已尝试过
+   * （成败同占窗）则本轮跳过（计数 deduplicated，不静默）。
    */
   #submitCalldata(
     data: Hex,
@@ -288,6 +290,7 @@ export class DockAutomationWorker implements LifecycleService {
       summary.deduplicated += 1;
       return Promise.resolve();
     }
+    this.#lastBroadcastAt.set(dedupeKey, nowMs);
     return submitter
       .submit({
         to: this.#dockingAddress,
@@ -295,7 +298,6 @@ export class DockAutomationWorker implements LifecycleService {
         ...(this.#config.maxGasPerTx ? { gas: this.#config.maxGasPerTx } : {})
       })
       .then(() => {
-        this.#lastBroadcastAt.set(dedupeKey, this.#now().getTime());
         summary.submitted += 1;
       })
       .catch((error) => {
