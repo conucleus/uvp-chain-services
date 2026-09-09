@@ -628,6 +628,15 @@ describe("durable storage", () => {
     await expect(store.reserveNonce("nonce-key")).resolves.toBe(false);
     await store.releaseNonce("nonce-key");
     await expect(store.reserveNonce("nonce-key")).resolves.toBe(true);
+    // 陈旧预留接管（硬崩溃泄漏形态）：命中预留时，仅当行的预留时间早于
+    // staleBefore 才条件更新接管；接管后行时间刷新，早于新时间的阈值
+    // 不再命中（未过期仍拒绝）。
+    await expect(store.reserveNonce("nonce-key", {
+      staleBefore: new Date(Date.now() + 60_000).toISOString(),
+    })).resolves.toBe(true);
+    await expect(store.reserveNonce("nonce-key", {
+      staleBefore: new Date(Date.now() - 60_000).toISOString(),
+    })).resolves.toBe(false);
     await store.putSubmission(submission);
     await store.markPreparedUsed(
       prepared.prepareId,
@@ -1428,6 +1437,12 @@ describePostgres(
       await expect(
         reopened.submissionStore.reserveNonce("nonce-key-postgres"),
       ).resolves.toBe(false);
+      // 陈旧预留接管与 sqlite 同判据：预留行早于 staleBefore 才接管。
+      await expect(
+        reopened.submissionStore.reserveNonce("nonce-key-postgres", {
+          staleBefore: new Date(Date.now() + 60_000).toISOString(),
+        }),
+      ).resolves.toBe(true);
       await expect(
         reopened.submissionStore.getPrepared(prepared.prepareId),
       ).resolves.toMatchObject({

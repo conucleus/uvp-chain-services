@@ -328,7 +328,13 @@ export function createProductSubmissionService(options: ProductSubmissionService
       }
 
       const nonceKey = submissionNonceKey(prepared);
-      const reserved = await store.reserveNonce(nonceKey);
+      // 授权有效期（prepare TTL）即陈旧预留阈值：存活中的 submit 要么在
+      // 落档事务内收尾要么显式释放，预留年龄超过一个授权窗口只可能是
+      // 进程在 reserve 与落档之间硬崩溃留下的泄漏行——条件更新接管，
+      // 未过期仍按重复拒绝。
+      const reserved = await store.reserveNonce(nonceKey, {
+        staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString()
+      });
       if (!reserved) {
         await audit.record({
           type: "relayer.submit.duplicate_nonce",

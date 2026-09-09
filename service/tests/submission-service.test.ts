@@ -944,6 +944,103 @@ describe("product task submissions", () => {
     });
   });
 
+  it("takes over a stale nonce reservation after a hard crash and still 409s an unexpired one", async () => {
+    // 崩溃窗口模拟：预留 nonce 后、广播前进程硬崩溃——落档事务（失败
+    // 档案 + releaseNonce）从未提交，泄漏的预留行在持久 store 里留存的
+    // 状态由本测试的 store 对象扮演（进程重启后仍在）。授权有效期内的
+    // 重试仍 409；超过授权有效期后重新 prepare（同 nonce 工厂、同 key）
+    // 由陈旧预留接管恢复，同 prepareId 的签名作废走新 prepare。
+    let clock = baseNow.getTime();
+    const now = () => new Date(clock);
+    const fixture = await submissionFixture({ now });
+    const inner = new InMemoryProductSubmissionStore({ now });
+    let prepareCounter = 0;
+    let submissionCounter = 0;
+    let broadcastCalls = 0;
+    let putSubmissionCalls = 0;
+    const broadcast: SubmissionBroadcastAdapter = {
+      attemptsBroadcast: true,
+      async broadcast(): Promise<SubmissionBroadcastResult> {
+        broadcastCalls += 1;
+        if (broadcastCalls === 1) {
+          throw new Error("rpc connection reset before writeContract");
+        }
+        return { status: "submitted" as const, txHash: txHash("41"), blockNumber: "7" };
+      }
+    };
+    const crashedStore: ProductSubmissionStore = {
+      putPrepared: (record) => inner.putPrepared(record),
+      getPrepared: (prepareId) => inner.getPrepared(prepareId),
+      markPreparedUsed: (prepareId, submissionId, usedAt) => inner.markPreparedUsed(prepareId, submissionId, usedAt),
+      reserveNonce: (key, options) => inner.reserveNonce(key, options),
+      releaseNonce: (key) => inner.releaseNonce(key),
+      // 硬崩溃：首次落档写丢失（catch 内失败档案写同败，releaseNonce
+      // 随之未执行）；重启后的进程落档恢复正常。
+      putSubmission: async (submission) => {
+        putSubmissionCalls += 1;
+        if (putSubmissionCalls === 1) {
+          throw new Error("process died before the submission was persisted");
+        }
+        return inner.putSubmission(submission);
+      },
+      getSubmission: (submissionId) => inner.getSubmission(submissionId),
+      listSubmissions: () => inner.listSubmissions()
+    };
+    const service = createProductSubmissionService({
+      productTasks: { getTask: async (taskId) => taskId === task.taskId ? task : undefined },
+      evidenceReader: fixture.evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => planId,
+      authorization: allowListedSubmissionAuthorization([{
+        orderId: task.orderId,
+        stageIdentifier: task.stageId,
+        signalName: "confirm_stage",
+        submitter
+      }]),
+      broadcastAdapter: broadcast,
+      store: crashedStore,
+      now,
+      prepareIdFactory: () => `prep_${++prepareCounter}`,
+      submissionIdFactory: () => `sub_${++submissionCounter}`,
+      nonceFactory: () => "42"
+    });
+    const prepared = await prepare({ service, evidence: fixture.evidence, task });
+    const signature = await signPrepared(prepared);
+
+    // 首次提交：预留后崩溃，泄漏预留行且无档案、prepare 未消费。
+    await expect(service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toThrow("process died before the submission was persisted");
+    expect(broadcastCalls).toBe(1);
+
+    // 授权有效期内重试同 prepareId：预留未过期，仍 409 duplicate_submit。
+    clock = baseNow.getTime() + 5 * 60_000;
+    await expect(service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toMatchObject({ code: "duplicate_submit", status: 409 });
+
+    // 超过授权有效期后重新 prepare（同 nonce → 同 key）：陈旧预留被
+    // 条件更新接管，提交成功，无需人工清表。
+    clock = baseNow.getTime() + 11 * 60_000;
+    const reprepared = await prepare({ service, evidence: fixture.evidence, task });
+    const resigned = await signPrepared(reprepared);
+    const recovered = await service.submit(task.taskId, {
+      prepareId: reprepared.prepareId,
+      walletAddress: submitter,
+      signature: resigned
+    });
+    expect(recovered).toMatchObject({
+      status: "submitted",
+      txHash: txHash("41")
+    });
+    expect(broadcastCalls).toBe(2);
+  });
+
   it("classifies getChainId RPC failures as failed broadcast results instead of throwing", async () => {
     const walletClient = {
       account: { address: "0x9999999999999999999999999999999999999999" },

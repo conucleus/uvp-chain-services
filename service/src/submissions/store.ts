@@ -3,7 +3,15 @@ import type { PreparedSubmissionRecord, ProductSubmissionDTO, ProductSubmissionS
 export class InMemoryProductSubmissionStore implements ProductSubmissionStore {
   readonly #prepared = new Map<string, PreparedSubmissionRecord>();
   readonly #submissions = new Map<string, ProductSubmissionDTO>();
-  readonly #reservedNonceKeys = new Set<string>();
+  readonly #reservedNonceKeys = new Map<string, string>();
+  readonly #now: () => Date;
+
+  constructor(options: { readonly now?: () => Date } = {}) {
+    // 预留年龄判定要求写入时间与调用方时钟同源（持久 store 用系统时钟，
+    // 内存 store 在服务时钟可注入的语境下必须可对齐），否则陈旧预留
+    // 接管在注入时钟下永不触发。
+    this.#now = options.now ?? (() => new Date());
+  }
 
   async putPrepared(record: PreparedSubmissionRecord): Promise<void> {
     this.#prepared.set(record.prepareId, record);
@@ -25,11 +33,19 @@ export class InMemoryProductSubmissionStore implements ProductSubmissionStore {
     });
   }
 
-  async reserveNonce(key: string): Promise<boolean> {
-    if (this.#reservedNonceKeys.has(key)) {
-      return false;
+  async reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean> {
+    const reservedAt = this.#now().toISOString();
+    const existing = this.#reservedNonceKeys.get(key);
+    if (existing !== undefined) {
+      // 与持久实现同判据：只接管早于 staleBefore 的陈旧预留，未过期的
+      // 预留可能属于存活中的提交，仍按重复拒绝。
+      if (!options?.staleBefore || existing >= options.staleBefore) {
+        return false;
+      }
+      this.#reservedNonceKeys.set(key, reservedAt);
+      return true;
     }
-    this.#reservedNonceKeys.add(key);
+    this.#reservedNonceKeys.set(key, reservedAt);
     return true;
   }
 
