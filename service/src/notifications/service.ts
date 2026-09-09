@@ -48,6 +48,9 @@ export type NotificationSkippedReason =
   | "transport_not_supported"
   | "executor_watch_self_managed"
   | "transport_adapter_missing"
+  // SignalSubmitted 事件缺可解码的 planId/orderId：无法定位订单桶，
+  // 派生被隔离，但丢弃必须落账可数（否则丢事件在台账不可见）。
+  | "event_scope_ids_missing"
   // dead_letter 终态的原因码（自动补投预算耗尽）：与 skipped 原因共用
   // reason 词表，不入枚举会在 evidence 视图被统一掩成
   // redacted_operator_reason，自动耗尽终态不可归因。
@@ -396,11 +399,22 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         const sourceId = bytes32Arg(event, "sourceId");
         const signalId = bytes32Arg(event, "signalId");
         // SignalSubmitted is plan-scoped on the frozen state-machine ABI.
-        // An event without a decodable planId is isolated like the indexer's
-        // undecodable logs (skipped without a delivery record): bare order
-        // ids never resolve, so two plans reusing the same orderId cannot
-        // receive each other's notification.
+        // An event without a decodable planId cannot resolve its order bucket
+        // and is isolated (no notification derivation), but the drop must be
+        // countable: a silent continue leaves lost events invisible in the
+        // run summary and delivery ledger.
         if (!planId || !orderId) {
+          updateIntentSummary(summary, await saveSkippedSignalDelivery({
+            deliveryStore,
+            event,
+            order: undefined,
+            signal: undefined,
+            receiverHook: undefined,
+            supplierMetadata: undefined,
+            reason: "event_scope_ids_missing",
+            transportType: undefined,
+            now
+          }));
           continue;
         }
         const order = await options.store.getStateMachineOrder(
@@ -883,6 +897,7 @@ function isNotificationSkippedReason(reason: string): reason is NotificationSkip
     "transport_not_supported",
     "executor_watch_self_managed",
     "transport_adapter_missing",
+    "event_scope_ids_missing",
     "delivery_attempts_exhausted",
     "reorg_rolled_back"
   ].includes(reason);

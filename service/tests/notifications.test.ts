@@ -138,7 +138,8 @@ describe("signal-routed notifications", () => {
     const service = serviceFor(store, supplierStore, sent);
 
     // 冻结 ABI 事件恒带 planId；缺 planId 的事件与索引器"不可解码日志"同
-    // 口径：直接隔离，不落投递记录，也绝不按裸 orderId 解析。
+    // 口径：直接隔离，绝不按裸 orderId 解析。丢弃必须落 skipped 台账
+    // 并计数——静默 continue 会让丢掉的事件在运行摘要与投递台账里消失。
     const summary = await service.processSignalSubmittedEvents([
       chainEvent(6n, "SignalSubmitted", {
         orderId,
@@ -153,11 +154,17 @@ describe("signal-routed notifications", () => {
 
     expect(summary).toMatchObject({
       signalsProcessed: 0,
-      deliveryIntents: 0,
+      deliveryIntents: 1,
       sent: 0,
-      skipped: 0
+      skipped: 1
     });
-    expect(deliveries).toEqual([]);
+    expect(deliveries).toEqual([
+      expect.objectContaining({
+        kind: "signal_received",
+        status: "skipped",
+        reason: "event_scope_ids_missing"
+      })
+    ]);
     expect(sent).toEqual([]);
   });
 
