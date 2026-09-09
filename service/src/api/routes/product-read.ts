@@ -1,4 +1,5 @@
 import type { ProductParticipantAssignmentDTO } from "../../product/bff/types.js";
+import { adminPrincipalFromHeaders } from "../../governance/index.js";
 import type { ProductOrderApiDTO } from "../../product/service.js";
 import {
   ProductOrderLookupError,
@@ -23,6 +24,16 @@ export function createProductReadRouteModule(options: {
   const routeModule: RouteModule = {
     async handle(request, context) {
       if (request.method === "GET" && request.pathname === "/product/staging/readiness") {
+        // 部署就绪探针倾倒运营细节（部署清单、角色输入姿态、样本任务
+        // 的 assigneeWallet）——与 /admin/diagnostics 同门：治理 admin
+        // 凭据才可读；公共聚合健康位走 /healthz、/readyz。
+        const principal = adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
+        if (!principal) {
+          return {
+            status: 403,
+            body: { error: "forbidden" }
+          };
+        }
         return withStorageGuard(async () => {
           const diagnostics = await context.buildDiagnostics();
           const summary = await buildProductApiStagingReadiness({

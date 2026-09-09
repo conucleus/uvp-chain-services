@@ -372,6 +372,46 @@ describe("product API routes", () => {
       });
   });
 
+  it("excludes assignee-wallet order matching from anonymous /store/search (N-72)", async () => {
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineProductEvents(),
+        // 链上授权事实 → 订单任务的 assigneeWallet=submitter。
+        chainEvent(8n, "SignalSubmitterAuthorized", {
+          orderId: stateMachineOrderId,
+          sourceId: hookId,
+          signalId,
+          submitter,
+          role: `0x${"33".repeat(32)}`,
+          metadataHash: `0x${"44".repeat(32)}`
+        })
+      ]
+    });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
+
+    // 匿名 q=钱包串 不得枚举钱包→订单关联。
+    const anonymousSearch = await router.handle({
+      method: "GET",
+      pathname: "/store/search",
+      query: { q: submitter, type: "order" }
+    });
+    expect(anonymousSearch.status).toBe(200);
+    expect((anonymousSearch.body as { results: { orderId?: string }[] }).results).toEqual([]);
+
+    // 已认证 Store 读（运营方）保留按钱包查单的运维检索能力。
+    const operatorSearch = await router.handle({
+      method: "GET",
+      pathname: "/store/search",
+      query: { q: submitter, type: "order" },
+      headers: storeOperatorHeaders
+    });
+    expect(operatorSearch.status).toBe(200);
+    expect((operatorSearch.body as { results: { resultType: string; id: string }[] }).results)
+      .toEqual([expect.objectContaining({ resultType: "order", id: stateMachineOrderId })]);
+  });
+
   it("includes Store search projection syncing state", async () => {
     const store = new MemoryProjectionStore();
     await store.saveSyncState({

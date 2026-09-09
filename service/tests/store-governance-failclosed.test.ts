@@ -1110,7 +1110,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress
       });
-      const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness" });
+      const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness", headers: adminHeaders });
       expect(response.status).toBe(503);
       const body = response.body as { reasons: string[]; indexer: { rebuildReady: boolean; rebuildStatus: string } };
       // 重建状态未知（无 rebuild 记录）→ rebuildReady=false + 明确 reason。

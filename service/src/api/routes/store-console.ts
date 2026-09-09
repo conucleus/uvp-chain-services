@@ -88,24 +88,27 @@ export function createStoreConsoleRouteModule(options: {
       if (request.method === "GET" && request.pathname === "/store/search") {
         // 供应商目录读门槛（与 /store/suppliers 同口径）：供应商命中暴露
         // 钱包精确匹配与审核状态，匿名不可枚举。type=supplier 显式查询
-        // 未认证即 401/403；all 查询对匿名静默剔除供应商命中。
+        // 未认证即 401/403；all 查询对匿名静默剔除供应商命中。订单的
+        // assigneeWallet 匹配同口径：匿名 q=钱包串 不得枚举钱包→订单关联。
         const type = parseStoreSearchType(request.query?.type);
         const supplierOnly = type === "supplier";
         const access = await context.storeIdentityProvider.resolve(request.headers);
-        const supplierReadable = hasStoreCapability(access, "store.read") && isStoreAccessAuthenticated(access);
-        if (supplierOnly && !supplierReadable) {
+        const authenticatedRead = hasStoreCapability(access, "store.read") && isStoreAccessAuthenticated(access);
+        if (supplierOnly && !authenticatedRead) {
           const resource = { type: "store_supplier" };
           if (isStoreAccessAuthenticated(access)) {
             return forbiddenStoreCapabilityResponse(access, "store.read");
           }
           return unauthorizedStoreCapabilityResponse(access, "store.read");
         }
-        const body = await context.storeConsoleService.search(parseStoreSearchQuery(request.query));
+        const body = await context.storeConsoleService.search(parseStoreSearchQuery(request.query), {
+          walletFieldMatching: authenticatedRead
+        });
         // search 过滤已下架——与 /store/zhixus 的
         // 口径一致（运营方可见，便于治理观察）。
         const filtered = await filterDelistedSearchResults(request, context, body);
         const record = filtered as { readonly results?: readonly { readonly resultType?: string }[] };
-        if (!supplierReadable && record?.results?.some((result) => result.resultType === "supplier")) {
+        if (!authenticatedRead && record?.results?.some((result) => result.resultType === "supplier")) {
           return {
             status: 200,
             body: {

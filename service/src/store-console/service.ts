@@ -48,8 +48,17 @@ export interface StoreConsoleListDTO {
 export interface StoreConsoleService {
   listZhixus(query?: StoreConsoleListQuery): Promise<StoreConsoleListDTO>;
   getZhixu(zhixuId: string): Promise<StoreZhixuDetailDTO | undefined>;
-  search(query: StoreSearchQuery): Promise<StoreSearchResponseDTO>;
+  search(query: StoreSearchQuery, options?: StoreSearchOptions): Promise<StoreSearchResponseDTO>;
   listOrderCandidates(orderId: string): Promise<StoreOrderCandidatesResponseDTO>;
+}
+
+export interface StoreSearchOptions {
+  /**
+   * assigneeWallet 参与订单/任务匹配：钱包→订单关联是业务侧数据，
+   * 匿名查询按钱包串枚举他人订单与供应商命中同口径收敛——只有
+   * 已认证读（会话/JWT）允许按钱包字段匹配。
+   */
+  readonly walletFieldMatching: boolean;
 }
 
 export function createStoreConsoleService(options: {
@@ -85,8 +94,8 @@ export function createStoreConsoleService(options: {
       return zhixu ? toStoreZhixuDetailDTO(row, zhixu) : toStoreZhixuDetailDTO(row, detailFallbackFromRow(row));
     },
 
-    async search(query) {
-      return searchStore(options, query);
+    async search(query, searchOptions) {
+      return searchStore(options, query, searchOptions);
     },
 
     async listOrderCandidates(orderId) {
@@ -166,12 +175,14 @@ async function searchStore(
     readonly store: ProjectionStore;
     readonly supplierMetadataStore: StoreSupplierMetadataStore;
   },
-  query: StoreSearchQuery
+  query: StoreSearchQuery,
+  searchOptions?: StoreSearchOptions
 ): Promise<StoreSearchResponseDTO> {
   const rawQuery = query.query ?? "";
   const normalizedQuery = normalizeSearchText(rawQuery);
   const type = query.type ?? "all";
   const limit = clampLimit(query.limit);
+  const walletFieldMatching = searchOptions?.walletFieldMatching ?? false;
   const [zhixuList, orders, suppliers, syncState] = await Promise.all([
     buildStoreConsoleZhixus(options),
     options.productService.listOrders(),
@@ -239,7 +250,7 @@ async function searchStore(
         if (ambiguousExactOrderId && normalizeSearchText(order.orderId) === normalizedQuery) {
           continue;
         }
-        const matchedFields = orderMatchedFields(order, normalizedQuery);
+        const matchedFields = orderMatchedFields(order, normalizedQuery, walletFieldMatching);
         if (matchedFields.length > 0) {
           pushResult(orderSearchResult(order, matchedFields));
         }
@@ -369,26 +380,27 @@ function zhixuMatchedFields(
   return [...new Set(fields)];
 }
 
-function orderMatchedFields(order: ProductOrderApiDTO, normalizedQuery: string): readonly string[] {
+function orderMatchedFields(order: ProductOrderApiDTO, normalizedQuery: string, walletFieldMatching: boolean): readonly string[] {
   const fields: string[] = [];
   addMatch(fields, "orderId", order.orderId, normalizedQuery);
   addMatch(fields, "title", order.title, normalizedQuery);
   addMatch(fields, "zhixuId", order.zhixuId, normalizedQuery);
   addMatch(fields, "currentStage", order.currentStageName, normalizedQuery);
   addMatch(fields, "status", order.statusLabel, normalizedQuery);
-  if (order.tasks?.some((task) => taskMatched(task, normalizedQuery))) {
+  if (order.tasks?.some((task) => taskMatched(task, normalizedQuery, walletFieldMatching))) {
     fields.push("tasks");
   }
   return [...new Set(fields)];
 }
 
-function taskMatched(task: ProductTaskApiDTO, normalizedQuery: string): boolean {
+function taskMatched(task: ProductTaskApiDTO, normalizedQuery: string, walletFieldMatching: boolean): boolean {
   return [
     task.taskId,
     task.title,
     task.subtitle,
     task.assigneeRole,
-    task.assigneeWallet,
+    // assigneeWallet 匹配是钱包→订单枚举通道，仅对已认证读开放。
+    ...(walletFieldMatching && task.assigneeWallet ? [task.assigneeWallet] : []),
     task.stageName
   ].some((field) => typeof field === "string" && normalizeSearchText(field).includes(normalizedQuery));
 }

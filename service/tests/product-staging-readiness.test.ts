@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { crossBorderPlanIds } from "@uvp-eth/product-dto/fixtures";
 import { buildConfigDiagnostics, loadConfigFromEnv, type ConfigDiagnostics } from "../src/config/index.js";
@@ -36,6 +37,22 @@ const stagingDeployerAddress = "0x5cbdd86a2fa8dc4bddd8a8f69dba48572eec07fb";
 const stagingGovernancePrivateKey = "0x4444444444444444444444444444444444444444444444444444444444444444";
 const stagingGovernanceAddress = "0x7564105e977516c53be337314c7e53838967bdac";
 const generatedAt = "2026-05-01T00:00:00.000Z";
+/**
+ * 就绪探针是治理 admin 门（N-72）：运营细节匿名不可读。staging 档的
+ * admin 凭据按 #12 基线叠加口令因子（sha256 哈希比对）。
+ */
+const stagingOpsAdminToken = "staging-ops-readiness-token";
+const stagingOpsAdminHeaders = {
+  "x-uvp-admin-id": "staging-ops-1",
+  "x-uvp-admin-role": "governance_admin",
+  "x-uvp-admin-token": stagingOpsAdminToken
+};
+const stagingOpsAdminRouterOptions = {
+  governanceAdminIds: ["staging-ops-1"],
+  governanceAdminTokenHashes: [
+    createHash("sha256").update(stagingOpsAdminToken, "utf8").digest("hex")
+  ]
+};
 
 describe("Product API staging readiness", () => {
   const tempDirs: string[] = [];
@@ -44,6 +61,19 @@ describe("Product API staging readiness", () => {
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("rejects anonymous staging readiness probes with 403 (N-72)", async () => {
+    const store = new MemoryProjectionStore();
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "staging",
+      ...stagingOpsAdminRouterOptions,
+      evidenceStorage: productionSafeEvidenceStorage(),
+      now: () => new Date(generatedAt)
+    });
+    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness" });
+    expect(response.status).toBe(403);
+    expect(response.body).toMatchObject({ error: "forbidden" });
   });
 
   it("serves a no-secret ready summary from non-demo chain projections", async () => {
@@ -74,11 +104,12 @@ describe("Product API staging readiness", () => {
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: stagingDiagnostics(tempDirs),
       productRuntimeEnvironment: "staging",
+      ...stagingOpsAdminRouterOptions,
       evidenceStorage: productionSafeEvidenceStorage(),
       now: () => new Date(generatedAt)
     });
 
-    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness" });
+    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness", headers: stagingOpsAdminHeaders });
 
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
@@ -196,11 +227,12 @@ describe("Product API staging readiness", () => {
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
+      ...stagingOpsAdminRouterOptions,
       evidenceStorage: productionSafeEvidenceStorage(),
       now: () => new Date(generatedAt)
     });
 
-    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness" });
+    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness", headers: stagingOpsAdminHeaders });
 
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
@@ -234,11 +266,12 @@ describe("Product API staging readiness", () => {
     const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: failedDiagnostics,
       productRuntimeEnvironment: "staging",
+      ...stagingOpsAdminRouterOptions,
       evidenceStorage: productionSafeEvidenceStorage(),
       now: () => new Date(generatedAt)
     });
 
-    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness" });
+    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness", headers: stagingOpsAdminHeaders });
 
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
@@ -274,11 +307,12 @@ describe("Product API staging readiness", () => {
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
+      ...stagingOpsAdminRouterOptions,
       evidenceStorage: productionSafeEvidenceStorage(),
       now: () => new Date(generatedAt)
     });
 
-    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness" });
+    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness", headers: stagingOpsAdminHeaders });
 
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
