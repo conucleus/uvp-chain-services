@@ -24,8 +24,14 @@ workspace.
 
 Services may cache, project, relay, and translate chain facts, but they must not
 become the source of truth for plans, orders, signals, hooks, or identity
-bindings. The only relayed transaction surface is the plan-scoped
-`submitSignalFor` broadcast of participant-signed signals; relayers pay gas and
+bindings. The relayed transaction surfaces are the plan-scoped `submitSignalFor`
+broadcast of participant-signed signals plus several narrowly scoped paid-gas
+submissions — stage patches (`applyStageExecutorPatchFor` /
+`applyStageResourcePatchFor`), order registration
+(`triggerOrderFromOutsideFor`), dock keeper liveness submissions
+(`submitDockedInput` / `submitDockedSignal`), and governance identity
+registration/revocation (`registerIdentityBinding` /
+`revokeIdentityBinding`, see `service/README.md`); relayers pay gas and
 carry no business-action vocabulary of their own. Rebuildability from contract
 events is the default rule.
 
