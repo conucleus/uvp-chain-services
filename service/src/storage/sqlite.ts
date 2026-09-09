@@ -77,6 +77,10 @@ export async function withSqliteTransaction<T>(
   database: SqliteDatabase,
   operation: () => Promise<T>
 ): Promise<T> {
+  // BEGIN IMMEDIATE 持有写锁直到 COMMIT：operation 虽是 async 签名，事务
+  // 体内只允许本模块的同步 sqlite 调用——任何 await 外部 I/O（RPC/文件/
+  // 其他连接）都会把写锁跨事件循环持有，放大 BUSY 竞争面并可能拖垮同库
+  // 其它连接的写入。
   if (isConnectionInTransaction(database)) {
     return operation();
   }
