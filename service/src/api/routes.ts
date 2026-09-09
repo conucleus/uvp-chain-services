@@ -149,7 +149,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.now ? { now: options.now } : {})
   });
   const submissionAuthorization = options.productBffStore
-    ? productBffStoreSubmissionAuthorization(options.productBffStore)
+    ? productBffStoreSubmissionAuthorization(options.productBffStore, store)
     : undefined;
   const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
   if (productTriggerChainId === undefined) {
@@ -392,7 +392,10 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   };
 }
 
-export function productBffStoreSubmissionAuthorization(store: ProductBffStore): SubmissionAuthorizationAdapter {
+export function productBffStoreSubmissionAuthorization(
+  store: ProductBffStore,
+  projectionStore?: ProjectionStore
+): SubmissionAuthorizationAdapter {
   return {
     async authorize(request) {
       // 《授权与签名规则》§五：执行者变更/委任不抹除既有的显式订单级
@@ -424,6 +427,10 @@ export function productBffStoreSubmissionAuthorization(store: ProductBffStore): 
           return { authorized: true, source: "product_bff_trigger" };
         }
       }
+      const chainAuthorization = await chainSignalSubmitterAuthorization(projectionStore, request);
+      if (chainAuthorization) {
+        return chainAuthorization;
+      }
       const overlayAuthorization = productBffActiveStageExecutorAuthorization(request);
       if (overlayAuthorization) {
         return overlayAuthorization;
@@ -436,6 +443,42 @@ export function productBffStoreSubmissionAuthorization(store: ProductBffStore): 
           : "order trigger authorization was not found"
       };
     }
+  };
+}
+
+/**
+ * 链上事后授权（SignalSubmitterAuthorized 事件投影）：参与方在订单
+ * 创建后才拿到 (sourceId, signalId, submitter) 授权时，BFF trigger
+ * 台账里没有对应记录——不读投影会让合法参与方的 prepare-submit 403。
+ * 同号订单跨 plan 复用与 BFF 路径同口径歧义即拒。
+ */
+async function chainSignalSubmitterAuthorization(
+  projectionStore: ProjectionStore | undefined,
+  request: SubmissionAuthorizationRequest
+): Promise<SubmissionAuthorizationResult | undefined> {
+  if (!projectionStore) {
+    return undefined;
+  }
+  const orders = await projectionStore.findStateMachineOrdersByOrderId(request.onchainOrderId);
+  if (orders.length === 0) {
+    return undefined;
+  }
+  const distinctPlanIds = new Set(orders.map((order) => order.planId.toLowerCase()));
+  if (distinctPlanIds.size > 1) {
+    return {
+      authorized: false,
+      source: "chain_signal_authorization",
+      reason: "ambiguous_order_id: order id exists on multiple plans"
+    };
+  }
+  // 投影键与 indexer signalAuthorizationProjectionKey 同构：
+  // `${sourceId}:${signalId}:${submitter 小写}`。
+  const authorizationKey = `${request.sourceId}:${request.signalId}:${request.submitter.toLowerCase()}`;
+  const authorized = orders.some((order) => order.authorizations[authorizationKey] !== undefined);
+  return {
+    authorized,
+    source: "chain_signal_authorization",
+    ...(authorized ? {} : { reason: "submitter is not authorized on chain for this signal" })
   };
 }
 

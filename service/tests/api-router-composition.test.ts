@@ -115,6 +115,70 @@ describe("API router composition", () => {
     expect(recorded).toMatchObject({ authorized: true, source: "active_stage_executor_overlay" });
   });
 
+  it("submission authorization honors on-chain SignalSubmitterAuthorized projections (N-74)", async () => {
+    const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
+    const { MemoryProductBffStore } = await import("../src/product/bff/store.js");
+    const { MemoryProjectionStore } = await import("../src/storage/projection-store.js");
+
+    // 投影携带链上事后授权（SignalSubmitterAuthorized），BFF trigger
+    // 台账为空——不读投影的适配器会把合法参与方 403。
+    const submitter = "0x7777777777777777777777777777777777777777";
+    const onchainOrderId = "0x" + "9".repeat(64);
+    const sourceId = "0x" + "a".repeat(64);
+    const signalId = "0x" + "b".repeat(64);
+    const planId = "0x" + "c".repeat(64);
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(1n, "PlanRegistered", { planId, planHash: "0x" + "d".repeat(64), hookCount: 1n }),
+        chainEvent(2n, "OrderRegistered", { orderId: onchainOrderId, planId }),
+        chainEvent(3n, "SignalSubmitterAuthorized", {
+          orderId: onchainOrderId,
+          planId,
+          sourceId,
+          signalId,
+          submitter,
+          role: "0x" + "3".repeat(64),
+          metadataHash: "0x" + "4".repeat(64)
+        })
+      ]
+    });
+    const authorization = productBffStoreSubmissionAuthorization(new MemoryProductBffStore(), store);
+
+    const authorized = await authorization.authorize({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "stage-1",
+      signalName: "confirm_stage",
+      onchainOrderId,
+      sourceId,
+      signalId,
+      intent: "confirm_stage",
+      submitter
+    } as never);
+    expect(authorized).toMatchObject({ authorized: true, source: "chain_signal_authorization" });
+
+    // 未获链上授权的钱包仍被拒。
+    const stranger = "0x6666666666666666666666666666666666666666";
+    const denied = await authorization.authorize({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "stage-1",
+      signalName: "confirm_stage",
+      onchainOrderId,
+      sourceId,
+      signalId,
+      intent: "confirm_stage",
+      submitter: stranger
+    } as never);
+    expect(denied).toMatchObject({
+      authorized: false,
+      source: "chain_signal_authorization",
+      reason: expect.stringContaining("not authorized on chain")
+    });
+  });
+
   it("route modules do not cross-import; composition stays in the public factory", () => {
     const apiDir = new URL("../src/api/", import.meta.url);
     const modulesDir = new URL("routes/", apiDir);
@@ -143,4 +207,16 @@ function productionSafeEvidenceStorage(): ObjectEvidenceStorage {
       }
     }
   });
+}
+
+function chainEvent(blockNumber: bigint, eventName: string, args: Record<string, unknown>) {
+  return {
+    chainId: 31337,
+    contractAddress: "0x1111111111111111111111111111111111111111",
+    blockNumber,
+    transactionHash: `0x${blockNumber.toString(16).padStart(64, "0")}`,
+    logIndex: 0,
+    eventName,
+    args
+  };
 }
