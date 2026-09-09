@@ -128,7 +128,7 @@ describe("Store Console closure dry-run summary", () => {
       summary: {
         session: {
           accessLevel: "store_read",
-          capabilities: ["store.read", "store.audit.read"]
+          capabilities: ["store.read", "store.audit.read", "store.docking.read"]
         },
         checks: expect.arrayContaining([
           expect.objectContaining({

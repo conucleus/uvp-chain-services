@@ -694,6 +694,33 @@ describe("product API routes", () => {
     });
   });
 
+  it("requires Store identity to read a docking session by id", async () => {
+    // 会话档案含草稿信号映射，与 create/validate/save 同门（bug_audit #5：
+    // 业务档案端点一律要求会话身份）——匿名按 id 读不可枚举。
+    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
+
+    const anonymousResponse = await router.handle({
+      method: "GET",
+      pathname: "/store/docking-sessions/session_1"
+    });
+    expect(anonymousResponse.status).toBe(401);
+    expect(anonymousResponse.body).toMatchObject({
+      error: "store_identity_missing",
+      requiredCapability: "store.docking.read"
+    });
+
+    const readerResponse = await router.handle({
+      method: "GET",
+      pathname: "/store/docking-sessions/session_1",
+      headers: {
+        "x-uvp-store-role": "reader",
+        "x-uvp-store-user-id": "reader-1"
+      }
+    });
+    expect(readerResponse.status).toBe(404);
+    expect(readerResponse.body).toMatchObject({ error: "docking_session_not_found" });
+  });
+
   it("returns missing source and target signal validation errors for docking drafts", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({

@@ -52,7 +52,7 @@ describe("Store JWT/JWKS operator identity", () => {
     }))).resolves.toMatchObject({
       accessLevel: "store_read",
       roles: ["store_reader"],
-      capabilities: ["store.read", "store.audit.read"]
+      capabilities: ["store.read", "store.audit.read", "store.docking.read"]
     });
 
     const storeAdmin = await storeSession(router, await signStoreToken(fixture, {

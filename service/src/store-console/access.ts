@@ -33,6 +33,7 @@ export type StoreCapability =
   | "store.supplier.identity.register"
   | "store.supplier.identity.revoke"
   | "store.supplier.notification_profile.update"
+  | "store.docking.read"
   | "store.docking.create"
   | "store.docking.validate"
   | "store.docking.save";
@@ -97,7 +98,10 @@ export interface StoreIdentityProviderOptions {
 const STORE_PUBLIC_READ_CAPABILITIES = ["store.read"] as const satisfies readonly StoreCapability[];
 const STORE_READ_CAPABILITIES = [
   ...STORE_PUBLIC_READ_CAPABILITIES,
-  "store.audit.read"
+  "store.audit.read",
+  // docking 会话档案含草稿信号映射，与公共读（store.read）分层：
+  // 已认证 reader 及以上才可按 id 读会话，匿名不可枚举。
+  "store.docking.read"
 ] as const satisfies readonly StoreCapability[];
 
 const STORE_OPERATOR_CAPABILITIES = [
@@ -207,6 +211,7 @@ export function storeAccessRequiredLevel(capability: StoreCapability): StoreAcce
       return "store_operator";
     case "store.read":
     case "store.audit.read":
+    case "store.docking.read":
       return "store_read";
     default:
       return "store_operator";

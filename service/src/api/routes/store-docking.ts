@@ -55,17 +55,30 @@ export function createStoreDockingRouteModule(): RouteModule {
         const sessionMatch = /^\/store\/docking-sessions\/([^/]+)$/.exec(request.pathname);
         if (request.method === "GET" && sessionMatch) {
           const sessionId = decodePathParameter(sessionMatch[1] ?? "");
-          const session = await context.storeDockingService.getSession(sessionId);
-          if (!session) {
-            return {
-              status: 404,
-              body: { error: "docking_session_not_found" }
-            };
+          // 会话档案含草稿信号映射，与 create/validate/save 同门：按 id 读
+          // 也要求已认证的 Store 身份（store.docking.read），匿名不可枚举。
+          const resource = { type: "store_docking_session" as const, id: sessionId };
+          const authorization = await authorizeStoreCapability(context, request, "store.docking.read", resource);
+          if (!isStoreAuthorizationResult(authorization)) {
+            return authorization;
           }
-          return {
-            status: 200,
-            body: { session }
-          };
+          try {
+            const session = await context.storeDockingService.getSession(sessionId);
+            if (!session) {
+              return {
+                status: 404,
+                body: { error: "docking_session_not_found" }
+              };
+            }
+            await recordStoreCapabilitySuccess(context, request, authorization.access, "store.docking.read", resource);
+            return {
+              status: 200,
+              body: { session }
+            };
+          } catch (error) {
+            await recordStoreCapabilityFailure(context, request, authorization.access, "store.docking.read", resource, error);
+            throw error;
+          }
         }
 
         const validateMatch = /^\/store\/docking-sessions\/([^/]+)\/validate$/.exec(request.pathname);

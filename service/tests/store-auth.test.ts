@@ -39,7 +39,7 @@ describe("Store operator identity and capability auth", () => {
       principalId: "reader-1",
       accessLevel: "store_read",
       authMode: "dev_store_headers",
-      capabilities: ["store.read", "store.audit.read"]
+      capabilities: ["store.read", "store.audit.read", "store.docking.read"]
     });
 
     const operator = await session(router, operatorHeaders);

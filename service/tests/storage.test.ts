@@ -1050,6 +1050,8 @@ describe("durable storage", () => {
       reopenedRouter.handle({
         method: "GET",
         pathname: `/store/docking-sessions/${dockingSessionId}`,
+        // 会话档案读与写同门：需要已认证的 Store 身份（store.docking.read）。
+        headers: adminHeaders,
       }),
     ).resolves.toMatchObject({
       status: 200,
