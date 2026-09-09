@@ -703,6 +703,12 @@ describe("product task submissions", () => {
       status: "submitted",
       txHash: txHash("21")
     });
+    // 绑定载荷随提交落库：reconcile 清扫对绑定缺失的提交重试绑定时
+    // 以此为唯一持久化依据。
+    expect(submission.evidenceIds).toEqual([fixture.evidence.evidence.evidenceId]);
+    await expect(fixture.service.getSubmission("sub_1")).resolves.toMatchObject({
+      evidenceIds: [fixture.evidence.evidence.evidenceId]
+    });
     expect(evidence).toMatchObject({
       evidence: {
         status: "bound",

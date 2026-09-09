@@ -1,12 +1,14 @@
 import { createPublicClient, defineChain, http } from "viem";
 import type { GovernanceStore } from "../governance/store.js";
 import type { GovernanceBroadcastStatus, GovernanceTxLogDTO, GovernanceTxLogStatus } from "../governance/types.js";
+import type { BindEvidenceRequestDTO, EvidencePrincipal, EvidenceProofDTO, EvidenceRecordDTO } from "../evidence/types.js";
 import type { ProductBffStore } from "../product/bff/store.js";
 import type {
   ProductOrderDraftDTO,
   ProductOrderTriggerRecord,
   ProductOrderTriggerStatus
 } from "../product/bff/types.js";
+import type { AuditSink } from "../security/audit.js";
 import type { Logger, Hex, LifecycleService } from "../shared/types.js";
 import { noopLogger } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
@@ -34,6 +36,15 @@ export interface ViemReconcileReceiptClientOptions {
   readonly chainId: number;
 }
 
+/**
+ * 证据绑定清扫依赖的最小读场面：与 EvidenceService 结构子集对齐，
+ * worker 不依赖完整证据服务面。
+ */
+export interface EvidenceBindingSweeper {
+  getProof(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceProofDTO | undefined>;
+  bindEvidence(input: BindEvidenceRequestDTO, principal: EvidencePrincipal): Promise<EvidenceRecordDTO | undefined>;
+}
+
 export interface TxReconcileWorkerOptions {
   readonly config: ReconcileWorkerConfig;
   readonly receiptClient: ReconcileReceiptClient;
@@ -41,6 +52,8 @@ export interface TxReconcileWorkerOptions {
   readonly productStore?: ProductBffStore;
   readonly submissionStore?: ProductSubmissionStore;
   readonly governanceStore?: GovernanceStore;
+  readonly evidenceBinder?: EvidenceBindingSweeper;
+  readonly audit?: AuditSink;
   readonly logger?: Logger;
   readonly now?: () => Date;
 }
@@ -60,6 +73,8 @@ export class TxReconcileWorker implements LifecycleService {
   readonly #productStore: ProductBffStore | undefined;
   readonly #submissionStore: ProductSubmissionStore | undefined;
   readonly #governanceStore: GovernanceStore | undefined;
+  readonly #evidenceBinder: EvidenceBindingSweeper | undefined;
+  readonly #audit: AuditSink | undefined;
   readonly #logger: Logger;
   readonly #now: () => Date;
   #timer: NodeJS.Timeout | undefined;
@@ -76,6 +91,8 @@ export class TxReconcileWorker implements LifecycleService {
     this.#productStore = options.productStore;
     this.#submissionStore = options.submissionStore;
     this.#governanceStore = options.governanceStore;
+    this.#evidenceBinder = options.evidenceBinder;
+    this.#audit = options.audit;
     this.#logger = options.logger ?? noopLogger;
     this.#now = options.now ?? (() => new Date());
   }
@@ -139,6 +156,8 @@ export class TxReconcileWorker implements LifecycleService {
         registrationsChecked: 0,
         submissionsChecked: 0,
         governanceLogsChecked: 0,
+        evidenceBindsSwept: 0,
+        evidenceBindsRepaired: 0,
         updated: 0,
         failed: 0
       };
@@ -156,6 +175,8 @@ export class TxReconcileWorker implements LifecycleService {
       registrationsChecked: 0,
       submissionsChecked: 0,
       governanceLogsChecked: 0,
+      evidenceBindsSwept: 0,
+      evidenceBindsRepaired: 0,
       updated: 0,
       failed: 0
     };
@@ -237,10 +258,93 @@ export class TxReconcileWorker implements LifecycleService {
       }
     }
 
+    await this.#sweepEvidenceBinds(summary);
+
     this.#lastRunAt = this.#now().toISOString();
     this.#lastSummary = summary;
     this.#lastError = undefined;
     return summary;
+  }
+
+  /**
+   * 证据绑定清扫：链上提交已成功但证据绑定缺失的记录，用随提交落库的
+   * 证据引用重试绑定（relayer.submit.evidence_bind_failed 的补账车道）。
+   * 与回执复核相互独立：绑定缺失不是链上事实缺口，不写提交记录。
+   */
+  async #sweepEvidenceBinds(summary: ReconcileRunSummaryDraft): Promise<void> {
+    if (!this.#submissionStore || !this.#evidenceBinder) {
+      return;
+    }
+    for (const submission of (await this.#submissionStore.listSubmissions()).filter(isEvidenceBindSweepable)) {
+      summary.evidenceBindsSwept += 1;
+      try {
+        summary.evidenceBindsRepaired += await this.#repairSubmissionEvidenceBinds(submission);
+      } catch (error) {
+        summary.failed += 1;
+        this.#logger.warn("reconcile worker failed to rebind submission evidence", {
+          submissionId: submission.submissionId,
+          orderId: submission.orderId,
+          message: redactErrorMessage(error)
+        });
+      }
+    }
+  }
+
+  async #repairSubmissionEvidenceBinds(submission: ProductSubmissionDTO): Promise<number> {
+    if (!this.#evidenceBinder || !submission.txHash) {
+      return 0;
+    }
+    const evidenceIds = submission.evidenceIds ?? [];
+    // 绑定主体与提交通路一致（业务签名者，prepare 时已过授权与签名核验），
+    // 清扫不获得超出原绑定尝试的权限。
+    const binderPrincipal: EvidencePrincipal = {
+      id: submission.submitter.toLowerCase(),
+      role: "participant"
+    };
+    const repaired: string[] = [];
+    for (const evidenceId of evidenceIds) {
+      const proof = await this.#evidenceBinder.getProof(evidenceId, binderPrincipal);
+      // 只补可验证为未绑定的证据：读不到（无权/不存在）与哈希失配不是
+      // 绑定缺口，清扫不得越权，也不得把其它故障类别混进补账。
+      if (proof?.verificationStatus !== "unbound") {
+        continue;
+      }
+      await this.#evidenceBinder.bindEvidence({
+        evidenceId,
+        submissionId: submission.submissionId,
+        txHash: submission.txHash,
+        orderId: submission.orderId,
+        onchainOrderId: submission.onchainOrderId,
+        sourceId: submission.sourceId,
+        signalId: submission.signalId,
+        boundAt: this.#now().toISOString()
+      }, binderPrincipal);
+      repaired.push(evidenceId);
+    }
+    if (repaired.length > 0) {
+      // 审计闭合：relayer.submit.evidence_bind_failed（failed）由本事件
+      // （succeeded）收口。
+      await this.#audit?.record({
+        type: "reconcile.evidence_bind.succeeded",
+        action: submission.signalName,
+        outcome: "succeeded",
+        subject: {
+          submissionId: submission.submissionId,
+          prepareId: submission.prepareId,
+          taskId: submission.taskId,
+          orderId: submission.orderId,
+          onchainOrderId: submission.onchainOrderId,
+          stageIdentifier: submission.stageIdentifier,
+          signalName: submission.signalName,
+          submitter: submission.submitter
+        },
+        ...(submission.txHash ? { txHash: submission.txHash } : {}),
+        metadata: {
+          repairedEvidenceIds: repaired
+        }
+      });
+    }
+    return repaired.length;
   }
 
   async #runOnceSafely(): Promise<void> {
@@ -539,6 +643,11 @@ interface ResolvedReconcileOutcome {
   readonly retryable: boolean;
 }
 
+/** 本轮内累加的进行中汇总（DTO 面只读，累加发生在 pass 内部）。 */
+type ReconcileRunSummaryDraft = {
+  -readonly [K in keyof ReconcileRunSummary]: ReconcileRunSummary[K];
+};
+
 function staleOutcome(checkedAt: string): ResolvedReconcileOutcome {
   return {
     kind: "stale_pending",
@@ -576,6 +685,20 @@ function isReconcileableSubmission(submission: ProductSubmissionDTO): boolean {
     return Boolean(submission.txHash);
   }
   return submission.status === "broadcasting" || submission.status === "submitted" || submission.status === "indexing";
+}
+
+function isEvidenceBindSweepable(submission: ProductSubmissionDTO): boolean {
+  // 清扫对象：链上提交已成功（持 txHash 的在途/已确认档）且随提交落库了
+  // 证据引用。failed 即便带 txHash 也是回执失败/未知，不存在"提交已成功"
+  // 的事实基础；expired/signature_received 从未上链；无证据引用的记录
+  // 没有可重试的绑定载荷。
+  if (!submission.txHash || !submission.evidenceIds?.length) {
+    return false;
+  }
+  return submission.status === "broadcasting"
+    || submission.status === "submitted"
+    || submission.status === "indexing"
+    || submission.status === "confirmed";
 }
 
 function isReconcileableGovernanceLog(log: GovernanceTxLogDTO): boolean {

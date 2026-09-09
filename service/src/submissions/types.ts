@@ -160,6 +160,11 @@ export interface ProductSubmissionDTO extends TxReconcileFields {
   readonly attempts: readonly ProductSubmissionAttemptDTO[];
   readonly attemptCount: number;
   readonly proofRows: readonly ProductSubmissionProofRowDTO[];
+  /**
+   * 随提交落库的证据引用（绑定载荷）：reconcile 清扫对"链上提交已成功
+   * 但绑定缺失"的记录重试绑定时，唯一的持久化依据。
+   */
+  readonly evidenceIds?: readonly string[];
   readonly createdAt: string;
   readonly updatedAt: string;
 }

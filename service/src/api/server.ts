@@ -8,6 +8,7 @@ import {
   ObjectEvidenceStorage,
   RehearsalObjectEvidenceStorage,
   S3EvidenceStorageClient,
+  createEvidenceService,
   type EvidenceStorage
 } from "../evidence/index.js";
 import { createConfiguredGovernanceChainAdapter, createGovernanceService } from "../governance/index.js";
@@ -168,6 +169,14 @@ export async function startApiServer(
     productStore: productBffStore,
     submissionStore,
     governanceStore,
+    // 证据绑定清扫：与 API 路由共用同一持久元数据仓与对象存储，
+    // 广播成功但绑定缺失的提交由 worker 周期性补绑。
+    evidenceBinder: createEvidenceService({
+      metadataStore: stores.evidenceMetadataStore,
+      storage: evidenceStorage,
+      runtimeEnvironment: config.security.environment
+    }),
+    audit,
     logger
   });
   // dock liveness worker。routeSource/submitter 未装配时为

@@ -452,15 +452,12 @@ export function createProductSubmissionService(options: ProductSubmissionService
       if (isEvidenceBindingSubmission(submission)) {
         // 链上广播已成功——绑定失败是服务端补账缺口，不得把已成功
         // 的提交以异常报成 500（违反信封契约）。返回成功提交结果，同时落
-        // 审计事件供对账；prepare 已被消费，绑定补账走人工/reconcile 路径。
+        // 审计事件供对账；证据引用随提交落库，绑定补账走 reconcile 清扫。
         try {
           await bindSubmittedEvidence(options.evidenceReader, prepared, submission);
         } catch (error) {
           try {
             await audit.record({
-              // 审计 type 即分类载体：evidence_bind_failed 尚无 taxonomy
-              // 条目（taxonomy 在 uvp-protocol 仓登记，不在本仓职权内），
-              // 不引入未登记的 errorCode 字面量。
               type: "relayer.submit.evidence_bind_failed",
               action: prepared.signalName,
               outcome: "failed",
@@ -469,6 +466,10 @@ export function createProductSubmissionService(options: ProductSubmissionService
                 submissionId: submission.submissionId,
                 ...(submission.txHash ? { txHash: submission.txHash } : {})
               },
+              // taxonomy 已登记 errorCode 载体（retryable=true，
+              // backoff=reconcile_poll）：重试由 reconcile worker 的绑定
+              // 清扫承担，本路径只留痕不重试。
+              errorCode: "evidence_bind_failed",
               retryable: true,
               metadata: {
                 message: error instanceof Error ? redactErrorMessage(error) : "unknown evidence bind error"
@@ -1171,6 +1172,7 @@ function submissionCommon(
     signatureStatus: input.recoveredSubmitter ? "signature_verified" : "not_verified",
     ...(input.signatureHash ? { signatureHash: input.signatureHash } : {}),
     ...(input.recoveredSubmitter ? { recoveredSubmitter: input.recoveredSubmitter } : {}),
+    evidenceIds: prepared.evidence.map((record) => record.evidenceId),
     createdAt: input.createdAt,
     updatedAt: input.createdAt
   };
