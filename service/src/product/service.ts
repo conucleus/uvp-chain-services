@@ -37,7 +37,7 @@ import type {
   ProjectionStore,
   ProjectionSyncState,
 } from "../storage/projection-store.js";
-import { compareChainPointers } from "../shared/types.js";
+import { compareChainPointers, type Address } from "../shared/types.js";
 // PlanRegistered(finalize) 才是发布权威时点：桶存在只代表 commitPlan 已执行。
 import { isPlanRegisteredProjection } from "../store-console/version.js";
 

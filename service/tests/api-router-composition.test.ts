@@ -212,9 +212,9 @@ function productionSafeEvidenceStorage(): ObjectEvidenceStorage {
 function chainEvent(blockNumber: bigint, eventName: string, args: Record<string, unknown>) {
   return {
     chainId: 31337,
-    contractAddress: "0x1111111111111111111111111111111111111111",
+    contractAddress: "0x1111111111111111111111111111111111111111" as `0x${string}`,
     blockNumber,
-    transactionHash: `0x${blockNumber.toString(16).padStart(64, "0")}`,
+    transactionHash: `0x${blockNumber.toString(16).padStart(64, "0")}` as `0x${string}`,
     logIndex: 0,
     eventName,
     args
