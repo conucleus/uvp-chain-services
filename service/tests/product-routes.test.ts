@@ -1501,7 +1501,7 @@ describe("product API routes", () => {
     expect(tasksResponse.body).toMatchObject({
       participant: {
         displayName: "Delivery Operator",
-        source: "accepted_participant",
+        source: "wallet",
         roleLabels: expect.arrayContaining(["物流/报关"])
       },
       tasks: [

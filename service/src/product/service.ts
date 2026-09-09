@@ -226,7 +226,12 @@ export interface ProductParticipantView {
     readonly displayName: string;
     readonly walletAddress?: string;
     readonly roleLabels: readonly string[];
-    readonly source: "accepted_participant" | "wallet" | "anonymous";
+    // 词表对齐冻结 DTO ProductParticipantProfileDTO.source
+    // （"wallet" | "mock" | "anonymous"）：参与事实由 participantId/
+    // roleLabels 表达，source 只回答身份锚定形态（钱包 / 匿名）。
+    // 自造 "accepted_participant" 会被前端严格校验置为 undefined，
+    // 已接受参与者恒显示"身份未确认"。
+    readonly source: "wallet" | "anonymous";
   };
   readonly orders: readonly ProductOrderApiDTO[];
   readonly tasks: readonly ProductTaskApiDTO[];
@@ -521,11 +526,7 @@ export function createProductService(
               ),
             ]),
           ).sort(),
-          source: primaryParticipant
-            ? "accepted_participant"
-            : walletAddress
-              ? "wallet"
-              : "anonymous",
+          source: walletAddress ? "wallet" : "anonymous",
         },
         orders: visibleOrders,
         tasks,

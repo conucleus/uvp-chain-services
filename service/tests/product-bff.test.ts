@@ -370,7 +370,7 @@ describe("product BFF order drafts and invites", () => {
         participantId: (acceptResponse.body as InviteResponse).participant
           .participantId,
         displayName: "Buyer Finance",
-        source: "accepted_participant",
+        source: "wallet",
         roleLabels: expect.arrayContaining(["资金方"]),
       },
       summary: {
