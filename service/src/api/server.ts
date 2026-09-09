@@ -356,16 +356,19 @@ export async function startApiServer(
       const responseBody = apiResponse.status >= 400
         ? withErrorMetadata(apiResponse.body, requestId, runId)
         : apiResponse.body;
-      const safeBody = redactSecrets(responseBody);
+      // 脱敏只属于日志：响应体是 API 契约载荷，按键名形状改写会吞掉
+      // 业务凭据字段（/store/auth/verify 签发的会话 token 即命中
+      // secret 键名模式，客户端拿到 [redacted:secret] 无法登录）。
+      // 日志只落白名单标识字段，且仍整体过脱敏保持"日志恒脱敏"不变量。
+      response.end(JSON.stringify(responseBody, jsonReplacer));
       logger.info("api request completed", {
         requestId,
         ...(runId ? { runId } : {}),
         method: request.method,
         pathname: url.pathname,
         status: apiResponse.status,
-        ...extractResponseLogFields(safeBody)
+        ...extractResponseLogFields(redactSecrets(responseBody))
       });
-      response.end(JSON.stringify(safeBody, jsonReplacer));
     })().catch((error: unknown) => {
       // 畸形路径参数是调用方可修正的 400，不落入兜底 500。
       if (error instanceof InvalidPathParameterError) {
@@ -406,16 +409,18 @@ export async function startApiServer(
   });
 
   // 轮询在初始后台重建结束后启动（见上方 M-5 注释），避免增量刷新与
-  // 全量重建并发写同一投影存储。
+  // 全量重建并发写同一投影存储。reconcile/dock-automation 首轮同门：重建
+  // 进行中读投影会把本应 confirmed 的记录误标 indexing（下一轮自愈，但
+  // 状态与外部通知面失真一轮）。
   void (async () => {
     await initialProjectionRebuild;
     const pollInterval = indexer ? startProjectionRefresh(indexer, config, logger) : undefined;
     if (pollInterval) {
       server.on("close", () => clearInterval(pollInterval));
     }
+    await reconcileWorker.start();
+    await dockAutomationWorker.start();
   })();
-  await reconcileWorker.start();
-  await dockAutomationWorker.start();
   server.on("close", () => {
     void (async () => {
       await dockAutomationWorker.stop();
