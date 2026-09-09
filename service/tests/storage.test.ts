@@ -576,6 +576,31 @@ describe("durable storage", () => {
         evidence: { ...record.evidence, evidenceId: "ev_duplicate" },
       }),
     ).rejects.toBeInstanceOf(StorageConstraintError);
+    // 上传路径的条件插入对同 (owner, payloadHash) 幂等收口：返回既有
+    // 记录而不是撞 UNIQUE（N-188——并发重复上传不再以存储错误泄露）。
+    await expect(
+      store.insertIfPayloadHashAbsent({
+        ...record,
+        evidence: { ...record.evidence, evidenceId: "ev_race_loser" },
+      }),
+    ).resolves.toMatchObject({
+      evidence: { evidenceId: record.evidence.evidenceId },
+    });
+    // 不同 owner 同 payloadHash 不受影响：插入成功返回 undefined。
+    await expect(
+      store.insertIfPayloadHashAbsent({
+        ...record,
+        evidence: {
+          ...record.evidence,
+          evidenceId: "ev_other_owner",
+          ownerParticipantId: "buyer",
+        },
+        accessPolicy: {
+          ...record.accessPolicy,
+          evidenceId: "ev_other_owner",
+        },
+      }),
+    ).resolves.toBe(undefined);
     await store.close();
     stores.splice(stores.indexOf(store), 1);
 

@@ -212,7 +212,19 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
         accessPolicy,
         canonicalMetadata
       };
-      await metadataStore.put(record);
+      // 条件插入收口并发同 payload 竞态：前置 find 各自未命中时，
+      // UNIQUE (owner, payload_hash) 由单语句 NOT EXISTS 判定，败者拿
+      // 既有记录幂等返回，不再以存储错误 500 泄露。
+      const raceExisting = await metadataStore.insertIfPayloadHashAbsent(record);
+      if (raceExisting) {
+        return {
+          evidence: raceExisting.evidence,
+          metadata: raceExisting.metadata,
+          accessPolicy: raceExisting.accessPolicy,
+          payloadHash: raceExisting.evidence.payloadHash,
+          payloadRef: raceExisting.evidence.payloadRef
+        };
+      }
 
       return {
         evidence,

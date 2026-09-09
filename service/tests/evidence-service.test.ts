@@ -35,6 +35,30 @@ describe("evidence service", () => {
     }
   });
 
+  it("settles concurrent same-payload uploads idempotently (N-188)", async () => {
+    // 并发同 (owner, payload) 上传：前置 find 各自未命中时，条件插入
+    // 只允许一条落库，败者按既有记录幂等返回——不撞 UNIQUE 变存储错误。
+    const service = testEvidenceService();
+    const body = {
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      fileName: "concurrent.json",
+      content: { encoding: "json" as const, value: { n: 1 } },
+      metadata: { businessLabel: "Commercial invoice", fields: { invoice: "INV-9" } }
+    };
+
+    const [first, second] = await Promise.all([
+      service.uploadEvidence(body, owner),
+      service.uploadEvidence(body, owner)
+    ]);
+
+    expect(first.evidence.evidenceId).toBe(second.evidence.evidenceId);
+    expect(first.payloadHash).toBe(second.payloadHash);
+    expect(first.evidence.evidenceId).toMatch(/^ev_/);
+  });
+
   it("generates stable hashes from canonical JSON metadata and payload content", async () => {
     const service = testEvidenceService();
     const first = await uploadJsonEvidence(service, {

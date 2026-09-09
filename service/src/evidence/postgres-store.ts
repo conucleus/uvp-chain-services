@@ -116,6 +116,46 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
     });
   }
 
+  async insertIfPayloadHashAbsent(record: EvidenceMetadataRecord): Promise<EvidenceMetadataRecord | undefined> {
+    let inserted = false;
+    await this.withTransaction(async () => {
+      const result = await this.#database.query(
+        `INSERT INTO evidence_object (
+           evidence_id, order_id, draft_id, task_id, stage_identifier, owner_participant_id,
+           file_name, mime_type, size, storage_uri, content_hash, metadata_hash, payload_hash,
+           payload_ref, status, created_at, bound_signal_tx_hash, bound_submission_id,
+           bound_onchain_order_id, bound_source_id, bound_signal_id, bound_at,
+           metadata_json, canonical_metadata_json
+         ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23::jsonb, $24::jsonb
+         WHERE NOT EXISTS (
+           SELECT 1 FROM evidence_object
+           WHERE owner_participant_id = $6 AND payload_hash = $13
+         )`,
+        evidenceValues(record)
+      );
+      inserted = (result.rowCount ?? 0) > 0;
+      if (inserted) {
+        await this.#database.query(
+          `INSERT INTO evidence_access_policy (
+             evidence_id, order_id, readers_json, writers_json, admin_readers_json, dispute_readers_json
+           ) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb)`,
+          [
+            record.accessPolicy.evidenceId,
+            record.accessPolicy.orderId ?? null,
+            stringifyStorageJson(record.accessPolicy.readers),
+            stringifyStorageJson(record.accessPolicy.writers),
+            stringifyStorageJson(record.accessPolicy.adminReaders),
+            stringifyStorageJson(record.accessPolicy.disputeReaders)
+          ]
+        );
+      }
+    });
+    if (!inserted) {
+      return this.findOwnedByPayloadHash(record.evidence.payloadHash, record.evidence.ownerParticipantId);
+    }
+    return undefined;
+  }
+
   async get(evidenceId: string): Promise<EvidenceMetadataRecord | undefined> {
     const result = await this.#database.query(
       `SELECT
