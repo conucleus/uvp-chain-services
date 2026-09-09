@@ -287,9 +287,9 @@ describe("durable storage", () => {
   });
 
   it("claims broadcast txHash ownership with the same contract on SQLite as on Postgres", async () => {
-    // ETH-07 三后端 parity：无既有归属时 claim 必须登记归属并返回 undefined，
-    // 已有归属时返回归属 idempotencyKey。Postgres 实现曾在抢到归属时误返回
-    // 自身 key，此断言把该契约锁定到两个持久后端。
+    // 三后端 parity：无既有归属时 claim 必须登记归属并返回 undefined，
+    // 已有归属时返回归属 idempotencyKey——抢到归属时不返回自身 key，
+    // 该契约锁定到两个持久后端。
     const dedupe = new SqliteBroadcastDedupeStore({
       databaseUrl: sqliteUrl(tempDirs),
       migrations: { autoRun: true, directory: migrationsDirectory() },
@@ -1254,7 +1254,7 @@ describePostgres(
     });
 
     it("assembles and persists notification state and broadcast dedupe stores in the Postgres factory wiring", async () => {
-      // ETH-04(b)/ETH-07：生产拓扑（postgres）同样装配持久化通知状态与
+      // 生产拓扑（postgres）同样装配持久化通知状态与
       // broadcast 去重状态，而不是静默退化为 undefined。
       const databaseUrl = await postgresSchemaUrl(schemas);
       const factoryStores = createChainServicesStores({
