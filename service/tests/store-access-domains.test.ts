@@ -781,6 +781,48 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       .resolves.toMatchObject({ status: 404, body: { error: "product_order_not_found" } });
   });
 
+  it("order creators read their own orders without a task assignment (N-79)", async () => {
+    // OrderRelayerRecorded 的 creator 是订单参与者：任务全部指派给他人
+    // 时，创建者无任务指派也必须读得到自己建的单（列表/详情/me 视图）。
+    const store = new MemoryProjectionStore();
+    await seedPlanProjection(store, { withSupplierBinding: true });
+    const creatorHeaders = { "x-uvp-store-dev-anchored-address": publisherAddress };
+    const orderId = "0x0000000000000000000000000000000000000000000000000000000000000a0a" as Hex;
+    const permission = demoZhixuDetail.orderPermissionTable.find((entry) => entry.roleSlotId === roleSlotId)
+      ?? demoZhixuDetail.orderPermissionTable[0]!;
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...seedOrderWithAuthorizationEvents(orderId, supplierWallet, permission.stageId),
+        chainEvent(6n, 0, "OrderRelayerRecorded", {
+          orderId,
+          planId,
+          relayer: publisherAddress,
+          creator: publisherAddress
+        })
+      ]
+    });
+    const router = createApiRouter(store, routerOptions());
+
+    const creatorList = await router.handle({ method: "GET", pathname: "/product/orders", headers: creatorHeaders });
+    expect(creatorList.status).toBe(200);
+    expect(((creatorList.body as { orders: { orderId: string }[] }).orders)
+      .some((order) => order.orderId.toLowerCase() === orderId.toLowerCase())).toBe(true);
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${orderId}`, headers: creatorHeaders }))
+      .resolves.toMatchObject({ status: 200 });
+
+    const meOrders = await router.handle({ method: "GET", pathname: "/product/me/orders", headers: creatorHeaders });
+    expect(meOrders.status).toBe(200);
+    expect(((meOrders.body as { orders: { orderId: string }[] }).orders)
+      .some((order) => order.orderId.toLowerCase() === orderId.toLowerCase())).toBe(true);
+
+    // 非创建者/非指派的旁观者仍然不可见。
+    const outsiderHeaders = { "x-uvp-store-dev-anchored-address": outsiderWallet };
+    const outsiderList = await router.handle({ method: "GET", pathname: "/product/orders", headers: outsiderHeaders });
+    expect(((outsiderList.body as { orders: { orderId: string }[] }).orders)
+      .some((order) => order.orderId.toLowerCase() === orderId.toLowerCase())).toBe(false);
+  });
+
 it("revoking an anchored address immediately invalidates sessions for it", async () => {
     const router = await buildRouter();
     const firstToken = await login(router, supplierWallet);

@@ -452,7 +452,9 @@ async function acceptedParticipantOrderIds(
  * 订单读可见性（与任务读同口径）：订单 DTO 内嵌全部任务，任务的
  * assigneeWallet/执行者 overlay 是参与者数据。无任何指派钱包的订单
  * 是纯链上事实（同"未指派任务"），对已认证参与者开放；有指派钱包
- * 的订单只有参与者本人（链上指派或已接受参与的订单归属）可见。
+ * 的订单只有参与者本人（链上指派、订单创建者或已接受参与的订单归属）
+ * 可见——创建者无任务指派时同样是订单参与者，读不到自己建的单与
+ * 上述口径相悖。
  */
 function orderVisibleToParticipant(
   order: ProductOrderApiDTO,
@@ -476,6 +478,9 @@ function orderVisibleToParticipant(
     if (overlay.activeExecutorWallet) {
       participants.add(overlay.activeExecutorWallet.toLowerCase());
     }
+  }
+  if (order.creatorWallet) {
+    participants.add(order.creatorWallet.toLowerCase());
   }
   return participants.size === 0 ||
     participants.has(walletAddress) ||

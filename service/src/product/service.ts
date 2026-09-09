@@ -171,6 +171,8 @@ export type ProductOrderApiDTO = ProductOrderDTO & {
   readonly chainStatus?: StateMachineOrderStatus;
   readonly projectionStatus?: ProductOrderProjectionStatus;
   readonly paymentConditionSummary?: string;
+  /** OrderRelayerRecorded 事实：订单创建者钱包（可见性判定的参与者之一）。 */
+  readonly creatorWallet?: Address;
   readonly tasks?: readonly ProductTaskApiDTO[];
   readonly stageExecutorOverlays?: Readonly<
     Record<string, ProductStageExecutorOverlayApiDTO>
@@ -465,6 +467,20 @@ export function createProductService(
           ));
         }
       }
+      // 创建者本人：OrderRelayerRecorded 的 creator 是订单参与者——
+      // 无任务指派时创建者也读得到自己建的单（与列表/详情读同口径）。
+      if (walletAddress) {
+        for (const order of orders) {
+          if (order.creator?.toLowerCase() === walletAddress) {
+            visibleOrderKeys.add(stateMachineOrderProjectionKey(
+              order.chainId,
+              order.contractAddress,
+              order.planId,
+              order.orderId,
+            ));
+          }
+        }
+      }
       for (const participant of acceptedParticipants) {
         if (!participant.orderId) {
           continue;
@@ -634,6 +650,7 @@ async function productOrderFromStateMachine(
     status: mapStateMachineOrderStatus(order.status),
     statusLabel: orderProjectionStatusLabel(order.status, projected),
     projectionStatus: projected ? "projected" : "pending",
+    ...(order.creator ? { creatorWallet: order.creator } : {}),
     totalAmount: {
       amount: "0",
       currency: "N/A",
