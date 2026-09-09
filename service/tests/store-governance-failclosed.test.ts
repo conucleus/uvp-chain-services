@@ -179,7 +179,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
         UVP_FINALITY_CONFIRMATIONS: "12"
       };
-      // STORE_AUTH_MODE 缺省（此前静默 dev_headers）→ 启动失败。
+      // STORE_AUTH_MODE 缺省无回落 → 启动失败。
       expect(() => loadConfigFromEnv(base)).toThrow(/STORE_AUTH_MODE/);
       // 显式 dev_headers 在 testnet 同样拒绝。
       expect(() => loadConfigFromEnv({ ...base, STORE_AUTH_MODE: "dev_headers" }))
@@ -568,7 +568,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         }
       });
       // 带 metadata/policy 的 review：registerIdentity 的 descriptor 哈希材料
-      // 必须包含原文（此前按 null 重建，两处口径分叉）。
+      // 必须包含原文（两侧口径一致，不按 null 重建）。
       await service.reviewSupplier({
         subjectId,
         status: "approved_for_broadcast",
@@ -690,7 +690,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const challenge = await service.createChallenge({ address: supplierWallet });
       const first = await service.verify({ nonce: challenge.nonce, signature: "0x" + "ab".repeat(32) });
       expect(first.token).toMatch(/^uvs_/);
-      // 重放同一 nonce：条件占位失败（此前读-判-写竞态会双通过）。
+      // 重放同一 nonce：条件占位失败（读-判-写竞态不得双通过）。
       await expect(service.verify({ nonce: challenge.nonce, signature: "0x" + "ab".repeat(32) }))
         .rejects.toMatchObject({ code: "store_challenge_invalid" });
     });
@@ -1023,7 +1023,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       });
       expect(recompiled).toMatchObject({ status: 409, body: { error: "product_schema_new_version_required" } });
 
-      // roleSlots 类型校验：非对象条目 400（此前 TypeError 500）。用未发布
+      // roleSlots 类型校验：非对象条目 400（不得以 TypeError 500 透出）。用未发布
       // plan 的草稿验证（已发布 plan 的草稿先命中 409 守卫）。
       const unprojectedStore = new MemoryProjectionStore();
       const unprojectedRouter = createApiRouter(unprojectedStore, {  productRuntimeEnvironment: "local",

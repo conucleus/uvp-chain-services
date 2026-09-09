@@ -265,7 +265,7 @@ describe("ViemChainEventSource", () => {
   });
 
   it("skips an undecodable log with an explicit count instead of failing the index range", async () => {
-    // 0132 P2-12：单条不可解码日志不得让索引器永久 degraded——跳过留痕
+    // 单条不可解码日志不得让索引器永久 degraded——跳过留痕
     // （计数 + warn），游标照常前进。
     const invalidLog = {
       ...planRegisteredLog(),

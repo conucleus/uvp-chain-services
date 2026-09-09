@@ -930,7 +930,7 @@ export class IndexerService implements LifecycleService {
     readonly toBlock: bigint;
     readonly newEventCount: number;
   }): Promise<IndexerRebuildResult> {
-    // 0212 P3-3：空批次（finalized 落后于 cursor）不得写出 fromBlock >
+    // 空批次（finalized 落后于 cursor）不得写出 fromBlock >
     // toBlock 的 rebuild 元数据，按 finalized 锚点收敛为退化空区间。
     const metadataFromBlock = input.fromBlock > input.toBlock ? input.toBlock : input.fromBlock;
     const snapshot = await this.#store.getOrderSnapshot?.() ?? createEmptyProjectionSnapshot();
@@ -1158,7 +1158,7 @@ export class IndexerService implements LifecycleService {
         // 无处理器（部署裁剪）或载荷为空：无法补投，也不应无限滞留。
         throw new Error(`signal notification processor unavailable for pending step ${step.stepId}`);
       }
-      // 0212 P3-3 通知上界跳批补处理：通知服务会按最终性上界过滤掉
+      // 通知上界跳批补处理：通知服务会按最终性上界过滤掉
       // 未达上界的事件且不产生投递记录；此时把该步骤按成功出队会永久
       // 丢失这批补投。保持排队并报错，待最终性追上后下一轮 sweep 再投。
       const finalizedBlock = (await this.#store.getSyncState(this.#scope))?.finalizedBlock;
