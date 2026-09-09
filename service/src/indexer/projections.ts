@@ -2230,6 +2230,13 @@ function markTaskSubmitted(
       return false;
     }
   }
+  if (task.status === "cancelled") {
+    // HookStatusChanged(cancelled) 是链上终态事实。taskMatchesSubmittedSignal
+    // 的宽松回退键（hookId === sourceId/signalId）可能匹配到无关信号，
+    // 不得借此把已撤销任务复活成 submitted；hook 重开会经 HookReady 重建
+    // ready 任务，合法的再提交走新任务。
+    return false;
+  }
   task.status = "submitted";
   task.updatedAt = proof;
   task.proof = proof;

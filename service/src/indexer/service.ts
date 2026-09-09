@@ -844,7 +844,56 @@ export class IndexerService implements LifecycleService {
       blockHash: ancestorHash
     };
     await this.#invalidateNotificationsAfterReorg(ancestorBlock);
+    await this.#trimPendingPostCommitStepsAfterReorg(ancestorBlock);
     return nextBlock;
+  }
+
+  /**
+   * reorg 回滚联动修剪 pending 补投队列：批次内高于祖先块的事件已从
+   * canonical 链消失，等最终性上界追平后 sweep 会照常补投——那是对已
+   * 删链上事实的幽灵通知。批次只保留祖先块及以下的事件（新 stepId 按
+   * 修剪后载荷派生；save 是 ON CONFLICT DO NOTHING，必须删旧存新）；
+   * projection_automation 步骤按当前投影幂等扫描，无需修剪。
+   */
+  async #trimPendingPostCommitStepsAfterReorg(ancestorBlock: bigint): Promise<void> {
+    const durableStore = this.#store;
+    if (!isDurableProjectionStore(durableStore)) {
+      return;
+    }
+    try {
+      const pendingSteps = await durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
+      for (const step of pendingSteps) {
+        if (step.kind !== "signal_notification" || !step.events || step.events.length === 0) {
+          continue;
+        }
+        const surviving = step.events.filter((event) => event.blockNumber <= ancestorBlock);
+        if (surviving.length === step.events.length) {
+          continue;
+        }
+        await durableStore.deletePendingPostCommitStep(step.stepId);
+        if (surviving.length > 0) {
+          await durableStore.savePendingPostCommitStep({
+            stepId: pendingPostCommitStepId("signal_notification", surviving),
+            chainId: step.chainId,
+            kind: step.kind,
+            events: surviving
+          });
+        }
+        this.#logger.warn("pending signal notification batch trimmed after reorg rollback; reorged-out events will not be delivered", {
+          stepId: step.stepId,
+          ancestorBlock: ancestorBlock.toString(),
+          droppedEvents: step.events.length - surviving.length,
+          survivingEvents: surviving.length
+        });
+      }
+    } catch (error) {
+      // 修剪失败不回滚投影主路径，但必须响亮：残留批次会在最终性追平后
+      // 被 sweep 补投成幽灵通知。
+      this.#logger.error("failed to trim pending post-commit steps after reorg rollback; ghost notifications may be delivered when finalization catches up", {
+        ancestorBlock: ancestorBlock.toString(),
+        message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+      });
+    }
   }
 
   /**

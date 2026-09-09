@@ -549,7 +549,9 @@ describe("indexer projection replay", () => {
     expect(summary).toMatchObject({
       activeEventCount: 2,
       removedEventCount: 1,
-      removedLogsFiltered: true
+      // 墓碑被复活抵消：活跃集没有实际丢失，removedLogsFiltered 如实为
+      // false（removedEventCount 仍记录见过的墓碑数）。
+      removedLogsFiltered: false
     });
     expect(summary.activeEvents.map((event) => event.eventName)).toEqual([
       "PlanRegistered",
@@ -587,6 +589,38 @@ describe("indexer projection replay", () => {
 
     expect(snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)]).toBeUndefined();
     expect(snapshot.eventCount).toBe(1);
+  });
+
+  it("keeps a cancelled task cancelled when a loose fallback-key signal arrives afterwards", () => {
+    // HookStatusChanged(cancelled) 是链上终态；taskMatchesSubmittedSignal 的
+    // 宽松回退键（hookId === sourceId/signalId）命中的无关信号不得把已
+    // 撤销任务复活成 submitted。
+    const snapshot = rebuildOrderProjections([
+      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+      chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
+      chainEvent(3n, 0, "HookReady", { orderId: stateMachineOrderId, hookId, stageId, hookName }),
+      chainEvent(4n, 0, "HookStatusChanged", {
+        orderId: stateMachineOrderId,
+        hookId,
+        previousStatus: 2,
+        newStatus: 3,
+        dueAt: 0n
+      }),
+      chainEvent(5n, 0, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        planId,
+        sourceId: hookId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signer
+      })
+    ]);
+
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
+    const taskKey = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
+    expect(order?.hooks[hookId]?.status).toBe("cancelled");
+    expect(order?.tasks[taskKey]?.status).toBe("cancelled");
   });
 
   it("projects registry deployments and scopes identical order ids by state machine", async () => {
@@ -1225,6 +1259,117 @@ describe("indexer projection replay", () => {
       });
       await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
         .resolves.toMatchObject({ nextBlock: 5n, finalizedBlock: 4n, blockHash: blockHashHex("block-4-fork") });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("trims pending post-commit notification batches above the reorg ancestor block", async () => {
+    // 幽灵通知：pending 批次内高于共同祖先的事件已被回滚删除，等最终性
+    // 追平后 sweep 会照常补投。回滚必须把批次修剪到祖先及以下；祖先以下的
+    // 事件保持排队等待补投。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-pending-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const canonicalEvents: readonly ChainEvent[] = [
+        chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+        chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId })
+      ];
+      const staleBlock3Event = {
+        ...chainEvent(3n, 0, "SignalSubmitted", {
+          orderId: stateMachineOrderId,
+          sourceId,
+          signalId,
+          payloadHash,
+          idempotencyKey,
+          submitter: signer
+        }),
+        blockHash: blockHashHex("block-3-stale")
+      };
+      let canonicalBlocks = new Map<bigint, Hex>([
+        [1n, blockHashHex("block-1")],
+        [2n, blockHashHex("block-2")],
+        [3n, blockHashHex("block-3-stale")]
+      ]);
+      let readableEvents: readonly ChainEvent[] = [
+        ...canonicalEvents.map((event, index) => ({ ...event, blockHash: blockHashHex(`block-${index + 1}`) })),
+        staleBlock3Event
+      ];
+      let finalizedBlock = 3n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return readableEvents.filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        },
+        async getBlockHash(blockNumber) {
+          return canonicalBlocks.get(blockNumber) ?? zeroBlockHash();
+        }
+      };
+      const indexer = new IndexerService({ config: testConfig(), eventSource, store });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      // 混合批次（块1+块3）与纯低块批次（块2）各一条 pending 补投记录。
+      await store.savePendingPostCommitStep({
+        stepId: "pending_signal_notification_mixed",
+        chainId: 31337,
+        kind: "signal_notification",
+        events: [
+          { ...canonicalEvents[0]!, blockHash: blockHashHex("block-1") },
+          staleBlock3Event
+        ]
+      });
+      await store.savePendingPostCommitStep({
+        stepId: "pending_signal_notification_below",
+        chainId: 31337,
+        kind: "signal_notification",
+        events: [{ ...canonicalEvents[1]!, blockHash: blockHashHex("block-2") }]
+      });
+
+      // fork：block 3 被替换，共同祖先为 block 2。
+      canonicalBlocks = new Map<bigint, Hex>([
+        [1n, blockHashHex("block-1")],
+        [2n, blockHashHex("block-2")],
+        [3n, blockHashHex("block-3-fork")]
+      ]);
+      readableEvents = [
+        ...canonicalEvents.map((event, index) => ({ ...event, blockHash: blockHashHex(`block-${index + 1}`) })),
+        {
+          ...chainEvent(3n, 0, "SignalSubmitted", {
+            orderId: stateMachineOrderId,
+            sourceId,
+            signalId,
+            payloadHash: bytes32Hex("feed"),
+            idempotencyKey: bytes32Hex("9002"),
+            submitter: signer
+          }),
+          blockHash: blockHashHex("block-3-fork")
+        }
+      ];
+      finalizedBlock = 3n;
+
+      await indexer.refreshFromCursorWithSummary();
+
+      const pending = await store.listPendingPostCommitSteps({ chainId: 31337 });
+      expect(pending).toHaveLength(2);
+      for (const step of pending) {
+        expect(step.kind).toBe("signal_notification");
+        for (const event of step.events ?? []) {
+          // 回滚后队列里不得残留高于祖先块（2）的载荷。
+          expect(event.blockNumber).toBeLessThanOrEqual(2n);
+        }
+      }
+      const eventBlocks = pending.flatMap((step) => (step.events ?? []).map((event) => event.blockNumber)).sort();
+      expect(eventBlocks).toEqual([1n, 2n]);
     } finally {
       await store.close();
       rmSync(tempDir, { recursive: true, force: true });
