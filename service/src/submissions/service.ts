@@ -280,7 +280,10 @@ export function createProductSubmissionService(options: ProductSubmissionService
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(prepared.deadline) < currentSeconds) {
         const expired = withSubmissionReconcileDefaults(
-          buildExpiredSubmission(prepared, submissionIdFactory(), now().toISOString())
+          buildExpiredSubmission(prepared, submissionIdFactory(), now().toISOString(), {
+            recoveredSubmitter,
+            signatureHash: signatureHashFor(signature)
+          })
         );
         await withSubmissionStoreTransaction(store, async () => {
           await store.putSubmission(expired);
@@ -1003,9 +1006,21 @@ function submissionFromBroadcast(
   };
 }
 
-function buildExpiredSubmission(prepared: PreparedSubmissionRecord, submissionId: string, timestamp: string): ProductSubmissionDTO {
+/**
+ * 过期档案在签名恢复之后才落（见 submit 的时序注释）——signatureStatus
+ * 必须如实记 signature_verified：失败的是时限，不是签名。
+ */
+function buildExpiredSubmission(
+  prepared: PreparedSubmissionRecord,
+  submissionId: string,
+  timestamp: string,
+  signature: {
+    readonly recoveredSubmitter?: Address;
+    readonly signatureHash?: Hex;
+  }
+): ProductSubmissionDTO {
   return {
-    ...submissionCommon(prepared, { submissionId, createdAt: timestamp }),
+    ...submissionCommon(prepared, { submissionId, createdAt: timestamp, ...signature }),
     status: "expired",
     statusLabel: submissionStatusLabel("expired"),
     broadcastStatus: "not_attempted",

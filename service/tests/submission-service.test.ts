@@ -351,10 +351,14 @@ describe("product task submissions", () => {
 
     expect(submission).toMatchObject({
       status: "expired",
-      signatureStatus: "not_verified",
+      // 过期检查发生在验签之后：签名是验证过的，失败的是时限——
+      // 台账不得谎报 not_verified。
+      signatureStatus: "signature_verified",
+      recoveredSubmitter: submitter,
       broadcastStatus: "not_attempted",
       errorCode: "submission_expired"
     });
+    expect(submission.signatureHash).toMatch(/^0x[0-9a-f]{64}$/);
     expect(broadcast.broadcast).not.toHaveBeenCalled();
   });
 
