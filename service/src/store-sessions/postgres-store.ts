@@ -15,13 +15,33 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
     this.#database = options.database;
   }
 
-  async putChallenge(record: StoreAuthChallengeRecord): Promise<void> {
-    await this.#database.query(
-      `INSERT INTO store_auth_challenge (nonce, address, intent, account_id, message, issued_at, expires_at, consumed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (nonce) DO UPDATE SET consumed_at = EXCLUDED.consumed_at`,
-      [record.nonce, record.address.toLowerCase(), record.intent, record.accountId ?? null, record.message, record.issuedAt, record.expiresAt, record.consumedAt ?? null]
-    );
+  async putChallengeWithinAddressQuota(
+    record: StoreAuthChallengeRecord,
+    options: { readonly maxLivePerAddress: number; readonly now: string }
+  ): Promise<boolean> {
+    // 配额判定与写入必须在同一事务内，且按地址咨询锁串行化：READ COMMITTED
+    // 下无锁的"数了再插"两条并发语句可同时看到未满的计数，双双写入穿透
+    // 配额。pg_advisory_xact_lock 随事务结束自动释放，不同地址互不阻塞。
+    const addressKey = record.address.toLowerCase();
+    return this.#database.withTransaction(async () => {
+      await this.#database.query("SELECT pg_advisory_xact_lock(hashtext($1))", [addressKey]);
+      const count = await this.#database.query(
+        `SELECT COUNT(*)::int AS live FROM store_auth_challenge
+         WHERE address = $1 AND consumed_at IS NULL AND expires_at >= $2`,
+        [addressKey, options.now]
+      );
+      const live = (count.rows[0] as { live: number } | undefined)?.live ?? 0;
+      if (live >= options.maxLivePerAddress) {
+        return false;
+      }
+      await this.#database.query(
+        `INSERT INTO store_auth_challenge (nonce, address, intent, account_id, message, issued_at, expires_at, consumed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (nonce) DO UPDATE SET consumed_at = EXCLUDED.consumed_at`,
+        [record.nonce, addressKey, record.intent, record.accountId ?? null, record.message, record.issuedAt, record.expiresAt, record.consumedAt ?? null]
+      );
+      return true;
+    });
   }
 
   async getChallenge(nonce: string): Promise<StoreAuthChallengeRecord | undefined> {

@@ -51,7 +51,17 @@ export interface StoreAccountAddressRecord {
 }
 
 export interface StoreWalletSessionStore {
-  putChallenge(record: StoreAuthChallengeRecord): Promise<void>;
+  /**
+   * 原子签发：同一地址的存活挑战（未消费且未过期）达到 maxLivePerAddress
+   * 时拒绝写入并返回 false。配额判定与写入必须处于存储层同一原子边界
+   * （内存驱动同步完成 / sqlite 单写连接 / postgres 事务内按地址咨询锁）
+   * ——服务层"先数后写"的窗口会被同地址并发请求整体穿透（每地址配额
+   * 形同虚设）。返回 true 表示挑战已落库。
+   */
+  putChallengeWithinAddressQuota(
+    record: StoreAuthChallengeRecord,
+    options: { readonly maxLivePerAddress: number; readonly now: string }
+  ): Promise<boolean>;
   getChallenge(nonce: string): Promise<StoreAuthChallengeRecord | undefined>;
   listChallengesForAddress(address: Address): Promise<readonly StoreAuthChallengeRecord[]>;
   updateChallenge(record: StoreAuthChallengeRecord): Promise<void>;
@@ -61,7 +71,7 @@ export interface StoreWalletSessionStore {
    * 仅当确实占位成功（行数=1）才返回占位后的记录；并发重放同一 nonce
    * 只有一个请求能通过（burn-on-attempt 原子化）。
    */
-  consumeChallenge?(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined>;
+  consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined>;
   /**
    * 过期挑战清扫：删除 expires_at < expiresBefore 的行（含已消费的），
    * 返回删除行数。challenge 入口未鉴权且只插不删会把表/内存无界放大

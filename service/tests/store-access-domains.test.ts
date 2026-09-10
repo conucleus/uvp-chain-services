@@ -1308,18 +1308,51 @@ describe("store auth challenge resource bounds", () => {
     });
 
     // 到达硬上限时先清过期行：最早过期的挑战被清扫而不是顶掉最新行。
-    await store.putChallenge(challengeAt(0, "2026-01-01T00:00:00Z"));
+    // 配额给到不可达值——本用例专测硬上限淘汰，不与每地址配额耦合
+    //（记录按 index%100 轮换地址，每地址多条会先撞配额）。
+    const put = (record: StoreAuthChallengeRecord): Promise<boolean> =>
+      store.putChallengeWithinAddressQuota(record, { maxLivePerAddress: Number.MAX_SAFE_INTEGER, now: "2101-01-01T00:00:00Z" });
+    await put(challengeAt(0, "2026-01-01T00:00:00Z"));
     for (let index = 1; index < MEMORY_CHALLENGE_HARD_LIMIT; index += 1) {
-      await store.putChallenge(challengeAt(index, "2100-01-01T00:00:00Z"));
+      await put(challengeAt(index, "2100-01-01T00:00:00Z"));
     }
-    await store.putChallenge(challengeAt(MEMORY_CHALLENGE_HARD_LIMIT, "2100-01-01T00:00:00Z"));
+    await put(challengeAt(MEMORY_CHALLENGE_HARD_LIMIT, "2100-01-01T00:00:00Z"));
     await expect(store.getChallenge("nonce000000")).resolves.toBeUndefined();
     await expect(store.getChallenge(`nonce${MEMORY_CHALLENGE_HARD_LIMIT.toString().padStart(6, "0")}`)).resolves.toBeDefined();
 
     // 全部存活仍超上限：按签发序淘汰最旧行——内存不随未鉴权写入无界增长。
-    await store.putChallenge(challengeAt(MEMORY_CHALLENGE_HARD_LIMIT + 1, "2100-01-01T00:00:00Z"));
+    await put(challengeAt(MEMORY_CHALLENGE_HARD_LIMIT + 1, "2100-01-01T00:00:00Z"));
     await expect(store.getChallenge("nonce000001")).resolves.toBeUndefined();
     await expect(store.getChallenge(`nonce${(MEMORY_CHALLENGE_HARD_LIMIT + 1).toString().padStart(6, "0")}`)).resolves.toBeDefined();
+  });
+
+  it("holds the per-address challenge quota under concurrent creation", async () => {
+    // 配额判定与写入必须原子：同地址并发签发风暴不允许整体穿透
+    //（32 个并发请求在"先数后写"实现下会全部读到同一旧计数）。
+    const { InMemoryStoreWalletSessionStore, StoreSessionServiceError, createStoreSessionService } =
+      await import("../src/store-sessions/index.js");
+    const store = new InMemoryStoreWalletSessionStore();
+    const current = new Date(Date.UTC(2026, 8, 10, 0, 0, 0));
+    const service = createStoreSessionService({
+      store,
+      config: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: false
+      },
+      now: () => current
+    });
+    const stormWallet = `0x${"9".repeat(40)}` as Address;
+    const results = await Promise.allSettled(
+      Array.from({ length: 32 }, () => service.createChallenge({ address: stormWallet }))
+    );
+    const accepted = results.filter((result) => result.status === "fulfilled").length;
+    expect(accepted).toBe(10);
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(rejected.every((result) => result.reason instanceof StoreSessionServiceError && result.reason.status === 429)).toBe(true);
   });
 });
 

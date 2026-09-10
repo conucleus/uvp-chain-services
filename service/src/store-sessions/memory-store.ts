@@ -11,13 +11,16 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
   readonly #sessions = new Map<string, StoreWalletSessionRecord>();
   readonly #accountAddresses = new Map<string, StoreAccountAddressRecord>();
 
-  async putChallenge(record: StoreAuthChallengeRecord): Promise<void> {
+  async putChallengeWithinAddressQuota(
+    record: StoreAuthChallengeRecord,
+    options: { readonly maxLivePerAddress: number; readonly now: string }
+  ): Promise<boolean> {
     // challenge 入口未鉴权：内存驱动必须有独立硬上限，否则即使有每地址
     // 配额，攻击者换地址循环打仍会无界增长（OOM）。到达上限时先清过期
     // 行（它们已无任何判定价值），仍满则按签发序淘汰最旧行——服务层
     // 的每地址配额保证正常流量到不了这里，这是最后防线而非常规路径。
     if (this.#challenges.size >= MEMORY_CHALLENGE_HARD_LIMIT) {
-      await this.deleteExpiredChallenges(new Date().toISOString());
+      await this.deleteExpiredChallenges(options.now);
       while (this.#challenges.size >= MEMORY_CHALLENGE_HARD_LIMIT) {
         const oldest = [...this.#challenges.values()]
           .sort((left, right) => left.issuedAt.localeCompare(right.issuedAt))[0];
@@ -27,7 +30,19 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
         this.#challenges.delete(oldest.nonce);
       }
     }
+    // 配额判定与写入同步完成（无 await 间隙）：JS 单线程事件循环即原子边界。
+    const address = record.address.toLowerCase();
+    let live = 0;
+    for (const challenge of this.#challenges.values()) {
+      if (challenge.address.toLowerCase() === address && !challenge.consumedAt && challenge.expiresAt >= options.now) {
+        live += 1;
+      }
+    }
+    if (live >= options.maxLivePerAddress) {
+      return false;
+    }
     this.#challenges.set(record.nonce, record);
+    return true;
   }
 
   async getChallenge(nonce: string): Promise<StoreAuthChallengeRecord | undefined> {

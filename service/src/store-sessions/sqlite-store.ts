@@ -51,14 +51,26 @@ export class SqliteStoreWalletSessionStore implements StoreWalletSessionStore {
     }
   }
 
-  async putChallenge(record: StoreAuthChallengeRecord): Promise<void> {
-    runSqliteWrite(() => {
+  async putChallengeWithinAddressQuota(
+    record: StoreAuthChallengeRecord,
+    options: { readonly maxLivePerAddress: number; readonly now: string }
+  ): Promise<boolean> {
+    // better-sqlite3 单连接同步写：计数与插入之间不存在并发写入者。
+    return runSqliteWrite(() => {
+      const { live } = this.#database.prepare(
+        `SELECT COUNT(*) AS live FROM store_auth_challenge
+         WHERE address = ? AND consumed_at IS NULL AND expires_at >= ?`
+      ).get(record.address.toLowerCase(), options.now) as { live: number };
+      if (live >= options.maxLivePerAddress) {
+        return false;
+      }
       this.#database.prepare(
         `INSERT INTO store_auth_challenge (nonce, address, intent, account_id, message, issued_at, expires_at, consumed_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(nonce) DO UPDATE SET
            consumed_at = excluded.consumed_at`
       ).run(...challengeValues(record));
+      return true;
     });
   }
 

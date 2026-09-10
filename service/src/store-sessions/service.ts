@@ -90,18 +90,9 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       const timestamp = now();
       // 未鉴权入口的资源上界：先顺带清扫过期挑战（只插不删会把表/内存
       // 无界放大），再按地址配额拒绝囤积——正常登录一个地址同时存活的
-      // 挑战只有个位数，10 个是宽松上界。
+      // 挑战只有个位数，10 个是宽松上界。配额判定在存储层原子完成：
+      // 服务层先数后写的窗口会被同地址并发请求整体穿透。
       await store.deleteExpiredChallenges(timestamp.toISOString());
-      const liveForAddress = (await store.listChallengesForAddress(address))
-        .filter((challenge) => !challenge.consumedAt && challenge.expiresAt >= timestamp.toISOString());
-      if (liveForAddress.length >= MAX_LIVE_CHALLENGES_PER_ADDRESS) {
-        throw new StoreSessionServiceError(
-          429,
-          "store_challenge_rate_limited",
-          "too many live challenges for this address; wait for them to expire or consume one",
-          { address, limit: MAX_LIVE_CHALLENGES_PER_ADDRESS }
-        );
-      }
       const nonce = randomBytes(16).toString("hex");
       const issuedAt = timestamp.toISOString();
       const expiresAt = new Date(timestamp.getTime() + config.challengeTtlSeconds * 1000).toISOString();
@@ -127,7 +118,18 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
         issuedAt,
         expiresAt
       };
-      await store.putChallenge(challenge);
+      const accepted = await store.putChallengeWithinAddressQuota(challenge, {
+        maxLivePerAddress: MAX_LIVE_CHALLENGES_PER_ADDRESS,
+        now: timestamp.toISOString()
+      });
+      if (!accepted) {
+        throw new StoreSessionServiceError(
+          429,
+          "store_challenge_rate_limited",
+          "too many live challenges for this address; wait for them to expire or consume one",
+          { address, limit: MAX_LIVE_CHALLENGES_PER_ADDRESS }
+        );
+      }
       return {
         nonce,
         address,
@@ -158,9 +160,7 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       // 挑战单次使用：条件 UPDATE 原子占位
       //（burn-on-attempt）：并发重放同一 nonce 只有一个请求能通过；
       // 签名失败可重新取挑战，代价可接受。
-      const consumed = store.consumeChallenge
-        ? await store.consumeChallenge(nonce, now().toISOString())
-        : await consumeChallengeByReadWrite(store, challenge, now);
+      const consumed = await store.consumeChallenge(nonce, now().toISOString());
       if (!consumed) {
         throw new StoreSessionServiceError(401, "store_challenge_invalid", "challenge is unknown or already used");
       }
@@ -531,19 +531,6 @@ function accountAddressView(record: { readonly address: Address; readonly status
     status: record.status,
     anchoredAt: record.anchoredAt
   };
-}
-
-/**
- * 可选能力回退：store 未实现条件占位 consumeChallenge 时，退化为
- * 读-判-写（非原子）。这是当前接口的可选能力语义，不是旧版本兼容。
- */
-async function consumeChallengeByReadWrite(
-  store: StoreWalletSessionStore,
-  challenge: NonNullable<Awaited<ReturnType<StoreWalletSessionStore["getChallenge"]>>>,
-  now: () => Date
-): Promise<unknown> {
-  await store.updateChallenge({ ...challenge, consumedAt: now().toISOString() });
-  return challenge;
 }
 
 function sha256Hex(value: string): string {
