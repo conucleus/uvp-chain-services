@@ -148,6 +148,83 @@ describe("submission API routes", () => {
     });
   });
 
+  it("rejects submission profile reads from wallets other than the submitter", async () => {
+    // IDOR 归属校验：会话身份门只挡匿名不比对属主——非签名者钱包拿到
+    // id 也不得读取提交档案（签名者/证据/广播细节）。
+    const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => new Date("2026-04-28T00:00:00Z"),
+      evidenceIdFactory: () => "ev_idor"
+    });
+    const submissionService = createProductSubmissionService({
+      productTasks: { getTask: async (taskId) => taskId === routeTask.taskId ? routeTask : undefined },
+      evidenceReader: evidenceService,
+      chainId: 31337,
+      verifyingContract,
+      resolveOrderPlanId: async () => routePlanId,
+      authorization: allowListedSubmissionAuthorization([{
+        orderId: routeTask.orderId,
+        stageIdentifier: routeTask.stageId,
+        signalName: "confirm_stage",
+        submitter
+      }]),
+      now: () => new Date("2026-04-28T00:00:00Z"),
+      prepareIdFactory: () => "prep_idor",
+      submissionIdFactory: () => "sub_idor",
+      nonceFactory: () => "11"
+    });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
+
+    const uploadResponse = await router.handle({
+      method: "POST",
+      pathname: "/product/evidence",
+      headers: { "x-uvp-principal-id": "seller" },
+      body: {
+        orderId: routeTask.orderId,
+        taskId: routeTask.taskId,
+        stageIdentifier: routeTask.stageId,
+        documentType: "customs-declaration",
+        textPayload: "customs declaration",
+        metadata: { fields: { declarationNo: "CD-IDOR" } }
+      }
+    });
+    const evidenceId = (uploadResponse.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
+    const prepareResponse = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${routeTask.taskId}/prepare-submit`,
+      headers: { "x-uvp-principal-id": "seller" },
+      body: { evidenceIds: [evidenceId], walletAddress: submitter, intent: "confirm_stage" }
+    });
+    const prepared = prepareResponse.body as PreparedSubmissionDTO;
+    const signature = await account.signTypedData(
+      prepared.typedData as unknown as Parameters<typeof account.signTypedData>[0]
+    );
+    await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${routeTask.taskId}/submit`,
+      body: { prepareId: prepared.prepareId, walletAddress: submitter, signature }
+    });
+
+    // 属主读取 200。
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/product/submissions/sub_idor",
+      headers: { "x-uvp-wallet-address": submitter }
+    })).resolves.toMatchObject({ status: 200 });
+
+    // 非属主（任一会话）403，不回显档案。
+    const stranger = "0x9999999999999999999999999999999999999999";
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/product/submissions/sub_idor",
+      headers: { "x-uvp-wallet-address": stranger }
+    })).resolves.toMatchObject({
+      status: 403,
+      body: { error: "submission_access_forbidden" }
+    });
+  });
+
   it("returns txHash when the injected submission broadcaster submits on-chain", async () => {
     const evidenceService = createEvidenceService({
     runtimeEnvironment: "local",

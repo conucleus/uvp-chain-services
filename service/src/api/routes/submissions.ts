@@ -68,13 +68,18 @@ export function createSubmissionsRouteModule(options: {
       if (request.method === "GET" && productSubmissionMatch) {
         return handleSubmissionRequest(async () => {
           // 提交档案携带签名者/证据/广播细节，匿名不可按 id 枚举——
-          // 与 product-read 订单/任务读同款会话身份门。
+          // 与 product-read 订单/任务读同款会话身份门；会话钱包还须与
+          // 档案属主（业务签名者）比对，否则"id 一旦泄露即任一会话可读"
+          // （IDOR，与 GET /product/order-drafts/:id 的归属断言同口径）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
           }
           const submissionId = decodePathParameter(productSubmissionMatch[1] ?? "");
-          const submission = await context.submissionService.getSubmission(submissionId);
+          const submission = await context.submissionService.getSubmission(
+            submissionId,
+            wallet.identity.walletAddress
+          );
           if (!submission) {
             return {
               status: 404,

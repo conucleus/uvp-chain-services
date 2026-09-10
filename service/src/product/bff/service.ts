@@ -114,7 +114,10 @@ export interface ProductBffService {
     draftId: string,
     input: TriggerProductOrderInput,
   ): Promise<TriggerProductOrderResult>;
-  getRegistration(triggerId: string): Promise<ProductOrderTriggerDTO>;
+  getRegistration(
+    triggerId: string,
+    readerWallet: Address
+  ): Promise<ProductOrderTriggerDTO>;
   createInvite(
     draftId: string,
     input: CreateProductInviteInput,
@@ -510,10 +513,29 @@ export function createProductBffService(
       );
     },
 
-    async getRegistration(triggerId) {
-      return registrationDtoFromRecord(
-        await requireRegistration(store, triggerId),
-      );
+    async getRegistration(triggerId, readerWallet) {
+      const registration = await requireRegistration(store, triggerId);
+      // 归属校验（IDOR）：trigger 档案携带草稿、签名者与授权明细——会话
+      // 身份门只挡匿名；读取者须为 trigger 创建者/签名者或草稿归属方
+      // （创建者/已接受参与者），与 getDraft 的 assertDraftAffiliate 同口径。
+      const draft = await store.getDraft(registration.draftId);
+      const participants = draft ? await store.listParticipants(registration.draftId) : [];
+      const affiliated =
+        registration.creator.toLowerCase() === readerWallet.toLowerCase() ||
+        (registration.submitter !== undefined &&
+          registration.submitter.toLowerCase() === readerWallet.toLowerCase()) ||
+        (draft !== undefined &&
+          (isDraftCreator(draft, readerWallet) ||
+            isAcceptedParticipantWallet(participants, readerWallet)));
+      if (!affiliated) {
+        throw new ProductBffError(
+          403,
+          "trigger_access_forbidden",
+          "only the trigger creator/submitter or a draft affiliate may read this trigger profile",
+          { triggerId }
+        );
+      }
+      return registrationDtoFromRecord(registration);
     },
 
     async triggerOrder(draftId, input) {

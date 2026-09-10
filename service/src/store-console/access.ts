@@ -467,7 +467,12 @@ function storeAccessFromJwtPayload(
     capabilities,
     authMode: "jwt",
     ...(governancePrincipal ? { governancePrincipal } : {}),
-    canWrite: capabilities.some((capability) => capability !== "store.read" && capability !== "store.audit.read"),
+    // 读级能力不构成写权：store.docking.read 与 store.read/store.audit.read
+    // 同为读面，漏排会把纯读会话判成 canWrite。
+    canWrite: capabilities.some((capability) =>
+      capability !== "store.read" &&
+      capability !== "store.audit.read" &&
+      capability !== "store.docking.read"),
     canAdmin: roles.includes("store_admin") || roles.includes("governance_admin")
   };
 }

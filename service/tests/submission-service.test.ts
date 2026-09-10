@@ -706,7 +706,7 @@ describe("product task submissions", () => {
     // 绑定载荷随提交落库：reconcile 清扫对绑定缺失的提交重试绑定时
     // 以此为唯一持久化依据。
     expect(submission.evidenceIds).toEqual([fixture.evidence.evidence.evidenceId]);
-    await expect(fixture.service.getSubmission("sub_1")).resolves.toMatchObject({
+    await expect(fixture.service.getSubmission("sub_1", submitter)).resolves.toMatchObject({
       evidenceIds: [fixture.evidence.evidence.evidenceId]
     });
     expect(evidence).toMatchObject({
@@ -834,7 +834,7 @@ describe("product task submissions", () => {
     // 分类器归档）与 nonce 释放在同一落档事务内，档案保留证据、释放保证
     // 同一 prepareId 可重试。（fixture 的 submissionId 工厂是常量，重试
     // 档案覆盖失败档案；断言在抛错后立即执行。）
-    const failedAttempt = await fixture.service.getSubmission("sub_1");
+    const failedAttempt = await fixture.service.getSubmission("sub_1", submitter);
     expect(failedAttempt).toMatchObject({
       status: "failed",
       retryable: true
@@ -1608,9 +1608,12 @@ describe("product task submissions", () => {
     };
 
     await secure.broadcast(request);
+    // 去重重放保留原始错误码（不再泛化成 broadcast_retry_blocked）：
+    // 响应契约对调用方诚实，重复提交被去重层拦截（inner 只调用一次）。
     await expect(secure.broadcast(request)).resolves.toMatchObject({
       status: "failed",
-      errorCode: "broadcast_retry_blocked",
+      errorCode: "invalid_signal_signature",
+      message: "wallet signature does not match the submitter payload",
       retryable: false
     });
     expect(inner.broadcast).toHaveBeenCalledOnce();

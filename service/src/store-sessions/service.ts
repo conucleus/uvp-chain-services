@@ -88,6 +88,20 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       }
       const accountId = requesterSession?.session.accountId;
       const timestamp = now();
+      // 未鉴权入口的资源上界：先顺带清扫过期挑战（只插不删会把表/内存
+      // 无界放大），再按地址配额拒绝囤积——正常登录一个地址同时存活的
+      // 挑战只有个位数，10 个是宽松上界。
+      await store.deleteExpiredChallenges(timestamp.toISOString());
+      const liveForAddress = (await store.listChallengesForAddress(address))
+        .filter((challenge) => !challenge.consumedAt && challenge.expiresAt >= timestamp.toISOString());
+      if (liveForAddress.length >= MAX_LIVE_CHALLENGES_PER_ADDRESS) {
+        throw new StoreSessionServiceError(
+          429,
+          "store_challenge_rate_limited",
+          "too many live challenges for this address; wait for them to expire or consume one",
+          { address, limit: MAX_LIVE_CHALLENGES_PER_ADDRESS }
+        );
+      }
       const nonce = randomBytes(16).toString("hex");
       const issuedAt = timestamp.toISOString();
       const expiresAt = new Date(timestamp.getTime() + config.challengeTtlSeconds * 1000).toISOString();
@@ -570,6 +584,8 @@ function optionalString(record: Record<string, unknown>, field: string): string 
 const CHALLENGE_INPUT_MAX_LENGTH = 128;
 /** chainId 在签名 message 中只是展示性标识，收窄到安全子集即可。 */
 const CHALLENGE_CHAIN_ID_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._:-]*$/;
+/** 单地址同时存活的未消费挑战配额（未鉴权入口的囤积上界）。 */
+const MAX_LIVE_CHALLENGES_PER_ADDRESS = 10;
 
 function boundedOptionalString(
   record: Record<string, unknown>,

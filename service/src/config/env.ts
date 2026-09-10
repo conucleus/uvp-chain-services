@@ -1324,6 +1324,10 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
       "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production",
     );
   }
+  // 受管库成本安全门对三档非 local 环境同口径（.env.example 表述为
+  // 受管库通用要求）：production 的受管 PG 同样要求显式轮询配置与
+  // 禁轮询知情确认，漏检会把最贵的环境留在无界计费面上。
+  validateManagedDatabaseCostSafety(config, env, "production");
   // production 必须显式配置 UVP_RPC_URL 且拒绝本地/回环地址——静默回落
   // 127.0.0.1:8545 会把生产指向不存在的节点（staging/testnet 同样强检）。
   if (!optionalEnv(env, "UVP_RPC_URL")) {
@@ -1863,7 +1867,7 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
 function validateManagedDatabaseCostSafety(
   config: ChainServicesConfig,
   env: Env,
-  environment: "staging" | "testnet",
+  environment: "staging" | "testnet" | "production",
 ): void {
   if (config.database.driver !== "postgres") {
     return;

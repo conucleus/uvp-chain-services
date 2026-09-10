@@ -2105,6 +2105,100 @@ describe("indexer projection replay", () => {
     }
   });
 
+  it("finality waits do not burn the pending sweep budget", async () => {
+    // 未达最终性上界的通知批次由 pending 队列推迟补投，而不是被判为
+    // 跳过：等待类失败不记 attempts、不触发死信——否则等待最终性的
+    // 批次会在若干轮 sweep 后被永久删除（M4）。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-finality-wait-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 9n;
+        },
+        async readEvents(range) {
+          return stateMachineEvents().filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents() {
+            // rebuild 期通知正常投递——pending 表里只留我们手工落的
+            // 高于最终性上界的批次，避免真实失败混入预算断言。
+          }
+        }
+      });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      // 直接落一行事件块号高于最终性上界的 pending 批次。
+      const lateEvent = chainEvent(15n, 0, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        sourceId: bytes32Hex("1606"),
+        signalId: bytes32Hex("1707"),
+        payloadHash,
+        idempotencyKey: bytes32Hex("1bbb"),
+        submitter: signer
+      });
+      await store.savePendingPostCommitStep({
+        stepId: "pending_signal_notification:finality-wait",
+        chainId: 31337,
+        kind: "signal_notification",
+        events: [lateEvent]
+      });
+
+      // 连续多轮 sweep（远超 16 次死信预算）：批次保持排队、attempts 不
+      // 增长、以 waitingFinality 计数，绝不被死信删除。
+      for (let round = 0; round < 20; round += 1) {
+        const summary = await indexer.sweepPendingPostCommitSteps();
+        expect(summary).toMatchObject({ swept: 1, delivered: 0, failed: 0, waitingFinality: 1 });
+      }
+      const queued = await indexer.listPendingPostCommitSteps();
+      expect(queued.length).toBe(1);
+      expect(queued[0]).toMatchObject({
+        stepId: "pending_signal_notification:finality-wait",
+        attempts: 0
+      });
+
+      // 最终性追上后批次正常补投出队（守卫分支不拦截已达上界的事件）。
+      await store.saveSyncState({
+        chainId: 31337,
+        contractAddress: "0x0000000000000000000000000000000000000000" as Hex,
+        syncStatus: "indexed",
+        finalizedBlock: 15n,
+        confirmationDepth: 1,
+        eventCount: 0
+      });
+      const delivered: (readonly ChainEvent[])[] = [];
+      const recovered = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents(events) {
+            delivered.push(events);
+          }
+        }
+      });
+      const finalSweep = await recovered.sweepPendingPostCommitSteps();
+      expect(finalSweep).toMatchObject({ swept: 1, delivered: 1, failed: 0, waitingFinality: 0 });
+      expect(delivered.length).toBe(1);
+      await expect(recovered.listPendingPostCommitSteps()).resolves.toEqual([]);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("reuses one stable pending row for repeated projection automation failures", async () => {
     // 无事件批次的 pending 步骤 id 必须稳定——时间戳
     // id 会让 ON CONFLICT DO NOTHING 永不命中，每次失败新开一行无限堆积。

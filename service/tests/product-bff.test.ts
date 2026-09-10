@@ -718,6 +718,34 @@ describe("product BFF order drafts and invites", () => {
     ).toEqual(prepared.trigger);
   });
 
+  it("rejects trigger profile reads from wallets outside the trigger/draft affiliation", async () => {
+    // IDOR 归属校验：trigger 档案携带草稿/签名者/授权明细——非归属
+    // 钱包拿到 triggerId 也不得读取（会话门之外的属主比对）。
+    const { router } = await createRouterFixture([
+      ...activeDeploymentEvents(),
+      planRegisteredEvent(11n),
+    ]);
+    const draft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+
+    // 属主（trigger 创建者 = 草稿创建者）读取 200。
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/order-triggers/${prepared.trigger.triggerId}`,
+      headers: creatorHeaders(),
+    })).resolves.toMatchObject({ status: 200 });
+
+    // 无关会话钱包 403，不回显档案。
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/order-triggers/${prepared.trigger.triggerId}`,
+      headers: { "x-uvp-wallet-address": testWallet(9) },
+    })).resolves.toMatchObject({
+      status: 403,
+      body: { error: "trigger_access_forbidden" },
+    });
+  });
+
   it("settles concurrent prepare-trigger on one record", async () => {
     // 并发双 prepare：前置检查双双通过后，draft_id 一事一单条件插入
     // 只允许一条落库；败者按赢家记录幂等返回，不得撞 UNIQUE 变 500。

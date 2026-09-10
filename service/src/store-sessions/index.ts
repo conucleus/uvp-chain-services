@@ -14,7 +14,8 @@ export {
   type ResolveWalletSessionResult
 } from "./service.js";
 export {
-  InMemoryStoreWalletSessionStore
+  InMemoryStoreWalletSessionStore,
+  MEMORY_CHALLENGE_HARD_LIMIT
 } from "./memory-store.js";
 export {
   SqliteStoreWalletSessionStore

@@ -1136,6 +1136,28 @@ describe("chain-services config", () => {
     })).rejects.toThrow(/on-chain governance registry owner does not match GOVERNANCE_REGISTRY_OWNER_ADDRESS/);
   });
 
+  it("requires the managed-database poll gates in production as well", () => {
+    // 受管库成本安全门与 staging/testnet 同口径：production 的非本地
+    // PG 同样要求显式轮询配置与禁轮询知情确认。
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_INDEXER_POLL_INTERVAL_MS: undefined
+    }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS must be explicitly configured/);
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_INDEXER_POLL_INTERVAL_MS: "0"
+    }))).toThrow(/UVP_INDEXER_POLL_DISABLED_ACK=1/);
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_INDEXER_POLL_INTERVAL_MS: "0",
+      UVP_INDEXER_POLL_DISABLED_ACK: "1"
+    }))).not.toThrow();
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      RECONCILE_WORKER_ENABLED: "true",
+      RECONCILE_POLL_INTERVAL_MS: "5000"
+    }))).toThrow(/RECONCILE_POLL_INTERVAL_MS must be 0 or at least 30000/);
+  });
+
   it("rejects production non-Postgres storage, unsafe migrations, and Anvil default private keys", () => {
     expect(() => loadRawConfigFromEnv({
       CHAIN_SERVICES_RUNTIME_ENV: "production",
@@ -1639,6 +1661,10 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Reco
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
     // 管理面生产基线：非 local 要求口令因子（sha256("test-admin-password")）。
     GOVERNANCE_ADMIN_TOKEN_HASHES: "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d",
+    // production 受管 PG 同样要求显式轮询配置（受管库成本安全门，
+    // 与 staging/testnet 同口径）。
+    UVP_INDEXER_POLL_INTERVAL_MS: "5000",
+    RECONCILE_POLL_INTERVAL_MS: "30000",
     ...storeAuthJwtEnv,
     ...overrides
   };

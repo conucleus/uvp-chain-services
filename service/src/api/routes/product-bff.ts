@@ -88,7 +88,8 @@ export function createProductBffRouteModule(options: {
       if (request.method === "GET" && productOrderRegistrationMatch) {
         return handleProductBffRequest(async () => {
           // trigger 档案携带草稿、签名者与授权明细，匿名不可按 id 枚举——
-          // 与 product-read 订单/任务读同款会话身份门。
+          // 会话身份门之外还须与档案归属（trigger 创建者/签名者或草稿
+          // 归属方）比对，与 GET /product/order-drafts/:id 同口径双门。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -96,7 +97,7 @@ export function createProductBffRouteModule(options: {
           const triggerId = decodePathParameter(productOrderRegistrationMatch[1] ?? "");
           return {
             status: 200,
-            body: { trigger: await context.productBffService.getRegistration(triggerId) }
+            body: { trigger: await context.productBffService.getRegistration(triggerId, wallet.identity.walletAddress) }
           };
         }, { audit: context.audit });
       }

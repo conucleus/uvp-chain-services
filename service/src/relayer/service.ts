@@ -236,6 +236,36 @@ export class RelayerService implements LifecycleService {
           if (resolved) {
             return resolved;
           }
+          const candidates = duplicateTransactionTxHashCandidates(error, prior.lastSubmission?.txHash);
+          if (candidates.length === 0) {
+            // gas nonce 冲突（nonce too low 等）通常不携带 txHash——探针
+            // 无可探对象，业务结果未在链上落定。钉 dead_letter 终态会让同
+            // 载荷幂等重放被 isTerminalSubmission 永久短路（换 gas nonce
+            // 重组装即可自愈的瞬态被误判为永久）。对齐同文件 reserve 失败
+            // 路径对 duplicate_signer_nonce 的非终态口径：释放服务侧
+            // nonce、按可重试失败落账。
+            await this.releaseNonce(request);
+            const reassemblable = relayFailure({
+              errorCode: "duplicate_transaction",
+              message: "broadcaster reported a nonce race without an attributable transaction hash; the payload can be re-assembled with a fresh gas nonce",
+              failureCategory: "retryable",
+              retryable: true,
+              deadLetter: false,
+              ...this.retrySchedule(priorFailedAttempts)
+            });
+            const reassembly = failedSubmission(
+              request,
+              reassemblable,
+              undefined,
+              attemptNumber,
+              this.retryBudgetRemaining(attemptNumber)
+            );
+            const persistedReassembly = await this.persistOutcome(submissionKey, reassembly, attemptNumber);
+            if (persistedReassembly.deadLetter) {
+              this.#rememberTerminalSubmission(submissionKey);
+            }
+            return persistedReassembly;
+          }
         }
 
         const unconfirmedTxHash = classification.errorCode === "duplicate_transaction"
@@ -248,19 +278,20 @@ export class RelayerService implements LifecycleService {
           attemptNumber,
           this.retryBudgetRemaining(attemptNumber)
         );
-        await this.persistOutcome(
+        // persistOutcome 的"胜者为准"守卫可能返回并发竞速下已落账的
+        // submitted 结果——响应必须与台账一致，丢弃它会把 submitted 台账
+        // 报成 failed+retryable，诱导调用方对已消费 nonce 重签。
+        const persisted = await this.persistOutcome(
           submissionKey,
           submission,
           classification.retryable || classification.errorCode === "broadcast_retry_exhausted"
             ? attemptNumber
             : priorFailedAttempts
-        ).then((persisted) => {
-          if (persisted.deadLetter) {
-            this.#rememberTerminalSubmission(submissionKey);
-          }
-          return persisted;
-        });
-        return submission;
+        );
+        if (persisted.deadLetter) {
+          this.#rememberTerminalSubmission(submissionKey);
+        }
+        return persisted;
       }
 
       const attemptNumber = priorFailedAttempts + 1;

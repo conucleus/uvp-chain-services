@@ -79,7 +79,10 @@ export interface ProductSubmissionService {
     principal: EvidencePrincipal
   ): Promise<PreparedSubmissionDTO>;
   submit(taskId: string, input: SubmitProductTaskInput): Promise<ProductSubmissionDTO>;
-  getSubmission(submissionId: string): Promise<ProductSubmissionDTO | undefined>;
+  getSubmission(
+    submissionId: string,
+    readerWallet: Address
+  ): Promise<ProductSubmissionDTO | undefined>;
 }
 
 export function createProductSubmissionService(options: ProductSubmissionServiceOptions): ProductSubmissionService {
@@ -483,9 +486,23 @@ export function createProductSubmissionService(options: ProductSubmissionService
       return submission;
     },
 
-    async getSubmission(submissionId) {
+    async getSubmission(submissionId, readerWallet) {
       const submission = await store.getSubmission(submissionId);
-      return submission ? withSubmissionReconcileDefaults(submission) : undefined;
+      if (!submission) {
+        return undefined;
+      }
+      // 归属校验（IDOR）：档案携带签名者/证据/广播细节——会话身份门只挡
+      // 匿名，不比对属主时任一会话可按 id 读取。读取者必须是该次提交的
+      // 业务签名者本人（与 getDraft 的 assertDraftAffiliate 同款双门）。
+      if (submission.submitter.toLowerCase() !== readerWallet.toLowerCase()) {
+        throw new ProductSubmissionError(
+          403,
+          "submission_access_forbidden",
+          "only the submitter of this submission may read its profile",
+          { submissionId }
+        );
+      }
+      return withSubmissionReconcileDefaults(submission);
     }
   };
 }
@@ -1268,8 +1285,6 @@ function errorLabelFor(errorCode: string): string {
       return "Broadcast disabled";
     case "broadcast_rate_limited":
       return "Broadcast is rate limited";
-    case "broadcast_retry_blocked":
-      return "Retry is blocked";
     case "broadcast_retry_exhausted":
       return "Retry limit reached";
     case "duplicate_tx_hash":

@@ -7,11 +7,12 @@ import {
 } from "../../governance/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError, normalizeAddress, normalizeBytes32 } from "../../shared/types.js";
+import type { IdentityBindingQuery } from "../../indexer/identity-projections.js";
 import { cleanQuery, decodePathParameter, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 type ParsedIdentityQuery =
-  | { readonly ok: true; readonly query: Record<string, string> }
+  | { readonly ok: true; readonly query: IdentityBindingQuery }
   | { readonly ok: false; readonly response: ApiResponse };
 
 export function createGovernanceRouteModule(): RouteModule {
@@ -189,7 +190,9 @@ function parseIdentityBindingQuery(query: ApiRequest["query"]): ParsedIdentityQu
   if (!parsed.ok || !activeOnly) {
     return parsed;
   }
-  return { ok: true, query: { ...parsed.query, activeOnly } };
+  // 路由层收敛为 boolean：字符串 "false" 若原样透传，投影侧按
+  // truthy 处理会把 false 当 true（撤销记录被错误过滤）。
+  return { ok: true, query: { ...parsed.query, activeOnly: activeOnly === "true" } };
 }
 
 function validateIdentityQuery(

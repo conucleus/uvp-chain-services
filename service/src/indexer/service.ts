@@ -113,6 +113,23 @@ export interface PendingPostCommitSweepSummary {
   readonly swept: number;
   readonly delivered: number;
   readonly failed: number;
+  /** 等待最终性而未投递的步骤数——不消耗重试预算，保持排队。 */
+  readonly waitingFinality: number;
+}
+
+/**
+ * 最终性等待类"失败"：通知批次尚未达到最终性上界，不是投递失败。
+ * 这类等待不得消耗 attempts 预算（与云轨 poke 的"DB 故障不退避"同构），
+ * 否则等待最终性的批次会在若干轮 sweep 后被当作死信永久删除，
+ * 违反《通知与参与方感知》"未达确认数的事件由 pending 队列推迟补投
+ * ……而不是被判为跳过"的口径。
+ */
+export class PendingPostCommitFinalityWaitError extends Error {
+  override readonly name = "PendingPostCommitFinalityWaitError";
+
+  constructor(message: string) {
+    super(message);
+  }
 }
 
 type MutablePendingPostCommitSweepSummary = Writable<PendingPostCommitSweepSummary>;
@@ -392,8 +409,9 @@ export class IndexerService implements LifecycleService {
       options.targetBlock
     );
     // 先补投历史 pending post-commit 步骤（游标已前进的失败批次），
-    // 再处理本轮增量，避免失败批次无限滞后。
-    await this.sweepPendingPostCommitSteps();
+    // 再处理本轮增量，避免失败批次无限滞后。刷新本身已持有互斥守卫，
+    // 直接调守卫内实现，避免经公开入口二次排队造成自等待。
+    await this.#sweepPendingPostCommitStepsUnderGuard();
     const storedCursor = await durableStore.getCursor(this.#scope);
     const cursor = this.#cursor ?? storedCursor;
     if (!cursor) {
@@ -1078,12 +1096,20 @@ export class IndexerService implements LifecycleService {
    * 后台补投：重放持久化 pending 队列中的 post-commit 步骤，成功即出队，
    * 失败累加 attempts 并留待下一轮（或人工经 admin-ops 触发）。每轮增量
    * 刷新前调用；非持久存储（memory）为 no-op。
+   *
+   * 公开入口必须经 #withExclusiveGuard 串行（与重建/增量刷新互斥）——
+   * admin-ops 直调本方法时不得绕过守卫与进行中的写路径交错。
    */
-  async sweepPendingPostCommitSteps(): Promise<PendingPostCommitSweepSummary> {
+  sweepPendingPostCommitSteps(): Promise<PendingPostCommitSweepSummary> {
+    return this.#withExclusiveGuard(() => this.#sweepPendingPostCommitStepsUnderGuard());
+  }
+
+  async #sweepPendingPostCommitStepsUnderGuard(): Promise<PendingPostCommitSweepSummary> {
     const summary: MutablePendingPostCommitSweepSummary = {
       swept: 0,
       delivered: 0,
-      failed: 0
+      failed: 0,
+      waitingFinality: 0
     };
     const durableStore = this.#store;
     if (!isDurableProjectionStore(durableStore)) {
@@ -1097,6 +1123,17 @@ export class IndexerService implements LifecycleService {
         await durableStore.deletePendingPostCommitStep(step.stepId);
         summary.delivered += 1;
       } catch (error) {
+        if (error instanceof PendingPostCommitFinalityWaitError) {
+          // 最终性等待不是投递失败：不记 attempts、不消耗死信预算，
+          // 保持排队等下一轮（预算只消耗于真实投递失败）。
+          summary.waitingFinality += 1;
+          this.#logger.info("pending post-commit step waits for finality; it stays queued without consuming the retry budget", {
+            stepId: step.stepId,
+            kind: step.kind,
+            message: error instanceof Error ? redactErrorMessage(error) : "unknown wait"
+          });
+          continue;
+        }
         summary.failed += 1;
         const message = error instanceof Error ? redactErrorMessage(error) : "unknown sweep error";
         const attempts = step.attempts + 1;
@@ -1104,7 +1141,7 @@ export class IndexerService implements LifecycleService {
           // 死信出队：无处理器/空载荷（部署裁剪）等永远无法补投的步骤
           // 不能无限滞留、逐轮告警——与"不应无限滞留"的契约对齐，超限
           // 删除并响亮记录 stepId 供人工重放（事件仍可由 rebuild 重建）。
-          // 瞬态失败（最终性上界未追上）在轮次间通常自愈，上限取宽松值。
+          // 瞬态失败（最终性上界未追上）不烧预算（上方独立分支）。
           await durableStore.deletePendingPostCommitStep(step.stepId)
             .catch((dropError: unknown) => {
               this.#logger.error("failed to dead-letter an exhausted pending post-commit step", {
@@ -1168,7 +1205,8 @@ export class IndexerService implements LifecycleService {
           0n
         );
         if (maxEventBlock > finalizedBlock) {
-          throw new Error(
+          // 哨兵错误：最终性等待不消耗补投预算（见 sweep 的分诊分支）。
+          throw new PendingPostCommitFinalityWaitError(
             `pending signal notification batch ${step.stepId} extends to block ${maxEventBlock} above the finalized bound ${finalizedBlock}; it stays queued until finalization catches up`
           );
         }

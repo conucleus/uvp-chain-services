@@ -140,6 +140,17 @@ const CODE_CASE_PATTERN: ReadonlyMap<string, RegExp> = new Map([
   ['src/stage-patches/broadcast-adapter.ts', /case "([a-z0-9_]+)":/g],
 ]);
 
+/**
+ * Taxonomy 内仍登记、但 chain-services 已刻意不再发射的内部名。
+ * - broadcast_retry_blocked: 去重重放改为保留原始错误码（2609100406
+ *   X-7 修复——泛化会抹掉 transaction_reverted 等真实错误码），该哨兵
+ *   不再有发射点；taxonomy（冻结于 uvp-protocol 仓）的 chain-services
+ *   登记项待其仓侧更新。
+ */
+const INTENTIONALLY_UNEMITTED_NAMES: ReadonlySet<string> = new Set([
+  'broadcast_retry_blocked',
+]);
+
 /** API request-validation / lifecycle codes outside the retry taxonomy scope. */
 const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'invalid_body',
@@ -159,6 +170,9 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'task_not_submittable',
   'submitter_not_authorized',
   'wallet_mismatch',
+  // IDOR 归属校验：广播/重试车道之外的 HTTP 访问控制 4xx（与
+  // draft_access_forbidden 同类，后者位于未被扫描的 BFF 服务源）。
+  'submission_access_forbidden',
   // Stage-patch / product domain-state request validations (HTTP 4xx before
   // any broadcast attempt): deterministic request defects outside the
   // broadcast retry/dead-letter lanes.
@@ -241,6 +255,9 @@ describe('chain-services classification completeness against the taxonomy', () =
       if (!/^[a-z0-9_]+$/.test(name)) {
         continue;
       }
+      if (INTENTIONALLY_UNEMITTED_NAMES.has(name)) {
+        continue;
+      }
       if (!scanned.has(name)) {
         stale.push(name);
       }
@@ -293,6 +310,8 @@ const SUBMISSION_PROBES: readonly { readonly internalName: string; readonly erro
   { internalName: 'unknown_order', error: new Error('UnknownOrder()') },
   { internalName: 'expired_signal_signature', error: new Error('ExpiredSignalSignature()') },
   { internalName: 'invalid_signal_signature', error: new Error('InvalidSignalSignature()') },
+  // 未登记 revert 走泛规则（对齐 relayer 兜底）：永久失败，不得无限重放烧 gas。
+  { internalName: 'transaction_reverted', error: new Error('execution reverted: SomeUnregisteredError()') },
   { internalName: 'relayer_insufficient_funds', error: new Error('insufficient funds') },
   { internalName: 'rpc_timeout', error: new Error('The request timed out') },
   { internalName: 'state_machine_broadcast_failed', error: new Error('broadcaster caught fire inexplicably') },

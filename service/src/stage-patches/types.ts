@@ -392,6 +392,14 @@ export interface ProductStagePatchStore<
    * patch 服务按 nonce 已消费处理（fail-closed，不重试）。
    */
   releaseNonce?(key: string): Promise<void>;
+  /**
+   * 过期 prepare 清扫：删除 deadline（unix 秒字符串）小于
+   * deadlineBeforeSeconds 的行，返回删除行数。prepare 入口未设配额，
+   * 只插不删会让内存表/持久表无界堆叠；由服务层在写入时顺带触发
+   * （同 store-sessions 挑战表口径）。可选能力：实现缺失时跳过清扫，
+   * memory 驱动自身的硬上限仍然兜底。
+   */
+  deleteExpiredPrepared?(deadlineBeforeSeconds: string): Promise<number>;
   putSubmission(submission: TSubmission): Promise<void>;
   getSubmission(submissionId: string): Promise<TSubmission | undefined>;
 }

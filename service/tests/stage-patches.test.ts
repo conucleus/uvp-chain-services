@@ -133,7 +133,15 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("accepts reordered prepared envelopes when comparing canonical typed data", async () => {
-    const { router } = await routerFixture();
+    // 广播装配为 submitted：本测试关注提交前的 canonical typed data
+    // 比较，不再依赖已修复前的 not_attempted 200 假成功路径。
+    const broadcast: StageExecutorPatchBroadcastAdapter = {
+      broadcast: async (): Promise<StagePatchBroadcastResult> => ({
+        status: "submitted",
+        txHash,
+      }),
+    };
+    const { router } = await routerFixture({ executorBroadcastAdapter: broadcast });
     const prepared = await prepareStageExecutorPatch(router);
     const response = await router.handle({
       method: "POST",
@@ -679,7 +687,16 @@ describe("stage executor/resource patch Product API", () => {
       body: { error: "stale_stage_executor_patch_nonce" },
     });
 
-    const duplicate = await routerFixture();
+    const duplicate = await routerFixture({
+      // 首次提交必须真实消费 prepare（not_attempted 已改为不消费），
+      // 才能钉住"同一 prepareId 二次提交 409"的重复拒绝。
+      executorBroadcastAdapter: {
+        broadcast: async (): Promise<StagePatchBroadcastResult> => ({
+          status: "submitted",
+          txHash,
+        }),
+      },
+    });
     const duplicatePrepared = await prepareStageExecutorPatch(duplicate.router);
     const duplicateSignature = await signExecutorPrepared(duplicatePrepared);
     const firstSubmit = await duplicate.router.handle({
@@ -708,30 +725,134 @@ describe("stage executor/resource patch Product API", () => {
     });
   });
 
-  it("verifies resource patch signatures but does not relay when the relayer is disabled", async () => {
-    const { router } = await routerFixture();
+  it("ties the selector wallet to the session-anchored address and rejects mismatched claims", async () => {
+    // 授权探测 oracle 收口（对照 submissions 路由）：selectorWallet 取自
+    // body 时可用任意（任务,钱包）组合探测 201/403——锚定地址为真源，
+    // 自报不一致即 403，不再进入授权求值。
+    const { router } = await routerFixture({ devAnchoredAuth: true });
+    const anchoredHeaders = { "x-uvp-store-dev-anchored-address": selectorWallet };
+    // 锚定一致：正常 201。
+    const aligned = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      headers: anchoredHeaders,
+      body: prepareExecutorBody(),
+    });
+    expect(aligned.status).toBe(201);
+
+    // 锚定不一致：403 wrong_wallet，不落入授权求值。
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      headers: anchoredHeaders,
+      body: prepareExecutorBody({ selectorWallet: executorWallet }),
+    })).resolves.toMatchObject({
+      status: 403,
+      body: { error: "wrong_wallet" },
+    });
+  });
+
+  it("fails loudly with a reusable prepare when the resource patch relayer is disabled", async () => {
+    // cannot broadcast 不得消费 prepare/nonce（submissions 主路径契约）：
+    // not_attempted 必须响亮失败（503 可重试错误信封），同一 prepareId
+    // 在装配广播后原签名重投成功——旧行为 200 假成功 + 烧毁 prepare +
+    // 楔死 nonce 是本缺陷本身。
+    let broadcastCalls = 0;
+    const broadcast: StageResourcePatchBroadcastAdapter = {
+      broadcast: async (): Promise<StagePatchBroadcastResult> => {
+        broadcastCalls += 1;
+        return broadcastCalls === 1
+          ? {
+              status: "not_attempted",
+              errorCode: "broadcast_disabled",
+              reason: "relayer broadcast is not configured",
+            }
+          : { status: "submitted", txHash };
+      },
+    };
+    const { router } = await routerFixture({
+      resourceBroadcastAdapter: broadcast,
+    });
     const prepared = await prepareStageResourcePatch(router);
-    const response = await router.handle({
+    const submitBody = {
+      prepareId: prepared.prepareId,
+      selectorWallet,
+      signature: await signResourcePrepared(prepared),
+    };
+
+    await expect(router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/submit-stage-resource-patch`,
+      body: submitBody,
+    })).resolves.toMatchObject({
+      status: 503,
       body: {
-        prepareId: prepared.prepareId,
-        selectorWallet,
-        signature: await signResourcePrepared(prepared),
+        error: "broadcast_disabled",
+        details: { retryable: true },
       },
     });
 
-    expect(response).toMatchObject({
+    const retried = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-resource-patch`,
+      body: submitBody,
+    });
+
+    expect(retried).toMatchObject({
       status: 200,
+      body: { status: "submitted", txHash },
+    });
+    expect(broadcastCalls).toBe(2);
+  });
+
+  it("fails loudly with a reusable prepare when the executor patch relayer is disabled", async () => {
+    // executor patch 同口径：not_attempted 释放 nonce、不烧毁 prepare。
+    let broadcastCalls = 0;
+    const broadcast: StageExecutorPatchBroadcastAdapter = {
+      broadcast: async (): Promise<StagePatchBroadcastResult> => {
+        broadcastCalls += 1;
+        return broadcastCalls === 1
+          ? {
+              status: "not_attempted",
+              errorCode: "broadcast_disabled",
+              reason: "relayer broadcast is not configured",
+            }
+          : { status: "submitted", txHash };
+      },
+    };
+    const { router } = await routerFixture({
+      executorBroadcastAdapter: broadcast,
+    });
+    const prepared = await prepareStageExecutorPatch(router);
+    const submitBody = {
+      prepareId: prepared.prepareId,
+      selectorWallet,
+      signature: await signExecutorPrepared(prepared),
+    };
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    })).resolves.toMatchObject({
+      status: 503,
       body: {
-        status: "signature_received",
-        signatureStatus: "signature_verified",
-        recoveredSelector: selectorWallet,
-        broadcastStatus: "not_attempted",
-        errorCode: "broadcast_disabled",
-        retryable: false,
+        error: "broadcast_disabled",
+        details: { retryable: true },
       },
     });
+
+    const retried = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    });
+
+    expect(retried).toMatchObject({
+      status: 200,
+      body: { status: "submitted", txHash },
+    });
+    expect(broadcastCalls).toBe(2);
   });
 
   it("releases the reserved patch nonce when broadcast throws so the same prepareId stays retryable", async () => {
@@ -989,6 +1110,8 @@ async function routerFixture(
     readonly productBffStore?: ProductBffStore;
     readonly productSchema?: StoreProductSchemaDTO;
     readonly explicitModuleAddresses?: boolean;
+    /** 本地联调 dev 锚定头（钱包会话叠加层）开关。 */
+    readonly devAnchoredAuth?: boolean;
   } = {},
 ): Promise<{
   readonly router: ApiRouter;
@@ -1051,6 +1174,24 @@ async function routerFixture(
     router: createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productStageExecutorPatchService: executorService,
       productStageResourcePatchService: resourceService,
+      ...(options.devAnchoredAuth
+        ? {
+            storeAuthConfig: {
+              mode: "dev_headers" as const,
+              roleClaim: "roles",
+              principalClaim: "sub",
+              clockToleranceSeconds: 60,
+              walletSession: {
+                enabled: true,
+                operatorWallets: [],
+                adminWallets: [],
+                sessionTtlSeconds: 43200,
+                challengeTtlSeconds: 300,
+                devAnchoredAddressHeaderEnabled: true
+              }
+            }
+          }
+        : {})
     }),
   };
 }
@@ -1558,6 +1699,39 @@ describe("stage patch payload hash parity with protocol-bindings", () => {
     expect(hashStageResourcePatchPayload(payload)).toBe(
       hashProtocolStageResourcePatchPayload(payload),
     );
+  });
+});
+
+describe("stage patch prepare table bounds", () => {
+  it("sweeps expired prepares on write and keeps a hard cap on the in-memory table", async () => {
+    const { InMemoryProductStagePatchStore, MEMORY_PREPARED_PATCH_HARD_LIMIT } = await import("../src/stage-patches/index.js");
+    let current = new Date("2026-04-30T00:00:00Z");
+    const store = new InMemoryProductStagePatchStore<PreparedStageExecutorPatchRecord, StageExecutorPatchSubmissionDTO>({
+      now: () => current
+    });
+    const preparedAt = (index: number, deadlineSeconds: string) => ({
+      prepareId: `prep_${index}`,
+      nonceKey: `nonce_${index}`,
+      taskId: "task_1",
+      patchHash: "0x" + "11".repeat(32),
+      status: "prepared",
+      deadline: deadlineSeconds
+    }) as unknown as PreparedStageExecutorPatchRecord;
+
+    // 过期清扫：deadline 已过的 prepare 被删除。
+    await store.putPrepared(preparedAt(0, "1"));
+    await store.putPrepared(preparedAt(1, String(Math.floor(current.getTime() / 1000) + 600)));
+    await expect(store.deleteExpiredPrepared(String(Math.floor(current.getTime() / 1000)))).resolves.toBe(1);
+    await expect(store.getPrepared("prep_0")).resolves.toBeUndefined();
+    await expect(store.getPrepared("prep_1")).resolves.toBeDefined();
+
+    // 硬上限：到顶后先清过期，仍满按最早 deadline 淘汰——表大小不随
+    // 未鉴权写入无界增长。
+    for (let index = 2; index < MEMORY_PREPARED_PATCH_HARD_LIMIT + 2; index += 1) {
+      await store.putPrepared(preparedAt(index, String(Math.floor(current.getTime() / 1000) + 600)));
+    }
+    await expect(store.getPrepared("prep_1")).resolves.toBeUndefined();
+    await expect(store.getPrepared(`prep_${MEMORY_PREPARED_PATCH_HARD_LIMIT + 1}`)).resolves.toBeDefined();
   });
 });
 

@@ -242,7 +242,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         UVP_FINALITY_CONFIRMATIONS: "12",
         GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
         OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
-        GOVERNANCE_ADMIN_TOKEN_HASHES: adminTokenHash
+        GOVERNANCE_ADMIN_TOKEN_HASHES: adminTokenHash,
+        // production 受管 PG 的显式轮询基线（受管库成本安全门三档同口径）。
+        UVP_INDEXER_POLL_INTERVAL_MS: "5000"
       };
       // 无 UVP_RPC_URL：不再静默回落 127.0.0.1:8545。
       expect(() => loadConfigFromEnv(base)).toThrow(/UVP_RPC_URL is required in production/);

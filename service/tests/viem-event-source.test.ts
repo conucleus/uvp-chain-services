@@ -12,11 +12,11 @@ describe("ViemChainEventSource", () => {
       UVPStateMachine: "uvp-state-machine.v0.10.json",
       UVPIdentityRegistry: "uvp-identity-registry.v0.1.json",
       UVPDeploymentRegistry: "uvp-deployment-registry.v0.2.json",
-      UVPStagePatchModule: "uvp-stage-patch-module.v0.2.json",
-      UVPPlanMetadataModule: "uvp-plan-metadata-module.v0.4.json",
+      UVPStagePatchModule: "uvp-stage-patch-module.v0.3.json",
+      UVPPlanMetadataModule: "uvp-plan-metadata-module.v0.5.json",
       UVPDerivedSignalModule: "uvp-derived-signal-module.v0.2.json",
       UVPOrderLinkModule: "uvp-order-link-module.v0.2.json",
-      UVPDockingModule: "uvp-docking-module.v4.0.json"
+      UVPDockingModule: "uvp-docking-module.v4.1.json"
     };
     const artifacts: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
       UVPStateMachine: "UVPStateMachine.sol/UVPStateMachine.json",
@@ -298,6 +298,37 @@ describe("ViemChainEventSource", () => {
     expect(eventSource.consumeUnresolvedLogCount()).toBe(1);
     expect(eventSource.unresolvedLogCount).toBe(0);
     expect(logger.warns.some((line) => line.includes("skipped undecodable chain log"))).toBe(true);
+  });
+
+  it("fails loudly on a malformed log address instead of swallowing it as undecodable", async () => {
+    // 日志地址畸形是 RPC 层故障（与块号/交易哈希缺失同口径），必须抛错
+    // ——被解码 catch 吞成"单条不可解码日志"会把节点故障静默成投影缺行。
+    const malformedAddressLog = {
+      ...planRegisteredLog(),
+      address: "0xnot-an-address"
+    } as Log;
+    const logger = new CapturingLogger();
+    const eventSource = new ViemChainEventSource({
+      logger,
+      publicClient: {
+        async getBlockNumber() {
+          return 0n;
+        },
+        async getLogs() {
+          return [malformedAddressLog];
+        }
+      }
+    });
+
+    await expect(eventSource.readEvents(
+      {
+        chainId: 84532,
+        fromBlock: 100n,
+        toBlock: 100n
+      },
+      chainServicesConfig()
+    )).rejects.toThrow(/20-byte EVM address/);
+    expect(eventSource.unresolvedLogCount).toBe(0);
   });
 
   it("keeps 0x-prefixed string event args verbatim while lowercasing bytes args", async () => {

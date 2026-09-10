@@ -201,9 +201,11 @@ function duplicateResult(
   const lastResult = state.lastResult;
   if (lastResult.status === "failed") {
     if (!lastResult.retryable) {
-      return failedBroadcastResult("broadcast_retry_blocked", "last broadcast failure is not retryable", false, state.attempts, {
-        deadLetter: true
-      });
+      // 去重重放必须保留原始失败结果：泛化成 broadcast_retry_blocked 会
+      // 抹掉真实错误码（invalid_signal_signature/transaction_reverted 等），
+      // 调用方与排障拿到的是被改写的响应契约。原结果自带不可重试语义
+      // （retryable=false/deadLetter），重放即最终事实。
+      return lastResult;
     }
     if (state.attempts > maxRetry) {
       return failedBroadcastResult("broadcast_retry_exhausted", "broadcast retry limit has been reached", false, state.attempts, {
@@ -362,8 +364,6 @@ function errorLabelForBroadcastError(errorCode: string): string {
   switch (errorCode) {
     case "broadcast_rate_limited":
       return "Broadcast is rate limited";
-    case "broadcast_retry_blocked":
-      return "Retry is blocked";
     case "broadcast_retry_exhausted":
       return "Retry limit reached";
     case "duplicate_tx_hash":

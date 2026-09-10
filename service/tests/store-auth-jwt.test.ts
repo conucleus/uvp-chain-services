@@ -75,6 +75,38 @@ describe("Store JWT/JWKS operator identity", () => {
     expect(governanceAdmin.capabilities).not.toContain("store.version.activate");
   });
 
+  it("does not grant canWrite to read-level Store JWT identities", async () => {
+    // store.docking.read 是读级能力：纯读会话（store_reader）不得因
+    // 漏排该能力被判定 canWrite（JWT 访问态谓词）。
+    const fixture = await createJwksFixture(servers);
+    const provider = createStoreIdentityProvider({
+      // 本地 JWKS fixture 是 http/127.0.0.1——strict runtime 会按 SSRF
+      // 防线拒绝；canWrite 谓词与运行档位无关，用 local 装配即可。
+      runtimeEnvironment: "local",
+      authConfig: {
+        mode: "jwt",
+        jwksUrl: fixture.jwksUrl,
+        issuer,
+        audience,
+        roleClaim: "roles",
+        principalClaim: "sub",
+        clockToleranceSeconds: 5
+      }
+    });
+
+    const reader = await provider.resolve({
+      authorization: `Bearer ${await signStoreToken(fixture, { sub: "reader-1", roles: ["store_reader"] })}`
+    });
+    expect(reader.capabilities).toEqual(["store.read", "store.audit.read", "store.docking.read"]);
+    expect(reader.canWrite).toBe(false);
+
+    const operator = await provider.resolve({
+      authorization: `Bearer ${await signStoreToken(fixture, { sub: "operator-1", roles: ["store_operator"] })}`
+    });
+    expect(operator.capabilities).toContain("store.docking.read");
+    expect(operator.canWrite).toBe(true);
+  });
+
   it("requires JWT governance_admin principals to pass the governance whitelist", async () => {
     const fixture = await createJwksFixture(servers);
     // 白名单注入后，IdP 声明的 governance_admin 角色不再直接映射治理权威：

@@ -12,6 +12,21 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
   readonly #accountAddresses = new Map<string, StoreAccountAddressRecord>();
 
   async putChallenge(record: StoreAuthChallengeRecord): Promise<void> {
+    // challenge 入口未鉴权：内存驱动必须有独立硬上限，否则即使有每地址
+    // 配额，攻击者换地址循环打仍会无界增长（OOM）。到达上限时先清过期
+    // 行（它们已无任何判定价值），仍满则按签发序淘汰最旧行——服务层
+    // 的每地址配额保证正常流量到不了这里，这是最后防线而非常规路径。
+    if (this.#challenges.size >= MEMORY_CHALLENGE_HARD_LIMIT) {
+      await this.deleteExpiredChallenges(new Date().toISOString());
+      while (this.#challenges.size >= MEMORY_CHALLENGE_HARD_LIMIT) {
+        const oldest = [...this.#challenges.values()]
+          .sort((left, right) => left.issuedAt.localeCompare(right.issuedAt))[0];
+        if (!oldest) {
+          break;
+        }
+        this.#challenges.delete(oldest.nonce);
+      }
+    }
     this.#challenges.set(record.nonce, record);
   }
 
@@ -26,6 +41,17 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
 
   async updateChallenge(record: StoreAuthChallengeRecord): Promise<void> {
     this.#challenges.set(record.nonce, record);
+  }
+
+  async deleteExpiredChallenges(expiresBefore: string): Promise<number> {
+    let deleted = 0;
+    for (const [nonce, challenge] of this.#challenges) {
+      if (challenge.expiresAt < expiresBefore) {
+        this.#challenges.delete(nonce);
+        deleted += 1;
+      }
+    }
+    return deleted;
   }
 
   async consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined> {
@@ -74,3 +100,6 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
 function accountAddressKey(address: Address): string {
   return address.toLowerCase();
 }
+
+/** memory 驱动的挑战表硬上限（未鉴权入口的最后防线，见 putChallenge）。 */
+export const MEMORY_CHALLENGE_HARD_LIMIT = 10_000;

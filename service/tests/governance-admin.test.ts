@@ -252,6 +252,41 @@ describe("identity governance API", () => {
       args: [subjectId, wallet, request.descriptorHash, request.descriptorURI],
     }));
   });
+
+  it("keeps the broadcast txHash when waiting for the receipt fails", async () => {
+    // 已广播的交易在等回执抛错时必须带着 txHash 失败——丢失哈希会造成
+    // 幽灵交易 + 重复登记（同仓其余广播适配器的共同防线）。
+    const publicClient: GovernancePublicClient = {
+      async getChainId() { return 31337; },
+      async readContract() { return signer; },
+      async waitForTransactionReceipt() {
+        throw new Error("receipt timeout");
+      },
+    };
+    const walletClient = { writeContract: vi.fn(async () => txHash) } as GovernanceWalletClient;
+    const adapter = createGovernanceBroadcasterAdapter({
+      rpcUrl: "http://127.0.0.1:8545",
+      chainId: 31337,
+      contractAddress: registryAddress,
+      privateKey: signerPrivateKey,
+      txConfirmations: 1,
+      publicClient,
+      walletClient,
+    });
+    const request = {
+      kind: "registerIdentity" as const,
+      subjectId,
+      account: wallet,
+      descriptorHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Hex,
+      descriptorURI: "uvp-store://identity/acme",
+    };
+    await expect(adapter.registerIdentity?.(request)).resolves.toMatchObject({
+      status: "failed",
+      txHash,
+      signer,
+      retryable: true,
+    });
+  });
 });
 
 /** 非 local 边界可接受的内存对象存储客户端（production-safe 适配器用）。 */

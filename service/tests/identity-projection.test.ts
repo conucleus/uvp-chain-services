@@ -65,6 +65,50 @@ describe("identity registry projection", () => {
     expect(response).toMatchObject({ status: 200 });
     expect((response.body as { bindings: unknown[] }).bindings).toHaveLength(1);
   });
+
+  it("parses activeOnly=false as boolean false so revoked records stay visible", async () => {
+    // activeOnly 的字符串 "false" 若原样透传给投影（truthy），撤销记录
+    // 会被错误过滤——路由层必须收敛为 boolean。
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        event(2n, 0, "IdentityBindingRegistered", {
+          bindingId,
+          subjectId,
+          account,
+          descriptorHash,
+          descriptorURI: "https://store/identities/1",
+          registrar,
+        }),
+        event(3n, 1, "IdentityBindingRevoked", {
+          bindingId,
+          reasonHash,
+          reasonURI: "https://store/identity-revocations/1",
+          revoker: registrar,
+        }),
+      ],
+    });
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+
+    const all = await router.handle({
+      method: "GET",
+      pathname: "/identity/bindings",
+      query: { account, activeOnly: "false" },
+    });
+    expect(all).toMatchObject({ status: 200 });
+    const allBindings = (all.body as { bindings: { status: string }[] }).bindings;
+    expect(allBindings).toHaveLength(1);
+    expect(allBindings[0]?.status).toBe("revoked");
+
+    const active = await router.handle({
+      method: "GET",
+      pathname: "/identity/bindings",
+      query: { account, activeOnly: "true" },
+    });
+    expect(active).toMatchObject({ status: 200 });
+    expect((active.body as { bindings: unknown[] }).bindings).toHaveLength(0);
+  });
 });
 
 function event(

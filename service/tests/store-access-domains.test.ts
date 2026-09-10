@@ -8,6 +8,7 @@ import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { ApiRouter } from "../src/api/route-context.js";
 import type { Address, Hex } from "../src/shared/types.js";
 import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import type { StoreAuthChallengeRecord } from "../src/store-sessions/index.js";
 
 /**
  * Store 身份与会话、加入闭环、装修权限、上架与锚核验的后端验收。
@@ -1254,6 +1255,73 @@ const addressKeyMap = new Map<string, `0x${string}`>([
   [operatorWallet.toLowerCase(), "0x4444444444444444444444444444444444444444444444444444444444444444"],
   [teamDerivedWallet.toLowerCase(), "0x3333333333333333333333333333333333333333333333333333333333333333"]
 ]);
+
+describe("store auth challenge resource bounds", () => {
+  it("rate-limits live challenges per address and sweeps expired ones on write", async () => {
+    const { createStoreSessionService, InMemoryStoreWalletSessionStore, StoreSessionServiceError } =
+      await import("../src/store-sessions/index.js");
+    let current = new Date("2026-04-28T00:00:00Z");
+    const store = new InMemoryStoreWalletSessionStore();
+    const service = createStoreSessionService({
+      store,
+      config: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: false
+      },
+      now: () => current
+    });
+
+    // 单地址同时存活的挑战有上界：第 11 个 429。
+    for (let index = 0; index < 10; index += 1) {
+      await expect(service.createChallenge({ address: supplierWallet })).resolves.toBeDefined();
+    }
+    const limited = service.createChallenge({ address: supplierWallet });
+    await expect(limited).rejects.toMatchObject({
+      status: 429,
+      code: "store_challenge_rate_limited"
+    });
+    await expect(limited).rejects.toBeInstanceOf(StoreSessionServiceError);
+
+    // 配额按地址计：别的地址不受该地址囤积影响。
+    await expect(service.createChallenge({ address: outsiderWallet })).resolves.toBeDefined();
+
+    // 过期挑战在写入时被清扫：TTL 过后配额自动释放。
+    current = new Date(current.getTime() + 301_000);
+    await expect(service.createChallenge({ address: supplierWallet })).resolves.toBeDefined();
+  });
+
+  it("keeps a hard cap on the in-memory challenge table", async () => {
+    const { InMemoryStoreWalletSessionStore, MEMORY_CHALLENGE_HARD_LIMIT } =
+      await import("../src/store-sessions/index.js");
+    const store = new InMemoryStoreWalletSessionStore();
+    const challengeAt = (index: number, expiresAt: string): StoreAuthChallengeRecord => ({
+      nonce: `nonce${index.toString().padStart(6, "0")}`,
+      address: `0x${(index % 100).toString(16).padStart(40, "0")}` as Address,
+      intent: "login",
+      message: "m",
+      issuedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 0) + index * 1000).toISOString(),
+      expiresAt
+    });
+
+    // 到达硬上限时先清过期行：最早过期的挑战被清扫而不是顶掉最新行。
+    await store.putChallenge(challengeAt(0, "2026-01-01T00:00:00Z"));
+    for (let index = 1; index < MEMORY_CHALLENGE_HARD_LIMIT; index += 1) {
+      await store.putChallenge(challengeAt(index, "2100-01-01T00:00:00Z"));
+    }
+    await store.putChallenge(challengeAt(MEMORY_CHALLENGE_HARD_LIMIT, "2100-01-01T00:00:00Z"));
+    await expect(store.getChallenge("nonce000000")).resolves.toBeUndefined();
+    await expect(store.getChallenge(`nonce${MEMORY_CHALLENGE_HARD_LIMIT.toString().padStart(6, "0")}`)).resolves.toBeDefined();
+
+    // 全部存活仍超上限：按签发序淘汰最旧行——内存不随未鉴权写入无界增长。
+    await store.putChallenge(challengeAt(MEMORY_CHALLENGE_HARD_LIMIT + 1, "2100-01-01T00:00:00Z"));
+    await expect(store.getChallenge("nonce000001")).resolves.toBeUndefined();
+    await expect(store.getChallenge(`nonce${(MEMORY_CHALLENGE_HARD_LIMIT + 1).toString().padStart(6, "0")}`)).resolves.toBeDefined();
+  });
+});
 
 function keyForAddress(address: Address): `0x${string}` {
   const key = addressKeyMap.get(address.toLowerCase());

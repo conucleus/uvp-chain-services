@@ -333,6 +333,11 @@ export function createProductStageExecutorPatchService(
           patchNonce,
         }),
       };
+      // 写入时顺带清扫过期 prepare（同 store-sessions 挑战表口径）：
+      // prepare 入口无配额，只插不删会让表无界堆叠。
+      await stageExecutorPatchStore.deleteExpiredPrepared?.(
+        String(Math.floor(now().getTime() / 1000)),
+      );
       await stageExecutorPatchStore.putPrepared(prepared);
       return executorDtoFromPrepared(prepared);
     },
@@ -463,6 +468,19 @@ export function createProductStageExecutorPatchService(
           timestamp,
         });
         await stageExecutorPatchStore.putSubmission(submission);
+        // cannot broadcast 的适配器不得消费 prepare/nonce（与 submissions
+        // 主路径 submissions/service.ts 的 attemptsBroadcast 契约一致）：
+        // 记录尝试后响亮失败（503 可重试），由统一 catch 释放序号、
+        // prepare 保持可复用——200 假成功会把这个补丁通道永久楔死在
+        // duplicate nonce 上。
+        if (broadcast.status === "not_attempted") {
+          throw new ProductStagePatchError(
+            503,
+            "broadcast_disabled",
+            "stage executor patch relayer broadcast is not configured; the verified signature was recorded but the prepare and nonce were not consumed",
+            { submissionId: submission.submissionId, retryable: true },
+          );
+        }
         // A retryable failure without a transaction hash means the relayer
         // never obtained a chain transaction. Keep the prepare reusable and
         // release the reservation after recording the attempt. A retryable
@@ -622,6 +640,10 @@ export function createProductStageResourcePatchService(
           patchNonce,
         }),
       };
+      // 同 executor patch 路径：写入时顺带清扫过期 prepare。
+      await stageResourcePatchStore.deleteExpiredPrepared?.(
+        String(Math.floor(now().getTime() / 1000)),
+      );
       await stageResourcePatchStore.putPrepared(prepared);
       return resourceDtoFromPrepared(prepared);
     },
@@ -720,6 +742,17 @@ export function createProductStageResourcePatchService(
           timestamp,
         });
         await stageResourcePatchStore.putSubmission(submission);
+        // 同 executor patch 路径：cannot broadcast 不得消费 prepare/nonce
+        // （submissions/service.ts 的 attemptsBroadcast 契约）——记录尝试
+        // 后响亮失败，统一 catch 释放序号，prepare 保持可复用。
+        if (broadcast.status === "not_attempted") {
+          throw new ProductStagePatchError(
+            503,
+            "broadcast_disabled",
+            "stage resource patch relayer broadcast is not configured; the verified signature was recorded but the prepare and nonce were not consumed",
+            { submissionId: submission.submissionId, retryable: true },
+          );
+        }
         // See the executor-patch path above: only a retryable failure with no
         // txHash is safe to reopen for the same prepareId.
         if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {

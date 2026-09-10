@@ -62,6 +62,13 @@ export interface StoreWalletSessionStore {
    * 只有一个请求能通过（burn-on-attempt 原子化）。
    */
   consumeChallenge?(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined>;
+  /**
+   * 过期挑战清扫：删除 expires_at < expiresBefore 的行（含已消费的），
+   * 返回删除行数。challenge 入口未鉴权且只插不删会把表/内存无界放大
+   * （DoS）；由服务层在写入时顺带触发，三种驱动同口径。过期行无论
+   * 是否消费都不再参与任何判定（verify 对过期/未知一律拒绝）。
+   */
+  deleteExpiredChallenges(expiresBefore: string): Promise<number>;
 
   putSession(record: StoreWalletSessionRecord): Promise<void>;
   findSessionByTokenHash(tokenHash: string): Promise<StoreWalletSessionRecord | undefined>;

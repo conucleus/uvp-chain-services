@@ -1840,6 +1840,130 @@ describe("product API routes", () => {
     });
   });
 
+  it("authorizes prepare-submit for the delegated executor after a stage patch takeover", async () => {
+    // D-1 修复回归：executor patch 接管后，新执行者按合约委任记录
+    // （_delegatedStageSignalAuthorizations，键=真实 (sourceId, signalId)，
+    // 不是 targetStageId）获得提交权——链下不得以"显式授权未命中"一票
+    // 否决。委任键与阶段键不同（sourceId=customs-source ≠ stageId），
+    // 同时钉住键位口径。
+    const delegatedSourceId = sourceId;
+    const delegatedSignalId = signalId;
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(1n, "PlanRegistered", {
+          planId: crossBorderPlanIds.planId,
+          planHash: crossBorderPlanIds.planHash,
+          hookCount: 1n
+        }),
+        chainEvent(2n, "SignalCapabilityRegistered", {
+          planId: crossBorderPlanIds.planId,
+          stageId,
+          targetSourceId: delegatedSourceId,
+          signalId: delegatedSignalId,
+          targetOrderRelation: 0
+        }),
+        chainEvent(3n, "OrderRegistered", {
+          orderId: stateMachineOrderId,
+          planId: crossBorderPlanIds.planId
+        }),
+        chainEvent(4n, "HookReady", {
+          orderId: stateMachineOrderId,
+          hookId,
+          stageId,
+          hookName
+        }),
+        chainEvent(5n, "StageExecutorPatchApplied", {
+          orderId: stateMachineOrderId,
+          selectorStageId,
+          targetStageId: stageId,
+          selector: submitter,
+          executor: overlayExecutor,
+          role: bytes32Text("customs-executor"),
+          executorMetadataHash: metadataHash,
+          patchHash: bytes32Hex("9301"),
+          patchNonce: 1n,
+          metadataURI: "ipfs://stage-executor/takeover-1"
+        }),
+        // delegateStageExecutorSignalFromModule 的链上事实（同笔交易
+        // 也会落 SignalSubmitterAuthorized——本测试刻意不落，验证委任腿
+        // 本身而不是被显式腿命中掩盖）。
+        chainEvent(6n, "StageExecutorSignalDelegated", {
+          orderId: stateMachineOrderId,
+          planId: crossBorderPlanIds.planId,
+          targetStageId: stageId,
+          sourceId: delegatedSourceId,
+          signalId: delegatedSignalId,
+          executor: overlayExecutor,
+          role: bytes32Text("customs-executor"),
+          metadataHash,
+          patchNonce: 1n
+        })
+      ]
+    });
+    const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => new Date("2026-04-29T00:00:00.000Z"),
+      evidenceIdFactory: () => "ev_delegated_prepare"
+    });
+    // BFF trigger 台账为空：授权只能来自链上投影（委任腿）。
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: new MemoryProductBffStore(), evidenceService });
+    const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
+    const uploadResponse = await router.handle({
+      method: "POST",
+      pathname: "/product/evidence",
+      headers: { "x-uvp-principal-id": "customs" },
+      body: {
+        orderId: stateMachineOrderId,
+        taskId,
+        stageIdentifier: "export.customs",
+        documentType: "customs-declaration",
+        textPayload: "customs declaration",
+        metadata: { fields: { declarationNo: "CD-DELEGATED" } }
+      }
+    });
+    const evidenceId = (uploadResponse.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
+    expect(evidenceId).toBe("ev_delegated_prepare");
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${taskId}/prepare-submit`,
+      headers: { "x-uvp-principal-id": "customs" },
+      body: {
+        evidenceIds: [evidenceId],
+        walletAddress: overlayExecutor,
+        intent: "confirm_stage"
+      }
+    })).resolves.toMatchObject({
+      status: 201,
+      body: {
+        authorization: {
+          source: "chain_signal_delegation"
+        }
+      }
+    });
+
+    // 未获委任的钱包仍被拒（显式腿未命中→委任腿未命中→overlay 兜底
+    // 不放行非在任执行者）。
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${taskId}/prepare-submit`,
+      headers: { "x-uvp-principal-id": "customs" },
+      body: {
+        evidenceIds: [evidenceId],
+        walletAddress: "0x0000000000000000000000000000000000000bad",
+        intent: "confirm_stage"
+      }
+    })).resolves.toMatchObject({
+      status: 403,
+      body: {
+        error: "submitter_not_authorized"
+      }
+    });
+  });
+
   it("returns typed product_storage_unavailable instead of opaque internal_server_error when database is unreachable", async () => {
     const { StorageUnavailableError } = await import("../src/storage/errors.js");
     const unavailableError = new StorageUnavailableError(

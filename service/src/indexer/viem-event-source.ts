@@ -58,7 +58,7 @@ const orderLinkModuleAbi = parseAbi([
   "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 planId,bytes32 originPlanId,bytes32 originSourceId,bytes32 originSignalId)",
 ]);
 
-// UVPDockingModule v3.0（具名接口 dock v2）。终态不由链上事件驱动，
+// UVPDockingModule v4.1（具名接口 dock v2）。终态不由链上事件驱动，
 // 事件面只有 open/input/output 三类。
 const dockingModuleAbi = parseAbi([
   "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 interfaceNameId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
@@ -405,6 +405,9 @@ function decodeChainEventLog(
       `incomplete ${contract.name} log metadata from ${contract.address}`,
     );
   }
+  // 日志地址畸形与块号/交易哈希缺失同属 RPC 层故障：必须在 try 外校验，
+  // 否则 normalizeLogAddress 的抛错被解码 catch 吞成"单条不可解码日志"。
+  const normalizedAddress = normalizeLogAddress(log.address);
 
   let event: ChainEvent | undefined;
   try {
@@ -417,7 +420,7 @@ function decodeChainEventLog(
     event = eventName
       ? {
         chainId,
-        contractAddress: normalizeLogAddress(log.address),
+        contractAddress: normalizedAddress,
         blockNumber: log.blockNumber,
         transactionHash: log.transactionHash.toLowerCase() as Hex,
         logIndex: Number(log.logIndex),

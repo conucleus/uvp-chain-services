@@ -88,6 +88,16 @@ export class SqliteStoreWalletSessionStore implements StoreWalletSessionStore {
     });
   }
 
+  async deleteExpiredChallenges(expiresBefore: string): Promise<number> {
+    // 过期行无论是否消费都不再参与判定——未鉴权入口的写入时清扫。
+    const result = runSqliteWrite(() =>
+      this.#database.prepare(
+        `DELETE FROM store_auth_challenge WHERE expires_at < ?`
+      ).run(expiresBefore)
+    );
+    return result.changes;
+  }
+
   async consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined> {
     // 条件 UPDATE 原子占位——
     // WHERE consumed_at IS NULL 保证并发重放同一 nonce 只有一个赢家。

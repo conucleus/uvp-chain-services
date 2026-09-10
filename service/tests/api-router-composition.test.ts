@@ -179,6 +179,75 @@ describe("API router composition", () => {
     });
   });
 
+  it("chain delegation leg authorizes the delegated executor by the real signal key when the explicit leg misses", async () => {
+    const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
+    const { MemoryProductBffStore } = await import("../src/product/bff/store.js");
+    const { MemoryProjectionStore } = await import("../src/storage/projection-store.js");
+
+    // D-1 合并裁决：显式腿（authorizations）未命中不是终局否决——
+    // 委任腿（signalDelegations）以真实 (sourceId, signalId) 为键
+    // （合约 _delegatedStageSignalAuthorizations 口径，sourceId 可以
+    // != targetStageId），executor 匹配即放行。
+    const delegatedExecutor = "0x5555555555555555555555555555555555555555";
+    const onchainOrderId = "0x" + "8".repeat(64);
+    const planId = "0x" + "c".repeat(64);
+    const realSourceId = "0x" + "a".repeat(64);
+    const signalId = "0x" + "b".repeat(64);
+    const targetStageId = "0x" + "7".repeat(64);
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(1n, "PlanRegistered", { planId, planHash: "0x" + "d".repeat(64), hookCount: 1n }),
+        chainEvent(2n, "OrderRegistered", { orderId: onchainOrderId, planId }),
+        chainEvent(3n, "StageExecutorSignalDelegated", {
+          orderId: onchainOrderId,
+          planId,
+          targetStageId,
+          sourceId: realSourceId,
+          signalId,
+          executor: delegatedExecutor,
+          role: "0x" + "3".repeat(64),
+          metadataHash: "0x" + "4".repeat(64),
+          patchNonce: 1n
+        })
+      ]
+    });
+    const authorization = productBffStoreSubmissionAuthorization(new MemoryProductBffStore(), store);
+
+    const authorized = await authorization.authorize({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "stage-1",
+      signalName: "confirm_stage",
+      onchainOrderId,
+      sourceId: realSourceId,
+      signalId,
+      intent: "confirm_stage",
+      submitter: delegatedExecutor
+    } as never);
+    expect(authorized).toMatchObject({ authorized: true, source: "chain_signal_delegation" });
+
+    // 非委任执行者：两腿未命中→overlay 兜底→仍拒，最终理由来自链上腿。
+    const stranger = "0x6666666666666666666666666666666666666666";
+    const denied = await authorization.authorize({
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "stage-1",
+      signalName: "confirm_stage",
+      onchainOrderId,
+      sourceId: realSourceId,
+      signalId,
+      intent: "confirm_stage",
+      submitter: stranger
+    } as never);
+    expect(denied).toMatchObject({
+      authorized: false,
+      source: "chain_signal_authorization",
+      reason: expect.stringContaining("not authorized on chain")
+    });
+  });
+
   it("route modules do not cross-import; composition stays in the public factory", () => {
     const apiDir = new URL("../src/api/", import.meta.url);
     const modulesDir = new URL("routes/", apiDir);
