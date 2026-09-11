@@ -25,11 +25,18 @@ import {
   type SupplierNotificationTransport
 } from "./profile.js";
 
-export type NotificationDeliveryStatus = "pending" | "sent" | "failed" | "skipped" | "dead_letter";
+export type NotificationDeliveryStatus =
+  | "pending"
+  | "sent"
+  | "failed"
+  | "skipped"
+  | "dead_letter"
+  // reorg 回滚联动失效：载荷指向的链上定位已被回滚删除，记录保留为
+  // 排障证据，不再是可重试/可重开的投递。
+  | "invalidated";
 export type NotificationActivationStatus = "accepted" | "started" | "rejected";
 
 export type NotificationSkippedReason =
-  | "not_finalized"
   | "order_projection_missing"
   | "signal_projection_missing"
   | "artifact_mapping_missing"
@@ -40,7 +47,16 @@ export type NotificationSkippedReason =
   | "notification_profile_missing"
   | "transport_not_supported"
   | "executor_watch_self_managed"
-  | "transport_adapter_missing";
+  | "transport_adapter_missing"
+  // SignalSubmitted 事件缺可解码的 planId/orderId：无法定位订单桶，
+  // 派生被隔离，但丢弃必须落账可数（否则丢事件在台账不可见）。
+  | "event_scope_ids_missing"
+  // dead_letter 终态的原因码（自动补投预算耗尽）：与 skipped 原因共用
+  // reason 词表，不入枚举会在 evidence 视图被统一掩成
+  // redacted_operator_reason，自动耗尽终态不可归因。
+  | "delivery_attempts_exhausted"
+  // reorg 回滚联动的失效原因码（status=invalidated 行）。
+  | "reorg_rolled_back";
 
 export interface SignalNotificationPayload {
   readonly version: "uvp.signalReceivedNotification.v1";
@@ -115,7 +131,9 @@ export type ParticipantNotificationKind =
   | "signal_submitted"
   | "submission_confirmed"
   | "submission_failed"
-  | "task_revoked";
+  | "task_revoked"
+  // 载荷指向的链上定位已被 reorg 回滚：通知内容不可信，需引导查证最新链上状态。
+  | "notification_invalidated";
 
 export type ParticipantNotificationSeverity = "info" | "action" | "warning" | "critical" | "success";
 export type ParticipantNotificationReadStatus = "read" | "unread";
@@ -147,6 +165,11 @@ export interface ParticipantNotificationRecord {
   readonly actionHref: string;
   readonly proofHref?: string;
   readonly proof?: ParticipantNotificationProof;
+  /** kind=notification_invalidated 时的结构化失效状态：前端按状态呈现操作指引，不解析文案。 */
+  readonly invalidation?: {
+    readonly status: "invalidated";
+    readonly reason?: string;
+  };
   readonly createdAt: string;
   readonly readAt?: string;
   readonly source: "chain_projection" | "notification_delivery";
@@ -268,12 +291,31 @@ export interface NotificationRunSummary {
 
 export type NotificationProcessSummary = NotificationRunSummary;
 
+/** dead_letter 显式重开：只允许 dead_letter 行，其余终态/非终态均拒绝。 */
+export type NotificationDeliveryReopenOutcome =
+  | { readonly outcome: "not_found" }
+  | { readonly outcome: "not_dead_letter"; readonly delivery: NotificationDeliveryRecord }
+  | { readonly outcome: "reopened"; readonly delivery: NotificationDeliveryRecord };
+
+/** retry 结果：终态行是 no-op，路由层据此返回非 200 而非假成功。 */
+export type NotificationDeliveryRetryOutcome =
+  | { readonly outcome: "not_found" }
+  | { readonly outcome: "terminal"; readonly delivery: NotificationDeliveryRecord }
+  | { readonly outcome: "retried"; readonly delivery: NotificationDeliveryRecord };
+
 export interface NotificationService {
   processSignalSubmittedEvents(events: readonly ChainEvent[]): Promise<NotificationProcessSummary>;
   listProfiles(): Promise<readonly NotificationProfileResolution[]>;
   listDeliveries(query?: NotificationDeliveryQuery): Promise<readonly NotificationDeliveryRecord[]>;
-  retryDelivery(deliveryId: Hex): Promise<NotificationDeliveryRecord | undefined>;
+  retryDelivery(deliveryId: Hex): Promise<NotificationDeliveryRetryOutcome>;
   deadLetterDelivery(deliveryId: Hex, reason?: string): Promise<NotificationDeliveryRecord | undefined>;
+  reopenDelivery(deliveryId: Hex): Promise<NotificationDeliveryReopenOutcome>;
+  /**
+   * reorg 回滚联动：把 proof 定位高于 blockNumber 的投递标记为
+   * invalidated——回滚删除了这些事件，已生成的投递（含 sent）从此指向
+   * 已消失的链上定位，必须失效留痕而不是继续呈现为有效通知。
+   */
+  invalidateDeliveriesAboveBlock(input: { readonly chainId: number; readonly blockNumber: bigint }): Promise<number>;
   listParticipantNotifications(query?: ParticipantNotificationQuery): Promise<ParticipantNotificationList>;
   markParticipantNotificationRead(input: ParticipantNotificationReadInput): Promise<ParticipantNotificationRecord | undefined>;
   buildRedactedEvidence(query?: NotificationRedactedEvidenceQuery): Promise<NotificationRedactedEvidence>;
@@ -357,11 +399,22 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         const sourceId = bytes32Arg(event, "sourceId");
         const signalId = bytes32Arg(event, "signalId");
         // SignalSubmitted is plan-scoped on the frozen state-machine ABI.
-        // An event without a decodable planId is isolated like the indexer's
-        // undecodable logs (skipped without a delivery record): bare order
-        // ids never resolve, so two plans reusing the same orderId cannot
-        // receive each other's notification.
+        // An event without a decodable planId cannot resolve its order bucket
+        // and is isolated (no notification derivation), but the drop must be
+        // countable: a silent continue leaves lost events invisible in the
+        // run summary and delivery ledger.
         if (!planId || !orderId) {
+          updateIntentSummary(summary, await saveSkippedSignalDelivery({
+            deliveryStore,
+            event,
+            order: undefined,
+            signal: undefined,
+            receiverHook: undefined,
+            supplierMetadata: undefined,
+            reason: "event_scope_ids_missing",
+            transportType: undefined,
+            now
+          }));
           continue;
         }
         const order = await options.store.getStateMachineOrder(
@@ -528,11 +581,15 @@ export function createNotificationService(options: CreateNotificationServiceOpti
 
     async retryDelivery(deliveryId) {
       const existing = await deliveryStore.getDelivery(deliveryId);
-      // Sent and dead-lettered rows are terminal until an operator explicitly
-      // reopens them; a skipped row (for example, no configured dispatcher)
-      // is safe to retry after the missing dependency is restored.
-      if (!existing || existing.status === "sent" || existing.status === "dead_letter") {
-        return existing;
+      // Sent, dead-lettered and invalidated rows are terminal: sent 永不重投，
+      // dead_letter 只能经显式重开（reopenDelivery），invalidated 的载荷
+      // 定位已被 reorg 回滚删除、重投必是伪造通知。非终态（failed/skipped/
+      // pending）照常重试。
+      if (!existing) {
+        return { outcome: "not_found" };
+      }
+      if (existing.status === "sent" || existing.status === "dead_letter" || existing.status === "invalidated") {
+        return { outcome: "terminal", delivery: existing };
       }
       const { reason: _reason, lastError: _lastError, ...rest } = existing;
       const pending = await deliveryStore.saveDelivery({
@@ -542,21 +599,88 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       });
       const resolved = await resolveRetryTransport(options, pending);
       if (resolved.status !== "ok") {
-        return deliveryStore.saveDelivery({
-          ...pending,
-          status: "skipped",
-          reason: resolved.reason,
+        return {
+          outcome: "retried",
+          delivery: await deliveryStore.saveDelivery({
+            ...pending,
+            status: "skipped",
+            reason: resolved.reason,
+            updatedAt: now()
+          })
+        };
+      }
+      return {
+        outcome: "retried",
+        delivery: await dispatchPreparedDelivery({
+          deliveryStore,
+          ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+          pending,
+          profile: resolved.profile,
+          transport: resolved.transport,
+          now
+        })
+      };
+    },
+
+    async reopenDelivery(deliveryId) {
+      const existing = await deliveryStore.getDelivery(deliveryId);
+      if (!existing) {
+        return { outcome: "not_found" };
+      }
+      if (existing.status !== "dead_letter") {
+        return { outcome: "not_dead_letter", delivery: existing };
+      }
+      const { reason: _reason, lastError: _lastError, ...rest } = existing;
+      const pending = await deliveryStore.saveDelivery({
+        ...rest,
+        status: "pending",
+        updatedAt: now()
+      });
+      const resolved = await resolveRetryTransport(options, pending);
+      if (resolved.status !== "ok") {
+        return {
+          outcome: "reopened",
+          delivery: await deliveryStore.saveDelivery({
+            ...pending,
+            status: "skipped",
+            reason: resolved.reason,
+            updatedAt: now()
+          })
+        };
+      }
+      return {
+        outcome: "reopened",
+        delivery: await dispatchPreparedDelivery({
+          deliveryStore,
+          ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+          pending,
+          profile: resolved.profile,
+          transport: resolved.transport,
+          now
+        })
+      };
+    },
+
+    async invalidateDeliveriesAboveBlock(input) {
+      const deliveries = await deliveryStore.listDeliveries();
+      let invalidated = 0;
+      for (const delivery of deliveries) {
+        if (delivery.status === "invalidated" || delivery.chainId !== input.chainId) {
+          continue;
+        }
+        const proofBlock = BigInt(delivery.payload.proof.blockNumber);
+        if (proofBlock <= input.blockNumber) {
+          continue;
+        }
+        await deliveryStore.saveDelivery({
+          ...delivery,
+          status: "invalidated",
+          reason: "reorg_rolled_back",
           updatedAt: now()
         });
+        invalidated += 1;
       }
-      return dispatchPreparedDelivery({
-        deliveryStore,
-        ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
-        pending,
-        profile: resolved.profile,
-        transport: resolved.transport,
-        now
-      });
+      return invalidated;
     },
 
     async deadLetterDelivery(deliveryId, reason) {
@@ -587,11 +711,25 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       if (!participantKey) {
         return undefined;
       }
-      const readAt = now();
+      // 先判存在/可见再写：已读状态是持久写入，对不存在（或对该参与者
+      // 不可见）的通知先落已读、再由路由 404，会把一次无效请求固化成
+      // 持久状态。列表即该参与者的可见集合判据。
+      const visible = await buildParticipantNotificationList({
+        store: options.store,
+        deliveryStore,
+        readStateStore: participantReadStateStore,
+        query: {
+          ...(input.walletAddress ? { walletAddress: input.walletAddress } : {})
+        },
+        now: options.now ?? (() => new Date())
+      });
+      if (!visible.notifications.some((notification) => notification.notificationId === input.notificationId)) {
+        return undefined;
+      }
       await participantReadStateStore.markRead({
         participantKey,
         notificationId: input.notificationId,
-        readAt
+        readAt: now()
       });
       const list = await buildParticipantNotificationList({
         store: options.store,
@@ -753,7 +891,7 @@ function deliveryMatchesNotificationEvidenceQuery(
 }
 
 function deliveryStatusRequiresRecipientEvidence(status: NotificationDeliveryStatus): boolean {
-  return status === "failed" || status === "skipped" || status === "dead_letter";
+  return status === "failed" || status === "skipped" || status === "dead_letter" || status === "invalidated";
 }
 
 function redactedDeliveryReasonCode(reason: string): string {
@@ -762,7 +900,6 @@ function redactedDeliveryReasonCode(reason: string): string {
 
 function isNotificationSkippedReason(reason: string): reason is NotificationSkippedReason {
   return [
-    "not_finalized",
     "order_projection_missing",
     "signal_projection_missing",
     "artifact_mapping_missing",
@@ -773,7 +910,10 @@ function isNotificationSkippedReason(reason: string): reason is NotificationSkip
     "notification_profile_missing",
     "transport_not_supported",
     "executor_watch_self_managed",
-    "transport_adapter_missing"
+    "transport_adapter_missing",
+    "event_scope_ids_missing",
+    "delivery_attempts_exhausted",
+    "reorg_rolled_back"
   ].includes(reason);
 }
 
@@ -818,15 +958,17 @@ async function buildParticipantNotificationList(input: {
   }
 
   for (const delivery of deliveries) {
-    if (delivery.status !== "failed") {
+    if (delivery.status !== "failed" && delivery.status !== "invalidated") {
       continue;
     }
     const task = delivery.taskId ? uniqueTaskForDelivery(tasks, delivery) : undefined;
     const order = task
       ? findOrderForTask(orders, task)
       : uniqueOrderForDelivery(orders, delivery);
-    const failed = participantDeliveryFailedNotification(delivery, task, order);
-    notifications.set(failed.notificationId, failed);
+    const record = delivery.status === "invalidated"
+      ? participantDeliveryInvalidatedNotification(delivery, task, order)
+      : participantDeliveryFailedNotification(delivery, task, order);
+    notifications.set(record.notificationId, record);
   }
 
   const withReadState: ParticipantNotificationRecord[] = [];
@@ -986,6 +1128,30 @@ function participantDeliveryFailedNotification(
   };
 }
 
+function participantDeliveryInvalidatedNotification(
+  delivery: NotificationDeliveryRecord,
+  task: StateMachineTaskProjection | undefined,
+  order: StateMachineOrderProjection | undefined
+): ParticipantNotificationRecord {
+  const base = task
+    ? participantNotificationBase(task, order)
+    : participantNotificationBaseFromDelivery(delivery, order);
+  return {
+    ...base,
+    notificationId: participantNotificationId("notification_invalidated", delivery.deliveryId),
+    kind: "notification_invalidated",
+    severity: "warning",
+    eventLabel: "通知已失效",
+    message: "该提醒指向的链上记录已被重组回滚，内容不再可信。请打开订单证明核对最新链上状态；若任务仍待处理，以最新状态为准操作。",
+    invalidation: {
+      status: "invalidated",
+      ...(delivery.reason ? { reason: delivery.reason } : {})
+    },
+    createdAt: delivery.updatedAt,
+    source: "notification_delivery"
+  };
+}
+
 function participantNotificationBase(
   task: StateMachineTaskProjection,
   order: StateMachineOrderProjection | undefined
@@ -1095,9 +1261,13 @@ function signalPayloadNotificationProof(proof: SignalNotificationProof): Partici
 }
 
 function participantCanSeeOrderSignals(order: StateMachineOrderProjection, participantKey: string): boolean {
-  return Object.values(order.authorizations).some((authorization) =>
-    authorization.submitter.toLowerCase() === participantKey
-  ) ||
+  // creator 与 product 读面 orderVisibleToParticipant 同口径：订单创建者
+  // 无任务指派/信号时同样是订单参与者，读不到自己创建的订单信号与该
+  // 口径相悖。
+  return order.creator?.toLowerCase() === participantKey ||
+    Object.values(order.authorizations).some((authorization) =>
+      authorization.submitter.toLowerCase() === participantKey
+    ) ||
     Object.values(order.signals).some((signal) => signal.submitter.toLowerCase() === participantKey) ||
     Object.values(order.tasks).some((task) => task.assigneeWallet?.toLowerCase() === participantKey) ||
     Object.values(order.stageExecutorOverlays).some((overlay) =>
@@ -1195,7 +1365,7 @@ type MutableNotificationRunSummary = {
   -readonly [TKey in keyof NotificationRunSummary]: NotificationRunSummary[TKey];
 };
 
-/** M-5：failed 投递的自动重投上限；超过即转 dead_letter（人工可重开）。 */
+/** failed 投递的自动重投上限；超过即转 dead_letter（人工可重开）。 */
 const MAX_AUTOMATIC_DELIVERY_ATTEMPTS = 5;
 
 type ReceiverResolution =
@@ -1310,12 +1480,11 @@ function supplierMetadataByWallet(
   if (matches.length === 0) {
     return { status: "skipped", reason: "store_supplier_not_found" };
   }
-  const first = matches[0];
   if (matches.length > 1) {
-    return first
-      ? { status: "skipped", reason: "store_supplier_ambiguous", supplierMetadata: first }
-      : { status: "skipped", reason: "store_supplier_ambiguous" };
+    // 歧义不带主体：带第一个命中会把别人的通知记到/投给任意首位供应商。
+    return { status: "skipped", reason: "store_supplier_ambiguous" };
   }
+  const first = matches[0];
   return first
     ? { status: "ok", supplierMetadata: first }
     : { status: "skipped", reason: "store_supplier_not_found" };
@@ -1334,12 +1503,11 @@ function supplierMetadataByStage(
   if (matches.length === 0) {
     return { status: "skipped", reason: "receiver_not_found" };
   }
-  const first = matches[0];
   if (matches.length > 1) {
-    return first
-      ? { status: "skipped", reason: "receiver_ambiguous", supplierMetadata: first }
-      : { status: "skipped", reason: "receiver_ambiguous" };
+    // 同上：歧义不带第一个命中。
+    return { status: "skipped", reason: "receiver_ambiguous" };
   }
+  const first = matches[0];
   return first
     ? { status: "ok", supplierMetadata: first }
     : { status: "skipped", reason: "receiver_not_found" };
@@ -1390,7 +1558,7 @@ async function dispatchSignalTransportDelivery(input: {
   if (existing && existing.status !== "pending" && existing.status !== "failed") {
     return existing;
   }
-  // M-5：自动补投预算。重建/重放会对 failed 行自动重投；无上限的重启
+  // 自动补投预算。重建/重放会对 failed 行自动重投；无上限的重启
   // 重投会无界重复外部投递（每次 webhook 最多一个超时周期）。超过预算
   // 转 dead_letter 终态，人工 retryDelivery 仍可显式重开。
   if (existing && existing.status === "failed" && existing.attempts >= MAX_AUTOMATIC_DELIVERY_ATTEMPTS) {
@@ -1458,7 +1626,7 @@ async function dispatchPreparedDelivery(input: {
       attempts: input.pending.attempts + 1,
       ...activationStatusForResult(input.transport, result),
       ...(result.externalReceiptRef ? { externalReceiptRef: result.externalReceiptRef } : {}),
-      // L-10：错误消息先脱敏再持久化（对齐兄弟路径），防 transport 异常
+      // 错误消息先脱敏再持久化（对齐兄弟路径），防 transport 异常
       // 文本把端点/凭证带进投递台账。
       ...(result.error ? { lastError: redactErrorMessage(result.error) } : {}),
       updatedAt: input.now()
@@ -1489,6 +1657,12 @@ async function resolveRetryTransport(
   options: CreateNotificationServiceOptions,
   delivery: NotificationDeliveryRecord
 ): Promise<RetryTransportResolution> {
+  // 无 supplier 定位字段的记录（投影缺失类 skip、歧义未携带主体）不得
+  // 投给任何供应商——空字段过滤对全部供应商恒真，会把含
+  // orderId/payloadHash 的通知投给无关方并标 sent。
+  if (!delivery.supplierSubjectId && !delivery.supplierWallet) {
+    return { status: "skipped", reason: "store_supplier_not_found" };
+  }
   const supplierRows = await options.supplierMetadataStore?.listSuppliers() ?? [];
   const matches = supplierRows.filter((supplier) =>
     (!delivery.supplierSubjectId || supplier.supplierSubjectId === delivery.supplierSubjectId) &&

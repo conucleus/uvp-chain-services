@@ -66,6 +66,12 @@ export interface ProjectionRebuildInput {
   readonly events: readonly ChainEvent[];
   readonly scope?: ProjectionScope;
   readonly syncState?: Omit<ProjectionSyncState, "updatedAt">;
+  /**
+   * 重建完成后的游标。durable 存储必须把它与"整库事件替换"写进同一
+   * 个事务：重建事务提交后、游标单独落库前崩溃会留下越过重建覆盖区间
+   * 的旧游标，产生静默丢事件的缺口。非持久存储忽略该字段。
+   */
+  readonly cursor?: Omit<StoredProjectionCursor, "updatedAt">;
 }
 
 export interface ProjectionScope {
@@ -155,9 +161,17 @@ export interface DurableProjectionStore
   extends ProjectionStore,
     StorageAdapterLifecycle,
     TransactionalStorage {
+  /**
+   * 持久化索引游标。options.expectNextBlock 提供时为条件写（CAS）：
+   * 持久游标的 next_block 与期望值一致才写入，返回 undefined 表示游标
+   * 已被其他写者移动（如另一进程的 full rebuild），调用方不得推进；
+   * 行不存在时视为可写（首条游标）。未提供 expectNextBlock 时为无条件
+   * upsert，恒返回写入结果。
+   */
   saveCursor(
     cursor: Omit<StoredProjectionCursor, "updatedAt">,
-  ): Promise<StoredProjectionCursor>;
+    options?: { readonly expectNextBlock?: bigint }
+  ): Promise<StoredProjectionCursor | undefined>;
   getCursor(
     scope: ProjectionScope,
   ): Promise<StoredProjectionCursor | undefined>;

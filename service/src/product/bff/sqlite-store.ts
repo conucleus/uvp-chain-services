@@ -119,8 +119,20 @@ export class SqliteProductBffStore implements ProductBffStore {
     runSqliteWrite(() => this.#upsertParticipant(participant));
   }
 
-  async createInvite(invite: ProductInviteDTO): Promise<void> {
-    runSqliteWrite(() => this.#insertInvite(invite));
+  async createInviteIfNoneActive(invite: ProductInviteDTO, nowIso: string): Promise<boolean> {
+    // 单语句条件插入：julianday 归一化解析 ISO8601（含时区偏移写法），
+    // check-then-act 由语句原子性承担，跨进程并发不会双 active。
+    const result = runSqliteWrite(() => this.#database.prepare(
+      `INSERT INTO product_invite (
+         invite_id, draft_id, participant_id, role_slot_id, token_hash, status,
+         expires_at, created_at, accepted_wallet_address
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE NOT EXISTS (
+         SELECT 1 FROM product_invite
+         WHERE participant_id = ? AND status = 'active' AND julianday(expires_at) > julianday(?)
+       )`
+    ).run(...inviteValues(invite), invite.participantId, nowIso));
+    return result.changes > 0;
   }
 
   async getInvite(inviteId: string): Promise<ProductInviteDTO | undefined> {
@@ -136,6 +148,20 @@ export class SqliteProductBffStore implements ProductBffStore {
     runSqliteWrite(() => this.#upsertInvite(invite));
   }
 
+  async updateInviteIfActive(invite: ProductInviteDTO): Promise<boolean> {
+    const result = runSqliteWrite(() => this.#database.prepare(
+      `UPDATE product_invite
+       SET status = ?, expires_at = ?, accepted_wallet_address = ?
+       WHERE invite_id = ? AND status = 'active'`
+    ).run(
+      invite.status,
+      invite.expiresAt,
+      invite.acceptedWalletAddress ?? null,
+      invite.inviteId
+    ));
+    return result.changes > 0;
+  }
+
   async listInvitesByDraft(draftId: string): Promise<readonly ProductInviteDTO[]> {
     return this.#database.prepare(
       `SELECT *
@@ -145,8 +171,8 @@ export class SqliteProductBffStore implements ProductBffStore {
     ).all(draftId).map((row) => inviteRow(row));
   }
 
-  async createRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
-    runSqliteWrite(() => this.#insertRegistration(registration));
+  async createRegistrationIfNoneForDraft(registration: ProductOrderTriggerRecord): Promise<boolean> {
+    return runSqliteWrite(() => this.#insertRegistrationIfNoneForDraft(registration));
   }
 
   async getRegistration(triggerId: string): Promise<ProductOrderTriggerRecord | undefined> {
@@ -252,15 +278,6 @@ export class SqliteProductBffStore implements ProductBffStore {
     );
   }
 
-  #insertInvite(invite: ProductInviteDTO): void {
-    this.#database.prepare(
-      `INSERT INTO product_invite (
-         invite_id, draft_id, participant_id, role_slot_id, token_hash, status,
-         expires_at, created_at, accepted_wallet_address
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(...inviteValues(invite));
-  }
-
   #upsertInvite(invite: ProductInviteDTO): void {
     this.#database.prepare(
       `INSERT INTO product_invite (
@@ -280,16 +297,18 @@ export class SqliteProductBffStore implements ProductBffStore {
     ).run(...inviteValues(invite));
   }
 
-  #insertRegistration(registration: ProductOrderTriggerRecord): void {
-    this.#database.prepare(
+  #insertRegistrationIfNoneForDraft(registration: ProductOrderTriggerRecord): boolean {
+    const result = this.#database.prepare(
       `INSERT INTO product_order_trigger (
          trigger_id, prepare_id, draft_id, order_id, plan_id, plan_hash, status, tx_hash,
          block_number, source_id, signal_id, trigger_hook_id, trigger_stage_id, submitter,
          payload_hash, idempotency_key, deadline, typed_data_json, signature,
          error_code, error_message, retryable, creator, authorizations_json, permissions_json,
          reconcile_status, last_checked_at, receipt_status, projection_status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(...registrationValues(registration));
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM product_order_trigger WHERE draft_id = ?)`
+    ).run(...registrationValues(registration), registration.draftId);
+    return result.changes > 0;
   }
 
   #upsertRegistration(registration: ProductOrderTriggerRecord): void {

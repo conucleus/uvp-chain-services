@@ -112,9 +112,6 @@ function readinessReasons(input: {
   if (input.profile.preflightStrict !== true || input.profile.preflightStatus !== "passed") {
     reasons.push("staging_preflight_not_passed");
   }
-  if (input.profile.e2eControls === true) {
-    reasons.push("product_e2e_fixtures_enabled");
-  }
   if (input.profile.permissiveAuthorizationRequested === true) {
     reasons.push("permissive_product_authorization_requested");
   }
@@ -162,7 +159,6 @@ function profileSummary(diagnostics: JsonRecord): JsonRecord {
     environment: stringOf(diagnostics.environment) ?? stringOf(recordOf(diagnostics.runtime)?.environment) ?? "unknown",
     preflightStrict: preflight?.strict === true,
     preflightStatus: stringOf(preflight?.status) ?? "unknown",
-    e2eControls: product?.e2eControls === true || diagnostics.e2eControls === true,
     registrationAdapter: stringOf(product?.registrationAdapter) ?? "unknown",
     permissiveAuthorizationRequested: product?.permissiveAuthorizationRequested === true,
     storageDriver: stringOf(storage?.driver) ?? stringOf(diagnostics.storageDriver) ?? "unknown",

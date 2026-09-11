@@ -136,7 +136,7 @@ describe("product BFF order drafts and invites", () => {
   });
 
   it("restricts draft writes, invites, and participant reads to the anchored creator or accepted participants", async () => {
-    // KEEP（草稿/邀请面鉴权收口）：
+    // 草稿/邀请面鉴权收口：
     // - PATCH/createInvite 限创建者（建单时会话锚定地址）；
     // - 参与者名单（含联系方式）限创建者或已接受参与者；
     // - 无会话身份的匿名调用一律 401（local 之外同样 fail-closed）。
@@ -216,7 +216,7 @@ describe("product BFF order drafts and invites", () => {
     const acceptResponse = await router.handle({
       method: "POST",
       pathname: `/product/invites/${fundsInvite.invite.inviteId}/accept`,
-      // 簇 C 修正：接受方的钱包声明来自 header/query/会话，不再读 body。
+      // 接受方的钱包声明来自 header/query/会话，不再读 body。
       headers: { "x-uvp-wallet-address": "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
       body: {
         displayName: "Buyer Finance",
@@ -272,6 +272,7 @@ describe("product BFF order drafts and invites", () => {
     const previewResponse = await router.handle({
       method: "GET",
       pathname: `/product/invites/${fundsInvite.invite.inviteId}`,
+      query: { token: fundsInvite.inviteToken! },
       headers: { "x-uvp-wallet-address": acceptedWallet },
     });
     expect(previewResponse.status).toBe(200);
@@ -280,7 +281,8 @@ describe("product BFF order drafts and invites", () => {
     ).not.toHaveProperty("tokenHash");
     expect(previewResponse.body).toMatchObject({
       invite: { inviteId: fundsInvite.invite.inviteId, status: "active" },
-      participant: { roleSlotId: "funds" },
+      // 预览联系方式脱敏，不回传原文/钱包地址。
+      participant: { roleSlotId: "funds", maskedContact: "fu***@example.com" },
       acceptance: { canAccept: true, status: "can_accept" },
       walletBinding: {
         walletAddress: acceptedWallet,
@@ -288,6 +290,45 @@ describe("product BFF order drafts and invites", () => {
         canAccept: true,
       },
     });
+    const previewParticipant = (previewResponse.body as {
+      participant: Record<string, unknown>;
+    }).participant;
+    expect(previewParticipant).not.toHaveProperty("contact");
+    expect(previewParticipant).not.toHaveProperty("walletAddress");
+    const previewDraft = (previewResponse.body as {
+      draft: Record<string, unknown>;
+    }).draft;
+    // 金额按可见范围收敛 + 运营字段不进预览
+    //（notes/planId/planHash/createdBy/goods 一律不回传）。
+    expect(previewDraft).not.toHaveProperty("notes");
+    expect(previewDraft).not.toHaveProperty("planId");
+    expect(previewDraft).not.toHaveProperty("planHash");
+    expect(previewDraft).not.toHaveProperty("createdBy");
+    expect(previewDraft).not.toHaveProperty("goods");
+    expect(previewDraft).not.toHaveProperty("status");
+    // 查看者是建单者（createdBy=testWallet(0)）→ 金额可见。
+    expect(previewDraft).toMatchObject({ totalAmount: "10000", currency: "USDC" });
+
+    // 纯 token 持有者（无会话钱包）不在金额可见范围。
+    const anonymousPreview = await router.handle({
+      method: "GET",
+      pathname: `/product/invites/${fundsInvite.invite.inviteId}`,
+      query: { token: fundsInvite.inviteToken! },
+    });
+    expect(anonymousPreview.status).toBe(200);
+    expect((anonymousPreview.body as { draft: Record<string, unknown> }).draft)
+      .not.toHaveProperty("totalAmount");
+
+    // 无关钱包（未接受参与、非创建者）同样不可见金额。
+    const strangerPreview = await router.handle({
+      method: "GET",
+      pathname: `/product/invites/${fundsInvite.invite.inviteId}`,
+      query: { token: fundsInvite.inviteToken! },
+      headers: { "x-uvp-wallet-address": testWallet(9) },
+    });
+    expect(strangerPreview.status).toBe(200);
+    expect((strangerPreview.body as { draft: Record<string, unknown> }).draft)
+      .not.toHaveProperty("totalAmount");
 
     const wrongWalletResponse = await router.handle({
       method: "POST",
@@ -329,7 +370,7 @@ describe("product BFF order drafts and invites", () => {
         participantId: (acceptResponse.body as InviteResponse).participant
           .participantId,
         displayName: "Buyer Finance",
-        source: "accepted_participant",
+        source: "wallet",
         roleLabels: expect.arrayContaining(["资金方"]),
       },
       summary: {
@@ -353,6 +394,82 @@ describe("product BFF order drafts and invites", () => {
       status: 409,
       body: { error: "invite_already_accepted" },
     });
+  });
+
+  it("requires the invite token for invite previews", async () => {
+    const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
+    const draft = (
+      await createDraft(router).then(
+        (response) => response.body as DraftResponse,
+      )
+    ).draft;
+    const invite = await createInvite(router, draft.draftId, "funds", "funds@example.com");
+
+    // inviteId 是弱凭据：无 token 的预览按 403 拒绝，不泄露受邀人
+    // 联系方式与草稿金额。
+    const noToken = await router.handle({
+      method: "GET",
+      pathname: `/product/invites/${invite.invite.inviteId}`
+    });
+    expect(noToken).toMatchObject({ status: 403, body: { error: "invite_token_mismatch" } });
+
+    const wrongToken = await router.handle({
+      method: "GET",
+      pathname: `/product/invites/${invite.invite.inviteId}`,
+      query: { token: "not-the-invite-token" }
+    });
+    expect(wrongToken).toMatchObject({ status: 403, body: { error: "invite_token_mismatch" } });
+  });
+
+  it("creates at most one active invite per participant even under racing createInvite calls", async () => {
+    // createInvite 的前置检查（listInvites 查活跃）是 check-then-act，
+    // 并发双双通过会落两条 active；条件插入把判定原子化到存储层
+    // （跨进程由单语句承担）。
+    const store = new MemoryProductBffStore();
+    const base = {
+      draftId: "draft_invite_race",
+      participantId: "participant_invite_race",
+      roleSlotId: "slot_customs",
+      tokenHash: "0x" + "11".repeat(32),
+      status: "active" as const,
+      expiresAt: "2026-02-01T00:00:00.000Z",
+      createdAt: "2026-01-01T00:00:00.000Z"
+    };
+
+    await expect(store.createInviteIfNoneActive(
+      { ...base, inviteId: "invite_race_a", tokenHash: ("0x" + "21".repeat(32)) as Hex },
+      "2026-01-02T00:00:00.000Z"
+    )).resolves.toBe(true);
+    // 同 participant 的第二条 active（前置检查双双通过的并发方）必须被拒。
+    await expect(store.createInviteIfNoneActive(
+      { ...base, inviteId: "invite_race_b", tokenHash: ("0x" + "22".repeat(32)) as Hex },
+      "2026-01-02T00:00:00.000Z"
+    )).resolves.toBe(false);
+    // 已过期的 active 不再占用：可再发新邀请。
+    await expect(store.createInviteIfNoneActive(
+      { ...base, inviteId: "invite_race_c", tokenHash: ("0x" + "23".repeat(32)) as Hex, expiresAt: "2026-03-01T00:00:00.000Z" },
+      "2026-02-02T00:00:00.000Z"
+    )).resolves.toBe(true);
+  });
+
+  it("invite status transitions are conditional on status=active", async () => {
+    const store = new MemoryProductBffStore();
+    const invite: ProductInviteDTO = {
+      inviteId: "invite_conditional_1",
+      draftId: "draft-1",
+      participantId: "participant-1",
+      roleSlotId: "funds",
+      tokenHash: ("0x" + "a".repeat(64)) as ProductInviteDTO["tokenHash"],
+      status: "active",
+      expiresAt: "2100-01-01T00:00:00.000Z",
+      createdAt: "2026-01-01T00:00:00.000Z"
+    };
+    await store.createInviteIfNoneActive(invite, "2026-01-01T00:00:00.000Z");
+    await expect(store.updateInviteIfActive({ ...invite, status: "accepted" })).resolves.toBe(true);
+    // 已接受的 invite 不再满足 WHERE status='active'：并发方的覆写被拒。
+    await expect(store.updateInviteIfActive({ ...invite, status: "rejected" })).resolves.toBe(false);
+    const reloaded = await store.getInvite(invite.inviteId);
+    expect(reloaded?.status).toBe("accepted");
   });
 
   it("blocks expired invites and duplicate participant wallet binding", async () => {
@@ -396,6 +513,7 @@ describe("product BFF order drafts and invites", () => {
     const expiredPreviewResponse = await router.handle({
       method: "GET",
       pathname: `/product/invites/${expiredInvite.invite.inviteId}`,
+      query: { token: expiredInvite.inviteToken! },
       headers: { "x-uvp-wallet-address": testWallet(2) },
     });
     expect(expiredPreviewResponse).toMatchObject({
@@ -477,7 +595,8 @@ describe("product BFF order drafts and invites", () => {
     const invite = await createInvite(router, draft.draftId, "funds", "funds-contact@example");
     const preview = await router.handle({
       method: "GET",
-      pathname: `/product/invites/${invite.invite.inviteId}`
+      pathname: `/product/invites/${invite.invite.inviteId}`,
+      query: { token: invite.inviteToken! }
     });
     expect(preview.status).toBe(200);
     expect((preview.body as { role: { evidenceSpec?: unknown } }).role.evidenceSpec)
@@ -572,7 +691,9 @@ describe("product BFF order drafts and invites", () => {
       status: "prepared",
       retryable: false,
     });
-    expect(prepared.trigger.triggerId).toMatch(/^trigger_/);
+    // triggerId 不可枚举——结构前缀 + 128 位随机熵后缀，
+    // 顺序段不可被猜测（会话门之外的第二道收敛）。
+    expect(prepared.trigger.triggerId).toMatch(/^trigger_[0-9a-f]{8}_\d{6}_[0-9a-f]{32}$/);
     expect(prepared.trigger.orderId).toMatch(/^0x[0-9a-f]{64}$/);
     expect(prepared.trigger.txHash).toBeUndefined();
     expect(prepared.permissions.length).toBeGreaterThan(0);
@@ -588,12 +709,95 @@ describe("product BFF order drafts and invites", () => {
     const registrationResponse = await router.handle({
       method: "GET",
       pathname: `/product/order-triggers/${prepared.trigger.triggerId}`,
+      headers: creatorHeaders(),
     });
     expect(registrationResponse.status).toBe(200);
     expect(
       (registrationResponse.body as { trigger: ProductOrderTriggerDTO })
         .trigger,
     ).toEqual(prepared.trigger);
+  });
+
+  it("rejects trigger profile reads from wallets outside the trigger/draft affiliation", async () => {
+    // IDOR 归属校验：trigger 档案携带草稿/签名者/授权明细——非归属
+    // 钱包拿到 triggerId 也不得读取（会话门之外的属主比对）。
+    const { router } = await createRouterFixture([
+      ...activeDeploymentEvents(),
+      planRegisteredEvent(11n),
+    ]);
+    const draft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+
+    // 属主（trigger 创建者 = 草稿创建者）读取 200。
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/order-triggers/${prepared.trigger.triggerId}`,
+      headers: creatorHeaders(),
+    })).resolves.toMatchObject({ status: 200 });
+
+    // 无关会话钱包 403，不回显档案。
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/product/order-triggers/${prepared.trigger.triggerId}`,
+      headers: { "x-uvp-wallet-address": testWallet(9) },
+    })).resolves.toMatchObject({
+      status: 403,
+      body: { error: "trigger_access_forbidden" },
+    });
+  });
+
+  it("settles concurrent prepare-trigger on one record", async () => {
+    // 并发双 prepare：前置检查双双通过后，draft_id 一事一单条件插入
+    // 只允许一条落库；败者按赢家记录幂等返回，不得撞 UNIQUE 变 500。
+    const { router, productStore } = await createRouterFixture([
+      ...activeDeploymentEvents(),
+      planRegisteredEvent(11n),
+    ]);
+    const draft = await createReadyDraft(router);
+
+    const [first, second] = await Promise.all([
+      router.handle({
+        method: "POST",
+        pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+        body: { walletAddress: testWallet(0) }
+      }),
+      router.handle({
+        method: "POST",
+        pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+        body: { walletAddress: testWallet(0) }
+      })
+    ]);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    const firstTrigger = (first.body as PreparedTriggerResponse).trigger;
+    const secondTrigger = (second.body as PreparedTriggerResponse).trigger;
+    expect(secondTrigger.triggerId).toBe(firstTrigger.triggerId);
+    await expect(productStore.listRegistrations()).resolves.toHaveLength(1);
+  });
+
+  it("issues non-enumerable trigger ids", async () => {    // 会话门已就位，id 熵是残余面：triggerId 必须携带 128 位随机后缀，
+    // 相邻草稿的两个 id 之间不存在顺序推导关系。
+    const { router } = await createRouterFixture([
+      ...activeDeploymentEvents(),
+      planRegisteredEvent(11n),
+    ]);
+    const triggerIds: string[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const draft = await createReadyDraft(router);
+      const prepareResponse = await router.handle({
+        method: "POST",
+        pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+        body: { walletAddress: testWallet(0) },
+      });
+      expect(prepareResponse.status, JSON.stringify(prepareResponse.body)).toBe(200);
+      const trigger = (prepareResponse.body as SubmitProductOrderDraftResult).trigger;
+      expect(trigger.triggerId).toMatch(/^trigger_[0-9a-f]{8}_\d{6}_[0-9a-f]{32}$/);
+      triggerIds.push(trigger.triggerId);
+    }
+    // 两个 id 的随机后缀互不相同——顺序段（scope 内自增）不可枚举。
+    const suffix = (id: string) => id.split("_").at(-1);
+    expect(suffix(triggerIds[0]!)).not.toBe(suffix(triggerIds[1]!));
   });
 
   it("only lets the trigger stage executor prepare outside trigger typed data", async () => {
@@ -609,14 +813,17 @@ describe("product BFF order drafts and invites", () => {
       body: { walletAddress: testWallet(1) },
     });
     expect(wrongExecutorResponse.status).toBe(403);
+    // details 不携带 expectedWalletAddress/walletAddress：403 回显执行者
+    // 钱包曾是"先打 403 拿地址再冒名重放"的绕过面（钱包身份现由会话锚定）。
     expect(wrongExecutorResponse.body).toMatchObject({
       error: "trigger_submitter_not_authorized",
       details: {
         roleSlotId: "funds",
-        expectedWalletAddress: testWallet(0),
-        walletAddress: testWallet(1),
       },
     });
+    const wrongDetails = (wrongExecutorResponse.body as { details: Record<string, unknown> }).details;
+    expect(wrongDetails).not.toHaveProperty("expectedWalletAddress");
+    expect(wrongDetails).not.toHaveProperty("walletAddress");
 
     const executorResponse = await router.handle({
       method: "POST",
@@ -710,7 +917,7 @@ describe("product BFF order drafts and invites", () => {
   });
 
   it("serializes concurrent trigger submissions per order so the broadcast fires exactly once", async () => {
-    // 簇 N（BFF 建单触发 per-order 互斥）：triggerOrder 的状态检查与
+    // triggerOrder 的状态检查与
     // "置 submitted + 广播"之间隔了 await——并发提交同一 draft 会双双通过
     // 检查并各自广播同一触发交易。per-order 互斥串行化后，第二个调用者
     // 在临界区内重读 registration，自然得到 409 trigger_not_prepared。
@@ -1032,7 +1239,7 @@ interface InviteResponse {
   readonly invite: ProductInviteDTO;
   readonly participant: DraftParticipantDTO;
   readonly draft: ProductOrderDraftDTO;
-  /** 簇 D 修正：createInvite 一次性下发的 invite token。 */
+  /** createInvite 一次性下发的 invite token。 */
   readonly inviteToken?: string;
 }
 

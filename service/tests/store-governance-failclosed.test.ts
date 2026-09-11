@@ -51,6 +51,9 @@ const planHash = crossBorderPlanIds.planHash as Hex;
 const roleSlotId = demoZhixuDetail.roleSlots[0]?.slotId ?? "supplier";
 const adminHeaders = { "x-uvp-admin-id": "governance-admin-1", "x-uvp-admin-role": "governance_admin" };
 const storeAdminHeaders = { "x-uvp-store-user-id": "store-admin-1", "x-uvp-store-role": "admin", "x-uvp-store-dev-anchored-address": publisherAddress };
+/** 管理面口令因子测试材料：sha256(adminTokenPlaintext) = adminTokenHash。 */
+const adminTokenPlaintext = "test-admin-password";
+const adminTokenHash = "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d";
 
 /** 本地联调的 dev 锚定头开关（仅非严格环境生效）。 */
 const devAnchoredStoreAuth = {
@@ -85,35 +88,75 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     const originalEnv = { ...process.env };
 
     afterEach(() => {
-      process.env.CHAIN_SERVICES_RUNTIME_ENV = originalEnv.CHAIN_SERVICES_RUNTIME_ENV;
-      process.env.GOVERNANCE_ADMIN_REVIEWER_IDS = originalEnv.GOVERNANCE_ADMIN_REVIEWER_IDS;
+      // 恢复要区分"未设置"与"空串"：直接赋 undefined 会留下字符串
+      // "undefined"，让后续测试的运行时判定变成 non-local（自报 admin
+      // 头被误关）。未设置的键必须删除。
+      for (const key of ["CHAIN_SERVICES_RUNTIME_ENV", "GOVERNANCE_ADMIN_REVIEWER_IDS"] as const) {
+        const value = originalEnv[key];
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
     });
 
     it("rejects self-reported governance admin headers outside local when the whitelist is empty", () => {
-      delete process.env.GOVERNANCE_ADMIN_REVIEWER_IDS;
-      process.env.CHAIN_SERVICES_RUNTIME_ENV = "testnet";
+      // 鉴权策略由装配层显式注入（governance/auth.ts 不读 process.env）。
       // 空白名单 + 非 local：自报 admin 头 fail-closed。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "attacker",
         "x-uvp-admin-role": "governance_admin"
-      })).toBeUndefined();
-      // 白名单非空：命中放行、未命中拒绝。
-      process.env.GOVERNANCE_ADMIN_REVIEWER_IDS = "gov-reviewer-1";
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: [] })).toBeUndefined();
+      // 白名单非空但未配置口令因子（明文白名单自报头
+      // 仅限 local 档）——非 local 命中白名单也不放行。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "gov-reviewer-1",
         "x-uvp-admin-role": "governance_admin"
-      })).toMatchObject({ adminId: "gov-reviewer-1" });
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"] })).toBeUndefined();
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "attacker",
         "x-uvp-admin-role": "governance_admin"
-      })).toBeUndefined();
-      // local 保持自报（dev 便利）。
-      process.env.CHAIN_SERVICES_RUNTIME_ENV = "local";
-      delete process.env.GOVERNANCE_ADMIN_REVIEWER_IDS;
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toBeUndefined();
+      // 白名单 + 口令因子（x-uvp-admin-token 哈希命中）才是非 local 的
+      // 完整凭据；口令错误/缺失都拒绝。
+      expect(adminPrincipalFromHeaders({
+        "x-uvp-admin-id": "gov-reviewer-1",
+        "x-uvp-admin-role": "governance_admin",
+        "x-uvp-admin-token": "wrong-password"
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toBeUndefined();
+      expect(adminPrincipalFromHeaders({
+        "x-uvp-admin-id": "gov-reviewer-1",
+        "x-uvp-admin-role": "governance_admin",
+        "x-uvp-admin-token": adminTokenPlaintext
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toMatchObject({ adminId: "gov-reviewer-1" });
+      // 白名单外 admin id 即使口令正确也拒绝（白名单仍是身份允许清单）。
+      expect(adminPrincipalFromHeaders({
+        "x-uvp-admin-id": "attacker",
+        "x-uvp-admin-role": "governance_admin",
+        "x-uvp-admin-token": adminTokenPlaintext
+      }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toBeUndefined();
+      // staging/production 与 testnet 同口径：白名单命中而无口令因子
+      // 一律拒绝（明文自报头仅限 local）。
+      expect(adminPrincipalFromHeaders({
+        "x-uvp-admin-id": "gov-reviewer-1",
+        "x-uvp-admin-role": "governance_admin"
+      }, { runtimeEnvironment: "staging", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toBeUndefined();
+      expect(adminPrincipalFromHeaders({
+        "x-uvp-admin-id": "gov-reviewer-1",
+        "x-uvp-admin-role": "governance_admin"
+      }, { runtimeEnvironment: "production", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
+        .toBeUndefined();
+      // local 保持自报（dev 便利），口令因子不强制。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "dev-admin",
         "x-uvp-admin-role": "governance_admin"
-      })).toMatchObject({ adminId: "dev-admin" });
+      }, { runtimeEnvironment: "local", allowedAdminIds: [] })).toMatchObject({ adminId: "dev-admin" });
     });
 
     it("rejects testnet config without admin whitelists or an explicit auth mode", () => {
@@ -133,9 +176,10 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
         UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222",
         UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222",
-        UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object"
+        UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
+        UVP_FINALITY_CONFIRMATIONS: "12"
       };
-      // STORE_AUTH_MODE 缺省（此前静默 dev_headers）→ 启动失败。
+      // STORE_AUTH_MODE 缺省无回落 → 启动失败。
       expect(() => loadConfigFromEnv(base)).toThrow(/STORE_AUTH_MODE/);
       // 显式 dev_headers 在 testnet 同样拒绝。
       expect(() => loadConfigFromEnv({ ...base, STORE_AUTH_MODE: "dev_headers" }))
@@ -154,13 +198,20 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1"
       };
       expect(() => loadConfigFromEnv(withWhitelists)).toThrow(/OPS_CONSOLE_ADMIN_IDS is required in testnet/);
+      // 管理面生产基线：testnet 同样要求口令因子配置。
       expect(() => loadConfigFromEnv({
         ...withWhitelists,
         OPS_CONSOLE_ADMIN_IDS: "ops-admin-1"
+      })).toThrow(/GOVERNANCE_ADMIN_TOKEN_HASHES is required in testnet/);
+      expect(() => loadConfigFromEnv({
+        ...withWhitelists,
+        OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
+        GOVERNANCE_ADMIN_TOKEN_HASHES: adminTokenHash
       })).not.toThrow();
       expect(loadConfigFromEnv({
         ...withWhitelists,
-        OPS_CONSOLE_ADMIN_IDS: "ops-admin-1"
+        OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
+        GOVERNANCE_ADMIN_TOKEN_HASHES: adminTokenHash
       }).storeAuth?.walletSession?.devAnchoredAddressHeaderEnabled).toBe(false);
     });
 
@@ -190,7 +241,10 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222",
         UVP_FINALITY_CONFIRMATIONS: "12",
         GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
-        OPS_CONSOLE_ADMIN_IDS: "ops-admin-1"
+        OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
+        GOVERNANCE_ADMIN_TOKEN_HASHES: adminTokenHash,
+        // production 受管 PG 的显式轮询基线（受管库成本安全门三档同口径）。
+        UVP_INDEXER_POLL_INTERVAL_MS: "5000"
       };
       // 无 UVP_RPC_URL：不再静默回落 127.0.0.1:8545。
       expect(() => loadConfigFromEnv(base)).toThrow(/UVP_RPC_URL is required in production/);
@@ -204,6 +258,12 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         UVP_RPC_URL: "https://base-mainnet.example/rpc",
         GOVERNANCE_ADMIN_REVIEWER_IDS: ""
       })).toThrow(/GOVERNANCE_ADMIN_REVIEWER_IDS is required in production/);
+      // 缺口令因子（明文白名单自报头仅限 local 档）在 production 拦截。
+      const productionReady = { ...base, UVP_RPC_URL: "https://base-mainnet.example/rpc" };
+      const { GOVERNANCE_ADMIN_TOKEN_HASHES: _tokenHashes, ...withoutAdminToken } = productionReady;
+      expect(() => loadConfigFromEnv(withoutAdminToken)).toThrow(/GOVERNANCE_ADMIN_TOKEN_HASHES is required in production/);
+      expect(() => loadConfigFromEnv({ ...withoutAdminToken, GOVERNANCE_ADMIN_TOKEN_HASHES: "not-hex" }))
+        .toThrow(/sha256 hex/);
     });
   });
 
@@ -510,7 +570,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         }
       });
       // 带 metadata/policy 的 review：registerIdentity 的 descriptor 哈希材料
-      // 必须包含原文（此前按 null 重建，两处口径分叉）。
+      // 必须包含原文（两侧口径一致，不按 null 重建）。
       await service.reviewSupplier({
         subjectId,
         status: "approved_for_broadcast",
@@ -632,7 +692,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const challenge = await service.createChallenge({ address: supplierWallet });
       const first = await service.verify({ nonce: challenge.nonce, signature: "0x" + "ab".repeat(32) });
       expect(first.token).toMatch(/^uvs_/);
-      // 重放同一 nonce：条件占位失败（此前读-判-写竞态会双通过）。
+      // 重放同一 nonce：条件占位失败（读-判-写竞态不得双通过）。
       await expect(service.verify({ nonce: challenge.nonce, signature: "0x" + "ab".repeat(32) }))
         .rejects.toMatchObject({ code: "store_challenge_invalid" });
     });
@@ -744,21 +804,40 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const evidenceId = (upload.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
       const contentHash = (upload.body as { evidence: { contentHash: string } }).evidence.contentHash;
 
-      // owner（非 admin）读自己的备份状态：verify 端点允许 reader 读。
+      // owner（非 admin）不得触发 verify/restore：restore 向主存储写回，
+      // verify 暴露副本布局——读级主体一律 403（角色先于存在性判定）。
       const ownerVerify = await router.handle({
         method: "POST",
         pathname: `/product/evidence/${evidenceId}/backup-verify`,
         headers: { "x-uvp-principal-id": "seller" }
       });
-      expect(ownerVerify.status).toBe(200);
-      expect(ownerVerify.body).toMatchObject({
+      expect(ownerVerify.status).toBe(403);
+      expect(ownerVerify.body).toMatchObject({ error: "forbidden" });
+
+      const ownerRestore = await router.handle({
+        method: "POST",
+        pathname: `/product/evidence/${evidenceId}/backup-restore`,
+        headers: { "x-uvp-principal-id": "seller" }
+      });
+      expect(ownerRestore.status).toBe(403);
+      expect(ownerRestore.body).toMatchObject({ error: "forbidden" });
+
+      // admin 会话：verify/restore 正常（接口注释即契约：admin 专用）。
+      const adminHeaders = { "x-uvp-admin-id": "audit-admin", "x-uvp-admin-role": "admin" };
+      const adminVerify = await router.handle({
+        method: "POST",
+        pathname: `/product/evidence/${evidenceId}/backup-verify`,
+        headers: adminHeaders
+      });
+      expect(adminVerify.status).toBe(200);
+      expect(adminVerify.body).toMatchObject({
         backup: { backupConfigured: true, backupPresent: true, hashMatches: true }
       });
 
       const restore = await router.handle({
         method: "POST",
         pathname: `/product/evidence/${evidenceId}/backup-restore`,
-        headers: { "x-uvp-principal-id": "seller" }
+        headers: adminHeaders
       });
       expect(restore.status).toBe(200);
       expect(restore.body).toMatchObject({
@@ -779,7 +858,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("requires store.read for /store/suppliers reads", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress
@@ -797,7 +877,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("filters delisted zhixus from store search for non-operators", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
@@ -849,22 +930,47 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("rejects unsupported store order filter status values", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
-        submissionVerifyingContract: contractAddress
+        submissionVerifyingContract: contractAddress,
+        storeAuthConfig: {
+          mode: "dev_headers" as const,
+          roleClaim: "roles",
+          principalClaim: "sub",
+          clockToleranceSeconds: 60,
+          walletSession: {
+            enabled: true,
+            operatorWallets: [],
+            adminWallets: [],
+            sessionTtlSeconds: 43200,
+            challengeTtlSeconds: 300,
+            devAnchoredAddressHeaderEnabled: true
+          }
+        }
       });
-      // 死词 "disputed" 已从词表移除：400 而不是静默空集。
+      // 运行时订单读要求会话锚定钱包（匿名 401）；锚定后死词 "disputed"
+      // 仍按 400 拒绝，不静默空集。
+      const anchoredHeaders = { "x-uvp-store-dev-anchored-address": publisherAddress };
       const disputed = await router.handle({
         method: "GET",
         pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
-        query: { status: "disputed" }
+        query: { status: "disputed" },
+        headers: anchoredHeaders
       });
       expect(disputed).toMatchObject({ status: 400, body: { error: "invalid_query" } });
-      const registered = await router.handle({
+      const anonymous = await router.handle({
         method: "GET",
         pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
         query: { status: "registered" }
+      });
+      expect(anonymous).toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+      const registered = await router.handle({
+        method: "GET",
+        pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+        query: { status: "registered" },
+        headers: anchoredHeaders
       });
       expect(registered.status).toBe(200);
     });
@@ -885,7 +991,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
           chainEvent(1n, 1, "PlanPublisherRecorded", { planId: customsPlanIds.planId, publisher: publisherAddress })
         ]
       });
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
@@ -909,10 +1016,20 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const schema = (compiled.body as { draft: { productSchema?: StoreProductSchemaDTO } }).draft.productSchema;
       expect(schema).toBeDefined();
 
-      // roleSlots 类型校验：非对象条目 400（此前 TypeError 500）。用未发布
+      // 重编译会以 inferred schema 覆写既有 schema——已发布
+      // plan 的草稿重跑 compile 同样命中 409 不可变门（与 PUT 同口径）。
+      const recompiled = await router.handle({
+        method: "POST",
+        pathname: `/store/zhixu-drafts/${draftId}/compile-preview`,
+        headers: operatorHeaders
+      });
+      expect(recompiled).toMatchObject({ status: 409, body: { error: "product_schema_new_version_required" } });
+
+      // roleSlots 类型校验：非对象条目 400（不得以 TypeError 500 透出）。用未发布
       // plan 的草稿验证（已发布 plan 的草稿先命中 409 守卫）。
       const unprojectedStore = new MemoryProjectionStore();
-      const unprojectedRouter = createApiRouter(unprojectedStore, {
+      const unprojectedRouter = createApiRouter(unprojectedStore, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
@@ -945,7 +1062,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       });
       expect(malformed).toMatchObject({ status: 400, body: { error: "invalid_product_schema" } });
 
-      // 簇 N 修正（审计三轮）：onchainHookPlanArtifact 主体进 schemaHash——
+      // onchainHookPlanArtifact 主体进 schemaHash——
       // 只改产物内部字段（不镜像到 planId/planHash/artifactHash 字段）也必须
       // 改变 schemaHash，否则产物本体可被无感替换。
       const tamperedArtifact = {
@@ -989,12 +1106,13 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("does not treat an unknown rebuild status as ready", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+
         productSchemaResolver: crossBorderSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress
       });
-      const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness" });
+      const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness", headers: adminHeaders });
       expect(response.status).toBe(503);
       const body = response.body as { reasons: string[]; indexer: { rebuildReady: boolean; rebuildStatus: string } };
       // 重建状态未知（无 rebuild 记录）→ rebuildReady=false + 明确 reason。
@@ -1007,6 +1125,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
 function joinRouterOptions() {
   return {
+    productRuntimeEnvironment: "local" as const,
     productSchemaResolver: crossBorderSchemaResolver(),
     submissionChainId: 31337,
     submissionVerifyingContract: contractAddress,

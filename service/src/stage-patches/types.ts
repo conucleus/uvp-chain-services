@@ -381,10 +381,24 @@ export interface ProductStagePatchStore<
   TPrepared extends PreparedPatchRecordBase,
   TSubmission extends StagePatchSubmissionBase
 > {
+  /**
+   * 可选事务能力（sqlite/postgres 实现）：putSubmission 与 nonce 收尾
+   * （释放或 markPreparedUsed）必须同事务提交——分开提交时事务间崩溃
+   * 会留下"nonce 行已插、prepare 未标 used"的组合，同 prepareId 的合法
+   * 重试将永久 409（全库无其他释放口）。
+   */
+  withTransaction?<T>(operation: () => Promise<T>): Promise<T>;
   putPrepared(record: TPrepared): Promise<void>;
   getPrepared(prepareId: string): Promise<TPrepared | undefined>;
   markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void>;
-  reserveNonce(key: string): Promise<boolean>;
+  /**
+   * staleBefore：命中既有预留时，预留时间早于该阈值的行视为陈旧预留
+   * （进程在 reserve 与落档之间硬崩溃的唯一泄漏形态——存活中的 submit
+   * 要么在同一落档事务内收尾，要么显式释放，预留年龄不可能超过一个
+   * 授权有效期）。陈旧行走条件更新接管并返回 true；未过期仍返回 false
+   * 由调用方 409。阈值缺省时退化为纯 insert 语义。
+   */
+  reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean>;
   /**
    * reserve 之后的 broadcast/存储写入抛错时，提交服务会先释放
    * nonce 再 rethrow，保证同一 prepareId 在瞬时 RPC/存储失败后仍可重试。
@@ -392,6 +406,14 @@ export interface ProductStagePatchStore<
    * patch 服务按 nonce 已消费处理（fail-closed，不重试）。
    */
   releaseNonce?(key: string): Promise<void>;
+  /**
+   * 过期 prepare 清扫：删除 deadline（unix 秒字符串）小于
+   * deadlineBeforeSeconds 的行，返回删除行数。prepare 入口未设配额，
+   * 只插不删会让内存表/持久表无界堆叠；由服务层在写入时顺带触发
+   * （同 store-sessions 挑战表口径）。可选能力：实现缺失时跳过清扫，
+   * memory 驱动自身的硬上限仍然兜底。
+   */
+  deleteExpiredPrepared?(deadlineBeforeSeconds: string): Promise<number>;
   putSubmission(submission: TSubmission): Promise<void>;
   getSubmission(submissionId: string): Promise<TSubmission | undefined>;
 }

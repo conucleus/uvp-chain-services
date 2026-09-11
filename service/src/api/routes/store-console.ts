@@ -23,7 +23,9 @@ import {
   type StoreConsoleListQuery,
   type StoreSearchQuery
 } from "../../store-console/service.js";
-import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { cleanQuery, decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { resolveParticipantWalletIdentity } from "../participant-identity.js";
+import type { ChainServicesRuntimeEnv } from "../../config/index.js";
 import type { RouteModule } from "../route-module.js";
 import {
   STORE_SESSION_HEADER,
@@ -52,7 +54,10 @@ type ParsedStoreAuditQuery =
   | { readonly ok: true; readonly query: StoreAuditQuery }
   | { readonly ok: false; readonly response: ApiResponse };
 
-export function createStoreConsoleRouteModule(): RouteModule {
+export function createStoreConsoleRouteModule(options: {
+  /** 仅显式 local 允许自报钱包；缺省/非 local 无会话身份即 401。 */
+  readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
+} = {}): RouteModule {
   return {
     async handle(request, context) {
       if (request.method === "GET" && request.pathname === "/store/session") {
@@ -83,24 +88,27 @@ export function createStoreConsoleRouteModule(): RouteModule {
       if (request.method === "GET" && request.pathname === "/store/search") {
         // 供应商目录读门槛（与 /store/suppliers 同口径）：供应商命中暴露
         // 钱包精确匹配与审核状态，匿名不可枚举。type=supplier 显式查询
-        // 未认证即 401/403；all 查询对匿名静默剔除供应商命中。
+        // 未认证即 401/403；all 查询对匿名静默剔除供应商命中。订单的
+        // assigneeWallet 匹配同口径：匿名 q=钱包串 不得枚举钱包→订单关联。
         const type = parseStoreSearchType(request.query?.type);
         const supplierOnly = type === "supplier";
         const access = await context.storeIdentityProvider.resolve(request.headers);
-        const supplierReadable = hasStoreCapability(access, "store.read") && isStoreAccessAuthenticated(access);
-        if (supplierOnly && !supplierReadable) {
+        const authenticatedRead = hasStoreCapability(access, "store.read") && isStoreAccessAuthenticated(access);
+        if (supplierOnly && !authenticatedRead) {
           const resource = { type: "store_supplier" };
           if (isStoreAccessAuthenticated(access)) {
             return forbiddenStoreCapabilityResponse(access, "store.read");
           }
           return unauthorizedStoreCapabilityResponse(access, "store.read");
         }
-        const body = await context.storeConsoleService.search(parseStoreSearchQuery(request.query));
+        const body = await context.storeConsoleService.search(parseStoreSearchQuery(request.query), {
+          walletFieldMatching: authenticatedRead
+        });
         // search 过滤已下架——与 /store/zhixus 的
         // 口径一致（运营方可见，便于治理观察）。
         const filtered = await filterDelistedSearchResults(request, context, body);
         const record = filtered as { readonly results?: readonly { readonly resultType?: string }[] };
-        if (!supplierReadable && record?.results?.some((result) => result.resultType === "supplier")) {
+        if (!authenticatedRead && record?.results?.some((result) => result.resultType === "supplier")) {
           return {
             status: 200,
             body: {
@@ -178,9 +186,15 @@ export function createStoreConsoleRouteModule(): RouteModule {
 
       const storeOrderCandidatesMatch = /^\/store\/orders\/([^/]+)\/candidates$/.exec(request.pathname);
       if (request.method === "GET" && storeOrderCandidatesMatch) {
+        // 候选清单暴露订单/任务/钱包映射，与 /store 运行时读同口径：
+        // 身份取会话锚定钱包（product-read 同款门），匿名不可枚举。
+        const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+        if (!wallet.ok) {
+          return wallet.response;
+        }
         return {
           status: 200,
-          body: await context.storeConsoleService.listOrderCandidates(decodeURIComponent(storeOrderCandidatesMatch[1] ?? ""))
+          body: await context.storeConsoleService.listOrderCandidates(decodePathParameter(storeOrderCandidatesMatch[1] ?? ""))
         };
       }
 
@@ -195,8 +209,8 @@ export function createStoreConsoleRouteModule(): RouteModule {
           return authorization;
         }
         const productSchema = await context.storeZhixuDraftWorkflowService.getProductSchemaByPlan(
-          decodeURIComponent(productSchemaMatch[1] ?? ""),
-          decodeURIComponent(productSchemaMatch[2] ?? ""),
+          decodePathParameter(productSchemaMatch[1] ?? ""),
+          decodePathParameter(productSchemaMatch[2] ?? ""),
           request.query?.artifactHash
         );
         if (!productSchema) {
@@ -211,7 +225,7 @@ export function createStoreConsoleRouteModule(): RouteModule {
         };
       }
 
-      const storeRuntimeResponse = await handleStoreRuntimeRequest(request, context);
+      const storeRuntimeResponse = await handleStoreRuntimeRequest(request, context, options.runtimeEnvironment);
       if (storeRuntimeResponse) {
         return storeRuntimeResponse;
       }
@@ -228,9 +242,17 @@ export function createStoreConsoleRouteModule(): RouteModule {
 
       const storeZhixuMatch = /^\/store\/zhixus\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && storeZhixuMatch) {
-        const zhixuId = decodeURIComponent(storeZhixuMatch[1] ?? "");
+        const zhixuId = decodePathParameter(storeZhixuMatch[1] ?? "");
         const zhixu = await context.storeConsoleService.getZhixu(zhixuId);
         if (!zhixu) {
+          return {
+            status: 404,
+            body: { error: "store_zhixu_not_found" }
+          };
+        }
+        // 下架抑制与列表/search 同口径：delisted 对非运营方 404
+        //（不泄露存在），运营方保留治理可见性。
+        if (await zhixuDelistedForRequester(request, context, zhixu.planId)) {
           return {
             status: 404,
             body: { error: "store_zhixu_not_found" }
@@ -251,9 +273,24 @@ export function createStoreConsoleRouteModule(): RouteModule {
 
 async function handleStoreRuntimeRequest(
   request: ApiRequest,
-  context: Parameters<RouteModule["handle"]>[1]
+  context: Parameters<RouteModule["handle"]>[1],
+  runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2]
 ) {
   try {
+    // /store 运行时读（订单/任务/钱包映射、观察、回放、审计汇总）与
+    // product-read 的订单/任务读同口径：身份取会话锚定钱包，匿名不可
+    // 枚举运营数据；自报钱包仅做一致性核验。
+    if (request.method === "GET" && (
+      request.pathname === "/store/runtime/summary" ||
+      /^\/store\/zhixus\/[^/]+\/orders$/.test(request.pathname) ||
+      /^\/store\/orders\/[^/]+\/(?:observation|replay|audit-summary)$/.test(request.pathname)
+    )) {
+      const wallet = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment);
+      if (!wallet.ok) {
+        return wallet.response;
+      }
+    }
+
     if (request.method === "GET" && request.pathname === "/store/runtime/summary") {
       return {
         status: 200,
@@ -263,7 +300,7 @@ async function handleStoreRuntimeRequest(
 
     const zhixuOrdersMatch = /^\/store\/zhixus\/([^/]+)\/orders$/.exec(request.pathname);
     if (request.method === "GET" && zhixuOrdersMatch) {
-      const zhixuId = decodeURIComponent(zhixuOrdersMatch[1] ?? "");
+      const zhixuId = decodePathParameter(zhixuOrdersMatch[1] ?? "");
       // status 过滤词表校验——未知 status 400，
       // 不静默返回空集。
       if (request.query?.status && !isSupportedStoreOrderFilterStatus(request.query.status)) {
@@ -285,7 +322,7 @@ async function handleStoreRuntimeRequest(
 
     const observationMatch = /^\/store\/orders\/([^/]+)\/observation$/.exec(request.pathname);
     if (request.method === "GET" && observationMatch) {
-      const orderId = decodeURIComponent(observationMatch[1] ?? "");
+      const orderId = decodePathParameter(observationMatch[1] ?? "");
       const observation = await context.storeRuntimeService.getOrderObservation(orderId);
       if (!observation) {
         return {
@@ -301,7 +338,7 @@ async function handleStoreRuntimeRequest(
 
     const replayMatch = /^\/store\/orders\/([^/]+)\/replay$/.exec(request.pathname);
     if (request.method === "GET" && replayMatch) {
-      const orderId = decodeURIComponent(replayMatch[1] ?? "");
+      const orderId = decodePathParameter(replayMatch[1] ?? "");
       const replay = await context.storeRuntimeService.getOrderReplay(orderId);
       if (!replay) {
         return {
@@ -317,7 +354,7 @@ async function handleStoreRuntimeRequest(
 
     const auditSummaryMatch = /^\/store\/orders\/([^/]+)\/audit-summary$/.exec(request.pathname);
     if (request.method === "GET" && auditSummaryMatch) {
-      const orderId = decodeURIComponent(auditSummaryMatch[1] ?? "");
+      const orderId = decodePathParameter(auditSummaryMatch[1] ?? "");
       const auditSummary = await context.storeRuntimeService.getOrderAuditSummary(orderId);
       if (!auditSummary) {
         return {
@@ -341,6 +378,9 @@ async function handleStoreRuntimeRequest(
         }
       };
     }
+    if (error instanceof InvalidPathParameterError) {
+      return invalidPathParameterResponse();
+    }
     if (error instanceof ProductOrderLookupError) {
       return {
         status: 409,
@@ -363,7 +403,7 @@ async function handleStoreZhixuVersionRequest(
   try {
     const listMatch = /^\/store\/zhixu-series\/([^/]+)\/versions$/.exec(request.pathname);
     if (request.method === "GET" && listMatch) {
-      const seriesId = decodeURIComponent(listMatch[1] ?? "");
+      const seriesId = decodePathParameter(listMatch[1] ?? "");
       return {
         status: 200,
         body: await context.storeZhixuVersionService.listVersions(seriesId)
@@ -373,8 +413,8 @@ async function handleStoreZhixuVersionRequest(
     const actionMatch = /^\/store\/zhixu-series\/([^/]+)\/versions\/([^/]+)\/(activate|deprecate)$/
       .exec(request.pathname);
     if (request.method === "POST" && actionMatch) {
-      const seriesId = decodeURIComponent(actionMatch[1] ?? "");
-      const versionId = decodeURIComponent(actionMatch[2] ?? "");
+      const seriesId = decodePathParameter(actionMatch[1] ?? "");
+      const versionId = decodePathParameter(actionMatch[2] ?? "");
       const action = actionMatch[3];
       const capability = versionCapability(action);
       const resource = { type: "store_zhixu_version", id: versionId, parentId: seriesId };
@@ -501,7 +541,7 @@ async function handleStoreZhixuDraftRequest(
       request.pathname
     );
     if (productSchemaMatch) {
-      const draftId = decodeURIComponent(productSchemaMatch[1] ?? "");
+      const draftId = decodePathParameter(productSchemaMatch[1] ?? "");
       const action = productSchemaMatch[2];
       if (request.method === "GET" && !action) {
         // 完整 Product Schema（DTO 含 compilePreview 材料）匿名不可读。
@@ -544,12 +584,29 @@ async function handleStoreZhixuDraftRequest(
         }
       }
       if (request.method === "POST" && action === "validate") {
-        return {
-          status: 200,
-          body: {
-            validation: await context.storeZhixuDraftWorkflowService.validateProductSchema(draftId, request.body)
-          }
-        };
+        // validate 无 body 时校验已存草稿并回显 stageId/roleSlotId/path——
+        // 与 GET/PUT 同资源同门（能力 + 锚定），否则匿名可枚举草稿结构。
+        const validateCapability: StoreCapability = "store.draft.compile";
+        const validateResource = { type: "store_zhixu_draft", id: draftId };
+        const validateAuthorization = await authorizeStoreCapability(context, request, validateCapability, validateResource);
+        if (!isStoreAuthorizationResult(validateAuthorization)) {
+          return validateAuthorization;
+        }
+        const validateAnchored = await requireAnchoredStoreAddress(context, request, validateResource);
+        if (!isAnchoredStoreAuthorizationResult(validateAnchored)) {
+          return validateAnchored;
+        }
+        try {
+          const validation = await context.storeZhixuDraftWorkflowService.validateProductSchema(draftId, request.body);
+          await recordStoreCapabilitySuccess(context, request, validateAuthorization.access, validateCapability, validateResource);
+          return {
+            status: 200,
+            body: { validation }
+          };
+        } catch (error) {
+          await recordStoreCapabilityFailure(context, request, validateAuthorization.access, validateCapability, validateResource, error);
+          throw error;
+        }
       }
     }
 
@@ -563,7 +620,7 @@ async function handleStoreZhixuDraftRequest(
       };
     }
 
-    const draftId = decodeURIComponent(draftMatch[1] ?? "");
+    const draftId = decodePathParameter(draftMatch[1] ?? "");
     const action = draftMatch[2];
 
     if (request.method === "GET" && !action) {
@@ -993,6 +1050,23 @@ async function filterDelistedSearchResults(
     return !planId || !delisted.has(planId);
   });
   return { ...record, results };
+}
+
+/** zhixu 详情端点与列表/search 同口径的下架抑制：非运营方 404。 */
+async function zhixuDelistedForRequester(
+  request: ApiRequest,
+  context: Parameters<RouteModule["handle"]>[1],
+  planId: string
+): Promise<boolean> {
+  if (!context.listingService) {
+    return false;
+  }
+  const access = await context.storeIdentityProvider.resolve(request.headers);
+  if (access.level === "store_operator" || access.level === "store_admin") {
+    return false;
+  }
+  return (await context.listingService.listListings("delisted"))
+    .some((listing) => listing.planId.toLowerCase() === planId.toLowerCase());
 }
 
 function isPlanNotProjectedError(error: unknown): boolean {

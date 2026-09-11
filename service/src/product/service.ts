@@ -1,6 +1,8 @@
 import {
   summarizeZhixu,
   type ChainProofRowDTO,
+  type DockableZhixuModuleDTO,
+  type DockableZhixuModulePortDTO,
   type FulfillmentPluginKind,
   type ProductExecutorOverlayDTO,
   type ProductOrderDTO,
@@ -35,7 +37,9 @@ import type {
   ProjectionStore,
   ProjectionSyncState,
 } from "../storage/projection-store.js";
-import { compareChainPointers } from "../shared/types.js";
+import { compareChainPointers, type Address } from "../shared/types.js";
+// PlanRegistered(finalize) 才是发布权威时点：桶存在只代表 commitPlan 已执行。
+import { isPlanRegisteredProjection } from "../store-console/version.js";
 
 export interface ProductChainProofDTO {
   readonly eventId: string;
@@ -167,6 +171,8 @@ export type ProductOrderApiDTO = ProductOrderDTO & {
   readonly chainStatus?: StateMachineOrderStatus;
   readonly projectionStatus?: ProductOrderProjectionStatus;
   readonly paymentConditionSummary?: string;
+  /** OrderRelayerRecorded 事实：订单创建者钱包（可见性判定的参与者之一）。 */
+  readonly creatorWallet?: Address;
   readonly tasks?: readonly ProductTaskApiDTO[];
   readonly stageExecutorOverlays?: Readonly<
     Record<string, ProductStageExecutorOverlayApiDTO>
@@ -222,7 +228,12 @@ export interface ProductParticipantView {
     readonly displayName: string;
     readonly walletAddress?: string;
     readonly roleLabels: readonly string[];
-    readonly source: "accepted_participant" | "wallet" | "anonymous";
+    // 词表对齐冻结 DTO ProductParticipantProfileDTO.source
+    // （"wallet" | "mock" | "anonymous"）：参与事实由 participantId/
+    // roleLabels 表达，source 只回答身份锚定形态（钱包 / 匿名）。
+    // 自造 "accepted_participant" 会被前端严格校验置为 undefined，
+    // 已接受参与者恒显示"身份未确认"。
+    readonly source: "wallet" | "anonymous";
   };
   readonly orders: readonly ProductOrderApiDTO[];
   readonly tasks: readonly ProductTaskApiDTO[];
@@ -456,6 +467,20 @@ export function createProductService(
           ));
         }
       }
+      // 创建者本人：OrderRelayerRecorded 的 creator 是订单参与者——
+      // 无任务指派时创建者也读得到自己建的单（与列表/详情读同口径）。
+      if (walletAddress) {
+        for (const order of orders) {
+          if (order.creator?.toLowerCase() === walletAddress) {
+            visibleOrderKeys.add(stateMachineOrderProjectionKey(
+              order.chainId,
+              order.contractAddress,
+              order.planId,
+              order.orderId,
+            ));
+          }
+        }
+      }
       for (const participant of acceptedParticipants) {
         if (!participant.orderId) {
           continue;
@@ -517,11 +542,7 @@ export function createProductService(
               ),
             ]),
           ).sort(),
-          source: primaryParticipant
-            ? "accepted_participant"
-            : walletAddress
-              ? "wallet"
-              : "anonymous",
+          source: walletAddress ? "wallet" : "anonymous",
         },
         orders: visibleOrders,
         tasks,
@@ -567,8 +588,8 @@ function zhixuDetailFromPlan(
     maintainer: plan.publisher ?? "未登记",
     updatedAt: `block ${plan.updatedAt.blockNumber.toString()}`,
     planPublication: {
-      status: "published",
-      label: "Plan 已发布",
+      status: isPlanRegisteredProjection(plan) ? "published" : "not_found",
+      label: isPlanRegisteredProjection(plan) ? "Plan 已发布" : "Plan 已提交，待注册（finalize）确认",
       stateMachineLabel: plan.stateMachineAddress,
       planId: plan.planId,
       planHash: plan.planHash,
@@ -629,6 +650,7 @@ async function productOrderFromStateMachine(
     status: mapStateMachineOrderStatus(order.status),
     statusLabel: orderProjectionStatusLabel(order.status, projected),
     projectionStatus: projected ? "projected" : "pending",
+    ...(order.creator ? { creatorWallet: order.creator } : {}),
     totalAmount: {
       amount: "0",
       currency: "N/A",
@@ -1248,7 +1270,7 @@ function zhixuDetailFromProductSchema(
     updatedAt: schema.updatedAt,
     planPublication,
     roleSlots: schema.roleSlots,
-    dockableModules: [],
+    dockableModules: dockableModulesFromArtifact(schema.onchainHookPlanArtifact),
     stages: schema.stages,
     orderPermissionTable: schema.orderPermissionTable,
     ...(schema.createOrderTrigger
@@ -1274,6 +1296,79 @@ function zhixuIdFromPlanIdentity(planId: string, planHash: string): string {
 
 function zhixuIdFromPlanId(planId: string): string {
   return `plan-${shortId(planId)}`;
+}
+
+/**
+ * 具名 dock 接口的展示面唯一来源是编译制品的 dockInterface 承诺
+ * （uvp.dockInterfaceArtifact.v2）——Store 不发明接口，只镜像发布者
+ * 已承诺的接口形状。schema 携带的制品是不透明 JSON，这里做结构化读取。
+ */
+function dockableModulesFromArtifact(
+  artifact: unknown
+): readonly DockableZhixuModuleDTO[] {
+  const dockInterface = recordField(artifact, "dockInterface");
+  const interfaces = dockInterface ? arrayField(dockInterface, "interfaces") : [];
+  return interfaces.flatMap((entry) => {
+    if (!isRecordValue(entry)) {
+      return [];
+    }
+    const interfaceName = entry.name;
+    const orderModes = entry.orderModes;
+    if (
+      typeof interfaceName !== "string" ||
+      !Array.isArray(orderModes) ||
+      !orderModes.every((mode) => mode === "new" || mode === "existing") ||
+      orderModes.length === 0
+    ) {
+      return [];
+    }
+    return [{
+      interfaceName,
+      orderModes: orderModes as readonly ("new" | "existing")[],
+      title: interfaceName,
+      desc: `发布者承诺的具名接口（下单模式：${orderModes.join("、")}）`,
+      inputs: portList(entry.inputs, "hookId"),
+      outputs: portList(entry.outputs, "canonicalOutputSignal"),
+      status: "available"
+    }];
+  });
+}
+
+function portList(
+  value: unknown,
+  refKey: "hookId" | "canonicalOutputSignal"
+): readonly DockableZhixuModulePortDTO[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((port): readonly DockableZhixuModulePortDTO[] => {
+    if (!isRecordValue(port) || typeof port.port !== "string" || port.port.length === 0) {
+      return [];
+    }
+    const ref = port[refKey];
+    return [{
+      portName: port.port,
+      label: typeof ref === "string" && ref.length > 0 ? ref : port.port,
+      ...(typeof ref === "string" && ref.length > 0
+        ? refKey === "hookId" ? { hook: ref } : { signal: ref }
+        : {})
+    }];
+  });
+}
+
+function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
+  return isRecordValue(value) && isRecordValue(value[key])
+    ? (value[key] as Record<string, unknown>)
+    : undefined;
+}
+
+function arrayField(record: Record<string, unknown>, key: string): readonly unknown[] {
+  const value = record[key];
+  return Array.isArray(value) ? value : [];
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function taskCapabilityPluginFromSlot(
@@ -2029,6 +2124,11 @@ function overlayPlanPublication(
   plan: ProjectionSnapshot["stateMachinePlans"][string] | undefined,
 ): ZhixuDetailDTO {
   if (!plan) {
+    return detail;
+  }
+  // 只有用 PlanRegistered(finalize) 覆写占位状态；commit-only 桶保留
+  // "not_found/等待发布同步" 占位——发布权威在 finalize，不在桶存在。
+  if (!isPlanRegisteredProjection(plan)) {
     return detail;
   }
   return {

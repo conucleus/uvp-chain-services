@@ -1,3 +1,4 @@
+import { decodePathParameter } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {
   StoreDockingServiceError,
@@ -53,23 +54,36 @@ export function createStoreDockingRouteModule(): RouteModule {
 
         const sessionMatch = /^\/store\/docking-sessions\/([^/]+)$/.exec(request.pathname);
         if (request.method === "GET" && sessionMatch) {
-          const sessionId = decodeURIComponent(sessionMatch[1] ?? "");
-          const session = await context.storeDockingService.getSession(sessionId);
-          if (!session) {
-            return {
-              status: 404,
-              body: { error: "docking_session_not_found" }
-            };
+          const sessionId = decodePathParameter(sessionMatch[1] ?? "");
+          // 会话档案含草稿信号映射，与 create/validate/save 同门：按 id 读
+          // 也要求已认证的 Store 身份（store.docking.read），匿名不可枚举。
+          const resource = { type: "store_docking_session" as const, id: sessionId };
+          const authorization = await authorizeStoreCapability(context, request, "store.docking.read", resource);
+          if (!isStoreAuthorizationResult(authorization)) {
+            return authorization;
           }
-          return {
-            status: 200,
-            body: { session }
-          };
+          try {
+            const session = await context.storeDockingService.getSession(sessionId);
+            if (!session) {
+              return {
+                status: 404,
+                body: { error: "docking_session_not_found" }
+              };
+            }
+            await recordStoreCapabilitySuccess(context, request, authorization.access, "store.docking.read", resource);
+            return {
+              status: 200,
+              body: { session }
+            };
+          } catch (error) {
+            await recordStoreCapabilityFailure(context, request, authorization.access, "store.docking.read", resource, error);
+            throw error;
+          }
         }
 
         const validateMatch = /^\/store\/docking-sessions\/([^/]+)\/validate$/.exec(request.pathname);
         if (request.method === "POST" && validateMatch) {
-          const sessionId = decodeURIComponent(validateMatch[1] ?? "");
+          const sessionId = decodePathParameter(validateMatch[1] ?? "");
           const capability = "store.docking.validate";
           const resource = { type: "store_docking_session", id: sessionId };
           const authorization = await authorizeStoreCapability(context, request, capability, resource);
@@ -98,7 +112,7 @@ export function createStoreDockingRouteModule(): RouteModule {
 
         const saveMatch = /^\/store\/docking-sessions\/([^/]+)\/save-draft-map$/.exec(request.pathname);
         if (request.method === "POST" && saveMatch) {
-          const sessionId = decodeURIComponent(saveMatch[1] ?? "");
+          const sessionId = decodePathParameter(saveMatch[1] ?? "");
           const capability = "store.docking.save";
           const resource = { type: "store_docking_session", id: sessionId };
           const authorization = await authorizeStoreCapability(context, request, capability, resource);
@@ -154,8 +168,6 @@ export function createStoreDockingRouteModule(): RouteModule {
 
 function parseStoreDockingCreateBody(body: unknown): StoreDockingSessionCreateDTO {
   const record = requireStoreDockingBodyRecord(body);
-  const sourceVersionId = optionalStoreDockingString(record, "sourceVersionId");
-  const targetVersionId = optionalStoreDockingString(record, "targetVersionId");
   const sourceZhixuId = requiredStoreDockingString(record, "sourceZhixuId");
   const targetZhixuId = requiredStoreDockingString(record, "targetZhixuId");
   // STORE-03：路由层快速拦截 self-docking（服务层为权威校验）。
@@ -167,12 +179,25 @@ function parseStoreDockingCreateBody(body: unknown): StoreDockingSessionCreateDT
       { sourceZhixuId, targetZhixuId }
     );
   }
+  const targetInterfaceName = optionalStoreDockingString(record, "targetInterfaceName");
+  const orderMode = optionalStoreDockingOrderMode(record);
   return {
     sourceZhixuId,
     targetZhixuId,
-    ...(sourceVersionId !== undefined ? { sourceVersionId } : {}),
-    ...(targetVersionId !== undefined ? { targetVersionId } : {})
+    ...(targetInterfaceName !== undefined ? { targetInterfaceName } : {}),
+    ...(orderMode !== undefined ? { orderMode } : {})
   };
+}
+
+function optionalStoreDockingOrderMode(record: Record<string, unknown>): "new" | "existing" | undefined {
+  if (!Object.hasOwn(record, "orderMode") || record.orderMode === null) {
+    return undefined;
+  }
+  const value = record.orderMode;
+  if (value !== "new" && value !== "existing") {
+    throw new StoreDockingServiceError(400, "invalid_body", "orderMode must be \"new\" or \"existing\"");
+  }
+  return value;
 }
 
 function parseStoreDraftSignalMapBody(body: unknown): readonly StoreDraftSignalMapEntryDTO[] {
@@ -188,8 +213,17 @@ function parseStoreDraftSignalMapBody(body: unknown): readonly StoreDraftSignalM
     const entry = item as Record<string, unknown>;
     const note = optionalStoreDockingString(entry, "note");
     const entryId = optionalStoreDockingString(entry, "entryId");
+    const bindingKind = entry.bindingKind;
+    if (bindingKind !== "input" && bindingKind !== "output") {
+      throw new StoreDockingServiceError(
+        400,
+        "invalid_body",
+        `draftSignalMap[${index}].bindingKind must be "input" or "output"`
+      );
+    }
     return {
       ...(entryId !== undefined ? { entryId } : {}),
+      bindingKind,
       sourceSignalId: requiredStoreDockingString(entry, "sourceSignalId"),
       targetSignalId: requiredStoreDockingString(entry, "targetSignalId"),
       ...(note !== undefined ? { note } : {})

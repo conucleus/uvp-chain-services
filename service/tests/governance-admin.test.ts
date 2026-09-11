@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
+import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import {
   createGovernanceBroadcasterAdapter,
   createGovernanceService,
@@ -15,6 +16,8 @@ const adminHeaders = {
   "x-uvp-admin-id": "admin-1",
   "x-uvp-admin-role": "admin",
 };
+/** 管理面口令因子：sha256("test-admin-password")。 */
+const adminTokenHash = "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d";
 const subjectId = "0x0000000000000000000000000000000000000000000000000000000000003001" as Hex;
 const bindingId = "0x0000000000000000000000000000000000000000000000000000000000004001" as Hex;
 const wallet = "0x4444444444444444444444444444444444444444" as Address;
@@ -25,7 +28,7 @@ const txHash = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 describe("identity governance API", () => {
   it("keeps admin review off-chain and requires an authenticated admin", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     await expect(router.handle({
       method: "POST",
       pathname: "/admin/governance/review-supplier",
@@ -43,6 +46,75 @@ describe("identity governance API", () => {
     });
   });
 
+  it("requires a password factor for the admin surface outside local", async () => {
+    const routerOptions = {
+      productRuntimeEnvironment: "staging" as const,
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111" as Address,
+      governanceAdminIds: ["admin-1"],
+      opsConsoleAdminIds: ["admin-1"],
+      governanceAdminTokenHashes: [adminTokenHash],
+      // staging/production 边界要求 production-safe 对象存储适配器。
+      evidenceStorage: new ObjectEvidenceStorage({ client: memoryObjectClient() }),
+    };
+    const router = createApiRouter(new MemoryProjectionStore(), routerOptions);
+
+    // staging：白名单命中的明文自报头不再是完整凭据 → 403。
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/governance/reviews",
+      headers: adminHeaders,
+    })).resolves.toMatchObject({ status: 403 });
+
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/ops/status",
+      headers: adminHeaders,
+    })).resolves.toMatchObject({ status: 403 });
+
+    // 口令因子命中（x-uvp-admin-token 哈希比对）→ 放行。
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/governance/reviews",
+      headers: { ...adminHeaders, "x-uvp-admin-token": "test-admin-password" },
+    })).resolves.toMatchObject({ status: 200 });
+
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/ops/status",
+      headers: { ...adminHeaders, "x-uvp-admin-token": "test-admin-password" },
+    })).resolves.toMatchObject({ status: 200, body: { ok: true } });
+
+    // 口令错误 → 403。
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/admin/governance/reviews",
+      headers: { ...adminHeaders, "x-uvp-admin-token": "wrong-password" },
+    })).resolves.toMatchObject({ status: 403 });
+
+    // production 同口径拒绝明文自报头。
+    const productionRouter = createApiRouter(new MemoryProjectionStore(), {
+      ...routerOptions,
+      productRuntimeEnvironment: "production" as const,
+    });
+    await expect(productionRouter.handle({
+      method: "GET",
+      pathname: "/admin/governance/reviews",
+      headers: adminHeaders,
+    })).resolves.toMatchObject({ status: 403 });
+
+    // local 档保持明文白名单自报头（dev 便利）。
+    const localRouter = createApiRouter(new MemoryProjectionStore(), {
+      ...routerOptions,
+      productRuntimeEnvironment: "local" as const,
+    });
+    await expect(localRouter.handle({
+      method: "GET",
+      pathname: "/admin/governance/reviews",
+      headers: adminHeaders,
+    })).resolves.toMatchObject({ status: 200 });
+  });
+
   it("registers and revokes a concrete identity binding without capability or reputation fields", async () => {
     const requests: GovernanceChainRequestDTO[] = [];
     const adapter: GovernanceChainAdapter = {
@@ -55,7 +127,7 @@ describe("identity governance API", () => {
         return { status: "submitted", txHash, signer, retryable: false, simulated: false };
       },
     };
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       governanceService: createGovernanceService({ adapter }),
     });
     await router.handle({
@@ -106,7 +178,7 @@ describe("identity governance API", () => {
         return { status: "submitted", txHash, signer, retryable: false, simulated: false };
       },
     };
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       governanceService: createGovernanceService({ adapter }),
     });
 
@@ -180,4 +252,64 @@ describe("identity governance API", () => {
       args: [subjectId, wallet, request.descriptorHash, request.descriptorURI],
     }));
   });
+
+  it("keeps the broadcast txHash when waiting for the receipt fails", async () => {
+    // 已广播的交易在等回执抛错时必须带着 txHash 失败——丢失哈希会造成
+    // 幽灵交易 + 重复登记（同仓其余广播适配器的共同防线）。
+    const publicClient: GovernancePublicClient = {
+      async getChainId() { return 31337; },
+      async readContract() { return signer; },
+      async waitForTransactionReceipt() {
+        throw new Error("receipt timeout");
+      },
+    };
+    const walletClient = { writeContract: vi.fn(async () => txHash) } as GovernanceWalletClient;
+    const adapter = createGovernanceBroadcasterAdapter({
+      rpcUrl: "http://127.0.0.1:8545",
+      chainId: 31337,
+      contractAddress: registryAddress,
+      privateKey: signerPrivateKey,
+      txConfirmations: 1,
+      publicClient,
+      walletClient,
+    });
+    const request = {
+      kind: "registerIdentity" as const,
+      subjectId,
+      account: wallet,
+      descriptorHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Hex,
+      descriptorURI: "uvp-store://identity/acme",
+    };
+    await expect(adapter.registerIdentity?.(request)).resolves.toMatchObject({
+      status: "failed",
+      txHash,
+      signer,
+      retryable: true,
+    });
+  });
 });
+
+/** 非 local 边界可接受的内存对象存储客户端（production-safe 适配器用）。 */
+function memoryObjectClient() {
+  const objects = new Map<string, Uint8Array>();
+  return {
+    async put(input: { readonly evidenceId: string; readonly bytes: Uint8Array }) {
+      const storageURI = `object://governance-admin/${encodeURIComponent(input.evidenceId)}`;
+      objects.set(storageURI, input.bytes);
+      return { storageURI, size: input.bytes.byteLength };
+    },
+    async get(storageURI: string) {
+      return objects.get(storageURI);
+    },
+    async exists(storageURI: string) {
+      return objects.has(storageURI);
+    },
+    storageURIForEvidenceId: (evidenceId: string) => `object://governance-admin/${encodeURIComponent(evidenceId)}`,
+    evidenceIdForStorageURI: (storageURI: string) => {
+      if (!storageURI.startsWith("object://governance-admin/")) {
+        throw new Error("storageURI is not managed by memoryObjectClient");
+      }
+      return decodeURIComponent(storageURI.slice("object://governance-admin/".length));
+    }
+  };
+}

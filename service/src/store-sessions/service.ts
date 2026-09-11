@@ -51,8 +51,20 @@ export interface ResolveWalletSessionResult {
   readonly record: StoreWalletSessionRecord;
 }
 
+/**
+ * 挑战签发的请求方上下文：只取服务端可见的连接信息（对端地址），
+ * 不接受任何自报字段——配额键自报等于没有配额。
+ */
+export interface StoreChallengeRequesterContext {
+  readonly clientAddress?: string | undefined;
+}
+
 export interface StoreSessionService {
-  createChallenge(input: unknown, requesterSession?: ResolveWalletSessionResult): Promise<StoreWalletSessionChallengeDTO>;
+  createChallenge(
+    input: unknown,
+    requesterSession?: ResolveWalletSessionResult,
+    requester?: StoreChallengeRequesterContext
+  ): Promise<StoreWalletSessionChallengeDTO>;
   verify(input: unknown, requesterSession?: ResolveWalletSessionResult): Promise<StoreWalletSessionVerifyResult>;
   resolveSessionFromToken(token: string | undefined): Promise<ResolveWalletSessionResult | undefined>;
   logout(token: string | undefined): Promise<boolean>;
@@ -72,12 +84,15 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
   const verifyWalletMessage = options.verifyWalletMessage ?? defaultVerifyWalletMessage;
 
   return {
-    async createChallenge(input, requesterSession) {
+    async createChallenge(input, requesterSession, requester) {
       if (!config.enabled) {
         throw new StoreSessionServiceError(403, "store_wallet_session_disabled", "wallet sessions are not enabled for this deployment");
       }
       const record = requireBodyRecord(input);
       const address = normalizeAddress(requiredString(record, "address"), "address");
+      // 请求方配额键：连接对端地址；取不到时归入共享兜底桶（fail-closed，
+      // 宁可错杀匿名签发量也不放开定向锁死面）。
+      const requesterKey = requester?.clientAddress?.trim() || FALLBACK_CHALLENGE_REQUESTER_KEY;
       const intentValue = optionalString(record, "intent") ?? "login";
       if (intentValue !== "login" && intentValue !== "anchor_address") {
         throw new StoreSessionServiceError(400, "invalid_body", "intent must be login or anchor_address");
@@ -88,10 +103,20 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       }
       const accountId = requesterSession?.session.accountId;
       const timestamp = now();
+      // 未鉴权入口的资源上界：先顺带清扫过期挑战（只插不删会把表/内存
+      // 无界放大），再按"请求方 + 目标地址"双键配额拒绝囤积——正常登录
+      // 一个地址同时存活的挑战只有个位数，10/30 都是宽松上界。单按地址
+      // 配额防不住定向锁死：入口匿名且 address 自报，任何人连发满额即可
+      // 顶掉任意受害地址的登录；请求方桶把囤积成本留在攻击者一侧。配额
+      // 判定在存储层原子完成：服务层先数后写的窗口会被并发请求整体穿透。
+      await store.deleteExpiredChallenges(timestamp.toISOString());
       const nonce = randomBytes(16).toString("hex");
       const issuedAt = timestamp.toISOString();
       const expiresAt = new Date(timestamp.getTime() + config.challengeTtlSeconds * 1000).toISOString();
-      const chainId = optionalString(record, "chainId");
+      // challenge 入口完全未鉴权且 message 会被整段落库：chainId 是唯一
+      // 由调用方提供并拼进 message 的自由文本字段，必须限长+字符集白名单，
+      // 否则任意长度写入直接放大成存储/内存 DoS（memory 驱动是无界 Map）。
+      const chainId = boundedOptionalString(record, "chainId", CHALLENGE_CHAIN_ID_PATTERN, CHALLENGE_INPUT_MAX_LENGTH);
       const message = buildStoreLoginMessage({
         address,
         intent,
@@ -104,13 +129,30 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       const challenge: StoreAuthChallengeRecord = {
         nonce,
         address,
+        requesterKey,
         intent,
         ...(accountId ? { accountId } : {}),
         message,
         issuedAt,
         expiresAt
       };
-      await store.putChallenge(challenge);
+      const accepted = await store.putChallengeWithinAddressQuota(challenge, {
+        maxLivePerAddress: MAX_LIVE_CHALLENGES_PER_ADDRESS,
+        maxLivePerRequester: MAX_LIVE_CHALLENGES_PER_REQUESTER,
+        now: timestamp.toISOString()
+      });
+      if (!accepted) {
+        throw new StoreSessionServiceError(
+          429,
+          "store_challenge_rate_limited",
+          "too many live challenges for this address or from this requester; wait for them to expire or consume one",
+          {
+            address,
+            limit: MAX_LIVE_CHALLENGES_PER_ADDRESS,
+            requesterLimit: MAX_LIVE_CHALLENGES_PER_REQUESTER
+          }
+        );
+      }
       return {
         nonce,
         address,
@@ -125,8 +167,11 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
         throw new StoreSessionServiceError(403, "store_wallet_session_disabled", "wallet sessions are not enabled for this deployment");
       }
       const record = requireBodyRecord(input);
-      const nonce = requiredString(record, "nonce");
-      const signature = requiredString(record, "signature") as Hex;
+      // 入口字段全部限长：nonce 由本服务铸造（32 位小写 hex），签名是
+      // 0x 前缀 hex——超长值在触达存储/验签前按 400 拒绝，不给未鉴权
+      // 调用方任何放大面。
+      const nonce = boundedRequiredString(record, "nonce", /^[0-9a-f]+$/, CHALLENGE_INPUT_MAX_LENGTH);
+      const signature = boundedRequiredString(record, "signature", /^0x[0-9a-fA-F]+$/, 132) as Hex;
       const challenge = await store.getChallenge(nonce);
       if (!challenge || challenge.consumedAt) {
         throw new StoreSessionServiceError(401, "store_challenge_invalid", "challenge is unknown or already used");
@@ -138,9 +183,7 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       // 挑战单次使用：条件 UPDATE 原子占位
       //（burn-on-attempt）：并发重放同一 nonce 只有一个请求能通过；
       // 签名失败可重新取挑战，代价可接受。
-      const consumed = store.consumeChallenge
-        ? await store.consumeChallenge(nonce, now().toISOString())
-        : await consumeChallengeByReadWrite(store, challenge, now);
+      const consumed = await store.consumeChallenge(nonce, now().toISOString());
       if (!consumed) {
         throw new StoreSessionServiceError(401, "store_challenge_invalid", "challenge is unknown or already used");
       }
@@ -195,6 +238,11 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
     },
 
     async resolveSessionFromToken(token) {
+      // 停用开关半关收敛：challenge/verify 都按 disabled 拒绝，存量
+      // token 不能在 TTL 内继续生效。
+      if (!config.enabled) {
+        return undefined;
+      }
       if (!token || !token.startsWith(STORE_SESSION_TOKEN_PREFIX)) {
         return undefined;
       }
@@ -280,17 +328,19 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
  * 把钱包会话叠加到既有 StoreAccessState 上：
  * - 未配置/未启用时原样返回（fail-closed，不放大权限）。
  * - 钱包地址命中运营方/管理员清单时提升 level；否则至少 store_read。
- * - local + dev_headers 模式允许 dev 锚定地址头（显式仅供本地联调，staging/prod 拒绝）。
+ * - dev 锚定地址头仅 local 生效（testnet 是公开测试网，与 staging/prod
+ *   同按 strict runtime 硬拒自报地址锚定）。
  */
 export function createWalletSessionStoreIdentityProvider(options: {
   readonly base: StoreIdentityProvider;
   readonly sessionService: StoreSessionService;
   readonly config?: StoreWalletSessionConfig;
-  readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
+  /** 必填：环境档位由装配层注入，漏传即构造失败，不回退 local。 */
+  readonly runtimeEnvironment: ChainServicesRuntimeEnv;
 }): StoreIdentityProvider {
   const config = options.config ?? defaultWalletSessionConfig();
-  const runtimeEnvironment = options.runtimeEnvironment ?? "local";
-  const strictRuntime = runtimeEnvironment === "staging" || runtimeEnvironment === "production";
+  const runtimeEnvironment = options.runtimeEnvironment;
+  const strictRuntime = runtimeEnvironment !== "local";
   return {
     async resolve(headers) {
       const base = await options.base.resolve(headers);
@@ -374,7 +424,6 @@ function capabilitiesForAccessLevel(level: StoreAccessLevel): readonly StoreCapa
         "store.draft.import",
         "store.draft.compile",
         "store.draft.schema.save",
-        "store.draft.review",
         "store.supplier.create",
         "store.supplier.review",
         "store.supplier.tags.update",
@@ -392,7 +441,6 @@ function capabilitiesForAccessLevel(level: StoreAccessLevel): readonly StoreCapa
         "store.draft.import",
         "store.draft.compile",
         "store.draft.schema.save",
-        "store.draft.review",
         "store.supplier.create",
         "store.supplier.review",
         "store.supplier.tags.update",
@@ -403,10 +451,16 @@ function capabilitiesForAccessLevel(level: StoreAccessLevel): readonly StoreCapa
         "store.listing.manage"
       ];
     case "store_read":
-      return storeReadCapabilities();
+      // 钱包会话对未命中运营方/管理员清单的地址只授公共读——
+      // store.audit.read 是运营审计面，任意钱包登录即可读全量运营
+      // 审计等于把运营数据开放给所有人。
+      return ["store.read"];
     case "anonymous_read":
       return ["store.read"];
   }
+  // store.draft.review 不下放：zhixu 草稿审核是治理动作（governance
+  // review 落库），提交者与审核者职责分离，专属 governance_admin
+  // （store-console/access.ts 口径；JWT 侧同样刻意不映射给运营级）。
 }
 
 function storeReadCapabilities(): readonly StoreCapability[] {
@@ -502,19 +556,6 @@ function accountAddressView(record: { readonly address: Address; readonly status
   };
 }
 
-/**
- * 可选能力回退：store 未实现条件占位 consumeChallenge 时，退化为
- * 读-判-写（非原子）。这是当前接口的可选能力语义，不是旧版本兼容。
- */
-async function consumeChallengeByReadWrite(
-  store: StoreWalletSessionStore,
-  challenge: NonNullable<Awaited<ReturnType<StoreWalletSessionStore["getChallenge"]>>>,
-  now: () => Date
-): Promise<unknown> {
-  await store.updateChallenge({ ...challenge, consumedAt: now().toISOString() });
-  return challenge;
-}
-
 function sha256Hex(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
@@ -547,6 +588,54 @@ function optionalString(record: Record<string, unknown>, field: string): string 
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** 未鉴权入口的字符串上限（防存储/内存放大，128 字符足够任何标识符）。 */
+const CHALLENGE_INPUT_MAX_LENGTH = 128;
+/** chainId 在签名 message 中只是展示性标识，收窄到安全子集即可。 */
+const CHALLENGE_CHAIN_ID_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._:-]*$/;
+/** 单地址同时存活的未消费挑战配额（未鉴权入口的囤积上界）。 */
+const MAX_LIVE_CHALLENGES_PER_ADDRESS = 10;
+/**
+ * 单请求方跨全部地址的存活挑战配额：防定向锁死——challenge 入口匿名
+ * 且 address 自报，只按地址配额时任一请求方可替受害者占满配额，使其
+ * 在 TTL 内无法登录且可续期。30 覆盖一个团队/出口 IP 的正常多地址登录。
+ */
+const MAX_LIVE_CHALLENGES_PER_REQUESTER = 30;
+/** 取不到对端地址时的共享请求方桶（fail-closed：不因缺追踪而放开）。 */
+const FALLBACK_CHALLENGE_REQUESTER_KEY = "";
+
+function boundedOptionalString(
+  record: Record<string, unknown>,
+  field: string,
+  pattern: RegExp,
+  maxLength: number
+): string | undefined {
+  const value = optionalString(record, field);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value.length > maxLength || !pattern.test(value)) {
+    throw new StoreSessionServiceError(
+      400,
+      "invalid_body",
+      `${field} must match ${String(pattern)} and be at most ${maxLength} characters`
+    );
+  }
+  return value;
+}
+
+function boundedRequiredString(
+  record: Record<string, unknown>,
+  field: string,
+  pattern: RegExp,
+  maxLength: number
+): string {
+  const value = boundedOptionalString(record, field, pattern, maxLength);
+  if (!value) {
+    throw new StoreSessionServiceError(400, "invalid_body", `${field} must be a non-empty string`);
+  }
+  return value;
 }
 
 function parseOptionalAddress(value: string | undefined): Address | undefined {

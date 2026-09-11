@@ -111,6 +111,8 @@ const expectedMigrationVersions = [
   "0016_submission_plan_id",
   "0017_indexer_pending_post_commit",
   "0018_store_governance_audit_constraints",
+  "0019_stage_patch_state",
+  "0020_store_challenge_requester_key",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -250,17 +252,45 @@ describe("durable storage", () => {
     expect(afterTombstone).toHaveLength(1);
     expect(afterTombstone[0]).toMatchObject({ removed: true });
 
-    await store.appendEvent(event);
+    // 复活载荷携带 transaction_index：墓碑行缺失该排序键时必须回填，
+    // 否则复活事件在同块事件全序里错位。
+    await store.appendEvent({ ...event, transactionIndex: 4 });
     const revived = await store.listEvents({ chainId, contractAddress });
     expect(revived).toHaveLength(1);
     expect(revived[0]?.removed).toBeUndefined();
-    expect(revived[0]).toMatchObject({ eventName: "OrderCreated" });
+    expect(revived[0]).toMatchObject({ eventName: "OrderCreated", transactionIndex: 4 });
+  });
+
+  it("backfills a missing transaction_index when reviving a tombstoned event", async () => {
+    // 墓碑行不带 transaction_index（初始插入时事件源未提供），
+    // 复活时携带的序号必须写回；已有序号的墓碑行复活时保留原值。
+    const store = openStore(tempDirs);
+    stores.push(store);
+    const base = chainEvent(11n, 1, "SignalSubmitted", {
+      orderId: "order-revive-index",
+    });
+
+    await store.appendEvent(base);
+    await store.appendEvent({ ...base, removed: true as const });
+    await store.appendEvent({ ...base, transactionIndex: 2 });
+    const revived = await store.listEvents({ chainId, contractAddress });
+    expect(revived).toHaveLength(1);
+    expect(revived[0]?.removed).toBeUndefined();
+    expect(revived[0]).toMatchObject({ transactionIndex: 2 });
+
+    const preserved = chainEvent(12n, 0, "HookReady", { orderId: "order-revive-keep" });
+    await store.appendEvent({ ...preserved, transactionIndex: 7 });
+    await store.appendEvent({ ...preserved, transactionIndex: 7, removed: true as const });
+    await store.appendEvent({ ...preserved });
+    const kept = (await store.listEvents({ chainId, contractAddress }))
+      .find((event) => event.eventName === "HookReady");
+    expect(kept).toMatchObject({ transactionIndex: 7 });
   });
 
   it("claims broadcast txHash ownership with the same contract on SQLite as on Postgres", async () => {
-    // ETH-07 三后端 parity：无既有归属时 claim 必须登记归属并返回 undefined，
-    // 已有归属时返回归属 idempotencyKey。Postgres 实现曾在抢到归属时误返回
-    // 自身 key，此断言把该契约锁定到两个持久后端。
+    // 三后端 parity：无既有归属时 claim 必须登记归属并返回 undefined，
+    // 已有归属时返回归属 idempotencyKey——抢到归属时不返回自身 key，
+    // 该契约锁定到两个持久后端。
     const dedupe = new SqliteBroadcastDedupeStore({
       databaseUrl: sqliteUrl(tempDirs),
       migrations: { autoRun: true, directory: migrationsDirectory() },
@@ -490,8 +520,8 @@ describe("durable storage", () => {
     const registration = productRegistration(draft.draftId);
 
     await store.createDraft(draft, [participant]);
-    await store.createInvite(invite);
-    await store.createRegistration(registration);
+    await store.createInviteIfNoneActive(invite, "2026-01-01T00:00:00.000Z");
+    await store.createRegistrationIfNoneForDraft(registration);
     await store.close();
     stores.splice(stores.indexOf(store), 1);
 
@@ -547,6 +577,31 @@ describe("durable storage", () => {
         evidence: { ...record.evidence, evidenceId: "ev_duplicate" },
       }),
     ).rejects.toBeInstanceOf(StorageConstraintError);
+    // 上传路径的条件插入对同 (owner, payloadHash) 幂等收口：返回既有
+    // 记录而不是撞 UNIQUE（并发重复上传不再以存储错误泄露）。
+    await expect(
+      store.insertIfPayloadHashAbsent({
+        ...record,
+        evidence: { ...record.evidence, evidenceId: "ev_race_loser" },
+      }),
+    ).resolves.toMatchObject({
+      evidence: { evidenceId: record.evidence.evidenceId },
+    });
+    // 不同 owner 同 payloadHash 不受影响：插入成功返回 undefined。
+    await expect(
+      store.insertIfPayloadHashAbsent({
+        ...record,
+        evidence: {
+          ...record.evidence,
+          evidenceId: "ev_other_owner",
+          ownerParticipantId: "buyer",
+        },
+        accessPolicy: {
+          ...record.accessPolicy,
+          evidenceId: "ev_other_owner",
+        },
+      }),
+    ).resolves.toBe(undefined);
     await store.close();
     stores.splice(stores.indexOf(store), 1);
 
@@ -574,6 +629,15 @@ describe("durable storage", () => {
     await expect(store.reserveNonce("nonce-key")).resolves.toBe(false);
     await store.releaseNonce("nonce-key");
     await expect(store.reserveNonce("nonce-key")).resolves.toBe(true);
+    // 陈旧预留接管（硬崩溃泄漏形态）：命中预留时，仅当行的预留时间早于
+    // staleBefore 才条件更新接管；接管后行时间刷新，早于新时间的阈值
+    // 不再命中（未过期仍拒绝）。
+    await expect(store.reserveNonce("nonce-key", {
+      staleBefore: new Date(Date.now() + 60_000).toISOString(),
+    })).resolves.toBe(true);
+    await expect(store.reserveNonce("nonce-key", {
+      staleBefore: new Date(Date.now() - 60_000).toISOString(),
+    })).resolves.toBe(false);
     await store.putSubmission(submission);
     await store.markPreparedUsed(
       prepared.prepareId,
@@ -1021,6 +1085,8 @@ describe("durable storage", () => {
       reopenedRouter.handle({
         method: "GET",
         pathname: `/store/docking-sessions/${dockingSessionId}`,
+        // 会话档案读与写同门：需要已认证的 Store 身份（store.docking.read）。
+        headers: adminHeaders,
       }),
     ).resolves.toMatchObject({
       status: 200,
@@ -1198,7 +1264,7 @@ describePostgres(
     });
 
     it("assembles and persists notification state and broadcast dedupe stores in the Postgres factory wiring", async () => {
-      // ETH-04(b)/ETH-07：生产拓扑（postgres）同样装配持久化通知状态与
+      // 生产拓扑（postgres）同样装配持久化通知状态与
       // broadcast 去重状态，而不是静默退化为 undefined。
       const databaseUrl = await postgresSchemaUrl(schemas);
       const factoryStores = createChainServicesStores({
@@ -1291,10 +1357,11 @@ describePostgres(
         ],
       });
       await first.productBffStore.createDraft(draft, [participant]);
-      await first.productBffStore.createInvite(
+      await first.productBffStore.createInviteIfNoneActive(
         productInvite(draft.draftId, participant.participantId),
+        "2026-01-01T00:00:00.000Z",
       );
-      await first.productBffStore.createRegistration(registration);
+      await first.productBffStore.createRegistrationIfNoneForDraft(registration);
       await first.evidenceMetadataStore.put(evidence);
       await first.evidenceMetadataStore.markBound?.({
         evidenceId: evidence.evidence.evidenceId,
@@ -1371,6 +1438,12 @@ describePostgres(
       await expect(
         reopened.submissionStore.reserveNonce("nonce-key-postgres"),
       ).resolves.toBe(false);
+      // 陈旧预留接管与 sqlite 同判据：预留行早于 staleBefore 才接管。
+      await expect(
+        reopened.submissionStore.reserveNonce("nonce-key-postgres", {
+          staleBefore: new Date(Date.now() + 60_000).toISOString(),
+        }),
+      ).resolves.toBe(true);
       await expect(
         reopened.submissionStore.getPrepared(prepared.prepareId),
       ).resolves.toMatchObject({
@@ -1702,7 +1775,7 @@ function openGovernanceStore(databaseUrl: string): SqliteGovernanceStore {
 }
 
 function createStoreMetadataRouter(stores: ChainServicesStores): ApiRouter {
-  return createApiRouter(stores.projectionStore, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+  return createApiRouter(stores.projectionStore, { productRuntimeEnvironment: "local", productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
     storeAuthConfig: {
       mode: "dev_headers" as const,
       roleClaim: "roles",
@@ -2336,8 +2409,6 @@ function storeDockingSession(): StoreDockingSessionDTO {
     source: {
       zhixuId: "source-zhixu",
       title: "Source Zhixu",
-      versionId: "source-v1",
-      versionLabel: "Source v1",
       lifecycleStatus: "active",
       publicationStatus: "published",
       planId,
@@ -2346,8 +2417,6 @@ function storeDockingSession(): StoreDockingSessionDTO {
     target: {
       zhixuId: "target-zhixu",
       title: "Target Zhixu",
-      versionId: "target-v1",
-      versionLabel: "Target v1",
       lifecycleStatus: "active",
       publicationStatus: "published",
       planId:
@@ -2355,10 +2424,21 @@ function storeDockingSession(): StoreDockingSessionDTO {
       planHash:
         "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     },
+    interfaces: [
+      {
+        interfaceName: "fulfillment_service",
+        orderModes: ["new"],
+        inputs: [{ portName: "execute", label: "执行入口", hook: "target.intake#EXECUTE" }],
+        outputs: [{ portName: "completed", label: "完成", signal: "target::target.intake.cmp" }],
+      },
+    ],
+    selectedInterfaceName: "fulfillment_service",
+    orderMode: "new",
     candidateMappings: [],
     draftSignalMap: [
       {
         entryId: "map_1",
+        bindingKind: "input",
         sourceSignalId: "source.done",
         targetSignalId: "target.start",
         note: "Durable draft map",

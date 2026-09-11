@@ -128,7 +128,7 @@ describe("Store runtime and version selection", () => {
     });
   });
 
-  it("KEEP: a committed-but-not-registered plan bucket is not activatable (UVP-02)", async () => {
+  it("a committed-but-not-registered plan bucket is not activatable", async () => {
     // 投影桶在 commitPlan 第一步即建、PlanRegistered 到 finalize 才发：
     // 只有 PlanCommitted 的"待定计划"不得激活建单。
     const store = new MemoryProjectionStore();

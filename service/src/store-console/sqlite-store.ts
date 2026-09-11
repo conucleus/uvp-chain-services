@@ -150,12 +150,16 @@ export class SqliteStoreZhixuDraftStore implements StoreZhixuDraftStore {
     planHash: string,
     artifactHash?: string
   ): Promise<StoreProductSchemaDTO | undefined> {
+    // planId 前置下推到 SQL（json_extract 大小写归一），只反序列化
+    // 同 plan 候选行，不再每轮全表捞取解析全部 schema；精确匹配
+    // （planHash/artifactHash、字段形状）仍由 JS 侧统一判定。
     const rows = this.#database.prepare(
       `SELECT product_schema_json
        FROM store_zhixu_draft
        WHERE product_schema_json IS NOT NULL
+         AND lower(json_extract(product_schema_json, '$.planId')) = lower(?)
        ORDER BY updated_at DESC, draft_id DESC`
-    ).all();
+    ).all(planId);
     return productSchemaRowsByPlan(rows, planId, planHash, artifactHash)[0];
   }
 
@@ -271,8 +275,8 @@ export class SqliteStoreDockingSessionStore implements StoreDockingSessionStore 
     runSqliteWrite(() => {
       this.#database.prepare(
         `INSERT INTO store_docking_session (
-           session_id, source_zhixu_id, target_zhixu_id, source_version_id,
-           target_version_id, status, draft_signal_map_json, validation_json,
+           session_id, source_zhixu_id, target_zhixu_id, selected_interface_name,
+           order_mode, status, draft_signal_map_json, validation_json,
            session_json, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(...dockingSessionValues(session));
@@ -292,16 +296,16 @@ export class SqliteStoreDockingSessionStore implements StoreDockingSessionStore 
     runSqliteWrite(() => {
       this.#database.prepare(
         `INSERT INTO store_docking_session (
-           session_id, source_zhixu_id, target_zhixu_id, source_version_id,
-           target_version_id, status, draft_signal_map_json, validation_json,
+           session_id, source_zhixu_id, target_zhixu_id, selected_interface_name,
+           order_mode, status, draft_signal_map_json, validation_json,
            session_json, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id)
          DO UPDATE SET
            source_zhixu_id = excluded.source_zhixu_id,
            target_zhixu_id = excluded.target_zhixu_id,
-           source_version_id = excluded.source_version_id,
-           target_version_id = excluded.target_version_id,
+           selected_interface_name = excluded.selected_interface_name,
+           order_mode = excluded.order_mode,
            status = excluded.status,
            draft_signal_map_json = excluded.draft_signal_map_json,
            validation_json = excluded.validation_json,
@@ -464,8 +468,8 @@ function dockingSessionValues(session: StoreDockingSessionDTO): readonly SqliteV
     session.sessionId,
     session.source.zhixuId,
     session.target.zhixuId,
-    session.source.versionId ?? null,
-    session.target.versionId ?? null,
+    session.selectedInterfaceName,
+    session.orderMode,
     session.status,
     stringifyStorageJson(session.draftSignalMap),
     stringifyStorageJson(session.validation),

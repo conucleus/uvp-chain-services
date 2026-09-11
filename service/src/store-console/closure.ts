@@ -99,9 +99,6 @@ apiVersion: uvp/v0
 kind: Zhixu
 metadata:
   name: store-closure-dry-run
-  uid: store-closure-dry-run-001
-  annotations:
-    version: "1"
 spec:
   platform:
     type: blockchain
@@ -113,7 +110,11 @@ spec:
       stages:
         - name: intake
           source: buyer
-          sendSignals: ["cmp"]
+          # 自发种子入口（uvp-core 物化门：零 hook 阶段永不可物化，其
+          # sendSignals 无钩子可挂，编译器拒绝该形状）。
+          receiveSignals:
+            START: "buyer::order.intake.seed"
+          sendSignals: ["cmp", "seed"]
           executor:
             supplierType: organization
             supplierID: closure-ops
@@ -512,15 +513,26 @@ async function checkDockingCreateValidateSave(
         review: "all",
         publication: "published",
       });
-      // STORE-03：docking 禁止 self-docking，dry-run 需要两个不同的已发布
-      // zhixu 分别充当 source 与 target。
+      // dock v2：target 必须是发布过具名接口的不同 zhixu；
+      // 列表行不携带接口信息，逐个用 detail 验证可拼性。
       const published = list.zhixus.filter(
         (zhixu) => zhixu.planPublication.status === "published",
       );
-      const source = published[0];
-      const target = source
-        ? published.find((zhixu) => zhixu.zhixuId !== source.zhixuId)
-        : undefined;
+      let target: (typeof published)[number] | undefined;
+      let source: (typeof published)[number] | undefined;
+      for (const candidate of published) {
+        const detail = await options.productService.getZhixu(candidate.zhixuId);
+        if (!detail || detail.dockableModules.length === 0) {
+          continue;
+        }
+        const other = published.find((zhixu) => zhixu.zhixuId !== candidate.zhixuId);
+        if (!other) {
+          break;
+        }
+        target = candidate;
+        source = other;
+        break;
+      }
       if (!source || !target) {
         return check({
           key: "docking_create_validate_save",
@@ -530,7 +542,7 @@ async function checkDockingCreateValidateSave(
           sourceOfTruth: "store-workflow-metadata",
           requiredCapabilities: required,
           message:
-            "Docking sandbox validation needs two distinct published zhixu projections (self-docking is forbidden).",
+            "Docking sandbox validation needs an interface-publishing target zhixu plus a distinct published source (self-docking is forbidden).",
           details: {
             totalZhixus: list.summary.totalZhixus,
             publishedZhixus: published.length,
@@ -543,10 +555,35 @@ async function checkDockingCreateValidateSave(
         sessionStore: new MemoryStoreDockingSessionStore(),
         ...(options.now ? { now: options.now } : {}),
       });
-      const created = await docking.createSession({
-        sourceZhixuId: source.zhixuId,
-        targetZhixuId: target.zhixuId,
-      });
+      // 试拼以目标发布的具名接口为前提（v2）：目标没有接口时显式 skip，
+      // 不静默降级回"任意两秩序可拼"。
+      let created: Awaited<ReturnType<typeof docking.createSession>>;
+      try {
+        created = await docking.createSession({
+          sourceZhixuId: source.zhixuId,
+          targetZhixuId: target.zhixuId,
+        });
+      } catch (error) {
+        const code = (error as { readonly code?: string }).code;
+        if (code === "target_has_no_dock_interface") {
+          return check({
+            key: "docking_create_validate_save",
+            label: "Docking sandbox create/validate/save",
+            status: "skipped",
+            classification: "workflow_metadata",
+            sourceOfTruth: "store-workflow-metadata",
+            requiredCapabilities: required,
+            message:
+              "No published target zhixu exposes a named dock interface; the sandbox cannot trial-assemble without one.",
+            details: {
+              totalZhixus: list.summary.totalZhixus,
+              publishedZhixus: published.length,
+              nonPublishing: true,
+            },
+          });
+        }
+        throw error;
+      }
       const candidate = created.candidateMappings[0];
       if (!candidate) {
         return check({
@@ -567,6 +604,7 @@ async function checkDockingCreateValidateSave(
       }
       const draftSignalMap = [
         {
+          bindingKind: candidate.bindingKind,
           sourceSignalId: candidate.sourceSignal.signalId,
           targetSignalId: candidate.targetSignal.signalId,
           note: "closure dry-run candidate",
@@ -591,6 +629,8 @@ async function checkDockingCreateValidateSave(
           sessionId: created.sessionId,
           sourceZhixuId: source.zhixuId,
           targetZhixuId: target.zhixuId,
+          selectedInterfaceName: created.selectedInterfaceName,
+          orderMode: created.orderMode,
           candidateMappingCount: created.candidateMappings.length,
           validateStatus: validated.status,
           saveStatus: saved.status,

@@ -24,7 +24,7 @@ export interface S3EvidenceStorageClientOptions {
   readonly forcePathStyle?: boolean;
   readonly accessKeyIdEnv: string;
   readonly secretAccessKeyEnv: string;
-  /** Optional name of the env variable holding an STS session token; required to be populated when set (audit #19). */
+  /** Optional name of the env variable holding an STS session token; required to be populated when set. */
   readonly sessionTokenEnv?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly objectClient?: S3CompatibleObjectClient;

@@ -9,7 +9,7 @@ import {
   recordStoreCapabilitySuccess,
   requireAnchoredStoreAddress
 } from "../store-authz.js";
-import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { cleanQuery, decodePathParameter, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 /**
@@ -80,7 +80,7 @@ export function createStoreListingsRouteModule(options: {
         if (!listingMatch) {
           return { status: 404, body: { error: "not_found" } };
         }
-        const listingId = decodeURIComponent(listingMatch[1] ?? "");
+        const listingId = decodePathParameter(listingMatch[1] ?? "");
         const action = listingMatch[2];
 
         if (request.method === "GET" && !action) {

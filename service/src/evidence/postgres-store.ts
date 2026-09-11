@@ -1,3 +1,4 @@
+import { StorageConstraintError } from "../storage/errors.js";
 import { parseStorageJson, stringifyStorageJson } from "../storage/json.js";
 import { PostgresDatabase } from "../storage/postgres-client.js";
 import {
@@ -114,6 +115,61 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
         ]
       );
     });
+  }
+
+  async insertIfPayloadHashAbsent(record: EvidenceMetadataRecord): Promise<EvidenceMetadataRecord | undefined> {
+    let inserted = false;
+    await this.withTransaction(async () => {
+      try {
+        const result = await this.#database.query(
+          `INSERT INTO evidence_object (
+             evidence_id, order_id, draft_id, task_id, stage_identifier, owner_participant_id,
+             file_name, mime_type, size, storage_uri, content_hash, metadata_hash, payload_hash,
+             payload_ref, status, created_at, bound_signal_tx_hash, bound_submission_id,
+             bound_onchain_order_id, bound_source_id, bound_signal_id, bound_at,
+             metadata_json, canonical_metadata_json
+           ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23::jsonb, $24::jsonb
+           WHERE NOT EXISTS (
+             SELECT 1 FROM evidence_object
+             WHERE owner_participant_id = $6 AND payload_hash = $13
+           )`,
+          evidenceValues(record)
+        );
+        inserted = (result.rowCount ?? 0) > 0;
+      } catch (error) {
+        // READ COMMITTED 下 NOT EXISTS 的检查可双过：同 owner+payload 的
+        // 并发上传败者在本事务内撞 UNIQUE (owner_participant_id,
+        // payload_hash)（23505）。这是重复上传的幂等路径而非存储故障，
+        // 按接口契约以既有记录返回，不得以 500 泄露；evidence_id 主键等
+        // 其他唯一冲突不属于该竞态，照旧上抛。
+        if (
+          !(error instanceof StorageConstraintError) ||
+          !EVIDENCE_PAYLOAD_UNIQUE_CONSTRAINT.test(error.message)
+        ) {
+          throw error;
+        }
+        inserted = false;
+      }
+      if (inserted) {
+        await this.#database.query(
+          `INSERT INTO evidence_access_policy (
+             evidence_id, order_id, readers_json, writers_json, admin_readers_json, dispute_readers_json
+           ) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb)`,
+          [
+            record.accessPolicy.evidenceId,
+            record.accessPolicy.orderId ?? null,
+            stringifyStorageJson(record.accessPolicy.readers),
+            stringifyStorageJson(record.accessPolicy.writers),
+            stringifyStorageJson(record.accessPolicy.adminReaders),
+            stringifyStorageJson(record.accessPolicy.disputeReaders)
+          ]
+        );
+      }
+    });
+    if (!inserted) {
+      return this.findOwnedByPayloadHash(record.evidence.payloadHash, record.evidence.ownerParticipantId);
+    }
+    return undefined;
   }
 
   async get(evidenceId: string): Promise<EvidenceMetadataRecord | undefined> {
@@ -237,6 +293,9 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
     return result.rows.map((row) => adminReadRow(row));
   }
 }
+
+/** postgres 对 UNIQUE (owner_participant_id, payload_hash) 的自动命名约束。 */
+const EVIDENCE_PAYLOAD_UNIQUE_CONSTRAINT = /evidence_object_owner_participant_id_payload_hash_key/;
 
 function evidenceValues(record: EvidenceMetadataRecord) {
   const evidence = record.evidence;

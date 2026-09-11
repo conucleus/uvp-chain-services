@@ -1,5 +1,4 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { keccak256Hex, onchainSignalId, onchainSourceId } from "@uvp-eth/compiler";
 import { buildProductSubmitTypedData, recoverProductSubmitSigner } from "@uvp-eth/protocol-bindings";
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
 import { hashCanonicalJson } from "../evidence/index.js";
@@ -31,11 +30,11 @@ import type {
   SubmitProductTaskInput,
   PrepareProductTaskSubmitInput
 } from "./types.js";
+import { classifyStateMachineBroadcastError } from "./broadcast-adapter.js";
 import type { EvidencePrincipal, EvidenceRecordDTO } from "../evidence/index.js";
 import { ProductOrderLookupError } from "../product/service.js";
 
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
-const PRODUCT_SIGNAL_SOURCE = "product";
 
 export class ProductSubmissionError extends Error {
   override readonly name = "ProductSubmissionError";
@@ -80,7 +79,10 @@ export interface ProductSubmissionService {
     principal: EvidencePrincipal
   ): Promise<PreparedSubmissionDTO>;
   submit(taskId: string, input: SubmitProductTaskInput): Promise<ProductSubmissionDTO>;
-  getSubmission(submissionId: string): Promise<ProductSubmissionDTO | undefined>;
+  getSubmission(
+    submissionId: string,
+    readerWallet: Address
+  ): Promise<ProductSubmissionDTO | undefined>;
 }
 
 export function createProductSubmissionService(options: ProductSubmissionServiceOptions): ProductSubmissionService {
@@ -115,7 +117,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
       }
 
       const submitter = normalizeAddress(input.walletAddress, "walletAddress");
-      ensureActiveStageExecutorSubmitter(task, submitter);
       const verifyingContract = task.stateMachineAddress
         ? normalizeAddress(task.stateMachineAddress, "task.stateMachineAddress")
         : defaultVerifyingContract;
@@ -268,24 +269,30 @@ export function createProductSubmissionService(options: ProductSubmissionService
         throw new ProductSubmissionError(400, "wallet_mismatch", "walletAddress does not match prepared submitter");
       }
 
-      const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
-      if (BigInt(prepared.deadline) < currentSeconds) {
-        const expired = withSubmissionReconcileDefaults(
-          buildExpiredSubmission(prepared, submissionIdFactory(), now().toISOString())
-        );
-        await withSubmissionStoreTransaction(store, async () => {
-          await store.putSubmission(expired);
-          await store.markPreparedUsed(prepared.prepareId, expired.submissionId, expired.updatedAt);
-        });
-        return expired;
-      }
-
       const signature = normalizeSignature(input.signature);
       const recoveredSubmitter = await recoverSignature(prepared, signature);
       if (recoveredSubmitter !== prepared.submitter) {
         throw new ProductSubmissionError(400, "invalid_signature", "signature recovery did not match prepared submitter", {
           recoveredSubmitter
         });
+      }
+
+      // 过期检查必须在签名恢复之后：消费 prepare（落 expired 档案 +
+      // markPreparedUsed）是写操作，任何持有 prepareId 的人都能触发——
+      // 未验签就烧毁他人的已过期 prepare 等于让无关方替持有人做决定。
+      const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
+      if (BigInt(prepared.deadline) < currentSeconds) {
+        const expired = withSubmissionReconcileDefaults(
+          buildExpiredSubmission(prepared, submissionIdFactory(), now().toISOString(), {
+            recoveredSubmitter,
+            signatureHash: signatureHashFor(signature)
+          })
+        );
+        await withSubmissionStoreTransaction(store, async () => {
+          await store.putSubmission(expired);
+          await store.markPreparedUsed(prepared.prepareId, expired.submissionId, expired.updatedAt);
+        });
+        return expired;
       }
 
       // Adapters that cannot broadcast must not consume the prepared
@@ -324,7 +331,13 @@ export function createProductSubmissionService(options: ProductSubmissionService
       }
 
       const nonceKey = submissionNonceKey(prepared);
-      const reserved = await store.reserveNonce(nonceKey);
+      // 授权有效期（prepare TTL）即陈旧预留阈值：存活中的 submit 要么在
+      // 落档事务内收尾要么显式释放，预留年龄超过一个授权窗口只可能是
+      // 进程在 reserve 与落档之间硬崩溃留下的泄漏行——条件更新接管，
+      // 未过期仍按重复拒绝。
+      const reserved = await store.reserveNonce(nonceKey, {
+        staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString()
+      });
       if (!reserved) {
         await audit.record({
           type: "relayer.submit.duplicate_nonce",
@@ -343,6 +356,9 @@ export function createProductSubmissionService(options: ProductSubmissionService
       // pre-broadcast observation: record the attempt, release the nonce, and
       // leave the prepare reusable. Any result carrying a txHash keeps the
       // reservation because the chain may already own that nonce.
+      // 契约：可重试失败的 nonce 释放必须发生在落档事务内部——事务提交后
+      // 崩溃不得留下"nonce 行已插、prepare 未标 used"的组合，否则同
+      // prepareId 的合法重试会永久 409 duplicate_submit（全库无其他释放口）。
       let submission: ProductSubmissionDTO;
       let broadcastSubmissionId: string | undefined;
       let broadcastTxHash: Hex | undefined;
@@ -368,13 +384,11 @@ export function createProductSubmissionService(options: ProductSubmissionService
         await withSubmissionStoreTransaction(store, async () => {
           await store.putSubmission(submission);
           if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
+            await store.releaseNonce?.(nonceKey);
             return;
           }
           await store.markPreparedUsed(prepared.prepareId, submissionId, submission.updatedAt);
         });
-        if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
-          await store.releaseNonce?.(nonceKey);
-        }
       } catch (error) {
         if (broadcastSubmissionId && broadcastTxHash) {
           // 广播已成功（拿到 txHash）但持久化失败：链上交易可能已占用
@@ -401,9 +415,29 @@ export function createProductSubmissionService(options: ProductSubmissionService
           }
           throw error;
         }
-        // 广播本身抛错（未拿到 txHash）：未上链、未落档，释放 nonce 让同一
-        // prepareId 保持可重试（基线 c64f4e8 行为）。
-        await store.releaseNonce?.(nonceKey);
+        // 广播本身抛错（未拿到 txHash）：未上链。逃逸异常违反适配器
+        // "分类为 failed 结果、绝不抛穿"的契约，但仍必须留下一致的持久
+        // 状态——失败档案（按适配器同款分类器归档，错误码走已登记词表）
+        // 与 nonce 释放写进同一个落档事务：事务提交后崩溃不得留下
+        // "nonce 行已插、无档案、prepare 未标 used"的组合，否则同
+        // prepareId 的合法重试会永久 409 duplicate_submit（全库无其他
+        // 释放口）。
+        const classifiedThrow = classifyStateMachineBroadcastError(error);
+        await withSubmissionStoreTransaction(store, async () => {
+          await store.putSubmission(withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
+            submissionId: submissionIdFactory(),
+            recoveredSubmitter,
+            signatureHash: signatureHashFor(signature),
+            createdAt: now().toISOString(),
+            broadcast: {
+              status: "failed",
+              errorCode: classifiedThrow.errorCode,
+              message: classifiedThrow.message,
+              retryable: classifiedThrow.retryable
+            }
+          })));
+          await store.releaseNonce?.(nonceKey);
+        });
         throw error;
       }
       await audit.record({
@@ -419,17 +453,14 @@ export function createProductSubmissionService(options: ProductSubmissionService
         retryable: submission.retryable
       });
       if (isEvidenceBindingSubmission(submission)) {
-        // CS-A4：链上广播已成功——绑定失败是服务端补账缺口，不得把已成功
+        // 链上广播已成功——绑定失败是服务端补账缺口，不得把已成功
         // 的提交以异常报成 500（违反信封契约）。返回成功提交结果，同时落
-        // 审计事件供对账；prepare 已被消费，绑定补账走人工/reconcile 路径。
+        // 审计事件供对账；证据引用随提交落库，绑定补账走 reconcile 清扫。
         try {
           await bindSubmittedEvidence(options.evidenceReader, prepared, submission);
         } catch (error) {
           try {
             await audit.record({
-              // 审计 type 即分类载体：evidence_bind_failed 尚无 taxonomy
-              // 条目（taxonomy 在 uvp-protocol 仓登记，超出本编队所有权），
-              // 不引入未登记的 errorCode 字面量。
               type: "relayer.submit.evidence_bind_failed",
               action: prepared.signalName,
               outcome: "failed",
@@ -438,6 +469,10 @@ export function createProductSubmissionService(options: ProductSubmissionService
                 submissionId: submission.submissionId,
                 ...(submission.txHash ? { txHash: submission.txHash } : {})
               },
+              // taxonomy 已登记 errorCode 载体（retryable=true，
+              // backoff=reconcile_poll）：重试由 reconcile worker 的绑定
+              // 清扫承担，本路径只留痕不重试。
+              errorCode: "evidence_bind_failed",
               retryable: true,
               metadata: {
                 message: error instanceof Error ? redactErrorMessage(error) : "unknown evidence bind error"
@@ -451,9 +486,23 @@ export function createProductSubmissionService(options: ProductSubmissionService
       return submission;
     },
 
-    async getSubmission(submissionId) {
+    async getSubmission(submissionId, readerWallet) {
       const submission = await store.getSubmission(submissionId);
-      return submission ? withSubmissionReconcileDefaults(submission) : undefined;
+      if (!submission) {
+        return undefined;
+      }
+      // 归属校验（IDOR）：档案携带签名者/证据/广播细节——会话身份门只挡
+      // 匿名，不比对属主时任一会话可按 id 读取。读取者必须是该次提交的
+      // 业务签名者本人（与 getDraft 的 assertDraftAffiliate 同款双门）。
+      if (submission.submitter.toLowerCase() !== readerWallet.toLowerCase()) {
+        throw new ProductSubmissionError(
+          403,
+          "submission_access_forbidden",
+          "only the submitter of this submission may read its profile",
+          { submissionId }
+        );
+      }
+      return withSubmissionReconcileDefaults(submission);
     }
   };
 }
@@ -473,6 +522,12 @@ async function bindSubmittedEvidence(
   if (!evidenceReader.bindEvidence || !submission.txHash) {
     return;
   }
+  // 绑定主体显式传入：绑定是 uploaded→bound 的状态迁移写，主体取该次
+  // 提交的业务签名者（prepare 时已过授权与签名核验）。
+  const binderPrincipal: EvidencePrincipal = {
+    id: prepared.submitter.toLowerCase(),
+    role: "participant"
+  };
   for (const evidence of prepared.evidenceRecords) {
     await evidenceReader.bindEvidence({
       evidenceId: evidence.evidence.evidenceId,
@@ -483,7 +538,7 @@ async function bindSubmittedEvidence(
       sourceId: prepared.sourceId,
       signalId: prepared.signalId,
       boundAt: submission.updatedAt
-    });
+    }, binderPrincipal);
   }
 }
 
@@ -525,32 +580,48 @@ function chainSignalForTask(task: ProductTaskDTO, signalName: string): {
   readonly signalId: Hex;
 } {
   const chainTask = task as ProductTaskChainFields;
+  // 与 planId"绝不捏造"同纪律：sourceId/signalId/orderId 三层链上
+  // 身份必须来自投影——本地按常量/命名约定推导出的 id 在链上不存在，
+  // 签出的 typedData 只会被链上拒绝。缺失即拒签并显式报错。
   const sourceId = firstBytes32(chainTask.proof?.sourceId) ??
-    activeStageExecutorSourceIdForTask(chainTask) ??
-    (onchainSourceId(PRODUCT_SIGNAL_SOURCE) as Hex);
-  const signalId = firstBytes32(chainTask.proof?.signalId) ?? (onchainSignalId(`${task.stageId}.${signalName}`) as Hex);
+    activeStageExecutorSourceIdForTask(chainTask);
+  if (!sourceId) {
+    throw new ProductSubmissionError(
+      409,
+      "order_plan_unresolved",
+      "state-machine projection has no chain sourceId for this task's submit signal; refusing to fabricate one for a plan-scoped signal signature",
+      { taskId: task.taskId }
+    );
+  }
+  const signalId = firstBytes32(chainTask.proof?.signalId);
+  if (!signalId) {
+    throw new ProductSubmissionError(
+      409,
+      "order_plan_unresolved",
+      `state-machine projection has no chain signalId for this task's ${signalName} signal; refusing to fabricate one for a plan-scoped signal signature`,
+      { taskId: task.taskId }
+    );
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(task.orderId)) {
+    throw new ProductSubmissionError(
+      409,
+      "order_plan_unresolved",
+      "task does not carry an on-chain (bytes32) order id; refusing to sign a locally-derived order identity",
+      { taskId: task.taskId, orderId: task.orderId }
+    );
+  }
   return {
-    orderId: normalizeBytes32OrHash(task.orderId, "orderId"),
+    orderId: normalizeBytes32(task.orderId, "orderId"),
     sourceId,
     signalId
   };
 }
 
-function ensureActiveStageExecutorSubmitter(task: ProductTaskDTO, submitter: Address): void {
-  const activeExecutorWallet = activeStageExecutorWalletForTask(task as ProductTaskChainFields);
-  if (!activeExecutorWallet) {
-    return;
-  }
-  const activeExecutor = normalizeAddress(activeExecutorWallet, "activeExecutorWallet");
-  if (activeExecutor !== submitter) {
-    throw new ProductSubmissionError(
-      403,
-      "submitter_wallet_not_active_executor",
-      "wallet is not the active executor for this stage",
-      { activeExecutorWallet: activeExecutor, submitter }
-    );
-  }
-}
+// 《授权与签名规则》§五：授权检查先看显式订单级授权、再看阶段委任的
+// 在任执行者——service 层不得用 submitter_wallet_not_active_executor
+// 前置一票否决（显式授权者会因此失去合约口径内的提交权）；
+// overlay 委任判定由 SubmissionAuthorizationAdapter（默认
+// productBffStoreSubmissionAuthorization）按同一顺序执行。
 
 function activeStageExecutorSourceIdForTask(task: ProductTaskChainFields): Hex | undefined {
   if (!activeStageExecutorWalletForTask(task)) {
@@ -575,16 +646,6 @@ function firstBytes32(...values: readonly (string | undefined)[]): Hex | undefin
     }
   }
   return undefined;
-}
-
-function normalizeBytes32OrHash(value: string, fieldName: string): Hex {
-  if (/^0x[0-9a-fA-F]{64}$/.test(value)) {
-    return normalizeBytes32(value, fieldName);
-  }
-  if (value.trim().length === 0) {
-    throw new ProductSubmissionError(400, "invalid_chain_identifier", `${fieldName} is required`);
-  }
-  return keccak256Hex(value) as Hex;
 }
 
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -614,8 +675,6 @@ export function notSupportedSubmissionBroadcastAdapter(): SubmissionBroadcastAda
     }
   };
 }
-
-export const noopSubmissionBroadcastAdapter = notSupportedSubmissionBroadcastAdapter;
 
 export function denyByDefaultSubmissionAuthorization(): SubmissionAuthorizationAdapter {
   return {
@@ -969,9 +1028,21 @@ function submissionFromBroadcast(
   };
 }
 
-function buildExpiredSubmission(prepared: PreparedSubmissionRecord, submissionId: string, timestamp: string): ProductSubmissionDTO {
+/**
+ * 过期档案在签名恢复之后才落（见 submit 的时序注释）——signatureStatus
+ * 必须如实记 signature_verified：失败的是时限，不是签名。
+ */
+function buildExpiredSubmission(
+  prepared: PreparedSubmissionRecord,
+  submissionId: string,
+  timestamp: string,
+  signature: {
+    readonly recoveredSubmitter?: Address;
+    readonly signatureHash?: Hex;
+  }
+): ProductSubmissionDTO {
   return {
-    ...submissionCommon(prepared, { submissionId, createdAt: timestamp }),
+    ...submissionCommon(prepared, { submissionId, createdAt: timestamp, ...signature }),
     status: "expired",
     statusLabel: submissionStatusLabel("expired"),
     broadcastStatus: "not_attempted",
@@ -1116,6 +1187,7 @@ function submissionCommon(
     signatureStatus: input.recoveredSubmitter ? "signature_verified" : "not_verified",
     ...(input.signatureHash ? { signatureHash: input.signatureHash } : {}),
     ...(input.recoveredSubmitter ? { recoveredSubmitter: input.recoveredSubmitter } : {}),
+    evidenceIds: prepared.evidence.map((record) => record.evidenceId),
     createdAt: input.createdAt,
     updatedAt: input.createdAt
   };
@@ -1211,8 +1283,6 @@ function errorLabelFor(errorCode: string): string {
       return "Broadcast disabled";
     case "broadcast_rate_limited":
       return "Broadcast is rate limited";
-    case "broadcast_retry_blocked":
-      return "Retry is blocked";
     case "broadcast_retry_exhausted":
       return "Retry limit reached";
     case "duplicate_tx_hash":

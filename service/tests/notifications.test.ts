@@ -138,7 +138,8 @@ describe("signal-routed notifications", () => {
     const service = serviceFor(store, supplierStore, sent);
 
     // 冻结 ABI 事件恒带 planId；缺 planId 的事件与索引器"不可解码日志"同
-    // 口径：直接隔离，不落投递记录，也绝不按裸 orderId 解析。
+    // 口径：直接隔离，绝不按裸 orderId 解析。丢弃必须落 skipped 台账
+    // 并计数——静默 continue 会让丢掉的事件在运行摘要与投递台账里消失。
     const summary = await service.processSignalSubmittedEvents([
       chainEvent(6n, "SignalSubmitted", {
         orderId,
@@ -153,11 +154,17 @@ describe("signal-routed notifications", () => {
 
     expect(summary).toMatchObject({
       signalsProcessed: 0,
-      deliveryIntents: 0,
+      deliveryIntents: 1,
       sent: 0,
-      skipped: 0
+      skipped: 1
     });
-    expect(deliveries).toEqual([]);
+    expect(deliveries).toEqual([
+      expect.objectContaining({
+        kind: "signal_received",
+        status: "skipped",
+        reason: "event_scope_ids_missing"
+      })
+    ]);
     expect(sent).toEqual([]);
   });
 
@@ -335,17 +342,129 @@ describe("signal-routed notifications", () => {
       }
     });
     const retried = await withDispatcher.retryDelivery(skipped!.deliveryId);
-
-    expect(retried).toMatchObject({
-      status: "sent",
-      attempts: 1,
-      externalReceiptRef: "receipt:webhook"
-    });
+    expect(retried.outcome).toBe("retried");
+    if (retried.outcome === "retried") {
+      expect(retried.delivery).toMatchObject({
+        status: "sent",
+        attempts: 1,
+        externalReceiptRef: "receipt:webhook"
+      });
+    }
     expect(sent).toHaveLength(1);
   });
 
+  it("reopens a dead-lettered delivery explicitly and refuses reopen for other statuses", async () => {
+    // dead_letter 必须有重开路径；retry 对 dead_letter 是无操作，
+    // 由路由层返回非 200。
+    const event = signalEvent(6n, requiredDependency(customsDependencyA));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [event]
+    });
+    const sent: NotificationDispatchRequest[] = [];
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      dispatcher: {
+        async send(request) {
+          sent.push(request);
+          return { ok: true, externalReceiptRef: "receipt:webhook" };
+        }
+      }
+    });
+
+    await service.processSignalSubmittedEvents([event]);
+    const [delivery] = await service.listDeliveries();
+    await service.deadLetterDelivery(delivery!.deliveryId, "operator review");
+
+    // retry 对 dead_letter 是无操作（路由层据此返回 409 而非 200 假成功）。
+    await expect(service.retryDelivery(delivery!.deliveryId)).resolves.toMatchObject({
+      outcome: "terminal",
+      delivery: expect.objectContaining({ status: "dead_letter" })
+    });
+    expect(sent).toHaveLength(1);
+
+    const reopened = await service.reopenDelivery(delivery!.deliveryId);
+    expect(reopened.outcome).toBe("reopened");
+    if (reopened.outcome === "reopened") {
+      expect(reopened.delivery).toMatchObject({ status: "sent", attempts: 2 });
+    }
+    expect(sent).toHaveLength(2);
+
+    // 非 dead_letter 行不可重开。
+    const notDeadLetter = await service.reopenDelivery(delivery!.deliveryId);
+    expect(notDeadLetter.outcome).toBe("not_dead_letter");
+    const notFound = await service.reopenDelivery("0x0000000000000000000000000000000000000000000000000000000000000001");
+    expect(notFound.outcome).toBe("not_found");
+  });
+
+  it("invalidates deliveries whose proof blocks were reorged out and leaves the rest intact", async () => {
+    // reorg 回滚删除 blockNumber > ancestor 的事件后，已生成投递
+    // （含 sent）指向已消失定位，必须联动失效留痕。
+    const lowEvent = signalEvent(5n, requiredDependency(customsDependencyA));
+    const highEvent = signalEvent(9n, requiredDependency(customsDependencyB), bytes32Hex("6009"));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [lowEvent, highEvent],
+      finalizedBlock: 10n
+    });
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      dispatcher: {
+        async send() {
+          return { ok: true };
+        }
+      }
+    });
+
+    await service.processSignalSubmittedEvents([lowEvent, highEvent]);
+    await expect(service.listDeliveries()).resolves.toHaveLength(2);
+    await expect(service.listDeliveries({ status: "sent" })).resolves.toHaveLength(2);
+
+    const invalidated = await service.invalidateDeliveriesAboveBlock({ chainId: 31337, blockNumber: 7n });
+    expect(invalidated).toBe(1);
+    const remaining = await service.listDeliveries();
+    expect(remaining).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "invalidated", reason: "reorg_rolled_back" }),
+      expect.objectContaining({ status: "sent" })
+    ]));
+    const staleRow = remaining.find((row) => row.status === "invalidated");
+    expect(BigInt(staleRow!.payload.proof.blockNumber)).toBeGreaterThan(7n);
+
+    // invalidated 是终态：retry 不再重投该载荷。
+    await expect(service.retryDelivery(staleRow!.deliveryId)).resolves.toMatchObject({
+      outcome: "terminal",
+      delivery: expect.objectContaining({ status: "invalidated" })
+    });
+    // 幂等：重复失效不重复计数。
+    await expect(service.invalidateDeliveriesAboveBlock({ chainId: 31337, blockNumber: 7n })).resolves.toBe(0);
+
+    // 参与者活动流以结构化状态呈现失效通知：附操作指引，
+    // 前端不解析文案即可识别 invalidation.status。
+    const feed = await service.listParticipantNotifications({ walletAddress: supplierWallet });
+    const invalidatedFeedItem = feed.notifications.find((item) => item.kind === "notification_invalidated");
+    expect(invalidatedFeedItem).toMatchObject({
+      severity: "warning",
+      source: "notification_delivery",
+      invalidation: { status: "invalidated", reason: "reorg_rolled_back" },
+      proofHref: expect.stringContaining("/proof")
+    });
+    expect(invalidatedFeedItem?.message).toContain("订单证明");
+  });
+
   it("redacts transport error messages before persisting them as lastError", async () => {
-    // L-10：transport 失败文本（可能携带端点 URL 与凭权查询参数）先过
+    // transport 失败文本（可能携带端点 URL 与凭权查询参数）先过
     // redactErrorMessage 再落投递台账，对齐兄弟路径。
     const event = signalEvent(6n, requiredDependency(customsDependencyA));
     const { store, supplierStore } = await notificationStore({
@@ -377,7 +496,7 @@ describe("signal-routed notifications", () => {
   });
 
   it("dead-letters automatically redelivered failed rows once the attempt budget is exhausted", async () => {
-    // M-5：重建/重放对 failed 行的自动重投必须有预算——无上限的重启重投
+    // 重建/重放对 failed 行的自动重投必须有预算——无上限的重启重投
     // 会无界重复外部投递。预算耗尽转 dead_letter 终态（人工可重开）。
     const event = signalEvent(6n, requiredDependency(customsDependencyA));
     const { store, supplierStore } = await notificationStore({
@@ -509,7 +628,7 @@ describe("signal-routed notifications", () => {
       deliveryReasonCode: "transport_adapter_missing"
     }));
 
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService: service, storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService: service, storeSupplierMetadataStore: supplierStore });
     await expect(router.handle({
       method: "GET",
       pathname: "/admin/notifications/redacted-evidence",
@@ -528,9 +647,12 @@ describe("signal-routed notifications", () => {
 
     await service.deadLetterDelivery(delivery!.deliveryId, "operator pasted sensitive review details");
     await expect(service.retryDelivery(delivery!.deliveryId)).resolves.toMatchObject({
-      status: "dead_letter",
-      reason: "operator pasted sensitive review details",
-      attempts: 0
+      outcome: "terminal",
+      delivery: expect.objectContaining({
+        status: "dead_letter",
+        reason: "operator pasted sensitive review details",
+        attempts: 0
+      })
     });
     const deadLetter = await service.buildRedactedEvidence({ walletAddress: supplierWallet, orderId });
     const serialized = JSON.stringify(deadLetter);
@@ -586,7 +708,7 @@ describe("signal-routed notifications", () => {
         }
       }
     });
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService, storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", notificationService, storeSupplierMetadataStore: supplierStore });
 
     const deliveriesResponse = await router.handle({
       method: "GET",
@@ -687,7 +809,7 @@ describe("signal-routed notifications", () => {
       createdAt: "2026-05-01T00:00:00.000Z",
       updatedAt: "2026-05-01T00:00:00.000Z"
     });
-    const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, storeSupplierMetadataStore: supplierStore });
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, storeSupplierMetadataStore: supplierStore });
     const notification = notificationProfile(account.address.toLowerCase() as Address);
     const body = {
       wallet: account.address,
@@ -745,7 +867,7 @@ describe("signal-routed notifications", () => {
     })).resolves.toMatchObject({ status: 404 });
   });
 
-  it("delivers through the generic webhook transport with timestamp.nonce.body HMAC signature (ETH-04)", async () => {
+  it("delivers through the generic webhook transport with timestamp.nonce.body HMAC signature", async () => {
     const requests: Array<{ readonly url: string; readonly init: RequestInit }> = [];
     const dispatcher = new WebhookNotificationDispatcher({
       url: "https://ops.example/uvp/notify",
@@ -820,7 +942,7 @@ describe("signal-routed notifications", () => {
     expect(guard.observe(fields.nonce, nowMs, nowMs + 5 * 60_000 + 1)).toBe(true);
   });
 
-  it("persists notification delivery and read state across store rebuilds (ETH-04)", async () => {
+  it("persists notification delivery and read state across store rebuilds", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-notification-state-"));
     const databaseUrl = `sqlite://${join(tempDir, "state.sqlite3")}`;
     const migrations = { autoRun: true, directory: resolve(__dirname, "../migrations") };

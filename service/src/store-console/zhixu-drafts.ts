@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   assertOnchainHookPlanArtifact,
   compileZhixuOnchainHookPlan,
+  displayIdentity,
   hashCanonical,
   parseZhixuDefinition,
   type OnchainHookPlanArtifact,
@@ -29,6 +30,7 @@ import type {
   GovernanceService
 } from "../governance/index.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
+import { isPlanRegisteredProjection } from "./version.js";
 
 export type StoreZhixuDraftSourceKind = "zhixu_yaml" | "onchain_hook_plan_manifest";
 
@@ -71,7 +73,10 @@ export interface StoreCompilePreviewDTO {
 export interface StoreZhixuDraftDTO {
   readonly draftId: string;
   readonly status: StoreZhixuDraftStatus;
+  /** 定义派生身份（编译产物 zhixuId）。 */
   readonly zhixuId?: string;
+  /** N6 显示口径：name(uid 去 zx- 后前 8 hex)。 */
+  readonly zhixuDisplay?: string;
   readonly title: string;
   readonly maintainer: string;
   readonly compilePreview?: StoreCompilePreviewDTO;
@@ -230,11 +235,18 @@ export function createStoreZhixuDraftWorkflowService(options: {
       const draft = await requireDraft(draftStore, draftId);
       const timestamp = now().toISOString();
       const compiled = compileDraftContent(draft);
+      if (compiled.ok) {
+        // 重编译会以 inferred schema 覆写既有 schema，与 PUT 同门：
+        // 以编译前的草稿锚定状态判定，否则"改内容→重编译刷新 preview→
+        // 再编译"两步即可绕过发布不可变（新 preview 不再命中已发布 plan）。
+        await assertDraftSchemaMutable(draft, options.projectionStore);
+      }
       const updated: StoreZhixuDraftRecord = compiled.ok
         ? {
             ...draft,
             status: "compiled",
             zhixuId: compiled.zhixuId,
+            zhixuDisplay: compiled.zhixuDisplay,
             title: draft.title === "未命名秩序草稿" ? compiled.title : draft.title,
             compilePreview: compiled.preview,
             productSchema: buildSuggestedProductSchema(draft, compiled.artifact, timestamp),
@@ -440,6 +452,7 @@ function compileDraftContent(
 ): {
   readonly ok: true;
   readonly zhixuId: string;
+  readonly zhixuDisplay: string;
   readonly title: string;
   readonly preview: StoreCompilePreviewDTO;
   readonly artifact: OnchainHookPlanArtifact;
@@ -451,7 +464,9 @@ function compileDraftContent(
       : compileManifest(draft.content);
     return {
       ok: true,
+      // 身份一律取编译产物 zhixuId（内容派生），无名称回退。
       zhixuId: onchain.zhixuId,
+      zhixuDisplay: displayIdentity(onchain.zhixuName, onchain.zhixuId),
       title: onchain.zhixuName,
       preview: previewFromOnchainArtifact(onchain),
       artifact: onchain
@@ -1485,6 +1500,7 @@ async function toDraftDTO(
     draftId: draft.draftId,
     status,
     ...(draft.zhixuId ? { zhixuId: draft.zhixuId } : {}),
+    ...(draft.zhixuDisplay ? { zhixuDisplay: draft.zhixuDisplay } : {}),
     title: draft.title,
     maintainer: draft.maintainer,
     ...(draft.compilePreview ? { compilePreview: draft.compilePreview } : {}),
@@ -1504,10 +1520,13 @@ async function hasPublishedPlan(
     return false;
   }
   const snapshot = await projectionStore.getOrderSnapshot();
+  // 发布权威是 PlanRegistered(finalize)：桶存在只代表 commitPlan，
+  // 仅 commit 的 plan 不能把草稿置 active/锁 schema。
   return Object.values(snapshot.stateMachinePlans).some(
     (plan) =>
       plan.planId === draft.compilePreview?.planId &&
-      plan.planHash === draft.compilePreview.planHash
+      plan.planHash === draft.compilePreview.planHash &&
+      isPlanRegisteredProjection(plan)
   );
 }
 

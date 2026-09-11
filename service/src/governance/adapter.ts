@@ -95,7 +95,15 @@ function simulatedBroadcast(request: unknown): GovernanceBroadcastResultDTO {
 
 export function createConfiguredGovernanceChainAdapter(config: ChainServicesConfig): GovernanceChainAdapter {
   if (!config.governance.broadcastEnabled) {
-    return createSimulatedGovernanceChainAdapter();
+    // simulated 适配器只允许 local：任何非 local 环境回落 simulated 意味着
+    // 治理写操作"成功"返回却永不上链（静默假广播）。缺省/漏配必须启动
+    // 失败，而不是安静降级。
+    if (config.security.environment === "local") {
+      return createSimulatedGovernanceChainAdapter();
+    }
+    throw new ConfigError(
+      `GOVERNANCE_BROADCAST_ENABLED=true is required in ${config.security.environment}; the simulated governance adapter is only available in local`
+    );
   }
 
   const contractAddress = identityRegistryAddress(config.network.contracts);
@@ -156,6 +164,11 @@ export function createGovernanceBroadcasterAdapter(
       return preflight;
     }
 
+    // 已广播的 txHash 必须穿越 catch：writeContract 成功后等待回执抛错
+    // 时链上交易已经存在，failed 结果丢失 txHash 会造成幽灵交易与重复
+    // 登记（对齐 product/bff/trigger、submissions/broadcast-adapter、
+    // relayer 的同款防线）。
+    let broadcastTxHash: ReturnType<typeof normalizeTxHash> | undefined;
     try {
       const txHash = normalizeTxHash(await walletClient.writeContract({
         address: contractAddress as ViemAddress,
@@ -165,6 +178,7 @@ export function createGovernanceBroadcasterAdapter(
         functionName,
         args
       }));
+      broadcastTxHash = txHash;
 
       if (options.txConfirmations <= 0) {
         return {
@@ -203,12 +217,17 @@ export function createGovernanceBroadcasterAdapter(
         simulated: false
       };
     } catch (error) {
-      return failedBroadcast({
-        errorCode: "broadcast_failed",
-        message: sanitizedErrorMessage(error, options.privateKey),
-        retryable: isRetryableBroadcastError(error),
-        signer
-      });
+      return {
+        ...failedBroadcast({
+          errorCode: "broadcast_failed",
+          message: sanitizedErrorMessage(error, options.privateKey),
+          retryable: isRetryableBroadcastError(error),
+          signer
+        }),
+        // 交易已在链上（或仍在池中）：回执等待失败不抹掉 txHash，人工/
+        // 对账路径可凭哈希追踪，不再重复登记。
+        ...(broadcastTxHash ? { txHash: broadcastTxHash } : {})
+      };
     }
   }
 

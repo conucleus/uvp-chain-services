@@ -35,6 +35,30 @@ describe("evidence service", () => {
     }
   });
 
+  it("settles concurrent same-payload uploads idempotently", async () => {
+    // 并发同 (owner, payload) 上传：前置 find 各自未命中时，条件插入
+    // 只允许一条落库，败者按既有记录幂等返回——不撞 UNIQUE 变存储错误。
+    const service = testEvidenceService();
+    const body = {
+      orderId: "order-1",
+      taskId: "task-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      fileName: "concurrent.json",
+      content: { encoding: "json" as const, value: { n: 1 } },
+      metadata: { businessLabel: "Commercial invoice", fields: { invoice: "INV-9" } }
+    };
+
+    const [first, second] = await Promise.all([
+      service.uploadEvidence(body, owner),
+      service.uploadEvidence(body, owner)
+    ]);
+
+    expect(first.evidence.evidenceId).toBe(second.evidence.evidenceId);
+    expect(first.payloadHash).toBe(second.payloadHash);
+    expect(first.evidence.evidenceId).toMatch(/^ev_/);
+  });
+
   it("generates stable hashes from canonical JSON metadata and payload content", async () => {
     const service = testEvidenceService();
     const first = await uploadJsonEvidence(service, {
@@ -51,7 +75,7 @@ describe("evidence service", () => {
     expect(first.evidence.contentHash).toBe(second.evidence.contentHash);
     expect(first.evidence.metadataHash).toBe(second.evidence.metadataHash);
     expect(first.evidence.payloadHash).toBe(second.evidence.payloadHash);
-    // 簇 N 修正（审计三轮）：同一 owner 重复上传完全相同的载荷幂等返回既有
+    // 同一 owner 重复上传完全相同的载荷幂等返回既有
     // 记录——payloadHash 覆盖 content+metadata+order+stage（fileName 不参与
     // 哈希），重命名文件重传不再追加内容副本。
     expect(second.evidence.evidenceId).toBe(first.evidence.evidenceId);
@@ -61,6 +85,7 @@ describe("evidence service", () => {
       metadataHash: first.evidence.metadataHash,
       documentType: first.metadata.documentType,
       ...(first.evidence.orderId ? { orderId: first.evidence.orderId } : {}),
+      ...(first.evidence.taskId ? { taskId: first.evidence.taskId } : {}),
       stageIdentifier: first.evidence.stageIdentifier
     }));
     expect(buildPayloadHashDocument({
@@ -77,6 +102,64 @@ describe("evidence service", () => {
       ...(first.evidence.orderId ? { orderId: first.evidence.orderId } : {}),
       stageIdentifier: first.evidence.stageIdentifier
     })).not.toHaveProperty("evidenceId");
+  });
+
+  it("keeps same-owner evidence on different tasks distinct via the taskId fingerprint component", async () => {
+    const service = testEvidenceService();
+    const base = {
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      fileName: "invoice.json",
+      content: { encoding: "json" as const, value: { amount: 100 } },
+      metadata: { businessLabel: "Invoice", fields: { invoice: "INV-9" } }
+    };
+    const taskA = await service.uploadEvidence({ orderId: "order-1", taskId: "task-a", ...base }, owner);
+    const taskB = await service.uploadEvidence({ orderId: "order-1", taskId: "task-b", ...base }, owner);
+    expect(taskA.evidence.taskId).toBe("task-a");
+    expect(taskB.evidence.taskId).toBe("task-b");
+    // (owner, payloadHash) 幂等不得跨任务错带：taskId 入指纹后两份记录
+    // 指纹不同，各自成档。
+    expect(taskA.evidence.payloadHash).not.toBe(taskB.evidence.payloadHash);
+    expect(taskB.evidence.evidenceId).not.toBe(taskA.evidence.evidenceId);
+  });
+
+  it("rejects bindEvidence from a principal that does not own the evidence", async () => {
+    const service = testEvidenceService();
+    const uploaded = await uploadJsonEvidence(service, {
+      fileName: "customs.txt",
+      content: { note: "declaration" },
+      metadataFields: { invoice: "INV-2" }
+    });
+    await expect(service.bindEvidence({
+      evidenceId: uploaded.evidence.evidenceId,
+      txHash: txHash("21"),
+      orderId: "order-1",
+      onchainOrderId: txHash("aa"),
+      sourceId: txHash("bb"),
+      signalId: txHash("cc")
+    }, { id: "another-participant", role: "participant" })).rejects.toMatchObject({
+      code: "forbidden",
+      status: 403
+    });
+    // owner 本人仍可绑定；admin 代绑不受影响。
+    const bound = await service.bindEvidence({
+      evidenceId: uploaded.evidence.evidenceId,
+      txHash: txHash("21"),
+      orderId: "order-1",
+      onchainOrderId: txHash("aa"),
+      sourceId: txHash("bb"),
+      signalId: txHash("cc")
+    }, owner);
+    expect(bound?.evidence.status).toBe("bound");
+    const second = await service.bindEvidence({
+      evidenceId: uploaded.evidence.evidenceId,
+      txHash: txHash("21"),
+      orderId: "order-1",
+      onchainOrderId: txHash("aa"),
+      sourceId: txHash("bb"),
+      signalId: txHash("cc")
+    }, { id: "admin-1", role: "admin" });
+    expect(second?.evidence.status).toBe("bound");
   });
 
   it("changes metadataHash and payloadHash when canonical metadata changes", async () => {
@@ -124,6 +207,44 @@ describe("evidence service", () => {
     expect(first.evidence.payloadHash).not.toBe(differentStage.evidence.payloadHash);
   });
 
+  it("separates draft evidence fingerprints by draftId (先存后绑)", async () => {
+    const service = testEvidenceService();
+    const uploadDraft = async (draftId: string) => service.uploadEvidence({
+      draftId,
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      fileName: "invoice.txt",
+      textPayload: "invoice payload",
+      metadata: {
+        businessLabel: "Commercial invoice",
+        fields: { invoice: "INV-1" }
+      }
+    }, owner);
+
+    const draftA = await uploadDraft("draft-1");
+    const draftB = await uploadDraft("draft-2");
+    // 《证据与存证规则》二.4：草稿期以 draftId 替代订单成分参与指纹——
+    // 同 owner 同内容的不同草稿不再共享 payloadHash，(owner, payload_hash)
+    // 幂等归并不会把 B 草稿的凭证错记到 A 草稿名下。
+    expect(draftA.evidence.payloadHash).not.toBe(draftB.evidence.payloadHash);
+    expect(draftB.evidence.evidenceId).not.toBe(draftA.evidence.evidenceId);
+    expect(draftB.evidence.draftId).toBe("draft-2");
+
+    // 同一草稿重复上传仍幂等返回既有记录。
+    const draftAgain = await uploadDraft("draft-1");
+    expect(draftAgain.evidence.evidenceId).toBe(draftA.evidence.evidenceId);
+
+    // 订单存在时（orderId 提给）文档不含 draftId 成分，四元组结构不变。
+    expect(buildPayloadHashDocument({
+      contentHash: draftA.evidence.contentHash,
+      metadataHash: draftA.evidence.metadataHash,
+      documentType: draftA.metadata.documentType,
+      orderId: "order-9",
+      draftId: "draft-1",
+      stageIdentifier: draftA.evidence.stageIdentifier
+    })).not.toHaveProperty("draftId");
+  });
+
   it("changes contentHash and payloadHash when file bytes change", async () => {
     const service = testEvidenceService();
     const first = await uploadTextEvidence(service, { invoice: "INV-1" });
@@ -148,6 +269,7 @@ describe("evidence service", () => {
   it("enforces owner, participant, adjudicator, admin, and outsider read rules", async () => {
     const metadataStore = new InMemoryEvidenceMetadataStore();
     const service = createEvidenceService({
+    runtimeEnvironment: "local",
       metadataStore,
       storage: new InMemoryEvidenceStorage(),
       now: () => new Date("2026-04-28T00:00:00Z")
@@ -172,8 +294,8 @@ describe("evidence service", () => {
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "ops-admin", role: "admin" })).resolves.toBeDefined();
     await expect(service.getProof(upload.evidence.evidenceId, { id: "ops-admin", role: "admin" }))
       .resolves.toMatchObject({ verificationStatus: "unbound" });
-    // KEEP（存在性 oracle 消除）：无权读取与"不存在"同为 undefined（路由
-    // 层 404 evidence_not_found），不再以 403 泄露证据是否存在。
+    // 存在性 oracle 消除：无权读取与"不存在"同为 undefined（路由层 404
+    // evidence_not_found），不再以 403 泄露证据是否存在。
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "outsider", role: "participant" }))
       .resolves.toBeUndefined();
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "ops", role: "participant" }))
@@ -192,6 +314,7 @@ describe("evidence service", () => {
   it("rejects attributing uploaded evidence to another participant via ownerParticipantId or request writers", async () => {
     const metadataStore = new InMemoryEvidenceMetadataStore();
     const service = createEvidenceService({
+    runtimeEnvironment: "local",
       metadataStore,
       storage: new InMemoryEvidenceStorage(),
       now: () => new Date("2026-04-28T00:00:00Z"),
@@ -263,6 +386,7 @@ describe("evidence service", () => {
   it("returns proof and reports missing_file or mismatch without deleting evidence metadata", async () => {
     const storage = new InMemoryEvidenceStorage();
     const service = createEvidenceService({
+    runtimeEnvironment: "local",
       storage,
       now: () => new Date("2026-04-28T00:00:00Z")
     });
@@ -297,6 +421,7 @@ describe("evidence service", () => {
 
   it("rejects oversized payloads and unsupported MIME types", async () => {
     const service = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       maxPayloadBytes: 4
     });
@@ -326,7 +451,7 @@ describe("evidence service", () => {
       boundAt: "2026-04-28T00:00:01.000Z"
     };
 
-    await expect(service.bindEvidence(binding)).resolves.toMatchObject({
+    await expect(service.bindEvidence(binding, owner)).resolves.toMatchObject({
       evidence: {
         status: "bound",
         boundSignalTxHash: txHash("1"),
@@ -341,7 +466,7 @@ describe("evidence service", () => {
       verificationStatus: "matched",
       boundSignalTxHash: txHash("1")
     });
-    await expect(service.bindEvidence({ ...binding, txHash: txHash("5"), signalId: txHash("5") }))
+    await expect(service.bindEvidence({ ...binding, txHash: txHash("5"), signalId: txHash("5") }, owner))
       .resolves.toMatchObject({
         evidence: {
           status: "bound",
@@ -412,7 +537,7 @@ describe("evidence service", () => {
   });
 
   it("keeps the default rehearsal object root stable across process restarts", () => {
-    // Audit #20: stored metadata references bytes under this root, so the
+    // Stored metadata references bytes under this root, so the
     // default must never embed a timestamp or pid that changes on restart.
     const first = new RehearsalObjectEvidenceStorage();
     const second = new RehearsalObjectEvidenceStorage();
@@ -565,7 +690,7 @@ describe("evidence service", () => {
   });
 
   it("resolves a configured STS session token env at construction time", () => {
-    // Audit #19: the session token must reach the S3 client when configured,
+    // The session token must reach the S3 client when configured,
     // and a configured-but-empty token env must fail construction instead of
     // producing a client that passes preflight and 403s on first use.
     expect(() => new S3EvidenceStorageClient({
@@ -664,6 +789,7 @@ function s3CredentialEnv(): Record<string, string> {
 
 function testEvidenceService() {
   return createEvidenceService({
+    runtimeEnvironment: "local",
     storage: new InMemoryEvidenceStorage(),
     now: () => new Date("2026-04-28T00:00:00Z")
   });
@@ -724,7 +850,7 @@ async function uploadTextEvidence(
   });
 }
 
-describe("evidence backup storage (ETH-05)", () => {
+describe("evidence backup storage", () => {
   it("writes a second copy on put and restores the primary object from the verified backup", async () => {
     const primary = new InMemoryEvidenceStorage();
     const backup = new InMemoryEvidenceStorage();

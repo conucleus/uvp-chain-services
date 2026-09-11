@@ -1,4 +1,4 @@
-import { encodeAbiParameters, keccak256, recoverTypedDataAddress, stringToHex } from "viem";
+import { keccak256, recoverTypedDataAddress, stringToHex } from "viem";
 import {
   STAGE_EXECUTOR_PATCH_DOMAIN_NAME,
   STAGE_EXECUTOR_PATCH_DOMAIN_VERSION,
@@ -9,6 +9,8 @@ import {
   STAGE_RESOURCE_PATCH_PRIMARY_TYPE,
   STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS as PROTOCOL_STAGE_RESOURCE_PATCH_TYPED_DATA_FIELDS,
   hashResourceManifest as hashProtocolResourceManifest,
+  hashStageExecutorPatchPayload as hashProtocolStageExecutorPatchPayload,
+  hashStageResourcePatchPayload as hashProtocolStageResourcePatchPayload,
   type ResourceManifestV1
 } from "@uvp-eth/protocol-bindings";
 import {
@@ -93,69 +95,35 @@ export interface BuildStageResourcePatchTypedDataInput extends StageResourcePatc
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
 
 export function hashStageExecutorPatchPayload(payload: StageExecutorPatchPayload): Hex {
+  // patchHash 口径唯一：preimage 的域常量首槽、字段规范化与 ABI 编码全部以
+  // protocol-bindings 为准；本地复制 preimage 会在两栈间产出不同的链上
+  // patchHash（签名可恢复但合约校验失败）。这里只做错误面（ConfigError）
+  // 与非零守卫。
   try {
     return nonZeroHash(
-      keccak256(encodeAbiParameters(
-        [
-          { name: "selectorStageId", type: "bytes32" },
-          { name: "targetStageId", type: "bytes32" },
-          { name: "executor", type: "address" },
-          { name: "role", type: "bytes32" },
-          { name: "executorMetadataHash", type: "bytes32" },
-          { name: "mode", type: "bytes32" },
-          { name: "previousExecutor", type: "address" },
-          { name: "approvalSourceId", type: "bytes32" },
-          { name: "approvalSignalId", type: "bytes32" },
-          { name: "patchNonce", type: "uint256" },
-          { name: "metadataURI", type: "string" }
-        ],
-        [
-          payload.selectorStageId,
-          payload.targetStageId,
-          payload.executor,
-          payload.role,
-          payload.executorMetadataHash,
-          payload.mode,
-          payload.previousExecutor,
-          payload.approvalSourceId,
-          payload.approvalSignalId,
-          BigInt(payload.patchNonce),
-          payload.metadataURI
-        ]
-      )),
+      hashProtocolStageExecutorPatchPayload(payload),
       "patchHash"
     );
   } catch (error) {
+    if (error instanceof ConfigError) {
+      throw error;
+    }
     throw new ConfigError(error instanceof Error ? error.message : "invalid stage executor patch payload");
   }
 }
 
 export function hashStageResourcePatchPayload(payload: StageResourcePatchPayload): Hex {
+  // 同上：resource patch 与 executor patch 共用 protocol-bindings 的
+  // 域分离 preimage，链上服务不得持有第二种哈希变体。
   try {
     return nonZeroHash(
-      keccak256(encodeAbiParameters(
-        [
-          { name: "selectorStageId", type: "bytes32" },
-          { name: "targetStageId", type: "bytes32" },
-          { name: "resourceKey", type: "bytes32" },
-          { name: "manifestHash", type: "bytes32" },
-          { name: "policyHash", type: "bytes32" },
-          { name: "patchNonce", type: "uint256" },
-          { name: "manifestURI", type: "string" }
-        ],
-        [
-          payload.selectorStageId,
-          payload.targetStageId,
-          payload.resourceKey,
-          payload.manifestHash,
-          payload.policyHash,
-          BigInt(payload.patchNonce),
-          payload.manifestURI
-        ]
-      )),
+      hashProtocolStageResourcePatchPayload(payload),
       "patchHash"
     );
   } catch (error) {
+    if (error instanceof ConfigError) {
+      throw error;
+    }
     throw new ConfigError(error instanceof Error ? error.message : "invalid stage resource patch payload");
   }
 }

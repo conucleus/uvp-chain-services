@@ -100,31 +100,6 @@ export function parseSupplierNotificationProfile(value: unknown): SupplierNotifi
   };
 }
 
-export function supplierNotificationProfileDataUri(profile: SupplierNotificationProfile): string {
-  return `data:application/json,${encodeURIComponent(JSON.stringify(profile))}`;
-}
-
-export async function resolveSupplierNotificationProfileFromUri(
-  metadataURI: string
-): Promise<SupplierNotificationProfile | undefined> {
-  const document = parseJsonDataUri(metadataURI);
-  if (!isRecord(document)) {
-    return undefined;
-  }
-
-  const profile = parseSupplierNotificationProfile(document);
-  if (profile) {
-    return profile;
-  }
-  if (isRecord(document.capability) && Object.hasOwn(document.capability, "notification")) {
-    return parseSupplierNotificationProfile(document.capability.notification);
-  }
-  if (isRecord(document.metadata) && isRecord(document.metadata.capability) && Object.hasOwn(document.metadata.capability, "notification")) {
-    return parseSupplierNotificationProfile(document.metadata.capability.notification);
-  }
-  return undefined;
-}
-
 function parseSupplierNotificationTransport(value: unknown): SupplierNotificationTransport | undefined {
   if (!isRecord(value) || typeof value.type !== "string") {
     return undefined;
@@ -206,23 +181,6 @@ function parseTransportControls(value: Record<string, unknown>): SupplierNotific
       : {}),
     ...(typeof value.enabled === "boolean" ? { enabled: value.enabled } : {})
   };
-}
-
-function parseJsonDataUri(uri: string): unknown | undefined {
-  const match = /^data:application\/json(?:;charset=[^;,]+)?(;base64)?,(.*)$/iu.exec(uri);
-  if (!match) {
-    return undefined;
-  }
-
-  try {
-    const encoded = match[2] ?? "";
-    const text = match[1]
-      ? Buffer.from(encoded, "base64").toString("utf8")
-      : decodeURIComponent(encoded);
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -160,6 +160,11 @@ export interface ProductSubmissionDTO extends TxReconcileFields {
   readonly attempts: readonly ProductSubmissionAttemptDTO[];
   readonly attemptCount: number;
   readonly proofRows: readonly ProductSubmissionProofRowDTO[];
+  /**
+   * 随提交落库的证据引用（绑定载荷）：reconcile 清扫对"链上提交已成功
+   * 但绑定缺失"的记录重试绑定时，唯一的持久化依据。
+   */
+  readonly evidenceIds?: readonly string[];
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -270,7 +275,14 @@ export interface ProductSubmissionStore {
   putPrepared(record: PreparedSubmissionRecord): Promise<void>;
   getPrepared(prepareId: string): Promise<PreparedSubmissionRecord | undefined>;
   markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void>;
-  reserveNonce(key: string): Promise<boolean>;
+  /**
+   * staleBefore：命中既有预留时，预留时间早于该阈值的行视为陈旧预留
+   * （进程在 reserve 与落档之间硬崩溃的唯一泄漏形态——存活中的 submit
+   * 要么在同一落档事务内收尾，要么显式释放，预留年龄不可能超过一个
+   * 授权有效期）。陈旧行走条件更新接管并返回 true；未过期仍返回 false
+   * 由调用方 409。阈值缺省时退化为纯 insert 语义。
+   */
+  reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean>;
   /**
    * Release a previously reserved nonce so the same prepared submission can be
    * retried after a failure that consumed the reservation without ever

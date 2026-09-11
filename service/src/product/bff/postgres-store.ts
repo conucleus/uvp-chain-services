@@ -114,8 +114,21 @@ export class PostgresProductBffStore implements ProductBffStore {
     await this.#upsertParticipant(participant);
   }
 
-  async createInvite(invite: ProductInviteDTO): Promise<void> {
-    await this.#insertInvite(invite);
+  async createInviteIfNoneActive(invite: ProductInviteDTO, nowIso: string): Promise<boolean> {
+    // 单语句条件插入：expires_at::timestamptz 归一化解析（含时区偏移），
+    // check-then-act 由语句原子性承担，READ COMMITTED 下并发也不会双 active。
+    const result = await this.#database.query(
+      `INSERT INTO product_invite (
+         invite_id, draft_id, participant_id, role_slot_id, token_hash, status,
+         expires_at, created_at, accepted_wallet_address
+       ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+       WHERE NOT EXISTS (
+         SELECT 1 FROM product_invite
+         WHERE participant_id = $10 AND status = 'active' AND expires_at::timestamptz > $11::timestamptz
+       )`,
+      [...inviteValues(invite), invite.participantId, nowIso]
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async getInvite(inviteId: string): Promise<ProductInviteDTO | undefined> {
@@ -132,6 +145,21 @@ export class PostgresProductBffStore implements ProductBffStore {
     await this.#upsertInvite(invite);
   }
 
+  async updateInviteIfActive(invite: ProductInviteDTO): Promise<boolean> {
+    const result = await this.#database.query(
+      `UPDATE product_invite
+       SET status = $2, expires_at = $3, accepted_wallet_address = $4
+       WHERE invite_id = $1 AND status = 'active'`,
+      [
+        invite.inviteId,
+        invite.status,
+        invite.expiresAt,
+        invite.acceptedWalletAddress ?? null
+      ]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async listInvitesByDraft(draftId: string): Promise<readonly ProductInviteDTO[]> {
     const result = await this.#database.query(
       `SELECT *
@@ -143,8 +171,20 @@ export class PostgresProductBffStore implements ProductBffStore {
     return result.rows.map((row) => inviteRow(row));
   }
 
-  async createRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
-    await this.#insertRegistration(registration);
+  async createRegistrationIfNoneForDraft(registration: ProductOrderTriggerRecord): Promise<boolean> {
+    const result = await this.#database.query(
+      `INSERT INTO product_order_trigger (
+         trigger_id, prepare_id, draft_id, order_id, state_machine_address, deployment_id,
+         plan_id, plan_hash, status, tx_hash, block_number, source_id, signal_id,
+         trigger_hook_id, trigger_stage_id, submitter, payload_hash, idempotency_key,
+         deadline, typed_data_json, signature, error_code, error_message, retryable,
+         creator, authorizations_json, permissions_json, reconcile_status, last_checked_at,
+         receipt_status, projection_status, created_at, updated_at
+       ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33
+       WHERE NOT EXISTS (SELECT 1 FROM product_order_trigger WHERE draft_id = $3)`,
+      registrationValues(registration)
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async getRegistration(triggerId: string): Promise<ProductOrderTriggerRecord | undefined> {
@@ -295,20 +335,6 @@ export class PostgresProductBffStore implements ProductBffStore {
          created_at = excluded.created_at,
          accepted_wallet_address = excluded.accepted_wallet_address`,
       inviteValues(invite)
-    );
-  }
-
-  async #insertRegistration(registration: ProductOrderTriggerRecord): Promise<void> {
-    await this.#database.query(
-      `INSERT INTO product_order_trigger (
-         trigger_id, prepare_id, draft_id, order_id, state_machine_address, deployment_id,
-         plan_id, plan_hash, status, tx_hash, block_number, source_id, signal_id,
-         trigger_hook_id, trigger_stage_id, submitter, payload_hash, idempotency_key,
-         deadline, typed_data_json, signature, error_code, error_message, retryable,
-         creator, authorizations_json, permissions_json, reconcile_status, last_checked_at,
-         receipt_status, projection_status, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33)`,
-      registrationValues(registration)
     );
   }
 

@@ -2,18 +2,24 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   lifecycleStatusForZhixu,
   type PlanPublicationStatus,
-  type OrderPermissionTableEntryDTO,
   type StoreZhixuLifecycleStatus,
   type ZhixuDetailDTO,
   type ZhixuStageDTO
 } from "@uvp-eth/product-dto";
 import type { ProductService } from "../product/service.js";
 
+/** dock 下单模式（{new, existing}）。 */
+export type StoreDockOrderMode = "new" | "existing";
+/** 草稿映射行方向：input=本地通道→接口输入端口，output=本地信号→接口输出端口。 */
+export type StoreDockBindingKind = "input" | "output";
+
 export interface StoreDockingSessionCreateDTO {
   readonly sourceZhixuId: string;
   readonly targetZhixuId: string;
-  readonly sourceVersionId?: string;
-  readonly targetVersionId?: string;
+  /** 目标具名接口；缺省取目标首个接口。 */
+  readonly targetInterfaceName?: string;
+  /** 下单模式；缺省取所选接口的首个开放模式。 */
+  readonly orderMode?: StoreDockOrderMode;
 }
 
 export type StoreDockingSessionStatus = "draft" | "valid" | "invalid";
@@ -21,18 +27,33 @@ export type StoreDockingSessionStatus = "draft" | "valid" | "invalid";
 export interface StoreDockingZhixuRefDTO {
   readonly zhixuId: string;
   readonly title: string;
-  readonly versionId?: string;
-  readonly versionLabel: string;
   readonly lifecycleStatus: StoreZhixuLifecycleStatus;
   readonly publicationStatus: PlanPublicationStatus;
   readonly planId: string;
   readonly planHash: string;
 }
 
+export interface StoreDockingInterfacePortDTO {
+  readonly portName: string;
+  readonly label: string;
+  /** input 端口的目标侧 hook 引用（<task>.<stage>#<channel>）。 */
+  readonly hook?: string;
+  /** output 端口的目标侧 canonical signal。 */
+  readonly signal?: string;
+}
+
+/** 目标定义发布的具名 dock 接口（试拼沙箱消费的 v2 接口形状）。 */
+export interface StoreDockingInterfaceDTO {
+  readonly interfaceName: string;
+  readonly orderModes: readonly StoreDockOrderMode[];
+  readonly inputs: readonly StoreDockingInterfacePortDTO[];
+  readonly outputs: readonly StoreDockingInterfacePortDTO[];
+}
+
 export interface StoreDockingSignalPortDTO {
   readonly signalId: string;
   readonly label: string;
-  readonly direction: "output" | "input";
+  readonly bindingKind: StoreDockBindingKind;
   readonly stageId?: string;
   readonly stageName?: string;
   readonly roleSlotId?: string;
@@ -43,6 +64,7 @@ export interface StoreDockingSignalPortDTO {
 
 export interface StoreSignalMappingCandidateDTO {
   readonly candidateId: string;
+  readonly bindingKind: StoreDockBindingKind;
   readonly sourceSignal: StoreDockingSignalPortDTO;
   readonly targetSignal: StoreDockingSignalPortDTO;
   readonly confidence: "high" | "medium" | "low";
@@ -51,21 +73,23 @@ export interface StoreSignalMappingCandidateDTO {
 
 export interface StoreDraftSignalMapEntryDTO {
   readonly entryId?: string;
+  readonly bindingKind: StoreDockBindingKind;
   readonly sourceSignalId: string;
   readonly targetSignalId: string;
   readonly note?: string;
 }
 
 export type StoreDockingValidationErrorCode =
-  | "source_output_not_found"
-  | "target_input_not_found"
-  | "incompatible_payload_hash"
-  | "target_role_slot_mismatch"
-  | "source_version_not_published"
-  | "target_version_not_published"
-  | "source_version_revoked"
-  | "target_version_revoked"
-  | "empty_signal_map";
+  | "source_zhixu_not_published"
+  | "target_zhixu_not_published"
+  | "source_zhixu_revoked"
+  | "target_zhixu_revoked"
+  | "target_interface_not_found"
+  | "order_mode_not_supported"
+  | "empty_signal_map"
+  | "source_port_not_found"
+  | "target_port_not_found"
+  | "duplicate_target_port";
 
 export interface StoreDockingValidationErrorDTO {
   readonly code: StoreDockingValidationErrorCode;
@@ -86,6 +110,10 @@ export interface StoreDockingSessionDTO {
   readonly status: StoreDockingSessionStatus;
   readonly source: StoreDockingZhixuRefDTO;
   readonly target: StoreDockingZhixuRefDTO;
+  /** 目标定义当前发布的具名接口全集（供操作员切换试拼对象）。 */
+  readonly interfaces: readonly StoreDockingInterfaceDTO[];
+  readonly selectedInterfaceName: string;
+  readonly orderMode: StoreDockOrderMode;
   readonly candidateMappings: readonly StoreSignalMappingCandidateDTO[];
   readonly draftSignalMap: readonly StoreDraftSignalMapEntryDTO[];
   readonly validation: StoreDockingValidationDTO;
@@ -135,6 +163,16 @@ export class StoreDockingServiceError extends Error {
   }
 }
 
+interface DockingSessionContext {
+  readonly sourceDetail: ZhixuDetailDTO;
+  readonly targetDetail: ZhixuDetailDTO;
+  readonly source: StoreDockingZhixuRefDTO;
+  readonly target: StoreDockingZhixuRefDTO;
+  readonly interfaces: readonly StoreDockingInterfaceDTO[];
+  readonly selectedInterface: StoreDockingInterfaceDTO;
+  readonly orderMode: StoreDockOrderMode;
+}
+
 export function createStoreDockingService(options: {
   readonly productService: ProductService;
   readonly sessionStore?: StoreDockingSessionStore;
@@ -157,15 +195,52 @@ export function createStoreDockingService(options: {
       }
       const sourceDetail = await requireZhixu(options.productService, input.sourceZhixuId, "sourceZhixuId");
       const targetDetail = await requireZhixu(options.productService, input.targetZhixuId, "targetZhixuId");
+      const interfaces = interfacesFromDetail(targetDetail);
+      if (interfaces.length === 0) {
+        throw new StoreDockingServiceError(
+          422,
+          "target_has_no_dock_interface",
+          "target zhixu does not publish any named dock interface",
+          { targetZhixuId: input.targetZhixuId }
+        );
+      }
+      const requested = input.targetInterfaceName
+        ? interfaces.find((entry) => entry.interfaceName === input.targetInterfaceName)
+        : undefined;
+      if (input.targetInterfaceName && !requested) {
+        throw new StoreDockingServiceError(
+          422,
+          "target_interface_not_found",
+          `target zhixu does not publish interface ${input.targetInterfaceName}`,
+          { targetZhixuId: input.targetZhixuId, targetInterfaceName: input.targetInterfaceName }
+        );
+      }
+      const selectedInterface = requested ?? interfaces[0]!;
+      const orderMode = input.orderMode ?? selectedInterface.orderModes[0];
+      if (!orderMode || !selectedInterface.orderModes.includes(orderMode)) {
+        throw new StoreDockingServiceError(
+          422,
+          "order_mode_not_supported",
+          `interface ${selectedInterface.interfaceName} does not support order mode ${input.orderMode ?? ""}`.trim(),
+          {
+            targetInterfaceName: selectedInterface.interfaceName,
+            orderModes: [...selectedInterface.orderModes]
+          }
+        );
+      }
       const createdAt = now().toISOString();
-      const source = zhixuRef(sourceDetail, input.sourceVersionId);
-      const target = zhixuRef(targetDetail, input.targetVersionId);
-      const candidateMappings = buildCandidateMappings(sourceDetail, targetDetail);
+      const context: DockingSessionContext = {
+        sourceDetail,
+        targetDetail,
+        source: zhixuRef(sourceDetail),
+        target: zhixuRef(targetDetail),
+        interfaces,
+        selectedInterface,
+        orderMode
+      };
+      const candidateMappings = buildCandidateMappings(context);
       const validation = validateSignalMap({
-        source,
-        target,
-        sourcePorts: sourceOutputPorts(sourceDetail),
-        targetPorts: targetInputPorts(targetDetail),
+        context,
         draftSignalMap: [],
         checkedAt: createdAt,
         requireNonEmpty: false
@@ -173,8 +248,11 @@ export function createStoreDockingService(options: {
       const session: StoreDockingSessionDTO = {
         sessionId: `dock_${randomUUID()}`,
         status: "draft",
-        source,
-        target,
+        source: context.source,
+        target: context.target,
+        interfaces,
+        selectedInterfaceName: selectedInterface.interfaceName,
+        orderMode,
         candidateMappings,
         draftSignalMap: [],
         validation,
@@ -191,13 +269,19 @@ export function createStoreDockingService(options: {
 
     async validateSession(sessionId, draftSignalMap) {
       const session = await requireSession(sessionStore, sessionId);
-      const current = await currentSessionDetails(options.productService, session);
+      const current = await currentSessionContext(options.productService, session);
       const checkedAt = now().toISOString();
-      const validation = validateStoredSession(current, draftSignalMap, checkedAt, true);
+      const validation = validateSignalMap({
+        context: current,
+        draftSignalMap: draftSignalMap.map(sanitizeDraftEntry),
+        checkedAt,
+        requireNonEmpty: true
+      });
       const updated: StoreDockingSessionDTO = {
         ...session,
         source: current.source,
         target: current.target,
+        interfaces: current.interfaces,
         status: validation.ok ? "valid" : "invalid",
         validation,
         updatedAt: checkedAt
@@ -208,14 +292,20 @@ export function createStoreDockingService(options: {
 
     async saveDraftMap(sessionId, draftSignalMap) {
       const session = await requireSession(sessionStore, sessionId);
-      const current = await currentSessionDetails(options.productService, session);
+      const current = await currentSessionContext(options.productService, session);
       const checkedAt = now().toISOString();
       const sanitized = draftSignalMap.map(sanitizeDraftEntry);
-      const validation = validateStoredSession(current, sanitized, checkedAt, true);
+      const validation = validateSignalMap({
+        context: current,
+        draftSignalMap: sanitized,
+        checkedAt,
+        requireNonEmpty: true
+      });
       const updated: StoreDockingSessionDTO = {
         ...session,
         source: current.source,
         target: current.target,
+        interfaces: current.interfaces,
         status: validation.ok ? "valid" : "invalid",
         draftSignalMap: sanitized,
         validation,
@@ -254,99 +344,92 @@ async function requireSession(
   return session;
 }
 
-async function currentSessionDetails(
+async function currentSessionContext(
   productService: ProductService,
   session: StoreDockingSessionDTO
-): Promise<{
-  readonly sourceDetail: ZhixuDetailDTO;
-  readonly targetDetail: ZhixuDetailDTO;
-  readonly source: StoreDockingZhixuRefDTO;
-  readonly target: StoreDockingZhixuRefDTO;
-}> {
+): Promise<DockingSessionContext> {
   const sourceDetail = await requireZhixu(productService, session.source.zhixuId, "sourceZhixuId");
   const targetDetail = await requireZhixu(productService, session.target.zhixuId, "targetZhixuId");
+  const interfaces = interfacesFromDetail(targetDetail);
+  const selectedInterface = interfaces.find((entry) => entry.interfaceName === session.selectedInterfaceName);
   return {
     sourceDetail,
     targetDetail,
-    source: zhixuRef(sourceDetail, session.source.versionId),
-    target: zhixuRef(targetDetail, session.target.versionId)
+    source: zhixuRef(sourceDetail),
+    target: zhixuRef(targetDetail),
+    interfaces,
+    // 会话锚定的接口在当前目标定义上已消失时保留接口名并让校验层以
+    // target_interface_not_found 阻断（会话是草稿，不静默改选接口）。
+    selectedInterface: selectedInterface ?? {
+      interfaceName: session.selectedInterfaceName,
+      orderModes: [],
+      inputs: [],
+      outputs: []
+    },
+    orderMode: session.orderMode
   };
 }
 
-function validateStoredSession(
-  current: {
-    readonly sourceDetail: ZhixuDetailDTO;
-    readonly targetDetail: ZhixuDetailDTO;
-    readonly source: StoreDockingZhixuRefDTO;
-    readonly target: StoreDockingZhixuRefDTO;
-  },
-  draftSignalMap: readonly StoreDraftSignalMapEntryDTO[],
-  checkedAt: string,
-  requireNonEmpty: boolean
-): StoreDockingValidationDTO {
-  return validateSignalMap({
-    source: current.source,
-    target: current.target,
-    sourcePorts: sourceOutputPorts(current.sourceDetail),
-    targetPorts: targetInputPorts(current.targetDetail),
-    draftSignalMap,
-    checkedAt,
-    requireNonEmpty
-  });
-}
-
 function validateSignalMap(input: {
-  readonly source: StoreDockingZhixuRefDTO;
-  readonly target: StoreDockingZhixuRefDTO;
-  readonly sourcePorts: readonly StoreDockingSignalPortDTO[];
-  readonly targetPorts: readonly StoreDockingSignalPortDTO[];
+  readonly context: DockingSessionContext;
   readonly draftSignalMap: readonly StoreDraftSignalMapEntryDTO[];
   readonly checkedAt: string;
   readonly requireNonEmpty: boolean;
 }): StoreDockingValidationDTO {
+  const { context, draftSignalMap } = input;
   const errors: StoreDockingValidationErrorDTO[] = [
-    ...versionErrors(input.source, "source"),
-    ...versionErrors(input.target, "target")
+    ...publicationErrors(context.source, "source"),
+    ...publicationErrors(context.target, "target")
   ];
-  if (input.requireNonEmpty && input.draftSignalMap.length === 0) {
-    errors.push(validationError("empty_signal_map", "signalMap 草稿至少需要一行"));
+  if (context.selectedInterface.orderModes.length === 0) {
+    errors.push(validationError(
+      "target_interface_not_found",
+      `目标接口 ${context.selectedInterface.interfaceName} 已不存在于当前目标定义`,
+      {}
+    ));
+  } else if (!context.selectedInterface.orderModes.includes(context.orderMode)) {
+    errors.push(validationError(
+      "order_mode_not_supported",
+      `接口 ${context.selectedInterface.interfaceName} 不支持下单模式 ${context.orderMode}（开放：${context.selectedInterface.orderModes.join("、")}）`,
+      {}
+    ));
+  }
+  if (input.requireNonEmpty && draftSignalMap.length === 0) {
+    errors.push(validationError("empty_signal_map", "映射草稿至少需要一行（输入或输出）"));
   }
 
-  const sourceById = new Map(input.sourcePorts.map((port) => [port.signalId, port]));
-  const targetById = new Map(input.targetPorts.map((port) => [port.signalId, port]));
-  for (const entry of input.draftSignalMap) {
-    const source = sourceById.get(entry.sourceSignalId);
-    const target = targetById.get(entry.targetSignalId);
+  const sourcePorts = sourcePortsForKind(context.sourceDetail);
+  const targetPorts = targetPortsForKind(context.selectedInterface);
+  const boundTargetPorts = new Set<string>();
+  for (const entry of draftSignalMap) {
+    const source = sourcePorts.get(entry.bindingKind)?.get(entry.sourceSignalId);
+    const target = targetPorts.get(entry.bindingKind)?.get(entry.targetSignalId);
     if (!source) {
       errors.push(validationError(
-        "source_output_not_found",
-        `源输出不存在：${entry.sourceSignalId}`,
+        "source_port_not_found",
+        bindingKindLabel(entry.bindingKind, "源端口不存在") + `：${entry.sourceSignalId}`,
         { sourceSignalId: entry.sourceSignalId, targetSignalId: entry.targetSignalId }
       ));
       continue;
     }
     if (!target) {
       errors.push(validationError(
-        "target_input_not_found",
-        `目标输入不存在：${entry.targetSignalId}`,
+        "target_port_not_found",
+        bindingKindLabel(entry.bindingKind, "目标端口不在所选接口内") + `：${entry.targetSignalId}`,
         { sourceSignalId: entry.sourceSignalId, targetSignalId: entry.targetSignalId }
       ));
       continue;
     }
-    if (source.payloadSchemaHash && target.payloadSchemaHash && source.payloadSchemaHash !== target.payloadSchemaHash) {
+    // 同一目标端口在一条 route 内至多绑定一次。
+    const targetPortKey = `${entry.bindingKind}:${entry.targetSignalId}`;
+    if (boundTargetPorts.has(targetPortKey)) {
       errors.push(validationError(
-        "incompatible_payload_hash",
-        "源输出和目标输入的 payload schema hint 不兼容",
+        "duplicate_target_port",
+        `目标端口被重复绑定：${entry.targetSignalId}`,
         { sourceSignalId: entry.sourceSignalId, targetSignalId: entry.targetSignalId }
       ));
     }
-    if (source.roleSlotId && target.roleSlotId && source.roleSlotId !== target.roleSlotId) {
-      errors.push(validationError(
-        "target_role_slot_mismatch",
-        "目标输入要求的角色槽与源输出角色槽不同",
-        { sourceSignalId: entry.sourceSignalId, targetSignalId: entry.targetSignalId }
-      ));
-    }
+    boundTargetPorts.add(targetPortKey);
   }
 
   return {
@@ -357,7 +440,7 @@ function validateSignalMap(input: {
   };
 }
 
-function versionErrors(
+function publicationErrors(
   ref: StoreDockingZhixuRefDTO,
   side: "source" | "target"
 ): readonly StoreDockingValidationErrorDTO[] {
@@ -370,14 +453,14 @@ function versionErrors(
   // stale projection still reports its old publication marker.
   if (ref.publicationStatus !== "published") {
     errors.push(validationError(
-      `${prefix}_version_not_published` as const,
-      `${prefix} version ${ref.versionId ?? ref.planId} is not published on the state machine`
+      `${prefix}_zhixu_not_published` as const,
+      `${prefix} zhixu ${ref.zhixuId} is not published on the state machine`
     ));
   }
   if (ref.lifecycleStatus === "revoked") {
     errors.push(validationError(
-      `${prefix}_version_revoked` as const,
-      `${prefix} version ${ref.versionId ?? ref.planId} has been revoked`
+      `${prefix}_zhixu_revoked` as const,
+      `${prefix} zhixu ${ref.zhixuId} has been revoked`
     ));
   }
   return errors;
@@ -396,13 +479,14 @@ function validationError(
   };
 }
 
-function zhixuRef(zhixu: ZhixuDetailDTO, versionId: string | undefined): StoreDockingZhixuRefDTO {
-  const resolvedVersionId = versionId ?? zhixu.planPublication.planHash;
+function bindingKindLabel(kind: StoreDockBindingKind, text: string): string {
+  return kind === "input" ? `输入绑定——${text}` : `输出绑定——${text}`;
+}
+
+function zhixuRef(zhixu: ZhixuDetailDTO): StoreDockingZhixuRefDTO {
   return {
     zhixuId: zhixu.zhixuId,
     title: zhixu.title,
-    ...(resolvedVersionId ? { versionId: resolvedVersionId } : {}),
-    versionLabel: "Plan 版本",
     lifecycleStatus: lifecycleStatusForZhixu(zhixu),
     publicationStatus: zhixu.planPublication.status,
     planId: zhixu.planPublication.planId,
@@ -410,26 +494,110 @@ function zhixuRef(zhixu: ZhixuDetailDTO, versionId: string | undefined): StoreDo
   };
 }
 
+function interfacesFromDetail(zhixu: ZhixuDetailDTO): readonly StoreDockingInterfaceDTO[] {
+  return zhixu.dockableModules.map((module) => ({
+    interfaceName: module.interfaceName,
+    orderModes: [...module.orderModes],
+    inputs: module.inputs.map((port) => ({
+      portName: port.portName,
+      label: port.label,
+      ...(port.hook ? { hook: port.hook } : {})
+    })),
+    outputs: module.outputs.map((port) => ({
+      portName: port.portName,
+      label: port.label,
+      ...(port.signal ? { signal: port.signal } : {})
+    }))
+  }));
+}
+
+/** 源侧端口按绑定方向分组：input 行用本地通道（receiveSignals 词表），output 行用本地完成信号。 */
+function sourcePortsForKind(
+  zhixu: ZhixuDetailDTO
+): ReadonlyMap<StoreDockBindingKind, ReadonlyMap<string, StoreDockingSignalPortDTO>> {
+  const channels = new Map<string, StoreDockingSignalPortDTO>();
+  for (const entry of zhixu.orderPermissionTable) {
+    const stage = zhixu.stages.find((item) => item.stageId === entry.stageId);
+    const evidence = entry.requiredEvidence.length > 0 ? entry.requiredEvidence : stage?.evidence ?? [];
+    channels.set(entry.signalName, signalPort({
+      signalId: entry.signalName,
+      label: stage ? `${stage.name} / ${signalLabel(entry.signalName)}` : signalLabel(entry.signalName),
+      bindingKind: "input",
+      stageId: entry.stageId,
+      ...(stage ? { stageName: stage.name } : {}),
+      roleSlotId: entry.roleSlotId,
+      roleLabel: roleLabelForSlot(zhixu, entry.roleSlotId) ?? entry.roleSlotId,
+      evidence
+    }));
+  }
+  const signals = new Map<string, StoreDockingSignalPortDTO>();
+  for (const stage of zhixu.stages) {
+    const roleSlotId = roleSlotIdForStage(zhixu, stage);
+    const signalId = `${stage.stageId}.completed`;
+    signals.set(signalId, signalPort({
+      signalId,
+      label: `${stage.name}已完成`,
+      bindingKind: "output",
+      stageId: stage.stageId,
+      stageName: stage.name,
+      ...(roleSlotId ? { roleSlotId } : {}),
+      roleLabel: roleLabelForSlot(zhixu, roleSlotId) ?? stage.ownerRole,
+      evidence: stage.evidence
+    }));
+  }
+  return new Map([
+    ["input", channels],
+    ["output", signals]
+  ]);
+}
+
+/** 目标侧端口按绑定方向分组：接口输入端口 / 接口输出端口。 */
+function targetPortsForKind(
+  selectedInterface: StoreDockingInterfaceDTO
+): ReadonlyMap<StoreDockBindingKind, ReadonlyMap<string, StoreDockingSignalPortDTO>> {
+  const inputs = new Map<string, StoreDockingSignalPortDTO>();
+  for (const port of selectedInterface.inputs) {
+    inputs.set(port.portName, signalPort({
+      signalId: port.portName,
+      label: port.label,
+      bindingKind: "input",
+      evidence: port.hook ? [port.hook] : []
+    }));
+  }
+  const outputs = new Map<string, StoreDockingSignalPortDTO>();
+  for (const port of selectedInterface.outputs) {
+    outputs.set(port.portName, signalPort({
+      signalId: port.portName,
+      label: port.label,
+      bindingKind: "output",
+      evidence: port.signal ? [port.signal] : []
+    }));
+  }
+  return new Map([
+    ["input", inputs],
+    ["output", outputs]
+  ]);
+}
+
 function buildCandidateMappings(
-  source: ZhixuDetailDTO,
-  target: ZhixuDetailDTO
+  context: DockingSessionContext
 ): readonly StoreSignalMappingCandidateDTO[] {
-  const sourcePorts = sourceOutputPorts(source);
-  const targetPorts = targetInputPorts(target);
+  const sourcePorts = sourcePortsForKind(context.sourceDetail);
+  const targetPorts = targetPortsForKind(context.selectedInterface);
   const candidates: StoreSignalMappingCandidateDTO[] = [];
-  for (const sourcePort of sourcePorts) {
-    for (const targetPort of targetPorts) {
-      const confidence = candidateConfidence(sourcePort, targetPort);
-      if (!confidence) {
-        continue;
+  for (const kind of ["input", "output"] as const) {
+    for (const sourcePort of sourcePorts.get(kind)?.values() ?? []) {
+      for (const targetPort of targetPorts.get(kind)?.values() ?? []) {
+        const confidence = candidateConfidence(sourcePort, targetPort);
+        candidates.push({
+          candidateId: candidateId(context.source.zhixuId, context.target.zhixuId, kind, sourcePort.signalId, targetPort.signalId),
+          bindingKind: kind,
+          sourceSignal: sourcePort,
+          targetSignal: targetPort,
+          confidence,
+          reason: candidateReason(sourcePort, targetPort, confidence)
+        });
       }
-      candidates.push({
-        candidateId: candidateId(source.zhixuId, target.zhixuId, sourcePort.signalId, targetPort.signalId),
-        sourceSignal: sourcePort,
-        targetSignal: targetPort,
-        confidence,
-        reason: candidateReason(sourcePort, targetPort, confidence)
-      });
     }
   }
   return candidates
@@ -437,72 +605,7 @@ function buildCandidateMappings(
     .slice(0, 12);
 }
 
-function sourceOutputPorts(zhixu: ZhixuDetailDTO): readonly StoreDockingSignalPortDTO[] {
-  return zhixu.stages.map((stage) => {
-    const roleSlotId = roleSlotIdForStage(zhixu, stage);
-    const roleLabel = roleLabelForSlot(zhixu, roleSlotId) ?? stage.ownerRole;
-    return signalPort({
-      signalId: `${stage.stageId}.completed`,
-      label: `${stage.name}已完成`,
-      direction: "output",
-      stageId: stage.stageId,
-      stageName: stage.name,
-      roleSlotId,
-      roleLabel,
-      evidence: stage.evidence
-    });
-  });
-}
-
-function targetInputPorts(zhixu: ZhixuDetailDTO): readonly StoreDockingSignalPortDTO[] {
-  return zhixu.orderPermissionTable
-    .map((entry) => inputPortFromPermission(zhixu, entry));
-}
-
-function inputPortFromPermission(
-  zhixu: ZhixuDetailDTO,
-  entry: OrderPermissionTableEntryDTO
-): StoreDockingSignalPortDTO {
-  const stage = zhixu.stages.find((item) => item.stageId === entry.stageId);
-  const evidence = entry.requiredEvidence.length > 0 ? entry.requiredEvidence : stage?.evidence ?? [];
-  const stageName = stage?.name;
-  return signalPort({
-    signalId: entry.signalName,
-    label: stageName ? `${stageName} / ${signalLabel(entry.signalName)}` : signalLabel(entry.signalName),
-    direction: "input",
-    stageId: entry.stageId,
-    ...(stageName ? { stageName } : {}),
-    roleSlotId: entry.roleSlotId,
-    roleLabel: roleLabelForSlot(zhixu, entry.roleSlotId) ?? entry.roleSlotId,
-    evidence
-  });
-}
-
-function signalPort(input: {
-  readonly signalId: string;
-  readonly label: string;
-  readonly direction: "output" | "input";
-  readonly stageId?: string;
-  readonly stageName?: string;
-  readonly roleSlotId?: string;
-  readonly roleLabel?: string;
-  readonly evidence: readonly string[];
-}): StoreDockingSignalPortDTO {
-  const schemaHint = input.evidence.length > 0 ? input.evidence.join("、") : "无 payload 约束";
-  return {
-    signalId: input.signalId,
-    label: input.label,
-    direction: input.direction,
-    ...(input.stageId ? { stageId: input.stageId } : {}),
-    ...(input.stageName ? { stageName: input.stageName } : {}),
-    ...(input.roleSlotId ? { roleSlotId: input.roleSlotId } : {}),
-    ...(input.roleLabel ? { roleLabel: input.roleLabel } : {}),
-    payloadSchemaHash: schemaHash(input.evidence),
-    schemaHint
-  };
-}
-
-function roleSlotIdForStage(zhixu: ZhixuDetailDTO, stage: ZhixuStageDTO): string {
+function roleSlotIdForStage(zhixu: ZhixuDetailDTO, stage: ZhixuStageDTO): string | undefined {
   return zhixu.orderPermissionTable.find((entry) => entry.stageId === stage.stageId)?.roleSlotId ??
     stage.ownerRole;
 }
@@ -514,20 +617,46 @@ function roleLabelForSlot(zhixu: ZhixuDetailDTO, roleSlotId: string | undefined)
   return zhixu.roleSlots.find((slot) => slot.slotId === roleSlotId)?.title;
 }
 
+function signalPort(input: {
+  readonly signalId: string;
+  readonly label: string;
+  readonly bindingKind: StoreDockBindingKind;
+  readonly stageId?: string;
+  readonly stageName?: string;
+  readonly roleSlotId?: string;
+  readonly roleLabel?: string;
+  readonly evidence: readonly string[];
+}): StoreDockingSignalPortDTO {
+  const schemaHint = input.evidence.length > 0 ? input.evidence.join("、") : "无 payload 约束";
+  return {
+    signalId: input.signalId,
+    label: input.label,
+    bindingKind: input.bindingKind,
+    ...(input.stageId ? { stageId: input.stageId } : {}),
+    ...(input.stageName ? { stageName: input.stageName } : {}),
+    ...(input.roleSlotId ? { roleSlotId: input.roleSlotId } : {}),
+    ...(input.roleLabel ? { roleLabel: input.roleLabel } : {}),
+    payloadSchemaHash: schemaHash(input.evidence),
+    schemaHint
+  };
+}
+
+/**
+ * 候选只做方向对齐与启发式排序，不做兼容性裁决：接口端口的 payload
+ * hint 是协议引用（hook/signal 原文），与源侧证据清单不可比，兼容性
+ * 由操作员在草稿中确认。
+ */
 function candidateConfidence(
   source: StoreDockingSignalPortDTO,
   target: StoreDockingSignalPortDTO
-): StoreSignalMappingCandidateDTO["confidence"] | undefined {
-  if (source.stageId && target.stageId && source.stageId === target.stageId && source.payloadSchemaHash === target.payloadSchemaHash) {
-    return source.roleSlotId === target.roleSlotId ? "high" : "medium";
+): StoreSignalMappingCandidateDTO["confidence"] {
+  if (source.stageId && target.stageId && source.stageId === target.stageId) {
+    return "high";
   }
   if (source.payloadSchemaHash && source.payloadSchemaHash === target.payloadSchemaHash) {
-    return source.roleSlotId === target.roleSlotId ? "medium" : "low";
+    return "medium";
   }
-  if (sharedBusinessToken(source.label, target.label)) {
-    return "low";
-  }
-  return undefined;
+  return "low";
 }
 
 function candidateReason(
@@ -536,12 +665,12 @@ function candidateReason(
   confidence: StoreSignalMappingCandidateDTO["confidence"]
 ): string {
   if (confidence === "high") {
-    return "阶段、payload hint 和角色槽一致";
+    return "阶段一致";
   }
   if (source.payloadSchemaHash === target.payloadSchemaHash) {
     return "payload hint 一致，需人工确认业务语义";
   }
-  return "业务标签相近，需人工确认";
+  return "方向一致，需人工确认业务语义";
 }
 
 function compareCandidates(left: StoreSignalMappingCandidateDTO, right: StoreSignalMappingCandidateDTO): number {
@@ -561,8 +690,14 @@ function confidenceRank(value: StoreSignalMappingCandidateDTO["confidence"]): nu
   }
 }
 
-function candidateId(sourceZhixuId: string, targetZhixuId: string, sourceSignalId: string, targetSignalId: string): string {
-  return `cand_${digest([sourceZhixuId, targetZhixuId, sourceSignalId, targetSignalId].join("|")).slice(0, 20)}`;
+function candidateId(
+  sourceZhixuId: string,
+  targetZhixuId: string,
+  bindingKind: StoreDockBindingKind,
+  sourceSignalId: string,
+  targetSignalId: string
+): string {
+  return `cand_${digest([sourceZhixuId, targetZhixuId, bindingKind, sourceSignalId, targetSignalId].join("|")).slice(0, 20)}`;
 }
 
 function schemaHash(evidence: readonly string[]): string {
@@ -571,19 +706,6 @@ function schemaHash(evidence: readonly string[]): string {
 
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function sharedBusinessToken(left: string, right: string): boolean {
-  const leftTokens = businessTokens(left);
-  return [...businessTokens(right)].some((token) => leftTokens.has(token));
-}
-
-function businessTokens(value: string): Set<string> {
-  return new Set(value
-    .toLowerCase()
-    .split(/[\s/._:-]+/u)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 2));
 }
 
 function signalLabel(signalName: string): string {
@@ -610,6 +732,7 @@ function sanitizeDraftEntry(entry: StoreDraftSignalMapEntryDTO): StoreDraftSigna
   const note = entry.note?.trim();
   return {
     ...(entry.entryId?.trim() ? { entryId: entry.entryId.trim() } : {}),
+    bindingKind: entry.bindingKind,
     sourceSignalId: entry.sourceSignalId.trim(),
     targetSignalId: entry.targetSignalId.trim(),
     ...(note ? { note } : {})

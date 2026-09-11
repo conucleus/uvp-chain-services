@@ -21,6 +21,10 @@ export interface ReconcileRunSummary {
   readonly registrationsChecked: number;
   readonly submissionsChecked: number;
   readonly governanceLogsChecked: number;
+  /** 证据绑定清扫检查的提交数（持 txHash 且落库了证据引用的记录）。 */
+  readonly evidenceBindsSwept: number;
+  /** 本轮补绑成功的证据数。 */
+  readonly evidenceBindsRepaired: number;
   readonly updated: number;
   readonly failed: number;
 }

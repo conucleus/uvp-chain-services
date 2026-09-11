@@ -13,9 +13,11 @@ export interface ActiveChainEventReplaySummary<TEvent extends ChainEvent = Chain
   readonly activeEventCount: number;
   readonly removedEventCount: number;
   /**
-   * honest metric — true only when this replay actually filtered at
-   * least one `removed` log (removedEventCount > 0). It never reports a
-   * vacuous true for replays that saw no removed logs at all.
+   * honest metric — true only when this replay's final active set actually
+   * lost at least one event to a `removed` tombstone（终态仍被过滤的事件
+   * id 数 > 0）。被复活抵消的墓碑（removed 后同位事件重新出现）不计入：
+   * 那种回合活跃集没有任何丢失，报 true 会虚标"发生过过滤"。
+   * removedEventCount 则保留"见过多少墓碑"的原始口径。
    */
   readonly removedLogsFiltered: boolean;
 }
@@ -90,6 +92,7 @@ export function buildActiveChainEventReplaySummary<TEvent extends ChainEvent>(
     activeEvents,
     activeEventCount: activeEvents.length,
     removedEventCount,
-    removedLogsFiltered: removedEventCount > 0
+    // 终态仍留在 removedEventIds 里的事件 = 墓碑未复活 = 真正被过滤。
+    removedLogsFiltered: removedEventIds.size > 0
   };
 }

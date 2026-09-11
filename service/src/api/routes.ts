@@ -93,7 +93,20 @@ export type {
 
 export function createApiRouter(store: ProjectionStore, options: CreateApiRouterOptions = {}): ApiRouter {
   const audit = options.audit ?? noopAuditSink;
+  // 运行环境只接受显式注入（config.security.environment 或等价的
+  // configDiagnostics.environment），绝不缺省 local——身份门/证据边界/
+  // 诊断全部以该档位定宽严，漏传即 fail-closed 拒绝装配。
   const productRuntimeEnvironment = options.productRuntimeEnvironment ?? options.configDiagnostics?.environment;
+  if (!productRuntimeEnvironment) {
+    throw new Error("productRuntimeEnvironment (or configDiagnostics.environment) is required to create the API router");
+  }
+  const governanceAdminPolicy = {
+    runtimeEnvironment: productRuntimeEnvironment,
+    allowedAdminIds: options.governanceAdminIds ?? [],
+    ...(options.governanceAdminTokenHashes && options.governanceAdminTokenHashes.length > 0
+      ? { adminTokenHashes: options.governanceAdminTokenHashes }
+      : {})
+  };
   const storeZhixuDraftStore = options.storeZhixuDraftStore ?? new MemoryStoreZhixuDraftStore();
   const storeZhixuVersionMetadataStore = options.storeZhixuVersionMetadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
   const storeSupplierMetadataStore = options.storeSupplierMetadataStore ?? new InMemoryStoreSupplierMetadataStore();
@@ -136,7 +149,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.now ? { now: options.now } : {})
   });
   const submissionAuthorization = options.productBffStore
-    ? productBffStoreSubmissionAuthorization(options.productBffStore)
+    ? productBffStoreSubmissionAuthorization(options.productBffStore, store)
     : undefined;
   const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
   if (productTriggerChainId === undefined) {
@@ -158,7 +171,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createEvidenceService({
       ...(options.evidenceMetadataStore ? { metadataStore: options.evidenceMetadataStore } : {}),
       storage: defaultEvidenceStorage ?? new LocalEvidenceStorage(),
-      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment ?? "local"
+      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
     })
   );
   const storeZhixuDraftWorkflowService = options.storeZhixuDraftWorkflowService ??
@@ -214,6 +227,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(stageExecutorPatchChainId !== undefined ? { chainId: stageExecutorPatchChainId } : {}),
     ...(stageExecutorPatchVerifyingContract ? { stagePatchModuleAddress: stageExecutorPatchVerifyingContract } : {}),
     ...(options.stageExecutorPatchBroadcastAdapter ? { broadcastAdapter: options.stageExecutorPatchBroadcastAdapter } : {}),
+    // 持久驱动（sqlite/postgres）注入持久化 stage-patch store；未注入
+    // （memory）时服务内部回落内存 store。
+    ...(options.stageExecutorPatchStore ? { stageExecutorPatchStore: options.stageExecutorPatchStore } : {}),
     ...(options.now ? { now: options.now } : {})
   });
   const stageResourcePatchChainId = options.stageResourcePatchChainId ?? options.submissionChainId;
@@ -225,13 +241,14 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(stageResourcePatchChainId !== undefined ? { chainId: stageResourcePatchChainId } : {}),
     ...(stageResourcePatchVerifyingContract ? { stagePatchModuleAddress: stageResourcePatchVerifyingContract } : {}),
     ...(options.stageResourcePatchBroadcastAdapter ? { broadcastAdapter: options.stageResourcePatchBroadcastAdapter } : {}),
+    ...(options.stageResourcePatchStore ? { stageResourcePatchStore: options.stageResourcePatchStore } : {}),
     ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
     ...(options.now ? { now: options.now } : {})
   });
   const buildDiagnostics = () => buildOperationalDiagnostics({
     store,
     ...(options.configDiagnostics ? { configDiagnostics: options.configDiagnostics } : {}),
-    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
+    runtimeEnvironment: productRuntimeEnvironment,
     ...(options.indexerDiagnostics ? { indexer: options.indexerDiagnostics } : {}),
     ...(options.reconcileDiagnostics ? { reconcile: options.reconcileDiagnostics } : {}),
     ...(options.submissionStore ? { submissionStore: options.submissionStore } : {}),
@@ -243,9 +260,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       docking: storeDockingSessionStore
     },
     ...(defaultEvidenceStorage ? { evidenceStorage: defaultEvidenceStorage } : {}),
-    ...(options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
-      ? { evidenceRuntimeEnvironment: (options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment)! }
-      : {})
+    evidenceRuntimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
   });
   const now = options.now ?? (() => new Date());
   const storeWalletSessionStore = options.storeWalletSessionStore ?? new InMemoryStoreWalletSessionStore();
@@ -256,15 +271,19 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.now ? { now: options.now } : {})
   });
   const baseStoreIdentityProvider = options.storeIdentityProvider ?? createStoreIdentityProvider({
-    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
-    ...(storeAuthConfig ? { authConfig: storeAuthConfig } : {})
+    runtimeEnvironment: productRuntimeEnvironment,
+    ...(storeAuthConfig ? { authConfig: storeAuthConfig } : {}),
+    ...(options.governanceAdminIds ? { governanceAdminIds: options.governanceAdminIds } : {}),
+    ...(options.governanceAdminTokenHashes && options.governanceAdminTokenHashes.length > 0
+      ? { governanceAdminTokenHashes: options.governanceAdminTokenHashes }
+      : {})
   });
   // 钱包会话叠加层（未启用时原样透传，fail-closed）。
   const storeIdentityProvider = createWalletSessionStoreIdentityProvider({
     base: baseStoreIdentityProvider,
     sessionService,
     ...(storeAuthConfig?.walletSession ? { config: storeAuthConfig.walletSession } : {}),
-    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {})
+    runtimeEnvironment: productRuntimeEnvironment
   });
   const storeDecorationService = options.storeDecorationService ?? createStoreDecorationService({
     projectionStore: store,
@@ -330,6 +349,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.opsConsoleAdminIds ? { opsConsoleAdminIds: options.opsConsoleAdminIds } : {}),
     audit,
     buildDiagnostics,
+    governanceAdminPolicy,
     ...(options.onTxMined ? { onTxMined: options.onTxMined } : {}),
     now
   };
@@ -337,7 +357,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createDiagnosticsRouteModule(),
     createAdminOpsRouteModule(),
     createStoreAuthRouteModule({ sessionService }),
-    createStoreConsoleRouteModule(),
+    createStoreConsoleRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createStoreDecorationRouteModule({ decorationService: storeDecorationService }),
     createStoreJoinRouteModule({ joinService }),
     createStoreListingsRouteModule({ listingService }),
@@ -346,16 +366,14 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createStoreRiskRouteModule(),
     createStoreSuppliersRouteModule(),
     createGovernanceRouteModule(),
-    createNotificationsRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) }),
+    createNotificationsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createEvidenceRouteModule({
-      ...((options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment)
-        ? { runtimeEnvironment: (options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment)! }
-        : {})
+      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
     }),
-    createStagePatchRouteModule(),
-    createSubmissionsRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) }),
-    createProductBffRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) }),
-    createProductReadRouteModule({ ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}) })
+    createStagePatchRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
+    createSubmissionsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
+    createProductBffRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
+    createProductReadRouteModule({ runtimeEnvironment: productRuntimeEnvironment })
   ];
 
   return {
@@ -374,14 +392,16 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   };
 }
 
-export function productBffStoreSubmissionAuthorization(store: ProductBffStore): SubmissionAuthorizationAdapter {
+export function productBffStoreSubmissionAuthorization(
+  store: ProductBffStore,
+  projectionStore?: ProjectionStore
+): SubmissionAuthorizationAdapter {
   return {
     async authorize(request) {
-      const overlayAuthorization = productBffActiveStageExecutorAuthorization(request);
-      if (overlayAuthorization) {
-        return overlayAuthorization;
-      }
-
+      // 《授权与签名规则》§五：执行者变更/委任不抹除既有的显式订单级
+      // 授权——先看显式 trigger 授权，命中即放行；未命中再看阶段委任的
+      // 在任执行者（overlay）。overlay 优先会一票否决显式授权者，
+      // 与合约口径（显式优先）相反。
       const registrations = await store.listRegistrations();
       const matches = registrations.filter((item) =>
         equalHex(item.orderId, request.onchainOrderId) || item.orderId.toLowerCase() === request.orderId.toLowerCase()
@@ -397,23 +417,106 @@ export function productBffStoreSubmissionAuthorization(store: ProductBffStore): 
         };
       }
       const registration = matches[0];
-      if (!registration) {
-        return {
-          authorized: false,
-          source: "product_bff_trigger",
-          reason: "order trigger authorization was not found"
-        };
+      if (registration) {
+        const authorized = registration.authorizations.some((authorization) =>
+          equalHex(authorization.sourceId, request.sourceId) &&
+          equalHex(authorization.signalId, request.signalId) &&
+          authorization.submitter.toLowerCase() === request.submitter.toLowerCase()
+        );
+        if (authorized) {
+          return { authorized: true, source: "product_bff_trigger" };
+        }
       }
-      const authorized = registration.authorizations.some((authorization) =>
-        equalHex(authorization.sourceId, request.sourceId) &&
-        equalHex(authorization.signalId, request.signalId) &&
-        authorization.submitter.toLowerCase() === request.submitter.toLowerCase()
-      );
-      return {
-        authorized,
+      // 《授权与签名规则》§四/§五 + 合约 _isSignalSubmitterAuthorized 的
+      // 两腿结构：显式授权未命中不是终局否决——链上还可能有阶段委任
+      // 记录。链上腿（显式+委任）与任务 overlay 兜底依序合并裁决，
+      // 任一命中即放行；全部未命中才拒绝，并以最具信息量的腿作为
+      // 拒绝理由。显式命中即短路是安全的；显式未命中短路才是缺陷
+      // （会把委任执行者系统性 403）。
+      const chainAuthorization = await chainSignalSubmitterAuthorization(projectionStore, request);
+      if (chainAuthorization?.verdict) {
+        return chainAuthorization.verdict;
+      }
+      const overlayAuthorization = productBffActiveStageExecutorAuthorization(request);
+      if (overlayAuthorization) {
+        return overlayAuthorization;
+      }
+      return chainAuthorization?.miss ?? {
+        authorized: false,
         source: "product_bff_trigger",
-        ...(authorized ? {} : { reason: "submitter is not present in order trigger authorizations" })
+        reason: registration
+          ? "submitter is not present in order trigger authorizations"
+          : "order trigger authorization was not found"
       };
+    }
+  };
+}
+
+/**
+ * 链上事后授权（SignalSubmitterAuthorized 事件投影）：参与方在订单
+ * 创建后才拿到 (sourceId, signalId, submitter) 授权时，BFF trigger
+ * 台账里没有对应记录——不读投影会让合法参与方的 prepare-submit 403。
+ * 同号订单跨 plan 复用与 BFF 路径同口径歧义即拒。
+ *
+ * 与合约 _isSignalSubmitterAuthorized 同构的两腿结构：
+ * - 显式腿：order.authorizations，键 `${sourceId}:${signalId}:${submitter}`；
+ * - 委任腿：order.signalDelegations，键 `${sourceId}:${signalId}`（真实
+ *   链上 sourceId，不是 targetStageId——合约 _delegatedStageSignalAuthorizations
+ *   按信号键落库，StageExecutorSignalDelegated 由 patch 模块按阶段能力
+ *   的真实 (targetSourceId, signalId) 逐条委派），executor 匹配即命中。
+ *
+ * verdict 是立即裁决（命中/歧义拒绝）；miss 只在两腿都评估过且未命中时
+ * 出现——未命中不是终局否决，调用方继续评估任务 overlay 兜底，仍未决
+ * 时才以 miss 作为最终拒绝理由。
+ */
+async function chainSignalSubmitterAuthorization(
+  projectionStore: ProjectionStore | undefined,
+  request: SubmissionAuthorizationRequest
+): Promise<
+  | { readonly verdict?: SubmissionAuthorizationResult; readonly miss?: SubmissionAuthorizationResult }
+  | undefined
+> {
+  if (!projectionStore) {
+    return undefined;
+  }
+  const orders = await projectionStore.findStateMachineOrdersByOrderId(request.onchainOrderId);
+  if (orders.length === 0) {
+    return undefined;
+  }
+  const distinctPlanIds = new Set(orders.map((order) => order.planId.toLowerCase()));
+  if (distinctPlanIds.size > 1) {
+    return {
+      verdict: {
+        authorized: false,
+        source: "chain_signal_authorization",
+        reason: "ambiguous_order_id: order id exists on multiple plans"
+      }
+    };
+  }
+  // 投影键与 indexer signalAuthorizationProjectionKey 同构：
+  // `${sourceId}:${signalId}:${submitter 小写}`。
+  const authorizationKey = `${request.sourceId}:${request.signalId}:${request.submitter.toLowerCase()}`;
+  if (orders.some((order) => order.authorizations[authorizationKey] !== undefined)) {
+    return {
+      verdict: { authorized: true, source: "chain_signal_authorization" }
+    };
+  }
+  // 委任腿：键与 indexer signalProjectionKey 同构 `${sourceId}:${signalId}`。
+  const delegationKey = `${request.sourceId}:${request.signalId}`;
+  const delegated = orders.some((order) => {
+    const delegation = order.signalDelegations[delegationKey];
+    return delegation !== undefined && delegation.executor.toLowerCase() === request.submitter.toLowerCase();
+  });
+  if (delegated) {
+    return {
+      verdict: { authorized: true, source: "chain_signal_delegation" }
+    };
+  }
+  return {
+    miss: {
+      authorized: false,
+      source: "chain_signal_authorization",
+      reason: "submitter is not authorized on chain for this signal"
     }
   };
 }
@@ -421,6 +524,9 @@ export function productBffStoreSubmissionAuthorization(store: ProductBffStore): 
 type ProductTaskWithExecutorOverlay = {
   readonly executorOverlay?: ProductTaskExecutorOverlay;
   readonly stageExecutorOverlay?: ProductTaskExecutorOverlay;
+  readonly proof?: {
+    readonly signalId?: string;
+  };
 };
 
 type ProductTaskExecutorOverlay = {
@@ -428,12 +534,25 @@ type ProductTaskExecutorOverlay = {
   readonly activeExecutorWallet?: string;
 };
 
+/**
+ * 任务 overlay 兜底（无链上投影裁决时的近似授权）：投影在场时委任
+ * 已由 chainSignalSubmitterAuthorization 的委任腿按真实 (sourceId,
+ * signalId) 键精确裁决（合约 _delegatedStageSignalAuthorizations 同构）；
+ * 本腿只覆盖任务自带 overlay 而投影未裁决的场景。targetStageId ==
+ * request.sourceId 是保守的阶段绑定——放宽为"在任执行者可提交任意
+ * 记录信号"会授权链上必 revert 的签名（active patch 单独不构成提交
+ * 权，见 _isSignalSubmitterAuthorized），保持 fail-closed。
+ */
 function productBffActiveStageExecutorAuthorization(
   request: SubmissionAuthorizationRequest
 ): SubmissionAuthorizationResult | undefined {
+  // 无任务上下文（链上腿评估过的请求可以不带 task）即无 overlay 可言。
+  if (!request.task) {
+    return undefined;
+  }
   const task = request.task as ProductTaskWithExecutorOverlay;
   const executorOverlay = task.stageExecutorOverlay ?? task.executorOverlay;
-  if (!executorOverlay?.targetStageId || !executorOverlay.activeExecutorWallet) {
+  if (!executorOverlay?.targetStageId || !executorOverlay?.activeExecutorWallet) {
     return undefined;
   }
 
@@ -442,6 +561,19 @@ function productBffActiveStageExecutorAuthorization(
       authorized: false,
       source: "active_stage_executor_overlay",
       reason: "active executor overlay does not target the submitted source"
+    };
+  }
+
+  // overlay 委任只覆盖目标阶段已记录的真实提交信号（proof.signalId 来自
+  // 投影 submitSignals）。signalId 是推导值（proof 缺signalId 时按
+  // stageId+intent 拼出）意味着无法证明链上存在该信号——为必 revert 的
+  // 签名完成授权并广播，必须在授权层拒绝。
+  const recordedSignalId = task.proof?.signalId;
+  if (!recordedSignalId || !equalHex(recordedSignalId, request.signalId)) {
+    return {
+      authorized: false,
+      source: "active_stage_executor_overlay",
+      reason: "active executor overlay only covers the task's recorded submit signal; refusing to authorize a derived signal that has no chain counterpart"
     };
   }
 

@@ -16,7 +16,9 @@ export function assessStoreAuthEvidence(
   config: StoreAuthConfig | undefined,
   runtimeEnvironment: ChainServicesRuntimeEnv
 ): StoreAuthEvidenceAssessment {
-  const strictRuntime = runtimeEnvironment === "staging" || runtimeEnvironment === "production";
+  // testnet 是公开测试网（Base Sepolia），与 staging/production 同按
+  // strict runtime 评估外部身份证据。
+  const strictRuntime = runtimeEnvironment !== "local";
   if (!config) {
     return failedStoreAuthEvidence(strictRuntime, "store_auth_config_missing", "missing");
   }

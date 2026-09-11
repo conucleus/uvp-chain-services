@@ -379,7 +379,9 @@ describe("relayer non-signing boundary", () => {
     });
   });
 
-  it("records duplicate signer nonce attempts as dead-letter duplicate failures", async () => {
+  it("records duplicate signer nonce attempts as retryable pending failures, never terminal dead letters", async () => {
+    // 预留失败不是终态——并发/在途的同 nonce 提交结果未知，钉成
+    // dead_letter 会让 nonce 释放后的合法重试被终态台账永久拒绝。
     const submitStarted = deferred<void>();
     const submitRelease = deferred<void>();
     const recorded: unknown[] = [];
@@ -414,13 +416,176 @@ describe("relayer non-signing boundary", () => {
       status: "failed",
       errorCode: "duplicate_signer_nonce",
       failureCategory: "duplicate",
-      retryable: false,
-      retryState: "dead_letter",
-      deadLetter: true
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false
     });
     expect(recorded).toEqual(expect.arrayContaining([
       expect.objectContaining({ errorCode: "duplicate_signer_nonce" })
     ]));
+  });
+
+  it("does not let a concurrent duplicate failure overwrite the winner's submitted ledger entry", async () => {
+    // 状态守卫：胜者 record 已落库（budget 尚未跟上）时，败者的
+    // duplicate_signer_nonce 失败行不得覆盖 submitted 成功台账。
+    const duplicateEnteredReserve = deferred<void>();
+    const winnerRecorded = deferred<void>();
+    const recorded: unknown[] = [];
+    let reserveCalls = 0;
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => ({ txHash })
+      },
+      nonceStore: {
+        reserve: async () => {
+          reserveCalls += 1;
+          if (reserveCalls === 1) {
+            return true;
+          }
+          duplicateEnteredReserve.resolve();
+          await winnerRecorded.promise;
+          return false;
+        },
+        release: async () => undefined
+      },
+      submissionStore: {
+        record: async (submission) => {
+          if (submission.status === "submitted") {
+            // 胜者的成功台账先落库，saveRetryState 尚未跟上——正是守卫
+            // 必须覆盖的窗口。
+            await duplicateEnteredReserve.promise;
+            recorded.push(submission);
+            winnerRecorded.resolve();
+            return;
+          }
+          recorded.push(submission);
+        },
+        load: async (submissionId: string) => {
+          const found = recorded.find((entry) => (entry as { readonly id: string }).id === submissionId);
+          return found as never;
+        }
+      },
+      now: () => new Date("2026-01-01T00:00:00Z")
+    });
+
+    const first = relayer.relay(request("nonce-guard"));
+    const duplicate = await relayer.relay(request("nonce-guard"));
+    await expect(first).resolves.toMatchObject({ status: "submitted", txHash });
+
+    // 败者拿到胜者的 submitted 结果，台账只保留成功行。
+    expect(duplicate).toMatchObject({ status: "submitted", txHash });
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({ status: "submitted" });
+  });
+
+  it("returns the winner's submitted result on the submitter failure path when the outcome guard fires", async () => {
+    // SVC-3：submitter 抛错路径不得丢弃 persistOutcome 的胜者结果——
+    // 并发竞速中台账已是 submitted+txHash 时，调用方必须拿到与台账
+    // 一致的 submitted，而不是本地构造的 failed+retryable（否则会对已
+    // 消费的 nonce 诱导重签）。
+    const winnerSubmitStarted = deferred<void>();
+    const failureLoadEntered = deferred<void>();
+    const winnerRecorded = deferred<void>();
+    const recorded: unknown[] = [];
+    let submitCalls = 0;
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      // 同一订单的两笔并发（胜者+败者）都要进入 submitter，不设单订单
+      // 在途门。
+      maxInFlightPerOrder: 0,
+      submitter: {
+        submit: vi.fn(async () => {
+          submitCalls += 1;
+          if (submitCalls === 1) {
+            // 胜者先进入 submit，等败者的台账读取就位后再返回 txHash。
+            winnerSubmitStarted.resolve();
+            await failureLoadEntered.promise;
+            return { txHash };
+          }
+          throw new Error("rpc connection reset");
+        })
+      },
+      nonceStore: {
+        reserve: async () => true,
+        release: async () => undefined
+      },
+      submissionStore: {
+        record: async (submission: RelaySubmission) => {
+          if (submission.status === "submitted") {
+            recorded.push(submission);
+            winnerRecorded.resolve();
+            return;
+          }
+          recorded.push(submission);
+        },
+        // loadRetryState 在每次 relay 入口都会 load——只在败者已抛错后的
+        // 守卫读取上阻塞，制造"胜者 record 已落库、budget 未跟上"的
+        // 竞速窗口。
+        load: async (submissionId: string) => {
+          if (submitCalls >= 2) {
+            failureLoadEntered.resolve();
+            await winnerRecorded.promise;
+          }
+          const found = recorded.find((entry) => (entry as { readonly id: string }).id === submissionId);
+          return found as never;
+        }
+      },
+      now: () => new Date("2026-01-01T00:00:00Z")
+    });
+
+    const first = relayer.relay(request("nonce-winner-guard"));
+    await winnerSubmitStarted.promise;
+    const failure = relayer.relay(request("nonce-winner-guard"));
+    await failureLoadEntered.promise;
+    await winnerRecorded.promise;
+
+    await expect(first).resolves.toMatchObject({ status: "submitted", txHash });
+    await expect(failure).resolves.toMatchObject({ status: "submitted", txHash });
+    // 台账只保留成功行——败者的 failed 行被守卫拦下。
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({ status: "submitted" });
+  });
+
+  it("treats nonce-too-low without a txHash as a retryable re-assembly, not a terminal dead letter", async () => {
+    // gas nonce 冲突是瞬态（换 nonce 重组装即自愈）：错误不携带 txHash、
+    // 探针无可探对象——不得钉 dead_letter 终态（否则同载荷重放被
+    // isTerminalSubmission 永久短路），且须释放服务侧 nonce 让重试可广播。
+    let submitCalls = 0;
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => {
+          submitCalls += 1;
+          if (submitCalls === 1) {
+            throw new Error("nonce too low");
+          }
+          return { txHash };
+        }
+      },
+      nonceStore: new MemoryRelayNonceStore(),
+      now: () => new Date("2026-01-01T00:00:00Z")
+    });
+
+    const first = await relayer.relay(request("nonce-too-low"));
+    expect(first).toMatchObject({
+      status: "failed",
+      errorCode: "duplicate_transaction",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false
+    });
+
+    // 同一载荷重试：nonce 已释放，重组装广播成功。
+    const retried = await relayer.relay(request("nonce-too-low"));
+    expect(retried).toMatchObject({ status: "submitted", txHash });
+    expect(submitCalls).toBe(2);
   });
 
   it("escalates retryable failure delays exponentially and resets after success", async () => {

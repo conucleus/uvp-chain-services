@@ -5,7 +5,7 @@ import {
   isAnchoredStoreAuthorizationResult,
   requireAnchoredStoreAddress
 } from "../store-authz.js";
-import type { ApiRequest, ApiResponse } from "../route-context.js";
+import { decodePathParameter, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 /** 装修路由：publisher（或受托成员）才可写，服务端强制。 */
@@ -20,7 +20,7 @@ export function createStoreDecorationRouteModule(options: {
       try {
         const decorationMatch = /^\/store\/decoration\/([^/]+)(?:\/versions(?:\/(\d+)(?:\/restore)?)?)?$/.exec(request.pathname);
         if (decorationMatch) {
-          const planId: string = decodeURIComponent(decorationMatch[1] ?? "");
+          const planId: string = decodePathParameter(decorationMatch[1] ?? "");
           if (!planId) {
             return { status: 404, body: { error: "not_found" } };
           }
@@ -79,7 +79,7 @@ export function createStoreDecorationRouteModule(options: {
 
         const delegationListMatch = /^\/store\/publishers\/([^/]+)\/delegations$/.exec(request.pathname);
         if (delegationListMatch && request.method === "GET") {
-          const authorization = await requireAnchoredStoreAddress(context, request, { type: "store_delegation", id: decodeURIComponent(delegationListMatch[1] ?? "") });
+          const authorization = await requireAnchoredStoreAddress(context, request, { type: "store_delegation", id: decodePathParameter(delegationListMatch[1] ?? "") });
           if (!isAnchoredStoreAuthorizationResult(authorization)) {
             return authorization;
           }
@@ -87,7 +87,7 @@ export function createStoreDecorationRouteModule(options: {
             status: 200,
             body: {
               delegations: await options.decorationService.listDelegations(
-                decodeURIComponent(delegationListMatch[1] ?? ""),
+                decodePathParameter(delegationListMatch[1] ?? ""),
                 decorationActor(authorization.access, authorization.anchoredAddress, authorization.accountId)
               )
             }
@@ -112,7 +112,7 @@ export function createStoreDecorationRouteModule(options: {
 
         const delegationRevokeMatch = /^\/store\/publishers\/delegations\/([^/]+)\/revoke$/.exec(request.pathname);
         if (delegationRevokeMatch && request.method === "POST") {
-          const authorization = await requireAnchoredStoreAddress(context, request, { type: "store_delegation", id: decodeURIComponent(delegationRevokeMatch[1] ?? "") });
+          const authorization = await requireAnchoredStoreAddress(context, request, { type: "store_delegation", id: decodePathParameter(delegationRevokeMatch[1] ?? "") });
           if (!isAnchoredStoreAuthorizationResult(authorization)) {
             return authorization;
           }
@@ -120,7 +120,7 @@ export function createStoreDecorationRouteModule(options: {
             status: 200,
             body: {
               delegations: await options.decorationService.revokeDelegation(
-                decodeURIComponent(delegationRevokeMatch[1] ?? ""),
+                decodePathParameter(delegationRevokeMatch[1] ?? ""),
                 request.body,
                 decorationActor(authorization.access, authorization.anchoredAddress, authorization.accountId)
               )

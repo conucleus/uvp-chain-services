@@ -132,7 +132,8 @@ export async function resolveEvidencePrincipal(
   runtimeEnvironment?: ChainServicesRuntimeEnv
 ): Promise<EvidencePrincipal> {
   const access = await context.storeIdentityProvider.resolve(request.headers);
-  const governance = access.governancePrincipal ?? adminPrincipalFromHeaders(request.headers);
+  const governance = access.governancePrincipal ??
+    adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
   if (governance) {
     return { id: governance.adminId.toLowerCase(), role: "admin" };
   }

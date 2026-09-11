@@ -4,6 +4,10 @@ import type { ChainServicesConfig } from "./env.js";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { assessStoreAuthEvidence, type StoreAuthEvidenceClassification, type StoreAuthKeySource } from "./store-auth-evidence.js";
+import {
+  ANVIL_DEFAULT_ADDRESSES,
+  ANVIL_DEFAULT_PRIVATE_KEYS,
+} from "./anvil-defaults.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -17,7 +21,6 @@ export interface ConfigDiagnosticCheck {
 
 export interface ConfigDiagnostics {
   readonly environment: ChainServicesConfig["security"]["environment"];
-  readonly e2eControls: boolean;
   readonly storageDriver: string;
   readonly relayerConfigured: boolean;
   readonly network: {
@@ -66,6 +69,8 @@ export interface ConfigDiagnostics {
     readonly governanceSigner: PrivateKeyRoleDiagnostics;
     readonly governanceAdminReviewer: {
       readonly configuredCount: number;
+      /** GOVERNANCE_ADMIN_TOKEN_HASHES 是否配置（非 local 口令因子）。 */
+      readonly adminTokenConfigured: boolean;
       readonly publicTrustAuthority: false;
     };
     readonly opsConsoleAdmin: {
@@ -110,7 +115,6 @@ export interface ConfigDiagnostics {
     readonly clockToleranceSeconds: number;
   };
   readonly product: {
-    readonly e2eControls: boolean;
     readonly registrationAdapter: ChainServicesConfig["productBff"]["registrationAdapter"];
     readonly permissiveAuthorizationRequested: boolean;
   };
@@ -219,19 +223,19 @@ export function buildConfigDiagnostics(
     ? privateKeyAddress(config.governance.signerPrivateKey, "governance signer")
     : undefined;
   const governanceContractConfigured = Boolean(identityRegistry);
-  const e2eControls = enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES");
   const permissiveAuthorizationRequested = enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") ||
     isPermissiveAuthorizationRequested(env);
   const storeAuth = effectiveStoreAuthConfig(config);
   const storeAuthEvidence = assessStoreAuthEvidence(storeAuth, config.security.environment);
   const preflight = options.preflight ?? {
-    status: config.security.preflightStrict ? "skipped" : "skipped",
+    // 未传入执行结果 = 预检尚未运行，无论 strict 与否都如实记 skipped
+    //（strict 部署正常都会经 runConfigPreflight 传入真实结果）。
+    status: "skipped" as const,
     checks: []
   };
 
   return {
     environment: config.security.environment,
-    e2eControls,
     storageDriver: config.database.driver,
     relayerConfigured,
     network: {
@@ -245,7 +249,6 @@ export function buildConfigDiagnostics(
     warnings: diagnosticWarnings(config, {
       relayerConfigured,
       relayerPrivateKeyConfigured,
-      e2eControls,
       permissiveAuthorizationRequested
     }),
     preflight: {
@@ -319,7 +322,6 @@ export function buildConfigDiagnostics(
       clockToleranceSeconds: storeAuth.clockToleranceSeconds
     },
     product: {
-      e2eControls,
       registrationAdapter: config.productBff.registrationAdapter,
       permissiveAuthorizationRequested
     },
@@ -345,6 +347,7 @@ function runStaticPreflight(
   runStoreAuthPreflight(config, env, checks, errors);
   runNonLocalRoleSafetyPreflight(config, env, checks, errors);
   runStateMachineModulesManifestPreflight(config, checks, errors);
+  runModuleAddressDriftPreflight(config, checks, errors);
 
   if (config.relayer.broadcastEnabled) {
     if (!stateMachine) {
@@ -411,7 +414,8 @@ function runStoreAuthPreflight(
   const envMode = env.STORE_AUTH_MODE?.trim();
   const storeAuth = effectiveStoreAuthConfig(config);
   const mode = envMode === "dev_headers" || envMode === "jwt" ? envMode : storeAuth.mode;
-  const strictRuntime = config.security.environment === "staging" || config.security.environment === "production";
+  // testnet 是公开测试网，与 staging/production 同按 strict runtime 收口。
+  const strictRuntime = config.security.environment !== "local";
   // testnet 不允许 dev_headers——自报 store 头不是 testnet 的身份证明；
   // STORE_AUTH_MODE 必须显式配置。
   const devHeadersAllowed = config.security.environment === "local";
@@ -427,6 +431,14 @@ function runStoreAuthPreflight(
     pass(checks, "store_auth.dev_headers");
   }
 
+  // dev 锚定地址头 local-only：非 local 自报地址锚定等于伪造身份
+  //（env 解析层已拒绝，这里是纵深防御）。
+  if (strictRuntime && enabledEnv(env, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")) {
+    fail(checks, errors, "store_auth.dev_anchored_header", "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER is only allowed in local development");
+  } else {
+    pass(checks, "store_auth.dev_anchored_header");
+  }
+
   if (mode !== "jwt") {
     return;
   }
@@ -440,9 +452,9 @@ function runStoreAuthPreflight(
   if (evidence.externalIdentityEvidence) {
     pass(checks, "store_auth.external_oidc");
   } else if (strictRuntime) {
-    fail(checks, errors, "store_auth.external_oidc", `Store staging identity must use external HTTPS OIDC/JWKS evidence; rejected reasons: ${evidence.reasons.join(", ")}`);
+    fail(checks, errors, "store_auth.external_oidc", `Store identity outside local development must use external HTTPS OIDC/JWKS evidence; rejected reasons: ${evidence.reasons.join(", ")}`);
   } else {
-    skip(checks, "store_auth.external_oidc", "external Store OIDC/JWKS evidence is not required outside staging and production");
+    skip(checks, "store_auth.external_oidc", "external Store OIDC/JWKS evidence is not required in local development");
   }
 }
 
@@ -516,6 +528,14 @@ function runProductionSafetyPreflight(
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in production");
   }
+  // 管理面生产基线：非 local 要求口令/签名因子——
+  // 明文白名单自报头不是完整凭据（governance/auth.ts 同口径拒
+  // 绝），缺口令哈希直接拦截启动。
+  if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
+    pass(checks, "operator.governance_admin_token");
+  } else {
+    fail(checks, errors, "operator.governance_admin_token", "GOVERNANCE_ADMIN_TOKEN_HASHES is required in production");
+  }
   requireDurableStoreMetadata(config, checks, errors, "production");
   if (config.database.migrationsAutoRun && env.UVP_PRODUCTION_ALLOW_AUTO_MIGRATIONS?.trim() !== "1") {
     fail(checks, errors, "storage.migrations_auto_run", "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN=true is forbidden in production without UVP_PRODUCTION_ALLOW_AUTO_MIGRATIONS=1");
@@ -532,16 +552,24 @@ function runProductionSafetyPreflight(
     fail(checks, errors, "network.finality_confirmations_explicit", "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production");
   }
 
+  // 生产最终性下限。确认数是 reorg 缓冲——配 1 时边界块自身的
+  // 单块重组即可穿透缓冲（哈希连续性校验只能事后补救），形同虚设；
+  // 生产至少 2 个确认。
+  if (config.network.finalityConfirmations >= 2) {
+    pass(checks, "network.finality_confirmations_floor");
+  } else {
+    fail(
+      checks,
+      errors,
+      "network.finality_confirmations_floor",
+      "UVP_FINALITY_CONFIRMATIONS must be at least 2 in production; a 1-block buffer lets a single-block reorg slip past the finality window"
+    );
+  }
+
   if (config.productBff.registrationAdapter !== "anvil") {
     fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production");
   } else {
     pass(checks, "product.registration_adapter");
-  }
-
-  if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
-    fail(checks, errors, "product.e2e_controls", "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in production");
-  } else {
-    pass(checks, "product.e2e_controls");
   }
 
   if (enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") || isPermissiveAuthorizationRequested(env)) {
@@ -644,6 +672,13 @@ function runTestnetSafetyPreflight(
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in testnet");
   }
+  // 管理面生产基线：testnet 同按非 local 口径要求
+  // 管理面口令因子。
+  if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
+    pass(checks, "operator.governance_admin_token");
+  } else {
+    fail(checks, errors, "operator.governance_admin_token", "GOVERNANCE_ADMIN_TOKEN_HASHES is required in testnet");
+  }
 
   if (stateMachine) {
     pass(checks, "contracts.state_machine");
@@ -673,12 +708,6 @@ function runTestnetSafetyPreflight(
     pass(checks, "evidence.storage_adapter");
   } else {
     fail(checks, errors, "evidence.storage_adapter", "UVP_EVIDENCE_STORAGE_ADAPTER=rehearsal-object is required in testnet");
-  }
-
-  if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
-    fail(checks, errors, "product.e2e_controls", "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in testnet");
-  } else {
-    pass(checks, "product.e2e_controls");
   }
 
   if (enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") || isPermissiveAuthorizationRequested(env)) {
@@ -807,11 +836,6 @@ function runStagingSafetyPreflight(
     pass(checks, "evidence.s3_object_namespace");
   }
 
-  if (enabledEnv(env, "UVP_PRODUCT_E2E_FIXTURES")) {
-    fail(checks, errors, "product.e2e_controls", "UVP_PRODUCT_E2E_FIXTURES=1 is forbidden in staging");
-  } else {
-    pass(checks, "product.e2e_controls");
-  }
   if (enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") || isPermissiveAuthorizationRequested(env)) {
     fail(checks, errors, "product.permissive_authorization", "permissive Product submission authorization is forbidden in staging");
   } else {
@@ -863,6 +887,38 @@ function runStateMachineModulesManifestPreflight(
     return;
   }
 
+  // activeDeploymentId 与清单不匹配时 selectActiveStateMachineDeployment
+  // 会静默回退（status=active / 首项），拼错的部署 id 因此永远不会暴露——
+  // 运行时用的是另一个部署。不匹配即显式失败。
+  if (
+    config.network.activeDeploymentId &&
+    !deployments.some((deployment) => deployment.deploymentId === config.network.activeDeploymentId)
+  ) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_modules_manifest",
+      `activeDeploymentId ${config.network.activeDeploymentId} does not match any deployment in stateMachineDeployments; refusing to silently fall back to another deployment`
+    );
+    return;
+  }
+
+  // 首项静默回退在 strict 环境同样必须消除：无 activeDeploymentId 且
+  // status=active 的部署不唯一（零个或多个）时，运行时用的是"碰巧排在
+  // 清单第一"的部署——canary/candidate 排前面就会整环境跑错部署。
+  if (!config.network.activeDeploymentId) {
+    const activeCount = deployments.filter((deployment) => deployment.status === "active").length;
+    if (activeCount !== 1) {
+      fail(
+        checks,
+        errors,
+        "contracts.state_machine_modules_manifest",
+        `stateMachineDeployments must contain exactly one status=active deployment (or an explicit activeDeploymentId) in production/testnet/staging; found ${activeCount}; refusing to silently use the first entry`
+      );
+      return;
+    }
+  }
+
   const active = selectActiveStateMachineDeployment(config);
   if (!active) {
     fail(
@@ -896,6 +952,57 @@ function runStateMachineModulesManifestPreflight(
     return;
   }
   pass(checks, "contracts.state_machine_modules_manifest");
+}
+
+const FLAT_CONTRACT_BY_MODULE_KEY = {
+  stagePatch: "UVPStagePatchModule",
+  derivedSignal: "UVPDerivedSignalModule",
+  docking: "UVPDockingModule",
+  planMetadata: "UVPPlanMetadataModule",
+  orderLink: "UVPOrderLinkModule"
+} as const;
+
+type ModuleManifestKey = keyof typeof FLAT_CONTRACT_BY_MODULE_KEY;
+
+/**
+ * 模块地址双轨一致性：扁平 contracts 键（server.ts moduleAddress 写路径
+ * 优先取、索引器也 watch）与 deployment.modules（预检对链核验）同时配置
+ * 且地址不一致时，写入与投影会指向不同合约——有写入无投影。任何环境都
+ * 不允许静默漂移；只配单轨（或两轨一致）不受影响。
+ */
+function runModuleAddressDriftPreflight(
+  config: ChainServicesConfig,
+  checks: ConfigDiagnosticCheck[],
+  errors: string[]
+): void {
+  const deployments = config.network.stateMachineDeployments ?? [];
+  if (deployments.length === 0) {
+    skip(checks, "contracts.module_address_consistency", "no nested deployment module manifest configured");
+    return;
+  }
+  const drifts: string[] = [];
+  for (const [moduleKey, contractName] of Object.entries(FLAT_CONTRACT_BY_MODULE_KEY) as readonly [ModuleManifestKey, string][]) {
+    const flat = config.network.contracts[contractName];
+    if (!flat) {
+      continue;
+    }
+    for (const deployment of deployments) {
+      const nested = deployment.modules?.[moduleKey];
+      if (nested && nested.toLowerCase() !== flat.toLowerCase()) {
+        drifts.push(`${contractName}=${flat} conflicts with deployment ${deployment.deploymentId} modules.${moduleKey}=${nested}`);
+      }
+    }
+  }
+  if (drifts.length > 0) {
+    fail(
+      checks,
+      errors,
+      "contracts.module_address_consistency",
+      `flat module contract addresses diverge from deployment module manifests: ${drifts.join("; ")}`
+    );
+    return;
+  }
+  pass(checks, "contracts.module_address_consistency");
 }
 
 function runNonLocalRoleSafetyPreflight(
@@ -995,6 +1102,13 @@ function runStagingRolePreflight(
     pass(checks, "operator.ops_console_admin");
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in staging");
+  }
+  // 管理面生产基线：staging gate 前置项——运营面
+  // 访问要求口令或签名因子，明文白名单自报头仅限 local 档。
+  if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
+    pass(checks, "operator.governance_admin_token");
+  } else {
+    fail(checks, errors, "operator.governance_admin_token", "GOVERNANCE_ADMIN_TOKEN_HASHES is required in staging");
   }
 }
 
@@ -1288,8 +1402,10 @@ function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Addr
 
 /**
  * 统一的 active deployment 选择口径：精确 activeDeploymentId 优先，其次
- * status=active，最后唯一回退首项。server.ts（模块地址解析）与
- * preflight（模块校验）共用，避免两处谓词漂移。
+ * status=active，最后唯一回退首项。server.ts（模块地址解析）与 preflight
+ * （模块校验）共用，避免两处谓词漂移。首项回退仅供 local 最小配置：
+ * strict 环境由 runStateMachineModulesManifestPreflight 强制显式选择
+ * （activeDeploymentId 或唯一 status=active），回退在那里不可达。
  */
 export function selectActiveStateMachineDeployment(
   config: ChainServicesConfig
@@ -1316,7 +1432,6 @@ function diagnosticWarnings(
   values: {
     readonly relayerConfigured: boolean;
     readonly relayerPrivateKeyConfigured: boolean;
-    readonly e2eControls: boolean;
     readonly permissiveAuthorizationRequested: boolean;
   }
 ): readonly string[] {
@@ -1326,9 +1441,6 @@ function diagnosticWarnings(
   }
   if (config.productBff.registrationAdapter === "memory-trigger") {
     warnings.push("Product BFF registration uses the memory-trigger adapter");
-  }
-  if (values.e2eControls) {
-    warnings.push("Product E2E controls are requested");
   }
   if (values.permissiveAuthorizationRequested) {
     warnings.push("permissive Product authorization is requested");
@@ -1348,7 +1460,7 @@ function diagnosticWarnings(
   // 产品通知渠道决策未做，webhook transport 默认关闭；未配置时
   // 所有投递按 transport_adapter_missing 记录失败，这里给出可见提醒。
   if (!config.notifications?.webhookUrl) {
-    warnings.push("UVP_NOTIFY_WEBHOOK_URL is not configured; notification delivery will be recorded as failed (transport_adapter_missing)");
+    warnings.push("UVP_NOTIFY_WEBHOOK_URL is not configured; notification delivery will be recorded as skipped (transport_adapter_missing)");
   }
   // 证据只有单副本时提醒配置第二副本 bucket。
   if (config.evidenceStorage.adapter === "s3" && !config.evidenceStorage.s3BackupBucket) {
@@ -1399,6 +1511,7 @@ function operatorRoleDiagnostics(config: ChainServicesConfig, env: Env): ConfigD
     ),
     governanceAdminReviewer: {
       configuredCount: config.operatorRoles.adminReviewers.length,
+      adminTokenConfigured: (config.operatorRoles.adminTokenHashes ?? []).length > 0,
       publicTrustAuthority: false
     },
     opsConsoleAdmin: {
@@ -1482,30 +1595,5 @@ function skip(checks: ConfigDiagnosticCheck[], name: string, message: string): v
   checks.push({ name, status: "skipped", message });
 }
 
-const ANVIL_DEFAULT_PRIVATE_KEYS = new Set([
-  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-  "0x59c6995e998f97a5a0044966f094538864e17c8b7e37a2c115d7e4cc795fb0c1",
-  "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
-  "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
-  "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
-  "0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a",
-  "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba",
-  "0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e",
-  "0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356",
-  "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97",
-  "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6"
-]);
-
-const ANVIL_DEFAULT_ADDRESSES = new Set<Address>([
-  "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
-  "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-  "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
-  "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
-  "0x15d34aaf54267db7d7c367839aaf71a00a2c6a65",
-  "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc",
-  "0x976ea74026e726554db657fa54763abd0c3a0aa9",
-  "0x14dc79964da2c08b23698b3d3cc7ca32193d9955",
-  "0x23618e81e3f5cdf7f54c3d65f7fbc0abf5b21e8f",
-  "0xa0ee7a142d267c1f36714e4a8f75612f20a79720",
-  "0xbcd4042de499d14e55001ccbb24a551f3b954096"
-]);
+// Anvil 开发账户黑名单的单一来源在 anvil-defaults.ts（与 env.ts 共享），
+// 私钥/地址成对维护，避免两份拷贝漂移。

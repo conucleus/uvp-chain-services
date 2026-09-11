@@ -1,4 +1,6 @@
+import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
+import { createEvidenceService, InMemoryEvidenceStorage, type EvidencePrincipal } from "../src/evidence/index.js";
 import { InMemoryGovernanceStore, type IdentityTxLogDTO } from "../src/governance/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProductBffStore } from "../src/product/bff/store.js";
@@ -6,7 +8,8 @@ import type {
   ProductOrderDraftDTO,
   ProductOrderTriggerRecord
 } from "../src/product/bff/types.js";
-import { TxReconcileWorker, type ReconcileReceipt, type ReconcileReceiptClient } from "../src/reconcile/index.js";
+import { TxReconcileWorker, createViemReconcileReceiptClient, type EvidenceBindingSweeper, type ReconcileReceipt, type ReconcileReceiptClient } from "../src/reconcile/index.js";
+import { InMemoryAuditSink, type AuditSink } from "../src/security/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { InMemoryProductSubmissionStore, type ProductSubmissionDTO } from "../src/submissions/index.js";
 import type { Address, Hex } from "../src/shared/types.js";
@@ -26,13 +29,57 @@ const payloadHash = bytes32("3003");
 const idempotencyKey = bytes32("3004");
 
 describe("tx/indexer reconcile worker", () => {
+  it("serializes concurrent manual and scheduled runs through the runOnce reentry guard", async () => {
+    // 回归：admin runReconcile / retrySubmission 与定时轮询并发触达
+    // runOnce，防重入必须在 runOnce 本体（只在 #runOnceSafely 挡不住手动
+    // 入口）。进行中的一轮未结束时，后到触发返回空汇总而不双跑。
+    const projectionStore = new MemoryProjectionStore();
+    const productStore = new MemoryProductBffStore();
+    const receipts = new Map<Hex, ReconcileReceipt | undefined>();
+    const txHash = bytes32("aaaa");
+    await productStore.createDraft(draftFixture(), []);
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ txHash }));
+    let releaseFirstRun: (() => void) | undefined;
+    const firstRunBlocked = new Promise<void>((resolve) => { releaseFirstRun = resolve; });
+    const client = receiptClient(receipts);
+    const worker = new TxReconcileWorker({
+      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000 },
+      receiptClient: {
+        async getTransactionReceipt(hash) {
+          await firstRunBlocked;
+          return client.getTransactionReceipt(hash);
+        }
+      },
+      projectionStore,
+      productStore,
+      now: () => baseNow
+    });
+
+    const firstRun = worker.runOnce();
+    // 首轮悬停在回执查询处：并发的第二轮（手动入口）必须被守卫挡下。
+    const secondRun = await worker.runOnce();
+    expect(secondRun).toEqual({
+      registrationsChecked: 0,
+      submissionsChecked: 0,
+      governanceLogsChecked: 0,
+      evidenceBindsSwept: 0,
+      evidenceBindsRepaired: 0,
+      updated: 0,
+      failed: 0
+    });
+
+    releaseFirstRun!();
+    const firstSummary = await firstRun;
+    expect(firstSummary.registrationsChecked).toBe(1);
+  });
+
   it("keeps receipt-missing registrations pending, then confirms after OrderRegistered projection appears", async () => {
     const projectionStore = new MemoryProjectionStore();
     const productStore = new MemoryProductBffStore();
     const receipts = new Map<Hex, ReconcileReceipt | undefined>();
     const txHash = bytes32("aaaa");
     await productStore.createDraft(draftFixture(), []);
-    await productStore.createRegistration(registrationFixture({ txHash }));
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ txHash }));
     const worker = workerFixture({ projectionStore, productStore, receipts });
 
     await worker.runOnce();
@@ -77,11 +124,16 @@ describe("tx/indexer reconcile worker", () => {
     const txHash = bytes32("a111");
     const mismatchedTxHash = bytes32("a222");
     await productStore.createDraft(draftFixture(), []);
-    await productStore.createRegistration(registrationFixture({ txHash }));
-    await productStore.createRegistration(registrationFixture({
-      triggerId: "registration_mismatch",
-      txHash: mismatchedTxHash
-    }));
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ txHash }));
+    await productStore.createRegistrationIfNoneForDraft({
+      ...registrationFixture({
+        triggerId: "registration_mismatch",
+        txHash: mismatchedTxHash
+      }),
+      // draft_id 一事一单（UNIQUE）：第二条记录必须落在自己的 draft 上，
+      // 同 draft 双记录在持久驱动里本来就插不进去。
+      draftId: "draft_mismatch"
+    });
     await projectionStore.resetFromEvents({
       deploymentBlock: 0n,
       events: [chainEvent(11n, txHash, 0, "OrderRegistered", { orderId, planId })]
@@ -107,7 +159,7 @@ describe("tx/indexer reconcile worker", () => {
   });
 
   it("isolates a broken registration record instead of stalling the whole reconcile round", async () => {
-    // 簇 E-3（2349 #8）：单条坏记录（缺字段/存储写失败）只计失败并继续，
+    // 单条坏记录（缺字段/存储写失败）只计失败并继续，
     // 不再把整轮（含 /admin/ops/reconcile/run）拖成 500。
     const projectionStore = new MemoryProjectionStore();
     const txHash = bytes32("a333");
@@ -129,8 +181,8 @@ describe("tx/indexer reconcile worker", () => {
     }();
     await productStore.createDraft({ ...draftFixture(), draftId: "draft_1" }, []);
     await productStore.createDraft({ ...draftFixture(), draftId: "draft_broken" }, []);
-    await productStore.createRegistration(registrationFixture({ txHash }));
-    await productStore.createRegistration({
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ txHash }));
+    await productStore.createRegistrationIfNoneForDraft({
       ...registrationFixture({ triggerId: "registration_broken", txHash: brokenTxHash }),
       draftId: "draft_broken",
       orderId: bytes32("0e0e")
@@ -148,7 +200,7 @@ describe("tx/indexer reconcile worker", () => {
   });
 
   it("confirms registrations through the (planId, orderId) composite key when two plans reuse an order id", async () => {
-    // 簇 E-3（0132 P2-11/0630 M-5/0632 CS-7）：裸 orderId 在同号订单跨 plan
+    // 裸 orderId 在同号订单跨 plan
     // 复用时永远查不中 → registration 永卡 indexing；复合键查询必须命中
     // 本 plan 的投影。
     const otherPlanId = bytes32("0f0f");
@@ -163,7 +215,7 @@ describe("tx/indexer reconcile worker", () => {
     });
     const productStore = new MemoryProductBffStore();
     await productStore.createDraft(draftFixture(), []);
-    await productStore.createRegistration(registrationFixture({ txHash }));
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ txHash }));
     const worker = workerFixture({
       projectionStore,
       productStore,
@@ -285,7 +337,7 @@ describe("tx/indexer reconcile worker", () => {
   it("marks stale pending txs failed without deleting unknown records", async () => {
     const productStore = new MemoryProductBffStore();
     const projectionStore = new MemoryProjectionStore();
-    await productStore.createRegistration(registrationFixture({
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({
       triggerId: "registration_stale",
       txHash: bytes32("eeee"),
       createdAt: "2026-04-27T23:00:00Z"
@@ -383,6 +435,261 @@ describe("tx/indexer reconcile worker", () => {
       status: "failed"
     });
   });
+
+  it("sweeps missing evidence binds for successful submissions and closes the audit trail", async () => {
+    // 绑定失败留痕（relayer.submit.evidence_bind_failed，submit 时落审计）
+    // 的记录由清扫补账：用随提交落库的证据引用重试绑定，成功后审计事件
+    // 闭合（reconcile.evidence_bind.succeeded）；已绑定的提交不动作。
+    const owner: EvidencePrincipal = { id: submitter.toLowerCase(), role: "participant" };
+    let evidenceCounter = 0;
+    const evidenceService = createEvidenceService({
+      runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => baseNow,
+      evidenceIdFactory: () => `ev_sweep_${++evidenceCounter}`
+    });
+    const missing = await evidenceService.uploadEvidence({
+      orderId,
+      taskId: "task_sweep_missing",
+      stageIdentifier: "stage",
+      documentType: "customs-declaration",
+      fileName: "missing.txt",
+      textPayload: "customs declaration missing bind"
+    }, owner);
+    const alreadyBound = await evidenceService.uploadEvidence({
+      orderId,
+      taskId: "task_sweep_bound",
+      stageIdentifier: "stage",
+      documentType: "customs-declaration",
+      fileName: "bound.txt",
+      textPayload: "customs declaration already bound"
+    }, owner);
+    await evidenceService.bindEvidence({
+      evidenceId: alreadyBound.evidence.evidenceId,
+      submissionId: "sub_bind_ok",
+      txHash: bytes32("7002"),
+      orderId,
+      onchainOrderId: orderId,
+      sourceId,
+      signalId,
+      boundAt: baseNow.toISOString()
+    }, owner);
+
+    const projectionStore = new MemoryProjectionStore();
+    const submissionStore = new InMemoryProductSubmissionStore();
+    // 预置 submit 时的失败审计事件，断言清扫事件在时间线上闭合它。
+    const audit = new InMemoryAuditSink();
+    await audit.record({
+      type: "relayer.submit.evidence_bind_failed",
+      action: "confirm_stage",
+      outcome: "failed",
+      subject: { submissionId: "sub_bind_missing" },
+      errorCode: "evidence_bind_failed",
+      retryable: true
+    });
+    const missingTx = bytes32("7001");
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_bind_missing",
+      txHash: missingTx,
+      evidenceIds: [missing.evidence.evidenceId]
+    }));
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_bind_ok",
+      txHash: bytes32("7002"),
+      evidenceIds: [alreadyBound.evidence.evidenceId]
+    }));
+    const worker = workerFixture({
+      projectionStore,
+      submissionStore,
+      receipts: new Map(),
+      evidenceBinder: evidenceService,
+      audit
+    });
+
+    const summary = await worker.runOnce();
+
+    // 两条提交都持 txHash 且落库了证据引用 → 都进清扫；只补缺失的一条。
+    expect(summary.evidenceBindsSwept).toBe(2);
+    expect(summary.evidenceBindsRepaired).toBe(1);
+
+    const repairedProof = await evidenceService.getProof(missing.evidence.evidenceId, owner);
+    expect(repairedProof).toMatchObject({
+      verificationStatus: "matched",
+      boundSubmissionId: "sub_bind_missing",
+      boundSignalTxHash: missingTx
+    });
+
+    const events = audit.list();
+    const closing = events.filter((event) => event.type === "reconcile.evidence_bind.succeeded");
+    expect(closing).toHaveLength(1);
+    expect(closing[0]).toMatchObject({
+      action: "confirm_stage",
+      outcome: "succeeded",
+      txHash: missingTx,
+      subject: { submissionId: "sub_bind_missing" },
+      metadata: { repairedEvidenceIds: [missing.evidence.evidenceId] }
+    });
+    // 审计闭合：失败留痕在前，补账收口在后。
+    expect(events.findIndex((event) => event.type === "relayer.submit.evidence_bind_failed"))
+      .toBeLessThan(events.findIndex((event) => event.type === "reconcile.evidence_bind.succeeded"));
+
+    // 第二轮：缺失已消除，无动作、无新审计事件。
+    const eventsBefore = audit.list().length;
+    const secondSummary = await worker.runOnce();
+    expect(secondSummary.evidenceBindsRepaired).toBe(0);
+    expect(audit.list()).toHaveLength(eventsBefore);
+  });
+
+  it("does not sweep submissions without a successful commit or without persisted evidence references", async () => {
+    // failed（即便带 txHash）没有"提交已成功"的事实基础；无证据引用的
+    // 记录没有可重试的绑定载荷——两者都不进清扫，证据保持原状。
+    const owner: EvidencePrincipal = { id: submitter.toLowerCase(), role: "participant" };
+    const evidenceService = createEvidenceService({
+      runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => baseNow,
+      evidenceIdFactory: () => "ev_unswept"
+    });
+    const evidence = await evidenceService.uploadEvidence({
+      orderId,
+      taskId: "task_unswept",
+      stageIdentifier: "stage",
+      documentType: "customs-declaration",
+      fileName: "unswept.txt",
+      textPayload: "customs declaration not swept"
+    }, owner);
+
+    const projectionStore = new MemoryProjectionStore();
+    const submissionStore = new InMemoryProductSubmissionStore();
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_failed_with_refs",
+      txHash: bytes32("7003"),
+      status: "failed",
+      broadcastStatus: "failed",
+      evidenceIds: [evidence.evidence.evidenceId]
+    }));
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_submitted_without_refs",
+      txHash: bytes32("7004")
+    }));
+    const audit = new InMemoryAuditSink();
+    const worker = workerFixture({
+      projectionStore,
+      submissionStore,
+      // 回执 reverted：failed 标记被链上事实确认，不因同轮回执复核改写
+      // 成在途态，清扫不得对其补绑。
+      receipts: new Map<Hex, ReconcileReceipt | undefined>([
+        [bytes32("7003"), { status: "reverted" }]
+      ]),
+      evidenceBinder: evidenceService,
+      audit
+    });
+
+    const summary = await worker.runOnce();
+
+    expect(summary.evidenceBindsSwept).toBe(0);
+    expect(summary.evidenceBindsRepaired).toBe(0);
+    await expect(evidenceService.getProof(evidence.evidence.evidenceId, owner)).resolves.toMatchObject({
+      verificationStatus: "unbound"
+    });
+    expect(audit.list()).toHaveLength(0);
+  });
+
+  it("surfaces gateway-style not-found transport errors as per-record failures instead of pending", async () => {
+    // 网关错误文本里的 "not found" 不代表回执缺失：吞成 pending 会在超时
+    // 车道把真实在链的交易误判成 tx_reconcile_timeout 失败。传输错误必须
+    // 响亮上抛（逐记录 catch 计 failed），记录保持原状等待下一轮。
+    const productStore = new MemoryProductBffStore();
+    const projectionStore = new MemoryProjectionStore();
+    const gatewayTx = bytes32("aaaa");
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({ triggerId: "registration_gateway", txHash: gatewayTx }));
+    const worker = new TxReconcileWorker({
+      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000 },
+      receiptClient: {
+        async getTransactionReceipt() {
+          throw new Error("upstream not found");
+        }
+      },
+      projectionStore,
+      productStore,
+      now: () => baseNow
+    });
+
+    const summary = await worker.runOnce();
+
+    expect(summary).toMatchObject({ registrationsChecked: 1, updated: 0, failed: 1 });
+    const untouched = await productStore.getRegistration("registration_gateway");
+    expect(untouched?.status).toBe("submitted");
+    expect(untouched).not.toHaveProperty("reconcileStatus");
+  });
+
+  it("classifies RPC receipt errors through the viem client boundary", async () => {
+    // 回执缺失判别收敛在 createViemReconcileReceiptClient 包装层：只有
+    // 明确指向交易/回执的 not found（geth "transaction not found"）才视为
+    // 缺失返回 undefined；网关类 "upstream not found" 原样上抛。
+    let rpcErrorMessage = "transaction not found";
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        error: { code: -32000, message: rpcErrorMessage }
+      }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    try {
+      const client = createViemReconcileReceiptClient({
+        rpcUrl: `http://127.0.0.1:${port}`,
+        chainId: 31337
+      });
+      await expect(client.getTransactionReceipt(bytes32("bbbb"))).resolves.toBeUndefined();
+
+      rpcErrorMessage = "upstream not found";
+      await expect(client.getTransactionReceipt(bytes32("cccc"))).rejects.toThrow(/not found/i);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("confirms governance logs whose txHash or account casing differs from the projection", async () => {
+    // 台账侧 EIP-55 混合大小写、投影侧事件解码小写：精确 === 比对会让
+    // 回执永远 miss、记录永卡 indexing。比对口径与其余路径一致 toLowerCase。
+    const projectionStore = new MemoryProjectionStore();
+    const governanceStore = new InMemoryGovernanceStore();
+    const lowercaseTx = bytes32("dddd");
+    const mixedCaseTx = `0x${"0".repeat(60)}dDdD` as Hex;
+    const mixedCaseAccount = "0x0000000000000000000000000000000000000AbC" as Address;
+    const lowercaseAccount = "0x0000000000000000000000000000000000000abc" as Address;
+    const receipts = new Map<Hex, ReconcileReceipt | undefined>([
+      [mixedCaseTx, { status: "success", blockNumber: 30n }]
+    ]);
+    await governanceStore.appendIdentityTxLog({
+      ...identityLogFixture({ txHash: mixedCaseTx }),
+      account: mixedCaseAccount
+    });
+    const worker = workerFixture({ projectionStore, governanceStore, receipts });
+
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [chainEvent(30n, lowercaseTx, 0, "IdentityBindingRegistered", {
+        bindingId: bytes32("2006"),
+        subjectId: planId,
+        account: lowercaseAccount,
+        descriptorHash: metadataHash,
+        descriptorURI: "uvp-store://identities/acme",
+        registrar: creator
+      })]
+    });
+    await worker.runOnce();
+
+    await expect(governanceStore.getTxLog("identity_log_1")).resolves.toMatchObject({
+      status: "confirmed",
+      receiptStatus: "success",
+      projectionStatus: "present"
+    });
+  });
 });
 
 function workerFixture(input: {
@@ -391,6 +698,8 @@ function workerFixture(input: {
   readonly productStore?: MemoryProductBffStore;
   readonly submissionStore?: InMemoryProductSubmissionStore;
   readonly governanceStore?: InMemoryGovernanceStore;
+  readonly evidenceBinder?: EvidenceBindingSweeper;
+  readonly audit?: AuditSink;
 }): TxReconcileWorker {
   return new TxReconcileWorker({
     config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000 },
@@ -399,6 +708,8 @@ function workerFixture(input: {
     ...(input.productStore ? { productStore: input.productStore } : {}),
     ...(input.submissionStore ? { submissionStore: input.submissionStore } : {}),
     ...(input.governanceStore ? { governanceStore: input.governanceStore } : {}),
+    ...(input.evidenceBinder ? { evidenceBinder: input.evidenceBinder } : {}),
+    ...(input.audit ? { audit: input.audit } : {}),
     now: () => baseNow
   });
 }
@@ -471,6 +782,7 @@ function submissionFixture(input: {
   readonly txHash?: Hex;
   readonly status?: ProductSubmissionDTO["status"];
   readonly broadcastStatus?: ProductSubmissionDTO["broadcastStatus"];
+  readonly evidenceIds?: readonly string[];
 }): ProductSubmissionDTO {
   const status = input.status ?? "submitted";
   return {
@@ -491,6 +803,7 @@ function submissionFixture(input: {
     submitter,
     nonce: "1",
     deadline: "1770000000",
+    ...(input.evidenceIds ? { evidenceIds: input.evidenceIds } : {}),
     status,
     signatureStatus: "signature_verified",
     signatureHash: bytes32("5001"),

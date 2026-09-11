@@ -9,9 +9,9 @@ import {
   type ProductSubmitIntent,
   type SubmitProductTaskInput
 } from "../../submissions/index.js";
-import { resolveEvidencePrincipal } from "../participant-identity.js";
+import { resolveEvidencePrincipal, resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { ChainServicesRuntimeEnv } from "../../config/index.js";
-import type { ApiResponse } from "../route-context.js";
+import { decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 export function createSubmissionsRouteModule(options: {
@@ -23,16 +23,26 @@ export function createSubmissionsRouteModule(options: {
       const productTaskPrepareSubmitMatch = /^\/product\/tasks\/([^/]+)\/prepare-submit$/.exec(request.pathname);
       if (request.method === "POST" && productTaskPrepareSubmitMatch) {
         return handleSubmissionRequest(async () => {
-          const taskId = decodeURIComponent(productTaskPrepareSubmitMatch[1] ?? "");
+          const taskId = decodePathParameter(productTaskPrepareSubmitMatch[1] ?? "");
           // prepare-submit 的证据读取主体不取自 x-uvp-principal-* 自报头
           // （否则可冒充任意参与者读取他人证据）；与 /product/evidence
           // 同口径：治理 admin 或钱包会话锚定地址，非 local 无身份即 401。
           const principal = await resolveEvidencePrincipal(request, context, options.runtimeEnvironment);
+          // 业务签名者身份以会话锚定地址为真源，body 自报钱包只做一致性
+          // 核验（不一致即 403）——否则可用任意（任务,钱包）组合探测
+          // 授权结果（201/403 oracle）。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
           return {
             status: 201,
             body: await context.submissionService.prepareSubmit(
               taskId,
-              parsePrepareSubmitBody(request.body),
+              {
+                ...parsePrepareSubmitBody(request.body),
+                walletAddress: wallet.identity.walletAddress
+              },
               principal
             )
           };
@@ -42,7 +52,7 @@ export function createSubmissionsRouteModule(options: {
       const productTaskSubmitMatch = /^\/product\/tasks\/([^/]+)\/submit$/.exec(request.pathname);
       if (request.method === "POST" && productTaskSubmitMatch) {
         return handleSubmissionRequest(async () => {
-          const taskId = decodeURIComponent(productTaskSubmitMatch[1] ?? "");
+          const taskId = decodePathParameter(productTaskSubmitMatch[1] ?? "");
           const submission = await context.submissionService.submit(taskId, parseSubmitBody(request.body));
           if (submission.txHash) {
             context.onTxMined?.();
@@ -57,8 +67,19 @@ export function createSubmissionsRouteModule(options: {
       const productSubmissionMatch = /^\/product\/submissions\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productSubmissionMatch) {
         return handleSubmissionRequest(async () => {
-          const submissionId = decodeURIComponent(productSubmissionMatch[1] ?? "");
-          const submission = await context.submissionService.getSubmission(submissionId);
+          // 提交档案携带签名者/证据/广播细节，匿名不可按 id 枚举——
+          // 与 product-read 订单/任务读同款会话身份门；会话钱包还须与
+          // 档案属主（业务签名者）比对，否则"id 一旦泄露即任一会话可读"
+          // （IDOR，与 GET /product/order-drafts/:id 的归属断言同口径）。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
+          const submissionId = decodePathParameter(productSubmissionMatch[1] ?? "");
+          const submission = await context.submissionService.getSubmission(
+            submissionId,
+            wallet.identity.walletAddress
+          );
           if (!submission) {
             return {
               status: 404,
@@ -99,6 +120,9 @@ async function handleSubmissionRequest(action: () => Promise<ApiResponse>): Prom
           message: redactErrorMessage(error)
         }
       };
+    }
+    if (error instanceof InvalidPathParameterError) {
+      return invalidPathParameterResponse();
     }
     if (error instanceof ConfigError) {
       return {

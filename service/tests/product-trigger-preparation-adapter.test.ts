@@ -201,7 +201,7 @@ describe("Product BFF trigger broadcast adapter", () => {
     });
   });
 
-  it("KEEP: transport envelopes like Invalid JSON RPC response stay retryable (G-30)", async () => {
+  it("transport envelopes like Invalid JSON RPC response stay retryable", async () => {
     // "Invalid JSON RPC response" 是传输层错误，不是确定性业务拒绝：
     // 误判成 retryable:false 会把草稿永久卡死在 failed。
     const walletClient: ProductTriggerBroadcastWalletClient = {
@@ -275,6 +275,80 @@ describe("Product BFF trigger broadcast adapter", () => {
     });
   });
 });
+
+  it("rejects the registrar wallet as the business submitter when the guard is enabled", async () => {
+    const walletClient: ProductTriggerBroadcastWalletClient = {
+      account: { address: registrarAddress },
+      writeContract: vi.fn(async () => {
+        return startTxHash;
+      })
+    };
+    const publicClient: ProductTriggerBroadcastPublicClient = {
+      waitForTransactionReceipt: vi.fn(async () => undefined)
+    };
+    const adapter = new AnvilProductOrderTriggerBroadcastAdapter({
+      rpcUrl: "http://127.0.0.1:8545",
+      chainId: 31337,
+      stateMachineAddress,
+      registrarAddress,
+      waitForReceipt: true,
+      rejectGasPayerAsSubmitter: true,
+      publicClient,
+      walletClient,
+      unknownOrderRetryDelayMs: 0,
+      unknownOrderMaxRetries: 2
+    });
+
+    // registrar == submitter：确定性拒绝，不产生任何链上交易。
+    const rejected = await adapter.broadcastOutsideTrigger({
+      draftId: "draft_guard",
+      triggerId: "trigger_guard",
+      orderId,
+      planId,
+      creator: registrarAddress,
+      triggerHookId,
+      triggerStageId,
+      sourceId,
+      signalId,
+      stateMachineAddress,
+      payloadHash,
+      idempotencyKey,
+      authorizations: [],
+      submitter: registrarAddress,
+      deadline: "9999999999",
+      signature
+    });
+    expect(rejected).toMatchObject({
+      status: "failed",
+      errorCode: "relayer_business_signer_reuse",
+      retryable: false
+    });
+    expect(walletClient.writeContract).not.toHaveBeenCalled();
+
+    // submitter != registrar：正常走广播路径。
+    const participantSubmitter = address("aaaa");
+    const allowed = await adapter.broadcastOutsideTrigger({
+      draftId: "draft_guard",
+      triggerId: "trigger_guard",
+      orderId,
+      planId,
+      creator: registrarAddress,
+      triggerHookId,
+      triggerStageId,
+      sourceId,
+      signalId,
+      stateMachineAddress,
+      payloadHash,
+      idempotencyKey,
+      authorizations: [],
+      submitter: participantSubmitter,
+      deadline: "9999999999",
+      signature
+    });
+    expect(allowed.status).not.toBe("failed");
+    expect(allowed.errorCode).not.toBe("relayer_business_signer_reuse");
+    expect(walletClient.writeContract).toHaveBeenCalledTimes(1);
+  });
 
 function adapterWithClients(
   publicClient: ProductTriggerBroadcastPublicClient,

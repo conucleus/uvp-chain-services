@@ -8,9 +8,15 @@ import {
   sortChainEvents
 } from "./events.js";
 import type { ProjectionSnapshot } from "./projections.js";
-import { countReplayAnomalies, createEmptyProjectionSnapshot, rebuildOrderProjections } from "./projections.js";
+import {
+  countDuplicateActiveEventAnomalies,
+  countReplayAnomalies,
+  createEmptyProjectionSnapshot,
+  rebuildOrderProjections
+} from "./projections.js";
 import { rebuildIdentityProjections } from "./identity-projections.js";
 import { createProjectionStore } from "../storage/factory.js";
+import { isTransientSqliteBusyError } from "../storage/sqlite.js";
 import {
   defaultProjectionScope,
   type DurableProjectionStore,
@@ -20,7 +26,7 @@ import {
   type ProjectionStore,
   type ProjectionSyncState
 } from "../storage/projection-store.js";
-import { consoleLogger, noopLogger, ConfigError, type Hex, type LifecycleService, type Logger } from "../shared/types.js";
+import { consoleLogger, noopLogger, ConfigError, ProjectionError, type Hex, type LifecycleService, type Logger } from "../shared/types.js";
 import { redactErrorMessage, redactSecrets } from "../security/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
 
@@ -53,6 +59,12 @@ export interface ChainEventSource {
 
 export interface ChainEventNotificationProcessor {
   processSignalSubmittedEvents(events: readonly ChainEvent[]): Promise<unknown>;
+  /**
+   * reorg 回滚联动：blockNumber 之后的事件已被删除，处理器须把指向这些
+   * 定位的已生成通知投递标记失效（sent 也一样——载荷指向已消失的链上
+   * 位置）。可选方法缺失时索引器只记警告。
+   */
+  invalidateDeliveriesAboveBlock?(input: { readonly chainId: number; readonly blockNumber: bigint }): Promise<unknown>;
 }
 
 export interface ProjectionAutomationProcessor {
@@ -101,6 +113,36 @@ export interface PendingPostCommitSweepSummary {
   readonly swept: number;
   readonly delivered: number;
   readonly failed: number;
+  /** 等待最终性而未投递的步骤数——不消耗重试预算，保持排队。 */
+  readonly waitingFinality: number;
+}
+
+/**
+ * 最终性等待类"失败"：通知批次尚未达到最终性上界，不是投递失败。
+ * 这类等待不得消耗 attempts 预算（与云轨 poke 的"DB 故障不退避"同构），
+ * 否则等待最终性的批次会在若干轮 sweep 后被当作死信永久删除，
+ * 违反《通知与参与方感知》"未达确认数的事件由 pending 队列推迟补投
+ * ……而不是被判为跳过"的口径。
+ */
+export class PendingPostCommitFinalityWaitError extends Error {
+  override readonly name = "PendingPostCommitFinalityWaitError";
+
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
+ * reorg 回滚事务内持久游标被其他写者移动（CAS 失败）：回滚的删事件与
+ * 游标回退前提（本轮 fromBlock 仍是持久游标位置）已失效，事务必须整体
+ * 中止——半途落地会留下"事件已删、游标未回退"或反之的撕裂状态。
+ */
+class ReorgCursorMovedError extends Error {
+  override readonly name = "ReorgCursorMovedError";
+
+  constructor() {
+    super("durable cursor was moved by another writer during reorg rollback");
+  }
 }
 
 type MutablePendingPostCommitSweepSummary = Writable<PendingPostCommitSweepSummary>;
@@ -108,10 +150,21 @@ type MutablePendingPostCommitSweepSummary = Writable<PendingPostCommitSweepSumma
 export class IndexerService implements LifecycleService {
   readonly name = "indexer";
 
+  // 单写者不变量：durable 游标 CAS 与 reorg 哈希连续性校验都以"本进程是
+  // 唯一索引器写者"为前提；同一 (chainId, scope) 部署第二个索引器进程会
+  // 造成持续游标竞争与伪 reorg 回滚。持久游标被外部写者连续移动达到
+  // 阈值时按多实例部署错误 fail-closed（见 #saveCursorAdvancingFrom）。
   #running = false;
-  #rebuilding = false;
+  // 全量重建与增量轮询共享同一个互斥守卫：重建以自身读到的 finalized 为
+  // 上界整库替换事件表，若与进行中的增量刷新交错，会把刷新已写的事件删
+  // 掉而刷新随后仍推进游标，形成确定性丢事件缺口。互斥必须同时覆盖
+  // refreshIfIdle（含 #drainRefreshQueue 的后台出队路径）与 admin 重建
+  // 入口——所有触发路径都要经 #withExclusiveGuard 串行。
+  #exclusive: Promise<unknown> = Promise.resolve();
+  #draining = false;
   #refreshQueued = false;
   #cursor: EventCursor | undefined;
+  #consecutiveCursorCasFailures = 0;
   readonly #config: ChainServicesConfig;
   readonly #eventSource: ChainEventSource;
   readonly #store: ProjectionStore;
@@ -152,6 +205,21 @@ export class IndexerService implements LifecycleService {
   }
 
   async rebuildFromDeploymentBlockWithSummary(options: IndexerRebuildOptions = {}): Promise<IndexerRebuildResult> {
+    return this.#withExclusiveGuard(() => this.#rebuildFromDeploymentBlock(options));
+  }
+
+  /**
+   * 共享互斥守卫：排队所有重建/增量刷新并串行执行。守卫不在获取处
+   * 阻塞调用语义（后台轮询照旧合并排队），只是保证任意时刻至多一个
+   * 写路径在操作存储。
+   */
+  #withExclusiveGuard<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.#exclusive.then(() => operation());
+    this.#exclusive = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  async #rebuildFromDeploymentBlock(options: IndexerRebuildOptions = {}): Promise<IndexerRebuildResult> {
     const deploymentBlock = this.#config.network.deploymentBlock;
     const finalizedBlock = minBlock(
       await this.#eventSource.getFinalizedBlock(this.#config),
@@ -239,8 +307,9 @@ export class IndexerService implements LifecycleService {
         this.#config
       );
       // mismatchCount 反映真实 replay 异常（重复/矛盾投递、投影
-      // apply 失败），不得硬编码 0。
-      mismatchCount = countReplayAnomalies(events);
+      // apply 失败），不得硬编码 0。apply 失败由 resetFromEvents 内的
+      // 重建直接抛出走向 degraded，这里只数重复投递，不再全量重放一遍。
+      mismatchCount = countDuplicateActiveEventAnomalies(events);
       const replaySummary = buildActiveChainEventReplaySummary(events);
       const activeEvents = [...replaySummary.activeEvents];
       const lastEvent = sortChainEvents(activeEvents).at(-1);
@@ -269,15 +338,10 @@ export class IndexerService implements LifecycleService {
           mismatchCount
         }
       };
-      const snapshot = await this.#store.resetFromEvents({
-        deploymentBlock,
-        events,
-        scope: this.#scope,
-        syncState: syncStateInput
-      });
-      await this.#processSignalNotifications(activeEvents);
-      await this.#processProjectionAutomation(snapshot);
-
+      // 游标哈希是 RPC 读，必须在进入存储事务前取好；随后把游标随
+      // resetFromEvents 一并传入——durable 存储将它与"整库事件替换"写入
+      // 同一事务，重建事务提交后、游标落库前崩溃不再留下越过重建覆盖
+      // 区间的旧游标（旧游标 + 已删除事件 = 静默丢事件缺口）。
       const nextCursor: EventCursor = {
         chainId: this.#config.network.chainId,
         deploymentBlock,
@@ -285,7 +349,22 @@ export class IndexerService implements LifecycleService {
         finalizedBlock,
         ...(await this.#cursorBlockHash(finalizedBlock))
       };
-      await this.#saveCursor(nextCursor);
+      const snapshot = await this.#store.resetFromEvents({
+        deploymentBlock,
+        events,
+        scope: this.#scope,
+        syncState: syncStateInput,
+        cursor: {
+          chainId: this.#scope.chainId,
+          contractAddress: this.#scope.contractAddress,
+          deploymentBlock,
+          nextBlock: nextCursor.nextBlock,
+          finalizedBlock,
+          ...(nextCursor.blockHash !== undefined ? { blockHash: nextCursor.blockHash } : {})
+        }
+      });
+      await this.#processSignalNotifications(activeEvents);
+      await this.#processProjectionAutomation(snapshot);
       this.#cursor = nextCursor;
 
       const syncState = await this.#store.getSyncState(this.#scope) ?? await this.#store.saveSyncState(syncStateInput);
@@ -319,17 +398,22 @@ export class IndexerService implements LifecycleService {
 
       return { snapshot, summary };
     } catch (error) {
-      // 投影 apply 失败（如未知 plan 引用）时把已统计到的真实
-      // 异常数带入 degraded 状态，而不是回退为旧值/0。
-      await this.#markDegraded(finalizedBlock, error, mismatchCount);
+      // 投影 apply 失败（如未知 plan 引用）时把已统计到的真实异常数带入
+      // degraded 状态，而不是回退为旧值/0；apply 失败本身计为 1 个异常。
+      const applyFailureCount = error instanceof ProjectionError ? 1 : 0;
+      await this.#markDegraded(finalizedBlock, error, mismatchCount + applyFailureCount);
       throw error;
     }
   }
 
   async refreshFromCursorWithSummary(options: IndexerRebuildOptions = {}): Promise<IndexerRebuildResult> {
+    return this.#withExclusiveGuard(() => this.#refreshFromCursor(options));
+  }
+
+  async #refreshFromCursor(options: IndexerRebuildOptions = {}): Promise<IndexerRebuildResult> {
     const durableStore = this.#store;
     if (!isDurableProjectionStore(durableStore)) {
-      return this.rebuildFromDeploymentBlockWithSummary(options);
+      return this.#rebuildFromDeploymentBlock(options);
     }
 
     const deploymentBlock = this.#config.network.deploymentBlock;
@@ -337,13 +421,10 @@ export class IndexerService implements LifecycleService {
       await this.#eventSource.getFinalizedBlock(this.#config),
       options.targetBlock
     );
-    // 先补投历史 pending post-commit 步骤（游标已前进的失败批次），
-    // 再处理本轮增量，避免失败批次无限滞后。
-    await this.sweepPendingPostCommitSteps();
     const storedCursor = await durableStore.getCursor(this.#scope);
     const cursor = this.#cursor ?? storedCursor;
     if (!cursor) {
-      return this.rebuildFromDeploymentBlockWithSummary(
+      return this.#rebuildFromDeploymentBlock(
         options.targetBlock === undefined ? {} : { targetBlock: finalizedBlock }
       );
     }
@@ -353,14 +434,27 @@ export class IndexerService implements LifecycleService {
     // 投影；finalityConfirmations 仍是第一道缓冲，超过其深度的 reorg 若
     // 回溯窗口内找不到共同祖先则报错要求 full rebuild。
     const effectiveFromBlock = await this.#rollbackOnReorg(fromBlock);
+    // 补投历史 pending post-commit 步骤（游标已前进的失败批次）必须
+    // 在 reorg 回滚之后：补投上界以持久 finalizedBlock 为准（见
+    // #deliverPendingPostCommitStep），回滚前扫会把回滚前残留的虚高
+    // 上界当真，放行已从 canonical 链消失的幽灵事件的外部投递（回滚
+    // 联动的队列修剪 #trimPendingPostCommitStepsAfterReorg 也尚未生效）。
+    // 主刷新循环的 finalized 防回退上界（下方）同是回滚后读取的先例。
+    await this.#sweepPendingPostCommitStepsUnderGuard();
+    // finalized 防回退上界必须在 reorg 回滚之后读取：回滚可能刚把持久化
+    // finalized 降回祖先高度，回滚前捕获的旧快景会把已回滚的虚高上界
+    // 写回去（补投上界过滤/诊断都以它为准）。
+    const priorFinalizedBlock = maxBlockOf(
+      (await durableStore.getCursor(this.#scope))?.finalizedBlock,
+      this.#cursor?.finalizedBlock
+    );
+    // 统一防回退：滞后节点的 finalized 读数不得把已持久化的最终性上界
+    // 写回退，滞后分支与主路径共用同一口径。
+    const reportedFinalizedBlock = priorFinalizedBlock !== undefined && priorFinalizedBlock > finalizedBlock
+      ? priorFinalizedBlock
+      : finalizedBlock;
     if (finalizedBlock < effectiveFromBlock) {
-      // finalized 回写防回退：滞后的 finalized 读数不得把已持久化的最终性
-      // 上界写回退（pending 补投的上界过滤与诊断都以它为准）。游标侧保留
-      // 已存最大值；本回合无新事件可索引。
-      const durableFinalizedBlock = maxBlockOf(storedCursor?.finalizedBlock, this.#cursor?.finalizedBlock);
-      const reportedFinalizedBlock = durableFinalizedBlock !== undefined && durableFinalizedBlock > finalizedBlock
-        ? durableFinalizedBlock
-        : finalizedBlock;
+      // 游标侧保留已存最大值；本回合无新事件可索引。
       const nextCursor: EventCursor = {
         chainId: this.#config.network.chainId,
         deploymentBlock,
@@ -370,8 +464,7 @@ export class IndexerService implements LifecycleService {
           ? (await this.#cursorBlockHash(effectiveFromBlock - 1n) ?? {})
           : {})
       };
-      await this.#saveCursor(nextCursor);
-      this.#cursor = nextCursor;
+      await this.#saveCursorAdvancingFrom(nextCursor, effectiveFromBlock);
       const result = await this.#summarizeStoredProjection({
         fromBlock: effectiveFromBlock,
         toBlock: reportedFinalizedBlock,
@@ -404,13 +497,14 @@ export class IndexerService implements LifecycleService {
       const identitySnapshot = rebuildIdentityProjections(allEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
-      // mismatchCount 反映真实 replay 异常，不得硬编码 0。
-      const mismatchCount = countReplayAnomalies(allEvents);
+      // 重复/矛盾投递计数：投影重建已在上面同一事务内执行（apply 失败
+      // 会直接中止本事务），这里不得再为计数触发一次 O(全历史) 重放。
+      const mismatchCount = countDuplicateActiveEventAnomalies(allEvents);
       const syncState = await durableStore.saveSyncState({
         ...this.#scope,
         syncStatus: "indexed",
         ...(lastEvent ? { latestIndexedBlock: lastEvent.blockNumber } : {}),
-        finalizedBlock,
+        finalizedBlock: reportedFinalizedBlock,
         confirmationDepth: this.#config.network.finalityConfirmations,
         ...(lastEvent ? { lastEventName: lastEvent.eventName } : {}),
         eventCount: activeEvents.length,
@@ -446,7 +540,7 @@ export class IndexerService implements LifecycleService {
       };
     });
 
-    // G-29/UVP-09：投递记录创建必须先于 cursor 推进。游标一旦先落库，
+    // 投递记录创建必须先于 cursor 推进。游标一旦先落库，
     // 窗口内硬崩溃会让该批事件永不再被读取，投递记录无从重建；先按
     // deliveryId 幂等创建投递记录再推游标，崩溃后重读重投不产生重复。
     await this.#processSignalNotifications(activeNewEvents);
@@ -455,11 +549,14 @@ export class IndexerService implements LifecycleService {
       chainId: this.#config.network.chainId,
       deploymentBlock,
       nextBlock: finalizedBlock + 1n,
-      finalizedBlock,
+      finalizedBlock: reportedFinalizedBlock,
       ...(await this.#cursorBlockHash(finalizedBlock))
     };
-    await this.#saveCursor(nextCursor);
-    this.#cursor = nextCursor;
+    // 游标推进带 CAS 前置条件（基于本轮 fromBlock）：事务提交与游标落库
+    // 之间若另一个写者（如另一进程的 full rebuild）移动了持久游标，本
+    // 轮不得把游标越过事件表实际覆盖区间；放弃推进，下一轮从持久游标
+    // 重读（事件 append 幂等，重投按 deliveryId 去重）。
+    await this.#saveCursorAdvancingFrom(nextCursor, effectiveFromBlock);
     await this.#processProjectionAutomation(result.snapshot);
 
     this.#logger.info("indexer incrementally refreshed projections from chain events", {
@@ -473,7 +570,7 @@ export class IndexerService implements LifecycleService {
       unresolvedDockEventCount: result.snapshot.unresolvedDockEventCount ?? 0,
       unresolvedStageActivationEventCount: result.snapshot.unresolvedStageActivationEventCount ?? 0,
       unresolvedLogCount: this.#consumeUnresolvedLogCount(),
-      nextBlock: this.#cursor.nextBlock.toString(),
+      nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
     });
 
@@ -485,20 +582,32 @@ export class IndexerService implements LifecycleService {
   }
 
   refreshIfIdle(): void {
-    if (this.#rebuilding) {
-      this.#refreshQueued = true;
+    this.#refreshQueued = true;
+    if (this.#draining) {
       return;
     }
-    this.#rebuilding = true;
     void this.#drainRefreshQueue();
   }
 
   async #drainRefreshQueue(): Promise<void> {
+    this.#draining = true;
     try {
-      do {
+      while (this.#refreshQueued) {
         this.#refreshQueued = false;
-        await this.refreshFromCursorWithSummary()
+        // 后台出队是增量刷新的触发路径之一，必须与 admin 重建共用
+        // #withExclusiveGuard：直调 #refreshFromCursor 会绕过互斥，与
+        // 并发的全量重建交错时刷新推进的游标越过重建删掉的事件区间，
+        // 形成静默丢事件缺口。
+        await this.#withExclusiveGuard(() => this.#refreshFromCursor())
           .catch((error: unknown) => {
+            if (isTransientSqliteBusyError(error)) {
+              // SQLITE_BUSY 是跨连接写竞争的瞬态缺锁，不是投影损坏：
+              // 不得把整库标成 degraded（误标降级）。下一轮刷新重试。
+              this.#logger.warn("indexer background refresh deferred by transient storage lock contention", {
+                message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+              });
+              return;
+            }
             void this.#markDegraded(undefined, error).catch((markError: unknown) => {
               this.#logger.warn("indexer failed to mark background refresh degraded", {
                 message: markError instanceof Error ? redactErrorMessage(markError) : "unknown error"
@@ -508,9 +617,14 @@ export class IndexerService implements LifecycleService {
               message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
             });
           });
-      } while (this.#refreshQueued);
+      }
     } finally {
-      this.#rebuilding = false;
+      this.#draining = false;
+      // finally 与 refreshIfIdle 之间新置位的排队请求不能丢（JS 单线程
+      // 内同步检查-复位无交错）。
+      if (this.#refreshQueued) {
+        void this.#drainRefreshQueue();
+      }
     }
   }
 
@@ -525,6 +639,59 @@ export class IndexerService implements LifecycleService {
       ...(cursor.finalizedBlock !== undefined ? { finalizedBlock: cursor.finalizedBlock } : {}),
       ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {})
     });
+  }
+
+  /**
+   * 增量路径的游标推进：CAS 前置条件为"持久游标仍停在本轮 fromBlock"。
+   * 条件不成立（其他写者已移动游标）时放弃推进，并把内存游标收敛回
+   * 持久值——本轮事件 append 幂等、投递按 deliveryId 去重，下一轮从
+   * 持久游标重读即恢复一致，绝不在事件表覆盖区间外推进游标。
+   */
+  async #saveCursorAdvancingFrom(cursor: EventCursor, expectNextBlock: bigint): Promise<void> {
+    const durableStore = this.#store;
+    if (!isDurableProjectionStore(durableStore)) {
+      this.#cursor = cursor;
+      return;
+    }
+    const saved = await durableStore.saveCursor(
+      {
+        ...this.#scope,
+        deploymentBlock: cursor.deploymentBlock,
+        nextBlock: cursor.nextBlock,
+        ...(cursor.finalizedBlock !== undefined ? { finalizedBlock: cursor.finalizedBlock } : {}),
+        ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {})
+      },
+      { expectNextBlock }
+    );
+    if (saved === undefined) {
+      const current = await durableStore.getCursor(this.#scope);
+      this.#cursor = current
+        ? {
+          chainId: current.chainId,
+          deploymentBlock: current.deploymentBlock,
+          nextBlock: current.nextBlock,
+          ...(current.finalizedBlock !== undefined ? { finalizedBlock: current.finalizedBlock } : {}),
+          ...(current.blockHash !== undefined ? { blockHash: current.blockHash } : {})
+        }
+        : cursor;
+      this.#consecutiveCursorCasFailures += 1;
+      if (this.#consecutiveCursorCasFailures >= CURSOR_CAS_FAILURE_LIMIT) {
+        // 所有触发路径已过 #withExclusiveGuard，进程内不存在竞争写者；
+        // 持久游标被连续移动只剩一种解释——同一 scope 部署了第二个索引器
+        // 进程。按多实例部署错误 fail-closed，而不是无限互相顶替游标。
+        throw new ConfigError(
+          "durable projection cursor keeps being moved by another writer; run exactly one indexer process per chain scope (single-writer invariant)"
+        );
+      }
+      this.#logger.warn("indexer cursor moved by another writer during refresh; deferring to the durable cursor and re-reading next round", {
+        expectedNextBlock: expectNextBlock.toString(),
+        durableNextBlock: current?.nextBlock.toString(),
+        consecutiveDeferrals: this.#consecutiveCursorCasFailures
+      });
+      return;
+    }
+    this.#consecutiveCursorCasFailures = 0;
+    this.#cursor = cursor;
   }
 
   /**
@@ -568,7 +735,44 @@ export class IndexerService implements LifecycleService {
     if (isSameBlockHash(canonicalHash, storedHash)) {
       return fromBlock;
     }
-    return this.#rollbackToCommonAncestor(durableStore, fromBlock);
+    try {
+      return await this.#rollbackToCommonAncestor(durableStore, fromBlock);
+    } catch (error) {
+      if (!(error instanceof ReorgCursorMovedError)) {
+        throw error;
+      }
+      // 回滚的游标写入与推进路径同一 CAS 语义：持久游标被其他写者移动即
+      // 放弃本轮回滚（事件删除随事务一并回退），按持久游标收敛并递延到
+      // 下一轮重读——否则回滚路径的无条件写会让后续自写 CAS 恒成功，
+      // 单写者防线（#saveCursorAdvancingFrom）在回滚轮次形同虚设。
+      const current = await durableStore.getCursor(this.#scope);
+      this.#consecutiveCursorCasFailures += 1;
+      if (this.#consecutiveCursorCasFailures >= CURSOR_CAS_FAILURE_LIMIT) {
+        throw new ConfigError(
+          "durable projection cursor keeps being moved by another writer; run exactly one indexer process per chain scope (single-writer invariant)"
+        );
+      }
+      this.#logger.warn("indexer cursor moved by another writer during reorg rollback; deferring to the durable cursor and re-reading next round", {
+        expectedNextBlock: fromBlock.toString(),
+        durableNextBlock: current?.nextBlock.toString(),
+        consecutiveDeferrals: this.#consecutiveCursorCasFailures
+      });
+      const nextBlock = current
+        ? (current.nextBlock > this.#config.network.deploymentBlock
+          ? current.nextBlock
+          : this.#config.network.deploymentBlock)
+        : fromBlock;
+      this.#cursor = current
+        ? {
+          chainId: current.chainId,
+          deploymentBlock: current.deploymentBlock,
+          nextBlock,
+          ...(current.finalizedBlock !== undefined ? { finalizedBlock: current.finalizedBlock } : {}),
+          ...(current.blockHash !== undefined ? { blockHash: current.blockHash } : {})
+        }
+        : this.#cursor;
+      return nextBlock;
+    }
   }
 
   /** 从 cursor 高度向回找共同祖先（有界），找到则回滚投影。 */
@@ -600,7 +804,7 @@ export class IndexerService implements LifecycleService {
       seenBlocks.add(event.blockNumber);
       const canonicalHash = await this.#eventSource.getBlockHash?.(event.blockNumber, this.#config);
       if (canonicalHash && isSameBlockHash(canonicalHash, event.blockHash)) {
-        return this.#applyReorgRollback(durableStore, event.blockNumber, canonicalHash);
+        return this.#applyReorgRollback(durableStore, fromBlock, event.blockNumber, canonicalHash);
       }
     }
 
@@ -608,7 +812,7 @@ export class IndexerService implements LifecycleService {
     // 只代表这段链上本来就没有事件。向更旧的已存锚点逐个回验（全库最新
     // 优先）：任一锚点仍与 canonical 一致即 reorg 未触及该锚点之前的投影，
     // 正常回滚到该锚点（删除数恒为 0，随后从 canonical 链重读）。
-    // 0200#15：只验最新锚点即抛"深于投影"会把"最新锚点恰好被 reorg 触及、
+    // 只验最新锚点即抛"深于投影"会把"最新锚点恰好被 reorg 触及、
     // 更旧锚点仍一致"的浅重org 误判成 full rebuild。
     const anchorsBelowWindow = storedEvents
       .filter((event): event is ChainEvent & { readonly blockHash: Hex } =>
@@ -620,7 +824,7 @@ export class IndexerService implements LifecycleService {
     for (const anchor of anchorsBelowWindow) {
       const canonicalHash = await this.#eventSource.getBlockHash?.(anchor.blockNumber, this.#config);
       if (canonicalHash && isSameBlockHash(canonicalHash, anchor.blockHash)) {
-        return this.#applyReorgRollback(durableStore, anchor.blockNumber, canonicalHash);
+        return this.#applyReorgRollback(durableStore, fromBlock, anchor.blockNumber, canonicalHash);
       }
     }
     if (anchorsBelowWindow.length > 0) {
@@ -630,8 +834,16 @@ export class IndexerService implements LifecycleService {
       );
     }
 
-    // 全库无任何已存事件：没有任何投影数据会被本次 reorg 影响，直接按
-    // canonical 链继续（新 cursor 哈希在刷新结束时保存）。
+    // 兜底判据是"全库无任何（未removed的）已存事件"，而非"无带哈希事件"：
+    // 库中存在事件但无一携带 blockHash 时既找不到锚点、也无法证明它们与
+    // canonical 链一致——按空库继续追加会让孤立分叉事件永久残留在投影里
+    // 且哈希连续性校验永远放行。fail-closed：显式报错要求 full rebuild。
+    const hasStoredEvents = storedEvents.some((event) => !event.removed);
+    if (hasStoredEvents) {
+      throw new ConfigError(
+        "chain reorg detected but stored events carry no block hashes; no common ancestor can be located; full projection rebuild is required"
+      );
+    }
     this.#logger.warn("chain reorg detected but no stored events exist; continuing from canonical chain", {
       fromBlock: fromBlock.toString()
     });
@@ -641,6 +853,7 @@ export class IndexerService implements LifecycleService {
   /** 删除祖先之后的事件、重建快照、回退 cursor。 */
   async #applyReorgRollback(
     durableStore: DurableProjectionStore,
+    fromBlock: bigint,
     ancestorBlock: bigint,
     ancestorHash: Hex
   ): Promise<bigint> {
@@ -656,7 +869,7 @@ export class IndexerService implements LifecycleService {
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
       const replaySummary = buildActiveChainEventReplaySummary(remainingEvents);
-      const mismatchCount = countReplayAnomalies(remainingEvents);
+      const mismatchCount = countDuplicateActiveEventAnomalies(remainingEvents);
       const existing = await durableStore.getSyncState(this.#scope).catch(() => undefined);
       await durableStore.saveSyncState({
         ...this.#scope,
@@ -681,19 +894,30 @@ export class IndexerService implements LifecycleService {
           mismatchCount
         }
       });
-      await durableStore.saveCursor({
-        ...this.#scope,
-        deploymentBlock,
-        nextBlock: ancestorBlock + 1n > deploymentBlock ? ancestorBlock + 1n : deploymentBlock,
-        finalizedBlock: ancestorBlock,
-        blockHash: ancestorHash
-      });
+      // 游标回退走与推进路径同一 CAS（前置条件：持久游标仍停在本轮
+      // fromBlock）。无条件写会把"其他写者已移动游标"静默顶掉，且让本
+      // 进程随后的自写 CAS 恒成功——单写者防线在回滚轮次被旁路。
+      const saved = await durableStore.saveCursor(
+        {
+          ...this.#scope,
+          deploymentBlock,
+          nextBlock: ancestorBlock + 1n > deploymentBlock ? ancestorBlock + 1n : deploymentBlock,
+          finalizedBlock: ancestorBlock,
+          blockHash: ancestorHash
+        },
+        { expectNextBlock: fromBlock }
+      );
+      if (saved === undefined) {
+        // 事务内抛错整体回退：删事件与游标回退必须同生共死。
+        throw new ReorgCursorMovedError();
+      }
       this.#logger.warn("indexer rolled back projections after chain reorg", {
         ancestorBlock: ancestorBlock.toString(),
         deletedEvents: deleted,
         nextBlock: (ancestorBlock + 1n).toString()
       });
     });
+    this.#consecutiveCursorCasFailures = 0;
     const nextBlock = ancestorBlock + 1n > deploymentBlock ? ancestorBlock + 1n : deploymentBlock;
     this.#cursor = {
       chainId: this.#config.network.chainId,
@@ -702,7 +926,86 @@ export class IndexerService implements LifecycleService {
       finalizedBlock: ancestorBlock,
       blockHash: ancestorHash
     };
+    await this.#invalidateNotificationsAfterReorg(ancestorBlock);
+    await this.#trimPendingPostCommitStepsAfterReorg(ancestorBlock);
     return nextBlock;
+  }
+
+  /**
+   * reorg 回滚联动修剪 pending 补投队列：批次内高于祖先块的事件已从
+   * canonical 链消失，等最终性上界追平后 sweep 会照常补投——那是对已
+   * 删链上事实的幽灵通知。批次只保留祖先块及以下的事件（新 stepId 按
+   * 修剪后载荷派生；save 是 ON CONFLICT DO NOTHING，必须删旧存新）；
+   * projection_automation 步骤按当前投影幂等扫描，无需修剪。
+   */
+  async #trimPendingPostCommitStepsAfterReorg(ancestorBlock: bigint): Promise<void> {
+    const durableStore = this.#store;
+    if (!isDurableProjectionStore(durableStore)) {
+      return;
+    }
+    try {
+      const pendingSteps = await durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
+      for (const step of pendingSteps) {
+        if (step.kind !== "signal_notification" || !step.events || step.events.length === 0) {
+          continue;
+        }
+        const surviving = step.events.filter((event) => event.blockNumber <= ancestorBlock);
+        if (surviving.length === step.events.length) {
+          continue;
+        }
+        await durableStore.deletePendingPostCommitStep(step.stepId);
+        if (surviving.length > 0) {
+          await durableStore.savePendingPostCommitStep({
+            stepId: pendingPostCommitStepId("signal_notification", surviving),
+            chainId: step.chainId,
+            kind: step.kind,
+            events: surviving
+          });
+        }
+        this.#logger.warn("pending signal notification batch trimmed after reorg rollback; reorged-out events will not be delivered", {
+          stepId: step.stepId,
+          ancestorBlock: ancestorBlock.toString(),
+          droppedEvents: step.events.length - surviving.length,
+          survivingEvents: surviving.length
+        });
+      }
+    } catch (error) {
+      // 修剪失败不回滚投影主路径，但必须响亮：残留批次会在最终性追平后
+      // 被 sweep 补投成幽灵通知。
+      this.#logger.error("failed to trim pending post-commit steps after reorg rollback; ghost notifications may be delivered when finalization catches up", {
+        ancestorBlock: ancestorBlock.toString(),
+        message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+      });
+    }
+  }
+
+  /**
+   * reorg 回滚的事务提交后联动失效通知投递：已删除事件之上的 sent/
+   * failed/skipped 投递从此指向消失的链上定位。标记幂等（invalidated 行
+   * 跳过），失败只响亮记录——回滚路径再次触发时重标，不留静默缺口。
+   */
+  async #invalidateNotificationsAfterReorg(ancestorBlock: bigint): Promise<void> {
+    const invalidate = this.#notificationProcessor?.invalidateDeliveriesAboveBlock;
+    if (!invalidate) {
+      return;
+    }
+    try {
+      const invalidated = await invalidate({
+        chainId: this.#scope.chainId,
+        blockNumber: ancestorBlock
+      });
+      if (invalidated !== undefined && Number(invalidated) > 0) {
+        this.#logger.warn("indexer invalidated notification deliveries targeting reorged-out blocks", {
+          ancestorBlock: ancestorBlock.toString(),
+          invalidated: Number(invalidated)
+        });
+      }
+    } catch (error) {
+      this.#logger.error("indexer failed to invalidate notification deliveries after reorg rollback; stale deliveries may reference reorged-out blocks until the next rollback", {
+        ancestorBlock: ancestorBlock.toString(),
+        message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+      });
+    }
   }
 
   async #summarizeStoredProjection(input: {
@@ -710,13 +1013,15 @@ export class IndexerService implements LifecycleService {
     readonly toBlock: bigint;
     readonly newEventCount: number;
   }): Promise<IndexerRebuildResult> {
-    // 0212 P3-3：空批次（finalized 落后于 cursor）不得写出 fromBlock >
+    // 空批次（finalized 落后于 cursor）不得写出 fromBlock >
     // toBlock 的 rebuild 元数据，按 finalized 锚点收敛为退化空区间。
     const metadataFromBlock = input.fromBlock > input.toBlock ? input.toBlock : input.fromBlock;
     const snapshot = await this.#store.getOrderSnapshot?.() ?? createEmptyProjectionSnapshot();
     const identitySnapshot = await this.#store.getIdentitySnapshot();
     const existing = await this.#store.getSyncState(this.#scope);
-    const mismatchCount = await this.#storedMismatchCount(existing);
+    // 空批次不改变事件表：mismatchCount 沿用最近一次事件变更轮持久化的
+    // 计数，不为每个稳态轮触发一次 O(全历史) 的 listEvents+重放。
+    const mismatchCount = existing?.rebuild?.mismatchCount ?? 0;
     const syncState = await this.#store.saveSyncState({
       ...this.#scope,
       syncStatus: "indexed",
@@ -804,11 +1109,14 @@ export class IndexerService implements LifecycleService {
       } catch (error) {
         const message = error instanceof Error ? redactErrorMessage(error) : `unknown ${pending.step} error`;
         if (attempt === POST_COMMIT_STEP_MAX_ATTEMPTS) {
+          // persisted 只反映持久化补投队列的真实写入结果：memory 驱动
+          // 无持久层（恒 false），持久化本身失败也必须如实记 false——
+          // 先记 true 再尝试持久化的日志会误导事故处置。
+          const persisted = await this.#persistPendingPostCommitStep(pending, message);
           this.#logger.error(`post-commit ${pending.step} failed after ${POST_COMMIT_STEP_MAX_ATTEMPTS} attempts`, {
             message,
-            persisted: true
+            persisted
           });
-          await this.#persistPendingPostCommitStep(pending, message);
           return;
         }
         const nextDelayMs = postCommitStepRetryDelayMs(attempt);
@@ -824,10 +1132,10 @@ export class IndexerService implements LifecycleService {
       readonly events?: readonly ChainEvent[];
     },
     error: string
-  ): Promise<void> {
+  ): Promise<boolean> {
     const durableStore = this.#store;
     if (!isDurableProjectionStore(durableStore)) {
-      return;
+      return false;
     }
     const stepId = pendingPostCommitStepId(pending.kind, pending.events);
     try {
@@ -838,12 +1146,14 @@ export class IndexerService implements LifecycleService {
         ...(pending.kind === "signal_notification" && pending.events ? { events: pending.events } : {})
       });
       await durableStore.recordPendingPostCommitAttempt(stepId, error);
+      return true;
     } catch (persistError) {
       const message = persistError instanceof Error ? redactErrorMessage(persistError) : "unknown persist error";
       this.#logger.error("failed to persist pending post-commit step; manual replay may be required", {
         kind: pending.kind,
         message
       });
+      return false;
     }
   }
 
@@ -851,12 +1161,20 @@ export class IndexerService implements LifecycleService {
    * 后台补投：重放持久化 pending 队列中的 post-commit 步骤，成功即出队，
    * 失败累加 attempts 并留待下一轮（或人工经 admin-ops 触发）。每轮增量
    * 刷新前调用；非持久存储（memory）为 no-op。
+   *
+   * 公开入口必须经 #withExclusiveGuard 串行（与重建/增量刷新互斥）——
+   * admin-ops 直调本方法时不得绕过守卫与进行中的写路径交错。
    */
-  async sweepPendingPostCommitSteps(): Promise<PendingPostCommitSweepSummary> {
+  sweepPendingPostCommitSteps(): Promise<PendingPostCommitSweepSummary> {
+    return this.#withExclusiveGuard(() => this.#sweepPendingPostCommitStepsUnderGuard());
+  }
+
+  async #sweepPendingPostCommitStepsUnderGuard(): Promise<PendingPostCommitSweepSummary> {
     const summary: MutablePendingPostCommitSweepSummary = {
       swept: 0,
       delivered: 0,
-      failed: 0
+      failed: 0,
+      waitingFinality: 0
     };
     const durableStore = this.#store;
     if (!isDurableProjectionStore(durableStore)) {
@@ -870,13 +1188,46 @@ export class IndexerService implements LifecycleService {
         await durableStore.deletePendingPostCommitStep(step.stepId);
         summary.delivered += 1;
       } catch (error) {
+        if (error instanceof PendingPostCommitFinalityWaitError) {
+          // 最终性等待不是投递失败：不记 attempts、不消耗死信预算，
+          // 保持排队等下一轮（预算只消耗于真实投递失败）。
+          summary.waitingFinality += 1;
+          this.#logger.info("pending post-commit step waits for finality; it stays queued without consuming the retry budget", {
+            stepId: step.stepId,
+            kind: step.kind,
+            message: error instanceof Error ? redactErrorMessage(error) : "unknown wait"
+          });
+          continue;
+        }
         summary.failed += 1;
         const message = error instanceof Error ? redactErrorMessage(error) : "unknown sweep error";
+        const attempts = step.attempts + 1;
+        if (attempts >= PENDING_POST_COMMIT_MAX_SWEEP_ATTEMPTS) {
+          // 死信出队：无处理器/空载荷（部署裁剪）等永远无法补投的步骤
+          // 不能无限滞留、逐轮告警——与"不应无限滞留"的契约对齐，超限
+          // 删除并响亮记录 stepId 供人工重放（事件仍可由 rebuild 重建）。
+          // 瞬态失败（最终性上界未追上）不烧预算（上方独立分支）。
+          await durableStore.deletePendingPostCommitStep(step.stepId)
+            .catch((dropError: unknown) => {
+              this.#logger.error("failed to dead-letter an exhausted pending post-commit step", {
+                stepId: step.stepId,
+                kind: step.kind,
+                message: dropError instanceof Error ? redactErrorMessage(dropError) : "unknown drop error"
+              });
+            });
+          this.#logger.error("pending post-commit step dead-lettered after exhausting the sweep attempt budget; manual replay is required", {
+            stepId: step.stepId,
+            kind: step.kind,
+            attempts,
+            message
+          });
+          continue;
+        }
         await durableStore.recordPendingPostCommitAttempt(step.stepId, message).catch(() => undefined);
         this.#logger.warn("pending post-commit step retry failed; it stays queued", {
           stepId: step.stepId,
           kind: step.kind,
-          attempts: step.attempts + 1,
+          attempts,
           message
         });
       }
@@ -909,7 +1260,7 @@ export class IndexerService implements LifecycleService {
         // 无处理器（部署裁剪）或载荷为空：无法补投，也不应无限滞留。
         throw new Error(`signal notification processor unavailable for pending step ${step.stepId}`);
       }
-      // 0212 P3-3 通知上界跳批补处理：通知服务会按最终性上界过滤掉
+      // 通知上界跳批补处理：通知服务会按最终性上界过滤掉
       // 未达上界的事件且不产生投递记录；此时把该步骤按成功出队会永久
       // 丢失这批补投。保持排队并报错，待最终性追上后下一轮 sweep 再投。
       const finalizedBlock = (await this.#store.getSyncState(this.#scope))?.finalizedBlock;
@@ -919,7 +1270,8 @@ export class IndexerService implements LifecycleService {
           0n
         );
         if (maxEventBlock > finalizedBlock) {
-          throw new Error(
+          // 哨兵错误：最终性等待不消耗补投预算（见 sweep 的分诊分支）。
+          throw new PendingPostCommitFinalityWaitError(
             `pending signal notification batch ${step.stepId} extends to block ${maxEventBlock} above the finalized bound ${finalizedBlock}; it stays queued until finalization catches up`
           );
         }
@@ -1040,6 +1392,9 @@ function maxBlockOf(left: bigint | undefined, right: bigint | undefined): bigint
 
 const MAX_REORG_BACKTRACK_BLOCKS = 1_000;
 
+/** 连续 CAS 失败达到该次数即判定为多实例部署错误（fail-closed）。 */
+const CURSOR_CAS_FAILURE_LIMIT = 3;
+
 function isSameBlockHash(left: Hex, right: Hex): boolean {
   return left.toLowerCase() === right.toLowerCase();
 }
@@ -1074,6 +1429,8 @@ function pendingPostCommitStepId(
 const POST_COMMIT_STEP_MAX_ATTEMPTS = 3;
 const POST_COMMIT_STEP_RETRY_BASE_DELAY_MS = 100;
 const POST_COMMIT_STEP_RETRY_MAX_DELAY_MS = 2000;
+/** sweep 死信上限：宽松于瞬态失败（最终性上界追平）通常需要的轮次。 */
+const PENDING_POST_COMMIT_MAX_SWEEP_ATTEMPTS = 16;
 
 function postCommitStepRetryDelayMs(attempt: number): number {
   return Math.min(

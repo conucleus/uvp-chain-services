@@ -8,6 +8,7 @@ import {
   ObjectEvidenceStorage,
   RehearsalObjectEvidenceStorage,
   S3EvidenceStorageClient,
+  createEvidenceService,
   type EvidenceStorage
 } from "../evidence/index.js";
 import { createConfiguredGovernanceChainAdapter, createGovernanceService } from "../governance/index.js";
@@ -39,6 +40,7 @@ import { createRedactingLogger, redactErrorMessage, redactSecrets } from "../sec
 import { isDirectRun } from "../shared/runtime.js";
 import { ConfigError, consoleLogger, type Address, type Logger } from "../shared/types.js";
 import { createApiRouter } from "./routes.js";
+import { InvalidPathParameterError, invalidPathParameterResponse } from "./route-context.js";
 import { createListingAnchorChainView } from "../store-listings/index.js";
 
 export interface StartApiServerOptions {
@@ -85,7 +87,9 @@ export async function startApiServer(
     })
     : undefined;
   if (!notificationDispatcher) {
-    logger.warn("NOTIFICATION DELIVERY IS NOT CONFIGURED: set UVP_NOTIFY_WEBHOOK_URL to enable the generic webhook transport; until then every delivery is recorded as failed (transport_adapter_missing) and no external channel is notified");
+    // 文案以代码为准：未装配 dispatcher 时 delivery 落 skipped
+    //（reason=transport_adapter_missing，可重投），不是 failed。
+    logger.warn("NOTIFICATION DELIVERY IS NOT CONFIGURED: set UVP_NOTIFY_WEBHOOK_URL to enable the generic webhook transport; until then every delivery is recorded as skipped (transport_adapter_missing) and no external channel is notified");
   }
   const notificationService = createNotificationService({
     store,
@@ -112,7 +116,7 @@ export async function startApiServer(
     })
     : undefined;
 
-  // M-5：全量重建不得阻塞 listen——通知补投的 webhook 逐条最多一个超时
+  // 全量重建不得阻塞 listen——通知补投的 webhook 逐条最多一个超时
   // 周期、串行跟在重建里会把启动拖成 N×超时。改为后台执行；投影轮询等
   // 重建结束后再启动，避免增量刷新与全量重建并发写同一存储。失败由
   // indexer 的 degraded 状态与错误日志暴露。
@@ -165,6 +169,14 @@ export async function startApiServer(
     productStore: productBffStore,
     submissionStore,
     governanceStore,
+    // 证据绑定清扫：与 API 路由共用同一持久元数据仓与对象存储，
+    // 广播成功但绑定缺失的提交由 worker 周期性补绑。
+    evidenceBinder: createEvidenceService({
+      metadataStore: stores.evidenceMetadataStore,
+      storage: evidenceStorage,
+      runtimeEnvironment: config.security.environment
+    }),
+    audit,
     logger
   });
   // dock liveness worker。routeSource/submitter 未装配时为
@@ -232,6 +244,14 @@ export async function startApiServer(
   const opsConsoleAdminIds = config.operatorRoles.opsConsoleAdmins ?? [];
   const router = createApiRouter(store, {
     productBffStore,
+    ...(config.operatorRoles.adminReviewers.length > 0
+      ? { governanceAdminIds: config.operatorRoles.adminReviewers }
+      : {}),
+    // 管理面口令因子：非 local 的自报 admin 头必须
+    // 叠加 x-uvp-admin-token 才构成完整凭据。
+    ...((config.operatorRoles.adminTokenHashes ?? []).length > 0
+      ? { governanceAdminTokenHashes: config.operatorRoles.adminTokenHashes }
+      : {}),
     evidenceMetadataStore: stores.evidenceMetadataStore,
     evidenceStorage,
     submissionStore,
@@ -272,6 +292,10 @@ export async function startApiServer(
     ...(submissionBroadcastAdapter ? { submissionBroadcastAdapter } : {}),
     ...(stageExecutorPatchBroadcastAdapter ? { stageExecutorPatchBroadcastAdapter } : {}),
     ...(stageResourcePatchBroadcastAdapter ? { stageResourcePatchBroadcastAdapter } : {}),
+    // 持久驱动（sqlite/postgres）下注入持久化 stage-patch store；
+    // memory 驱动不注入，服务内部用内存 store。
+    ...(stores.stageExecutorPatchStore ? { stageExecutorPatchStore: stores.stageExecutorPatchStore } : {}),
+    ...(stores.stageResourcePatchStore ? { stageResourcePatchStore: stores.stageResourcePatchStore } : {}),
     productRegistrationAdapter,
     productTriggerChainId: config.network.chainId,
     ...(config.productBff.registrationCreatorAddress
@@ -333,7 +357,8 @@ export async function startApiServer(
         pathname: url.pathname,
         query: Object.fromEntries(url.searchParams),
         headers: normalizeHeaders(request.headers),
-        body: parsedBody
+        body: parsedBody,
+        clientAddress: clientAddressFromSocket(request)
       });
 
       response.statusCode = apiResponse.status;
@@ -341,17 +366,28 @@ export async function startApiServer(
       const responseBody = apiResponse.status >= 400
         ? withErrorMetadata(apiResponse.body, requestId, runId)
         : apiResponse.body;
-      const safeBody = redactSecrets(responseBody);
+      // 脱敏只属于日志：响应体是 API 契约载荷，按键名形状改写会吞掉
+      // 业务凭据字段（/store/auth/verify 签发的会话 token 即命中
+      // secret 键名模式，客户端拿到 [redacted:secret] 无法登录）。
+      // 日志只落白名单标识字段，且仍整体过脱敏保持"日志恒脱敏"不变量。
+      response.end(JSON.stringify(responseBody, jsonReplacer));
       logger.info("api request completed", {
         requestId,
         ...(runId ? { runId } : {}),
         method: request.method,
         pathname: url.pathname,
         status: apiResponse.status,
-        ...extractResponseLogFields(safeBody)
+        ...extractResponseLogFields(redactSecrets(responseBody))
       });
-      response.end(JSON.stringify(safeBody, jsonReplacer));
     })().catch((error: unknown) => {
+      // 畸形路径参数是调用方可修正的 400，不落入兜底 500。
+      if (error instanceof InvalidPathParameterError) {
+        const body400 = withErrorMetadata(invalidPathParameterResponse().body, requestId, runId);
+        response.statusCode = 400;
+        response.setHeader("content-type", "application/json; charset=utf-8");
+        response.end(JSON.stringify(body400));
+        return;
+      }
       response.statusCode = 500;
       setCorsHeaders(response);
       response.setHeader("x-request-id", requestId);
@@ -382,17 +418,19 @@ export async function startApiServer(
     server.listen(config.api.port, config.api.host, resolve);
   });
 
-  // 轮询在初始后台重建结束后启动（见上方 M-5 注释），避免增量刷新与
-  // 全量重建并发写同一投影存储。
+  // 轮询在初始后台重建结束后启动（见上方注释），避免增量刷新与
+  // 全量重建并发写同一投影存储。reconcile/dock-automation 首轮同门：重建
+  // 进行中读投影会把本应 confirmed 的记录误标 indexing（下一轮自愈，但
+  // 状态与外部通知面失真一轮）。
   void (async () => {
     await initialProjectionRebuild;
     const pollInterval = indexer ? startProjectionRefresh(indexer, config, logger) : undefined;
     if (pollInterval) {
       server.on("close", () => clearInterval(pollInterval));
     }
+    await reconcileWorker.start();
+    await dockAutomationWorker.start();
   })();
-  await reconcileWorker.start();
-  await dockAutomationWorker.start();
   server.on("close", () => {
     void (async () => {
       await dockAutomationWorker.stop();
@@ -540,12 +578,14 @@ const CORS_ALLOWED_ORIGINS = new Set(
 );
 
 function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): void {
-  // UI-1（服务端半）：前端治理写链路使用 PUT，跨源部署下预检会拦
-  // 未列入 allow-methods 的方法，必须显式放行。
+  // 服务端半：前端治理写链路使用 PUT，跨源部署下预检会拦
+  // 未列入 allow-methods 的方法，必须显式放行；非 local 管理面必携
+  // x-uvp-admin-token（governance/auth.ts），跨源管理台预检同样会拦
+  // 未列入 allow-headers 的头。
   response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
-    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role, x-uvp-store-session, x-uvp-store-dev-anchored-address"
+    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-admin-token, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role, x-uvp-store-session, x-uvp-store-dev-anchored-address"
   );
   response.setHeader("access-control-max-age", "86400");
   const origin = request?.headers.origin?.trim() ?? "";
@@ -600,7 +640,8 @@ function productRegistrationAdapterFromConfig(config: ChainServicesConfig): Prod
     rpcUrl: config.network.rpcUrl,
     chainId: config.network.chainId,
     privateKey,
-    waitForReceipt: config.productBff.waitForReceipt
+    waitForReceipt: config.productBff.waitForReceipt,
+    rejectGasPayerAsSubmitter: config.security.environment !== "local"
   });
 }
 
@@ -709,6 +750,19 @@ function runIdFromHeaders(request: IncomingMessage): string | undefined {
   const value = Array.isArray(header) ? header[0] : header;
   const runId = value && value.trim().length > 0 ? value.trim() : process.env.UVP_RUN_ID?.trim();
   return runId && runId.length > 0 ? runId : undefined;
+}
+
+/**
+ * 匿名入口的请求方配额键：直连部署取 socket 对端地址并剥掉 IPv6
+ * 映射前缀（::ffff:1.2.3.4），保证 IPv4 映射与原生写法归入同一桶。
+ * 不读任何客户端自报头——自报的请求方键等于没有配额。
+ */
+function clientAddressFromSocket(request: IncomingMessage): string | undefined {
+  const remote = request.socket.remoteAddress;
+  if (!remote) {
+    return undefined;
+  }
+  return remote.replace(/^::ffff:/, "");
 }
 
 function withErrorMetadata(body: unknown, requestId: string, runId: string | undefined): unknown {
