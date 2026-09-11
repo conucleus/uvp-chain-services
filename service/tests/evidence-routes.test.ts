@@ -217,7 +217,7 @@ describe("evidence API routes", () => {
     });
     const upload = uploadResponse.body as { evidence: { evidenceId: string } };
 
-    // KEEP（存在性 oracle 消除）：无权读取与不存在同响应（404），
+    // 存在性 oracle 消除：无权读取与不存在同响应（404），
     // 未认证在读取前即 401——不再以 403/404 区分泄露证据存在性。
     await expect(router.handle({
       method: "GET",

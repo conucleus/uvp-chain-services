@@ -38,7 +38,7 @@ node --env-file=.env.local --import tsx src/api/server.ts
 - `UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED`: State Machine 广播开关
 - `RECONCILE_WORKER_ENABLED`: 交易回执对账
 
-非本地环境应使用持久数据库和对象存储，并通过安全预检。仓库不含 demo/fixture/mock 运行路径。
+非本地环境应使用持久数据库和对象存储，并通过安全预检。demo/fixture/mock 运行路径仅存在于 local 档（simulated 治理链适配器、内存广播/存储等开发适配器），非 local 环境不含。
 
 ## 接口概览
 

@@ -136,7 +136,7 @@ describe("product BFF order drafts and invites", () => {
   });
 
   it("restricts draft writes, invites, and participant reads to the anchored creator or accepted participants", async () => {
-    // KEEP（草稿/邀请面鉴权收口）：
+    // 草稿/邀请面鉴权收口：
     // - PATCH/createInvite 限创建者（建单时会话锚定地址）；
     // - 参与者名单（含联系方式）限创建者或已接受参与者；
     // - 无会话身份的匿名调用一律 401（local 之外同样 fail-closed）。

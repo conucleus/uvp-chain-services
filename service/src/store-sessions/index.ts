@@ -11,7 +11,8 @@ export {
   STORE_DEV_ANCHORED_ADDRESS_HEADER,
   type StoreSessionService,
   type StoreSessionServiceOptions,
-  type ResolveWalletSessionResult
+  type ResolveWalletSessionResult,
+  type StoreChallengeRequesterContext
 } from "./service.js";
 export {
   InMemoryStoreWalletSessionStore,

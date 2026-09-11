@@ -14,10 +14,11 @@ import {
   deriveTriggerOrderId
 } from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../../shared/types.js";
+import { redactErrorMessage } from "../../security/redaction.js";
 import type { ProductOrderTriggerStatus, SignalAuthorizationDTO } from "./types.js";
 
 export const DEFAULT_PRODUCT_REGISTRAR_ADDRESS = "0x000000000000000000000000000000000000bff1" as const;
-// UVPStateMachine v0.9: planId/orderId/sourceId are indexed; signalId is the
+// UVPStateMachine v0.10: planId/orderId/sourceId are indexed; signalId is the
 // first value in the data payload (not a fourth topic).
 const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,address)"));
 
@@ -375,9 +376,12 @@ function classifyProductTriggerBroadcastError(error: unknown): ClassifiedProduct
       retryable: false
     };
   }
+  // 可重试分支的 message 会落 errorMessage 并回显给调用方：裸 error.message
+  // 可能携带 RPC URL/内网主机等基础设施细节，先脱敏再出镜（对齐
+  // submissions/broadcast-adapter 的 errorText 口径）。
   return {
     errorCode: "trigger_order_broadcast_failed",
-    message,
+    message: redactErrorMessage(message),
     retryable: true
   };
 }

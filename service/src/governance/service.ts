@@ -280,16 +280,6 @@ export function isPubliclyDiscoverableReview(review: Pick<GovernanceReviewDTO, "
   return review.status === "approved_for_broadcast" || review.status === "approved" || review.status === "restricted";
 }
 
-export function isRecommendedReview(review: Pick<GovernanceReviewDTO, "status">): boolean {
-  return review.status === "approved_for_broadcast" || review.status === "approved";
-}
-
-export function filterPublicGovernanceReviews(
-  reviews: readonly GovernanceReviewDTO[]
-): readonly PublicGovernanceReviewDTO[] {
-  return reviews.filter(isPubliclyDiscoverableReview).map(toPublicGovernanceReview);
-}
-
 function saveReview(options: {
   readonly store: GovernanceStore;
   readonly subjectType: GovernanceSubjectType;

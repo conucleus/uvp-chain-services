@@ -132,6 +132,19 @@ export class PendingPostCommitFinalityWaitError extends Error {
   }
 }
 
+/**
+ * reorg 回滚事务内持久游标被其他写者移动（CAS 失败）：回滚的删事件与
+ * 游标回退前提（本轮 fromBlock 仍是持久游标位置）已失效，事务必须整体
+ * 中止——半途落地会留下"事件已删、游标未回退"或反之的撕裂状态。
+ */
+class ReorgCursorMovedError extends Error {
+  override readonly name = "ReorgCursorMovedError";
+
+  constructor() {
+    super("durable cursor was moved by another writer during reorg rollback");
+  }
+}
+
 type MutablePendingPostCommitSweepSummary = Writable<PendingPostCommitSweepSummary>;
 
 export class IndexerService implements LifecycleService {
@@ -408,10 +421,6 @@ export class IndexerService implements LifecycleService {
       await this.#eventSource.getFinalizedBlock(this.#config),
       options.targetBlock
     );
-    // 先补投历史 pending post-commit 步骤（游标已前进的失败批次），
-    // 再处理本轮增量，避免失败批次无限滞后。刷新本身已持有互斥守卫，
-    // 直接调守卫内实现，避免经公开入口二次排队造成自等待。
-    await this.#sweepPendingPostCommitStepsUnderGuard();
     const storedCursor = await durableStore.getCursor(this.#scope);
     const cursor = this.#cursor ?? storedCursor;
     if (!cursor) {
@@ -425,6 +434,13 @@ export class IndexerService implements LifecycleService {
     // 投影；finalityConfirmations 仍是第一道缓冲，超过其深度的 reorg 若
     // 回溯窗口内找不到共同祖先则报错要求 full rebuild。
     const effectiveFromBlock = await this.#rollbackOnReorg(fromBlock);
+    // 补投历史 pending post-commit 步骤（游标已前进的失败批次）必须
+    // 在 reorg 回滚之后：补投上界以持久 finalizedBlock 为准（见
+    // #deliverPendingPostCommitStep），回滚前扫会把回滚前残留的虚高
+    // 上界当真，放行已从 canonical 链消失的幽灵事件的外部投递（回滚
+    // 联动的队列修剪 #trimPendingPostCommitStepsAfterReorg 也尚未生效）。
+    // 主刷新循环的 finalized 防回退上界（下方）同是回滚后读取的先例。
+    await this.#sweepPendingPostCommitStepsUnderGuard();
     // finalized 防回退上界必须在 reorg 回滚之后读取：回滚可能刚把持久化
     // finalized 降回祖先高度，回滚前捕获的旧快景会把已回滚的虚高上界
     // 写回去（补投上界过滤/诊断都以它为准）。
@@ -719,7 +735,44 @@ export class IndexerService implements LifecycleService {
     if (isSameBlockHash(canonicalHash, storedHash)) {
       return fromBlock;
     }
-    return this.#rollbackToCommonAncestor(durableStore, fromBlock);
+    try {
+      return await this.#rollbackToCommonAncestor(durableStore, fromBlock);
+    } catch (error) {
+      if (!(error instanceof ReorgCursorMovedError)) {
+        throw error;
+      }
+      // 回滚的游标写入与推进路径同一 CAS 语义：持久游标被其他写者移动即
+      // 放弃本轮回滚（事件删除随事务一并回退），按持久游标收敛并递延到
+      // 下一轮重读——否则回滚路径的无条件写会让后续自写 CAS 恒成功，
+      // 单写者防线（#saveCursorAdvancingFrom）在回滚轮次形同虚设。
+      const current = await durableStore.getCursor(this.#scope);
+      this.#consecutiveCursorCasFailures += 1;
+      if (this.#consecutiveCursorCasFailures >= CURSOR_CAS_FAILURE_LIMIT) {
+        throw new ConfigError(
+          "durable projection cursor keeps being moved by another writer; run exactly one indexer process per chain scope (single-writer invariant)"
+        );
+      }
+      this.#logger.warn("indexer cursor moved by another writer during reorg rollback; deferring to the durable cursor and re-reading next round", {
+        expectedNextBlock: fromBlock.toString(),
+        durableNextBlock: current?.nextBlock.toString(),
+        consecutiveDeferrals: this.#consecutiveCursorCasFailures
+      });
+      const nextBlock = current
+        ? (current.nextBlock > this.#config.network.deploymentBlock
+          ? current.nextBlock
+          : this.#config.network.deploymentBlock)
+        : fromBlock;
+      this.#cursor = current
+        ? {
+          chainId: current.chainId,
+          deploymentBlock: current.deploymentBlock,
+          nextBlock,
+          ...(current.finalizedBlock !== undefined ? { finalizedBlock: current.finalizedBlock } : {}),
+          ...(current.blockHash !== undefined ? { blockHash: current.blockHash } : {})
+        }
+        : this.#cursor;
+      return nextBlock;
+    }
   }
 
   /** 从 cursor 高度向回找共同祖先（有界），找到则回滚投影。 */
@@ -751,7 +804,7 @@ export class IndexerService implements LifecycleService {
       seenBlocks.add(event.blockNumber);
       const canonicalHash = await this.#eventSource.getBlockHash?.(event.blockNumber, this.#config);
       if (canonicalHash && isSameBlockHash(canonicalHash, event.blockHash)) {
-        return this.#applyReorgRollback(durableStore, event.blockNumber, canonicalHash);
+        return this.#applyReorgRollback(durableStore, fromBlock, event.blockNumber, canonicalHash);
       }
     }
 
@@ -771,7 +824,7 @@ export class IndexerService implements LifecycleService {
     for (const anchor of anchorsBelowWindow) {
       const canonicalHash = await this.#eventSource.getBlockHash?.(anchor.blockNumber, this.#config);
       if (canonicalHash && isSameBlockHash(canonicalHash, anchor.blockHash)) {
-        return this.#applyReorgRollback(durableStore, anchor.blockNumber, canonicalHash);
+        return this.#applyReorgRollback(durableStore, fromBlock, anchor.blockNumber, canonicalHash);
       }
     }
     if (anchorsBelowWindow.length > 0) {
@@ -800,6 +853,7 @@ export class IndexerService implements LifecycleService {
   /** 删除祖先之后的事件、重建快照、回退 cursor。 */
   async #applyReorgRollback(
     durableStore: DurableProjectionStore,
+    fromBlock: bigint,
     ancestorBlock: bigint,
     ancestorHash: Hex
   ): Promise<bigint> {
@@ -840,19 +894,30 @@ export class IndexerService implements LifecycleService {
           mismatchCount
         }
       });
-      await durableStore.saveCursor({
-        ...this.#scope,
-        deploymentBlock,
-        nextBlock: ancestorBlock + 1n > deploymentBlock ? ancestorBlock + 1n : deploymentBlock,
-        finalizedBlock: ancestorBlock,
-        blockHash: ancestorHash
-      });
+      // 游标回退走与推进路径同一 CAS（前置条件：持久游标仍停在本轮
+      // fromBlock）。无条件写会把"其他写者已移动游标"静默顶掉，且让本
+      // 进程随后的自写 CAS 恒成功——单写者防线在回滚轮次被旁路。
+      const saved = await durableStore.saveCursor(
+        {
+          ...this.#scope,
+          deploymentBlock,
+          nextBlock: ancestorBlock + 1n > deploymentBlock ? ancestorBlock + 1n : deploymentBlock,
+          finalizedBlock: ancestorBlock,
+          blockHash: ancestorHash
+        },
+        { expectNextBlock: fromBlock }
+      );
+      if (saved === undefined) {
+        // 事务内抛错整体回退：删事件与游标回退必须同生共死。
+        throw new ReorgCursorMovedError();
+      }
       this.#logger.warn("indexer rolled back projections after chain reorg", {
         ancestorBlock: ancestorBlock.toString(),
         deletedEvents: deleted,
         nextBlock: (ancestorBlock + 1n).toString()
       });
     });
+    this.#consecutiveCursorCasFailures = 0;
     const nextBlock = ancestorBlock + 1n > deploymentBlock ? ancestorBlock + 1n : deploymentBlock;
     this.#cursor = {
       chainId: this.#config.network.chainId,

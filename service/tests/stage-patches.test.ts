@@ -366,7 +366,7 @@ describe("stage executor/resource patch Product API", () => {
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
       body: prepareExecutorBody({
-        mode: "replace",
+        mode: "replacement",
         previousExecutorWallet,
         approval: {
           sourceId: approvalSourceId,
@@ -400,7 +400,7 @@ describe("stage executor/resource patch Product API", () => {
       executorBroadcastAdapter: broadcast,
     });
     const prepared = await prepareStageExecutorPatch(valid.router, {
-      mode: "replace",
+      mode: "replacement",
       previousExecutorWallet,
       approval: {
         sourceId: approvalSourceId,

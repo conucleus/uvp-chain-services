@@ -1,3 +1,4 @@
+import { StorageConstraintError } from "../storage/errors.js";
 import { parseStorageJson, stringifyStorageJson } from "../storage/json.js";
 import { PostgresDatabase } from "../storage/postgres-client.js";
 import type {
@@ -84,14 +85,37 @@ export class PostgresProductStagePatchStore<
     );
   }
 
-  async reserveNonce(key: string): Promise<boolean> {
+  async withTransaction<T>(operation: () => Promise<T>): Promise<T> {
+    return this.#database.withTransaction(operation);
+  }
+
+  async reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean> {
+    const reservedAt = new Date().toISOString();
+    try {
+      await this.#database.query(
+        `INSERT INTO stage_patch_nonce (nonce_key, created_at)
+         VALUES ($1, $2)`,
+        [key, reservedAt]
+      );
+      return true;
+    } catch (error) {
+      if (!(error instanceof StorageConstraintError)) {
+        throw error;
+      }
+    }
+    // 条件 UPDATE 原子接管（对齐 submissions/postgres-store 手法）：年龄
+    // 判定在 WHERE 内完成，并发重试同 key 只有一个赢家。
+    const staleBefore = options?.staleBefore;
+    if (!staleBefore) {
+      return false;
+    }
     const result = await this.#database.query(
-      `INSERT INTO stage_patch_nonce (nonce_key, created_at)
-       VALUES ($1, $2)
-       ON CONFLICT(nonce_key) DO NOTHING`,
-      [key, new Date().toISOString()]
+      `UPDATE stage_patch_nonce
+       SET created_at = $1
+       WHERE nonce_key = $2 AND created_at < $3`,
+      [reservedAt, key, staleBefore]
     );
-    return (result.rowCount ?? 0) > 0;
+    return (result.rowCount ?? 0) === 1;
   }
 
   async releaseNonce(key: string): Promise<void> {

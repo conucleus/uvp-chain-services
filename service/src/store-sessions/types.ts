@@ -17,6 +17,13 @@ export interface StoreAuthChallengeRecord {
   /** 单次使用的随机 nonce（32 字符 hex）。 */
   readonly nonce: string;
   readonly address: Address;
+  /**
+   * 签发请求方标识（连接对端地址；取不到时为共享兜底桶）。
+   * challenge 入口匿名且 address 由调用方自报——若只按目标地址配额，
+   * 任何人连发满额即可锁死任意受害地址的 Store 登录；请求方维度配额
+   * 把囤积成本留在攻击者自己的请求方桶里。
+   */
+  readonly requesterKey: string;
   /** 会话意图：登录或为既有账号锚定新地址。 */
   readonly intent: "login" | "anchor_address";
   /** anchor_address 意图下的目标账号。 */
@@ -52,15 +59,22 @@ export interface StoreAccountAddressRecord {
 
 export interface StoreWalletSessionStore {
   /**
-   * 原子签发：同一地址的存活挑战（未消费且未过期）达到 maxLivePerAddress
-   * 时拒绝写入并返回 false。配额判定与写入必须处于存储层同一原子边界
-   * （内存驱动同步完成 / sqlite 单写连接 / postgres 事务内按地址咨询锁）
-   * ——服务层"先数后写"的窗口会被同地址并发请求整体穿透（每地址配额
-   * 形同虚设）。返回 true 表示挑战已落库。
+   * 原子签发：同一地址的存活挑战（未消费且未过期）达到
+   * maxLivePerAddress，或同一请求方（requesterKey）跨全部地址的存活
+   * 挑战达到 maxLivePerRequester 时拒绝写入并返回 false。双键都防的是
+   * 匿名入口的定向锁死：仅按地址配额时任一请求方可替受害者把配额
+   * 占满，仅按请求方配额时协同多方仍可围攻单地址。配额判定与写入
+   * 必须处于存储层同一原子边界（内存驱动同步完成 / sqlite 单写连接 /
+   * postgres 事务内按地址+请求方咨询锁）——服务层"先数后写"的窗口会被
+   * 并发请求整体穿透（配额形同虚设）。返回 true 表示挑战已落库。
    */
   putChallengeWithinAddressQuota(
     record: StoreAuthChallengeRecord,
-    options: { readonly maxLivePerAddress: number; readonly now: string }
+    options: {
+      readonly maxLivePerAddress: number;
+      readonly maxLivePerRequester: number;
+      readonly now: string;
+    }
   ): Promise<boolean>;
   getChallenge(nonce: string): Promise<StoreAuthChallengeRecord | undefined>;
   listChallengesForAddress(address: Address): Promise<readonly StoreAuthChallengeRecord[]>;

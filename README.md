@@ -42,11 +42,12 @@ signal-container producer APIs.
 
 ## API Access Policy
 
-Pure on-chain fact projections are public by design: `GET
-/product/orders/:orderId/timeline` and `GET /product/orders/:orderId/proof` are
-anonymous-readable (chain events are the publicly replayable truth). In
-contrast, business-record endpoints (`GET /product/submissions/:submissionId`,
-`GET /product/order-triggers/:triggerId`, and the invite preview `GET
+Order/task reads are participant-gated: `GET /product/orders/:orderId` (with
+its `/timeline` and `/proof` views, which disclose participant wallets and
+signer details) requires a session identity, and orders assigned to other
+participants are indistinguishable from nonexistent (404). Business-record
+endpoints (`GET /product/submissions/:submissionId`, `GET
+/product/order-triggers/:triggerId`, and the invite preview `GET
 /product/invites/:inviteId`) always require a session identity (the invite
 preview additionally requires the one-time invite token). Outside the `local`
 runtime profile, admin/ops surfaces additionally require a password factor

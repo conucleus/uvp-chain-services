@@ -711,11 +711,25 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       if (!participantKey) {
         return undefined;
       }
-      const readAt = now();
+      // 先判存在/可见再写：已读状态是持久写入，对不存在（或对该参与者
+      // 不可见）的通知先落已读、再由路由 404，会把一次无效请求固化成
+      // 持久状态。列表即该参与者的可见集合判据。
+      const visible = await buildParticipantNotificationList({
+        store: options.store,
+        deliveryStore,
+        readStateStore: participantReadStateStore,
+        query: {
+          ...(input.walletAddress ? { walletAddress: input.walletAddress } : {})
+        },
+        now: options.now ?? (() => new Date())
+      });
+      if (!visible.notifications.some((notification) => notification.notificationId === input.notificationId)) {
+        return undefined;
+      }
       await participantReadStateStore.markRead({
         participantKey,
         notificationId: input.notificationId,
-        readAt
+        readAt: now()
       });
       const list = await buildParticipantNotificationList({
         store: options.store,
@@ -1247,9 +1261,13 @@ function signalPayloadNotificationProof(proof: SignalNotificationProof): Partici
 }
 
 function participantCanSeeOrderSignals(order: StateMachineOrderProjection, participantKey: string): boolean {
-  return Object.values(order.authorizations).some((authorization) =>
-    authorization.submitter.toLowerCase() === participantKey
-  ) ||
+  // creator 与 product 读面 orderVisibleToParticipant 同口径：订单创建者
+  // 无任务指派/信号时同样是订单参与者，读不到自己创建的订单信号与该
+  // 口径相悖。
+  return order.creator?.toLowerCase() === participantKey ||
+    Object.values(order.authorizations).some((authorization) =>
+      authorization.submitter.toLowerCase() === participantKey
+    ) ||
     Object.values(order.signals).some((signal) => signal.submitter.toLowerCase() === participantKey) ||
     Object.values(order.tasks).some((task) => task.assigneeWallet?.toLowerCase() === participantKey) ||
     Object.values(order.stageExecutorOverlays).some((overlay) =>

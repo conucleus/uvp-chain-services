@@ -1497,11 +1497,13 @@ describe("indexer projection replay", () => {
     const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: orderHeaders });
     const timelineResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${stateMachineOrderId}/timeline`
+      pathname: `/product/orders/${stateMachineOrderId}/timeline`,
+      headers: orderHeaders
     });
     const proofResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${stateMachineOrderId}/proof`
+      pathname: `/product/orders/${stateMachineOrderId}/proof`,
+      headers: orderHeaders
     });
     // 任务读取收口：已认证参与者（锚定钱包）读取任务；该任务未指派
     // 受理人，纯链上事实对已认证参与者开放。
@@ -1727,7 +1729,8 @@ describe("indexer projection replay", () => {
     const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const proofResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${stateMachineOrderId}/proof`
+      pathname: `/product/orders/${stateMachineOrderId}/proof`,
+      headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" }
     });
 
     expect(proofResponse.status).toBe(200);
@@ -1818,7 +1821,8 @@ describe("indexer projection replay", () => {
     const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const proofResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${queuedOrderId}/proof`
+      pathname: `/product/orders/${queuedOrderId}/proof`,
+      headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" }
     });
 
     expect(proofResponse.status).toBe(200);

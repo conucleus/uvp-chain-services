@@ -9,7 +9,8 @@ export class InMemoryProductStagePatchStore<
 > implements ProductStagePatchStore<TPrepared, TSubmission> {
   readonly #prepared = new Map<string, TPrepared & { readonly deadline?: string }>();
   readonly #submissions = new Map<string, TSubmission>();
-  readonly #reservedNonceKeys = new Set<string>();
+  /** nonce 预留 → 预留时刻（ISO）：staleBefore 接管需要预留年龄。 */
+  readonly #reservedNonceKeys = new Map<string, string>();
   readonly #now: () => Date;
 
   constructor(options: { readonly now?: () => Date } = {}) {
@@ -64,11 +65,19 @@ export class InMemoryProductStagePatchStore<
     return deleted;
   }
 
-  async reserveNonce(key: string): Promise<boolean> {
-    if (this.#reservedNonceKeys.has(key)) {
-      return false;
+  async reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean> {
+    const reservedAt = this.#now().toISOString();
+    const existing = this.#reservedNonceKeys.get(key);
+    if (existing !== undefined) {
+      // 与持久实现同判据：只接管早于 staleBefore 的陈旧预留，未过期的
+      // 预留可能属于存活中的提交，仍按重复拒绝。
+      if (!options?.staleBefore || existing >= options.staleBefore) {
+        return false;
+      }
+      this.#reservedNonceKeys.set(key, reservedAt);
+      return true;
     }
-    this.#reservedNonceKeys.add(key);
+    this.#reservedNonceKeys.set(key, reservedAt);
     return true;
   }
 

@@ -51,8 +51,20 @@ export interface ResolveWalletSessionResult {
   readonly record: StoreWalletSessionRecord;
 }
 
+/**
+ * 挑战签发的请求方上下文：只取服务端可见的连接信息（对端地址），
+ * 不接受任何自报字段——配额键自报等于没有配额。
+ */
+export interface StoreChallengeRequesterContext {
+  readonly clientAddress?: string | undefined;
+}
+
 export interface StoreSessionService {
-  createChallenge(input: unknown, requesterSession?: ResolveWalletSessionResult): Promise<StoreWalletSessionChallengeDTO>;
+  createChallenge(
+    input: unknown,
+    requesterSession?: ResolveWalletSessionResult,
+    requester?: StoreChallengeRequesterContext
+  ): Promise<StoreWalletSessionChallengeDTO>;
   verify(input: unknown, requesterSession?: ResolveWalletSessionResult): Promise<StoreWalletSessionVerifyResult>;
   resolveSessionFromToken(token: string | undefined): Promise<ResolveWalletSessionResult | undefined>;
   logout(token: string | undefined): Promise<boolean>;
@@ -72,12 +84,15 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
   const verifyWalletMessage = options.verifyWalletMessage ?? defaultVerifyWalletMessage;
 
   return {
-    async createChallenge(input, requesterSession) {
+    async createChallenge(input, requesterSession, requester) {
       if (!config.enabled) {
         throw new StoreSessionServiceError(403, "store_wallet_session_disabled", "wallet sessions are not enabled for this deployment");
       }
       const record = requireBodyRecord(input);
       const address = normalizeAddress(requiredString(record, "address"), "address");
+      // 请求方配额键：连接对端地址；取不到时归入共享兜底桶（fail-closed，
+      // 宁可错杀匿名签发量也不放开定向锁死面）。
+      const requesterKey = requester?.clientAddress?.trim() || FALLBACK_CHALLENGE_REQUESTER_KEY;
       const intentValue = optionalString(record, "intent") ?? "login";
       if (intentValue !== "login" && intentValue !== "anchor_address") {
         throw new StoreSessionServiceError(400, "invalid_body", "intent must be login or anchor_address");
@@ -89,9 +104,11 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       const accountId = requesterSession?.session.accountId;
       const timestamp = now();
       // 未鉴权入口的资源上界：先顺带清扫过期挑战（只插不删会把表/内存
-      // 无界放大），再按地址配额拒绝囤积——正常登录一个地址同时存活的
-      // 挑战只有个位数，10 个是宽松上界。配额判定在存储层原子完成：
-      // 服务层先数后写的窗口会被同地址并发请求整体穿透。
+      // 无界放大），再按"请求方 + 目标地址"双键配额拒绝囤积——正常登录
+      // 一个地址同时存活的挑战只有个位数，10/30 都是宽松上界。单按地址
+      // 配额防不住定向锁死：入口匿名且 address 自报，任何人连发满额即可
+      // 顶掉任意受害地址的登录；请求方桶把囤积成本留在攻击者一侧。配额
+      // 判定在存储层原子完成：服务层先数后写的窗口会被并发请求整体穿透。
       await store.deleteExpiredChallenges(timestamp.toISOString());
       const nonce = randomBytes(16).toString("hex");
       const issuedAt = timestamp.toISOString();
@@ -112,6 +129,7 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       const challenge: StoreAuthChallengeRecord = {
         nonce,
         address,
+        requesterKey,
         intent,
         ...(accountId ? { accountId } : {}),
         message,
@@ -120,14 +138,19 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       };
       const accepted = await store.putChallengeWithinAddressQuota(challenge, {
         maxLivePerAddress: MAX_LIVE_CHALLENGES_PER_ADDRESS,
+        maxLivePerRequester: MAX_LIVE_CHALLENGES_PER_REQUESTER,
         now: timestamp.toISOString()
       });
       if (!accepted) {
         throw new StoreSessionServiceError(
           429,
           "store_challenge_rate_limited",
-          "too many live challenges for this address; wait for them to expire or consume one",
-          { address, limit: MAX_LIVE_CHALLENGES_PER_ADDRESS }
+          "too many live challenges for this address or from this requester; wait for them to expire or consume one",
+          {
+            address,
+            limit: MAX_LIVE_CHALLENGES_PER_ADDRESS,
+            requesterLimit: MAX_LIVE_CHALLENGES_PER_REQUESTER
+          }
         );
       }
       return {
@@ -573,6 +596,14 @@ const CHALLENGE_INPUT_MAX_LENGTH = 128;
 const CHALLENGE_CHAIN_ID_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._:-]*$/;
 /** 单地址同时存活的未消费挑战配额（未鉴权入口的囤积上界）。 */
 const MAX_LIVE_CHALLENGES_PER_ADDRESS = 10;
+/**
+ * 单请求方跨全部地址的存活挑战配额：防定向锁死——challenge 入口匿名
+ * 且 address 自报，只按地址配额时任一请求方可替受害者占满配额，使其
+ * 在 TTL 内无法登录且可续期。30 覆盖一个团队/出口 IP 的正常多地址登录。
+ */
+const MAX_LIVE_CHALLENGES_PER_REQUESTER = 30;
+/** 取不到对端地址时的共享请求方桶（fail-closed：不因缺追踪而放开）。 */
+const FALLBACK_CHALLENGE_REQUESTER_KEY = "";
 
 function boundedOptionalString(
   record: Record<string, unknown>,

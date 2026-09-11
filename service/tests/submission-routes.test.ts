@@ -449,7 +449,9 @@ describe("submission API routes", () => {
 
     const proofResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${orderId}/proof`
+      pathname: `/product/orders/${orderId}/proof`,
+      // 订单 proof 与订单详情同口径参与者门（匿名 401），带提交者会话读取。
+      headers: { "x-uvp-wallet-address": submitter }
     });
 
     expect(proofResponse.status).toBe(200);

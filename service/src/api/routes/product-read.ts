@@ -178,7 +178,18 @@ export function createProductReadRouteModule(options: {
       const productOrderTimelineMatch = /^\/product\/orders\/([^/]+)\/timeline$/.exec(request.pathname);
       if (request.method === "GET" && productOrderTimelineMatch) {
         return withStorageGuard(async () => {
+          // 时间线与订单详情同口径参与者门：事件载荷携带信号提交者等
+          // 参与者数据，匿名/非参与者不可读；不可见与"不存在"同响应
+          //（404），不泄露存在性。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
           const orderId = decodePathParameter(productOrderTimelineMatch[1] ?? "");
+          const visibility = await resolveOrderVisibility(context, orderId, wallet.identity.walletAddress);
+          if ("response" in visibility) {
+            return visibility.response;
+          }
           let timeline;
           try {
             timeline = await context.productService.listOrderTimeline(orderId);
@@ -207,7 +218,17 @@ export function createProductReadRouteModule(options: {
       const productOrderProofMatch = /^\/product\/orders\/([^/]+)\/proof$/.exec(request.pathname);
       if (request.method === "GET" && productOrderProofMatch) {
         return withStorageGuard(async () => {
+          // 证明行与订单详情同口径参与者门：proof 披露每步链上事件的
+          // 参与者钱包与签名细节，匿名/非参与者不可读（404 不泄露存在性）。
+          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          if (!wallet.ok) {
+            return wallet.response;
+          }
           const orderId = decodePathParameter(productOrderProofMatch[1] ?? "");
+          const visibility = await resolveOrderVisibility(context, orderId, wallet.identity.walletAddress);
+          if ("response" in visibility) {
+            return visibility.response;
+          }
           let proof;
           try {
             proof = await context.productService.listOrderProof(orderId);
@@ -243,34 +264,13 @@ export function createProductReadRouteModule(options: {
             return wallet.response;
           }
           const orderId = decodePathParameter(productOrderMatch[1] ?? "");
-          let order: ProductOrderApiDTO | undefined;
-          try {
-            order = await context.productService.getOrder(orderId);
-          } catch (error) {
-            if (error instanceof ProductOrderLookupError) {
-              return {
-                status: 409,
-                body: {
-                  error: error.code,
-                  details: error.details
-                }
-              };
-            }
-            throw error;
-          }
-          if (!order || !orderVisibleToParticipant(
-            order,
-            wallet.identity.walletAddress.toLowerCase(),
-            await acceptedParticipantOrderIds(context, wallet.identity.walletAddress)
-          )) {
-            return {
-              status: 404,
-              body: { error: "product_order_not_found" }
-            };
+          const visibility = await resolveOrderVisibility(context, orderId, wallet.identity.walletAddress);
+          if ("response" in visibility) {
+            return visibility.response;
           }
           return {
             status: 200,
-            body: { order }
+            body: { order: visibility.order }
           };
         });
       }
@@ -478,6 +478,48 @@ async function acceptedParticipantOrderIds(
     const orderId = assignment.trigger?.orderId ?? assignment.draft.triggeredOrderId;
     return orderId ? [orderId.toLowerCase()] : [];
   }));
+}
+
+/**
+ * 订单读取的参与者门（订单详情与 timeline/proof 共用）：订单身份无法
+ * 唯一定位时透传 409（歧义是调用方可修正的请求错误）；不可见与
+ * "不存在"同响应（404），不泄露存在性。
+ */
+async function resolveOrderVisibility(
+  context: Parameters<RouteModule["handle"]>[1],
+  orderId: string,
+  walletAddress: string
+): Promise<
+  | { readonly order: ProductOrderApiDTO }
+  | { readonly response: ApiResponse }
+> {
+  let order: ProductOrderApiDTO | undefined;
+  try {
+    order = await context.productService.getOrder(orderId);
+  } catch (error) {
+    if (error instanceof ProductOrderLookupError) {
+      return {
+        response: {
+          status: 409,
+          body: { error: error.code, details: error.details }
+        }
+      };
+    }
+    throw error;
+  }
+  if (!order || !orderVisibleToParticipant(
+    order,
+    walletAddress.toLowerCase(),
+    await acceptedParticipantOrderIds(context, walletAddress)
+  )) {
+    return {
+      response: {
+        status: 404,
+        body: { error: "product_order_not_found" }
+      }
+    };
+  }
+  return { order };
 }
 
 /**

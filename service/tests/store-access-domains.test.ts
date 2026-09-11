@@ -1294,6 +1294,42 @@ describe("store auth challenge resource bounds", () => {
     await expect(service.createChallenge({ address: supplierWallet })).resolves.toBeDefined();
   });
 
+  it("caps a single requester across all addresses (anonymous targeted lockout bound)", async () => {
+    // challenge 入口匿名且 address 自报：若无请求方维度配额，一个请求方
+    // 连发 10 次即可锁死任意受害地址并按 TTL 续期。请求方桶把单个
+    // 请求方可占用的总囤积量压到 30——换地址绕过地址配额不再可行。
+    const { createStoreSessionService, StoreSessionServiceError } =
+      await import("../src/store-sessions/index.js");
+    const current = new Date(Date.UTC(2026, 8, 10, 0, 0, 0));
+    const service = createStoreSessionService({
+      config: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: false
+      },
+      now: () => current
+    });
+    const requester = { clientAddress: "203.0.113.7" };
+    for (let index = 0; index < 30; index += 1) {
+      const address = `0x${(0x1000 + index).toString(16).padStart(40, "0")}` as Address;
+      await expect(service.createChallenge({ address }, undefined, requester)).resolves.toBeDefined();
+    }
+    // 每个地址只被签发过 1 次（远未触地址配额），但请求方桶已满：429。
+    await expect(
+      service.createChallenge({ address: `0x${"7".repeat(40)}` as Address }, undefined, requester)
+    ).rejects.toMatchObject({ status: 429, code: "store_challenge_rate_limited" });
+    await expect(
+      service.createChallenge({ address: `0x${"8".repeat(40)}` as Address }, undefined, requester)
+    ).rejects.toBeInstanceOf(StoreSessionServiceError);
+    // 别的请求方不受该请求方囤积影响。
+    await expect(
+      service.createChallenge({ address: `0x${"7".repeat(40)}` as Address }, undefined, { clientAddress: "198.51.100.9" })
+    ).resolves.toBeDefined();
+  });
+
   it("keeps a hard cap on the in-memory challenge table", async () => {
     const { InMemoryStoreWalletSessionStore, MEMORY_CHALLENGE_HARD_LIMIT } =
       await import("../src/store-sessions/index.js");
@@ -1301,6 +1337,7 @@ describe("store auth challenge resource bounds", () => {
     const challengeAt = (index: number, expiresAt: string): StoreAuthChallengeRecord => ({
       nonce: `nonce${index.toString().padStart(6, "0")}`,
       address: `0x${(index % 100).toString(16).padStart(40, "0")}` as Address,
+      requesterKey: "test-requester",
       intent: "login",
       message: "m",
       issuedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 0) + index * 1000).toISOString(),
@@ -1308,10 +1345,14 @@ describe("store auth challenge resource bounds", () => {
     });
 
     // 到达硬上限时先清过期行：最早过期的挑战被清扫而不是顶掉最新行。
-    // 配额给到不可达值——本用例专测硬上限淘汰，不与每地址配额耦合
-    //（记录按 index%100 轮换地址，每地址多条会先撞配额）。
+    // 配额给到不可达值——本用例专测硬上限淘汰，不与每地址/每请求方配额
+    // 耦合（记录按 index%100 轮换地址，同请求方多条会先撞请求方配额）。
     const put = (record: StoreAuthChallengeRecord): Promise<boolean> =>
-      store.putChallengeWithinAddressQuota(record, { maxLivePerAddress: Number.MAX_SAFE_INTEGER, now: "2101-01-01T00:00:00Z" });
+      store.putChallengeWithinAddressQuota(record, {
+        maxLivePerAddress: Number.MAX_SAFE_INTEGER,
+        maxLivePerRequester: Number.MAX_SAFE_INTEGER,
+        now: "2101-01-01T00:00:00Z"
+      });
     await put(challengeAt(0, "2026-01-01T00:00:00Z"));
     for (let index = 1; index < MEMORY_CHALLENGE_HARD_LIMIT; index += 1) {
       await put(challengeAt(index, "2100-01-01T00:00:00Z"));

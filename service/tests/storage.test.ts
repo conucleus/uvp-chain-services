@@ -112,6 +112,7 @@ const expectedMigrationVersions = [
   "0017_indexer_pending_post_commit",
   "0018_store_governance_audit_constraints",
   "0019_stage_patch_state",
+  "0020_store_challenge_requester_key",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0

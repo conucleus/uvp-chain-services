@@ -381,10 +381,24 @@ export interface ProductStagePatchStore<
   TPrepared extends PreparedPatchRecordBase,
   TSubmission extends StagePatchSubmissionBase
 > {
+  /**
+   * 可选事务能力（sqlite/postgres 实现）：putSubmission 与 nonce 收尾
+   * （释放或 markPreparedUsed）必须同事务提交——分开提交时事务间崩溃
+   * 会留下"nonce 行已插、prepare 未标 used"的组合，同 prepareId 的合法
+   * 重试将永久 409（全库无其他释放口）。
+   */
+  withTransaction?<T>(operation: () => Promise<T>): Promise<T>;
   putPrepared(record: TPrepared): Promise<void>;
   getPrepared(prepareId: string): Promise<TPrepared | undefined>;
   markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void>;
-  reserveNonce(key: string): Promise<boolean>;
+  /**
+   * staleBefore：命中既有预留时，预留时间早于该阈值的行视为陈旧预留
+   * （进程在 reserve 与落档之间硬崩溃的唯一泄漏形态——存活中的 submit
+   * 要么在同一落档事务内收尾，要么显式释放，预留年龄不可能超过一个
+   * 授权有效期）。陈旧行走条件更新接管并返回 true；未过期仍返回 false
+   * 由调用方 409。阈值缺省时退化为纯 insert 语义。
+   */
+  reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean>;
   /**
    * reserve 之后的 broadcast/存储写入抛错时，提交服务会先释放
    * nonce 再 rethrow，保证同一 prepareId 在瞬时 RPC/存储失败后仍可重试。

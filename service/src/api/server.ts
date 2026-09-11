@@ -357,7 +357,8 @@ export async function startApiServer(
         pathname: url.pathname,
         query: Object.fromEntries(url.searchParams),
         headers: normalizeHeaders(request.headers),
-        body: parsedBody
+        body: parsedBody,
+        clientAddress: clientAddressFromSocket(request)
       });
 
       response.statusCode = apiResponse.status;
@@ -578,11 +579,13 @@ const CORS_ALLOWED_ORIGINS = new Set(
 
 function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): void {
   // 服务端半：前端治理写链路使用 PUT，跨源部署下预检会拦
-  // 未列入 allow-methods 的方法，必须显式放行。
+  // 未列入 allow-methods 的方法，必须显式放行；非 local 管理面必携
+  // x-uvp-admin-token（governance/auth.ts），跨源管理台预检同样会拦
+  // 未列入 allow-headers 的头。
   response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
-    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role, x-uvp-store-session, x-uvp-store-dev-anchored-address"
+    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-admin-token, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role, x-uvp-store-session, x-uvp-store-dev-anchored-address"
   );
   response.setHeader("access-control-max-age", "86400");
   const origin = request?.headers.origin?.trim() ?? "";
@@ -747,6 +750,19 @@ function runIdFromHeaders(request: IncomingMessage): string | undefined {
   const value = Array.isArray(header) ? header[0] : header;
   const runId = value && value.trim().length > 0 ? value.trim() : process.env.UVP_RUN_ID?.trim();
   return runId && runId.length > 0 ? runId : undefined;
+}
+
+/**
+ * 匿名入口的请求方配额键：直连部署取 socket 对端地址并剥掉 IPv6
+ * 映射前缀（::ffff:1.2.3.4），保证 IPv4 映射与原生写法归入同一桶。
+ * 不读任何客户端自报头——自报的请求方键等于没有配额。
+ */
+function clientAddressFromSocket(request: IncomingMessage): string | undefined {
+  const remote = request.socket.remoteAddress;
+  if (!remote) {
+    return undefined;
+  }
+  return remote.replace(/^::ffff:/, "");
 }
 
 function withErrorMetadata(body: unknown, requestId: string, runId: string | undefined): unknown {

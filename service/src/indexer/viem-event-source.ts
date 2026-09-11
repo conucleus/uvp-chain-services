@@ -58,7 +58,7 @@ const orderLinkModuleAbi = parseAbi([
   "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 planId,bytes32 originPlanId,bytes32 originSourceId,bytes32 originSignalId)",
 ]);
 
-// UVPDockingModule v4.1（具名接口 dock v2）。终态不由链上事件驱动，
+// UVPDockingModule v4.2（具名接口 dock v2）。终态不由链上事件驱动，
 // 事件面只有 open/input/output 三类。
 const dockingModuleAbi = parseAbi([
   "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 interfaceNameId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
@@ -245,14 +245,6 @@ export class ViemChainEventSource implements ChainEventSource {
       createPublicClient({ transport: http(config.network.rpcUrl) })
     );
   }
-}
-
-export function createDefaultEventSource(
-  config: ChainServicesConfig,
-): ChainEventSource | undefined {
-  return hasConfiguredEvmIndexerContracts(config)
-    ? new ViemChainEventSource()
-    : undefined;
 }
 
 export function hasConfiguredEvmIndexerContracts(

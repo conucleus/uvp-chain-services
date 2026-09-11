@@ -16,7 +16,6 @@ import {
 } from "../notifications/config.js";
 import type { ProductService, ProductTaskApiDTO } from "../product/service.js";
 import {
-  ConfigError,
   compareChainPointers,
   normalizeAddress,
   normalizeBytes32,
@@ -1286,13 +1285,4 @@ function shortHex(value: string): string {
   return value.length > 18
     ? `${value.slice(0, 8)}...${value.slice(-8)}`
     : value;
-}
-
-export function storeSupplierErrorFromConfigError(
-  error: unknown,
-): StoreSupplierServiceError | undefined {
-  if (error instanceof ConfigError) {
-    return new StoreSupplierServiceError(400, "invalid_body", error.message);
-  }
-  return undefined;
 }

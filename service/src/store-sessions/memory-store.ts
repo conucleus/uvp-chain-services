@@ -13,7 +13,7 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
 
   async putChallengeWithinAddressQuota(
     record: StoreAuthChallengeRecord,
-    options: { readonly maxLivePerAddress: number; readonly now: string }
+    options: { readonly maxLivePerAddress: number; readonly maxLivePerRequester: number; readonly now: string }
   ): Promise<boolean> {
     // challenge 入口未鉴权：内存驱动必须有独立硬上限，否则即使有每地址
     // 配额，攻击者换地址循环打仍会无界增长（OOM）。到达上限时先清过期
@@ -32,13 +32,21 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
     }
     // 配额判定与写入同步完成（无 await 间隙）：JS 单线程事件循环即原子边界。
     const address = record.address.toLowerCase();
-    let live = 0;
+    const requesterKey = record.requesterKey;
+    let liveForAddress = 0;
+    let liveForRequester = 0;
     for (const challenge of this.#challenges.values()) {
-      if (challenge.address.toLowerCase() === address && !challenge.consumedAt && challenge.expiresAt >= options.now) {
-        live += 1;
+      if (challenge.consumedAt || challenge.expiresAt < options.now) {
+        continue;
+      }
+      if (challenge.address.toLowerCase() === address) {
+        liveForAddress += 1;
+      }
+      if (challenge.requesterKey === requesterKey) {
+        liveForRequester += 1;
       }
     }
-    if (live >= options.maxLivePerAddress) {
+    if (liveForAddress >= options.maxLivePerAddress || liveForRequester >= options.maxLivePerRequester) {
       return false;
     }
     this.#challenges.set(record.nonce, record);

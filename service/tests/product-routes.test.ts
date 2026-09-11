@@ -837,8 +837,14 @@ describe("product API routes", () => {
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
     const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders });
-    const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
-    const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` });
+    // timeline/proof 披露参与者钱包与签名细节：与订单详情同口径参与者门
+    //（匿名 401），带会话断言 200。非参与者 404 的断言在下方"参与者集合
+    // 非空"的用例覆盖——本 fixture 的订单无任何指派参与者（纯链上事实，
+    // 对已认证钱包开放），不构成 404 判据。
+    const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: assigneeHeaders });
+    const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: assigneeHeaders });
+    const anonymousTimeline = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
+    const anonymousProof = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` });
     const tasksResponse = await router.handle({ method: "GET", pathname: "/product/tasks", query: { orderId: stateMachineOrderId }, headers: assigneeHeaders });
 
     expect(orderResponse.status).toBe(200);
@@ -890,6 +896,8 @@ describe("product API routes", () => {
         blockNumber: "3",
         transactionHash: txHash(3n)
       }));
+    expect(anonymousTimeline.status).toBe(401);
+    expect(anonymousProof.status).toBe(401);
     expect((tasksResponse.body as { tasks: Array<{ taskId: string; status: string }> }).tasks)
       .toContainEqual(expect.objectContaining({ taskId, status: "open" }));
 
@@ -902,9 +910,9 @@ describe("product API routes", () => {
 
     await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders }))
       .resolves.toMatchObject({ body: firstOrderBody });
-    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` }))
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: assigneeHeaders }))
       .resolves.toMatchObject({ body: firstTimelineBody });
-    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` }))
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: assigneeHeaders }))
       .resolves.toMatchObject({ body: firstProofBody });
     await expect(router.handle({ method: "GET", pathname: "/product/tasks", query: { orderId: stateMachineOrderId }, headers: assigneeHeaders }))
       .resolves.toMatchObject({ body: firstTasksBody });
@@ -1022,8 +1030,8 @@ describe("product API routes", () => {
     const taskResponse = await router.handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: { "x-uvp-wallet-address": overlayExecutor } });
     // 订单内嵌任务的 assigneeWallet=overlayExecutor——订单读按参与者过滤。
     const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: { "x-uvp-wallet-address": overlayExecutor } });
-    const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` });
-    const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
+    const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: { "x-uvp-wallet-address": overlayExecutor } });
+    const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: { "x-uvp-wallet-address": overlayExecutor } });
 
     expect(taskResponse.status).toBe(200);
     expect((taskResponse.body as { task: Record<string, unknown> }).task).toMatchObject({
@@ -1172,6 +1180,17 @@ describe("product API routes", () => {
       .not.toContain(assignedTaskId);
     const outsiderAssignedDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${assignedTaskId}`, headers: outsiderHeaders });
     expect(outsiderAssignedDetail.status).toBe(404);
+
+    // timeline/proof 与订单详情同口径参与者门：该订单有参与者集合
+    //（overlay 执行者 + 创建者），无关认证钱包 404 不泄露存在性。
+    const outsiderTimeline = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: outsiderHeaders });
+    expect(outsiderTimeline.status).toBe(404);
+    const outsiderProof = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: outsiderHeaders });
+    expect(outsiderProof.status).toBe(404);
+    const participantTimeline = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: { "x-uvp-wallet-address": overlayExecutor } });
+    expect(participantTimeline.status).toBe(200);
+    const participantProof = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: { "x-uvp-wallet-address": overlayExecutor } });
+    expect(participantProof.status).toBe(200);
 
     // 订单参与者（overlay 委任执行者）：未指派任务列表可见、详情 200。
     const participantList = await router.handle({ method: "GET", pathname: "/product/tasks", headers: { "x-uvp-wallet-address": overlayExecutor } });
@@ -1696,11 +1715,13 @@ describe("product API routes", () => {
     });
     const timelineResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${DEMO_ORDER_ID}/timeline`
+      pathname: `/product/orders/${DEMO_ORDER_ID}/timeline`,
+      headers: assigneeHeaders
     });
     const proofResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${DEMO_ORDER_ID}/proof`
+      pathname: `/product/orders/${DEMO_ORDER_ID}/proof`,
+      headers: assigneeHeaders
     });
 
     expect(ordersResponse.status).toBe(200);

@@ -947,7 +947,6 @@ function submittedSubmission(
     status: "submitted",
     txHash,
     ...(attemptNumber !== undefined ? { attemptNumber } : {}),
-    ...(attemptNumber !== undefined ? { attemptCount: attemptNumber } : {}),
     ...(retryBudgetRemaining !== undefined ? { retryBudgetRemaining } : {}),
     retryable: false,
     retryState: "not_applicable",
@@ -967,7 +966,6 @@ function failedSubmission(
     status: "failed",
     ...(txHash ? { txHash } : {}),
     ...(attemptNumber !== undefined ? { attemptNumber } : {}),
-    ...(attemptNumber !== undefined ? { attemptCount: attemptNumber } : {}),
     ...(retryBudgetRemaining !== undefined ? { retryBudgetRemaining } : {}),
     errorCode: classification.errorCode,
     errorLabel: classification.errorLabel,
@@ -988,7 +986,6 @@ function submissionBase(request: RelayRequest): Omit<
   | "errorLabel"
   | "error"
   | "attemptNumber"
-  | "attemptCount"
   | "retryBudgetRemaining"
   | "failureCategory"
   | "retryable"
@@ -1088,7 +1085,7 @@ function failedAttemptsFromSubmission(submission: RelaySubmission | undefined): 
       (submission.retryable !== true && submission.retryState !== "retryable")) {
     return 0;
   }
-  return Math.max(submission.attemptNumber ?? submission.attemptCount ?? 0, 0);
+  return Math.max(submission.attemptNumber ?? 0, 0);
 }
 
 function cappedExponentialBackoffMs(baseMs: number, maxMs: number, attempts: number): number {

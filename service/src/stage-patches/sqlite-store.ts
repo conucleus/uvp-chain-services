@@ -1,8 +1,10 @@
+import { StorageConstraintError } from "../storage/errors.js";
 import { parseStorageJson, stringifyStorageJson } from "../storage/json.js";
 import { runSqliteMigrations } from "../storage/migrations.js";
 import {
   openSqliteDatabase,
   runSqliteWrite,
+  withSqliteTransaction,
   type SqliteDatabase
 } from "../storage/sqlite.js";
 import { rowObject, stringColumn } from "../storage/sqlite-rows.js";
@@ -132,17 +134,44 @@ export class SqliteProductStagePatchStore<
     });
   }
 
-  async reserveNonce(key: string): Promise<boolean> {
-    const result = runSqliteWrite(() =>
+  async withTransaction<T>(operation: () => Promise<T>): Promise<T> {
+    return withSqliteTransaction(this.#database, operation);
+  }
+
+  async reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean> {
+    const reservedAt = new Date().toISOString();
+    try {
+      runSqliteWrite(() => {
+        this.#database
+          .prepare(
+            `INSERT INTO stage_patch_nonce (nonce_key, created_at)
+             VALUES (?, ?)`
+          )
+          .run(key, reservedAt);
+      });
+      return true;
+    } catch (error) {
+      if (!(error instanceof StorageConstraintError)) {
+        throw error;
+      }
+    }
+    // 条件 UPDATE 原子接管（对齐 submissions/sqlite-store 手法）：年龄判定
+    // 在 WHERE 内完成，并发重试同 key 只有一个赢家。created_at 统一
+    // toISOString 落库，字典序即时间序。
+    const staleBefore = options?.staleBefore;
+    if (!staleBefore) {
+      return false;
+    }
+    const updated = runSqliteWrite(() =>
       this.#database
         .prepare(
-          `INSERT INTO stage_patch_nonce (nonce_key, created_at)
-           VALUES (?, ?)
-           ON CONFLICT(nonce_key) DO NOTHING`
+          `UPDATE stage_patch_nonce
+           SET created_at = ?
+           WHERE nonce_key = ? AND created_at < ?`
         )
-        .run(key, new Date().toISOString())
+        .run(reservedAt, key, staleBefore)
     );
-    return result.changes > 0;
+    return updated.changes === 1;
   }
 
   async releaseNonce(key: string): Promise<void> {

@@ -676,8 +676,6 @@ export function notSupportedSubmissionBroadcastAdapter(): SubmissionBroadcastAda
   };
 }
 
-export const noopSubmissionBroadcastAdapter = notSupportedSubmissionBroadcastAdapter;
-
 export function denyByDefaultSubmissionAuthorization(): SubmissionAuthorizationAdapter {
   return {
     async authorize(): Promise<SubmissionAuthorizationResult> {

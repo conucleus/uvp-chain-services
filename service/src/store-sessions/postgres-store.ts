@@ -17,28 +17,38 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
 
   async putChallengeWithinAddressQuota(
     record: StoreAuthChallengeRecord,
-    options: { readonly maxLivePerAddress: number; readonly now: string }
+    options: { readonly maxLivePerAddress: number; readonly maxLivePerRequester: number; readonly now: string }
   ): Promise<boolean> {
-    // 配额判定与写入必须在同一事务内，且按地址咨询锁串行化：READ COMMITTED
-    // 下无锁的"数了再插"两条并发语句可同时看到未满的计数，双双写入穿透
-    // 配额。pg_advisory_xact_lock 随事务结束自动释放，不同地址互不阻塞。
+    // 配额判定与写入必须在同一事务内，且按地址+请求方两个咨询锁串行化：
+    // READ COMMITTED 下无锁的"数了再插"两条并发语句可同时看到未满的
+    // 计数，双双写入穿透配额。pg_advisory_xact_lock 随事务结束自动释放，
+    // 无关的地址/请求方组合互不阻塞；两把锁按字典序固定顺序获取，避免
+    // "地址 A+请求方 R1"与"地址 B+请求方 R2"交叉持锁时互等死锁。
     const addressKey = record.address.toLowerCase();
+    const requesterKey = record.requesterKey;
     return this.#database.withTransaction(async () => {
-      await this.#database.query("SELECT pg_advisory_xact_lock(hashtext($1))", [addressKey]);
+      for (const lockKey of [addressKey, requesterKey].sort((left, right) => left.localeCompare(right))) {
+        await this.#database.query("SELECT pg_advisory_xact_lock(hashtext($1))", [lockKey]);
+      }
       const count = await this.#database.query(
-        `SELECT COUNT(*)::int AS live FROM store_auth_challenge
-         WHERE address = $1 AND consumed_at IS NULL AND expires_at >= $2`,
-        [addressKey, options.now]
+        `SELECT
+           COUNT(*) FILTER (WHERE address = $1)::int AS live_for_address,
+           COUNT(*) FILTER (WHERE requester_key = $2)::int AS live_for_requester
+         FROM store_auth_challenge
+         WHERE consumed_at IS NULL AND expires_at >= $3
+           AND (address = $1 OR requester_key = $2)`,
+        [addressKey, requesterKey, options.now]
       );
-      const live = (count.rows[0] as { live: number } | undefined)?.live ?? 0;
-      if (live >= options.maxLivePerAddress) {
+      const liveForAddress = (count.rows[0] as { live_for_address: number } | undefined)?.live_for_address ?? 0;
+      const liveForRequester = (count.rows[0] as { live_for_requester: number } | undefined)?.live_for_requester ?? 0;
+      if (liveForAddress >= options.maxLivePerAddress || liveForRequester >= options.maxLivePerRequester) {
         return false;
       }
       await this.#database.query(
-        `INSERT INTO store_auth_challenge (nonce, address, intent, account_id, message, issued_at, expires_at, consumed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO store_auth_challenge (nonce, address, requester_key, intent, account_id, message, issued_at, expires_at, consumed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (nonce) DO UPDATE SET consumed_at = EXCLUDED.consumed_at`,
-        [record.nonce, addressKey, record.intent, record.accountId ?? null, record.message, record.issuedAt, record.expiresAt, record.consumedAt ?? null]
+        [record.nonce, addressKey, requesterKey, record.intent, record.accountId ?? null, record.message, record.issuedAt, record.expiresAt, record.consumedAt ?? null]
       );
       return true;
     });
@@ -158,6 +168,7 @@ function challengeRow(row: Row): StoreAuthChallengeRecord {
   return {
     nonce: String(row.nonce),
     address: String(row.address) as Address,
+    requesterKey: String(row.requester_key ?? ""),
     intent: row.intent === "anchor_address" ? "anchor_address" : "login",
     ...(row.account_id ? { accountId: String(row.account_id) } : {}),
     message: String(row.message),

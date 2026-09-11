@@ -74,6 +74,12 @@ export interface ApiRequest {
   readonly query?: Readonly<Record<string, string>>;
   readonly headers?: Readonly<Record<string, string | undefined>>;
   readonly body?: unknown;
+  /**
+   * 连接对端地址（服务端观测值，调用方不可自报）。匿名入口的请求方
+   * 维度限流/配额键；直连部署取 socket 对端，经反代部署由装配层按其
+   * 转发头策略填充。
+   */
+  readonly clientAddress?: string | undefined;
 }
 
 export interface ApiResponse {

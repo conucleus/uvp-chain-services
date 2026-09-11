@@ -8,7 +8,6 @@ import {
   assertProductionStorageURI,
   BackupEvidenceStorage,
   InMemoryEvidenceStorage,
-  LocalEvidenceStorage,
   type EvidenceStorage,
   type EvidenceStorageRuntimeEnvironment
 } from "./storage.js";
@@ -391,14 +390,6 @@ function requireAdminPrincipal(principal: EvidencePrincipal): void {
 
 function backupStorageOf(storage: EvidenceStorage): BackupEvidenceStorage | undefined {
   return storage instanceof BackupEvidenceStorage ? storage : undefined;
-}
-
-export function createDefaultEvidenceService(): EvidenceService {
-  return createEvidenceService({
-    metadataStore: new InMemoryEvidenceMetadataStore(),
-    storage: new LocalEvidenceStorage(),
-    runtimeEnvironment: "local"
-  });
 }
 
 export function principalFromHeaders(headers: Readonly<Record<string, string | undefined>> | undefined): EvidencePrincipal {
