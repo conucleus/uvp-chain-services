@@ -119,7 +119,6 @@ apiVersion: uvp/v0
 kind: Zhixu
 metadata:
   name: route-durable
-  uid: route-durable-001
   annotations:
     version: "1"
 spec:
@@ -133,7 +132,10 @@ spec:
       stages:
         - name: gate
           source: buyer
-          sendSignals: ["ready"]
+          # BEGIN 自发种子入口（物化门：零 hook 阶段在链上永不可物化）。
+          receiveSignals:
+            BEGIN: "buyer::selector.gate.seed"
+          sendSignals: ["ready", "seed"]
           executor:
             supplierType: organization
             supplierID: selector-ops
@@ -1669,6 +1671,8 @@ describePostgres(
         reopenedRouter.handle({
           method: "GET",
           pathname: `/store/product-schemas/${encodeURIComponent(savedSchema.planId)}/${encodeURIComponent(savedSchema.planHash)}`,
+          // plan 级完整 schema 同为发布者创作资产，匿名不可读（operator 级）。
+          headers: adminHeaders,
           query: { artifactHash: savedSchema.artifactHash },
         }),
       ).resolves.toMatchObject({
@@ -1679,6 +1683,7 @@ describePostgres(
         reopenedRouter.handle({
           method: "GET",
           pathname: `/store/zhixu-series/${CROSS_BORDER_ZHIXU_ID}/versions`,
+          headers: adminHeaders,
         }),
       ).resolves.toMatchObject({
         status: 200,
@@ -1729,6 +1734,7 @@ describePostgres(
         reopenedRouter.handle({
           method: "GET",
           pathname: `/store/docking-sessions/${dockingSessionId}`,
+          headers: adminHeaders,
         }),
       ).resolves.toMatchObject({
         status: 200,
@@ -1795,6 +1801,9 @@ function createStoreMetadataRouter(stores: ChainServicesStores): ApiRouter {
     submissionStore: stores.submissionStore,
     governanceStore: stores.governanceStore,
     storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    // 锚定地址的 wallet 会话必须与被测栈同源（postgres 持久化）：不传时
+    // 路由自建内存会话仓，重启后 store_operator 身份蒸发、路由 401。
+    storeWalletSessionStore: stores.storeWalletSessionStore,
     storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
     storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
     storeDockingSessionStore: stores.storeDockingSessionStore,
@@ -1842,6 +1851,9 @@ async function saveExplicitRouteSmokeSchema(
   const schemaResponse = await router.handle({
     method: "GET",
     pathname: `/store/zhixu-drafts/${draftId}/product-schema`,
+    // 完整 schema 含 compilePreview 材料，路由对匿名读取强制 401——
+    // smoke 链路与其余写操作一样走 admin 能力头。
+    headers: adminHeaders,
   });
   expect(schemaResponse.status).toBe(200);
   const schema = (
