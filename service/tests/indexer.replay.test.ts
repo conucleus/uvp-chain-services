@@ -249,7 +249,7 @@ describe("indexer projection replay", () => {
   });
 
   it("keeps the earliest matching signal as the submitted proof when a later matching signal arrives", () => {
-    // L-11：任务 submitted 是首个完成事实——后到的匹配信号不得覆盖
+    // 任务 submitted 是首个完成事实——后到的匹配信号不得覆盖
     // 任务的完成证明与 updatedAt（与创建路径取最早证明同口径）。
     const base: readonly ChainEvent[] = [
       chainEvent(1n, 0, "PlanRegistered", {
@@ -549,7 +549,9 @@ describe("indexer projection replay", () => {
     expect(summary).toMatchObject({
       activeEventCount: 2,
       removedEventCount: 1,
-      removedLogsFiltered: true
+      // 墓碑被复活抵消：活跃集没有实际丢失，removedLogsFiltered 如实为
+      // false（removedEventCount 仍记录见过的墓碑数）。
+      removedLogsFiltered: false
     });
     expect(summary.activeEvents.map((event) => event.eventName)).toEqual([
       "PlanRegistered",
@@ -589,6 +591,38 @@ describe("indexer projection replay", () => {
     expect(snapshot.eventCount).toBe(1);
   });
 
+  it("keeps a cancelled task cancelled when a loose fallback-key signal arrives afterwards", () => {
+    // HookStatusChanged(cancelled) 是链上终态；taskMatchesSubmittedSignal 的
+    // 宽松回退键（hookId === sourceId/signalId）命中的无关信号不得把已
+    // 撤销任务复活成 submitted。
+    const snapshot = rebuildOrderProjections([
+      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+      chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
+      chainEvent(3n, 0, "HookReady", { orderId: stateMachineOrderId, hookId, stageId, hookName }),
+      chainEvent(4n, 0, "HookStatusChanged", {
+        orderId: stateMachineOrderId,
+        hookId,
+        previousStatus: 2,
+        newStatus: 3,
+        dueAt: 0n
+      }),
+      chainEvent(5n, 0, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        planId,
+        sourceId: hookId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signer
+      })
+    ]);
+
+    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
+    const taskKey = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
+    expect(order?.hooks[hookId]?.status).toBe("cancelled");
+    expect(order?.tasks[taskKey]?.status).toBe("cancelled");
+  });
+
   it("projects registry deployments and scopes identical order ids by state machine", async () => {
     const events = [
       ...deploymentRegistryEvents(),
@@ -612,7 +646,12 @@ describe("indexer projection replay", () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events });
     const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
-    const response = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
+    // 订单读有身份门（匿名 401 先于歧义判定）；歧义判定对已认证参与者仍 409。
+    const response = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${stateMachineOrderId}`,
+      headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" }
+    });
 
     expect(response.status).toBe(409);
     expect(response.body).toMatchObject({
@@ -712,6 +751,7 @@ describe("indexer projection replay", () => {
         dockInstanceId: dockInstanceId,
         localOrderId: stateMachineOrderId,
         linkedOrderId: bytes32Hex("303"),
+        interfaceNameId: bytes32Text("production_service"),
         localPlanId: planId,
         targetPlanId: bytes32Hex("404"),
         routeId: bytes32Hex("505"),
@@ -763,7 +803,7 @@ describe("indexer projection replay", () => {
       localOrderId: stateMachineOrderId,
       linkedOrderId: bytes32Hex("303"),
       targetPlanId: bytes32Hex("404"),
-      status: "open"
+      interfaceNameId: bytes32Text("production_service")
     });
     expect(Object.keys(snapshot.stateMachineDocks[dockKey]?.inputDeliveries ?? {})).toEqual([
       bytes32Hex("606")
@@ -1111,7 +1151,7 @@ describe("indexer projection replay", () => {
   });
 
   it("rolls back stored events and replays the canonical fork when a reorg breaks cursor hash continuity", async () => {
-    // ETH-02：模拟 fork——block 3 之后链被替换。cursor 哈希校验发现断链，
+    // 模拟 fork——block 3 之后链被替换。cursor 哈希校验发现断链，
     // 共同祖先定位到 block 2，删除 block 3 的旧事件，从 fork 链重放。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-"));
     const store = new SqliteProjectionStore({
@@ -1225,8 +1265,119 @@ describe("indexer projection replay", () => {
     }
   });
 
+  it("trims pending post-commit notification batches above the reorg ancestor block", async () => {
+    // 幽灵通知：pending 批次内高于共同祖先的事件已被回滚删除，等最终性
+    // 追平后 sweep 会照常补投。回滚必须把批次修剪到祖先及以下；祖先以下的
+    // 事件保持排队等待补投。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-pending-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const canonicalEvents: readonly ChainEvent[] = [
+        chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+        chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId })
+      ];
+      const staleBlock3Event = {
+        ...chainEvent(3n, 0, "SignalSubmitted", {
+          orderId: stateMachineOrderId,
+          sourceId,
+          signalId,
+          payloadHash,
+          idempotencyKey,
+          submitter: signer
+        }),
+        blockHash: blockHashHex("block-3-stale")
+      };
+      let canonicalBlocks = new Map<bigint, Hex>([
+        [1n, blockHashHex("block-1")],
+        [2n, blockHashHex("block-2")],
+        [3n, blockHashHex("block-3-stale")]
+      ]);
+      let readableEvents: readonly ChainEvent[] = [
+        ...canonicalEvents.map((event, index) => ({ ...event, blockHash: blockHashHex(`block-${index + 1}`) })),
+        staleBlock3Event
+      ];
+      let finalizedBlock = 3n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return readableEvents.filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        },
+        async getBlockHash(blockNumber) {
+          return canonicalBlocks.get(blockNumber) ?? zeroBlockHash();
+        }
+      };
+      const indexer = new IndexerService({ config: testConfig(), eventSource, store });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      // 混合批次（块1+块3）与纯低块批次（块2）各一条 pending 补投记录。
+      await store.savePendingPostCommitStep({
+        stepId: "pending_signal_notification_mixed",
+        chainId: 31337,
+        kind: "signal_notification",
+        events: [
+          { ...canonicalEvents[0]!, blockHash: blockHashHex("block-1") },
+          staleBlock3Event
+        ]
+      });
+      await store.savePendingPostCommitStep({
+        stepId: "pending_signal_notification_below",
+        chainId: 31337,
+        kind: "signal_notification",
+        events: [{ ...canonicalEvents[1]!, blockHash: blockHashHex("block-2") }]
+      });
+
+      // fork：block 3 被替换，共同祖先为 block 2。
+      canonicalBlocks = new Map<bigint, Hex>([
+        [1n, blockHashHex("block-1")],
+        [2n, blockHashHex("block-2")],
+        [3n, blockHashHex("block-3-fork")]
+      ]);
+      readableEvents = [
+        ...canonicalEvents.map((event, index) => ({ ...event, blockHash: blockHashHex(`block-${index + 1}`) })),
+        {
+          ...chainEvent(3n, 0, "SignalSubmitted", {
+            orderId: stateMachineOrderId,
+            sourceId,
+            signalId,
+            payloadHash: bytes32Hex("feed"),
+            idempotencyKey: bytes32Hex("9002"),
+            submitter: signer
+          }),
+          blockHash: blockHashHex("block-3-fork")
+        }
+      ];
+      finalizedBlock = 3n;
+
+      await indexer.refreshFromCursorWithSummary();
+
+      const pending = await store.listPendingPostCommitSteps({ chainId: 31337 });
+      expect(pending).toHaveLength(2);
+      for (const step of pending) {
+        expect(step.kind).toBe("signal_notification");
+        for (const event of step.events ?? []) {
+          // 回滚后队列里不得残留高于祖先块（2）的载荷。
+          expect(event.blockNumber).toBeLessThanOrEqual(2n);
+        }
+      }
+      const eventBlocks = pending.flatMap((step) => (step.events ?? []).map((event) => event.blockNumber)).sort();
+      expect(eventBlocks).toEqual([1n, 2n]);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("fails with a full-rebuild demand when a reorg erases every known block hash", async () => {
-    // ETH-02：整条已知链都被替换时，回溯窗口内找不到共同祖先 → 报错。
+    // 整条已知链都被替换时，回溯窗口内找不到共同祖先 → 报错。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-deep-"));
     const store = new SqliteProjectionStore({
       databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
@@ -1281,7 +1432,7 @@ describe("indexer projection replay", () => {
   });
 
   it("reports real replay anomalies in rebuild mismatchCount instead of a hardcoded zero", async () => {
-    // ETH-09：同一事件键作为活跃事件重复投递（矛盾投递）必须计入
+    // 同一事件键作为活跃事件重复投递（矛盾投递）必须计入
     // mismatchCount；正常流保持 0。
     const events = stateMachineEvents();
     const duplicated = [...events, events[2]!];
@@ -1341,15 +1492,18 @@ describe("indexer projection replay", () => {
     const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
-    const ordersResponse = await router.handle({ method: "GET", pathname: "/product/orders" });
-    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
+    const orderHeaders = { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" };
+    const ordersResponse = await router.handle({ method: "GET", pathname: "/product/orders", headers: orderHeaders });
+    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: orderHeaders });
     const timelineResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${stateMachineOrderId}/timeline`
+      pathname: `/product/orders/${stateMachineOrderId}/timeline`,
+      headers: orderHeaders
     });
     const proofResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${stateMachineOrderId}/proof`
+      pathname: `/product/orders/${stateMachineOrderId}/proof`,
+      headers: orderHeaders
     });
     // 任务读取收口：已认证参与者（锚定钱包）读取任务；该任务未指派
     // 受理人，纯链上事实对已认证参与者开放。
@@ -1425,6 +1579,116 @@ describe("indexer projection replay", () => {
     expect(readCount).toBe(2);
   });
 
+  it("serializes a background incremental refresh with an in-flight full rebuild on the durable store", async () => {
+    // 回归：refreshIfIdle 的后台出队曾直调 #refreshFromCursor 绕过
+    // #withExclusiveGuard——重建进行中时并发刷新会与整库替换交错（重复
+    // 通知补投、SQLITE_BUSY 风暴，配合旧无条件游标写即静默丢事件）。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-guard-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const events = stateMachineEvents();
+      const readLog: string[] = [];
+      let unblockRebuild: (() => void) | undefined;
+      const rebuildBlocked = new Promise<void>((resolve) => { unblockRebuild = resolve; });
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 7n;
+        },
+        async readEvents(range) {
+          readLog.push(`${range.fromBlock}-${range.toBlock}`);
+          if (range.fromBlock === 0n) {
+            // 全量重建悬停在事件读取处，模拟 admin 重建进行中。
+            await rebuildBlocked;
+          }
+          return events.filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        }
+      };
+      const indexer = new IndexerService({ config: testConfig(), eventSource, store });
+
+      const rebuildPromise = indexer.rebuildFromDeploymentBlockWithSummary();
+      await waitForCondition(() => readLog.length === 1);
+
+      indexer.refreshIfIdle();
+      // 重建未结束：后台刷新必须仍在守卫队列中等待，不得并发发起读取。
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(readLog).toEqual(["0-7"]);
+
+      unblockRebuild!();
+      const { summary } = await rebuildPromise;
+      expect(summary.syncStatus).toBe("indexed");
+
+      // 重建提交后队列里的刷新出队：游标已到 8（finalized 7），空批次
+      // 收敛，不越过事件表覆盖区间。
+      await waitForCondition(() => indexer.cursor !== undefined);
+      await expect(store.listEvents({ chainId: 31337 })).resolves.toHaveLength(9);
+      await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
+        .resolves.toMatchObject({ nextBlock: 8n, finalizedBlock: 7n });
+      expect(readLog).toEqual(["0-7"]);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed after the durable cursor is repeatedly moved by another writer", async () => {
+    // 所有触发路径已过互斥守卫后，持久游标连续 CAS 失败只能来自
+    // 第二个索引器进程——按多实例部署错误显式失败，而不是无限顶替。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-cas-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const events = stateMachineEvents();
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 7n;
+        },
+        async readEvents(range) {
+          // 读事件与游标 CAS 落库之间的窗口里，"另一进程"再次移动持久游标。
+          await store.saveCursor({ ...scope, deploymentBlock: 0n, nextBlock: 50n + BigInt(counter) });
+          counter += 1;
+          return events.filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        }
+      };
+      const scope = { chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" as Hex };
+      let counter = 1;
+      const indexer = new IndexerService({ config: testConfig(), eventSource, store });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      // 模拟外部写者连续移动持久游标（守卫内无竞争写者，只能是另一进程）：
+      // 前两次 CAS 失败优雅让位，第三次按多实例部署错误显式失败。
+      for (let round = 1; round <= 3; round += 1) {
+        await store.saveCursor({ ...scope, deploymentBlock: 0n, nextBlock: 4n });
+        if (round < 3) {
+          await indexer.refreshFromCursorWithSummary();
+        } else {
+          await expect(indexer.refreshFromCursorWithSummary()).rejects.toThrow(
+            /run exactly one indexer process per chain scope/
+          );
+        }
+      }
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("queued projection refresh includes the final submit signal in Product proof", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: [] });
@@ -1465,7 +1729,8 @@ describe("indexer projection replay", () => {
     const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const proofResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${stateMachineOrderId}/proof`
+      pathname: `/product/orders/${stateMachineOrderId}/proof`,
+      headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" }
     });
 
     expect(proofResponse.status).toBe(200);
@@ -1556,7 +1821,8 @@ describe("indexer projection replay", () => {
     const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const proofResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${queuedOrderId}/proof`
+      pathname: `/product/orders/${queuedOrderId}/proof`,
+      headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" }
     });
 
     expect(proofResponse.status).toBe(200);
@@ -1606,7 +1872,7 @@ describe("indexer projection replay", () => {
   });
 
   it("replays the real two-step plan publish transaction log order without a ProjectionError", () => {
-    // 簇 E-1（0620 H-1/0630 C-1）：真实链序 commitPlan 先发 PlanCommitted →
+    // 真实链序 commitPlan 先发 PlanCommitted →
     // PlanPublisherRecorded；finalizePlan 内先调 plan metadata 模块（模块
     // 事件 logIndex 更小），随后才发 PlanFinalized + PlanRegistered。投影
     // 若只认 PlanRegistered 建桶，首次两步发布即在 finalize 交易内撞
@@ -1692,7 +1958,7 @@ describe("indexer projection replay", () => {
   });
 
   it("recovers from a shallow reorg on a quiet chain whose stored events are far below the backtrack window", async () => {
-    // 簇 E-2（0620 M-6）：安静链上浅 reorg——回溯窗口内没有任何已存事件
+    // 安静链上浅 reorg——回溯窗口内没有任何已存事件
     // 锚点不代表 reorg 深于窗口，只代表这段链上本来就没有事件。回退到全库
     // 最新已存事件锚点核对 canonical 哈希，一致即正常继续，不误判要求人工
     // full rebuild。
@@ -1759,7 +2025,7 @@ describe("indexer projection replay", () => {
   });
 
   it("persists exhausted post-commit notification batches and redelivers them from the durable sweep", async () => {
-    // 簇 E-4（0630 C-8/0632 CS-4/0653 M-10）：通知 post-commit 3 次进程内
+    // 通知 post-commit 3 次进程内
     // 重试耗尽且 cursor 已越过——失败批次必须落持久 pending 表（0017）由
     // 后台 sweep 补投，不允许静默丢。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-pending-"));
@@ -1843,8 +2109,102 @@ describe("indexer projection replay", () => {
     }
   });
 
+  it("finality waits do not burn the pending sweep budget", async () => {
+    // 未达最终性上界的通知批次由 pending 队列推迟补投，而不是被判为
+    // 跳过：等待类失败不记 attempts、不触发死信——否则等待最终性的
+    // 批次会在若干轮 sweep 后被永久删除（M4）。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-finality-wait-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 9n;
+        },
+        async readEvents(range) {
+          return stateMachineEvents().filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents() {
+            // rebuild 期通知正常投递——pending 表里只留我们手工落的
+            // 高于最终性上界的批次，避免真实失败混入预算断言。
+          }
+        }
+      });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      // 直接落一行事件块号高于最终性上界的 pending 批次。
+      const lateEvent = chainEvent(15n, 0, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        sourceId: bytes32Hex("1606"),
+        signalId: bytes32Hex("1707"),
+        payloadHash,
+        idempotencyKey: bytes32Hex("1bbb"),
+        submitter: signer
+      });
+      await store.savePendingPostCommitStep({
+        stepId: "pending_signal_notification:finality-wait",
+        chainId: 31337,
+        kind: "signal_notification",
+        events: [lateEvent]
+      });
+
+      // 连续多轮 sweep（远超 16 次死信预算）：批次保持排队、attempts 不
+      // 增长、以 waitingFinality 计数，绝不被死信删除。
+      for (let round = 0; round < 20; round += 1) {
+        const summary = await indexer.sweepPendingPostCommitSteps();
+        expect(summary).toMatchObject({ swept: 1, delivered: 0, failed: 0, waitingFinality: 1 });
+      }
+      const queued = await indexer.listPendingPostCommitSteps();
+      expect(queued.length).toBe(1);
+      expect(queued[0]).toMatchObject({
+        stepId: "pending_signal_notification:finality-wait",
+        attempts: 0
+      });
+
+      // 最终性追上后批次正常补投出队（守卫分支不拦截已达上界的事件）。
+      await store.saveSyncState({
+        chainId: 31337,
+        contractAddress: "0x0000000000000000000000000000000000000000" as Hex,
+        syncStatus: "indexed",
+        finalizedBlock: 15n,
+        confirmationDepth: 1,
+        eventCount: 0
+      });
+      const delivered: (readonly ChainEvent[])[] = [];
+      const recovered = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents(events) {
+            delivered.push(events);
+          }
+        }
+      });
+      const finalSweep = await recovered.sweepPendingPostCommitSteps();
+      expect(finalSweep).toMatchObject({ swept: 1, delivered: 1, failed: 0, waitingFinality: 0 });
+      expect(delivered.length).toBe(1);
+      await expect(recovered.listPendingPostCommitSteps()).resolves.toEqual([]);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("reuses one stable pending row for repeated projection automation failures", async () => {
-    // UVP-12/L-9/CS-P3：无事件批次的 pending 步骤 id 必须稳定——时间戳
+    // 无事件批次的 pending 步骤 id 必须稳定——时间戳
     // id 会让 ON CONFLICT DO NOTHING 永不命中，每次失败新开一行无限堆积。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-automation-pending-"));
     const store = new SqliteProjectionStore({
@@ -1899,7 +2259,7 @@ describe("indexer projection replay", () => {
   });
 
   it("creates notification delivery intents before advancing the durable cursor", async () => {
-    // G-29/UVP-09：投递记录创建先于 cursor 推进——游标先落库的窗口内硬
+    // 投递记录创建先于 cursor 推进——游标先落库的窗口内硬
     // 崩溃会让该批事件永不再被读取、投递记录无从重建。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-notify-order-"));
     const store = new SqliteProjectionStore({
@@ -1943,9 +2303,11 @@ describe("indexer projection replay", () => {
           }
         }
       });
-      // 首轮 rebuild：通知处理时 cursor 尚未保存（undefined）。
+      // 首轮 rebuild：游标与"整库事件替换"同事务收敛，
+      // 通知处理发生在事务提交之后——此时持久游标已就位（10n）。重建提
+      // 交后、通知前崩溃不再可能留下越过重建覆盖区间的旧游标。
       await indexer.rebuildFromDeploymentBlockWithSummary();
-      expect(cursorNextBlockAtNotification).toEqual([undefined]);
+      expect(cursorNextBlockAtNotification).toEqual([10n]);
       await expect(store.getCursor(scope)).resolves.toMatchObject({ nextBlock: 10n });
 
       // 增量刷新携带新 SignalSubmitted：通知处理时游标仍停在旧位置 10n，
@@ -1961,7 +2323,7 @@ describe("indexer projection replay", () => {
   });
 
   it("rolls back to an older consistent anchor when the newest below-window anchor was reorged", async () => {
-    // 0200#15：最新已存锚点恰好被 reorg 触及、更旧锚点仍与 canonical 一致
+    // 最新已存锚点恰好被 reorg 触及、更旧锚点仍与 canonical 一致
     // 时是浅 reorg——回验更旧锚点继续,不得误判要求 full rebuild。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-reorg-older-anchor-"));
     const store = new SqliteProjectionStore({
@@ -2021,7 +2383,7 @@ describe("indexer projection replay", () => {
   });
 
   it("moves a task off ready when an out-of-vocabulary explicit authorization submits on chain", () => {
-    // 簇 N（0653 M-8）：合约 _authorizeSignalSubmitter 不校验 plan 能力词表
+    // 合约 _authorizeSignalSubmitter 不校验 plan 能力词表
     // ——显式授权可以落在词表之外。SignalSubmitted 落链后任务匹配必须以
     // 链上事实为准（StageExecutorSignalDelegated 的 targetStageId 阶段归属
     // + hookId===sourceId/signalId 绑定键），否则任务永远停在 ready，与链
@@ -2096,7 +2458,7 @@ describe("indexer projection replay", () => {
   });
 
   it("resolves state-machine orders by the (planId, orderId) composite key and fails closed on bare-id ambiguity", async () => {
-    // 簇 E-3/簇 N（0630 M-5/0632 CS-7）：订单身份是 (planId, orderId)。裸
+    // 订单身份是 (planId, orderId)。裸
     // orderId 多命中必须 fail-closed 返回 undefined（绝不取第一个），带
     // planId 的复合键查询必须命中正确的 plan。
     const otherPlanId = bytes32Hex("8101");

@@ -328,8 +328,10 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
    * 2. 门禁前置：无既有 active binding 时，链上登记要求 governance_admin
    *    权威——在建供应商/翻 approved_for_broadcast 等任何副作用之前
    *    拒绝，绝不留下"供应商已建、审批却失败"的半提交；
-   * 3. 无供应商元数据则以申请信息创建；
-   * 4. 治理 review 先行（approved_for_broadcast 落 governance 记录）；
+   * 3. 无供应商元数据则以申请信息创建（以元数据存在性判断，DTO 行对
+   *    只有 revoked binding 的 subject 也生成一行，不能当存在性）；
+   * 4. 运营审核翻案仅限持有 operator 级能力的审批者（与
+   *    /store/suppliers/{id}/review 的能力门禁同口径）；
    * 5. 链上身份绑定：地址已有同主体 active binding → 复用其交易证据；
    *    无绑定 → registerIdentity。
    * 任何一步失败，申请留在 under_review，不落后续状态。
@@ -368,9 +370,21 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         { boundAccount: subjectBinding.account }
       );
     }
+    // 自报 subjectId 防误伤：既有供应商元数据登记了别人的钱包时，
+    // 该申请不得挂到别人名下（binding 方向核验只覆盖 active 绑定）。
+    const existingMetadata = await options.supplierService.findSupplierMetadataBySubjectId(application.applicantSubjectId);
+    if (existingMetadata?.wallet && existingMetadata.wallet.toLowerCase() !== application.applicantAddress.toLowerCase()) {
+      throw new StoreJoinServiceError(
+        409,
+        "supplier_subject_conflict",
+        "the applicant subject already belongs to a supplier record with a different wallet; approve would misattribute the application",
+        { supplierId: existingMetadata.supplierId }
+      );
+    }
     // 门禁前置：需要链上登记（无 active binding）时先核验 governance
-    // _admin 权威——此前该检查在创建供应商、翻转 approved_for_broadcast、
-    // 落治理 review 之后才执行且不回滚，失败留下半提交状态。
+    // _admin 权威——门禁必须先于任何写库动作（创建供应商、翻转
+    // approved_for_broadcast、落治理 review）执行，事后才拒会留下
+    // 无法回滚的半提交状态。
     if (!activeBinding && !actor.governanceAdmin) {
       await emitAudit({
         action: "join.approved",
@@ -388,19 +402,35 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         { applicationId: application.applicationId }
       );
     }
+    // 运营审核翻案门：供应商未过 approved_for_broadcast 时，只有持有
+    // operator 级能力（store.supplier.review）的审批者才能经本链路补审核；
+    // 纯 publisher 审批不得直接翻案运营审核状态。判断先于任何写——
+    // 拒绝时不留孤儿供应商记录。
+    const needsOperationalReview = !existingMetadata || existingMetadata.reviewStatus !== "approved_for_broadcast";
+    const actorHoldsOperatorCapability = OPERATOR_LEVELS.has(actor.accessLevel);
+    if (!activeBinding && needsOperationalReview && !actorHoldsOperatorCapability) {
+      throw new StoreJoinServiceError(
+        409,
+        "supplier_review_required",
+        "the supplier has not passed Store operational review (approved_for_broadcast); complete /store/suppliers/{id}/review with an operator session or re-run the approval with an operator-capable reviewer",
+        { supplierId: existingMetadata?.supplierId, applicationId: application.applicationId }
+      );
+    }
     // principal 只承载真实身份：operatorId 取审批者锚定地址（本函数
-    // 调用前 requireAnchored 已保证存在），role 只在真实持有
-    // governance_admin 时标治理权威——不把 plan publisher 包装成运营方。
+    // 调用前 requireAnchored 已保证存在），role 如实记录审批者权威
+    // （治理/运营级别/plan publisher）——不把 plan publisher 包装成运营方。
     const principal: StoreOperatorPrincipal = {
       operatorId: actor.anchoredAddress ?? actor.principalId ?? "join-reviewer",
-      role: actor.governanceAdmin ? "governance_admin" : "store_operator"
+      role: actor.governanceAdmin
+        ? "governance_admin"
+        : actor.accessLevel === "store_admin"
+          ? "store_admin"
+          : actor.accessLevel === "store_operator"
+            ? "store_operator"
+            : "plan_publisher"
     };
-    let supplierId = application.supplierId;
-    const existingSupplier = await options.supplierService.listSuppliers()
-      .then((list) => list.suppliers.find((supplier) =>
-        supplier.supplierSubjectId.toLowerCase() === application.applicantSubjectId.toLowerCase()
-      ));
-    if (!existingSupplier) {
+    let supplierId = existingMetadata?.supplierId;
+    if (!existingMetadata) {
       const created = await options.supplierService.createSupplier(
         {
           supplierSubjectId: application.applicantSubjectId,
@@ -408,24 +438,25 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
           wallet: application.applicantAddress,
           supportedRoleSlotIds: [application.roleSlotId],
           ...(application.stageId ? { supportedStageIds: [application.stageId] } : {}),
-          reviewStatus: "submitted"
+          // active binding 意味着该主体此前已通过登记门（登记前置
+          // approved_for_broadcast）；镜像该事实，避免把目录显示状态
+          // 从 approved_for_broadcast 无端降级成 submitted。
+          reviewStatus: activeBinding ? "approved_for_broadcast" : "submitted"
         },
         principal
       );
       supplierId = created.supplier.supplierId;
-    } else {
-      supplierId = existingSupplier.supplierId;
     }
 
     if (activeBinding) {
       return {
-        supplierId,
+        ...(supplierId ? { supplierId } : {}),
         txHash: activeBinding.registeredAt.transactionHash,
         executionMode: "on_chain"
       };
     }
 
-    if (existingSupplier?.reviewStatus !== "approved_for_broadcast") {
+    if (needsOperationalReview) {
       await options.supplierService.reviewSupplier(
         supplierId!,
         {
@@ -447,7 +478,7 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     );
     const log = (registration.governance as { readonly log?: { readonly txHash?: Hex; readonly txLogId?: string; readonly executionMode?: string } }).log;
     return {
-      supplierId,
+      ...(supplierId ? { supplierId } : {}),
       ...(log?.txHash ? { txHash: log.txHash } : {}),
       ...(log?.txLogId ? { txLogId: log.txLogId } : {}),
       ...(log?.executionMode === "on_chain" || log?.executionMode === "simulated" ? { executionMode: log.executionMode } : { executionMode: "simulated" })
@@ -652,9 +683,10 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
 
   /**
    * 红线（服务端强制，与前端抑制同口径）：
-   * listing 已下架/未公开或锚核验冲突时，加入入口关闭。
-   * 无 listing（未走上架流）时按链投影可查即放行——上架是 Store 经营动作，
-   * 不是链上事实的前置。
+   * listing 存在时，只有 public 且锚核验不冲突才开放加入——
+   * imported(待审)/rejected/delisted 一律拦截，否则前端被抑制的
+   * 入口可直调 API 绕过。无 listing（未走上架流）时按链投影可查
+   * 即放行——上架是 Store 经营动作，不是链上事实的前置。
    */
   async function assertJoinEntryAllowedNow(planId: Hex): Promise<void> {
     const gate = options.listingGate;
@@ -662,13 +694,18 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
       return;
     }
     const listing = await gate.getListingForPlan(planId).catch(() => undefined);
-    if (listing && (listing.status === "delisted" || listing.anchorVerification.status === "conflict")) {
+    if (!listing) {
+      return;
+    }
+    if (listing.status !== "public" || listing.anchorVerification.status === "conflict") {
       throw new StoreJoinServiceError(
         409,
         "join_entry_suppressed",
         listing.status === "delisted"
           ? "this zhixu is delisted; the join entry is closed"
-          : "listing anchors conflict with chain facts; the join entry is suppressed",
+          : listing.anchorVerification.status === "conflict"
+            ? "listing anchors conflict with chain facts; the join entry is suppressed"
+            : "this zhixu listing is not public; the join entry is closed until the listing review completes",
         { planId, listingStatus: listing.status }
       );
     }

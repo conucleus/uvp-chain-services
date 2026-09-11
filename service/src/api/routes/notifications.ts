@@ -1,7 +1,7 @@
 import { adminPrincipalFromHeaders } from "../../governance/index.js";
 import type { NotificationDeliveryStatus, NotificationRedactedEvidenceQuery } from "../../notifications/index.js";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address } from "../../shared/types.js";
-import { cleanQuery, readApiHeader, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { cleanQuery, decodePathParameter, readApiHeader, type ApiRequest, type ApiResponse } from "../route-context.js";
 import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { RouteModule } from "../route-module.js";
 
@@ -96,7 +96,7 @@ async function handleNotificationRequest(
     return undefined;
   }
 
-  const principal = adminPrincipalFromHeaders(request.headers);
+  const principal = adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
   if (!principal) {
     return {
       status: 403,
@@ -139,16 +139,59 @@ async function handleNotificationRequest(
     if (!deliveryId.ok) {
       return deliveryId.response;
     }
-    const delivery = await context.notificationService.retryDelivery(deliveryId.deliveryId);
-    if (!delivery) {
+    const outcome = await context.notificationService.retryDelivery(deliveryId.deliveryId);
+    if (outcome.outcome === "not_found") {
       return {
         status: 404,
         body: { error: "notification_delivery_not_found" }
       };
     }
+    // 终态行 retry 是无操作，不得返回 200 假成功。sent/invalidated
+    // 不可重开；dead_letter 需经显式 reopen 端点。
+    if (outcome.outcome === "terminal") {
+      return {
+        status: 409,
+        body: {
+          error: "notification_delivery_terminal",
+          message: outcome.delivery.status === "dead_letter"
+            ? "delivery is dead-lettered; use the reopen endpoint to explicitly reopen it"
+            : `delivery status ${outcome.delivery.status} is terminal and cannot be retried`,
+          delivery: outcome.delivery
+        }
+      };
+    }
     return {
       status: 200,
-      body: { delivery }
+      body: { delivery: outcome.delivery }
+    };
+  }
+
+  const reopenMatch = /^\/admin\/notifications\/deliveries\/([^/]+)\/reopen$/.exec(request.pathname);
+  if (request.method === "POST" && reopenMatch) {
+    const deliveryId = parseDeliveryId(reopenMatch[1] ?? "");
+    if (!deliveryId.ok) {
+      return deliveryId.response;
+    }
+    const outcome = await context.notificationService.reopenDelivery(deliveryId.deliveryId);
+    if (outcome.outcome === "not_found") {
+      return {
+        status: 404,
+        body: { error: "notification_delivery_not_found" }
+      };
+    }
+    if (outcome.outcome === "not_dead_letter") {
+      return {
+        status: 409,
+        body: {
+          error: "notification_delivery_not_dead_letter",
+          message: "only dead-lettered deliveries can be reopened",
+          delivery: outcome.delivery
+        }
+      };
+    }
+    return {
+      status: 200,
+      body: { delivery: outcome.delivery }
     };
   }
 
@@ -219,7 +262,7 @@ function parseNotificationDeliveryQuery(query: ApiRequest["query"]): ParsedNotif
     return {
       response: {
         status: 400,
-        body: { error: "invalid_query", message: "status must be pending, sent, failed, skipped, or dead_letter" }
+        body: { error: "invalid_query", message: "status must be pending, sent, failed, skipped, dead_letter, or invalidated" }
       }
     };
   }
@@ -228,7 +271,7 @@ function parseNotificationDeliveryQuery(query: ApiRequest["query"]): ParsedNotif
 
 function parseDeliveryId(value: string): { readonly ok: true; readonly deliveryId: `0x${string}` } | { readonly ok: false; readonly response: ApiResponse } {
   try {
-    return { ok: true, deliveryId: normalizeBytes32(decodeURIComponent(value), "deliveryId") };
+    return { ok: true, deliveryId: normalizeBytes32(decodePathParameter(value), "deliveryId") };
   } catch (error) {
     if (error instanceof ConfigError) {
       return {
@@ -255,5 +298,5 @@ function optionalReason(body: unknown): string | undefined {
 }
 
 function isNotificationDeliveryStatus(value: string): value is NotificationDeliveryStatus {
-  return value === "pending" || value === "sent" || value === "failed" || value === "skipped" || value === "dead_letter";
+  return value === "pending" || value === "sent" || value === "failed" || value === "skipped" || value === "dead_letter" || value === "invalidated";
 }

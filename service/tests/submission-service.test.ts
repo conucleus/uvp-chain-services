@@ -4,7 +4,6 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
-import { onchainSignalId, onchainSourceId } from "@uvp-eth/compiler";
 import { STATE_MACHINE_ABI } from "@uvp-eth/protocol-bindings";
 import { privateKeyToAccount } from "viem/accounts";
 import {
@@ -41,12 +40,20 @@ const verifyingContract = "0x1111111111111111111111111111111111111111" as Addres
 const planId = "0x7777777777777777777777777777777777777777777777777777777777777777" as Hex;
 const zeroPlanId = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
 const chainId = 31337;
-const owner: EvidencePrincipal = { id: "seller", role: "participant" };
+// 证据归属=业务签名者本人（会话锚定上传者 principal id 即小写钱包地址，
+// prepare-submit 的签名者同锚定地址）——bind 归属校验按此判定。
+const owner: EvidencePrincipal = { id: submitter.toLowerCase(), role: "participant" };
 const baseNow = new Date("2026-04-28T00:00:00Z");
 
-const task: ProductTaskDTO = {
+// 链上身份常量：orderId/sourceId/signalId 必须是真实的 bytes32 链上身份
+// （prepare 绝不本地捏造回退）。
+const fixtureOnchainOrderId = "0x0000000000000000000000000000000000000000000000000000000000000301" as Hex;
+const fixtureSourceId = "0x0000000000000000000000000000000000000000000000000000000000000401" as Hex;
+const fixtureSignalId = "0x0000000000000000000000000000000000000000000000000000000000000501" as Hex;
+
+const task = {
   taskId: "task-1",
-  orderId: "order-1",
+  orderId: fixtureOnchainOrderId,
   orderTitle: "Order 1",
   zhixuId: "zhixu-1",
   title: "Confirm customs",
@@ -58,12 +65,59 @@ const task: ProductTaskDTO = {
   fundingImpact: "advance workflow",
   status: "open",
   responsibilityStatements: [],
-  proofRows: []
-};
+  proofRows: [],
+  proof: {
+    eventId: `${verifyingContract}:10:0`,
+    chainId,
+    contractAddress: verifyingContract,
+    blockNumber: "10",
+    transactionHash: "0x0000000000000000000000000000000000000000000000000000000000000021",
+    logIndex: 0,
+    eventName: "HookReady",
+    proofKind: "chain",
+    args: {},
+    sourceId: fixtureSourceId,
+    signalId: fixtureSignalId,
+    stageIdentifier: "customs-complete"
+  }
+} as unknown as ProductTaskDTO;
 
 describe("product task submissions", () => {
+  it("refuses to prepare when the projection supplies no chain signal identity instead of fabricating one", async () => {
+    // （对齐 planId"绝不捏造"纪律）：sourceId/signalId/orderId 缺失时
+    // 不得按命名约定本地推导——推导出的链上身份不存在，签出的 typedData
+    // 只会被链上拒绝。
+    const strippedTask = { ...task, proof: undefined, orderId: "business-order-1" } as unknown as ProductTaskDTO;
+    const fixture = await submissionFixture({ task: strippedTask });
+
+    await expect(fixture.service.prepareSubmit(strippedTask.taskId, {
+      evidenceIds: [fixture.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "order_plan_unresolved",
+      status: 409
+    });
+
+    // sourceId 可由 overlay 解析，但 signalId 缺失同样拒签。
+    const overlayOnlyTask = {
+      ...task,
+      proof: { stageIdentifier: txHash("516") }
+    } as unknown as ProductTaskDTO;
+    const overlayFixture = await submissionFixture({ task: overlayOnlyTask });
+    await expect(overlayFixture.service.prepareSubmit(overlayOnlyTask.taskId, {
+      evidenceIds: [overlayFixture.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "order_plan_unresolved",
+      status: 409
+    });
+  });
+
   it("does not authorize permissively when no authorization adapter is configured", async () => {
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => baseNow,
       evidenceIdFactory: () => "ev_no_auth"
@@ -136,8 +190,8 @@ describe("product task submissions", () => {
       onchainOrderId: prepared.typedData.message.orderId,
       stageIdentifier: task.stageId,
       signalName: "confirm_stage",
-      sourceId: onchainSourceId("product"),
-      signalId: onchainSignalId(`${task.stageId}.confirm_stage`),
+      sourceId: fixtureSourceId,
+      signalId: fixtureSignalId,
       payloadHash: fixture.evidence.evidence.payloadHash,
       payloadRef: fixture.evidence.evidence.payloadRef,
       idempotencyKey: prepared.typedData.message.idempotencyKey,
@@ -164,7 +218,7 @@ describe("product task submissions", () => {
         }
       }
     });
-    // 审计 #10：UVPStateMachineSignal 签名域并入 planId，且首字段为 planId。
+    // UVPStateMachineSignal 签名域并入 planId，且首字段为 planId。
     expect(prepared.typedData.types.UVPStateMachineSignal.map((field) => field.name)).toEqual([
       "planId",
       "orderId",
@@ -179,7 +233,7 @@ describe("product task submissions", () => {
   });
 
   it("refuses to prepare when the projection cannot supply the order planId", async () => {
-    // 审计 #10 负例：投影无 planId（或为零占位）时不构造签名，prepare 直接失败。
+    // 负例：投影无 planId（或为零占位）时不构造签名，prepare 直接失败。
     const fixture = await submissionFixture({
       authorization: permissiveProductProjectionAuthorization()
     });
@@ -297,10 +351,14 @@ describe("product task submissions", () => {
 
     expect(submission).toMatchObject({
       status: "expired",
-      signatureStatus: "not_verified",
+      // 过期检查发生在验签之后：签名是验证过的，失败的是时限——
+      // 台账不得谎报 not_verified。
+      signatureStatus: "signature_verified",
+      recoveredSubmitter: submitter,
       broadcastStatus: "not_attempted",
       errorCode: "submission_expired"
     });
+    expect(submission.signatureHash).toMatch(/^0x[0-9a-f]{64}$/);
     expect(broadcast.broadcast).not.toHaveBeenCalled();
   });
 
@@ -434,7 +492,11 @@ describe("product task submissions", () => {
     });
   });
 
-  it("requires signal submissions to come from the active stage executor", async () => {
+  it("lets an explicitly authorized submitter pass even when an overlay names another active executor", async () => {
+    // 《授权与签名规则》§五：先看显式订单级授权、再看阶段委任的在任
+    // 执行者——显式授权者在任执行者变更后不失去提交权（合约按同一
+    // 口径接受）；service 层若以 submitter_wallet_not_active_executor
+    // 前置拦截，即与合约相反。
     const targetStageId = txHash("515");
     const overlayTask = {
       ...task,
@@ -443,20 +505,25 @@ describe("product task submissions", () => {
         activeExecutorWallet: "0x2222222222222222222222222222222222222222"
       },
       proof: {
-        stageIdentifier: targetStageId
+        stageIdentifier: targetStageId,
+        // prepare 绝不捏造 signalId——overlay 场景的链上信号身份
+        // 仍须由投影 proof 提供（sourceId 由 overlay 目标阶段解析）。
+        signalId: fixtureSignalId
       }
     } as ProductTaskDTO;
     const fixture = await submissionFixture({ task: overlayTask });
 
+    // submitter 在显式授权清单内（allow list），overlay 指向别人 → 放行。
     await expect(fixture.service.prepareSubmit(overlayTask.taskId, {
       evidenceIds: [fixture.evidence.evidence.evidenceId],
       walletAddress: submitter,
       intent: "confirm_stage"
-    }, owner)).rejects.toMatchObject({
-      code: "submitter_wallet_not_active_executor",
-      status: 403
+    }, owner)).resolves.toMatchObject({
+      submitter,
+      sourceId: targetStageId
     });
 
+    // 在任执行者提交：既被显式授权（fixture 允许）也是 active executor。
     const activeExecutor = "0x2222222222222222222222222222222222222222" as Address;
     const activeFixture = await submissionFixture({
       task: overlayTask,
@@ -470,10 +537,26 @@ describe("product task submissions", () => {
       submitter: activeExecutor,
       sourceId: targetStageId
     });
+
+    // 既无显式授权、也不是在任执行者 → 拒绝（由授权适配器裁决）。
+    const unauthorized = "0x3333333333333333333333333333333333333333" as Address;
+    const unauthorizedFixture = await submissionFixture({
+      task: overlayTask,
+      authorizedSubmitter: activeExecutor
+    });
+    await expect(unauthorizedFixture.service.prepareSubmit(overlayTask.taskId, {
+      evidenceIds: [unauthorizedFixture.evidence.evidence.evidenceId],
+      walletAddress: unauthorized,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "submitter_not_authorized",
+      status: 403
+    });
   });
 
   it("rejects missing evidence before preparing a signed payload", async () => {
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => baseNow
     });
@@ -506,6 +589,7 @@ describe("product task submissions", () => {
   it("rejects hash-mismatched evidence before preparing a signed payload", async () => {
     const storage = new InMemoryEvidenceStorage();
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage,
       now: () => baseNow,
       evidenceIdFactory: () => "ev_mismatch"
@@ -534,6 +618,7 @@ describe("product task submissions", () => {
 
   it("builds deterministic payload bundle hashes regardless of evidence id order", async () => {
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => baseNow,
       evidenceIdFactory: sequentialIds(["ev_b", "ev_a"])
@@ -617,6 +702,12 @@ describe("product task submissions", () => {
     expect(submission).toMatchObject({
       status: "submitted",
       txHash: txHash("21")
+    });
+    // 绑定载荷随提交落库：reconcile 清扫对绑定缺失的提交重试绑定时
+    // 以此为唯一持久化依据。
+    expect(submission.evidenceIds).toEqual([fixture.evidence.evidence.evidenceId]);
+    await expect(fixture.service.getSubmission("sub_1", submitter)).resolves.toMatchObject({
+      evidenceIds: [fixture.evidence.evidence.evidenceId]
     });
     expect(evidence).toMatchObject({
       evidence: {
@@ -739,6 +830,17 @@ describe("product task submissions", () => {
       signature
     })).rejects.toThrow("rpc connection reset before writeContract");
 
+    // 逃逸异常必须留下一致的持久状态——失败档案（按适配器同款
+    // 分类器归档）与 nonce 释放在同一落档事务内，档案保留证据、释放保证
+    // 同一 prepareId 可重试。（fixture 的 submissionId 工厂是常量，重试
+    // 档案覆盖失败档案；断言在抛错后立即执行。）
+    const failedAttempt = await fixture.service.getSubmission("sub_1", submitter);
+    expect(failedAttempt).toMatchObject({
+      status: "failed",
+      retryable: true
+    });
+    expect(typeof failedAttempt?.errorCode).toBe("string");
+
     // The nonce was released, so retrying the same prepareId succeeds instead
     // of reporting a false duplicate_submit.
     const retried = await fixture.service.submit(task.taskId, {
@@ -846,6 +948,103 @@ describe("product task submissions", () => {
       code: "duplicate_submit",
       status: 409
     });
+  });
+
+  it("takes over a stale nonce reservation after a hard crash and still 409s an unexpired one", async () => {
+    // 崩溃窗口模拟：预留 nonce 后、广播前进程硬崩溃——落档事务（失败
+    // 档案 + releaseNonce）从未提交，泄漏的预留行在持久 store 里留存的
+    // 状态由本测试的 store 对象扮演（进程重启后仍在）。授权有效期内的
+    // 重试仍 409；超过授权有效期后重新 prepare（同 nonce 工厂、同 key）
+    // 由陈旧预留接管恢复，同 prepareId 的签名作废走新 prepare。
+    let clock = baseNow.getTime();
+    const now = () => new Date(clock);
+    const fixture = await submissionFixture({ now });
+    const inner = new InMemoryProductSubmissionStore({ now });
+    let prepareCounter = 0;
+    let submissionCounter = 0;
+    let broadcastCalls = 0;
+    let putSubmissionCalls = 0;
+    const broadcast: SubmissionBroadcastAdapter = {
+      attemptsBroadcast: true,
+      async broadcast(): Promise<SubmissionBroadcastResult> {
+        broadcastCalls += 1;
+        if (broadcastCalls === 1) {
+          throw new Error("rpc connection reset before writeContract");
+        }
+        return { status: "submitted" as const, txHash: txHash("41"), blockNumber: "7" };
+      }
+    };
+    const crashedStore: ProductSubmissionStore = {
+      putPrepared: (record) => inner.putPrepared(record),
+      getPrepared: (prepareId) => inner.getPrepared(prepareId),
+      markPreparedUsed: (prepareId, submissionId, usedAt) => inner.markPreparedUsed(prepareId, submissionId, usedAt),
+      reserveNonce: (key, options) => inner.reserveNonce(key, options),
+      releaseNonce: (key) => inner.releaseNonce(key),
+      // 硬崩溃：首次落档写丢失（catch 内失败档案写同败，releaseNonce
+      // 随之未执行）；重启后的进程落档恢复正常。
+      putSubmission: async (submission) => {
+        putSubmissionCalls += 1;
+        if (putSubmissionCalls === 1) {
+          throw new Error("process died before the submission was persisted");
+        }
+        return inner.putSubmission(submission);
+      },
+      getSubmission: (submissionId) => inner.getSubmission(submissionId),
+      listSubmissions: () => inner.listSubmissions()
+    };
+    const service = createProductSubmissionService({
+      productTasks: { getTask: async (taskId) => taskId === task.taskId ? task : undefined },
+      evidenceReader: fixture.evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => planId,
+      authorization: allowListedSubmissionAuthorization([{
+        orderId: task.orderId,
+        stageIdentifier: task.stageId,
+        signalName: "confirm_stage",
+        submitter
+      }]),
+      broadcastAdapter: broadcast,
+      store: crashedStore,
+      now,
+      prepareIdFactory: () => `prep_${++prepareCounter}`,
+      submissionIdFactory: () => `sub_${++submissionCounter}`,
+      nonceFactory: () => "42"
+    });
+    const prepared = await prepare({ service, evidence: fixture.evidence, task });
+    const signature = await signPrepared(prepared);
+
+    // 首次提交：预留后崩溃，泄漏预留行且无档案、prepare 未消费。
+    await expect(service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toThrow("process died before the submission was persisted");
+    expect(broadcastCalls).toBe(1);
+
+    // 授权有效期内重试同 prepareId：预留未过期，仍 409 duplicate_submit。
+    clock = baseNow.getTime() + 5 * 60_000;
+    await expect(service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toMatchObject({ code: "duplicate_submit", status: 409 });
+
+    // 超过授权有效期后重新 prepare（同 nonce → 同 key）：陈旧预留被
+    // 条件更新接管，提交成功，无需人工清表。
+    clock = baseNow.getTime() + 11 * 60_000;
+    const reprepared = await prepare({ service, evidence: fixture.evidence, task });
+    const resigned = await signPrepared(reprepared);
+    const recovered = await service.submit(task.taskId, {
+      prepareId: reprepared.prepareId,
+      walletAddress: submitter,
+      signature: resigned
+    });
+    expect(recovered).toMatchObject({
+      status: "submitted",
+      txHash: txHash("41")
+    });
+    expect(broadcastCalls).toBe(2);
   });
 
   it("classifies getChainId RPC failures as failed broadcast results instead of throwing", async () => {
@@ -967,7 +1166,7 @@ describe("product task submissions", () => {
   });
 
   it("refuses to broadcast a prepared submission whose planId is missing or zero", async () => {
-    // 审计 #10 负例：零占位 planId 无法通过链上 (planId, orderId) 存在性校验，
+    // 负例：零占位 planId 无法通过链上 (planId, orderId) 存在性校验，
     // broadcast 适配器必须拒绝构造调用而不是发一笔注定 revert 的交易。
     const walletClient = {
       account: { address: "0x9999999999999999999999999999999999999999" as Address },
@@ -1202,7 +1401,7 @@ describe("product task submissions", () => {
       status: "failed",
       errorCode: "relayer_insufficient_funds",
       errorLabel: "Relayer gas payer needs funds",
-      // 0653 L-10：与 relayer 口径统一——充值是运营可修复条件，同签名
+      // 与 relayer 口径统一——充值是运营可修复条件，同签名
       // 载荷可重试（submitter 未产生 txHash，nonce 未消费），不烧死信。
       retryable: true,
       retryState: "retryable",
@@ -1409,9 +1608,12 @@ describe("product task submissions", () => {
     };
 
     await secure.broadcast(request);
+    // 去重重放保留原始错误码（不再泛化成 broadcast_retry_blocked）：
+    // 响应契约对调用方诚实，重复提交被去重层拦截（inner 只调用一次）。
     await expect(secure.broadcast(request)).resolves.toMatchObject({
       status: "failed",
-      errorCode: "broadcast_retry_blocked",
+      errorCode: "invalid_signal_signature",
+      message: "wallet signature does not match the submitter payload",
       retryable: false
     });
     expect(inner.broadcast).toHaveBeenCalledOnce();
@@ -1517,6 +1719,7 @@ async function submissionFixture(options: {
   const now = options.now ?? (() => baseNow);
   const fixtureTask = options.task ?? task;
   const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
     storage: new InMemoryEvidenceStorage(),
     now,
     evidenceIdFactory: () => "ev_1"
@@ -1635,7 +1838,7 @@ function idempotencyKeyHex(value: string): Hex {
   return `0x${Buffer.from(value, "utf8").toString("hex").padStart(64, "0")}` as Hex;
 }
 
-describe("secure broadcast durable dedupe (ETH-07)", () => {
+describe("secure broadcast durable dedupe", () => {
   it("dedupes the same submission through a rebuilt adapter backed by the durable store", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-broadcast-dedupe-"));
     const databaseUrl = `sqlite://${join(tempDir, "dedupe.sqlite3")}`;

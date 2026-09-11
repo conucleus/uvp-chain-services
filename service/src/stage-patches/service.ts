@@ -43,10 +43,12 @@ import {
 import type {
   PrepareProductStageExecutorPatchInput,
   PrepareProductStageResourcePatchInput,
+  PreparedPatchRecordBase,
   PreparedStageExecutorPatchDTO,
   PreparedStageExecutorPatchRecord,
   PreparedStageResourcePatchDTO,
   PreparedStageResourcePatchRecord,
+  ProductStagePatchStore,
   ProductStageExecutorPatchStore,
   ProductStageResourcePatchStore,
   StageExecutorPatchMode,
@@ -54,6 +56,7 @@ import type {
   StageExecutorPatchSubmissionDTO,
   PreviousExecutorSignatureStatus,
   StagePatchBroadcastResult,
+  StagePatchSubmissionBase,
   StageResourcePatchBroadcastAdapter,
   StageResourcePatchSubmissionDTO,
   SubmitProductStageExecutorPatchInput,
@@ -333,6 +336,11 @@ export function createProductStageExecutorPatchService(
           patchNonce,
         }),
       };
+      // 写入时顺带清扫过期 prepare（同 store-sessions 挑战表口径）：
+      // prepare 入口无配额，只插不删会让表无界堆叠。
+      await stageExecutorPatchStore.deleteExpiredPrepared?.(
+        String(Math.floor(now().getTime() / 1000)),
+      );
       await stageExecutorPatchStore.putPrepared(prepared);
       return executorDtoFromPrepared(prepared);
     },
@@ -359,6 +367,25 @@ export function createProductStageExecutorPatchService(
         "stage executor patch",
       );
 
+      const signature = normalizeSignature(input.signature);
+      const recoveredSelector = await recoverExecutorSelector(
+        prepared,
+        signature,
+      );
+      if (recoveredSelector !== prepared.selectorWallet) {
+        throw new ProductStagePatchError(
+          400,
+          "invalid_signature",
+          "signature recovery did not match prepared selector",
+          {
+            recoveredSelector,
+          },
+        );
+      }
+
+      // 过期检查必须在签名恢复之后：消费 prepare（落 expired 档案 +
+      // markPreparedUsed）是写操作，任何持有 prepareId 的人都能触发——
+      // 未验签就烧毁他人的已过期 prepare 等于让无关方替持有人做决定。
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(prepared.deadline) < currentSeconds) {
         const submission = expiredExecutorSubmission(
@@ -378,21 +405,6 @@ export function createProductStageExecutorPatchService(
       const context = await resolveSelectorTaskContext(options.store, taskId);
       ensureExecutorPreparedStillCurrent(context.order, prepared);
 
-      const signature = normalizeSignature(input.signature);
-      const recoveredSelector = await recoverExecutorSelector(
-        prepared,
-        signature,
-      );
-      if (recoveredSelector !== prepared.selectorWallet) {
-        throw new ProductStagePatchError(
-          400,
-          "invalid_signature",
-          "signature recovery did not match prepared selector",
-          {
-            recoveredSelector,
-          },
-        );
-      }
       const previousSignature = signatureForPreviousExecutor(
         prepared,
         input.previousExecutorSignature,
@@ -411,8 +423,15 @@ export function createProductStageExecutorPatchService(
           { recoveredPreviousExecutor },
         );
       }
+      // 授权有效期（prepare TTL）即陈旧预留阈值：存活中的 submit 要么在
+      // 落档事务内收尾要么显式释放，预留年龄超过一个授权窗口只可能是
+      // 进程在 reserve 与落档之间硬崩溃留下的泄漏行——条件更新接管，
+      // 未过期仍按重复拒绝。patchNonce 虽从链上投影派生
+      // （nextStageExecutorPatchNonce），键本身不变，接管只复用崩溃泄漏
+      // 的预留、不影响派生。
       const reserved = await stageExecutorPatchStore.reserveNonce(
         prepared.nonceKey,
+        { staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString() },
       );
       if (!reserved) {
         throw new ProductStagePatchError(
@@ -428,6 +447,8 @@ export function createProductStageExecutorPatchService(
       // 链上交易可能已占用 nonce（对齐 submissions 主路径：只有确认失败
       // 才释放）。broadcast 返回失败结果视为已消费。
       let broadcastTxHash: Hex | undefined;
+      let notAttempted = false;
+      let submission: StageExecutorPatchSubmissionDTO;
       try {
         const broadcast = await broadcastAdapter.broadcast({
           prepared: executorDtoFromPrepared(prepared),
@@ -443,8 +464,9 @@ export function createProductStageExecutorPatchService(
           : broadcast.status === "not_attempted"
             ? undefined
             : broadcast.txHash;
+        notAttempted = broadcast.status === "not_attempted";
         const timestamp = now().toISOString();
-        const submission = executorSubmissionFromBroadcast(prepared, {
+        submission = executorSubmissionFromBroadcast(prepared, {
           submissionId: submissionIdFactory(),
           signatureHash: signatureHashFor(signature),
           ...(previousSignature
@@ -458,29 +480,49 @@ export function createProductStageExecutorPatchService(
           broadcast,
           timestamp,
         });
-        await stageExecutorPatchStore.putSubmission(submission);
+        // 落档与 nonce 收尾同事务：分开提交时两次写之间崩溃会留下
+        // "nonce 行已插、prepare 未标 used"的组合，同 prepareId 的合法
+        // 重试将永久 409（全库无其他释放口，只剩 staleBefore 接管兜底）。
         // A retryable failure without a transaction hash means the relayer
-        // never obtained a chain transaction. Keep the prepare reusable and
-        // release the reservation after recording the attempt. A retryable
-        // result that carries a txHash is different: the chain may already
-        // own the nonce, so it remains consumed and is reconciled instead of
-        // being broadcast a second time.
-        if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
-          await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
-          return submission;
-        }
-        await stageExecutorPatchStore.markPreparedUsed(
-          prepared.prepareId,
-          submission.submissionId,
-          submission.updatedAt,
-        );
-        return submission;
+        // never obtained a chain transaction: release the reservation in the
+        // same transaction and keep the prepare reusable. A retryable result
+        // that carries a txHash is different: the chain may already own the
+        // nonce, so it remains consumed and is reconciled instead of being
+        // broadcast a second time.
+        const reopenForRetry =
+          broadcast.status === "failed" && broadcast.retryable && !submission.txHash;
+        await withStagePatchStoreTransaction(stageExecutorPatchStore, async () => {
+          await stageExecutorPatchStore.putSubmission(submission);
+          if (notAttempted || reopenForRetry) {
+            await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
+            return;
+          }
+          await stageExecutorPatchStore.markPreparedUsed(
+            prepared.prepareId,
+            submission.submissionId,
+            submission.updatedAt,
+          );
+        });
       } catch (error) {
         if (!broadcastTxHash) {
           await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
         }
         throw error;
       }
+      // cannot broadcast 的适配器不得消费 prepare/nonce（与 submissions
+      // 主路径 submissions/service.ts 的 attemptsBroadcast 契约一致）：
+      // 记录尝试后响亮失败（503 可重试），nonce 已在落档事务内释放、
+      // prepare 保持可复用——200 假成功会把这个补丁通道永久楔死在
+      // duplicate nonce 上。
+      if (notAttempted) {
+        throw new ProductStagePatchError(
+          503,
+          "broadcast_disabled",
+          "stage executor patch relayer broadcast is not configured; the verified signature was recorded but the prepare and nonce were not consumed",
+          { submissionId: submission.submissionId, retryable: true },
+        );
+      }
+      return submission;
     },
 
     async getStageExecutorPatchSubmission(submissionId) {
@@ -618,6 +660,10 @@ export function createProductStageResourcePatchService(
           patchNonce,
         }),
       };
+      // 同 executor patch 路径：写入时顺带清扫过期 prepare。
+      await stageResourcePatchStore.deleteExpiredPrepared?.(
+        String(Math.floor(now().getTime() / 1000)),
+      );
       await stageResourcePatchStore.putPrepared(prepared);
       return resourceDtoFromPrepared(prepared);
     },
@@ -644,6 +690,25 @@ export function createProductStageResourcePatchService(
         "stage resource patch",
       );
 
+      const signature = normalizeSignature(input.signature);
+      const recoveredSelector = await recoverResourceSelector(
+        prepared,
+        signature,
+      );
+      if (recoveredSelector !== prepared.selectorWallet) {
+        throw new ProductStagePatchError(
+          400,
+          "invalid_signature",
+          "signature recovery did not match prepared selector",
+          {
+            recoveredSelector,
+          },
+        );
+      }
+
+      // 过期检查必须在签名恢复之后：消费 prepare（落 expired 档案 +
+      // markPreparedUsed）是写操作，任何持有 prepareId 的人都能触发——
+      // 未验签就烧毁他人的已过期 prepare 等于让无关方替持有人做决定。
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(prepared.deadline) < currentSeconds) {
         const submission = expiredResourceSubmission(
@@ -662,24 +727,12 @@ export function createProductStageResourcePatchService(
 
       const context = await resolveSelectorTaskContext(options.store, taskId);
       ensureResourcePreparedStillCurrent(context.order, prepared);
-
-      const signature = normalizeSignature(input.signature);
-      const recoveredSelector = await recoverResourceSelector(
-        prepared,
-        signature,
-      );
-      if (recoveredSelector !== prepared.selectorWallet) {
-        throw new ProductStagePatchError(
-          400,
-          "invalid_signature",
-          "signature recovery did not match prepared selector",
-          {
-            recoveredSelector,
-          },
-        );
-      }
+      // 同 executor patch 路径：prepare TTL 即陈旧预留阈值，崩溃泄漏的
+      // 预留由新请求条件接管（nextStageResourcePatchNonce 的链上派生不受
+      // 影响），未过期仍按重复拒绝。
       const reserved = await stageResourcePatchStore.reserveNonce(
         prepared.nonceKey,
+        { staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString() },
       );
       if (!reserved) {
         throw new ProductStagePatchError(
@@ -693,6 +746,8 @@ export function createProductStageResourcePatchService(
       // nonce；广播已返回 txHash 后的落库失败不释放（链上可能已占用
       // nonce，对齐 submissions 主路径语义）。
       let broadcastTxHash: Hex | undefined;
+      let notAttempted = false;
+      let submission: StageResourcePatchSubmissionDTO;
       try {
         const broadcast = await broadcastAdapter.broadcast({
           prepared: resourceDtoFromPrepared(prepared),
@@ -704,33 +759,50 @@ export function createProductStageResourcePatchService(
           : broadcast.status === "not_attempted"
             ? undefined
             : broadcast.txHash;
+        notAttempted = broadcast.status === "not_attempted";
         const timestamp = now().toISOString();
-        const submission = resourceSubmissionFromBroadcast(prepared, {
+        submission = resourceSubmissionFromBroadcast(prepared, {
           submissionId: submissionIdFactory(),
           signatureHash: signatureHashFor(signature),
           recoveredSelector,
           broadcast,
           timestamp,
         });
-        await stageResourcePatchStore.putSubmission(submission);
-        // See the executor-patch path above: only a retryable failure with no
-        // txHash is safe to reopen for the same prepareId.
-        if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
-          await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
-          return submission;
-        }
-        await stageResourcePatchStore.markPreparedUsed(
-          prepared.prepareId,
-          submission.submissionId,
-          submission.updatedAt,
-        );
-        return submission;
+        // 同 executor patch 路径：落档与 nonce 收尾同事务（见该路径注释）。
+        // Only a retryable failure with no txHash is safe to reopen for the
+        // same prepareId.
+        const reopenForRetry =
+          broadcast.status === "failed" && broadcast.retryable && !submission.txHash;
+        await withStagePatchStoreTransaction(stageResourcePatchStore, async () => {
+          await stageResourcePatchStore.putSubmission(submission);
+          if (notAttempted || reopenForRetry) {
+            await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
+            return;
+          }
+          await stageResourcePatchStore.markPreparedUsed(
+            prepared.prepareId,
+            submission.submissionId,
+            submission.updatedAt,
+          );
+        });
       } catch (error) {
         if (!broadcastTxHash) {
           await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
         }
         throw error;
       }
+      // 同 executor patch 路径：cannot broadcast 不得消费 prepare/nonce
+      // （submissions/service.ts 的 attemptsBroadcast 契约）——记录尝试后
+      // 响亮失败，nonce 已在落档事务内释放，prepare 保持可复用。
+      if (notAttempted) {
+        throw new ProductStagePatchError(
+          503,
+          "broadcast_disabled",
+          "stage resource patch relayer broadcast is not configured; the verified signature was recorded but the prepare and nonce were not consumed",
+          { submissionId: submission.submissionId, retryable: true },
+        );
+      }
+      return submission;
     },
 
     async getStageResourcePatchSubmission(submissionId) {
@@ -748,6 +820,13 @@ interface SelectorTaskContext {
 interface SelectorPatchContext extends SelectorTaskContext {
   readonly selectorWallet: Address;
   readonly targetStageId: Hex;
+}
+
+async function withStagePatchStoreTransaction(
+  store: ProductStagePatchStore<PreparedPatchRecordBase, StagePatchSubmissionBase>,
+  operation: () => Promise<void>
+): Promise<void> {
+  return store.withTransaction ? store.withTransaction(operation) : operation();
 }
 
 async function resolveSelectorPatchContext(
@@ -1367,9 +1446,6 @@ function normalizeExecutorPatchMode(
   value: string | undefined,
 ): StageExecutorPatchMode {
   const normalized = (value ?? "assign").trim().toLowerCase();
-  if (normalized === "replace") {
-    return "replacement";
-  }
   if (
     normalized === "assign" ||
     normalized === "handoff" ||
@@ -1380,7 +1456,7 @@ function normalizeExecutorPatchMode(
   throw new ProductStagePatchError(
     400,
     "invalid_executor_patch_mode",
-    "mode must be assign, handoff, replace, or replacement",
+    "mode must be assign, handoff, or replacement",
   );
 }
 
@@ -2282,6 +2358,12 @@ function stringField(
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * 未分类异常的兜底 500 分类器：`stage_patch_failed` 在跨仓错误词表
+ * （uvp-protocol/protocol/uvp-error-taxonomy.v1.json，chain-services 名下）
+ * 注册，本函数是该 internal name 在服务端的唯一出处——词表登记与代码
+ * 出处由 error-taxonomy.conformance 测试双向锁定，删改需与词表仓同步。
+ */
 export function normalizeStagePatchServiceError(
   error: unknown,
 ): ProductStagePatchError {

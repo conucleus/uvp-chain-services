@@ -5,6 +5,7 @@ import {
 } from "../../evidence/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { resolveEvidencePrincipal } from "../participant-identity.js";
+import { decodePathParameter } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 export function createEvidenceRouteModule(options: {
@@ -35,7 +36,7 @@ export function createEvidenceRouteModule(options: {
 
         const backupVerifyMatch = /^\/product\/evidence\/([^/]+)\/backup-verify$/.exec(request.pathname);
         if (request.method === "POST" && backupVerifyMatch) {
-          const evidenceId = decodeURIComponent(backupVerifyMatch[1] ?? "");
+          const evidenceId = decodePathParameter(backupVerifyMatch[1] ?? "");
           const principal = await resolveEvidencePrincipal(request, context, options.runtimeEnvironment);
           const status = await context.evidenceService.verifyEvidenceBackup(evidenceId, principal);
           if (!status) {
@@ -52,7 +53,7 @@ export function createEvidenceRouteModule(options: {
 
         const backupRestoreMatch = /^\/product\/evidence\/([^/]+)\/backup-restore$/.exec(request.pathname);
         if (request.method === "POST" && backupRestoreMatch) {
-          const evidenceId = decodeURIComponent(backupRestoreMatch[1] ?? "");
+          const evidenceId = decodePathParameter(backupRestoreMatch[1] ?? "");
           const principal = await resolveEvidencePrincipal(request, context, options.runtimeEnvironment);
           const status = await context.evidenceService.restoreEvidenceBackup(evidenceId, principal);
           if (!status) {
@@ -75,7 +76,7 @@ export function createEvidenceRouteModule(options: {
               body: { error: "method_not_allowed" }
             };
           }
-          const evidenceId = decodeURIComponent(proofMatch[1] ?? "");
+          const evidenceId = decodePathParameter(proofMatch[1] ?? "");
           const principal = await resolveEvidencePrincipal(request, context, options.runtimeEnvironment);
           const proof = await context.evidenceService.getProof(evidenceId, principal);
           if (!proof) {
@@ -98,7 +99,7 @@ export function createEvidenceRouteModule(options: {
               body: { error: "method_not_allowed" }
             };
           }
-          const evidenceId = decodeURIComponent(evidenceMatch[1] ?? "");
+          const evidenceId = decodePathParameter(evidenceMatch[1] ?? "");
           const principal = await resolveEvidencePrincipal(request, context, options.runtimeEnvironment);
           const evidence = await context.evidenceService.getEvidence(evidenceId, principal);
           if (!evidence) {

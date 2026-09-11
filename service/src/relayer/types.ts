@@ -107,8 +107,6 @@ export interface RelaySubmission {
   readonly txHash?: Hex;
   /** One-based number of broadcast attempts for this submission. */
   readonly attemptNumber?: number;
-  /** Additive alias for consumers that use the submission DTO vocabulary. */
-  readonly attemptCount?: number;
   /** Number of retries still available after this outcome, when bounded. */
   readonly retryBudgetRemaining?: number;
   readonly errorCode?: string;

@@ -111,6 +111,15 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       }
       await this.saveSnapshot(scope, "order", orderSnapshot);
       await this.saveSnapshot(scope, "identity", identitySnapshot);
+      // 游标与"整库事件替换"同事务收敛：重建覆盖区间之外的旧游标
+      // 不允许在崩溃窗口内越过事件表。
+      if (input.cursor) {
+        await this.saveCursor({
+          ...input.cursor,
+          chainId: scope.chainId,
+          contractAddress: scope.contractAddress,
+        });
+      }
       await this.saveSyncState(
         input.syncState
           ? {
@@ -229,12 +238,50 @@ export class SqliteProjectionStore implements DurableProjectionStore {
 
   async saveCursor(
     cursor: Omit<StoredProjectionCursor, "updatedAt">,
-  ): Promise<StoredProjectionCursor> {
+    options?: { readonly expectNextBlock?: bigint },
+  ): Promise<StoredProjectionCursor | undefined> {
     const updatedAt = new Date().toISOString();
     const normalizedContract = normalizeAddress(
       cursor.contractAddress,
       "cursor.contractAddress",
     );
+
+    if (options?.expectNextBlock !== undefined) {
+      // CAS：本轮回读基于 expectNextBlock，持久游标已被其他写者移动时
+      // 拒绝推进（返回 undefined），防止把游标写到事件表覆盖区间之外。
+      const expectNextBlock = options.expectNextBlock;
+      const updated = runSqliteWrite(() =>
+        this.#database
+          .prepare(
+            `UPDATE chain_index_cursor
+             SET deployment_block = ?, next_block = ?, finalized_block = ?, block_hash = ?, updated_at = ?
+             WHERE chain_id = ? AND contract_address = ? AND CAST(next_block AS INTEGER) = ?`,
+          )
+          .run(
+            cursor.deploymentBlock.toString(),
+            cursor.nextBlock.toString(),
+            cursor.finalizedBlock?.toString() ?? null,
+            cursor.blockHash?.toLowerCase() ?? null,
+            updatedAt,
+            cursor.chainId,
+            normalizedContract,
+            expectNextBlock.toString(),
+          ),
+      );
+      if (updated.changes > 0) {
+        return cursorResult(cursor, normalizedContract, updatedAt);
+      }
+      const existing = this.#database
+        .prepare(
+          "SELECT 1 FROM chain_index_cursor WHERE chain_id = ? AND contract_address = ?",
+        )
+        .get(cursor.chainId, normalizedContract);
+      if (existing) {
+        return undefined;
+      }
+      // 行不存在：首条游标，直接插入。
+    }
+
     runSqliteWrite(() => {
       this.#database
         .prepare(
@@ -260,17 +307,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
         );
     });
 
-    return {
-      chainId: cursor.chainId,
-      contractAddress: normalizedContract,
-      deploymentBlock: cursor.deploymentBlock,
-      nextBlock: cursor.nextBlock,
-      ...(cursor.finalizedBlock !== undefined
-        ? { finalizedBlock: cursor.finalizedBlock }
-        : {}),
-      ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {}),
-      updatedAt,
-    };
+    return cursorResult(cursor, normalizedContract, updatedAt);
   }
 
   async getCursor(
@@ -423,11 +460,14 @@ export class SqliteProjectionStore implements DurableProjectionStore {
         // 复活：同主键（chain/contract/block/txHash/logIndex）的事件此前
         // 因 reorg 被打上 removed 墓碑，canonical 链重新出现同一位日志时
         // 必须解除墓碑；INSERT OR IGNORE 只会忽略主键冲突、保留 removed=1，
-        // 导致复活事件被永久跳过。
+        // 导致复活事件被永久跳过。transaction_index 随复活回填：墓碑行可能
+        // 在交易哈希之外缺该列（同块内交易重排后同位日志的序号可变），
+        // 排序键缺失会让复活事件在 listEvents 的全序里错位。
         const revival = this.#database
           .prepare(
             `UPDATE chain_event_log
-           SET removed = 0, event_name = ?, args_json = ?, block_hash = COALESCE(?, block_hash)
+           SET removed = 0, event_name = ?, args_json = ?, block_hash = COALESCE(?, block_hash),
+             transaction_index = COALESCE(transaction_index, ?)
            WHERE chain_id = ? AND contract_address = ? AND block_number = ?
              AND transaction_hash = ? AND log_index = ? AND removed = 1`,
           )
@@ -435,6 +475,7 @@ export class SqliteProjectionStore implements DurableProjectionStore {
             event.eventName,
             stringifyStorageJson(event.args),
             event.blockHash?.toLowerCase() ?? null,
+            event.transactionIndex ?? null,
             event.chainId,
             normalizedContract,
             event.blockNumber.toString(),
@@ -667,6 +708,24 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       contractAddress: this.#snapshotScope.contractAddress,
     };
   }
+}
+
+function cursorResult(
+  cursor: Omit<StoredProjectionCursor, "updatedAt">,
+  normalizedContract: Address,
+  updatedAt: string,
+): StoredProjectionCursor {
+  return {
+    chainId: cursor.chainId,
+    contractAddress: normalizedContract,
+    deploymentBlock: cursor.deploymentBlock,
+    nextBlock: cursor.nextBlock,
+    ...(cursor.finalizedBlock !== undefined
+      ? { finalizedBlock: cursor.finalizedBlock }
+      : {}),
+    ...(cursor.blockHash !== undefined ? { blockHash: cursor.blockHash } : {}),
+    updatedAt,
+  };
 }
 
 function cursorRow(row: unknown): StoredProjectionCursor {

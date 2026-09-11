@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { loadConfigFromEnv } from "../config/index.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
@@ -151,7 +152,7 @@ export class RelayerService implements LifecycleService {
       // A persisted final outcome is authoritative for this submission id. In
       // particular, do not turn a durable DLQ into duplicate_signer_nonce or
       // broadcast it again after a process restart.
-      this.#terminalSubmissionIds.add(submissionKey);
+      this.#rememberTerminalSubmission(submissionKey);
       return prior.lastSubmission;
     }
     if (this.retryBudgetExhausted(priorFailedAttempts)) {
@@ -162,24 +163,28 @@ export class RelayerService implements LifecycleService {
         priorFailedAttempts,
         this.retryBudgetRemaining(priorFailedAttempts)
       );
-      await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
-      this.#terminalSubmissionIds.add(submissionKey);
-      return submission;
+      const persisted = await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
+      if (persisted.deadLetter) {
+        this.#rememberTerminalSubmission(submissionKey);
+      }
+      return persisted;
     }
 
     const reserved = await this.reserveNonce(request);
     if (!reserved) {
+      // 预留失败不是终态：并发/在途的同 (signer,nonce) 提交结果未知——
+      // 持有者可能随后成功上链，也可能失败并释放 nonce 让本轮重试。
+      // 钉成 dead_letter 会让 nonce 释放后的合法重试被终态台账永久拒绝。
       const classification = relayFailure({
         errorCode: "duplicate_signer_nonce",
         message: "duplicate signer nonce",
         failureCategory: "duplicate",
-        retryable: false,
-        deadLetter: true
+        retryable: true,
+        deadLetter: false,
+        ...this.retrySchedule(priorFailedAttempts)
       });
       const submission = failedSubmission(request, classification, undefined, priorFailedAttempts, this.retryBudgetRemaining(priorFailedAttempts));
-      await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
-      this.#terminalSubmissionIds.add(submissionKey);
-      return submission;
+      return this.persistOutcome(submissionKey, submission, priorFailedAttempts);
     }
 
     if (!this.acquireOrder(request)) {
@@ -193,8 +198,7 @@ export class RelayerService implements LifecycleService {
         ...this.retrySchedule(priorFailedAttempts)
       });
       const submission = failedSubmission(request, classification, undefined, priorFailedAttempts, this.retryBudgetRemaining(priorFailedAttempts));
-      await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
-      return submission;
+      return this.persistOutcome(submissionKey, submission, priorFailedAttempts);
     }
 
     try {
@@ -206,10 +210,12 @@ export class RelayerService implements LifecycleService {
           classifyRelaySubmitterError(error, this.retrySchedule(priorFailedAttempts)),
           priorFailedAttempts
         );
-        if (classification.retryable) {
-          // A submitter rejection carries no txHash, so the nonce is safe to
-          // retry. This includes operator-recoverable insufficient-funds
-          // failures; a funded relayer can retry the same signed payload.
+        // nonce store 只是服务侧防双发去重，链从未接受该业务 nonce 的
+        // submitter 抛错路径（预检拒绝、revert、重试预算耗尽）都不构成
+        // "链上已消费"；继续占用会让同 (signer,nonce) 的合法重签永久
+        // duplicate_signer_nonce 死信。唯一例外是 duplicate_transaction：
+        // 候选 txHash 可能仍在池中/已上链，回执未裁决前不得释放。
+        if (classification.errorCode !== "duplicate_transaction") {
           await this.releaseNonce(request);
         }
 
@@ -230,6 +236,36 @@ export class RelayerService implements LifecycleService {
           if (resolved) {
             return resolved;
           }
+          const candidates = duplicateTransactionTxHashCandidates(error, prior.lastSubmission?.txHash);
+          if (candidates.length === 0) {
+            // gas nonce 冲突（nonce too low 等）通常不携带 txHash——探针
+            // 无可探对象，业务结果未在链上落定。钉 dead_letter 终态会让同
+            // 载荷幂等重放被 isTerminalSubmission 永久短路（换 gas nonce
+            // 重组装即可自愈的瞬态被误判为永久）。对齐同文件 reserve 失败
+            // 路径对 duplicate_signer_nonce 的非终态口径：释放服务侧
+            // nonce、按可重试失败落账。
+            await this.releaseNonce(request);
+            const reassemblable = relayFailure({
+              errorCode: "duplicate_transaction",
+              message: "broadcaster reported a nonce race without an attributable transaction hash; the payload can be re-assembled with a fresh gas nonce",
+              failureCategory: "retryable",
+              retryable: true,
+              deadLetter: false,
+              ...this.retrySchedule(priorFailedAttempts)
+            });
+            const reassembly = failedSubmission(
+              request,
+              reassemblable,
+              undefined,
+              attemptNumber,
+              this.retryBudgetRemaining(attemptNumber)
+            );
+            const persistedReassembly = await this.persistOutcome(submissionKey, reassembly, attemptNumber);
+            if (persistedReassembly.deadLetter) {
+              this.#rememberTerminalSubmission(submissionKey);
+            }
+            return persistedReassembly;
+          }
         }
 
         const unconfirmedTxHash = classification.errorCode === "duplicate_transaction"
@@ -242,17 +278,20 @@ export class RelayerService implements LifecycleService {
           attemptNumber,
           this.retryBudgetRemaining(attemptNumber)
         );
-        await this.persistOutcome(
+        // persistOutcome 的"胜者为准"守卫可能返回并发竞速下已落账的
+        // submitted 结果——响应必须与台账一致，丢弃它会把 submitted 台账
+        // 报成 failed+retryable，诱导调用方对已消费 nonce 重签。
+        const persisted = await this.persistOutcome(
           submissionKey,
           submission,
           classification.retryable || classification.errorCode === "broadcast_retry_exhausted"
             ? attemptNumber
             : priorFailedAttempts
         );
-        if (submission.deadLetter) {
-          this.#terminalSubmissionIds.add(submissionKey);
+        if (persisted.deadLetter) {
+          this.#rememberTerminalSubmission(submissionKey);
         }
-        return submission;
+        return persisted;
       }
 
       const attemptNumber = priorFailedAttempts + 1;
@@ -268,7 +307,7 @@ export class RelayerService implements LifecycleService {
           lastSubmission: submission
         });
         this.#failedAttemptsBySubmission.delete(submissionKey);
-        this.#lastSubmissionById.set(submissionKey, submission);
+        this.#rememberLastSubmission(submissionKey, submission);
         this.#terminalSubmissionIds.delete(submissionKey);
         return submission;
       } catch (error) {
@@ -289,8 +328,8 @@ export class RelayerService implements LifecycleService {
           attemptNumber,
           this.retryBudgetRemaining(0)
         );
-        this.#lastSubmissionById.set(submissionKey, persistFailure);
-        this.#terminalSubmissionIds.add(submissionKey);
+        this.#rememberLastSubmission(submissionKey, persistFailure);
+        this.#rememberTerminalSubmission(submissionKey);
         this.#failedAttemptsBySubmission.delete(submissionKey);
         await this.bestEffortPersistAfterBroadcast(submissionKey, persistFailure, attemptNumber, error);
         throw error;
@@ -302,6 +341,28 @@ export class RelayerService implements LifecycleService {
 
   get running(): boolean {
     return this.#running;
+  }
+
+
+  /**
+   * 进程内台账有界——写入按插入序 FIFO 淘汰最旧条目，长生命周期
+   * 进程不随提交数无界增长。淘汰只影响无持久 store 时的内存回退精度，
+   * 持久 submissionStore/retryBudgetStore 始终是完整真源。
+   */
+  #rememberLastSubmission(submissionKey: string, submission: RelaySubmission): void {
+    this.#lastSubmissionById.delete(submissionKey);
+    this.#lastSubmissionById.set(submissionKey, submission);
+    evictOldestMapEntries(this.#lastSubmissionById, IN_FLIGHT_LEDGER_MAX_ENTRIES);
+  }
+
+  #rememberFailedAttempts(submissionKey: string, failedAttempts: number): void {
+    this.#failedAttemptsBySubmission.set(submissionKey, failedAttempts);
+    evictOldestMapEntries(this.#failedAttemptsBySubmission, IN_FLIGHT_LEDGER_MAX_ENTRIES);
+  }
+
+  #rememberTerminalSubmission(submissionKey: string): void {
+    this.#terminalSubmissionIds.add(submissionKey);
+    evictOldestSetEntries(this.#terminalSubmissionIds, IN_FLIGHT_LEDGER_MAX_ENTRIES);
   }
 
   private async reserveNonce(request: RelayRequest): Promise<boolean> {
@@ -359,7 +420,7 @@ export class RelayerService implements LifecycleService {
             lastSubmission: submission
           });
           this.#failedAttemptsBySubmission.delete(submissionKey);
-          this.#lastSubmissionById.set(submissionKey, submission);
+          this.#rememberLastSubmission(submissionKey, submission);
           this.#terminalSubmissionIds.delete(submissionKey);
         } catch (persistError) {
           this.#logger.warn("relayer resolved duplicate transaction but persisting the outcome failed; the nonce stays consumed", {
@@ -422,15 +483,34 @@ export class RelayerService implements LifecycleService {
     submissionKey: string,
     submission: RelaySubmission,
     failedAttempts: number
-  ): Promise<void> {
-    this.#lastSubmissionById.set(submissionKey, submission);
+  ): Promise<RelaySubmission> {
+    // 状态守卫：并发同 (signer,nonce) 的失败结果不得覆盖已 submitted 的
+    // 成功台账——nonce 链上已消费，submitted 是该提交的最终真相。胜者的
+    // record 已落库（budget 尚未跟上）时以胜者为准返回，不写失败行。
+    if (submission.status === "failed") {
+      const [persistedSubmission, persistedBudget] = await Promise.all([
+        this.loadSubmission(submissionKey),
+        this.#retryBudgetStore ? this.#retryBudgetStore.load(submissionKey) : Promise.resolve(undefined)
+      ]);
+      const winner = persistedSubmission?.status === "submitted"
+        ? persistedSubmission
+        : persistedBudget?.lastSubmission?.status === "submitted"
+          ? persistedBudget.lastSubmission
+          : undefined;
+      if (winner) {
+        this.#rememberLastSubmission(submissionKey, winner);
+        return winner;
+      }
+    }
+    this.#rememberLastSubmission(submissionKey, submission);
     if (failedAttempts > 0) {
-      this.#failedAttemptsBySubmission.set(submissionKey, failedAttempts);
+      this.#rememberFailedAttempts(submissionKey, failedAttempts);
     } else {
       this.#failedAttemptsBySubmission.delete(submissionKey);
     }
     await this.record(submission);
     await this.saveRetryState(submissionKey, { failedAttempts, lastSubmission: submission });
+    return submission;
   }
 
   private async saveRetryState(submissionKey: string, snapshot: RelayRetryBudgetSnapshot): Promise<void> {
@@ -518,6 +598,30 @@ export class RelayerService implements LifecycleService {
     return {
       nextRetryAt: new Date(this.#now().getTime() + delayMs).toISOString()
     };
+  }
+}
+
+
+/** 进程内台账容量上限（FIFO 淘汰最旧）。 */
+const IN_FLIGHT_LEDGER_MAX_ENTRIES = 10_000;
+
+function evictOldestMapEntries<K, V>(map: Map<K, V>, maxEntries: number): void {
+  while (map.size > maxEntries) {
+    const oldest = map.keys().next();
+    if (oldest.done) {
+      return;
+    }
+    map.delete(oldest.value);
+  }
+}
+
+function evictOldestSetEntries<V>(set: Set<V>, maxEntries: number): void {
+  while (set.size > maxEntries) {
+    const oldest = set.values().next();
+    if (oldest.done) {
+      return;
+    }
+    set.delete(oldest.value);
   }
 }
 
@@ -843,7 +947,6 @@ function submittedSubmission(
     status: "submitted",
     txHash,
     ...(attemptNumber !== undefined ? { attemptNumber } : {}),
-    ...(attemptNumber !== undefined ? { attemptCount: attemptNumber } : {}),
     ...(retryBudgetRemaining !== undefined ? { retryBudgetRemaining } : {}),
     retryable: false,
     retryState: "not_applicable",
@@ -863,7 +966,6 @@ function failedSubmission(
     status: "failed",
     ...(txHash ? { txHash } : {}),
     ...(attemptNumber !== undefined ? { attemptNumber } : {}),
-    ...(attemptNumber !== undefined ? { attemptCount: attemptNumber } : {}),
     ...(retryBudgetRemaining !== undefined ? { retryBudgetRemaining } : {}),
     errorCode: classification.errorCode,
     errorLabel: classification.errorLabel,
@@ -884,7 +986,6 @@ function submissionBase(request: RelayRequest): Omit<
   | "errorLabel"
   | "error"
   | "attemptNumber"
-  | "attemptCount"
   | "retryBudgetRemaining"
   | "failureCategory"
   | "retryable"
@@ -984,7 +1085,7 @@ function failedAttemptsFromSubmission(submission: RelaySubmission | undefined): 
       (submission.retryable !== true && submission.retryState !== "retryable")) {
     return 0;
   }
-  return Math.max(submission.attemptNumber ?? submission.attemptCount ?? 0, 0);
+  return Math.max(submission.attemptNumber ?? 0, 0);
 }
 
 function cappedExponentialBackoffMs(baseMs: number, maxMs: number, attempts: number): number {
@@ -1090,12 +1191,49 @@ function freezeRelayRequest(request: RelayRequest): Readonly<RelayRequest> {
 }
 
 function submissionId(request: RelayRequest): string {
+  // 幂等键必须包含载荷身份：只按 (signer,nonce) 收敛会让同 nonce 的
+  // 不同载荷互相顶替——旧载荷的台账被覆盖、永不再广播，新调用却拿到
+  // 旧载荷的 txHash。指纹覆盖 typedData 全部签名字段（domain/types/
+  // primaryType/message），排除 signature 本身（ECDSA 每次重签不同，
+  // 纳入会破坏同载荷幂等）。不同载荷 → 不同 submissionId 并行记账；
+  // 同 (signer,nonce) 的互斥由 nonce store 承担（链上已消费时第二个
+  // 载荷 reserve 失败，按 duplicate_signer_nonce 拒绝，不顶替前者）。
   return [
     request.business.chainId,
     request.business.verifyingContract.toLowerCase(),
     request.business.signer.toLowerCase(),
-    request.business.nonce
+    request.business.nonce,
+    relayPayloadFingerprint(request)
   ].join(":");
+}
+
+function relayPayloadFingerprint(request: RelayRequest): string {
+  return `0x${createHash("sha256")
+    .update(canonicalRelayPayload({
+      domain: request.typedData.domain,
+      types: request.typedData.types,
+      primaryType: request.typedData.primaryType,
+      message: request.typedData.message
+    }))
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+/** 稳定序列化：键排序、过滤 undefined、bigint 显式标记，同一逻辑载荷恒等。 */
+function canonicalRelayPayload(value: unknown): string {
+  if (typeof value === "bigint") {
+    return `${value.toString()}n`;
+  }
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value ?? null) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalRelayPayload).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, entryValue]) => entryValue !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${canonicalRelayPayload(entryValue)}`).join(",")}}`;
 }
 
 function orderKey(request: RelayRequest): string {

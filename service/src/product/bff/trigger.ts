@@ -14,10 +14,11 @@ import {
   deriveTriggerOrderId
 } from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../../shared/types.js";
+import { redactErrorMessage } from "../../security/redaction.js";
 import type { ProductOrderTriggerStatus, SignalAuthorizationDTO } from "./types.js";
 
 export const DEFAULT_PRODUCT_REGISTRAR_ADDRESS = "0x000000000000000000000000000000000000bff1" as const;
-// UVPStateMachine v0.9: planId/orderId/sourceId are indexed; signalId is the
+// UVPStateMachine v0.10: planId/orderId/sourceId are indexed; signalId is the
 // first value in the data payload (not a fourth topic).
 const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,address)"));
 
@@ -107,6 +108,8 @@ export interface AnvilProductTriggerBroadcastAdapterOptions {
   readonly privateKey?: Hex | string;
   readonly registrarAddress?: Address;
   readonly waitForReceipt?: boolean;
+  /** 非 local 默认开：代付 gas 的注册器不得同时是业务签名者（同族 submissions/stage-patch 防线）。 */
+  readonly rejectGasPayerAsSubmitter?: boolean;
   readonly publicClient?: ProductTriggerBroadcastPublicClient;
   readonly walletClient?: ProductTriggerBroadcastWalletClient;
   readonly unknownOrderRetryDelayMs?: number;
@@ -163,6 +166,18 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
   }
 
   async broadcastOutsideTrigger(input: ProductBroadcastOutsideTriggerInput): Promise<ProductOrderTriggerBroadcastResult> {
+    // 与 submissions/stage-patch 广播同防线：registrar（gas 付费方）
+    // 不得同时是业务签名者——代付通道自己签名自己提交会让"服务不生成
+    // 业务签名"的边界名存实亡。确定性拒绝，不产生任何链上交易。
+    if (this.#options.rejectGasPayerAsSubmitter &&
+        this.registrarAddress.toLowerCase() === input.submitter.toLowerCase()) {
+      return {
+        status: "failed",
+        errorCode: "relayer_business_signer_reuse",
+        errorMessage: "relayer gas payer must not be the participant business signer",
+        retryable: false
+      };
+    }
     // 已广播的 txHash 必须穿越 catch：writeContract 成功后等待回执/解析回执
     // 抛错时，链上交易已经存在，failed 结果不得丢失 txHash（对齐
     // submissions/broadcast-adapter 的 failedResult 携带方式）。
@@ -337,11 +352,15 @@ interface ClassifiedProductTriggerBroadcastError {
 
 /**
  * 传输层错误信封（JSON-RPC / HTTP / 网络）。这些错误与链上业务状态
- * 无关，一律可重试——此前裸 /invalid/ 正则把 "Invalid JSON RPC
+ * 无关，一律可重试——裸 /invalid/ 正则会把 "Invalid JSON RPC
  * response" 误判为确定性拒绝（retryable:false），草稿被永久卡死。
  */
 function isTransportEnvelopeError(haystack: string): boolean {
-  return /json.?rpc|http request|fetch failed|network|socket|connection|ECONN|ETIMEDOUT|timeout|timed out|AbortError|transport|too many|rate.?limit/i.test(haystack);
+  // "context deadline exceeded" 是传输层超时信封（代理/网关侧截止），
+  // 不入传输正则会被确定性分支的 /deadline/ 吞掉：判成
+  // trigger_order_reverted retryable:false（无 txHash 无从复核），
+  // 单草稿触发死锁（重触发只接受 failed&&retryable）。
+  return /json.?rpc|http request|fetch failed|network|socket|connection|ECONN|ETIMEDOUT|timeout|timed out|deadline exceeded|AbortError|transport|too many|rate.?limit/i.test(haystack);
 }
 
 function classifyProductTriggerBroadcastError(error: unknown): ClassifiedProductTriggerBroadcastError {
@@ -357,9 +376,12 @@ function classifyProductTriggerBroadcastError(error: unknown): ClassifiedProduct
       retryable: false
     };
   }
+  // 可重试分支的 message 会落 errorMessage 并回显给调用方：裸 error.message
+  // 可能携带 RPC URL/内网主机等基础设施细节，先脱敏再出镜（对齐
+  // submissions/broadcast-adapter 的 errorText 口径）。
   return {
     errorCode: "trigger_order_broadcast_failed",
-    message,
+    message: redactErrorMessage(message),
     retryable: true
   };
 }

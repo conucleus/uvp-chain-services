@@ -298,6 +298,18 @@ export function classifyStateMachineBroadcastError(error: unknown): ClassifiedSt
       name?.includes("InvalidSignalSignature") ? name : "InvalidSignalSignature"
     );
   }
+  // 未登记 revert 的泛规则（对齐 relayer 的兜底与错误分类表）：真实执行
+  // 失败按永久失败处理——继续按可重试无限重放同一签名载荷只会重复烧
+  // gas。位置在 UnknownOrder 等瞬态判定之后：viem 复合错误文本同时含
+  // "reverted." 与具体错误名，泛规则在前会把瞬态永久死信。
+  if (/execution reverted|transaction reverted|reverted/i.test(haystack)) {
+    return classifiedBroadcastError(
+      "transaction_reverted",
+      "state-machine transaction reverted before the signal was accepted",
+      false,
+      text
+    );
+  }
   if (/insufficient funds/i.test(haystack)) {
     return classifiedBroadcastError(
       "relayer_insufficient_funds",

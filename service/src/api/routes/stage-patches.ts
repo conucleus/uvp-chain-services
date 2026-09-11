@@ -8,22 +8,32 @@ import {
   type SubmitProductStageExecutorPatchInput,
   type SubmitProductStageResourcePatchInput
 } from "../../stage-patches/index.js";
-import { ConfigError } from "../../shared/types.js";
-import type { ApiResponse } from "../route-context.js";
+import { ConfigError, normalizeAddress, type Address } from "../../shared/types.js";
+import type { ChainServicesRuntimeEnv } from "../../config/index.js";
+import { decodePathParameter, type ApiRequest, type ApiResponse, type ApiRouteContext } from "../route-context.js";
+import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { RouteModule } from "../route-module.js";
 
-export function createStagePatchRouteModule(): RouteModule {
+export function createStagePatchRouteModule(options: {
+  /** 仅显式 local 允许自报 selector 头/体；缺省/非 local 无会话身份即 401。 */
+  readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
+} = {}): RouteModule {
   return {
     async handle(request, context) {
       const prepareExecutorMatch = /^\/product\/tasks\/([^/]+)\/prepare-stage-executor-patch$/.exec(request.pathname);
       if (request.method === "POST" && prepareExecutorMatch) {
         return handleStagePatchRequest(async () => {
-          const taskId = decodeURIComponent(prepareExecutorMatch[1] ?? "");
+          const taskId = decodePathParameter(prepareExecutorMatch[1] ?? "");
+          const input = parsePrepareExecutorBody(request.body);
+          const identity = await resolveSelectorWalletIdentity(request, context, options.runtimeEnvironment, input.selectorWallet);
+          if (!identity.ok) {
+            return identity.response;
+          }
           return {
             status: 201,
             body: await context.productStageExecutorPatchService.prepareStageExecutorPatch(
               taskId,
-              parsePrepareExecutorBody(request.body)
+              { ...input, selectorWallet: identity.walletAddress }
             )
           };
         });
@@ -32,12 +42,17 @@ export function createStagePatchRouteModule(): RouteModule {
       const submitExecutorMatch = /^\/product\/tasks\/([^/]+)\/submit-stage-executor-patch$/.exec(request.pathname);
       if (request.method === "POST" && submitExecutorMatch) {
         return handleStagePatchRequest(async () => {
-          const taskId = decodeURIComponent(submitExecutorMatch[1] ?? "");
+          const taskId = decodePathParameter(submitExecutorMatch[1] ?? "");
+          const input = parseSubmitExecutorBody(request.body);
+          const identity = await resolveSelectorWalletIdentity(request, context, options.runtimeEnvironment, input.selectorWallet);
+          if (!identity.ok) {
+            return identity.response;
+          }
           return {
             status: 200,
             body: await context.productStageExecutorPatchService.submitStageExecutorPatch(
               taskId,
-              parseSubmitExecutorBody(request.body)
+              { ...input, selectorWallet: identity.walletAddress }
             )
           };
         });
@@ -46,12 +61,17 @@ export function createStagePatchRouteModule(): RouteModule {
       const prepareResourceMatch = /^\/product\/tasks\/([^/]+)\/prepare-stage-resource-patch$/.exec(request.pathname);
       if (request.method === "POST" && prepareResourceMatch) {
         return handleStagePatchRequest(async () => {
-          const taskId = decodeURIComponent(prepareResourceMatch[1] ?? "");
+          const taskId = decodePathParameter(prepareResourceMatch[1] ?? "");
+          const input = parsePrepareResourceBody(request.body);
+          const identity = await resolveSelectorWalletIdentity(request, context, options.runtimeEnvironment, input.selectorWallet);
+          if (!identity.ok) {
+            return identity.response;
+          }
           return {
             status: 201,
             body: await context.productStageResourcePatchService.prepareStageResourcePatch(
               taskId,
-              parsePrepareResourceBody(request.body)
+              { ...input, selectorWallet: identity.walletAddress }
             )
           };
         });
@@ -60,12 +80,17 @@ export function createStagePatchRouteModule(): RouteModule {
       const submitResourceMatch = /^\/product\/tasks\/([^/]+)\/submit-stage-resource-patch$/.exec(request.pathname);
       if (request.method === "POST" && submitResourceMatch) {
         return handleStagePatchRequest(async () => {
-          const taskId = decodeURIComponent(submitResourceMatch[1] ?? "");
+          const taskId = decodePathParameter(submitResourceMatch[1] ?? "");
+          const input = parseSubmitResourceBody(request.body);
+          const identity = await resolveSelectorWalletIdentity(request, context, options.runtimeEnvironment, input.selectorWallet);
+          if (!identity.ok) {
+            return identity.response;
+          }
           return {
             status: 200,
             body: await context.productStageResourcePatchService.submitStageResourcePatch(
               taskId,
-              parseSubmitResourceBody(request.body)
+              { ...input, selectorWallet: identity.walletAddress }
             )
           };
         });
@@ -74,6 +99,55 @@ export function createStagePatchRouteModule(): RouteModule {
       return undefined;
     }
   };
+}
+
+/**
+ * selector 身份收口（对照 submissions 路由的 resolveParticipantWalletIdentity
+ * 做法）：会话锚定地址为真源，body 自报 selectorWallet 只做一致性核验——
+ * 不一致即 403，否则可用任意（任务,钱包）组合探测授权结果（201/403
+ * oracle）。仅显式 local 允许 body 自报 selector 作为身份；非 local 无
+ * 锚定即 401 fail-closed。
+ */
+async function resolveSelectorWalletIdentity(
+  request: ApiRequest,
+  context: ApiRouteContext,
+  runtimeEnvironment: ChainServicesRuntimeEnv | undefined,
+  selectorWallet: string
+): Promise<{ readonly ok: true; readonly walletAddress: Address } | { readonly ok: false; readonly response: ApiResponse }> {
+  let claimed: Address;
+  try {
+    claimed = normalizeAddress(selectorWallet, "selectorWallet");
+  } catch {
+    return {
+      ok: false,
+      response: {
+        status: 400,
+        body: { error: "invalid_wallet", message: "selectorWallet must be a valid EVM address" }
+      }
+    };
+  }
+  const resolved = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment, { includeBodyWallet: false });
+  if (resolved.ok) {
+    if (claimed.toLowerCase() !== resolved.identity.walletAddress.toLowerCase()) {
+      return {
+        ok: false,
+        response: {
+          status: 403,
+          body: {
+            error: "wrong_wallet",
+            message: "claimed selectorWallet does not match the session-anchored address",
+            anchoredAddress: resolved.identity.walletAddress,
+            walletAddress: claimed
+          }
+        }
+      };
+    }
+    return { ok: true, walletAddress: resolved.identity.walletAddress };
+  }
+  if (runtimeEnvironment === "local") {
+    return { ok: true, walletAddress: claimed };
+  }
+  return { ok: false, response: resolved.response };
 }
 
 async function handleStagePatchRequest(action: () => Promise<ApiResponse>): Promise<ApiResponse> {

@@ -44,6 +44,8 @@ import type {
   PreviewProductInviteInput,
   ProductInviteAcceptanceDTO,
   ProductInviteDTO,
+  ProductInvitePreviewDraftDTO,
+  ProductInvitePreviewParticipantDTO,
   ProductInvitePreviewResponse,
   ProductInviteRolePreviewDTO,
   ProductInviteWalletBindingDTO,
@@ -112,7 +114,10 @@ export interface ProductBffService {
     draftId: string,
     input: TriggerProductOrderInput,
   ): Promise<TriggerProductOrderResult>;
-  getRegistration(triggerId: string): Promise<ProductOrderTriggerDTO>;
+  getRegistration(
+    triggerId: string,
+    readerWallet: Address
+  ): Promise<ProductOrderTriggerDTO>;
   createInvite(
     draftId: string,
     input: CreateProductInviteInput,
@@ -388,9 +393,12 @@ export function createProductBffService(
       const deadline = Math.floor(
         prepareNow.getTime() / 1000 + 3600,
       ).toString();
+      // triggerId 追加 128 位随机熵：会话门已就位，
+      // 顺序段（scope 内自增）是残余枚举面——GET /product/order-triggers/:id
+      // 的路径键不得可被顺序猜测。与 inviteId 同款"结构前缀 + 随机后缀"。
       const triggerId =
         existingRegistration?.triggerId ??
-        nextId("trigger", idScope, sequence++);
+        `${nextId("trigger", idScope, sequence++)}_${randomBytes(16).toString("hex")}`;
       const prepareId = nextId("prepare", idScope, sequence++);
       const sourceId = productSignalSourceId(createOrderTrigger.source);
       const signalId = productSignalId(createOrderTrigger.signalName);
@@ -463,14 +471,41 @@ export function createProductBffService(
         status: "ready_to_trigger",
         updatedAt: createdAt,
       };
+      let idempotentWinner: ProductOrderTriggerRecord | undefined;
       await withProductStoreTransaction(store, async () => {
         if (existingRegistration) {
           await store.updateRegistration(registration);
-        } else {
-          await store.createRegistration(registration);
+        } else if (!(await store.createRegistrationIfNoneForDraft(registration))) {
+          // 并发 prepare-trigger 败者：draft_id 一事一单条件插入落败，
+          // 回读赢家记录——同一提交人的未过期 prepare 幂等返回，
+          // 其余情形 409，不以 draft_id UNIQUE 存储错误 500 泄露。
+          const winner = await store.getRegistrationByDraft(draftId);
+          if (
+            winner &&
+            winner.status === "prepared" &&
+            winner.submitter === walletAddress &&
+            !isPrepareExpired(winner, prepareNow)
+          ) {
+            idempotentWinner = winner;
+            return;
+          }
+          throw new ProductBffError(
+            409,
+            "trigger_already_exists",
+            "order draft already has a trigger record",
+            {
+              triggerId: winner?.triggerId,
+              ...(winner ? { status: winner.status } : {}),
+            },
+          );
         }
         await store.updateDraft(readyDraft);
       });
+      if (idempotentWinner) {
+        // 赢家事务已把草稿置 ready_to_trigger；回读避免返回过期状态。
+        const winnerDraft = (await store.getDraft(draftId)) ?? readyDraft;
+        return prepareResultFromRegistration(winnerDraft, participants, idempotentWinner);
+      }
       return prepareResultFromRegistration(
         readyDraft,
         participants,
@@ -478,10 +513,29 @@ export function createProductBffService(
       );
     },
 
-    async getRegistration(triggerId) {
-      return registrationDtoFromRecord(
-        await requireRegistration(store, triggerId),
-      );
+    async getRegistration(triggerId, readerWallet) {
+      const registration = await requireRegistration(store, triggerId);
+      // 归属校验（IDOR）：trigger 档案携带草稿、签名者与授权明细——会话
+      // 身份门只挡匿名；读取者须为 trigger 创建者/签名者或草稿归属方
+      // （创建者/已接受参与者），与 getDraft 的 assertDraftAffiliate 同口径。
+      const draft = await store.getDraft(registration.draftId);
+      const participants = draft ? await store.listParticipants(registration.draftId) : [];
+      const affiliated =
+        registration.creator.toLowerCase() === readerWallet.toLowerCase() ||
+        (registration.submitter !== undefined &&
+          registration.submitter.toLowerCase() === readerWallet.toLowerCase()) ||
+        (draft !== undefined &&
+          (isDraftCreator(draft, readerWallet) ||
+            isAcceptedParticipantWallet(participants, readerWallet)));
+      if (!affiliated) {
+        throw new ProductBffError(
+          403,
+          "trigger_access_forbidden",
+          "only the trigger creator/submitter or a draft affiliate may read this trigger profile",
+          { triggerId }
+        );
+      }
+      return registrationDtoFromRecord(registration);
     },
 
     async triggerOrder(draftId, input) {
@@ -643,7 +697,16 @@ export function createProductBffService(
       };
       return withProductStoreTransaction(store, async () => {
         await store.updateParticipant(invited);
-        await store.createInvite(invite);
+        // 并发 createInvite 双双通过前置检查时，条件插入保证只有
+        // 一个 active invite 落库（跨进程原子性由单语句承担）。
+        if (!(await store.createInviteIfNoneActive(invite, now().toISOString()))) {
+          throw new ProductBffError(
+            409,
+            "invite_already_active",
+            "participant already has an active invite",
+            { participantId: participant.participantId, roleSlotId: participant.roleSlotId },
+          );
+        }
         const nextDraft = await refreshDraftStatus(store, draft, now);
         return { invite, participant: invited, draft: nextDraft, inviteToken };
       });
@@ -651,6 +714,9 @@ export function createProductBffService(
 
     async getInvite(inviteId, input = {}) {
       const invite = await requireInvite(store, inviteId);
+      // 预览读取受邀人联系方式与草稿金额，凭据口径与 accept/reject 一致：
+      // token 哈希比对（inviteId 是弱凭据，不可单独作为预览凭据）。
+      assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const draft = await requireDraft(store, invite.draftId);
       const zhixu = await options.productService.getZhixu(draft.zhixuId);
@@ -666,10 +732,16 @@ export function createProductBffService(
             walletAddress,
           )
         : undefined;
+      // 响应字段最小集：联系方式脱敏、金额按可见范围
+      // 收敛——totalAmount 只对创建者/已接受参与者（会话钱包）可见，
+      // notes/createdBy/planId 等运营字段不进预览。
+      const amountVisible = walletAddress
+        ? await isDraftAmountVisible(store, draft, walletAddress)
+        : false;
       return {
         invite: previewInvite,
-        participant,
-        draft,
+        participant: invitePreviewParticipant(participant),
+        draft: invitePreviewDraft(draft, amountVisible),
         role: inviteRolePreview(zhixu, participant),
         acceptance: inviteAcceptance(previewInvite, participant, walletBinding),
         ...(walletBinding ? { walletBinding } : {}),
@@ -722,8 +794,12 @@ export function createProductBffService(
         acceptedWalletAddress,
       };
       return withProductStoreTransaction(store, async () => {
+        // 条件状态迁移（WHERE status='active'）：并发双 accept 只有一个
+        // 能落档，败者按现行状态返回冲突，不再相互覆写。
+        if (!(await store.updateInviteIfActive(acceptedInvite))) {
+          throw inactiveInviteError(await requireInvite(store, inviteId));
+        }
         await store.updateParticipant(accepted);
-        await store.updateInvite(acceptedInvite);
         const draft = await refreshDraftStatus(
           store,
           await requireDraft(store, invite.draftId),
@@ -750,8 +826,11 @@ export function createProductBffService(
         status: "rejected",
       };
       return withProductStoreTransaction(store, async () => {
+        // 同 accept：条件状态迁移收口并发 accept/reject 竞态。
+        if (!(await store.updateInviteIfActive(rejectedInvite))) {
+          throw inactiveInviteError(await requireInvite(store, inviteId));
+        }
         await store.updateParticipant(rejected);
-        await store.updateInvite(rejectedInvite);
         const draft = await refreshDraftStatus(
           store,
           await requireDraft(store, invite.draftId),
@@ -1117,6 +1196,81 @@ function inviteAcceptance(
   return { canAccept: true, status: "can_accept" };
 }
 
+/**
+ * 预览金额可见范围：与 getDraft 的草稿归属同口径——
+ * 创建者或已接受参与者的会话钱包可见 totalAmount；纯 token 持有者
+ *（尚未接受邀请）不在金额可见范围。
+ */
+async function isDraftAmountVisible(
+  store: ProductBffStore,
+  draft: ProductOrderDraftDTO,
+  wallet: Address,
+): Promise<boolean> {
+  if (isDraftCreator(draft, wallet)) {
+    return true;
+  }
+  return isAcceptedParticipantWallet(
+    await store.listParticipants(draft.draftId),
+    wallet,
+  );
+}
+
+/** 预览参与者最小投影：联系方式脱敏，不回传钱包地址。 */
+function invitePreviewParticipant(
+  participant: DraftParticipantDTO,
+): ProductInvitePreviewParticipantDTO {
+  return {
+    participantId: participant.participantId,
+    draftId: participant.draftId,
+    roleSlotId: participant.roleSlotId,
+    roleLabel: participant.roleLabel,
+    displayName: participant.displayName,
+    ...(participant.contact ? { maskedContact: maskContact(participant.contact) } : {}),
+    status: participant.status,
+    required: participant.required,
+  };
+}
+
+/** 预览草稿最小投影：金额按可见范围收敛，notes/planId 等不进预览。 */
+function invitePreviewDraft(
+  draft: ProductOrderDraftDTO,
+  amountVisible: boolean,
+): ProductInvitePreviewDraftDTO {
+  return {
+    draftId: draft.draftId,
+    zhixuId: draft.zhixuId,
+    title: draft.title,
+    businessType: draft.businessType,
+    currency: draft.currency,
+    ...(draft.exportRegion ? { exportRegion: draft.exportRegion } : {}),
+    ...(draft.destinationRegion ? { destinationRegion: draft.destinationRegion } : {}),
+    ...(draft.expectedCompletionDate ? { expectedCompletionDate: draft.expectedCompletionDate } : {}),
+    ...(amountVisible ? { totalAmount: draft.totalAmount } : {}),
+  };
+}
+
+/**
+ * 联系方式脱敏：邮箱保留本地部分前 2 位 + 域名；
+ * 电话/其他文本保留前 3 后 2；过短或空值整段遮蔽。预览只证明
+ * "邀请发到了这个联系方式"，不回传原文。
+ */
+function maskContact(contact: string): string {
+  const trimmed = contact.trim();
+  if (!trimmed) {
+    return "***";
+  }
+  const atIndex = trimmed.lastIndexOf("@");
+  if (atIndex > 0 && trimmed.indexOf(".", atIndex) > atIndex) {
+    const localPart = trimmed.slice(0, atIndex);
+    const domain = trimmed.slice(atIndex);
+    return `${localPart.slice(0, 2)}***${domain}`;
+  }
+  if (trimmed.length >= 7) {
+    return `${trimmed.slice(0, 3)}****${trimmed.slice(-2)}`;
+  }
+  return "***";
+}
+
 function inviteRolePreview(
   zhixu: ZhixuDetailDTO | undefined,
   participant: DraftParticipantDTO,
@@ -1382,6 +1536,9 @@ function requireTriggerSubmitter(
     "participant.walletAddress",
   );
   if (authorityWallet !== submitter) {
+    // details 不携带 expectedWalletAddress：自报比对的年代先打 403 拿到
+    // 执行者钱包再冒名重放即可绕过；钱包由会话锚定后错误响应也不得
+    // 再泄露执行者地址。
     throw new ProductBffError(
       403,
       "trigger_submitter_not_authorized",
@@ -1389,8 +1546,6 @@ function requireTriggerSubmitter(
       {
         roleSlotId: authority.roleSlotId,
         roleLabel: authority.roleLabel,
-        expectedWalletAddress: authorityWallet,
-        walletAddress: submitter,
         ...(authority.stageId ? { stageId: authority.stageId } : {}),
       },
     );

@@ -75,7 +75,7 @@ export async function verifyListingAnchors(options: {
   const { listing } = options;
   const snapshot = await options.projectionStore.getOrderSnapshot();
   // 投影以 chainId:contract:planId 为键；按 planId 值匹配（大小写不敏感）。
-  // 已注册判据：桶存在只代表 commitPlan 已执行（UVP-02）——须见到
+  // 已注册判据：桶存在只代表 commitPlan 已执行——须见到
   // PlanRegistered（registeredAt 被 finalize 交易覆写）或 PlanFinalized。
   const plan = Object.values(snapshot.stateMachinePlans)
     .find((candidate) =>

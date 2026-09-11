@@ -37,7 +37,7 @@ export function createDiagnosticsRouteModule(): RouteModule {
       }
 
       if (request.method === "GET" && request.pathname === "/admin/diagnostics") {
-        const principal = adminPrincipalFromHeaders(request.headers);
+        const principal = adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
         if (!principal) {
           return {
             status: 403,

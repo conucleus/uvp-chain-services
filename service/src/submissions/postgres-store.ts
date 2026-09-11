@@ -146,20 +146,34 @@ export class PostgresSubmissionStore implements ProductSubmissionStore {
     );
   }
 
-  async reserveNonce(key: string): Promise<boolean> {
+  async reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean> {
+    const reservedAt = new Date().toISOString();
+    const normalizedKey = key.toLowerCase();
     try {
       await this.#database.query(
         `INSERT INTO submission_nonce (nonce_key, reserved_at)
          VALUES ($1, $2)`,
-        [key.toLowerCase(), new Date().toISOString()]
+        [normalizedKey, reservedAt]
       );
       return true;
     } catch (error) {
-      if (error instanceof StorageConstraintError) {
-        return false;
+      if (!(error instanceof StorageConstraintError)) {
+        throw error;
       }
-      throw error;
     }
+    // 条件 UPDATE 原子接管（对齐 store-sessions consumeChallenge 手法）：
+    // 年龄判定在 WHERE 内完成，并发重试同 key 只有一个赢家。reserved_at
+    // 统一 toISOString 落库，字典序即时间序。
+    if (!options?.staleBefore) {
+      return false;
+    }
+    const result = await this.#database.query(
+      `UPDATE submission_nonce
+       SET reserved_at = $1
+       WHERE nonce_key = $2 AND reserved_at < $3`,
+      [reservedAt, normalizedKey, options.staleBefore]
+    );
+    return (result.rowCount ?? 0) === 1;
   }
 
   async releaseNonce(key: string): Promise<void> {

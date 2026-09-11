@@ -37,7 +37,7 @@ const supplierWallet = "0x4444444444444444444444444444444444444444" as Address;
 
 describe("Store sensitive action confirmation", () => {
   it("requires exact confirmation before supplier approval and governance handoff side effects", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
 
     await expect(router.handle({
       method: "POST",

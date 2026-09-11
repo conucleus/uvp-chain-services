@@ -51,14 +51,36 @@ export class SqliteStoreWalletSessionStore implements StoreWalletSessionStore {
     }
   }
 
-  async putChallenge(record: StoreAuthChallengeRecord): Promise<void> {
-    runSqliteWrite(() => {
+  async putChallengeWithinAddressQuota(
+    record: StoreAuthChallengeRecord,
+    options: { readonly maxLivePerAddress: number; readonly maxLivePerRequester: number; readonly now: string }
+  ): Promise<boolean> {
+    // better-sqlite3 单连接同步写：计数与插入之间不存在并发写入者。
+    return runSqliteWrite(() => {
+      const { liveForAddress, liveForRequester } = this.#database.prepare(
+        `SELECT
+           SUM(CASE WHEN address = ? THEN 1 ELSE 0 END) AS liveForAddress,
+           SUM(CASE WHEN requester_key = ? THEN 1 ELSE 0 END) AS liveForRequester
+         FROM store_auth_challenge
+         WHERE consumed_at IS NULL AND expires_at >= ?
+           AND (address = ? OR requester_key = ?)`
+      ).get(
+        record.address.toLowerCase(),
+        record.requesterKey,
+        options.now,
+        record.address.toLowerCase(),
+        record.requesterKey
+      ) as { liveForAddress: number | null; liveForRequester: number | null };
+      if ((liveForAddress ?? 0) >= options.maxLivePerAddress || (liveForRequester ?? 0) >= options.maxLivePerRequester) {
+        return false;
+      }
       this.#database.prepare(
-        `INSERT INTO store_auth_challenge (nonce, address, intent, account_id, message, issued_at, expires_at, consumed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO store_auth_challenge (nonce, address, requester_key, intent, account_id, message, issued_at, expires_at, consumed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(nonce) DO UPDATE SET
            consumed_at = excluded.consumed_at`
       ).run(...challengeValues(record));
+      return true;
     });
   }
 
@@ -86,6 +108,16 @@ export class SqliteStoreWalletSessionStore implements StoreWalletSessionStore {
         record.nonce
       );
     });
+  }
+
+  async deleteExpiredChallenges(expiresBefore: string): Promise<number> {
+    // 过期行无论是否消费都不再参与判定——未鉴权入口的写入时清扫。
+    const result = runSqliteWrite(() =>
+      this.#database.prepare(
+        `DELETE FROM store_auth_challenge WHERE expires_at < ?`
+      ).run(expiresBefore)
+    );
+    return result.changes;
   }
 
   async consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined> {
@@ -176,6 +208,7 @@ function challengeValues(record: StoreAuthChallengeRecord): readonly SqliteValue
   return [
     record.nonce,
     record.address.toLowerCase(),
+    record.requesterKey,
     record.intent,
     record.accountId ?? null,
     record.message,
@@ -190,6 +223,7 @@ function challengeRow(row: unknown): StoreAuthChallengeRecord {
   return {
     nonce: stringColumn(record, "nonce"),
     address: stringColumn(record, "address") as Address,
+    requesterKey: stringColumn(record, "requester_key"),
     intent: stringColumn(record, "intent") === "anchor_address" ? "anchor_address" : "login",
     ...(optionalStringColumn(record, "account_id") ? { accountId: optionalStringColumn(record, "account_id")! } : {}),
     message: stringColumn(record, "message"),

@@ -13,7 +13,7 @@ import { ConfigError, noopLogger, type Address, type Hex, type Logger } from "..
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
-// UVPStateMachine v0.9（SM ABI fixture：uvp-state-machine.v0.9.json）：
+// UVPStateMachine v0.10（SM ABI fixture：uvp-state-machine.v0.10.json）：
 // 订单维度事件全部 plan-scoped；patch/metadata/derived/link/dock 事件由
 // 各模块合约发出，按 deployment.modules 分地址挂 ABI。
 const stateMachineAbi = parseAbi([
@@ -30,7 +30,9 @@ const stateMachineAbi = parseAbi([
   "event SignalSubmitterAuthorized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,address submitter,bytes32 role,bytes32 metadataHash)",
   "event SignalSubmitted(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
   "event StageMaterialized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed stageId,bytes32 triggerHookId,bytes32 sourceId,bytes32 signalId)",
-  "event OrderTriggered(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed triggerStageId,bytes32 sourceId,bytes32 signalId,address submitter)",
+  // v0.10：OrderTriggered 增加 triggerHookId——回放方不必反查 plan 即可
+  // 定位出生 hook（多 hook 阶段下 stageId 不足以定位求值语义）。
+  "event OrderTriggered(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed triggerStageId,bytes32 triggerHookId,bytes32 sourceId,bytes32 signalId,address submitter)",
   "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)",
   "event StageExecutorSignalDelegated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,bytes32 sourceId,bytes32 signalId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce)",
   "event HookStatusChanged(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint8 previousStatus,uint8 newStatus,uint64 dueAt)",
@@ -56,12 +58,12 @@ const orderLinkModuleAbi = parseAbi([
   "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 planId,bytes32 originPlanId,bytes32 originSourceId,bytes32 originSignalId)",
 ]);
 
-// UVPDockingModule v2（uvp.dock.v1 统一委托协议）。
+// UVPDockingModule v4.2（具名接口 dock v2）。终态不由链上事件驱动，
+// 事件面只有 open/input/output 三类。
 const dockingModuleAbi = parseAbi([
-  "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
+  "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 interfaceNameId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
   "event DockInputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed inputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 payloadHash,address submitter)",
   "event DockOutputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed outputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 localSignalId,bytes32 payloadHash,address submitter)",
-  "event DockTerminal(bytes32 indexed dockInstanceId,uint8 terminal)",
 ]);
 
 const identityRegistryAbi = parseAbi([
@@ -245,14 +247,6 @@ export class ViemChainEventSource implements ChainEventSource {
   }
 }
 
-export function createDefaultEventSource(
-  config: ChainServicesConfig,
-): ChainEventSource | undefined {
-  return hasConfiguredEvmIndexerContracts(config)
-    ? new ViemChainEventSource()
-    : undefined;
-}
-
 export function hasConfiguredEvmIndexerContracts(
   config: ChainServicesConfig,
 ): boolean {
@@ -278,6 +272,34 @@ function indexedContracts(
       "UVPDeploymentRegistry",
       config.network.contracts,
       deploymentRegistryAbi,
+    ),
+    // 扁平模块键与写路径（server.ts moduleAddress）同源：patch/dock 服务
+    // 只配扁平键时写入的模块事件也必须入投影，否则有写入无投影。双轨
+    // 同配且一致时按 name:address 去重；漂移由 preflight fail-closed。
+    indexedContract(
+      "UVPStagePatchModule",
+      config.network.contracts,
+      stagePatchModuleAbi,
+    ),
+    indexedContract(
+      "UVPPlanMetadataModule",
+      config.network.contracts,
+      planMetadataModuleAbi,
+    ),
+    indexedContract(
+      "UVPDerivedSignalModule",
+      config.network.contracts,
+      derivedSignalModuleAbi,
+    ),
+    indexedContract(
+      "UVPOrderLinkModule",
+      config.network.contracts,
+      orderLinkModuleAbi,
+    ),
+    indexedContract(
+      "UVPDockingModule",
+      config.network.contracts,
+      dockingModuleAbi,
     ),
     ...stateMachineDeployments.flatMap((deployment) => {
       const modules = deployment.modules ?? {};
@@ -375,6 +397,9 @@ function decodeChainEventLog(
       `incomplete ${contract.name} log metadata from ${contract.address}`,
     );
   }
+  // 日志地址畸形与块号/交易哈希缺失同属 RPC 层故障：必须在 try 外校验，
+  // 否则 normalizeLogAddress 的抛错被解码 catch 吞成"单条不可解码日志"。
+  const normalizedAddress = normalizeLogAddress(log.address);
 
   let event: ChainEvent | undefined;
   try {
@@ -387,7 +412,7 @@ function decodeChainEventLog(
     event = eventName
       ? {
         chainId,
-        contractAddress: normalizeLogAddress(log.address),
+        contractAddress: normalizedAddress,
         blockNumber: log.blockNumber,
         transactionHash: log.transactionHash.toLowerCase() as Hex,
         logIndex: Number(log.logIndex),

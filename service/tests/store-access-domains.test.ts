@@ -8,6 +8,7 @@ import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { ApiRouter } from "../src/api/route-context.js";
 import type { Address, Hex } from "../src/shared/types.js";
 import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import type { StoreAuthChallengeRecord } from "../src/store-sessions/index.js";
 
 /**
  * Store 身份与会话、加入闭环、装修权限、上架与锚核验的后端验收。
@@ -139,6 +140,99 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(session.capabilities).toContain("store.listing.manage");
   });
 
+  it("plain wallet sessions only get the public read capability, not store.audit.read", async () => {
+    // 未命中运营方/管理员清单的钱包登录只证明钱包控制权——运营审计
+    // （store.audit.read）是运营数据面，不得随登录默认授予。
+    const router = await buildRouter({ operatorWallets: [operatorWallet] });
+    const plainToken = await login(router, supplierWallet);
+    const operatorToken = await login(router, operatorWallet);
+
+    const plainSession = (await router.handle({
+      method: "GET",
+      pathname: "/store/session",
+      headers: { "x-uvp-store-session": plainToken }
+    })).body as { session: { accessLevel: string; capabilities: readonly string[] } };
+    expect(plainSession.session.accessLevel).toBe("store_read");
+    expect(plainSession.session.capabilities).toContain("store.read");
+    expect(plainSession.session.capabilities).not.toContain("store.audit.read");
+
+    const operatorSession = (await router.handle({
+      method: "GET",
+      pathname: "/store/session",
+      headers: { "x-uvp-store-session": operatorToken }
+    })).body as { session: { capabilities: readonly string[] } };
+    expect(operatorSession.session.capabilities).toContain("store.audit.read");
+  });
+
+  it("ignores the dev anchored address header outside local runtime", async () => {
+    const { createWalletSessionStoreIdentityProvider } = await import("../src/store-sessions/index.js");
+    const { createStoreSessionService } = await import("../src/store-sessions/index.js");
+    const sessionService = createStoreSessionService();
+    const base = {
+      async resolve() {
+        return {
+          level: "anonymous_read" as const,
+          roles: ["anonymous_read" as const],
+          capabilities: ["store.read" as const],
+          authMode: "anonymous" as const,
+          canWrite: false,
+          canAdmin: false
+        };
+      }
+    };
+    const headers = { "x-uvp-store-dev-anchored-address": supplierWallet };
+    const localProvider = createWalletSessionStoreIdentityProvider({
+      base,
+      sessionService,
+      config: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: true
+      },
+      runtimeEnvironment: "local"
+    });
+    expect((await localProvider.resolve(headers))?.anchoredAddress?.toLowerCase()).toBe(supplierWallet.toLowerCase());
+
+    const testnetProvider = createWalletSessionStoreIdentityProvider({
+      base,
+      sessionService,
+      config: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: true
+      },
+      runtimeEnvironment: "testnet"
+    });
+    // testnet 是公开测试网：自报地址头不构成身份锚定。
+    expect((await testnetProvider.resolve(headers)).anchoredAddress).toBeUndefined();
+  });
+
+  it("wallet sessions never receive store.draft.review (governance-only capability)", async () => {
+    // 职责分离（store-console/access.ts 口径）：zhixu 草稿审核是治理动作，
+    // 专属 governance_admin——钱包会话的 operator/store_admin 能力表都
+    // 不得下放（JWT 侧同样刻意不映射）。
+    const router = await buildRouter({ operatorWallets: [operatorWallet], adminWallets: [teamDerivedWallet] });
+    const operatorToken = await login(router, operatorWallet);
+    const adminToken = await login(router, teamDerivedWallet);
+
+    for (const token of [operatorToken, adminToken]) {
+      const sessionResponse = await router.handle({
+        method: "GET",
+        pathname: "/store/session",
+        headers: { "x-uvp-store-session": token }
+      });
+      const session = (sessionResponse.body as { session: { accessLevel: string; capabilities: readonly string[] } }).session;
+      expect(["store_operator", "store_admin"]).toContain(session.accessLevel);
+      expect(session.capabilities).not.toContain("store.draft.review");
+    }
+  });
+
   it("anchoring an additional address links it to the same account; revocation removes it", async () => {
     const router = await buildRouter();
     const firstToken = await login(router, supplierWallet);
@@ -212,7 +306,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const suppliers = await router.handle({
       method: "GET",
       pathname: "/store/suppliers",
-      // 簇 N 修正：读面鉴权——用已认证 store 头读取。
+      // 读面鉴权——用已认证 store 头读取。
       headers: governanceAdminHeaders
     });
     const supplierId = (suppliers.body as { suppliers: { supplierId: string }[] }).suppliers[0]!.supplierId;
@@ -413,12 +507,21 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const zhixusAfter = (catalogAfter.body as { zhixus: { planId: string }[] }).zhixus;
     expect(zhixusAfter.some((row) => row.planId.toLowerCase() === planId.toLowerCase())).toBe(false);
 
+    // 详情与列表/search 同口径：delisted 对非运营方 404（不泄露存在），
+    // 运营方保留治理可见性（下架状态经 overlay 可见）。
     const detailAfter = await router.handle({
       method: "GET",
       pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}`
     });
-    expect(detailAfter.status).toBe(200);
-    expect((detailAfter.body as { storeOverlay?: { listing?: { status: string } } }).storeOverlay?.listing?.status).toBe("delisted");
+    expect(detailAfter.status).toBe(404);
+    expect(detailAfter.body).toMatchObject({ error: "store_zhixu_not_found" });
+    const operatorDetailAfter = await router.handle({
+      method: "GET",
+      pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}`,
+      headers: storeOperatorHeaders
+    });
+    expect(operatorDetailAfter.status).toBe(200);
+    expect((operatorDetailAfter.body as { storeOverlay?: { listing?: { status: string } } }).storeOverlay?.listing?.status).toBe("delisted");
 
     const hiddenAnchorVerification = await router.handle({
       method: "GET",
@@ -535,7 +638,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const suppliers = await router.handle({
       method: "GET",
       pathname: "/store/suppliers",
-      // 簇 N 修正：读面鉴权——用已认证 store 头读取。
+      // 读面鉴权——用已认证 store 头读取。
       headers: governanceAdminHeaders
     });
     const createdSupplier = (suppliers.body as { suppliers: { wallet?: string; reviewStatus: string; identityStatus: string }[] }).suppliers
@@ -543,7 +646,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(createdSupplier).toMatchObject({ reviewStatus: "approved_for_broadcast", identityStatus: "active" });
   });
 
-  it("KEEP: publisher approval without governance admin is rejected before any side effects (G-03/M-2)", async () => {
+  it("publisher approval without governance admin is rejected before any side effects", async () => {
     // 无既有 active binding 时，链上身份登记需要 governance_admin 权威：
     // 门禁前置于建供应商/翻 approved_for_broadcast/落治理 review——
     // 拒绝后不留半提交（供应商未创建、申请留在 under_review）。
@@ -595,8 +698,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect((detail.body as { application: { status: string } }).application.status).toBe("under_review");
   });
 
-  it("on-chain authorization event materializes the application to active", async () => {
-    const store = new MemoryProjectionStore();
+  it("on-chain authorization event materializes the application to active", async () => {    const store = new MemoryProjectionStore();
     await seedPlanProjection(store, { withSupplierBinding: true });
     const router = createApiRouter(store, routerOptions());
     const applicantToken = await login(router, supplierWallet);
@@ -633,6 +735,93 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(detailBody.application.status).toBe("active");
     expect(detailBody.application.txEvidence.some((entry) => entry.kind === "signal_submitter" && entry.status === "materialized" && entry.txHash)).toBe(true);
     expect(detailBody.events.map((event) => event.type)).toContain("activated");
+  });
+
+  it("order reads require identity and hide orders assigned to other participants", async () => {
+    // 订单 DTO 内嵌全部任务（assigneeWallet/proofRows 等参与者数据）：
+    // 与任务读同口径——匿名不可枚举；已指派参与者的订单只有参与者本人
+    // 可见（404/列表过滤）。
+    const store = new MemoryProjectionStore();
+    await seedPlanProjection(store, { withSupplierBinding: true });
+    const router = createApiRouter(store, routerOptions());
+
+    // 匿名 → 401。
+    await expect(router.handle({ method: "GET", pathname: "/product/orders" }))
+      .resolves.toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+    await expect(router.handle({ method: "GET", pathname: "/product/orders/0x0000000000000000000000000000000000000000000000000000000000000909" }))
+      .resolves.toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+
+    // 订单出现指派参与者：任务就绪（HookReady）+ 槽位权限上的
+    // SignalSubmitterAuthorized（submitter=supplierWallet）。
+    const orderId = "0x0000000000000000000000000000000000000000000000000000000000000909" as Hex;
+    const permission = demoZhixuDetail.orderPermissionTable.find((entry) => entry.roleSlotId === roleSlotId)
+      ?? demoZhixuDetail.orderPermissionTable[0]!;
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...seedOrderWithAuthorizationEvents(orderId, supplierWallet, permission.stageId)
+      ]
+    });
+    const supplierHeaders = { "x-uvp-store-dev-anchored-address": supplierWallet };
+    const outsiderHeaders = { "x-uvp-store-dev-anchored-address": outsiderWallet };
+
+    // 参与者本人可见。
+    const supplierList = await router.handle({ method: "GET", pathname: "/product/orders", headers: supplierHeaders });
+    expect(supplierList.status).toBe(200);
+    expect(((supplierList.body as { orders: { orderId: string }[] }).orders)
+      .some((order) => order.orderId.toLowerCase() === orderId.toLowerCase())).toBe(true);
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${orderId}`, headers: supplierHeaders }))
+      .resolves.toMatchObject({ status: 200 });
+
+    // 无关参与者：列表不含该订单，详情 404（不可区分不存在）。
+    const outsiderList = await router.handle({ method: "GET", pathname: "/product/orders", headers: outsiderHeaders });
+    expect(outsiderList.status).toBe(200);
+    expect(((outsiderList.body as { orders: { orderId: string }[] }).orders)
+      .some((order) => order.orderId.toLowerCase() === orderId.toLowerCase())).toBe(false);
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${orderId}`, headers: outsiderHeaders }))
+      .resolves.toMatchObject({ status: 404, body: { error: "product_order_not_found" } });
+  });
+
+  it("order creators read their own orders without a task assignment", async () => {
+    // OrderRelayerRecorded 的 creator 是订单参与者：任务全部指派给他人
+    // 时，创建者无任务指派也必须读得到自己建的单（列表/详情/me 视图）。
+    const store = new MemoryProjectionStore();
+    await seedPlanProjection(store, { withSupplierBinding: true });
+    const creatorHeaders = { "x-uvp-store-dev-anchored-address": publisherAddress };
+    const orderId = "0x0000000000000000000000000000000000000000000000000000000000000a0a" as Hex;
+    const permission = demoZhixuDetail.orderPermissionTable.find((entry) => entry.roleSlotId === roleSlotId)
+      ?? demoZhixuDetail.orderPermissionTable[0]!;
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...seedOrderWithAuthorizationEvents(orderId, supplierWallet, permission.stageId),
+        chainEvent(6n, 0, "OrderRelayerRecorded", {
+          orderId,
+          planId,
+          relayer: publisherAddress,
+          creator: publisherAddress
+        })
+      ]
+    });
+    const router = createApiRouter(store, routerOptions());
+
+    const creatorList = await router.handle({ method: "GET", pathname: "/product/orders", headers: creatorHeaders });
+    expect(creatorList.status).toBe(200);
+    expect(((creatorList.body as { orders: { orderId: string }[] }).orders)
+      .some((order) => order.orderId.toLowerCase() === orderId.toLowerCase())).toBe(true);
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${orderId}`, headers: creatorHeaders }))
+      .resolves.toMatchObject({ status: 200 });
+
+    const meOrders = await router.handle({ method: "GET", pathname: "/product/me/orders", headers: creatorHeaders });
+    expect(meOrders.status).toBe(200);
+    expect(((meOrders.body as { orders: { orderId: string }[] }).orders)
+      .some((order) => order.orderId.toLowerCase() === orderId.toLowerCase())).toBe(true);
+
+    // 非创建者/非指派的旁观者仍然不可见。
+    const outsiderHeaders = { "x-uvp-store-dev-anchored-address": outsiderWallet };
+    const outsiderList = await router.handle({ method: "GET", pathname: "/product/orders", headers: outsiderHeaders });
+    expect(((outsiderList.body as { orders: { orderId: string }[] }).orders)
+      .some((order) => order.orderId.toLowerCase() === orderId.toLowerCase())).toBe(false);
   });
 
 it("revoking an anchored address immediately invalidates sessions for it", async () => {
@@ -710,6 +899,18 @@ it("revoking an anchored address immediately invalidates sessions for it", async
       body: { decision: "approve" }
     });
     expect(publishDenied.status).toBe(403);
+
+    // 未公开 listing（imported，上架审核未完成）服务端一律拦截加入——
+    // 前端被抑制的入口不得可直调 API 绕过。
+    const applicantTokenEarly = await login(router, supplierWallet);
+    const joinWhileImported = await router.handle({
+      method: "POST",
+      pathname: "/store/join-applications",
+      headers: { "x-uvp-store-session": applicantTokenEarly },
+      body: { planId, roleSlotId, authorizationKind: "signal_submitter" }
+    });
+    expect(joinWhileImported.status).toBe(409);
+    expect(joinWhileImported.body).toMatchObject({ error: "join_entry_suppressed" });
 
     // 公开 → 下架后加入入口被服务端抑制（红线）。
     await router.handle({
@@ -914,14 +1115,15 @@ function decorationBody(overrides: Record<string, unknown> = {}): Record<string,
   };
 }
 
-async function buildRouter(options: { readonly operatorWallets?: readonly Address[] } = {}): Promise<ApiRouter> {
+async function buildRouter(options: { readonly operatorWallets?: readonly Address[]; readonly adminWallets?: readonly Address[] } = {}): Promise<ApiRouter> {
   const store = new MemoryProjectionStore();
   await seedPlanProjection(store);
   return createApiRouter(store, routerOptions(options));
 }
 
-function routerOptions(options: { readonly operatorWallets?: readonly Address[] } = {}) {
+function routerOptions(options: { readonly operatorWallets?: readonly Address[]; readonly adminWallets?: readonly Address[] } = {}) {
   return {
+    productRuntimeEnvironment: "local" as const,
     productSchemaResolver: crossBorderSchemaResolver(),
     submissionChainId: 31337,
     submissionVerifyingContract: contractAddress,
@@ -933,7 +1135,7 @@ function routerOptions(options: { readonly operatorWallets?: readonly Address[] 
       walletSession: {
         enabled: true,
         operatorWallets: options.operatorWallets ?? [],
-        adminWallets: [],
+        adminWallets: options.adminWallets ?? [],
         sessionTtlSeconds: 43200,
         challengeTtlSeconds: 300,
         devAnchoredAddressHeaderEnabled: true
@@ -981,30 +1183,50 @@ async function seedOrderWithAuthorization(store: MemoryProjectionStore, submitte
   const orderId = "0x0000000000000000000000000000000000000000000000000000000000000909" as Hex;
   await store.resetFromEvents({
     deploymentBlock: 0n,
-    events: [
-      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 2n }),
-      chainEvent(1n, 1, "PlanPublisherRecorded", { planId, publisher: publisherAddress }),
-      chainEvent(2n, 0, "IdentityBindingRegistered", {
-        bindingId: `0x${"aa".repeat(32)}`,
-        subjectId: derivedJoinSubject(supplierWallet),
-        account: supplierWallet,
-        descriptorHash: `0x${"bb".repeat(32)}`,
-        descriptorURI: "uvp-governance://metadata/test",
-        registrar: publisherAddress
-      }),
-      chainEvent(3n, 0, "OrderRegistered", { orderId, planId }),
-      // 簇 D 修正（审计三轮）：授权事件的 (sourceId, signalId) 必须落在
-      // 申请槽位的 orderPermissionTable 能力集合内——激活判定不再接受
-      // "同 plan 任意信号"。
-      chainEvent(4n, 0, "SignalSubmitterAuthorized", {
-        orderId,
-        ...slotPermissionKeyForRoleSlot(roleSlotId),
-        submitter,
-        role: `0x${"33".repeat(32)}`,
-        metadataHash: `0x${"44".repeat(32)}`
-      })
-    ]
+    events: seedOrderWithAuthorizationEvents(orderId, submitter)
   });
+}
+
+/** 订单 + 槽位权限授权 + 任务就绪（任务由此携带 submitter 的 assigneeWallet）。 */
+function seedOrderWithAuthorizationEvents(orderId: Hex, submitter: Address, hookStageId?: string): readonly ChainEvent[] {
+  const permissionStageId = hookStageId
+    ?? (demoZhixuDetail.orderPermissionTable.find((entry) => entry.roleSlotId === roleSlotId)
+      ?? demoZhixuDetail.orderPermissionTable[0]!).stageId;
+  return [
+    chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 2n }),
+    chainEvent(1n, 1, "PlanPublisherRecorded", { planId, publisher: publisherAddress }),
+    chainEvent(2n, 0, "IdentityBindingRegistered", {
+      bindingId: `0x${"aa".repeat(32)}`,
+      subjectId: derivedJoinSubject(supplierWallet),
+      account: supplierWallet,
+      descriptorHash: `0x${"bb".repeat(32)}`,
+      descriptorURI: "uvp-governance://metadata/test",
+      registrar: publisherAddress
+    }),
+    chainEvent(3n, 0, "OrderRegistered", { orderId, planId }),
+    // 授权事件的 (sourceId, signalId) 必须落在
+    // 申请槽位的 orderPermissionTable 能力集合内——激活判定不再接受
+    // "同 plan 任意信号"。
+    chainEvent(4n, 0, "SignalSubmitterAuthorized", {
+      orderId,
+      ...slotPermissionKeyForRoleSlot(roleSlotId),
+      submitter,
+      role: `0x${"33".repeat(32)}`,
+      metadataHash: `0x${"44".repeat(32)}`
+    }),
+    // 任务就绪（capability 解析按 stage 匹配槽位权限 → assigneeWallet）。
+    // stageId 以 utf8 填充 bytes32 播种（decodedStageId 可还原显示名）。
+    chainEvent(5n, 0, "HookReady", {
+      orderId,
+      hookId: `0x${"cc".repeat(32)}`,
+      stageId: bytes32Text(permissionStageId),
+      hookName: bytes32Text("confirm_stage")
+    })
+  ];
+}
+
+function bytes32Text(value: string): Hex {
+  return `0x${Buffer.from(value, "utf8").toString("hex").padEnd(64, "0")}` as Hex;
 }
 
 async function login(router: ApiRouter, address: Address): Promise<string> {
@@ -1033,6 +1255,147 @@ const addressKeyMap = new Map<string, `0x${string}`>([
   [operatorWallet.toLowerCase(), "0x4444444444444444444444444444444444444444444444444444444444444444"],
   [teamDerivedWallet.toLowerCase(), "0x3333333333333333333333333333333333333333333333333333333333333333"]
 ]);
+
+describe("store auth challenge resource bounds", () => {
+  it("rate-limits live challenges per address and sweeps expired ones on write", async () => {
+    const { createStoreSessionService, InMemoryStoreWalletSessionStore, StoreSessionServiceError } =
+      await import("../src/store-sessions/index.js");
+    let current = new Date("2026-04-28T00:00:00Z");
+    const store = new InMemoryStoreWalletSessionStore();
+    const service = createStoreSessionService({
+      store,
+      config: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: false
+      },
+      now: () => current
+    });
+
+    // 单地址同时存活的挑战有上界：第 11 个 429。
+    for (let index = 0; index < 10; index += 1) {
+      await expect(service.createChallenge({ address: supplierWallet })).resolves.toBeDefined();
+    }
+    const limited = service.createChallenge({ address: supplierWallet });
+    await expect(limited).rejects.toMatchObject({
+      status: 429,
+      code: "store_challenge_rate_limited"
+    });
+    await expect(limited).rejects.toBeInstanceOf(StoreSessionServiceError);
+
+    // 配额按地址计：别的地址不受该地址囤积影响。
+    await expect(service.createChallenge({ address: outsiderWallet })).resolves.toBeDefined();
+
+    // 过期挑战在写入时被清扫：TTL 过后配额自动释放。
+    current = new Date(current.getTime() + 301_000);
+    await expect(service.createChallenge({ address: supplierWallet })).resolves.toBeDefined();
+  });
+
+  it("caps a single requester across all addresses (anonymous targeted lockout bound)", async () => {
+    // challenge 入口匿名且 address 自报：若无请求方维度配额，一个请求方
+    // 连发 10 次即可锁死任意受害地址并按 TTL 续期。请求方桶把单个
+    // 请求方可占用的总囤积量压到 30——换地址绕过地址配额不再可行。
+    const { createStoreSessionService, StoreSessionServiceError } =
+      await import("../src/store-sessions/index.js");
+    const current = new Date(Date.UTC(2026, 8, 10, 0, 0, 0));
+    const service = createStoreSessionService({
+      config: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: false
+      },
+      now: () => current
+    });
+    const requester = { clientAddress: "203.0.113.7" };
+    for (let index = 0; index < 30; index += 1) {
+      const address = `0x${(0x1000 + index).toString(16).padStart(40, "0")}` as Address;
+      await expect(service.createChallenge({ address }, undefined, requester)).resolves.toBeDefined();
+    }
+    // 每个地址只被签发过 1 次（远未触地址配额），但请求方桶已满：429。
+    await expect(
+      service.createChallenge({ address: `0x${"7".repeat(40)}` as Address }, undefined, requester)
+    ).rejects.toMatchObject({ status: 429, code: "store_challenge_rate_limited" });
+    await expect(
+      service.createChallenge({ address: `0x${"8".repeat(40)}` as Address }, undefined, requester)
+    ).rejects.toBeInstanceOf(StoreSessionServiceError);
+    // 别的请求方不受该请求方囤积影响。
+    await expect(
+      service.createChallenge({ address: `0x${"7".repeat(40)}` as Address }, undefined, { clientAddress: "198.51.100.9" })
+    ).resolves.toBeDefined();
+  });
+
+  it("keeps a hard cap on the in-memory challenge table", async () => {
+    const { InMemoryStoreWalletSessionStore, MEMORY_CHALLENGE_HARD_LIMIT } =
+      await import("../src/store-sessions/index.js");
+    const store = new InMemoryStoreWalletSessionStore();
+    const challengeAt = (index: number, expiresAt: string): StoreAuthChallengeRecord => ({
+      nonce: `nonce${index.toString().padStart(6, "0")}`,
+      address: `0x${(index % 100).toString(16).padStart(40, "0")}` as Address,
+      requesterKey: "test-requester",
+      intent: "login",
+      message: "m",
+      issuedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 0) + index * 1000).toISOString(),
+      expiresAt
+    });
+
+    // 到达硬上限时先清过期行：最早过期的挑战被清扫而不是顶掉最新行。
+    // 配额给到不可达值——本用例专测硬上限淘汰，不与每地址/每请求方配额
+    // 耦合（记录按 index%100 轮换地址，同请求方多条会先撞请求方配额）。
+    const put = (record: StoreAuthChallengeRecord): Promise<boolean> =>
+      store.putChallengeWithinAddressQuota(record, {
+        maxLivePerAddress: Number.MAX_SAFE_INTEGER,
+        maxLivePerRequester: Number.MAX_SAFE_INTEGER,
+        now: "2101-01-01T00:00:00Z"
+      });
+    await put(challengeAt(0, "2026-01-01T00:00:00Z"));
+    for (let index = 1; index < MEMORY_CHALLENGE_HARD_LIMIT; index += 1) {
+      await put(challengeAt(index, "2100-01-01T00:00:00Z"));
+    }
+    await put(challengeAt(MEMORY_CHALLENGE_HARD_LIMIT, "2100-01-01T00:00:00Z"));
+    await expect(store.getChallenge("nonce000000")).resolves.toBeUndefined();
+    await expect(store.getChallenge(`nonce${MEMORY_CHALLENGE_HARD_LIMIT.toString().padStart(6, "0")}`)).resolves.toBeDefined();
+
+    // 全部存活仍超上限：按签发序淘汰最旧行——内存不随未鉴权写入无界增长。
+    await put(challengeAt(MEMORY_CHALLENGE_HARD_LIMIT + 1, "2100-01-01T00:00:00Z"));
+    await expect(store.getChallenge("nonce000001")).resolves.toBeUndefined();
+    await expect(store.getChallenge(`nonce${(MEMORY_CHALLENGE_HARD_LIMIT + 1).toString().padStart(6, "0")}`)).resolves.toBeDefined();
+  });
+
+  it("holds the per-address challenge quota under concurrent creation", async () => {
+    // 配额判定与写入必须原子：同地址并发签发风暴不允许整体穿透
+    //（32 个并发请求在"先数后写"实现下会全部读到同一旧计数）。
+    const { InMemoryStoreWalletSessionStore, StoreSessionServiceError, createStoreSessionService } =
+      await import("../src/store-sessions/index.js");
+    const store = new InMemoryStoreWalletSessionStore();
+    const current = new Date(Date.UTC(2026, 8, 10, 0, 0, 0));
+    const service = createStoreSessionService({
+      store,
+      config: {
+        enabled: true,
+        operatorWallets: [],
+        adminWallets: [],
+        sessionTtlSeconds: 43200,
+        challengeTtlSeconds: 300,
+        devAnchoredAddressHeaderEnabled: false
+      },
+      now: () => current
+    });
+    const stormWallet = `0x${"9".repeat(40)}` as Address;
+    const results = await Promise.allSettled(
+      Array.from({ length: 32 }, () => service.createChallenge({ address: stormWallet }))
+    );
+    const accepted = results.filter((result) => result.status === "fulfilled").length;
+    expect(accepted).toBe(10);
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(rejected.every((result) => result.reason instanceof StoreSessionServiceError && result.reason.status === 429)).toBe(true);
+  });
+});
 
 function keyForAddress(address: Address): `0x${string}` {
   const key = addressKeyMap.get(address.toLowerCase());

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { adminPrincipalFromHeaders } from "../../governance/index.js";
+import type { AuditSink } from "../../security/audit.js";
 import { redactErrorMessage, redactSecrets } from "../../security/redaction.js";
 import type { ProductSubmissionDTO } from "../../submissions/index.js";
 import {
@@ -7,13 +8,17 @@ import {
   buildOperatorOpsSummary
 } from "../diagnostics.js";
 import type { AdminOpsActionEffect, ApiRequest, ApiResponse } from "../route-context.js";
-import { readApiHeader } from "../route-context.js";
+import { decodePathParameter, readApiHeader } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions.retry" | "indexer.sweep_pending";
 
 interface AdminOpsRequestContext {
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
+  /** 审计通道（装配层注入）：每个 ops 动作留一条操作留痕。 */
+  readonly audit?: AuditSink;
+  /** 治理 admin 鉴权策略（环境档位 + 白名单，装配层注入）。 */
+  readonly governanceAdminPolicy: Parameters<RouteModule["handle"]>[1]["governanceAdminPolicy"];
   /** OPS_CONSOLE_ADMIN_IDS 白名单；非空时只放行集合内 admin id。 */
   readonly opsConsoleAdminIds?: readonly string[];
   readonly actions?: {
@@ -37,6 +42,8 @@ export function createAdminOpsRouteModule(): RouteModule {
     async handle(request, context) {
       return handleAdminOpsRequest(request, {
         buildDiagnostics: context.buildDiagnostics,
+        audit: context.audit,
+        governanceAdminPolicy: context.governanceAdminPolicy,
         ...(context.opsConsoleAdminIds ? { opsConsoleAdminIds: context.opsConsoleAdminIds } : {}),
         ...(context.opsRecoveryActions ? { actions: context.opsRecoveryActions } : {}),
         ...(context.submissionStore ? { submissionStore: context.submissionStore } : {}),
@@ -54,7 +61,7 @@ async function handleAdminOpsRequest(
     return undefined;
   }
 
-  const principal = adminPrincipalFromHeaders(request.headers);
+  const principal = adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
   if (!principal) {
     return {
       status: 403,
@@ -102,6 +109,7 @@ async function handleAdminOpsRequest(
   if (request.method === "POST" && request.pathname === "/admin/ops/reconcile/run") {
     return runAdminOpsAction(request, context, {
       action: "reconcile.run",
+      actor: principal.adminId,
       run: context.actions?.runReconcile
     });
   }
@@ -109,6 +117,7 @@ async function handleAdminOpsRequest(
   if (request.method === "POST" && request.pathname === "/admin/ops/projections/rebuild") {
     return runAdminOpsAction(request, context, {
       action: "projections.rebuild",
+      actor: principal.adminId,
       run: context.actions?.rebuildProjections
     });
   }
@@ -132,13 +141,14 @@ async function handleAdminOpsRequest(
   if (request.method === "POST" && request.pathname === "/admin/ops/indexer/pending-steps/retry") {
     return runAdminOpsAction(request, context, {
       action: "indexer.sweep_pending",
+      actor: principal.adminId,
       run: context.actions?.sweepPendingPostCommitSteps
     });
   }
 
   const retrySubmissionMatch = /^\/admin\/ops\/submissions\/([^/]+)\/retry$/.exec(request.pathname);
   if (request.method === "POST" && retrySubmissionMatch) {
-    const submissionId = decodeURIComponent(retrySubmissionMatch[1] ?? "").trim();
+    const submissionId = decodePathParameter(retrySubmissionMatch[1] ?? "").trim();
     if (!submissionId) {
       return {
         status: 400,
@@ -169,6 +179,7 @@ async function handleAdminOpsRequest(
 
     return runAdminOpsAction(request, context, {
       action: "submissions.retry",
+      actor: principal.adminId,
       targetId: submissionId,
       run: context.actions?.retrySubmission
         ? () => context.actions!.retrySubmission!({
@@ -190,6 +201,8 @@ async function runAdminOpsAction(
   context: AdminOpsRequestContext,
   input: {
     readonly action: AdminOpsActionName;
+    /** 操作者（通过 admin 鉴权的 principal id）。 */
+    readonly actor: string;
     readonly targetId?: string;
     readonly run: (() => Promise<AdminOpsActionEffect | void>) | undefined;
   }
@@ -198,7 +211,35 @@ async function runAdminOpsAction(
   const actionId = actionIdFor(input.action, requestId, input.targetId);
   const diagnostics = await context.buildDiagnostics();
 
+  // ops 动作（重试/重建/补投）直接改变系统行为，必须留审计痕：
+  // 操作者 + 动作 + 目标 + 结果（accepted/rejected/failed）一条不少。
+  // 审计通道不可用不得改变动作本身的响应语义（对齐 submissions 的
+  // evidence bind 审计口径）。
+  const recordAudit = async (outcome: "accepted" | "rejected" | "failed", errorCode?: string, message?: string): Promise<void> => {
+    if (!context.audit) {
+      return;
+    }
+    try {
+      await context.audit.record({
+        type: "admin.ops",
+        action: input.action,
+        outcome,
+        actor: input.actor,
+        subject: {
+          actionId,
+          requestId,
+          ...(input.targetId ? { targetId: input.targetId } : {})
+        },
+        ...(errorCode ? { errorCode } : {}),
+        ...(message !== undefined ? { metadata: { message } } : {})
+      });
+    } catch {
+      // 审计失败不改变动作响应。
+    }
+  };
+
   if (preflightStatus(diagnostics) === "failed") {
+    await recordAudit("rejected", "preflight_failed");
     return {
       status: 503,
       body: rejectedOpsActionBody({
@@ -212,6 +253,7 @@ async function runAdminOpsAction(
   }
 
   if (!input.run) {
+    await recordAudit("rejected", "ops_dependency_unavailable");
     return {
       status: 503,
       body: rejectedOpsActionBody({
@@ -226,6 +268,7 @@ async function runAdminOpsAction(
 
   try {
     const effect = await input.run();
+    await recordAudit("accepted");
     return {
       status: 202,
       body: redactSecrets({
@@ -246,6 +289,7 @@ async function runAdminOpsAction(
       })
     };
   } catch (error) {
+    await recordAudit("failed", "ops_action_failed", redactErrorMessage(error));
     return {
       status: 500,
       body: redactSecrets({

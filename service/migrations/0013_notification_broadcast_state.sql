@@ -1,5 +1,5 @@
--- ETH-04(b)：通知 delivery / participant read 状态持久化；
--- ETH-07：safe broadcast 去重状态持久化（重启后仍可去重）。
+-- 通知 delivery / participant read 状态持久化；
+-- safe broadcast 去重状态持久化（重启后仍可去重）。
 CREATE TABLE IF NOT EXISTS notification_delivery (
   delivery_id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,

@@ -39,10 +39,11 @@ const dockingWriteAbi = [
  * Dock liveness worker（keeper 只提供活性）。
  *
  * 候选发现完全来自投影 + route 来源，keeper 不发明任何协议 word：
- * - open：route 来源携带预组装的 openDockedOrder calldata（permit 路由
- *   必须已含 publisher 签名）；仅当投影中入口 hook 已 Ready 且该 route
- *   尚无 dock 实例时提交。
- * - input：父订单 hook Ready 且 binding 未投递 → submitDockedInput。
+ * - open：仅 new 模式 route（链轨对 existing 显式拒绝）；route 来源携带
+ *   预组装的 openDockedOrder calldata（permit 必须已含 publisher 签名）；
+ *   仅当投影中入口 hook 已 Ready 且该 route 尚无 dock 实例时提交。
+ * - input：父订单 hook Ready 且 binding 未投递 → submitDockedInput；
+ *   entrance 绑定（new 模式的 inputs[0]）由 open 原子投递，跳过。
  * - output：子订单事实已在投影中且 binding 未投递 → submitDockedSignal。
  *
  * 未配置 routeSource/submitter 时 runOnce 为显式 no-op（summary 归零），
@@ -64,10 +65,13 @@ export class DockAutomationWorker implements LifecycleService {
   #checking = false;
   #lastSummary: DockAutomationRunSummary | undefined;
   /**
-   * 最终性窗口去重：key → 最近一次成功广播时刻。投影要等
-   * 链事件 finalize+索引后才呈现 delivery，窗口内逐轮重发同一 binding 是
-   * 纯 gas 浪费的 no-op 交易；窗口过后仍未投递才允许重试（覆盖交易
-   * 丢失）。进程内状态即可：keeper 是单实例写者。
+   * 广播 + 最终性窗口去重：同一 key 在 redeliveryWindowMs 内已尝试过
+   * （无论成败）则本轮跳过。成功后窗口防的是 finalize+索引延迟内的
+   * 纯 gas 浪费；失败后同样占窗——否则持续 revert 的绑定每轮重发，
+   * gas 燃烧没有任何速率上限。窗口过后投影仍未呈现 delivery 才重试
+   * （覆盖交易丢失），每次重试的失败照常进 summary.skipped 可见。
+   * 进程内状态即可：keeper 是单实例写者，重启多发的最坏情形是窗口内
+   * 每绑定一条冗余交易（投递事实以投影为准，重启后仍收敛）。
    */
   readonly #lastBroadcastAt = new Map<string, number>();
 
@@ -93,6 +97,15 @@ export class DockAutomationWorker implements LifecycleService {
 
   async start(): Promise<void> {
     if (!this.#config.enabled || this.#running) {
+      return;
+    }
+    // enabled 但 routeSource/submitter 未装配：runOnce 的候选扫描恒归零，
+    // keeper 永远不会提交任何交易——不启动空转轮询，也不宣称 started，
+    // 响亮声明装配缺口（交付形态当前就是未装配，见 api/server.ts）。
+    if (!this.#routeSource || !this.#submitter) {
+      this.#logger.warn(
+        "dock automation is enabled but no route source/submitter is wired; the keeper stays idle until the assembly provides them"
+      );
       return;
     }
     this.#running = true;
@@ -161,16 +174,24 @@ export class DockAutomationWorker implements LifecycleService {
         if (summary.submitted >= this.#config.maxCandidatesPerRun) {
           break;
         }
+        // 链轨只支持 new 模式（on-chain 编译期对 existing 响亮拒绝）；
+        // 云轨 existing route 不经本 keeper。
+        if (route.orderMode !== "new") {
+          continue;
+        }
+        // dock 实例身份是 (routeId, localPlanId, localOrderId)：同 plan
+        // 复用同一 routeId 时每个订单各有一个 dock 实例，忽略 localOrderId
+        // 会把 binding 提交到别的订单的实例上。
         const dock = docks.find(
           (candidate) =>
             candidate.routeId.toLowerCase() === route.routeId.toLowerCase() &&
-            candidate.localPlanId.toLowerCase() === route.localPlanId.toLowerCase()
+            candidate.localPlanId.toLowerCase() === route.localPlanId.toLowerCase() &&
+            candidate.localOrderId.toLowerCase() === route.localOrderId.toLowerCase()
         );
 
         if (!dock) {
-          // open 候选：open 策略 + 入口 hook 已 Ready + route 来源携带 calldata。
+          // open 候选：new 模式 + 入口 hook 已 Ready + route 来源携带 calldata。
           if (
-            route.accessPolicy === "open" &&
             route.openCalldata &&
             this.entranceHookReady(snapshot, route)
           ) {
@@ -179,22 +200,21 @@ export class DockAutomationWorker implements LifecycleService {
               route.openCalldata,
               summary,
               "open",
-              `open:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}`
+              // 去重键与实例身份同构（含 localOrderId）：同 route 不同订单
+              // 的 open 各自独立，不得互相吃掉对方的广播窗口。
+              `open:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}:${route.localOrderId.toLowerCase()}`
             );
           }
           continue;
         }
 
-        if (dock.status !== "open") {
-          continue;
-        }
-
-        // input 候选：父 hook Ready 且事件投影中未见投递。
-        for (const binding of route.inputs) {
+        // input 候选：父 hook Ready 且事件投影中未见投递；entrance 绑定
+        // （new 模式的唯一 input）由 openDockedOrder 原子投递，不重发。
+        for (const [bindingIndex, binding] of route.inputs.entries()) {
           if (summary.submitted >= this.#config.maxCandidatesPerRun) {
             break;
           }
-          if (binding.kind !== "signal") {
+          if (bindingIndex === 0) {
             continue;
           }
           if (dock.inputDeliveries[binding.bindingHash.toLowerCase()]) {
@@ -251,9 +271,8 @@ export class DockAutomationWorker implements LifecycleService {
   }
 
   /**
-   * 广播 + 最终性窗口去重：同一 key 在 redeliveryWindowMs 内
-   * 已成功广播过则本轮跳过（计数 deduplicated，不静默）；窗口过后投影
-   * 仍未呈现 delivery 才会重试，覆盖交易丢失的情形。
+   * 广播 + 最终性窗口去重：同一 key 在 redeliveryWindowMs 内已尝试过
+   * （成败同占窗）则本轮跳过（计数 deduplicated，不静默）。
    */
   #submitCalldata(
     data: Hex,
@@ -271,6 +290,7 @@ export class DockAutomationWorker implements LifecycleService {
       summary.deduplicated += 1;
       return Promise.resolve();
     }
+    this.#lastBroadcastAt.set(dedupeKey, nowMs);
     return submitter
       .submit({
         to: this.#dockingAddress,
@@ -278,7 +298,6 @@ export class DockAutomationWorker implements LifecycleService {
         ...(this.#config.maxGasPerTx ? { gas: this.#config.maxGasPerTx } : {})
       })
       .then(() => {
-        this.#lastBroadcastAt.set(dedupeKey, this.#now().getTime());
         summary.submitted += 1;
       })
       .catch((error) => {
@@ -292,7 +311,7 @@ export class DockAutomationWorker implements LifecycleService {
     orderId: Hex,
     stateMachineAddress?: Hex
   ) {
-    // CS-P5：订单身份含 stateMachineAddress——裸 (chainId,planId,orderId)
+    // 订单身份含 stateMachineAddress——裸 (chainId,planId,orderId)
     // 扫描在同号订单跨部署复用时会多命中；多命中 fail-closed 返回
     // undefined（对齐同仓不变量），绝不静默取首条。有 dock 上下文时按
     // 其状态机地址收敛。
@@ -311,8 +330,13 @@ export class DockAutomationWorker implements LifecycleService {
     snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
     route: DockRouteRecord
   ): boolean {
+    // new 模式恰一条 input 绑定（出生锚），其本地 hook 即 entrance。
+    const entranceHookId = route.inputs[0]?.localHookId;
+    if (!entranceHookId) {
+      return false;
+    }
     const order = this.#orderFor(snapshot, route.localPlanId, route.localOrderId);
-    return order?.hooks[route.entranceHookId.toLowerCase()]?.status === "ready";
+    return order?.hooks[entranceHookId.toLowerCase()]?.status === "ready";
   }
 
   inputHookReady(

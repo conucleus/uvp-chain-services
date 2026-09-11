@@ -200,6 +200,8 @@ export interface RejectProductInviteInput {
 }
 
 export interface PreviewProductInviteInput {
+  /** 预览与 accept/reject 同门：inviteId 是弱凭据，token 哈希比对是强凭据。 */
+  readonly token?: string;
   readonly walletAddress?: string;
 }
 
@@ -258,7 +260,47 @@ export interface ProductInviteRolePreviewDTO {
   readonly evidenceSpec?: readonly ProductEvidenceSpecDTO[];
 }
 
-export interface ProductInvitePreviewResponse extends ProductInviteResponse {
+/**
+ * 邀请预览的参与者最小投影：联系方式脱敏、不回传
+ * 钱包地址——预览只需要证明"邀请发给了哪个角色槽/哪位受邀人"。
+ */
+export interface ProductInvitePreviewParticipantDTO {
+  readonly participantId: string;
+  readonly draftId: string;
+  readonly roleSlotId: string;
+  readonly roleLabel: string;
+  readonly displayName: string;
+  /** 脱敏后的联系方式（如 ab***@example.com / 138****78）；空联系方式不回传。 */
+  readonly maskedContact?: string;
+  readonly status: DraftParticipantStatus;
+  readonly required: boolean;
+}
+
+/**
+ * 邀请预览的草稿最小投影：金额按可见范围收敛——totalAmount 仅对
+ * 创建者/已接受参与者可见，notes/planId/createdBy 等运营字段不进预览。
+ */
+export interface ProductInvitePreviewDraftDTO {
+  readonly draftId: string;
+  readonly zhixuId: string;
+  readonly title: string;
+  readonly businessType: string;
+  readonly currency: string;
+  readonly exportRegion?: string;
+  readonly destinationRegion?: string;
+  readonly expectedCompletionDate?: string;
+  /** 金额：仅查看者属于草稿可见范围（创建者/已接受参与者）时携带。 */
+  readonly totalAmount?: string;
+}
+
+/**
+ * 邀请预览响应字段最小集：token 门已就位，本响应
+ * 只保留决定是否接受邀请所需的最小字段。
+ */
+export interface ProductInvitePreviewResponse {
+  readonly invite: ProductInviteDTO;
+  readonly participant: ProductInvitePreviewParticipantDTO;
+  readonly draft: ProductInvitePreviewDraftDTO;
   readonly acceptance: ProductInviteAcceptanceDTO;
   readonly role: ProductInviteRolePreviewDTO;
   readonly walletBinding?: ProductInviteWalletBindingDTO;

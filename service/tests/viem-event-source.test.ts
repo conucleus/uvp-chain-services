@@ -12,11 +12,11 @@ describe("ViemChainEventSource", () => {
       UVPStateMachine: "uvp-state-machine.v0.10.json",
       UVPIdentityRegistry: "uvp-identity-registry.v0.1.json",
       UVPDeploymentRegistry: "uvp-deployment-registry.v0.2.json",
-      UVPStagePatchModule: "uvp-stage-patch-module.v0.2.json",
-      UVPPlanMetadataModule: "uvp-plan-metadata-module.v0.3.json",
+      UVPStagePatchModule: "uvp-stage-patch-module.v0.3.json",
+      UVPPlanMetadataModule: "uvp-plan-metadata-module.v0.5.json",
       UVPDerivedSignalModule: "uvp-derived-signal-module.v0.2.json",
       UVPOrderLinkModule: "uvp-order-link-module.v0.2.json",
-      UVPDockingModule: "uvp-docking-module.v2.1.json"
+      UVPDockingModule: "uvp-docking-module.v4.2.json"
     };
     const artifacts: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
       UVPStateMachine: "UVPStateMachine.sol/UVPStateMachine.json",
@@ -81,6 +81,83 @@ describe("ViemChainEventSource", () => {
         }
       })
     ).toThrow(UnsupportedChainTargetError);
+  });
+
+  it("indexes module contracts configured through flat contract keys", async () => {
+    // 写路径（server.ts moduleAddress）对模块地址扁平键优先：索引器也必须
+    // watch 扁平模块键，否则只配扁平键时 patch/dock 写入有事件无投影。
+    const dockingModuleAddress = "0x6666666666666666666666666666666666666666";
+    const dockInstanceId = "0x0000000000000000000000000000000000000000000000000000000000000901";
+    const localOrderId = "0x0000000000000000000000000000000000000000000000000000000000000902";
+    const linkedOrderId = "0x0000000000000000000000000000000000000000000000000000000000000903";
+    const dockOpenedLog = {
+      address: dockingModuleAddress,
+      blockNumber: 100n,
+      blockHash: bytes32Hex("ab"),
+      transactionHash: bytes32Hex("cf"),
+      transactionIndex: 0,
+      logIndex: 0,
+      data: encodeAbiParameters(
+        [
+          { type: "bytes32" },
+          { type: "bytes32" },
+          { type: "bytes32" },
+          { type: "bytes32" },
+          { type: "bytes32" },
+          { type: "uint8" },
+          { type: "address" }
+        ],
+        [
+          "0x0000000000000000000000000000000000000000000000000000000000000904",
+          "0x0000000000000000000000000000000000000000000000000000000000000905",
+          "0x0000000000000000000000000000000000000000000000000000000000000906",
+          "0x0000000000000000000000000000000000000000000000000000000000000907",
+          "0x0000000000000000000000000000000000000000000000000000000000000908",
+          1,
+          "0x2222222222222222222222222222222222222222"
+        ]
+      ),
+      topics: encodeEventTopics({
+        abi: INDEXER_EVENT_ABIS.UVPDockingModule,
+        eventName: "DockOpened",
+        args: { dockInstanceId, localOrderId, linkedOrderId }
+      }),
+      removed: false
+    } as Log;
+    const queriedAddresses: string[] = [];
+    const eventSource = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 0n;
+        },
+        async getLogs(input) {
+          queriedAddresses.push(input.address);
+          return input.address === dockingModuleAddress ? [dockOpenedLog] : [];
+        }
+      }
+    });
+
+    const events = await eventSource.readEvents(
+      { chainId: 84532, fromBlock: 100n, toBlock: 100n },
+      {
+        ...chainServicesConfig(),
+        network: {
+          ...chainServicesConfig().network,
+          contracts: {
+            UVPStateMachine: "0x1111111111111111111111111111111111111111",
+            UVPDockingModule: dockingModuleAddress
+          }
+        }
+      } as unknown as ChainServicesConfig
+    );
+
+    expect(queriedAddresses).toContain(dockingModuleAddress);
+    expect(events).toEqual([
+      expect.objectContaining({
+        eventName: "DockOpened",
+        contractAddress: dockingModuleAddress
+      })
+    ]);
   });
 
   it("chunks getLogs requests under public RPC range limits", async () => {
@@ -188,7 +265,7 @@ describe("ViemChainEventSource", () => {
   });
 
   it("skips an undecodable log with an explicit count instead of failing the index range", async () => {
-    // 0132 P2-12：单条不可解码日志不得让索引器永久 degraded——跳过留痕
+    // 单条不可解码日志不得让索引器永久 degraded——跳过留痕
     // （计数 + warn），游标照常前进。
     const invalidLog = {
       ...planRegisteredLog(),
@@ -223,8 +300,39 @@ describe("ViemChainEventSource", () => {
     expect(logger.warns.some((line) => line.includes("skipped undecodable chain log"))).toBe(true);
   });
 
+  it("fails loudly on a malformed log address instead of swallowing it as undecodable", async () => {
+    // 日志地址畸形是 RPC 层故障（与块号/交易哈希缺失同口径），必须抛错
+    // ——被解码 catch 吞成"单条不可解码日志"会把节点故障静默成投影缺行。
+    const malformedAddressLog = {
+      ...planRegisteredLog(),
+      address: "0xnot-an-address"
+    } as Log;
+    const logger = new CapturingLogger();
+    const eventSource = new ViemChainEventSource({
+      logger,
+      publicClient: {
+        async getBlockNumber() {
+          return 0n;
+        },
+        async getLogs() {
+          return [malformedAddressLog];
+        }
+      }
+    });
+
+    await expect(eventSource.readEvents(
+      {
+        chainId: 84532,
+        fromBlock: 100n,
+        toBlock: 100n
+      },
+      chainServicesConfig()
+    )).rejects.toThrow(/20-byte EVM address/);
+    expect(eventSource.unresolvedLogCount).toBe(0);
+  });
+
   it("keeps 0x-prefixed string event args verbatim while lowercasing bytes args", async () => {
-    // CS-9/L-8：0x 小写化只允许作用于 bytes/address 类型；string 参数
+    // 0x 小写化只允许作用于 bytes/address 类型；string 参数
     //（URI 等）大小写敏感，必须保持链上原文。
     const eventSource = new ViemChainEventSource({
       publicClient: {

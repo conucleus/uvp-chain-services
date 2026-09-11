@@ -7,7 +7,7 @@ Chain Services 把 UVP 链上事实投影成 Product、Store 和运维接口，�
 - `UVPStateMachine` 及其冻结模块定义 Order、Stage、Signal、Plan 发布、提交授权和资源补丁。
 - `UVPIdentityRegistry` 只记录线下主体标识与链上账户的绑定和撤销。
 - Store 的供应商档案、能力标签、搜索、推荐、审核记录均为链下经营数据，不形成协议级信用或平台担保。
-- Chain Services 可以代付 gas，但业务签名仍由对应参与者产生；广播的唯一交易面是 plan-scoped 的 `submitSignalFor`。
+- Chain Services 可以代付 gas，但业务签名仍由对应参与者产生，服务在任何路径上都不生成业务签名。代付广播的交易面不止一处：plan-scoped 的 `submitSignalFor`（Signal 提交）、`applyStageExecutorPatchFor` / `applyStageResourcePatchFor`（stage 补丁代发）、`triggerOrderFromOutsideFor`（订单注册）、`submitDockedInput` / `submitDockedSignal`（dock keeper 活性提交），以及治理身份注册/撤销（`registerIdentityBinding` / `revokeIdentityBinding`）。
 - 证据正文保存在链下，链上和投影层只保存可校验的哈希与资源句柄。
 
 ## 运行
@@ -38,7 +38,7 @@ node --env-file=.env.local --import tsx src/api/server.ts
 - `UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED`: State Machine 广播开关
 - `RECONCILE_WORKER_ENABLED`: 交易回执对账
 
-非本地环境应使用持久数据库和对象存储，并通过安全预检。仓库不含 demo/fixture/mock 运行路径。
+非本地环境应使用持久数据库和对象存储，并通过安全预检。demo/fixture/mock 运行路径仅存在于 local 档（simulated 治理链适配器、内存广播/存储等开发适配器），非 local 环境不含。
 
 ## 接口概览
 
@@ -61,6 +61,12 @@ Store：
 - `/store/docking-sessions` 下的凝结核工作流
 - `GET /store/search`、`GET /store/audit`、`GET /store/runtime/summary`
 - `GET /store/closure/dry-run`
+- Store 运行时读端点（订单/任务/钱包映射的运营视图，要求会话锚定钱包，匿名不可枚举）：
+  - `GET /store/zhixus/:zhixuId/orders`
+  - `GET /store/orders/:orderId/candidates`
+  - `GET /store/orders/:orderId/observation`
+  - `GET /store/orders/:orderId/replay`
+  - `GET /store/orders/:orderId/audit-summary`
 
 治理与身份：
 

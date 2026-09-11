@@ -208,14 +208,13 @@ export interface StateMachineStageResourceOverlayProjection {
 }
 
 /**
- * uvp.dock.v1 统一委托协议投影。dock 实例身份由
- * dockInstanceId 唯一确定（哈希 preimage 覆盖双方 plan/order/route），
- * 投影键为 (chainId, stateMachineAddress, dockInstanceId)；binding 细节
- * （portKey/localHookId/kind/terminal 全量 word）来自 DockingModule
- * 事件可见字段，事件不携带的补全由 keeper 通过 lens 视图按需读取。
+ * uvp.dock.v2 具名接口委托协议投影。dock 实例身份由
+ * dockInstanceId 唯一确定（哈希 preimage 覆盖双方 plan/order/route +
+ * 接口/mode），投影键为 (chainId, stateMachineAddress, dockInstanceId)；
+ * binding 细节（portKey/localHookId）来自 DockingModule 事件可见字段，
+ * 事件不携带的补全由 keeper 通过 lens 视图按需读取。终态不由链上事件
+ * 驱动：投影只记录开启与投递事实。
  */
-export type StateMachineDockStatus = "open" | "terminal";
-
 export interface StateMachineDockInputDeliveryProjection {
   readonly inputBindingHash: Hex;
   readonly localPlanId: Hex;
@@ -251,19 +250,17 @@ export interface StateMachineDockProjection {
   readonly localOrderId: Hex;
   readonly routeId: Hex;
   readonly routeHash: Hex;
+  /** keccak(interfaceName)：具名接口的链上 word 形态。 */
+  readonly interfaceNameId: Hex;
   readonly targetPlanId: Hex;
   readonly linkedOrderId: Hex;
   readonly depth: number;
   readonly opener: Address;
-  readonly status: StateMachineDockStatus;
   readonly inputDeliveries: Readonly<Record<string, StateMachineDockInputDeliveryProjection>>;
   readonly outputDeliveries: Readonly<Record<string, StateMachineDockOutputDeliveryProjection>>;
   readonly openedAt: ProjectionProvenance;
-  readonly terminalAt?: ProjectionProvenance;
-  readonly terminalCode?: number;
   readonly updatedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
-  readonly terminalProof?: StateMachineProofProjection;
 }
 
 export interface StateMachineOrderTriggerLinkProjection {
@@ -402,7 +399,7 @@ export interface ProjectionSnapshot {
    */
   readonly unresolvedModuleOrderEventCount?: number;
   /**
-   * Dock 事件（input/output/terminal）无法定位已开启 dock 桶的显式计数
+   * Dock 事件（input/output）无法定位已开启 dock 桶的显式计数
    * （dock 未开启 / 模块未登记 / 回放顺序中 DockOpened 缺失）。不允许静默。
    */
   readonly unresolvedDockEventCount?: number;
@@ -508,6 +505,22 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
  * 独立集成任务，此处先用真实可观测异常计数。
  */
 export function countReplayAnomalies(events: readonly ChainEvent[]): number {
+  let anomalies = countDuplicateActiveEventAnomalies(events);
+  try {
+    rebuildOrderProjections(events);
+  } catch {
+    anomalies += 1;
+  }
+  return anomalies;
+}
+
+/**
+ * 重复/矛盾投递计数（countReplayAnomalies 的第一类异常）。调用方在同一
+ * 路径里已自行执行 rebuildOrderProjections（apply 失败会直接抛出走向
+ * degraded，无需在此再全量重放一遍）时使用本函数，避免每轮增量触发
+ * 一次冗余的 O(全历史) 投影重放。
+ */
+export function countDuplicateActiveEventAnomalies(events: readonly ChainEvent[]): number {
   let anomalies = 0;
   const seenActive = new Set<string>();
   for (const event of events) {
@@ -519,11 +532,6 @@ export function countReplayAnomalies(events: readonly ChainEvent[]): number {
       anomalies += 1;
     }
     seenActive.add(key);
-  }
-  try {
-    rebuildOrderProjections(events);
-  } catch {
-    anomalies += 1;
   }
   return anomalies;
 }
@@ -696,9 +704,6 @@ function applyStateMachineEvent(
       return;
     case "DockOutputSubmitted":
       applyDockOutputSubmitted(state, event);
-      return;
-    case "DockTerminal":
-      applyDockTerminal(state, event);
       return;
     case "DerivedSignalSubmitted":
       applyDerivedSignalSubmitted(state, event);
@@ -1300,6 +1305,8 @@ function applyOrderTriggered(
   const orderId = requiredBytes32Arg(event, "orderId");
   const planId = requiredBytes32Arg(event, "planId");
   const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
+  // v0.10 起携带 triggerHookId（出生 hook 定位）；旧事件无此字段按可选处理。
+  const triggerHookId = optionalBytes32Arg(event, "triggerHookId");
   const sourceId = requiredBytes32Arg(event, "sourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
   const submitter = requiredAddressArg(event, "submitter");
@@ -1320,7 +1327,13 @@ function applyOrderTriggered(
   order.status = order.status === "unknown" ? "registered" : order.status;
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "触发信号已启动订单", proof, { orderId, planId, sourceId, signalId }));
+  appendOrderTimeline(order, timelineOf(event, "触发信号已启动订单", proof, {
+    orderId,
+    planId,
+    sourceId,
+    signalId,
+    ...(triggerHookId !== undefined ? { triggerHookId } : {})
+  }));
 }
 
 function applyOrderLinked(
@@ -1527,7 +1540,7 @@ function applyStageExecutorActivated(
  * delegateStageExecutorSignalFromModule 在链上把 (sourceId, signalId) 的
  * 提交权委派给 executor，并携带 targetStageId 阶段绑定。同一交易内先发
  * SignalSubmitterAuthorized（order.authorizations 已有记录）再发本事件；
- * 投影用本事件补齐阶段归属，供任务 submitSignals 挂接（F25）。
+ * 投影用本事件补齐阶段归属，供任务 submitSignals 挂接。
  */
 function applyStageExecutorSignalDelegated(
   state: {
@@ -1627,11 +1640,11 @@ function applyDockOpened(
     localOrderId,
     routeId: requiredBytes32Arg(event, "routeId"),
     routeHash: requiredBytes32Arg(event, "routeHash"),
+    interfaceNameId: requiredBytes32Arg(event, "interfaceNameId"),
     targetPlanId: requiredBytes32Arg(event, "targetPlanId"),
     linkedOrderId,
     depth,
     opener,
-    status: "open",
     inputDeliveries: {},
     outputDeliveries: {},
     openedAt: provenanceOf(event),
@@ -1776,30 +1789,6 @@ function applyDockOutputSubmitted(
     orderId: dock.localOrderId,
     planId: dock.localPlanId
   }));
-}
-
-function applyDockTerminal(
-  state: {
-    modules: StateMachineModuleIndex;
-    diagnostics: ProjectionReplayDiagnostics;
-    orders: Map<string, MutableStateMachineOrderProjection>;
-    docks: Map<string, MutableStateMachineDockProjection>;
-  },
-  event: ChainEvent
-): void {
-  const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
-  const dock = findDockForEvent(state, event, dockInstanceId);
-  if (!dock) {
-    // dock 未开启（或模块归属无法解析）：显式计数，不允许静默丢弃。
-    state.diagnostics.unresolvedDockEventCount += 1;
-    return;
-  }
-  const terminalCode = Number(event.args["terminal"] ?? 0);
-  dock.status = "terminal";
-  dock.terminalCode = terminalCode;
-  dock.terminalAt = provenanceOf(event);
-  dock.terminalProof = proofOf(event, { planId: dock.localPlanId });
-  dock.updatedAt = provenanceOf(event);
 }
 
 /** dock 事件桶定位：模块地址归一化 + dockInstanceId 键；未开启的 dock 事件忽略。 */
@@ -2132,7 +2121,7 @@ function refreshTaskSubmitSignals(
       source: "authorization"
     });
   }
-  // F25：合约 _authorizeSignalSubmitter 不校验 plan 能力词表——授权可以
+  // 合约 _authorizeSignalSubmitter 不校验 plan 能力词表——授权可以
   // 落链在词表之外。任务完成判定以链上事实为准：词表外授权通过两个链上
   // 绑定键挂到任务：sourceId/signalId 即任务 hookId（既有回退键），或
   // StageExecutorSignalDelegated 显式携带的 targetStageId 阶段归属。
@@ -2234,12 +2223,19 @@ function markTaskSubmitted(
   proof: StateMachineProofProjection
 ): boolean {
   if (task.status === "submitted") {
-    // L-11：submitted 是已成立的完成事实。后到的匹配信号不得覆盖首个
+    // submitted 是已成立的完成事实。后到的匹配信号不得覆盖首个
     // 完成证明与 updatedAt（与创建路径取最早证明同口径）；仅当链上位置
     // 更早时才修正为真正最早的事实（容忍乱序回放）。
     if (compareProofEvents(proof, task.proof) >= 0) {
       return false;
     }
+  }
+  if (task.status === "cancelled") {
+    // HookStatusChanged(cancelled) 是链上终态事实。taskMatchesSubmittedSignal
+    // 的宽松回退键（hookId === sourceId/signalId）可能匹配到无关信号，
+    // 不得借此把已撤销任务复活成 submitted；hook 重开会经 HookReady 重建
+    // ready 任务，合法的再提交走新任务。
+    return false;
   }
   task.status = "submitted";
   task.updatedAt = proof;
@@ -2291,7 +2287,7 @@ function markTargetStageTasksAssignedFromOverlay(
 }
 
 /**
- * F25：StageExecutorSignalDelegated 的阶段绑定把委派信号挂到目标阶段的
+ * StageExecutorSignalDelegated 的阶段绑定把委派信号挂到目标阶段的
  * 任务上（submitSignals + 指派委派执行方），使词表外已授权/已提交的信号
  * 能把任务推进到 submitted——投影忠于链上事实。
  */
@@ -2492,7 +2488,7 @@ export function signalAuthorizationMatchesHook(
   authorization: StateMachineSignalAuthorizationProjection,
   hook: SignalAuthorizationHookMatchInput
 ): boolean {
-  // F25：除 plan 词表外，sourceId/signalId 即 hookId 是链上授权与任务的
+  // 除 plan 词表外，sourceId/signalId 即 hookId 是链上授权与任务的
   // 另一个事实绑定键（taskMatchesSubmittedSignal 的既有回退口径一致）。
   if (hook.hookId === authorization.sourceId || hook.hookId === authorization.signalId) {
     return true;

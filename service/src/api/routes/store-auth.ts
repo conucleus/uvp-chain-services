@@ -26,9 +26,17 @@ export function createStoreAuthRouteModule(options: {
         const requesterSession = await resolveRequesterSession(request, options.sessionService);
 
         if (request.method === "POST" && request.pathname === "/store/auth/challenge") {
+          // 请求方维度（对端地址）随服务端观测值传入：挑战配额需要
+          // "请求方 + 目标地址"双键才能防住匿名定向锁死（见 service 注释）。
           return {
             status: 201,
-            body: { challenge: await options.sessionService.createChallenge(request.body, requesterSession) }
+            body: {
+              challenge: await options.sessionService.createChallenge(
+                request.body,
+                requesterSession,
+                { clientAddress: request.clientAddress }
+              )
+            }
           };
         }
 

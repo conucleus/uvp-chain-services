@@ -242,7 +242,8 @@ describe("product API routes", () => {
     });
     const directCandidates = await router.handle({
       method: "GET",
-      pathname: `/store/orders/${stateMachineOrderId}/candidates`
+      pathname: `/store/orders/${stateMachineOrderId}/candidates`,
+      headers: assigneeHeaders
     });
 
     expect((directSearch.body as { results: Array<{ resultType: string; id: string; primaryHref: string }> }).results[0])
@@ -278,7 +279,8 @@ describe("product API routes", () => {
     });
     const ambiguousCandidates = await ambiguousRouter.handle({
       method: "GET",
-      pathname: `/store/orders/${stateMachineOrderId}/candidates`
+      pathname: `/store/orders/${stateMachineOrderId}/candidates`,
+      headers: assigneeHeaders
     });
 
     expect((ambiguousSearch.body as { results: Array<{ badgeLabel: string; primaryHref: string }> }).results[0])
@@ -296,9 +298,11 @@ describe("product API routes", () => {
       });
 
     for (const suffix of ["", "/timeline", "/proof"]) {
+      // 订单读有身份门（匿名 401 先于歧义判定）；timeline/proof 同请求。
       const response = await ambiguousRouter.handle({
         method: "GET",
-        pathname: `/product/orders/${stateMachineOrderId}${suffix}`
+        pathname: `/product/orders/${stateMachineOrderId}${suffix}`,
+        headers: assigneeHeaders
       });
       expect(response).toMatchObject({
         status: 409,
@@ -368,6 +372,46 @@ describe("product API routes", () => {
       });
   });
 
+  it("excludes assignee-wallet order matching from anonymous /store/search", async () => {
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineProductEvents(),
+        // 链上授权事实 → 订单任务的 assigneeWallet=submitter。
+        chainEvent(8n, "SignalSubmitterAuthorized", {
+          orderId: stateMachineOrderId,
+          sourceId: hookId,
+          signalId,
+          submitter,
+          role: `0x${"33".repeat(32)}`,
+          metadataHash: `0x${"44".repeat(32)}`
+        })
+      ]
+    });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
+
+    // 匿名 q=钱包串 不得枚举钱包→订单关联。
+    const anonymousSearch = await router.handle({
+      method: "GET",
+      pathname: "/store/search",
+      query: { q: submitter, type: "order" }
+    });
+    expect(anonymousSearch.status).toBe(200);
+    expect((anonymousSearch.body as { results: { orderId?: string }[] }).results).toEqual([]);
+
+    // 已认证 Store 读（运营方）保留按钱包查单的运维检索能力。
+    const operatorSearch = await router.handle({
+      method: "GET",
+      pathname: "/store/search",
+      query: { q: submitter, type: "order" },
+      headers: storeOperatorHeaders
+    });
+    expect(operatorSearch.status).toBe(200);
+    expect((operatorSearch.body as { results: { resultType: string; id: string }[] }).results)
+      .toEqual([expect.objectContaining({ resultType: "order", id: stateMachineOrderId })]);
+  });
+
   it("includes Store search projection syncing state", async () => {
     const store = new MemoryProjectionStore();
     await store.saveSyncState({
@@ -433,6 +477,7 @@ describe("product API routes", () => {
         status: string;
         validation: { ok: boolean; nonPublishing: boolean; errors: unknown[] };
         candidateMappings: Array<{
+          bindingKind: "input" | "output";
           sourceSignal: { signalId: string };
           targetSignal: { signalId: string };
         }>;
@@ -449,6 +494,7 @@ describe("product API routes", () => {
     expect(created.candidateMappings.length).toBeGreaterThan(0);
     const candidate = created.candidateMappings[0]!;
     const draftSignalMap = [{
+      bindingKind: candidate.bindingKind,
       sourceSignalId: candidate.sourceSignal.signalId,
       targetSignalId: candidate.targetSignal.signalId,
       note: "same stage candidate"
@@ -648,6 +694,33 @@ describe("product API routes", () => {
     });
   });
 
+  it("requires Store identity to read a docking session by id", async () => {
+    // 会话档案含草稿信号映射，与 create/validate/save 同门（
+    // 业务档案端点一律要求会话身份）——匿名按 id 读不可枚举。
+    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
+
+    const anonymousResponse = await router.handle({
+      method: "GET",
+      pathname: "/store/docking-sessions/session_1"
+    });
+    expect(anonymousResponse.status).toBe(401);
+    expect(anonymousResponse.body).toMatchObject({
+      error: "store_identity_missing",
+      requiredCapability: "store.docking.read"
+    });
+
+    const readerResponse = await router.handle({
+      method: "GET",
+      pathname: "/store/docking-sessions/session_1",
+      headers: {
+        "x-uvp-store-role": "reader",
+        "x-uvp-store-user-id": "reader-1"
+      }
+    });
+    expect(readerResponse.status).toBe(404);
+    expect(readerResponse.body).toMatchObject({ error: "docking_session_not_found" });
+  });
+
   it("returns missing source and target signal validation errors for docking drafts", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
@@ -679,6 +752,7 @@ describe("product API routes", () => {
       session: {
         sessionId: string;
         candidateMappings: Array<{
+          bindingKind: "input" | "output";
           sourceSignal: { signalId: string };
           targetSignal: { signalId: string };
         }>;
@@ -693,10 +767,12 @@ describe("product API routes", () => {
       body: {
         draftSignalMap: [
           {
+            bindingKind: candidate.bindingKind,
             sourceSignalId: "missing.output",
             targetSignalId: candidate.targetSignal.signalId
           },
           {
+            bindingKind: candidate.bindingKind,
             sourceSignalId: candidate.sourceSignal.signalId,
             targetSignalId: "missing.input"
           }
@@ -712,8 +788,8 @@ describe("product API routes", () => {
       validation: {
         ok: false,
         errors: expect.arrayContaining([
-          expect.objectContaining({ code: "source_output_not_found" }),
-          expect.objectContaining({ code: "target_input_not_found" })
+          expect.objectContaining({ code: "source_port_not_found" }),
+          expect.objectContaining({ code: "target_port_not_found" })
         ])
       }
     });
@@ -747,8 +823,8 @@ describe("product API routes", () => {
     expect(session.validation).toMatchObject({
       ok: false,
       errors: expect.arrayContaining([
-        expect.objectContaining({ code: "source_version_not_published" }),
-        expect.objectContaining({ code: "target_version_revoked" })
+        expect.objectContaining({ code: "source_zhixu_not_published" }),
+        expect.objectContaining({ code: "target_zhixu_revoked" })
       ])
     });
   });
@@ -760,9 +836,15 @@ describe("product API routes", () => {
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
-    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
-    const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
-    const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` });
+    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders });
+    // timeline/proof 披露参与者钱包与签名细节：与订单详情同口径参与者门
+    //（匿名 401），带会话断言 200。非参与者 404 的断言在下方"参与者集合
+    // 非空"的用例覆盖——本 fixture 的订单无任何指派参与者（纯链上事实，
+    // 对已认证钱包开放），不构成 404 判据。
+    const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: assigneeHeaders });
+    const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: assigneeHeaders });
+    const anonymousTimeline = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
+    const anonymousProof = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` });
     const tasksResponse = await router.handle({ method: "GET", pathname: "/product/tasks", query: { orderId: stateMachineOrderId }, headers: assigneeHeaders });
 
     expect(orderResponse.status).toBe(200);
@@ -814,6 +896,8 @@ describe("product API routes", () => {
         blockNumber: "3",
         transactionHash: txHash(3n)
       }));
+    expect(anonymousTimeline.status).toBe(401);
+    expect(anonymousProof.status).toBe(401);
     expect((tasksResponse.body as { tasks: Array<{ taskId: string; status: string }> }).tasks)
       .toContainEqual(expect.objectContaining({ taskId, status: "open" }));
 
@@ -824,11 +908,11 @@ describe("product API routes", () => {
     await store.resetFromEvents({ deploymentBlock: 0n, events: [] });
     await store.resetFromEvents({ deploymentBlock: 0n, events });
 
-    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` }))
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders }))
       .resolves.toMatchObject({ body: firstOrderBody });
-    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` }))
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: assigneeHeaders }))
       .resolves.toMatchObject({ body: firstTimelineBody });
-    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` }))
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: assigneeHeaders }))
       .resolves.toMatchObject({ body: firstProofBody });
     await expect(router.handle({ method: "GET", pathname: "/product/tasks", query: { orderId: stateMachineOrderId }, headers: assigneeHeaders }))
       .resolves.toMatchObject({ body: firstTasksBody });
@@ -844,7 +928,7 @@ describe("product API routes", () => {
     const eventsWithoutRegistration = stateMachineProductEvents().filter((event) => event.eventName !== "OrderRegistered");
     await store.resetFromEvents({ deploymentBlock: 0n, events: eventsWithoutRegistration });
 
-    const pendingResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
+    const pendingResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders });
     expect(pendingResponse.status).toBe(200);
     expect((pendingResponse.body as { order: ChainBackedOrder }).order).toMatchObject({
       orderId: stateMachineOrderId,
@@ -853,7 +937,7 @@ describe("product API routes", () => {
       statusLabel: "同步中"
     });
 
-    const pendingListResponse = await router.handle({ method: "GET", pathname: "/product/orders" });
+    const pendingListResponse = await router.handle({ method: "GET", pathname: "/product/orders", headers: assigneeHeaders });
     expect(pendingListResponse.status).toBe(200);
     expect((pendingListResponse.body as { orders: ChainBackedOrder[] }).orders)
       .toContainEqual(expect.objectContaining({
@@ -864,7 +948,7 @@ describe("product API routes", () => {
     // OrderRegistered 投影到达后，同一读面翻转为 projected——字段表达的是
     // 可自愈的短暂窗口，不是持久错误。
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
-    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` }))
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders }))
       .resolves.toMatchObject({
         body: { order: { orderId: stateMachineOrderId, projectionStatus: "projected", statusLabel: "已注册" } }
       });
@@ -944,9 +1028,10 @@ describe("product API routes", () => {
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
     const taskResponse = await router.handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: { "x-uvp-wallet-address": overlayExecutor } });
-    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` });
-    const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof` });
-    const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
+    // 订单内嵌任务的 assigneeWallet=overlayExecutor——订单读按参与者过滤。
+    const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: { "x-uvp-wallet-address": overlayExecutor } });
+    const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: { "x-uvp-wallet-address": overlayExecutor } });
+    const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: { "x-uvp-wallet-address": overlayExecutor } });
 
     expect(taskResponse.status).toBe(200);
     expect((taskResponse.body as { task: Record<string, unknown> }).task).toMatchObject({
@@ -1027,6 +1112,100 @@ describe("product API routes", () => {
           patchNonce: "1"
         })
       }));
+  });
+
+  it("hides unassigned on-chain tasks from authenticated wallets outside the order participants", async () => {
+    // 读面收紧：未指派任务随订单走参与者判定（参与者集合含链上指派、
+    // overlay 委任与订单创建者）——无关认证钱包不可见（列表不出现、
+    // 详情 404 不泄露存在性）；订单参与者照常可见；已指派任务的
+    // "仅受理人本人"语义不变。
+    const unassignedHookId = bytes32Hex("0304");
+    const unassignedStageId = bytes32Text("buyer.sign-contract");
+    const unassignedHookName = bytes32Text("sign-contract");
+    const creatorWallet = routeTestWallet(5);
+    const outsiderHeaders = { "x-uvp-wallet-address": routeTestWallet(7) };
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineProductEvents(),
+        // 基础 fixture 的任务经 overlay 委任指派给 overlayExecutor，
+        // 订单因此带参与者集合；另建一个无任何指派的未指派任务。
+        chainEvent(8n, "StageExecutorPatchApplied", {
+          orderId: stateMachineOrderId,
+          selectorStageId,
+          targetStageId: stageId,
+          selector: submitter,
+          executor: overlayExecutor,
+          role: bytes32Text("customs-executor"),
+          executorMetadataHash: metadataHash,
+          patchHash: bytes32Hex("9201"),
+          patchNonce: 1n,
+          metadataURI: "ipfs://stage-executor/customs-1"
+        }),
+        chainEvent(9n, "StageExecutorActivated", {
+          orderId: stateMachineOrderId,
+          targetStageId: stageId,
+          executor: overlayExecutor,
+          role: bytes32Text("customs-executor"),
+          metadataHash,
+          patchNonce: 1n
+        }),
+        chainEvent(10n, "OrderRelayerRecorded", {
+          orderId: stateMachineOrderId,
+          planId: crossBorderPlanIds.planId,
+          relayer: routeTestWallet(6),
+          creator: creatorWallet
+        }),
+        chainEvent(11n, "HookReady", {
+          orderId: stateMachineOrderId,
+          hookId: unassignedHookId,
+          stageId: unassignedStageId,
+          hookName: unassignedHookName
+        })
+      ]
+    });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
+    const assignedTaskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
+    const unassignedTaskId = `${contractAddress}:${stateMachineOrderId}:${unassignedHookId}`;
+
+    // 无关认证钱包：未指派任务列表不可见、详情 404；已指派任务保持
+    // 仅受理人可见（404）。
+    const outsiderList = await router.handle({ method: "GET", pathname: "/product/tasks", headers: outsiderHeaders });
+    expect((outsiderList.body as { tasks: Array<{ taskId: string }> }).tasks.map((task) => task.taskId))
+      .not.toContain(unassignedTaskId);
+    const outsiderDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${unassignedTaskId}`, headers: outsiderHeaders });
+    expect(outsiderDetail.status).toBe(404);
+    expect((outsiderList.body as { tasks: Array<{ taskId: string }> }).tasks.map((task) => task.taskId))
+      .not.toContain(assignedTaskId);
+    const outsiderAssignedDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${assignedTaskId}`, headers: outsiderHeaders });
+    expect(outsiderAssignedDetail.status).toBe(404);
+
+    // timeline/proof 与订单详情同口径参与者门：该订单有参与者集合
+    //（overlay 执行者 + 创建者），无关认证钱包 404 不泄露存在性。
+    const outsiderTimeline = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: outsiderHeaders });
+    expect(outsiderTimeline.status).toBe(404);
+    const outsiderProof = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: outsiderHeaders });
+    expect(outsiderProof.status).toBe(404);
+    const participantTimeline = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: { "x-uvp-wallet-address": overlayExecutor } });
+    expect(participantTimeline.status).toBe(200);
+    const participantProof = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: { "x-uvp-wallet-address": overlayExecutor } });
+    expect(participantProof.status).toBe(200);
+
+    // 订单参与者（overlay 委任执行者）：未指派任务列表可见、详情 200。
+    const participantList = await router.handle({ method: "GET", pathname: "/product/tasks", headers: { "x-uvp-wallet-address": overlayExecutor } });
+    expect((participantList.body as { tasks: Array<{ taskId: string }> }).tasks.map((task) => task.taskId))
+      .toContain(unassignedTaskId);
+    const participantDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${unassignedTaskId}`, headers: { "x-uvp-wallet-address": overlayExecutor } });
+    expect(participantDetail.status).toBe(200);
+
+    // 订单创建者：无任务指派也属于订单参与者，未指派任务详情可读。
+    const creatorDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${unassignedTaskId}`, headers: { "x-uvp-wallet-address": creatorWallet } });
+    expect(creatorDetail.status).toBe(200);
+    expect((creatorDetail.body as { task: Record<string, unknown> }).task).toMatchObject({
+      taskId: unassignedTaskId
+    });
+    expect((creatorDetail.body as { task: Record<string, unknown> }).task.assigneeWallet).toBeUndefined();
   });
 
   it("selects task plugins from explicit slot capability metadata for generic authorized roles", async () => {
@@ -1347,6 +1526,80 @@ describe("product API routes", () => {
     expect((unauthorizedResponse.body as { tasks: unknown[] }).tasks).toEqual([]);
   });
 
+  it("accepted participants see the order detail under the same visibility rule as /product/me/orders", async () => {
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineProductEvents(),
+        chainEvent(8n, "SignalSubmitterAuthorized", {
+          orderId: stateMachineOrderId,
+          sourceId: stageId,
+          signalId: hookName,
+          submitter,
+          role: bytes32Text("customs-broker"),
+          metadataHash
+        })
+      ]
+    });
+    // 已接受参与（链下 product-bff 记录）绑定到投影订单：draft 已触发，
+    // participant.status=accepted，acceptedWallet ≠ 链上 assignee。
+    const acceptedWallet = "0x7777777777777777777777777777777777777777";
+    const productStore = new MemoryProductBffStore();
+    await productStore.createDraft({
+      draftId: "draft-accepted-1",
+      zhixuId: CROSS_BORDER_ZHIXU_ID,
+      planId: ("0x" + "5".repeat(64)) as Hex,
+      planHash: ("0x" + "6".repeat(64)) as Hex,
+      title: "Accepted participant order",
+      businessType: "parallel-export",
+      goods: [],
+      totalAmount: "10000",
+      currency: "USDC",
+      status: "triggered",
+      triggeredOrderId: stateMachineOrderId,
+      createdAt: "2026-04-28T00:00:00.000Z",
+      updatedAt: "2026-04-28T00:00:00.000Z"
+    }, [{
+      participantId: "participant-accepted-1",
+      draftId: "draft-accepted-1",
+      roleSlotId: "delivery",
+      roleLabel: "物流/报关",
+      displayName: "Delivery Operator",
+      walletAddress: acceptedWallet,
+      contact: "delivery@example.com",
+      status: "accepted",
+      required: true,
+      acceptedAt: "2026-04-28T01:00:00.000Z"
+    }]);
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: productStore });
+
+    // /product/me/orders 与 /product/orders/:id 同判据：已接受参与者在
+    // 两边都可见，不再"列表可见、详情 404"。
+    const meOrders = await router.handle({
+      method: "GET",
+      pathname: "/product/me/orders",
+      headers: { "x-uvp-wallet-address": acceptedWallet }
+    });
+    expect(meOrders.status).toBe(200);
+    expect(JSON.stringify(meOrders.body)).toContain(stateMachineOrderId);
+
+    const detail = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${stateMachineOrderId}`,
+      headers: { "x-uvp-wallet-address": acceptedWallet }
+    });
+    expect(detail.status).toBe(200);
+
+    // 无关钱包（非链上 assignee、非已接受参与）仍不可见（404 不泄露存在）。
+    const outsider = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${stateMachineOrderId}`,
+      headers: { "x-uvp-wallet-address": "0x2777777777777777777777777777777777777777" }
+    });
+    expect(outsider).toMatchObject({ status: 404, body: { error: "product_order_not_found" } });
+  });
+
   it("uses accepted participant records for /product/me identity while filtering tasks by wallet authorization", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
@@ -1387,7 +1640,7 @@ describe("product API routes", () => {
       }
     });
     const inviteId = (inviteResponse.body as { invite: { inviteId: string } }).invite.inviteId;
-    // 簇 D 修正：accept 必须携带 createInvite 一次性下发的 token。
+    // accept 必须携带 createInvite 一次性下发的 token。
     const inviteToken = (inviteResponse.body as { inviteToken?: string }).inviteToken;
     expect(typeof inviteToken).toBe("string");
     await expect(router.handle({
@@ -1417,7 +1670,7 @@ describe("product API routes", () => {
     expect(tasksResponse.body).toMatchObject({
       participant: {
         displayName: "Delivery Operator",
-        source: "accepted_participant",
+        source: "wallet",
         roleLabels: expect.arrayContaining(["物流/报关"])
       },
       tasks: [
@@ -1442,11 +1695,13 @@ describe("product API routes", () => {
 
     const ordersResponse = await router.handle({
       method: "GET",
-      pathname: "/product/orders"
+      pathname: "/product/orders",
+      headers: assigneeHeaders
     });
     const orderResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${DEMO_ORDER_ID}`
+      pathname: `/product/orders/${DEMO_ORDER_ID}`,
+      headers: assigneeHeaders
     });
     const tasksResponse = await router.handle({
       method: "GET",
@@ -1460,11 +1715,13 @@ describe("product API routes", () => {
     });
     const timelineResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${DEMO_ORDER_ID}/timeline`
+      pathname: `/product/orders/${DEMO_ORDER_ID}/timeline`,
+      headers: assigneeHeaders
     });
     const proofResponse = await router.handle({
       method: "GET",
-      pathname: `/product/orders/${DEMO_ORDER_ID}/proof`
+      pathname: `/product/orders/${DEMO_ORDER_ID}/proof`,
+      headers: assigneeHeaders
     });
 
     expect(ordersResponse.status).toBe(200);
@@ -1502,7 +1759,7 @@ describe("product API routes", () => {
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
-    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}` }))
+    await expect(router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders }))
       .resolves.toMatchObject({ status: 200 });
     await expect(router.handle({ method: "POST", pathname: "/product/e2e/controls/syncing" }))
       .resolves.toMatchObject({ status: 404, body: { error: "not_found" } });
@@ -1515,7 +1772,7 @@ describe("product API routes", () => {
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
     const productBffStore = new MemoryProductBffStore();
     const createdAt = "2026-04-29T00:00:00.000Z";
-    await productBffStore.createRegistration({
+    await productBffStore.createRegistrationIfNoneForDraft({
       triggerId: "registration-auth-route",
       prepareId: "prepare-auth-route",
       draftId: "draft-auth-route",
@@ -1547,6 +1804,7 @@ describe("product API routes", () => {
       permissions: []
     });
     const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => new Date(createdAt),
       evidenceIdFactory: () => "ev_product_auth"
@@ -1603,6 +1861,130 @@ describe("product API routes", () => {
     });
   });
 
+  it("authorizes prepare-submit for the delegated executor after a stage patch takeover", async () => {
+    // D-1 修复回归：executor patch 接管后，新执行者按合约委任记录
+    // （_delegatedStageSignalAuthorizations，键=真实 (sourceId, signalId)，
+    // 不是 targetStageId）获得提交权——链下不得以"显式授权未命中"一票
+    // 否决。委任键与阶段键不同（sourceId=customs-source ≠ stageId），
+    // 同时钉住键位口径。
+    const delegatedSourceId = sourceId;
+    const delegatedSignalId = signalId;
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(1n, "PlanRegistered", {
+          planId: crossBorderPlanIds.planId,
+          planHash: crossBorderPlanIds.planHash,
+          hookCount: 1n
+        }),
+        chainEvent(2n, "SignalCapabilityRegistered", {
+          planId: crossBorderPlanIds.planId,
+          stageId,
+          targetSourceId: delegatedSourceId,
+          signalId: delegatedSignalId,
+          targetOrderRelation: 0
+        }),
+        chainEvent(3n, "OrderRegistered", {
+          orderId: stateMachineOrderId,
+          planId: crossBorderPlanIds.planId
+        }),
+        chainEvent(4n, "HookReady", {
+          orderId: stateMachineOrderId,
+          hookId,
+          stageId,
+          hookName
+        }),
+        chainEvent(5n, "StageExecutorPatchApplied", {
+          orderId: stateMachineOrderId,
+          selectorStageId,
+          targetStageId: stageId,
+          selector: submitter,
+          executor: overlayExecutor,
+          role: bytes32Text("customs-executor"),
+          executorMetadataHash: metadataHash,
+          patchHash: bytes32Hex("9301"),
+          patchNonce: 1n,
+          metadataURI: "ipfs://stage-executor/takeover-1"
+        }),
+        // delegateStageExecutorSignalFromModule 的链上事实（同笔交易
+        // 也会落 SignalSubmitterAuthorized——本测试刻意不落，验证委任腿
+        // 本身而不是被显式腿命中掩盖）。
+        chainEvent(6n, "StageExecutorSignalDelegated", {
+          orderId: stateMachineOrderId,
+          planId: crossBorderPlanIds.planId,
+          targetStageId: stageId,
+          sourceId: delegatedSourceId,
+          signalId: delegatedSignalId,
+          executor: overlayExecutor,
+          role: bytes32Text("customs-executor"),
+          metadataHash,
+          patchNonce: 1n
+        })
+      ]
+    });
+    const evidenceService = createEvidenceService({
+    runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => new Date("2026-04-29T00:00:00.000Z"),
+      evidenceIdFactory: () => "ev_delegated_prepare"
+    });
+    // BFF trigger 台账为空：授权只能来自链上投影（委任腿）。
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: new MemoryProductBffStore(), evidenceService });
+    const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
+    const uploadResponse = await router.handle({
+      method: "POST",
+      pathname: "/product/evidence",
+      headers: { "x-uvp-principal-id": "customs" },
+      body: {
+        orderId: stateMachineOrderId,
+        taskId,
+        stageIdentifier: "export.customs",
+        documentType: "customs-declaration",
+        textPayload: "customs declaration",
+        metadata: { fields: { declarationNo: "CD-DELEGATED" } }
+      }
+    });
+    const evidenceId = (uploadResponse.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
+    expect(evidenceId).toBe("ev_delegated_prepare");
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${taskId}/prepare-submit`,
+      headers: { "x-uvp-principal-id": "customs" },
+      body: {
+        evidenceIds: [evidenceId],
+        walletAddress: overlayExecutor,
+        intent: "confirm_stage"
+      }
+    })).resolves.toMatchObject({
+      status: 201,
+      body: {
+        authorization: {
+          source: "chain_signal_delegation"
+        }
+      }
+    });
+
+    // 未获委任的钱包仍被拒（显式腿未命中→委任腿未命中→overlay 兜底
+    // 不放行非在任执行者）。
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${taskId}/prepare-submit`,
+      headers: { "x-uvp-principal-id": "customs" },
+      body: {
+        evidenceIds: [evidenceId],
+        walletAddress: "0x0000000000000000000000000000000000000bad",
+        intent: "confirm_stage"
+      }
+    })).resolves.toMatchObject({
+      status: 403,
+      body: {
+        error: "submitter_not_authorized"
+      }
+    });
+  });
+
   it("returns typed product_storage_unavailable instead of opaque internal_server_error when database is unreachable", async () => {
     const { StorageUnavailableError } = await import("../src/storage/errors.js");
     const unavailableError = new StorageUnavailableError(
@@ -1625,7 +2007,8 @@ describe("product API routes", () => {
     });
 
     // /product/orders should also return a typed error when the store is unavailable
-    const ordersResponse = await router.handle({ method: "GET", pathname: "/product/orders" });
+    //（身份门先行：无身份时 401 先于存储访问）。
+    const ordersResponse = await router.handle({ method: "GET", pathname: "/product/orders", headers: assigneeHeaders });
     expect(ordersResponse.status).toBe(503);
     expect(ordersResponse.body).toMatchObject({
       error: "product_storage_unavailable",
