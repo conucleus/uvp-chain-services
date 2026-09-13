@@ -408,6 +408,13 @@ export interface ProjectionSnapshot {
    * （激活前补丁事件缺失）。不允许静默。
    */
   readonly unresolvedStageActivationEventCount?: number;
+  /**
+   * DockOpened 的跨部署子订单归桶诊断计数：linkedOrderId/targetPlanId 的
+   * 子订单按 local 状态机地址建桶（现状行为），但 targetPlan 无法在 local
+   * 状态机下定位已登记 plan（跨部署 dock / plan 未登记 / 回放顺序缺口）
+   * 时，子订单归属未经证实——显式计数，不允许静默。
+   */
+  readonly unresolvedDockTargetDeploymentCount?: number;
 }
 
 type Writable<TValue> = {
@@ -469,6 +476,7 @@ interface ProjectionReplayDiagnostics {
   unresolvedModuleOrderEventCount: number;
   unresolvedDockEventCount: number;
   unresolvedStageActivationEventCount: number;
+  unresolvedDockTargetDeploymentCount: number;
 }
 
 type StateMachineModuleIndex = ReadonlyMap<string, MutableStateMachineModuleProjection>;
@@ -486,7 +494,8 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     stateMachineTasks: {},
     unresolvedModuleOrderEventCount: 0,
     unresolvedDockEventCount: 0,
-    unresolvedStageActivationEventCount: 0
+    unresolvedStageActivationEventCount: 0,
+    unresolvedDockTargetDeploymentCount: 0
   };
 }
 
@@ -545,7 +554,8 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
   const diagnostics: ProjectionReplayDiagnostics = {
     unresolvedModuleOrderEventCount: 0,
     unresolvedDockEventCount: 0,
-    unresolvedStageActivationEventCount: 0
+    unresolvedStageActivationEventCount: 0,
+    unresolvedDockTargetDeploymentCount: 0
   };
   let activeStateMachineDeploymentId: Hex | undefined;
   let eventCount = 0;
@@ -623,6 +633,7 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
     unresolvedModuleOrderEventCount: diagnostics.unresolvedModuleOrderEventCount,
     unresolvedDockEventCount: diagnostics.unresolvedDockEventCount,
     unresolvedStageActivationEventCount: diagnostics.unresolvedStageActivationEventCount,
+    unresolvedDockTargetDeploymentCount: diagnostics.unresolvedDockTargetDeploymentCount,
     ...(lastEvent ? { lastEvent } : {})
   };
 }
@@ -1588,6 +1599,7 @@ function applyStageExecutorSignalDelegated(
 function applyDockOpened(
   state: {
     modules: StateMachineModuleIndex;
+    plans: Map<string, MutableStateMachinePlanProjection>;
     diagnostics: ProjectionReplayDiagnostics;
     orders: Map<string, MutableStateMachineOrderProjection>;
     docks: Map<string, MutableStateMachineDockProjection>;
@@ -1600,6 +1612,7 @@ function applyDockOpened(
   const localPlanId = requiredBytes32Arg(event, "localPlanId");
   const localOrderId = requiredBytes32Arg(event, "localOrderId");
   const linkedOrderId = requiredBytes32Arg(event, "linkedOrderId");
+  const targetPlanId = requiredBytes32Arg(event, "targetPlanId");
   const opener = requiredAddressArg(event, "opener");
   const depth = Number(event.args["depth"] ?? 0);
   const proof = proofOf(event, {
@@ -1607,6 +1620,14 @@ function applyDockOpened(
     planId: localPlanId,
     submitter: opener
   });
+
+  // 跨部署子订单归桶诊断：linkedOrderId 的子订单按 local 状态机地址建桶
+  //（现状行为），但 targetPlan 无法在 local 状态机下定位已登记 plan 时，
+  // 归属未经证实（跨部署 dock / plan 未登记 / 回放顺序缺口）——显式计数，
+  // 不允许静默（对照 unresolvedModuleOrderEventCount 纪律）。
+  if (!state.plans.has(stateMachineScopedKey(event.chainId, stateMachineAddress, targetPlanId))) {
+    state.diagnostics.unresolvedDockTargetDeploymentCount += 1;
+  }
 
   // 父订单与子订单各自补事件轨迹（订单本体由 OrderRegistered 等建桶）。
   const localOrder = ensureStateMachineOrder(state.orders, event, localOrderId, localPlanId, undefined, stateMachineAddress);
@@ -1621,7 +1642,7 @@ function applyDockOpened(
     state.orders,
     event,
     linkedOrderId,
-    requiredBytes32Arg(event, "targetPlanId"),
+    targetPlanId,
     undefined,
     stateMachineAddress
   );
@@ -1629,7 +1650,7 @@ function applyDockOpened(
   appendOrderProof(linkedOrder, proof);
   appendOrderTimeline(linkedOrder, timelineOf(event, "独立子订单已由 dock 创建", proof, {
     orderId: linkedOrderId,
-    planId: requiredBytes32Arg(event, "targetPlanId")
+    planId: targetPlanId
   }));
 
   const dock: MutableStateMachineDockProjection = {
@@ -1641,7 +1662,7 @@ function applyDockOpened(
     routeId: requiredBytes32Arg(event, "routeId"),
     routeHash: requiredBytes32Arg(event, "routeHash"),
     interfaceNameId: requiredBytes32Arg(event, "interfaceNameId"),
-    targetPlanId: requiredBytes32Arg(event, "targetPlanId"),
+    targetPlanId,
     linkedOrderId,
     depth,
     opener,

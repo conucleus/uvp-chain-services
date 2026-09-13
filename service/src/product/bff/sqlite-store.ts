@@ -300,12 +300,13 @@ export class SqliteProductBffStore implements ProductBffStore {
   #insertRegistrationIfNoneForDraft(registration: ProductOrderTriggerRecord): boolean {
     const result = this.#database.prepare(
       `INSERT INTO product_order_trigger (
-         trigger_id, prepare_id, draft_id, order_id, plan_id, plan_hash, status, tx_hash,
-         block_number, source_id, signal_id, trigger_hook_id, trigger_stage_id, submitter,
-         payload_hash, idempotency_key, deadline, typed_data_json, signature,
-         error_code, error_message, retryable, creator, authorizations_json, permissions_json,
-         reconcile_status, last_checked_at, receipt_status, projection_status, created_at, updated_at
-       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         trigger_id, prepare_id, draft_id, order_id, state_machine_address, deployment_id,
+         plan_id, plan_hash, status, tx_hash, block_number, source_id, signal_id,
+         trigger_hook_id, trigger_stage_id, submitter, payload_hash, idempotency_key,
+         deadline, typed_data_json, signature, error_code, error_message, retryable,
+         creator, authorizations_json, permissions_json, reconcile_status, last_checked_at,
+         receipt_status, projection_status, created_at, updated_at
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE NOT EXISTS (SELECT 1 FROM product_order_trigger WHERE draft_id = ?)`
     ).run(...registrationValues(registration), registration.draftId);
     return result.changes > 0;
@@ -314,17 +315,20 @@ export class SqliteProductBffStore implements ProductBffStore {
   #upsertRegistration(registration: ProductOrderTriggerRecord): void {
     this.#database.prepare(
       `INSERT INTO product_order_trigger (
-         trigger_id, prepare_id, draft_id, order_id, plan_id, plan_hash, status, tx_hash,
-         block_number, source_id, signal_id, trigger_hook_id, trigger_stage_id, submitter,
-         payload_hash, idempotency_key, deadline, typed_data_json, signature,
-         error_code, error_message, retryable, creator, authorizations_json, permissions_json,
-         reconcile_status, last_checked_at, receipt_status, projection_status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         trigger_id, prepare_id, draft_id, order_id, state_machine_address, deployment_id,
+         plan_id, plan_hash, status, tx_hash, block_number, source_id, signal_id,
+         trigger_hook_id, trigger_stage_id, submitter, payload_hash, idempotency_key,
+         deadline, typed_data_json, signature, error_code, error_message, retryable,
+         creator, authorizations_json, permissions_json, reconcile_status, last_checked_at,
+         receipt_status, projection_status, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(trigger_id)
        DO UPDATE SET
          prepare_id = excluded.prepare_id,
          draft_id = excluded.draft_id,
          order_id = excluded.order_id,
+         state_machine_address = excluded.state_machine_address,
+         deployment_id = excluded.deployment_id,
          plan_id = excluded.plan_id,
          plan_hash = excluded.plan_hash,
          status = excluded.status,
@@ -401,6 +405,8 @@ function registrationValues(registration: ProductOrderTriggerRecord) {
     registration.prepareId ?? null,
     registration.draftId,
     registration.orderId,
+    registration.stateMachineAddress ?? null,
+    registration.deploymentId ?? null,
     registration.planId,
     registration.planHash,
     registration.status,
@@ -507,6 +513,8 @@ function registrationRow(row: unknown): ProductOrderTriggerRecord {
   const record = rowObject(row, "product_order_trigger query");
   const triggerId = stringColumn(record, "trigger_id");
   const prepareId = optionalStringColumn(record, "prepare_id");
+  const stateMachineAddress = optionalStringColumn(record, "state_machine_address");
+  const deploymentId = optionalStringColumn(record, "deployment_id");
   const txHash = optionalStringColumn(record, "tx_hash");
   const blockNumber = optionalStringColumn(record, "block_number");
   const sourceId = optionalStringColumn(record, "source_id");
@@ -532,6 +540,12 @@ function registrationRow(row: unknown): ProductOrderTriggerRecord {
     prepareId: prepareId ?? triggerId,
     draftId: stringColumn(record, "draft_id"),
     orderId: stringColumn(record, "order_id") as ProductOrderTriggerRecord["orderId"],
+    ...(stateMachineAddress !== undefined
+      ? { stateMachineAddress: stateMachineAddress as NonNullable<ProductOrderTriggerRecord["stateMachineAddress"]> }
+      : {}),
+    ...(deploymentId !== undefined
+      ? { deploymentId: deploymentId as NonNullable<ProductOrderTriggerRecord["deploymentId"]> }
+      : {}),
     planId: stringColumn(record, "plan_id") as ProductOrderTriggerRecord["planId"],
     planHash: stringColumn(record, "plan_hash") as ProductOrderTriggerRecord["planHash"],
     status: stringColumn(record, "status") as ProductOrderTriggerRecord["status"],

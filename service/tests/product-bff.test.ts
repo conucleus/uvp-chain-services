@@ -270,9 +270,9 @@ describe("product BFF order drafts and invites", () => {
     const acceptedWallet = testWallet(0);
 
     const previewResponse = await router.handle({
-      method: "GET",
+      method: "POST",
       pathname: `/product/invites/${fundsInvite.invite.inviteId}`,
-      query: { token: fundsInvite.inviteToken! },
+      body: { token: fundsInvite.inviteToken! },
       headers: { "x-uvp-wallet-address": acceptedWallet },
     });
     expect(previewResponse.status).toBe(200);
@@ -311,9 +311,9 @@ describe("product BFF order drafts and invites", () => {
 
     // 纯 token 持有者（无会话钱包）不在金额可见范围。
     const anonymousPreview = await router.handle({
-      method: "GET",
+      method: "POST",
       pathname: `/product/invites/${fundsInvite.invite.inviteId}`,
-      query: { token: fundsInvite.inviteToken! },
+      body: { token: fundsInvite.inviteToken! },
     });
     expect(anonymousPreview.status).toBe(200);
     expect((anonymousPreview.body as { draft: Record<string, unknown> }).draft)
@@ -321,9 +321,9 @@ describe("product BFF order drafts and invites", () => {
 
     // 无关钱包（未接受参与、非创建者）同样不可见金额。
     const strangerPreview = await router.handle({
-      method: "GET",
+      method: "POST",
       pathname: `/product/invites/${fundsInvite.invite.inviteId}`,
-      query: { token: fundsInvite.inviteToken! },
+      body: { token: fundsInvite.inviteToken! },
       headers: { "x-uvp-wallet-address": testWallet(9) },
     });
     expect(strangerPreview.status).toBe(200);
@@ -405,18 +405,20 @@ describe("product BFF order drafts and invites", () => {
     ).draft;
     const invite = await createInvite(router, draft.draftId, "funds", "funds@example.com");
 
-    // inviteId 是弱凭据：无 token 的预览按 403 拒绝，不泄露受邀人
-    // 联系方式与草稿金额。
+    // inviteId 是弱凭据：缺 token 的预览与 accept 同为 400（body 必填），
+    // 错 token 403——都不泄露受邀人联系方式与草稿金额。token 走 POST
+    // body——同权凭据不落 URL/Referer/代理日志。
     const noToken = await router.handle({
-      method: "GET",
-      pathname: `/product/invites/${invite.invite.inviteId}`
+      method: "POST",
+      pathname: `/product/invites/${invite.invite.inviteId}`,
+      body: {}
     });
-    expect(noToken).toMatchObject({ status: 403, body: { error: "invite_token_mismatch" } });
+    expect(noToken).toMatchObject({ status: 400, body: { error: "invalid_body" } });
 
     const wrongToken = await router.handle({
-      method: "GET",
+      method: "POST",
       pathname: `/product/invites/${invite.invite.inviteId}`,
-      query: { token: "not-the-invite-token" }
+      body: { token: "not-the-invite-token" }
     });
     expect(wrongToken).toMatchObject({ status: 403, body: { error: "invite_token_mismatch" } });
   });
@@ -511,9 +513,9 @@ describe("product BFF order drafts and invites", () => {
       "2000-01-01T00:00:00.000Z",
     );
     const expiredPreviewResponse = await router.handle({
-      method: "GET",
+      method: "POST",
       pathname: `/product/invites/${expiredInvite.invite.inviteId}`,
-      query: { token: expiredInvite.inviteToken! },
+      body: { token: expiredInvite.inviteToken! },
       headers: { "x-uvp-wallet-address": testWallet(2) },
     });
     expect(expiredPreviewResponse).toMatchObject({
@@ -594,9 +596,9 @@ describe("product BFF order drafts and invites", () => {
     ).draft;
     const invite = await createInvite(router, draft.draftId, "funds", "funds-contact@example");
     const preview = await router.handle({
-      method: "GET",
+      method: "POST",
       pathname: `/product/invites/${invite.invite.inviteId}`,
-      query: { token: invite.inviteToken! }
+      body: { token: invite.inviteToken! }
     });
     expect(preview.status).toBe(200);
     expect((preview.body as { role: { evidenceSpec?: unknown } }).role.evidenceSpec)

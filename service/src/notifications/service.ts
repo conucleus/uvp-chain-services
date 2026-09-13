@@ -1340,10 +1340,53 @@ function compareParticipantNotifications(
   if (severity !== 0) {
     return severity;
   }
+  // 排序键按类分流：链上事件类（任务/信号）的 createdAt 是 "block N"
+  // 字符串、投递类是 ISO 时间——两类互排是 localeCompare 字典序乱序。
+  // 链上事件按 (blockNumber, logIndex) 数值序，投递类按时间戳；混排时
+  // 链上事件类稳定在前：链是真相，投递反馈只是链上事实的派生回执，
+  // 两者没有可互排的全序。
+  if (left.source !== right.source) {
+    return left.source === "chain_projection" ? -1 : 1;
+  }
+  if (left.source === "chain_projection") {
+    return compareChainProvenanceDesc(left, right);
+  }
   if (left.createdAt !== right.createdAt) {
     return right.createdAt.localeCompare(left.createdAt);
   }
   return left.notificationId.localeCompare(right.notificationId);
+}
+
+/** 链上事件类通知按 (blockNumber, logIndex) 数值倒序；行序缺失时以
+ * notificationId 兜底保证稳定全序。 */
+function compareChainProvenanceDesc(
+  left: ParticipantNotificationRecord,
+  right: ParticipantNotificationRecord
+): number {
+  const leftBlock = chainProvenanceBlock(left);
+  const rightBlock = chainProvenanceBlock(right);
+  if (leftBlock !== rightBlock) {
+    return leftBlock < rightBlock ? 1 : -1;
+  }
+  const leftLogIndex = left.proof?.logIndex;
+  const rightLogIndex = right.proof?.logIndex;
+  if (leftLogIndex !== undefined && rightLogIndex !== undefined && leftLogIndex !== rightLogIndex) {
+    return leftLogIndex < rightLogIndex ? 1 : -1;
+  }
+  return left.notificationId.localeCompare(right.notificationId);
+}
+
+function chainProvenanceBlock(record: ParticipantNotificationRecord): bigint {
+  if (record.proof?.blockNumber !== undefined) {
+    try {
+      return BigInt(record.proof.blockNumber);
+    } catch {
+      // fall through to createdAt parsing
+    }
+  }
+  const match = /^block (\d+)$/u.exec(record.createdAt);
+  const blockText = match?.[1];
+  return blockText !== undefined ? BigInt(blockText) : -1n;
 }
 
 function severityRank(severity: ParticipantNotificationSeverity): number {

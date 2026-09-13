@@ -11,7 +11,7 @@ import type {
   StoreListingStore,
   StoreListingStatus
 } from "./types.js";
-import { StoreListingServiceError } from "./types.js";
+import { StoreListingServiceError, StoreListingPlanConflictError } from "./types.js";
 import { anchorVerificationAllowsPublish, verifyListingAnchors } from "./verify.js";
 
 export interface StoreListingServiceOptions {
@@ -107,7 +107,19 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
         importedAt: timestamp,
         updatedAt: timestamp
       };
-      await listingStore.putListing(listing);
+      try {
+        await listingStore.putListing(listing);
+      } catch (error) {
+        // 并发导入的败者：前置查重窗口被穿透时由 UNIQUE(plan_id) 裁决
+        //——与前置查重同响应 409，不得让约束错误漏成 503 失真。
+        if (!(error instanceof StoreListingPlanConflictError)) {
+          throw error;
+        }
+        const winner = await listingStore.findListingByPlanId(planId);
+        throw new StoreListingServiceError(409, "listing_exists", "a listing already exists for this planId", {
+          ...(winner ? { listingId: winner.listingId, status: winner.status } : {})
+        });
+      }
       await emitAudit({
         action: "listing.imported",
         listingId: listing.listingId,

@@ -17,7 +17,7 @@ import type {
   StoreJoinAuthorizationKind,
   StoreJoinTxEvidence
 } from "./types.js";
-import { StoreJoinServiceError } from "./types.js";
+import { StoreJoinServiceError, StoreJoinOpenApplicationExistsError } from "./types.js";
 
 export interface StoreJoinServiceOptions {
   readonly projectionStore: ProjectionStore;
@@ -125,7 +125,20 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         submittedAt: timestamp,
         updatedAt: timestamp
       };
-      await joinStore.putApplication(application);
+      try {
+        await joinStore.putApplication(application);
+      } catch (error) {
+        // 并发双提交的败者：前置查重窗口被穿透时，由存储层在途唯一
+        // 约束裁决——与前置查重同响应 409，不落第二条在途申请。
+        if (!(error instanceof StoreJoinOpenApplicationExistsError)) {
+          throw error;
+        }
+        const winner = (await joinStore.listApplications({ planId, applicantAddress: anchoredAddress }))
+          .find((row) => row.status === "applied" || row.status === "under_review");
+        throw new StoreJoinServiceError(409, "application_exists", "an open application already exists for this address and plan", {
+          applicationId: winner?.applicationId
+        });
+      }
       await appendEvent(application.applicationId, "submitted", { ...actor, anchoredAddress }, undefined, undefined, timestamp);
       await emitAudit({
         action: "join.submitted",

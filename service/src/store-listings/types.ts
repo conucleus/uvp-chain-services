@@ -108,4 +108,12 @@ export class StoreListingServiceError extends Error {
   }
 }
 
+/**
+ * 存储层 plan 唯一约束命中（同 plan 并发导入第二条 listing 的败者）：
+ * 服务层统一映射为 409 listing_exists，不得失真为 503 存储故障。
+ */
+export class StoreListingPlanConflictError extends Error {
+  override readonly name = "StoreListingPlanConflictError";
+}
+
 export type { Address, Hex };

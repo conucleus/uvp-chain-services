@@ -393,12 +393,17 @@ export function createProductStageExecutorPatchService(
           submissionIdFactory(),
           now().toISOString(),
         );
-        await stageExecutorPatchStore.putSubmission(submission);
-        await stageExecutorPatchStore.markPreparedUsed(
-          prepared.prepareId,
-          submission.submissionId,
-          submission.updatedAt,
-        );
+        // 落档与 markPreparedUsed 同事务（对齐主路径与 submissions 口径）：
+        // 分开提交时两写之间崩溃会留下"expired 档案已落、prepare 未标
+        // used"的组合，重放同 prepareId 会再次消费而非复用档案结果。
+        await withStagePatchStoreTransaction(stageExecutorPatchStore, async () => {
+          await stageExecutorPatchStore.putSubmission(submission);
+          await stageExecutorPatchStore.markPreparedUsed(
+            prepared.prepareId,
+            submission.submissionId,
+            submission.updatedAt,
+          );
+        });
         return submission;
       }
 
@@ -449,6 +454,7 @@ export function createProductStageExecutorPatchService(
       let broadcastTxHash: Hex | undefined;
       let notAttempted = false;
       let submission: StageExecutorPatchSubmissionDTO;
+      let broadcastSubmissionId: string | undefined;
       try {
         const broadcast = await broadcastAdapter.broadcast({
           prepared: executorDtoFromPrepared(prepared),
@@ -465,9 +471,10 @@ export function createProductStageExecutorPatchService(
             ? undefined
             : broadcast.txHash;
         notAttempted = broadcast.status === "not_attempted";
+        broadcastSubmissionId = submissionIdFactory();
         const timestamp = now().toISOString();
         submission = executorSubmissionFromBroadcast(prepared, {
-          submissionId: submissionIdFactory(),
+          submissionId: broadcastSubmissionId,
           signatureHash: signatureHashFor(signature),
           ...(previousSignature
             ? {
@@ -504,8 +511,35 @@ export function createProductStageExecutorPatchService(
           );
         });
       } catch (error) {
-        if (!broadcastTxHash) {
+        if (!broadcastTxHash || !broadcastSubmissionId) {
           await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
+          throw error;
+        }
+        // 广播已成功（拿到 txHash）但持久化失败：链上交易可能已占用
+        // nonce，不得释放。先尽力落一条 failed（persist_failed、带 txHash、
+        // 回执未知如实报 not_checked）的档案保证链上哈希零留痕可追——
+        // 对齐 submissions 主路径的同款兜底；落档本身失败也不能掩盖
+        // 原始错误。
+        try {
+          await stageExecutorPatchStore.putSubmission(executorSubmissionFromBroadcast(prepared, {
+            submissionId: broadcastSubmissionId,
+            signatureHash: signatureHashFor(signature),
+            ...(previousSignature
+              ? { previousExecutorSignatureHash: signatureHashFor(previousSignature) }
+              : {}),
+            recoveredSelector,
+            ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
+            broadcast: {
+              status: "failed",
+              txHash: broadcastTxHash,
+              errorCode: "persist_failed",
+              message: "broadcast succeeded but persisting the stage executor patch failed; the receipt is unknown and the nonce stays consumed",
+              retryable: false
+            },
+            timestamp: now().toISOString()
+          }));
+        } catch {
+          // 尽力而为：落档失败时保持原始错误继续上抛。
         }
         throw error;
       }
@@ -716,12 +750,15 @@ export function createProductStageResourcePatchService(
           submissionIdFactory(),
           now().toISOString(),
         );
-        await stageResourcePatchStore.putSubmission(submission);
-        await stageResourcePatchStore.markPreparedUsed(
-          prepared.prepareId,
-          submission.submissionId,
-          submission.updatedAt,
-        );
+        // 同 executor patch 路径：落档与 markPreparedUsed 同事务。
+        await withStagePatchStoreTransaction(stageResourcePatchStore, async () => {
+          await stageResourcePatchStore.putSubmission(submission);
+          await stageResourcePatchStore.markPreparedUsed(
+            prepared.prepareId,
+            submission.submissionId,
+            submission.updatedAt,
+          );
+        });
         return submission;
       }
 
@@ -748,6 +785,7 @@ export function createProductStageResourcePatchService(
       let broadcastTxHash: Hex | undefined;
       let notAttempted = false;
       let submission: StageResourcePatchSubmissionDTO;
+      let broadcastSubmissionId: string | undefined;
       try {
         const broadcast = await broadcastAdapter.broadcast({
           prepared: resourceDtoFromPrepared(prepared),
@@ -760,9 +798,10 @@ export function createProductStageResourcePatchService(
             ? undefined
             : broadcast.txHash;
         notAttempted = broadcast.status === "not_attempted";
+        broadcastSubmissionId = submissionIdFactory();
         const timestamp = now().toISOString();
         submission = resourceSubmissionFromBroadcast(prepared, {
-          submissionId: submissionIdFactory(),
+          submissionId: broadcastSubmissionId,
           signatureHash: signatureHashFor(signature),
           recoveredSelector,
           broadcast,
@@ -786,8 +825,28 @@ export function createProductStageResourcePatchService(
           );
         });
       } catch (error) {
-        if (!broadcastTxHash) {
+        if (!broadcastTxHash || !broadcastSubmissionId) {
           await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
+          throw error;
+        }
+        // 同 executor patch 路径：广播拿到 txHash 后的落库失败尽力补
+        // persist_failed 档案（带 txHash），链上哈希不得零留痕。
+        try {
+          await stageResourcePatchStore.putSubmission(resourceSubmissionFromBroadcast(prepared, {
+            submissionId: broadcastSubmissionId,
+            signatureHash: signatureHashFor(signature),
+            recoveredSelector,
+            broadcast: {
+              status: "failed",
+              txHash: broadcastTxHash,
+              errorCode: "persist_failed",
+              message: "broadcast succeeded but persisting the stage resource patch failed; the receipt is unknown and the nonce stays consumed",
+              retryable: false
+            },
+            timestamp: now().toISOString()
+          }));
+        } catch {
+          // 尽力而为：落档失败时保持原始错误继续上抛。
         }
         throw error;
       }

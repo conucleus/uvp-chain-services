@@ -187,10 +187,10 @@ export function createStoreConsoleRouteModule(options: {
       const storeOrderCandidatesMatch = /^\/store\/orders\/([^/]+)\/candidates$/.exec(request.pathname);
       if (request.method === "GET" && storeOrderCandidatesMatch) {
         // 候选清单暴露订单/任务/钱包映射，与 /store 运行时读同口径：
-        // 身份取会话锚定钱包（product-read 同款门），匿名不可枚举。
-        const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
-        if (!wallet.ok) {
-          return wallet.response;
+        // 运营观察面要求 store.audit.read 能力，纯钱包会话不可读。
+        const authorization = await authorizeStoreCapability(context, request, "store.audit.read", { type: "store_runtime" });
+        if (!isStoreAuthorizationResult(authorization)) {
+          return authorization;
         }
         return {
           status: 200,
@@ -225,7 +225,7 @@ export function createStoreConsoleRouteModule(options: {
         };
       }
 
-      const storeRuntimeResponse = await handleStoreRuntimeRequest(request, context, options.runtimeEnvironment);
+      const storeRuntimeResponse = await handleStoreRuntimeRequest(request, context);
       if (storeRuntimeResponse) {
         return storeRuntimeResponse;
       }
@@ -273,33 +273,40 @@ export function createStoreConsoleRouteModule(options: {
 
 async function handleStoreRuntimeRequest(
   request: ApiRequest,
-  context: Parameters<RouteModule["handle"]>[1],
-  runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2]
+  context: Parameters<RouteModule["handle"]>[1]
 ) {
   try {
-    // /store 运行时读（订单/任务/钱包映射、观察、回放、审计汇总）与
-    // product-read 的订单/任务读同口径：身份取会话锚定钱包，匿名不可
-    // 枚举运营数据；自报钱包仅做一致性核验。
-    if (request.method === "GET" && (
-      request.pathname === "/store/runtime/summary" ||
-      /^\/store\/zhixus\/[^/]+\/orders$/.test(request.pathname) ||
-      /^\/store\/orders\/[^/]+\/(?:observation|replay|audit-summary)$/.test(request.pathname)
-    )) {
-      const wallet = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment);
-      if (!wallet.ok) {
-        return wallet.response;
+    const isRuntimeSummary = request.method === "GET" && request.pathname === "/store/runtime/summary";
+    const zhixuOrdersMatch = request.method === "GET"
+      ? /^\/store\/zhixus\/([^/]+)\/orders$/.exec(request.pathname)
+      : null;
+    const storeOrderRuntimeMatch = request.method === "GET"
+      ? /^\/store\/orders\/([^/]+)\/(?:observation|replay|audit-summary)$/.exec(request.pathname)
+      : null;
+    if (isRuntimeSummary || zhixuOrdersMatch || storeOrderRuntimeMatch) {
+      // /store 运行时读（summary/订单观察/回放/审计汇总）是无参与者过滤
+      // 的运营观察面：响应含全部订单的 authorizations/signals submitter
+      // 地址、tasks assigneeWallet 与参与者钱包映射。这不是参与者自见
+      // 数据——任意第三方钱包 SIWE 登录不因"有锚定会话"即得全量运营
+      // 数据；与 /store/audit 同能力门（store.audit.read：运营方/管理员
+      // 钱包会话，或同级 dev/JWT 身份）。
+      const capability = "store.audit.read";
+      const authorization = await authorizeStoreCapability(context, request, capability, {
+        type: "store_runtime"
+      });
+      if (!isStoreAuthorizationResult(authorization)) {
+        return authorization;
       }
     }
 
-    if (request.method === "GET" && request.pathname === "/store/runtime/summary") {
+    if (isRuntimeSummary) {
       return {
         status: 200,
         body: await context.storeRuntimeService.getSummary()
       };
     }
 
-    const zhixuOrdersMatch = /^\/store\/zhixus\/([^/]+)\/orders$/.exec(request.pathname);
-    if (request.method === "GET" && zhixuOrdersMatch) {
+    if (zhixuOrdersMatch) {
       const zhixuId = decodePathParameter(zhixuOrdersMatch[1] ?? "");
       // status 过滤词表校验——未知 status 400，
       // 不静默返回空集。
@@ -320,8 +327,10 @@ async function handleStoreRuntimeRequest(
       };
     }
 
-    const observationMatch = /^\/store\/orders\/([^/]+)\/observation$/.exec(request.pathname);
-    if (request.method === "GET" && observationMatch) {
+    const observationMatch = request.method === "GET"
+      ? /^\/store\/orders\/([^/]+)\/observation$/.exec(request.pathname)
+      : null;
+    if (observationMatch) {
       const orderId = decodePathParameter(observationMatch[1] ?? "");
       const observation = await context.storeRuntimeService.getOrderObservation(orderId);
       if (!observation) {
@@ -336,8 +345,10 @@ async function handleStoreRuntimeRequest(
       };
     }
 
-    const replayMatch = /^\/store\/orders\/([^/]+)\/replay$/.exec(request.pathname);
-    if (request.method === "GET" && replayMatch) {
+    const replayMatch = request.method === "GET"
+      ? /^\/store\/orders\/([^/]+)\/replay$/.exec(request.pathname)
+      : null;
+    if (replayMatch) {
       const orderId = decodePathParameter(replayMatch[1] ?? "");
       const replay = await context.storeRuntimeService.getOrderReplay(orderId);
       if (!replay) {
@@ -352,8 +363,10 @@ async function handleStoreRuntimeRequest(
       };
     }
 
-    const auditSummaryMatch = /^\/store\/orders\/([^/]+)\/audit-summary$/.exec(request.pathname);
-    if (request.method === "GET" && auditSummaryMatch) {
+    const auditSummaryMatch = request.method === "GET"
+      ? /^\/store\/orders\/([^/]+)\/audit-summary$/.exec(request.pathname)
+      : null;
+    if (auditSummaryMatch) {
       const orderId = decodePathParameter(auditSummaryMatch[1] ?? "");
       const auditSummary = await context.storeRuntimeService.getOrderAuditSummary(orderId);
       if (!auditSummary) {

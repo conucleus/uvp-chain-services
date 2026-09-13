@@ -1065,6 +1065,33 @@ function parseContracts(env: Env): Readonly<Record<string, Address>> {
   return contracts;
 }
 
+/**
+ * UVP_CONTRACTS_JSON 覆盖地址清单（UVP_ADDRESS_MANIFEST）同名合约时的
+ * 可见性出口：合并顺序是 env 内联 JSON 优先，覆盖会静默生效——清单与
+ * JSON 分头维护的部署拿到的实际地址无从核对。返回被覆盖且地址不一致的
+ * 合约名，供 preflight 诊断告警。
+ */
+export function listContractJsonOverrides(env: Env): readonly string[] {
+  const jsonContracts = parseContracts(env);
+  const overridden = Object.keys(jsonContracts).filter((name) => {
+    try {
+      const manifest = parseAddressManifest(env);
+      const manifestAddress = manifest.contracts[name];
+      const jsonAddress = jsonContracts[name];
+      return Boolean(
+        manifestAddress &&
+        jsonAddress &&
+        manifestAddress.toLowerCase() !== jsonAddress.toLowerCase()
+      );
+    } catch {
+      // 清单解析失败由 loadConfigFromEnv 的强校验负责报错；诊断侧不重复
+      // 抛错，只放弃覆盖检测。
+      return false;
+    }
+  });
+  return overridden;
+}
+
 const zeroAddress = "0x0000000000000000000000000000000000000000";
 
 function parseAddressManifest(env: Env): ParsedAddressManifest {
@@ -1423,6 +1450,20 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production",
     );
   }
+  // 档位倒挂收口（与 staging 同口径）：fire-and-forget 注册会让 BFF 在
+  // 交易未上链时就回报成功——生产必须等回执。
+  if (!config.productBff.waitForReceipt) {
+    throw new ConfigError(
+      "UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in production",
+    );
+  }
+  // 档位倒挂收口（与 staging 同口径）：对账 worker 缺席时链上回执与
+  // 投影的漂移只能靠人工发现。
+  if (!config.reconcile.enabled) {
+    throw new ConfigError(
+      "RECONCILE_WORKER_ENABLED=true is required in production",
+    );
+  }
   if (!stateMachineAddress(config.network.contracts)) {
     throw new ConfigError(
       "UVPStateMachine contract address is required in production",
@@ -1741,6 +1782,16 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
   if (!/^postgres(?:ql)?:\/\//.test(config.database.url)) {
     throw new ConfigError(
       "CHAIN_SERVICES_DATABASE_URL must point to a Postgres database in testnet",
+    );
+  }
+  // 自动迁移知情门（对照 production/staging 档）：testnet 的受管 PG 同样
+  // 会在启动期自动执行 DDL，必须显式确认知情，避免部署管道无意间改库。
+  if (
+    config.database.migrationsAutoRun &&
+    optionalEnv(env, "UVP_TESTNET_ALLOW_AUTO_MIGRATIONS") !== "1"
+  ) {
+    throw new ConfigError(
+      "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN=true is forbidden in testnet without UVP_TESTNET_ALLOW_AUTO_MIGRATIONS=1",
     );
   }
 

@@ -370,8 +370,11 @@ function blockRanges(
   maxSpan: bigint,
 ): readonly { readonly fromBlock: bigint; readonly toBlock: bigint }[] {
   const ranges: { fromBlock: bigint; toBlock: bigint }[] = [];
-  for (let start = fromBlock; start <= toBlock; start = start + maxSpan + 1n) {
-    const end = start + maxSpan < toBlock ? start + maxSpan : toBlock;
+  // maxSpan 语义与 executor-kit watcher 同源：闭区间每片恰 maxSpan 个块
+  // （[start, start + maxSpan - 1]），不是 toBlock - fromBlock = maxSpan 的
+  // 10000 块跨——那会超出 provider 对 eth_getLogs 的 10K 块硬限制。
+  for (let start = fromBlock; start <= toBlock; start = start + maxSpan) {
+    const end = start + maxSpan - 1n < toBlock ? start + maxSpan - 1n : toBlock;
     ranges.push({ fromBlock: start, toBlock: end });
   }
   return ranges;

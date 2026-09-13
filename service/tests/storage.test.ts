@@ -1941,6 +1941,8 @@ function productRegistration(draftId: string): ProductOrderTriggerRecord {
     prepareId: `${draftId}_prepare`,
     draftId,
     orderId: stateMachineOrderId,
+    stateMachineAddress: contractAddress as Address,
+    deploymentId: planId as Hex,
     planId: planId as Hex,
     planHash: planHash as Hex,
     status: "submitted",

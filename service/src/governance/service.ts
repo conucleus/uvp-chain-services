@@ -542,13 +542,25 @@ async function reusableDuplicateIdentityLog(
   request: IdentityRegistrationRequestDTO | IdentityRevocationRequestDTO
 ): Promise<IdentityTxLogDTO | undefined> {
   const key = governanceRequestKey(action, request);
-  const duplicate = (await store.listIdentityTxLogs())
-    .find((log) => log.action === action && governanceRequestKey(log.action, log.request) === key);
-  return duplicate && isReusableDuplicateLog(duplicate) ? duplicate : undefined;
+  // 同请求键的历史档案可能既有失败档也有成功档（失败后重播）：必须选中
+  // 第一条"可复用"的成功档，而不是第一条键匹配档——后者若是失败档就
+  // 直接放弃复用会引发不必要的重播（时间戳并列时档案顺序还不稳定）。
+  return (await store.listIdentityTxLogs())
+    .find((log) => log.action === action
+      && governanceRequestKey(log.action, log.request) === key
+      && isReusableDuplicateLog(log));
 }
 
 function isReusableDuplicateLog(log: GovernanceTxLogDTO): boolean {
-  return log.status !== "failed" || !log.retryable;
+  // 复用只认"已成功在途/终态"的广播（simulated_tx/submitted/confirmed）：
+  // 这些档案代表一次真实（或 local 档模拟）广播已发生，同请求重放幂等
+  // 返回已记录结果即可。failed 档案不得当最终答复复用——即便
+  // retryable:false，失败也只是当时的一次尝试结果（历史上还存在把瞬态
+  // 传输错误误钉成不可重试的分类），把它当复用终态会让陈年失败台账永久
+  // 堵死 registerIdentity/revokeIdentity 通道；重放应重新广播并落新档案。
+  return log.broadcastStatus === "simulated_tx"
+    || log.broadcastStatus === "submitted"
+    || log.broadcastStatus === "confirmed";
 }
 
 function governanceRequestKey(action: GovernanceTxAction, request: GovernanceChainRequestDTO): Hex {

@@ -1,6 +1,6 @@
 import { createPublicClient, http, parseAbi, type Address as ViemAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import type { ChainServicesConfig } from "./env.js";
+import { listContractJsonOverrides, type ChainServicesConfig } from "./env.js";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { assessStoreAuthEvidence, type StoreAuthEvidenceClassification, type StoreAuthKeySource } from "./store-auth-evidence.js";
@@ -246,11 +246,19 @@ export function buildConfigDiagnostics(
       stateMachineConfigured: Boolean(stateMachine),
       identityRegistryConfigured: Boolean(identityRegistry)
     },
-    warnings: diagnosticWarnings(config, {
-      relayerConfigured,
-      relayerPrivateKeyConfigured,
-      permissiveAuthorizationRequested
-    }),
+    warnings: [
+      ...diagnosticWarnings(config, {
+        relayerConfigured,
+        relayerPrivateKeyConfigured,
+        permissiveAuthorizationRequested
+      }),
+      // UVP_CONTRACTS_JSON 以 env 内联 JSON 优先的合并顺序静默覆盖地址
+      // 清单同名合约：清单与 JSON 分头维护时实际生效地址无从核对，至少
+      // 在诊断面留痕（告警不拦截——热改地址是合法运维手段）。
+      ...safeListContractJsonOverrides(env).map((name) =>
+        `UVP_CONTRACTS_JSON overrides the UVP_ADDRESS_MANIFEST entry for ${name}; the inline JSON address silently wins`
+      )
+    ],
     preflight: {
       strict: config.security.preflightStrict,
       status: preflight.status,
@@ -348,6 +356,7 @@ function runStaticPreflight(
   runNonLocalRoleSafetyPreflight(config, env, checks, errors);
   runStateMachineModulesManifestPreflight(config, checks, errors);
   runModuleAddressDriftPreflight(config, checks, errors);
+  runStateMachineAddressDriftPreflight(config, checks, errors);
 
   if (config.relayer.broadcastEnabled) {
     if (!stateMachine) {
@@ -572,6 +581,22 @@ function runProductionSafetyPreflight(
     pass(checks, "product.registration_adapter");
   }
 
+  // 档位倒挂收口（与 staging 同口径）：fire-and-forget 注册会让 BFF 在
+  // 交易未上链时就回报成功——生产必须等回执。
+  if (config.productBff.waitForReceipt) {
+    pass(checks, "product.registration_receipt");
+  } else {
+    fail(checks, errors, "product.registration_receipt", "UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in production");
+  }
+
+  // 档位倒挂收口（与 staging 同口径）：对账 worker 缺席时链上回执与
+  // 投影的漂移只能靠人工发现。
+  if (config.reconcile.enabled) {
+    pass(checks, "reconcile.worker_enabled");
+  } else {
+    fail(checks, errors, "reconcile.worker_enabled", "RECONCILE_WORKER_ENABLED=true is required in production");
+  }
+
   if (enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") || isPermissiveAuthorizationRequested(env)) {
     fail(checks, errors, "product.permissive_authorization", "permissive Product submission authorization is forbidden in production");
   } else {
@@ -647,6 +672,13 @@ function runTestnetSafetyPreflight(
     fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in testnet");
   }
   requireDurableStoreMetadata(config, checks, errors, "testnet");
+  // 自动迁移知情门（对照 production/staging 档）：testnet 的受管 PG 同样
+  // 会在启动期自动执行 DDL，必须显式确认知情，避免部署管道无意间改库。
+  if (config.database.migrationsAutoRun && env.UVP_TESTNET_ALLOW_AUTO_MIGRATIONS?.trim() !== "1") {
+    fail(checks, errors, "storage.migrations_auto_run", "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN=true is forbidden in testnet without UVP_TESTNET_ALLOW_AUTO_MIGRATIONS=1");
+  } else {
+    pass(checks, "storage.migrations_auto_run");
+  }
 
   if (config.network.chainId === 84532) {
     pass(checks, "network.chain_id_configured");
@@ -1003,6 +1035,45 @@ function runModuleAddressDriftPreflight(
     return;
   }
   pass(checks, "contracts.module_address_consistency");
+}
+
+/**
+ * 状态机地址双轨一致性：扁平 contracts.UVPStateMachine（字节码预检、BFF
+ * 广播与签名域取值）与 active deployment 的 stateMachineAddress（模块
+ * 投影、E20 跨部署守卫取值）同时配置且不一致时，预检查看 X、运行时投影
+ * 看 Y——部署切换窗口的静默分叉。与模块地址漂移同口径：任何环境不允许
+ * 静默漂移；只配单轨（或两轨一致）不受影响。
+ */
+function runStateMachineAddressDriftPreflight(
+  config: ChainServicesConfig,
+  checks: ConfigDiagnosticCheck[],
+  errors: string[]
+): void {
+  const deployments = config.network.stateMachineDeployments ?? [];
+  if (deployments.length === 0) {
+    skip(checks, "contracts.state_machine_address_consistency", "no nested state-machine deployments configured");
+    return;
+  }
+  const flat = stateMachineAddress(config.network.contracts);
+  if (!flat) {
+    skip(checks, "contracts.state_machine_address_consistency", "flat UVPStateMachine contract address is not configured");
+    return;
+  }
+  const active = selectActiveStateMachineDeployment(config);
+  if (!active) {
+    skip(checks, "contracts.state_machine_address_consistency", "no active state-machine deployment could be selected");
+    return;
+  }
+  if (active.stateMachineAddress.toLowerCase() !== flat.toLowerCase()) {
+    fail(
+      checks,
+      errors,
+      "contracts.state_machine_address_consistency",
+      `contracts.UVPStateMachine=${flat} does not match active deployment ${active.deploymentId} stateMachineAddress=${active.stateMachineAddress}`
+    );
+    return;
+  }
+  pass(checks, "contracts.state_machine_address_consistency");
 }
 
 function runNonLocalRoleSafetyPreflight(
@@ -1472,6 +1543,16 @@ function diagnosticWarnings(
 function enabledEnv(env: Env, name: string): boolean {
   const rawValue = env[name]?.trim().toLowerCase();
   return rawValue === "1" || rawValue === "true" || rawValue === "yes";
+}
+
+/** 诊断侧的覆盖检测兜底：清单文件在配置加载后被移动/删除等情况不重复
+ * 抛错（那是 loadConfigFromEnv 的职责），只放弃告警。 */
+function safeListContractJsonOverrides(env: Env): readonly string[] {
+  try {
+    return listContractJsonOverrides(env);
+  } catch {
+    return [];
+  }
 }
 
 function isPermissiveAuthorizationRequested(env: Env): boolean {

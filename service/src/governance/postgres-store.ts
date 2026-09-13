@@ -11,7 +11,7 @@ import type {
   GovernanceTxLogDTO,
   IdentityTxLogDTO
 } from "./types.js";
-import type { GovernanceReviewQuery, GovernanceStore } from "./store.js";
+import type { GovernanceReviewQuery, GovernanceStore, GovernanceTxLogScanCursor } from "./store.js";
 
 export interface PostgresGovernanceStoreOptions {
   readonly databaseUrl?: string;
@@ -145,6 +145,29 @@ export class PostgresGovernanceStore implements GovernanceStore {
       `SELECT log_json::text AS log_json
        FROM governance_tx_log
        ORDER BY created_at DESC, log_id DESC`
+    );
+    return result.rows.map((row) => parseTxLogRow(row) as IdentityTxLogDTO);
+  }
+
+  async listOpenIdentityTxLogsPage(
+    after: GovernanceTxLogScanCursor | undefined,
+    limit: number
+  ): Promise<readonly IdentityTxLogDTO[]> {
+    // 终态剪除在服务端完成（confirmed 等不返回），键序 (created_at,
+    // log_id) 与游标推进一致；failed/simulated 的行级口径由调用方过滤。
+    const result = await this.#database.query(
+      `SELECT log_json::text AS log_json
+       FROM governance_tx_log
+       WHERE status = ANY($1::text[])
+         AND ($2::text IS NULL OR (created_at, log_id) > ($2::text, $3::text))
+       ORDER BY created_at ASC, log_id ASC
+       LIMIT $4`,
+      [
+        ["pending", "broadcasting", "indexing", "failed"],
+        after?.createdAt ?? null,
+        after?.logId ?? null,
+        limit
+      ]
     );
     return result.rows.map((row) => parseTxLogRow(row) as IdentityTxLogDTO);
   }

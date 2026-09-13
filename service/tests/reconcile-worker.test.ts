@@ -690,6 +690,171 @@ describe("tx/indexer reconcile worker", () => {
       projectionStatus: "present"
     });
   });
+
+  it("prunes terminal confirmed submissions from the evidence-bind sweep instead of rescanning all history", async () => {
+    // 事故形态：清扫集合把终态 confirmed 也纳入——确认档随历史单调增长，
+    // 每轮 O(全历史) 逐条 evidence getProof。终态剪除对齐回执对账侧口径；
+    // 在途档的补绑不受影响。
+    const owner: EvidencePrincipal = { id: submitter.toLowerCase(), role: "participant" };
+    let evidenceCounter = 0;
+    const evidenceService = createEvidenceService({
+      runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => baseNow,
+      evidenceIdFactory: () => `ev_prune_${++evidenceCounter}`
+    });
+    const inFlight = await evidenceService.uploadEvidence({
+      orderId,
+      taskId: "task_prune_inflight",
+      stageIdentifier: "stage",
+      documentType: "customs-declaration",
+      fileName: "inflight.txt",
+      textPayload: "in-flight bind repair"
+    }, owner);
+    const terminal = await evidenceService.uploadEvidence({
+      orderId,
+      taskId: "task_prune_terminal",
+      stageIdentifier: "stage",
+      documentType: "customs-declaration",
+      fileName: "terminal.txt",
+      textPayload: "already-confirmed bind stays as-is"
+    }, owner);
+
+    const projectionStore = new MemoryProjectionStore();
+    const submissionStore = new InMemoryProductSubmissionStore();
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_prune_inflight",
+      txHash: bytes32("7005"),
+      evidenceIds: [inFlight.evidence.evidenceId]
+    }));
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_prune_confirmed",
+      txHash: bytes32("7006"),
+      status: "confirmed",
+      broadcastStatus: "confirmed",
+      evidenceIds: [terminal.evidence.evidenceId]
+    }));
+    const worker = workerFixture({
+      projectionStore,
+      submissionStore,
+      receipts: new Map(),
+      evidenceBinder: evidenceService,
+      audit: new InMemoryAuditSink()
+    });
+
+    const summary = await worker.runOnce();
+
+    // 只有在途档进清扫并被补绑；confirmed 终态不重扫。
+    expect(summary.evidenceBindsSwept).toBe(1);
+    expect(summary.evidenceBindsRepaired).toBe(1);
+    await expect(evidenceService.getProof(inFlight.evidence.evidenceId, owner)).resolves.toMatchObject({
+      verificationStatus: "matched"
+    });
+    await expect(evidenceService.getProof(terminal.evidence.evidenceId, owner)).resolves.toMatchObject({
+      verificationStatus: "unbound"
+    });
+  });
+
+  it("scans open ledger lanes page by page and falls back to full listing without the page capability", async () => {
+    // 分页/键序扫描：持久驱动的 listOpenSubmissionsPage 按页拉取未闭环行
+    // （终态在服务端剪除）；页大小不丢记录。能力缺失（旧桩/内存桩）回退
+    // listSubmissions() 全量。
+    const projectionStore = new MemoryProjectionStore();
+    const receipts = new Map<Hex, ReconcileReceipt | undefined>();
+    const paged = new InMemoryProductSubmissionStore();
+    await paged.putSubmission(submissionFixture({ submissionId: "sub_page_1", txHash: bytes32("7010") }));
+    await paged.putSubmission(submissionFixture({ submissionId: "sub_page_2", txHash: bytes32("7011") }));
+    await paged.putSubmission(submissionFixture({
+      submissionId: "sub_page_terminal",
+      txHash: bytes32("7012"),
+      status: "confirmed",
+      broadcastStatus: "confirmed"
+    }));
+    const receiptCalls: Hex[] = [];
+    const pagedWorker = new TxReconcileWorker({
+      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000, scanPageSize: 1 },
+      receiptClient: {
+        async getTransactionReceipt(txHash) {
+          receiptCalls.push(txHash);
+          return receipts.get(txHash);
+        }
+      },
+      projectionStore,
+      submissionStore: paged,
+      now: () => baseNow
+    });
+
+    const pagedSummary = await pagedWorker.runOnce();
+    // 两页各一条在途档都被复核；confirmed 终态从未进入扫描（无回执查询）。
+    expect(pagedSummary.submissionsChecked).toBe(2);
+    expect(receiptCalls).toEqual(expect.arrayContaining([bytes32("7010"), bytes32("7011")]));
+    expect(receiptCalls).not.toContain(bytes32("7012"));
+
+    // 回退路径：无分页能力的桩仍走 listSubmissions 全量 + 行级过滤。
+    const fallbackInner = new InMemoryProductSubmissionStore();
+    await fallbackInner.putSubmission(submissionFixture({ submissionId: "sub_fallback", txHash: bytes32("7013") }));
+    const fallbackStore = {
+      putSubmission: (submission: ProductSubmissionDTO) => fallbackInner.putSubmission(submission),
+      getSubmission: (submissionId: string) => fallbackInner.getSubmission(submissionId),
+      listSubmissions: () => fallbackInner.listSubmissions()
+    } as unknown as InMemoryProductSubmissionStore;
+    const fallbackWorker = new TxReconcileWorker({
+      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000, scanPageSize: 1 },
+      receiptClient: receiptClient(new Map()),
+      projectionStore,
+      submissionStore: fallbackStore,
+      now: () => baseNow
+    });
+    const fallbackSummary = await fallbackWorker.runOnce();
+    expect(fallbackSummary.submissionsChecked).toBe(1);
+  });
+
+  it("alerts once when a broadcast revoke is reverted on chain after the review was already marked revoked", async () => {
+    // 撤销异步失败分叉：revoke 广播成功后 reorg/revert，review 已翻 revoked
+    // 且不可回退——"库 revoked、链 binding 仍 active"。最小闭合是转变时
+    // 落一次显式告警（运营重发 revoke-identity 即可重新广播：失败台账不
+    // 再被 duplicate 复用短路）；持续 failed 的复核轮不重复刷屏。
+    const projectionStore = new MemoryProjectionStore();
+    const governanceStore = new InMemoryGovernanceStore();
+    const revokeTx = bytes32("7020");
+    const receipts = new Map<Hex, ReconcileReceipt | undefined>([
+      [revokeTx, { status: "reverted", blockNumber: 40n }]
+    ]);
+    await governanceStore.appendIdentityTxLog({
+      ...identityLogFixture({ txHash: revokeTx }),
+      action: "revoke_identity",
+      bindingId: bytes32("2007"),
+      request: {
+        kind: "revokeIdentity",
+        bindingId: bytes32("2007"),
+        subjectId: planId,
+        reasonHash: metadataHash,
+        reasonURI: "uvp-governance://metadata/reason"
+      }
+    });
+    const audit = new InMemoryAuditSink();
+    const worker = workerFixture({ projectionStore, governanceStore, receipts, audit });
+
+    await worker.runOnce();
+
+    await expect(governanceStore.getTxLog("identity_log_1")).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "transaction_reverted"
+    });
+    const alerts = audit.list().filter((event) => event.type === "reconcile.governance_revoke_reverted");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      action: "revoke_identity",
+      outcome: "failed",
+      txHash: revokeTx,
+      errorCode: "transaction_reverted",
+      subject: { logId: "identity_log_1", subjectId: planId, bindingId: bytes32("2007") }
+    });
+
+    // 第二轮：台账已 failed，重探回执仍 reverted——告警不重复。
+    await worker.runOnce();
+    expect(audit.list().filter((event) => event.type === "reconcile.governance_revoke_reverted")).toHaveLength(1);
+  });
 });
 
 function workerFixture(input: {

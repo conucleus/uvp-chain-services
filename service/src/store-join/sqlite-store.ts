@@ -1,4 +1,5 @@
 import { runSqliteMigrations } from "../storage/migrations.js";
+import { StorageConstraintError } from "../storage/errors.js";
 import {
   openSqliteDatabase,
   runSqliteWrite,
@@ -19,6 +20,7 @@ import type {
   StoreJoinApplicationStatus,
   StoreJoinTxEvidence
 } from "./types.js";
+import { StoreJoinOpenApplicationExistsError } from "./types.js";
 
 export class SqliteStoreJoinApplicationStore implements StoreJoinApplicationStore {
   readonly #database: SqliteDatabase;
@@ -45,25 +47,34 @@ export class SqliteStoreJoinApplicationStore implements StoreJoinApplicationStor
   }
 
   async putApplication(record: StoreJoinApplicationRecord): Promise<void> {
-    runSqliteWrite(() => {
-      this.#database.prepare(
-        `INSERT INTO store_join_application
-           (application_id, plan_id, zhixu_id, role_slot_id, authorization_kind, stage_id,
-            applicant_address, applicant_account_id, applicant_subject_id, applicant_display_name,
-            statement, status, supplier_id, tx_evidence_json, rejection_reason, revocation_reason,
-            decided_by_address, decided_at, submitted_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(application_id) DO UPDATE SET
-           status = excluded.status,
-           supplier_id = excluded.supplier_id,
-           tx_evidence_json = excluded.tx_evidence_json,
-           rejection_reason = excluded.rejection_reason,
-           revocation_reason = excluded.revocation_reason,
-           decided_by_address = excluded.decided_by_address,
-           decided_at = excluded.decided_at,
-           updated_at = excluded.updated_at`
-      ).run(...applicationValues(record));
-    });
+    try {
+      runSqliteWrite(() => {
+        this.#database.prepare(
+          `INSERT INTO store_join_application
+             (application_id, plan_id, zhixu_id, role_slot_id, authorization_kind, stage_id,
+              applicant_address, applicant_account_id, applicant_subject_id, applicant_display_name,
+              statement, status, supplier_id, tx_evidence_json, rejection_reason, revocation_reason,
+              decided_by_address, decided_at, submitted_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(application_id) DO UPDATE SET
+             status = excluded.status,
+             supplier_id = excluded.supplier_id,
+             tx_evidence_json = excluded.tx_evidence_json,
+             rejection_reason = excluded.rejection_reason,
+             revocation_reason = excluded.revocation_reason,
+             decided_by_address = excluded.decided_by_address,
+             decided_at = excluded.decided_at,
+             updated_at = excluded.updated_at`
+        ).run(...applicationValues(record));
+      });
+    } catch (error) {
+      // application_id 冲突已被 ON CONFLICT 吸收；此处约束命中只能是
+      // 在途唯一索引 (plan_id, applicant_address)——并发双提交的败者。
+      if (error instanceof StorageConstraintError) {
+        throw new StoreJoinOpenApplicationExistsError();
+      }
+      throw error;
+    }
   }
 
   async getApplication(applicationId: string): Promise<StoreJoinApplicationRecord | undefined> {

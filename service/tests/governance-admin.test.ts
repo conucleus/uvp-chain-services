@@ -4,6 +4,7 @@ import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import {
   createGovernanceBroadcasterAdapter,
   createGovernanceService,
+  InMemoryGovernanceStore,
   type GovernanceChainAdapter,
   type GovernanceChainRequestDTO,
   type GovernancePublicClient,
@@ -286,6 +287,127 @@ describe("identity governance API", () => {
       signer,
       retryable: true,
     });
+  });
+
+  it("classifies viem's unknown-RPC transport envelope as retryable instead of a permanent failure", async () => {
+    // 事故形态：viem 对非标准节点错误的通用信封 UnknownRpcError（文本
+    // "An unknown RPC error occurred."）是瞬态传输故障。宽子串 "unknown"
+    // 匹配曾把它钉成 retryable:false 落库，之后同请求命中失败台账复用
+    // 短路，registerIdentity 永久卡死。
+    const publicClient: GovernancePublicClient = {
+      async getChainId() { return 31337; },
+      async readContract() { return signer; },
+      async waitForTransactionReceipt() {
+        const error = new Error("An unknown RPC error occurred.");
+        error.name = "UnknownRpcError";
+        throw error;
+      },
+    };
+    const walletClient = { writeContract: vi.fn(async () => txHash) } as GovernanceWalletClient;
+    const adapter = createGovernanceBroadcasterAdapter({
+      rpcUrl: "http://127.0.0.1:8545",
+      chainId: 31337,
+      contractAddress: registryAddress,
+      privateKey: signerPrivateKey,
+      txConfirmations: 1,
+      publicClient,
+      walletClient,
+    });
+    const request = {
+      kind: "registerIdentity" as const,
+      subjectId,
+      account: wallet,
+      descriptorHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Hex,
+      descriptorURI: "uvp-store://identity/acme",
+    };
+    await expect(adapter.registerIdentity?.(request)).resolves.toMatchObject({
+      status: "failed",
+      txHash,
+      retryable: true,
+    });
+  });
+
+  it("still treats deterministic contract reverts as permanent", async () => {
+    const publicClient: GovernancePublicClient = {
+      async getChainId() { return 31337; },
+      async readContract() { return signer; },
+      async waitForTransactionReceipt() {
+        throw new Error("The contract function reverted with reason: NotOwner");
+      },
+    };
+    const walletClient = { writeContract: vi.fn(async () => txHash) } as GovernanceWalletClient;
+    const adapter = createGovernanceBroadcasterAdapter({
+      rpcUrl: "http://127.0.0.1:8545",
+      chainId: 31337,
+      contractAddress: registryAddress,
+      privateKey: signerPrivateKey,
+      txConfirmations: 1,
+      publicClient,
+      walletClient,
+    });
+    const request = {
+      kind: "revokeIdentity" as const,
+      bindingId,
+      subjectId,
+      reasonHash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Hex,
+      reasonURI: "uvp-governance://metadata/test",
+    };
+    await expect(adapter.revokeIdentity?.(request)).resolves.toMatchObject({
+      status: "failed",
+      retryable: false,
+    });
+  });
+
+  it("re-broadcasts after a permanent failure instead of reusing the failed ledger entry as a final answer", async () => {
+    // 事故形态：failed && !retryable 的陈年台账被 isReusableDuplicateLog
+    // 当"可复用终态"，同请求重放永久返回旧失败，治理通道卡死。复用只认
+    // 成功在途/终态（simulated_tx/submitted/confirmed）；失败档必须重新
+    // 广播并落新档。
+    const broadcasts: string[] = [];
+    const adapter: GovernanceChainAdapter = {
+      async registerIdentity() {
+        broadcasts.push("register");
+        if (broadcasts.length === 1) {
+          return {
+            status: "failed",
+            errorCode: "transaction_reverted",
+            message: "governance transaction reverted",
+            retryable: false,
+            simulated: false,
+          };
+        }
+        return { status: "submitted", txHash, signer, retryable: false, simulated: false };
+      },
+      async revokeIdentity() {
+        broadcasts.push("revoke");
+        return { status: "submitted", txHash, signer, retryable: false, simulated: false };
+      },
+    };
+    const service = createGovernanceService({
+      adapter,
+      store: new InMemoryGovernanceStore(),
+      now: () => new Date("2026-04-28T00:00:00Z"),
+    });
+    const principal = { adminId: "admin-1", role: "admin" };
+    await service.reviewSupplier(
+      { subjectId, status: "approved_for_broadcast", publicSummary: "Identity checked." },
+      principal,
+    );
+    const body = { subjectId, account: wallet };
+
+    const first = await service.registerIdentity(body, principal);
+    expect(first.broadcast).toMatchObject({ status: "failed", retryable: false });
+
+    // 同请求重放：不复用失败档，重新广播并成功。
+    const second = await service.registerIdentity(body, principal);
+    expect(second.broadcast).toMatchObject({ status: "submitted", txHash });
+    expect(broadcasts).toEqual(["register", "register"]);
+
+    // 成功在途档才是幂等复用对象：第三次重放直接返回已记录结果。
+    const third = await service.registerIdentity(body, principal);
+    expect(third.broadcast).toMatchObject({ status: "submitted", txHash });
+    expect(third.log.logId).toBe(second.log.logId);
+    expect(broadcasts).toEqual(["register", "register"]);
   });
 });
 

@@ -1,6 +1,6 @@
-import { normalizeBytes32, type Hex } from "../shared/types.js";
+import { ConfigError, normalizeBytes32, type Hex } from "../shared/types.js";
 
-export type ProofCheckStatus = "matched" | "missing" | "mismatch";
+export type ProofCheckStatus = "matched" | "missing" | "mismatch" | "invalid";
 
 export interface HashExpectation {
   readonly actual?: Hex;
@@ -48,8 +48,20 @@ function compareHash(
     return { name, status: "missing" };
   }
 
-  const actual = expectation.actual ? normalizeBytes32(expectation.actual, `${name}.actual`) : undefined;
-  const expected = expectation.expected ? normalizeBytes32(expectation.expected, `${name}.expected`) : undefined;
+  // 契约：任何输入都产出 ProofVerificationResult——畸形哈希（非 32 字节
+  // hex）折叠为 invalid 检查项而不是抛 ConfigError 逃逸调用方；valid 只
+  // 认全部 matched，invalid 自然判 false。
+  const actual = readHashSide(name, "actual", expectation.actual);
+  const expected = readHashSide(name, "expected", expectation.expected);
+
+  if (actual instanceof Error || expected instanceof Error) {
+    return {
+      name,
+      status: "invalid",
+      ...(actual instanceof Error ? {} : actual !== undefined ? { actual } : {}),
+      ...(expected instanceof Error ? {} : expected !== undefined ? { expected } : {})
+    };
+  }
 
   if (!actual || !expected) {
     // 单侧缺失按 mismatch 记（材料不完整），两侧缺失记 missing。
@@ -67,4 +79,21 @@ function compareHash(
     actual,
     expected
   };
+}
+
+/** 单侧哈希读取：缺失返回 undefined，畸形返回 Error（由调用方折叠为
+ * invalid），合法返回规范化小写 hex。 */
+function readHashSide(
+  name: ProofCheck["name"],
+  side: "actual" | "expected",
+  value: Hex | undefined
+): Hex | undefined | Error {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    return normalizeBytes32(value, `${name}.${side}`);
+  } catch (error) {
+    return error instanceof ConfigError ? error : new ConfigError(`${name}.${side} is not a 32-byte hex string`);
+  }
 }

@@ -588,6 +588,144 @@ describe("relayer non-signing boundary", () => {
     expect(submitCalls).toBe(2);
   });
 
+  it("keeps a pool-pending duplicate transaction retryable with its candidate hash and self-heals on the next probe", async () => {
+    // 事故形态："already known" 带候选 txHash 但交易仍在池中尚未挖出——
+    // 单次 getTransactionReceipt 探不到不是失败裁决。钉 failed 终态死信
+    // 会让同载荷幂等重放被 isTerminalSubmission 永久短路、reconcile 无该
+    // 台账复核通道。对齐 submissions 的 transaction_receipt_unknown 口径：
+    // 可重试、不释放 nonce、候选哈希留台账，下轮重放重探。
+    const candidateTx = `0x${"cc".repeat(32)}` as Hex;
+    const store = new MemoryRelaySubmissionStore();
+    const retryBudgetStore = new MemoryRelayRetryBudgetStore();
+    const nonceStore = new MemoryRelayNonceStore();
+    const receipts = new Map<string, { status?: "success" | "reverted" | string }>();
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => {
+          const error = new Error("already known") as Error & { txHash?: string };
+          error.txHash = candidateTx;
+          throw error;
+        },
+        getTransactionReceipt: async (txHash: Hex) => receipts.get(txHash)
+      },
+      nonceStore,
+      submissionStore: store,
+      retryBudgetStore,
+      now: () => new Date("2026-01-01T00:00:00Z")
+    });
+
+    const first = await relayer.relay(request("nonce-dup-pending"));
+    expect(first).toMatchObject({
+      status: "failed",
+      errorCode: "transaction_receipt_unknown",
+      failureCategory: "retryable",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false,
+      txHash: candidateTx
+    });
+
+    // nonce 不释放：候选交易可能随后上链消费 nonce——服务侧预留必须仍在
+    // （重放走 reserve 失败路径，正是"下轮重探"的入口）。
+    await expect(nonceStore.reserve(signer, "nonce-dup-pending")).resolves.toBe(false);
+
+    // 重放重探：回执仍未产出 → 仍是可重试的未知，不升级为终态。
+    const stillUnknown = await relayer.relay(request("nonce-dup-pending"));
+    expect(stillUnknown).toMatchObject({
+      status: "failed",
+      errorCode: "duplicate_signer_nonce",
+      retryable: true,
+      deadLetter: false
+    });
+
+    // 回执挖出且成功 → 闭环 submitted（带候选哈希），不再是失败。
+    receipts.set(candidateTx, { status: "success" });
+    const healed = await relayer.relay(request("nonce-dup-pending"));
+    expect(healed).toMatchObject({ status: "submitted", txHash: candidateTx });
+    await expect(store.load(healed.id)).resolves.toMatchObject({
+      status: "submitted",
+      txHash: candidateTx
+    });
+  });
+
+  it("dead-letters a duplicate transaction only once its mined receipt proves a revert", async () => {
+    // 回执已产出且明确 revert：链上已裁决该交易失败、nonce 已被消费——
+    // 终态 dead letter（transaction_reverted），重放幂等返回已记录结果。
+    const candidateTx = `0x${"dd".repeat(32)}` as Hex;
+    const store = new MemoryRelaySubmissionStore();
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => {
+          const error = new Error("already known") as Error & { txHash?: string };
+          error.txHash = candidateTx;
+          throw error;
+        },
+        getTransactionReceipt: async () => ({ status: "reverted" })
+      },
+      nonceStore: new MemoryRelayNonceStore(),
+      submissionStore: store,
+      now: () => new Date("2026-01-01T00:00:00Z")
+    });
+
+    const first = await relayer.relay(request("nonce-dup-reverted"));
+    expect(first).toMatchObject({
+      status: "failed",
+      errorCode: "transaction_reverted",
+      retryable: false,
+      retryState: "dead_letter",
+      deadLetter: true,
+      txHash: candidateTx
+    });
+
+    const replay = await relayer.relay(request("nonce-dup-reverted"));
+    expect(replay).toMatchObject({
+      status: "failed",
+      errorCode: "transaction_reverted",
+      deadLetter: true
+    });
+  });
+
+  it("returns the recorded terminal outcome for a replay whose deadline has since expired", async () => {
+    // 终态台账查询先于 deadline 校验：已上链提交的结果在 deadline 过后
+    // 必须幂等取回（含 txHash），否则过期拒绝会误导参与方对已消费 nonce
+    // 重签。无台账记录的过期载荷仍按 expired_payload_deadline 拒绝。
+    const store = new MemoryRelaySubmissionStore();
+    const retryBudgetStore = new MemoryRelayRetryBudgetStore();
+    let currentTime = new Date("2026-01-01T00:00:00Z");
+    const relayer = createRelayerService({
+      verifier: {
+        verify: async () => ({ valid: true, signer })
+      },
+      submitter: {
+        submit: async () => ({ txHash })
+      },
+      nonceStore: new MemoryRelayNonceStore(),
+      submissionStore: store,
+      retryBudgetStore,
+      now: () => currentTime
+    });
+
+    const first = await relayer.relay(request("nonce-expired-replay"));
+    expect(first).toMatchObject({ status: "submitted", txHash });
+
+    // deadline（2_000_000_000s ≈ 2033）已过：同载荷重放幂等返回台账终态。
+    currentTime = new Date("2034-01-01T00:00:00Z");
+    const replay = await relayer.relay(request("nonce-expired-replay"));
+    expect(replay).toMatchObject({ status: "submitted", txHash });
+
+    // 对照：无台账记录的过期载荷仍被永久拒绝。
+    await expect(relayer.relay(request("nonce-expired-fresh"))).rejects.toMatchObject({
+      name: "RelayRejection",
+      errorCode: "expired_payload_deadline"
+    });
+  });
+
   it("escalates retryable failure delays exponentially and resets after success", async () => {
     let failing = true;
     const recorded: unknown[] = [];

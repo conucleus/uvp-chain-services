@@ -1265,6 +1265,113 @@ describe("indexer projection replay", () => {
     }
   });
 
+  it("sweeps committed-but-unadvanced ghost rows when a shallow reorg lands inside the crash window", async () => {
+    // 崩溃窗口×浅 reorg：事件事务已提交、游标未推进（中间夹通知投递）
+    // 时进程崩溃，随后游标高度之上的块发生浅 reorg。游标哈希校验只看
+    // 游标高度一处哈希，不会触发回滚；重读追加的 ON CONFLICT DO NOTHING
+    // 挡不住不同 txHash 的旧分叉行——增量轮必须先清扫游标之上的残留行，
+    // 否则旧分叉事件与 canonical 并存成永久幽灵，每轮重放投进投影。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-crash-window-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const stableEvents: readonly ChainEvent[] = [
+        chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+        chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
+        chainEvent(3n, 0, "SignalSubmitted", {
+          orderId: stateMachineOrderId,
+          sourceId,
+          signalId,
+          payloadHash,
+          idempotencyKey,
+          submitter: signer
+        })
+      ].map((event, index) => ({ ...event, blockHash: blockHashHex(`block-${index + 1}`) }));
+      // 崩溃窗口残留：旧分叉上 block 4 的事件（不同 txHash）已随事件事务
+      // 提交，游标停在 4 未推进。
+      const staleForkBlock4Event = {
+        ...chainEvent(4n, 0, "SignalSubmitted", {
+          orderId: stateMachineOrderId,
+          sourceId,
+          signalId: bytes32Hex("dead"),
+          payloadHash: bytes32Hex("face"),
+          idempotencyKey: bytes32Hex("9001"),
+          submitter: signer
+        }, contractAddress, { transactionHash: bytes32Hex("e1") }),
+        blockHash: blockHashHex("block-4-stale")
+      };
+      const canonicalBlock4Event = {
+        ...chainEvent(4n, 0, "HookReady", {
+          orderId: stateMachineOrderId,
+          hookId,
+          stageId,
+          hookName
+        }),
+        blockHash: blockHashHex("block-4-fork")
+      };
+      let canonicalBlocks = new Map<bigint, Hex>([
+        [1n, blockHashHex("block-1")],
+        [2n, blockHashHex("block-2")],
+        [3n, blockHashHex("block-3")],
+        [4n, blockHashHex("block-4-fork")]
+      ]);
+      let readableEvents: readonly ChainEvent[] = stableEvents;
+      let finalizedBlock = 3n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return readableEvents.filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        },
+        async getBlockHash(blockNumber) {
+          return canonicalBlocks.get(blockNumber) ?? zeroBlockHash();
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store
+      });
+
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+      await store.appendEvent(staleForkBlock4Event);
+      await expect(store.listEvents({ chainId: 31337 })).resolves.toHaveLength(4);
+
+      // 浅 reorg 只动了 block 4（游标高度 3 的哈希不变）。
+      finalizedBlock = 4n;
+      readableEvents = [...stableEvents, canonicalBlock4Event];
+
+      const result = await indexer.refreshFromCursorWithSummary();
+
+      // 旧分叉行被清扫：block 4 只剩 canonical 事件，无幽灵并存。
+      const storedEvents = await store.listEvents({ chainId: 31337 });
+      expect(storedEvents).toHaveLength(4);
+      expect(storedEvents.filter((event) => event.blockNumber === 4n)).toHaveLength(1);
+      expect(storedEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ blockNumber: 4n, blockHash: blockHashHex("block-4-fork") })
+      ]));
+      expect(result.summary).toMatchObject({
+        fromBlock: "4",
+        toBlock: "4",
+        syncStatus: "indexed",
+        finalizedBlock: "4",
+        mismatchCount: 0
+      });
+      await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
+        .resolves.toMatchObject({ nextBlock: 5n, finalizedBlock: 4n });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("trims pending post-commit notification batches above the reorg ancestor block", async () => {
     // 幽灵通知：pending 批次内高于共同祖先的事件已被回滚删除，等最终性
     // 追平后 sweep 会照常补投。回滚必须把批次修剪到祖先及以下；祖先以下的

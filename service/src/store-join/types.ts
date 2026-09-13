@@ -132,4 +132,12 @@ export class StoreJoinServiceError extends Error {
   }
 }
 
+/**
+ * 存储层在途申请唯一约束命中（同 plan + 同申请人的并发双提交败者）：
+ * 服务层统一映射为 409 application_exists，不泄露为存储故障。
+ */
+export class StoreJoinOpenApplicationExistsError extends Error {
+  override readonly name = "StoreJoinOpenApplicationExistsError";
+}
+
 export type { Address, Hex };

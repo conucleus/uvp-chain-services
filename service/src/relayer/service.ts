@@ -77,6 +77,11 @@ export interface RelayFailureClassification {
   readonly nextRetryAt?: string;
 }
 
+/** duplicate_transaction 候选哈希的回执裁决结果（见 #resolveDuplicateTransaction）。 */
+type DuplicateTransactionResolution =
+  | { readonly kind: "submitted"; readonly submission: RelaySubmission }
+  | { readonly kind: "receipt_failed"; readonly txHash: Hex };
+
 const DEFAULT_MAX_IN_FLIGHT_PER_ORDER = 1;
 const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
 const DEFAULT_RETRY_BASE_MS = 250;
@@ -127,8 +132,10 @@ export class RelayerService implements LifecycleService {
   }
 
   async relay(request: RelayRequest): Promise<RelaySubmission> {
+    // 只校验载荷形状（身份字段/签名 hex）：malformed 载荷不可能有台账
+    // 记录，先拒之门外；deadline 校验后置到终态台账短路之后。
     try {
-      validateRelayRequest(request, this.#now());
+      validateRelayRequestShape(request);
     } catch (error) {
       if (error instanceof RelayRejection) {
         throw error;
@@ -142,12 +149,12 @@ export class RelayerService implements LifecycleService {
       });
     }
 
-    const verification = await this.#verifier.verify(freezeRelayRequest(request));
-    ensureVerifiedSigner(request, verification);
-
+    // 终态台账查询先于 deadline 校验（isTerminalSubmission 的注释契约：
+    // 同载荷重放必须幂等返回已记录结果）。deadline 过期若抢先于此，
+    // 已上链提交的结果在过期后永远拿不回来——调用方只剩
+    // expired_payload_deadline 拒绝，等于被误导对已消费 nonce 重签。
     const submissionKey = submissionId(request);
     const prior = await this.loadRetryState(submissionKey);
-    const priorFailedAttempts = prior.failedAttempts;
     if (prior.lastSubmission && isTerminalSubmission(prior.lastSubmission)) {
       // A persisted final outcome is authoritative for this submission id. In
       // particular, do not turn a durable DLQ into duplicate_signer_nonce or
@@ -155,6 +162,13 @@ export class RelayerService implements LifecycleService {
       this.#rememberTerminalSubmission(submissionKey);
       return prior.lastSubmission;
     }
+
+    validateRelayDeadline(request, this.#now());
+
+    const verification = await this.#verifier.verify(freezeRelayRequest(request));
+    ensureVerifiedSigner(request, verification);
+
+    const priorFailedAttempts = prior.failedAttempts;
     if (this.retryBudgetExhausted(priorFailedAttempts)) {
       const submission = failedSubmission(
         request,
@@ -175,6 +189,36 @@ export class RelayerService implements LifecycleService {
       // 预留失败不是终态：并发/在途的同 (signer,nonce) 提交结果未知——
       // 持有者可能随后成功上链，也可能失败并释放 nonce 让本轮重试。
       // 钉成 dead_letter 会让 nonce 释放后的合法重试被终态台账永久拒绝。
+      // 台账上有候选 txHash（duplicate_transaction 的 receipt-unknown 车道
+      // 保留的哈希）时先重探回执：nonce 仍被本服务持有、重放无法再进
+      // submitter，这里就是"下轮重探"的入口；成功即闭环 submitted，明确
+      // revert 即终态，仍未产出则保持可重试并把候选哈希继续留在台账上
+      //（否则 txHash-less 的 duplicate_signer_nonce 行会顶掉带哈希的上一
+      // 行，候选哈希从台账消失、重探通道自断）。
+      const priorCandidateTxHash = prior.lastSubmission && !isTerminalSubmission(prior.lastSubmission)
+        ? prior.lastSubmission.txHash
+        : undefined;
+      if (priorCandidateTxHash) {
+        const reprobed = await this.#resolveDuplicateTransaction(
+          submissionKey,
+          request,
+          undefined,
+          priorCandidateTxHash,
+          priorFailedAttempts + 1
+        );
+        if (reprobed?.kind === "submitted") {
+          return reprobed.submission;
+        }
+        if (reprobed?.kind === "receipt_failed") {
+          return this.#recordDuplicateTransactionReverted(
+            submissionKey,
+            request,
+            reprobed.txHash,
+            priorFailedAttempts + 1,
+            priorFailedAttempts
+          );
+        }
+      }
       const classification = relayFailure({
         errorCode: "duplicate_signer_nonce",
         message: "duplicate signer nonce",
@@ -183,7 +227,13 @@ export class RelayerService implements LifecycleService {
         deadLetter: false,
         ...this.retrySchedule(priorFailedAttempts)
       });
-      const submission = failedSubmission(request, classification, undefined, priorFailedAttempts, this.retryBudgetRemaining(priorFailedAttempts));
+      const submission = failedSubmission(
+        request,
+        classification,
+        priorCandidateTxHash,
+        priorFailedAttempts,
+        this.retryBudgetRemaining(priorFailedAttempts)
+      );
       return this.persistOutcome(submissionKey, submission, priorFailedAttempts);
     }
 
@@ -221,10 +271,13 @@ export class RelayerService implements LifecycleService {
 
         const attemptNumber = priorFailedAttempts + 1;
 
-        // "already known"/"nonce too low" 不等于失败：交易可能已经上链。
-        // 先按候选 txHash 探回执，确认成功则按 submitted+txHash 记账
-        //（nonce 视为已消费）；查不到才允许死信，并把探过的 txHash 留在
-        // 台账供人工复核，避免把已上链交易永久标记 failed 误导参与方重签。
+        // "already known"/"nonce too low" 不等于失败：交易可能已经上链或
+        // 仍在池中。先按候选 txHash 探回执裁决——成功按 submitted+txHash
+        // 记账；回执明确 revert 按终态 dead letter；回执未产出/状态未知不
+        // 是失败裁决，按 transaction_receipt_unknown 可重试落账（对齐
+        // submissions 同场景口径），nonce 不释放、候选 txHash 留在台账，
+        // 等待下轮重放重探/对账。把"仍在池中尚未挖出"钉成终态死信会让同
+        // 载荷幂等重放被永久短路，误导参与方对可能已上链的 nonce 重签。
         if (classification.errorCode === "duplicate_transaction") {
           const resolved = await this.#resolveDuplicateTransaction(
             submissionKey,
@@ -233,8 +286,8 @@ export class RelayerService implements LifecycleService {
             prior.lastSubmission?.txHash,
             attemptNumber
           );
-          if (resolved) {
-            return resolved;
+          if (resolved?.kind === "submitted") {
+            return resolved.submission;
           }
           const candidates = duplicateTransactionTxHashCandidates(error, prior.lastSubmission?.txHash);
           if (candidates.length === 0) {
@@ -266,15 +319,39 @@ export class RelayerService implements LifecycleService {
             }
             return persistedReassembly;
           }
+          if (resolved?.kind === "receipt_failed") {
+            return this.#recordDuplicateTransactionReverted(
+              submissionKey,
+              request,
+              resolved.txHash,
+              attemptNumber,
+              priorFailedAttempts
+            );
+          }
+          // 有候选 txHash 但回执未产出：nonce 不释放（候选交易可能随后
+          // 上链消费 nonce），可重试失败落账并保留候选哈希。
+          const receiptUnknown = relayFailure({
+            errorCode: "transaction_receipt_unknown",
+            message: "broadcaster reported a duplicate transaction but no receipt is available yet; the candidate hash is retained for the next probe",
+            failureCategory: "retryable",
+            retryable: true,
+            deadLetter: false,
+            ...this.retrySchedule(priorFailedAttempts)
+          });
+          const unconfirmed = failedSubmission(
+            request,
+            receiptUnknown,
+            candidates[0],
+            attemptNumber,
+            this.retryBudgetRemaining(attemptNumber)
+          );
+          return this.persistOutcome(submissionKey, unconfirmed, attemptNumber);
         }
 
-        const unconfirmedTxHash = classification.errorCode === "duplicate_transaction"
-          ? duplicateTransactionTxHashCandidates(error, prior.lastSubmission?.txHash)[0]
-          : undefined;
         const submission = failedSubmission(
           request,
           classification,
-          unconfirmedTxHash,
+          undefined,
           attemptNumber,
           this.retryBudgetRemaining(attemptNumber)
         );
@@ -383,9 +460,13 @@ export class RelayerService implements LifecycleService {
   /**
    * duplicate_transaction（already known / nonce too low）的回执裁决：
    * 交易可能已在链上。按候选 txHash（错误对象携带的哈希 + 该提交此前
-   * 记录的 txHash）探回执；确认 success 则按 submitted 记账并返回，
-   * 否则返回 undefined 走死信路径（复核通道：unconfirmed txHash 保留在
-   * 台账上）。探针不可用（submitter 未实现）时同样走死信。
+   * 记录的 txHash）探回执并三态返回：
+   * - status=success → 按 submitted+txHash 记账（nonce 视为已消费）；
+   * - status=reverted/failed → 链上已裁决失败（nonce 已被该失败交易
+   *   消费），返回 receipt_failed 由调用方落终态 dead letter；
+   * - 回执未产出/探针抛错/状态未知 → 返回 undefined：不是失败裁决，
+   *   调用方按 transaction_receipt_unknown 可重试落账（候选 txHash 留在
+   *   台账），下轮重放重探。探针不可用（submitter 未实现）同样未裁决。
    */
   async #resolveDuplicateTransaction(
     submissionKey: string,
@@ -393,7 +474,7 @@ export class RelayerService implements LifecycleService {
     error: unknown,
     priorTxHash: Hex | undefined,
     attemptNumber: number
-  ): Promise<RelaySubmission | undefined> {
+  ): Promise<DuplicateTransactionResolution | undefined> {
     const getReceipt = this.#submitter.getTransactionReceipt;
     if (!getReceipt) {
       return undefined;
@@ -434,10 +515,45 @@ export class RelayerService implements LifecycleService {
           submissionId: submissionKey,
           txHash
         });
-        return submission;
+        return { kind: "submitted", submission };
+      }
+      if (receipt && (receipt.status === "reverted" || receipt.status === "failed")) {
+        return { kind: "receipt_failed", txHash };
       }
     }
     return undefined;
+  }
+
+  /**
+   * 回执已裁决 revert 的 duplicate_transaction 收口：链上这笔交易已消费
+   * nonce 且失败——终态 dead letter，nonce 不释放。
+   */
+  async #recordDuplicateTransactionReverted(
+    submissionKey: string,
+    request: RelayRequest,
+    txHash: Hex,
+    attemptNumber: number,
+    priorFailedAttempts: number
+  ): Promise<RelaySubmission> {
+    const reverted = relayFailure({
+      errorCode: "transaction_reverted",
+      message: "the duplicate transaction was mined and reverted on chain",
+      failureCategory: "permanent",
+      retryable: false,
+      deadLetter: true
+    });
+    const submission = failedSubmission(
+      request,
+      reverted,
+      txHash,
+      attemptNumber,
+      this.retryBudgetRemaining(priorFailedAttempts)
+    );
+    const persisted = await this.persistOutcome(submissionKey, submission, priorFailedAttempts);
+    if (persisted.deadLetter) {
+      this.#rememberTerminalSubmission(submissionKey);
+    }
+    return persisted;
   }
 
   private async loadRetryState(submissionKey: string): Promise<RelayRetryBudgetSnapshot> {
@@ -742,7 +858,8 @@ function collectTxHashLikeFields(
   }
 }
 
-function validateRelayRequest(request: RelayRequest, now: Date): void {
+/** 载荷形状校验（不含 deadline）：identity 字段缺失/畸形的载荷不可能有台账记录。 */
+function validateRelayRequestShape(request: RelayRequest): void {
   if (!request.business.orderId) {
     throw relayRejection({
       errorCode: "missing_order_id",
@@ -761,15 +878,6 @@ function validateRelayRequest(request: RelayRequest, now: Date): void {
       deadLetter: true
     });
   }
-  if (request.business.deadline < BigInt(Math.floor(now.getTime() / 1000))) {
-    throw relayRejection({
-      errorCode: "expired_payload_deadline",
-      message: "payload deadline has expired",
-      failureCategory: "permanent",
-      retryable: false,
-      deadLetter: true
-    });
-  }
 
   normalizeAddress(request.business.signer, "business.signer");
   normalizeAddress(request.business.verifyingContract, "business.verifyingContract");
@@ -780,6 +888,22 @@ function validateRelayRequest(request: RelayRequest, now: Date): void {
   }
   if (request.business.metadataHash) {
     normalizeBytes32(request.business.metadataHash, "business.metadataHash");
+  }
+}
+
+/**
+ * deadline 校验独立于形状校验、后置于终态台账短路：终态台账对同载荷重放
+ * 是权威答复，过期不得抢在幂等返回之前拒绝（见 relay 内注释）。
+ */
+function validateRelayDeadline(request: RelayRequest, now: Date): void {
+  if (request.business.deadline < BigInt(Math.floor(now.getTime() / 1000))) {
+    throw relayRejection({
+      errorCode: "expired_payload_deadline",
+      message: "payload deadline has expired",
+      failureCategory: "permanent",
+      retryable: false,
+      deadLetter: true
+    });
   }
 }
 
@@ -1135,6 +1259,8 @@ function errorLabelForRelayError(errorCode: string): string {
       return "Relay retry limit reached";
     case "transaction_reverted":
       return "Transaction reverted";
+    case "transaction_receipt_unknown":
+      return "Transaction receipt is unknown";
     case "unauthorized_signal_submitter":
       return "Submitter is not authorized";
     case "unknown_order":

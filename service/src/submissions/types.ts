@@ -270,6 +270,12 @@ export interface SubmissionBroadcastAdapter {
   broadcast(request: SubmissionBroadcastRequest): Promise<SubmissionBroadcastResult>;
 }
 
+/** 台账键序扫描游标：(createdAt, submissionId) 双键，created_at 不可变保证轮中更新不影响游标稳定性。 */
+export interface ProductSubmissionScanCursor {
+  readonly createdAt: string;
+  readonly submissionId: string;
+}
+
 export interface ProductSubmissionStore {
   withTransaction?<T>(operation: () => Promise<T>): Promise<T>;
   putPrepared(record: PreparedSubmissionRecord): Promise<void>;
@@ -294,6 +300,19 @@ export interface ProductSubmissionStore {
   putSubmission(submission: ProductSubmissionDTO): Promise<void>;
   getSubmission(submissionId: string): Promise<ProductSubmissionDTO | undefined>;
   listSubmissions(): Promise<readonly ProductSubmissionDTO[]>;
+  /**
+   * 对账/清扫车道的有界扫描（可选能力）：按 (createdAt, submissionId)
+   * 键序返回"未闭环"的一页——status ∈ {broadcasting, submitted,
+   * indexing, failed}。终态（confirmed/expired/signature_received/
+   * replaced）随历史单调增长且每轮重扫是 O(全历史) 的根因，服务端直接
+   * 剪除不返回。failed 是否可复核（需带 txHash）由调用方行级过滤。after
+   * 为上一页末尾游标，缺省从头开始；实现缺失时调用方回退
+   * listSubmissions() 全量。
+   */
+  listOpenSubmissionsPage?(
+    after: ProductSubmissionScanCursor | undefined,
+    limit: number
+  ): Promise<readonly ProductSubmissionDTO[]>;
 }
 
 export interface PreparedSubmissionRecord extends PreparedSubmissionDTO {

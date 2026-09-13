@@ -1,4 +1,5 @@
 import { runSqliteMigrations } from "../storage/migrations.js";
+import { StorageConstraintError } from "../storage/errors.js";
 import {
   openSqliteDatabase,
   runSqliteWrite,
@@ -12,6 +13,7 @@ import {
 } from "../storage/sqlite-rows.js";
 import type { Address, Hex } from "../shared/types.js";
 import type { StoreListingRecord, StoreListingStore, StoreListingStatus } from "./types.js";
+import { StoreListingPlanConflictError } from "./types.js";
 
 export class SqliteStoreListingStore implements StoreListingStore {
   readonly #database: SqliteDatabase;
@@ -38,22 +40,31 @@ export class SqliteStoreListingStore implements StoreListingStore {
   }
 
   async putListing(record: StoreListingRecord): Promise<void> {
-    runSqliteWrite(() => {
-      this.#database.prepare(
-        `INSERT INTO store_zhixu_listing
-           (listing_id, plan_id, plan_hash_claimed, deployment_id_claimed, state_machine_address_claimed,
-            status, imported_by_address, imported_by_account_id, imported_at,
-            reviewed_by_address, reviewed_at, review_note, delist_reason, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(listing_id) DO UPDATE SET
-           status = excluded.status,
-           reviewed_by_address = excluded.reviewed_by_address,
-           reviewed_at = excluded.reviewed_at,
-           review_note = excluded.review_note,
-           delist_reason = excluded.delist_reason,
-           updated_at = excluded.updated_at`
-      ).run(...listingValues(record));
-    });
+    try {
+      runSqliteWrite(() => {
+        this.#database.prepare(
+          `INSERT INTO store_zhixu_listing
+             (listing_id, plan_id, plan_hash_claimed, deployment_id_claimed, state_machine_address_claimed,
+              status, imported_by_address, imported_by_account_id, imported_at,
+              reviewed_by_address, reviewed_at, review_note, delist_reason, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(listing_id) DO UPDATE SET
+             status = excluded.status,
+             reviewed_by_address = excluded.reviewed_by_address,
+             reviewed_at = excluded.reviewed_at,
+             review_note = excluded.review_note,
+             delist_reason = excluded.delist_reason,
+             updated_at = excluded.updated_at`
+        ).run(...listingValues(record));
+      });
+    } catch (error) {
+      // listing_id 冲突已被 ON CONFLICT 吸收；此处约束命中只能是
+      // UNIQUE(plan_id)——并发导入同 plan 第二条 listing 的败者。
+      if (error instanceof StorageConstraintError) {
+        throw new StoreListingPlanConflictError();
+      }
+      throw error;
+    }
   }
 
   async getListing(listingId: string): Promise<StoreListingRecord | undefined> {

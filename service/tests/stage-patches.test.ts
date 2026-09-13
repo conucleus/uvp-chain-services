@@ -29,10 +29,14 @@ import {
   type PreparedStageExecutorPatchDTO,
   type PreparedStageExecutorPatchRecord,
   type PreparedStageResourcePatchDTO,
+  type PreparedStageResourcePatchRecord,
+  type ProductStageExecutorPatchStore,
+  type ProductStageResourcePatchStore,
   type StageExecutorPatchBroadcastAdapter,
   type StageExecutorPatchSubmissionDTO,
   type StagePatchBroadcastResult,
   type StageResourcePatchBroadcastAdapter,
+  type StageResourcePatchSubmissionDTO,
   SqliteProductStagePatchStore,
 } from "../src/stage-patches/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
@@ -508,6 +512,98 @@ describe("stage executor/resource patch Product API", () => {
     expect(broadcast.broadcast).toHaveBeenCalledOnce();
   });
 
+  it("records a persist_failed fallback with the txHash on the resource patch path when the store write fails after broadcast", async () => {
+    // 同 executor patch 路径：广播拿到 txHash 后的落库失败不得释放
+    // nonce，且必须补一条带 txHash 的 persist_failed 档案。
+    const innerBroadcast: StageResourcePatchBroadcastAdapter = {
+      broadcast: async (): Promise<StagePatchBroadcastResult> => ({
+        status: "submitted",
+        txHash,
+      }),
+    };
+    const inner = new InMemoryProductStagePatchStore<
+      PreparedStageResourcePatchRecord,
+      StageResourcePatchSubmissionDTO
+    >();
+    let putSubmissionCalls = 0;
+    const flakyStore: ProductStageResourcePatchStore = {
+      withTransaction: (operation) => operation(),
+      putPrepared: (record) => inner.putPrepared(record),
+      getPrepared: (prepareId) => inner.getPrepared(prepareId),
+      markPreparedUsed: (prepareId, submissionId, usedAt) => inner.markPreparedUsed(prepareId, submissionId, usedAt),
+      reserveNonce: (key, options) => inner.reserveNonce(key, options),
+      releaseNonce: (key) => inner.releaseNonce(key),
+      putSubmission: async (submission) => {
+        putSubmissionCalls += 1;
+        if (putSubmissionCalls === 1) {
+          throw new Error("simulated durable resource patch store outage");
+        }
+        return inner.putSubmission(submission);
+      },
+      getSubmission: (submissionId) => inner.getSubmission(submissionId),
+    };
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: baseEvents(),
+    });
+    const failingService = createProductStageResourcePatchService({
+      store,
+      chainId,
+      stagePatchModuleAddress: contractAddress,
+      now: () => baseNow,
+      prepareIdFactory: () => "prep_1",
+      submissionIdFactory: () => "sub_1",
+      stageResourcePatchStore: flakyStore,
+      broadcastAdapter: innerBroadcast,
+    });
+    const router = createApiRouter(store, {
+      productRuntimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract:
+        "0x1111111111111111111111111111111111111111",
+      productStageResourcePatchService: failingService,
+    });
+    const prepareResponse = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
+      body: prepareResourceBody(),
+    });
+    expect(prepareResponse.status).toBe(201);
+    const prepared = prepareResponse.body as PreparedStageResourcePatchDTO;
+    const submitBody = {
+      prepareId: prepared.prepareId,
+      selectorWallet,
+      signature: await signResourcePrepared(prepared),
+    };
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-resource-patch`,
+      body: submitBody,
+    })).rejects.toThrow("simulated durable resource patch store outage");
+
+    expect(putSubmissionCalls).toBe(2);
+    await expect(inner.getSubmission("sub_1")).resolves.toMatchObject({
+      status: "failed",
+      txHash,
+      errorCode: "persist_failed",
+      retryable: false,
+    });
+
+    // nonce 不释放：重试撞 duplicate_stage_resource_patch_nonce，不会
+    // 二次广播。
+    const retried = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-resource-patch`,
+      body: submitBody,
+    });
+    expect(retried).toMatchObject({
+      status: 409,
+      body: { error: "duplicate_stage_resource_patch_nonce" },
+    });
+  });
+
   it("requires content-addressed resource manifest references in production", async () => {
     const { router } = await routerFixture({
       runtimeEnvironment: "production",
@@ -948,28 +1044,38 @@ describe("stage executor/resource patch Product API", () => {
     expect(broadcastCalls).toBe(2);
   });
 
-  it("keeps the patch nonce consumed when a broadcast already returned a txHash and the store write fails", async () => {
-    // 广播已返回 txHash 后的落库失败不得释放 nonce——链上交易
-    // 可能已占用该 nonce，重试会二次广播同一 patch；对齐 submissions 主
-    // 路径语义（只有确认失败且无 txHash 才释放）。
+  it("records a persist_failed fallback with the txHash and keeps the nonce consumed when the store write fails after broadcast", async () => {
+    // 广播已返回 txHash 后的落库失败：不得释放 nonce（链上交易可能已
+    // 占用，重试会二次广播），且必须尽力补一条带 txHash 的
+    // persist_failed 档案——链上哈希零留痕会让已上链交易从台账消失
+    //（对齐 submissions 主路径的同款兜底）。
     const innerBroadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => ({
         status: "submitted",
         txHash,
       }),
     };
-    const failingStore = new class extends InMemoryProductStagePatchStore<
+    const inner = new InMemoryProductStagePatchStore<
       PreparedStageExecutorPatchRecord,
       StageExecutorPatchSubmissionDTO
-    > {
-      putSubmissionCalls = 0;
-      override async putSubmission(
-        submission: StageExecutorPatchSubmissionDTO,
-      ): Promise<void> {
-        this.putSubmissionCalls += 1;
-        throw new Error("simulated durable patch store outage");
-      }
-    }();
+    >();
+    let putSubmissionCalls = 0;
+    const flakyStore: ProductStageExecutorPatchStore = {
+      withTransaction: (operation) => operation(),
+      putPrepared: (record) => inner.putPrepared(record),
+      getPrepared: (prepareId) => inner.getPrepared(prepareId),
+      markPreparedUsed: (prepareId, submissionId, usedAt) => inner.markPreparedUsed(prepareId, submissionId, usedAt),
+      reserveNonce: (key, options) => inner.reserveNonce(key, options),
+      releaseNonce: (key) => inner.releaseNonce(key),
+      putSubmission: async (submission) => {
+        putSubmissionCalls += 1;
+        if (putSubmissionCalls === 1) {
+          throw new Error("simulated durable patch store outage");
+        }
+        return inner.putSubmission(submission);
+      },
+      getSubmission: (submissionId) => inner.getSubmission(submissionId),
+    };
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
       deploymentBlock: 0n,
@@ -982,7 +1088,7 @@ describe("stage executor/resource patch Product API", () => {
       now: () => baseNow,
       prepareIdFactory: () => "prep_1",
       submissionIdFactory: () => "sub_1",
-      stageExecutorPatchStore: failingStore,
+      stageExecutorPatchStore: flakyStore,
       broadcastAdapter: innerBroadcast,
     });
     const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
@@ -1012,6 +1118,17 @@ describe("stage executor/resource patch Product API", () => {
       body: submitBody,
     })).rejects.toThrow("simulated durable patch store outage");
 
+    // 第一次 putSubmission 抛错，catch 中的尽力落档补上带 txHash 的
+    // persist_failed 档案——链上哈希不零留痕，对账可凭哈希追。
+    expect(putSubmissionCalls).toBe(2);
+    await expect(inner.getSubmission("sub_1")).resolves.toMatchObject({
+      status: "failed",
+      broadcastStatus: "failed",
+      txHash,
+      errorCode: "persist_failed",
+      retryable: false,
+    });
+
     // nonce 未释放：同一 prepareId 重试撞 duplicate_stage_executor_patch_nonce
     //（409），不会二次广播；补单交给 reconcile 从链上回执对账。
     const retried = await router.handle({
@@ -1024,7 +1141,6 @@ describe("stage executor/resource patch Product API", () => {
       status: 409,
       body: { error: "duplicate_stage_executor_patch_nonce" },
     });
-    expect(failingStore.putSubmissionCalls).toBe(1);
   });
 
   it("releases the reserved patch nonce when the broadcast throws before producing a txHash so the same prepareId stays retryable", async () => {
@@ -1762,6 +1878,7 @@ describe("stage patch durable store (sqlite)", () => {
       nonceKey: "executor:31337:0xabc:1",
       taskId: "task_1",
       patchHash: "0x" + "11".repeat(32),
+      deadline: String(Math.floor(baseNow.getTime() / 1000) + 600),
       status: "prepared"
     } as unknown as PreparedStageExecutorPatchRecord;
     await first.putPrepared(prepared);
@@ -1791,6 +1908,20 @@ describe("stage patch durable store (sqlite)", () => {
       await expect(second.reserveNonce("executor:31337:0xabc:1")).resolves.toBe(false);
       await second.releaseNonce("executor:31337:0xabc:1");
       await expect(second.reserveNonce("executor:31337:0xabc:1")).resolves.toBe(true);
+
+      // 持久表清扫（此前只进不出）：过期 prepare 按 deadline 列删除，
+      // 存活行不受影响——每行数 KB（含完整 typedData）的表不再无界堆叠。
+      await second.putPrepared({
+        ...prepared,
+        prepareId: "prep_restart_expired",
+        nonceKey: "executor:31337:0xabc:2",
+        deadline: String(Math.floor(baseNow.getTime() / 1000) - 1)
+      } as unknown as PreparedStageExecutorPatchRecord);
+      await expect(
+        second.deleteExpiredPrepared(String(Math.floor(baseNow.getTime() / 1000)))
+      ).resolves.toBe(1);
+      await expect(second.getPrepared("prep_restart_expired")).resolves.toBeUndefined();
+      await expect(second.getPrepared("prep_restart_1")).resolves.toBeDefined();
     } finally {
       await second.close();
     }

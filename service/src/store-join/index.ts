@@ -9,6 +9,7 @@ export { InMemoryStoreJoinApplicationStore } from "./memory-store.js";
 export { SqliteStoreJoinApplicationStore } from "./sqlite-store.js";
 export {
   StoreJoinServiceError,
+  StoreJoinOpenApplicationExistsError,
   type StoreJoinActor,
   type StoreJoinApplicationDetailDTO,
   type StoreJoinApplicationEventRecord,

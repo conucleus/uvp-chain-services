@@ -1,4 +1,12 @@
-import type { PreparedSubmissionRecord, ProductSubmissionDTO, ProductSubmissionStore } from "./types.js";
+import type {
+  PreparedSubmissionRecord,
+  ProductSubmissionDTO,
+  ProductSubmissionScanCursor,
+  ProductSubmissionStore
+} from "./types.js";
+
+/** 台账扫描的"未闭环"状态集（与 reconcile worker 的行级口径同源）。 */
+const OPEN_SUBMISSION_STATUSES = new Set(["broadcasting", "submitted", "indexing", "failed"]);
 
 export class InMemoryProductSubmissionStore implements ProductSubmissionStore {
   readonly #prepared = new Map<string, PreparedSubmissionRecord>();
@@ -63,6 +71,18 @@ export class InMemoryProductSubmissionStore implements ProductSubmissionStore {
 
   async listSubmissions(): Promise<readonly ProductSubmissionDTO[]> {
     return [...this.#submissions.values()].sort(compareSubmissionCreatedAsc);
+  }
+
+  async listOpenSubmissionsPage(
+    after: ProductSubmissionScanCursor | undefined,
+    limit: number
+  ): Promise<readonly ProductSubmissionDTO[]> {
+    return (await this.listSubmissions())
+      .filter((submission) => OPEN_SUBMISSION_STATUSES.has(submission.status))
+      .filter((submission) => !after
+        || submission.createdAt > after.createdAt
+        || (submission.createdAt === after.createdAt && submission.submissionId > after.submissionId))
+      .slice(0, Math.max(limit, 0));
   }
 }
 

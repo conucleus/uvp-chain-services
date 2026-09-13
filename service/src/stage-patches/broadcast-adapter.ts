@@ -60,77 +60,82 @@ const DEFAULT_RELAYER_PRIVATE_KEY_ENV = "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
 
+/** 分类标签随工厂导出：conformance 测试复用同一份标签做"revert 名→检测模式"锁定。 */
+export const STAGE_EXECUTOR_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLabels<PreparedStageExecutorPatchDTO> = {
+  label: "stage executor patch",
+  invalidSignatureError: "invalid_stage_executor_patch_signature",
+  staleNonceError: "stale_stage_executor_patch_nonce",
+  genericFailureError: "stage_executor_patch_broadcast_failed",
+  buildCall: (config, prepared, request) => buildApplyStageExecutorPatchForCall(
+    {
+      stagePatchModuleAddress: config.stagePatchModuleAddress,
+      ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
+    },
+    {
+      planId: prepared.planId,
+      orderId: prepared.onchainOrderId,
+      patch: {
+        selectorStageId: prepared.selectorStageId,
+        targetStageId: prepared.targetStageId,
+        executor: prepared.executorWallet,
+        role: prepared.roleHash,
+        executorMetadataHash: prepared.executorMetadataHash,
+        mode: prepared.modeHash,
+        previousExecutor: prepared.previousExecutor ?? ZERO_ADDRESS,
+        approvalSourceId: prepared.approvalSourceId ?? ZERO_BYTES32,
+        approvalSignalId: prepared.approvalSignalId ?? ZERO_BYTES32,
+        patchHash: prepared.patchHash,
+        patchNonce: prepared.patchNonce,
+        metadataURI: prepared.metadataURI
+      },
+      selector: prepared.selectorWallet,
+      deadline: prepared.deadline,
+      selectorSignature: request.signature,
+      previousExecutorSignature: request.previousExecutorSignature ?? "0x"
+    }
+  )
+};
+
+export const STAGE_RESOURCE_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLabels<PreparedStageResourcePatchDTO> = {
+  label: "stage resource patch",
+  invalidSignatureError: "invalid_stage_resource_patch_signature",
+  staleNonceError: "stale_stage_resource_patch_nonce",
+  genericFailureError: "stage_resource_patch_broadcast_failed",
+  buildCall: (config, prepared, request) => buildApplyStageResourcePatchForCall(
+    {
+      stagePatchModuleAddress: config.stagePatchModuleAddress,
+      ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
+    },
+    {
+      planId: prepared.planId,
+      orderId: prepared.onchainOrderId,
+      patch: {
+        selectorStageId: prepared.selectorStageId,
+        targetStageId: prepared.targetStageId,
+        resourceKey: prepared.resourceKey,
+        manifestHash: prepared.manifestHash,
+        policyHash: prepared.policyHash,
+        patchHash: prepared.patchHash,
+        patchNonce: prepared.patchNonce,
+        manifestURI: prepared.manifestURI
+      },
+      selector: prepared.selectorWallet,
+      deadline: prepared.deadline,
+      signature: request.signature
+    }
+  )
+};
+
 export function createStateMachineStageExecutorPatchBroadcastAdapter(
   options: StateMachineStageExecutorPatchBroadcastAdapterOptions
 ): StageExecutorPatchBroadcastAdapter {
-  return createStagePatchBroadcastAdapter(options, {
-    label: "stage executor patch",
-    invalidSignatureError: "invalid_stage_executor_patch_signature",
-    staleNonceError: "stale_stage_executor_patch_nonce",
-    genericFailureError: "stage_executor_patch_broadcast_failed",
-    buildCall: (config, prepared, request) => buildApplyStageExecutorPatchForCall(
-      {
-        stagePatchModuleAddress: config.stagePatchModuleAddress,
-        ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
-      },
-      {
-        planId: prepared.planId,
-        orderId: prepared.onchainOrderId,
-        patch: {
-          selectorStageId: prepared.selectorStageId,
-          targetStageId: prepared.targetStageId,
-          executor: prepared.executorWallet,
-          role: prepared.roleHash,
-          executorMetadataHash: prepared.executorMetadataHash,
-          mode: prepared.modeHash,
-          previousExecutor: prepared.previousExecutor ?? ZERO_ADDRESS,
-          approvalSourceId: prepared.approvalSourceId ?? ZERO_BYTES32,
-          approvalSignalId: prepared.approvalSignalId ?? ZERO_BYTES32,
-          patchHash: prepared.patchHash,
-          patchNonce: prepared.patchNonce,
-          metadataURI: prepared.metadataURI
-        },
-        selector: prepared.selectorWallet,
-        deadline: prepared.deadline,
-        selectorSignature: request.signature,
-        previousExecutorSignature: request.previousExecutorSignature ?? "0x"
-      }
-    )
-  });
+  return createStagePatchBroadcastAdapter(options, STAGE_EXECUTOR_PATCH_BROADCAST_LABELS);
 }
 
 export function createStateMachineStageResourcePatchBroadcastAdapter(
   options: StateMachineStageResourcePatchBroadcastAdapterOptions
 ): StageResourcePatchBroadcastAdapter {
-  return createStagePatchBroadcastAdapter(options, {
-    label: "stage resource patch",
-    invalidSignatureError: "invalid_stage_resource_patch_signature",
-    staleNonceError: "stale_stage_resource_patch_nonce",
-    genericFailureError: "stage_resource_patch_broadcast_failed",
-    buildCall: (config, prepared, request) => buildApplyStageResourcePatchForCall(
-      {
-        stagePatchModuleAddress: config.stagePatchModuleAddress,
-        ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
-      },
-      {
-        planId: prepared.planId,
-        orderId: prepared.onchainOrderId,
-        patch: {
-          selectorStageId: prepared.selectorStageId,
-          targetStageId: prepared.targetStageId,
-          resourceKey: prepared.resourceKey,
-          manifestHash: prepared.manifestHash,
-          policyHash: prepared.policyHash,
-          patchHash: prepared.patchHash,
-          patchNonce: prepared.patchNonce,
-          manifestURI: prepared.manifestURI
-        },
-        selector: prepared.selectorWallet,
-        deadline: prepared.deadline,
-        signature: request.signature
-      }
-    )
-  });
+  return createStagePatchBroadcastAdapter(options, STAGE_RESOURCE_PATCH_BROADCAST_LABELS);
 }
 
 type PreparedPatchForBroadcast =
@@ -328,7 +333,19 @@ interface ClassifiedBroadcastError {
   readonly retryable: boolean;
 }
 
-function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroadcast>(
+/**
+ * stage patch 广播错误的分类（viem 抛穿 writeContract/getChainId 的错误）。
+ * 导出供 error-taxonomy conformance 测试做"合约 revert 名→检测模式"锁定；
+ * 合约错误名以权威 ABI 为准——UVPStateMachine 的错误名可从
+ * @uvp-eth/protocol-bindings 的 UVP_STATE_MACHINE_ARTIFACT_ABI 交叉验证
+ * （error-taxonomy conformance 测试锁定），UVPStagePatchModule 自身的错误
+ * 名以合约源为准。检测串必须是真实合约错误名：近似名（如历史上的
+ * "StaleStagePatchNonce"/"UnauthorizedStageSelector"）与真实名
+ * （StageExecutorPatchNonceNotIncreasing/UnauthorizedStageExecutorPatchSelector）
+ * 互不为子串，失配会让一切持久性 revert 落进泛 retryable 分支，同一
+ * prepare 被无限重试链上必拒的变更。
+ */
+export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroadcast>(
   error: unknown,
   labels: StagePatchBroadcastAdapterLabels<TPrepared>
 ): ClassifiedBroadcastError {
@@ -336,9 +353,20 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
   const name = findErrorName(error);
   const haystack = `${name ?? ""} ${text}`;
   if (
-    haystack.includes("InvalidStagePatchSignature") ||
+    haystack.includes("ExpiredStageExecutorPatchSignature") ||
+    haystack.includes("ExpiredStageResourcePatchSignature")
+  ) {
+    return {
+      errorCode: `expired_${labels.invalidSignatureError.replace(/^invalid_/, "")}`,
+      message: `${labels.label} signature deadline has expired on chain`,
+      retryable: false
+    };
+  }
+  if (
     haystack.includes("InvalidStageExecutorPatchSignature") ||
-    haystack.includes("InvalidStageResourcePatchSignature")
+    haystack.includes("InvalidStageResourcePatchSignature") ||
+    haystack.includes("InvalidStageExecutorPatchSignatureLength") ||
+    haystack.includes("InvalidStageResourcePatchSignatureLength")
   ) {
     return {
       errorCode: labels.invalidSignatureError,
@@ -347,9 +375,8 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
     };
   }
   if (
-    haystack.includes("StaleStagePatchNonce") ||
-    haystack.includes("StaleStageExecutorPatchNonce") ||
-    haystack.includes("StaleStageResourcePatchNonce")
+    haystack.includes("StageExecutorPatchNonceNotIncreasing") ||
+    haystack.includes("StageResourcePatchNonceNotIncreasing")
   ) {
     return {
       errorCode: labels.staleNonceError,
@@ -358,9 +385,8 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
     };
   }
   if (
-    haystack.includes("UnauthorizedSignalSubmitter") ||
-    haystack.includes("UnauthorizedStageSelector") ||
-    haystack.includes("UnauthorizedStageResourceSelector")
+    haystack.includes("UnauthorizedStageExecutorPatchSelector") ||
+    haystack.includes("UnauthorizedStageResourcePatchSelector")
   ) {
     return {
       errorCode: "selector_not_authorized",
@@ -368,11 +394,32 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
       retryable: false
     };
   }
+  // UnknownOrder 先于泛 reverted 判定：viem 的合约执行错误文本同时含
+  // "reverted." 与 "Error: UnknownOrder()"，泛规则在前会把"订单尚未注册/
+  // 索引未跟上"的典型瞬态永久死信（对齐 submissions/relayer 的既有规则）。
+  if (haystack.includes("UnknownOrder")) {
+    return {
+      errorCode: "unknown_order",
+      message: "order is not registered on the state machine",
+      retryable: true
+    };
+  }
   if (/timeout|timed out|ETIMEDOUT|AbortError|ECONNRESET/i.test(haystack)) {
     return {
       errorCode: "rpc_timeout",
       message: `RPC request timed out while broadcasting the ${labels.label}`,
       retryable: true
+    };
+  }
+  // 泛 revert 兜底（对齐 submissions/broadcast-adapter 既有规则）：发送前
+  // viem 的 gas 预估（estimateGas）对必拒交易抛泛 revert——真实执行失败按
+  // 永久失败处理，继续按可重试无限重放同一签名载荷只会重复烧 gas。位置
+  // 必须在 UnknownOrder/timeout 等瞬态判定之后，否则复合文本的瞬态被误判。
+  if (/execution reverted|transaction reverted|reverted/i.test(haystack)) {
+    return {
+      errorCode: "transaction_reverted",
+      message: `state-machine transaction reverted before the ${labels.label} was accepted`,
+      retryable: false
     };
   }
   return {

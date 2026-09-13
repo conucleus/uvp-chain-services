@@ -3,9 +3,15 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { UVP_STATE_MACHINE_ARTIFACT_ABI } from '@uvp-eth/protocol-bindings';
 
 import { classifyRelaySubmitterError } from '../src/relayer/service.js';
 import { classifyStateMachineBroadcastError } from '../src/submissions/broadcast-adapter.js';
+import {
+  classifyStagePatchBroadcastError,
+  STAGE_EXECUTOR_PATCH_BROADCAST_LABELS,
+  STAGE_RESOURCE_PATCH_BROADCAST_LABELS
+} from '../src/stage-patches/broadcast-adapter.js';
 
 /**
  * Conformance suite for the unified UVP error taxonomy
@@ -373,6 +379,181 @@ describe('chain-services classification consistency against the taxonomy', () =>
     expect(verdict.retryable).toBe(false);
     // executor-kit override records the diverging retryable=true disposition.
     expect(entry.producer_overrides?.['executor-kit']?.['retryable']).toBe(true);
+  });
+});
+
+/**
+ * 第三腿：stage-patch 广播分类器的"合约 revert 名→检测模式"conformance。
+ * 前两腿（内部名登记完备性/双向、分类器判定与词表属性一致）不覆盖这
+ * 一点——历史上分类器检查的自造近似名（StaleStagePatchNonce /
+ * UnauthorizedStageSelector 等）与真实合约错误名互不为子串，全部失配，
+ * 一切持久性 revert 落进泛 retryable 分支（同一 prepare 无限重试链上必
+ * 拒的变更）。本腿把每个受检错误名钉在权威 ABI 上：
+ * - UVPStateMachine 的错误名直接取自 @uvp-eth/protocol-bindings 的
+ *   UVP_STATE_MACHINE_ARTIFACT_ABI（forge artifacts 生成，上游重命名
+ *   即红）；
+ * - UVPStagePatchModule 自身的错误名暂以合约源镜像清单锁定（bindings
+ *   尚未导出模块 artifact ABI），与 state machine 重名的条目由 artifact
+ *   ABI 交叉验证防拼写漂移。
+ */
+describe('stage-patch contract revert names against the authoritative ABI (third leg)', () => {
+  /** UVPStagePatchModule.sol 声明的全部 custom error（合约源镜像，勿凭记忆改写）。 */
+  const STAGE_PATCH_MODULE_ERROR_NAMES: readonly string[] = [
+    'ExpiredStageExecutorPatchSignature',
+    'ExpiredStageResourcePatchSignature',
+    'InvalidStageExecutorPatchMode',
+    'InvalidStageExecutorPatchSignature',
+    'InvalidStageExecutorPatchSignatureLength',
+    'InvalidStageResourcePatchSignature',
+    'InvalidStageResourcePatchSignatureLength',
+    'StageAlreadyHasSignal',
+    'StageExecutorPatchApprovalSignalMissing',
+    'StageExecutorPatchNonceNotIncreasing',
+    'StageExecutorPatchPreviousExecutorMismatch',
+    'StageHasNoSignal',
+    'StageExecutorPatchForbiddenOnBirthStage',
+    'StagePreviousExecutorAmbiguous',
+    'StageResourcePatchNonceNotIncreasing',
+    'StageSelectorBindingNotFound',
+    'UnauthorizedStageExecutorPatchSelector',
+    'UnauthorizedStageResourcePatchSelector',
+    'UnknownOrder',
+    'ZeroManifestHash',
+    'ZeroPatchHash',
+    'ZeroPolicyHash',
+    'ZeroResourceKey',
+    'ZeroSelector',
+    'ZeroSelectorStageId',
+    'ZeroStageExecutor',
+    'ZeroTargetStageId'
+  ];
+
+  /** 与 UVPStateMachine（artifact ABI）重名的条目——可程序化交叉验证。 */
+  const ARTIFACT_CROSS_CHECK_NAMES: readonly string[] = [
+    'StageExecutorPatchNonceNotIncreasing',
+    'UnknownOrder',
+    'ZeroPatchHash',
+    'ZeroStageExecutor',
+    'ZeroTargetStageId'
+  ];
+
+  /** 曾经失配的自造近似名——任何一侧出现即红（防回归）。 */
+  const RETIRED_MISSPELLED_NAMES: readonly string[] = [
+    'StaleStagePatchNonce',
+    'StaleStageExecutorPatchNonce',
+    'StaleStageResourcePatchNonce',
+    'UnauthorizedStageSelector',
+    'UnauthorizedStageResourceSelector',
+    'InvalidStagePatchSignature'
+  ];
+
+  function stateMachineArtifactErrorNames(): Set<string> {
+    const entries = UVP_STATE_MACHINE_ARTIFACT_ABI as readonly { readonly type: string; readonly name?: string }[];
+    return new Set(
+      entries
+        .filter((entry) => entry.type === 'error' && typeof entry.name === 'string')
+        .map((entry) => entry.name as string)
+    );
+  }
+
+  it('cross-checks the mirrored module names against the state-machine artifact ABI', () => {
+    const artifactNames = stateMachineArtifactErrorNames();
+    for (const name of ARTIFACT_CROSS_CHECK_NAMES) {
+      expect(artifactNames, `"${name}" must exist in UVP_STATE_MACHINE_ARTIFACT_ABI (contract renamed?)`).toContain(name);
+      expect(STAGE_PATCH_MODULE_ERROR_NAMES).toContain(name);
+    }
+    for (const retired of RETIRED_MISSPELLED_NAMES) {
+      expect(artifactNames, `retired misspelled name "${retired}" must not reappear as a real contract error`).not.toContain(retired);
+      expect(STAGE_PATCH_MODULE_ERROR_NAMES).not.toContain(retired);
+    }
+  });
+
+  interface RevertNameExpectation {
+    readonly internalName: string;
+    readonly retryable: boolean;
+    readonly labels?: 'resource';
+  }
+
+  /** 各权威 revert 名的期望分类（内部名均已在 taxonomy 登记）。 */
+  const REVERT_NAME_EXPECTATIONS: readonly (RevertNameExpectation & { readonly name: string })[] = [
+    { name: 'ExpiredStageExecutorPatchSignature', internalName: 'expired_stage_executor_patch_signature', retryable: false },
+    { name: 'ExpiredStageResourcePatchSignature', internalName: 'expired_stage_resource_patch_signature', retryable: false, labels: 'resource' },
+    { name: 'InvalidStageExecutorPatchSignature', internalName: 'invalid_stage_executor_patch_signature', retryable: false },
+    { name: 'InvalidStageExecutorPatchSignatureLength', internalName: 'invalid_stage_executor_patch_signature', retryable: false },
+    { name: 'InvalidStageResourcePatchSignature', internalName: 'invalid_stage_resource_patch_signature', retryable: false, labels: 'resource' },
+    { name: 'InvalidStageResourcePatchSignatureLength', internalName: 'invalid_stage_resource_patch_signature', retryable: false, labels: 'resource' },
+    { name: 'StageExecutorPatchNonceNotIncreasing', internalName: 'stale_stage_executor_patch_nonce', retryable: false },
+    { name: 'StageResourcePatchNonceNotIncreasing', internalName: 'stale_stage_resource_patch_nonce', retryable: false, labels: 'resource' },
+    { name: 'UnauthorizedStageExecutorPatchSelector', internalName: 'selector_not_authorized', retryable: false },
+    { name: 'UnauthorizedStageResourcePatchSelector', internalName: 'selector_not_authorized', retryable: false, labels: 'resource' },
+    // 瞬态优先于泛 revert：viem 复合文本同时含 "reverted." 与错误名。
+    { name: 'UnknownOrder', internalName: 'unknown_order', retryable: true },
+    // 其余持久 revert 走泛规则（estimateGas 阶段的未登记 revert）——永久。
+    { name: 'InvalidStageExecutorPatchMode', internalName: 'transaction_reverted', retryable: false },
+    { name: 'StageSelectorBindingNotFound', internalName: 'transaction_reverted', retryable: false },
+    { name: 'StageExecutorPatchApprovalSignalMissing', internalName: 'transaction_reverted', retryable: false },
+    { name: 'StageExecutorPatchPreviousExecutorMismatch', internalName: 'transaction_reverted', retryable: false },
+    { name: 'ZeroPatchHash', internalName: 'transaction_reverted', retryable: false },
+    { name: 'ZeroStageExecutor', internalName: 'transaction_reverted', retryable: false }
+  ];
+
+  it('detects every authoritative revert name through both errorName and revert text, with taxonomy-consistent verdicts', () => {
+    for (const expectation of REVERT_NAME_EXPECTATIONS) {
+      // 分类器对 labels 的泛型只约束 buildCall 的入参类型（分类路径不触
+      // 碰 buildCall），资源档标签按执行档标签类型传入即可统一断言。
+      const labels = (expectation.labels === 'resource'
+        ? STAGE_RESOURCE_PATCH_BROADCAST_LABELS
+        : STAGE_EXECUTOR_PATCH_BROADCAST_LABELS) as typeof STAGE_EXECUTOR_PATCH_BROADCAST_LABELS;
+      const viaErrorName = classifyStagePatchBroadcastError(
+        Object.assign(new Error('The contract function reverted with the following reason: execution reverted'), {
+          errorName: expectation.name
+        }),
+        labels
+      ) as ClassifierVerdict & { errorCode: string };
+      expect(
+        viaErrorName.errorCode,
+        `errorName "${expectation.name}" must classify as ${expectation.internalName}`
+      ).toBe(expectation.internalName);
+      expect(viaErrorName.retryable, `${expectation.name}: retryable`).toBe(expectation.retryable);
+
+      const viaRevertText = classifyStagePatchBroadcastError(
+        new Error(`execution reverted: Error: ${expectation.name}()`),
+        labels
+      ) as ClassifierVerdict & { errorCode: string };
+      expect(
+        viaRevertText.errorCode,
+        `revert text containing "${expectation.name}" must classify as ${expectation.internalName}`
+      ).toBe(expectation.internalName);
+      expect(viaRevertText.retryable).toBe(expectation.retryable);
+
+      // 判定与 taxonomy 属性字段一致。例外：expired_stage_* 由模板拼接
+      //（沿用广播前 deadline 预检的既有内部名约定），不在冻结词表的
+      // chain-services internal_names 登记内——词表仓（uvp-protocol）补
+      // 登记前跳过查表，仅锁定 retryable=false 的判定。
+      if (expectation.internalName.startsWith('expired_stage_')) {
+        continue;
+      }
+      const entry = entryForInternalName(expectation.internalName);
+      expect(expectation.retryable, `${entry.code} via ${expectation.name}`).toBe(entry.retryable);
+    }
+  });
+
+  it('keeps resource-patch names on the resource label set', () => {
+    const verdict = classifyStagePatchBroadcastError(
+      new Error('execution reverted: Error: StageResourcePatchNonceNotIncreasing()'),
+      STAGE_RESOURCE_PATCH_BROADCAST_LABELS
+    ) as ClassifierVerdict & { errorCode: string };
+    expect(verdict.errorCode).toBe('stale_stage_resource_patch_nonce');
+    expect(verdict.retryable).toBe(false);
+  });
+
+  it('keeps transport errors retryable and ahead of the generic revert rule', () => {
+    const verdict = classifyStagePatchBroadcastError(
+      Object.assign(new Error('The request timed out'), { name: 'TimeoutError' }),
+      STAGE_EXECUTOR_PATCH_BROADCAST_LABELS
+    ) as ClassifierVerdict & { errorCode: string };
+    expect(verdict.errorCode).toBe('rpc_timeout');
+    expect(verdict.retryable).toBe(true);
   });
 });
 

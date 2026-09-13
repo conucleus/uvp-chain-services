@@ -1079,6 +1079,106 @@ describe("chain-services config", () => {
     })).rejects.toThrow(/UVPStagePatchModule=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa conflicts with deployment/);
   });
 
+  it("rejects flat UVPStateMachine addresses that diverge from the active deployment", async () => {
+    // 状态机地址双轨：字节码预检/BFF 广播与签名域取扁平键，模块投影与
+    // E20 跨部署守卫取 active deployment——两轨同配不一致即静默分叉。
+    const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-sm-drift-"));
+    tempDirs.push(manifestDir);
+    const manifestPath = join(manifestDir, "addresses.sm-drift.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
+      stateMachineDeployments: [
+        {
+          deploymentId: `0x${"02".repeat(32)}`,
+          stateMachineAddress: "0x9999999999999999999999999999999999999999",
+          status: "active",
+          deploymentBlock: "20",
+          modules: {
+            stagePatch: "0x4444444444444444444444444444444444444444",
+            derivedSignal: "0x5555555555555555555555555555555555555555",
+            docking: "0x6666666666666666666666666666666666666666",
+            planMetadata: "0x8888888888888888888888888888888888888888",
+            orderLink: "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+            lens: "0x7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c"
+          }
+        }
+      ],
+      contracts: {
+        // 与 deployment.stateMachineAddress 漂移的扁平键。
+        UVPStateMachine: {
+          address: "0x1111111111111111111111111111111111111111",
+          deployment: { blockNumber: 20 }
+        }
+      }
+    }));
+
+    const env = {
+      UVP_ADDRESS_MANIFEST: manifestPath,
+      UVP_RPC_URL: "http://127.0.0.1:8545"
+    };
+    await expect(runConfigPreflight(loadConfigFromEnv(env), { env })).rejects.toThrow(
+      /contracts\.UVPStateMachine=0x1111111111111111111111111111111111111111 does not match active deployment/
+    );
+  });
+
+  it("warns when UVP_CONTRACTS_JSON overrides address-manifest contract entries", () => {
+    const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-json-override-"));
+    tempDirs.push(manifestDir);
+    const manifestPath = join(manifestDir, "addresses.override.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      schemaVersion: "uvp-eth.addresses.v1",
+      contracts: {
+        UVPStateMachine: {
+          address: "0x1111111111111111111111111111111111111111",
+          deployment: { blockNumber: 20 }
+        }
+      }
+    }));
+
+    const env = {
+      UVP_ADDRESS_MANIFEST: manifestPath,
+      UVP_CONTRACTS_JSON: JSON.stringify({
+        UVPStateMachine: "0x9999999999999999999999999999999999999999"
+      })
+    };
+    const diagnostics = buildConfigDiagnostics(loadConfigFromEnv(env), { env });
+    expect(diagnostics.warnings).toContainEqual(
+      expect.stringContaining("UVP_CONTRACTS_JSON overrides the UVP_ADDRESS_MANIFEST entry for UVPStateMachine")
+    );
+
+    // 地址一致（或清单缺席）不算覆盖漂移，不告警。
+    const consistentEnv = {
+      UVP_ADDRESS_MANIFEST: manifestPath,
+      UVP_CONTRACTS_JSON: JSON.stringify({
+        UVPStateMachine: "0x1111111111111111111111111111111111111111"
+      })
+    };
+    const consistent = buildConfigDiagnostics(loadConfigFromEnv(consistentEnv), { env: consistentEnv });
+    expect(consistent.warnings).not.toContainEqual(
+      expect.stringContaining("UVP_CONTRACTS_JSON overrides")
+    );
+  });
+
+  it("requires wait-for-receipt registration and the reconcile worker in production", () => {
+    // 档位倒挂收口（对照 staging）：fire-and-forget 注册与缺席对账在
+    // 生产都是启动期拦截项，不允许静默降档。
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: undefined
+    }))).toThrow(/UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in production/);
+
+    expect(() => loadConfigFromEnv(productionEnv({
+      RECONCILE_WORKER_ENABLED: undefined
+    }))).toThrow(/RECONCILE_WORKER_ENABLED=true is required in production/);
+  });
+
+  it("requires an informed acknowledgement for testnet auto migrations", () => {
+    // 自动迁移知情门（对照 production/staging 档）：受管 PG 的启动期 DDL
+    // 必须显式确认知情。
+    expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
+      UVP_TESTNET_ALLOW_AUTO_MIGRATIONS: undefined
+    }))).toThrow(/UVP_TESTNET_ALLOW_AUTO_MIGRATIONS=1/);
+  });
+
   it("enforces a finality confirmation floor of 2 in production preflight", async () => {
     // 确认数是 reorg 缓冲，配 1 形同虚设——单块重组即可穿透
     // 最终性窗口；生产下限 2，启动期显式失败。（达标面由既有生产
@@ -1642,6 +1742,10 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Reco
     CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:db-secret@prod-db.internal:5432/uvp",
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
+    // production 档位倒挂收口：等回执注册与对账 worker 是生产基线
+    //（对照 staging 口径），基线 env 一并带上。
+    UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: "true",
+    RECONCILE_WORKER_ENABLED: "true",
     ...storeAuthJwtEnv,
     UVP_CONTRACTS_JSON: productionContracts,
     UVP_EVIDENCE_STORAGE_ADAPTER: "s3",
@@ -1695,6 +1799,9 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: databaseUrl,
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "true",
+    // testnet 自动迁移知情门（对照 production/staging 档）：基线 env 显式
+    // 确认知情。
+    UVP_TESTNET_ALLOW_AUTO_MIGRATIONS: "1",
     UVP_INDEXER_POLL_INTERVAL_MS: "5000",
     UVP_CHAIN_ID: "84532",
     UVP_RPC_URL: "https://base-sepolia.example/rpc",
