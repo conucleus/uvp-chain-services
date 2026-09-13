@@ -186,11 +186,13 @@ export function createStoreConsoleRouteModule(options: {
 
       const storeOrderCandidatesMatch = /^\/store\/orders\/([^/]+)\/candidates$/.exec(request.pathname);
       if (request.method === "GET" && storeOrderCandidatesMatch) {
-        // 候选清单暴露订单/任务/钱包映射，与 /store 运行时读同口径：
-        // 运营观察面要求 store.audit.read 能力，纯钱包会话不可读。
-        const authorization = await authorizeStoreCapability(context, request, "store.audit.read", { type: "store_runtime" });
-        if (!isStoreAuthorizationResult(authorization)) {
-          return authorization;
+        // 歧义订单消歧页是产品向能力（/store/search 的 order 结果与跨部署
+        // 候选页消费它），候选只携带部署级元数据（链/状态机地址/状态），
+        // 不含钱包或提交者映射——要求会话锚定钱包身份即可，匿名不可枚举。
+        // 运营观察面（observation/replay/audit-summary）才是能力门管辖面。
+        const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+        if (!wallet.ok) {
+          return wallet.response;
         }
         return {
           status: 200,

@@ -716,6 +716,9 @@ function applyStateMachineEvent(
     case "DockOutputSubmitted":
       applyDockOutputSubmitted(state, event);
       return;
+    case "DockOutputSatisfied":
+      applyDockOutputSatisfied(state, event);
+      return;
     case "DerivedSignalSubmitted":
       applyDerivedSignalSubmitted(state, event);
       return;
@@ -1807,6 +1810,63 @@ function applyDockOutputSubmitted(
   localOrder.updatedAt = provenanceOf(event);
   appendOrderProof(localOrder, proof);
   appendOrderTimeline(localOrder, timelineOf(event, "子订单事实已映射回父订单", proof, {
+    orderId: dock.localOrderId,
+    planId: dock.localPlanId
+  }));
+}
+
+/** 兄弟 output 绑定的等价交付满足：没有发生新的镜像写入，只把该绑定收敛为
+ * 已交付——不落子侧"已回写"与父侧"映射事实落账"时间线（那两条属于真正
+ * 执行过写入的 Submitted 事件），父侧只留一条说明性时间线供审计解释该绑定
+ * 为何没有 Submitted 事件。 */
+function applyDockOutputSatisfied(
+  state: {
+    modules: StateMachineModuleIndex;
+    diagnostics: ProjectionReplayDiagnostics;
+    orders: Map<string, MutableStateMachineOrderProjection>;
+    docks: Map<string, MutableStateMachineDockProjection>;
+  },
+  event: ChainEvent
+): void {
+  const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
+  const dock = findDockForEvent(state, event, dockInstanceId);
+  if (!dock) {
+    state.diagnostics.unresolvedDockEventCount += 1;
+    return;
+  }
+  const outputBindingHash = requiredBytes32Arg(event, "outputBindingHash");
+  const submitter = requiredAddressArg(event, "submitter");
+  const proof = proofOf(event, {
+    orderId: dock.localOrderId,
+    planId: dock.localPlanId,
+    submitter
+  });
+  dock.outputDeliveries[outputBindingHash.toLowerCase()] = {
+    outputBindingHash,
+    localPlanId: requiredBytes32Arg(event, "localPlanId"),
+    localOrderId: requiredBytes32Arg(event, "localOrderId"),
+    targetPlanId: requiredBytes32Arg(event, "targetPlanId"),
+    linkedOrderId: requiredBytes32Arg(event, "linkedOrderId"),
+    targetSignalId: requiredBytes32Arg(event, "targetSignalId"),
+    localSignalId: requiredBytes32Arg(event, "localSignalId"),
+    payloadHash: requiredBytes32Arg(event, "payloadHash"),
+    submitter,
+    deliveredAt: provenanceOf(event),
+    proof
+  };
+  dock.updatedAt = provenanceOf(event);
+
+  const localOrder = ensureStateMachineOrder(
+    state.orders,
+    event,
+    dock.localOrderId,
+    dock.localPlanId,
+    undefined,
+    dock.stateMachineAddress
+  );
+  localOrder.updatedAt = provenanceOf(event);
+  appendOrderProof(localOrder, proof);
+  appendOrderTimeline(localOrder, timelineOf(event, "绑定已由等价交付满足（本地事实已由兄弟绑定送达）", proof, {
     orderId: dock.localOrderId,
     planId: dock.localPlanId
   }));
