@@ -85,7 +85,7 @@ describe("API router composition", () => {
 
   it("active-executor overlay authorization only covers the task's recorded submit signal", async () => {
     const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
-    const { MemoryProductBffStore } = await import("../src/product/bff/store.js");
+    const { MemoryProductBffStore } = await import("../src/product/query/bff/store.js");
     const authorization = productBffStoreSubmissionAuthorization(new MemoryProductBffStore());
     const executor = "0x8888888888888888888888888888888888888888";
     const targetStageId = "0x" + "1".repeat(64);
@@ -134,7 +134,7 @@ describe("API router composition", () => {
 
   it("submission authorization honors on-chain SignalSubmitterAuthorized projections", async () => {
     const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
-    const { MemoryProductBffStore } = await import("../src/product/bff/store.js");
+    const { MemoryProductBffStore } = await import("../src/product/query/bff/store.js");
     const { MemoryProjectionStore } = await import("../src/storage/projection-store.js");
 
     // 投影携带链上事后授权（SignalSubmitterAuthorized），BFF trigger
@@ -198,7 +198,7 @@ describe("API router composition", () => {
 
   it("chain delegation leg authorizes the delegated executor by the real signal key when the explicit leg misses", async () => {
     const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
-    const { MemoryProductBffStore } = await import("../src/product/bff/store.js");
+    const { MemoryProductBffStore } = await import("../src/product/query/bff/store.js");
     const { MemoryProjectionStore } = await import("../src/storage/projection-store.js");
 
     // D-1 合并裁决：显式腿（authorizations）未命中不是终局否决——

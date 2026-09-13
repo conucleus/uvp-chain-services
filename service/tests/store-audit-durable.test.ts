@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
 import { InMemoryAuditSink } from "../src/security/index.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
-import { recordStoreAudit } from "../src/store-console/audit.js";
+import { recordStoreAudit } from "../src/store/console/audit.js";
 
 const operatorHeaders = {
   "x-uvp-store-operator-id": "audit-operator",

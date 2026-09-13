@@ -32,7 +32,7 @@ import type {
 } from "./types.js";
 import { classifyStateMachineBroadcastError } from "./broadcast-adapter.js";
 import type { EvidencePrincipal, EvidenceRecordDTO } from "../evidence/index.js";
-import { ProductOrderLookupError } from "../product/service.js";
+import { ProductOrderLookupError } from "../product/application/service.js";
 
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
 

@@ -4,10 +4,10 @@ import type { GovernanceStore, GovernanceTxLogDTO } from "../governance/index.js
 import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
 import { redactErrorMessage, redactSecrets } from "../security/redaction.js";
 import type { ProjectionRebuildMetadata, ProjectionStore, ProjectionSyncState } from "../storage/projection-store.js";
-import type { StoreDockingSessionStore } from "../store-console/docking.js";
-import type { StoreZhixuDraftStore } from "../store-console/zhixu-drafts.js";
-import type { StoreZhixuVersionMetadataStore } from "../store-console/version.js";
-import type { StoreSupplierMetadataStore } from "../store-suppliers/index.js";
+import type { StoreDockingSessionStore } from "../store/console/docking.js";
+import type { StoreZhixuDraftStore } from "../store/console/zhixu-drafts.js";
+import type { StoreZhixuVersionMetadataStore } from "../store/console/version.js";
+import type { StoreSupplierMetadataStore } from "../store/suppliers/index.js";
 import type {
   ProductSubmissionAttemptDTO,
   ProductSubmissionDTO,

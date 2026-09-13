@@ -18,7 +18,7 @@ import type { ChainEvent } from "../src/indexer/events.js";
 import {
   MemoryProductBffStore,
   type ProductBffStore,
-} from "../src/product/bff/store.js";
+} from "../src/product/query/bff/store.js";
 import {
   createProductStageExecutorPatchService,
   createProductStageResourcePatchService,

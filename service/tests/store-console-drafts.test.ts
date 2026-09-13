@@ -27,7 +27,7 @@ import type {
   StoreZhixuDraftDTO,
   StoreZhixuDraftRecord,
   StoreZhixuDraftStore
-} from "../src/store-console/zhixu-drafts.js";
+} from "../src/store/console/zhixu-drafts.js";
 
 const storeOperatorHeaders = {
   "x-uvp-store-operator-id": "operator-1",

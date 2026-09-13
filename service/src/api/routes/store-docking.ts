@@ -4,7 +4,7 @@ import {
   StoreDockingServiceError,
   type StoreDockingSessionCreateDTO,
   type StoreDraftSignalMapEntryDTO
-} from "../../store-console/docking.js";
+} from "../../store/console/docking.js";
 import {
   authorizeStoreCapability,
   isAnchoredStoreAuthorizationResult,

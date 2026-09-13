@@ -18,14 +18,14 @@ import {
   InMemoryStoreSupplierMetadataStore,
   type StoreSupplierAuditRecord,
   type StoreSupplierMetadataRecord,
-} from "../src/store-suppliers/index.js";
-import type { StoreIdentityProvider } from "../src/store-console/access.js";
+} from "../src/store/suppliers/index.js";
+import type { StoreIdentityProvider } from "../src/store/console/access.js";
 import type {
   ProductService,
   ProductTaskApiDTO,
-} from "../src/product/service.js";
+} from "../src/product/application/service.js";
 import type { Address, Hex } from "../src/shared/types.js";
-import type { ProductOrderDraftDTO } from "../src/product/bff/types.js";
+import type { ProductOrderDraftDTO } from "../src/product/query/bff/types.js";
 
 const operatorWallet = "0x1234567890123456789012345678901234567890" as Address;
 

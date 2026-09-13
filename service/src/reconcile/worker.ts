@@ -2,12 +2,12 @@ import { createPublicClient, defineChain, http } from "viem";
 import type { GovernanceStore, GovernanceTxLogScanCursor } from "../governance/store.js";
 import type { GovernanceBroadcastStatus, GovernanceTxLogDTO, GovernanceTxLogStatus, IdentityTxLogDTO } from "../governance/types.js";
 import type { BindEvidenceRequestDTO, EvidencePrincipal, EvidenceProofDTO, EvidenceRecordDTO } from "../evidence/types.js";
-import type { ProductBffStore } from "../product/bff/store.js";
+import type { ProductBffStore } from "../product/query/bff/store.js";
 import type {
   ProductOrderDraftDTO,
   ProductOrderTriggerRecord,
   ProductOrderTriggerStatus
-} from "../product/bff/types.js";
+} from "../product/query/bff/types.js";
 import type { AuditSink } from "../security/audit.js";
 import type { Logger, Hex, LifecycleService } from "../shared/types.js";
 import { noopLogger } from "../shared/types.js";

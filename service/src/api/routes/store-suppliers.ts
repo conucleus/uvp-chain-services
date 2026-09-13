@@ -6,9 +6,9 @@ import {
   StoreSupplierServiceError,
   type StoreOperatorPrincipal,
   type StoreSupplierListQuery
-} from "../../store-suppliers/service.js";
-import type { StoreAccessState, StoreCapability } from "../../store-console/access.js";
-import { isStoreAccessAuthenticated } from "../../store-console/access.js";
+} from "../../store/suppliers/service.js";
+import type { StoreAccessState, StoreCapability } from "../../store/console/access.js";
+import { isStoreAccessAuthenticated } from "../../store/console/access.js";
 import { cleanQuery, decodePathParameter, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {

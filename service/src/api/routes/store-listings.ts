@@ -1,6 +1,6 @@
 import { redactErrorMessage } from "../../security/redaction.js";
-import type { StoreListingService } from "../../store-listings/index.js";
-import { StoreListingServiceError, type StoreListingStatus, type StoreListingRecord } from "../../store-listings/index.js";
+import type { StoreListingService } from "../../store/listings/index.js";
+import { StoreListingServiceError, type StoreListingStatus, type StoreListingRecord } from "../../store/listings/index.js";
 import {
   authorizeStoreCapability,
   isAnchoredStoreAuthorizationResult,

@@ -5,11 +5,11 @@ import {
   storeAccessRequiredLevel,
   type StoreAccessState,
   type StoreCapability
-} from "../store-console/access.js";
+} from "../store/console/access.js";
 import {
   recordStoreAudit,
   type StoreAuditResource
-} from "../store-console/audit.js";
+} from "../store/console/audit.js";
 import type { AuditOutcome } from "../security/audit.js";
 import type { Address } from "../shared/types.js";
 

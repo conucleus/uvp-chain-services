@@ -1,7 +1,7 @@
 import {
   ProductBffError,
   type ProductBffService
-} from "../../product/bff/service.js";
+} from "../../product/query/bff/service.js";
 import type {
   AcceptProductInviteInput,
   CreateProductInviteInput,
@@ -13,7 +13,7 @@ import type {
   RejectProductInviteInput,
   TriggerProductOrderInput,
   UpdateProductOrderDraftInput
-} from "../../product/bff/types.js";
+} from "../../product/query/bff/types.js";
 import type { AuditSink } from "../../security/audit.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError } from "../../shared/types.js";

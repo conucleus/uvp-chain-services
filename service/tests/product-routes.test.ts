@@ -12,8 +12,8 @@ import {
 import { createApiRouter } from "../src/api/routes.js";
 import { createEvidenceService, InMemoryEvidenceStorage, ObjectEvidenceStorage } from "../src/evidence/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProductBffStore } from "../src/product/bff/store.js";
-import type { ProductService } from "../src/product/service.js";
+import { MemoryProductBffStore } from "../src/product/query/bff/store.js";
+import type { ProductService } from "../src/product/application/service.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import {
   DOCK_TARGET_ZHIXU_ID,
@@ -21,9 +21,9 @@ import {
   crossBorderStoreProductSchema,
   dockTargetPlanIds
 } from "./cross-border-schema.js";
-import { createStoreDockingService } from "../src/store-console/docking.js";
-import { MemoryStoreZhixuDraftStore } from "../src/store-console/zhixu-drafts.js";
-import { InMemoryStoreSupplierMetadataStore } from "../src/store-suppliers/service.js";
+import { createStoreDockingService } from "../src/store/console/docking.js";
+import { MemoryStoreZhixuDraftStore } from "../src/store/console/zhixu-drafts.js";
+import { InMemoryStoreSupplierMetadataStore } from "../src/store/suppliers/service.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const contractAddress = "0x1111111111111111111111111111111111111111";

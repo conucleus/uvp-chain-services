@@ -5,9 +5,9 @@ import { PostgresEvidenceStore } from "../evidence/postgres-store.js";
 import { InMemoryGovernanceStore, type GovernanceStore } from "../governance/store.js";
 import { PostgresGovernanceStore } from "../governance/postgres-store.js";
 import { SqliteGovernanceStore } from "../governance/sqlite-store.js";
-import { PostgresProductBffStore } from "../product/bff/postgres-store.js";
-import { SqliteProductBffStore } from "../product/bff/sqlite-store.js";
-import { MemoryProductBffStore, type ProductBffStore } from "../product/bff/store.js";
+import { PostgresProductBffStore } from "../product/query/bff/postgres-store.js";
+import { SqliteProductBffStore } from "../product/query/bff/sqlite-store.js";
+import { MemoryProductBffStore, type ProductBffStore } from "../product/query/bff/store.js";
 import type { Address } from "../shared/types.js";
 import { InMemoryProductSubmissionStore } from "../submissions/store.js";
 import { PostgresSubmissionStore } from "../submissions/postgres-store.js";
@@ -40,35 +40,35 @@ import {
   PostgresStoreSupplierMetadataStore,
   SqliteStoreSupplierMetadataStore,
   type StoreSupplierMetadataStore
-} from "../store-suppliers/index.js";
+} from "../store/suppliers/index.js";
 import {
   MemoryStoreDockingSessionStore,
   type StoreDockingSessionStore
-} from "../store-console/docking.js";
+} from "../store/console/docking.js";
 import {
   MemoryStoreAuditStore,
   type StoreAuditStore
-} from "../store-console/audit.js";
+} from "../store/console/audit.js";
 import {
   PostgresStoreAuditStore,
   PostgresStoreDockingSessionStore,
   PostgresStoreZhixuDraftStore,
   PostgresStoreZhixuVersionMetadataStore
-} from "../store-console/postgres-store.js";
+} from "../store/console/postgres-store.js";
 import {
   SqliteStoreAuditStore,
   SqliteStoreDockingSessionStore,
   SqliteStoreZhixuDraftStore,
   SqliteStoreZhixuVersionMetadataStore
-} from "../store-console/sqlite-store.js";
-import { MemoryStoreZhixuDraftStore, type StoreZhixuDraftStore } from "../store-console/zhixu-drafts.js";
-import { MemoryStoreZhixuVersionMetadataStore, type StoreZhixuVersionMetadataStore } from "../store-console/version.js";
+} from "../store/console/sqlite-store.js";
+import { MemoryStoreZhixuDraftStore, type StoreZhixuDraftStore } from "../store/console/zhixu-drafts.js";
+import { MemoryStoreZhixuVersionMetadataStore, type StoreZhixuVersionMetadataStore } from "../store/console/version.js";
 import { SqliteEvidenceStore } from "../evidence/sqlite-store.js";
 import {
   InMemoryStoreWalletSessionStore,
   SqliteStoreWalletSessionStore,
   type StoreWalletSessionStore
-} from "../store-sessions/index.js";
+} from "../store/sessions/index.js";
 import {
   InMemoryStorePublisherDelegationStore,
   InMemoryStoreZhixuDecorationStore,
@@ -76,7 +76,7 @@ import {
   SqliteStoreZhixuDecorationStore,
   type StorePublisherDelegationStore,
   type StoreZhixuDecorationStore
-} from "../store-decoration/index.js";
+} from "../store/decoration/index.js";
 import {
   InMemoryStoreIdentityDescriptorSnapshotStore,
   SqliteStoreIdentityDescriptorSnapshotStore
@@ -85,12 +85,12 @@ import {
   InMemoryStoreListingStore,
   SqliteStoreListingStore,
   type StoreListingStore
-} from "../store-listings/index.js";
+} from "../store/listings/index.js";
 import {
   InMemoryStoreJoinApplicationStore,
   SqliteStoreJoinApplicationStore,
   type StoreJoinApplicationStore
-} from "../store-join/index.js";
+} from "../store/join/index.js";
 import {
   PostgresStoreIdentityDescriptorSnapshotStore,
   PostgresStoreJoinApplicationStore,
@@ -98,7 +98,7 @@ import {
   PostgresStorePublisherDelegationStore,
   PostgresStoreZhixuDecorationStore
 } from "../store-access-postgres-stores.js";
-import { PostgresStoreWalletSessionStore } from "../store-sessions/index.js";
+import { PostgresStoreWalletSessionStore } from "../store/sessions/index.js";
 import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
 import { PostgresDatabase } from "./postgres-client.js";
 import { PostgresProjectionStore } from "./postgres.js";

@@ -7,13 +7,13 @@ import {
   buildActiveChainEventReplaySummary,
   sortChainEvents
 } from "./events.js";
-import type { ProjectionSnapshot } from "./projections.js";
+import type { ProjectionSnapshot } from "./projections/index.js";
+import { createEmptyProjectionSnapshot } from "./projections/index.js";
 import {
   countDuplicateActiveEventAnomalies,
   countReplayAnomalies,
-  createEmptyProjectionSnapshot,
   rebuildOrderProjections
-} from "./projections.js";
+} from "./replay.js";
 import { rebuildIdentityProjections } from "./identity-projections.js";
 import { createProjectionStore } from "../storage/factory.js";
 import { isTransientSqliteBusyError } from "../storage/sqlite.js";

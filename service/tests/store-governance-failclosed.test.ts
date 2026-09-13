@@ -24,16 +24,16 @@ import {
   ObjectEvidenceStorage
 } from "../src/evidence/index.js";
 import { verifyProofBundle } from "../src/proof-verifier/service.js";
-import { createProductService } from "../src/product/service.js";
+import { createProductService } from "../src/product/application/service.js";
 import {
   InMemoryStoreZhixuDecorationStore,
   InMemoryStorePublisherDelegationStore
-} from "../src/store-decoration/memory-store.js";
+} from "../src/store/decoration/memory-store.js";
 import {
   MemoryStoreZhixuVersionMetadataStore,
   createStoreZhixuVersionService
-} from "../src/store-console/version.js";
-import { InMemoryStoreWalletSessionStore, createStoreSessionService } from "../src/store-sessions/index.js";
+} from "../src/store/console/version.js";
+import { InMemoryStoreWalletSessionStore, createStoreSessionService } from "../src/store/sessions/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { openSqliteDatabase } from "../src/storage/sqlite.js";
 import { runSqliteMigrations } from "../src/storage/migrations.js";

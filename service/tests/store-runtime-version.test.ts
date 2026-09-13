@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { crossBorderPlanIds } from "@uvp-eth/product-dto/fixtures";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { createProductService } from "../src/product/service.js";
-import { createStoreRuntimeService } from "../src/store-console/runtime.js";
+import { createProductService } from "../src/product/application/service.js";
+import { createStoreRuntimeService } from "../src/store/console/runtime.js";
 import {
   createStoreZhixuVersionService,
   MemoryStoreZhixuVersionMetadataStore,
   type StoreZhixuVersionRecord,
-} from "../src/store-console/version.js";
+} from "../src/store/console/version.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { crossBorderSchemaResolver } from "./cross-border-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";

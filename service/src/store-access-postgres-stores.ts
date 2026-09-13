@@ -8,19 +8,19 @@ import type {
   StoreZhixuDecorationData,
   StoreZhixuDecorationStore,
   StoreZhixuDecorationVersionRecord
-} from "./store-decoration/types.js";
+} from "./store/decoration/types.js";
 import type {
   StoreJoinApplicationEventRecord,
   StoreJoinApplicationRecord,
   StoreJoinApplicationStore,
   StoreJoinApplicationStatus,
   StoreJoinTxEvidence
-} from "./store-join/types.js";
+} from "./store/join/types.js";
 import type {
   StoreListingRecord,
   StoreListingStore,
   StoreListingStatus
-} from "./store-listings/types.js";
+} from "./store/listings/types.js";
 
 /**
  * Store 域的 postgres 持久化。

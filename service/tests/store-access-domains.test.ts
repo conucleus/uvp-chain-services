@@ -11,7 +11,7 @@ import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { ApiRouter } from "../src/api/route-context.js";
 import type { Address, Hex } from "../src/shared/types.js";
 import { crossBorderSchemaResolver } from "./cross-border-schema.js";
-import type { StoreAuthChallengeRecord } from "../src/store-sessions/index.js";
+import type { StoreAuthChallengeRecord } from "../src/store/sessions/index.js";
 
 /**
  * Store 身份与会话、加入闭环、装修权限、上架与锚核验的后端验收。
@@ -211,8 +211,8 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("ignores the dev anchored address header outside local runtime", async () => {
-    const { createWalletSessionStoreIdentityProvider } = await import("../src/store-sessions/index.js");
-    const { createStoreSessionService } = await import("../src/store-sessions/index.js");
+    const { createWalletSessionStoreIdentityProvider } = await import("../src/store/sessions/index.js");
+    const { createStoreSessionService } = await import("../src/store/sessions/index.js");
     const sessionService = createStoreSessionService();
     const base = {
       async resolve() {
@@ -260,7 +260,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("wallet sessions never receive store.draft.review (governance-only capability)", async () => {
-    // 职责分离（store-console/access.ts 口径）：zhixu 草稿审核是治理动作，
+    // 职责分离（store/console/access.ts 口径）：zhixu 草稿审核是治理动作，
     // 专属 governance_admin——钱包会话的 operator/store_admin 能力表都
     // 不得下放（JWT 侧同样刻意不映射）。
     const router = await buildRouter({ operatorWallets: [operatorWallet], adminWallets: [teamDerivedWallet] });
@@ -1087,7 +1087,7 @@ it("revoking an anchored address immediately invalidates sessions for it", async
     const { tmpdir } = await import("node:os");
     const dir = mkdtempSync(join(tmpdir(), "store-decoration-sqlite-"));
     try {
-      const { SqliteStoreZhixuDecorationStore } = await import("../src/store-decoration/sqlite-store.js");
+      const { SqliteStoreZhixuDecorationStore } = await import("../src/store/decoration/sqlite-store.js");
       const decorations = new SqliteStoreZhixuDecorationStore({
         databaseUrl: `file:${join(dir, "decoration.db")}`,
         migrations: { autoRun: true }
@@ -1220,7 +1220,7 @@ describe("store listing and join store uniqueness (sqlite driver)", () => {
   });
 
   it("enforces the one-open-application invariant via the partial unique index", async () => {
-    const { SqliteStoreJoinApplicationStore, StoreJoinOpenApplicationExistsError } = await import("../src/store-join/index.js");
+    const { SqliteStoreJoinApplicationStore, StoreJoinOpenApplicationExistsError } = await import("../src/store/join/index.js");
     const store = new SqliteStoreJoinApplicationStore({
       databaseUrl: sqliteUrl(),
       migrations: { autoRun: true }
@@ -1249,7 +1249,7 @@ describe("store listing and join store uniqueness (sqlite driver)", () => {
   });
 
   it("enforces one listing per plan and maps the race loser to a typed conflict", async () => {
-    const { SqliteStoreListingStore, StoreListingPlanConflictError } = await import("../src/store-listings/index.js");
+    const { SqliteStoreListingStore, StoreListingPlanConflictError } = await import("../src/store/listings/index.js");
     const store = new SqliteStoreListingStore({
       databaseUrl: sqliteUrl(),
       migrations: { autoRun: true }
@@ -1432,7 +1432,7 @@ const addressKeyMap = new Map<string, `0x${string}`>([
 describe("store auth challenge resource bounds", () => {
   it("rate-limits live challenges per address and sweeps expired ones on write", async () => {
     const { createStoreSessionService, InMemoryStoreWalletSessionStore, StoreSessionServiceError } =
-      await import("../src/store-sessions/index.js");
+      await import("../src/store/sessions/index.js");
     let current = new Date("2026-04-28T00:00:00Z");
     const store = new InMemoryStoreWalletSessionStore();
     const service = createStoreSessionService({
@@ -1472,7 +1472,7 @@ describe("store auth challenge resource bounds", () => {
     // 连发 10 次即可锁死任意受害地址并按 TTL 续期。请求方桶把单个
     // 请求方可占用的总囤积量压到 30——换地址绕过地址配额不再可行。
     const { createStoreSessionService, StoreSessionServiceError } =
-      await import("../src/store-sessions/index.js");
+      await import("../src/store/sessions/index.js");
     const current = new Date(Date.UTC(2026, 8, 10, 0, 0, 0));
     const service = createStoreSessionService({
       config: {
@@ -1505,7 +1505,7 @@ describe("store auth challenge resource bounds", () => {
 
   it("keeps a hard cap on the in-memory challenge table", async () => {
     const { InMemoryStoreWalletSessionStore, MEMORY_CHALLENGE_HARD_LIMIT } =
-      await import("../src/store-sessions/index.js");
+      await import("../src/store/sessions/index.js");
     const store = new InMemoryStoreWalletSessionStore();
     const challengeAt = (index: number, expiresAt: string): StoreAuthChallengeRecord => ({
       nonce: `nonce${index.toString().padStart(6, "0")}`,
@@ -1544,7 +1544,7 @@ describe("store auth challenge resource bounds", () => {
     // 配额判定与写入必须原子：同地址并发签发风暴不允许整体穿透
     //（32 个并发请求在"先数后写"实现下会全部读到同一旧计数）。
     const { InMemoryStoreWalletSessionStore, StoreSessionServiceError, createStoreSessionService } =
-      await import("../src/store-sessions/index.js");
+      await import("../src/store/sessions/index.js");
     const store = new InMemoryStoreWalletSessionStore();
     const current = new Date(Date.UTC(2026, 8, 10, 0, 0, 0));
     const service = createStoreSessionService({

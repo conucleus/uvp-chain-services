@@ -20,7 +20,7 @@ import {
   dockTargetPlanIds,
 } from "./cross-border-schema.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import type { ProjectionSnapshot } from "../src/indexer/projections.js";
+import type { ProjectionSnapshot } from "../src/indexer/projections/index.js";
 import { SqliteEvidenceStore } from "../src/evidence/sqlite-store.js";
 import type { EvidenceMetadataRecord } from "../src/evidence/store.js";
 import { SqliteGovernanceStore } from "../src/governance/sqlite-store.js";
@@ -28,13 +28,13 @@ import type {
   GovernanceReviewDTO,
   IdentityTxLogDTO,
 } from "../src/governance/types.js";
-import { SqliteProductBffStore } from "../src/product/bff/sqlite-store.js";
+import { SqliteProductBffStore } from "../src/product/query/bff/sqlite-store.js";
 import type {
   DraftParticipantDTO,
   ProductInviteDTO,
   ProductOrderDraftDTO,
   ProductOrderTriggerRecord,
-} from "../src/product/bff/types.js";
+} from "../src/product/query/bff/types.js";
 import type { Address, Hex } from "../src/shared/types.js";
 import { StorageConstraintError } from "../src/storage/errors.js";
 import {
@@ -56,16 +56,16 @@ import {
   openSqliteDatabase,
   type SqliteDatabase,
 } from "../src/storage/sqlite.js";
-import type { StoreDockingSessionDTO } from "../src/store-console/docking.js";
+import type { StoreDockingSessionDTO } from "../src/store/console/docking.js";
 import type {
   StoreZhixuDraftDTO,
   StoreZhixuDraftRecord,
-} from "../src/store-console/zhixu-drafts.js";
-import type { StoreZhixuVersionRecord } from "../src/store-console/version.js";
+} from "../src/store/console/zhixu-drafts.js";
+import type { StoreZhixuVersionRecord } from "../src/store/console/version.js";
 import type {
   StoreSupplierAuditRecord,
   StoreSupplierMetadataRecord,
-} from "../src/store-suppliers/index.js";
+} from "../src/store/suppliers/index.js";
 import { SqliteSubmissionStore } from "../src/submissions/sqlite-store.js";
 import { SqliteBroadcastDedupeStore } from "../src/submissions/broadcast-dedupe-sqlite-store.js";
 import type {

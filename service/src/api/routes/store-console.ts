@@ -1,28 +1,28 @@
-import { ProductBffError } from "../../product/bff/service.js";
-import { ProductOrderLookupError } from "../../product/service.js";
+import { ProductBffError } from "../../product/query/bff/service.js";
+import { ProductOrderLookupError } from "../../product/application/service.js";
 import { GovernanceServiceError } from "../../governance/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import type { AuditOutcome } from "../../security/audit.js";
 import { ConfigError } from "../../shared/types.js";
-import { storeSessionFromAccess, hasStoreCapability, isStoreAccessAuthenticated, type StoreCapability } from "../../store-console/access.js";
-import type { StoreAuditQuery } from "../../store-console/audit.js";
-import { buildStoreClosureDryRunSummary } from "../../store-console/closure.js";
+import { storeSessionFromAccess, hasStoreCapability, isStoreAccessAuthenticated, type StoreCapability } from "../../store/console/access.js";
+import type { StoreAuditQuery } from "../../store/console/audit.js";
+import { buildStoreClosureDryRunSummary } from "../../store/console/closure.js";
 import {
   StoreRuntimeError,
   isSupportedStoreOrderFilterStatus
-} from "../../store-console/runtime.js";
-import { isPlanRegisteredProjection } from "../../store-console/version.js";
+} from "../../store/console/runtime.js";
+import { isPlanRegisteredProjection } from "../../store/console/version.js";
 import {
   StoreZhixuDraftWorkflowError
-} from "../../store-console/zhixu-drafts.js";
+} from "../../store/console/zhixu-drafts.js";
 import {
   StoreZhixuVersionError,
   type StoreZhixuVersionMutationInput
-} from "../../store-console/version.js";
+} from "../../store/console/version.js";
 import {
   type StoreConsoleListQuery,
   type StoreSearchQuery
-} from "../../store-console/service.js";
+} from "../../store/console/service.js";
 import { cleanQuery, decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiRequest, type ApiResponse } from "../route-context.js";
 import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { ChainServicesRuntimeEnv } from "../../config/index.js";
@@ -32,9 +32,9 @@ import {
   storeSessionDtoWithWalletOverlay,
   type StoreSessionService,
   type StoreWalletSessionView
-} from "../../store-sessions/index.js";
-import type { StoreDecorationService } from "../../store-decoration/index.js";
-import type { StoreListingService } from "../../store-listings/index.js";
+} from "../../store/sessions/index.js";
+import type { StoreDecorationService } from "../../store/decoration/index.js";
+import type { StoreListingService } from "../../store/listings/index.js";
 import { normalizeBytes32 } from "../../shared/types.js";
 import {
   authorizeStoreCapability,

@@ -5,12 +5,12 @@ import {
 } from "../indexer/events.js";
 import {
   createEmptyProjectionSnapshot,
-  rebuildOrderProjections,
   type OrderProjection,
   type ProjectionSnapshot,
   type StateMachineOrderProjection,
   type StateMachineTaskProjection,
-} from "../indexer/projections.js";
+} from "../indexer/projections/index.js";
+import { rebuildOrderProjections } from "../indexer/replay.js";
 import {
   createEmptyIdentityProjectionSnapshot,
   filterIdentityBindings,

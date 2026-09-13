@@ -6,10 +6,10 @@ import type {
   EvidenceStorage
 } from "../evidence/index.js";
 import type { GovernanceAdminAuthPolicy, GovernanceService, GovernanceStore } from "../governance/index.js";
-import type { ProductBffService } from "../product/bff/service.js";
-import type { ProductOrderTriggerBroadcastAdapter } from "../product/bff/trigger.js";
-import type { ProductBffStore } from "../product/bff/store.js";
-import type { ProductSchemaResolver, ProductService } from "../product/service.js";
+import type { ProductBffService } from "../product/query/bff/service.js";
+import type { ProductOrderTriggerBroadcastAdapter } from "../product/query/bff/trigger.js";
+import type { ProductBffStore } from "../product/query/bff/store.js";
+import type { ProductSchemaResolver, ProductService } from "../product/application/service.js";
 import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
 import type { RiskGraphService } from "../risk/index.js";
 import type { AuditSink } from "../security/audit.js";
@@ -35,37 +35,37 @@ import type {
 } from "../notifications/index.js";
 import type {
   StoreConsoleService
-} from "../store-console/service.js";
+} from "../store/console/service.js";
 import type {
   StoreAuditStore
-} from "../store-console/audit.js";
+} from "../store/console/audit.js";
 import type {
   StoreIdentityProvider
-} from "../store-console/access.js";
+} from "../store/console/access.js";
 import type {
   StoreDockingSessionStore,
   StoreDockingService
-} from "../store-console/docking.js";
+} from "../store/console/docking.js";
 import type {
   StoreRuntimeService
-} from "../store-console/runtime.js";
+} from "../store/console/runtime.js";
 import type {
   StoreZhixuDraftStore,
   StoreZhixuDraftWorkflowService
-} from "../store-console/zhixu-drafts.js";
+} from "../store/console/zhixu-drafts.js";
 import type {
   StoreZhixuVersionMetadataStore,
   StoreZhixuVersionService
-} from "../store-console/version.js";
+} from "../store/console/version.js";
 import type {
   StoreSupplierMetadataStore,
   StoreSupplierService
-} from "../store-suppliers/service.js";
-import type { StoreSessionService, StoreWalletSessionStore } from "../store-sessions/index.js";
-import type { StoreDecorationService, StoreZhixuDecorationStore, StorePublisherDelegationStore } from "../store-decoration/index.js";
+} from "../store/suppliers/service.js";
+import type { StoreSessionService, StoreWalletSessionStore } from "../store/sessions/index.js";
+import type { StoreDecorationService, StoreZhixuDecorationStore, StorePublisherDelegationStore } from "../store/decoration/index.js";
 import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
-import type { ListingAnchorChainView, StoreListingService, StoreListingStore } from "../store-listings/index.js";
-import type { StoreJoinService, StoreJoinApplicationStore } from "../store-join/index.js";
+import type { ListingAnchorChainView, StoreListingService, StoreListingStore } from "../store/listings/index.js";
+import type { StoreJoinService, StoreJoinApplicationStore } from "../store/join/index.js";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
 export interface ApiRequest {

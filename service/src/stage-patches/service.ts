@@ -22,7 +22,7 @@ import type {
   StateMachineTaskProjection,
 } from "../indexer/projection-types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
-import type { ProductSchemaResolver } from "../product/service.js";
+import type { ProductSchemaResolver } from "../product/application/service.js";
 import { InMemoryProductStagePatchStore } from "./store.js";
 import {
   buildStageExecutorPatchTypedData,

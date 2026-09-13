@@ -3,4 +3,4 @@ export type {
   StateMachinePlanProjection,
   StateMachineStageSelectorBindingProjection,
   StateMachineTaskProjection
-} from "./projections.js";
+} from "./projections/index.js";

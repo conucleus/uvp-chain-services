@@ -15,20 +15,20 @@ import type { ChainEvent } from "../src/indexer/events.js";
 import {
   ProductAuthorizationBuilder,
   ProductAuthorizationBuilderError,
-} from "../src/product/bff/authorization.js";
+} from "../src/product/query/bff/authorization.js";
 import {
   crossBorderSchemaResolver,
   crossBorderStoreProductSchema,
 } from "./cross-border-schema.js";
-import { MemoryProductOrderTriggerBroadcastAdapter } from "../src/product/bff/trigger.js";
+import { MemoryProductOrderTriggerBroadcastAdapter } from "../src/product/query/bff/trigger.js";
 import type {
   ProductBroadcastOutsideTriggerInput,
   ProductOrderTriggerBroadcastAdapter,
   ProductOrderTriggerBroadcastResult,
-} from "../src/product/bff/trigger.js";
-import { MemoryStoreZhixuVersionMetadataStore } from "../src/store-console/version.js";
+} from "../src/product/query/bff/trigger.js";
+import { MemoryStoreZhixuVersionMetadataStore } from "../src/store/console/version.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { MemoryProductBffStore } from "../src/product/bff/store.js";
+import { MemoryProductBffStore } from "../src/product/query/bff/store.js";
 import {
   STAGE_EXECUTOR_PATCH_SIGNAL_ID,
   STAGE_RESOURCE_PATCH_SIGNAL_ID,
@@ -40,7 +40,7 @@ import type {
   ProductOrderDraftDTO,
   SignalAuthorizationDTO,
   SubmitProductOrderDraftResult,
-} from "../src/product/bff/types.js";
+} from "../src/product/query/bff/types.js";
 import type { Hex } from "../src/shared/types.js";
 import type { Address } from "../src/shared/types.js";
 

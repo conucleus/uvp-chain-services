@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import type { StoreSessionDTO } from "../src/store-console/access.js";
+import type { StoreSessionDTO } from "../src/store/console/access.js";
 
 const readHeaders = {
   "x-uvp-store-user-id": "reader-1",

@@ -166,7 +166,7 @@ export function createGovernanceBroadcasterAdapter(
 
     // 已广播的 txHash 必须穿越 catch：writeContract 成功后等待回执抛错
     // 时链上交易已经存在，failed 结果丢失 txHash 会造成幽灵交易与重复
-    // 登记（对齐 product/bff/trigger、submissions/broadcast-adapter、
+    // 登记（对齐 product/query/bff/trigger、submissions/broadcast-adapter、
     // relayer 的同款防线）。
     let broadcastTxHash: ReturnType<typeof normalizeTxHash> | undefined;
     try {

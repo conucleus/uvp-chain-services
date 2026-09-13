@@ -4,7 +4,7 @@ import {
   type RiskGraphAssessmentInput,
   type RiskGraphSubjectType
 } from "../../risk/index.js";
-import type { StoreAuditResource } from "../../store-console/audit.js";
+import type { StoreAuditResource } from "../../store/console/audit.js";
 import type { RouteModule } from "../route-module.js";
 import {
   authorizeStoreCapability,

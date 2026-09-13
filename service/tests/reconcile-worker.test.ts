@@ -3,11 +3,11 @@ import { describe, expect, it } from "vitest";
 import { createEvidenceService, InMemoryEvidenceStorage, type EvidencePrincipal } from "../src/evidence/index.js";
 import { InMemoryGovernanceStore, type IdentityTxLogDTO } from "../src/governance/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProductBffStore } from "../src/product/bff/store.js";
+import { MemoryProductBffStore } from "../src/product/query/bff/store.js";
 import type {
   ProductOrderDraftDTO,
   ProductOrderTriggerRecord
-} from "../src/product/bff/types.js";
+} from "../src/product/query/bff/types.js";
 import { TxReconcileWorker, createViemReconcileReceiptClient, type EvidenceBindingSweeper, type ReconcileReceipt, type ReconcileReceiptClient } from "../src/reconcile/index.js";
 import { InMemoryAuditSink, type AuditSink } from "../src/security/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";

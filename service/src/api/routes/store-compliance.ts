@@ -10,8 +10,8 @@ import {
   isStoreAccessAuthenticated,
   type StoreAccessState,
   type StoreCapability
-} from "../../store-console/access.js";
-import { recordStoreAudit, type StoreAuditResource } from "../../store-console/audit.js";
+} from "../../store/console/access.js";
+import { recordStoreAudit, type StoreAuditResource } from "../../store/console/audit.js";
 import type { ApiRequest, ApiResponse, ApiRouteContext } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {

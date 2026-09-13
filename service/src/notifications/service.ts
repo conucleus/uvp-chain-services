@@ -13,13 +13,13 @@ import {
   type StateMachineSignalAuthorizationProjection,
   type StateMachineSignalProjection,
   type StateMachineTaskProjection
-} from "../indexer/projections.js";
+} from "../indexer/projections/index.js";
 import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "../indexer/events.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { compareChainPointers, type Address, type Hex } from "../shared/types.js";
-import type { ProductSchemaResolver } from "../product/service.js";
-import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store-suppliers/types.js";
+import type { ProductSchemaResolver } from "../product/application/service.js";
+import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store/suppliers/types.js";
 import {
   type SupplierNotificationProfile,
   type SupplierNotificationTransport
