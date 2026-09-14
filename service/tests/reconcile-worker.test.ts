@@ -11,7 +11,7 @@ import type {
 import { TxReconcileWorker, createViemReconcileReceiptClient, type EvidenceBindingSweeper, type ReconcileReceipt, type ReconcileReceiptClient } from "../src/reconcile/index.js";
 import { InMemoryAuditSink, type AuditSink } from "../src/security/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { InMemoryProductSubmissionStore, type ProductSubmissionDTO } from "../src/submissions/index.js";
+import { InMemoryProductSubmissionStore, submissionStatusLabel, type ProductSubmissionDTO } from "../src/submissions/index.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const baseNow = new Date("2026-04-28T00:00:00Z");
@@ -970,6 +970,7 @@ function submissionFixture(input: {
     deadline: "1770000000",
     ...(input.evidenceIds ? { evidenceIds: input.evidenceIds } : {}),
     status,
+    statusLabel: submissionStatusLabel(status),
     signatureStatus: "signature_verified",
     signatureHash: bytes32("5001"),
     recoveredSubmitter: submitter,

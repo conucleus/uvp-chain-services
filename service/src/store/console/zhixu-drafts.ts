@@ -9,6 +9,7 @@ import {
   type OnchainSignalInstruction
 } from "@uvp-eth/compiler";
 import {
+  submitIntentByPluginKind,
   type FulfillmentPluginKind,
   type OrderPermissionTableEntryDTO,
   type ParticipantAddOnKind,
@@ -837,7 +838,9 @@ function suggestedAddOnManifestForSlot(
         actionKind: "submit_signal",
         label: plugin.primaryActionLabel ?? primaryActionForPlugin(plugin.pluginKind),
         primary: true,
-        intent: plugin.pluginKind === "dispute_material" ? "raise_dispute" : "confirm_stage",
+        // 无 manifest 声明时的兜底推导单源在 product-dto：dispute_material
+        // 不得以 confirm_stage 口径提交。
+        intent: submitIntentByPluginKind[plugin.pluginKind],
         inputBindings: {
           walletAddress: walletInputId,
           evidenceIds: evidenceInputId,

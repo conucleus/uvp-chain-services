@@ -68,6 +68,7 @@ import type {
 } from "../src/store/suppliers/index.js";
 import { SqliteSubmissionStore } from "../src/submissions/sqlite-store.js";
 import { SqliteBroadcastDedupeStore } from "../src/submissions/broadcast-dedupe-sqlite-store.js";
+import { submissionStatusLabel } from "../src/submissions/service.js";
 import type {
   PreparedSubmissionRecord,
   ProductSubmissionDTO,
@@ -2157,6 +2158,7 @@ function productSubmission(
     nonce: prepared.nonce,
     deadline: prepared.deadline,
     status: "submitted",
+    statusLabel: submissionStatusLabel("submitted"),
     signatureStatus: "signature_verified",
     signatureHash:
       "0x1212121212121212121212121212121212121212121212121212121212121212",
