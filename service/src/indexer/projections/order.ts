@@ -36,33 +36,6 @@ import type {
 } from "./stage.js";
 import type { MutableStateMachineTaskProjection, StateMachineTaskProjection } from "./task.js";
 
-export type OrderStatus = "registered";
-export type StageStatus = "approved" | "released" | "refunded" | "disputed" | "resolved";
-
-export interface StageProjection {
-  readonly orderId: string;
-  readonly stageId: string;
-  readonly status: StageStatus;
-  readonly signal?: string;
-  readonly evidenceHash?: Hex;
-  readonly signer?: Address;
-  readonly updatedAt: ProjectionProvenance;
-}
-
-export interface OrderProjection {
-  readonly orderId: string;
-  readonly chainId: number;
-  readonly contractAddress: Address;
-  readonly status: OrderStatus;
-  readonly buyer?: Address;
-  readonly seller?: Address;
-  readonly zhixuHash?: Hex;
-  readonly metadataHash?: Hex;
-  readonly createdAt?: ProjectionProvenance;
-  readonly updatedAt: ProjectionProvenance;
-  readonly stages: Readonly<Record<string, StageProjection>>;
-}
-
 export type StateMachineOrderStatus = "registered" | "unknown";
 
 export interface StateMachineOrderTriggerLinkProjection {

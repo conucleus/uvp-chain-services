@@ -496,7 +496,6 @@ describe("durable storage", () => {
       contractAddress: snapshotScopeContract,
     });
 
-    expect(await store.getOrder("order-removed")).toBeUndefined();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       eventName: "OrderCreated",

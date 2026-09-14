@@ -8,10 +8,6 @@ export type {
   StateMachineTimelineEventProjection
 } from "./proof.js";
 export type {
-  OrderStatus,
-  StageStatus,
-  StageProjection,
-  OrderProjection,
   StateMachineOrderStatus,
   StateMachineOrderTriggerLinkProjection,
   StateMachineOrderProjection,

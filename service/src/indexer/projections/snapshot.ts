@@ -3,7 +3,6 @@
 import { compareChainPointers, type Address, type Hex } from "../../shared/types.js";
 import type { ProjectionProvenance, StateMachineProofProjection } from "./proof.js";
 import type {
-  OrderProjection,
   StateMachineModuleProjection,
   StateMachineOrderProjection
 } from "./order.js";
@@ -37,7 +36,6 @@ export interface StateMachineDeploymentProjection {
 export interface ProjectionSnapshot {
   readonly rebuildable: true;
   readonly eventCount: number;
-  readonly orders: Readonly<Record<string, OrderProjection>>;
   readonly activeStateMachineDeploymentId?: Hex;
   readonly stateMachineDeployments: Readonly<Record<string, StateMachineDeploymentProjection>>;
   readonly stateMachineModules: Readonly<Record<string, StateMachineModuleProjection>>;
@@ -91,7 +89,6 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
   return {
     rebuildable: true,
     eventCount: 0,
-    orders: {},
     stateMachineDeployments: {},
     stateMachineModules: {},
     stateMachinePlans: {},

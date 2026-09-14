@@ -191,7 +191,6 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
   return {
     rebuildable: true,
     eventCount,
-    orders: {},
     ...(activeStateMachineDeploymentId ? { activeStateMachineDeploymentId } : {}),
     stateMachineDeployments: Object.fromEntries(stateMachineDeployments),
     stateMachineModules: Object.fromEntries(stateMachineModules),
