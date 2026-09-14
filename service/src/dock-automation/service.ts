@@ -151,6 +151,13 @@ export class DockAutomationWorker implements LifecycleService {
     this.#checking = true;
     try {
       const routes = (await this.#routeSource?.listRoutes()) ?? [];
+      // fail-closed 前置：route 记录来自链下来源（云编译产物），keeper 只
+      // 提交可从链上 committed 状态推导的数据——身份字段缺失/畸形即整轮
+      // 响亮报错，不静默跳过（坏一条即来源可疑，静默会让"没跑"伪装成
+      // "没问题"）。校验抛错上抛 runOnce（轮询由 interval 捕获记 warn）。
+      routes.forEach((route, index) =>
+        validateDockRouteRecord(route, this.#chainId, index)
+      );
       const snapshot = await this.#projectionStore.getOrderSnapshot();
       const docks = Object.values(snapshot.stateMachineDocks).filter(
         (dock) => dock.chainId === this.#chainId
@@ -326,8 +333,7 @@ export class DockAutomationWorker implements LifecycleService {
     return matches.length === 1 ? matches[0] : undefined;
   }
 
-  entranceHookReady(
-    snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
+  entranceHookReady(    snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
     route: DockRouteRecord
   ): boolean {
     // new 模式恰一条 input 绑定（出生锚），其本地 hook 即 entrance。
@@ -359,5 +365,79 @@ export class DockAutomationWorker implements LifecycleService {
     return Boolean(
       linkedOrder?.signals[`${targetSourceId.toLowerCase()}:${targetSignalId.toLowerCase()}`]
     );
+  }
+}
+
+const NON_ZERO_BYTES32 = /^0x[0-9a-fA-F]{64}$/;
+const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const CALLDATA_LIKE = /^0x(?:[0-9a-fA-F]{2})+$/;
+
+/**
+ * route 来源记录的 fail-closed 校验（P2-2 B3，keeper 在役化前置）。
+ * route 数据是链下编译产物（DockRouteSource 由云侧实现），keeper 只提交
+ * 可由链上 committed 投影推导的就绪性——记录本身的身份字段必须完整且
+ * 形状合法：缺字段/零值/跨链记录/openCalldata 缺失（new 模式开仓唯一
+ * 载荷）即抛错，不静默跳过。抛错即响亮失败：runOnce 上抛（轮询由
+ * interval 捕获记 warn、运维可见），绝不带着可疑数据继续提交。
+ */
+function validateDockRouteRecord(
+  route: DockRouteRecord,
+  workerChainId: number,
+  index: number
+): void {
+  const at = `dock route source routes[${index}]`;
+  const requireBytes32 = (value: unknown, field: string): Hex => {
+    if (typeof value !== "string" || !NON_ZERO_BYTES32.test(value) || value === ZERO_BYTES32) {
+      throw new Error(`${at}.${field} must be a non-zero bytes32 hex identity, got ${String(value)}`);
+    }
+    return value as Hex;
+  };
+  if (route.chainId !== workerChainId) {
+    throw new Error(`${at}.chainId ${String(route.chainId)} does not match the keeper chain ${String(workerChainId)}`);
+  }
+  requireBytes32(route.localPlanId, "localPlanId");
+  requireBytes32(route.localOrderId, "localOrderId");
+  requireBytes32(route.targetPlanId, "targetPlanId");
+  requireBytes32(route.linkedOrderId, "linkedOrderId");
+  requireBytes32(route.routeId, "routeId");
+  requireBytes32(route.routeHash, "routeHash");
+  if (typeof route.interfaceName !== "string" || route.interfaceName.trim().length === 0) {
+    throw new Error(`${at}.interfaceName must be a non-empty string`);
+  }
+  if (route.orderMode !== "new" && route.orderMode !== "existing") {
+    throw new Error(`${at}.orderMode must be "new" or "existing", got ${String(route.orderMode)}`);
+  }
+  if (!Array.isArray(route.inputs) || !Array.isArray(route.outputs)) {
+    throw new Error(`${at}.inputs/outputs must be arrays`);
+  }
+  route.inputs.forEach((binding, bindingIndex) => {
+    const bindingAt = `${at}.inputs[${bindingIndex}]`;
+    requireBytes32(binding.bindingHash, `${bindingAt}.bindingHash`);
+    requireBytes32(binding.localHookId, `${bindingAt}.localHookId`);
+    requireBytes32(binding.targetSourceId, `${bindingAt}.targetSourceId`);
+    requireBytes32(binding.targetSignalId, `${bindingAt}.targetSignalId`);
+  });
+  route.outputs.forEach((binding, bindingIndex) => {
+    const bindingAt = `${at}.outputs[${bindingIndex}]`;
+    requireBytes32(binding.bindingHash, `${bindingAt}.bindingHash`);
+    requireBytes32(binding.localSourceId, `${bindingAt}.localSourceId`);
+    requireBytes32(binding.localSignalId, `${bindingAt}.localSignalId`);
+    requireBytes32(binding.targetSourceId, `${bindingAt}.targetSourceId`);
+    requireBytes32(binding.targetSignalId, `${bindingAt}.targetSignalId`);
+  });
+  if (route.orderMode === "new") {
+    // new 模式：entrance 绑定（inputs[0]）是出生锚，openCalldata 是
+    // openDockedOrder 的唯一载荷（route 来源预组装、含 publisher permit）。
+    // 两者任一缺失，该 route 永远无法开仓——来源装配缺口必须响亮暴露。
+    if (route.inputs.length === 0) {
+      throw new Error(`${at}: new-mode route must carry the entrance input binding`);
+    }
+    if (
+      typeof route.openCalldata !== "string" ||
+      !CALLDATA_LIKE.test(route.openCalldata) ||
+      route.openCalldata.length <= 2
+    ) {
+      throw new Error(`${at}.openCalldata must be pre-assembled calldata hex for a new-mode route`);
+    }
   }
 }
