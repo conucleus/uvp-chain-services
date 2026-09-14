@@ -207,6 +207,9 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'order_signal_authorization_missing',
   'prepared_patch_mismatch',
   'previous_executor_mismatch',
+  // 镜像合约 StagePreviousExecutorAmbiguous 的广播前快速失败（409，
+  // 与 previous_executor_mismatch 同族：领域状态预检，不在重试/死信词表）。
+  'previous_executor_ambiguous',
   'previous_executor_not_allowed',
   'previous_executor_required',
   'previous_executor_signature_required',

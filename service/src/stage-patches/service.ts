@@ -18,9 +18,12 @@ import {
 import type {
   StateMachineOrderProjection,
   StateMachinePlanProjection,
+  StateMachineSignalCapabilityProjection,
   StateMachineStageSelectorBindingProjection,
   StateMachineTaskProjection,
 } from "../indexer/projection-types.js";
+import { signalProjectionKey } from "../indexer/projections/signal.js";
+import type { ProjectionProvenance } from "../indexer/projections/proof.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { ProductSchemaResolver } from "../product/application/service.js";
 import { InMemoryProductStagePatchStore } from "./store.js";
@@ -209,6 +212,7 @@ export function createProductStageExecutorPatchService(
             ? { approvalSignalId: input.approvalSignalId }
             : {}),
         },
+        context.planSignalCapabilities,
       );
       const executorWallet = normalizeNonZeroAddress(
         input.executorWallet,
@@ -408,7 +412,11 @@ export function createProductStageExecutorPatchService(
       }
 
       const context = await resolveSelectorTaskContext(options.store, taskId);
-      ensureExecutorPreparedStillCurrent(context.order, prepared);
+      ensureExecutorPreparedStillCurrent(
+        context.order,
+        prepared,
+        (await findProjectedPlan(options.store, context.order))?.signalCapabilities ?? [],
+      );
 
       const previousSignature = signatureForPreviousExecutor(
         prepared,
@@ -763,7 +771,11 @@ export function createProductStageResourcePatchService(
       }
 
       const context = await resolveSelectorTaskContext(options.store, taskId);
-      ensureResourcePreparedStillCurrent(context.order, prepared);
+      ensureResourcePreparedStillCurrent(
+        context.order,
+        prepared,
+        (await findProjectedPlan(options.store, context.order))?.signalCapabilities ?? [],
+      );
       // 同 executor patch 路径：prepare TTL 即陈旧预留阈值，崩溃泄漏的
       // 预留由新请求条件接管（nextStageResourcePatchNonce 的链上派生不受
       // 影响），未过期仍按重复拒绝。
@@ -879,6 +891,11 @@ interface SelectorTaskContext {
 interface SelectorPatchContext extends SelectorTaskContext {
   readonly selectorWallet: Address;
   readonly targetStageId: Hex;
+  /**
+   * 编译 plan 的信号能力表事实键（投影形态）：执行者/资源补丁的进度
+   * 闸与合约 _stageSignalState 同构——能力表键 ∪ source==stageId 回退键。
+   */
+  readonly planSignalCapabilities: readonly StateMachineSignalCapabilityProjection[];
 }
 
 async function withStagePatchStoreTransaction(
@@ -925,6 +942,8 @@ async function resolveSelectorPatchContext(
   }
 
   const target = normalizeTargetStage(input.targetStageId);
+  const planSignalCapabilities =
+    (await findProjectedPlan(options.store, context.order))?.signalCapabilities ?? [];
   const binding = await findAllowedSelectorBinding(
     options.store,
     options.productSchemaResolver,
@@ -954,7 +973,7 @@ async function resolveSelectorPatchContext(
   });
   if (
     !input.allowSubmittedTargetSignals &&
-    hasSubmittedTargetSignal(context.order, target.stageId)
+    hasSubmittedTargetSignal(context.order, target.stageId, planSignalCapabilities)
   ) {
     throw new ProductStagePatchError(
       409,
@@ -967,6 +986,7 @@ async function resolveSelectorPatchContext(
     ...context,
     selectorWallet,
     targetStageId: target.stageId,
+    planSignalCapabilities,
   };
 }
 
@@ -1391,6 +1411,17 @@ interface ExecutorPatchGovernance {
   readonly approvalSignalIdForPatch: Hex;
 }
 
+/**
+ * 执行者补丁治理预检（合约 UVPStagePatchModule._validateStageExecutorPatchMode
+ * 的服务层镜像；合约为权威，此处只做广播前快速失败）。
+ * 事实键与定序与合约 _stageSignalState 同构：
+ * - 事实键 = 编译 plan 能力表键（relation=0/current 的 (targetSourceId,
+ *   signalId)，即 keccak256(source)×keccak256(signalName) 事实键）∪
+ *   source==targetStageId 回退键——两流并集，只统计"有没有"；
+ * - "上一执行者" = 在任 overlay executor（activePatch.exists 时权威）；
+ *   否则取末位提交者，末位不可唯一判定（同块并列不同提交者/两流末位
+ *   不一致）时 fail-closed（镜像 StagePreviousExecutorAmbiguous）。
+ */
 function resolveExecutorPatchGovernance(
   order: StateMachineOrderProjection,
   targetStageId: Hex,
@@ -1400,10 +1431,11 @@ function resolveExecutorPatchGovernance(
     readonly approvalSourceId?: string;
     readonly approvalSignalId?: string;
   },
+  planSignalCapabilities: readonly StateMachineSignalCapabilityProjection[],
 ): ExecutorPatchGovernance {
   const mode = normalizeExecutorPatchMode(input.mode);
   const modeHash = executorPatchModeHash(mode);
-  const progress = targetStageProgress(order, targetStageId);
+  const progress = targetStageProgress(order, targetStageId, planSignalCapabilities);
   if (mode === "assign") {
     if (progress.signalCount > 0) {
       throw new ProductStagePatchError(
@@ -1445,15 +1477,31 @@ function resolveExecutorPatchGovernance(
     targetStageId,
     progress,
   );
+  if (expectedPreviousExecutor.kind === "ambiguous") {
+    throw new ProductStagePatchError(
+      409,
+      "previous_executor_ambiguous",
+      "the previous executor cannot be uniquely determined for the target stage: "
+        + "signals tied at the same block carry different submitters, or the compiled-plan "
+        + "capability facts and the source==stage fallback facts disagree on the latest "
+        + "submitter. The chain reverts this shape with StagePreviousExecutorAmbiguous; "
+        + "resubmit after the tie is broken on chain.",
+      {
+        targetStageId,
+        signalCount: progress.signalCount,
+        tieBlockNumber: expectedPreviousExecutor.tieBlockNumber?.toString(),
+      },
+    );
+  }
   if (
-    expectedPreviousExecutor &&
-    previousExecutor !== expectedPreviousExecutor
+    expectedPreviousExecutor.value &&
+    previousExecutor !== expectedPreviousExecutor.value
   ) {
     throw new ProductStagePatchError(
       409,
       "previous_executor_mismatch",
       "previousExecutor must match the active overlay executor or last target-stage signal submitter",
-      { expectedPreviousExecutor, previousExecutor },
+      { expectedPreviousExecutor: expectedPreviousExecutor.value, previousExecutor },
     );
   }
 
@@ -1571,8 +1619,9 @@ function normalizeRequiredPreviousExecutor(
 function hasSubmittedTargetSignal(
   order: StateMachineOrderProjection,
   targetStageId: Hex,
+  planSignalCapabilities: readonly StateMachineSignalCapabilityProjection[],
 ): boolean {
-  return targetStageProgress(order, targetStageId).signalCount > 0;
+  return targetStageProgress(order, targetStageId, planSignalCapabilities).signalCount > 0;
 }
 
 function hasSignal(
@@ -1588,35 +1637,168 @@ function hasSignal(
 interface TargetStageProgress {
   readonly signalCount: number;
   readonly lastSignalSubmitter?: Address;
+  /**
+   * 末位提交者不可唯一判定（镜像合约 StagePreviousExecutorAmbiguous 的
+   * fail-closed 形态）。仅在无在任 overlay 时被消费。
+   */
+  readonly lastSignalAmbiguous?: boolean;
+  /** 歧义证据：并列最高块（⟹合约同秒）。 */
+  readonly lastSignalTieBlockNumber?: bigint;
 }
 
+/**
+ * 目标阶段进度镜像（合约 _stageSignalState 的服务层形态）。
+ *
+ * 事实键两流并集（与 _recordSignal 的两条归属路径同构，缺一会让另一流
+ * 绕过 assign 闸）：
+ * 1. 编译 plan 能力表：plan 投影 signalCapabilities 中 stageId==目标、
+ *    relation=current（合约 relation=0）的 (targetSourceId, signalId)——
+ *    即 keccak256(source)×keccak256(signalName) 事实键，与 stageId 无
+ *    必然相等关系（回退形态 source==stageId 只是 targetSource 恰为阶段
+ *    自身标识符时的特例）；
+ * 2. source==targetStageId 回退键。
+ *
+ * 末位提交者：合约取最高 submittedAt（block.timestamp 秒）的提交者，同秒
+ * 并列不同提交者 fail-closed。SignalSubmitted 事件不携带秒级时间戳，投影
+ * 只保有链序 provenance（blockNumber/txIndex/logIndex）——本镜像以链序为
+ * submittedAt 的全序代理：同块必同秒（可判定歧义，保守 fail-closed），
+ * 跨块同秒不可判定（合约仍会拒绝，服务层放行只是预检漏报，广播后合约
+ * revert 兜底）。纯回退流合约无歧义判定（lastSignalSubmitter 即写入序
+ * 末位），镜像保持同口径。
+ */
 function targetStageProgress(
   order: StateMachineOrderProjection,
   targetStageId: Hex,
+  planSignalCapabilities: readonly StateMachineSignalCapabilityProjection[],
 ): TargetStageProgress {
-  const targetSignals = Object.values(order.signals)
-    .filter((signal) => signal.sourceId === targetStageId)
-    .sort((left, right) => compareSignalSubmissionOrder(left, right));
-  return {
-    signalCount: targetSignals.length,
-    ...(targetSignals.length > 0
+  const normalizedTargetStageId = targetStageId.toLowerCase();
+  const capabilityFacts = new Set(
+    planSignalCapabilities
+      .filter(
+        (capability) =>
+          capability.stageId.toLowerCase() === normalizedTargetStageId &&
+          capability.targetOrderRelation === "current",
+      )
+      .map((capability) =>
+        signalProjectionKey(capability.targetSourceId, capability.signalId),
+      ),
+  );
+  const orderSignals = Object.values(order.signals);
+  const capabilitySignals = orderSignals.filter((signal) =>
+    capabilityFacts.has(signalProjectionKey(signal.sourceId, signal.signalId)),
+  );
+  const fallbackSignals = orderSignals.filter(
+    (signal) => signal.sourceId.toLowerCase() === normalizedTargetStageId,
+  );
+  const countedFacts = new Set<string>(fallbackSignals.map((signal) =>
+    signalProjectionKey(signal.sourceId, signal.signalId),
+  ));
+  for (const signal of capabilitySignals) {
+    countedFacts.add(signalProjectionKey(signal.sourceId, signal.signalId));
+  }
+  if (countedFacts.size === 0) {
+    return { signalCount: 0 };
+  }
+
+  const capabilityLatest = latestSubmitterByChainOrder(capabilitySignals);
+  const fallbackLatest = latestSubmitterByChainOrder(fallbackSignals);
+  const mergeLatest = (
+    ambiguous: boolean,
+    submitter?: Address,
+    tieBlockNumber?: bigint,
+  ): TargetStageProgress => ({
+    signalCount: countedFacts.size,
+    ...(submitter !== undefined ? { lastSignalSubmitter: submitter } : {}),
+    ...(ambiguous
       ? {
-          lastSignalSubmitter:
-            targetSignals[targetSignals.length - 1]!.submitter,
+          lastSignalAmbiguous: true,
+          ...(tieBlockNumber !== undefined ? { lastSignalTieBlockNumber: tieBlockNumber } : {}),
         }
       : {}),
+  });
+  if (capabilitySignals.length > 0 && fallbackSignals.length > 0) {
+    // 两流并存：回退流逐键时序无法跨流定序（合约同款 fail-closed）——
+    // 两流末位提交者不一致即歧义；一致则无歧义。
+    const crossFlowAmbiguous =
+      capabilityLatest.submitter !== undefined &&
+      fallbackLatest.submitter !== undefined &&
+      capabilityLatest.submitter !== fallbackLatest.submitter;
+    return mergeLatest(
+      capabilityLatest.ambiguous ||
+        fallbackLatest.ambiguous ||
+        crossFlowAmbiguous,
+      capabilityLatest.submitter ?? fallbackLatest.submitter,
+      capabilityLatest.tieBlockNumber ?? fallbackLatest.tieBlockNumber,
+    );
+  }
+  if (capabilitySignals.length > 0) {
+    return mergeLatest(
+      capabilityLatest.ambiguous,
+      capabilityLatest.submitter,
+      capabilityLatest.tieBlockNumber,
+    );
+  }
+  return mergeLatest(false, fallbackLatest.submitter, fallbackLatest.tieBlockNumber);
+}
+
+/** 单流末位提交者：链序最大者；同块（⟹同秒）并列不同提交者标记歧义。 */
+function latestSubmitterByChainOrder(
+  signals: readonly {
+    readonly submitter: Address;
+    readonly submittedAt: ProjectionProvenance;
+  }[],
+): {
+  readonly submitter?: Address;
+  readonly ambiguous: boolean;
+  readonly tieBlockNumber?: bigint;
+} {
+  if (signals.length === 0) {
+    return { ambiguous: false };
+  }
+  const ordered = [...signals].sort(compareSignalSubmissionOrder);
+  const last = ordered[ordered.length - 1]!;
+  const maxBlock = last.submittedAt.blockNumber;
+  const submittersAtMaxBlock = new Set(
+    ordered
+      .filter((signal) => signal.submittedAt.blockNumber === maxBlock)
+      .map((signal) => signal.submitter.toLowerCase()),
+  );
+  return {
+    submitter: last.submitter,
+    ambiguous: submittersAtMaxBlock.size > 1,
+    ...(submittersAtMaxBlock.size > 1 ? { tieBlockNumber: maxBlock } : {}),
   };
 }
+
+type ExpectedPreviousExecutor =
+  | { readonly kind: "resolved"; readonly value?: Address }
+  | { readonly kind: "ambiguous"; readonly tieBlockNumber?: bigint };
 
 function expectedPreviousExecutorForPatch(
   order: StateMachineOrderProjection,
   targetStageId: Hex,
   progress: TargetStageProgress,
-): Address | undefined {
-  return (
-    order.stageExecutorOverlays[targetStageId.toLowerCase()]
-      ?.activeExecutorWallet ?? progress.lastSignalSubmitter
-  );
+): ExpectedPreviousExecutor {
+  // 在任 overlay executor 即合约 activePatch.executor：存在时权威，
+  // 不回退、无歧义（镜像合约 activePatch.exists 分支）。
+  const overlay =
+    order.stageExecutorOverlays[targetStageId.toLowerCase()];
+  if (overlay) {
+    return overlay.activeExecutorWallet === undefined
+      ? { kind: "resolved" as const }
+      : { kind: "resolved" as const, value: overlay.activeExecutorWallet };
+  }
+  if (progress.lastSignalAmbiguous) {
+    return {
+      kind: "ambiguous",
+      ...(progress.lastSignalTieBlockNumber !== undefined
+        ? { tieBlockNumber: progress.lastSignalTieBlockNumber }
+        : {}),
+    };
+  }
+  return progress.lastSignalSubmitter === undefined
+    ? { kind: "resolved" as const }
+    : { kind: "resolved" as const, value: progress.lastSignalSubmitter };
 }
 
 function compareSignalSubmissionOrder(
@@ -1667,6 +1849,7 @@ function nextStageResourcePatchNonce(
 function ensureExecutorPreparedStillCurrent(
   order: StateMachineOrderProjection,
   prepared: PreparedStageExecutorPatchRecord,
+  planSignalCapabilities: readonly StateMachineSignalCapabilityProjection[],
 ): void {
   resolveExecutorPatchGovernance(order, prepared.targetStageId, {
     mode: prepared.mode,
@@ -1679,7 +1862,7 @@ function ensureExecutorPreparedStillCurrent(
     ...(prepared.approvalSignalId
       ? { approvalSignalId: prepared.approvalSignalId }
       : {}),
-  });
+  }, planSignalCapabilities);
   const currentNonce =
     order.stageExecutorOverlays[prepared.targetStageId.toLowerCase()]
       ?.patchNonce;
@@ -1700,8 +1883,11 @@ function ensureExecutorPreparedStillCurrent(
 function ensureResourcePreparedStillCurrent(
   order: StateMachineOrderProjection,
   prepared: PreparedStageResourcePatchRecord,
+  planSignalCapabilities: readonly StateMachineSignalCapabilityProjection[],
 ): void {
-  if (hasSubmittedTargetSignal(order, prepared.targetStageId)) {
+  if (
+    hasSubmittedTargetSignal(order, prepared.targetStageId, planSignalCapabilities)
+  ) {
     throw new ProductStagePatchError(
       409,
       "target_stage_locked",

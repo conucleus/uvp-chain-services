@@ -5,6 +5,11 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
+  onchainSignalId,
+  onchainSourceId,
+  onchainStageId,
+} from "@uvp-eth/compiler";
+import {
   hashResourceManifest as hashProtocolResourceManifest,
   hashStageExecutorPatchPayload as hashProtocolStageExecutorPatchPayload,
   hashStageResourcePatchPayload as hashProtocolStageResourcePatchPayload,
@@ -1112,6 +1117,279 @@ describe("stage executor/resource patch Product API", () => {
       blockNumber: "61"
     });
     expect(writeContract).toHaveBeenCalledTimes(2);
+  });
+
+  // ---- 执行者治理镜像（合约 UVPStagePatchModule._stageSignalState 同构）----
+  // 编译 plan 事实键（keccak 形态）：此前 fixture 把 utf8 stageId 同时当
+  // 事实 sourceId，只建模了 source==stageId 的回退形态——真实 plan 的
+  // 事实键是 (keccak256(source), keccak256(signalName))，治理规则漂移
+  // 没被拦住的根因正是夹具建模错误（审计 R1/R6-C）。
+  const compiledTargetStageIdentifier = "target.stage";
+  const compiledFactSource = "origin.stage";
+  const compiledFactSignalName = "origin.handoff-proof";
+  const compiledTieFactSignalName = "origin.handoff-proof-2";
+
+  function compiledPlanEvents(
+    extraSignals: readonly ChainEvent[],
+  ): readonly ChainEvent[] {
+    return [
+      ...baseEvents({ targetStageId: targetStageOnchainId }),
+      chainEvent(
+        1n,
+        "SignalCapabilityRegistered",
+        {
+          planId,
+          stageId: targetStageOnchainId,
+          targetSourceId: onchainSourceId(compiledFactSource),
+          signalId: onchainSignalId(compiledFactSignalName),
+          targetOrderRelation: 0,
+        },
+        2,
+      ),
+      chainEvent(
+        1n,
+        "SignalCapabilityRegistered",
+        {
+          planId,
+          stageId: targetStageOnchainId,
+          targetSourceId: onchainSourceId(compiledFactSource),
+          signalId: onchainSignalId(compiledTieFactSignalName),
+          targetOrderRelation: 0,
+        },
+        3,
+      ),
+      ...extraSignals,
+    ];
+  }
+
+  function compiledFactSignalEvent(
+    blockNumber: bigint,
+    submitter: Address,
+    signalName = compiledFactSignalName,
+    logIndex = 0,
+  ): ChainEvent {
+    return chainEvent(
+      blockNumber,
+      "SignalSubmitted",
+      {
+        orderId,
+        sourceId: onchainSourceId(compiledFactSource),
+        signalId: onchainSignalId(signalName),
+        payloadHash: bytes32Hex("525"),
+        idempotencyKey: bytes32Hex("626"),
+        submitter,
+      },
+      logIndex,
+    );
+  }
+
+  it("pins the fixture stage ids to the compiler's keccak derivation (compiled-plan shape)", () => {
+    expect(onchainStageId(compiledTargetStageIdentifier)).toBe(targetStageOnchainId);
+  });
+
+  it("gates assign on compiled-plan capability fact keys whose source differs from the stage id", async () => {
+    // 回归：事实键 (keccak(source), keccak(signalName)) 命中能力表——
+    // sourceId != targetStageId 仍计入进度。旧服务层只统计回退形态，
+    // assign 预检恒放行、白烧签名（链上 StageAlreadyHasSignal 必拒）。
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet),
+      ]),
+    });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "assign",
+      }),
+    })).resolves.toMatchObject({
+      status: 409,
+      body: { error: "target_stage_started_assign_rejected" },
+    });
+  });
+
+  it("lets the first handoff through on compiled-plan fact keys (previously a spurious 409)", async () => {
+    // 回归：真实 plan 第一步 handoff 不再被 target_stage_not_started 拒绝。
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet),
+      ]),
+    });
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet,
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({
+      mode: "handoff",
+      previousExecutor: previousExecutorWallet,
+    });
+  });
+
+  it("locks resource patches on compiled-plan capability fact keys too", async () => {
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet),
+      ]),
+    });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
+      body: prepareResourceBody({
+        targetStageId: compiledTargetStageIdentifier,
+      }),
+    })).resolves.toMatchObject({
+      status: 409,
+      body: { error: "target_stage_locked" },
+    });
+  });
+
+  it("keeps the fallback form working alongside compiled-plan facts with one latest submitter", async () => {
+    // 混排（回退形态 + 编译形态）且末位提交者一致：不歧义，handoff 可备签。
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet),
+        chainEvent(6n, "SignalSubmitted", {
+          orderId,
+          sourceId: targetStageOnchainId,
+          signalId: onchainSignalId("target-started"),
+          payloadHash: bytes32Hex("535"),
+          idempotencyKey: bytes32Hex("636"),
+          submitter: previousExecutorWallet,
+        }),
+      ]),
+    });
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet,
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ previousExecutor: previousExecutorWallet });
+  });
+
+  it("fails closed when the two fact flows disagree on the latest submitter (previous_executor_ambiguous)", async () => {
+    // 镜像合约 _stageSignalState 的跨流 fail-closed：能力流末位与回退流
+    // 末位不一致 → 无法定序"上一执行者"。
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet),
+        chainEvent(6n, "SignalSubmitted", {
+          orderId,
+          sourceId: targetStageOnchainId,
+          signalId: onchainSignalId("target-started"),
+          payloadHash: bytes32Hex("535"),
+          idempotencyKey: bytes32Hex("636"),
+          submitter: selectorWallet,
+        }),
+      ]),
+    });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet,
+      }),
+    })).resolves.toMatchObject({
+      status: 409,
+      body: {
+        error: "previous_executor_ambiguous",
+        details: { targetStageId: targetStageOnchainId },
+      },
+    });
+  });
+
+  it("fails closed on a same-block tie between different submitters within the capability flow", async () => {
+    // 同块 ⟹ 同一 block.timestamp（合约同秒）：并列不同提交者时合约
+    // StagePreviousExecutorAmbiguous 必拒，服务层同口径给可解释错误。
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet, compiledFactSignalName, 0),
+        compiledFactSignalEvent(5n, selectorWallet, compiledTieFactSignalName, 1),
+      ]),
+    });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet,
+      }),
+    })).resolves.toMatchObject({
+      status: 409,
+      body: {
+        error: "previous_executor_ambiguous",
+        details: { tieBlockNumber: "5" },
+      },
+    });
+  });
+
+  it("treats a same-block tie with a single submitter as unambiguous", async () => {
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet, compiledFactSignalName, 0),
+        compiledFactSignalEvent(5n, previousExecutorWallet, compiledTieFactSignalName, 1),
+      ]),
+    });
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet,
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ previousExecutor: previousExecutorWallet });
+  });
+
+  it("keeps the applied overlay executor authoritative over an ambiguous signal history", async () => {
+    // 合约 activePatch.exists 分支：在任 patch executor 是权威"上一执行者"，
+    // 不回退到末位提交者、不受歧义影响。
+    const { router } = await routerFixture({
+      events: [
+        ...compiledPlanEvents([
+          compiledFactSignalEvent(5n, previousExecutorWallet),
+        ]),
+        chainEvent(6n, "StageExecutorPatchApplied", {
+          orderId,
+          selectorStageId,
+          targetStageId: targetStageOnchainId,
+          selector: selectorWallet,
+          executor: executorWallet,
+          role: roleHash,
+          executorMetadataHash,
+          patchHash: executorPatchHash,
+          patchNonce: 1n,
+          metadataURI: "ipfs://stage-executor-patches/1",
+        }),
+      ],
+    });
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet: executorWallet,
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ previousExecutor: executorWallet });
   });
 
   it("records a persist_failed fallback with the txHash and keeps the nonce consumed when the store write fails after broadcast", async () => {
