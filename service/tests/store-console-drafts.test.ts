@@ -368,6 +368,77 @@ describe("Store Zhixu draft workflow", () => {
     });
   });
 
+  it("classifies a plugin whose source is missing as status missing via the shared message contract", async () => {
+    // 弱分类修复钉（审计 R6-A）：missing 族判定按 code 圈定 + 共享文案
+    // 常量精确匹配，不再 message.includes("missing")——plugin.source 缺失
+    // 是 missing 唯一的非 missing_* code 入口，措辞即分类契约。
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const draft = await importDraft(router);
+    await compileDraft(router, draft.draftId);
+    const schemaResponse = await router.handle({
+      method: "GET",
+      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
+      headers: storeOperatorHeaders
+    });
+    expect(schemaResponse.status).toBe(200);
+    const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
+    const roleSlots = schema.roleSlots.map((slot) => ({
+      ...slot,
+      capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
+        ...plugin,
+        source: "missing" as const
+      }))
+    }));
+
+    const updateResponse = await router.handle({
+      method: "PUT",
+      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
+      headers: storeOperatorHeaders,
+      body: {
+        productSchema: {
+          ...schema,
+          roleSlots,
+          capabilityPlugins: roleSlots.flatMap((slot) => slot.capabilityPlugins ?? [])
+        }
+      }
+    });
+    expect(updateResponse.status).toBe(200);
+    expect((updateResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema.validation).toMatchObject({
+      ok: false,
+      status: "missing",
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "capability_plugin_not_explicit",
+          message: "capability plugin source is missing and must be authored before broadcast"
+        })
+      ])
+    });
+
+    // 对照：inferred 来源仍是 inferred（不因文案含 "missing" 字样升级）。
+    const inferredResponse = await router.handle({
+      method: "PUT",
+      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
+      headers: storeOperatorHeaders,
+      body: {
+        productSchema: {
+          ...schema,
+          roleSlots: schema.roleSlots.map((slot) => ({
+            ...slot,
+            capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
+              ...plugin,
+              source: "inferred" as const
+            }))
+          }))
+        }
+      }
+    });
+    expect(inferredResponse.status).toBe(200);
+    expect((inferredResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema.validation).toMatchObject({
+      ok: false,
+      status: "inferred"
+    });
+  });
+
   it("preserves publisher evidenceSpec on stages and capability plugins across schema rebuild (evidenceSpec passthrough)", async () => {
     // schema 是发布者拥有的不透明 JSON：从编译产物重建 schema 时，
     // stage / capability plugin 携带的 evidenceSpec 不得被静默丢掉。

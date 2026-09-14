@@ -1031,7 +1031,7 @@ function validateProductSchemaBundle(
           code: "capability_plugin_not_explicit",
           severity: "error",
           message: plugin.source === "missing"
-            ? "capability plugin source is missing and must be authored before broadcast"
+            ? CAPABILITY_PLUGIN_SOURCE_MISSING_MESSAGE
             : "capability plugin must be confirmed as explicit before broadcast",
           path: `roleSlots.${slot.slotId}.capabilityPlugins`,
           roleSlotId: slot.slotId
@@ -1458,6 +1458,16 @@ function stageExecutorSelectionIssue(
   };
 }
 
+/**
+ * "source 缺失"口味的 capability_plugin_not_explicit 文案（发射与分类共用
+ * 同一常量）：issue code 词表冻结在 product-dto（missing 族无独立 code），
+ * 分类只能按 code 圈定范围后精确匹配此文案——不得退回 message 子串
+ * includes（compile_error 等外来文案含 "missing" 会把 status 误翻成
+ * missing，随措辞漂移）。文案本身是分类契约，改动两侧同批。
+ */
+const CAPABILITY_PLUGIN_SOURCE_MISSING_MESSAGE =
+  "capability plugin source is missing and must be authored before broadcast";
+
 function validationForIssues(
   issues: readonly StoreProductSchemaValidationIssueDTO[],
   checkedAt?: string
@@ -1466,7 +1476,8 @@ function validationForIssues(
     issue.code === "missing_role_slot" ||
     issue.code === "slot_missing_capability_plugin" ||
     issue.code === "stage_not_covered" ||
-    issue.message.includes("missing")
+    (issue.code === "capability_plugin_not_explicit" &&
+      issue.message === CAPABILITY_PLUGIN_SOURCE_MISSING_MESSAGE)
   );
   const hasInferred = issues.some((issue) => issue.code === "capability_plugin_not_explicit");
   return {
