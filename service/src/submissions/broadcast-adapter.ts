@@ -1,8 +1,18 @@
-import { createPublicClient, createWalletClient, http, type Chain } from "viem";
+import { createPublicClient, createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { STATE_MACHINE_ABI, buildSubmitSignalForCall } from "@uvp-eth/protocol-bindings";
-import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from "../shared/types.js";
-import { redactErrorMessage } from "../security/redaction.js";
+import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
+import {
+  ZERO_ADDRESS,
+  ZERO_BYTES32,
+  broadcastFailureCore,
+  chainFor,
+  errorText,
+  findErrorName,
+  loadRelayerPrivateKey,
+  normalizeGasPayer,
+  requiredRpcUrl
+} from "../shared/broadcast/kit.js";
 import { resolveDuplicateTransactionOutcome } from "../shared/broadcast/duplicate-transaction.js";
 import type { SubmissionBroadcastAdapter, SubmissionBroadcastResult } from "./types.js";
 
@@ -59,9 +69,7 @@ export interface ClassifiedStateMachineBroadcastError {
   readonly revertReason?: string;
 }
 
-const DEFAULT_RELAYER_PRIVATE_KEY_ENV = "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY";
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const DEFAULT_RELAYER_PRIVATE_KEY_LABEL = "state-machine submission broadcast";
 
 export function createStateMachineSubmissionBroadcastAdapter(
   options: StateMachineSubmissionBroadcastAdapterOptions
@@ -74,13 +82,13 @@ export function createStateMachineSubmissionBroadcastAdapter(
   const chain = options.rpcUrl ? chainFor(options.chainId, options.rpcUrl) : undefined;
   const publicClient: StateMachineSubmissionPublicClient = options.publicClient ?? createPublicClient({
     ...(chain ? { chain } : {}),
-    transport: http(requiredRpcUrl(options.rpcUrl))
+    transport: http(requiredRpcUrl(options.rpcUrl, DEFAULT_RELAYER_PRIVATE_KEY_LABEL))
   });
-  const account = options.walletClient ? undefined : privateKeyToAccount(loadRelayerPrivateKey(options));
+  const account = options.walletClient ? undefined : privateKeyToAccount(loadRelayerPrivateKey(options, DEFAULT_RELAYER_PRIVATE_KEY_LABEL));
   const walletClient: StateMachineSubmissionWalletClient = options.walletClient ?? (createWalletClient({
     account,
     ...(chain ? { chain } : {}),
-    transport: http(requiredRpcUrl(options.rpcUrl))
+    transport: http(requiredRpcUrl(options.rpcUrl, DEFAULT_RELAYER_PRIVATE_KEY_LABEL))
   }) as unknown as StateMachineSubmissionWalletClient);
   const gasPayer = normalizeGasPayer(options.walletClient?.account?.address ?? account?.address);
   const waitForReceipt = options.waitForReceipt ?? true;
@@ -443,26 +451,16 @@ function failedResult(
   const deadLetter = deadLetterForBroadcastError(errorCode, retryable);
   const errorLabel = errorLabelForBroadcastError(errorCode);
   const retryState = deadLetter ? "dead_letter" : retryable ? "retryable" : "not_retryable";
+  const core = broadcastFailureCore({ errorCode, message, retryable, gasPayer, ...(txHash ? { txHash } : {}), ...(blockNumber ? { blockNumber } : {}) });
   return {
-    status: "failed",
-    ...(txHash ? { txHash } : {}),
-    ...(blockNumber ? { blockNumber } : {}),
-    errorCode,
+    ...core,
     errorLabel,
-    message,
-    retryable,
     retryState,
     deadLetter,
     attempt: {
-      status: "failed",
-      ...(txHash ? { txHash } : {}),
-      ...(blockNumber ? { blockNumber } : {}),
-      errorCode,
+      ...core.attempt,
       errorLabel,
-      errorMessage: message,
       ...(revertReason ? { revertReason } : {}),
-      gasPayer,
-      retryable,
       retryState,
       deadLetter
     }
@@ -522,94 +520,10 @@ function deadLetterForBroadcastError(errorCode: string, retryable: boolean): boo
   }
 }
 
-function loadRelayerPrivateKey(options: StateMachineSubmissionBroadcastAdapterOptions): Hex {
-  const privateKey = options.relayerPrivateKey ?? (options.env ?? process.env)[
-    options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV
-  ];
-  if (!privateKey) {
-    throw new ConfigError(`${options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV} is required for state-machine submission broadcast`);
-  }
-  assertHex(privateKey, options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV);
-  if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
-    throw new ConfigError(`${options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV} must be a 32-byte private key`);
-  }
-  return privateKey.toLowerCase() as Hex;
-}
-
 function normalizePlanId(value: Hex | string | undefined): Hex | undefined {
   if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
     return undefined;
   }
   const normalized = value.toLowerCase() as Hex;
   return normalized === ZERO_BYTES32 ? undefined : normalized;
-}
-
-function normalizeGasPayer(value: string | undefined): Address {
-  if (!value) {
-    throw new ConfigError("relayer gas payer address is required");
-  }
-  const address = normalizeAddress(value, "relayer gas payer");
-  if (address === ZERO_ADDRESS) {
-    throw new ConfigError("relayer gas payer address must not be zero");
-  }
-  return address;
-}
-
-function requiredRpcUrl(rpcUrl: string | undefined): string {
-  // fail-closed：无显式 RPC 配置即抛错，不回落 127.0.0.1:8545（本地环境
-  // 也必须显式传 UVP_RPC_URL）。
-  if (!rpcUrl) {
-    throw new ConfigError("UVP_RPC_URL is required for state-machine submission broadcast; refusing to fall back to a default RPC endpoint");
-  }
-  return rpcUrl;
-}
-
-function chainFor(chainId: number, rpcUrl: string): Chain {
-  return {
-    id: chainId,
-    name: `uvp-${chainId}`,
-    nativeCurrency: {
-      name: "Ether",
-      symbol: "ETH",
-      decimals: 18
-    },
-    rpcUrls: {
-      default: {
-        http: [rpcUrl]
-      }
-    }
-  };
-}
-
-function findErrorName(error: unknown): string | undefined {
-  if (!error || typeof error !== "object") {
-    return undefined;
-  }
-  const record = error as Record<string, unknown>;
-  if (typeof record.errorName === "string") {
-    return record.errorName;
-  }
-  if (record.cause) {
-    return findErrorName(record.cause);
-  }
-  return undefined;
-}
-
-function errorText(error: unknown): string {
-  if (error instanceof Error) {
-    const causeText = "cause" in error ? errorText((error as { readonly cause?: unknown }).cause) : "";
-    return redactErrorMessage([error.message, causeText].filter(Boolean).join(" "));
-  }
-  if (typeof error === "string") {
-    return redactErrorMessage(error);
-  }
-  if (error && typeof error === "object") {
-    const text = Object.entries(error as Record<string, unknown>)
-      .filter(([key]) => key !== "stack")
-      .map(([_key, value]) => typeof value === "string" ? value : "")
-      .filter(Boolean)
-      .join(" ");
-    return redactErrorMessage(text);
-  }
-  return "";
 }
