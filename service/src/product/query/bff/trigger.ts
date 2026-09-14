@@ -3,8 +3,7 @@ import {
   createWalletClient,
   defineChain,
   http,
-  keccak256,
-  stringToBytes,
+  getEventSelector,
   decodeAbiParameters
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -13,21 +12,43 @@ import {
   buildTriggerOrderFromOutsideForCall,
   deriveTriggerOrderId
 } from "@uvp-eth/protocol-bindings";
+import { onchainSignalId, onchainSourceId } from "@uvp-eth/compiler";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../../../shared/types.js";
 import { redactErrorMessage } from "../../../security/redaction.js";
 import type { ProductOrderTriggerStatus, SignalAuthorizationDTO } from "./types.js";
 
 export const DEFAULT_PRODUCT_REGISTRAR_ADDRESS = "0x000000000000000000000000000000000000bff1" as const;
-// UVPStateMachine v0.10: planId/orderId/sourceId are indexed; signalId is the
-// first value in the data payload (not a fourth topic).
-const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,address)"));
 
+/**
+ * SignalSubmitted 的 topic 从权威 ABI 推导（此前是冻结 fixture 体系外
+ * 唯一手写的事件签名串——ABI 重命名即静默失配，回执探针漏判）。
+ * UVPStateMachine v0.10：planId/orderId/sourceId indexed；signalId 是
+ * data 载荷首参（非第四个 topic）。
+ */
+const signalSubmittedTopic = eventTopicFromAbi("SignalSubmitted");
+
+function eventTopicFromAbi(eventName: string): Hex {
+  type StateMachineAbiEvent = Extract<
+    (typeof STATE_MACHINE_ABI)[number],
+    { readonly type: "event" }
+  >;
+  const event = STATE_MACHINE_ABI.find(
+    (entry): entry is StateMachineAbiEvent =>
+      entry.type === "event" && entry.name === eventName
+  );
+  if (!event) {
+    throw new ConfigError(`STATE_MACHINE_ABI is missing the ${eventName} event`);
+  }
+  return getEventSelector(event);
+}
+
+/** 链上事实键单源：与 @uvp-eth/compiler 的 onchainSourceId/onchainSignalId 同派生。 */
 export function productSignalSourceId(source: string): Hex {
-  return keccak256(stringToBytes(source)) as Hex;
+  return onchainSourceId(source);
 }
 
 export function productSignalId(signalName: string): Hex {
-  return keccak256(stringToBytes(signalName)) as Hex;
+  return onchainSignalId(signalName);
 }
 
 export interface ProductBroadcastOutsideTriggerInput {
