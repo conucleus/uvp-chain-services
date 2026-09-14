@@ -19,7 +19,7 @@ Chain Services 把 UVP 链上事实投影成 Product、Store 和运维接口，�
 - `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件）、`signal`（信号/授权/委派）、`stage`（阶段补丁与 hook 生命周期）、`docking`（dock 具名接口委托）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
 - `product/application/`：产品用例与命令（订单草稿、证据、Signal/补丁/dock 提交编排）；`product/query/`：读模型与 BFF（含 `bff/` 各存储实现与 staging 就绪检查）。
 - `store/`：Store 链下业务数据的聚合目录——`sessions`（钱包会话与挑战）、`suppliers`（供应商档案）、`listings`、`join`（入驻申请）、`decoration`（店铺装修）、`console`（运营台：草稿编译、审计、closure、运行时视图）。供应商、会话和经营资料是链下业务数据，不属于"删除后从链重建"的范围。
-- 其余：`api/`（HTTP 路由与边界）、`relayer/`、`submissions/`、`reconcile/`、`dock-automation/`、`evidence/`、`stage-patches/`、`notifications/`、`governance/`、`risk/`、`compliance/`、`storage/`、`config/`、`security/`、`chain-adapters/`、`proof-verifier/`。
+- 其余：`api/`（HTTP 路由与边界）、`submissions/`、`reconcile/`、`dock-automation/`、`evidence/`、`stage-patches/`、`notifications/`、`governance/`、`storage/`、`config/`、`security/`、`chain-adapters/`、`proof-verifier/`、`shared/broadcast/`（两条在役广播链路的装配套件与 duplicate-transaction 车道单源）。
 
 ## 运行
 
@@ -72,12 +72,21 @@ Store：
 - `/store/docking-sessions` 下的凝结核工作流
 - `GET /store/search`、`GET /store/audit`、`GET /store/runtime/summary`
 - `GET /store/closure/dry-run`
-- Store 运行时读端点（订单/任务/钱包映射的运营视图，要求会话锚定钱包，匿名不可枚举）：
+- Store 运行时读端点（订单/任务的运营视图）：
   - `GET /store/zhixus/:zhixuId/orders`
-  - `GET /store/orders/:orderId/candidates`
   - `GET /store/orders/:orderId/observation`
   - `GET /store/orders/:orderId/replay`
   - `GET /store/orders/:orderId/audit-summary`
+- `GET /store/orders/:orderId/candidates`（歧义订单消歧页，产品向）
+
+### API 访问策略
+
+接口按三档身份门执行（以路由实际代码为准，本节是索引不是权威）：
+
+- **参与者面**（Product 提交/触发档案/证据读取、`/store/orders/:orderId/candidates`）：要求会话锚定钱包身份（匿名 `wallet_identity_required`）。candidates 只携带部署级元数据，不含钱包或提交者映射。
+- **Store 公共读**（`store.read` 能力）：`/store/zhixus`、`/store/search` 等公开目录面。
+- **运营观察面**（`store.audit.read` 能力）：`/store/audit`、`/store/closure/dry-run`、`/store/runtime/summary`、`/store/zhixus/:zhixuId/orders`、`/store/orders/:orderId/{observation,replay,audit-summary}`。这些响应含全部订单的 submitter 地址、tasks assigneeWallet 与参与者钱包映射（无参与者过滤）——持有者是运营方/管理员钱包会话，以及 dev/JWT 形态的 reader 及以上身份；任意第三方钱包 SIWE 会话不因"有锚定会话"即得全量运营数据。
+- Store 写操作面（草稿导入/编译、schema 保存、listing/supplier/docking 管理）要求 `store_operator`；版本激活/废弃与治理动作（草稿审核、身份登记/撤销）分别要求 `store_admin` / 治理管理员。
 
 治理与身份：
 
