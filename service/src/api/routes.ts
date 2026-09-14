@@ -1,7 +1,5 @@
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { Hex } from "../shared/types.js";
-import { createNoopComplianceService } from "../compliance/index.js";
-import { createNoopRiskGraphService } from "../risk/index.js";
 import { createProductService, ProductOrderLookupError } from "../product/application/service.js";
 import {
   createProductBffService,
@@ -74,9 +72,7 @@ import { createNotificationsRouteModule } from "./routes/notifications.js";
 import { createProductBffRouteModule } from "./routes/product-bff.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
 import { createStoreConsoleRouteModule } from "./routes/store-console.js";
-import { createStoreComplianceRouteModule } from "./routes/store-compliance.js";
 import { createStoreDockingRouteModule } from "./routes/store-docking.js";
-import { createStoreRiskRouteModule } from "./routes/store-risk.js";
 import { createStoreSuppliersRouteModule } from "./routes/store-suppliers.js";
 import { createSubmissionsRouteModule } from "./routes/submissions.js";
 import { createStagePatchRouteModule } from "./routes/stage-patches.js";
@@ -135,8 +131,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     descriptorSnapshotStore: identityDescriptorSnapshots,
     ...(options.descriptorPublicBaseUrl ? { descriptorPublicBaseUrl: options.descriptorPublicBaseUrl } : {})
   });
-  const complianceService = options.complianceService ?? createNoopComplianceService();
-  const riskGraphService = options.riskGraphService ?? createNoopRiskGraphService();
   const storeRuntimeService = createStoreRuntimeService({
     productService,
     store,
@@ -336,8 +330,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     joinService,
     identityDescriptorSnapshots,
     governanceService,
-    complianceService,
-    riskGraphService,
     notificationService,
     supplierNotificationConfigService,
     evidenceService,
@@ -361,9 +353,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createStoreDecorationRouteModule({ decorationService: storeDecorationService }),
     createStoreJoinRouteModule({ joinService }),
     createStoreListingsRouteModule({ listingService }),
-    createStoreComplianceRouteModule(),
     createStoreDockingRouteModule(),
-    createStoreRiskRouteModule(),
     createStoreSuppliersRouteModule(),
     createGovernanceRouteModule(),
     createNotificationsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
