@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { UVP_STATE_MACHINE_ARTIFACT_ABI } from '@uvp-eth/protocol-bindings';
 
-import { classifyRelaySubmitterError } from '../src/relayer/service.js';
 import { classifyStateMachineBroadcastError } from '../src/submissions/broadcast-adapter.js';
 import {
   classifyStagePatchBroadcastError,
@@ -17,8 +16,8 @@ import {
  * Conformance suite for the unified UVP error taxonomy
  * (uvp-protocol/protocol/uvp-error-taxonomy.v1.json).
  *
- * chain-services keeps its handwritten classification points (relayer,
- * submissions/safe-broadcast, stage-patches, reconcile, indexer sweep) — the
+ * chain-services keeps its handwritten classification points (submissions
+ * broadcast + safe-broadcast, stage-patches, reconcile, indexer sweep) — the
  * runtime is intentionally not table-driven — but this suite pins the taxonomy
  * version + sha256 and enforces, in both directions:
  *
@@ -119,7 +118,6 @@ describe('uvp error taxonomy pinning (chain-services)', () => {
  * taxonomy's scope and live in OUT_OF_TAXONOMY_SCOPE below.
  */
 const CLASSIFICATION_SOURCES: readonly string[] = [
-  'src/relayer/service.ts',
   'src/submissions/broadcast-adapter.ts',
   'src/submissions/safe-broadcast-adapter.ts',
   'src/submissions/service.ts',
@@ -152,9 +150,24 @@ const CODE_CASE_PATTERN: ReadonlyMap<string, RegExp> = new Map([
  *   X-7 修复——泛化会抹掉 transaction_reverted 等真实错误码），该哨兵
  *   不再有发射点；taxonomy（冻结于 uvp-protocol 仓）的 chain-services
  *   登记项待其仓侧更新。
+ * - relayer 框架专属名（2026-09-14 P2-1 裁决删除 src/relayer 死框架，
+ *   无生产构造点；duplicate-transaction 车道已下沉两在役 broadcast
+ *   adapter，其通用文本分类 executor-kit/protocol 自持）：下列内部名
+ *   不再有发射点，taxonomy 登记项待 uvp-protocol 仓侧同步清理。
  */
 const INTENTIONALLY_UNEMITTED_NAMES: ReadonlySet<string> = new Set([
   'broadcast_retry_blocked',
+  'duplicate_signer_nonce',
+  'expired_payload_deadline',
+  'invalid_business_signature',
+  'malformed_relay_payload',
+  'missing_nonce',
+  'missing_order_id',
+  'missing_verified_signer',
+  'order_relay_in_flight',
+  'relay_broadcast_failed',
+  'rpc_unavailable',
+  'verified_signer_mismatch',
 ]);
 
 /** API request-validation / lifecycle codes outside the retry taxonomy scope. */
@@ -294,22 +307,6 @@ interface ClassifierVerdict {
   readonly deadLetter?: boolean;
 }
 
-/** Drives the relayer classifier into each branch and maps to the taxonomy code. */
-const RELAYER_PROBES: readonly { readonly internalName: string; readonly error: unknown }[] = [
-  { internalName: 'unauthorized_signal_submitter', error: new Error('Contract function reverted: UnauthorizedSignalSubmitter()') },
-  { internalName: 'invalid_business_signature', error: new Error('InvalidSignalSignature: signature does not match') },
-  { internalName: 'expired_payload_deadline', error: new Error('ExpiredSignalSignature: deadline has expired') },
-  { internalName: 'signal_already_exists', error: new Error('SignalAlreadyExists()') },
-  { internalName: 'duplicate_transaction', error: new Error('nonce too low') },
-  { internalName: 'duplicate_transaction', error: new Error('already known') },
-  { internalName: 'relayer_insufficient_funds', error: new Error('insufficient funds for gas * price + value') },
-  { internalName: 'chain_id_mismatch', error: new Error('chain id mismatch: 1 != 31337') },
-  { internalName: 'unknown_order', error: new Error('execution reverted: Error: UnknownOrder()') },
-  { internalName: 'transaction_reverted', error: new Error('execution reverted') },
-  { internalName: 'rpc_unavailable', error: new Error('request timed out: ETIMEDOUT') },
-  { internalName: 'relay_broadcast_failed', error: new Error('something unprecedented happened') },
-];
-
 const SUBMISSION_PROBES: readonly { readonly internalName: string; readonly error: unknown }[] = [
   { internalName: 'unauthorized_signal_submitter', error: new Error('UnauthorizedSignalSubmitter()') },
   { internalName: 'signal_already_exists', error: new Error('SignalAlreadyExists()') },
@@ -330,20 +327,6 @@ const SUBMISSION_PROBES: readonly { readonly internalName: string; readonly erro
 ];
 
 describe('chain-services classification consistency against the taxonomy', () => {
-  it('relayer classifier verdicts match the taxonomy attributes field by field', () => {
-    expect(RELAYER_PROBES.length).toBeGreaterThanOrEqual(12);
-    for (const probe of RELAYER_PROBES) {
-      const entry = entryForInternalName(probe.internalName);
-      const verdict = classifyRelaySubmitterError(probe.error) as ClassifierVerdict & { errorCode: string };
-      const actual = verdict.errorCode;
-      // The probe must land on the branch it claims to cover.
-      const branch = entryForInternalName(actual);
-      expect(branch.code, `probe error for "${probe.internalName}" landed on "${actual}"`).toBe(entry.code);
-      expect(verdict.retryable, `${entry.code}: retryable`).toBe(entry.retryable);
-      expect(verdict.deadLetter ?? !verdict.retryable, `${entry.code}: dead_letter`).toBe(entry.dead_letter);
-    }
-  });
-
   it('submissions broadcast classifier verdicts match the taxonomy attributes field by field', () => {
     for (const probe of SUBMISSION_PROBES) {
       const entry = entryForInternalName(probe.internalName);
@@ -356,10 +339,8 @@ describe('chain-services classification consistency against the taxonomy', () =>
     }
   });
 
-  it('keeps the route-4 unification pinned: insufficient_funds is retryable in both lanes', () => {
-    const relayerVerdict = classifyRelaySubmitterError(new Error('insufficient funds'));
+  it('keeps the route-4 unification pinned: insufficient_funds is retryable in the broadcast lane', () => {
     const submissionVerdict = classifyStateMachineBroadcastError(new Error('insufficient funds'));
-    expect(relayerVerdict.retryable).toBe(true);
     expect(submissionVerdict.retryable).toBe(true);
     const entry = entryByCode('insufficient_funds');
     expect(entry.retryable).toBe(true);
@@ -377,9 +358,9 @@ describe('chain-services classification consistency against the taxonomy', () =>
     expect(entry.producer_overrides?.['executor-kit']?.['dead_letter']).toBe(false);
   });
 
-  it('keeps the nonce_conflict divergence recorded (needs-ruling): relayer non-retryable, table base matches relayer', () => {
+  it('keeps the nonce_conflict divergence recorded (needs-ruling): submissions non-retryable base, table base matches', () => {
     const entry = entryByCode('nonce_conflict');
-    const verdict = classifyRelaySubmitterError(new Error('replacement transaction underpriced')) as ClassifierVerdict & { errorCode: string };
+    const verdict = classifyStateMachineBroadcastError(new Error('replacement transaction underpriced')) as ClassifierVerdict & { errorCode: string };
     expect(verdict.errorCode).toBe('duplicate_transaction');
     expect(verdict.retryable).toBe(entry.retryable);
     expect(verdict.retryable).toBe(false);

@@ -16,8 +16,6 @@ export * from "./product/application/service.js";
 export * from "./product/query/bff/authorization.js";
 export * from "./product/query/bff/trigger.js";
 export * from "./proof-verifier/service.js";
-export * from "./relayer/service.js";
-export * from "./relayer/types.js";
 export * from "./risk/index.js";
 export * from "./security/index.js";
 export * from "./storage/factory.js";
