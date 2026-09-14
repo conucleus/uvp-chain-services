@@ -8,6 +8,7 @@ import {
 } from "@uvp-eth/protocol-bindings";
 import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
+import { resolveDuplicateTransactionOutcome } from "../shared/broadcast/duplicate-transaction.js";
 import type {
   PreparedStageExecutorPatchDTO,
   PreparedStageResourcePatchDTO,
@@ -30,6 +31,11 @@ export interface StateMachineStagePatchPublicClient {
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
   } | undefined>;
+  /** duplicate-transaction 车道的回执探针（viem publicClient 自带同签名）。 */
+  getTransactionReceipt?(args: { readonly hash: Hex }): Promise<{
+    readonly status?: "success" | "reverted" | string;
+    readonly blockNumber?: bigint;
+  } | undefined | null>;
 }
 
 export interface StateMachineStagePatchWalletClient {
@@ -245,6 +251,60 @@ function createStagePatchBroadcastAdapter<TPrepared extends PreparedPatchForBroa
         }, request.prepared, request));
       } catch (error) {
         const classified = classifyStagePatchBroadcastError(error, labels);
+        // duplicate-transaction 三车道（nonce too low / already known /
+        // replacement underpriced）不是终态失败：交易可能已上链或仍在池中，
+        // 先按候选 txHash 探回执裁决（成功按 submitted 落账、revert 终态、
+        // 未知可重试并保留候选哈希），机制单源在 shared/broadcast。
+        if (classified.errorCode === "duplicate_transaction") {
+          const getReceipt = publicClient.getTransactionReceipt
+            ? (txHash: Hex) => publicClient.getTransactionReceipt!({ hash: txHash })
+            : undefined;
+          return resolveDuplicateTransactionOutcome(
+            error,
+            getReceipt,
+            {
+              onSubmitted: ({ txHash: probedTxHash, blockNumber }) => {
+                const status = options.confirmOnReceipt ? "confirmed" : "submitted";
+                return {
+                  status,
+                  txHash: probedTxHash,
+                  ...(blockNumber !== undefined ? { blockNumber } : {}),
+                  attempt: {
+                    status,
+                    txHash: probedTxHash,
+                    ...(blockNumber !== undefined ? { blockNumber } : {}),
+                    gasPayer,
+                    retryable: false
+                  }
+                } satisfies StagePatchBroadcastResult;
+              },
+              onReceiptFailed: ({ txHash: failedTxHash, blockNumber }) =>
+                failedResult(
+                  "transaction_reverted",
+                  "the duplicate transaction was mined and reverted on chain",
+                  false,
+                  gasPayer,
+                  failedTxHash,
+                  blockNumber
+                ),
+              onReceiptUnknown: ({ txHash: candidateTxHash }) =>
+                failedResult(
+                  "transaction_receipt_unknown",
+                  "broadcaster reported a duplicate transaction but no receipt is available yet; the candidate hash is retained for the next probe",
+                  true,
+                  gasPayer,
+                  candidateTxHash
+                ),
+              onReassemblableNonceRace: () =>
+                failedResult(
+                  "duplicate_transaction",
+                  `broadcaster reported a nonce race without an attributable transaction hash; the ${labels.label} can be re-assembled with a fresh gas nonce`,
+                  true,
+                  gasPayer
+                )
+            }
+          );
+        }
         return failedResult(classified.errorCode, classified.message, classified.retryable, gasPayer);
       }
 
@@ -402,6 +462,16 @@ export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatch
       errorCode: "unknown_order",
       message: "order is not registered on the state machine",
       retryable: true
+    };
+  }
+  // duplicate-transaction 车道（broadcaster 的 nonce 冲突三形态）：基础判定
+  // 对齐 taxonomy nonce_conflict（不可重试、死信），但 broadcast() 捕获口会
+  // 先走回执探针裁决改判——直接死信会把已上链交易永久标记 failed。
+  if (/nonce too low|replacement transaction underpriced|already known/i.test(haystack)) {
+    return {
+      errorCode: "duplicate_transaction",
+      message: `broadcaster reported a duplicate or already-used transaction nonce for the ${labels.label}`,
+      retryable: false
     };
   }
   if (/timeout|timed out|ETIMEDOUT|AbortError|ECONNRESET/i.test(haystack)) {

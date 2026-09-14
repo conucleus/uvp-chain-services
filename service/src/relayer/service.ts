@@ -3,6 +3,11 @@ import { loadConfigFromEnv } from "../config/index.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
 import {
+  duplicateTransactionReceiptVerdict,
+  duplicateTransactionTxHashCandidates,
+  isDuplicateTransactionReport
+} from "../shared/broadcast/duplicate-transaction.js";
+import {
   ConfigError,
   assertHex,
   normalizeAddress,
@@ -492,7 +497,8 @@ export class RelayerService implements LifecycleService {
         });
         continue;
       }
-      if (receipt?.status === "success") {
+      const verdict = duplicateTransactionReceiptVerdict(receipt);
+      if (verdict === "success") {
         const submission = submittedSubmission(request, txHash, attemptNumber);
         try {
           await this.record(submission);
@@ -517,7 +523,7 @@ export class RelayerService implements LifecycleService {
         });
         return { kind: "submitted", submission };
       }
-      if (receipt && (receipt.status === "reverted" || receipt.status === "failed")) {
+      if (verdict === "failed") {
         return { kind: "receipt_failed", txHash };
       }
     }
@@ -800,64 +806,6 @@ export function createRelayerService(options: RelayerServiceOptions): RelayerSer
   return new RelayerService(options);
 }
 
-const TX_HASH_LIKE = /^0x[0-9a-fA-F]{64}$/;
-
-/**
- * duplicate_transaction 的候选 txHash（去重保序）：错误对象上携带的
- * txHash/transactionHash 字段（viem/节点错误常见），加上该提交此前记录
- * 的 txHash——"already known" 通常是同一签名载荷先前已广播。
- */
-function duplicateTransactionTxHashCandidates(
-  error: unknown,
-  priorTxHash: Hex | undefined
-): readonly Hex[] {
-  const candidates: Hex[] = [];
-  const push = (value: unknown): void => {
-    if (typeof value === "string" && TX_HASH_LIKE.test(value)) {
-      const normalized = value.toLowerCase() as Hex;
-      if (!candidates.includes(normalized)) {
-        candidates.push(normalized);
-      }
-    }
-  };
-  collectTxHashLikeFields(error, push, 0);
-  push(priorTxHash);
-  return candidates;
-}
-
-function collectTxHashLikeFields(
-  value: unknown,
-  visit: (value: unknown) => void,
-  depth: number
-): void {
-  if (depth > 4 || value == null) {
-    return;
-  }
-  if (typeof value === "string") {
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      collectTxHashLikeFields(item, visit, depth + 1);
-    }
-    return;
-  }
-  if (typeof value !== "object") {
-    return;
-  }
-  const record = value as Record<string, unknown>;
-  for (const key of ["txHash", "transactionHash", "hash"]) {
-    if (key in record) {
-      visit(record[key]);
-    }
-  }
-  for (const key of ["transaction", "cause", "error", "details"]) {
-    if (key in record) {
-      collectTxHashLikeFields(record[key], visit, depth + 1);
-    }
-  }
-}
-
 /** 载荷形状校验（不含 deadline）：identity 字段缺失/畸形的载荷不可能有台账记录。 */
 function validateRelayRequestShape(request: RelayRequest): void {
   if (!request.business.orderId) {
@@ -984,7 +932,7 @@ export function classifyRelaySubmitterError(
       deadLetter: true
     });
   }
-  if (/nonce too low|replacement transaction underpriced|already known/i.test(haystack)) {
+  if (isDuplicateTransactionReport(haystack)) {
     return relayFailure({
       errorCode: "duplicate_transaction",
       message: "broadcaster reported a duplicate or already-used transaction nonce",

@@ -316,6 +316,12 @@ const SUBMISSION_PROBES: readonly { readonly internalName: string; readonly erro
   { internalName: 'unknown_order', error: new Error('UnknownOrder()') },
   { internalName: 'expired_signal_signature', error: new Error('ExpiredSignalSignature()') },
   { internalName: 'invalid_signal_signature', error: new Error('InvalidSignalSignature()') },
+  // duplicate-transaction 三车道（原 relayer 专属，已下沉两在役面）：基础
+  // 判定对齐 taxonomy nonce_conflict；broadcast() 捕获口的回执探针改判由
+  // broadcast-duplicate-transaction.test.ts 钉。
+  { internalName: 'duplicate_transaction', error: new Error('nonce too low') },
+  { internalName: 'duplicate_transaction', error: new Error('already known') },
+  { internalName: 'duplicate_transaction', error: new Error('replacement transaction underpriced') },
   // 未登记 revert 走泛规则（对齐 relayer 兜底）：永久失败，不得无限重放烧 gas。
   { internalName: 'transaction_reverted', error: new Error('execution reverted: SomeUnregisteredError()') },
   { internalName: 'relayer_insufficient_funds', error: new Error('insufficient funds') },
@@ -547,6 +553,26 @@ describe('stage-patch contract revert names against the authoritative ABI (third
     expect(verdict.retryable).toBe(false);
   });
 
+  it('keeps the shared duplicate-transaction lanes terminal-by-default on both patch label sets', () => {
+    // 基础判定对齐 taxonomy nonce_conflict（retryable=false/dead_letter=true）；
+    // broadcast() 捕获口的回执探针改判（receipt_unknown 可重试等）由
+    // broadcast-duplicate-transaction.test.ts 单独钉。
+    for (const labels of [STAGE_EXECUTOR_PATCH_BROADCAST_LABELS, STAGE_RESOURCE_PATCH_BROADCAST_LABELS] as const) {
+      for (const text of ['nonce too low', 'already known', 'replacement transaction underpriced']) {
+        const verdict = classifyStagePatchBroadcastError(
+          new Error(text),
+          // 分类器对 labels 的泛型只约束 buildCall 的入参类型（分类路径不
+          // 触碰 buildCall），资源档标签按执行档标签类型传入即可统一断言。
+          labels as typeof STAGE_EXECUTOR_PATCH_BROADCAST_LABELS
+        ) as ClassifierVerdict & { errorCode: string };
+        expect(verdict.errorCode, `${text} on ${labels.label}`).toBe('duplicate_transaction');
+        const entry = entryForInternalName('duplicate_transaction');
+        expect(verdict.retryable).toBe(entry.retryable);
+        expect(entry.dead_letter).toBe(true);
+      }
+    }
+  });
+
   it('keeps transport errors retryable and ahead of the generic revert rule', () => {
     const verdict = classifyStagePatchBroadcastError(
       Object.assign(new Error('The request timed out'), { name: 'TimeoutError' }),
@@ -564,6 +590,7 @@ function branchDeadLetterFallback(errorCode: string, retryable: boolean): boolea
   }
   const deadLetterCodes = new Set([
     'chain_id_mismatch',
+    'duplicate_transaction',
     'expired_signal_signature',
     'invalid_signal_signature',
     'order_plan_unresolved',

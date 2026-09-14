@@ -22,6 +22,7 @@ import {
 import {
   createProductStageExecutorPatchService,
   createProductStageResourcePatchService,
+  createStateMachineStageExecutorPatchBroadcastAdapter,
   hashResourceManifest,
   hashStageExecutorPatchPayload,
   hashStageResourcePatchPayload,
@@ -1042,6 +1043,75 @@ describe("stage executor/resource patch Product API", () => {
       },
     });
     expect(broadcastCalls).toBe(2);
+  });
+
+  it("resolves a duplicate-transaction broadcast through the shared receipt probe", async () => {
+    // 三车道从 relayer 下沉后的在役消费：writeContract 报 "already known"
+    // 且携带候选 txHash 时，先探回执——探到成功按 submitted 落账（nonce 已
+    // 被链上消费，不再放行重试）；探不到回执保持 transaction_receipt_unknown
+    // 可重试并保留候选哈希（nonce 不释放、reconcile 通道可查）。
+    const duplicateTx = bytes32Hex("e0e");
+    const receipts = new Map<string, { status?: "success" | "reverted" | string; blockNumber?: bigint }>();
+    const writeContract = vi.fn(async () => {
+      const error = new Error("already known") as Error & { txHash?: string };
+      error.txHash = duplicateTx;
+      throw error;
+    });
+    const adapter = createStateMachineStageExecutorPatchBroadcastAdapter({
+      stateMachineAddress,
+      chainId,
+      publicClient: {
+        getChainId: async () => chainId,
+        getTransactionReceipt: async ({ hash }: { hash: Hex }) => receipts.get(hash)
+      },
+      walletClient: {
+        account: { address: "0x9999999999999999999999999999999999999999" },
+        writeContract
+      },
+      waitForReceipt: true,
+      now: () => baseNow
+    });
+    const { router } = await routerFixture({ executorBroadcastAdapter: adapter });
+    const prepared = await prepareStageExecutorPatch(router);
+    const submitBody = {
+      prepareId: prepared.prepareId,
+      selectorWallet,
+      signature: await signExecutorPrepared(prepared),
+    };
+
+    // 回执未产出：可重试的 receipt_unknown，候选哈希随提交落账（prepare
+    // 被消费、nonce 不释放——链上可能已持有，收口交给 reconcile 通道）。
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    })).resolves.toMatchObject({
+      status: 200,
+      body: {
+        status: "failed",
+        errorCode: "transaction_receipt_unknown",
+        retryable: true,
+        txHash: duplicateTx
+      }
+    });
+
+    // 回执挖出且成功：车道自愈——同 stage 的补丁 nonce 已被 receipt_unknown
+    // 行持有（服务面 409 是正确防御），直接驱动 adapter 验证探针闭环
+    // submitted（带候选哈希与块高）。
+    receipts.set(duplicateTx, { status: "success", blockNumber: 61n });
+    const healedPrepared = await prepareStageExecutorPatch(router, {
+      metadataURI: "ipfs://stage-executor-patches/2"
+    });
+    await expect(adapter.broadcast({
+      prepared: healedPrepared,
+      signature: await signExecutorPrepared(healedPrepared),
+      recoveredSelector: selectorWallet
+    })).resolves.toMatchObject({
+      status: "submitted",
+      txHash: duplicateTx,
+      blockNumber: "61"
+    });
+    expect(writeContract).toHaveBeenCalledTimes(2);
   });
 
   it("records a persist_failed fallback with the txHash and keeps the nonce consumed when the store write fails after broadcast", async () => {
