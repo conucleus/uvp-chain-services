@@ -9,7 +9,7 @@ import {
   type Log,
 } from "viem";
 import type { ChainServicesConfig } from "../config/index.js";
-import { ConfigError, noopLogger, type Address, type Hex, type Logger } from "../shared/types.js";
+import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type Logger } from "../shared/types.js";
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
@@ -496,10 +496,13 @@ function eventInputTypes(abi: Abi, eventName: string): ReadonlyMap<string, strin
 }
 
 function normalizeLogAddress(address: string): Address {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+  // 与 shared normalizeAddress 同语义（畸形 RPC 日志地址→ConfigError，
+  // 调用点在解码 catch 之外抛出）；委托单源实现，仅保留错误文案锚点。
+  try {
+    return normalizeAddress(address, "log address");
+  } catch {
     throw new ConfigError("log address must be a 20-byte EVM address");
   }
-  return address.toLowerCase() as Address;
 }
 
 function isZeroAddress(address: Address): boolean {
