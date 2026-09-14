@@ -464,7 +464,7 @@ export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatch
   }
   // UnknownOrder 先于泛 reverted 判定：viem 的合约执行错误文本同时含
   // "reverted." 与 "Error: UnknownOrder()"，泛规则在前会把"订单尚未注册/
-  // 索引未跟上"的典型瞬态永久死信（对齐 submissions/relayer 的既有规则）。
+  // 索引未跟上"的典型瞬态永久死信（对齐 submissions 广播分类器的既有规则）。
   if (haystack.includes("UnknownOrder")) {
     return {
       errorCode: "unknown_order",

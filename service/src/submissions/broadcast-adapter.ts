@@ -382,7 +382,7 @@ export function classifyStateMachineBroadcastError(error: unknown): ClassifiedSt
       text
     );
   }
-  // 未登记 revert 的泛规则（对齐 relayer 的兜底与错误分类表）：真实执行
+  // 未登记 revert 的泛规则（对齐 taxonomy transaction_reverted 基础判定）：真实执行
   // 失败按永久失败处理——继续按可重试无限重放同一签名载荷只会重复烧
   // gas。位置在 UnknownOrder 等瞬态判定之后：viem 复合错误文本同时含
   // "reverted." 与具体错误名，泛规则在前会把瞬态永久死信。
@@ -398,7 +398,7 @@ export function classifyStateMachineBroadcastError(error: unknown): ClassifiedSt
     return classifiedBroadcastError(
       "relayer_insufficient_funds",
       "relayer gas payer has insufficient funds",
-      // 与 relayer 口径统一：给 gas payer 充值是运营可修复条件，同签名
+      // 对齐 taxonomy insufficient_funds（充值是运营可修复条件，同签名
       // 载荷可重试；不消费 prepare/nonce（submitter 未产生 txHash）。
       true,
       text
