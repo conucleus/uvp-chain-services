@@ -38,6 +38,7 @@ import type {
   ProjectionSyncState,
 } from "../../storage/projection-store.js";
 import { compareChainPointers, type Address } from "../../shared/types.js";
+import { decodeBytes32Text, displayBytes32 } from "../../shared/display.js";
 // PlanRegistered(finalize) 才是发布权威时点：桶存在只代表 commitPlan 已执行。
 import { isPlanRegisteredProjection } from "../../store/console/version.js";
 
@@ -2424,27 +2425,15 @@ function compareProvenance(
   return compareChainPointers(left, right);
 }
 
+// bytes32 展示解码/回落单源在 shared/display.ts（审计 §1.1 "bytes32 展示
+// 解码 ×2"）：displayBytes32 的标签回落 `${fallback} ${短哈希}` 与本视图
+// 既有形态一致，直接消费单源。displayStageId 是"解码失败原样透传"的
+// 恒等组合：它的输出参与 currentStageId 匹配、executorOverlays/
+// resourceRequirements 记录键与 schema 阶段比对，回落必须是原始值而非
+// 短哈希（前端与链上原始值关联依赖它），故仅委托单源解码、不套标签
+// 回落。
 function displayStageId(value: string): string {
   return decodeBytes32Text(value) ?? value;
-}
-
-function displayBytes32(value: string | undefined, fallback: string): string {
-  if (!value) {
-    return fallback;
-  }
-  return decodeBytes32Text(value) ?? `${fallback} ${shortHex(value)}`;
-}
-
-function decodeBytes32Text(value: string): string | undefined {
-  if (!/^0x[0-9a-fA-F]{64}$/.test(value)) {
-    return undefined;
-  }
-  const hex = value.slice(2).replace(/(00)+$/, "");
-  if (hex.length === 0 || hex.length % 2 !== 0) {
-    return undefined;
-  }
-  const text = Buffer.from(hex, "hex").toString("utf8");
-  return /^[\x20-\x7E]+$/.test(text) ? text : undefined;
 }
 
 function shortHex(value: string): string {

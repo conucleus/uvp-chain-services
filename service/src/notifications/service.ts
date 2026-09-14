@@ -18,6 +18,7 @@ import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "../inde
 import type { ProjectionStore } from "../storage/projection-store.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { compareChainPointers, type Address, type Hex } from "../shared/types.js";
+import { displayBytes32 } from "../shared/display.js";
 import type { ProductSchemaResolver } from "../product/application/service.js";
 import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store/suppliers/types.js";
 import {
@@ -1163,7 +1164,7 @@ function participantNotificationBase(
     orderTitle: orderTitle(order ?? task),
     taskId: task.taskId,
     taskTitle: taskTitle(task),
-    stageId: displayBytes32(task.stageIdentifier, task.stageIdentifier),
+    stageId: displayBytes32(task.stageIdentifier),
     stageLabel,
     participantRole: displayParticipantRole(task.assigneeRole),
     actionHref: `/product/orders/${encodeURIComponent(task.orderId)}#task=${encodeURIComponent(task.taskId)}`,
@@ -1184,7 +1185,7 @@ function participantNotificationBaseFromDelivery(
     orderTitle: orderTitle(order ?? delivery),
     ...(delivery.taskId ? { taskId: delivery.taskId } : {}),
     taskTitle: delivery.kind === "signal_received" ? "链上信号触达" : "处理链上待办",
-    ...(stageId ? { stageId: displayBytes32(stageId, stageId) } : {}),
+    ...(stageId ? { stageId: displayBytes32(stageId) } : {}),
     stageLabel: displayBytes32(stageId, "当前阶段"),
     actionHref: delivery.taskId
       ? `/product/orders/${encodeURIComponent(delivery.orderId)}#task=${encodeURIComponent(delivery.taskId)}`
@@ -1296,21 +1297,11 @@ function displayParticipantRole(role: string): string {
   }
 }
 
-function displayBytes32(value: string | undefined, fallback: string): string {
-  if (!value) {
-    return fallback;
-  }
-  if (!/^0x[0-9a-fA-F]{64}$/u.test(value)) {
-    return value;
-  }
-  const hex = value.slice(2);
-  const bytes = Buffer.from(hex, "hex");
-  const end = bytes.indexOf(0);
-  const text = bytes.slice(0, end >= 0 ? end : undefined).toString("utf8").trim();
-  return text.length > 0 && /^[\p{Letter}\p{Number}\p{Punctuation}\p{Separator}]+$/u.test(text)
-    ? text
-    : shortId(value);
-}
+// bytes32 展示单源在 shared/display.ts（审计 §1.1 "bytes32 展示解码 ×2"）：
+// 中文等 Unicode 标识与 "$=|~" 类 ASCII 符号标识按并集语义显示文本；
+// 非 bytes32 原样透传、不可解码回落短哈希，与通知流既有行为一致。
+// stageId 技术字段用无标签形态（解码文本或裸短哈希），stageLabel/
+// message 用标签形态（"当前阶段 0x…"）——统一后与阶段视图同标识同显示。
 
 function shortId(value: string): string {
   return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
