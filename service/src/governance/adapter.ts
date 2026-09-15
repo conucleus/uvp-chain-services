@@ -166,7 +166,7 @@ export function createGovernanceBroadcasterAdapter(
 
     // 已广播的 txHash 必须穿越 catch：writeContract 成功后等待回执抛错
     // 时链上交易已经存在，failed 结果丢失 txHash 会造成幽灵交易与重复
-    // 登记（对齐 product/bff/trigger、submissions/broadcast-adapter、
+    // 登记（对齐 product/query/bff/trigger、submissions/broadcast-adapter、
     // relayer 的同款防线）。
     let broadcastTxHash: ReturnType<typeof normalizeTxHash> | undefined;
     try {
@@ -349,11 +349,44 @@ function sanitizedErrorMessage(error: unknown, privateKey: Hex): string {
 }
 
 function isRetryableBroadcastError(error: unknown): boolean {
+  const name = findGovernanceErrorName(error);
   const message = error instanceof Error ? error.message.toLowerCase() : "";
-  if (message.includes("revert") || message.includes("notowner") || message.includes("unknown")) {
+  const haystack = `${name ?? ""} ${message}`;
+  // 传输层信封是瞬态故障，必须先于 revert 判定短路为可重试：viem 对
+  // 非标准节点错误的通用信封 UnknownRpcError（"An unknown RPC error
+  // occurred."）与 HTTP/超时类错误不代表交易被链上裁决，钉成
+  // retryable:false 落库后，同请求会被失败台账复用短路（对照
+  // relayer/submissions 的同类处理：只有链上裁决的确定性 revert 才永久）。
+  if (
+    /unknownrpcerror|rpcerror|httprequesterror|websocketerror|timeouterror|resourceunavailable/i.test(name ?? "") ||
+    /timeout|timed out|etimedout|econnreset|econnrefused|aborterror|fetch failed|network error|rpc unavailable/i.test(haystack)
+  ) {
+    return true;
+  }
+  // 合约确定性 revert（含 NotOwner 权限拒绝）才是永久失败：继续重试同一
+  // 交易只会重复烧 gas。viem 的复合错误文本同时含 "reverted" 与错误名，
+  // 因此 revert 判定必须放在传输信封/瞬态判定之后。
+  if (haystack.includes("revert") || haystack.includes("notowner") || haystack.includes("not owner")) {
     return false;
   }
   return true;
+}
+
+function findGovernanceErrorName(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+  const record = error as Record<string, unknown>;
+  if (typeof record.errorName === "string") {
+    return record.errorName;
+  }
+  if (typeof record.name === "string") {
+    return record.name;
+  }
+  if (record.cause) {
+    return findGovernanceErrorName(record.cause);
+  }
+  return undefined;
 }
 
 const zeroAddress = "0x0000000000000000000000000000000000000000";

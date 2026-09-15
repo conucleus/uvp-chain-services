@@ -1,7 +1,11 @@
+import type {
+  EvidenceProofDTO,
+  EvidenceVerificationStatus
+} from "@uvp-eth/product-dto";
 import type { Hex } from "../shared/types.js";
 
+export type { EvidenceProofDTO, EvidenceVerificationStatus };
 export type EvidenceStatus = "uploaded" | "bound" | "superseded" | "withdrawn" | "missing_file" | "mismatch";
-export type EvidenceVerificationStatus = "unbound" | "matched" | "mismatch" | "missing_file";
 export type EvidencePrincipalRole = "anonymous" | "participant" | "adjudicator" | "admin";
 
 export type EvidenceJsonValue =
@@ -64,23 +68,9 @@ export interface EvidenceAccessPolicyDTO {
   readonly disputeReaders: readonly string[];
 }
 
-export interface EvidenceProofDTO {
-  readonly evidenceId: string;
-  readonly payloadHash: Hex;
-  readonly contentHash: Hex;
-  readonly metadataHash: Hex;
-  readonly payloadRef: string;
-  readonly storageURI: string;
-  readonly boundSignalTxHash?: Hex;
-  readonly boundSubmissionId?: string;
-  readonly boundOnchainOrderId?: Hex;
-  readonly boundSourceId?: Hex;
-  readonly boundSignalId?: Hex;
-  readonly boundAt?: string;
-  readonly blockNumber?: string;
-  readonly submitter?: string;
-  readonly verificationStatus: EvidenceVerificationStatus;
-}
+// EvidenceProofDTO 单源在 @uvp-eth/product-dto（write-side.ts，字段集以
+// 本服务端 getProof 恒产出真身为权威——evidenceId/payloadRef/storageURI
+// 必填属实：storageURI 源自 EvidenceObjectDTO.storageURI（上传即落，非空）。
 
 export type EvidenceContentDTO =
   | {

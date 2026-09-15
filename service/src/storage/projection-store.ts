@@ -2,12 +2,11 @@ import type { ChainEvent } from "../indexer/events.js";
 import { filterActiveChainEvents, sortChainEvents } from "../indexer/events.js";
 import {
   createEmptyProjectionSnapshot,
-  rebuildOrderProjections,
-  type OrderProjection,
   type ProjectionSnapshot,
   type StateMachineOrderProjection,
   type StateMachineTaskProjection,
-} from "../indexer/projections.js";
+} from "../indexer/projections/index.js";
+import { rebuildOrderProjections } from "../indexer/replay.js";
 import {
   createEmptyIdentityProjectionSnapshot,
   filterIdentityBindings,
@@ -132,8 +131,6 @@ export interface ProjectionStore {
   getSyncState(
     scope?: Partial<ProjectionScope>,
   ): Promise<ProjectionSyncState | undefined>;
-  listOrders(): Promise<readonly OrderProjection[]>;
-  getOrder(orderId: string): Promise<OrderProjection | undefined>;
   listStateMachineOrders(): Promise<readonly StateMachineOrderProjection[]>;
   /**
    * 订单身份是 (planId, orderId) 复合键。调用方持有 planId 时必须传入：
@@ -242,14 +239,6 @@ export class MemoryProjectionStore implements ProjectionStore {
     _scope: Partial<ProjectionScope> = {},
   ): Promise<ProjectionSyncState | undefined> {
     return this.#syncState;
-  }
-
-  async listOrders(): Promise<readonly OrderProjection[]> {
-    return Object.values(this.#snapshot.orders);
-  }
-
-  async getOrder(orderId: string): Promise<OrderProjection | undefined> {
-    return this.#snapshot.orders[orderId];
   }
 
   async listStateMachineOrders(): Promise<

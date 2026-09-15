@@ -183,20 +183,23 @@ describe("ViemChainEventSource", () => {
       chainServicesConfig()
     );
 
+    // 每片闭区间恰 9999 个块（与 executor-kit watcher 同源口径）：
+    // [100, 10098]、[10099, 20097]、[20098, 20150]。10000 块跨会撞
+    // provider 对 eth_getLogs 的 10K 块硬限制。
     expect(calls).toEqual([
       {
         address: "0x1111111111111111111111111111111111111111",
         fromBlock: 100n,
-        toBlock: 10_099n
+        toBlock: 10_098n
       },
       {
         address: "0x1111111111111111111111111111111111111111",
-        fromBlock: 10_100n,
-        toBlock: 20_099n
+        fromBlock: 10_099n,
+        toBlock: 20_097n
       },
       {
         address: "0x1111111111111111111111111111111111111111",
-        fromBlock: 20_100n,
+        fromBlock: 20_098n,
         toBlock: 20_150n
       }
     ]);

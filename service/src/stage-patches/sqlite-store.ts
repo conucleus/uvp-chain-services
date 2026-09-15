@@ -32,7 +32,7 @@ export interface SqliteProductStagePatchStoreOptions {
  * CAS——重启不丢已签名 prepare，多实例不双播同一 nonce。
  */
 export class SqliteProductStagePatchStore<
-    TPrepared extends PreparedPatchRecordBase,
+    TPrepared extends PreparedPatchRecordBase & { readonly deadline: string },
     TSubmission extends StagePatchSubmissionBase
   >
   implements ProductStagePatchStore<TPrepared, TSubmission>
@@ -85,21 +85,36 @@ export class SqliteProductStagePatchStore<
     runSqliteWrite(() => {
       this.#database
         .prepare(
-          `INSERT INTO stage_patch_prepared (prepare_id, patch_kind, record_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?)
+          `INSERT INTO stage_patch_prepared (prepare_id, patch_kind, record_json, deadline_seconds, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(prepare_id) DO UPDATE SET
              patch_kind = excluded.patch_kind,
              record_json = excluded.record_json,
+             deadline_seconds = excluded.deadline_seconds,
              updated_at = excluded.updated_at`
         )
         .run(
           record.prepareId,
           this.#patchKind,
           stringifyStorageJson(record),
+          deadlineSecondsOf(record.deadline),
           now,
           now
         );
     });
+  }
+
+  async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
+    // deadline 列随行写入（putPrepared），清扫不解析 record_json；持久表
+    // 此前只进不出，prepare 入口无配额会让表无界堆叠。
+    return runSqliteWrite(() =>
+      this.#database
+        .prepare(
+          `DELETE FROM stage_patch_prepared
+           WHERE deadline_seconds < ?`
+        )
+        .run(deadlineSecondsOf(deadlineBeforeSeconds)).changes
+    );
   }
 
   async getPrepared(prepareId: string): Promise<TPrepared | undefined> {
@@ -210,4 +225,13 @@ export class SqliteProductStagePatchStore<
       .get(submissionId);
     return row ? parseStorageJson<TSubmission>(stringColumn(rowObject(row), "recordJson")) : undefined;
   }
+}
+
+/** prepare 截止（unix 秒字符串）→ 数值列；非数值 deadline 是数据损坏，响亮失败。 */
+function deadlineSecondsOf(deadline: string): number {
+  const parsed = Number(deadline);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`stage patch prepare deadline must be a unix-seconds string, got: ${deadline}`);
+  }
+  return Math.floor(parsed);
 }

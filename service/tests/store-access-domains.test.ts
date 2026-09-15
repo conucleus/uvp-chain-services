@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import { keccak256, stringToBytes } from "viem";
 import { CROSS_BORDER_ZHIXU_ID, crossBorderPlanIds, demoZhixuDetail } from "@uvp-eth/product-dto/fixtures";
@@ -8,7 +11,7 @@ import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { ApiRouter } from "../src/api/route-context.js";
 import type { Address, Hex } from "../src/shared/types.js";
 import { crossBorderSchemaResolver } from "./cross-border-schema.js";
-import type { StoreAuthChallengeRecord } from "../src/store-sessions/index.js";
+import type { StoreAuthChallengeRecord } from "../src/store/sessions/index.js";
 
 /**
  * Store 身份与会话、加入闭环、装修权限、上架与锚核验的后端验收。
@@ -164,9 +167,52 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(operatorSession.session.capabilities).toContain("store.audit.read");
   });
 
+  it("store runtime observation reads require the store.audit.read capability", async () => {
+    // 运行时观察面（summary/订单观察/回放/审计汇总）无参与者过滤，暴露
+    // 全量订单的 authorizations/signals submitter、tasks assigneeWallet
+    // 与参与者钱包映射：任意第三方钱包 SIWE 登录不得因"有锚定会话"即得
+    // 运营数据——与 /store/audit 同能力门（store.audit.read）。
+    const router = await buildRouter({ operatorWallets: [operatorWallet] });
+    const plainToken = await login(router, supplierWallet);
+    const operatorToken = await login(router, operatorWallet);
+
+    const runtimePaths = [
+      "/store/runtime/summary",
+      `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+      "/store/orders/0x0000000000000000000000000000000000000000000000000000000000000909/observation",
+      "/store/orders/0x0000000000000000000000000000000000000000000000000000000000000909/replay",
+      "/store/orders/0x0000000000000000000000000000000000000000000000000000000000000909/audit-summary"
+    ];
+    for (const pathname of runtimePaths) {
+      // 纯钱包会话只证明钱包控制权（store.read）：403，不因锚定而放行。
+      const plain = await router.handle({ method: "GET", pathname, headers: { "x-uvp-store-session": plainToken } });
+      expect(plain).toMatchObject({ status: 403, body: { error: "forbidden" } });
+    }
+    // 运营方钱包会话持有 store.audit.read：summary/订单列表 200；具体
+    // 订单缺投影时 404（不泄露存在），不再是身份层拒绝。
+    const summary = await router.handle({
+      method: "GET",
+      pathname: "/store/runtime/summary",
+      headers: { "x-uvp-store-session": operatorToken }
+    });
+    expect(summary.status).toBe(200);
+    const orders = await router.handle({
+      method: "GET",
+      pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+      headers: { "x-uvp-store-session": operatorToken }
+    });
+    expect(orders.status).toBe(200);
+    const observation = await router.handle({
+      method: "GET",
+      pathname: "/store/orders/0x0000000000000000000000000000000000000000000000000000000000000909/observation",
+      headers: { "x-uvp-store-session": operatorToken }
+    });
+    expect(observation).toMatchObject({ status: 404, body: { error: "store_order_not_found" } });
+  });
+
   it("ignores the dev anchored address header outside local runtime", async () => {
-    const { createWalletSessionStoreIdentityProvider } = await import("../src/store-sessions/index.js");
-    const { createStoreSessionService } = await import("../src/store-sessions/index.js");
+    const { createWalletSessionStoreIdentityProvider } = await import("../src/store/sessions/index.js");
+    const { createStoreSessionService } = await import("../src/store/sessions/index.js");
     const sessionService = createStoreSessionService();
     const base = {
       async resolve() {
@@ -214,7 +260,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("wallet sessions never receive store.draft.review (governance-only capability)", async () => {
-    // 职责分离（store-console/access.ts 口径）：zhixu 草稿审核是治理动作，
+    // 职责分离（store/console/access.ts 口径）：zhixu 草稿审核是治理动作，
     // 专属 governance_admin——钱包会话的 operator/store_admin 能力表都
     // 不得下放（JWT 侧同样刻意不映射）。
     const router = await buildRouter({ operatorWallets: [operatorWallet], adminWallets: [teamDerivedWallet] });
@@ -1041,7 +1087,7 @@ it("revoking an anchored address immediately invalidates sessions for it", async
     const { tmpdir } = await import("node:os");
     const dir = mkdtempSync(join(tmpdir(), "store-decoration-sqlite-"));
     try {
-      const { SqliteStoreZhixuDecorationStore } = await import("../src/store-decoration/sqlite-store.js");
+      const { SqliteStoreZhixuDecorationStore } = await import("../src/store/decoration/sqlite-store.js");
       const decorations = new SqliteStoreZhixuDecorationStore({
         databaseUrl: `file:${join(dir, "decoration.db")}`,
         migrations: { autoRun: true }
@@ -1102,6 +1148,133 @@ it("revoking an anchored address immediately invalidates sessions for it", async
     const listBody = myList.body as { applications: { application: { applicationId: string } }[] };
     expect(listBody.applications.every((entry) => entry.application.applicationId === applicationId)).toBe(true);
   });
+
+  it("concurrent join submissions leave exactly one open application", async () => {
+    // 在途查重是"先查后写"：并发双提交会同时通过前置检查。裁决必须
+    // 落在存储层（内存驱动同步查判+写入原子；持久驱动在途唯一索引）
+    // ——败者 409 application_exists，只留一条在途申请。
+    const store = new MemoryProjectionStore();
+    await seedPlanProjection(store, { withSupplierBinding: true });
+    const router = createApiRouter(store, routerOptions());
+    const applicantToken = await login(router, supplierWallet);
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 8 }, () => router.handle({
+        method: "POST",
+        pathname: "/store/join-applications",
+        headers: { "x-uvp-store-session": applicantToken },
+        body: { planId, roleSlotId, authorizationKind: "signal_submitter" }
+      }))
+    );
+    const responses = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+    expect(responses).toHaveLength(8);
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(1);
+    for (const conflict of responses.filter((response) => response.status === 409)) {
+      expect(conflict.body).toMatchObject({ error: "application_exists" });
+    }
+    const list = await router.handle({
+      method: "GET",
+      pathname: "/store/join-applications",
+      headers: { "x-uvp-store-session": applicantToken }
+    });
+    expect((list.body as { applications: unknown[] }).applications).toHaveLength(1);
+  });
+
+  it("concurrent listing imports for one plan leave exactly one listing (409 for the loser)", async () => {
+    // "一 plan 一 listing"不能只靠先查后写：并发双导入若都落库，旧条
+    // delist 后加入门与详情抑制会按新条放行。存储层唯一裁决 + 败者
+    // 409 listing_exists（不是 503 存储故障失真）。
+    const router = await buildRouter();
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 8 }, () => router.handle({
+        method: "POST",
+        pathname: "/store/listings/import",
+        headers: storeOperatorHeaders,
+        body: { planId, planHash }
+      }))
+    );
+    const responses = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+    expect(responses).toHaveLength(8);
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(1);
+    for (const conflict of responses.filter((response) => response.status === 409)) {
+      expect(conflict.body).toMatchObject({ error: "listing_exists" });
+    }
+    const catalog = await router.handle({
+      method: "GET",
+      pathname: "/store/listings",
+      headers: storeOperatorHeaders
+    });
+    const listings = (catalog.body as { listings: { planId: string }[] }).listings;
+    expect(listings.filter((listing) => listing.planId.toLowerCase() === planId.toLowerCase())).toHaveLength(1);
+  });
+});
+
+describe("store listing and join store uniqueness (sqlite driver)", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces the one-open-application invariant via the partial unique index", async () => {
+    const { SqliteStoreJoinApplicationStore, StoreJoinOpenApplicationExistsError } = await import("../src/store/join/index.js");
+    const store = new SqliteStoreJoinApplicationStore({
+      databaseUrl: sqliteUrl(),
+      migrations: { autoRun: true }
+    });
+    const base = {
+      planId,
+      roleSlotId,
+      authorizationKind: "signal_submitter" as const,
+      applicantAddress: supplierWallet,
+      applicantSubjectId: `0x${"12".repeat(32)}` as Hex,
+      txEvidence: [],
+      submittedAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z"
+    };
+
+    await store.putApplication({ ...base, applicationId: "join_a", status: "applied" });
+    // 并发双提交的败者：同 (plan, applicant) 第二条在途申请被唯一索引拒绝。
+    await expect(store.putApplication({ ...base, applicationId: "join_b", status: "applied" }))
+      .rejects.toBeInstanceOf(StoreJoinOpenApplicationExistsError);
+    // 同一条申请的状态推进不受影响（同 applicationId 的 upsert）。
+    await store.putApplication({ ...base, applicationId: "join_a", status: "under_review" });
+    await store.putApplication({ ...base, applicationId: "join_a", status: "authorized" });
+    // 终态后同一申请人可再次提交新申请（部分索引只约束在途状态）。
+    await store.putApplication({ ...base, applicationId: "join_c", status: "applied" });
+    store.close();
+  });
+
+  it("enforces one listing per plan and maps the race loser to a typed conflict", async () => {
+    const { SqliteStoreListingStore, StoreListingPlanConflictError } = await import("../src/store/listings/index.js");
+    const store = new SqliteStoreListingStore({
+      databaseUrl: sqliteUrl(),
+      migrations: { autoRun: true }
+    });
+    const base = {
+      planId,
+      status: "imported" as const,
+      importedAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z"
+    };
+
+    await store.putListing({ ...base, listingId: "listing_a" });
+    await expect(store.putListing({ ...base, listingId: "listing_b" }))
+      .rejects.toBeInstanceOf(StoreListingPlanConflictError);
+    // 同一条 listing 的状态流转（同 listingId upsert）不受约束影响。
+    await store.putListing({ ...base, listingId: "listing_a", status: "delisted" });
+    expect((await store.findListingByPlanId(planId))?.status).toBe("delisted");
+    store.close();
+  });
+
+  function sqliteUrl(): string {
+    const dir = mkdtempSync(join(tmpdir(), "uvp-store-uniqueness-"));
+    tempDirs.push(dir);
+    return `sqlite://${join(dir, "store.sqlite")}`;
+  }
 });
 
 function decorationBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1259,7 +1432,7 @@ const addressKeyMap = new Map<string, `0x${string}`>([
 describe("store auth challenge resource bounds", () => {
   it("rate-limits live challenges per address and sweeps expired ones on write", async () => {
     const { createStoreSessionService, InMemoryStoreWalletSessionStore, StoreSessionServiceError } =
-      await import("../src/store-sessions/index.js");
+      await import("../src/store/sessions/index.js");
     let current = new Date("2026-04-28T00:00:00Z");
     const store = new InMemoryStoreWalletSessionStore();
     const service = createStoreSessionService({
@@ -1299,7 +1472,7 @@ describe("store auth challenge resource bounds", () => {
     // 连发 10 次即可锁死任意受害地址并按 TTL 续期。请求方桶把单个
     // 请求方可占用的总囤积量压到 30——换地址绕过地址配额不再可行。
     const { createStoreSessionService, StoreSessionServiceError } =
-      await import("../src/store-sessions/index.js");
+      await import("../src/store/sessions/index.js");
     const current = new Date(Date.UTC(2026, 8, 10, 0, 0, 0));
     const service = createStoreSessionService({
       config: {
@@ -1332,7 +1505,7 @@ describe("store auth challenge resource bounds", () => {
 
   it("keeps a hard cap on the in-memory challenge table", async () => {
     const { InMemoryStoreWalletSessionStore, MEMORY_CHALLENGE_HARD_LIMIT } =
-      await import("../src/store-sessions/index.js");
+      await import("../src/store/sessions/index.js");
     const store = new InMemoryStoreWalletSessionStore();
     const challengeAt = (index: number, expiresAt: string): StoreAuthChallengeRecord => ({
       nonce: `nonce${index.toString().padStart(6, "0")}`,
@@ -1371,7 +1544,7 @@ describe("store auth challenge resource bounds", () => {
     // 配额判定与写入必须原子：同地址并发签发风暴不允许整体穿透
     //（32 个并发请求在"先数后写"实现下会全部读到同一旧计数）。
     const { InMemoryStoreWalletSessionStore, StoreSessionServiceError, createStoreSessionService } =
-      await import("../src/store-sessions/index.js");
+      await import("../src/store/sessions/index.js");
     const store = new InMemoryStoreWalletSessionStore();
     const current = new Date(Date.UTC(2026, 8, 10, 0, 0, 0));
     const service = createStoreSessionService({

@@ -5,12 +5,11 @@ import {
 } from "../indexer/events.js";
 import {
   createEmptyProjectionSnapshot,
-  rebuildOrderProjections,
-  type OrderProjection,
   type ProjectionSnapshot,
   type StateMachineOrderProjection,
   type StateMachineTaskProjection,
-} from "../indexer/projections.js";
+} from "../indexer/projections/index.js";
+import { rebuildOrderProjections } from "../indexer/replay.js";
 import {
   createEmptyIdentityProjectionSnapshot,
   filterIdentityBindings,
@@ -573,14 +572,6 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       ],
     );
     return result.rows[0] ? snapshotRow<TSnapshot>(result.rows[0]) : undefined;
-  }
-
-  async listOrders(): Promise<readonly OrderProjection[]> {
-    return Object.values((await this.#currentOrderSnapshot()).orders);
-  }
-
-  async getOrder(orderId: string): Promise<OrderProjection | undefined> {
-    return (await this.#currentOrderSnapshot()).orders[orderId];
   }
 
   async listStateMachineOrders(): Promise<

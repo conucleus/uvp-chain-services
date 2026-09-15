@@ -18,6 +18,7 @@ import {
 import { redactSecrets } from "../src/security/index.js";
 import {
   InMemoryProductSubmissionStore,
+  submissionStatusLabel,
   type ProductSubmissionDTO
 } from "../src/submissions/index.js";
 import type { Address, Hex } from "../src/shared/types.js";
@@ -623,6 +624,7 @@ function deadLetterSubmission(): ProductSubmissionDTO {
     nonce: "1",
     deadline: "1770000000",
     status: "failed",
+    statusLabel: submissionStatusLabel("failed"),
     signatureStatus: "signature_verified",
     signatureHash: bytes32("5001"),
     recoveredSubmitter: submitter,

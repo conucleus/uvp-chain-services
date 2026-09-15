@@ -23,7 +23,7 @@ export interface PostgresProductStagePatchStoreOptions {
  * 多实例共享库不双播同一 patchNonce。
  */
 export class PostgresProductStagePatchStore<
-    TPrepared extends PreparedPatchRecordBase,
+    TPrepared extends PreparedPatchRecordBase & { readonly deadline: string },
     TSubmission extends StagePatchSubmissionBase
   >
   implements ProductStagePatchStore<TPrepared, TSubmission>
@@ -53,14 +53,27 @@ export class PostgresProductStagePatchStore<
   async putPrepared(record: TPrepared): Promise<void> {
     const now = new Date().toISOString();
     await this.#database.query(
-      `INSERT INTO stage_patch_prepared (prepare_id, patch_kind, record_json, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $4)
+      `INSERT INTO stage_patch_prepared (prepare_id, patch_kind, record_json, deadline_seconds, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $5)
        ON CONFLICT(prepare_id) DO UPDATE SET
          patch_kind = excluded.patch_kind,
          record_json = excluded.record_json,
+         deadline_seconds = excluded.deadline_seconds,
          updated_at = excluded.updated_at`,
-      [record.prepareId, this.#patchKind, stringifyStorageJson(record), now]
+      [record.prepareId, this.#patchKind, stringifyStorageJson(record), deadlineSecondsOf(record.deadline), now]
     );
+  }
+
+  async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
+    // deadline 列随行写入（putPrepared），清扫不解析 record_json——每行
+    // 数 KB 的 typedData 只在命中点查时读取。持久表此前只进不出，prepare
+    // 入口无配额会让表无界堆叠。
+    const result = await this.#database.query(
+      `DELETE FROM stage_patch_prepared
+       WHERE deadline_seconds < $1::bigint`,
+      [deadlineSecondsOf(deadlineBeforeSeconds)]
+    );
+    return result.rowCount ?? 0;
   }
 
   async getPrepared(prepareId: string): Promise<TPrepared | undefined> {
@@ -146,4 +159,13 @@ export class PostgresProductStagePatchStore<
     const row = result.rows[0] as { readonly recordJson?: string } | undefined;
     return row?.recordJson ? parseStorageJson<TSubmission>(row.recordJson) : undefined;
   }
+}
+
+/** prepare 截止（unix 秒字符串）→ 数值列；非数值 deadline 是数据损坏，响亮失败。 */
+function deadlineSecondsOf(deadline: string): number {
+  const parsed = Number(deadline);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`stage patch prepare deadline must be a unix-seconds string, got: ${deadline}`);
+  }
+  return Math.floor(parsed);
 }

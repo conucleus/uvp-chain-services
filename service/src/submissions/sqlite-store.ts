@@ -5,7 +5,8 @@ import {
   openSqliteDatabase,
   runSqliteWrite,
   withSqliteTransaction,
-  type SqliteDatabase
+  type SqliteDatabase,
+  type SqliteValue
 } from "../storage/sqlite.js";
 import {
   optionalStringColumn,
@@ -16,6 +17,7 @@ import type {
   PreparedSubmissionRecord,
   ProductSubmissionAttemptDTO,
   ProductSubmissionDTO,
+  ProductSubmissionScanCursor,
   ProductSubmissionStore
 } from "./types.js";
 
@@ -331,17 +333,57 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
        WHERE submission_json IS NOT NULL
        ORDER BY created_at ASC, submission_id ASC`
     ).all();
-    const submissions = rows.map((row) => {
+    return this.#hydrateSubmissionsWithAttempts(rows.map((row) => {
       const record = rowObject(row, "submission list query");
-      const stored = parseStorageJson<ProductSubmissionDTO>(stringColumn(record, "submission_json"));
-      if (!stored.planId) {
-        throw new Error(`stored submission ${stringColumn(record, "submission_id")} is missing planId`);
-      }
       return {
         submissionId: stringColumn(record, "submission_id"),
-        submission: stored
+        submission: this.#parseSubmissionRecord(record, stringColumn(record, "submission_id"))
       };
-    });
+    }));
+  }
+
+  async listOpenSubmissionsPage(
+    after: ProductSubmissionScanCursor | undefined,
+    limit: number
+  ): Promise<readonly ProductSubmissionDTO[]> {
+    // 终态剪除 + (created_at, submission_id) 键序翻页，与 postgres 实现同
+    // 口径（见该侧注释）。
+    const clauses = [
+      "submission_json IS NOT NULL",
+      "status IN (?, ?, ?, ?)"
+    ];
+    const parameters: SqliteValue[] = ["broadcasting", "submitted", "indexing", "failed"];
+    if (after) {
+      clauses.push("(created_at > ? OR (created_at = ? AND submission_id > ?))");
+      parameters.push(after.createdAt, after.createdAt, after.submissionId);
+    }
+    const rows = this.#database.prepare(
+      `SELECT submission_id, submission_json, plan_id
+       FROM submission
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY created_at ASC, submission_id ASC
+       LIMIT ?`
+    ).all(...parameters, limit);
+    return this.#hydrateSubmissionsWithAttempts(rows.map((row) => {
+      const record = rowObject(row, "submission open page query");
+      return {
+        submissionId: stringColumn(record, "submission_id"),
+        submission: this.#parseSubmissionRecord(record, stringColumn(record, "submission_id"))
+      };
+    }));
+  }
+
+  #parseSubmissionRecord(record: Readonly<Record<string, unknown>>, submissionId: string): ProductSubmissionDTO {
+    const stored = parseStorageJson<ProductSubmissionDTO>(stringColumn(record, "submission_json"));
+    if (!stored.planId) {
+      throw new Error(`stored submission ${submissionId} is missing planId`);
+    }
+    return stored;
+  }
+
+  #hydrateSubmissionsWithAttempts(
+    submissions: readonly { readonly submissionId: string; readonly submission: ProductSubmissionDTO }[]
+  ): readonly ProductSubmissionDTO[] {
     if (submissions.length === 0) {
       return [];
     }

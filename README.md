@@ -31,9 +31,14 @@ submissions — stage patches (`applyStageExecutorPatchFor` /
 (`triggerOrderFromOutsideFor`), dock keeper liveness submissions
 (`submitDockedInput` / `submitDockedSignal`), and governance identity
 registration/revocation (`registerIdentityBinding` /
-`revokeIdentityBinding`, see `service/README.md`); relayers pay gas and
-carry no business-action vocabulary of their own. Rebuildability from contract
-events is the default rule.
+`revokeIdentityBinding`, see `service/README.md`). Delivery status of the dock
+keeper surface: `submitDockedInput` / `submitDockedSignal` are permissionless
+contract surfaces, and their service-side automation is not assembled in the
+current delivery — the `DockAutomationWorker` in the API server runs as an
+explicit no-op until a route source and a paid-gas submitter are wired (the
+assembly point is provided by the cloud-compile route database integrator).
+Relayers pay gas and carry no business-action vocabulary of their own.
+Rebuildability from contract events is the default rule.
 
 This domain implements the service-side convergence gate for Product Schema v1,
 dynamic stage executor authority, docked Zhixu projection language, resource

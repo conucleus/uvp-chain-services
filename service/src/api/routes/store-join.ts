@@ -1,7 +1,7 @@
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../../shared/types.js";
-import type { StoreJoinService } from "../../store-join/index.js";
-import { StoreJoinServiceError, type StoreJoinActor } from "../../store-join/index.js";
+import type { StoreJoinService } from "../../store/join/index.js";
+import { StoreJoinServiceError, type StoreJoinActor } from "../../store/join/index.js";
 import {
   isAnchoredStoreAuthorizationResult,
   requireAnchoredStoreAddress

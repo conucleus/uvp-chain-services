@@ -1,4 +1,4 @@
-import { createPublicClient, createWalletClient, http, type Chain } from "viem";
+import { createPublicClient, createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   buildApplyStageExecutorPatchForCall,
@@ -6,8 +6,19 @@ import {
   type ApplyStageExecutorPatchForCall,
   type ApplyStageResourcePatchForCall
 } from "@uvp-eth/protocol-bindings";
-import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from "../shared/types.js";
-import { redactErrorMessage } from "../security/redaction.js";
+import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
+import {
+  ZERO_ADDRESS,
+  ZERO_BYTES32,
+  broadcastFailureCore,
+  chainFor,
+  errorText,
+  findErrorName,
+  loadRelayerPrivateKey,
+  normalizeGasPayer,
+  requiredRpcUrl
+} from "../shared/broadcast/kit.js";
+import { resolveDuplicateTransactionOutcome } from "../shared/broadcast/duplicate-transaction.js";
 import type {
   PreparedStageExecutorPatchDTO,
   PreparedStageResourcePatchDTO,
@@ -30,6 +41,11 @@ export interface StateMachineStagePatchPublicClient {
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
   } | undefined>;
+  /** duplicate-transaction 车道的回执探针（viem publicClient 自带同签名）。 */
+  getTransactionReceipt?(args: { readonly hash: Hex }): Promise<{
+    readonly status?: "success" | "reverted" | string;
+    readonly blockNumber?: bigint;
+  } | undefined | null>;
 }
 
 export interface StateMachineStagePatchWalletClient {
@@ -53,84 +69,87 @@ export interface StateMachineStagePatchBroadcastAdapterOptions {
   readonly now?: () => Date;
 }
 
+const BROADCAST_LABEL = "stage patch broadcast";
+
 export type StateMachineStageExecutorPatchBroadcastAdapterOptions = StateMachineStagePatchBroadcastAdapterOptions;
 export type StateMachineStageResourcePatchBroadcastAdapterOptions = StateMachineStagePatchBroadcastAdapterOptions;
 
-const DEFAULT_RELAYER_PRIVATE_KEY_ENV = "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY";
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
-const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
+/** 分类标签随工厂导出：conformance 测试复用同一份标签做"revert 名→检测模式"锁定。 */
+export const STAGE_EXECUTOR_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLabels<PreparedStageExecutorPatchDTO> = {
+  label: "stage executor patch",
+  invalidSignatureError: "invalid_stage_executor_patch_signature",
+  staleNonceError: "stale_stage_executor_patch_nonce",
+  genericFailureError: "stage_executor_patch_broadcast_failed",
+  buildCall: (config, prepared, request) => buildApplyStageExecutorPatchForCall(
+    {
+      stagePatchModuleAddress: config.stagePatchModuleAddress,
+      ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
+    },
+    {
+      planId: prepared.planId,
+      orderId: prepared.onchainOrderId,
+      patch: {
+        selectorStageId: prepared.selectorStageId,
+        targetStageId: prepared.targetStageId,
+        executor: prepared.executorWallet,
+        role: prepared.roleHash,
+        executorMetadataHash: prepared.executorMetadataHash,
+        mode: prepared.modeHash,
+        previousExecutor: prepared.previousExecutor ?? ZERO_ADDRESS,
+        approvalSourceId: prepared.approvalSourceId ?? ZERO_BYTES32,
+        approvalSignalId: prepared.approvalSignalId ?? ZERO_BYTES32,
+        patchHash: prepared.patchHash,
+        patchNonce: prepared.patchNonce,
+        metadataURI: prepared.metadataURI
+      },
+      selector: prepared.selectorWallet,
+      deadline: prepared.deadline,
+      selectorSignature: request.signature,
+      previousExecutorSignature: request.previousExecutorSignature ?? "0x"
+    }
+  )
+};
+
+export const STAGE_RESOURCE_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLabels<PreparedStageResourcePatchDTO> = {
+  label: "stage resource patch",
+  invalidSignatureError: "invalid_stage_resource_patch_signature",
+  staleNonceError: "stale_stage_resource_patch_nonce",
+  genericFailureError: "stage_resource_patch_broadcast_failed",
+  buildCall: (config, prepared, request) => buildApplyStageResourcePatchForCall(
+    {
+      stagePatchModuleAddress: config.stagePatchModuleAddress,
+      ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
+    },
+    {
+      planId: prepared.planId,
+      orderId: prepared.onchainOrderId,
+      patch: {
+        selectorStageId: prepared.selectorStageId,
+        targetStageId: prepared.targetStageId,
+        resourceKey: prepared.resourceKey,
+        manifestHash: prepared.manifestHash,
+        policyHash: prepared.policyHash,
+        patchHash: prepared.patchHash,
+        patchNonce: prepared.patchNonce,
+        manifestURI: prepared.manifestURI
+      },
+      selector: prepared.selectorWallet,
+      deadline: prepared.deadline,
+      signature: request.signature
+    }
+  )
+};
 
 export function createStateMachineStageExecutorPatchBroadcastAdapter(
   options: StateMachineStageExecutorPatchBroadcastAdapterOptions
 ): StageExecutorPatchBroadcastAdapter {
-  return createStagePatchBroadcastAdapter(options, {
-    label: "stage executor patch",
-    invalidSignatureError: "invalid_stage_executor_patch_signature",
-    staleNonceError: "stale_stage_executor_patch_nonce",
-    genericFailureError: "stage_executor_patch_broadcast_failed",
-    buildCall: (config, prepared, request) => buildApplyStageExecutorPatchForCall(
-      {
-        stagePatchModuleAddress: config.stagePatchModuleAddress,
-        ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
-      },
-      {
-        planId: prepared.planId,
-        orderId: prepared.onchainOrderId,
-        patch: {
-          selectorStageId: prepared.selectorStageId,
-          targetStageId: prepared.targetStageId,
-          executor: prepared.executorWallet,
-          role: prepared.roleHash,
-          executorMetadataHash: prepared.executorMetadataHash,
-          mode: prepared.modeHash,
-          previousExecutor: prepared.previousExecutor ?? ZERO_ADDRESS,
-          approvalSourceId: prepared.approvalSourceId ?? ZERO_BYTES32,
-          approvalSignalId: prepared.approvalSignalId ?? ZERO_BYTES32,
-          patchHash: prepared.patchHash,
-          patchNonce: prepared.patchNonce,
-          metadataURI: prepared.metadataURI
-        },
-        selector: prepared.selectorWallet,
-        deadline: prepared.deadline,
-        selectorSignature: request.signature,
-        previousExecutorSignature: request.previousExecutorSignature ?? "0x"
-      }
-    )
-  });
+  return createStagePatchBroadcastAdapter(options, STAGE_EXECUTOR_PATCH_BROADCAST_LABELS);
 }
 
 export function createStateMachineStageResourcePatchBroadcastAdapter(
   options: StateMachineStageResourcePatchBroadcastAdapterOptions
 ): StageResourcePatchBroadcastAdapter {
-  return createStagePatchBroadcastAdapter(options, {
-    label: "stage resource patch",
-    invalidSignatureError: "invalid_stage_resource_patch_signature",
-    staleNonceError: "stale_stage_resource_patch_nonce",
-    genericFailureError: "stage_resource_patch_broadcast_failed",
-    buildCall: (config, prepared, request) => buildApplyStageResourcePatchForCall(
-      {
-        stagePatchModuleAddress: config.stagePatchModuleAddress,
-        ...(config.chainId !== undefined ? { chainId: config.chainId } : {})
-      },
-      {
-        planId: prepared.planId,
-        orderId: prepared.onchainOrderId,
-        patch: {
-          selectorStageId: prepared.selectorStageId,
-          targetStageId: prepared.targetStageId,
-          resourceKey: prepared.resourceKey,
-          manifestHash: prepared.manifestHash,
-          policyHash: prepared.policyHash,
-          patchHash: prepared.patchHash,
-          patchNonce: prepared.patchNonce,
-          manifestURI: prepared.manifestURI
-        },
-        selector: prepared.selectorWallet,
-        deadline: prepared.deadline,
-        signature: request.signature
-      }
-    )
-  });
+  return createStagePatchBroadcastAdapter(options, STAGE_RESOURCE_PATCH_BROADCAST_LABELS);
 }
 
 type PreparedPatchForBroadcast =
@@ -167,13 +186,13 @@ function createStagePatchBroadcastAdapter<TPrepared extends PreparedPatchForBroa
   const chain = options.rpcUrl ? chainFor(options.chainId, options.rpcUrl) : undefined;
   const publicClient: StateMachineStagePatchPublicClient = options.publicClient ?? createPublicClient({
     ...(chain ? { chain } : {}),
-    transport: http(requiredRpcUrl(options.rpcUrl))
+    transport: http(requiredRpcUrl(options.rpcUrl, BROADCAST_LABEL))
   });
-  const account = options.walletClient ? undefined : privateKeyToAccount(loadRelayerPrivateKey(options));
+  const account = options.walletClient ? undefined : privateKeyToAccount(loadRelayerPrivateKey(options, BROADCAST_LABEL));
   const walletClient: StateMachineStagePatchWalletClient = options.walletClient ?? (createWalletClient({
     account,
     ...(chain ? { chain } : {}),
-    transport: http(requiredRpcUrl(options.rpcUrl))
+    transport: http(requiredRpcUrl(options.rpcUrl, BROADCAST_LABEL))
   }) as unknown as StateMachineStagePatchWalletClient);
   const gasPayer = normalizeGasPayer(options.walletClient?.account?.address ?? account?.address);
   const waitForReceipt = options.waitForReceipt ?? true;
@@ -240,6 +259,60 @@ function createStagePatchBroadcastAdapter<TPrepared extends PreparedPatchForBroa
         }, request.prepared, request));
       } catch (error) {
         const classified = classifyStagePatchBroadcastError(error, labels);
+        // duplicate-transaction 三车道（nonce too low / already known /
+        // replacement underpriced）不是终态失败：交易可能已上链或仍在池中，
+        // 先按候选 txHash 探回执裁决（成功按 submitted 落账、revert 终态、
+        // 未知可重试并保留候选哈希），机制单源在 shared/broadcast。
+        if (classified.errorCode === "duplicate_transaction") {
+          const getReceipt = publicClient.getTransactionReceipt
+            ? (txHash: Hex) => publicClient.getTransactionReceipt!({ hash: txHash })
+            : undefined;
+          return resolveDuplicateTransactionOutcome(
+            error,
+            getReceipt,
+            {
+              onSubmitted: ({ txHash: probedTxHash, blockNumber }) => {
+                const status = options.confirmOnReceipt ? "confirmed" : "submitted";
+                return {
+                  status,
+                  txHash: probedTxHash,
+                  ...(blockNumber !== undefined ? { blockNumber } : {}),
+                  attempt: {
+                    status,
+                    txHash: probedTxHash,
+                    ...(blockNumber !== undefined ? { blockNumber } : {}),
+                    gasPayer,
+                    retryable: false
+                  }
+                } satisfies StagePatchBroadcastResult;
+              },
+              onReceiptFailed: ({ txHash: failedTxHash, blockNumber }) =>
+                failedResult(
+                  "transaction_reverted",
+                  "the duplicate transaction was mined and reverted on chain",
+                  false,
+                  gasPayer,
+                  failedTxHash,
+                  blockNumber
+                ),
+              onReceiptUnknown: ({ txHash: candidateTxHash }) =>
+                failedResult(
+                  "transaction_receipt_unknown",
+                  "broadcaster reported a duplicate transaction but no receipt is available yet; the candidate hash is retained for the next probe",
+                  true,
+                  gasPayer,
+                  candidateTxHash
+                ),
+              onReassemblableNonceRace: () =>
+                failedResult(
+                  "duplicate_transaction",
+                  `broadcaster reported a nonce race without an attributable transaction hash; the ${labels.label} can be re-assembled with a fresh gas nonce`,
+                  true,
+                  gasPayer
+                )
+            }
+          );
+        }
         return failedResult(classified.errorCode, classified.message, classified.retryable, gasPayer);
       }
 
@@ -328,7 +401,19 @@ interface ClassifiedBroadcastError {
   readonly retryable: boolean;
 }
 
-function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroadcast>(
+/**
+ * stage patch 广播错误的分类（viem 抛穿 writeContract/getChainId 的错误）。
+ * 导出供 error-taxonomy conformance 测试做"合约 revert 名→检测模式"锁定；
+ * 合约错误名以权威 ABI 为准——UVPStateMachine 的错误名可从
+ * @uvp-eth/protocol-bindings 的 UVP_STATE_MACHINE_ARTIFACT_ABI 交叉验证
+ * （error-taxonomy conformance 测试锁定），UVPStagePatchModule 自身的错误
+ * 名以合约源为准。检测串必须是真实合约错误名：近似名（如历史上的
+ * "StaleStagePatchNonce"/"UnauthorizedStageSelector"）与真实名
+ * （StageExecutorPatchNonceNotIncreasing/UnauthorizedStageExecutorPatchSelector）
+ * 互不为子串，失配会让一切持久性 revert 落进泛 retryable 分支，同一
+ * prepare 被无限重试链上必拒的变更。
+ */
+export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroadcast>(
   error: unknown,
   labels: StagePatchBroadcastAdapterLabels<TPrepared>
 ): ClassifiedBroadcastError {
@@ -336,9 +421,20 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
   const name = findErrorName(error);
   const haystack = `${name ?? ""} ${text}`;
   if (
-    haystack.includes("InvalidStagePatchSignature") ||
+    haystack.includes("ExpiredStageExecutorPatchSignature") ||
+    haystack.includes("ExpiredStageResourcePatchSignature")
+  ) {
+    return {
+      errorCode: `expired_${labels.invalidSignatureError.replace(/^invalid_/, "")}`,
+      message: `${labels.label} signature deadline has expired on chain`,
+      retryable: false
+    };
+  }
+  if (
     haystack.includes("InvalidStageExecutorPatchSignature") ||
-    haystack.includes("InvalidStageResourcePatchSignature")
+    haystack.includes("InvalidStageResourcePatchSignature") ||
+    haystack.includes("InvalidStageExecutorPatchSignatureLength") ||
+    haystack.includes("InvalidStageResourcePatchSignatureLength")
   ) {
     return {
       errorCode: labels.invalidSignatureError,
@@ -347,9 +443,8 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
     };
   }
   if (
-    haystack.includes("StaleStagePatchNonce") ||
-    haystack.includes("StaleStageExecutorPatchNonce") ||
-    haystack.includes("StaleStageResourcePatchNonce")
+    haystack.includes("StageExecutorPatchNonceNotIncreasing") ||
+    haystack.includes("StageResourcePatchNonceNotIncreasing")
   ) {
     return {
       errorCode: labels.staleNonceError,
@@ -358,13 +453,32 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
     };
   }
   if (
-    haystack.includes("UnauthorizedSignalSubmitter") ||
-    haystack.includes("UnauthorizedStageSelector") ||
-    haystack.includes("UnauthorizedStageResourceSelector")
+    haystack.includes("UnauthorizedStageExecutorPatchSelector") ||
+    haystack.includes("UnauthorizedStageResourcePatchSelector")
   ) {
     return {
       errorCode: "selector_not_authorized",
       message: "selector wallet is not authorized to patch this stage",
+      retryable: false
+    };
+  }
+  // UnknownOrder 先于泛 reverted 判定：viem 的合约执行错误文本同时含
+  // "reverted." 与 "Error: UnknownOrder()"，泛规则在前会把"订单尚未注册/
+  // 索引未跟上"的典型瞬态永久死信（对齐 submissions 广播分类器的既有规则）。
+  if (haystack.includes("UnknownOrder")) {
+    return {
+      errorCode: "unknown_order",
+      message: "order is not registered on the state machine",
+      retryable: true
+    };
+  }
+  // duplicate-transaction 车道（broadcaster 的 nonce 冲突三形态）：基础判定
+  // 对齐 taxonomy nonce_conflict（不可重试、死信），但 broadcast() 捕获口会
+  // 先走回执探针裁决改判——直接死信会把已上链交易永久标记 failed。
+  if (/nonce too low|replacement transaction underpriced|already known/i.test(haystack)) {
+    return {
+      errorCode: "duplicate_transaction",
+      message: `broadcaster reported a duplicate or already-used transaction nonce for the ${labels.label}`,
       retryable: false
     };
   }
@@ -373,6 +487,17 @@ function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroa
       errorCode: "rpc_timeout",
       message: `RPC request timed out while broadcasting the ${labels.label}`,
       retryable: true
+    };
+  }
+  // 泛 revert 兜底（对齐 submissions/broadcast-adapter 既有规则）：发送前
+  // viem 的 gas 预估（estimateGas）对必拒交易抛泛 revert——真实执行失败按
+  // 永久失败处理，继续按可重试无限重放同一签名载荷只会重复烧 gas。位置
+  // 必须在 UnknownOrder/timeout 等瞬态判定之后，否则复合文本的瞬态被误判。
+  if (/execution reverted|transaction reverted|reverted/i.test(haystack)) {
+    return {
+      errorCode: "transaction_reverted",
+      message: `state-machine transaction reverted before the ${labels.label} was accepted`,
+      retryable: false
     };
   }
   return {
@@ -390,97 +515,6 @@ function failedResult(
   txHash?: Hex,
   blockNumber?: string
 ): StagePatchBroadcastResult {
-  return {
-    status: "failed",
-    ...(txHash ? { txHash } : {}),
-    ...(blockNumber ? { blockNumber } : {}),
-    errorCode,
-    message,
-    retryable,
-    attempt: {
-      status: "failed",
-      ...(txHash ? { txHash } : {}),
-      ...(blockNumber ? { blockNumber } : {}),
-      gasPayer,
-      errorCode,
-      errorMessage: message,
-      retryable
-    }
-  };
+  return broadcastFailureCore({ errorCode, message, retryable, gasPayer, ...(txHash ? { txHash } : {}), ...(blockNumber ? { blockNumber } : {}) });
 }
 
-function loadRelayerPrivateKey(options: StateMachineStagePatchBroadcastAdapterOptions): Hex {
-  const privateKey = options.relayerPrivateKey ?? (options.env ?? process.env)[
-    options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV
-  ];
-  if (!privateKey) {
-    throw new ConfigError(`${options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV} is required for stage patch broadcast`);
-  }
-  assertHex(privateKey, options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV);
-  if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
-    throw new ConfigError(`${options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV} must be a 32-byte private key`);
-  }
-  return privateKey.toLowerCase() as Hex;
-}
-
-function normalizeGasPayer(value: string | undefined): Address {
-  if (!value) {
-    throw new ConfigError("relayer gas payer address is required");
-  }
-  const address = normalizeAddress(value, "relayer gas payer");
-  if (address === ZERO_ADDRESS) {
-    throw new ConfigError("relayer gas payer address must not be zero");
-  }
-  return address;
-}
-
-function requiredRpcUrl(rpcUrl: string | undefined): string {
-  // fail-closed：无显式 RPC 配置即抛错，不回落 127.0.0.1:8545（本地环境
-  // 也必须显式传 UVP_RPC_URL）。
-  if (!rpcUrl) {
-    throw new ConfigError("UVP_RPC_URL is required for stage patch broadcast; refusing to fall back to a default RPC endpoint");
-  }
-  return rpcUrl;
-}
-
-function chainFor(chainId: number, rpcUrl: string): Chain {
-  return {
-    id: chainId,
-    name: `uvp-${chainId}`,
-    nativeCurrency: {
-      name: "Ether",
-      symbol: "ETH",
-      decimals: 18
-    },
-    rpcUrls: {
-      default: {
-        http: [rpcUrl]
-      }
-    }
-  };
-}
-
-function findErrorName(error: unknown): string | undefined {
-  if (!error || typeof error !== "object") {
-    return undefined;
-  }
-  const record = error as Record<string, unknown>;
-  if (typeof record.errorName === "string") {
-    return record.errorName;
-  }
-  if (record.cause) {
-    return findErrorName(record.cause);
-  }
-  return undefined;
-}
-
-function errorText(error: unknown): string {
-  if (error instanceof Error) {
-    const causeText = "cause" in error ? errorText((error as { readonly cause?: unknown }).cause) : "";
-    return redactErrorMessage([error.message, causeText].filter(Boolean).join(" "));
-  }
-  if (typeof error === "string") {
-    return redactErrorMessage(error);
-  }
-  return "";
-}

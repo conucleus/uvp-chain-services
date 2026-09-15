@@ -32,7 +32,7 @@ import type {
 } from "./types.js";
 import { classifyStateMachineBroadcastError } from "./broadcast-adapter.js";
 import type { EvidencePrincipal, EvidenceRecordDTO } from "../evidence/index.js";
-import { ProductOrderLookupError } from "../product/service.js";
+import { ProductOrderLookupError } from "../product/application/service.js";
 
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
 
@@ -1063,7 +1063,11 @@ function buildExpiredSubmission(
   };
 }
 
-function submissionStatusLabel(status: ProductSubmissionStatus): string {
+/**
+ * statusLabel 的唯一产出点（DTO 已定必填）：withSubmissionReconcileDefaults
+ * 兜底与各状态落档共用。导出供测试夹具按状态取真值，不在测试侧镜像词表。
+ */
+export function submissionStatusLabel(status: ProductSubmissionStatus): string {
   switch (status) {
     case "prepared":
       return "已准备";

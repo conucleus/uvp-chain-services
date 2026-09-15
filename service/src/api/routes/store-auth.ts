@@ -3,11 +3,11 @@ import {
   STORE_SESSION_HEADER,
   StoreSessionServiceError,
   type StoreSessionService
-} from "../../store-sessions/index.js";
-import type { StoreAccessState } from "../../store-console/access.js";
+} from "../../store/sessions/index.js";
+import type { StoreAccessState } from "../../store/console/access.js";
 import { readApiHeader, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
-import type { ResolveWalletSessionResult } from "../../store-sessions/index.js";
+import type { ResolveWalletSessionResult } from "../../store/sessions/index.js";
 
 /**
  * 会话路由：challenge → 钱包签名 → verify（发 token）→ session 读取。

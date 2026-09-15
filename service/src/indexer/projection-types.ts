@@ -1,6 +1,7 @@
 export type {
   StateMachineOrderProjection,
   StateMachinePlanProjection,
+  StateMachineSignalCapabilityProjection,
   StateMachineStageSelectorBindingProjection,
   StateMachineTaskProjection
-} from "./projections.js";
+} from "./projections/index.js";

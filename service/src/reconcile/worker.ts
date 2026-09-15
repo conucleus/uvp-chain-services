@@ -1,18 +1,18 @@
 import { createPublicClient, defineChain, http } from "viem";
-import type { GovernanceStore } from "../governance/store.js";
-import type { GovernanceBroadcastStatus, GovernanceTxLogDTO, GovernanceTxLogStatus } from "../governance/types.js";
+import type { GovernanceStore, GovernanceTxLogScanCursor } from "../governance/store.js";
+import type { GovernanceBroadcastStatus, GovernanceTxLogDTO, GovernanceTxLogStatus, IdentityTxLogDTO } from "../governance/types.js";
 import type { BindEvidenceRequestDTO, EvidencePrincipal, EvidenceProofDTO, EvidenceRecordDTO } from "../evidence/types.js";
-import type { ProductBffStore } from "../product/bff/store.js";
+import type { ProductBffStore } from "../product/query/bff/store.js";
 import type {
   ProductOrderDraftDTO,
   ProductOrderTriggerRecord,
   ProductOrderTriggerStatus
-} from "../product/bff/types.js";
+} from "../product/query/bff/types.js";
 import type { AuditSink } from "../security/audit.js";
 import type { Logger, Hex, LifecycleService } from "../shared/types.js";
 import { noopLogger } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
-import type { ProductSubmissionDTO, ProductSubmissionStore } from "../submissions/types.js";
+import type { ProductSubmissionDTO, ProductSubmissionScanCursor, ProductSubmissionStore } from "../submissions/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import type { ReconcileRunSummary, ReconcileWorkerDiagnostics, TxReconcileFields } from "./status.js";
 
@@ -20,7 +20,16 @@ export interface ReconcileWorkerConfig {
   readonly enabled: boolean;
   readonly pollIntervalMs: number;
   readonly txTimeoutMs: number;
+  /**
+   * 台账扫描页大小（可选能力）：submission/governance 车道按
+   * (createdAt, id) 键序分页加载，避免每轮把全历史拉进内存。缺省用
+   * DEFAULT_RECONCILE_SCAN_PAGE_SIZE。
+   */
+  readonly scanPageSize?: number;
 }
+
+/** 对账扫描缺省页大小：单轮内存占用有界，历史规模只影响轮时长。 */
+export const DEFAULT_RECONCILE_SCAN_PAGE_SIZE = 200;
 
 export interface ReconcileReceipt {
   readonly status?: "success" | "reverted" | "failed" | string;
@@ -184,6 +193,11 @@ export class TxReconcileWorker implements LifecycleService {
     // 每条记录独立 try/catch：单条坏记录（缺字段/投影查询异常）只计失败
     // 并继续，不把整轮（以及 /admin/ops/reconcile/run、retrySubmission）
     // 一起拖成 500。
+
+    // 证据清扫先行：清扫对象是"在途未终"的提交，先跑可确保本轮即将被
+    // reconcile 确认（终态剪除后不再进入清扫）的记录仍获得一次补绑机会。
+    await this.#sweepEvidenceBinds(summary);
+
     if (this.#productStore) {
       for (const registration of (await this.#productStore.listRegistrations()).filter(isReconcileableRegistration)) {
         summary.registrationsChecked += 1;
@@ -207,7 +221,17 @@ export class TxReconcileWorker implements LifecycleService {
     }
 
     if (this.#submissionStore) {
-      for (const submission of (await this.#submissionStore.listSubmissions()).filter(isReconcileableSubmission)) {
+      // 分页/终态剪除扫描：持久驱动按 (createdAt, submissionId) 键序 +
+      // status 过滤只取未闭环行（见 listOpenSubmissionsPage）；能力缺失
+      // （测试内存桩等）回退全量。行级 isReconcileableSubmission 仍兜底
+      // 过滤（failed 还需 txHash 才可复核）。
+      for await (const submission of iterateOpenSubmissions(
+        this.#submissionStore,
+        this.#config.scanPageSize ?? DEFAULT_RECONCILE_SCAN_PAGE_SIZE
+      )) {
+        if (!isReconcileableSubmission(submission)) {
+          continue;
+        }
         summary.submissionsChecked += 1;
         try {
           const updated = await this.#reconcileSubmission(submission);
@@ -229,16 +253,20 @@ export class TxReconcileWorker implements LifecycleService {
     }
 
     if (this.#governanceStore) {
-      const logs = (await this.#governanceStore.listIdentityTxLogs())
-        .filter(isReconcileableGovernanceLog);
-      const actionable = logs.filter((log) => !isSimulatedGovernanceLog(log));
-      const skippedSimulatedCount = logs.length - actionable.length;
-      if (skippedSimulatedCount > 0) {
-        this.#logger.warn("reconcile worker skipped simulated governance ledger entries; they never hit chain and cannot be reconciled", {
-          skippedSimulatedCount
-        });
-      }
-      for (const log of actionable) {
+      // 同 submission 车道：分页 + status 剪除，simulated 档（从未上链）
+      // 逐条跳过并计数告警。
+      let skippedSimulatedCount = 0;
+      for await (const log of iterateOpenGovernanceLogs(
+        this.#governanceStore,
+        this.#config.scanPageSize ?? DEFAULT_RECONCILE_SCAN_PAGE_SIZE
+      )) {
+        if (!isReconcileableGovernanceLog(log)) {
+          continue;
+        }
+        if (isSimulatedGovernanceLog(log)) {
+          skippedSimulatedCount += 1;
+          continue;
+        }
         summary.governanceLogsChecked += 1;
         try {
           const updated = await this.#reconcileGovernanceLog(log);
@@ -256,9 +284,12 @@ export class TxReconcileWorker implements LifecycleService {
           });
         }
       }
+      if (skippedSimulatedCount > 0) {
+        this.#logger.warn("reconcile worker skipped simulated governance ledger entries; they never hit chain and cannot be reconciled", {
+          skippedSimulatedCount
+        });
+      }
     }
-
-    await this.#sweepEvidenceBinds(summary);
 
     this.#lastRunAt = this.#now().toISOString();
     this.#lastSummary = summary;
@@ -270,12 +301,23 @@ export class TxReconcileWorker implements LifecycleService {
    * 证据绑定清扫：链上提交已成功但证据绑定缺失的记录，用随提交落库的
    * 证据引用重试绑定（relayer.submit.evidence_bind_failed 的补账车道）。
    * 与回执复核相互独立：绑定缺失不是链上事实缺口，不写提交记录。
+   * 终态 confirmed 不进清扫（对齐回执对账侧 isReconcileableSubmission 的
+   * 终态剪除口径）：确认档随历史单调增长，纳入清扫会让每轮
+   * O(全历史) 逐条 getProof。补绑车道因此以"本轮清扫先于 reconcile
+   * 确认"收口——确认后仍缺失的绑定由 evidence_bind_failed 审计事件留痕
+   * 供人工处置。
    */
   async #sweepEvidenceBinds(summary: ReconcileRunSummaryDraft): Promise<void> {
     if (!this.#submissionStore || !this.#evidenceBinder) {
       return;
     }
-    for (const submission of (await this.#submissionStore.listSubmissions()).filter(isEvidenceBindSweepable)) {
+    for await (const submission of iterateOpenSubmissions(
+      this.#submissionStore,
+      this.#config.scanPageSize ?? DEFAULT_RECONCILE_SCAN_PAGE_SIZE
+    )) {
+      if (!isEvidenceBindSweepable(submission)) {
+        continue;
+      }
       summary.evidenceBindsSwept += 1;
       try {
         summary.evidenceBindsRepaired += await this.#repairSubmissionEvidenceBinds(submission);
@@ -447,6 +489,40 @@ export class TxReconcileWorker implements LifecycleService {
       updatedAt: outcome.checkedAt
     };
     await this.#governanceStore?.updateTxLog(updated);
+    // 撤销异步失败分叉的显式告警：revoke 广播 submitted/confirmed 后
+    // reorg/revert，回执复核把 tx log 翻 failed，但 review 已在广播前翻成
+    // revoked 且不可回退（revoked 是 review 状态机的终态，预撤销的哈希
+    // 材料也无法从日志无损重建）——"库 revoked、链上 binding 仍 active"
+    // 没有自动闭合路径。最小闭合是留痕告警：治理侧失败台账不再被
+    // duplicate 复用短路（isReusableDuplicateLog 只认成功终态），运营
+    // 重发 revoke-identity 即可携带原请求重新广播。仅在翻入 failed 的
+    // 转变时告警一次，持续 failed 的复核轮不重复刷屏。
+    if (
+      log.action === "revoke_identity" &&
+      outcome.kind === "failed" &&
+      log.status !== "failed"
+    ) {
+      await this.#audit?.record({
+        type: "reconcile.governance_revoke_reverted",
+        action: "revoke_identity",
+        outcome: "failed",
+        actor: "tx-indexer-reconcile",
+        subject: {
+          logId: log.logId,
+          subjectId: log.subjectId,
+          ...(log.bindingId ? { bindingId: log.bindingId } : {}),
+          ...(log.txHash ? { txHash: log.txHash } : {})
+        },
+        ...(log.txHash ? { txHash: log.txHash } : {}),
+        ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
+        retryable: outcome.retryable,
+        metadata: {
+          beforeStatus: log.status,
+          afterStatus: status,
+          fork: "review is marked revoked while the on-chain binding is still active; re-issue revoke-identity to re-broadcast"
+        }
+      });
+    }
     return updated;
   }
 
@@ -688,17 +764,17 @@ function isReconcileableSubmission(submission: ProductSubmissionDTO): boolean {
 }
 
 function isEvidenceBindSweepable(submission: ProductSubmissionDTO): boolean {
-  // 清扫对象：链上提交已成功（持 txHash 的在途/已确认档）且随提交落库了
-  // 证据引用。failed 即便带 txHash 也是回执失败/未知，不存在"提交已成功"
-  // 的事实基础；expired/signature_received 从未上链；无证据引用的记录
-  // 没有可重试的绑定载荷。
+  // 清扫对象：链上提交已成功（持 txHash 的在途档）且随提交落库了证据
+  // 引用。failed 即便带 txHash 也是回执失败/未知，不存在"提交已成功"的
+  // 事实基础；expired/signature_received 从未上链；无证据引用的记录
+  // 没有可重试的绑定载荷。终态 confirmed 不进清扫（对齐回执对账侧的
+  // 终态剪除口径，见 #sweepEvidenceBinds 注释）。
   if (!submission.txHash || !submission.evidenceIds?.length) {
     return false;
   }
   return submission.status === "broadcasting"
     || submission.status === "submitted"
-    || submission.status === "indexing"
-    || submission.status === "confirmed";
+    || submission.status === "indexing";
 }
 
 function isReconcileableGovernanceLog(log: GovernanceTxLogDTO): boolean {
@@ -711,6 +787,67 @@ function isReconcileableGovernanceLog(log: GovernanceTxLogDTO): boolean {
 
 function isSimulatedGovernanceLog(log: GovernanceTxLogDTO): boolean {
   return log.executionMode === "simulated" || log.broadcastStatus === "simulated_tx";
+}
+
+/**
+ * 未闭环提交的有界扫描：持久驱动提供 listOpenSubmissionsPage 时按
+ * (createdAt, submissionId) 键序分页（服务端 status 剪除，终态不再返回），
+ * 能力缺失时回退 listSubmissions() 全量（调用方行级过滤兜底）。键序基于
+ * created_at（不可变），轮中对页内记录的状态更新不影响游标稳定性。
+ */
+async function* iterateOpenSubmissions(
+  store: ProductSubmissionStore,
+  pageSize: number
+): AsyncGenerator<ProductSubmissionDTO, void, unknown> {
+  if (!store.listOpenSubmissionsPage) {
+    for (const submission of await store.listSubmissions()) {
+      yield submission;
+    }
+    return;
+  }
+  let after: ProductSubmissionScanCursor | undefined;
+  while (true) {
+    const page = await store.listOpenSubmissionsPage(after, pageSize);
+    if (page.length === 0) {
+      return;
+    }
+    for (const submission of page) {
+      yield submission;
+    }
+    const last = page[page.length - 1]!;
+    after = { createdAt: last.createdAt, submissionId: last.submissionId };
+    if (page.length < pageSize) {
+      return;
+    }
+  }
+}
+
+/** 同 iterateOpenSubmissions 的 governance 台账版本（(createdAt, logId) 键序）。 */
+async function* iterateOpenGovernanceLogs(
+  store: GovernanceStore,
+  pageSize: number
+): AsyncGenerator<IdentityTxLogDTO, void, unknown> {
+  if (!store.listOpenIdentityTxLogsPage) {
+    for (const log of await store.listIdentityTxLogs()) {
+      yield log;
+    }
+    return;
+  }
+  let after: GovernanceTxLogScanCursor | undefined;
+  while (true) {
+    const page = await store.listOpenIdentityTxLogsPage(after, pageSize);
+    if (page.length === 0) {
+      return;
+    }
+    for (const log of page) {
+      yield log;
+    }
+    const last = page[page.length - 1]!;
+    after = { createdAt: last.createdAt, logId: last.logId };
+    if (page.length < pageSize) {
+      return;
+    }
+  }
 }
 
 async function registrationProjectionConfirmation(

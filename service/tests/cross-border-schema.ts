@@ -4,7 +4,7 @@ import {
   crossBorderPlanIds,
   demoZhixuDetail
 } from "@uvp-eth/product-dto/fixtures";
-import type { ProductSchemaResolver } from "../src/product/service.js";
+import type { ProductSchemaResolver } from "../src/product/application/service.js";
 
 /**
  * Test-side explicit Store schema for the frozen cross-border fixture plan.

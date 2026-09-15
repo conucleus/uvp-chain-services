@@ -1,6 +1,6 @@
 import { redactErrorMessage } from "../../security/redaction.js";
-import type { StoreDecorationService } from "../../store-decoration/index.js";
-import { StoreDecorationServiceError } from "../../store-decoration/index.js";
+import type { StoreDecorationService } from "../../store/decoration/index.js";
+import { StoreDecorationServiceError } from "../../store/decoration/index.js";
 import {
   isAnchoredStoreAuthorizationResult,
   requireAnchoredStoreAddress

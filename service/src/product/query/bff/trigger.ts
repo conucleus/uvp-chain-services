@@ -1,0 +1,410 @@
+import {
+  createPublicClient,
+  createWalletClient,
+  defineChain,
+  http,
+  getEventSelector,
+  decodeAbiParameters
+} from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import {
+  STATE_MACHINE_ABI,
+  buildTriggerOrderFromOutsideForCall,
+  deriveTriggerOrderId
+} from "@uvp-eth/protocol-bindings";
+import { onchainSignalId, onchainSourceId } from "@uvp-eth/compiler";
+import { ConfigError, normalizeAddress, type Address, type Hex } from "../../../shared/types.js";
+import { redactErrorMessage } from "../../../security/redaction.js";
+import type { ProductOrderTriggerStatus, SignalAuthorizationDTO } from "./types.js";
+
+export const DEFAULT_PRODUCT_REGISTRAR_ADDRESS = "0x000000000000000000000000000000000000bff1" as const;
+
+/**
+ * SignalSubmitted 的 topic 从权威 ABI 推导（此前是冻结 fixture 体系外
+ * 唯一手写的事件签名串——ABI 重命名即静默失配，回执探针漏判）。
+ * UVPStateMachine v0.10：planId/orderId/sourceId indexed；signalId 是
+ * data 载荷首参（非第四个 topic）。
+ */
+const signalSubmittedTopic = eventTopicFromAbi("SignalSubmitted");
+
+function eventTopicFromAbi(eventName: string): Hex {
+  type StateMachineAbiEvent = Extract<
+    (typeof STATE_MACHINE_ABI)[number],
+    { readonly type: "event" }
+  >;
+  const event = STATE_MACHINE_ABI.find(
+    (entry): entry is StateMachineAbiEvent =>
+      entry.type === "event" && entry.name === eventName
+  );
+  if (!event) {
+    throw new ConfigError(`STATE_MACHINE_ABI is missing the ${eventName} event`);
+  }
+  return getEventSelector(event);
+}
+
+/** 链上事实键单源：与 @uvp-eth/compiler 的 onchainSourceId/onchainSignalId 同派生。 */
+export function productSignalSourceId(source: string): Hex {
+  return onchainSourceId(source);
+}
+
+export function productSignalId(signalName: string): Hex {
+  return onchainSignalId(signalName);
+}
+
+export interface ProductBroadcastOutsideTriggerInput {
+  readonly triggerId: string;
+  readonly draftId: string;
+  readonly orderId: Hex;
+  readonly planId: Hex;
+  readonly creator: Address;
+  readonly triggerHookId: Hex;
+  readonly triggerStageId: Hex;
+  readonly sourceId: Hex;
+  readonly signalId: Hex;
+  readonly payloadHash: Hex;
+  readonly idempotencyKey: Hex;
+  readonly submitter: Address;
+  readonly deadline: string;
+  readonly signature: Hex;
+  readonly stateMachineAddress?: Address;
+  readonly deploymentId?: Hex;
+  readonly authorizations: readonly SignalAuthorizationDTO[];
+}
+
+export interface ProductOrderTriggerBroadcastResult {
+  readonly status: ProductOrderTriggerStatus;
+  readonly txHash?: Hex;
+  readonly blockNumber?: string;
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+  readonly retryable: boolean;
+}
+
+export interface ProductOrderTriggerBroadcastAdapter {
+  readonly registrarAddress?: Address;
+  broadcastOutsideTrigger(input: ProductBroadcastOutsideTriggerInput): Promise<ProductOrderTriggerBroadcastResult>;
+}
+
+export interface MemoryProductTriggerBroadcastAdapterOptions {
+  readonly registrarAddress?: Address;
+}
+
+/**
+ * memory-trigger adapter: records the trigger attempt in process memory only.
+ * It never broadcasts and never claims an on-chain outcome, so it always
+ * reports status "pending" with no transaction hash. Drafts stay out of the
+ * "triggered" state until a real chain adapter confirms the order.
+ */
+export class MemoryProductOrderTriggerBroadcastAdapter implements ProductOrderTriggerBroadcastAdapter {
+  readonly registrarAddress: Address;
+  readonly #attempts: ProductBroadcastOutsideTriggerInput[] = [];
+
+  constructor(options: MemoryProductTriggerBroadcastAdapterOptions = {}) {
+    this.registrarAddress = normalizeAddress(options.registrarAddress ?? DEFAULT_PRODUCT_REGISTRAR_ADDRESS, "registrarAddress");
+  }
+
+  listAttempts(): readonly ProductBroadcastOutsideTriggerInput[] {
+    return this.#attempts.map((attempt) => ({
+      ...attempt,
+      authorizations: [...attempt.authorizations]
+    }));
+  }
+
+  async broadcastOutsideTrigger(input: ProductBroadcastOutsideTriggerInput): Promise<ProductOrderTriggerBroadcastResult> {
+    this.#attempts.push({
+      ...input,
+      authorizations: [...input.authorizations]
+    });
+    return {
+      status: "pending",
+      retryable: false
+    };
+  }
+}
+
+export interface AnvilProductTriggerBroadcastAdapterOptions {
+  readonly rpcUrl: string;
+  readonly chainId: number;
+  readonly stateMachineAddress: Address;
+  readonly privateKey?: Hex | string;
+  readonly registrarAddress?: Address;
+  readonly waitForReceipt?: boolean;
+  /** 非 local 默认开：代付 gas 的注册器不得同时是业务签名者（同族 submissions/stage-patch 防线）。 */
+  readonly rejectGasPayerAsSubmitter?: boolean;
+  readonly publicClient?: ProductTriggerBroadcastPublicClient;
+  readonly walletClient?: ProductTriggerBroadcastWalletClient;
+  readonly unknownOrderRetryDelayMs?: number;
+  readonly unknownOrderMaxRetries?: number;
+}
+
+export interface ProductTriggerBroadcastReceiptLog {
+  readonly address?: Address;
+  readonly topics: readonly Hex[];
+  readonly data?: Hex;
+}
+
+export interface ProductTriggerBroadcastReceipt {
+  readonly status?: "success" | "reverted" | "failed" | string;
+  readonly blockNumber?: bigint;
+  readonly logs: readonly ProductTriggerBroadcastReceiptLog[];
+}
+
+export interface ProductTriggerBroadcastPublicClient {
+  waitForTransactionReceipt(parameters: { readonly hash: Hex; readonly timeout?: number }): Promise<ProductTriggerBroadcastReceipt | undefined>;
+}
+
+export interface ProductTriggerBroadcastWalletClient {
+  readonly account?: { readonly address?: string };
+  writeContract(parameters: {
+    readonly address: Address;
+    readonly abi: typeof STATE_MACHINE_ABI;
+    readonly functionName: "triggerOrderFromOutsideFor";
+    readonly args: readonly unknown[];
+  }): Promise<Hex>;
+}
+
+export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTriggerBroadcastAdapter {
+  readonly registrarAddress: Address;
+  readonly #options: AnvilProductTriggerBroadcastAdapterOptions & { readonly privateKey?: Hex };
+
+  constructor(options: AnvilProductTriggerBroadcastAdapterOptions) {
+    const privateKey = options.privateKey ? normalizePrivateKey(options.privateKey, "privateKey") : undefined;
+    if (!privateKey && !options.walletClient) {
+      throw new ConfigError("privateKey is required when walletClient is not provided");
+    }
+    const registrarAddress = options.registrarAddress ?? options.walletClient?.account?.address ??
+      (privateKey ? privateKeyToAccount(privateKey).address : undefined);
+    if (!registrarAddress) {
+      throw new ConfigError("registrarAddress is required when privateKey or walletClient account address is not provided");
+    }
+    this.registrarAddress = normalizeAddress(registrarAddress, "registrarAddress");
+    const { privateKey: _privateKey, ...normalizedOptions } = options;
+    this.#options = {
+      ...normalizedOptions,
+      stateMachineAddress: normalizeAddress(options.stateMachineAddress, "stateMachineAddress"),
+      ...(privateKey ? { privateKey } : {})
+    };
+  }
+
+  async broadcastOutsideTrigger(input: ProductBroadcastOutsideTriggerInput): Promise<ProductOrderTriggerBroadcastResult> {
+    // 与 submissions/stage-patch 广播同防线：registrar（gas 付费方）
+    // 不得同时是业务签名者——代付通道自己签名自己提交会让"服务不生成
+    // 业务签名"的边界名存实亡。确定性拒绝，不产生任何链上交易。
+    if (this.#options.rejectGasPayerAsSubmitter &&
+        this.registrarAddress.toLowerCase() === input.submitter.toLowerCase()) {
+      return {
+        status: "failed",
+        errorCode: "relayer_business_signer_reuse",
+        errorMessage: "relayer gas payer must not be the participant business signer",
+        retryable: false
+      };
+    }
+    // 已广播的 txHash 必须穿越 catch：writeContract 成功后等待回执/解析回执
+    // 抛错时，链上交易已经存在，failed 结果不得丢失 txHash（对齐
+    // submissions/broadcast-adapter 的 failedResult 携带方式）。
+    let txHash: Hex | undefined;
+    try {
+      const { publicClient, wallet } = this.#clients();
+      const stateMachineAddress = input.stateMachineAddress ?? this.#options.stateMachineAddress;
+      const call = buildTriggerOrderFromOutsideForCall({
+        stateMachineAddress,
+        chainId: this.#options.chainId
+      }, {
+        planId: input.planId,
+        creator: input.creator,
+        triggerHookId: input.triggerHookId,
+        triggerStageId: input.triggerStageId,
+        sourceId: input.sourceId,
+        signalId: input.signalId,
+        payloadHash: input.payloadHash,
+        idempotencyKey: input.idempotencyKey,
+        submitter: input.submitter,
+        deadline: input.deadline,
+        authorizations: input.authorizations,
+        signature: input.signature
+      });
+      txHash = await wallet.writeContract({
+        address: call.address,
+        abi: call.abi,
+        functionName: call.functionName,
+        args: call.args
+      });
+      if (!this.#options.waitForReceipt) {
+        return {
+          status: "submitted",
+          txHash,
+          retryable: false
+        };
+      }
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+      // 一事一单：链上订单 id 由合约从事实派生——本地镜像同一公式做回执
+      // 事件匹配（input.orderId 是产品侧关联 id，不进链上请求）。
+      const chainOrderId = deriveTriggerOrderId(input.planId, input.sourceId, input.signalId, input.payloadHash);
+      if (receipt?.status === "success" && hasSignalSubmittedEvent(receipt.logs, input.planId, chainOrderId, input.sourceId, input.signalId)) {
+        return {
+          status: "confirmed",
+          txHash,
+          ...(receipt.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
+          retryable: false
+        };
+      }
+      if (receipt?.status === "success") {
+        return {
+          status: "indexing",
+          txHash,
+          ...(receipt.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
+          retryable: false
+        };
+      }
+      if (receipt?.status === "reverted" || receipt?.status === "failed") {
+        return {
+          status: "failed",
+          txHash,
+          ...(receipt.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
+          errorCode: "trigger_order_reverted",
+          errorMessage: `triggerOrderFromOutsideFor transaction receipt status ${receipt.status}`,
+          retryable: false
+        };
+      }
+      // A missing receipt or an RPC/client-specific status is neither a
+      // success nor a deterministic revert. Keep the known tx in indexing so
+      // reconcile can probe it later; callers must not rebroadcast it.
+      return {
+        status: "indexing",
+        txHash,
+        ...(receipt?.blockNumber !== undefined ? { blockNumber: receipt.blockNumber.toString() } : {}),
+        errorCode: "transaction_receipt_unknown",
+        errorMessage: "trigger transaction receipt is missing or has an unknown status",
+        retryable: true
+      };
+    } catch (error) {
+      const classified = classifyProductTriggerBroadcastError(error);
+      return {
+        status: txHash && classified.retryable ? "indexing" : "failed",
+        ...(txHash ? { txHash } : {}),
+        errorCode: txHash && classified.retryable ? "transaction_receipt_unknown" : classified.errorCode,
+        errorMessage: txHash && classified.retryable
+          ? "trigger transaction receipt could not be verified"
+          : classified.message,
+        retryable: classified.retryable
+      };
+    }
+  }
+
+  #clients(): { readonly publicClient: ProductTriggerBroadcastPublicClient; readonly wallet: ProductTriggerBroadcastWalletClient } {
+    const chain = defineChain({
+      id: this.#options.chainId,
+      name: `uvp-${this.#options.chainId}`,
+      nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+      rpcUrls: { default: { http: [this.#options.rpcUrl] } }
+    });
+    const publicClient = this.#options.publicClient ?? createPublicClient({
+      chain,
+      transport: http(this.#options.rpcUrl)
+    }) as ProductTriggerBroadcastPublicClient;
+    if (this.#options.walletClient) {
+      return { publicClient, wallet: this.#options.walletClient };
+    }
+    if (!this.#options.privateKey) {
+      throw new ConfigError("privateKey is required when walletClient is not provided");
+    }
+    const account = privateKeyToAccount(this.#options.privateKey);
+    return {
+      publicClient,
+      wallet: createWalletClient({
+        account,
+        chain,
+        transport: http(this.#options.rpcUrl)
+      }) as ProductTriggerBroadcastWalletClient
+    };
+  }
+}
+
+function normalizePrivateKey(value: Hex | string, fieldName: string): Hex {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    throw new ConfigError(`${fieldName} must be a 32-byte private key hex string`);
+  }
+  return value.toLowerCase() as Hex;
+}
+
+function hasSignalSubmittedEvent(
+  logs: readonly ProductTriggerBroadcastReceiptLog[],
+  planId: Hex,
+  orderId: Hex,
+  sourceId: Hex,
+  signalId: Hex
+): boolean {
+  const normalizedPlanId = planId.toLowerCase();
+  const normalizedOrderId = orderId.toLowerCase();
+  return logs.some((log) =>
+    log.topics[0]?.toLowerCase() === signalSubmittedTopic &&
+    log.topics[1]?.toLowerCase() === normalizedPlanId &&
+    log.topics[2]?.toLowerCase() === normalizedOrderId &&
+    log.topics[3]?.toLowerCase() === sourceId.toLowerCase() &&
+    signalIdFromEventData(log.data) === signalId.toLowerCase()
+  );
+}
+
+function signalIdFromEventData(data: Hex | undefined): string | undefined {
+  if (!data) {
+    return undefined;
+  }
+  try {
+    const [signalId] = decodeAbiParameters(
+      [
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "address" }
+      ],
+      data
+    );
+    return typeof signalId === "string" ? signalId.toLowerCase() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface ClassifiedProductTriggerBroadcastError {
+  readonly errorCode: string;
+  readonly message: string;
+  readonly retryable: boolean;
+}
+
+/**
+ * 传输层错误信封（JSON-RPC / HTTP / 网络）。这些错误与链上业务状态
+ * 无关，一律可重试——裸 /invalid/ 正则会把 "Invalid JSON RPC
+ * response" 误判为确定性拒绝（retryable:false），草稿被永久卡死。
+ */
+function isTransportEnvelopeError(haystack: string): boolean {
+  // "context deadline exceeded" 是传输层超时信封（代理/网关侧截止），
+  // 不入传输正则会被确定性分支的 /deadline/ 吞掉：判成
+  // trigger_order_reverted retryable:false（无 txHash 无从复核），
+  // 单草稿触发死锁（重触发只接受 failed&&retryable）。
+  return /json.?rpc|http request|fetch failed|network|socket|connection|ECONN|ETIMEDOUT|timeout|timed out|deadline exceeded|AbortError|transport|too many|rate.?limit/i.test(haystack);
+}
+
+function classifyProductTriggerBroadcastError(error: unknown): ClassifiedProductTriggerBroadcastError {
+  const message = error instanceof Error ? error.message : "triggerOrderFromOutsideFor broadcast failed";
+  const haystack = `${error instanceof Error ? error.name : ""} ${message}`;
+  // 只有确定性业务拒绝（合约 revert/签名/授权/期限类拒绝）才不可重试；
+  // 传输层信封先短路为可重试，其余未知错误也按可重试处理（对账可探测）。
+  if (!isTransportEnvelopeError(haystack) &&
+      /\brevert|unauthori[sz]ed|expired|deadline|unknown.?order|already.?(?:registered|exists|triggered)|signature/i.test(haystack)) {
+    return {
+      errorCode: "trigger_order_reverted",
+      message: "triggerOrderFromOutsideFor transaction was rejected deterministically",
+      retryable: false
+    };
+  }
+  // 可重试分支的 message 会落 errorMessage 并回显给调用方：裸 error.message
+  // 可能携带 RPC URL/内网主机等基础设施细节，先脱敏再出镜（对齐
+  // submissions/broadcast-adapter 的 errorText 口径）。
+  return {
+    errorCode: "trigger_order_broadcast_failed",
+    message: redactErrorMessage(message),
+    retryable: true
+  };
+}
+
+export type ProductOrderTriggerResult = ProductOrderTriggerBroadcastResult;

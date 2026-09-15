@@ -19,7 +19,7 @@ import type {
   GovernanceTxLogDTO,
   IdentityTxLogDTO
 } from "./types.js";
-import type { GovernanceReviewQuery, GovernanceStore } from "./store.js";
+import type { GovernanceReviewQuery, GovernanceStore, GovernanceTxLogScanCursor } from "./store.js";
 
 export interface SqliteGovernanceStoreOptions {
   readonly databaseUrl?: string;
@@ -149,6 +149,26 @@ export class SqliteGovernanceStore implements GovernanceStore {
        FROM governance_tx_log
        ORDER BY created_at DESC, log_id DESC`
     ).all().map((row) => parseTxLogRow(row) as IdentityTxLogDTO);
+  }
+
+  async listOpenIdentityTxLogsPage(
+    after: GovernanceTxLogScanCursor | undefined,
+    limit: number
+  ): Promise<readonly IdentityTxLogDTO[]> {
+    // 终态剪除 + (created_at, log_id) 键序翻页，与 postgres 实现同口径。
+    const clauses = ["status IN (?, ?, ?, ?)"];
+    const parameters: SqliteValue[] = ["pending", "broadcasting", "indexing", "failed"];
+    if (after) {
+      clauses.push("(created_at > ? OR (created_at = ? AND log_id > ?))");
+      parameters.push(after.createdAt, after.createdAt, after.logId);
+    }
+    return this.#database.prepare(
+      `SELECT log_json
+       FROM governance_tx_log
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY created_at ASC, log_id ASC
+       LIMIT ?`
+    ).all(...parameters, limit).map((row) => parseTxLogRow(row) as IdentityTxLogDTO);
   }
 
   async appendIdentityTxLog(log: IdentityTxLogDTO): Promise<void> {

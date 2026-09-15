@@ -30,7 +30,7 @@ import {
 import { SqliteNotificationStateStore } from "../src/notifications/sqlite-store.js";
 import { createApiRouter } from "../src/api/routes.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { InMemoryStoreSupplierMetadataStore } from "../src/store-suppliers/service.js";
+import { InMemoryStoreSupplierMetadataStore } from "../src/store/suppliers/service.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { Address, Hex } from "../src/shared/types.js";
 

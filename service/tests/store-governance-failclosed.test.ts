@@ -24,16 +24,16 @@ import {
   ObjectEvidenceStorage
 } from "../src/evidence/index.js";
 import { verifyProofBundle } from "../src/proof-verifier/service.js";
-import { createProductService } from "../src/product/service.js";
+import { createProductService } from "../src/product/application/service.js";
 import {
   InMemoryStoreZhixuDecorationStore,
   InMemoryStorePublisherDelegationStore
-} from "../src/store-decoration/memory-store.js";
+} from "../src/store/decoration/memory-store.js";
 import {
   MemoryStoreZhixuVersionMetadataStore,
   createStoreZhixuVersionService
-} from "../src/store-console/version.js";
-import { InMemoryStoreWalletSessionStore, createStoreSessionService } from "../src/store-sessions/index.js";
+} from "../src/store/console/version.js";
+import { InMemoryStoreWalletSessionStore, createStoreSessionService } from "../src/store/sessions/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { openSqliteDatabase } from "../src/storage/sqlite.js";
 import { runSqliteMigrations } from "../src/storage/migrations.js";
@@ -166,6 +166,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
         CHAIN_SERVICES_DATABASE_URL: databaseUrl,
         CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "true",
+        // testnet 自动迁移知情门：本用例聚焦鉴权/白名单失败面，基线先过
+        // 迁移门（对照 production/staging 档口径）。
+        UVP_TESTNET_ALLOW_AUTO_MIGRATIONS: "1",
         UVP_INDEXER_POLL_INTERVAL_MS: "5000",
         UVP_CHAIN_ID: "84532",
         UVP_RPC_URL: "https://base-sepolia.example/rpc",
@@ -243,6 +246,11 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
         OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
         GOVERNANCE_ADMIN_TOKEN_HASHES: adminTokenHash,
+        // production 档位倒挂收口：等回执注册与对账 worker 是生产基线
+        //（对照 staging 口径），本用例聚焦 RPC/白名单失败面，基线先过档。
+        UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: "true",
+        RECONCILE_WORKER_ENABLED: "true",
+        RECONCILE_POLL_INTERVAL_MS: "30000",
         // production 受管 PG 的显式轮询基线（受管库成本安全门三档同口径）。
         UVP_INDEXER_POLL_INTERVAL_MS: "5000"
       };
@@ -950,27 +958,40 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
           }
         }
       });
-      // 运行时订单读要求会话锚定钱包（匿名 401）；锚定后死词 "disputed"
-      // 仍按 400 拒绝，不静默空集。
-      const anchoredHeaders = { "x-uvp-store-dev-anchored-address": publisherAddress };
-      const disputed = await router.handle({
-        method: "GET",
-        pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
-        query: { status: "disputed" },
-        headers: anchoredHeaders
-      });
-      expect(disputed).toMatchObject({ status: 400, body: { error: "invalid_query" } });
+      // 运行时订单读是运营观察面：与 /store/audit 同能力门
+      //（store.audit.read）——匿名与纯锚定钱包（仅证明钱包控制权）都
+      // 不可读；持有该能力的会话锚定后死词 "disputed" 仍按 400 拒绝，
+      // 不静默空集。
       const anonymous = await router.handle({
         method: "GET",
         pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
         query: { status: "registered" }
       });
-      expect(anonymous).toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
+      expect(anonymous).toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
+      const anchoredPlainWallet = await router.handle({
+        method: "GET",
+        pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+        query: { status: "registered" },
+        headers: { "x-uvp-store-dev-anchored-address": publisherAddress }
+      });
+      expect(anchoredPlainWallet).toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
+      const capabilityHeaders = {
+        "x-uvp-store-user-id": "reader-1",
+        "x-uvp-store-role": "reader",
+        "x-uvp-store-dev-anchored-address": publisherAddress
+      };
+      const disputed = await router.handle({
+        method: "GET",
+        pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+        query: { status: "disputed" },
+        headers: capabilityHeaders
+      });
+      expect(disputed).toMatchObject({ status: 400, body: { error: "invalid_query" } });
       const registered = await router.handle({
         method: "GET",
         pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
         query: { status: "registered" },
-        headers: anchoredHeaders
+        headers: capabilityHeaders
       });
       expect(registered.status).toBe(200);
     });

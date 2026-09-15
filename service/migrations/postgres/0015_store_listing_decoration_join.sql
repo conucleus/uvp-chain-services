@@ -92,6 +92,13 @@ CREATE INDEX IF NOT EXISTS store_join_application_plan_idx
 CREATE INDEX IF NOT EXISTS store_join_application_applicant_idx
   ON store_join_application (applicant_address, submitted_at);
 
+-- 在途申请唯一性（同 plan + 同申请人只允许一条 applied/under_review）：
+-- 服务层"先查后写"的查重窗口会被并发双提交穿透，唯一裁决必须在
+-- 存储层（败者按 409 application_exists 收敛）。
+CREATE UNIQUE INDEX IF NOT EXISTS store_join_application_open_plan_applicant_uk
+  ON store_join_application (plan_id, applicant_address)
+  WHERE status IN ('applied', 'under_review');
+
 CREATE TABLE IF NOT EXISTS store_join_application_event (
   event_id TEXT PRIMARY KEY,
   application_id TEXT NOT NULL,

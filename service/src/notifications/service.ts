@@ -13,13 +13,14 @@ import {
   type StateMachineSignalAuthorizationProjection,
   type StateMachineSignalProjection,
   type StateMachineTaskProjection
-} from "../indexer/projections.js";
+} from "../indexer/projections/index.js";
 import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "../indexer/events.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { compareChainPointers, type Address, type Hex } from "../shared/types.js";
-import type { ProductSchemaResolver } from "../product/service.js";
-import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store-suppliers/types.js";
+import { displayBytes32 } from "../shared/display.js";
+import type { ProductSchemaResolver } from "../product/application/service.js";
+import type { StoreSupplierMetadataRecord, StoreSupplierMetadataStore } from "../store/suppliers/types.js";
 import {
   type SupplierNotificationProfile,
   type SupplierNotificationTransport
@@ -1163,7 +1164,7 @@ function participantNotificationBase(
     orderTitle: orderTitle(order ?? task),
     taskId: task.taskId,
     taskTitle: taskTitle(task),
-    stageId: displayBytes32(task.stageIdentifier, task.stageIdentifier),
+    stageId: displayBytes32(task.stageIdentifier),
     stageLabel,
     participantRole: displayParticipantRole(task.assigneeRole),
     actionHref: `/product/orders/${encodeURIComponent(task.orderId)}#task=${encodeURIComponent(task.taskId)}`,
@@ -1184,7 +1185,7 @@ function participantNotificationBaseFromDelivery(
     orderTitle: orderTitle(order ?? delivery),
     ...(delivery.taskId ? { taskId: delivery.taskId } : {}),
     taskTitle: delivery.kind === "signal_received" ? "链上信号触达" : "处理链上待办",
-    ...(stageId ? { stageId: displayBytes32(stageId, stageId) } : {}),
+    ...(stageId ? { stageId: displayBytes32(stageId) } : {}),
     stageLabel: displayBytes32(stageId, "当前阶段"),
     actionHref: delivery.taskId
       ? `/product/orders/${encodeURIComponent(delivery.orderId)}#task=${encodeURIComponent(delivery.taskId)}`
@@ -1296,21 +1297,11 @@ function displayParticipantRole(role: string): string {
   }
 }
 
-function displayBytes32(value: string | undefined, fallback: string): string {
-  if (!value) {
-    return fallback;
-  }
-  if (!/^0x[0-9a-fA-F]{64}$/u.test(value)) {
-    return value;
-  }
-  const hex = value.slice(2);
-  const bytes = Buffer.from(hex, "hex");
-  const end = bytes.indexOf(0);
-  const text = bytes.slice(0, end >= 0 ? end : undefined).toString("utf8").trim();
-  return text.length > 0 && /^[\p{Letter}\p{Number}\p{Punctuation}\p{Separator}]+$/u.test(text)
-    ? text
-    : shortId(value);
-}
+// bytes32 展示单源在 shared/display.ts（审计 §1.1 "bytes32 展示解码 ×2"）：
+// 中文等 Unicode 标识与 "$=|~" 类 ASCII 符号标识按并集语义显示文本；
+// 非 bytes32 原样透传、不可解码回落短哈希，与通知流既有行为一致。
+// stageId 技术字段用无标签形态（解码文本或裸短哈希），stageLabel/
+// message 用标签形态（"当前阶段 0x…"）——统一后与阶段视图同标识同显示。
 
 function shortId(value: string): string {
   return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
@@ -1340,10 +1331,53 @@ function compareParticipantNotifications(
   if (severity !== 0) {
     return severity;
   }
+  // 排序键按类分流：链上事件类（任务/信号）的 createdAt 是 "block N"
+  // 字符串、投递类是 ISO 时间——两类互排是 localeCompare 字典序乱序。
+  // 链上事件按 (blockNumber, logIndex) 数值序，投递类按时间戳；混排时
+  // 链上事件类稳定在前：链是真相，投递反馈只是链上事实的派生回执，
+  // 两者没有可互排的全序。
+  if (left.source !== right.source) {
+    return left.source === "chain_projection" ? -1 : 1;
+  }
+  if (left.source === "chain_projection") {
+    return compareChainProvenanceDesc(left, right);
+  }
   if (left.createdAt !== right.createdAt) {
     return right.createdAt.localeCompare(left.createdAt);
   }
   return left.notificationId.localeCompare(right.notificationId);
+}
+
+/** 链上事件类通知按 (blockNumber, logIndex) 数值倒序；行序缺失时以
+ * notificationId 兜底保证稳定全序。 */
+function compareChainProvenanceDesc(
+  left: ParticipantNotificationRecord,
+  right: ParticipantNotificationRecord
+): number {
+  const leftBlock = chainProvenanceBlock(left);
+  const rightBlock = chainProvenanceBlock(right);
+  if (leftBlock !== rightBlock) {
+    return leftBlock < rightBlock ? 1 : -1;
+  }
+  const leftLogIndex = left.proof?.logIndex;
+  const rightLogIndex = right.proof?.logIndex;
+  if (leftLogIndex !== undefined && rightLogIndex !== undefined && leftLogIndex !== rightLogIndex) {
+    return leftLogIndex < rightLogIndex ? 1 : -1;
+  }
+  return left.notificationId.localeCompare(right.notificationId);
+}
+
+function chainProvenanceBlock(record: ParticipantNotificationRecord): bigint {
+  if (record.proof?.blockNumber !== undefined) {
+    try {
+      return BigInt(record.proof.blockNumber);
+    } catch {
+      // fall through to createdAt parsing
+    }
+  }
+  const match = /^block (\d+)$/u.exec(record.createdAt);
+  const blockText = match?.[1];
+  return blockText !== undefined ? BigInt(blockText) : -1n;
 }
 
 function severityRank(severity: ParticipantNotificationSeverity): number {

@@ -4,7 +4,7 @@ import { createApiRouter } from "../src/api/routes.js";
 import { crossBorderSchemaResolver, dockTargetPlanIds } from "./cross-border-schema.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { MemoryStoreAuditStore } from "../src/store-console/audit.js";
+import { MemoryStoreAuditStore } from "../src/store/console/audit.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const operatorHeaders = {

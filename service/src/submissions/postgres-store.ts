@@ -10,6 +10,7 @@ import type {
   PreparedSubmissionRecord,
   ProductSubmissionAttemptDTO,
   ProductSubmissionDTO,
+  ProductSubmissionScanCursor,
   ProductSubmissionStore
 } from "./types.js";
 
@@ -323,17 +324,57 @@ export class PostgresSubmissionStore implements ProductSubmissionStore {
        WHERE submission_json IS NOT NULL
        ORDER BY created_at ASC, submission_id ASC`
     );
-    const submissions = result.rows.map((row) => {
+    return this.#hydrateSubmissionsWithAttempts(result.rows.map((row) => {
       const record = rowObject(row, "submission list query");
-      const stored = parseStorageJson<ProductSubmissionDTO>(stringColumn(record, "submission_json"));
-      if (!stored.planId) {
-        throw new Error(`stored submission ${stringColumn(record, "submission_id")} is missing planId`);
-      }
       return {
         submissionId: stringColumn(record, "submission_id"),
-        submission: stored
+        submission: this.#parseSubmissionRecord(record, stringColumn(record, "submission_id"))
       };
-    });
+    }));
+  }
+
+  async listOpenSubmissionsPage(
+    after: ProductSubmissionScanCursor | undefined,
+    limit: number
+  ): Promise<readonly ProductSubmissionDTO[]> {
+    // 终态剪除在服务端完成（confirmed/expired/signature_received/replaced
+    // 不返回），键序 (created_at, submission_id) 与游标推进一致；行值比较
+    // 保证双键翻页不重不漏。failed 是否可复核由调用方按 txHash 行级过滤。
+    const result = await this.#database.query(
+      `SELECT submission_id, submission_json::text AS submission_json, plan_id
+       FROM submission
+       WHERE submission_json IS NOT NULL
+         AND status = ANY($1::text[])
+         AND ($2::text IS NULL OR (created_at, submission_id) > ($2::text, $3::text))
+       ORDER BY created_at ASC, submission_id ASC
+       LIMIT $4`,
+      [
+        ["broadcasting", "submitted", "indexing", "failed"],
+        after?.createdAt ?? null,
+        after?.submissionId ?? null,
+        limit
+      ]
+    );
+    return this.#hydrateSubmissionsWithAttempts(result.rows.map((row) => {
+      const record = rowObject(row, "submission open page query");
+      return {
+        submissionId: stringColumn(record, "submission_id"),
+        submission: this.#parseSubmissionRecord(record, stringColumn(record, "submission_id"))
+      };
+    }));
+  }
+
+  #parseSubmissionRecord(record: Readonly<Record<string, unknown>>, submissionId: string): ProductSubmissionDTO {
+    const stored = parseStorageJson<ProductSubmissionDTO>(stringColumn(record, "submission_json"));
+    if (!stored.planId) {
+      throw new Error(`stored submission ${submissionId} is missing planId`);
+    }
+    return stored;
+  }
+
+  async #hydrateSubmissionsWithAttempts(
+    submissions: readonly { readonly submissionId: string; readonly submission: ProductSubmissionDTO }[]
+  ): Promise<readonly ProductSubmissionDTO[]> {
     if (submissions.length === 0) {
       return [];
     }

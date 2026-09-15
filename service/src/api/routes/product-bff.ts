@@ -1,7 +1,7 @@
 import {
   ProductBffError,
   type ProductBffService
-} from "../../product/bff/service.js";
+} from "../../product/query/bff/service.js";
 import type {
   AcceptProductInviteInput,
   CreateProductInviteInput,
@@ -13,7 +13,7 @@ import type {
   RejectProductInviteInput,
   TriggerProductOrderInput,
   UpdateProductOrderDraftInput
-} from "../../product/bff/types.js";
+} from "../../product/query/bff/types.js";
 import type { AuditSink } from "../../security/audit.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError } from "../../shared/types.js";
@@ -153,16 +153,18 @@ export function createProductBffRouteModule(options: {
       }
 
       const productInvitePreviewMatch = /^\/product\/invites\/([^/]+)$/.exec(request.pathname);
-      if (request.method === "GET" && productInvitePreviewMatch) {
+      if (request.method === "POST" && productInvitePreviewMatch) {
         return handleProductBffRequest(async () => {
           const inviteId = decodePathParameter(productInvitePreviewMatch[1] ?? "");
           // 预览同样强制 invite token（哈希比对）：inviteId 是弱凭据，
           // 仅凭 id 即可读受邀人联系方式与草稿金额等于邀请面全员可枚举。
-          // 会话钱包仍可选（用于钱包绑定判定）。
+          // token 与 accept/reject 同走 body——同权凭据不得落 URL query
+          //（URL/Referer/代理日志留痕等于一次性凭据泄漏）。会话钱包仍
+          // 可选（用于金额可见范围判定）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           const walletAddress = wallet.ok ? wallet.identity.walletAddress : undefined;
           const result = await context.productBffService.getInvite(inviteId, {
-            ...(request.query?.token !== undefined ? { token: request.query.token } : {}),
+            ...parseInvitePreviewBody(request.body),
             ...(walletAddress ? { walletAddress } : {})
           });
           return {
@@ -402,6 +404,13 @@ function parseTriggerBody(body: unknown): TriggerProductOrderInput {
     prepareId: requiredString(record, "prepareId"),
     signature: requiredString(record, "signature"),
     walletAddress: requiredString(record, "walletAddress")
+  };
+}
+
+function parseInvitePreviewBody(body: unknown): { readonly token: string } {
+  const record = requireBodyRecord(body);
+  return {
+    token: requiredString(record, "token")
   };
 }
 

@@ -6,7 +6,7 @@ import {
   productSignalSourceId,
   type ProductTriggerBroadcastPublicClient,
   type ProductTriggerBroadcastWalletClient
-} from "../src/product/bff/trigger.js";
+} from "../src/product/query/bff/trigger.js";
 import { deriveTriggerOrderId } from "@uvp-eth/protocol-bindings";
 import type { Address, Hex } from "../src/shared/types.js";
 

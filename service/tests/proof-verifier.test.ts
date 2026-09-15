@@ -24,4 +24,16 @@ describe("proof verifier", () => {
     expect(result.valid).toBe(false);
     expect(result.checks.find((check) => check.name === "evidenceHash")?.status).toBe("mismatch");
   });
+
+  it("collapses malformed hash inputs into an invalid check instead of throwing", () => {
+    // 契约：任何输入都产出 ProofVerificationResult——畸形哈希不抛
+    // ConfigError 逃逸，折叠为 invalid 检查项且 valid=false。
+    const result = verifyProofBundle({
+      zhixuHash: { actual: "0x1234" as `0x${string}`, expected: hashA }
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.checks.find((check) => check.name === "zhixuHash")?.status).toBe("invalid");
+    expect(result.checks.find((check) => check.name === "metadataHash")?.status).toBe("missing");
+  });
 });

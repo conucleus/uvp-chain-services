@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createProductService } from "../src/product/service.js";
+import { createProductService } from "../src/product/application/service.js";
+import { rebuildOrderProjections } from "../src/indexer/replay.js";
 import {
-  rebuildOrderProjections,
   stateMachineScopedKey,
   stateMachineTaskProjectionKey,
-} from "../src/indexer/projections.js";
+} from "../src/indexer/projections/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { Address, Hex } from "../src/shared/types.js";

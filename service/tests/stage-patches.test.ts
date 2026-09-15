@@ -5,6 +5,11 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
+  onchainSignalId,
+  onchainSourceId,
+  onchainStageId,
+} from "@uvp-eth/compiler";
+import {
   hashResourceManifest as hashProtocolResourceManifest,
   hashStageExecutorPatchPayload as hashProtocolStageExecutorPatchPayload,
   hashStageResourcePatchPayload as hashProtocolStageResourcePatchPayload,
@@ -18,10 +23,11 @@ import type { ChainEvent } from "../src/indexer/events.js";
 import {
   MemoryProductBffStore,
   type ProductBffStore,
-} from "../src/product/bff/store.js";
+} from "../src/product/query/bff/store.js";
 import {
   createProductStageExecutorPatchService,
   createProductStageResourcePatchService,
+  createStateMachineStageExecutorPatchBroadcastAdapter,
   hashResourceManifest,
   hashStageExecutorPatchPayload,
   hashStageResourcePatchPayload,
@@ -29,10 +35,14 @@ import {
   type PreparedStageExecutorPatchDTO,
   type PreparedStageExecutorPatchRecord,
   type PreparedStageResourcePatchDTO,
+  type PreparedStageResourcePatchRecord,
+  type ProductStageExecutorPatchStore,
+  type ProductStageResourcePatchStore,
   type StageExecutorPatchBroadcastAdapter,
   type StageExecutorPatchSubmissionDTO,
   type StagePatchBroadcastResult,
   type StageResourcePatchBroadcastAdapter,
+  type StageResourcePatchSubmissionDTO,
   SqliteProductStagePatchStore,
 } from "../src/stage-patches/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
@@ -508,6 +518,98 @@ describe("stage executor/resource patch Product API", () => {
     expect(broadcast.broadcast).toHaveBeenCalledOnce();
   });
 
+  it("records a persist_failed fallback with the txHash on the resource patch path when the store write fails after broadcast", async () => {
+    // 同 executor patch 路径：广播拿到 txHash 后的落库失败不得释放
+    // nonce，且必须补一条带 txHash 的 persist_failed 档案。
+    const innerBroadcast: StageResourcePatchBroadcastAdapter = {
+      broadcast: async (): Promise<StagePatchBroadcastResult> => ({
+        status: "submitted",
+        txHash,
+      }),
+    };
+    const inner = new InMemoryProductStagePatchStore<
+      PreparedStageResourcePatchRecord,
+      StageResourcePatchSubmissionDTO
+    >();
+    let putSubmissionCalls = 0;
+    const flakyStore: ProductStageResourcePatchStore = {
+      withTransaction: (operation) => operation(),
+      putPrepared: (record) => inner.putPrepared(record),
+      getPrepared: (prepareId) => inner.getPrepared(prepareId),
+      markPreparedUsed: (prepareId, submissionId, usedAt) => inner.markPreparedUsed(prepareId, submissionId, usedAt),
+      reserveNonce: (key, options) => inner.reserveNonce(key, options),
+      releaseNonce: (key) => inner.releaseNonce(key),
+      putSubmission: async (submission) => {
+        putSubmissionCalls += 1;
+        if (putSubmissionCalls === 1) {
+          throw new Error("simulated durable resource patch store outage");
+        }
+        return inner.putSubmission(submission);
+      },
+      getSubmission: (submissionId) => inner.getSubmission(submissionId),
+    };
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: baseEvents(),
+    });
+    const failingService = createProductStageResourcePatchService({
+      store,
+      chainId,
+      stagePatchModuleAddress: contractAddress,
+      now: () => baseNow,
+      prepareIdFactory: () => "prep_1",
+      submissionIdFactory: () => "sub_1",
+      stageResourcePatchStore: flakyStore,
+      broadcastAdapter: innerBroadcast,
+    });
+    const router = createApiRouter(store, {
+      productRuntimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract:
+        "0x1111111111111111111111111111111111111111",
+      productStageResourcePatchService: failingService,
+    });
+    const prepareResponse = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
+      body: prepareResourceBody(),
+    });
+    expect(prepareResponse.status).toBe(201);
+    const prepared = prepareResponse.body as PreparedStageResourcePatchDTO;
+    const submitBody = {
+      prepareId: prepared.prepareId,
+      selectorWallet,
+      signature: await signResourcePrepared(prepared),
+    };
+
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-resource-patch`,
+      body: submitBody,
+    })).rejects.toThrow("simulated durable resource patch store outage");
+
+    expect(putSubmissionCalls).toBe(2);
+    await expect(inner.getSubmission("sub_1")).resolves.toMatchObject({
+      status: "failed",
+      txHash,
+      errorCode: "persist_failed",
+      retryable: false,
+    });
+
+    // nonce 不释放：重试撞 duplicate_stage_resource_patch_nonce，不会
+    // 二次广播。
+    const retried = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-resource-patch`,
+      body: submitBody,
+    });
+    expect(retried).toMatchObject({
+      status: 409,
+      body: { error: "duplicate_stage_resource_patch_nonce" },
+    });
+  });
+
   it("requires content-addressed resource manifest references in production", async () => {
     const { router } = await routerFixture({
       runtimeEnvironment: "production",
@@ -948,28 +1050,380 @@ describe("stage executor/resource patch Product API", () => {
     expect(broadcastCalls).toBe(2);
   });
 
-  it("keeps the patch nonce consumed when a broadcast already returned a txHash and the store write fails", async () => {
-    // 广播已返回 txHash 后的落库失败不得释放 nonce——链上交易
-    // 可能已占用该 nonce，重试会二次广播同一 patch；对齐 submissions 主
-    // 路径语义（只有确认失败且无 txHash 才释放）。
+  it("resolves a duplicate-transaction broadcast through the shared receipt probe", async () => {
+    // 三车道从 relayer 下沉后的在役消费：writeContract 报 "already known"
+    // 且携带候选 txHash 时，先探回执——探到成功按 submitted 落账（nonce 已
+    // 被链上消费，不再放行重试）；探不到回执保持 transaction_receipt_unknown
+    // 可重试并保留候选哈希（nonce 不释放、reconcile 通道可查）。
+    const duplicateTx = bytes32Hex("e0e");
+    const receipts = new Map<string, { status?: "success" | "reverted" | string; blockNumber?: bigint }>();
+    const writeContract = vi.fn(async () => {
+      const error = new Error("already known") as Error & { txHash?: string };
+      error.txHash = duplicateTx;
+      throw error;
+    });
+    const adapter = createStateMachineStageExecutorPatchBroadcastAdapter({
+      stateMachineAddress,
+      chainId,
+      publicClient: {
+        getChainId: async () => chainId,
+        getTransactionReceipt: async ({ hash }: { hash: Hex }) => receipts.get(hash)
+      },
+      walletClient: {
+        account: { address: "0x9999999999999999999999999999999999999999" },
+        writeContract
+      },
+      waitForReceipt: true,
+      now: () => baseNow
+    });
+    const { router } = await routerFixture({ executorBroadcastAdapter: adapter });
+    const prepared = await prepareStageExecutorPatch(router);
+    const submitBody = {
+      prepareId: prepared.prepareId,
+      selectorWallet,
+      signature: await signExecutorPrepared(prepared),
+    };
+
+    // 回执未产出：可重试的 receipt_unknown，候选哈希随提交落账（prepare
+    // 被消费、nonce 不释放——链上可能已持有，收口交给 reconcile 通道）。
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: submitBody,
+    })).resolves.toMatchObject({
+      status: 200,
+      body: {
+        status: "failed",
+        errorCode: "transaction_receipt_unknown",
+        retryable: true,
+        txHash: duplicateTx
+      }
+    });
+
+    // 回执挖出且成功：车道自愈——同 stage 的补丁 nonce 已被 receipt_unknown
+    // 行持有（服务面 409 是正确防御），直接驱动 adapter 验证探针闭环
+    // submitted（带候选哈希与块高）。
+    receipts.set(duplicateTx, { status: "success", blockNumber: 61n });
+    const healedPrepared = await prepareStageExecutorPatch(router, {
+      metadataURI: "ipfs://stage-executor-patches/2"
+    });
+    await expect(adapter.broadcast({
+      prepared: healedPrepared,
+      signature: await signExecutorPrepared(healedPrepared),
+      recoveredSelector: selectorWallet
+    })).resolves.toMatchObject({
+      status: "submitted",
+      txHash: duplicateTx,
+      blockNumber: "61"
+    });
+    expect(writeContract).toHaveBeenCalledTimes(2);
+  });
+
+  // ---- 执行者治理镜像（合约 UVPStagePatchModule._stageSignalState 同构）----
+  // 编译 plan 事实键（keccak 形态）：此前 fixture 把 utf8 stageId 同时当
+  // 事实 sourceId，只建模了 source==stageId 的回退形态——真实 plan 的
+  // 事实键是 (keccak256(source), keccak256(signalName))，治理规则漂移
+  // 没被拦住的根因正是夹具建模错误（审计 R1/R6-C）。
+  const compiledTargetStageIdentifier = "target.stage";
+  const compiledFactSource = "origin.stage";
+  const compiledFactSignalName = "origin.handoff-proof";
+  const compiledTieFactSignalName = "origin.handoff-proof-2";
+
+  function compiledPlanEvents(
+    extraSignals: readonly ChainEvent[],
+  ): readonly ChainEvent[] {
+    return [
+      ...baseEvents({ targetStageId: targetStageOnchainId }),
+      chainEvent(
+        1n,
+        "SignalCapabilityRegistered",
+        {
+          planId,
+          stageId: targetStageOnchainId,
+          targetSourceId: onchainSourceId(compiledFactSource),
+          signalId: onchainSignalId(compiledFactSignalName),
+          targetOrderRelation: 0,
+        },
+        2,
+      ),
+      chainEvent(
+        1n,
+        "SignalCapabilityRegistered",
+        {
+          planId,
+          stageId: targetStageOnchainId,
+          targetSourceId: onchainSourceId(compiledFactSource),
+          signalId: onchainSignalId(compiledTieFactSignalName),
+          targetOrderRelation: 0,
+        },
+        3,
+      ),
+      ...extraSignals,
+    ];
+  }
+
+  function compiledFactSignalEvent(
+    blockNumber: bigint,
+    submitter: Address,
+    signalName = compiledFactSignalName,
+    logIndex = 0,
+  ): ChainEvent {
+    return chainEvent(
+      blockNumber,
+      "SignalSubmitted",
+      {
+        orderId,
+        sourceId: onchainSourceId(compiledFactSource),
+        signalId: onchainSignalId(signalName),
+        payloadHash: bytes32Hex("525"),
+        idempotencyKey: bytes32Hex("626"),
+        submitter,
+      },
+      logIndex,
+    );
+  }
+
+  it("pins the fixture stage ids to the compiler's keccak derivation (compiled-plan shape)", () => {
+    expect(onchainStageId(compiledTargetStageIdentifier)).toBe(targetStageOnchainId);
+  });
+
+  it("gates assign on compiled-plan capability fact keys whose source differs from the stage id", async () => {
+    // 回归：事实键 (keccak(source), keccak(signalName)) 命中能力表——
+    // sourceId != targetStageId 仍计入进度。旧服务层只统计回退形态，
+    // assign 预检恒放行、白烧签名（链上 StageAlreadyHasSignal 必拒）。
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet),
+      ]),
+    });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "assign",
+      }),
+    })).resolves.toMatchObject({
+      status: 409,
+      body: { error: "target_stage_started_assign_rejected" },
+    });
+  });
+
+  it("lets the first handoff through on compiled-plan fact keys (previously a spurious 409)", async () => {
+    // 回归：真实 plan 第一步 handoff 不再被 target_stage_not_started 拒绝。
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet),
+      ]),
+    });
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet,
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({
+      mode: "handoff",
+      previousExecutor: previousExecutorWallet,
+    });
+  });
+
+  it("locks resource patches on compiled-plan capability fact keys too", async () => {
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet),
+      ]),
+    });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-resource-patch`,
+      body: prepareResourceBody({
+        targetStageId: compiledTargetStageIdentifier,
+      }),
+    })).resolves.toMatchObject({
+      status: 409,
+      body: { error: "target_stage_locked" },
+    });
+  });
+
+  it("keeps the fallback form working alongside compiled-plan facts with one latest submitter", async () => {
+    // 混排（回退形态 + 编译形态）且末位提交者一致：不歧义，handoff 可备签。
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet),
+        chainEvent(6n, "SignalSubmitted", {
+          orderId,
+          sourceId: targetStageOnchainId,
+          signalId: onchainSignalId("target-started"),
+          payloadHash: bytes32Hex("535"),
+          idempotencyKey: bytes32Hex("636"),
+          submitter: previousExecutorWallet,
+        }),
+      ]),
+    });
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet,
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ previousExecutor: previousExecutorWallet });
+  });
+
+  it("fails closed when the two fact flows disagree on the latest submitter (previous_executor_ambiguous)", async () => {
+    // 镜像合约 _stageSignalState 的跨流 fail-closed：能力流末位与回退流
+    // 末位不一致 → 无法定序"上一执行者"。
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet),
+        chainEvent(6n, "SignalSubmitted", {
+          orderId,
+          sourceId: targetStageOnchainId,
+          signalId: onchainSignalId("target-started"),
+          payloadHash: bytes32Hex("535"),
+          idempotencyKey: bytes32Hex("636"),
+          submitter: selectorWallet,
+        }),
+      ]),
+    });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet,
+      }),
+    })).resolves.toMatchObject({
+      status: 409,
+      body: {
+        error: "previous_executor_ambiguous",
+        details: { targetStageId: targetStageOnchainId },
+      },
+    });
+  });
+
+  it("fails closed on a same-block tie between different submitters within the capability flow", async () => {
+    // 同块 ⟹ 同一 block.timestamp（合约同秒）：并列不同提交者时合约
+    // StagePreviousExecutorAmbiguous 必拒，服务层同口径给可解释错误。
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet, compiledFactSignalName, 0),
+        compiledFactSignalEvent(5n, selectorWallet, compiledTieFactSignalName, 1),
+      ]),
+    });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet,
+      }),
+    })).resolves.toMatchObject({
+      status: 409,
+      body: {
+        error: "previous_executor_ambiguous",
+        details: { tieBlockNumber: "5" },
+      },
+    });
+  });
+
+  it("treats a same-block tie with a single submitter as unambiguous", async () => {
+    const { router } = await routerFixture({
+      events: compiledPlanEvents([
+        compiledFactSignalEvent(5n, previousExecutorWallet, compiledFactSignalName, 0),
+        compiledFactSignalEvent(5n, previousExecutorWallet, compiledTieFactSignalName, 1),
+      ]),
+    });
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet,
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ previousExecutor: previousExecutorWallet });
+  });
+
+  it("keeps the applied overlay executor authoritative over an ambiguous signal history", async () => {
+    // 合约 activePatch.exists 分支：在任 patch executor 是权威"上一执行者"，
+    // 不回退到末位提交者、不受歧义影响。
+    const { router } = await routerFixture({
+      events: [
+        ...compiledPlanEvents([
+          compiledFactSignalEvent(5n, previousExecutorWallet),
+        ]),
+        chainEvent(6n, "StageExecutorPatchApplied", {
+          orderId,
+          selectorStageId,
+          targetStageId: targetStageOnchainId,
+          selector: selectorWallet,
+          executor: executorWallet,
+          role: roleHash,
+          executorMetadataHash,
+          patchHash: executorPatchHash,
+          patchNonce: 1n,
+          metadataURI: "ipfs://stage-executor-patches/1",
+        }),
+      ],
+    });
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({
+        targetStageId: compiledTargetStageIdentifier,
+        mode: "handoff",
+        previousExecutorWallet: executorWallet,
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({ previousExecutor: executorWallet });
+  });
+
+  it("records a persist_failed fallback with the txHash and keeps the nonce consumed when the store write fails after broadcast", async () => {
+    // 广播已返回 txHash 后的落库失败：不得释放 nonce（链上交易可能已
+    // 占用，重试会二次广播），且必须尽力补一条带 txHash 的
+    // persist_failed 档案——链上哈希零留痕会让已上链交易从台账消失
+    //（对齐 submissions 主路径的同款兜底）。
     const innerBroadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => ({
         status: "submitted",
         txHash,
       }),
     };
-    const failingStore = new class extends InMemoryProductStagePatchStore<
+    const inner = new InMemoryProductStagePatchStore<
       PreparedStageExecutorPatchRecord,
       StageExecutorPatchSubmissionDTO
-    > {
-      putSubmissionCalls = 0;
-      override async putSubmission(
-        submission: StageExecutorPatchSubmissionDTO,
-      ): Promise<void> {
-        this.putSubmissionCalls += 1;
-        throw new Error("simulated durable patch store outage");
-      }
-    }();
+    >();
+    let putSubmissionCalls = 0;
+    const flakyStore: ProductStageExecutorPatchStore = {
+      withTransaction: (operation) => operation(),
+      putPrepared: (record) => inner.putPrepared(record),
+      getPrepared: (prepareId) => inner.getPrepared(prepareId),
+      markPreparedUsed: (prepareId, submissionId, usedAt) => inner.markPreparedUsed(prepareId, submissionId, usedAt),
+      reserveNonce: (key, options) => inner.reserveNonce(key, options),
+      releaseNonce: (key) => inner.releaseNonce(key),
+      putSubmission: async (submission) => {
+        putSubmissionCalls += 1;
+        if (putSubmissionCalls === 1) {
+          throw new Error("simulated durable patch store outage");
+        }
+        return inner.putSubmission(submission);
+      },
+      getSubmission: (submissionId) => inner.getSubmission(submissionId),
+    };
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
       deploymentBlock: 0n,
@@ -982,7 +1436,7 @@ describe("stage executor/resource patch Product API", () => {
       now: () => baseNow,
       prepareIdFactory: () => "prep_1",
       submissionIdFactory: () => "sub_1",
-      stageExecutorPatchStore: failingStore,
+      stageExecutorPatchStore: flakyStore,
       broadcastAdapter: innerBroadcast,
     });
     const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
@@ -1012,6 +1466,17 @@ describe("stage executor/resource patch Product API", () => {
       body: submitBody,
     })).rejects.toThrow("simulated durable patch store outage");
 
+    // 第一次 putSubmission 抛错，catch 中的尽力落档补上带 txHash 的
+    // persist_failed 档案——链上哈希不零留痕，对账可凭哈希追。
+    expect(putSubmissionCalls).toBe(2);
+    await expect(inner.getSubmission("sub_1")).resolves.toMatchObject({
+      status: "failed",
+      broadcastStatus: "failed",
+      txHash,
+      errorCode: "persist_failed",
+      retryable: false,
+    });
+
     // nonce 未释放：同一 prepareId 重试撞 duplicate_stage_executor_patch_nonce
     //（409），不会二次广播；补单交给 reconcile 从链上回执对账。
     const retried = await router.handle({
@@ -1024,7 +1489,6 @@ describe("stage executor/resource patch Product API", () => {
       status: 409,
       body: { error: "duplicate_stage_executor_patch_nonce" },
     });
-    expect(failingStore.putSubmissionCalls).toBe(1);
   });
 
   it("releases the reserved patch nonce when the broadcast throws before producing a txHash so the same prepareId stays retryable", async () => {
@@ -1762,6 +2226,7 @@ describe("stage patch durable store (sqlite)", () => {
       nonceKey: "executor:31337:0xabc:1",
       taskId: "task_1",
       patchHash: "0x" + "11".repeat(32),
+      deadline: String(Math.floor(baseNow.getTime() / 1000) + 600),
       status: "prepared"
     } as unknown as PreparedStageExecutorPatchRecord;
     await first.putPrepared(prepared);
@@ -1791,6 +2256,20 @@ describe("stage patch durable store (sqlite)", () => {
       await expect(second.reserveNonce("executor:31337:0xabc:1")).resolves.toBe(false);
       await second.releaseNonce("executor:31337:0xabc:1");
       await expect(second.reserveNonce("executor:31337:0xabc:1")).resolves.toBe(true);
+
+      // 持久表清扫（此前只进不出）：过期 prepare 按 deadline 列删除，
+      // 存活行不受影响——每行数 KB（含完整 typedData）的表不再无界堆叠。
+      await second.putPrepared({
+        ...prepared,
+        prepareId: "prep_restart_expired",
+        nonceKey: "executor:31337:0xabc:2",
+        deadline: String(Math.floor(baseNow.getTime() / 1000) - 1)
+      } as unknown as PreparedStageExecutorPatchRecord);
+      await expect(
+        second.deleteExpiredPrepared(String(Math.floor(baseNow.getTime() / 1000)))
+      ).resolves.toBe(1);
+      await expect(second.getPrepared("prep_restart_expired")).resolves.toBeUndefined();
+      await expect(second.getPrepared("prep_restart_1")).resolves.toBeDefined();
     } finally {
       await second.close();
     }

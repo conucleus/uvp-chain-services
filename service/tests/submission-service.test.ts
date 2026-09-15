@@ -1911,3 +1911,123 @@ describe("secure broadcast durable dedupe", () => {
     }
   });
 });
+
+describe("state-machine broadcast duplicate-transaction lanes", () => {
+  // 三车道（nonce too low / already known / replacement underpriced）从
+  // relayer 下沉后的在役消费测试：基础分类 + 回执探针四态裁决。
+  const duplicateTx = txHash("aa");
+
+  function duplicateLaneFixture(receipts: Map<string, { status?: "success" | "reverted" | string; blockNumber?: bigint }>) {
+    const writeContract = vi.fn(async () => {
+      const error = new Error("already known") as Error & { txHash?: string };
+      error.txHash = duplicateTx;
+      throw error;
+    });
+    const adapter = createStateMachineSubmissionBroadcastAdapter({
+      stateMachineAddress: verifyingContract,
+      chainId,
+      publicClient: {
+        getChainId: async () => chainId,
+        getTransactionReceipt: async ({ hash }: { hash: Hex }) => receipts.get(hash)
+      },
+      walletClient: {
+        account: { address: "0x9999999999999999999999999999999999999999" },
+        writeContract
+      },
+      waitForReceipt: true,
+      now: () => baseNow
+    });
+    return { adapter, writeContract };
+  }
+
+  it("resolves an already-mined duplicate to submitted with the probed receipt", async () => {
+    const { adapter } = duplicateLaneFixture(new Map([[duplicateTx, { status: "success", blockNumber: 55n }]]));
+    const fixture = await submissionFixture();
+    const prepared = await prepare(fixture);
+    await expect(adapter.broadcast({
+      prepared,
+      signature: await signPrepared(prepared),
+      recoveredSubmitter: submitter,
+      evidence: []
+    })).resolves.toMatchObject({
+      status: "submitted",
+      txHash: duplicateTx,
+      blockNumber: "55",
+      attempt: { status: "submitted", gasPayer: "0x9999999999999999999999999999999999999999", retryable: false }
+    });
+  });
+
+  it("dead-letters only when the probed receipt proves a revert", async () => {
+    const { adapter } = duplicateLaneFixture(new Map([[duplicateTx, { status: "reverted", blockNumber: 56n }]]));
+    const fixture = await submissionFixture();
+    const prepared = await prepare(fixture);
+    await expect(adapter.broadcast({
+      prepared,
+      signature: await signPrepared(prepared),
+      recoveredSubmitter: submitter,
+      evidence: []
+    })).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "transaction_reverted",
+      retryable: false,
+      retryState: "dead_letter",
+      deadLetter: true,
+      txHash: duplicateTx,
+      blockNumber: "56"
+    });
+  });
+
+  it("keeps a pool-pending duplicate retryable with the candidate hash (receipt unknown)", async () => {
+    const { adapter } = duplicateLaneFixture(new Map());
+    const fixture = await submissionFixture();
+    const prepared = await prepare(fixture);
+    await expect(adapter.broadcast({
+      prepared,
+      signature: await signPrepared(prepared),
+      recoveredSubmitter: submitter,
+      evidence: []
+    })).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "transaction_receipt_unknown",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false,
+      txHash: duplicateTx
+    });
+  });
+
+  it("treats a nonce race without an attributable hash as a retryable re-assembly", async () => {
+    const writeContract = vi.fn(async () => {
+      throw new Error("nonce too low");
+    });
+    const adapter = createStateMachineSubmissionBroadcastAdapter({
+      stateMachineAddress: verifyingContract,
+      chainId,
+      publicClient: {
+        getChainId: async () => chainId,
+        getTransactionReceipt: async () => undefined
+      },
+      walletClient: {
+        account: { address: "0x9999999999999999999999999999999999999999" },
+        writeContract
+      },
+      waitForReceipt: true,
+      now: () => baseNow
+    });
+    const fixture = await submissionFixture();
+    const prepared = await prepare(fixture);
+    await expect(adapter.broadcast({
+      prepared,
+      signature: await signPrepared(prepared),
+      recoveredSubmitter: submitter,
+      evidence: []
+    })).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "duplicate_transaction",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false
+    });
+    // 无 txHash 的可重试失败：submit 落档事务会释放 nonce、prepare 可重用。
+  });
+});

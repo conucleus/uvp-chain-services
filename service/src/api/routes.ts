@@ -1,23 +1,21 @@
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { Hex } from "../shared/types.js";
-import { createNoopComplianceService } from "../compliance/index.js";
-import { createNoopRiskGraphService } from "../risk/index.js";
-import { createProductService, ProductOrderLookupError } from "../product/service.js";
+import { createProductService, ProductOrderLookupError } from "../product/application/service.js";
 import {
   createProductBffService,
-} from "../product/bff/service.js";
-import type { ProductBffStore } from "../product/bff/store.js";
+} from "../product/query/bff/service.js";
+import type { ProductBffStore } from "../product/query/bff/store.js";
 import { createEvidenceService, LocalEvidenceStorage } from "../evidence/index.js";
 import { createGovernanceService } from "../governance/index.js";
 import {
   createStoreZhixuDraftWorkflowService,
   MemoryStoreZhixuDraftStore
-} from "../store-console/zhixu-drafts.js";
-import { createStoreRuntimeService } from "../store-console/runtime.js";
+} from "../store/console/zhixu-drafts.js";
+import { createStoreRuntimeService } from "../store/console/runtime.js";
 import {
   createStoreZhixuVersionService,
   MemoryStoreZhixuVersionMetadataStore
-} from "../store-console/version.js";
+} from "../store/console/version.js";
 import {
   createProductSubmissionService,
   type SubmissionAuthorizationAdapter,
@@ -34,32 +32,32 @@ import {
   createNotificationService,
   createSupplierNotificationProfileConfigService
 } from "../notifications/index.js";
-import { createStoreConsoleService } from "../store-console/service.js";
-import { MemoryStoreAuditStore } from "../store-console/audit.js";
-import { createStoreIdentityProvider } from "../store-console/access.js";
-import { createStoreDockingService, MemoryStoreDockingSessionStore } from "../store-console/docking.js";
-import { createStoreSupplierService, InMemoryStoreSupplierMetadataStore } from "../store-suppliers/service.js";
+import { createStoreConsoleService } from "../store/console/service.js";
+import { MemoryStoreAuditStore } from "../store/console/audit.js";
+import { createStoreIdentityProvider } from "../store/console/access.js";
+import { createStoreDockingService, MemoryStoreDockingSessionStore } from "../store/console/docking.js";
+import { createStoreSupplierService, InMemoryStoreSupplierMetadataStore } from "../store/suppliers/service.js";
 import {
   createStoreSessionService,
   createWalletSessionStoreIdentityProvider,
   InMemoryStoreWalletSessionStore
-} from "../store-sessions/index.js";
+} from "../store/sessions/index.js";
 import {
   createStoreDecorationService,
   InMemoryStorePublisherDelegationStore,
   InMemoryStoreZhixuDecorationStore
-} from "../store-decoration/index.js";
+} from "../store/decoration/index.js";
 import {
   InMemoryStoreIdentityDescriptorSnapshotStore
 } from "../governance/descriptors.js";
 import {
   createStoreListingService,
   InMemoryStoreListingStore
-} from "../store-listings/index.js";
+} from "../store/listings/index.js";
 import {
   createStoreJoinService,
   InMemoryStoreJoinApplicationStore
-} from "../store-join/index.js";
+} from "../store/join/index.js";
 import { createStoreAuthRouteModule } from "./routes/store-auth.js";
 import { createStoreDecorationRouteModule } from "./routes/store-decoration.js";
 import { createStoreJoinRouteModule } from "./routes/store-join.js";
@@ -74,9 +72,7 @@ import { createNotificationsRouteModule } from "./routes/notifications.js";
 import { createProductBffRouteModule } from "./routes/product-bff.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
 import { createStoreConsoleRouteModule } from "./routes/store-console.js";
-import { createStoreComplianceRouteModule } from "./routes/store-compliance.js";
 import { createStoreDockingRouteModule } from "./routes/store-docking.js";
-import { createStoreRiskRouteModule } from "./routes/store-risk.js";
 import { createStoreSuppliersRouteModule } from "./routes/store-suppliers.js";
 import { createSubmissionsRouteModule } from "./routes/submissions.js";
 import { createStagePatchRouteModule } from "./routes/stage-patches.js";
@@ -135,8 +131,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     descriptorSnapshotStore: identityDescriptorSnapshots,
     ...(options.descriptorPublicBaseUrl ? { descriptorPublicBaseUrl: options.descriptorPublicBaseUrl } : {})
   });
-  const complianceService = options.complianceService ?? createNoopComplianceService();
-  const riskGraphService = options.riskGraphService ?? createNoopRiskGraphService();
   const storeRuntimeService = createStoreRuntimeService({
     productService,
     store,
@@ -336,8 +330,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     joinService,
     identityDescriptorSnapshots,
     governanceService,
-    complianceService,
-    riskGraphService,
     notificationService,
     supplierNotificationConfigService,
     evidenceService,
@@ -361,9 +353,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createStoreDecorationRouteModule({ decorationService: storeDecorationService }),
     createStoreJoinRouteModule({ joinService }),
     createStoreListingsRouteModule({ listingService }),
-    createStoreComplianceRouteModule(),
     createStoreDockingRouteModule(),
-    createStoreRiskRouteModule(),
     createStoreSuppliersRouteModule(),
     createGovernanceRouteModule(),
     createNotificationsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),

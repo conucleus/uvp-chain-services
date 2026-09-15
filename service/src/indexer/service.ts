@@ -7,13 +7,13 @@ import {
   buildActiveChainEventReplaySummary,
   sortChainEvents
 } from "./events.js";
-import type { ProjectionSnapshot } from "./projections.js";
+import type { ProjectionSnapshot } from "./projections/index.js";
+import { createEmptyProjectionSnapshot } from "./projections/index.js";
 import {
   countDuplicateActiveEventAnomalies,
   countReplayAnomalies,
-  createEmptyProjectionSnapshot,
   rebuildOrderProjections
-} from "./projections.js";
+} from "./replay.js";
 import { rebuildIdentityProjections } from "./identity-projections.js";
 import { createProjectionStore } from "../storage/factory.js";
 import { isTransientSqliteBusyError } from "../storage/sqlite.js";
@@ -280,6 +280,8 @@ export class IndexerService implements LifecycleService {
 
     const startedAt = new Date().toISOString();
     let mismatchCount = 0;
+    let rebuildNotificationStepId: string | undefined;
+    let rebuildCommitted = false;
     await this.#store.saveSyncState({
       ...this.#scope,
       syncStatus: "rebuilding",
@@ -349,6 +351,13 @@ export class IndexerService implements LifecycleService {
         finalizedBlock,
         ...(await this.#cursorBlockHash(finalizedBlock))
       };
+      // 通知派生先于重建事务提交落 pending（对齐增量路径不变量：投递
+      // 记录必须先于游标推进）：全量重建把游标随整库替换同事务落库，
+      // 提交后才处理通知——该窗口内硬崩溃会让这批事件永不再被读取、
+      // 通知无从重建。预落步骤崩溃后由 sweep 补投（重投按 deliveryId
+      // 幂等去重，成功投递后的残留步骤同样被幂等补投一遍后出队）；
+      // 重建未提交即失败时撤销预落（未提交的重建不欠投递）。
+      rebuildNotificationStepId = await this.#prePersistRebuildNotificationStep(activeEvents);
       const snapshot = await this.#store.resetFromEvents({
         deploymentBlock,
         events,
@@ -363,7 +372,16 @@ export class IndexerService implements LifecycleService {
           ...(nextCursor.blockHash !== undefined ? { blockHash: nextCursor.blockHash } : {})
         }
       });
-      await this.#processSignalNotifications(activeEvents);
+      rebuildCommitted = true;
+      const notificationStatus = await this.#processSignalNotifications(activeEvents);
+      if (rebuildNotificationStepId !== undefined && notificationStatus === "delivered") {
+        // 当轮投递成功：预落步骤的历史使命（覆盖崩溃窗口）结束，撤销以
+        // 免 sweep 重复补投；重试耗尽（persisted）时保留，交由 sweep 补投。
+        await this.#dropPendingPostCommitStep(
+          rebuildNotificationStepId,
+          "rebuild notification step withdrawn after in-process delivery succeeded"
+        );
+      }
       await this.#processProjectionAutomation(snapshot);
       this.#cursor = nextCursor;
 
@@ -391,6 +409,7 @@ export class IndexerService implements LifecycleService {
         unresolvedModuleOrderEventCount: snapshot.unresolvedModuleOrderEventCount ?? 0,
         unresolvedDockEventCount: snapshot.unresolvedDockEventCount ?? 0,
         unresolvedStageActivationEventCount: snapshot.unresolvedStageActivationEventCount ?? 0,
+        unresolvedDockTargetDeploymentCount: snapshot.unresolvedDockTargetDeploymentCount ?? 0,
         unresolvedLogCount: this.#consumeUnresolvedLogCount(),
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
@@ -398,12 +417,59 @@ export class IndexerService implements LifecycleService {
 
       return { snapshot, summary };
     } catch (error) {
+      if (rebuildNotificationStepId !== undefined && !rebuildCommitted) {
+        await this.#dropPendingPostCommitStep(
+          rebuildNotificationStepId,
+          "rebuild notification step withdrawn after the rebuild transaction failed before commit"
+        );
+      }
       // 投影 apply 失败（如未知 plan 引用）时把已统计到的真实异常数带入
       // degraded 状态，而不是回退为旧值/0；apply 失败本身计为 1 个异常。
       const applyFailureCount = error instanceof ProjectionError ? 1 : 0;
       await this.#markDegraded(finalizedBlock, error, mismatchCount + applyFailureCount);
       throw error;
     }
+  }
+
+  /**
+   * 全量重建的通知派生预落步骤：重建事务提交前持久化 signal_notification
+   * pending（见 #rebuildFromDeploymentBlock 调用点注释）。失败不阻断重建
+   * 主路径——响亮记录后返回 undefined，退化为提交后处理的旧行为。
+   */
+  async #prePersistRebuildNotificationStep(events: readonly ChainEvent[]): Promise<string | undefined> {
+    const durableStore = this.#store;
+    if (!isDurableProjectionStore(durableStore) || !this.#notificationProcessor || events.length === 0) {
+      return undefined;
+    }
+    const stepId = pendingPostCommitStepId("signal_notification", events);
+    try {
+      await durableStore.savePendingPostCommitStep({
+        stepId,
+        chainId: this.#scope.chainId,
+        kind: "signal_notification",
+        events
+      });
+      return stepId;
+    } catch (error) {
+      this.#logger.error("failed to pre-persist the rebuild notification step; notifications for this rebuild may be lost if the process crashes before delivery", {
+        message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+      });
+      return undefined;
+    }
+  }
+
+  async #dropPendingPostCommitStep(stepId: string, reason: string): Promise<void> {
+    const durableStore = this.#store;
+    if (!isDurableProjectionStore(durableStore)) {
+      return;
+    }
+    await durableStore.deletePendingPostCommitStep(stepId).catch((error: unknown) => {
+      this.#logger.error("failed to withdraw a pending post-commit step; the sweep may redeliver it", {
+        stepId,
+        reason,
+        message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+      });
+    });
   }
 
   async refreshFromCursorWithSummary(options: IndexerRebuildOptions = {}): Promise<IndexerRebuildResult> {
@@ -486,6 +552,28 @@ export class IndexerService implements LifecycleService {
     const activeNewEvents = [...newReplaySummary.activeEvents];
 
     const result = await durableStore.withTransaction(async () => {
+      // 崩溃窗口残留清扫：事件事务先于游标提交（中间还夹着通知投递），
+      // 游标未推进而事件已落库的行只可能在 [fromBlock, ∞) 区间。单写者
+      // 不变量下这些行只来自本进程上一轮崩溃窗口；窗口内若发生浅 reorg，
+      // 旧分叉行会与本轮 canonical 追加（ON CONFLICT DO NOTHING 挡不住
+      // 不同 txHash 的分叉行）并存成永久幽灵，每轮重放都投进投影。以
+      // 持久游标仍停在本轮 fromBlock 为前置（否则是别的写者已接管，本
+      // 轮按 CAS 语义递延），整窗删除后重放 canonical 链数据——链是真相。
+      if (effectiveFromBlock > 0n) {
+        const cursorAtAppend = await durableStore.getCursor(this.#scope);
+        if (cursorAtAppend?.nextBlock === effectiveFromBlock) {
+          const swept = await durableStore.deleteEventsAfterBlock(
+            { chainId: this.#scope.chainId },
+            effectiveFromBlock - 1n
+          );
+          if (swept > 0) {
+            this.#logger.warn("indexer swept committed-but-unadvanced event rows before replaying canonical chain data", {
+              fromBlock: effectiveFromBlock.toString(),
+              sweptEvents: swept
+            });
+          }
+        }
+      }
       for (const event of events) {
         await durableStore.appendEvent(event);
       }
@@ -569,6 +657,7 @@ export class IndexerService implements LifecycleService {
       unresolvedModuleOrderEventCount: result.snapshot.unresolvedModuleOrderEventCount ?? 0,
       unresolvedDockEventCount: result.snapshot.unresolvedDockEventCount ?? 0,
       unresolvedStageActivationEventCount: result.snapshot.unresolvedStageActivationEventCount ?? 0,
+      unresolvedDockTargetDeploymentCount: result.snapshot.unresolvedDockTargetDeploymentCount ?? 0,
       unresolvedLogCount: this.#consumeUnresolvedLogCount(),
       nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
@@ -711,9 +800,15 @@ export class IndexerService implements LifecycleService {
    * 已存事件与 canonical 链之间找共同祖先，删除祖先之后的事件、从剩余
    * 事件重建快照并回退 cursor，然后从祖先 + 1 正常追加。
    *
+   * 兜底行为（比声明回溯窗口更自愈）：窗口内找不到共同祖先时不直接
+   * 报错，而是向任意深度的更旧已存锚点逐个回验（无下界，最新优先），
+   * 效果等效对全库逐锚点的 full rebuild 级校验；仅当全部锚点都不在
+   * canonical 链上才 fail-closed 报错要求 full rebuild。已删除锚点之下
+   * 的事件随后从 canonical 链重读，不会残留旧分叉数据。
+   *
    * 残余风险：超过 finalityConfirmations 的深度 reorg 仍可能伪造出
-   * "完全一致"的历史；回溯窗口内找不到共同祖先时报错要求 full rebuild。
-   * cursor 无已存哈希（事件源不支持或未持久化哈希）时跳过校验。
+   * "完全一致"的历史；cursor 无已存哈希（事件源不支持或未持久化哈希）
+   * 时跳过校验。
    */
   async #rollbackOnReorg(fromBlock: bigint): Promise<bigint> {
     const durableStore = this.#store;
@@ -943,7 +1038,7 @@ export class IndexerService implements LifecycleService {
     if (!isDurableProjectionStore(durableStore)) {
       return;
     }
-    try {
+    const trimPass = async (): Promise<void> => {
       const pendingSteps = await durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
       for (const step of pendingSteps) {
         if (step.kind !== "signal_notification" || !step.events || step.events.length === 0) {
@@ -953,15 +1048,20 @@ export class IndexerService implements LifecycleService {
         if (surviving.length === step.events.length) {
           continue;
         }
-        await durableStore.deletePendingPostCommitStep(step.stepId);
-        if (surviving.length > 0) {
-          await durableStore.savePendingPostCommitStep({
-            stepId: pendingPostCommitStepId("signal_notification", surviving),
-            chainId: step.chainId,
-            kind: step.kind,
-            events: surviving
-          });
-        }
+        // 删旧存新必须同事务：save 是 ON CONFLICT DO NOTHING，两步分离时
+        // 删旧后半途崩溃会让旧 stepId 已消失、新 stepId 未落库，修剪效果
+        // 丢失且无从辨认重跑。
+        await durableStore.withTransaction(async () => {
+          await durableStore.deletePendingPostCommitStep(step.stepId);
+          if (surviving.length > 0) {
+            await durableStore.savePendingPostCommitStep({
+              stepId: pendingPostCommitStepId("signal_notification", surviving),
+              chainId: step.chainId,
+              kind: step.kind,
+              events: surviving
+            });
+          }
+        });
         this.#logger.warn("pending signal notification batch trimmed after reorg rollback; reorged-out events will not be delivered", {
           stepId: step.stepId,
           ancestorBlock: ancestorBlock.toString(),
@@ -969,13 +1069,26 @@ export class IndexerService implements LifecycleService {
           survivingEvents: surviving.length
         });
       }
+    };
+    try {
+      await trimPass();
     } catch (error) {
-      // 修剪失败不回滚投影主路径，但必须响亮：残留批次会在最终性追平后
-      // 被 sweep 补投成幽灵通知。
-      this.#logger.error("failed to trim pending post-commit steps after reorg rollback; ghost notifications may be delivered when finalization catches up", {
-        ancestorBlock: ancestorBlock.toString(),
-        message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
-      });
+      // 修剪失败不回滚投影主路径，但至少重试一次（修剪幂等：已修剪批次
+      // 自然跳过）；再失败必须响亮——残留批次会在最终性追平后被 sweep
+      // 补投成幽灵通知。
+      try {
+        await trimPass();
+        this.#logger.warn("indexer recovered pending post-commit trim after one retry", {
+          ancestorBlock: ancestorBlock.toString(),
+          firstError: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+        });
+        return;
+      } catch (retryError) {
+        this.#logger.error("failed to trim pending post-commit steps after reorg rollback (retry exhausted); ghost notifications may be delivered when finalization catches up", {
+          ancestorBlock: ancestorBlock.toString(),
+          message: retryError instanceof Error ? redactErrorMessage(retryError) : "unknown error"
+        });
+      }
     }
   }
 
@@ -989,22 +1102,38 @@ export class IndexerService implements LifecycleService {
     if (!invalidate) {
       return;
     }
-    try {
-      const invalidated = await invalidate({
+    const runInvalidate = async (): Promise<unknown> =>
+      invalidate({
         chainId: this.#scope.chainId,
         blockNumber: ancestorBlock
       });
-      if (invalidated !== undefined && Number(invalidated) > 0) {
+    const toInvalidatedCount = (value: unknown): number | undefined =>
+      value === undefined ? undefined : Number(value);
+    try {
+      const invalidated = toInvalidatedCount(await runInvalidate());
+      if (invalidated !== undefined && invalidated > 0) {
         this.#logger.warn("indexer invalidated notification deliveries targeting reorged-out blocks", {
           ancestorBlock: ancestorBlock.toString(),
-          invalidated: Number(invalidated)
+          invalidated
         });
       }
     } catch (error) {
-      this.#logger.error("indexer failed to invalidate notification deliveries after reorg rollback; stale deliveries may reference reorged-out blocks until the next rollback", {
-        ancestorBlock: ancestorBlock.toString(),
-        message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
-      });
+      // 失效标记幂等（invalidated 行跳过），失败至少重试一次；再失败只
+      // 响亮记录——回滚路径再次触发时会重标，不留静默缺口。
+      try {
+        const invalidated = toInvalidatedCount(await runInvalidate());
+        this.#logger.warn("indexer recovered notification delivery invalidation after one retry", {
+          ancestorBlock: ancestorBlock.toString(),
+          invalidated: invalidated !== undefined ? Number(invalidated) : undefined,
+          firstError: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+        });
+        return;
+      } catch (retryError) {
+        this.#logger.error("indexer failed to invalidate notification deliveries after reorg rollback (retry exhausted); stale deliveries may reference reorged-out blocks until the next rollback", {
+          ancestorBlock: ancestorBlock.toString(),
+          message: retryError instanceof Error ? redactErrorMessage(retryError) : "unknown error"
+        });
+      }
     }
   }
 
@@ -1062,12 +1191,12 @@ export class IndexerService implements LifecycleService {
     };
   }
 
-  async #processSignalNotifications(events: readonly ChainEvent[]): Promise<void> {
+  async #processSignalNotifications(events: readonly ChainEvent[]): Promise<PostCommitStepStatus> {
     const processor = this.#notificationProcessor;
     if (!processor || events.length === 0) {
-      return;
+      return "skipped";
     }
-    await this.#runPostCommitStepWithBoundedRetry(
+    return this.#runPostCommitStepWithBoundedRetry(
       { kind: "signal_notification", step: "signal notification", events },
       () => processor.processSignalSubmittedEvents(events)
     );
@@ -1092,7 +1221,9 @@ export class IndexerService implements LifecycleService {
    * once retries are exhausted the step is persisted into the durable pending
    * queue (rebuildable by the background sweep) instead of being dropped —
    * the cursor already advanced, so the incremental refresh will never see
-   * these events again.
+   * these events again. 返回 "delivered"（当轮成功）/ "persisted"（重试耗
+   * 尽已转 pending）/ "skipped"（无处理器或空载荷，未产生任何步骤）——
+   * 全量重建路径据此撤销投递成功后不再需要的预落步骤。
    */
   async #runPostCommitStepWithBoundedRetry(
     pending: {
@@ -1101,11 +1232,11 @@ export class IndexerService implements LifecycleService {
       readonly events?: readonly ChainEvent[];
     },
     run: () => Promise<unknown>
-  ): Promise<void> {
+  ): Promise<PostCommitStepStatus> {
     for (let attempt = 1; attempt <= POST_COMMIT_STEP_MAX_ATTEMPTS; attempt += 1) {
       try {
         await run();
-        return;
+        return "delivered";
       } catch (error) {
         const message = error instanceof Error ? redactErrorMessage(error) : `unknown ${pending.step} error`;
         if (attempt === POST_COMMIT_STEP_MAX_ATTEMPTS) {
@@ -1117,13 +1248,14 @@ export class IndexerService implements LifecycleService {
             message,
             persisted
           });
-          return;
+          return "persisted";
         }
         const nextDelayMs = postCommitStepRetryDelayMs(attempt);
         this.#logger.warn(`post-commit ${pending.step} failed; retrying`, { attempt, nextDelayMs, message });
         await sleep(nextDelayMs);
       }
     }
+    return "persisted";
   }
 
   async #persistPendingPostCommitStep(
@@ -1431,6 +1563,10 @@ const POST_COMMIT_STEP_RETRY_BASE_DELAY_MS = 100;
 const POST_COMMIT_STEP_RETRY_MAX_DELAY_MS = 2000;
 /** sweep 死信上限：宽松于瞬态失败（最终性上界追平）通常需要的轮次。 */
 const PENDING_POST_COMMIT_MAX_SWEEP_ATTEMPTS = 16;
+
+/** post-commit 步骤的当轮结局：delivered=当轮成功；persisted=重试耗尽已转
+ * 持久 pending 队列；skipped=无处理器/空载荷，未产生任何步骤。 */
+type PostCommitStepStatus = "delivered" | "persisted" | "skipped";
 
 function postCommitStepRetryDelayMs(attempt: number): number {
   return Math.min(

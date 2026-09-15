@@ -19,7 +19,7 @@ import {
   AnvilProductOrderTriggerBroadcastAdapter,
   MemoryProductOrderTriggerBroadcastAdapter,
   type ProductOrderTriggerBroadcastAdapter
-} from "../product/bff/trigger.js";
+} from "../product/query/bff/trigger.js";
 import { createViemReconcileReceiptClient, TxReconcileWorker } from "../reconcile/index.js";
 import { DockAutomationWorker } from "../dock-automation/index.js";
 import { createChainServicesStores } from "../storage/factory.js";
@@ -41,7 +41,7 @@ import { isDirectRun } from "../shared/runtime.js";
 import { ConfigError, consoleLogger, type Address, type Logger } from "../shared/types.js";
 import { createApiRouter } from "./routes.js";
 import { InvalidPathParameterError, invalidPathParameterResponse } from "./route-context.js";
-import { createListingAnchorChainView } from "../store-listings/index.js";
+import { createListingAnchorChainView } from "../store/listings/index.js";
 
 export interface StartApiServerOptions {
   readonly config?: ChainServicesConfig;

@@ -1,8 +1,19 @@
-import { createPublicClient, createWalletClient, http, type Chain } from "viem";
+import { createPublicClient, createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { STATE_MACHINE_ABI, buildSubmitSignalForCall } from "@uvp-eth/protocol-bindings";
-import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from "../shared/types.js";
-import { redactErrorMessage } from "../security/redaction.js";
+import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
+import {
+  ZERO_ADDRESS,
+  ZERO_BYTES32,
+  broadcastFailureCore,
+  chainFor,
+  errorText,
+  findErrorName,
+  loadRelayerPrivateKey,
+  normalizeGasPayer,
+  requiredRpcUrl
+} from "../shared/broadcast/kit.js";
+import { resolveDuplicateTransactionOutcome } from "../shared/broadcast/duplicate-transaction.js";
 import type { SubmissionBroadcastAdapter, SubmissionBroadcastResult } from "./types.js";
 
 export interface StateMachineSubmissionPublicClient {
@@ -11,6 +22,11 @@ export interface StateMachineSubmissionPublicClient {
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
   } | undefined>;
+  /** duplicate-transaction 车道的回执探针（viem publicClient 自带同签名）。 */
+  getTransactionReceipt?(args: { readonly hash: Hex }): Promise<{
+    readonly status?: "success" | "reverted" | string;
+    readonly blockNumber?: bigint;
+  } | undefined | null>;
 }
 
 export interface StateMachineSubmitSignalForCall {
@@ -53,9 +69,7 @@ export interface ClassifiedStateMachineBroadcastError {
   readonly revertReason?: string;
 }
 
-const DEFAULT_RELAYER_PRIVATE_KEY_ENV = "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY";
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const DEFAULT_RELAYER_PRIVATE_KEY_LABEL = "state-machine submission broadcast";
 
 export function createStateMachineSubmissionBroadcastAdapter(
   options: StateMachineSubmissionBroadcastAdapterOptions
@@ -68,13 +82,13 @@ export function createStateMachineSubmissionBroadcastAdapter(
   const chain = options.rpcUrl ? chainFor(options.chainId, options.rpcUrl) : undefined;
   const publicClient: StateMachineSubmissionPublicClient = options.publicClient ?? createPublicClient({
     ...(chain ? { chain } : {}),
-    transport: http(requiredRpcUrl(options.rpcUrl))
+    transport: http(requiredRpcUrl(options.rpcUrl, DEFAULT_RELAYER_PRIVATE_KEY_LABEL))
   });
-  const account = options.walletClient ? undefined : privateKeyToAccount(loadRelayerPrivateKey(options));
+  const account = options.walletClient ? undefined : privateKeyToAccount(loadRelayerPrivateKey(options, DEFAULT_RELAYER_PRIVATE_KEY_LABEL));
   const walletClient: StateMachineSubmissionWalletClient = options.walletClient ?? (createWalletClient({
     account,
     ...(chain ? { chain } : {}),
-    transport: http(requiredRpcUrl(options.rpcUrl))
+    transport: http(requiredRpcUrl(options.rpcUrl, DEFAULT_RELAYER_PRIVATE_KEY_LABEL))
   }) as unknown as StateMachineSubmissionWalletClient);
   const gasPayer = normalizeGasPayer(options.walletClient?.account?.address ?? account?.address);
   const waitForReceipt = options.waitForReceipt ?? true;
@@ -162,6 +176,64 @@ export function createStateMachineSubmissionBroadcastAdapter(
         txHash = await walletClient.writeContract(call);
       } catch (error) {
         const classified = classifyStateMachineBroadcastError(error);
+        // duplicate-transaction 三车道（nonce too low / already known /
+        // replacement underpriced）不是终态失败：交易可能已上链或仍在池中，
+        // 先按候选 txHash 探回执裁决（成功按 submitted 落账、revert 终态、
+        // 未知可重试并保留候选哈希），机制单源在 shared/broadcast。
+        if (classified.errorCode === "duplicate_transaction") {
+          const getReceipt = publicClient.getTransactionReceipt
+            ? (txHash: Hex) => publicClient.getTransactionReceipt!({ hash: txHash })
+            : undefined;
+          return resolveDuplicateTransactionOutcome(
+            error,
+            getReceipt,
+            {
+              onSubmitted: ({ txHash: probedTxHash, blockNumber }) => {
+                const status = options.confirmOnReceipt ? "confirmed" : "submitted";
+                return {
+                  status,
+                  txHash: probedTxHash,
+                  ...(blockNumber !== undefined ? { blockNumber } : {}),
+                  attempt: {
+                    status,
+                    txHash: probedTxHash,
+                    ...(blockNumber !== undefined ? { blockNumber } : {}),
+                    gasPayer,
+                    retryable: false,
+                    retryState: "not_applicable",
+                    deadLetter: false
+                  }
+                } satisfies SubmissionBroadcastResult;
+              },
+              onReceiptFailed: ({ txHash: failedTxHash, blockNumber }) =>
+                failedResult(
+                  "transaction_reverted",
+                  "the duplicate transaction was mined and reverted on chain",
+                  false,
+                  gasPayer,
+                  "transaction_reverted",
+                  failedTxHash,
+                  blockNumber
+                ),
+              onReceiptUnknown: ({ txHash: candidateTxHash }) =>
+                failedResult(
+                  "transaction_receipt_unknown",
+                  "broadcaster reported a duplicate transaction but no receipt is available yet; the candidate hash is retained for the next probe",
+                  true,
+                  gasPayer,
+                  "transaction_receipt_unknown",
+                  candidateTxHash
+                ),
+              onReassemblableNonceRace: () =>
+                failedResult(
+                  "duplicate_transaction",
+                  "broadcaster reported a nonce race without an attributable transaction hash; the payload can be re-assembled with a fresh gas nonce",
+                  true,
+                  gasPayer
+                )
+            }
+          );
+        }
         return failedResult(
           classified.errorCode,
           classified.message,
@@ -298,7 +370,19 @@ export function classifyStateMachineBroadcastError(error: unknown): ClassifiedSt
       name?.includes("InvalidSignalSignature") ? name : "InvalidSignalSignature"
     );
   }
-  // 未登记 revert 的泛规则（对齐 relayer 的兜底与错误分类表）：真实执行
+  // duplicate-transaction 车道（broadcaster 的 nonce 冲突三形态）：基础判定
+  // 对齐 taxonomy nonce_conflict（不可重试、死信），但 broadcast() 捕获口会
+  // 先走回执探针裁决改判（submitted / receipt_failed / receipt_unknown /
+  // 可重组装）——直接死信会把已上链交易永久标记 failed。
+  if (/nonce too low|replacement transaction underpriced|already known/i.test(haystack)) {
+    return classifiedBroadcastError(
+      "duplicate_transaction",
+      "broadcaster reported a duplicate or already-used transaction nonce",
+      false,
+      text
+    );
+  }
+  // 未登记 revert 的泛规则（对齐 taxonomy transaction_reverted 基础判定）：真实执行
   // 失败按永久失败处理——继续按可重试无限重放同一签名载荷只会重复烧
   // gas。位置在 UnknownOrder 等瞬态判定之后：viem 复合错误文本同时含
   // "reverted." 与具体错误名，泛规则在前会把瞬态永久死信。
@@ -314,7 +398,7 @@ export function classifyStateMachineBroadcastError(error: unknown): ClassifiedSt
     return classifiedBroadcastError(
       "relayer_insufficient_funds",
       "relayer gas payer has insufficient funds",
-      // 与 relayer 口径统一：给 gas payer 充值是运营可修复条件，同签名
+      // 对齐 taxonomy insufficient_funds（充值是运营可修复条件，同签名
       // 载荷可重试；不消费 prepare/nonce（submitter 未产生 txHash）。
       true,
       text
@@ -367,26 +451,16 @@ function failedResult(
   const deadLetter = deadLetterForBroadcastError(errorCode, retryable);
   const errorLabel = errorLabelForBroadcastError(errorCode);
   const retryState = deadLetter ? "dead_letter" : retryable ? "retryable" : "not_retryable";
+  const core = broadcastFailureCore({ errorCode, message, retryable, gasPayer, ...(txHash ? { txHash } : {}), ...(blockNumber ? { blockNumber } : {}) });
   return {
-    status: "failed",
-    ...(txHash ? { txHash } : {}),
-    ...(blockNumber ? { blockNumber } : {}),
-    errorCode,
+    ...core,
     errorLabel,
-    message,
-    retryable,
     retryState,
     deadLetter,
     attempt: {
-      status: "failed",
-      ...(txHash ? { txHash } : {}),
-      ...(blockNumber ? { blockNumber } : {}),
-      errorCode,
+      ...core.attempt,
       errorLabel,
-      errorMessage: message,
       ...(revertReason ? { revertReason } : {}),
-      gasPayer,
-      retryable,
       retryState,
       deadLetter
     }
@@ -407,6 +481,8 @@ function errorLabelForBroadcastError(errorCode: string): string {
       return "Wallet signature is invalid";
     case "chain_id_mismatch":
       return "RPC chain does not match configuration";
+    case "duplicate_transaction":
+      return "Duplicate transaction";
     case "relayer_insufficient_funds":
       return "Relayer gas payer needs funds";
     case "relayer_business_signer_reuse":
@@ -430,6 +506,7 @@ function deadLetterForBroadcastError(errorCode: string, retryable: boolean): boo
   }
   switch (errorCode) {
     case "chain_id_mismatch":
+    case "duplicate_transaction":
     case "expired_signal_signature":
     case "invalid_signal_signature":
     case "order_plan_unresolved":
@@ -443,94 +520,10 @@ function deadLetterForBroadcastError(errorCode: string, retryable: boolean): boo
   }
 }
 
-function loadRelayerPrivateKey(options: StateMachineSubmissionBroadcastAdapterOptions): Hex {
-  const privateKey = options.relayerPrivateKey ?? (options.env ?? process.env)[
-    options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV
-  ];
-  if (!privateKey) {
-    throw new ConfigError(`${options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV} is required for state-machine submission broadcast`);
-  }
-  assertHex(privateKey, options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV);
-  if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
-    throw new ConfigError(`${options.relayerPrivateKeyEnv ?? DEFAULT_RELAYER_PRIVATE_KEY_ENV} must be a 32-byte private key`);
-  }
-  return privateKey.toLowerCase() as Hex;
-}
-
 function normalizePlanId(value: Hex | string | undefined): Hex | undefined {
   if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
     return undefined;
   }
   const normalized = value.toLowerCase() as Hex;
   return normalized === ZERO_BYTES32 ? undefined : normalized;
-}
-
-function normalizeGasPayer(value: string | undefined): Address {
-  if (!value) {
-    throw new ConfigError("relayer gas payer address is required");
-  }
-  const address = normalizeAddress(value, "relayer gas payer");
-  if (address === ZERO_ADDRESS) {
-    throw new ConfigError("relayer gas payer address must not be zero");
-  }
-  return address;
-}
-
-function requiredRpcUrl(rpcUrl: string | undefined): string {
-  // fail-closed：无显式 RPC 配置即抛错，不回落 127.0.0.1:8545（本地环境
-  // 也必须显式传 UVP_RPC_URL）。
-  if (!rpcUrl) {
-    throw new ConfigError("UVP_RPC_URL is required for state-machine submission broadcast; refusing to fall back to a default RPC endpoint");
-  }
-  return rpcUrl;
-}
-
-function chainFor(chainId: number, rpcUrl: string): Chain {
-  return {
-    id: chainId,
-    name: `uvp-${chainId}`,
-    nativeCurrency: {
-      name: "Ether",
-      symbol: "ETH",
-      decimals: 18
-    },
-    rpcUrls: {
-      default: {
-        http: [rpcUrl]
-      }
-    }
-  };
-}
-
-function findErrorName(error: unknown): string | undefined {
-  if (!error || typeof error !== "object") {
-    return undefined;
-  }
-  const record = error as Record<string, unknown>;
-  if (typeof record.errorName === "string") {
-    return record.errorName;
-  }
-  if (record.cause) {
-    return findErrorName(record.cause);
-  }
-  return undefined;
-}
-
-function errorText(error: unknown): string {
-  if (error instanceof Error) {
-    const causeText = "cause" in error ? errorText((error as { readonly cause?: unknown }).cause) : "";
-    return redactErrorMessage([error.message, causeText].filter(Boolean).join(" "));
-  }
-  if (typeof error === "string") {
-    return redactErrorMessage(error);
-  }
-  if (error && typeof error === "object") {
-    const text = Object.entries(error as Record<string, unknown>)
-      .filter(([key]) => key !== "stack")
-      .map(([_key, value]) => typeof value === "string" ? value : "")
-      .filter(Boolean)
-      .join(" ");
-    return redactErrorMessage(text);
-  }
-  return "";
 }

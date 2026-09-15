@@ -48,15 +48,32 @@ describe("API router composition", () => {
       pathname: "/store/zhixus/%E0%A4%A/orders",
       headers: { "x-uvp-wallet-address": "0x9999999999999999999999999999999999999999" }
     });
-    expect(storeOrder).toMatchObject({ status: 400, body: { error: "invalid_path_parameter" } });
+    // /store 运行时读先过能力门（store.audit.read）：自报钱包头不构成
+    // 该能力，按 401 拒绝，不做路径解码。
+    expect(storeOrder).toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
+    // 持有该能力的会话走到路径解码：非法百分号编码仍 400，不 500。
+    const storeOrderOperator = await router.handle({
+      method: "GET",
+      pathname: "/store/zhixus/%E0%A4%A/orders",
+      headers: { "x-uvp-store-user-id": "operator-1", "x-uvp-store-role": "operator" }
+    });
+    expect(storeOrderOperator).toMatchObject({ status: 400, body: { error: "invalid_path_parameter" } });
   });
 
   it("store runtime reads and submission/trigger reads require session identity", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
 
+    // /store 运行时读是运营观察面（无参与者过滤）：与 /store/audit 同
+    // 能力门——匿名按 store_identity_missing 拒绝（store.audit.read）。
     for (const pathname of [
       "/store/runtime/summary",
-      "/store/zhixus/zhixu-1/orders",
+      "/store/zhixus/zhixu-1/orders"
+    ]) {
+      const anonymous = await router.handle({ method: "GET", pathname });
+      expect(anonymous).toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
+    }
+    // 参与者面（候选清单/提交/触发档案）仍按会话锚定钱包门。
+    for (const pathname of [
       "/store/orders/0xabc/candidates",
       "/product/submissions/sub_1",
       "/product/order-triggers/trg_1"
@@ -68,7 +85,7 @@ describe("API router composition", () => {
 
   it("active-executor overlay authorization only covers the task's recorded submit signal", async () => {
     const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
-    const { MemoryProductBffStore } = await import("../src/product/bff/store.js");
+    const { MemoryProductBffStore } = await import("../src/product/query/bff/store.js");
     const authorization = productBffStoreSubmissionAuthorization(new MemoryProductBffStore());
     const executor = "0x8888888888888888888888888888888888888888";
     const targetStageId = "0x" + "1".repeat(64);
@@ -117,7 +134,7 @@ describe("API router composition", () => {
 
   it("submission authorization honors on-chain SignalSubmitterAuthorized projections", async () => {
     const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
-    const { MemoryProductBffStore } = await import("../src/product/bff/store.js");
+    const { MemoryProductBffStore } = await import("../src/product/query/bff/store.js");
     const { MemoryProjectionStore } = await import("../src/storage/projection-store.js");
 
     // 投影携带链上事后授权（SignalSubmitterAuthorized），BFF trigger
@@ -181,7 +198,7 @@ describe("API router composition", () => {
 
   it("chain delegation leg authorizes the delegated executor by the real signal key when the explicit leg misses", async () => {
     const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
-    const { MemoryProductBffStore } = await import("../src/product/bff/store.js");
+    const { MemoryProductBffStore } = await import("../src/product/query/bff/store.js");
     const { MemoryProjectionStore } = await import("../src/storage/projection-store.js");
 
     // D-1 合并裁决：显式腿（authorizations）未命中不是终局否决——

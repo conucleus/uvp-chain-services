@@ -9,7 +9,7 @@ import {
   type Log,
 } from "viem";
 import type { ChainServicesConfig } from "../config/index.js";
-import { ConfigError, noopLogger, type Address, type Hex, type Logger } from "../shared/types.js";
+import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type Logger } from "../shared/types.js";
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
@@ -64,6 +64,7 @@ const dockingModuleAbi = parseAbi([
   "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 interfaceNameId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
   "event DockInputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed inputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 payloadHash,address submitter)",
   "event DockOutputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed outputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 localSignalId,bytes32 payloadHash,address submitter)",
+  "event DockOutputSatisfied(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed outputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 localSignalId,bytes32 payloadHash,address submitter)",
 ]);
 
 const identityRegistryAbi = parseAbi([
@@ -370,8 +371,11 @@ function blockRanges(
   maxSpan: bigint,
 ): readonly { readonly fromBlock: bigint; readonly toBlock: bigint }[] {
   const ranges: { fromBlock: bigint; toBlock: bigint }[] = [];
-  for (let start = fromBlock; start <= toBlock; start = start + maxSpan + 1n) {
-    const end = start + maxSpan < toBlock ? start + maxSpan : toBlock;
+  // maxSpan 语义与 executor-kit watcher 同源：闭区间每片恰 maxSpan 个块
+  // （[start, start + maxSpan - 1]），不是 toBlock - fromBlock = maxSpan 的
+  // 10000 块跨——那会超出 provider 对 eth_getLogs 的 10K 块硬限制。
+  for (let start = fromBlock; start <= toBlock; start = start + maxSpan) {
+    const end = start + maxSpan - 1n < toBlock ? start + maxSpan - 1n : toBlock;
     ranges.push({ fromBlock: start, toBlock: end });
   }
   return ranges;
@@ -492,10 +496,13 @@ function eventInputTypes(abi: Abi, eventName: string): ReadonlyMap<string, strin
 }
 
 function normalizeLogAddress(address: string): Address {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+  // 与 shared normalizeAddress 同语义（畸形 RPC 日志地址→ConfigError，
+  // 调用点在解码 catch 之外抛出）；委托单源实现，仅保留错误文案锚点。
+  try {
+    return normalizeAddress(address, "log address");
+  } catch {
     throw new ConfigError("log address must be a 20-byte EVM address");
   }
-  return address.toLowerCase() as Address;
 }
 
 function isZeroAddress(address: Address): boolean {

@@ -53,6 +53,47 @@ describe("dock liveness keeper", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(worker.getLastSummary()).toBeUndefined();
   });
+
+  it("fails closed on route records with missing or malformed identity fields (P2-2 B3)", async () => {
+    // route 数据来自链下来源：keeper 只提交可由链上 committed 投影推导的
+    // 就绪性——记录身份字段缺失/零值/跨链/new 模式缺 openCalldata 即整轮
+    // 响亮报错，不静默跳过、不带可疑数据继续提交。
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({ deploymentBlock: 0n, events: dockEvents() });
+    const submitted: string[] = [];
+    const build = (routes: readonly DockRouteRecord[]) =>
+      new DockAutomationWorker({
+        config: { enabled: true, pollIntervalMs: 5_000, redeliveryWindowMs: 60_000, maxCandidatesPerRun: 4 },
+        projectionStore: store,
+        dockingAddress: dockingModuleAddress,
+        chainId,
+        routeSource: { listRoutes: async () => routes },
+        submitter: {
+          submit: async (submission) => {
+            submitted.push(submission.data);
+            return "0x" + "ab".repeat(32) as Hex;
+          }
+        }
+      });
+
+    await expect(build([{ ...dockRoute(), chainId: 31338 }]).runOnce())
+      .rejects.toThrow(/routes\[0\]\.chainId .* does not match the keeper chain/);
+    await expect(build([{ ...dockRoute(), routeId: "0x" + "00".repeat(32) as Hex }]).runOnce())
+      .rejects.toThrow(/routes\[0\]\.routeId must be a non-zero bytes32/);
+    const { openCalldata: _omitted, ...missingOpen } = dockRoute();
+    void _omitted;
+    await expect(build([missingOpen as DockRouteRecord]).runOnce())
+      .rejects.toThrow(/routes\[0\]\.openCalldata must be pre-assembled calldata hex for a new-mode route/);
+    await expect(build([{ ...dockRoute(), inputs: [] }]).runOnce())
+      .rejects.toThrow(/routes\[0\]: new-mode route must carry the entrance input binding/);
+    await expect(build([{
+      ...dockRoute(),
+      inputs: [...dockRoute().inputs.slice(1), { ...dockRoute().inputs[1]!, bindingHash: "0x1234" as Hex }]
+    }]).runOnce())
+      .rejects.toThrow(/routes\[0\]\.inputs\[1\]\.bindingHash must be a non-zero bytes32/);
+    // 无提交发生：校验在任何广播之前完成。
+    expect(submitted).toEqual([]);
+  });
   it("does not re-broadcast the same binding inside the finality window and retries after it", async () => {
     // 最终性窗口内同一 binding 每轮（默认 5s）重复广播 no-op
     // 交易是纯 gas 浪费。窗口内去重跳过（计数 deduplicated）；窗口过后
@@ -190,6 +231,105 @@ describe("dock liveness keeper", () => {
     expect(summary).toMatchObject({ inputCandidates: 0, submitted: 0, deduplicated: 0 });
     expect(submitted.length).toBe(0);
   });
+
+  it("treats a sibling-satisfied output binding as delivered instead of re-broadcasting forever", async () => {
+    // 同一本地事实键的两条 output 绑定：首条真实交付（Submitted），兄弟绑定
+    // 在链上被等价交付吸收（Satisfied）。Satisfied 事件必须把投影台账收敛为
+    // 已交付——否则 keeper 每个重发窗口都会把兄弟绑定再广播一次（永不收敛
+    // 的 gas 循环）。
+    const doneBindingHash = bytes32Hex("0d0d");
+    const progressBindingHash = bytes32Hex("0e0e");
+    const outputs = [
+      {
+        bindingHash: doneBindingHash,
+        localSourceId: sourceId,
+        localSignalId: signalId,
+        targetSourceId: sourceId,
+        targetSignalId: signalId
+      },
+      {
+        bindingHash: progressBindingHash,
+        localSourceId: sourceId,
+        localSignalId: signalId,
+        targetSourceId: sourceId,
+        targetSignalId: signalId
+      }
+    ];
+    // entrance-only inputs：跳过 input 候选路径，聚焦 output 车道。
+    const route: DockRouteRecord = { ...dockRoute(), inputs: [dockRoute().inputs[0]!], outputs };
+    const baseEvents: readonly ChainEvent[] = [
+      ...dockEvents(),
+      chainEvent(6n, 0, "SignalSubmitted", {
+        orderId: linkedOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey: bytes32Hex("0aaa"),
+        submitter: signer
+      }),
+      chainEvent(7n, 0, "DockOutputSubmitted", {
+        dockInstanceId,
+        linkedOrderId,
+        outputBindingHash: doneBindingHash,
+        localPlanId: planId,
+        localOrderId: orderId,
+        targetPlanId,
+        targetSignalId: signalId,
+        localSignalId: signalId,
+        payloadHash,
+        submitter: signer
+      }, dockingModuleAddress)
+    ];
+    const satisfiedEvent: ChainEvent = chainEvent(8n, 0, "DockOutputSatisfied", {
+      dockInstanceId,
+      linkedOrderId,
+      outputBindingHash: progressBindingHash,
+      localPlanId: planId,
+      localOrderId: orderId,
+      targetPlanId,
+      targetSignalId: signalId,
+      localSignalId: signalId,
+      payloadHash,
+      submitter: signer
+    }, dockingModuleAddress);
+
+    const buildWorker = async (events: readonly ChainEvent[]) => {
+      const store = new MemoryProjectionStore();
+      await store.resetFromEvents({ deploymentBlock: 0n, events });
+      const submitted: string[] = [];
+      const worker = new DockAutomationWorker({
+        config: {
+          enabled: true,
+          pollIntervalMs: 5_000,
+          maxCandidatesPerRun: 4,
+          redeliveryWindowMs: 60_000
+        },
+        projectionStore: store,
+        dockingAddress: dockingModuleAddress,
+        chainId,
+        routeSource: { listRoutes: async () => [route] },
+        submitter: {
+          submit: async (submission) => {
+            submitted.push(submission.data);
+            return "0x" + "ab".repeat(32) as Hex;
+          }
+        }
+      });
+      return { worker, submitted };
+    };
+
+    // 反例（无 Satisfied 事件）：兄弟绑定仍被视为未交付，候选成立。
+    const without = await buildWorker(baseEvents);
+    const withoutSummary = await without.worker.runOnce();
+    expect(withoutSummary).toMatchObject({ outputCandidates: 1, submitted: 1 });
+    expect(without.submitted.length).toBe(1);
+
+    // 正例（含 Satisfied 事件）：两条绑定台账齐备，候选归零、不再广播。
+    const withSatisfied = await buildWorker([...baseEvents, satisfiedEvent]);
+    const summary = await withSatisfied.worker.runOnce();
+    expect(summary).toMatchObject({ outputCandidates: 0, submitted: 0, deduplicated: 0 });
+    expect(withSatisfied.submitted.length).toBe(0);
+  });
 });
 
 function dockRoute(): DockRouteRecord {
@@ -203,6 +343,7 @@ function dockRoute(): DockRouteRecord {
     routeHash: planHash,
     interfaceName: "production_service",
     orderMode: "new",
+    openCalldata: "0xabcd1234" as Hex,
     inputs: [
       {
         // entrance（new 模式唯一 input 绑定，open 原子投递）。

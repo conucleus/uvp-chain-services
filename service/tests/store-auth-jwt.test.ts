@@ -5,7 +5,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { createApiRouter } from "../src/api/routes.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { StoreAuthConfig } from "../src/config/index.js";
-import { createStoreIdentityProvider, type StoreSessionDTO } from "../src/store-console/access.js";
+import { createStoreIdentityProvider, type StoreSessionDTO } from "../src/store/console/access.js";
 
 const issuer = "https://identity.example/";
 const audience = "uvp-store";

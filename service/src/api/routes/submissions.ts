@@ -178,10 +178,19 @@ function requiredSubmissionStringArray(record: Record<string, unknown>, field: s
   return value.map((item) => item.trim());
 }
 
+// 运行时受理集以 Record<ProductSubmitIntent, true> 锚定单源词表：
+// 联合增删成员时编译器在此处强制同步，字面量不再裸奔。
+const SUBMIT_INTENTS: Readonly<Record<ProductSubmitIntent, true>> = {
+  confirm_stage: true,
+  reject_stage: true,
+  raise_dispute: true,
+  resolve_dispute: true
+};
+
 function requiredSubmitIntent(record: Record<string, unknown>, field: string): ProductSubmitIntent {
   const value = requiredSubmissionString(record, field);
-  if (value === "confirm_stage" || value === "reject_stage" || value === "raise_dispute" || value === "resolve_dispute") {
-    return value;
+  if (SUBMIT_INTENTS[value as ProductSubmitIntent] === true) {
+    return value as ProductSubmitIntent;
   }
   throw new ProductSubmissionError(400, "invalid_body", `${field} is not a supported submit intent`);
 }

@@ -1,12 +1,12 @@
-import type { ProductParticipantAssignmentDTO } from "../../product/bff/types.js";
+import type { ProductParticipantAssignmentDTO } from "../../product/query/bff/types.js";
 import { adminPrincipalFromHeaders } from "../../governance/index.js";
-import type { ProductOrderApiDTO } from "../../product/service.js";
+import type { ProductOrderApiDTO } from "../../product/application/service.js";
 import {
   ProductOrderLookupError,
   type ProductParticipantIdentityDTO,
   type ProductParticipantViewQuery
-} from "../../product/service.js";
-import { buildProductApiStagingReadiness } from "../../product/staging-readiness.js";
+} from "../../product/application/service.js";
+import { buildProductApiStagingReadiness } from "../../product/query/staging-readiness.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import type { ProjectionSyncState } from "../../storage/projection-store.js";
 import { StorageUnavailableError } from "../../storage/errors.js";
