@@ -17,4 +17,4 @@ playwright-report/
 
 out/
 cache/
-broadcast/
+/broadcast/
