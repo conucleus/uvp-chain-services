@@ -1173,15 +1173,35 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         storeAuthConfig: devAnchoredStoreAuth
       });
       const operatorHeaders = { "x-uvp-store-user-id": "operator-1", "x-uvp-store-role": "operator", "x-uvp-store-dev-anchored-address": publisherAddress };
+      // 投影里 plan 已注册在役：重导入其 manifest 会在首编译生成 inferred
+      // schema、按 updatedAt 取新遮蔽在役 explicit schema——导入即拒。
       const importResponse = await router.handle({
         method: "POST",
         pathname: "/store/zhixu-drafts/import",
         headers: operatorHeaders,
         body: { sourceKind: "onchain_hook_plan_manifest", content: JSON.stringify(customsOnchainHookPlanArtifact) }
       });
-      expect(importResponse.status).toBe(201);
-      const draftId = (importResponse.body as { draft: { draftId: string } }).draft.draftId;
-      const compiled = await router.handle({
+      expect(importResponse).toMatchObject({ status: 409, body: { error: "plan_already_in_service" } });
+
+      // 发布前导入并编译的草稿：plan 上链后 inferred schema 冻结——
+      // 重编译与 PUT 都命中不可变门。
+      const prePublishStore = new MemoryProjectionStore();
+      const prePublishRouter = createApiRouter(prePublishStore, {  productRuntimeEnvironment: "local",
+
+        productSchemaResolver: crossBorderSchemaResolver(),
+        submissionChainId: 31337,
+        submissionVerifyingContract: contractAddress,
+        storeAuthConfig: devAnchoredStoreAuth
+      });
+      const prePublishImport = await prePublishRouter.handle({
+        method: "POST",
+        pathname: "/store/zhixu-drafts/import",
+        headers: operatorHeaders,
+        body: { sourceKind: "onchain_hook_plan_manifest", content: JSON.stringify(customsOnchainHookPlanArtifact) }
+      });
+      expect(prePublishImport.status).toBe(201);
+      const draftId = (prePublishImport.body as { draft: { draftId: string } }).draft.draftId;
+      const compiled = await prePublishRouter.handle({
         method: "POST",
         pathname: `/store/zhixu-drafts/${draftId}/compile-preview`,
         headers: operatorHeaders
@@ -1190,9 +1210,21 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const schema = (compiled.body as { draft: { productSchema?: StoreProductSchemaDTO } }).draft.productSchema;
       expect(schema).toBeDefined();
 
+      await prePublishStore.resetFromEvents({
+        deploymentBlock: 0n,
+        events: [
+          chainEvent(1n, 0, "PlanRegistered", {
+            planId: customsPlanIds.planId,
+            planHash: customsPlanIds.planHash,
+            hookCount: 2n
+          }),
+          chainEvent(1n, 1, "PlanPublisherRecorded", { planId: customsPlanIds.planId, publisher: publisherAddress })
+        ]
+      });
+
       // 重编译会以 inferred schema 覆写既有 schema——已发布
       // plan 的草稿重跑 compile 同样命中 409 不可变门（与 PUT 同口径）。
-      const recompiled = await router.handle({
+      const recompiled = await prePublishRouter.handle({
         method: "POST",
         pathname: `/store/zhixu-drafts/${draftId}/compile-preview`,
         headers: operatorHeaders
@@ -1260,7 +1292,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
       // 编译产物的 plan 已在投影中（已发布）→ schema 原地改写 409；
       // 携带被替换的 onchainHookPlanArtifact 主体也一样被拒。
-      const mutation = await router.handle({
+      const mutation = await prePublishRouter.handle({
         method: "PUT",
         pathname: `/store/zhixu-drafts/${draftId}/product-schema`,
         headers: operatorHeaders,

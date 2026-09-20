@@ -209,6 +209,17 @@ export function createStoreZhixuDraftWorkflowService(options: {
   return {
     async importDraft(input) {
       const request = parseImportRequest(input);
+      // manifest 导入的在役门：清单锚定的 (planId, planHash) 已注册在役时，
+      // 该 plan 的产品 schema 已随发布冻结——放行导入会在首编译生成一份
+      // inferred schema，按 updatedAt 取新即可遮蔽在役 explicit schema
+      //（findProductSchemaByPlan 以最新者为先）。内容无法解析时不在导入
+      // 期拒绝，维持"编译期报告内容错误"的既有口径。
+      if (request.sourceKind === "onchain_hook_plan_manifest") {
+        const manifest = tryCompileManifest(request.content);
+        if (manifest) {
+          await assertPlanAnchorNotInService(manifest.planId, manifest.planHash, options.projectionStore);
+        }
+      }
       const timestamp = now().toISOString();
       const draft: StoreZhixuDraftRecord = {
         draftId: draftIdFactory(),
@@ -241,6 +252,13 @@ export function createStoreZhixuDraftWorkflowService(options: {
         // 以编译前的草稿锚定状态判定，否则"改内容→重编译刷新 preview→
         // 再编译"两步即可绕过发布不可变（新 preview 不再命中已发布 plan）。
         await assertDraftSchemaMutable(draft, options.projectionStore);
+        // 首编译门：草稿锚定在编译前不存在，前置门对新导入恒放行——
+        // 编译产物锚定已发布 plan（导入在役 manifest、或 yaml 恰与在役
+        // plan 同锚）时，inferred schema 不得落库遮蔽在役 schema。
+        await assertDraftSchemaMutable(
+          { ...draft, compilePreview: compiled.preview },
+          options.projectionStore
+        );
       }
       const updated: StoreZhixuDraftRecord = compiled.ok
         ? {
@@ -404,6 +422,41 @@ async function assertDraftSchemaMutable(
       "product_schema_new_version_required",
       "this draft anchors a published plan; its product schema cannot be changed in place (create a new draft version)"
     );
+  }
+}
+
+/**
+ * 导入内容锚定的 plan 是否已注册在役（发布权威是 PlanRegistered）。
+ * 在役 plan 的产品 schema 随发布冻结，重导入只允许作为只读参照，
+ * 不允许生成可按 plan 解析到的新 schema。
+ */
+async function assertPlanAnchorNotInService(
+  planId: string,
+  planHash: string,
+  projectionStore: ProjectionStore
+): Promise<void> {
+  const snapshot = await projectionStore.getOrderSnapshot();
+  const inService = Object.values(snapshot.stateMachinePlans).some(
+    (plan) =>
+      plan.planId.toLowerCase() === planId.toLowerCase() &&
+      plan.planHash.toLowerCase() === planHash.toLowerCase() &&
+      isPlanRegisteredProjection(plan)
+  );
+  if (inService) {
+    throw new StoreZhixuDraftWorkflowError(
+      409,
+      "plan_already_in_service",
+      "the imported manifest anchors a plan that is already published and in service; its product schema is immutable and cannot be re-derived by import (create a new draft version instead)"
+    );
+  }
+}
+
+/** 解析失败返回 undefined（导入期不承担内容校验，编译期报告内容错误）。 */
+function tryCompileManifest(raw: string): OnchainHookPlanArtifact | undefined {
+  try {
+    return compileManifest(raw);
+  } catch {
+    return undefined;
   }
 }
 
