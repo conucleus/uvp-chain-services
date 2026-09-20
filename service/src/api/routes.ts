@@ -295,7 +295,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     delegationStore: options.storePublisherDelegationStore ?? new InMemoryStorePublisherDelegationStore(),
     ...(options.now ? { now: options.now } : {}),
     // 装修域审计事件接 AuditSink：emitAudit 只有接到回调才留痕，未接线
-    // 时 saved/restored/委托变更全部零审计（M40 盲区）。
+    // 时 saved/restored/委托变更全部零审计。
     audit: (event) => recordStoreDomainAuditEvent(audit, "store.decoration", event.action, event)
   });
   const listingService = options.storeListingService ?? createStoreListingService({

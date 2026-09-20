@@ -45,6 +45,19 @@ dynamic stage executor authority, docked Zhixu projection language, resource
 manifest/access state, Store authoring, proof/read models, operator audit, and
 signal-container producer APIs.
 
+## Deployment Assumptions
+
+The service assumes a single writer instance per database. The BFF trigger
+lock, broadcast dedupe claims, in-flight broadcast rate limiting, and stage
+patch nonce reservations are process-local: the "at most one in-flight
+broadcast per order/submitter" and "one trigger per draft" guarantees hold only
+while a single process owns the API and relaying loops. Races that cross the
+process boundary are arbitrated by storage constraints and conditional
+updates (invite single-active, join decisions, wallet-to-role binding,
+migration advisory locks), but running multiple API/relayer instances against
+one database is not a supported topology; horizontal scaling requires
+single-writer partitioning first.
+
 ## API Access Policy
 
 Order/task reads are participant-gated: `GET /product/orders/:orderId` (with

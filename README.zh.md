@@ -20,6 +20,10 @@ Services 可以缓存、投影、relay 和翻译链上事实，但不能成为 p
 
 本域实现 service 侧收束门禁，覆盖 Product Schema v1、dynamic stage executor authority、docked Zhixu projection language、resource manifest/access state、Store authoring、proof/read models、operator audit 和 signal-container producer APIs。
 
+## 部署假设
+
+本服务假设每个数据库只有一个单写者实例。BFF 触发锁、广播去重 claim、在途广播限流与 stage 补丁 nonce 预留都是进程内的："每单/每提交者至多一笔在途广播"、"一稿一 trigger"等保证只在单进程拥有 API 与中继循环时成立。跨进程的竞态由存储层约束与条件更新裁决（invite 单活、join 决策、钱包-角色绑定、迁移 advisory lock），但多 API/relayer 实例共写一个数据库不是受支持拓扑；横向扩展必须先做单写者分区。
+
 ## API 访问口径
 
 订单/任务读取是参与者门控：`GET /product/orders/:orderId`（连同其 `/timeline` 与 `/proof` 视图——两者披露参与者钱包与签名者细节）要求会话身份，且其他参与者的订单与不存在的订单不可区分（404）。与之相对，业务档案端点（`GET /product/submissions/:submissionId`、`GET /product/order-triggers/:triggerId` 与邀请预览 `GET /product/invites/:inviteId`）一律要求会话身份（邀请预览另需一次性 invite token）。local 运行档之外，管理/运营面还要求口令因子（`x-uvp-admin-token`）；明文白名单自报 admin 头仅限 local 开发档。
