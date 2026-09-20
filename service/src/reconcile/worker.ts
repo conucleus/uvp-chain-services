@@ -9,10 +9,20 @@ import type {
   ProductOrderTriggerStatus
 } from "../product/query/bff/types.js";
 import type { AuditSink } from "../security/audit.js";
-import type { Logger, Hex, LifecycleService } from "../shared/types.js";
+import type { Address, Logger, Hex, LifecycleService } from "../shared/types.js";
 import { noopLogger } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { ProductSubmissionDTO, ProductSubmissionScanCursor, ProductSubmissionStore } from "../submissions/types.js";
+import type {
+  PreparedStageExecutorPatchRecord,
+  PreparedStageResourcePatchRecord,
+  ProductStageExecutorPatchStore,
+  ProductStageResourcePatchStore,
+  StageExecutorPatchSubmissionDTO,
+  StagePatchSubmissionScanCursor,
+  StageResourcePatchSubmissionDTO
+} from "../stage-patches/types.js";
+import type { StateMachineOrderProjection } from "../indexer/projection-types.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import type { ReconcileRunSummary, ReconcileWorkerDiagnostics, TxReconcileFields } from "./status.js";
 
@@ -61,6 +71,9 @@ export interface TxReconcileWorkerOptions {
   readonly productStore?: ProductBffStore;
   readonly submissionStore?: ProductSubmissionStore;
   readonly governanceStore?: GovernanceStore;
+  /** stage-patch 台账对账（可选装配）：广播后回执未知/迟到的补丁行收敛。 */
+  readonly stageExecutorPatchStore?: ProductStageExecutorPatchStore;
+  readonly stageResourcePatchStore?: ProductStageResourcePatchStore;
   readonly evidenceBinder?: EvidenceBindingSweeper;
   readonly audit?: AuditSink;
   readonly logger?: Logger;
@@ -82,6 +95,8 @@ export class TxReconcileWorker implements LifecycleService {
   readonly #productStore: ProductBffStore | undefined;
   readonly #submissionStore: ProductSubmissionStore | undefined;
   readonly #governanceStore: GovernanceStore | undefined;
+  readonly #stageExecutorPatchStore: ProductStageExecutorPatchStore | undefined;
+  readonly #stageResourcePatchStore: ProductStageResourcePatchStore | undefined;
   readonly #evidenceBinder: EvidenceBindingSweeper | undefined;
   readonly #audit: AuditSink | undefined;
   readonly #logger: Logger;
@@ -102,6 +117,8 @@ export class TxReconcileWorker implements LifecycleService {
     this.#productStore = options.productStore;
     this.#submissionStore = options.submissionStore;
     this.#governanceStore = options.governanceStore;
+    this.#stageExecutorPatchStore = options.stageExecutorPatchStore;
+    this.#stageResourcePatchStore = options.stageResourcePatchStore;
     this.#evidenceBinder = options.evidenceBinder;
     this.#audit = options.audit;
     this.#logger = options.logger ?? noopLogger;
@@ -167,6 +184,7 @@ export class TxReconcileWorker implements LifecycleService {
         registrationsChecked: 0,
         submissionsChecked: 0,
         governanceLogsChecked: 0,
+        stagePatchesChecked: 0,
         evidenceBindsSwept: 0,
         evidenceBindsRepaired: 0,
         updated: 0,
@@ -186,6 +204,7 @@ export class TxReconcileWorker implements LifecycleService {
       registrationsChecked: 0,
       submissionsChecked: 0,
       governanceLogsChecked: 0,
+      stagePatchesChecked: 0,
       evidenceBindsSwept: 0,
       evidenceBindsRepaired: 0,
       updated: 0,
@@ -293,6 +312,8 @@ export class TxReconcileWorker implements LifecycleService {
       }
       await this.#sweepOrphanRevokedReviews(summary);
     }
+
+    await this.#reconcileStagePatches(summary);
 
     this.#lastRunAt = this.#now().toISOString();
     this.#lastSummary = summary;
@@ -448,6 +469,77 @@ export class TxReconcileWorker implements LifecycleService {
           fork: "review is marked revoked with no governance tx log while the on-chain binding is still active; re-issue revoke-identity to rebuild the ledger entry"
         }
       });
+    }
+  }
+
+  /**
+   * stage-patch 台账对账：执行者/资源补丁广播后的行此前没有收敛车道，
+   * receipt_unknown（failed+txHash、retryable）与 submitted 行永滞在途。
+   * 口径与 registration/submission 车道同源：投影 overlay 按 patchHash
+   * （补丁内容身份）确认——overlay 呈现即补丁已上链生效；无投影再探
+   * 回执；超时无哈希的行先查投影（哈希可能在落档窗口丢失）再判失败。
+   */
+  async #reconcileStagePatches(summary: ReconcileRunSummaryDraft): Promise<void> {
+    if (this.#stageExecutorPatchStore?.listOpenSubmissionsPage) {
+      const orders = await this.#projectionStore.listStateMachineOrders();
+      await this.#reconcileStagePatchLane<
+        PreparedStageExecutorPatchRecord,
+        StageExecutorPatchSubmissionDTO
+      >(this.#stageExecutorPatchStore, summary, (submission) =>
+        confirmExecutorPatchProjection(submission, orders));
+    }
+    if (this.#stageResourcePatchStore?.listOpenSubmissionsPage) {
+      const orders = await this.#projectionStore.listStateMachineOrders();
+      await this.#reconcileStagePatchLane<
+        PreparedStageResourcePatchRecord,
+        StageResourcePatchSubmissionDTO
+      >(this.#stageResourcePatchStore, summary, (submission) =>
+        confirmResourcePatchProjection(submission, orders));
+    }
+  }
+
+  async #reconcileStagePatchLane<
+    TPrepared,
+    TSubmission extends StageExecutorPatchSubmissionDTO | StageResourcePatchSubmissionDTO
+  >(
+    store: {
+      putSubmission(submission: TSubmission): Promise<void>;
+      listOpenSubmissionsPage?: (
+        after: StagePatchSubmissionScanCursor | undefined,
+        limit: number
+      ) => Promise<readonly TSubmission[]>;
+    },
+    summary: ReconcileRunSummaryDraft,
+    confirm: (submission: TSubmission) => Promise<ProjectionConfirmation | undefined>
+  ): Promise<void> {
+    const listOpen = store.listOpenSubmissionsPage?.bind(store);
+    if (!listOpen) {
+      return;
+    }
+    for await (const submission of iterateOpenStagePatches(
+      { listOpenSubmissionsPage: listOpen },
+      this.#config.scanPageSize ?? DEFAULT_RECONCILE_SCAN_PAGE_SIZE
+    )) {
+      summary.stagePatchesChecked += 1;
+      try {
+        const outcome = await this.#resolveOutcome(submission, () => confirm(submission));
+        if (!outcome) {
+          continue;
+        }
+        const updated = stagePatchSubmissionFromOutcome(submission, outcome);
+        await store.putSubmission(updated);
+        summary.updated += 1;
+        if (updated.status === "failed") {
+          summary.failed += 1;
+        }
+      } catch (error) {
+        summary.failed += 1;
+        this.#logger.warn("reconcile worker skipped a broken stage patch submission record", {
+          submissionId: submission.submissionId,
+          orderId: submission.orderId,
+          message: redactErrorMessage(error)
+        });
+      }
     }
   }
 
@@ -857,6 +949,113 @@ function isReconcileableGovernanceLog(log: GovernanceTxLogDTO): boolean {
 
 function isSimulatedGovernanceLog(log: GovernanceTxLogDTO): boolean {
   return log.executionMode === "simulated" || log.broadcastStatus === "simulated_tx";
+}
+
+/** stage-patch 台账的同款有界扫描（(createdAt, submissionId) 键序）。 */
+async function* iterateOpenStagePatches<TSubmission extends {
+  readonly submissionId: string;
+  readonly createdAt: string;
+  readonly status: string;
+  readonly txHash?: Hex;
+}>(
+  store: { listOpenSubmissionsPage(after: StagePatchSubmissionScanCursor | undefined, limit: number): Promise<readonly TSubmission[]> },
+  pageSize: number
+): AsyncGenerator<TSubmission, void, unknown> {
+  let after: StagePatchSubmissionScanCursor | undefined;
+  while (true) {
+    const page = await store.listOpenSubmissionsPage(after, pageSize);
+    if (page.length === 0) {
+      return;
+    }
+    for (const submission of page) {
+      yield submission;
+    }
+    const last = page[page.length - 1]!;
+    after = { createdAt: last.createdAt, submissionId: last.submissionId };
+    if (page.length < pageSize) {
+      return;
+    }
+  }
+}
+
+/** 执行者补丁的投影确认：订单按 (orderId, 状态机地址) 定位，overlay 按 patchHash（内容身份）匹配。 */
+async function confirmExecutorPatchProjection(
+  submission: StageExecutorPatchSubmissionDTO,
+  orders: readonly StateMachineOrderProjection[]
+): Promise<ProjectionConfirmation | undefined> {
+  const order = findStagePatchOrder(orders, submission);
+  const overlay = order?.stageExecutorOverlays[submission.targetStageId.toLowerCase()];
+  if (!overlay || overlay.patchHash.toLowerCase() !== submission.patchHash.toLowerCase()) {
+    return undefined;
+  }
+  return {
+    transactionHash: overlay.updatedAt.transactionHash,
+    blockNumber: overlay.updatedAt.blockNumber.toString()
+  };
+}
+
+/** 资源补丁的投影确认：overlay 键是 (targetStageId, resourceKey)。 */
+async function confirmResourcePatchProjection(
+  submission: StageResourcePatchSubmissionDTO,
+  orders: readonly StateMachineOrderProjection[]
+): Promise<ProjectionConfirmation | undefined> {
+  const order = findStagePatchOrder(orders, submission);
+  const overlay = order?.stageResourceOverlays[`${submission.targetStageId.toLowerCase()}:${submission.resourceKey.toLowerCase()}`];
+  if (!overlay || overlay.patchHash.toLowerCase() !== submission.patchHash.toLowerCase()) {
+    return undefined;
+  }
+  return {
+    transactionHash: overlay.updatedAt.transactionHash,
+    blockNumber: overlay.updatedAt.blockNumber.toString()
+  };
+}
+
+function findStagePatchOrder(
+  orders: readonly StateMachineOrderProjection[],
+  submission: { readonly onchainOrderId: Hex; readonly stateMachineAddress: Address }
+): StateMachineOrderProjection | undefined {
+  return orders.find((order) =>
+    order.orderId.toLowerCase() === submission.onchainOrderId.toLowerCase() &&
+    order.contractAddress.toLowerCase() === submission.stateMachineAddress.toLowerCase());
+}
+
+/** 对账结论映射回补丁台账行（confirmed/failed 终态，pending 档如实保留在途）。 */
+function stagePatchSubmissionFromOutcome<TSubmission extends StageExecutorPatchSubmissionDTO | StageResourcePatchSubmissionDTO>(
+  submission: TSubmission,
+  outcome: ResolvedReconcileOutcome
+): TSubmission {
+  let status: TSubmission["status"];
+  let broadcastStatus: TSubmission["broadcastStatus"];
+  switch (outcome.kind) {
+    case "confirmed":
+      status = "confirmed";
+      broadcastStatus = "confirmed";
+      break;
+    case "failed":
+    case "stale_pending":
+      status = "failed";
+      broadcastStatus = "failed";
+      break;
+    case "indexing":
+      // 回执成功、投影未呈现：如实标 submitted（等待索引），不虚构 confirmed。
+      status = "submitted";
+      broadcastStatus = "submitted";
+      break;
+    case "pending":
+      status = submission.txHash ? "submitted" : "broadcasting";
+      broadcastStatus = submission.txHash ? "submitted" : "broadcasting";
+      break;
+  }
+  return {
+    ...submission,
+    status,
+    broadcastStatus,
+    ...(outcome.blockNumber ? { blockNumber: outcome.blockNumber } : {}),
+    ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
+    ...(outcome.errorMessage ? { errorMessage: outcome.errorMessage } : {}),
+    retryable: outcome.retryable,
+    updatedAt: outcome.checkedAt
+  };
 }
 
 /**

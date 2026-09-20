@@ -88,6 +88,7 @@ describe("ops health diagnostics", () => {
           registrationsChecked: 0,
           submissionsChecked: 1,
           governanceLogsChecked: 1,
+          stagePatchesChecked: 0,
           evidenceBindsSwept: 0,
           evidenceBindsRepaired: 0,
           updated: 0,

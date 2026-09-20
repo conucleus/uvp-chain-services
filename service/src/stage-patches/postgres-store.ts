@@ -4,7 +4,8 @@ import { PostgresDatabase } from "../storage/postgres-client.js";
 import type {
   PreparedPatchRecordBase,
   ProductStagePatchStore,
-  StagePatchSubmissionBase
+  StagePatchSubmissionBase,
+  StagePatchSubmissionScanCursor
 } from "./types.js";
 
 export interface PostgresProductStagePatchStoreOptions {
@@ -153,11 +154,34 @@ export class PostgresProductStagePatchStore<
 
   async getSubmission(submissionId: string): Promise<TSubmission | undefined> {
     const result = await this.#database.query(
-      "SELECT record_json AS \"recordJson\" FROM stage_patch_submission WHERE submission_id = $1",
+      "SELECT record_json::text AS \"recordJson\" FROM stage_patch_submission WHERE submission_id = $1",
       [submissionId]
     );
     const row = result.rows[0] as { readonly recordJson?: string } | undefined;
     return row?.recordJson ? parseStorageJson<TSubmission>(row.recordJson) : undefined;
+  }
+
+  async listOpenSubmissionsPage(
+    after: StagePatchSubmissionScanCursor | undefined,
+    limit: number
+  ): Promise<readonly TSubmission[]> {
+    // 未闭环剪除在 SQL 内完成（status/txHash 都在 record_json 里），
+    // 键序翻页与 submissions 台账同口径。
+    const result = await this.#database.query(
+      `SELECT record_json::text AS "recordJson" FROM stage_patch_submission
+       WHERE (record_json::jsonb->>'status' IN ('broadcasting', 'submitted')
+              OR (record_json::jsonb->>'status' = 'failed'
+                  AND record_json::jsonb->>'txHash' IS NOT NULL))
+         AND ($1::text IS NULL
+              OR created_at > $1
+              OR (created_at = $1 AND submission_id > $2))
+       ORDER BY created_at ASC, submission_id ASC
+       LIMIT $3`,
+      [after?.createdAt ?? null, after?.submissionId ?? null, limit]
+    );
+    return (result.rows as { readonly recordJson?: string }[])
+      .filter((row) => Boolean(row.recordJson))
+      .map((row) => parseStorageJson<TSubmission>(row.recordJson!));
   }
 }
 

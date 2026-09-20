@@ -377,6 +377,12 @@ export interface StagePatchSubmissionBase {
   readonly submissionId: string;
 }
 
+/** 未闭环补丁台账的有界扫描游标：(createdAt, submissionId) 双键。 */
+export interface StagePatchSubmissionScanCursor {
+  readonly createdAt: string;
+  readonly submissionId: string;
+}
+
 export interface ProductStagePatchStore<
   TPrepared extends PreparedPatchRecordBase,
   TSubmission extends StagePatchSubmissionBase
@@ -416,6 +422,16 @@ export interface ProductStagePatchStore<
   deleteExpiredPrepared?(deadlineBeforeSeconds: string): Promise<number>;
   putSubmission(submission: TSubmission): Promise<void>;
   getSubmission(submissionId: string): Promise<TSubmission | undefined>;
+  /**
+   * 对账车道的有界扫描（可选能力）：按 (createdAt, submissionId) 键序
+   * 返回"未闭环"的一页——status ∈ {broadcasting, submitted}，或带
+   * txHash 的 failed（迟到成功需自愈复核）。终态（confirmed/expired）
+   * 与从未上链的 signature_received 不返回。实现缺失时对账车道不装配。
+   */
+  listOpenSubmissionsPage?(
+    after: StagePatchSubmissionScanCursor | undefined,
+    limit: number
+  ): Promise<readonly TSubmission[]>;
 }
 
 export type ProductStageExecutorPatchStore = ProductStagePatchStore<

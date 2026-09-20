@@ -169,6 +169,9 @@ export async function startApiServer(
     productStore: productBffStore,
     submissionStore,
     governanceStore,
+    // stage-patch 台账对账：广播后回执未知/迟到的补丁行由同一 worker 收敛。
+    ...(stores.stageExecutorPatchStore ? { stageExecutorPatchStore: stores.stageExecutorPatchStore } : {}),
+    ...(stores.stageResourcePatchStore ? { stageResourcePatchStore: stores.stageResourcePatchStore } : {}),
     // 证据绑定清扫：与 API 路由共用同一持久元数据仓与对象存储，
     // 广播成功但绑定缺失的提交由 worker 周期性补绑。
     evidenceBinder: createEvidenceService({

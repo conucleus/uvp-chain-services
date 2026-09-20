@@ -11,7 +11,8 @@ import { rowObject, stringColumn } from "../storage/sqlite-rows.js";
 import type {
   PreparedPatchRecordBase,
   ProductStagePatchStore,
-  StagePatchSubmissionBase
+  StagePatchSubmissionBase,
+  StagePatchSubmissionScanCursor
 } from "./types.js";
 
 export interface SqliteProductStagePatchStoreOptions {
@@ -224,6 +225,26 @@ export class SqliteProductStagePatchStore<
       .prepare("SELECT record_json AS recordJson FROM stage_patch_submission WHERE submission_id = ?")
       .get(submissionId);
     return row ? parseStorageJson<TSubmission>(stringColumn(rowObject(row), "recordJson")) : undefined;
+  }
+
+  async listOpenSubmissionsPage(
+    after: StagePatchSubmissionScanCursor | undefined,
+    limit: number
+  ): Promise<readonly TSubmission[]> {
+    // 未闭环剪除在 SQL 内完成（status/txHash 都在 record_json 里），
+    // 键序翻页与 submissions 台账同口径。
+    const rows = this.#database.prepare(
+      `SELECT record_json AS recordJson FROM stage_patch_submission
+       WHERE (json_extract(record_json, '$.status') IN ('broadcasting', 'submitted')
+              OR (json_extract(record_json, '$.status') = 'failed'
+                  AND json_extract(record_json, '$.txHash') IS NOT NULL))
+         AND (? IS NULL
+              OR created_at > ?
+              OR (created_at = ? AND submission_id > ?))
+       ORDER BY created_at ASC, submission_id ASC
+       LIMIT ?`
+    ).all(after?.createdAt ?? null, after?.createdAt ?? null, after?.createdAt ?? null, after?.submissionId ?? null, limit);
+    return rows.map((row) => parseStorageJson<TSubmission>(stringColumn(rowObject(row), "recordJson")));
   }
 }
 

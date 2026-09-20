@@ -21,6 +21,8 @@ export interface ReconcileRunSummary {
   readonly registrationsChecked: number;
   readonly submissionsChecked: number;
   readonly governanceLogsChecked: number;
+  /** stage-patch 台账（执行者/资源补丁）本轮复核的未闭环行数。 */
+  readonly stagePatchesChecked: number;
   /** 证据绑定清扫检查的提交数（持 txHash 且落库了证据引用的记录）。 */
   readonly evidenceBindsSwept: number;
   /** 本轮补绑成功的证据数。 */

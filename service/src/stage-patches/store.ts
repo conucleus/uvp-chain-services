@@ -1,4 +1,19 @@
-import type { PreparedPatchRecordBase, ProductStagePatchStore, StagePatchSubmissionBase } from "./types.js";
+import type {
+  PreparedPatchRecordBase,
+  ProductStagePatchStore,
+  StagePatchSubmissionBase,
+  StagePatchSubmissionScanCursor
+} from "./types.js";
+
+/** 台账扫描的"未闭环"状态判定（与持久实现的 SQL 口径同源）。 */
+function isOpenStagePatchSubmission(
+  submission: StagePatchSubmissionBase & { readonly status?: string; readonly txHash?: string }
+): boolean {
+  if (submission.status === "broadcasting" || submission.status === "submitted") {
+    return true;
+  }
+  return submission.status === "failed" && typeof submission.txHash === "string";
+}
 
 /** memory 驱动 prepare 表的硬上限（未配额入口的最后防线，见 putPrepared）。 */
 export const MEMORY_PREPARED_PATCH_HARD_LIMIT = 5_000;
@@ -91,5 +106,25 @@ export class InMemoryProductStagePatchStore<
 
   async getSubmission(submissionId: string): Promise<TSubmission | undefined> {
     return this.#submissions.get(submissionId);
+  }
+
+  async listOpenSubmissionsPage(
+    after: StagePatchSubmissionScanCursor | undefined,
+    limit: number
+  ): Promise<readonly TSubmission[]> {
+    // 键序/剪除所需字段是台账行契约的一部分（createdAt 在基类之外由
+    // 具体 DTO 提供），此处按结构收窄。
+    type Scannable = TSubmission & { readonly createdAt: string; readonly status: string; readonly txHash?: string };
+    const open = (submission: TSubmission): submission is Scannable =>
+      isOpenStagePatchSubmission(submission as Scannable);
+    return ([...this.#submissions.values()] as TSubmission[])
+      .filter(open)
+      .sort((left, right) =>
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.submissionId.localeCompare(right.submissionId))
+      .filter((submission) => !after
+        || submission.createdAt > after.createdAt
+        || (submission.createdAt === after.createdAt && submission.submissionId > after.submissionId))
+      .slice(0, Math.max(limit, 0));
   }
 }

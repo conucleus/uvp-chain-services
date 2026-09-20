@@ -12,6 +12,13 @@ import { TxReconcileWorker, createViemReconcileReceiptClient, type EvidenceBindi
 import { InMemoryAuditSink, type AuditSink } from "../src/security/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { InMemoryProductSubmissionStore, submissionStatusLabel, type ProductSubmissionDTO } from "../src/submissions/index.js";
+import { InMemoryProductStagePatchStore } from "../src/stage-patches/store.js";
+import type {
+  PreparedStageExecutorPatchRecord,
+  PreparedStageResourcePatchRecord,
+  StageExecutorPatchSubmissionDTO,
+  StageResourcePatchSubmissionDTO
+} from "../src/stage-patches/types.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const baseNow = new Date("2026-04-28T00:00:00Z");
@@ -63,6 +70,7 @@ describe("tx/indexer reconcile worker", () => {
       registrationsChecked: 0,
       submissionsChecked: 0,
       governanceLogsChecked: 0,
+      stagePatchesChecked: 0,
       evidenceBindsSwept: 0,
       evidenceBindsRepaired: 0,
       updated: 0,
@@ -438,6 +446,136 @@ describe("tx/indexer reconcile worker", () => {
     await worker.runOnce();
     await worker.runOnce();
     expect(audit.list().filter((event) => event.type === "reconcile.governance_revoke_orphan")).toHaveLength(1);
+  });
+
+  it("confirms a submitted stage executor patch once the overlay projection lands", async () => {
+    // stage-patch 台账对账：submitted 行凭投影 overlay 按 patchHash（内容
+    // 身份）确认——overlay 呈现即补丁已上链生效。
+    const patchHash = bytes32("7a01");
+    const targetStageId = bytes32("7a02");
+    const projectionStore = new MemoryProjectionStore();
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(11n, bytes32("fe01"), 0, "OrderRegistered", { orderId, planId }),
+        chainEvent(12n, bytes32("fe02"), 0, "StageExecutorPatchApplied", {
+          orderId,
+          planId,
+          selectorStageId: bytes32("7a03"),
+          targetStageId,
+          selector: submitter,
+          executor: creator,
+          role: bytes32("7a04"),
+          executorMetadataHash: metadataHash,
+          patchHash,
+          patchNonce: 1n,
+          metadataURI: "ipfs://stage-executor/reconcile-1"
+        })
+      ]
+    });
+    const stageExecutorPatchStore = new InMemoryProductStagePatchStore<PreparedStageExecutorPatchRecord, StageExecutorPatchSubmissionDTO>();
+    await stageExecutorPatchStore.putSubmission(executorPatchSubmissionFixture({
+      submissionId: "stage_patch_sub_1",
+      status: "submitted",
+      txHash: bytes32("fe03"),
+      patchHash,
+      targetStageId
+    }));
+    const worker = workerFixture({ projectionStore, receipts: new Map(), stageExecutorPatchStore });
+
+    const summary = await worker.runOnce();
+
+    expect(summary).toMatchObject({ stagePatchesChecked: 1, updated: 1 });
+    await expect(stageExecutorPatchStore.getSubmission("stage_patch_sub_1")).resolves.toMatchObject({
+      status: "confirmed",
+      broadcastStatus: "confirmed",
+      blockNumber: "12",
+      retryable: false
+    });
+  });
+
+  it("self-heals a receipt-unknown stage executor patch on a successful receipt plus overlay", async () => {
+    // failed + txHash（receipt_unknown 形态）必须继续复核：迟到成功自愈
+    // confirmed，不得永滞失败档。
+    const patchHash = bytes32("7b01");
+    const targetStageId = bytes32("7b02");
+    const projectionStore = new MemoryProjectionStore();
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(11n, bytes32("ff01"), 0, "OrderRegistered", { orderId, planId }),
+        chainEvent(12n, bytes32("ff02"), 0, "StageExecutorPatchApplied", {
+          orderId,
+          planId,
+          selectorStageId: bytes32("7b03"),
+          targetStageId,
+          selector: submitter,
+          executor: creator,
+          role: bytes32("7b04"),
+          executorMetadataHash: metadataHash,
+          patchHash,
+          patchNonce: 1n,
+          metadataURI: "ipfs://stage-executor/reconcile-2"
+        })
+      ]
+    });
+    const stageExecutorPatchStore = new InMemoryProductStagePatchStore<PreparedStageExecutorPatchRecord, StageExecutorPatchSubmissionDTO>();
+    await stageExecutorPatchStore.putSubmission(executorPatchSubmissionFixture({
+      submissionId: "stage_patch_sub_2",
+      status: "failed",
+      broadcastStatus: "failed",
+      txHash: bytes32("ff03"),
+      errorCode: "transaction_receipt_unknown",
+      errorMessage: "receipt unknown at broadcast time",
+      retryable: true,
+      patchHash,
+      targetStageId
+    }));
+    const worker = workerFixture({
+      projectionStore,
+      receipts: new Map<Hex, ReconcileReceipt | undefined>([[bytes32("ff03"), { status: "success", blockNumber: 12n }]]),
+      stageExecutorPatchStore
+    });
+
+    await worker.runOnce();
+
+    await expect(stageExecutorPatchStore.getSubmission("stage_patch_sub_2")).resolves.toMatchObject({
+      status: "confirmed",
+      broadcastStatus: "confirmed"
+    });
+  });
+
+  it("fails a timed-out tx-less stage resource patch only after the projection check misses", async () => {
+    // 超时无哈希 ≠ 链上无补丁：先查投影，查不中才按超时收失败档。
+    const patchHash = bytes32("7c01");
+    const projectionStore = new MemoryProjectionStore();
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [chainEvent(11n, bytes32("fd01"), 0, "OrderRegistered", { orderId, planId })]
+    });
+    const stageResourcePatchStore = new InMemoryProductStagePatchStore<PreparedStageResourcePatchRecord, StageResourcePatchSubmissionDTO>();
+    await stageResourcePatchStore.putSubmission(resourcePatchSubmissionFixture({
+      submissionId: "stage_patch_sub_3",
+      status: "broadcasting",
+      patchHash
+    }));
+    const worker = new TxReconcileWorker({
+      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 1_000 },
+      receiptClient: receiptClient(new Map()),
+      projectionStore,
+      stageResourcePatchStore,
+      now: () => baseNow
+    });
+
+    const summary = await worker.runOnce();
+
+    expect(summary).toMatchObject({ stagePatchesChecked: 1, updated: 1, failed: 1 });
+    await expect(stageResourcePatchStore.getSubmission("stage_patch_sub_3")).resolves.toMatchObject({
+      status: "failed",
+      broadcastStatus: "failed",
+      errorCode: "tx_reconcile_timeout",
+      retryable: true
+    });
   });
 
   it("keeps tx-less pending submissions in broadcasting instead of relabeling them submitted", async () => {
@@ -945,6 +1083,8 @@ function workerFixture(input: {
   readonly governanceStore?: InMemoryGovernanceStore;
   readonly evidenceBinder?: EvidenceBindingSweeper;
   readonly audit?: AuditSink;
+  readonly stageExecutorPatchStore?: InMemoryProductStagePatchStore<PreparedStageExecutorPatchRecord, StageExecutorPatchSubmissionDTO>;
+  readonly stageResourcePatchStore?: InMemoryProductStagePatchStore<PreparedStageResourcePatchRecord, StageResourcePatchSubmissionDTO>;
 }): TxReconcileWorker {
   return new TxReconcileWorker({
     config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000 },
@@ -955,6 +1095,8 @@ function workerFixture(input: {
     ...(input.governanceStore ? { governanceStore: input.governanceStore } : {}),
     ...(input.evidenceBinder ? { evidenceBinder: input.evidenceBinder } : {}),
     ...(input.audit ? { audit: input.audit } : {}),
+    ...(input.stageExecutorPatchStore ? { stageExecutorPatchStore: input.stageExecutorPatchStore } : {}),
+    ...(input.stageResourcePatchStore ? { stageResourcePatchStore: input.stageResourcePatchStore } : {}),
     now: () => baseNow
   });
 }
@@ -1111,6 +1253,93 @@ function identityLogFixture(input: { readonly txHash: Hex }): IdentityTxLogDTO {
     },
     createdAt: baseNow.toISOString(),
     updatedAt: baseNow.toISOString()
+  };
+}
+
+function executorPatchSubmissionFixture(input: {
+  readonly submissionId: string;
+  readonly status: StageExecutorPatchSubmissionDTO["status"];
+  readonly txHash?: Hex;
+  readonly patchHash: Hex;
+  readonly targetStageId: Hex;
+  readonly broadcastStatus?: StageExecutorPatchSubmissionDTO["broadcastStatus"];
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+  readonly retryable?: boolean;
+  readonly createdAt?: string;
+}): StageExecutorPatchSubmissionDTO {
+  return {
+    submissionId: input.submissionId,
+    prepareId: `prepare_${input.submissionId}`,
+    taskId: "task_stage_patch",
+    orderId,
+    onchainOrderId: orderId,
+    stateMachineAddress: contractAddress,
+    selectorStageId: bytes32("7f01"),
+    targetStageId: input.targetStageId,
+    selectorWallet: submitter,
+    executorWallet: creator,
+    mode: "assign",
+    modeHash: bytes32("7f02"),
+    roleHash: bytes32("7f03"),
+    executorMetadataHash: metadataHash,
+    patchHash: input.patchHash,
+    patchNonce: "1",
+    metadataURI: "ipfs://stage-executor/fixture",
+    deadline: "1893456000",
+    status: input.status,
+    signatureStatus: "signature_verified",
+    selectorSignatureStatus: "signature_verified",
+    previousExecutorSignatureStatus: "not_required",
+    broadcastStatus: input.broadcastStatus ?? (input.status === "failed" ? "failed" : "broadcasting"),
+    ...(input.txHash ? { txHash: input.txHash } : {}),
+    ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+    ...(input.errorMessage ? { errorMessage: input.errorMessage } : {}),
+    retryable: input.retryable ?? false,
+    proofRows: [],
+    createdAt: input.createdAt ?? "2026-04-27T23:00:00Z",
+    updatedAt: "2026-04-27T23:00:00Z"
+  };
+}
+
+function resourcePatchSubmissionFixture(input: {
+  readonly submissionId: string;
+  readonly status: StageResourcePatchSubmissionDTO["status"];
+  readonly txHash?: Hex;
+  readonly patchHash: Hex;
+  readonly broadcastStatus?: StageResourcePatchSubmissionDTO["broadcastStatus"];
+  readonly errorCode?: string;
+  readonly errorMessage?: string;
+  readonly retryable?: boolean;
+  readonly createdAt?: string;
+}): StageResourcePatchSubmissionDTO {
+  return {
+    submissionId: input.submissionId,
+    prepareId: `prepare_${input.submissionId}`,
+    taskId: "task_stage_patch",
+    orderId,
+    onchainOrderId: orderId,
+    stateMachineAddress: contractAddress,
+    selectorStageId: bytes32("7f01"),
+    targetStageId: bytes32("7f04"),
+    resourceKey: bytes32("7f05"),
+    selectorWallet: submitter,
+    manifestHash: metadataHash,
+    policyHash: metadataHash,
+    patchHash: input.patchHash,
+    patchNonce: "1",
+    manifestURI: "ipfs://resource-manifests/fixture",
+    deadline: "1893456000",
+    status: input.status,
+    signatureStatus: "signature_verified",
+    broadcastStatus: input.broadcastStatus ?? "broadcasting",
+    ...(input.txHash ? { txHash: input.txHash } : {}),
+    ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+    ...(input.errorMessage ? { errorMessage: input.errorMessage } : {}),
+    retryable: input.retryable ?? false,
+    proofRows: [],
+    createdAt: input.createdAt ?? "2026-04-27T23:00:00Z",
+    updatedAt: "2026-04-27T23:00:00Z"
   };
 }
 
