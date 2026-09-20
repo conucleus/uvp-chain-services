@@ -447,11 +447,12 @@ describe("product BFF order drafts and invites", () => {
       { ...base, inviteId: "invite_race_b", tokenHash: ("0x" + "22".repeat(32)) as Hex },
       "2026-01-02T00:00:00.000Z"
     )).resolves.toBe(false);
-    // 已过期的 active 不再占用：可再发新邀请。
+    // 已过期但未翻档的 active 行同样占用单活索引：裸插入仍被拒——
+    // 重邀必须由服务层先把过期档翻 expired（见 invite 过期重邀用例）。
     await expect(store.createInviteIfNoneActive(
       { ...base, inviteId: "invite_race_c", tokenHash: ("0x" + "23".repeat(32)) as Hex, expiresAt: "2026-03-01T00:00:00.000Z" },
       "2026-02-02T00:00:00.000Z"
-    )).resolves.toBe(true);
+    )).resolves.toBe(false);
   });
 
   it("invite status transitions are conditional on status=active", async () => {
@@ -541,6 +542,120 @@ describe("product BFF order drafts and invites", () => {
       status: 410,
       body: { error: "invite_expired" },
     });
+  });
+
+  it("re-invites after expiry by persisting the expired flip first", async () => {
+    const { router, productStore } = await createRouterFixture([planRegisteredEvent(1n)]);
+    const draft = (await createDraft(router).then(
+      (response) => response.body as DraftResponse,
+    )).draft;
+    const expired = await createInvite(
+      router,
+      draft.draftId,
+      "supply",
+      "supply@example.com",
+      "2000-01-01T00:00:00.000Z",
+    );
+    // 过期档在库内仍是 status=active：直接重邀会撞单活索引。服务层
+    // 先把过期档持久翻成 expired，新邀才能落库。
+    const reinvite = await createInvite(
+      router,
+      draft.draftId,
+      "supply",
+      "supply@example.com",
+    );
+    expect(reinvite.invite.inviteId).not.toBe(expired.invite.inviteId);
+    const flipped = await productStore.getInvite(expired.invite.inviteId);
+    expect(flipped?.status).toBe("expired");
+    const active = await productStore.getInvite(reinvite.invite.inviteId);
+    expect(active?.status).toBe("active");
+  });
+
+  it("binds one accepted wallet to one role slot per draft at the storage layer", async () => {
+    const store = new MemoryProductBffStore();
+    const wallet = testWallet(3);
+    const participant = (draftId: string, participantId: string, roleSlotId: string): DraftParticipantDTO => ({
+      participantId,
+      draftId,
+      roleSlotId,
+      roleLabel: roleSlotId,
+      displayName: roleSlotId,
+      contact: `${roleSlotId}@example.com`,
+      status: "invited",
+      required: false
+    });
+    const funds = { ...participant("draft_one", "p_funds", "funds"), status: "accepted" as const, walletAddress: wallet, acceptedAt: "2026-01-01T00:00:00.000Z" };
+    await store.updateParticipant(funds);
+
+    // 同 draft 跨槽：同钱包的第二个已接受角色撞一钱包一角色约束。
+    const delivery = { ...participant("draft_one", "p_delivery", "delivery"), status: "accepted" as const, walletAddress: wallet, acceptedAt: "2026-01-02T00:00:00.000Z" };
+    await expect(store.updateParticipant(delivery)).rejects.toMatchObject({
+      name: "StorageConstraintError"
+    });
+    // 未接受/未绑钱包的行不受限。
+    await expect(store.updateParticipant(participant("draft_one", "p_delivery", "delivery"))).resolves.toBeUndefined();
+    // 不同 draft 间同钱包多角色合法（键含 draft_id）。
+    const otherDraft = { ...participant("draft_two", "p_other_delivery", "delivery"), status: "accepted" as const, walletAddress: wallet, acceptedAt: "2026-01-03T00:00:00.000Z" };
+    await expect(store.updateParticipant(otherDraft)).resolves.toBeUndefined();
+    // 同一行幂等重写不误伤。
+    await expect(store.updateParticipant(funds)).resolves.toBeUndefined();
+  });
+
+  it("rejects a cross-slot accept when the storage wallet constraint wins the race", async () => {
+    const { router, productStore } = await createRouterFixture([planRegisteredEvent(1n)]);
+    const draft = (await createDraft(router).then(
+      (response) => response.body as DraftResponse,
+    )).draft;
+    await inviteAndAccept(router, draft.draftId, "funds", 0);
+    const deliveryInvite = await createInvite(
+      router,
+      draft.draftId,
+      "delivery",
+      "delivery@example.com",
+    );
+    // 模拟并发窗口：事务外的钱包前置查重读到旧快照（未见 funds 的已
+    // 接受行），判定落到存储层约束——同响应 409，不外泄存储错误。
+    const originalList = productStore.listParticipants.bind(productStore);
+    let staleSnapshotServed = false;
+    productStore.listParticipants = async (draftId: string) => {
+      if (!staleSnapshotServed) {
+        staleSnapshotServed = true;
+        return [];
+      }
+      return originalList(draftId);
+    };
+    const racedAccept = await router.handle({
+      method: "POST",
+      pathname: `/product/invites/${deliveryInvite.invite.inviteId}/accept`,
+      headers: { "x-uvp-wallet-address": testWallet(0) },
+      body: {
+        displayName: "Delivery",
+        walletAddress: testWallet(0),
+        contact: "delivery@example.com",
+        token: deliveryInvite.inviteToken,
+      },
+    });
+    expect(racedAccept).toMatchObject({
+      status: 409,
+      body: { error: "wallet_already_bound" },
+    });
+    // 败者不落 accepted、invite 未被消费：换一个钱包仍可接受。
+    const deliveryRow = (await originalList(draft.draftId)).find(
+      (participant) => participant.roleSlotId === "delivery",
+    );
+    expect(deliveryRow?.status).toBe("invited");
+    const retryAccept = await router.handle({
+      method: "POST",
+      pathname: `/product/invites/${deliveryInvite.invite.inviteId}/accept`,
+      headers: { "x-uvp-wallet-address": testWallet(4) },
+      body: {
+        displayName: "Delivery",
+        walletAddress: testWallet(4),
+        contact: "delivery@example.com",
+        token: deliveryInvite.inviteToken,
+      },
+    });
+    expect(retryAccept.status).toBe(200);
   });
 
   it("carries publisher evidenceSpec into invite previews and prepared permissions (evidenceSpec passthrough)", async () => {

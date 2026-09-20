@@ -1,3 +1,4 @@
+import { StorageConstraintError } from "../../../storage/errors.js";
 import { parseStorageJson, stringifyStorageJson } from "../../../storage/json.js";
 import { PostgresDatabase } from "../../../storage/postgres-client.js";
 import {
@@ -130,20 +131,29 @@ export class PostgresProductBffStore implements ProductBffStore {
   }
 
   async createInviteIfNoneActive(invite: ProductInviteDTO, nowIso: string): Promise<boolean> {
-    // 单语句条件插入：expires_at::timestamptz 归一化解析（含时区偏移），
-    // check-then-act 由语句原子性承担，READ COMMITTED 下并发也不会双 active。
-    const result = await this.#database.query(
-      `INSERT INTO product_invite (
-         invite_id, draft_id, participant_id, role_slot_id, token_hash, status,
-         expires_at, created_at, accepted_wallet_address
-       ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
-       WHERE NOT EXISTS (
-         SELECT 1 FROM product_invite
-         WHERE participant_id = $10 AND status = 'active' AND expires_at::timestamptz > $11::timestamptz
-       )`,
-      [...inviteValues(invite), invite.participantId, nowIso]
-    );
-    return (result.rowCount ?? 0) > 0;
+    // 单语句条件插入：expires_at::timestamptz 归一化解析（含时区偏移）。
+    // 单活不变量由 (participant_id) WHERE status='active' 部分唯一索引承担：
+    // READ COMMITTED 下语句快照读不到并发方未提交的 active 行，NOT EXISTS
+    // 会双双通过，败者由索引兜底——命中约束按 false 交服务层 409 收敛。
+    try {
+      const result = await this.#database.query(
+        `INSERT INTO product_invite (
+           invite_id, draft_id, participant_id, role_slot_id, token_hash, status,
+           expires_at, created_at, accepted_wallet_address
+         ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+         WHERE NOT EXISTS (
+           SELECT 1 FROM product_invite
+           WHERE participant_id = $10 AND status = 'active' AND expires_at::timestamptz > $11::timestamptz
+         )`,
+        [...inviteValues(invite), invite.participantId, nowIso]
+      );
+      return (result.rowCount ?? 0) > 0;
+    } catch (error) {
+      if (error instanceof StorageConstraintError) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   async getInvite(inviteId: string): Promise<ProductInviteDTO | undefined> {

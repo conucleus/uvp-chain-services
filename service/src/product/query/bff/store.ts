@@ -4,6 +4,7 @@ import type {
   ProductOrderDraftDTO,
   ProductOrderTriggerRecord
 } from "./types.js";
+import { StorageConstraintError } from "../../../storage/errors.js";
 
 export interface ProductBffStore {
   withTransaction?<T>(operation: () => Promise<T>): Promise<T>;
@@ -20,11 +21,20 @@ export interface ProductBffStore {
   listParticipants(draftId: string): Promise<readonly DraftParticipantDTO[]>;
   listAcceptedParticipantsByWallet(walletAddress: string): Promise<readonly DraftParticipantDTO[]>;
   getParticipant(participantId: string): Promise<DraftParticipantDTO | undefined>;
+  /**
+   * 更新参与者行（整行 upsert）。一钱包一角色不变量由存储层承担：
+   * 持久驱动靠 (draft_id, LOWER(wallet_address)) WHERE status='accepted'
+   * 部分唯一索引，内存实现靠写入时的同步查重——写入 status=accepted 且
+   * 带钱包、同 draft 已有其他已接受行占用该钱包时抛
+   * StorageConstraintError，服务层捕获后按 409 wallet_already_bound 收敛。
+   */
   updateParticipant(participant: DraftParticipantDTO): Promise<void>;
   /**
    * 条件插入：participant 已有 active 且未过期的 invite 时拒绝
-   * （返回 false），单语句原子判定防并发双 active（跨进程由数据库承担
-   * check-then-act 的原子性，内存实现由单线程临界区承担）。
+   * （返回 false）。常规路径由单语句 NOT EXISTS 判定；持久驱动的
+   * (participant_id) WHERE status='active' 部分唯一索引是单活不变量的
+   * 最终裁决者——语句快照读不到并发方的未提交行，败者在索引上撞车，
+   * 约束命中同样按 false 返回（不外泄存储错误）。
    */
   createInviteIfNoneActive(invite: ProductInviteDTO, nowIso: string): Promise<boolean>;
   getInvite(inviteId: string): Promise<ProductInviteDTO | undefined>;
@@ -99,14 +109,33 @@ export class MemoryProductBffStore implements ProductBffStore {
   }
 
   async updateParticipant(participant: DraftParticipantDTO): Promise<void> {
+    // 一钱包一角色的内存侧执行（对齐 0023 迁移的部分唯一索引）：
+    // 判定与写入同处同步临界区，并发 accept 的败者在此抛约束错误，
+    // 由服务层按 409 收敛。
+    if (participant.status === "accepted" && participant.walletAddress) {
+      const wallet = participant.walletAddress.toLowerCase();
+      const taken = [...this.#participants.values()].some((other) =>
+        other.participantId !== participant.participantId &&
+        other.draftId === participant.draftId &&
+        other.status === "accepted" &&
+        other.walletAddress?.toLowerCase() === wallet
+      );
+      if (taken) {
+        throw new StorageConstraintError(
+          `wallet ${participant.walletAddress} is already bound to another accepted participant in draft ${participant.draftId}`
+        );
+      }
+    }
     this.#participants.set(participant.participantId, participant);
   }
 
   async createInviteIfNoneActive(invite: ProductInviteDTO, nowIso: string): Promise<boolean> {
+    void nowIso;
+    // 对齐部分唯一索引的语义：单活判定只认 status，不看时间性过期——
+    // 过期未翻档的 active 行同样占用索引，重邀由服务层先翻 expired 再插入。
     const hasActive = [...this.#invites.values()].some((existing) =>
       existing.participantId === invite.participantId &&
-      existing.status === "active" &&
-      Date.parse(existing.expiresAt) > Date.parse(nowIso)
+      existing.status === "active"
     );
     if (hasActive) {
       return false;

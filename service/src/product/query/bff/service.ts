@@ -19,6 +19,7 @@ import {
 } from "../../../shared/types.js";
 import type { TxReconcileFields } from "../../../reconcile/status.js";
 import { normalizeEvidenceSpec, type ProductService } from "../../application/service.js";
+import { StorageConstraintError } from "../../../storage/errors.js";
 import {
   ProductAuthorizationBuilder,
   ProductAuthorizationBuilderError,
@@ -662,11 +663,10 @@ export function createProductBffService(
           },
         );
       }
-      const existingActiveInvite = (
-        await store.listInvitesByDraft(draftId)
-      ).find(
+      const participantInvites = (await store.listInvitesByDraft(draftId))
+        .filter((invite) => invite.participantId === participant.participantId);
+      const existingActiveInvite = participantInvites.find(
         (invite) =>
-          invite.participantId === participant.participantId &&
           invite.status === "active" &&
           !isInviteExpired(invite, now()),
       );
@@ -706,8 +706,16 @@ export function createProductBffService(
       };
       return withProductStoreTransaction(store, async () => {
         await store.updateParticipant(invited);
+        // 过期档先翻 expired 再发新邀：单活索引只认 status，时间性过期
+        // 不在索引语义内——不翻档时旧 active 行（已过期）会挡住新邀插入。
+        for (const stale of participantInvites) {
+          if (stale.status === "active" && isInviteExpired(stale, now())) {
+            await store.updateInvite({ ...stale, status: "expired" });
+          }
+        }
         // 并发 createInvite 双双通过前置检查时，条件插入保证只有
-        // 一个 active invite 落库（跨进程原子性由单语句承担）。
+        // 一个 active invite 落库；败者（索引命中）由存储层映射为 false，
+        // 与存储错误 500 区分。
         if (!(await store.createInviteIfNoneActive(invite, now().toISOString()))) {
           throw new ProductBffError(
             409,
@@ -803,12 +811,44 @@ export function createProductBffService(
         acceptedWalletAddress,
       };
       return withProductStoreTransaction(store, async () => {
+        // 受约束的参与者写在前、invite 条件迁移在后：持久驱动同事务等价；
+        // 无事务的内存实现里，钱包冲突败者不至于先把 invite 消费成
+        // accepted。
+        try {
+          await store.updateParticipant(accepted);
+        } catch (error) {
+          // 前置钱包查重（assertWalletCanAcceptInvite）在事务外，并发
+          // 跨槽 accept 双双通过时由存储层的一钱包一角色约束裁决——
+          // 败者回读占用详情，与前置查重同响应 409，不外泄存储错误。
+          if (!(error instanceof StorageConstraintError)) {
+            throw error;
+          }
+          const binding = await inviteWalletBinding(
+            store,
+            invite,
+            participant,
+            acceptedWalletAddress,
+          );
+          throw new ProductBffError(
+            409,
+            "wallet_already_bound",
+            "wallet is already bound to another participant in this order",
+            {
+              walletAddress: acceptedWalletAddress,
+              ...(binding.boundParticipantId
+                ? { participantId: binding.boundParticipantId }
+                : {}),
+              ...(binding.boundRoleSlotId
+                ? { roleSlotId: binding.boundRoleSlotId }
+                : {}),
+            },
+          );
+        }
         // 条件状态迁移（WHERE status='active'）：并发双 accept 只有一个
         // 能落档，败者按现行状态返回冲突，不再相互覆写。
         if (!(await store.updateInviteIfActive(acceptedInvite))) {
           throw inactiveInviteError(await requireInvite(store, inviteId));
         }
-        await store.updateParticipant(accepted);
         const draft = await refreshDraftStatus(
           store,
           await requireDraft(store, invite.draftId),
