@@ -17,11 +17,14 @@ import type {
   StoreJoinApplicationStatus,
   StoreJoinTxEvidence
 } from "./store/join/types.js";
+import { StoreJoinOpenApplicationExistsError } from "./store/join/types.js";
 import type {
   StoreListingRecord,
   StoreListingStore,
   StoreListingStatus
 } from "./store/listings/types.js";
+import { StoreListingPlanConflictError } from "./store/listings/types.js";
+import { StorageConstraintError } from "./storage/errors.js";
 
 /**
  * Store 域的 postgres 持久化。
@@ -218,21 +221,30 @@ export class PostgresStoreListingStore implements StoreListingStore {
   }
 
   async putListing(record: StoreListingRecord): Promise<void> {
-    await this.#database.query(
-      `INSERT INTO store_zhixu_listing
-         (listing_id, plan_id, plan_hash_claimed, deployment_id_claimed, state_machine_address_claimed,
-          status, imported_by_address, imported_by_account_id, imported_at,
-          reviewed_by_address, reviewed_at, review_note, delist_reason, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       ON CONFLICT (listing_id) DO UPDATE SET
-         status = EXCLUDED.status,
-         reviewed_by_address = EXCLUDED.reviewed_by_address,
-         reviewed_at = EXCLUDED.reviewed_at,
-         review_note = EXCLUDED.review_note,
-         delist_reason = EXCLUDED.delist_reason,
-         updated_at = EXCLUDED.updated_at`,
-      listingValues(record)
-    );
+    try {
+      await this.#database.query(
+        `INSERT INTO store_zhixu_listing
+           (listing_id, plan_id, plan_hash_claimed, deployment_id_claimed, state_machine_address_claimed,
+            status, imported_by_address, imported_by_account_id, imported_at,
+            reviewed_by_address, reviewed_at, review_note, delist_reason, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+         ON CONFLICT (listing_id) DO UPDATE SET
+           status = EXCLUDED.status,
+           reviewed_by_address = EXCLUDED.reviewed_by_address,
+           reviewed_at = EXCLUDED.reviewed_at,
+           review_note = EXCLUDED.review_note,
+           delist_reason = EXCLUDED.delist_reason,
+           updated_at = EXCLUDED.updated_at`,
+        listingValues(record)
+      );
+    } catch (error) {
+      // listing_id 冲突已被 ON CONFLICT 吸收；约束命中只能是 UNIQUE(plan_id)
+      // ——并发导入同 plan 第二条 listing 的败者（与 sqlite 实现同口径）。
+      if (error instanceof StorageConstraintError) {
+        throw new StoreListingPlanConflictError();
+      }
+      throw error;
+    }
   }
 
   async getListing(listingId: string): Promise<StoreListingRecord | undefined> {
@@ -306,24 +318,34 @@ export class PostgresStoreJoinApplicationStore implements StoreJoinApplicationSt
   }
 
   async putApplication(record: StoreJoinApplicationRecord): Promise<void> {
-    await this.#database.query(
-      `INSERT INTO store_join_application
-         (application_id, plan_id, zhixu_id, role_slot_id, authorization_kind, stage_id,
-          applicant_address, applicant_account_id, applicant_subject_id, applicant_display_name,
-          statement, status, supplier_id, tx_evidence_json, rejection_reason, revocation_reason,
-          decided_by_address, decided_at, submitted_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $18, $19, $20)
-       ON CONFLICT (application_id) DO UPDATE SET
-         status = EXCLUDED.status,
-         supplier_id = EXCLUDED.supplier_id,
-         tx_evidence_json = EXCLUDED.tx_evidence_json,
-         rejection_reason = EXCLUDED.rejection_reason,
-         revocation_reason = EXCLUDED.revocation_reason,
-         decided_by_address = EXCLUDED.decided_by_address,
-         decided_at = EXCLUDED.decided_at,
-         updated_at = EXCLUDED.updated_at`,
-      applicationValues(record)
-    );
+    try {
+      await this.#database.query(
+        `INSERT INTO store_join_application
+           (application_id, plan_id, zhixu_id, role_slot_id, authorization_kind, stage_id,
+            applicant_address, applicant_account_id, applicant_subject_id, applicant_display_name,
+            statement, status, supplier_id, tx_evidence_json, rejection_reason, revocation_reason,
+            decided_by_address, decided_at, submitted_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $18, $19, $20)
+         ON CONFLICT (application_id) DO UPDATE SET
+           status = EXCLUDED.status,
+           supplier_id = EXCLUDED.supplier_id,
+           tx_evidence_json = EXCLUDED.tx_evidence_json,
+           rejection_reason = EXCLUDED.rejection_reason,
+           revocation_reason = EXCLUDED.revocation_reason,
+           decided_by_address = EXCLUDED.decided_by_address,
+           decided_at = EXCLUDED.decided_at,
+           updated_at = EXCLUDED.updated_at`,
+        applicationValues(record)
+      );
+    } catch (error) {
+      // application_id 冲突已被 ON CONFLICT 吸收；约束命中只能是
+      // 在途唯一索引 (plan_id, applicant_address)——并发双提交的败者
+      //（与 sqlite 实现同口径）。
+      if (error instanceof StorageConstraintError) {
+        throw new StoreJoinOpenApplicationExistsError();
+      }
+      throw error;
+    }
   }
 
   async getApplication(applicationId: string): Promise<StoreJoinApplicationRecord | undefined> {
