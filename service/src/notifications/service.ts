@@ -1620,9 +1620,16 @@ async function dispatchSignalTransportDelivery(input: {
     return existing;
   }
   // 自动补投预算。重建/重放会对 failed 行自动重投；无上限的重启
-  // 重投会无界重复外部投递（每次 webhook 最多一个超时周期）。超过预算
-  // 转 dead_letter 终态，人工 retryDelivery 仍可显式重开。
-  if (existing && existing.status === "failed" && existing.attempts >= MAX_AUTOMATIC_DELIVERY_ATTEMPTS) {
+  // 重投会无界重复外部投递（每次 webhook 最多一个超时周期）。预算闸同时
+  // 覆盖 pending 行：外发记账先行后，"外发已发生、结果落账前崩溃"的行
+  // 停在 pending 且预算已扣——重放必须尊重已扣预算，否则崩溃循环里
+  // pending 永远不过闸。超过预算转 dead_letter 终态，人工 retryDelivery
+  // 仍可显式重开。
+  if (
+    existing &&
+    (existing.status === "failed" || existing.status === "pending") &&
+    existing.attempts >= MAX_AUTOMATIC_DELIVERY_ATTEMPTS
+  ) {
     return input.deliveryStore.saveDelivery({
       ...existing,
       status: "dead_letter",
@@ -1675,32 +1682,44 @@ async function dispatchPreparedDelivery(input: {
     });
   }
 
+  // 外发前先记账（attempts 预增持久落库）：webhook 已送达而进程在外发与
+  // 落账之间死亡时，预算已被扣减——重启重投由 attempts 上限收敛，不会
+  // 以"零尝试"的姿态无限重发。这与广播车道的"nonce 先占位后外发"同构：
+  // 不可撤销的外部副作用之前，账必须先落。
+  const inFlight = await input.deliveryStore.saveDelivery({
+    ...input.pending,
+    attempts: input.pending.attempts + 1,
+    updatedAt: input.now()
+  });
+
+  let result: NotificationDispatchResult;
   try {
-    const result = await input.dispatcher.send({
-      record: input.pending,
+    result = await input.dispatcher.send({
+      record: inFlight,
       profile: input.profile,
       transport: input.transport
     });
-    return input.deliveryStore.saveDelivery({
-      ...input.pending,
-      status: result.ok ? "sent" : "failed",
-      attempts: input.pending.attempts + 1,
-      ...activationStatusForResult(input.transport, result),
-      ...(result.externalReceiptRef ? { externalReceiptRef: result.externalReceiptRef } : {}),
-      // 错误消息先脱敏再持久化（对齐兄弟路径），防 transport 异常
-      // 文本把端点/凭证带进投递台账。
-      ...(result.error ? { lastError: redactErrorMessage(result.error) } : {}),
-      updatedAt: input.now()
-    });
   } catch (error) {
     return input.deliveryStore.saveDelivery({
-      ...input.pending,
+      ...inFlight,
       status: "failed",
-      attempts: input.pending.attempts + 1,
       lastError: error instanceof Error ? redactErrorMessage(error) : "notification dispatch failed",
       updatedAt: input.now()
     });
   }
+  // 外发已发生（成功或渠道自报失败）：此处落账抛错不得回退成 failed——
+  // 外部已收到的投递被记成失败会驱动一次必然双发的重试。让错误上抛，
+  // 行保持 pending+已扣预算，由重建/重放的预算闸与运营台账收敛。
+  return input.deliveryStore.saveDelivery({
+    ...inFlight,
+    status: result.ok ? "sent" : "failed",
+    ...activationStatusForResult(input.transport, result),
+    ...(result.externalReceiptRef ? { externalReceiptRef: result.externalReceiptRef } : {}),
+    // 错误消息先脱敏再持久化（对齐兄弟路径），防 transport 异常
+    // 文本把端点/凭证带进投递台账。
+    ...(result.error ? { lastError: redactErrorMessage(result.error) } : {}),
+    updatedAt: input.now()
+  });
 }
 
 type RetryTransportResolution =

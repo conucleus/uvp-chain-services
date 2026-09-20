@@ -23,6 +23,8 @@ import {
   verifyWebhookSignature,
   WebhookNotificationDispatcher,
   type NotificationDeliveryRecord,
+  type NotificationDeliveryQuery,
+  type NotificationDeliveryStore,
   type NotificationDispatchRequest,
   type NotificationDispatcher,
   type SupplierNotificationProfile
@@ -351,6 +353,75 @@ describe("signal-routed notifications", () => {
       });
     }
     expect(sent).toHaveLength(1);
+  });
+
+  it("keeps a delivered webhook out of failed accounting when the outcome save fails", async () => {
+    // 外部副作用与记账的顺序：attempts 先于外发落库；外发成功后落账抛错
+    // 必须上抛而非回写 failed——把已送达的投递记成失败会驱动一次必然
+    // 双发的重试。行停在 pending 且预算已扣，重建/重放的预算闸收敛。
+    const event = signalEvent(6n, requiredDependency(customsDependencyA));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [event]
+    });
+    const backing = new MemoryNotificationDeliveryStore();
+    const deliveryStore: NotificationDeliveryStore = {
+      getDelivery: (deliveryId) => backing.getDelivery(deliveryId),
+      // 模拟"外发已成功、sent 结果落库时存储故障"的窗口。
+      async saveDelivery(record) {
+        if (record.status === "sent") {
+          throw new Error("delivery ledger unavailable");
+        }
+        return backing.saveDelivery(record);
+      },
+      listDeliveries: (query) => backing.listDeliveries(query)
+    };
+    const sent: NotificationDispatchRequest[] = [];
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      deliveryStore,
+      dispatcher: {
+        async send(request) {
+          sent.push(request);
+          return { ok: true, externalReceiptRef: "receipt:webhook" };
+        }
+      }
+    });
+
+    await expect(service.processSignalSubmittedEvents([event])).rejects.toThrow("delivery ledger unavailable");
+    expect(sent).toHaveLength(1);
+    const [delivery] = await service.listDeliveries();
+    expect(delivery).toMatchObject({ status: "pending", attempts: 1 });
+
+    // 重放不因上一轮的记账故障误判：预算未耗尽时可再投，结果落账恢复后
+    // 行收敛 sent 且 attempts 如实累计。
+    const recovered = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      deliveryStore: backing,
+      dispatcher: {
+        async send(request) {
+          sent.push(request);
+          return { ok: true, externalReceiptRef: "receipt:webhook" };
+        }
+      }
+    });
+    await recovered.processSignalSubmittedEvents([event]);
+    expect(sent).toHaveLength(2);
+    await expect(recovered.listDeliveries()).resolves.toEqual([
+      expect.objectContaining({ status: "sent", attempts: 2 })
+    ]);
   });
 
   it("reopens a dead-lettered delivery explicitly and refuses reopen for other statuses", async () => {
