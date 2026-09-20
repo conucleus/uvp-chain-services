@@ -411,7 +411,7 @@ describe("identity governance API", () => {
   });
 
   it("records a persist_failed fallback log with the txHash when the tx log write fails after a real broadcast", async () => {
-    // B2：广播已成功（拿到 txHash）后写台账抛错——先补一条带 txHash 的
+    // 广播已成功（拿到 txHash）后写台账抛错——先补一条带 txHash 的
     // failed 档（reconcile 凭哈希复核可自愈），再上抛原始错误。
     const adapter: GovernanceChainAdapter = {
       async registerIdentity() {
@@ -459,7 +459,7 @@ describe("identity governance API", () => {
   });
 
   it("assembles a fail-closed refusing governance adapter for production when broadcast is disabled", async () => {
-    // M33：production 禁 env 私钥治理（GOVERNANCE_BROADCAST_ENABLED=true 被
+    // production 禁 env 私钥治理（GOVERNANCE_BROADCAST_ENABLED=true 被
     // validateProductionSafety 拒绝），广播关闭时装配拒绝适配器——服务可
     // 启动，治理写面一律 failed 拒绝（不假成功），而不是启动即死。
     const { createConfiguredGovernanceChainAdapter } = await import("../src/governance/adapter.js");
@@ -468,7 +468,9 @@ describe("identity governance API", () => {
       governance: { broadcastEnabled: false, signerPrivateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY" },
       network: { contracts: { UVPIdentityRegistry: registryAddress } },
     };
-    const adapter = createConfiguredGovernanceChainAdapter(productionConfig as Parameters<typeof createConfiguredGovernanceChainAdapter>[0]);
+    const adapter = createConfiguredGovernanceChainAdapter(
+      productionConfig as unknown as Parameters<typeof createConfiguredGovernanceChainAdapter>[0],
+    );
     await expect(adapter.registerIdentity({
       kind: "registerIdentity",
       subjectId,

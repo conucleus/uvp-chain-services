@@ -92,6 +92,8 @@ export class TxReconcileWorker implements LifecycleService {
   #lastRunAt: string | undefined;
   #lastSummary: ReconcileRunSummary | undefined;
   #lastError: string | undefined;
+  /** 已告警过的孤儿 review（每进程至多一条，防每轮重复刷审计台账）。 */
+  readonly #orphanRevokedAlerted = new Set<string>();
 
   constructor(options: TxReconcileWorkerOptions) {
     this.#config = options.config;
@@ -424,6 +426,13 @@ export class TxReconcileWorker implements LifecycleService {
       if (activeBindings.length === 0) {
         continue;
       }
+      // 孤儿条件没有状态转变可依附（补台账前它会一直成立），按 reviewId
+      // 每进程只告警一次：运营重发 revoke-identity 落下新台账后，主体键
+      // 进入 loggedSubjectIds，该行自然退出孤儿集；重启后至多再告一次。
+      if (this.#orphanRevokedAlerted.has(review.reviewId)) {
+        continue;
+      }
+      this.#orphanRevokedAlerted.add(review.reviewId);
       summary.failed += 1;
       await this.#audit?.record({
         type: "reconcile.governance_revoke_orphan",

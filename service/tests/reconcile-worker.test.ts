@@ -362,7 +362,7 @@ describe("tx/indexer reconcile worker", () => {
   });
 
   it("checks the projection before failing a timed-out tx-less registration", async () => {
-    // B1：txHash 在落档窗口丢失（广播成功、崩溃于落档）时，超时车道不得
+    // txHash 在落档窗口丢失（广播成功、崩溃于落档）时，超时车道不得
     // 仅凭"无哈希可探回执"就钉 failed——先查投影，订单已呈现即自愈确认。
     const productStore = new MemoryProductBffStore();
     const projectionStore = new MemoryProjectionStore();
@@ -395,7 +395,7 @@ describe("tx/indexer reconcile worker", () => {
   });
 
   it("audits an orphan revoked review whose binding is still active with no governance tx log", async () => {
-    // B3：review 翻 revoked 落库、台账写入前进程死亡的补偿复核——零台账
+    // review 翻 revoked 落库、台账写入前进程死亡的补偿复核——零台账
     // 且链上 binding 仍 active 时必须告警（有 log 的分叉由既有车道覆盖）。
     const projectionStore = new MemoryProjectionStore();
     const governanceStore = new InMemoryGovernanceStore();
@@ -431,6 +431,12 @@ describe("tx/indexer reconcile worker", () => {
 
     await worker.runOnce();
 
+    expect(audit.list().filter((event) => event.type === "reconcile.governance_revoke_orphan")).toHaveLength(1);
+
+    // 孤儿条件在运营补发 revoke 前持续成立：同一 worker 不得每轮重刷
+    // 告警（重启后至多再告一次是可接受的边界）。
+    await worker.runOnce();
+    await worker.runOnce();
     expect(audit.list().filter((event) => event.type === "reconcile.governance_revoke_orphan")).toHaveLength(1);
   });
 

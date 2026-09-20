@@ -34,6 +34,7 @@ import {
   createStoreZhixuVersionService
 } from "../src/store/console/version.js";
 import { InMemoryStoreWalletSessionStore, createStoreSessionService } from "../src/store/sessions/index.js";
+import type { StoreJoinApplicationStore } from "../src/store/join/types.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { openSqliteDatabase } from "../src/storage/sqlite.js";
 import { runSqliteMigrations } from "../src/storage/migrations.js";
@@ -460,7 +461,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("keeps the application under review and refuses on_chain evidence when the identity registration broadcast fails", async () => {
-      // M35：approve 不得吞身份登记广播失败——申请留 under_review（可重试
+      // approve 不得吞身份登记广播失败——申请留 under_review（可重试
       // 审批恢复），不落 authorized、tx 证据不冒充 on_chain 已记录。
       const store = new MemoryProjectionStore();
       await seedPlan(store);
@@ -517,7 +518,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("does not let a concurrent decision overwrite the terminal state after identity pairing", async () => {
-      // C4：approve 的终态翻转走条件 UPDATE——身份已登记但 CAS 败者
+      // approve 的终态翻转走条件 UPDATE——身份已登记但 CAS 败者
       // 不得把 rejected（或其他赢家终态）整行覆盖成 authorized。
       const store = new MemoryProjectionStore();
       await seedPlan(store, { withSupplierBinding: true });
@@ -526,10 +527,10 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const { InMemoryStoreJoinApplicationStore } = await import("../src/store/join/index.js");
       const realJoinStore = new InMemoryStoreJoinApplicationStore();
       let doctorNextRead = false;
-      const staleSnapshotStore = {
-        putApplication: (record: Parameters<InMemoryStoreJoinApplicationStore["putApplication"]>[0]) => realJoinStore.putApplication(record),
-        updateApplicationIfStatus: (record: Parameters<InMemoryStoreJoinApplicationStore["updateApplicationIfStatus"]>[0], expected: Parameters<InMemoryStoreJoinApplicationStore["updateApplicationIfStatus"]>[1]) => realJoinStore.updateApplicationIfStatus(record, expected),
-        getApplication: async (applicationId: string) => {
+      const staleSnapshotStore: StoreJoinApplicationStore = {
+        putApplication: (record) => realJoinStore.putApplication(record),
+        updateApplicationIfStatus: (record, expected) => realJoinStore.updateApplicationIfStatus(record, expected),
+        getApplication: async (applicationId) => {
           const record = await realJoinStore.getApplication(applicationId);
           if (doctorNextRead && record) {
             doctorNextRead = false;
@@ -537,9 +538,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
           }
           return record;
         },
-        listApplications: (query?: Parameters<InMemoryStoreJoinApplicationStore["listApplications"]>[0]) => realJoinStore.listApplications(query),
-        appendEvent: (record: Parameters<InMemoryStoreJoinApplicationStore["appendEvent"]>[0]) => realJoinStore.appendEvent(record),
-        listEvents: (applicationId: string) => realJoinStore.listEvents(applicationId)
+        listApplications: (query) => realJoinStore.listApplications(query),
+        appendEvent: (record) => realJoinStore.appendEvent(record),
+        listEvents: (applicationId) => realJoinStore.listEvents(applicationId)
       };
       const router = createApiRouter(store, { ...joinRouterOptions(), storeJoinApplicationStore: staleSnapshotStore });
       const session = await login(router, supplierAccount);
@@ -653,7 +654,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("keeps at most one active version per series (single-active invariant)", async () => {
-      // C1：并发/连续激活不得留下双 active——内存后端在写入 active 时
+      // 并发/连续激活不得留下双 active——内存后端在写入 active 时
       // 同步撤销同 series 其他 active（持久后端由 0021 部分唯一索引裁决）。
       const metadataStore = new MemoryStoreZhixuVersionMetadataStore();
       const timestamp = new Date("2026-04-28T00:00:00Z").toISOString();

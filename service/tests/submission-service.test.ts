@@ -1583,7 +1583,7 @@ describe("product task submissions", () => {
   });
 
   it("returns the txHash-bearing broadcast result when the dedupe ledger write fails after a real broadcast", async () => {
-    // M34：内层适配器已真实广播（拿到 txHash）后，去重台账（claimTxHash/
+    // 内层适配器已真实广播（拿到 txHash）后，去重台账（claimTxHash/
     // save）抛错不得让异常带着哈希一起逃逸——调用方 catch 口无哈希可救，
     // 会释放 nonce，重启后同一签名被二次真实广播烧 gas。
     const audit = new InMemoryAuditSink();

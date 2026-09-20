@@ -255,7 +255,7 @@ async function duplicateTxHashResult(
 ): Promise<SubmissionBroadcastResult | undefined> {
   const txHash = broadcastResultTxHash(result);
   if (!txHash) {
-    return Promise.resolve(undefined);
+    return undefined;
   }
 
   const normalizedTxHash = txHash.toLowerCase();
