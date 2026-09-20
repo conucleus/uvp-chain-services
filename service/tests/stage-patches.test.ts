@@ -270,6 +270,113 @@ describe("stage executor/resource patch Product API", () => {
     });
   });
 
+  it("rejects a previous-executor signature attached to a non-handoff patch before broadcasting", async () => {
+    // 与合约同口径：前任签名只在 handoff 是授权材料，其他模式附带即拒
+    // ——静默放行会让调用方误以为签名参与了授权，广播也在链上必 revert。
+    const broadcast = vi.fn(async (): Promise<StagePatchBroadcastResult> => ({
+      status: "submitted",
+      txHash,
+    }));
+    const broadcastAdapter: StageExecutorPatchBroadcastAdapter = { broadcast };
+    const { router } = await routerFixture({ executorBroadcastAdapter: broadcastAdapter });
+    const prepared = await prepareStageExecutorPatch(router);
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: {
+        prepareId: prepared.prepareId,
+        selectorWallet,
+        typedData: prepared.typedData,
+        patch: prepared,
+        signature: await signExecutorPrepared(prepared),
+        previousExecutorSignature: await signExecutorPrepared(prepared),
+      },
+    });
+    expect(response).toMatchObject({
+      status: 400,
+      body: { error: "previous_executor_signature_not_allowed" },
+    });
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it("mirrors the on-chain birth-stage rejection before broadcasting an executor patch", async () => {
+    const broadcast = vi.fn(async (): Promise<StagePatchBroadcastResult> => ({
+      status: "submitted",
+      txHash,
+    }));
+    const broadcastAdapter: StageExecutorPatchBroadcastAdapter = { broadcast };
+    const birthStageSchema = (triggerKind: string): StoreProductSchemaDTO => ({
+      ...productSchemaFixture(),
+      onchainHookPlanArtifact: {
+        compiledHooks: [
+          // 产物键位：stageId 是标识符 keccak、stageIdentifier 是原文——
+          // 补丁目标以标识符右补齐 bytes32 形态进来，两种形态都可命中。
+          { stageId: targetStageOnchainId, stageIdentifier: "target.stage", orderTriggerKind: triggerKind }
+        ]
+      } as StoreProductSchemaDTO["onchainHookPlanArtifact"],
+    });
+    const mintRouter = (await routerFixture({
+      executorBroadcastAdapter: broadcastAdapter,
+      productSchema: birthStageSchema("mint"),
+    })).router;
+    const mintPrepared = await prepareStageExecutorPatch(mintRouter);
+    const mintResponse = await mintRouter.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: {
+        prepareId: mintPrepared.prepareId,
+        selectorWallet,
+        typedData: mintPrepared.typedData,
+        patch: mintPrepared,
+        signature: await signExecutorPrepared(mintPrepared),
+      },
+    });
+    expect(mintResponse).toMatchObject({
+      status: 409,
+      body: { error: "executor_patch_forbidden_on_birth_stage" },
+    });
+    // 同锚的 dock 出生阶段同样拒绝。
+    const dockRouter = (await routerFixture({
+      executorBroadcastAdapter: broadcastAdapter,
+      productSchema: birthStageSchema("dock"),
+    })).router;
+    const dockPrepared = await prepareStageExecutorPatch(dockRouter);
+    const dockResponse = await dockRouter.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: {
+        prepareId: dockPrepared.prepareId,
+        selectorWallet,
+        typedData: dockPrepared.typedData,
+        patch: dockPrepared,
+        signature: await signExecutorPrepared(dockPrepared),
+      },
+    });
+    expect(dockResponse).toMatchObject({
+      status: 409,
+      body: { error: "executor_patch_forbidden_on_birth_stage" },
+    });
+    // 非出生阶段（orderTriggerKind=none）不误伤：正常提交并广播。
+    const plainRouter = (await routerFixture({
+      executorBroadcastAdapter: broadcastAdapter,
+      productSchema: birthStageSchema("none"),
+    })).router;
+    const plainPrepared = await prepareStageExecutorPatch(plainRouter);
+    const plainResponse = await plainRouter.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: {
+        prepareId: plainPrepared.prepareId,
+        selectorWallet,
+        typedData: plainPrepared.typedData,
+        patch: plainPrepared,
+        signature: await signExecutorPrepared(plainPrepared),
+      },
+    });
+    expect(plainResponse.status).toBe(200);
+    expect(broadcast).toHaveBeenCalledOnce();
+  });
+
   it("requires and verifies the previous executor signature for handoff mode", async () => {
     const broadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: vi.fn(async (request): Promise<StagePatchBroadcastResult> => {

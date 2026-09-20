@@ -213,7 +213,11 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'previous_executor_ambiguous',
   'previous_executor_not_allowed',
   'previous_executor_required',
+  'previous_executor_signature_not_allowed',
   'previous_executor_signature_required',
+  // 镜像合约 StageExecutorPatchForbiddenOnBirthStage 的广播前快速失败
+  //（409 领域状态预检，与 target_stage_locked 同族）。
+  'executor_patch_forbidden_on_birth_stage',
   'product_order_not_found',
   'selector_wallet_not_authorized',
   'state_machine_address_missing',

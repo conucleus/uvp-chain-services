@@ -412,10 +412,11 @@ export function createProductStageExecutorPatchService(
       }
 
       const context = await resolveSelectorTaskContext(options.store, taskId);
-      ensureExecutorPreparedStillCurrent(
+      await ensureExecutorPreparedStillCurrent(
+        options,
         context.order,
         prepared,
-        (await findProjectedPlan(options.store, context.order))?.signalCapabilities ?? [],
+        await findProjectedPlan(options.store, context.order),
       );
 
       const previousSignature = signatureForPreviousExecutor(
@@ -1846,11 +1847,13 @@ function nextStageResourcePatchNonce(
 }
 
 
-function ensureExecutorPreparedStillCurrent(
+async function ensureExecutorPreparedStillCurrent(
+  options: ProductStagePatchServiceOptions,
   order: StateMachineOrderProjection,
   prepared: PreparedStageExecutorPatchRecord,
-  planSignalCapabilities: readonly StateMachineSignalCapabilityProjection[],
-): void {
+  plan: StateMachinePlanProjection | undefined,
+): Promise<void> {
+  const planSignalCapabilities = plan?.signalCapabilities ?? [];
   resolveExecutorPatchGovernance(order, prepared.targetStageId, {
     mode: prepared.mode,
     ...(prepared.previousExecutor
@@ -1863,6 +1866,7 @@ function ensureExecutorPreparedStillCurrent(
       ? { approvalSignalId: prepared.approvalSignalId }
       : {}),
   }, planSignalCapabilities);
+  await assertTargetStageNotBirthStage(options, order, prepared.targetStageId, plan);
   const currentNonce =
     order.stageExecutorOverlays[prepared.targetStageId.toLowerCase()]
       ?.patchNonce;
@@ -1877,6 +1881,79 @@ function ensureExecutorPreparedStillCurrent(
       },
     );
   }
+}
+
+/**
+ * 出生阶段守卫的服务端镜像：目标阶段挂有 mint/dock 开单 trigger hook 时，
+ * 合约对逐单 executor patch 必 revert（出生阶段执行者终生不可变）。
+ * 不镜像则签名验证通过后广播必失败，gas 白烧、nonce 白占。判定读产品
+ * schema 的编译产物（compiledHooks.orderTriggerKind）；无 schema 可镜像时
+ * 不拦截——合约仍是最终守门人，广播 revert 由失败车道如实落账。
+ */
+async function assertTargetStageNotBirthStage(
+  options: ProductStagePatchServiceOptions,
+  order: StateMachineOrderProjection,
+  targetStageId: Hex,
+  plan: StateMachinePlanProjection | undefined,
+): Promise<void> {
+  const schema = await findProductSchema(
+    options.productSchemaResolver,
+    order,
+    plan,
+  );
+  const artifact = (schema as
+    | { readonly onchainHookPlanArtifact?: unknown }
+    | undefined)?.onchainHookPlanArtifact as
+    | {
+        readonly compiledHooks?: readonly {
+          readonly stageId?: unknown;
+          readonly stageIdentifier?: unknown;
+          readonly orderTriggerKind?: unknown;
+        }[];
+      }
+    | undefined;
+  const isBirthStage = (artifact?.compiledHooks ?? []).some((hook) =>
+    (hook.orderTriggerKind === "mint" || hook.orderTriggerKind === "dock") &&
+    hookStageMatchesTarget(hook, targetStageId));
+  if (isBirthStage) {
+    throw new ProductStagePatchError(
+      409,
+      "executor_patch_forbidden_on_birth_stage",
+      "the target stage is a birth stage (mint/dock order trigger); its executor is immutable and the on-chain patch would revert",
+      { targetStageId },
+    );
+  }
+}
+
+/**
+ * 编译产物的 hook 阶段键对齐补丁目标：产物侧 stageId 是标识符的 keccak，
+ * 而补丁目标允许两种合法形态——keccak id 或标识符右补齐的 bytes32。
+ * 两种形态都比对，漏一种会让补丁目标与产物键错位、守卫形同虚设。
+ */
+function hookStageMatchesTarget(
+  hook: { readonly stageId?: unknown; readonly stageIdentifier?: unknown },
+  targetStageId: Hex
+): boolean {
+  const target = targetStageId.toLowerCase();
+  if (typeof hook.stageId === "string" && hook.stageId.toLowerCase() === target) {
+    return true;
+  }
+  if (typeof hook.stageIdentifier === "string") {
+    const padded = identifierPaddedBytes32(hook.stageIdentifier);
+    if (padded && padded === target) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function identifierPaddedBytes32(identifier: string): Hex | undefined {
+  const bytes = new TextEncoder().encode(identifier);
+  if (bytes.length > 32) {
+    return undefined;
+  }
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `0x${hex.padEnd(64, "0")}` as Hex;
 }
 
 
@@ -2109,6 +2186,17 @@ function signatureForPreviousExecutor(
   signatureInput: string | undefined,
 ): Hex | undefined {
   if (prepared.mode !== "handoff") {
+    if (signatureInput) {
+      // 与合约同口径：前任签名只在 handoff 是授权材料，其他模式附带
+      // 即拒绝——静默丢弃会让调用方误以为签名参与了授权，签名通过后
+      // 广播也必在链上被拒（白烧 gas）。
+      throw new ProductStagePatchError(
+        400,
+        "previous_executor_signature_not_allowed",
+        "previousExecutorSignature is only accepted in handoff mode; remove it or re-prepare with mode=handoff",
+        { mode: prepared.mode },
+      );
+    }
     return undefined;
   }
   if (!signatureInput) {
