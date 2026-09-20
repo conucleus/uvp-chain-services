@@ -120,6 +120,39 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
     );
   }
 
+  async putSupplierIfReviewStatus(record: StoreSupplierMetadataRecord, expected: StoreSupplierMetadataRecord["reviewStatus"]): Promise<boolean> {
+    // 条件 upsert（CAS）：行存在且 review_status 已被并发迁移时 rowCount 0，
+    // 过期快照的整行写不得复活被运营翻案的审核态。
+    const updated = await this.#database.query(
+      `INSERT INTO store_supplier_metadata (
+           supplier_id, supplier_subject_id, display_name, wallet,
+           capability_tags_json, supported_role_slot_ids_json,
+           supported_stage_ids_json, registry_addresses_json, review_status, metadata_uri,
+           notification_profile_json, notification_profile_hash, notification_updated_at,
+           created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11::jsonb, $12, $13, $14, $15)
+         ON CONFLICT(supplier_id)
+         DO UPDATE SET
+         supplier_subject_id = EXCLUDED.supplier_subject_id,
+           display_name = EXCLUDED.display_name,
+           wallet = EXCLUDED.wallet,
+           capability_tags_json = EXCLUDED.capability_tags_json,
+           supported_role_slot_ids_json = EXCLUDED.supported_role_slot_ids_json,
+           supported_stage_ids_json = EXCLUDED.supported_stage_ids_json,
+           registry_addresses_json = EXCLUDED.registry_addresses_json,
+           review_status = EXCLUDED.review_status,
+           metadata_uri = EXCLUDED.metadata_uri,
+           notification_profile_json = EXCLUDED.notification_profile_json,
+           notification_profile_hash = EXCLUDED.notification_profile_hash,
+           notification_updated_at = EXCLUDED.notification_updated_at,
+           created_at = EXCLUDED.created_at,
+           updated_at = EXCLUDED.updated_at
+       WHERE store_supplier_metadata.review_status = $16`,
+      [...supplierValues(record), expected]
+    );
+    return (updated.rowCount ?? 0) > 0;
+  }
+
   async appendAudit(record: StoreSupplierAuditInput): Promise<void> {
     await this.#database.query(
       `INSERT INTO store_supplier_audit (

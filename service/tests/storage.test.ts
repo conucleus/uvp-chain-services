@@ -755,6 +755,53 @@ describe("durable storage", () => {
     ]);
   });
 
+  it("guards governance review transitions and evidence bindings with conditional writes in SQLite", async () => {
+    const databaseUrl = sqliteUrl(tempDirs);
+    const governanceStore = openGovernanceStore(databaseUrl);
+    stores.push(governanceStore);
+    const evidenceStore = openEvidenceStore(databaseUrl);
+    stores.push(evidenceStore);
+
+    // review：行已迁移时，过期期望的条件写不得覆盖赢家。
+    const review = governanceReview();
+    await governanceStore.putReview(review);
+    await expect(
+      governanceStore.putReviewIfStatus({ ...review, status: "restricted" }, review.status),
+    ).resolves.toBe(true);
+    await expect(
+      governanceStore.putReviewIfStatus({ ...review, status: "revoked" }, review.status),
+    ).resolves.toBe(false);
+    await expect(governanceStore.getReview(review.reviewId)).resolves.toMatchObject({
+      status: "restricted",
+    });
+
+    // evidence：仅 uploaded 可绑定；已绑行的再次 markBound 拿回赢家档。
+    const evidence = evidenceRecord();
+    await evidenceStore.put(evidence);
+    const bindingOrderId = evidence.evidence.orderId ?? "order-1";
+    const bound = await evidenceStore.markBound?.({
+      evidenceId: evidence.evidence.evidenceId,
+      txHash: `0x${"1".repeat(64)}`,
+      orderId: bindingOrderId,
+      onchainOrderId: `0x${"2".repeat(64)}`,
+      sourceId: `0x${"3".repeat(64)}`,
+      signalId: `0x${"4".repeat(64)}`
+    });
+    expect(bound?.evidence.status).toBe("bound");
+    const loser = await evidenceStore.markBound?.({
+      evidenceId: evidence.evidence.evidenceId,
+      txHash: `0x${"5".repeat(64)}`,
+      orderId: bindingOrderId,
+      onchainOrderId: `0x${"6".repeat(64)}`,
+      sourceId: `0x${"7".repeat(64)}`,
+      signalId: `0x${"8".repeat(64)}`
+    });
+    expect(loser?.evidence).toMatchObject({
+      status: "bound",
+      boundOnchainOrderId: `0x${"2".repeat(64)}`,
+    });
+  });
+
   it("wires all chain-services stores to durable SQLite across service restarts", async () => {
     const databaseUrl = sqliteUrl(tempDirs);
     const database = {

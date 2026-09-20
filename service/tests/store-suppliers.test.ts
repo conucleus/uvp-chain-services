@@ -236,6 +236,92 @@ describe("Store supplier directory API", () => {
     );
   });
 
+  it("preserves a concurrent review reversal when identity registration lands after it", async () => {
+    // 登记链读到 approved_for_broadcast 后广播期间，运营并发把审核翻成
+    // revoked：广播后的供应商整行写不得以过期快照复活被翻案的审核态；
+    // 登记事实由治理台账承载，审计行照常补记。
+    const adapter: GovernanceChainAdapter = {
+      async registerIdentity() {
+        return {
+          status: "submitted",
+          txHash: simulatedTx,
+          signer: registrar,
+          retryable: false,
+          simulated: false,
+        };
+      },
+      async revokeIdentity() {
+        return {
+          status: "submitted",
+          txHash: simulatedTx,
+          signer: registrar,
+          retryable: false,
+          simulated: false,
+        };
+      },
+    };
+    const backing = new InMemoryStoreSupplierMetadataStore();
+    let flipDuringBroadcast = false;
+    const adapterWithFlip: GovernanceChainAdapter = {
+      ...adapter,
+      async registerIdentity(request) {
+        if (flipDuringBroadcast) {
+          flipDuringBroadcast = false;
+          // 广播期间运营翻案：审核态 revoked、钱包摘除。
+          const latest = await backing.getSupplier("supplier-shenzhen-logistics");
+          if (latest) {
+            const { wallet: _wallet, ...rest } = latest;
+            await backing.putSupplier({ ...rest, reviewStatus: "revoked" });
+          }
+        }
+        return adapter.registerIdentity(request);
+      },
+    };
+    const projectionStore = new MemoryProjectionStore();
+    const router = createApiRouter(projectionStore, {
+      productSchemaResolver: crossBorderSchemaResolver(),
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      storeAuthConfig: devAnchoredStoreAuth,
+      productRuntimeEnvironment: "local" as const,
+      storeSupplierMetadataStore: backing,
+      governanceService: createGovernanceService({ adapter: adapterWithFlip }),
+    });
+    await createSupplier(router, { reviewStatus: "approved_for_broadcast" });
+    // 登记前置：供应商先过运营审核（治理侧落 supplier review）。
+    const review = await router.handle({
+      method: "POST",
+      pathname: "/store/suppliers/supplier-shenzhen-logistics/review",
+      headers: storeHeaders,
+      body: {
+        reviewStatus: "approved_for_broadcast",
+        publicSummary: "Approved for Store broadcast.",
+        confirmation: { supplierId: "supplier-shenzhen-logistics" },
+      },
+    });
+    expect(review.status).toBe(200);
+
+    flipDuringBroadcast = true;
+    const registration = await router.handle({
+      method: "POST",
+      pathname: "/store/suppliers/supplier-shenzhen-logistics/request-identity-registration",
+      headers: adminHeaders,
+      body: { confirmation: { supplierId: "supplier-shenzhen-logistics" } },
+    });
+    expect(registration.status).toBe(202);
+    expect(
+      (registration.body as { supplier: StoreSupplierDTO }).supplier,
+    ).toMatchObject({ reviewStatus: "revoked" });
+    await expect(
+      backing.getSupplier("supplier-shenzhen-logistics"),
+    ).resolves.toMatchObject({ reviewStatus: "revoked" });
+    expect(
+      (await backing.listAudits("supplier-shenzhen-logistics")).some(
+        (audit) => audit.action === "request_identity_registration",
+      ),
+    ).toBe(true);
+  });
+
   it("audits tag edits and delegates identity registration and revocation", async () => {
     const requests: GovernanceChainRequestDTO[] = [];
     const adapter: GovernanceChainAdapter = {

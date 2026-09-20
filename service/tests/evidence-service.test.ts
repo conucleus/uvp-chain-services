@@ -162,6 +162,71 @@ describe("evidence service", () => {
     expect(second?.evidence.status).toBe("bound");
   });
 
+  it("settles a concurrent double-bind by first-writer-wins and rejects the cross-order loser", async () => {
+    // 并发双绑都读到 uploaded 快照：条件翻转只有一个赢家；败者回读拿到
+    // 赢家的绑定档——同订单幂等收敛，跨订单按 409 拒绝，不得把别人的
+    // 绑定当成本次成功返回。
+    const backing = new InMemoryEvidenceMetadataStore();
+    let staleReadPending = false;
+    const racingStore: typeof backing = new Proxy(backing, {
+      get(target, property, receiver) {
+        if (property === "get") {
+          return async (evidenceId: string) => {
+            const latest = await target.get(evidenceId);
+            if (staleReadPending && latest) {
+              staleReadPending = false;
+              return { ...latest, evidence: { ...latest.evidence, status: "uploaded" as const } };
+            }
+            return latest;
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const service = createEvidenceService({
+      runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      metadataStore: racingStore,
+    });
+    const uploaded = await uploadJsonEvidence(service, {
+      fileName: "double-bind.txt",
+      content: { note: "race" },
+      metadataFields: { invoice: "INV-RACE" },
+    });
+    const evidenceId = uploaded.evidence.evidenceId;
+
+    const winnerBinding = {
+      evidenceId,
+      txHash: txHash("31"),
+      orderId: "order-1",
+      onchainOrderId: txHash("a1"),
+      sourceId: txHash("b1"),
+      signalId: txHash("c1")
+    };
+    await service.bindEvidence(winnerBinding, owner);
+
+    // 败者读到 uploaded 旧快照、试图绑到另一链上订单：条件翻转落空，
+    // 拿回赢家的绑定档，按归属冲突拒绝。
+    staleReadPending = true;
+    await expect(service.bindEvidence({
+      ...winnerBinding,
+      txHash: txHash("32"),
+      onchainOrderId: txHash("a2")
+    }, owner)).rejects.toMatchObject({
+      code: "invalid_request",
+      status: 409
+    });
+
+    // 同订单的迟到重放幂等：拿回赢家的绑定档按成功收敛。
+    staleReadPending = true;
+    const idempotent = await service.bindEvidence(winnerBinding, owner);
+    expect(idempotent?.evidence).toMatchObject({
+      status: "bound",
+      boundOnchainOrderId: txHash("a1"),
+    });
+  });
+
   it("changes metadataHash and payloadHash when canonical metadata changes", async () => {
     const service = testEvidenceService();
     const first = await uploadTextEvidence(service, { invoice: "INV-1" });

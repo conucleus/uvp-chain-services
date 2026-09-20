@@ -21,6 +21,14 @@ export interface GovernanceStore {
   listReviews(query?: GovernanceReviewQuery): Promise<readonly GovernanceReviewDTO[]>;
   getReview(reviewId: string): Promise<GovernanceReviewDTO | undefined>;
   putReview(review: GovernanceReviewDTO): Promise<void>;
+  /**
+   * 条件状态迁移（CAS）：行不存在时按新档插入；存在时仅当现行 status
+   * 仍是 expected 才整行落档（UPDATE ... WHERE status=?）。返回 false
+   * 表示并发方已先改状态——review 的状态机校验（canTransition）是
+   * check-then-act，败者不得以过期校验结果覆盖赢家的迁移（如把已
+   * revoked 的档盖回 approved）。
+   */
+  putReviewIfStatus(review: GovernanceReviewDTO, expected: GovernanceReviewDTO["status"]): Promise<boolean>;
   findLatestReview(subjectType: GovernanceSubjectType, subjectId: string): Promise<GovernanceReviewDTO | undefined>;
   listIdentityTxLogs(): Promise<readonly IdentityTxLogDTO[]>;
   /**
@@ -63,6 +71,16 @@ export class InMemoryGovernanceStore implements GovernanceStore {
 
   async putReview(review: GovernanceReviewDTO): Promise<void> {
     this.reviews.set(review.reviewId, review);
+  }
+
+  async putReviewIfStatus(review: GovernanceReviewDTO, expected: GovernanceReviewDTO["status"]): Promise<boolean> {
+    // 判定与写入同处一个同步临界区：并发迁移只有一个赢家。
+    const current = this.reviews.get(review.reviewId);
+    if (current && current.status !== expected) {
+      return false;
+    }
+    this.reviews.set(review.reviewId, review);
+    return true;
   }
 
   async findLatestReview(

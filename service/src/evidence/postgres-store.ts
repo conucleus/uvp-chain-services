@@ -255,25 +255,33 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
   }
 
   async markBound(input: BindEvidenceRequestDTO): Promise<EvidenceMetadataRecord | undefined> {
-    const current = await this.get(input.evidenceId);
-    if (!current) {
+    // 条件 UPDATE（CAS）：仅 uploaded 可翻转 bound——并发双绑只有一个
+    // 赢家，后到者回读既有档（同订单幂等、跨订单由服务层核验拒绝），
+    // 不再以读-改-写整行覆盖赢家的绑定归属。
+    const updated = await this.#database.query(
+      `UPDATE evidence_object
+       SET status = 'bound',
+           bound_signal_tx_hash = $1,
+           bound_submission_id = COALESCE($2, bound_submission_id),
+           bound_onchain_order_id = $3,
+           bound_source_id = $4,
+           bound_signal_id = $5,
+           bound_at = COALESCE($6, bound_at)
+       WHERE evidence_id = $7 AND status = 'uploaded'`,
+      [
+        input.txHash,
+        input.submissionId ?? null,
+        input.onchainOrderId,
+        input.sourceId,
+        input.signalId,
+        input.boundAt ?? null,
+        input.evidenceId
+      ]
+    );
+    if ((updated.rowCount ?? 0) === 0 && !(await this.get(input.evidenceId))) {
       return undefined;
     }
-    const updated: EvidenceMetadataRecord = {
-      ...current,
-      evidence: {
-        ...current.evidence,
-        status: "bound",
-        boundSignalTxHash: input.txHash,
-        ...(input.submissionId ? { boundSubmissionId: input.submissionId } : {}),
-        boundOnchainOrderId: input.onchainOrderId,
-        boundSourceId: input.sourceId,
-        boundSignalId: input.signalId,
-        ...(input.boundAt ? { boundAt: input.boundAt } : {})
-      }
-    };
-    await this.put(updated);
-    return updated;
+    return this.get(input.evidenceId);
   }
 
   async recordAdminRead(entry: EvidenceAdminReadAuditDTO): Promise<void> {

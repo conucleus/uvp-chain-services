@@ -83,6 +83,19 @@ export class InMemoryStoreSupplierMetadataStore
     this.#suppliers.set(record.supplierId, record);
   }
 
+  async putSupplierIfReviewStatus(
+    record: StoreSupplierMetadataRecord,
+    expected: StoreSupplierMetadataRecord["reviewStatus"],
+  ): Promise<boolean> {
+    // 判定与写入同处一个同步临界区：并发审核态迁移只有一个赢家。
+    const current = this.#suppliers.get(record.supplierId);
+    if (current && current.reviewStatus !== expected) {
+      return false;
+    }
+    this.#suppliers.set(record.supplierId, record);
+    return true;
+  }
+
   async appendAudit(record: StoreSupplierAuditInput): Promise<void> {
     // auditId 由存储端生成（单实例内存后端用 UUID），不接进程内序号。
     this.#audits.push({ ...record, auditId: record.auditId ?? `audit_${randomUUID()}` });
@@ -337,10 +350,19 @@ export function createStoreSupplierService(
         governancePrincipal(principal),
       );
       await withSupplierStoreTransaction(metadataStore, async () => {
-        await metadataStore.putSupplier(record);
+        // 广播期间运营可能并发翻案审核态（如 revoked）：过期快照的整行写
+        // 不得复活被翻案的 review 状态。登记事实由治理台账与身份绑定投影
+        // 承载；CAS 败者保留库内最新审核态，只补登记审计行。
+        const persisted = await metadataStore.putSupplierIfReviewStatus(
+          record,
+          "approved_for_broadcast",
+        );
+        const audited = persisted
+          ? record
+          : await requireMetadata(metadataStore, supplierId);
         await metadataStore.appendAudit(
           auditRecord(
-            record,
+            audited,
             "request_identity_registration",
             principal,
             now,

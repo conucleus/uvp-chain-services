@@ -62,6 +62,13 @@ export interface StoreSupplierMetadataStore {
   findSupplierBySubjectId(supplierSubjectId: Hex): Promise<StoreSupplierMetadataRecord | undefined>;
   listSuppliers(): Promise<readonly StoreSupplierMetadataRecord[]>;
   putSupplier(record: StoreSupplierMetadataRecord): Promise<void>;
+  /**
+   * 条件覆盖（CAS）：仅当现行 review_status 仍是 expected 时整行落档
+   * （UPDATE ... WHERE review_status=?）。返回 false 表示并发方已先改
+   * 审核态——身份登记链读到 approved_for_broadcast 后广播期间，运营
+   * 并发翻案（如 revoked）不得被过期快照的整行写复活。
+   */
+  putSupplierIfReviewStatus(record: StoreSupplierMetadataRecord, expected: StoreSupplierMetadataRecord["reviewStatus"]): Promise<boolean>;
   /** 审计行与业务写同事务（提供 withTransaction 的后端）；auditId 库端生成。 */
   appendAudit(record: StoreSupplierAuditInput): Promise<void>;
   listAudits(supplierId?: string): Promise<readonly StoreSupplierAuditRecord[]>;

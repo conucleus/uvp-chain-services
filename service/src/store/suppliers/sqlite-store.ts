@@ -107,6 +107,38 @@ export class SqliteStoreSupplierMetadataStore implements StoreSupplierMetadataSt
     });
   }
 
+  async putSupplierIfReviewStatus(record: StoreSupplierMetadataRecord, expected: StoreSupplierMetadataRecord["reviewStatus"]): Promise<boolean> {
+    // 条件 upsert（CAS）：行存在且 review_status 已被并发迁移时 changes 0，
+    // 过期快照的整行写不得复活被运营翻案的审核态。
+    const updated = runSqliteWrite(() => this.#database.prepare(
+      `INSERT INTO store_supplier_metadata (
+           supplier_id, supplier_subject_id, display_name, wallet,
+           capability_tags_json, supported_role_slot_ids_json,
+           supported_stage_ids_json, registry_addresses_json, review_status, metadata_uri,
+           notification_profile_json, notification_profile_hash, notification_updated_at,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(supplier_id)
+         DO UPDATE SET
+         supplier_subject_id = excluded.supplier_subject_id,
+           display_name = excluded.display_name,
+           wallet = excluded.wallet,
+           capability_tags_json = excluded.capability_tags_json,
+           supported_role_slot_ids_json = excluded.supported_role_slot_ids_json,
+           supported_stage_ids_json = excluded.supported_stage_ids_json,
+           registry_addresses_json = excluded.registry_addresses_json,
+           review_status = excluded.review_status,
+           metadata_uri = excluded.metadata_uri,
+           notification_profile_json = excluded.notification_profile_json,
+           notification_profile_hash = excluded.notification_profile_hash,
+           notification_updated_at = excluded.notification_updated_at,
+           created_at = excluded.created_at,
+           updated_at = excluded.updated_at
+       WHERE store_supplier_metadata.review_status = ?`
+    ).run(...supplierValues(record), expected));
+    return updated.changes > 0;
+  }
+
   async appendAudit(record: StoreSupplierAuditInput): Promise<void> {
     runSqliteWrite(() => {
       this.#database.prepare(

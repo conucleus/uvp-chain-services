@@ -136,6 +136,54 @@ export class SqliteGovernanceStore implements GovernanceStore {
     });
   }
 
+  async putReviewIfStatus(review: GovernanceReviewDTO, expected: GovernanceReviewDTO["status"]): Promise<boolean> {
+    // 条件 upsert（CAS）：行不存在按新档插入；存在时 DO UPDATE 附
+    // WHERE status=? ——行已迁移则 changes 0，过期校验结果不得覆盖。
+    const updated = runSqliteWrite(() => this.#database.prepare(
+      `INSERT INTO governance_review (
+         review_id, subject_type, subject_id, status, risk_level, risk_tags_json,
+         public_summary, internal_notes, policy_hash, metadata_hash, metadata_uri,
+         reviewer, created_at, updated_at, metadata_document_json, policy_document_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(review_id)
+       DO UPDATE SET
+         subject_type = excluded.subject_type,
+         subject_id = excluded.subject_id,
+         status = excluded.status,
+         risk_level = excluded.risk_level,
+         risk_tags_json = excluded.risk_tags_json,
+         public_summary = excluded.public_summary,
+         internal_notes = excluded.internal_notes,
+         policy_hash = excluded.policy_hash,
+         metadata_hash = excluded.metadata_hash,
+         metadata_uri = excluded.metadata_uri,
+         reviewer = excluded.reviewer,
+         updated_at = excluded.updated_at,
+         metadata_document_json = excluded.metadata_document_json,
+         policy_document_json = excluded.policy_document_json
+       WHERE governance_review.status = ?`
+    ).run(
+      review.reviewId,
+      review.subjectType,
+      review.subjectId,
+      review.status,
+      review.riskLevel,
+      stringifyStorageJson(review.riskTags),
+      review.publicSummary,
+      review.internalNotes,
+      review.policyHash,
+      review.metadataHash,
+      review.metadataURI,
+      review.reviewer,
+      review.createdAt,
+      review.updatedAt,
+      review.metadataDocument !== undefined ? stringifyStorageJson(review.metadataDocument) : null,
+      review.policyDocument !== undefined ? stringifyStorageJson(review.policyDocument) : null,
+      expected
+    ));
+    return updated.changes > 0;
+  }
+
   async findLatestReview(
     subjectType: GovernanceSubjectType,
     subjectId: string

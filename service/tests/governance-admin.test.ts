@@ -458,6 +458,68 @@ describe("identity governance API", () => {
     });
   });
 
+  it("rejects a review transition validated against a stale snapshot", async () => {
+    // review 状态机校验是 check-then-act：校验读取后行被并发迁移
+    //（如撤销），过期校验结果的整行写不得把 revoked 盖回 restricted。
+    const base = new InMemoryGovernanceStore();
+    const principal = { adminId: "admin-1", role: "admin" };
+    const service = createGovernanceService({
+      adapter: {
+        async registerIdentity() {
+          return { status: "simulated_tx", retryable: false, simulated: true };
+        },
+        async revokeIdentity() {
+          return { status: "simulated_tx", retryable: false, simulated: true };
+        },
+      },
+      store: base,
+    });
+    const created = await service.reviewSupplier(
+      { subjectId, status: "approved_for_broadcast", publicSummary: "Identity checked." },
+      principal,
+    );
+    const reviewId = created.review.reviewId;
+    await service.reviewSupplier(
+      { reviewId, subjectId, status: "revoked", publicSummary: "Revoked concurrently." },
+      principal,
+    );
+
+    // 代理 getReview：下一次读取返回 approved_for_broadcast 的过期快照，
+    // 模拟"校验已读、写入未落"窗口内的并发撤销。
+    let staleReadPending = false;
+    const doctored: InMemoryGovernanceStore = Object.create(base);
+    doctored.getReview = async (reviewId: string) => {
+      const latest = await base.getReview(reviewId);
+      if (staleReadPending && latest) {
+        staleReadPending = false;
+        return { ...latest, status: "approved_for_broadcast" as const };
+      }
+      return latest;
+    };
+    const racing = createGovernanceService({
+      store: doctored,
+      adapter: {
+        async registerIdentity() {
+          return { status: "simulated_tx", retryable: false, simulated: true };
+        },
+        async revokeIdentity() {
+          return { status: "simulated_tx", retryable: false, simulated: true };
+        },
+      },
+    });
+
+    staleReadPending = true;
+    await expect(
+      racing.reviewSupplier({ reviewId, subjectId, status: "restricted" }, principal),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "invalid_review_transition",
+    });
+    await expect(base.findLatestReview("supplier", subjectId)).resolves.toMatchObject({
+      status: "revoked",
+    });
+  });
+
   it("assembles a fail-closed refusing governance adapter for production when broadcast is disabled", async () => {
     // production 禁 env 私钥治理（GOVERNANCE_BROADCAST_ENABLED=true 被
     // validateProductionSafety 拒绝），广播关闭时装配拒绝适配器——服务可

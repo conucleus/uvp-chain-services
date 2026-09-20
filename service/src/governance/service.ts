@@ -387,11 +387,30 @@ async function saveReviewFromRecord(options: {
     ...(metadataDocument !== undefined ? { metadataDocument } : {}),
     ...(policyDocument !== undefined ? { policyDocument } : {})
   };
-  await options.store.putReview(review);
+  // 状态迁移以条件更新收口：校验（canTransition）与写入之间行可能已被
+  // 并发迁移，过期校验结果不得覆盖赢家。同目标状态的并发更新幂等重放。
+  if (!(await options.store.putReviewIfStatus(review, existing?.status ?? review.status))) {
+    const latest = await requireReviewForConflict(options.store, review.reviewId);
+    if (latest.status !== status) {
+      throw new GovernanceServiceError(409, "invalid_review_transition", `${latest.status} cannot transition to ${status}`);
+    }
+    await options.store.putReviewIfStatus(review, latest.status);
+  }
   return {
     review,
     publicReview: toPublicGovernanceReview(review)
   };
+}
+
+async function requireReviewForConflict(
+  store: GovernanceStore,
+  reviewId: string
+): Promise<GovernanceReviewDTO> {
+  const latest = await store.getReview(reviewId);
+  if (!latest) {
+    throw new GovernanceServiceError(404, "review_not_found", "review not found");
+  }
+  return latest;
 }
 
 function canTransitionReviewStatus(from: GovernanceReviewStatus, to: GovernanceReviewStatus): boolean {
@@ -477,7 +496,15 @@ async function markReviewRevoked(
     reviewer: principal.adminId,
     updatedAt: now().toISOString()
   };
-  await store.putReview(updated);
+  // 预翻转必须条件落库：撤销是 revoke 广播的前置，并发方先改了 review
+  // 状态时，过期快照的翻转不得覆盖（已 revoked 的档幂等返回）。
+  if (!(await store.putReviewIfStatus(updated, review.status))) {
+    const latest = await requireReviewForConflict(store, review.reviewId);
+    if (latest.status !== "revoked") {
+      throw new GovernanceServiceError(409, "invalid_review_transition", `${latest.status} cannot transition to revoked`);
+    }
+    return latest;
+  }
   return updated;
 }
 

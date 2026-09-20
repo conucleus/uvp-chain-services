@@ -80,9 +80,15 @@ export class InMemoryEvidenceMetadataStore implements EvidenceMetadataStore {
   }
 
   async markBound(input: BindEvidenceRequestDTO): Promise<EvidenceMetadataRecord | undefined> {
+    // 条件翻转（CAS，与 sqlite/postgres 实现同口径）：仅 uploaded 可绑
+    // 定，并发双绑的败者拿回赢家的绑定档（同订单幂等、跨订单由服务层
+    // 复核拒绝），不得覆盖赢家的归属。
     const current = this.#records.get(input.evidenceId);
     if (!current) {
       return undefined;
+    }
+    if (current.evidence.status !== "uploaded") {
+      return current;
     }
     const updated: EvidenceMetadataRecord = {
       ...current,

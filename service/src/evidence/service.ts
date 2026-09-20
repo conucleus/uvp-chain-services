@@ -342,7 +342,19 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
       const updated = metadataStore.markBound
         ? await metadataStore.markBound(binding)
         : await putBoundRecord(metadataStore, record, binding);
-      return updated ? recordToDto(updated) : undefined;
+      if (!updated) {
+        return undefined;
+      }
+      // 绑定落库后的归属复核：并发双绑的败者会拿到赢家的绑定档——同链上
+      // 订单按幂等收敛，跨订单是归属冲突，与前置检查同响应 409，不得把
+      // 别人的绑定当成本次成功返回。
+      if (
+        updated.evidence.status === "bound" &&
+        updated.evidence.boundOnchainOrderId?.toLowerCase() !== binding.onchainOrderId.toLowerCase()
+      ) {
+        throw new EvidenceServiceError("invalid_request", "evidence is already bound to a different order", 409);
+      }
+      return recordToDto(updated);
     },
 
     async verifyEvidenceBackup(evidenceId, principal) {
