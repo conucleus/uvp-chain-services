@@ -1063,6 +1063,54 @@ describe("product API routes", () => {
       });
   });
 
+  it("keeps /product/me task and order visibility on the same effective-assignee basis", async () => {
+    // 任务归属按生效指派（执行者 overlay/能力提交者优先，回退链上指派）；
+    // 订单可见性必须取同一个判据。授权轮换（同 (source, signal) 的最新
+    // 授权者接管）后：接手者任务与订单两栏同时可见、被接管者两栏同时
+    // 退场——不允许"看得到任务却看不到订单"（或反之）的分裂。
+    const rival = "0x6666666666666666666666666666666666666666";
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineProductEvents(),
+        chainEvent(8n, "SignalSubmitterAuthorized", {
+          orderId: stateMachineOrderId,
+          sourceId: hookId,
+          signalId,
+          submitter,
+          role: `0x${"33".repeat(32)}`,
+          metadataHash: `0x${"44".repeat(32)}`
+        }),
+        chainEvent(9n, "SignalSubmitterAuthorized", {
+          orderId: stateMachineOrderId,
+          sourceId: hookId,
+          signalId,
+          submitter: rival,
+          role: `0x${"33".repeat(32)}`,
+          metadataHash: `0x${"44".repeat(32)}`
+        })
+      ]
+    });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
+
+    const rivalTasks = await router.handle({ method: "GET", pathname: "/product/me/tasks", headers: { "x-uvp-wallet-address": rival } });
+    const rivalOrders = await router.handle({ method: "GET", pathname: "/product/me/orders", headers: { "x-uvp-wallet-address": rival } });
+    expect(((rivalTasks.body as { tasks: unknown[] }).tasks ?? []).length).toBeGreaterThan(0);
+    expect(
+      ((rivalOrders.body as { orders: { orderId: string }[] }).orders)
+        .some((order) => order.orderId === stateMachineOrderId),
+    ).toBe(true);
+
+    const previousTasks = await router.handle({ method: "GET", pathname: "/product/me/tasks", headers: assigneeHeaders });
+    const previousOrders = await router.handle({ method: "GET", pathname: "/product/me/orders", headers: assigneeHeaders });
+    expect(((previousTasks.body as { tasks: unknown[] }).tasks ?? [])).toEqual([]);
+    expect(
+      ((previousOrders.body as { orders: { orderId: string }[] }).orders)
+        .some((order) => order.orderId === stateMachineOrderId),
+    ).toBe(false);
+  });
+
   it("marks HookReady task submitted when a matching signal is projected", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents({ includeMatchingSignal: true }) });

@@ -458,8 +458,12 @@ export function createProductService(
             .map(({ dto }) => dto)
         : [];
       const visibleOrderKeys = new Set<string>();
-      for (const { task, order } of visibleTaskRows) {
-        if (walletAddress && task.assigneeWallet?.toLowerCase() === walletAddress && order) {
+      // 订单可见性与任务列表同一口径：任务归属按 DTO 的生效指派
+      // （执行者 overlay/能力提交者优先，回退链上指派）。此前任务列表用
+      // 生效指派、订单列表用原始投影指派——overlay 接管执行者后，接手者
+      // 看得到任务却看不到订单，被接管者反之，me 视图两栏互相矛盾。
+      for (const { order, dto } of visibleTaskRows) {
+        if (walletAddress && dto.assigneeWallet?.toLowerCase() === walletAddress && order) {
           visibleOrderKeys.add(stateMachineOrderProjectionKey(
             order.chainId,
             order.contractAddress,
