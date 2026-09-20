@@ -1,0 +1,23 @@
+# 本镜像的构建上下文是 uvp-eth 伞仓根（见 Dockerfile 头注释），这是
+# 针对该上下文的 allowlist：只有下列路径进入构建，伞仓其余业务仓、
+# 嵌套私有 submodule、node_modules、Rust target 与 .git 一律不进。
+**
+!package.json
+!pnpm-workspace.yaml
+!pnpm-lock.yaml
+!uvp-chain-services/
+!uvp-chain-services/**
+!uvp-protocol/packages/
+!uvp-protocol/packages/**
+!uvp-core/Cargo.toml
+!uvp-core/Cargo.lock
+!uvp-core/rust-toolchain.toml
+!uvp-core/crates/
+!uvp-core/crates/**
+# allowlist 目录内的依赖/构建产物仍然排除：镜像内一律重装重编。
+uvp-chain-services/node_modules/
+uvp-chain-services/service/node_modules/
+uvp-chain-services/service/dist/
+uvp-protocol/packages/**/node_modules/
+uvp-protocol/packages/**/dist/
+uvp-core/target/
