@@ -88,6 +88,7 @@ describe("durable Store operator audit", () => {
     const reopenedRouter = createApiRouter(reopened.projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       storeAuditStore: reopened.storeAuditStore
     });
+    // 审计流按租户隔离（U5）：跨 actor 的过滤读属于管理员视角。
     const auditResponse = await reopenedRouter.handle({
       method: "GET",
       pathname: "/store/audit",
@@ -97,7 +98,7 @@ describe("durable Store operator audit", () => {
         outcome: "succeeded",
         limit: "10"
       },
-      headers: readerHeaders
+      headers: adminHeaders
     });
 
     expect(auditResponse.status).toBe(200);
@@ -118,6 +119,69 @@ describe("durable Store operator audit", () => {
       action: "store.draft.import",
       outcome: "succeeded"
     }));
+  });
+
+  it("isolates the audit stream per acting tenant (U5)", async () => {
+    const audit = new InMemoryAuditSink();
+    const stores = openStores(sqliteUrl(tempDirs), openedStores);
+    const router = createApiRouter(stores.projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
+      audit,
+      storeAuditStore: stores.storeAuditStore
+    });
+
+    // operator-1 落下一条成功审计；reader 是另一个主体（不同 principal）。
+    const importResponse = await router.handle({
+      method: "POST",
+      pathname: "/store/zhixu-drafts/import",
+      headers: { ...operatorHeaders, "x-uvp-request-id": "req-audit-tenant-1" },
+      body: {
+        sourceKind: "zhixu_yaml",
+        content: "apiVersion: uvp/v0\nkind: Zhixu\nmetadata:\n  name: tenant-isolated\n",
+        title: "Tenant isolated"
+      }
+    });
+    expect(importResponse.status).toBe(201);
+
+    // 非管理员只读到自己 actor 名下的流：reader 名下无记录 → 空集，
+    // 不能再枚举运营方 colleague 的审计轨迹。
+    const readerStream = await router.handle({
+      method: "GET",
+      pathname: "/store/audit",
+      headers: readerHeaders
+    });
+    expect(readerStream.status).toBe(200);
+    expect(((readerStream.body as { records: { actor: string }[] }).records)
+      .every((record) => record.actor === "audit-reader")).toBe(true);
+    expect((readerStream.body as { records: unknown[] }).records).toHaveLength(0);
+
+    // 显式点名他人 actor：直接 403，不静默降级成空集。
+    await expect(router.handle({
+      method: "GET",
+      pathname: "/store/audit",
+      query: { actor: "audit-operator" },
+      headers: readerHeaders
+    })).resolves.toMatchObject({ status: 403, body: { error: "store_audit_actor_forbidden" } });
+
+    // 操作者本人能读自己的轨迹；管理员保留全量视角。
+    const operatorStream = await router.handle({
+      method: "GET",
+      pathname: "/store/audit",
+      headers: operatorHeaders
+    });
+    expect(operatorStream.status).toBe(200);
+    expect(((operatorStream.body as { records: { actor: string }[] }).records)
+      .every((record) => record.actor === "audit-operator")).toBe(true);
+    expect(((operatorStream.body as { records: { requestId?: string }[] }).records)
+      .some((record) => record.requestId === "req-audit-tenant-1")).toBe(true);
+
+    const adminStream = await router.handle({
+      method: "GET",
+      pathname: "/store/audit",
+      headers: adminHeaders
+    });
+    expect(adminStream.status).toBe(200);
+    expect(((adminStream.body as { records: { actor: string }[] }).records)
+      .some((record) => record.actor === "audit-operator")).toBe(true);
   });
 
   it("redacts sensitive audit metadata before durable storage", async () => {
@@ -190,7 +254,7 @@ describe("durable Store operator audit", () => {
         action: "store.supplier.create",
         outcome: "duplicate"
       },
-      headers: readerHeaders
+      headers: adminHeaders
     })).resolves.toMatchObject({
       status: 200,
       body: {

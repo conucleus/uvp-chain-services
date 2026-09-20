@@ -180,6 +180,7 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'evidence_not_found',
   'evidence_not_usable',
   'evidence_order_mismatch',
+  'evidence_slot_required',
   'evidence_stage_mismatch',
   'evidence_task_mismatch',
   'prepare_already_used',

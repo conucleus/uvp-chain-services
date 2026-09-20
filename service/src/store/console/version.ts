@@ -145,11 +145,11 @@ export function createStoreZhixuVersionService(options: {
         input,
         now,
       });
-      const summary = await summarizeRecord(
-        record,
+      const view = await loadVersionSummaryView(
         options.productService,
         options.projectionStore,
       );
+      const summary = summarizeRecord(record, view);
       // 激活确认取服务端记录——publicationStatus 由
       // 链投影（stateMachinePlans）判定，调用方自报的 planId/planHash 不是
       // 激活的依据；记录锚不可改（patchVersionRecord 拒绝）。
@@ -251,8 +251,10 @@ export function createStoreZhixuVersionService(options: {
       return activeRecord
         ? summarizeRecord(
             activeRecord,
-            options.productService,
-            options.projectionStore,
+            await loadVersionSummaryView(
+              options.productService,
+              options.projectionStore,
+            ),
           )
         : undefined;
     },
@@ -267,8 +269,10 @@ async function mutationResult(
   projectionStore: ProjectionStore,
   now: () => Date,
 ): Promise<StoreZhixuVersionMutationDTO> {
-  const [version, versions] = await Promise.all([
-    summarizeRecord(record, productService, projectionStore),
+  // 快照与订单计数视图单次加载、系列内共享：逐版本各自拉全量订单是
+  // O(版本×全量订单) 放大，列表端点的代价随版本数线性叠加。
+  const [view, versions] = await Promise.all([
+    loadVersionSummaryView(productService, projectionStore),
     summarizeSeries({
       seriesId,
       metadataStore,
@@ -280,7 +284,7 @@ async function mutationResult(
   return {
     sourceOfTruth: "contracts-and-chain-events",
     seriesId,
-    version,
+    version: summarizeRecord(record, view),
     versions,
   };
 }
@@ -412,13 +416,13 @@ async function summarizeSeries(input: {
   readonly projectionStore: ProjectionStore;
   readonly now: () => Date;
 }): Promise<readonly StoreZhixuVersionSummaryDTO[]> {
-  const records = await effectiveVersionRecords(input);
-  const summaries = await Promise.all(
-    records.map((record) =>
-      summarizeRecord(record, input.productService, input.projectionStore),
-    ),
-  );
-  return summaries.sort(compareVersionSummaries);
+  const [records, view] = await Promise.all([
+    effectiveVersionRecords(input),
+    loadVersionSummaryView(input.productService, input.projectionStore),
+  ]);
+  return records
+    .map((record) => summarizeRecord(record, view))
+    .sort(compareVersionSummaries);
 }
 
 async function effectiveVersionRecords(input: {
@@ -480,19 +484,58 @@ async function synthesizeDefaultVersion(
   };
 }
 
-async function summarizeRecord(
-  record: StoreZhixuVersionRecord,
+/**
+ * 版本摘要的共享读视图：订单快照一次、订单计数按 (planId, planHash)
+ * 预先索引——系列内每个版本只做一次查表，不再逐版本扫全量订单。
+ */
+interface VersionSummaryView {
+  readonly snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>;
+  readonly orderCountByPlanAndHash: ReadonlyMap<string, number>;
+  readonly orderCountByPlanWithoutHash: ReadonlyMap<string, number>;
+}
+
+async function loadVersionSummaryView(
   productService: ProductService,
   projectionStore: ProjectionStore,
-): Promise<StoreZhixuVersionSummaryDTO> {
-  const [orderSnapshot, orders] = await Promise.all([
+): Promise<VersionSummaryView> {
+  const [snapshot, orders] = await Promise.all([
     projectionStore.getOrderSnapshot(),
     productService.listOrders(),
   ]);
+  const orderCountByPlanAndHash = new Map<string, number>();
+  const orderCountByPlanWithoutHash = new Map<string, number>();
+  for (const order of orders) {
+    if (!order.planId) {
+      continue;
+    }
+    if (!order.planHash) {
+      // 无 planHash 的订单按原口径计入同 planId 的任意版本。
+      orderCountByPlanWithoutHash.set(order.planId, (orderCountByPlanWithoutHash.get(order.planId) ?? 0) + 1);
+      continue;
+    }
+    const key = versionOrderKey(order.planId, order.planHash);
+    orderCountByPlanAndHash.set(key, (orderCountByPlanAndHash.get(key) ?? 0) + 1);
+  }
+  return { snapshot, orderCountByPlanAndHash, orderCountByPlanWithoutHash };
+}
+
+function versionOrderKey(planId: string, planHash: string): string {
+  return `${planId}\u0000${planHash}`;
+}
+
+function orderCountForVersion(view: VersionSummaryView, planId: Hex, planHash: Hex): number {
+  return (view.orderCountByPlanAndHash.get(versionOrderKey(planId, planHash)) ?? 0) +
+    (view.orderCountByPlanWithoutHash.get(planId) ?? 0);
+}
+
+function summarizeRecord(
+  record: StoreZhixuVersionRecord,
+  view: VersionSummaryView,
+): StoreZhixuVersionSummaryDTO {
   // "published" 要求链上已 finalize（PlanFinalized/PlanRegistered 均在
   // finalize 交易内发出）：投影桶在 commitPlan 即建，仅凭桶存在会把
   // 待定计划当成已发布。
-  const plan = findFinalizedPlan(orderSnapshot, record.planId, record.planHash);
+  const plan = findFinalizedPlan(view.snapshot, record.planId, record.planHash);
   const publicationStatus: PlanPublicationStatus = plan ? "published" : "not_found";
   const artifactHash = record.artifactHash;
   return {
@@ -505,11 +548,7 @@ async function summarizeRecord(
     planHash: record.planHash,
     ...(artifactHash ? { artifactHash } : {}),
     publicationStatus,
-    orderCount: orders.filter(
-      (order) =>
-        order.planId === record.planId &&
-        (!order.planHash || order.planHash === record.planHash),
-    ).length,
+    orderCount: orderCountForVersion(view, record.planId, record.planHash),
     createdAt: record.createdAt,
     ...(record.cutoverAt ? { cutoverAt: record.cutoverAt } : {}),
     ...(record.cutoverReason ? { cutoverReason: record.cutoverReason } : {}),

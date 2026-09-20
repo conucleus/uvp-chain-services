@@ -69,6 +69,12 @@ export interface EvidenceServiceOptions {
   readonly maxPayloadBytes?: number;
   /** 必填：生产存储边界断言按环境档位定宽严，缺省 local 是 fail-open。 */
   readonly runtimeEnvironment: EvidenceStorageRuntimeEnvironment;
+  /**
+   * 草稿期证据（draftId 来源）绑定订单前的事实源：把 draftId 解析成该
+   * 草稿已触发的订单 id。缺省时草稿来源凭证不可绑定（fail-closed）——
+   * "先存后绑"要求订单与草稿的对应关系可证明，不允许凭空绑定。
+   */
+  readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
 }
 
 export interface EvidenceService {
@@ -111,6 +117,12 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
       const draftId = optionalNonEmptyString(input.draftId, "draftId");
       if (!orderId && !draftId) {
         throw invalidRequest("either orderId or draftId is required");
+      }
+      // 《证据与存证规则》二.4：草稿期以 draftId 替代订单成分参与指纹——
+      // 是替代不是叠加，两者并提会让 draftId 悄悄退出指纹，同一哈希对应
+      // 两个不同的绑定元组。
+      if (orderId && draftId) {
+        throw invalidRequest("orderId and draftId are mutually exclusive; draft-period evidence substitutes draftId for the order component");
       }
 
       const taskId = optionalNonEmptyString(input.taskId, "taskId");
@@ -166,6 +178,10 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
       // 副本，也不会把另一草稿/任务的同内容凭证错记到本名下。
       const existing = await metadataStore.findOwnedByPayloadHash?.(payloadHash, ownerParticipantId);
       if (existing) {
+        assertIdempotentBindingTuple(existing, {
+          ...(orderId ? { orderId } : {}),
+          ...(draftId ? { draftId } : {})
+        });
         return {
           evidence: existing.evidence,
           metadata: existing.metadata,
@@ -216,6 +232,10 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
       // 既有记录幂等返回，不再以存储错误 500 泄露。
       const raceExisting = await metadataStore.insertIfPayloadHashAbsent(record);
       if (raceExisting) {
+        assertIdempotentBindingTuple(raceExisting, {
+          ...(orderId ? { orderId } : {}),
+          ...(draftId ? { draftId } : {})
+        });
         return {
           evidence: raceExisting.evidence,
           metadata: raceExisting.metadata,
@@ -301,6 +321,7 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
         return undefined;
       }
       assertBindable(record, binding);
+      await assertDraftOriginBoundToOrder(record, binding, options.resolveDraftOrder);
       if (!canWriteEvidence(bindingPrincipal, record.evidence.ownerParticipantId)) {
         throw new EvidenceServiceError(
           "forbidden",
@@ -472,11 +493,60 @@ function assertBindable(record: EvidenceMetadataRecord, binding: BindEvidenceReq
     throw new EvidenceServiceError("invalid_request", "evidence belongs to a different order", 409);
   }
   if (record.evidence.status === "bound") {
+    // 已绑定记录的幂等重放只对同一链上订单成立：换订单重放（尤其
+    // draftId 来源、库里无 orderId 可比对的历史记录）必须 409，不能
+    // 静默返回首单的旧档案让调用方误以为绑定成功。
+    if (record.evidence.boundOnchainOrderId?.toLowerCase() !== binding.onchainOrderId.toLowerCase()) {
+      throw new EvidenceServiceError("invalid_request", "evidence is already bound to a different order", 409);
+    }
     return;
   }
   if (record.evidence.status !== "uploaded") {
     throw new EvidenceServiceError("invalid_request", "evidence status cannot be bound", 409);
   }
+}
+
+/**
+ * 草稿期上传的凭证（draftId 来源，无 orderId）绑定订单前必须能证明
+ * "该草稿触发的就是这个订单"：解析器缺省或解析不到订单即拒绝——
+ * 《证据与存证规则》二.4 的"先存后绑"要求绑定有事实依据，不允许
+ * 草稿凭证漂移到任意订单名下。
+ */
+async function assertDraftOriginBoundToOrder(
+  record: EvidenceMetadataRecord,
+  binding: BindEvidenceRequestDTO,
+  resolveDraftOrder: ((draftId: string) => Promise<string | undefined>) | undefined
+): Promise<void> {
+  if (record.evidence.orderId || !record.evidence.draftId) {
+    return;
+  }
+  const draftOrder = await resolveDraftOrder?.(record.evidence.draftId);
+  if (!draftOrder || draftOrder.toLowerCase() !== binding.orderId.toLowerCase()) {
+    throw new EvidenceServiceError(
+      "invalid_request",
+      "draft evidence can only be bound to the order created from its draft",
+      409
+    );
+  }
+}
+
+/**
+ * 重复上传幂等返回前校验绑定元组一致：payloadHash 相同但已存记录的
+ * （orderId, draftId）与本次请求不一致时按 409 拒绝，不把另一订单/
+ * 草稿名下的既有记录当成本次上传的结果返回。
+ */
+function assertIdempotentBindingTuple(
+  existing: EvidenceMetadataRecord,
+  requested: { readonly orderId?: string; readonly draftId?: string }
+): void {
+  if (existing.evidence.orderId === requested.orderId && existing.evidence.draftId === requested.draftId) {
+    return;
+  }
+  throw new EvidenceServiceError(
+    "evidence_already_bound",
+    "an identical evidence payload is already recorded under a different order/draft binding",
+    409
+  );
 }
 
 function requireAuthenticated(principal: EvidencePrincipal): void {

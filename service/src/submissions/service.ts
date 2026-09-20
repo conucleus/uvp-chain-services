@@ -64,6 +64,12 @@ export interface ProductSubmissionServiceOptions {
    * projection cannot supply a non-zero planId.
    */
   readonly resolveOrderPlanId?: (onchainOrderId: Hex) => Promise<Hex | undefined>;
+  /**
+   * 草稿期上传的凭证（draftId 来源）进入提交前的归属核验：把 draftId
+   * 解析成该草稿已触发的订单 id，与目标订单比对。缺省或解析不到时
+   * draftId 来源凭证一律拒绝（fail-closed）——空 orderId 不是通行证。
+   */
+  readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
   readonly now?: () => Date;
   readonly prepareTtlSeconds?: number;
   readonly prepareIdFactory?: () => string;
@@ -128,8 +134,12 @@ export function createProductSubmissionService(options: ProductSubmissionService
         principal,
         orderId: task.orderId,
         taskId,
-        stageIdentifier: task.stageId
+        stageIdentifier: task.stageId,
+        ...(options.resolveDraftOrder ? { resolveDraftOrder: options.resolveDraftOrder } : {})
       });
+      // 《证据与存证规则》二.1/二.2：必填凭证槽位的最终门在服务端——
+      // 前端渲染只是提示，提交入口按任务的证据槽位声明校验必填凭证在场。
+      validateEvidenceSlots(task, evidence);
       const payload = payloadForEvidence(evidence);
       const authRequest: SubmissionAuthorizationRequest = {
         task,
@@ -739,6 +749,7 @@ async function resolveEvidence(input: {
   readonly orderId: string;
   readonly taskId: string;
   readonly stageIdentifier: string;
+  readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
 }): Promise<readonly EvidenceRecordDTO[]> {
   if (input.evidenceIds.length === 0) {
     throw new ProductSubmissionError(400, "evidence_required", "at least one evidenceId is required");
@@ -750,7 +761,7 @@ async function resolveEvidence(input: {
     if (!record) {
       throw new ProductSubmissionError(404, "evidence_not_found", `evidence not found: ${evidenceId}`);
     }
-    validateEvidenceRecord(record, input);
+    await validateEvidenceRecord(record, input);
     const proof = await input.evidenceReader.getProof(evidenceId, input.principal);
     if (!proof) {
       throw new ProductSubmissionError(404, "evidence_not_found", `evidence proof not found: ${evidenceId}`);
@@ -766,14 +777,15 @@ async function resolveEvidence(input: {
   return records;
 }
 
-function validateEvidenceRecord(
+async function validateEvidenceRecord(
   record: EvidenceRecordDTO,
   expected: {
     readonly orderId: string;
     readonly taskId: string;
     readonly stageIdentifier: string;
+    readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
   }
-): void {
+): Promise<void> {
   const evidence = record.evidence;
   if (evidence.status !== "uploaded" && evidence.status !== "bound") {
     throw new ProductSubmissionError(409, "evidence_not_usable", "evidence status is not usable for submit", {
@@ -781,10 +793,25 @@ function validateEvidenceRecord(
       status: evidence.status
     });
   }
-  if (evidence.orderId && evidence.orderId !== expected.orderId) {
-    throw new ProductSubmissionError(409, "evidence_order_mismatch", "evidence belongs to a different order", {
-      evidenceId: evidence.evidenceId
-    });
+  if (evidence.orderId) {
+    if (evidence.orderId !== expected.orderId) {
+      throw new ProductSubmissionError(409, "evidence_order_mismatch", "evidence belongs to a different order", {
+        evidenceId: evidence.evidenceId
+      });
+    }
+  } else {
+    // 空 orderId 只允许一种形态：草稿期上传（draftId 来源）且该草稿
+    // 触发的正是目标订单。草稿未触发、触发成他单或无法解析归属时
+    // 一律拒绝——草稿凭证不得漂移进无关订单的提交。
+    const draftOrder = evidence.draftId && expected.resolveDraftOrder
+      ? await expected.resolveDraftOrder(evidence.draftId)
+      : undefined;
+    if (!draftOrder || draftOrder.toLowerCase() !== expected.orderId.toLowerCase()) {
+      throw new ProductSubmissionError(409, "evidence_order_mismatch", "evidence is not bound to this order", {
+        evidenceId: evidence.evidenceId,
+        ...(evidence.draftId ? { draftId: evidence.draftId } : {})
+      });
+    }
   }
   if (evidence.taskId && evidence.taskId !== expected.taskId) {
     throw new ProductSubmissionError(409, "evidence_task_mismatch", "evidence belongs to a different task", {
@@ -794,6 +821,76 @@ function validateEvidenceRecord(
   if (evidence.stageIdentifier !== expected.stageIdentifier) {
     throw new ProductSubmissionError(409, "evidence_stage_mismatch", "evidence belongs to a different stage", {
       evidenceId: evidence.evidenceId
+    });
+  }
+}
+
+interface RequiredEvidenceSlot {
+  /** 凭证槽位对应的 documentType（spec 槽位即 spec key，product-dto 约定）。 */
+  readonly documentType: string;
+  readonly label: string;
+  /** 文本/日期槽位的值随文件上传进 metadata.fields，按 spec key 检查。 */
+  readonly fieldKey?: string;
+}
+
+/**
+ * 任务的必填凭证槽位（合并去重视图：《证据与存证规则》二.2）：
+ * - evidenceSpec 槽位，required 缺省为 true，documentType = spec key；
+ * - 非 metadata 型资源要求槽位，documentType = resourceType（缺省取
+ *   resourceId）；同一 documentType 已由 spec 声明时以 spec 为准；
+ * - 声明缺失即无槽位——不从声明文本臆造通用"阶段凭证"槽位。
+ */
+function requiredEvidenceSlotsForTask(task: ProductTaskDTO): readonly RequiredEvidenceSlot[] {
+  const slots: RequiredEvidenceSlot[] = [];
+  const documentTypes = new Set<string>();
+  for (const entry of task.evidenceSpec ?? []) {
+    if (!entry || typeof entry.key !== "string" || entry.key.trim().length === 0) {
+      continue;
+    }
+    if (entry.required === false) {
+      documentTypes.add(entry.key);
+      continue;
+    }
+    documentTypes.add(entry.key);
+    slots.push({
+      documentType: entry.key,
+      label: entry.label ?? entry.key,
+      ...(entry.inputKind === "text" || entry.inputKind === "date" ? { fieldKey: entry.key } : {})
+    });
+  }
+  for (const resource of task.resourceRequirements ?? []) {
+    if (resource.required === false || resource.resourceType === "metadata") {
+      continue;
+    }
+    const documentType = resource.resourceType ?? resource.resourceId;
+    if (!documentType || documentTypes.has(documentType)) {
+      continue;
+    }
+    documentTypes.add(documentType);
+    slots.push({
+      documentType,
+      label: resource.label ?? documentType
+    });
+  }
+  return slots;
+}
+
+function validateEvidenceSlots(task: ProductTaskDTO, records: readonly EvidenceRecordDTO[]): void {
+  const slots = requiredEvidenceSlotsForTask(task);
+  if (slots.length === 0) {
+    return;
+  }
+  const documentTypes = new Set(records.map((record) => record.metadata.documentType));
+  const fieldValues = records.flatMap((record) =>
+    Object.entries(record.metadata.fields ?? {})
+      .filter(([, value]) => typeof value === "string" && value.trim().length > 0)
+      .map(([key]) => key));
+  const missing = slots.filter((slot) =>
+    !documentTypes.has(slot.documentType) &&
+    !(slot.fieldKey && fieldValues.includes(slot.fieldKey)));
+  if (missing.length > 0) {
+    throw new ProductSubmissionError(409, "evidence_slot_required", "required evidence slots are not satisfied", {
+      missingSlots: missing.map((slot) => ({ documentType: slot.documentType, label: slot.label }))
     });
   }
 }

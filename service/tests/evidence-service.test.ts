@@ -723,6 +723,141 @@ describe("evidence service", () => {
     await expect(service.getEvidence("ev_missing", owner)).resolves.toBeUndefined();
     await expect(service.getProof("ev_missing", owner)).resolves.toBeUndefined();
   });
+
+  it("rejects uploads carrying both orderId and draftId (U4)", async () => {
+    // 草稿期 draftId 替代（不是叠加）订单成分：并提会让 draftId 悄悄
+    // 退出指纹，同一 payloadHash 对应两个绑定元组。
+    const service = testEvidenceService();
+    await expect(service.uploadEvidence({
+      orderId: "order-1",
+      draftId: "draft-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "invoice payload"
+    }, owner)).rejects.toMatchObject({ code: "invalid_request", status: 400 });
+  });
+
+  it("binds draft evidence only to the order created from its draft (U4)", async () => {
+    const metadataStore = new InMemoryEvidenceMetadataStore();
+    const storage = new InMemoryEvidenceStorage();
+    const serviceFor = (resolveDraftOrder?: (draftId: string) => Promise<string | undefined>) =>
+      createEvidenceService({
+        runtimeEnvironment: "local",
+        metadataStore,
+        storage,
+        now: () => new Date("2026-04-28T00:00:00Z"),
+        ...(resolveDraftOrder ? { resolveDraftOrder } : {})
+      });
+    const service = serviceFor();
+    const uploaded = await service.uploadEvidence({
+      draftId: "draft-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      fileName: "invoice.txt",
+      textPayload: "draft invoice"
+    }, owner);
+    const bindTo = (svc: ReturnType<typeof createEvidenceService>, orderId: string, onchainOrderId: ReturnType<typeof txHash>) =>
+      svc.bindEvidence({
+        evidenceId: uploaded.evidence.evidenceId,
+        txHash: txHash("31"),
+        orderId,
+        onchainOrderId,
+        sourceId: txHash("bb"),
+        signalId: txHash("cc")
+      }, owner);
+
+    // 无解析器：草稿与订单的对应关系无法证明，fail-closed 拒绝绑定。
+    await expect(bindTo(service, "order-1", txHash("aa"))).rejects.toMatchObject({ code: "invalid_request", status: 409 });
+
+    // 解析到另一个订单：拒绝——草稿凭证不得漂移到无关订单名下。
+    await expect(bindTo(serviceFor(async () => "order-other"), "order-1", txHash("aa")))
+      .rejects.toMatchObject({ code: "invalid_request", status: 409 });
+
+    // 草稿未触发（解析不到订单）：同样拒绝。
+    await expect(bindTo(serviceFor(async () => undefined), "order-1", txHash("aa")))
+      .rejects.toMatchObject({ code: "invalid_request", status: 409 });
+
+    // 草稿触发的正是目标订单：绑定成功。
+    await expect(bindTo(serviceFor(async (draftId) => draftId === "draft-1" ? "order-1" : undefined), "order-1", txHash("aa")))
+      .resolves.toMatchObject({ evidence: { status: "bound" } });
+
+    // 绑定后的跨订单重放：即使解析器口径放宽也按已存链上订单 409。
+    await expect(bindTo(serviceFor(async () => "order-2"), "order-2", txHash("dd")))
+      .rejects.toMatchObject({ code: "invalid_request", status: 409 });
+  });
+
+  it("refuses idempotent returns when the stored binding tuple differs from the request (U4)", async () => {
+    // 防线钉住契约：即便指纹实现漂移（同 hash 命中不同绑定元组的记录），
+    // 幂等分支也必须 409，而不是把他人订单/草稿名下的记录当本次结果返回。
+    const base = new InMemoryEvidenceMetadataStore();
+    const seeding = createEvidenceService({
+      runtimeEnvironment: "local",
+      metadataStore: base,
+      storage: new InMemoryEvidenceStorage(),
+      now: () => new Date("2026-04-28T00:00:00Z")
+    });
+    const stored = await seeding.uploadEvidence({
+      orderId: "order-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "tuple guard"
+    }, owner);
+    const record = await base.get(stored.evidence.evidenceId);
+    const service = createEvidenceService({
+      runtimeEnvironment: "local",
+      metadataStore: {
+        put: (input) => base.put(input),
+        insertIfPayloadHashAbsent: (input) => base.insertIfPayloadHashAbsent(input),
+        get: (evidenceId) => base.get(evidenceId),
+        recordAdminRead: (entry) => base.recordAdminRead(entry),
+        findOwnedByPayloadHash: async (payloadHash, ownerParticipantId) =>
+          payloadHash.toLowerCase() === stored.evidence.payloadHash.toLowerCase() &&
+          ownerParticipantId.toLowerCase() === stored.evidence.ownerParticipantId.toLowerCase() &&
+          record
+            ? { ...record, evidence: { ...record.evidence, orderId: "order-2" } }
+            : undefined
+      },
+      storage: new InMemoryEvidenceStorage(),
+      now: () => new Date("2026-04-28T00:00:00Z")
+    });
+    await expect(service.uploadEvidence({
+      orderId: "order-1",
+      stageIdentifier: "export-documents",
+      documentType: "invoice",
+      textPayload: "tuple guard"
+    }, owner)).rejects.toMatchObject({ code: "evidence_already_bound", status: 409 });
+  });
+
+  it("rejects replaying a bound evidence to a different chain order under the same order id (U4)", async () => {    const service = testEvidenceService();
+    const upload = await uploadTextEvidence(service, { invoice: "INV-1" });
+    await service.bindEvidence({
+      evidenceId: upload.evidence.evidenceId,
+      txHash: txHash("1"),
+      orderId: "order-1",
+      onchainOrderId: txHash("2"),
+      sourceId: txHash("3"),
+      signalId: txHash("4")
+    }, owner);
+
+    await expect(service.bindEvidence({
+      evidenceId: upload.evidence.evidenceId,
+      txHash: txHash("9"),
+      orderId: "order-1",
+      onchainOrderId: txHash("5"),
+      sourceId: txHash("3"),
+      signalId: txHash("4")
+    }, owner)).rejects.toMatchObject({ code: "invalid_request", status: 409 });
+
+    // 同一链上订单的重放保持幂等（返回首绑档案）。
+    await expect(service.bindEvidence({
+      evidenceId: upload.evidence.evidenceId,
+      txHash: txHash("9"),
+      orderId: "order-1",
+      onchainOrderId: txHash("2"),
+      sourceId: txHash("3"),
+      signalId: txHash("4")
+    }, owner)).resolves.toMatchObject({ evidence: { boundOnchainOrderId: txHash("2") } });
+  });
 });
 
 function objectStorageWithUri(storageURI: string): ObjectEvidenceStorage {

@@ -1701,6 +1701,129 @@ describe("product task submissions", () => {
     });
     expect(inner.broadcast).toHaveBeenCalledTimes(2);
   });
+
+  it("rejects draft-origin evidence replayed into a submission it is not bound to (U4)", async () => {
+    const evidenceService = createEvidenceService({
+      runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => baseNow,
+      evidenceIdFactory: () => "ev_draft_replay"
+    });
+    const uploaded = await evidenceService.uploadEvidence({
+      draftId: "draft-1",
+      stageIdentifier: task.stageId,
+      documentType: "customs-declaration",
+      fileName: "customs.txt",
+      textPayload: "draft-period customs declaration",
+      metadata: {
+        businessLabel: "Customs declaration",
+        fields: { declarationNo: "CD-DRAFT" }
+      }
+    }, owner);
+    const serviceFor = (resolveDraftOrder?: (draftId: string) => Promise<string | undefined>) =>
+      createProductSubmissionService({
+        productTasks: {
+          getTask: async (taskId) => taskId === task.taskId ? task : undefined
+        },
+        evidenceReader: evidenceService,
+        chainId,
+        verifyingContract,
+        resolveOrderPlanId: async () => planId,
+        authorization: permissiveProductProjectionAuthorization(),
+        ...(resolveDraftOrder ? { resolveDraftOrder } : {}),
+        now: () => baseNow
+      });
+    const prepareDraftSubmit = (service: ReturnType<typeof createProductSubmissionService>) =>
+      service.prepareSubmit(task.taskId, {
+        evidenceIds: [uploaded.evidence.evidenceId],
+        walletAddress: submitter,
+        intent: "confirm_stage"
+      }, owner);
+
+    // 草稿触发了另一个订单：凭证不得进入本订单的提交。
+    await expect(prepareDraftSubmit(serviceFor(async () => "0x0000000000000000000000000000000000000000000000000000000000009999")))
+      .rejects.toMatchObject({ code: "evidence_order_mismatch", status: 409 });
+    // 草稿尚未触发成订单：无归属可证，拒绝。
+    await expect(prepareDraftSubmit(serviceFor(async () => undefined)))
+      .rejects.toMatchObject({ code: "evidence_order_mismatch", status: 409 });
+    // 无解析器装配：空 orderId 不再放行（fail-closed）。
+    await expect(prepareDraftSubmit(serviceFor()))
+      .rejects.toMatchObject({ code: "evidence_order_mismatch", status: 409 });
+    // 草稿触发的正是目标订单：提交准备成功。
+    await expect(prepareDraftSubmit(serviceFor(async (draftId) =>
+      draftId === "draft-1" ? task.orderId : undefined)))
+      .resolves.toMatchObject({ orderId: task.orderId });
+  });
+
+  it("enforces required evidence slots from the task evidenceSpec at prepare (M51)", async () => {
+    const slotTask = {
+      ...task,
+      evidenceSpec: [
+        { key: "invoice", label: "商业发票", inputKind: "file" as const, required: true },
+        { key: "packing-list", label: "装箱单", inputKind: "file" as const, required: false },
+        { key: "customs-note", label: "报关备注", inputKind: "text" as const, required: true }
+      ]
+    } as unknown as ProductTaskDTO;
+    const evidenceService = createEvidenceService({
+      runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => baseNow,
+      evidenceIdFactory: sequentialIds(["ev_slot_invoice", "ev_slot_other"])
+    });
+    // 文件槽位（invoice）上传 + 文本槽位（customs-note）值随元数据字段。
+    const invoice = await evidenceService.uploadEvidence({
+      orderId: slotTask.orderId,
+      taskId: slotTask.taskId,
+      stageIdentifier: slotTask.stageId,
+      documentType: "invoice",
+      fileName: "invoice.txt",
+      textPayload: "invoice payload",
+      metadata: {
+        businessLabel: "Invoice",
+        fields: { "customs-note": "免检口岸" }
+      }
+    }, owner);
+    const otherDocument = await evidenceService.uploadEvidence({
+      orderId: slotTask.orderId,
+      taskId: slotTask.taskId,
+      stageIdentifier: slotTask.stageId,
+      documentType: "logistics-receipt",
+      fileName: "receipt.txt",
+      textPayload: "receipt payload",
+      metadata: { businessLabel: "Receipt", fields: {} }
+    }, owner);
+    const service = createProductSubmissionService({
+      productTasks: {
+        getTask: async (taskId) => taskId === slotTask.taskId ? slotTask : undefined
+      },
+      evidenceReader: evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => planId,
+      authorization: permissiveProductProjectionAuthorization(),
+      now: () => baseNow
+    });
+
+    // 缺必填文件槽位（只带了无关凭证类型）：必填凭证在场性最终门拒绝。
+    await expect(service.prepareSubmit(slotTask.taskId, {
+      evidenceIds: [otherDocument.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "evidence_slot_required",
+      status: 409,
+      details: {
+        missingSlots: [expect.objectContaining({ documentType: "invoice" }), expect.objectContaining({ documentType: "customs-note" })]
+      }
+    });
+
+    // 必填槽位齐备（可选槽位 packing-list 缺席不阻断）：通过。
+    await expect(service.prepareSubmit(slotTask.taskId, {
+      evidenceIds: [invoice.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).resolves.toMatchObject({ orderId: slotTask.orderId });
+  });
 });
 
 async function submissionFixture(options: {

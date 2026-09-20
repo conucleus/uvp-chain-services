@@ -85,7 +85,8 @@ Store：
 
 - **参与者面**（Product 提交/触发档案/证据读取、`/store/orders/:orderId/candidates`）：要求会话锚定钱包身份（匿名 `wallet_identity_required`）。candidates 只携带部署级元数据，不含钱包或提交者映射。
 - **Store 公共读**（`store.read` 能力）：`/store/zhixus`、`/store/search` 等公开目录面。
-- **运营观察面**（`store.audit.read` 能力）：`/store/audit`、`/store/closure/dry-run`、`/store/runtime/summary`、`/store/zhixus/:zhixuId/orders`、`/store/orders/:orderId/{observation,replay,audit-summary}`。这些响应含全部订单的 submitter 地址、tasks assigneeWallet 与参与者钱包映射（无参与者过滤）——持有者是运营方/管理员钱包会话，以及 dev/JWT 形态的 reader 及以上身份；任意第三方钱包 SIWE 会话不因"有锚定会话"即得全量运营数据。
+- **运营观察面**（`store.audit.read` 能力）：`/store/audit`、`/store/closure/dry-run`、`/store/runtime/summary`、`/store/zhixu-series/:seriesId/versions`、`/store/zhixus/:zhixuId/orders`、`/store/orders/:orderId/{observation,replay,audit-summary}`。这些响应含全部订单的 submitter 地址、tasks assigneeWallet 与参与者钱包映射（无参与者过滤）——持有者是运营方/管理员钱包会话，以及 dev/JWT 形态的 reader 及以上身份；任意第三方钱包 SIWE 会话不因"有锚定会话"即得全量运营数据。`/store/audit` 在此之上按租户过滤：非管理员（reader/operator）只能读到自己 actor 名下的审计记录，管理员保留全量视角。
+- **试拼会话归属**：`/store/docking-sessions` 的会话档案（含 draftSignalMap）按创建者锚定地址做租户归属断言——非创建者读 404（与不存在同响应）、写 403；管理员保留跨租户治理可见性。
 - Store 写操作面（草稿导入/编译、schema 保存、listing/supplier/docking 管理）要求 `store_operator`；版本激活/废弃与治理动作（草稿审核、身份登记/撤销）分别要求 `store_admin` / 治理管理员。
 
 治理与身份：

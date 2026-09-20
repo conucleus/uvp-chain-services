@@ -134,7 +134,23 @@ export function createStoreConsoleRouteModule(options: {
         if (!isStoreAuthorizationResult(authorization)) {
           return authorization;
         }
-        const records = await context.storeAuditStore.query(parsedQuery.query);
+        // 审计流租户隔离（U5）：非管理员（reader/operator）只能读到自己
+        // actor 名下的记录——运营观察面的全局流是跨运营方枚举桥，只有
+        // canAdmin（store_admin/governance_admin）保留全量视角。显式点名
+        // 他人 actor 直接 403，不静默返回空集。
+        let query: StoreAuditQuery = parsedQuery.query;
+        if (!authorization.access.canAdmin) {
+          const viewerActor = authorization.access.principalId;
+          if (!viewerActor || (parsedQuery.query.actor && parsedQuery.query.actor !== viewerActor)) {
+            await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, new Error("store_audit_actor_forbidden"));
+            return {
+              status: 403,
+              body: { error: "store_audit_actor_forbidden" }
+            };
+          }
+          query = { ...parsedQuery.query, actor: viewerActor };
+        }
+        const records = await context.storeAuditStore.query(query);
         await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource, {
           resultCount: records.length
         });
@@ -419,10 +435,22 @@ async function handleStoreZhixuVersionRequest(
     const listMatch = /^\/store\/zhixu-series\/([^/]+)\/versions$/.exec(request.pathname);
     if (request.method === "GET" && listMatch) {
       const seriesId = decodePathParameter(listMatch[1] ?? "");
-      return {
-        status: 200,
-        body: await context.storeZhixuVersionService.listVersions(seriesId)
-      };
+      // 版本清单是运营台数据（版本状态、plan 锚、订单计数），与运行时
+      // 观察面同门（store.audit.read）——此前漏挂能力门，匿名可枚举。
+      const capability: StoreCapability = "store.audit.read";
+      const resource = { type: "store_zhixu_version", parentId: seriesId };
+      const authorization = await authorizeStoreCapability(context, request, capability, resource);
+      if (!isStoreAuthorizationResult(authorization)) {
+        return authorization;
+      }
+      try {
+        const body = await context.storeZhixuVersionService.listVersions(seriesId);
+        await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+        return { status: 200, body };
+      } catch (error) {
+        await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+        throw error;
+      }
     }
 
     const actionMatch = /^\/store\/zhixu-series\/([^/]+)\/versions\/([^/]+)\/(activate|deprecate)$/

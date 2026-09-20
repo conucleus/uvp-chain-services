@@ -7,6 +7,7 @@ import {
   type ZhixuStageDTO
 } from "@uvp-eth/product-dto";
 import type { ProductService } from "../../product/application/service.js";
+import type { Address } from "../../shared/types.js";
 
 /** dock 下单模式（{new, existing}）。 */
 export type StoreDockOrderMode = "new" | "existing";
@@ -108,6 +109,8 @@ export interface StoreDockingValidationDTO {
 export interface StoreDockingSessionDTO {
   readonly sessionId: string;
   readonly status: StoreDockingSessionStatus;
+  /** 创建会话的锚定地址（资源租户）：读写归属断言的比对基准。 */
+  readonly createdBy: Address;
   readonly source: StoreDockingZhixuRefDTO;
   readonly target: StoreDockingZhixuRefDTO;
   /** 目标定义当前发布的具名接口全集（供操作员切换试拼对象）。 */
@@ -122,10 +125,33 @@ export interface StoreDockingSessionDTO {
 }
 
 export interface StoreDockingService {
-  createSession(input: StoreDockingSessionCreateDTO): Promise<StoreDockingSessionDTO>;
+  /** creator 必须是路由层锚定校验拿到的服务端地址，不从请求体取。 */
+  createSession(
+    input: StoreDockingSessionCreateDTO,
+    creator: { readonly anchoredAddress: Address }
+  ): Promise<StoreDockingSessionDTO>;
   getSession(sessionId: string): Promise<StoreDockingSessionDTO | undefined>;
   validateSession(sessionId: string, draftSignalMap: readonly StoreDraftSignalMapEntryDTO[]): Promise<StoreDockingSessionDTO>;
   saveDraftMap(sessionId: string, draftSignalMap: readonly StoreDraftSignalMapEntryDTO[]): Promise<StoreDockingSessionDTO>;
+}
+
+/**
+ * 试拼会话的租户归属断言（U5）：会话是创建者的谈判桌（含草稿信号
+ * 映射），非创建者不得读写；管理员（canAdmin）保留跨租户治理可见性。
+ * 历史会话无 createdBy（无法证明归属）时对非管理员一律不可见。
+ */
+export function canAccessDockingSession(
+  session: StoreDockingSessionDTO,
+  viewer: { readonly anchoredAddress?: Address; readonly canAdmin: boolean }
+): boolean {
+  if (viewer.canAdmin) {
+    return true;
+  }
+  return Boolean(
+    session.createdBy &&
+    viewer.anchoredAddress &&
+    session.createdBy.toLowerCase() === viewer.anchoredAddress.toLowerCase()
+  );
 }
 
 export interface StoreDockingSessionStore {
@@ -182,7 +208,7 @@ export function createStoreDockingService(options: {
   const now = options.now ?? (() => new Date());
 
   return {
-    async createSession(input) {
+    async createSession(input, creator) {
       // STORE-03：self-docking 无业务意义且会绕过信号映射校验的 source/target
       // 前提；服务层为权威校验，路由层另做同规则快速拦截。
       if (input.sourceZhixuId.trim() === input.targetZhixuId.trim()) {
@@ -248,6 +274,7 @@ export function createStoreDockingService(options: {
       const session: StoreDockingSessionDTO = {
         sessionId: `dock_${randomUUID()}`,
         status: "draft",
+        createdBy: creator.anchoredAddress,
         source: context.source,
         target: context.target,
         interfaces,

@@ -145,6 +145,11 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const submissionAuthorization = options.productBffStore
     ? productBffStoreSubmissionAuthorization(options.productBffStore, store)
     : undefined;
+  // 草稿期证据归属核验（U4）：draftId → 该草稿已触发的订单 id。装配在
+  // BFF 台账上——trigger 记录是草稿与订单对应关系的服务端事实源。
+  const resolveDraftOrder = options.productBffStore
+    ? productBffStoreDraftOrderResolver(options.productBffStore)
+    : undefined;
   const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
   if (productTriggerChainId === undefined) {
     throw new Error("productTriggerChainId or submissionChainId is required to create the Product BFF service");
@@ -165,7 +170,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createEvidenceService({
       ...(options.evidenceMetadataStore ? { metadataStore: options.evidenceMetadataStore } : {}),
       storage: defaultEvidenceStorage ?? new LocalEvidenceStorage(),
-      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
+      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment,
+      ...(resolveDraftOrder ? { resolveDraftOrder } : {})
     })
   );
   const storeZhixuDraftWorkflowService = options.storeZhixuDraftWorkflowService ??
@@ -205,6 +211,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     // plan 作用域 submitSignal 的 planId 取自索引器投影
     // （OrderRegistered/OrderMaterialized 的 indexed planId）。
     resolveOrderPlanId: resolveOrderPlanIdFromStore(store),
+    // draftId 来源凭证的提交归属核验（U4）：无解析器时提交侧 fail-closed。
+    ...(resolveDraftOrder ? { resolveDraftOrder } : {}),
     ...(options.submissionBroadcastAdapter ? { broadcastAdapter: options.submissionBroadcastAdapter } : {}),
     ...(submissionAuthorization ? { authorization: submissionAuthorization } : {}),
     audit
@@ -382,11 +390,26 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   };
 }
 
+/**
+ * draftId → 已触发订单 id 的解析器（草稿期证据归属核验的事实源）：
+ * trigger 记录优先（订单确认即落 orderId），draft.triggeredOrderId 兜底。
+ */
+export function productBffStoreDraftOrderResolver(
+  store: ProductBffStore
+): (draftId: string) => Promise<string | undefined> {
+  return async (draftId) => {
+    const registration = await store.getRegistrationByDraft(draftId);
+    if (registration) {
+      return registration.orderId;
+    }
+    return (await store.getDraft(draftId))?.triggeredOrderId;
+  };
+}
+
 export function productBffStoreSubmissionAuthorization(
   store: ProductBffStore,
   projectionStore?: ProjectionStore
-): SubmissionAuthorizationAdapter {
-  return {
+): SubmissionAuthorizationAdapter {  return {
     async authorize(request) {
       // 《授权与签名规则》§五：执行者变更/委任不抹除既有的显式订单级
       // 授权——先看显式 trigger 授权，命中即放行；未命中再看阶段委任的

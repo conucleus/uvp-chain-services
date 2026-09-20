@@ -1,8 +1,10 @@
-import { decodePathParameter } from "../route-context.js";
+import { decodePathParameter, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {
+  canAccessDockingSession,
   StoreDockingServiceError,
   type StoreDockingSessionCreateDTO,
+  type StoreDockingSessionDTO,
   type StoreDraftSignalMapEntryDTO
 } from "../../store/console/docking.js";
 import {
@@ -35,7 +37,11 @@ export function createStoreDockingRouteModule(): RouteModule {
             return anchored;
           }
           try {
-            const session = await context.storeDockingService.createSession(parseStoreDockingCreateBody(request.body));
+            // 归属由服务端锚定地址派生（U5）：创建者即会话租户，不从请求体取。
+            const session = await context.storeDockingService.createSession(
+              parseStoreDockingCreateBody(request.body),
+              { anchoredAddress: anchored.anchoredAddress }
+            );
             await recordStoreCapabilitySuccess(context, request, authorization.access, capability, {
               type: "store_docking_session",
               id: session.sessionId
@@ -64,7 +70,16 @@ export function createStoreDockingRouteModule(): RouteModule {
           }
           try {
             const session = await context.storeDockingService.getSession(sessionId);
-            if (!session) {
+            // 归属断言（U5）：非本租户会话与不存在同响应（404），不向他人
+            // reader 泄露会话存在性；管理员保留跨租户治理可见性。
+            if (!session || !canAccessDockingSession(session, authorization.access)) {
+              const denied = new StoreDockingServiceError(
+                404,
+                "docking_session_not_found",
+                "docking session was not found",
+                { sessionId }
+              );
+              await recordStoreCapabilityFailure(context, request, authorization.access, "store.docking.read", resource, denied);
               return {
                 status: 404,
                 body: { error: "docking_session_not_found" }
@@ -94,6 +109,11 @@ export function createStoreDockingRouteModule(): RouteModule {
           if (!isAnchoredStoreAuthorizationResult(anchored)) {
             return anchored;
           }
+          const ownership = await dockingSessionOwnership(context, sessionId, authorization.access);
+          if ("response" in ownership) {
+            await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, ownership.error);
+            return ownership.response;
+          }
           try {
             const session = await context.storeDockingService.validateSession(
               sessionId,
@@ -122,6 +142,11 @@ export function createStoreDockingRouteModule(): RouteModule {
           const anchored = await requireAnchoredStoreAddress(context, request, resource);
           if (!isAnchoredStoreAuthorizationResult(anchored)) {
             return anchored;
+          }
+          const ownership = await dockingSessionOwnership(context, sessionId, authorization.access);
+          if ("response" in ownership) {
+            await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, ownership.error);
+            return ownership.response;
           }
           try {
             const session = await context.storeDockingService.saveDraftMap(
@@ -162,6 +187,33 @@ export function createStoreDockingRouteModule(): RouteModule {
         status: 404,
         body: { error: "not_found" }
       };
+    }
+  };
+}
+
+/**
+ * 写路径（validate/save-draft-map）的租户归属断言：写者已过能力门与
+ * 锚定门，403 明示"不是你的会话"（与装修面 not_plan_publisher 同口径），
+ * 不与 404 混淆——写者身份已知，掩盖存在性没有意义。
+ */
+async function dockingSessionOwnership(
+  context: Parameters<RouteModule["handle"]>[1],
+  sessionId: string,
+  access: Parameters<typeof canAccessDockingSession>[1]
+): Promise<{ readonly session: StoreDockingSessionDTO } | { readonly response: ApiResponse; readonly error: StoreDockingServiceError }> {
+  const session = await context.storeDockingService.getSession(sessionId);
+  if (session && canAccessDockingSession(session, access)) {
+    return { session };
+  }
+  const notFound = session === undefined;
+  const error = notFound
+    ? new StoreDockingServiceError(404, "docking_session_not_found", "docking session was not found", { sessionId })
+    : new StoreDockingServiceError(403, "docking_session_access_forbidden", "docking session belongs to another store tenant", { sessionId });
+  return {
+    error,
+    response: {
+      status: notFound ? 404 : 403,
+      body: { error: error.code, message: error.message, ...(error.details !== undefined ? { details: error.details } : {}) }
     }
   };
 }

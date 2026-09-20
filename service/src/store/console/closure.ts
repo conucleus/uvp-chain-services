@@ -126,6 +126,9 @@ const CLOSURE_SUPPLIER_WALLET =
   "0x1160000000000000000000000000000000000001" as Address;
 const CLOSURE_REGISTRY_ADDRESS =
   "0x1160000000000000000000000000000000000011" as Address;
+/** docking dry-run 探针的合成锚定地址（会话只落独立内存 store）。 */
+const CLOSURE_DOCKING_PROBE_ADDRESS =
+  "0x1160000000000000000000000000000000000012" as Address;
 
 export async function buildStoreClosureDryRunSummary(
   options: StoreClosureDryRunOptions,
@@ -559,10 +562,12 @@ async function checkDockingCreateValidateSave(
       // 不静默降级回"任意两秩序可拼"。
       let created: Awaited<ReturnType<typeof docking.createSession>>;
       try {
+        // dry-run 会话落在独立内存 store，只验证工作流本身；探针锚定
+        // 地址是合成值，不进入任何租户的会话档案。
         created = await docking.createSession({
           sourceZhixuId: source.zhixuId,
           targetZhixuId: target.zhixuId,
-        });
+        }, { anchoredAddress: CLOSURE_DOCKING_PROBE_ADDRESS });
       } catch (error) {
         const code = (error as { readonly code?: string }).code;
         if (code === "target_has_no_dock_interface") {

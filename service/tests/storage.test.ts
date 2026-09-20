@@ -1054,6 +1054,8 @@ describe("durable storage", () => {
       reopenedRouter.handle({
         method: "GET",
         pathname: `/store/zhixu-series/${CROSS_BORDER_ZHIXU_ID}/versions`,
+        // 版本清单与运行时观察面同门（store.audit.read），匿名不可枚举。
+        headers: adminHeaders,
       }),
     ).resolves.toMatchObject({
       status: 200,
@@ -2421,6 +2423,7 @@ function storeDockingSession(): StoreDockingSessionDTO {
   return {
     sessionId: "dock_sqlite",
     status: "valid",
+    createdBy: "0x1234567890123456789012345678901234567890",
     source: {
       zhixuId: "source-zhixu",
       title: "Source Zhixu",
