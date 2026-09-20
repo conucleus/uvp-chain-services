@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+  push:
+    branches:
+      - dev
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  service:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      # 激活 storage.test.ts 中 CHAIN_SERVICES_POSTGRES_TEST_URL 门控的
+      # postgres durable storage 套件（未设该 env 时整段 describe.skip）。
+      # services 块照搬 uvp-eth 伞仓 .github/workflows/ci.yml。
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: uvp
+          POSTGRES_PASSWORD: uvp
+          POSTGRES_DB: uvp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U uvp"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # 本仓不提交 pnpm-lock.yaml（workspace 锁定在 uvp-eth 伞仓根），
+          # setup-node 的 pnpm 缓存以 lockfile 为键，这里不能开。
+
+      - name: Install dependencies
+        # 伞仓 CI 用 --frozen-lockfile；子仓无 lockfile（CI 下 frozen 默认
+        # 开启会 ERR_PNPM_NO_LOCKFILE），故显式 --no-frozen-lockfile。
+        run: pnpm install --no-frozen-lockfile
+        timeout-minutes: 5
+
+      - name: Typecheck
+        # 等价伞仓 "pnpm check"（-r typecheck）对本仓 @uvp-eth/chain-services 的覆盖。
+        run: pnpm typecheck
+        timeout-minutes: 8
+
+      - name: Test
+        # 测试自建/自清随机 schema，只需 CREATE/DROP SCHEMA 权限，
+        # 迁移为纯 SQL 无扩展依赖（同伞仓 Test 步骤说明）。
+        run: pnpm test
+        env:
+          CHAIN_SERVICES_POSTGRES_TEST_URL: postgres://uvp:uvp@127.0.0.1:5432/uvp
+        timeout-minutes: 10
+
+      - name: Build
+        run: pnpm build
+        timeout-minutes: 12
