@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,6 +43,7 @@ import {
 } from "../src/storage/factory.js";
 import {
   listAppliedSqliteMigrations,
+  loadSqlMigrations,
   runSqliteMigrations,
 } from "../src/storage/migrations.js";
 import { PostgresDatabase } from "../src/storage/postgres-client.js";
@@ -203,6 +204,41 @@ describe("durable storage", () => {
         migrationsDirectory: migrationsDirectory(),
       }).applied,
     ).toHaveLength(0);
+  });
+
+  it("rejects malformed migration filenames and duplicate sequence numbers", () => {
+    const directory = mkdtempSync(join(tmpdir(), "uvp-migrations-probe-"));
+    const write = (name: string) => writeFileSync(join(directory, name), "-- probe\n");
+    write("0100_probe.sql");
+    expect(() => loadSqlMigrations(directory)).not.toThrow();
+
+    write("0100_duplicate.sql");
+    expect(() => loadSqlMigrations(directory)).toThrow(/sequence 0100/);
+    rmSync(directory, { recursive: true, force: true });
+
+    const malformed = mkdtempSync(join(tmpdir(), "uvp-migrations-probe-"));
+    writeFileSync(join(malformed, "0101-No-Go.sql"), "-- probe\n");
+    expect(() => loadSqlMigrations(malformed)).toThrow(/NNNN_name\.sql/);
+    rmSync(malformed, { recursive: true, force: true });
+  });
+
+  it("refuses to run when the ledger holds versions missing from the files", () => {
+    // 迁移文件被删除/改名后，库内已应用版本在文件集里没有对应——
+    // 静默继续会让版本历史叠在洞上，必须响亮失败交人工裁决。
+    const database = openSqliteDatabase(sqliteUrl(tempDirs));
+    databases.push(database);
+    runSqliteMigrations({ database, migrationsDirectory: migrationsDirectory() });
+
+    const directory = mkdtempSync(join(tmpdir(), "uvp-migrations-retired-"));
+    tempDirs.push(directory);
+    // 只保留一个真实迁移文件作为"文件集"，其余已应用版本全部表现为缺失。
+    copyFileSync(
+      join(migrationsDirectory(), "0001_projection_storage.sql"),
+      join(directory, "0001_projection_storage.sql"),
+    );
+    expect(() =>
+      runSqliteMigrations({ database, migrationsDirectory: directory }),
+    ).toThrow(/applied migrations missing/);
   });
 
   it("deduplicates the same event but retains same-position logs from different transactions", async () => {

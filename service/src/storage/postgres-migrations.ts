@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { StorageMigrationError } from "./errors.js";
 import {
+  assertNoRetiredMigrations,
   loadSqlMigrations,
   type AppliedMigrationRecord,
   type MigrationDefinition,
@@ -28,27 +29,43 @@ export async function runPostgresMigrations(options: RunPostgresMigrationsOption
   const migrations = loadSqlMigrations(options.migrationsDirectory ?? defaultPostgresMigrationsDirectory());
   await options.database.queryRaw(migrationTableSql);
 
-  const applied: AppliedMigrationRecord[] = [];
-  const pending: MigrationDefinition[] = [];
-
-  for (const migration of migrations) {
-    const existing = await getMigrationRecord(options.database, migration.version);
-    if (existing) {
-      if (existing.checksum !== migration.checksum) {
-        throw new StorageMigrationError(
-          `migration ${migration.version} checksum mismatch: database=${existing.checksum} file=${migration.checksum}`
-        );
+  if (options.dryRun === true) {
+    assertNoRetiredMigrations(await listAppliedVersionsPostgres(options.database), migrations);
+    const pending = [];
+    for (const migration of migrations) {
+      const existing = await getMigrationRecord(options.database, migration.version);
+      if (existing) {
+        assertChecksumMatches(existing, migration);
+        continue;
       }
-      continue;
+      pending.push(migration);
     }
+    return { applied: [], pending };
+  }
 
-    pending.push(migration);
-    if (options.dryRun === true) {
-      continue;
-    }
+  // 多实例并发启动会各自跑迁移：查询-应用-记账的序列没有库级互斥时，
+  // 两个实例可以同时把同一批 pending 各自应用一遍（DDL 竞态 + 台账
+  // 重复插入）。事务级 advisory lock 把整轮序列化——后来者在锁上等待，
+  // 拿锁后重读台账（上一轮已应用的版本直接跳过），同一迁移只会被应用
+  // 一次。批次整体一个事务：任一步失败全批回滚，库留在上一完整基线，
+  // 下次启动整批重放。
+  return options.database.withTransactionRaw(async () => {
+    await options.database.queryRaw("SELECT pg_advisory_xact_lock(hashtext('chain_services_migrations'))");
+    assertNoRetiredMigrations(await listAppliedVersionsPostgres(options.database), migrations);
 
-    const start = Date.now();
-    await options.database.withTransactionRaw(async () => {
+    const applied: AppliedMigrationRecord[] = [];
+    const pending: MigrationDefinition[] = [];
+
+    for (const migration of migrations) {
+      const existing = await getMigrationRecord(options.database, migration.version);
+      if (existing) {
+        assertChecksumMatches(existing, migration);
+        continue;
+      }
+
+      pending.push(migration);
+
+      const start = Date.now();
       await options.database.queryRaw(migration.sql);
       const record = {
         version: migration.version,
@@ -62,10 +79,25 @@ export async function runPostgresMigrations(options: RunPostgresMigrationsOption
         [record.version, record.checksum, record.appliedAt, record.durationMs]
       );
       applied.push(record);
-    });
-  }
+    }
 
-  return { applied, pending };
+    return { applied, pending };
+  });
+}
+
+function assertChecksumMatches(existing: AppliedMigrationRecord, migration: MigrationDefinition): void {
+  if (existing.checksum !== migration.checksum) {
+    throw new StorageMigrationError(
+      `migration ${migration.version} checksum mismatch: database=${existing.checksum} file=${migration.checksum}`
+    );
+  }
+}
+
+async function listAppliedVersionsPostgres(database: PostgresDatabase): Promise<readonly string[]> {
+  const result = await database.queryRaw<{ readonly version: string }>(
+    `SELECT version FROM chain_services_migrations ORDER BY version ASC`
+  );
+  return result.rows.map((row) => row.version);
 }
 
 export async function listAppliedPostgresMigrations(

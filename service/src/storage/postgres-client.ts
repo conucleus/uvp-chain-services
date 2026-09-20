@@ -67,6 +67,9 @@ export class PostgresDatabase {
   }
 
   async withTransactionRaw<T>(operation: () => Promise<T>): Promise<T> {
+    // 不等 ready()：迁移运行器是 #ready 的构造方，等 ready 是循环等待
+    // （迁移→开事务→等迁移完成→死锁）。公开的 withTransaction 仍先过
+    // ready 门，业务查询不会跑到迁移前面。
     const currentClient = this.#transaction.getStore();
     if (currentClient) {
       return operation();
