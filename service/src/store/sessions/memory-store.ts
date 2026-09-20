@@ -104,6 +104,36 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
     this.#accountAddresses.set(accountAddressKey(record.address), record);
   }
 
+  async claimActiveAccountAddress(record: StoreAccountAddressRecord): Promise<StoreAccountAddressRecord | undefined> {
+    // 判定与写入同步完成（无 await 间隙）：事件循环即原子边界。
+    const key = accountAddressKey(record.address);
+    const current = this.#accountAddresses.get(key);
+    if (current?.status === "active") {
+      return current;
+    }
+    this.#accountAddresses.set(key, record);
+    return undefined;
+  }
+
+  async revokeActiveAccountAddress(input: {
+    readonly address: Address;
+    readonly accountId: string;
+    readonly revokedAt: string;
+    readonly revokedBySessionId?: string;
+  }): Promise<boolean> {
+    const current = this.#accountAddresses.get(accountAddressKey(input.address));
+    if (!current || current.status !== "active" || current.accountId !== input.accountId) {
+      return false;
+    }
+    this.#accountAddresses.set(accountAddressKey(input.address), {
+      ...current,
+      status: "revoked",
+      revokedAt: input.revokedAt,
+      ...(input.revokedBySessionId ? { revokedBySessionId: input.revokedBySessionId } : {}),
+    });
+    return true;
+  }
+
   async listAccountAddresses(accountId: string): Promise<readonly StoreAccountAddressRecord[]> {
     return [...this.#accountAddresses.values()]
       .filter((record) => record.accountId === accountId)

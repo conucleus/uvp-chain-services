@@ -1582,6 +1582,43 @@ describe("product task submissions", () => {
     expect(audit.list().map((event) => event.type)).toContain("relayer.broadcast.duplicate");
   });
 
+  it("returns the txHash-bearing broadcast result when the dedupe ledger write fails after a real broadcast", async () => {
+    // M34：内层适配器已真实广播（拿到 txHash）后，去重台账（claimTxHash/
+    // save）抛错不得让异常带着哈希一起逃逸——调用方 catch 口无哈希可救，
+    // 会释放 nonce，重启后同一签名被二次真实广播烧 gas。
+    const audit = new InMemoryAuditSink();
+    const inner: SubmissionBroadcastAdapter = {
+      broadcast: vi.fn(async (): Promise<SubmissionBroadcastResult> => ({
+        status: "submitted",
+        txHash: txHash("34"),
+        attempt: { status: "submitted", txHash: txHash("34") }
+      }))
+    };
+    const dedupe = {
+      load: vi.fn(async () => undefined),
+      save: vi.fn(async () => {
+        throw new Error("dedupe ledger unavailable");
+      }),
+      claimTxHash: vi.fn(async () => undefined)
+    };
+    const secure = createSecureSubmissionBroadcastAdapter({ adapter: inner, audit, dedupeStore: dedupe });
+    const fixture = await submissionFixture();
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+    const request = {
+      prepared,
+      signature,
+      recoveredSubmitter: submitter,
+      evidence: []
+    };
+
+    await expect(secure.broadcast(request)).resolves.toMatchObject({
+      status: "submitted",
+      txHash: txHash("34")
+    });
+    expect(audit.list().map((event) => event.type)).toContain("relayer.broadcast.dedupe_persist_failed");
+  });
+
   it("blocks retry after a non-retryable secure broadcast failure", async () => {
     const inner: SubmissionBroadcastAdapter = {
       broadcast: vi.fn(async (): Promise<SubmissionBroadcastResult> => ({

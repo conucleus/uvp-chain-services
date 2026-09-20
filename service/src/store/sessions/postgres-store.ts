@@ -140,6 +140,57 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
     );
   }
 
+  async claimActiveAccountAddress(record: StoreAccountAddressRecord): Promise<StoreAccountAddressRecord | undefined> {
+    // 单语句原子 CAS：已有 active 行时 SELECT 产出 0 行（不插入），
+    // 已撤销行经 conflict 分支条件重锚（两个并发重锚只有一个胜者）；
+    // 占位失败后回读既有 active 行交给服务层按 409 收敛。
+    const claimed = await this.#database.query(
+      `INSERT INTO store_account_address (address, account_id, status, anchored_at, anchor_session_id)
+       SELECT $1, $2, 'active', $3, $4
+       WHERE NOT EXISTS (
+         SELECT 1 FROM store_account_address WHERE address = $1 AND status = 'active'
+       )
+       ON CONFLICT (address) DO UPDATE SET
+         account_id = EXCLUDED.account_id,
+         status = 'active',
+         anchored_at = EXCLUDED.anchored_at,
+         anchor_session_id = EXCLUDED.anchor_session_id,
+         revoked_at = NULL,
+         revoked_by_session_id = NULL
+       WHERE store_account_address.status = 'revoked'`,
+      [
+        record.address.toLowerCase(),
+        record.accountId,
+        record.anchoredAt,
+        record.anchorSessionId ?? null
+      ]
+    );
+    if ((claimed.rowCount ?? 0) > 0) {
+      return undefined;
+    }
+    return this.findActiveAccountAddress(record.address);
+  }
+
+  async revokeActiveAccountAddress(input: {
+    readonly address: Address;
+    readonly accountId: string;
+    readonly revokedAt: string;
+    readonly revokedBySessionId?: string;
+  }): Promise<boolean> {
+    const updated = await this.#database.query(
+      `UPDATE store_account_address
+       SET status = 'revoked', revoked_at = $1, revoked_by_session_id = $2
+       WHERE address = $3 AND account_id = $4 AND status = 'active'`,
+      [
+        input.revokedAt,
+        input.revokedBySessionId ?? null,
+        input.address.toLowerCase(),
+        input.accountId
+      ]
+    );
+    return (updated.rowCount ?? 0) > 0;
+  }
+
   async listAccountAddresses(accountId: string): Promise<readonly StoreAccountAddressRecord[]> {
     const result = await this.#database.query(
       `SELECT * FROM store_account_address WHERE account_id = $1 ORDER BY anchored_at ASC, address ASC`,

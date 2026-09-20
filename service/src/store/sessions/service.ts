@@ -211,29 +211,43 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       }
       const timestamp = now().toISOString();
       const token = `${STORE_SESSION_TOKEN_PREFIX}${randomBytes(32).toString("hex")}`;
+      const sessionId = `sess_${randomUUID()}`;
+      // 锚定 CAS：并发双 verify（同地址不同挑战）的败者在此收敛——
+      // 已有 active 行时不得覆盖（返回既有归属，409 收口），不再依赖
+      // findActiveAccountAddress 的先查后写窗口。
+      const claimed = existing
+        ? undefined
+        : await store.claimActiveAccountAddress({
+          accountId,
+          address,
+          status: "active",
+          anchoredAt: timestamp,
+          anchorSessionId: sessionId
+        });
+      if (claimed && claimed.accountId !== accountId) {
+        throw new StoreSessionServiceError(
+          409,
+          "store_address_already_anchored",
+          "address is already anchored to another account",
+          { accountId: claimed.accountId }
+        );
+      }
       const session: StoreWalletSessionRecord = {
-        sessionId: `sess_${randomUUID()}`,
+        sessionId,
         tokenHash: sha256Hex(token),
-        accountId,
+        // CAS 败者复用胜者已落库的账号归属（同地址只属一个账号），
+        // 不为同一地址分裂出第二个账号。
+        accountId: claimed?.accountId ?? accountId,
         anchoredAddress: address,
         createdAt: timestamp,
         expiresAt: new Date(new Date(timestamp).getTime() + config.sessionTtlSeconds * 1000).toISOString(),
         lastSeenAt: timestamp
       };
       await store.putSession(session);
-      if (!existing) {
-        await store.putAccountAddress({
-          accountId,
-          address,
-          status: "active",
-          anchoredAt: timestamp,
-          anchorSessionId: session.sessionId
-        });
-      }
       return {
         token,
         session: await this.sessionView(session),
-        linkedToExistingAccount: Boolean(anchorToAccountId)
+        linkedToExistingAccount: Boolean(anchorToAccountId) || Boolean(claimed)
       };
     },
 
@@ -301,12 +315,25 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
         );
       }
       const timestamp = now().toISOString();
-      await store.putAccountAddress({
-        ...active,
-        status: "revoked",
+      // 撤销 CAS：并发撤销/重锚只有一个赢家——条件 UPDATE 失败即回读
+      // 最新状态（行已被他人撤销或重锚），不回写陈旧快照。
+      const revoked = await store.revokeActiveAccountAddress({
+        address,
+        accountId: requesterSession.session.accountId,
         revokedAt: timestamp,
         revokedBySessionId: requesterSession.record.sessionId
       });
+      if (!revoked) {
+        const latest = await store.findActiveAccountAddress(address);
+        if (latest && latest.accountId === requesterSession.session.accountId) {
+          throw new StoreSessionServiceError(
+            409,
+            "store_address_anchor_conflict",
+            "address anchor changed concurrently; retry the revocation",
+            { address }
+          );
+        }
+      }
       return this.listAccountAddresses(requesterSession.session.accountId);
     },
 

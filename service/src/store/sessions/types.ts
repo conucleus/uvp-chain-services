@@ -99,6 +99,24 @@ export interface StoreWalletSessionStore {
   updateSession(record: StoreWalletSessionRecord): Promise<void>;
 
   putAccountAddress(record: StoreAccountAddressRecord): Promise<void>;
+  /**
+   * 锚定 CAS：原子地为一地址落 active 锚定行。已存在 active 行时返回
+   * 该行且不写入（并发双 verify 的败者据此按 409 收敛，不会落第二条
+   * active）；行已撤销时按 UPDATE ... WHERE status='revoked' 重锚，与
+   * 并发重锚互斥（仅一个胜者）。写入成功返回 undefined。
+   */
+  claimActiveAccountAddress(record: StoreAccountAddressRecord): Promise<StoreAccountAddressRecord | undefined>;
+  /**
+   * 撤销 CAS：仅当地址行仍属该账号且 active 时翻 revoked
+   * （UPDATE ... WHERE address=? AND account_id=? AND status='active'）。
+   * 返回 false 表示并发方已先完成撤销/重锚，调用方回读最新状态收口。
+   */
+  revokeActiveAccountAddress(input: {
+    readonly address: Address;
+    readonly accountId: string;
+    readonly revokedAt: string;
+    readonly revokedBySessionId?: string;
+  }): Promise<boolean>;
   listAccountAddresses(accountId: string): Promise<readonly StoreAccountAddressRecord[]>;
   findActiveAccountAddress(address: Address): Promise<StoreAccountAddressRecord | undefined>;
   listAccountIds(): Promise<readonly string[]>;

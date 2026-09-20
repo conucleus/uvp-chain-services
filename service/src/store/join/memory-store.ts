@@ -33,6 +33,19 @@ export class InMemoryStoreJoinApplicationStore implements StoreJoinApplicationSt
     return this.#applications.get(applicationId);
   }
 
+  async updateApplicationIfStatus(
+    record: StoreJoinApplicationRecord,
+    expected: StoreJoinApplicationStatus
+  ): Promise<boolean> {
+    // 判定与写入同步完成（无 await 间隙）：事件循环即原子边界。
+    const current = this.#applications.get(record.applicationId);
+    if (!current || current.status !== expected) {
+      return false;
+    }
+    this.#applications.set(record.applicationId, record);
+    return true;
+  }
+
   async listApplications(query?: {
     readonly planId?: Hex;
     readonly applicantAddress?: Address;

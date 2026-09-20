@@ -96,10 +96,21 @@ function simulatedBroadcast(request: unknown): GovernanceBroadcastResultDTO {
 export function createConfiguredGovernanceChainAdapter(config: ChainServicesConfig): GovernanceChainAdapter {
   if (!config.governance.broadcastEnabled) {
     // simulated 适配器只允许 local：任何非 local 环境回落 simulated 意味着
-    // 治理写操作"成功"返回却永不上链（静默假广播）。缺省/漏配必须启动
-    // 失败，而不是安静降级。
+    // 治理写操作"成功"返回却永不上链（静默假广播）。
     if (config.security.environment === "local") {
       return createSimulatedGovernanceChainAdapter();
+    }
+    // production 禁用 env 私钥治理（validateProductionSafety），两条
+    // "要么开广播、要么拒启动"的路都死会让合法组合无法启动。装配一个
+    // fail-closed 拒绝适配器：服务可启动（读面/其余域不受影响），
+    // registerIdentity/revokeIdentity 一律按 failed 广播结果拒绝——
+    // 不假成功、留台账与审计，治理广播通道等专门的 production 治理
+    // 接入方接上后再启用。testnet/staging 是 rehearsal 档，仍要求显式
+    // 配置 GOVERNANCE_BROADCAST_ENABLED=true（启动即失败提醒配置缺失）。
+    if (config.security.environment === "production") {
+      return createRefusingGovernanceChainAdapter(
+        "governance broadcast is disabled: production forbids env private-key governance (GOVERNANCE_BROADCAST_ENABLED) and no production governance signer is assembled; identity registration/revocation is refused until a production governance integration is wired"
+      );
     }
     throw new ConfigError(
       `GOVERNANCE_BROADCAST_ENABLED=true is required in ${config.security.environment}; the simulated governance adapter is only available in local`
@@ -122,6 +133,32 @@ export function createConfiguredGovernanceChainAdapter(config: ChainServicesConf
     txConfirmations: config.governance.txConfirmations,
     allowedOperators: config.governance.allowedOperators
   });
+}
+
+/**
+ * fail-closed 拒绝适配器：不广播、不假成功。每次调用按 failed 广播结果
+ * 拒绝（retryable=true——接上正式治理 signer 后同一请求可直接重发），
+ * 服务层会把它当一次失败尝试落台账并留审计。
+ */
+export function createRefusingGovernanceChainAdapter(reason: string): GovernanceChainAdapter {
+  return {
+    async registerIdentity() {
+      return refusedBroadcastResult(reason);
+    },
+    async revokeIdentity() {
+      return refusedBroadcastResult(reason);
+    }
+  };
+}
+
+function refusedBroadcastResult(reason: string): GovernanceBroadcastResultDTO {
+  return {
+    status: "failed",
+    errorCode: "governance_broadcast_disabled",
+    message: reason,
+    retryable: true,
+    simulated: false
+  };
 }
 
 export function createGovernanceBroadcasterAdapter(

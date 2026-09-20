@@ -362,6 +362,7 @@ describe("signal-routed notifications", () => {
       events: [event]
     });
     const sent: NotificationDispatchRequest[] = [];
+    let transportUp = false;
     const service = createNotificationService({
       store,
       supplierMetadataStore: supplierStore,
@@ -373,28 +374,47 @@ describe("signal-routed notifications", () => {
       dispatcher: {
         async send(request) {
           sent.push(request);
-          return { ok: true, externalReceiptRef: "receipt:webhook" };
+          return transportUp
+            ? { ok: true, externalReceiptRef: "receipt:webhook" }
+            : { ok: false, error: "transport down" };
         }
       }
     });
 
     await service.processSignalSubmittedEvents([event]);
     const [delivery] = await service.listDeliveries();
-    await service.deadLetterDelivery(delivery!.deliveryId, "operator review");
+    expect(delivery?.status).toBe("failed");
 
-    // retry 对 dead_letter 是无操作（路由层据此返回 409 而非 200 假成功）。
+    // 死信只对非终态行开放：failed 行可被人工死信；retry 对 dead_letter
+    // 是无操作（路由层据此返回 409 而非 200 假成功）。
+    await expect(service.deadLetterDelivery(delivery!.deliveryId, "operator review"))
+      .resolves.toMatchObject({
+        outcome: "dead_lettered",
+        delivery: expect.objectContaining({ status: "dead_letter", reason: "operator review" })
+      });
     await expect(service.retryDelivery(delivery!.deliveryId)).resolves.toMatchObject({
       outcome: "terminal",
       delivery: expect.objectContaining({ status: "dead_letter" })
     });
     expect(sent).toHaveLength(1);
 
+    transportUp = true;
     const reopened = await service.reopenDelivery(delivery!.deliveryId);
     expect(reopened.outcome).toBe("reopened");
     if (reopened.outcome === "reopened") {
-      expect(reopened.delivery).toMatchObject({ status: "sent", attempts: 2 });
+      // 重开即重置自动补投预算：attempts 从 0 重新计数，死信行携带的
+      // 旧预算不得把重开后的第一次失败直接推回 dead_letter（双发车道）。
+      expect(reopened.delivery).toMatchObject({ status: "sent", attempts: 1 });
     }
     expect(sent).toHaveLength(2);
+
+    // sent 是不可追改的终态：死信守卫拒绝把已送达行回写 dead_letter
+    // （reopen 后重发即对已送达内容双发）。
+    await expect(service.deadLetterDelivery(delivery!.deliveryId, "operator review"))
+      .resolves.toMatchObject({
+        outcome: "terminal",
+        delivery: expect.objectContaining({ status: "sent" })
+      });
 
     // 非 dead_letter 行不可重开。
     const notDeadLetter = await service.reopenDelivery(delivery!.deliveryId);
@@ -731,14 +751,16 @@ describe("signal-routed notifications", () => {
     });
     expect(sent).toHaveLength(1);
 
+    // sent 是不可追改的终态：回写 dead_letter 会伪造投递台账，且经
+    // reopen 重发即对已送达内容双发——终态守卫按 409 拒绝。
     await expect(router.handle({
       method: "POST",
       pathname: `/admin/notifications/deliveries/${delivery?.deliveryId}/dead-letter`,
       headers: adminHeaders,
       body: { reason: "operator review" }
     })).resolves.toMatchObject({
-      status: 200,
-      body: { delivery: expect.objectContaining({ status: "dead_letter", reason: "operator review" }) }
+      status: 409,
+      body: { error: "notification_delivery_terminal" }
     });
   });
 

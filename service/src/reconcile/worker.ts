@@ -289,6 +289,7 @@ export class TxReconcileWorker implements LifecycleService {
           skippedSimulatedCount
         });
       }
+      await this.#sweepOrphanRevokedReviews(summary);
     }
 
     this.#lastRunAt = this.#now().toISOString();
@@ -387,6 +388,58 @@ export class TxReconcileWorker implements LifecycleService {
       });
     }
     return repaired.length;
+  }
+
+  /**
+   * revoke 预翻转崩溃窗的补偿复核：review 已翻 revoked、同主体在链上
+   * 投影仍有 active binding、且台账里没有任何该主体的 tx log——即"翻转
+   * 落库成功、台账写入前进程死亡"的孤儿形态（有 log 的分叉由既有
+   * failed+txHash 复核车道与 revoke-reverted 告警覆盖）。此时零告警会
+   * 让"库 revoked、链上 active"静默漂移；补一条审计告警，运营重发
+   * revoke-identity 即可重建台账并消除孤儿。
+   */
+  async #sweepOrphanRevokedReviews(summary: ReconcileRunSummaryDraft): Promise<void> {
+    if (!this.#governanceStore || !this.#projectionStore) {
+      return;
+    }
+    const revokedReviews = await this.#governanceStore.listReviews({
+      subjectType: "supplier",
+      status: "revoked"
+    });
+    if (revokedReviews.length === 0) {
+      return;
+    }
+    const loggedSubjectIds = new Set(
+      (await this.#governanceStore.listIdentityTxLogs()).map((log) => log.subjectId.toLowerCase())
+    );
+    for (const review of revokedReviews) {
+      const subjectKey = review.subjectId.toLowerCase();
+      if (loggedSubjectIds.has(subjectKey)) {
+        continue;
+      }
+      const activeBindings = await this.#projectionStore.listIdentityBindings({
+        subjectId: review.subjectId,
+        activeOnly: true
+      });
+      if (activeBindings.length === 0) {
+        continue;
+      }
+      summary.failed += 1;
+      await this.#audit?.record({
+        type: "reconcile.governance_revoke_orphan",
+        action: "revoke_identity",
+        outcome: "failed",
+        actor: "tx-indexer-reconcile",
+        subject: {
+          reviewId: review.reviewId,
+          subjectId: review.subjectId
+        },
+        retryable: true,
+        metadata: {
+          fork: "review is marked revoked with no governance tx log while the on-chain binding is still active; re-issue revoke-identity to rebuild the ledger entry"
+        }
+      });
+    }
   }
 
   async #runOnceSafely(): Promise<void> {
@@ -549,6 +602,14 @@ export class TxReconcileWorker implements LifecycleService {
           // broadcast failure.
           retryable: true
         };
+      }
+      // 超时但无 txHash ≠ 链上无订单：哈希可能在落档窗口丢失（persist
+      // 失败/崩溃）。先查投影——订单已呈现即按已确认收口，不得仅凭
+      // "无哈希可探回执"就把行钉成 failed（failed 且无 txHash 的行不再
+      // 进复核，迟到投影永远无人认领）。
+      const projectedWithoutHash = await projectionConfirmation();
+      if (projectedWithoutHash) {
+        return confirmedOutcome(checkedAt, projectedWithoutHash.blockNumber);
       }
       return staleOutcome(checkedAt);
     }

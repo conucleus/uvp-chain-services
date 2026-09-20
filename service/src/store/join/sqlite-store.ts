@@ -84,6 +84,38 @@ export class SqliteStoreJoinApplicationStore implements StoreJoinApplicationStor
     return row ? applicationRow(row) : undefined;
   }
 
+  async updateApplicationIfStatus(
+    record: StoreJoinApplicationRecord,
+    expected: StoreJoinApplicationStatus
+  ): Promise<boolean> {
+    // 条件 UPDATE（CAS）：better-sqlite3 单写连接内原子，WHERE status
+    // 保证并发迁移的败者（行数 0）不得覆盖赢家的终态。
+    const updated = runSqliteWrite(() =>
+      this.#database.prepare(
+        `UPDATE store_join_application
+         SET status = ?, supplier_id = ?, tx_evidence_json = ?, rejection_reason = ?,
+             revocation_reason = ?, decided_by_address = ?, decided_at = ?, updated_at = ?,
+             applicant_display_name = ?, statement = ?, applicant_account_id = ?
+         WHERE application_id = ? AND status = ?`
+      ).run(
+        record.status,
+        record.supplierId ?? null,
+        stringifyStorageJson(record.txEvidence),
+        record.rejectionReason ?? null,
+        record.revocationReason ?? null,
+        record.decidedByAddress?.toLowerCase() ?? null,
+        record.decidedAt ?? null,
+        record.updatedAt,
+        record.applicantDisplayName ?? null,
+        record.statement ?? null,
+        record.applicantAccountId ?? null,
+        record.applicationId,
+        expected
+      )
+    );
+    return updated.changes > 0;
+  }
+
   async listApplications(query?: {
     readonly planId?: Hex;
     readonly applicantAddress?: Address;

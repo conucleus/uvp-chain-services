@@ -199,8 +199,21 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const broadcast = await safeBroadcast(() => broadcastIdentityRegistration(adapter, request));
       const timestamp = now().toISOString();
       const log = identityLog(nextId("identity_log"), "register_identity", request, broadcast, principal, timestamp);
-      await store.appendIdentityTxLog(log);
-      await auditGovernanceLog(audit, log, auditOutcomeFromBroadcast(broadcast));
+      await appendIdentityTxLogWithPersistFallback({
+        store,
+        audit,
+        log,
+        fallback: () => identityLog(nextId("identity_log"), "register_identity", request, {
+          status: "failed",
+          ...(broadcast.txHash ? { txHash: broadcast.txHash } : {}),
+          ...(broadcast.blockNumber ? { blockNumber: broadcast.blockNumber } : {}),
+          ...(broadcast.signer ? { signer: broadcast.signer } : {}),
+          errorCode: "persist_failed",
+          message: "identity registration broadcast completed but persisting the tx log failed; the receipt is unknown",
+          retryable: true,
+          simulated: false
+        }, principal, timestamp)
+      });
       return { request, broadcast, log };
     },
 
@@ -244,8 +257,21 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       }
       const timestamp = now().toISOString();
       const log = identityLog(nextId("identity_log"), "revoke_identity", request, broadcast, principal, timestamp);
-      await store.appendIdentityTxLog(log);
-      await auditGovernanceLog(audit, log, auditOutcomeFromBroadcast(broadcast));
+      await appendIdentityTxLogWithPersistFallback({
+        store,
+        audit,
+        log,
+        fallback: () => identityLog(nextId("identity_log"), "revoke_identity", request, {
+          status: "failed",
+          ...(broadcast.txHash ? { txHash: broadcast.txHash } : {}),
+          ...(broadcast.blockNumber ? { blockNumber: broadcast.blockNumber } : {}),
+          ...(broadcast.signer ? { signer: broadcast.signer } : {}),
+          errorCode: "persist_failed",
+          message: "identity revocation broadcast completed but persisting the tx log failed; the receipt is unknown",
+          retryable: true,
+          simulated: false
+        }, principal, timestamp)
+      });
       return { request, broadcast, log };
     }
   };
@@ -627,6 +653,43 @@ async function safeBroadcast(action: () => Promise<GovernanceBroadcastResultDTO>
       simulated: false
     };
   }
+}
+
+/**
+ * 台账写入的 persist_failed 兜底：广播已完成（拿到 txHash）后写台账
+ * 抛错会制造幽灵交易——链上事实存在、库内零留痕，重启重放同请求还会
+ * 二次广播。先尽力补一条带 txHash 的 failed 档（reconcile 凭哈希复核
+ * 回执/投影，迟到成功自愈 confirmed），再上抛原始错误；补档失败也不
+ * 掩盖原始错误。广播未拿到 txHash 时无需兜底，直接上抛。
+ */
+async function appendIdentityTxLogWithPersistFallback(input: {
+  readonly store: GovernanceStore;
+  readonly audit: AuditSink;
+  readonly log: IdentityTxLogDTO;
+  readonly fallback: () => IdentityTxLogDTO;
+}): Promise<void> {
+  try {
+    await input.store.appendIdentityTxLog(input.log);
+  } catch (error) {
+    // simulated 档从未上链（executionMode=simulated），补档无哈希可复核，
+    // 重放同请求也安全——直接上抛即可。
+    if (!input.log.txHash || input.log.executionMode === "simulated") {
+      throw error;
+    }
+    const fallbackLog = input.fallback();
+    try {
+      await input.store.appendIdentityTxLog(fallbackLog);
+      await auditGovernanceLog(input.audit, fallbackLog, "failed");
+    } catch {
+      // 尽力而为：补档失败时保持原始错误继续上抛。
+    }
+    throw error;
+  }
+  await auditGovernanceLog(
+    input.audit,
+    input.log,
+    input.log.broadcastStatus === "failed" ? "failed" : "succeeded"
+  );
 }
 
 function txLogStatusFromBroadcast(status: GovernanceBroadcastResultDTO["status"]): IdentityTxLogDTO["status"] {

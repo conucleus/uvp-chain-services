@@ -1,5 +1,6 @@
 import { canonicalStringify } from "@uvp-eth/compiler";
 import type { PostgresDatabase } from "./storage/postgres-client.js";
+import { stringifyStorageJson } from "./storage/json.js";
 import type { StoreIdentityDescriptorSnapshotRecord, StoreIdentityDescriptorSnapshotStore } from "./governance/descriptors.js";
 import type { Address, Hex } from "./shared/types.js";
 import type {
@@ -328,6 +329,33 @@ export class PostgresStoreJoinApplicationStore implements StoreJoinApplicationSt
   async getApplication(applicationId: string): Promise<StoreJoinApplicationRecord | undefined> {
     const result = await this.#database.query(`SELECT * FROM store_join_application WHERE application_id = $1`, [applicationId]);
     return result.rows[0] ? applicationRow(result.rows[0]) : undefined;
+  }
+
+  async updateApplicationIfStatus(
+    record: StoreJoinApplicationRecord,
+    expected: StoreJoinApplicationStatus
+  ): Promise<boolean> {
+    // 条件 UPDATE（CAS）：WHERE status = expected 保证并发终态迁移的
+    // 败者（rowCount 0）不得整行覆盖赢家的决策。
+    const updated = await this.#database.query(
+      `UPDATE store_join_application
+       SET status = $1, supplier_id = $2, tx_evidence_json = $3::jsonb, rejection_reason = $4,
+           revocation_reason = $5, decided_by_address = $6, decided_at = $7, updated_at = $8
+       WHERE application_id = $9 AND status = $10`,
+      [
+        record.status,
+        record.supplierId ?? null,
+        stringifyStorageJson(record.txEvidence),
+        record.rejectionReason ?? null,
+        record.revocationReason ?? null,
+        record.decidedByAddress?.toLowerCase() ?? null,
+        record.decidedAt ?? null,
+        record.updatedAt,
+        record.applicationId,
+        expected
+      ]
+    );
+    return (updated.rowCount ?? 0) > 0;
   }
 
   async listApplications(query?: {

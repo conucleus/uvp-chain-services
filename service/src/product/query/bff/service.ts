@@ -1802,10 +1802,40 @@ async function broadcastOutsideTrigger(input: {
     updatedAt,
   };
   const draft = draftFromTriggerBroadcast(input.draft, registration, updatedAt);
-  await withProductStoreTransaction(input.store, async () => {
-    await input.store.updateRegistration(registration);
-    await input.store.updateDraft(draft);
-  });
+  try {
+    await withProductStoreTransaction(input.store, async () => {
+      await input.store.updateRegistration(registration);
+      await input.store.updateDraft(draft);
+    });
+  } catch (error) {
+    if (!broadcast.txHash) {
+      throw error;
+    }
+    // 广播已成功（拿到 txHash）但落档失败：哈希不得丢失——行内不带
+    // txHash 的 failed 永不进 reconcile 复核，链上订单会被超时车道误标
+    // 失败而草稿被误翻 failed。尽力补一条带 txHash 的 persist_failed 档
+    //（reconcile 凭哈希复核回执/投影可自愈为 confirmed）；补档失败也不
+    // 掩盖原始错误。
+    const persistFailed: ProductOrderTriggerRecord = {
+      ...registration,
+      status: "failed",
+      txHash: broadcast.txHash,
+      ...(broadcast.blockNumber ? { blockNumber: broadcast.blockNumber } : {}),
+      errorCode: "persist_failed",
+      errorMessage:
+        "trigger broadcast succeeded but persisting the registration failed; the receipt is unknown and the tx hash is retained for reconcile",
+      retryable: true,
+    };
+    try {
+      await withProductStoreTransaction(input.store, async () => {
+        await input.store.updateRegistration(persistFailed);
+        await input.store.updateDraft(draftFromTriggerBroadcast(input.draft, persistFailed, input.now().toISOString()));
+      });
+    } catch {
+      // 尽力而为：补档失败时保持原始错误继续上抛。
+    }
+    throw error;
+  }
   if (registration.status === "failed") {
     throw new ProductBffError(
       502,

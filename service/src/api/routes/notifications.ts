@@ -201,16 +201,28 @@ async function handleNotificationRequest(
     if (!deliveryId.ok) {
       return deliveryId.response;
     }
-    const delivery = await context.notificationService.deadLetterDelivery(deliveryId.deliveryId, optionalReason(request.body));
-    if (!delivery) {
+    const outcome = await context.notificationService.deadLetterDelivery(deliveryId.deliveryId, optionalReason(request.body));
+    if (outcome.outcome === "not_found") {
       return {
         status: 404,
         body: { error: "notification_delivery_not_found" }
       };
     }
+    // sent/invalidated 是不可追改的终态：回写 dead_letter 会伪造投递
+    // 台账（reopen 重发即双发），按 409 拒绝而非假成功。
+    if (outcome.outcome === "terminal") {
+      return {
+        status: 409,
+        body: {
+          error: "notification_delivery_terminal",
+          message: `delivery status ${outcome.delivery.status} is terminal and cannot be dead-lettered`,
+          delivery: outcome.delivery
+        }
+      };
+    }
     return {
       status: 200,
-      body: { delivery }
+      body: { delivery: outcome.delivery }
     };
   }
 

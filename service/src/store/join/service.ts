@@ -198,7 +198,14 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
       assertTransition(application.status, "under_review");
       const timestamp = now().toISOString();
       const updated: StoreJoinApplicationRecord = { ...application, status: "under_review", updatedAt: timestamp };
-      await joinStore.putApplication(updated);
+      // 条件迁移：并发 startReview/决策只有一个赢家；幂等命中（已是
+      // under_review）按成功收敛。
+      if (!(await joinStore.updateApplicationIfStatus(updated, application.status))) {
+        const latest = await requireApplication(applicationId);
+        if (latest.status !== "under_review") {
+          throw new StoreJoinServiceError(409, "invalid_application_transition", `${latest.status} application cannot transition to under_review`);
+        }
+      }
       await appendEvent(applicationId, "review_started", { ...actor, anchoredAddress }, undefined, undefined, timestamp);
       await emitAudit({
         action: "join.review_started",
@@ -247,7 +254,29 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         decidedAt: timestamp,
         updatedAt: timestamp
       };
-      await joinStore.putApplication(updated);
+      // 终态翻转用条件 UPDATE：身份登记（链上副作用）已发生，CAS 败者
+      // 不得整行覆盖赢家的终态——"链上身份已登记而终态已拒绝"的半提交
+      // 由冲突显式暴露，运营复核（重跑审批会复用 active binding 证据，
+      // 不二次广播）后收敛。
+      if (!(await joinStore.updateApplicationIfStatus(updated, "under_review"))) {
+        const latest = await requireApplication(applicationId);
+        await emitAudit({
+          action: "join.approved",
+          applicationId,
+          planId: application.planId,
+          actorAddress: anchoredAddress,
+          outcome: "blocked",
+          errorCode: "application_decision_conflict",
+          metadata: { currentStatus: latest.status, identityRegistered: Boolean(pairing.txHash) },
+          createdAt: now().toISOString()
+        });
+        throw new StoreJoinServiceError(
+          409,
+          "application_decision_conflict",
+          `the application moved to ${latest.status} while the approval was pairing the on-chain identity; the registration evidence is retained, re-run the approval to reconcile`,
+          { currentStatus: latest.status, identityRegistered: Boolean(pairing.txHash) }
+        );
+      }
       await appendEvent(applicationId, "approved", { ...actor, anchoredAddress }, note, undefined, timestamp);
       await appendEvent(applicationId, "authorized", { ...actor, anchoredAddress }, note, pairing.txHash, timestamp);
       await emitAudit({
@@ -283,7 +312,16 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         decidedAt: timestamp,
         updatedAt: timestamp
       };
-      await joinStore.putApplication(updated);
+      // 同 approve：终态翻转走条件 UPDATE，并发决策的败者按冲突收敛。
+      if (!(await joinStore.updateApplicationIfStatus(updated, application.status))) {
+        const latest = await requireApplication(applicationId);
+        throw new StoreJoinServiceError(
+          409,
+          "application_decision_conflict",
+          `the application moved to ${latest.status} while the rejection was being recorded`,
+          { currentStatus: latest.status }
+        );
+      }
       await appendEvent(applicationId, "rejected", { ...actor, anchoredAddress }, reason, undefined, timestamp);
       await emitAudit({
         action: "join.rejected",
@@ -321,7 +359,18 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         decidedAt: timestamp,
         updatedAt: timestamp
       };
-      await joinStore.putApplication(updated);
+      // 同 approve/reject：终态翻转走条件 UPDATE，败者按冲突收敛。
+      if (!(await joinStore.updateApplicationIfStatus(updated, application.status))) {
+        const latest = await requireApplication(applicationId);
+        if (latest.status !== "revoked") {
+          throw new StoreJoinServiceError(
+            409,
+            "application_decision_conflict",
+            `the application moved to ${latest.status} while the revocation was being recorded`,
+            { currentStatus: latest.status }
+          );
+        }
+      }
       await appendEvent(applicationId, "revoked", actor, reason, undefined, timestamp);
       await emitAudit({
         action: "join.revoked",
@@ -489,12 +538,27 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
       { wallet: application.applicantAddress },
       principal
     );
+    // 广播失败不得吞：申请保持 under_review（可重试审批恢复），不落
+    // authorized、不把 tx 证据标成 on_chain 已记录——那会把未上链的
+    // 身份登记伪装成既成事实。
+    const registrationBroadcast = (registration.governance as { readonly broadcast?: { readonly status?: string; readonly errorCode?: string } }).broadcast;
+    if (registrationBroadcast?.status === "failed") {
+      throw new StoreJoinServiceError(
+        502,
+        "identity_registration_broadcast_failed",
+        "on-chain identity registration broadcast failed; the application stays under review and the approval can be retried",
+        {
+          applicationId: application.applicationId,
+          ...(registrationBroadcast.errorCode ? { errorCode: registrationBroadcast.errorCode } : {})
+        }
+      );
+    }
     const log = (registration.governance as { readonly log?: { readonly txHash?: Hex; readonly txLogId?: string; readonly executionMode?: string } }).log;
     return {
       ...(supplierId ? { supplierId } : {}),
       ...(log?.txHash ? { txHash: log.txHash } : {}),
       ...(log?.txLogId ? { txLogId: log.txLogId } : {}),
-      ...(log?.executionMode === "on_chain" || log?.executionMode === "simulated" ? { executionMode: log.executionMode } : { executionMode: "simulated" })
+      ...(log?.executionMode === "on_chain" || log?.executionMode === "simulated" ? { executionMode: log.executionMode } : {})
     };
   }
 
@@ -553,17 +617,22 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
             }
           ];
           const refreshed = { ...current, status: "active" as StoreJoinApplicationStatus, txEvidence: evidence, updatedAt: timestamp };
-          await joinStore.putApplication(refreshed);
-          await appendEvent(refreshed.applicationId, "activated", undefined, undefined, materialized.txHash, timestamp);
-          await emitAudit({
-            action: "join.activated",
-            applicationId: refreshed.applicationId,
-            planId: refreshed.planId,
-            outcome: "succeeded",
-            metadata: { authorizationKind: refreshed.authorizationKind },
-            createdAt: timestamp
-          });
-          current = refreshed;
+          // 惰性收敛也是状态迁移：条件 UPDATE 兜并发（与决策路径互斥），
+          // 败者说明另一条车道已收敛，沿用库内最新状态。
+          if (await joinStore.updateApplicationIfStatus(refreshed, current.status)) {
+            await appendEvent(refreshed.applicationId, "activated", undefined, undefined, materialized.txHash, timestamp);
+            await emitAudit({
+              action: "join.activated",
+              applicationId: refreshed.applicationId,
+              planId: refreshed.planId,
+              outcome: "succeeded",
+              metadata: { authorizationKind: refreshed.authorizationKind },
+              createdAt: timestamp
+            });
+            current = refreshed;
+          } else {
+            current = await requireApplication(current.applicationId);
+          }
         } else {
           current = { ...current, status: "active" };
         }
@@ -595,11 +664,15 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
       revocationReason: application.revocationReason ?? reason,
       updatedAt: timestamp
     };
-    await joinStore.putApplication(updated);
-    if (!hasEvent) {
-      await appendEvent(application.applicationId, eventType, undefined, reason, undefined, timestamp);
+    // 联动收敛也走条件 UPDATE：与决策路径并发时只有一方落档；败者
+    // 回读库内最新状态（可能已被决策翻成 authorized 等非撤销态）。
+    if (await joinStore.updateApplicationIfStatus(updated, application.status)) {
+      if (!hasEvent) {
+        await appendEvent(application.applicationId, eventType, undefined, reason, undefined, timestamp);
+      }
+      return updated;
     }
-    return updated;
+    return requireApplication(application.applicationId);
   }
 
   /**

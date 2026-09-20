@@ -114,6 +114,7 @@ const expectedMigrationVersions = [
   "0018_store_governance_audit_constraints",
   "0019_stage_patch_state",
   "0020_store_challenge_requester_key",
+  "0021_zhixu_version_single_active",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { canonicalize } from "@uvp-eth/compiler";
 import { hashCanonicalJson, hashEvidenceBytes, hashEvidencePayload } from "./hashing.js";
 import { normalizeBytes32 } from "../shared/types.js";
+import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { InMemoryEvidenceMetadataStore, type EvidenceMetadataRecord, type EvidenceMetadataStore } from "./store.js";
 import {
   assertEvidenceStorageProductionBoundary,
@@ -75,6 +76,11 @@ export interface EvidenceServiceOptions {
    * "先存后绑"要求订单与草稿的对应关系可证明，不允许凭空绑定。
    */
   readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
+  /**
+   * 运维面审计（backup verify/restore 是对存储布局的 admin 探测/写回
+   * 动作，零审计即盲区）。缺省 no-op，路由装配时注入。
+   */
+  readonly audit?: AuditSink;
 }
 
 export interface EvidenceService {
@@ -106,6 +112,7 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
   const evidenceIdFactory = options.evidenceIdFactory ?? (() => `ev_${randomUUID()}`);
   const maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
   const runtimeEnvironment = options.runtimeEnvironment;
+  const audit = options.audit ?? noopAuditSink;
   assertEvidenceStorageProductionBoundary(storage, runtimeEnvironment);
 
   return {
@@ -357,6 +364,19 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
         record.evidence.storageURI,
         record.evidence.contentHash
       );
+      // 存储布局探测面（admin 专用）留审计：谁在何时核验了哪份副本、
+      // 结果如何——verify 结果异常（副本缺失/哈希失配）是数据事故的
+      // 第一信号，零审计即盲区。
+      await audit.record({
+        type: "evidence.backup.verify",
+        action: "verifyEvidenceBackup",
+        outcome: verification.backupPresent && verification.hashMatches ? "succeeded" : "failed",
+        actor: normalizedPrincipal.id ?? "admin",
+        subject: { evidenceId },
+        ...(verification.backupPresent === false || verification.hashMatches === false
+          ? { errorCode: verification.backupPresent === false ? "evidence_backup_missing" : "evidence_backup_hash_mismatch" }
+          : {})
+      });
       return {
         evidenceId,
         backupConfigured: true,
@@ -388,6 +408,16 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
         record.evidence.storageURI,
         record.evidence.contentHash
       );
+      // restore 是对主存储的写回动作，必须留审计（成功与失败同录）。
+      await audit.record({
+        type: "evidence.backup.restore",
+        action: "restoreEvidenceBackup",
+        outcome: restored && verification.hashMatches ? "succeeded" : "failed",
+        actor: normalizedPrincipal.id ?? "admin",
+        subject: { evidenceId },
+        ...(restored ? {} : { errorCode: "evidence_backup_restore_failed" }),
+        metadata: { restored, hashMatches: verification.hashMatches }
+      });
       return {
         evidenceId,
         backupConfigured: true,

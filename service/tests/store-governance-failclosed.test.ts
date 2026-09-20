@@ -47,6 +47,7 @@ const supplierAccount = privateKeyToAccount(supplierWalletKey);
 const supplierWallet = supplierAccount.address as Address;
 const rivalWallet = "0xcccc000000000000000000000000000000000003" as Address;
 const planId = crossBorderPlanIds.planId as Hex;
+const planHashFixture = crossBorderPlanIds.planHash as Hex;
 const planHash = crossBorderPlanIds.planHash as Hex;
 const roleSlotId = demoZhixuDetail.roleSlots[0]?.slotId ?? "supplier";
 const adminHeaders = { "x-uvp-admin-id": "governance-admin-1", "x-uvp-admin-role": "governance_admin" };
@@ -458,6 +459,130 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       expect(approved).toMatchObject({ status: 403, body: { error: "governance_admin_required" } });
     });
 
+    it("keeps the application under review and refuses on_chain evidence when the identity registration broadcast fails", async () => {
+      // M35：approve 不得吞身份登记广播失败——申请留 under_review（可重试
+      // 审批恢复），不落 authorized、tx 证据不冒充 on_chain 已记录。
+      const store = new MemoryProjectionStore();
+      await seedPlan(store);
+      const failingGovernance = createGovernanceService({
+        store: new (await import("../src/governance/index.js")).InMemoryGovernanceStore(),
+        adapter: {
+          async registerIdentity() {
+            return { status: "failed", errorCode: "governance_adapter_failed", message: "rpc down", retryable: true, simulated: false };
+          },
+          async revokeIdentity() {
+            return { status: "failed", errorCode: "governance_adapter_failed", message: "rpc down", retryable: true, simulated: false };
+          }
+        }
+      });
+      // 审批链路要求既有 supplier review（registerIdentity 的前置）。
+      await failingGovernance.reviewSupplier(
+        { subjectId: derivedJoinSubject(supplierWallet), status: "approved_for_broadcast" },
+        { adminId: "governance-admin-1", role: "governance_admin" }
+      );
+      const router = createApiRouter(store, {
+        ...joinRouterOptions(),
+        governanceService: failingGovernance
+      });
+      const session = await login(router, supplierAccount);
+      const submitted = await router.handle({
+        method: "POST",
+        pathname: "/store/join-applications",
+        headers: { "x-uvp-store-session": session },
+        body: { planId, roleSlotId, authorizationKind: "signal_submitter" }
+      });
+      const applicationId = (submitted.body as { application: { applicationId: string } }).application.applicationId;
+      await router.handle({
+        method: "POST",
+        pathname: `/store/join-applications/${applicationId}/review-start`,
+        headers: publisherAnchoredHeaders,
+        body: {}
+      });
+      // 运营（governance_admin + operator 能力）审批：登记广播失败。
+      const approved = await router.handle({
+        method: "POST",
+        pathname: `/store/join-applications/${applicationId}/approve`,
+        headers: { ...publisherAnchoredHeaders, "x-uvp-admin-id": "governance-admin-1", "x-uvp-admin-role": "governance_admin" },
+        body: {}
+      });
+      expect(approved).toMatchObject({ status: 502, body: { error: "identity_registration_broadcast_failed" } });
+      const detail = await router.handle({
+        method: "GET",
+        pathname: `/store/join-applications/${applicationId}`,
+        headers: { "x-uvp-store-session": session }
+      });
+      const application = (detail.body as { application: { status: string; txEvidence: readonly { status: string }[] } }).application;
+      expect(application.status).toBe("under_review");
+      expect(application.txEvidence).toHaveLength(0);
+    });
+
+    it("does not let a concurrent decision overwrite the terminal state after identity pairing", async () => {
+      // C4：approve 的终态翻转走条件 UPDATE——身份已登记但 CAS 败者
+      // 不得把 rejected（或其他赢家终态）整行覆盖成 authorized。
+      const store = new MemoryProjectionStore();
+      await seedPlan(store, { withSupplierBinding: true });
+      // 代理 join store：可指定下一次读取返回过期快照（under_review），
+      // 精确模拟"approve 读快照后、终态翻转前"的并发决策窗口。
+      const { InMemoryStoreJoinApplicationStore } = await import("../src/store/join/index.js");
+      const realJoinStore = new InMemoryStoreJoinApplicationStore();
+      let doctorNextRead = false;
+      const staleSnapshotStore = {
+        putApplication: (record: Parameters<InMemoryStoreJoinApplicationStore["putApplication"]>[0]) => realJoinStore.putApplication(record),
+        updateApplicationIfStatus: (record: Parameters<InMemoryStoreJoinApplicationStore["updateApplicationIfStatus"]>[0], expected: Parameters<InMemoryStoreJoinApplicationStore["updateApplicationIfStatus"]>[1]) => realJoinStore.updateApplicationIfStatus(record, expected),
+        getApplication: async (applicationId: string) => {
+          const record = await realJoinStore.getApplication(applicationId);
+          if (doctorNextRead && record) {
+            doctorNextRead = false;
+            return { ...record, status: "under_review" as const };
+          }
+          return record;
+        },
+        listApplications: (query?: Parameters<InMemoryStoreJoinApplicationStore["listApplications"]>[0]) => realJoinStore.listApplications(query),
+        appendEvent: (record: Parameters<InMemoryStoreJoinApplicationStore["appendEvent"]>[0]) => realJoinStore.appendEvent(record),
+        listEvents: (applicationId: string) => realJoinStore.listEvents(applicationId)
+      };
+      const router = createApiRouter(store, { ...joinRouterOptions(), storeJoinApplicationStore: staleSnapshotStore });
+      const session = await login(router, supplierAccount);
+      const submitted = await router.handle({
+        method: "POST",
+        pathname: "/store/join-applications",
+        headers: { "x-uvp-store-session": session },
+        body: { planId, roleSlotId, authorizationKind: "signal_submitter" }
+      });
+      const applicationId = (submitted.body as { application: { applicationId: string } }).application.applicationId;
+      await router.handle({
+        method: "POST",
+        pathname: `/store/join-applications/${applicationId}/review-start`,
+        headers: publisherAnchoredHeaders,
+        body: {}
+      });
+      // 并发决策赢家先落终态 rejected。
+      const rejected = await router.handle({
+        method: "POST",
+        pathname: `/store/join-applications/${applicationId}/reject`,
+        headers: publisherAnchoredHeaders,
+        body: { reason: "concurrent winner" }
+      });
+      expect(rejected.status).toBe(200);
+
+      // approve 读取的快照是过期的 under_review，但行已是 rejected——
+      // CAS 失败，不得覆盖（active binding 场景下身份证据已在链上）。
+      doctorNextRead = true;
+      const approved = await router.handle({
+        method: "POST",
+        pathname: `/store/join-applications/${applicationId}/approve`,
+        headers: { ...publisherAnchoredHeaders, "x-uvp-admin-id": "governance-admin-1", "x-uvp-admin-role": "governance_admin" },
+        body: {}
+      });
+      expect(approved).toMatchObject({ status: 409, body: { error: "application_decision_conflict" } });
+      const detail = await router.handle({
+        method: "GET",
+        pathname: `/store/join-applications/${applicationId}`,
+        headers: { "x-uvp-store-session": session }
+      });
+      expect((detail.body as { application: { status: string } }).application.status).toBe("rejected");
+    });
+
     it("does not materialize activation from a signal outside the applied-for slot", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store, { withSupplierBinding: true });
@@ -525,6 +650,33 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         planId: "0x0000000000000000000000000000000000000000000000000000000000000abc",
         planHash: "0x0000000000000000000000000000000000000000000000000000000000000def"
       })).rejects.toMatchObject({ code: "plan_not_projected" });
+    });
+
+    it("keeps at most one active version per series (single-active invariant)", async () => {
+      // C1：并发/连续激活不得留下双 active——内存后端在写入 active 时
+      // 同步撤销同 series 其他 active（持久后端由 0021 部分唯一索引裁决）。
+      const metadataStore = new MemoryStoreZhixuVersionMetadataStore();
+      const timestamp = new Date("2026-04-28T00:00:00Z").toISOString();
+      const versionRecord = (versionId: string, planId: Hex) => ({
+        versionId,
+        zhixuId: CROSS_BORDER_ZHIXU_ID,
+        seriesId: CROSS_BORDER_ZHIXU_ID,
+        versionLabel: versionId,
+        status: "deprecated" as const,
+        planId,
+        planHash: planHashFixture,
+        createdAt: timestamp
+      });
+      await metadataStore.upsertVersion(versionRecord("version-a", planId));
+      await metadataStore.upsertVersion(versionRecord("version-b", "0x0000000000000000000000000000000000000000000000000000000000000bbb"));
+
+      await metadataStore.upsertVersion({ ...versionRecord("version-a", planId), status: "active" });
+      await metadataStore.upsertVersion({ ...versionRecord("version-b", "0x0000000000000000000000000000000000000000000000000000000000000bbb"), status: "active" });
+
+      const versions = await metadataStore.listVersions(CROSS_BORDER_ZHIXU_ID);
+      const active = versions.filter((version) => version.status === "active");
+      expect(active).toHaveLength(1);
+      expect(active[0]?.versionId).toBe("version-b");
     });
   });
 

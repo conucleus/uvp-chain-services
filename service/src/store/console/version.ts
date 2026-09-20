@@ -5,6 +5,7 @@ import {
 } from "@uvp-eth/product-dto";
 import type { ProductService } from "../../product/application/service.js";
 import { normalizeBytes32, type Hex } from "../../shared/types.js";
+import { StorageConstraintError } from "../../storage/errors.js";
 import type { ProjectionStore } from "../../storage/projection-store.js";
 
 export interface StoreZhixuVersionService {
@@ -93,6 +94,20 @@ export class MemoryStoreZhixuVersionMetadataStore
   }
 
   async upsertVersion(record: StoreZhixuVersionRecord): Promise<void> {
+    // 单活不变量的内存侧执行（对齐 0021 迁移的部分唯一索引）：写入
+    // active 时同步撤销同 series 的其他 active 行——Map 写入与遍历同处
+    // 一个同步临界区，相对事件循环原子，并发 activate 不会留下双 active。
+    if (record.status === "active") {
+      for (const [key, item] of this.#records) {
+        if (item.seriesId === record.seriesId && item.status === "active" && item.versionId !== record.versionId) {
+          this.#records.set(key, {
+            ...item,
+            status: "deprecated",
+            cutoverReason: "Superseded by active Store version.",
+          });
+        }
+      }
+    }
     this.#records.set(versionKey(record.seriesId, record.versionId), record);
   }
 }
@@ -108,6 +123,22 @@ export class StoreZhixuVersionError extends Error {
   ) {
     super(message);
   }
+}
+
+/**
+ * 并发激活撞上单活部分唯一索引：败者的 cutover 事务整体回滚，按 409
+ * 报告冲突；其余错误原样上抛。
+ */
+function mapActivationConflict(error: unknown): unknown {
+  if (error instanceof StorageConstraintError) {
+    return new StoreZhixuVersionError(
+      409,
+      "version_activation_conflict",
+      "another activation won the cutover for this series; re-read the series and retry",
+      {},
+    );
+  }
+  return error;
 }
 
 export function createStoreZhixuVersionService(options: {
@@ -191,8 +222,15 @@ export function createStoreZhixuVersionService(options: {
         await metadataStore.upsertVersion(active);
         return active;
       };
+      // cutover（旧 active 批量 deprecated + 新 active 落库）
+      // 事务化；持久后端中途失败整体回滚，不留双 active/无 active 中间态。
+      // 并发 activate 的败者由 (series_id) WHERE status='active' 部分唯一
+      // 索引裁决（0021 迁移）：两事务各自基于 cutover 前旧状态写入时，
+      // 后提交者在索引上撞车，按激活冲突 409 收敛而非留下双 active。
       const active = metadataStore.withTransaction
-        ? await metadataStore.withTransaction(applyCutover)
+        ? await metadataStore.withTransaction(applyCutover).catch((error: unknown) => {
+          throw mapActivationConflict(error);
+        })
         : await applyCutover();
       return mutationResult(
         seriesId,

@@ -409,6 +409,78 @@ describe("identity governance API", () => {
     expect(third.log.logId).toBe(second.log.logId);
     expect(broadcasts).toEqual(["register", "register"]);
   });
+
+  it("records a persist_failed fallback log with the txHash when the tx log write fails after a real broadcast", async () => {
+    // B2：广播已成功（拿到 txHash）后写台账抛错——先补一条带 txHash 的
+    // failed 档（reconcile 凭哈希复核可自愈），再上抛原始错误。
+    const adapter: GovernanceChainAdapter = {
+      async registerIdentity() {
+        return { status: "submitted", txHash, signer, retryable: false, simulated: false };
+      },
+      async revokeIdentity() {
+        return { status: "submitted", txHash, signer, retryable: false, simulated: false };
+      },
+    };
+    // 先成功落一条 review 供登记使用；随后让 appendIdentityTxLog 只在第
+    // 一次（正常档）抛错，兜底档允许落库。
+    let appendCalls = 0;
+    const base = new InMemoryGovernanceStore();
+    const flaky: InMemoryGovernanceStore = Object.create(base);
+    flaky.appendIdentityTxLog = async (log: Parameters<InMemoryGovernanceStore["appendIdentityTxLog"]>[0]) => {
+      appendCalls += 1;
+      if (appendCalls === 1) {
+        throw new Error("governance store unavailable");
+      }
+      return base.appendIdentityTxLog(log);
+    };
+    const service = createGovernanceService({
+      adapter,
+      store: flaky,
+      now: () => new Date("2026-04-28T00:00:00Z"),
+    });
+    const principal = { adminId: "admin-1", role: "admin" };
+    await service.reviewSupplier(
+      { subjectId, status: "approved_for_broadcast", publicSummary: "Identity checked." },
+      principal,
+    );
+
+    await expect(
+      service.registerIdentity({ subjectId, account: wallet }, principal),
+    ).rejects.toThrow("governance store unavailable");
+
+    const logs = await flaky.listIdentityTxLogs();
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({
+      action: "register_identity",
+      status: "failed",
+      txHash,
+      errorCode: "persist_failed",
+    });
+  });
+
+  it("assembles a fail-closed refusing governance adapter for production when broadcast is disabled", async () => {
+    // M33：production 禁 env 私钥治理（GOVERNANCE_BROADCAST_ENABLED=true 被
+    // validateProductionSafety 拒绝），广播关闭时装配拒绝适配器——服务可
+    // 启动，治理写面一律 failed 拒绝（不假成功），而不是启动即死。
+    const { createConfiguredGovernanceChainAdapter } = await import("../src/governance/adapter.js");
+    const productionConfig = {
+      security: { environment: "production" },
+      governance: { broadcastEnabled: false, signerPrivateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY" },
+      network: { contracts: { UVPIdentityRegistry: registryAddress } },
+    };
+    const adapter = createConfiguredGovernanceChainAdapter(productionConfig as Parameters<typeof createConfiguredGovernanceChainAdapter>[0]);
+    await expect(adapter.registerIdentity({
+      kind: "registerIdentity",
+      subjectId,
+      account: wallet,
+      descriptorHash: txHash,
+      descriptorURI: "uvp-governance://metadata/x",
+    })).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "governance_broadcast_disabled",
+      retryable: true,
+    });
+  });
 });
 
 /** 非 local 边界可接受的内存对象存储客户端（production-safe 适配器用）。 */

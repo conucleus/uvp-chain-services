@@ -304,12 +304,22 @@ export type NotificationDeliveryRetryOutcome =
   | { readonly outcome: "terminal"; readonly delivery: NotificationDeliveryRecord }
   | { readonly outcome: "retried"; readonly delivery: NotificationDeliveryRecord };
 
+/**
+ * dead-letter 结果：sent/invalidated 是不可追改的终态——把已投递/已失效
+ * 的行回写成 dead_letter 会伪造投递台账，且经 reopen 重发即双发；
+ * dead_letter 行幂等返回 dead_lettered。
+ */
+export type NotificationDeliveryDeadLetterOutcome =
+  | { readonly outcome: "not_found" }
+  | { readonly outcome: "terminal"; readonly delivery: NotificationDeliveryRecord }
+  | { readonly outcome: "dead_lettered"; readonly delivery: NotificationDeliveryRecord };
+
 export interface NotificationService {
   processSignalSubmittedEvents(events: readonly ChainEvent[]): Promise<NotificationProcessSummary>;
   listProfiles(): Promise<readonly NotificationProfileResolution[]>;
   listDeliveries(query?: NotificationDeliveryQuery): Promise<readonly NotificationDeliveryRecord[]>;
   retryDelivery(deliveryId: Hex): Promise<NotificationDeliveryRetryOutcome>;
-  deadLetterDelivery(deliveryId: Hex, reason?: string): Promise<NotificationDeliveryRecord | undefined>;
+  deadLetterDelivery(deliveryId: Hex, reason?: string): Promise<NotificationDeliveryDeadLetterOutcome>;
   reopenDelivery(deliveryId: Hex): Promise<NotificationDeliveryReopenOutcome>;
   /**
    * reorg 回滚联动：把 proof 定位高于 blockNumber 的投递标记为
@@ -635,6 +645,11 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       const pending = await deliveryStore.saveDelivery({
         ...rest,
         status: "pending",
+        // 重开即重置自动补投预算：死信是"上一轮预算耗尽"的结论，带着
+        // 已耗尽的 attempts 重开会在下一次失败后立即再次转死信——
+        // 重开→失败→dead-letter 循环里一次外部投递都不会发生；显式
+        // 重开就是运营授权的一轮全新预算。
+        attempts: 0,
         updatedAt: now()
       });
       const resolved = await resolveRetryTransport(options, pending);
@@ -687,14 +702,26 @@ export function createNotificationService(options: CreateNotificationServiceOpti
     async deadLetterDelivery(deliveryId, reason) {
       const existing = await deliveryStore.getDelivery(deliveryId);
       if (!existing) {
-        return undefined;
+        return { outcome: "not_found" };
       }
-      return deliveryStore.saveDelivery({
-        ...existing,
-        status: "dead_letter",
-        ...(reason ? { reason } : existing.reason ? { reason: existing.reason } : {}),
-        updatedAt: now()
-      });
+      // 终态守卫：sent 是"外部已确认收到"的事实，invalidated 的载荷定位
+      // 已被 reorg 删除——把这两种行回写成 dead_letter 是伪造台账，且
+      // reopen 后重发即对已送达/已失效内容双发。dead_letter 幂等返回。
+      if (existing.status === "sent" || existing.status === "invalidated") {
+        return { outcome: "terminal", delivery: existing };
+      }
+      if (existing.status === "dead_letter") {
+        return { outcome: "dead_lettered", delivery: existing };
+      }
+      return {
+        outcome: "dead_lettered",
+        delivery: await deliveryStore.saveDelivery({
+          ...existing,
+          status: "dead_letter",
+          ...(reason ? { reason } : existing.reason ? { reason: existing.reason } : {}),
+          updatedAt: now()
+        })
+      };
     },
 
     async listParticipantNotifications(query = {}) {
@@ -1868,10 +1895,12 @@ function chooseTransportForRetry(
 }
 
 function isPushTransport(transport: SupplierNotificationTransport): boolean {
-  return transport.type === "webhook" ||
-    transport.type === "slack" ||
-    transport.type === "email" ||
-    transport.type === "mcp";
+  // 只有 webhook 是已产品化的推送渠道：当前装配的唯一 dispatcher 是
+  // WebhookNotificationDispatcher（单一 webhook URL）。slack/email/mcp
+  // 的专用渠道产品尚未做——放行会把它们的载荷统一误投到 webhook URL
+  //（错渠道投递+假 sent），因此 fail-closed 拒绝：标记
+  // transport_not_supported 留账，等渠道产品化后再启用。
+  return transport.type === "webhook";
 }
 
 function activationStatusForResult(

@@ -147,15 +147,43 @@ export function createSecureSubmissionBroadcastAdapter(
           retryBaseMs,
           retryMaxMs
         });
-        const duplicateTxHash = await duplicateTxHashResult(idempotencyKey, broadcast, txHashOwners, attemptNumber, dedupeStore);
-        const result = duplicateTxHash ?? broadcast;
-        const newState = {
-          attempts: attemptNumber,
-          lastResult: result
-        };
-        states.set(idempotencyKey, newState);
-        // 写穿持久层；失败不吞——与内存路径同等严格。
-        await dedupeStore?.save(idempotencyKey, newState);
+        // 去重台账（claimTxHash/save）故障不得吞掉已上链交易的 txHash：
+        // 内层适配器已经真实广播，异常逃逸会让调用方 catch 口按"无 txHash
+        // 的失败"释放 nonce——重启后同一签名会被二次真实广播烧 gas。带
+        // txHash 的结果原样返回（调用方保持 nonce 占用、落档后交 reconcile
+        // 复核），并留审计事件；无 txHash 的结果（从未上链）才允许异常
+        // 继续上抛。
+        let result: SubmissionBroadcastResult;
+        try {
+          const duplicateTxHash = await duplicateTxHashResult(idempotencyKey, broadcast, txHashOwners, attemptNumber, dedupeStore);
+          result = duplicateTxHash ?? broadcast;
+          const newState = {
+            attempts: attemptNumber,
+            lastResult: result
+          };
+          states.set(idempotencyKey, newState);
+          // 写穿持久层；失败不吞——与内存路径同等严格（带 txHash 的
+          // 失败在下方 catch 转为结果返回，不留静默缺口）。
+          await dedupeStore?.save(idempotencyKey, newState);
+        } catch (error) {
+          const broadcastTxHash = broadcastResultTxHash(broadcast);
+          if (!broadcastTxHash) {
+            throw error;
+          }
+          await audit.record({
+            type: "relayer.broadcast.dedupe_persist_failed",
+            action: request.prepared.signalName,
+            outcome: "failed",
+            subject: auditSubject(request),
+            txHash: broadcastTxHash,
+            errorCode: "persist_failed",
+            retryable: true,
+            metadata: {
+              message: "broadcast dedupe ledger write failed after a real broadcast; the txHash is returned so the submission keeps its nonce and reconcile can probe the receipt"
+            }
+          });
+          return broadcast;
+        }
 
         if (result.status === "failed") {
           await audit.record({
@@ -225,13 +253,9 @@ async function duplicateTxHashResult(
   attemptNumber: number,
   dedupeStore: BroadcastDedupeStore | undefined
 ): Promise<SubmissionBroadcastResult | undefined> {
-  const txHash = result.status === "submitted" || result.status === "confirmed" || result.status === "broadcasting"
-    ? result.txHash
-    : result.status === "failed"
-      ? result.attempt?.txHash
-      : undefined;
+  const txHash = broadcastResultTxHash(result);
   if (!txHash) {
-    return undefined;
+    return Promise.resolve(undefined);
   }
 
   const normalizedTxHash = txHash.toLowerCase();
@@ -250,6 +274,15 @@ async function duplicateTxHashResult(
   return failedBroadcastResult("duplicate_tx_hash", "broadcast returned a txHash already recorded for another submission", false, attemptNumber, {
     deadLetter: true
   });
+}
+
+/** 广播结果携带的链上 txHash（顶层或 attempt），无论成功失败形态。 */
+function broadcastResultTxHash(result: SubmissionBroadcastResult): string | undefined {
+  return result.status === "submitted" || result.status === "confirmed" || result.status === "broadcasting"
+    ? result.txHash
+    : result.status === "failed"
+      ? result.attempt?.txHash
+      : undefined;
 }
 
 function withAttemptMetadata(

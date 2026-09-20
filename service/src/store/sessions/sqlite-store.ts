@@ -184,6 +184,60 @@ export class SqliteStoreWalletSessionStore implements StoreWalletSessionStore {
     });
   }
 
+  async claimActiveAccountAddress(record: StoreAccountAddressRecord): Promise<StoreAccountAddressRecord | undefined> {
+    // 单语句原子 CAS：已有 active 行时 SELECT 产出 0 行（不插入），
+    // 已撤销行经 conflict 分支条件重锚——并发双 verify 的败者必然读到
+    // 胜者的 active 行。
+    const claimed = runSqliteWrite(() =>
+      this.#database.prepare(
+        `INSERT INTO store_account_address (address, account_id, status, anchored_at, anchor_session_id)
+         SELECT ?, ?, 'active', ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM store_account_address WHERE address = ? AND status = 'active'
+         )
+         ON CONFLICT(address) DO UPDATE SET
+           account_id = excluded.account_id,
+           status = 'active',
+           anchored_at = excluded.anchored_at,
+           anchor_session_id = excluded.anchor_session_id,
+           revoked_at = NULL,
+           revoked_by_session_id = NULL
+         WHERE store_account_address.status = 'revoked'`
+      ).run(
+        record.address.toLowerCase(),
+        record.accountId,
+        record.anchoredAt,
+        record.anchorSessionId ?? null,
+        record.address.toLowerCase()
+      )
+    );
+    if (claimed.changes > 0) {
+      return undefined;
+    }
+    return this.findActiveAccountAddress(record.address);
+  }
+
+  async revokeActiveAccountAddress(input: {
+    readonly address: Address;
+    readonly accountId: string;
+    readonly revokedAt: string;
+    readonly revokedBySessionId?: string;
+  }): Promise<boolean> {
+    const updated = runSqliteWrite(() =>
+      this.#database.prepare(
+        `UPDATE store_account_address
+         SET status = 'revoked', revoked_at = ?, revoked_by_session_id = ?
+         WHERE address = ? AND account_id = ? AND status = 'active'`
+      ).run(
+        input.revokedAt,
+        input.revokedBySessionId ?? null,
+        input.address.toLowerCase(),
+        input.accountId
+      )
+    );
+    return updated.changes > 0;
+  }
+
   async listAccountAddresses(accountId: string): Promise<readonly StoreAccountAddressRecord[]> {
     return this.#database.prepare(
       `SELECT * FROM store_account_address WHERE account_id = ? ORDER BY anchored_at ASC, address ASC`

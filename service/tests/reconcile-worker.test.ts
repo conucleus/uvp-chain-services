@@ -27,6 +27,7 @@ const sourceId = bytes32("3001");
 const signalId = bytes32("3002");
 const payloadHash = bytes32("3003");
 const idempotencyKey = bytes32("3004");
+const subjectIdForOrphan = bytes32("5a01");
 
 describe("tx/indexer reconcile worker", () => {
   it("serializes concurrent manual and scheduled runs through the runOnce reentry guard", async () => {
@@ -358,6 +359,79 @@ describe("tx/indexer reconcile worker", () => {
       receiptStatus: "timeout",
       errorCode: "tx_reconcile_timeout"
     });
+  });
+
+  it("checks the projection before failing a timed-out tx-less registration", async () => {
+    // B1：txHash 在落档窗口丢失（广播成功、崩溃于落档）时，超时车道不得
+    // 仅凭"无哈希可探回执"就钉 failed——先查投影，订单已呈现即自愈确认。
+    const productStore = new MemoryProductBffStore();
+    const projectionStore = new MemoryProjectionStore();
+    await productStore.createDraft(draftFixture(), []);
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({
+      triggerId: "registration_no_hash",
+      createdAt: "2026-04-27T23:00:00Z"
+    }));
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [chainEvent(12n, bytes32("ffff"), 0, "OrderRegistered", { orderId, planId })]
+    });
+    const worker = new TxReconcileWorker({
+      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 1_000 },
+      receiptClient: receiptClient(new Map()),
+      projectionStore,
+      productStore,
+      now: () => baseNow
+    });
+
+    await worker.runOnce();
+
+    await expect(productStore.getRegistration("registration_no_hash")).resolves.toMatchObject({
+      status: "confirmed",
+      reconcileStatus: "confirmed",
+      receiptStatus: "success",
+      projectionStatus: "present",
+      blockNumber: "12"
+    });
+  });
+
+  it("audits an orphan revoked review whose binding is still active with no governance tx log", async () => {
+    // B3：review 翻 revoked 落库、台账写入前进程死亡的补偿复核——零台账
+    // 且链上 binding 仍 active 时必须告警（有 log 的分叉由既有车道覆盖）。
+    const projectionStore = new MemoryProjectionStore();
+    const governanceStore = new InMemoryGovernanceStore();
+    const audit = new InMemoryAuditSink();
+    await governanceStore.putReview({
+      reviewId: "review_orphan",
+      subjectType: "supplier",
+      subjectId: subjectIdForOrphan,
+      status: "revoked",
+      riskLevel: "unknown",
+      riskTags: [],
+      publicSummary: "",
+      internalNotes: "",
+      policyHash: planHash,
+      metadataHash: planHash,
+      metadataURI: "uvp-governance://metadata/x",
+      reviewer: "admin",
+      createdAt: baseNow.toISOString(),
+      updatedAt: baseNow.toISOString()
+    });
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [chainEvent(8n, bytes32("0f01"), 0, "IdentityBindingRegistered", {
+        bindingId: bytes32("4a01"),
+        subjectId: subjectIdForOrphan,
+        account: creator,
+        registrar: address("2222"),
+        descriptorHash: planHash,
+        descriptorURI: "uvp-governance://metadata/x"
+      })]
+    });
+    const worker = workerFixture({ projectionStore, governanceStore, receipts: new Map(), audit });
+
+    await worker.runOnce();
+
+    expect(audit.list().filter((event) => event.type === "reconcile.governance_revoke_orphan")).toHaveLength(1);
   });
 
   it("keeps tx-less pending submissions in broadcasting instead of relabeling them submitted", async () => {

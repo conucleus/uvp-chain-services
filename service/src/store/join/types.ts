@@ -85,6 +85,17 @@ export interface StoreJoinApplicationEventRecord {
 
 export interface StoreJoinApplicationStore {
   putApplication(record: StoreJoinApplicationRecord): Promise<void>;
+  /**
+   * 条件状态迁移（CAS）：仅当现行状态仍是 expected 时落档（持久层
+   * UPDATE ... WHERE status = ?，内存层同步临界区）。返回 false 表示
+   * 并发方已先完成迁移——approve/reject/revoke 的终态翻转以条件更新
+   * 收口，败者不得整行覆盖赢家的终态（链上身份可能已登记，覆盖会留下
+   * "链上已登记而终态已拒绝"的半提交假象）。
+   */
+  updateApplicationIfStatus(
+    record: StoreJoinApplicationRecord,
+    expected: StoreJoinApplicationStatus
+  ): Promise<boolean>;
   getApplication(applicationId: string): Promise<StoreJoinApplicationRecord | undefined>;
   listApplications(query?: {
     readonly planId?: Hex;

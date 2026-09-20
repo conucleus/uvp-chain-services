@@ -26,7 +26,7 @@ import {
   createProductStageExecutorPatchService,
   createProductStageResourcePatchService
 } from "../stage-patches/index.js";
-import { noopAuditSink } from "../security/audit.js";
+import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { buildOperationalDiagnostics } from "./diagnostics.js";
 import {
   createNotificationService,
@@ -171,7 +171,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       ...(options.evidenceMetadataStore ? { metadataStore: options.evidenceMetadataStore } : {}),
       storage: defaultEvidenceStorage ?? new LocalEvidenceStorage(),
       runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment,
-      ...(resolveDraftOrder ? { resolveDraftOrder } : {})
+      ...(resolveDraftOrder ? { resolveDraftOrder } : {}),
+      // backup verify/restore 的 admin 存储探测/写回动作留审计。
+      audit
     })
   );
   const storeZhixuDraftWorkflowService = options.storeZhixuDraftWorkflowService ??
@@ -291,13 +293,18 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     projectionStore: store,
     decorationStore: options.storeDecorationStore ?? new InMemoryStoreZhixuDecorationStore(),
     delegationStore: options.storePublisherDelegationStore ?? new InMemoryStorePublisherDelegationStore(),
-    ...(options.now ? { now: options.now } : {})
+    ...(options.now ? { now: options.now } : {}),
+    // 装修域审计事件接 AuditSink：emitAudit 只有接到回调才留痕，未接线
+    // 时 saved/restored/委托变更全部零审计（M40 盲区）。
+    audit: (event) => recordStoreDomainAuditEvent(audit, "store.decoration", event.action, event)
   });
   const listingService = options.storeListingService ?? createStoreListingService({
     projectionStore: store,
     listingStore: options.storeListingStore ?? new InMemoryStoreListingStore(),
     ...(options.listingAnchorChainView ? { chainView: options.listingAnchorChainView } : {}),
-    ...(options.now ? { now: options.now } : {})
+    ...(options.now ? { now: options.now } : {}),
+    // 同装修域：上架/审核/下架/恢复事件接 AuditSink。
+    audit: (event) => recordStoreDomainAuditEvent(audit, "store.listing", event.action, event)
   });
   const joinService = options.storeJoinService ?? createStoreJoinService({
     projectionStore: store,
@@ -318,7 +325,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       }
     },
     joinStore: options.storeJoinApplicationStore ?? new InMemoryStoreJoinApplicationStore(),
-    ...(options.now ? { now: options.now } : {})
+    ...(options.now ? { now: options.now } : {}),
+    // 同装修/上架域：提交/评审/决策/联动事件接 AuditSink。
+    audit: (event) => recordStoreDomainAuditEvent(audit, "store.join", event.action, event)
   });
   const context: ApiRouteContext = {
     store,
@@ -634,4 +643,31 @@ function resolveOrderPlanIdFromStore(
     }
     return candidates[0]?.planId;
   };
+}
+
+/**
+ * store 域服务级审计事件（join/listing/装修）接入 AuditSink：这些域的
+ * 服务自带 outcome/errorCode/元数据丰富的审计回调，路由层此前未接线，
+ * 决策与联动事件零留痕。事件体（含 planId/applicationId 等定位字段）
+ * 作为 subject 整体入账。
+ */
+async function recordStoreDomainAuditEvent(
+  audit: AuditSink,
+  type: "store.join" | "store.listing" | "store.decoration",
+  action: string,
+  event: {
+    readonly outcome: "succeeded" | "blocked";
+    readonly errorCode?: string;
+    readonly createdAt: string;
+  }
+): Promise<void> {
+  const { outcome, errorCode, createdAt, ...subject } = event;
+  await audit.record({
+    type,
+    action,
+    outcome,
+    ...(errorCode ? { errorCode } : {}),
+    createdAt,
+    subject
+  });
 }
