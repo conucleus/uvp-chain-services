@@ -3,6 +3,7 @@
     "chainId": 31337,
     "rpcUrl": "http://127.0.0.1:8545",
     "deploymentBlock": "0",
+    "finalityAnchor": "confirmations",
     "finalityConfirmations": 1,
     "contracts": {
       "UVPStateMachine": "0x0000000000000000000000000000000000000000",

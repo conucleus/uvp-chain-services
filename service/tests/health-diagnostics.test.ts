@@ -748,6 +748,7 @@ function serverTestConfig(): ChainServicesConfig {
       chainId: 31337,
       rpcUrl: "http://127.0.0.1:8545",
       deploymentBlock: 0n,
+      finalityAnchor: "confirmations",
       finalityConfirmations: 2,
       contracts: {
         UVPStateMachine: "0x1111111111111111111111111111111111111111"

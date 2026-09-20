@@ -151,6 +151,7 @@ function testConfig(input: {
       chainId: input.chainId,
       rpcUrl: input.rpcUrl,
       deploymentBlock: input.deploymentBlock,
+      finalityAnchor: "confirmations",
       finalityConfirmations: 0,
       contracts: {
         UVPIdentityRegistry: input.registry,

@@ -14,15 +14,27 @@ import {
 } from "./anvil-defaults.js";
 import { storeAuthUrlEvidenceFailure } from "./store-auth-evidence.js";
 
+export type FinalityAnchor = "finalized" | "confirmations";
+
 export interface NetworkConfig {
   readonly chainTarget?: ChainTarget;
   readonly chainId: number;
   readonly rpcUrl: string;
   readonly deploymentBlock: bigint;
   /**
-   * Finality buffer used before an event range is indexed. The indexer also
-   * persists block hashes and rolls back to a common ancestor when a reorg is
-   * detected; this value bounds the normal exposure window.
+   * 游标最终性锚点（UVP_FINALITY_ANCHOR）：
+   * - finalized（默认）：以链的 finalized 标签为索引上界，深度 reorg 在
+   *   最终性边界之内被根除；
+   * - confirmations：latest - finalityConfirmations 浅缓冲，供 anvil 等
+   *   不支持 finalized 标签的本地/测试链环境显式覆盖——2 块深 reorg 即
+   *   越过 1 块缓冲，越窗回滚依赖哈希连续性校验兜底。
+   */
+  readonly finalityAnchor: FinalityAnchor;
+  /**
+   * Finality buffer used before an event range is indexed (confirmations
+   * anchor only). The indexer also persists block hashes and rolls back to a
+   * common ancestor when a reorg is detected; this value bounds the normal
+   * exposure window.
    */
   readonly finalityConfirmations: number;
   readonly contracts: Readonly<Record<string, Address>>;
@@ -277,8 +289,10 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         "UVP_DEPLOYMENT_BLOCK",
         manifest.deploymentBlock ?? 0n,
       ),
-      // 默认 1 仅供本地/测试网；production 预检要求显式配置
-      // （validateProductionSafety / runProductionSafetyPreflight）。
+      // confirmations 锚仅供本地 anvil/浅最终性链显式覆盖（默认锚是
+      // finalized 标签，见 finalityAnchor）；production 预检在
+      // confirmations 锚下要求显式配置（validateProductionSafety）。
+      finalityAnchor: parseFinalityAnchor(env),
       finalityConfirmations: parseInteger(env, "UVP_FINALITY_CONFIRMATIONS", 1),
       contracts,
       stateMachineDeployments: manifest.stateMachineDeployments,
@@ -420,6 +434,14 @@ function parseInteger(env: Env, name: string, fallback: number): number {
   }
 
   return parsed;
+}
+
+function parseFinalityAnchor(env: Env): FinalityAnchor {
+  const rawValue = optionalEnv(env, "UVP_FINALITY_ANCHOR") ?? "finalized";
+  if (rawValue === "finalized" || rawValue === "confirmations") {
+    return rawValue;
+  }
+  throw new ConfigError("UVP_FINALITY_ANCHOR must be finalized or confirmations");
 }
 
 function parseBoolean(env: Env, name: string, fallback: boolean): boolean {
@@ -1382,15 +1404,17 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
     throw new ConfigError("GOVERNANCE_ADMIN_TOKEN_HASHES is required in production");
   }
-  // production 禁止静默使用 env 默认值 1。finality 确认数是索引器
-  // reorg 缓冲必须显式配置为正整数；非生产保持默认 1 不变。追加前的
-  // block-hash continuity check 与有界共同祖先回滚由 indexer 一并执行。
+  // confirmations 锚下禁止静默使用 env 默认值 1：2 块深 reorg 即越缓冲，
+  // finality 确认数必须显式配置为正整数。默认 finalized 锚以最终性标签
+  // 为上界，不消费该值。追加前的 block-hash continuity check 与有界共同
+  // 祖先回滚由 indexer 一并执行。
   if (
-    !optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
-    config.network.finalityConfirmations <= 0
+    config.network.finalityAnchor === "confirmations" &&
+    (!optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
+      config.network.finalityConfirmations <= 0)
   ) {
     throw new ConfigError(
-      "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production",
+      "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production when UVP_FINALITY_ANCHOR=confirmations",
     );
   }
   if (!optionalEnv(env, "CHAIN_SERVICES_DATABASE_URL")) {
@@ -1570,12 +1594,15 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   ) {
     throw new ConfigError("UVP_CHAIN_ID=84532 is required in staging");
   }
+  // confirmations 锚是显式的浅缓冲覆盖：确认数必须显式为正
+  // （默认 finalized 锚不消费该值）。
   if (
-    !optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
-    config.network.finalityConfirmations <= 0
+    config.network.finalityAnchor === "confirmations" &&
+    (!optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
+      config.network.finalityConfirmations <= 0)
   ) {
     throw new ConfigError(
-      "UVP_FINALITY_CONFIRMATIONS must be an explicit positive integer in staging",
+      "UVP_FINALITY_CONFIRMATIONS must be an explicit positive integer in staging when UVP_FINALITY_ANCHOR=confirmations",
     );
   }
   if (!stateMachineAddress(config.network.contracts)) {
@@ -1820,14 +1847,16 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "UVPIdentityRegistry contract address is required in testnet",
     );
   }
-  // 公网测试网缺省 depth=1 等于几乎无 reorg 缓冲：finality 确认数必须
-  // 显式配置为正整数（production/staging 同口径）。
+  // 公网测试网缺省 depth=1 等于几乎无 reorg 缓冲：confirmations 锚下
+  // finality 确认数必须显式配置为正整数（production/staging 同口径；
+  // 默认 finalized 锚不消费该值）。
   if (
-    !optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
-    config.network.finalityConfirmations <= 0
+    config.network.finalityAnchor === "confirmations" &&
+    (!optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
+      config.network.finalityConfirmations <= 0)
   ) {
     throw new ConfigError(
-      "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in testnet",
+      "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in testnet when UVP_FINALITY_ANCHOR=confirmations",
     );
   }
   // testnet 同样强制 admin 白名单非空——空白名单等于任意自报 admin 通过。

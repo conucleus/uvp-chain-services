@@ -124,7 +124,13 @@ interface ViemLogReader {
     readonly fromBlock: bigint;
     readonly toBlock: bigint;
   }): Promise<readonly Log[]>;
-  getBlock?(input: { readonly blockNumber: bigint }): Promise<{ readonly hash: Hex }>;
+  getBlock?(input:
+    | { readonly blockNumber: bigint; readonly blockTag?: undefined }
+    | { readonly blockNumber?: undefined; readonly blockTag: "finalized" }): Promise<{
+    /** null 仅见于 pending 区块；按高度/标签取块时恒非空。 */
+    readonly hash: Hex | null;
+    readonly number?: bigint | null;
+  }>;
 }
 
 export interface ViemChainEventSourceOptions {
@@ -160,15 +166,29 @@ export class ViemChainEventSource implements ChainEventSource {
   }
 
   async getFinalizedBlock(config: ChainServicesConfig): Promise<bigint> {
-    const latestBlock = await this.#client(config).getBlockNumber();
-    // reorg 安全 = finalityConfirmations 缓冲 + indexer/service.ts
-    // 的追加前哈希连续性校验与有界共同祖先回滚。超过回滚窗口的深 reorg
-    // 仍需 full rebuild；`removed` log 的墓碑/复活过滤在 replay 层完成。
-    const confirmations = BigInt(config.network.finalityConfirmations);
-    if (latestBlock <= confirmations) {
-      return 0n;
+    const client = this.#client(config);
+    if (config.network.finalityAnchor === "confirmations") {
+      // 显式覆盖锚（anvil 等不支持 finalized 标签的本地/测试链）：
+      // reorg 安全 = finalityConfirmations 缓冲 + indexer/service.ts
+      // 的追加前哈希连续性校验与有界共同祖先回滚。超过回滚窗口的深
+      // reorg 仍需 full rebuild；`removed` log 的墓碑/复活过滤在 replay
+      // 层完成。
+      const latestBlock = await client.getBlockNumber();
+      const confirmations = BigInt(config.network.finalityConfirmations);
+      if (latestBlock <= confirmations) {
+        return 0n;
+      }
+      return latestBlock - confirmations;
     }
-    return latestBlock - confirmations;
+    // 默认锚：finalized 标签。最终性边界内的 reorg 被根除，游标不会
+    // 锚到可回滚的高度。
+    const finalizedBlock = await client.getBlock?.({ blockTag: "finalized" });
+    if (!finalizedBlock) {
+      throw new ConfigError(
+        "configured RPC client does not support getBlock; the finalized finality anchor requires it (set UVP_FINALITY_ANCHOR=confirmations for chains without finalized-tag support)"
+      );
+    }
+    return finalizedBlock.number ?? 0n;
   }
 
   /**
@@ -184,6 +204,11 @@ export class ViemChainEventSource implements ChainEventSource {
       throw new ConfigError("configured RPC client does not support getBlock; reorg detection is unavailable");
     }
     const block = await client.getBlock({ blockNumber });
+    if (block.hash === null || block.hash === undefined) {
+      // 按高度取 canonical 区块却拿到无哈希块属 RPC 层异常（仅 pending
+      // 块无哈希）；返回空值会让游标带着假锚点放行 reorg 校验。
+      throw new ConfigError(`block ${blockNumber} returned by the RPC node carries no hash`);
+    }
     return block.hash.toLowerCase() as Hex;
   }
 

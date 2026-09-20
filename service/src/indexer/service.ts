@@ -5,6 +5,7 @@ import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import type { ChainEvent, EventCursor } from "./events.js";
 import {
   buildActiveChainEventReplaySummary,
+  chainEventKey,
   sortChainEvents
 } from "./events.js";
 import type { ProjectionSnapshot } from "./projections/index.js";
@@ -115,6 +116,8 @@ export interface PendingPostCommitSweepSummary {
   readonly failed: number;
   /** 等待最终性而未投递的步骤数——不消耗重试预算，保持排队。 */
   readonly waitingFinality: number;
+  /** 载荷事件已不在投影事件表里而被判废出队的步骤数（幽灵通知）。 */
+  readonly ghostDropped: number;
 }
 
 /**
@@ -126,6 +129,20 @@ export interface PendingPostCommitSweepSummary {
  */
 export class PendingPostCommitFinalityWaitError extends Error {
   override readonly name = "PendingPostCommitFinalityWaitError";
+
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
+ * 幽灵批次判废（M45）：pending 通知载荷指向的事件已不在投影事件表里
+ * （重建整库替换 / reorg 回滚后的脏存量）。批次已无可补投的链上事实，
+ * 必须判废出队——既不投递（把幽灵当链上事实投出去），也不消耗重试
+ * 预算（永远无法靠重试恢复）。
+ */
+export class PendingPostCommitGhostStepError extends Error {
+  override readonly name = "PendingPostCommitGhostStepError";
 
   constructor(message: string) {
     super(message);
@@ -240,6 +257,8 @@ export class IndexerService implements LifecycleService {
       this.#cursor = nextCursor;
       // 空回放区间不得写出 fromBlock > toBlock 的 rebuild 元数据：按
       // finalized 锚点收敛为退化空区间（from = to = finalized）。
+      // 链尚未达到部署块：本轮没有重放任何事件，projectionRebuilt
+      // 必须如实报 false（fail-open 的"已重建"会掩盖未完成态）。
       const syncState = await this.#store.saveSyncState({
         ...this.#scope,
         syncStatus: "syncing",
@@ -255,7 +274,7 @@ export class IndexerService implements LifecycleService {
           activeEventCount: 0,
           removedEventCount: 0,
           removedLogsFiltered: false,
-          projectionRebuilt: true,
+          projectionRebuilt: false,
           mismatchCount: 0
         }
       });
@@ -273,7 +292,8 @@ export class IndexerService implements LifecycleService {
           removedEventCount: 0,
           removedLogsFiltered: false,
           syncState,
-          mismatchCount: 0
+          mismatchCount: 0,
+          projectionRebuilt: false
         })
       };
     }
@@ -373,6 +393,7 @@ export class IndexerService implements LifecycleService {
         }
       });
       rebuildCommitted = true;
+      await this.#dropGhostPendingNotificationStepsAfterRebuild(events, finalizedBlock);
       const notificationStatus = await this.#processSignalNotifications(activeEvents);
       if (rebuildNotificationStepId !== undefined && notificationStatus === "delivered") {
         // 当轮投递成功：预落步骤的历史使命（覆盖崩溃窗口）结束，撤销以
@@ -470,6 +491,44 @@ export class IndexerService implements LifecycleService {
         message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
       });
     });
+  }
+
+  /**
+   * 全量重建的 pending 通知清理（M45）：resetFromEvents 整库替换事件表
+   * 后，载荷引用已不存在事件的步骤会在后续 sweep 里补投成幽灵通知。
+   * 判废条件是"事件缺失且块号在本轮重建覆盖区间内"——事件全部命中的
+   * 步骤保留（含本次重建预落的步骤，其载荷就是本批事件）；块号越过
+   * 本轮 finalized 上界的步骤不属于本次重建的管辖（finalized 读数回退
+   * 的边缘），留待事件表追平后由 sweep 按存在性分诊。运行于
+   * #withExclusiveGuard 内，与 sweep 互斥，清理不与补投交错。
+   */
+  async #dropGhostPendingNotificationStepsAfterRebuild(
+    events: readonly ChainEvent[],
+    finalizedBlock: bigint
+  ): Promise<void> {
+    const durableStore = this.#store;
+    if (!isDurableProjectionStore(durableStore)) {
+      return;
+    }
+    const incomingEventIds = new Set(events.map(chainEventKey));
+    const pendingSteps = await durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
+    for (const step of pendingSteps) {
+      if (step.kind !== "signal_notification" || !step.events || step.events.length === 0) {
+        continue;
+      }
+      if (step.events.some((event) => event.blockNumber > finalizedBlock)) {
+        continue;
+      }
+      const missingEvents = step.events.filter((event) => !incomingEventIds.has(chainEventKey(event)));
+      if (missingEvents.length === 0) {
+        continue;
+      }
+      await durableStore.deletePendingPostCommitStep(step.stepId).catch(() => undefined);
+      this.#logger.warn("pending signal notification batch dropped after the full rebuild; its events are no longer on the rebuilt event log", {
+        stepId: step.stepId,
+        droppedEvents: missingEvents.length
+      });
+    }
   }
 
   async refreshFromCursorWithSummary(options: IndexerRebuildOptions = {}): Promise<IndexerRebuildResult> {
@@ -1306,20 +1365,45 @@ export class IndexerService implements LifecycleService {
       swept: 0,
       delivered: 0,
       failed: 0,
-      waitingFinality: 0
+      waitingFinality: 0,
+      ghostDropped: 0
     };
     const durableStore = this.#store;
     if (!isDurableProjectionStore(durableStore)) {
       return summary;
     }
     const pendingSteps = await durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
+    // 事件存在性检查的底册：本轮 sweep 只读一次事件表，供所有
+    // signal_notification 批次共用（无批次时不付 O(全历史) 读取代价）。
+    const storedEventIds = pendingSteps.some((step) => step.kind === "signal_notification")
+      ? new Set((await durableStore.listEvents({ chainId: this.#scope.chainId })).map(chainEventKey))
+      : new Set<string>();
     for (const step of pendingSteps) {
       summary.swept += 1;
       try {
-        await this.#deliverPendingPostCommitStep(step);
+        await this.#deliverPendingPostCommitStep(step, storedEventIds);
         await durableStore.deletePendingPostCommitStep(step.stepId);
         summary.delivered += 1;
       } catch (error) {
+        if (error instanceof PendingPostCommitGhostStepError) {
+          // 载荷事件已从投影事件表消失：判废出队（删除失败仅记录——
+          // 下一轮 sweep 会再次判废，不会投递）。
+          summary.ghostDropped += 1;
+          await durableStore.deletePendingPostCommitStep(step.stepId)
+            .catch((dropError: unknown) => {
+              this.#logger.error("failed to drop a ghost pending post-commit step", {
+                stepId: step.stepId,
+                kind: step.kind,
+                message: dropError instanceof Error ? redactErrorMessage(dropError) : "unknown drop error"
+              });
+            });
+          this.#logger.warn("pending post-commit step dropped; its events are no longer in the projection event log", {
+            stepId: step.stepId,
+            kind: step.kind,
+            message: error instanceof Error ? redactErrorMessage(error) : "unknown ghost"
+          });
+          continue;
+        }
         if (error instanceof PendingPostCommitFinalityWaitError) {
           // 最终性等待不是投递失败：不记 attempts、不消耗死信预算，
           // 保持排队等下一轮（预算只消耗于真实投递失败）。
@@ -1384,7 +1468,10 @@ export class IndexerService implements LifecycleService {
     return this.#eventSource.consumeUnresolvedLogCount?.() ?? 0;
   }
 
-  async #deliverPendingPostCommitStep(step: PendingPostCommitStep): Promise<void> {
+  async #deliverPendingPostCommitStep(
+    step: PendingPostCommitStep,
+    storedEventIds: ReadonlySet<string>
+  ): Promise<void> {
     if (step.kind === "signal_notification") {
       const processor = this.#notificationProcessor;
       const events = step.events ?? [];
@@ -1407,6 +1494,16 @@ export class IndexerService implements LifecycleService {
             `pending signal notification batch ${step.stepId} extends to block ${maxEventBlock} above the finalized bound ${finalizedBlock}; it stays queued until finalization catches up`
           );
         }
+      }
+      // 事件存在性检查（M45）：批次已达最终性上界，事件却不在投影事件表
+      // 里——这是重建替换/reorg 回滚后的脏存量，链上事实已不存在，补投
+      // 只会把幽灵通知投出去。判废（哨兵错误，见 sweep 的分诊分支），
+      // 不消耗重试预算。
+      const missingEvents = events.filter((event) => !storedEventIds.has(chainEventKey(event)));
+      if (missingEvents.length > 0) {
+        throw new PendingPostCommitGhostStepError(
+          `pending signal notification batch ${step.stepId} references ${missingEvents.length} event(s) absent from the projection event log; dropping it instead of delivering a ghost notification`
+        );
       }
       await processor.processSignalSubmittedEvents(events);
       return;
@@ -1592,6 +1689,8 @@ function summaryFromSnapshot(input: {
   readonly removedLogsFiltered: boolean;
   readonly syncState: ProjectionSyncState;
   readonly mismatchCount: number;
+  /** 显式覆盖（如链未达部署块的早退路径）：默认取 snapshot.rebuildable。 */
+  readonly projectionRebuilt?: boolean;
 }): IndexerRebuildSummary {
   return {
     chainId: input.chainId,
@@ -1602,7 +1701,7 @@ function summaryFromSnapshot(input: {
     activeEventCount: input.activeEventCount,
     removedEventCount: input.removedEventCount,
     removedLogsFiltered: input.removedLogsFiltered,
-    projectionRebuilt: input.snapshot.rebuildable,
+    projectionRebuilt: input.projectionRebuilt ?? input.snapshot.rebuildable,
     // 快照记录只含 plan 作用域复合键，每键一条，计数即唯一订单数。
     stateMachineOrderCount: Object.values(input.snapshot.stateMachineOrders).length,
     identityBindingCount: input.identityBindingCount,

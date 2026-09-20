@@ -688,10 +688,119 @@ describe("product API routes", () => {
     await expect(service.createSession({
       sourceZhixuId: "zhixu-a",
       targetZhixuId: "  zhixu-a  "
-    })).rejects.toMatchObject({
+    }, { anchoredAddress: "0x1234567890123456789012345678901234567890" })).rejects.toMatchObject({
       status: 422,
       code: "self_docking_forbidden"
     });
+  });
+
+  it("scopes docking session reads and writes to the creating tenant (U5)", async () => {
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(1n, "PlanRegistered", {
+          planId: crossBorderPlanIds.planId,
+          planHash: crossBorderPlanIds.planHash,
+          hookCount: 1n
+        }),
+        chainEvent(2n, "PlanRegistered", {
+          planId: dockTargetPlanIds.planId,
+          planHash: dockTargetPlanIds.planHash,
+          hookCount: 1n
+        })
+      ]
+    });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
+
+    const createResponse = await router.handle({
+      method: "POST",
+      pathname: "/store/docking-sessions",
+      headers: storeOperatorHeaders,
+      body: { sourceZhixuId: CROSS_BORDER_ZHIXU_ID, targetZhixuId: DOCK_TARGET_ZHIXU_ID }
+    });
+    expect(createResponse.status).toBe(201);
+    const sessionId = ((createResponse.body as { session: { sessionId: string } }).session).sessionId;
+    const candidate = ((createResponse.body as {
+      session: { candidateMappings: Array<{ bindingKind: "input" | "output"; sourceSignal: { signalId: string }; targetSignal: { signalId: string } }> };
+    }).session).candidateMappings[0]!;
+    const draftSignalMap = [{
+      bindingKind: candidate.bindingKind,
+      sourceSignalId: candidate.sourceSignal.signalId,
+      targetSignalId: candidate.targetSignal.signalId
+    }];
+
+    // 另一租户的 operator（不同锚定地址）：读不可见（与不存在同响应），
+    // 写被明示拒绝——会话档案（含 draftSignalMap）只属于创建者租户。
+    const otherOperatorHeaders = {
+      "x-uvp-store-user-id": "store-operator-2",
+      "x-uvp-store-role": "operator",
+      "x-uvp-store-dev-anchored-address": "0x9999999999999999999999999999999999999999"
+    };
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/store/docking-sessions/${sessionId}`,
+      headers: otherOperatorHeaders
+    })).resolves.toMatchObject({ status: 404, body: { error: "docking_session_not_found" } });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/store/docking-sessions/${sessionId}/save-draft-map`,
+      headers: otherOperatorHeaders,
+      body: { draftSignalMap }
+    })).resolves.toMatchObject({ status: 403, body: { error: "docking_session_access_forbidden" } });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/store/docking-sessions/${sessionId}/validate`,
+      headers: otherOperatorHeaders,
+      body: { draftSignalMap }
+    })).resolves.toMatchObject({ status: 403, body: { error: "docking_session_access_forbidden" } });
+
+    // 创建者本人读写不受影响；管理员保留跨租户治理可见性。
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/store/docking-sessions/${sessionId}`,
+      headers: storeOperatorHeaders
+    })).resolves.toMatchObject({ status: 200, body: { session: { sessionId } } });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/store/docking-sessions/${sessionId}/save-draft-map`,
+      headers: storeOperatorHeaders,
+      body: { draftSignalMap }
+    })).resolves.toMatchObject({ status: 200 });
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/store/docking-sessions/${sessionId}`,
+      headers: storeAdminHeaders
+    })).resolves.toMatchObject({ status: 200, body: { session: { sessionId } } });
+  });
+
+  it("gates the zhixu version list behind store.audit.read (U5)", async () => {
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(1n, "PlanRegistered", {
+          planId: crossBorderPlanIds.planId,
+          planHash: crossBorderPlanIds.planHash,
+          hookCount: 1n
+        })
+      ]
+    });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
+
+    // 版本清单是运营台数据：匿名按身份缺失拒绝，不再无门放行。
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/store/zhixu-series/${CROSS_BORDER_ZHIXU_ID}/versions`
+    })).resolves.toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
+
+    const operatorList = await router.handle({
+      method: "GET",
+      pathname: `/store/zhixu-series/${CROSS_BORDER_ZHIXU_ID}/versions`,
+      headers: storeOperatorHeaders
+    });
+    expect(operatorList.status).toBe(200);
+    expect(((operatorList.body as { versions: unknown[] }).versions).length).toBeGreaterThan(0);
   });
 
   it("requires Store identity to read a docking session by id", async () => {
@@ -817,7 +926,7 @@ describe("product API routes", () => {
     const session = await service.createSession({
       sourceZhixuId: source.zhixuId,
       targetZhixuId: target.zhixuId
-    });
+    }, { anchoredAddress: "0x1234567890123456789012345678901234567890" });
 
     expect(session.status).toBe("draft");
     expect(session.validation).toMatchObject({
@@ -1981,6 +2090,144 @@ describe("product API routes", () => {
       status: 403,
       body: {
         error: "submitter_not_authorized"
+      }
+    });
+  });
+
+  it("rejects the replaced executor after an A-to-B delegation rotation while the current executor stays authorized", async () => {
+    // U3 回归：轮换 A→B 后，A 的 verdict 不得命中 chain_signal_authorization
+    // ——链上委任槽已替换为 B，A 再提交会 UnauthorizedSignalSubmitter
+    // revert；同交易的伴生 SignalSubmitterAuthorized 是当时的槽快照，
+    // 投影必须随更高 nonce 的委任收回。B 命中委任腿获准。
+    const replacementExecutor = "0x6666666666666666666666666666666666666666";
+    const delegatedSourceId = sourceId;
+    const delegatedSignalId = signalId;
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(1n, "PlanRegistered", {
+          planId: crossBorderPlanIds.planId,
+          planHash: crossBorderPlanIds.planHash,
+          hookCount: 1n
+        }),
+        chainEvent(2n, "SignalCapabilityRegistered", {
+          planId: crossBorderPlanIds.planId,
+          stageId,
+          targetSourceId: delegatedSourceId,
+          signalId: delegatedSignalId,
+          targetOrderRelation: 0
+        }),
+        chainEvent(3n, "OrderRegistered", {
+          orderId: stateMachineOrderId,
+          planId: crossBorderPlanIds.planId
+        }),
+        chainEvent(4n, "HookReady", {
+          orderId: stateMachineOrderId,
+          hookId,
+          stageId,
+          hookName
+        }),
+        // 轮换第一腿：委派给 A（同交易伴生授权 + 委任事实）。
+        chainEvent(5n, "SignalSubmitterAuthorized", {
+          planId: crossBorderPlanIds.planId,
+          orderId: stateMachineOrderId,
+          sourceId: delegatedSourceId,
+          signalId: delegatedSignalId,
+          submitter: overlayExecutor,
+          role: bytes32Text("customs-executor"),
+          metadataHash
+        }),
+        chainEvent(5n, "StageExecutorSignalDelegated", {
+          planId: crossBorderPlanIds.planId,
+          orderId: stateMachineOrderId,
+          targetStageId: stageId,
+          sourceId: delegatedSourceId,
+          signalId: delegatedSignalId,
+          executor: overlayExecutor,
+          role: bytes32Text("customs-executor"),
+          metadataHash,
+          patchNonce: 1n
+        }),
+        // 轮换第二腿：nonce 递增，A 被替换为 B。
+        chainEvent(6n, "SignalSubmitterAuthorized", {
+          planId: crossBorderPlanIds.planId,
+          orderId: stateMachineOrderId,
+          sourceId: delegatedSourceId,
+          signalId: delegatedSignalId,
+          submitter: replacementExecutor,
+          role: bytes32Text("customs-executor"),
+          metadataHash
+        }),
+        chainEvent(6n, "StageExecutorSignalDelegated", {
+          planId: crossBorderPlanIds.planId,
+          orderId: stateMachineOrderId,
+          targetStageId: stageId,
+          sourceId: delegatedSourceId,
+          signalId: delegatedSignalId,
+          executor: replacementExecutor,
+          role: bytes32Text("customs-executor"),
+          metadataHash,
+          patchNonce: 2n
+        })
+      ]
+    });
+    const evidenceService = createEvidenceService({
+      runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => new Date("2026-04-29T00:00:00.000Z"),
+      evidenceIdFactory: () => "ev_rotation_prepare"
+    });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: new MemoryProductBffStore(), evidenceService });
+    const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
+    const uploadResponse = await router.handle({
+      method: "POST",
+      pathname: "/product/evidence",
+      headers: { "x-uvp-principal-id": "customs" },
+      body: {
+        orderId: stateMachineOrderId,
+        taskId,
+        stageIdentifier: "export.customs",
+        documentType: "customs-declaration",
+        textPayload: "customs declaration",
+        metadata: { fields: { declarationNo: "CD-ROTATION" } }
+      }
+    });
+    const evidenceId = (uploadResponse.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
+
+    // 被替换的 A：显式腿的旧投影条目已被收回，委任腿执行者是 B——拒绝。
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${taskId}/prepare-submit`,
+      headers: { "x-uvp-principal-id": "customs" },
+      body: {
+        evidenceIds: [evidenceId],
+        walletAddress: overlayExecutor,
+        intent: "confirm_stage"
+      }
+    })).resolves.toMatchObject({
+      status: 403,
+      body: {
+        error: "submitter_not_authorized"
+      }
+    });
+
+    // 现任执行者 B：命中委任腿。
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${taskId}/prepare-submit`,
+      headers: { "x-uvp-principal-id": "customs" },
+      body: {
+        evidenceIds: [evidenceId],
+        walletAddress: replacementExecutor,
+        intent: "confirm_stage"
+      }
+    })).resolves.toMatchObject({
+      status: 201,
+      body: {
+        authorization: {
+          source: "chain_signal_delegation"
+        }
       }
     });
   });

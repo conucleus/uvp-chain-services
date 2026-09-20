@@ -1179,16 +1179,32 @@ describe("chain-services config", () => {
     }))).toThrow(/UVP_TESTNET_ALLOW_AUTO_MIGRATIONS=1/);
   });
 
-  it("enforces a finality confirmation floor of 2 in production preflight", async () => {
+  it("enforces a finality confirmation floor of 2 in production preflight under the confirmations anchor", async () => {
     // 确认数是 reorg 缓冲，配 1 形同虚设——单块重组即可穿透
-    // 最终性窗口；生产下限 2，启动期显式失败。（达标面由既有生产
-    // preflight 用例以 12 确认覆盖。）
+    // 最终性窗口；confirmations 锚（显式浅缓冲覆盖）在生产下限 2，
+    // 启动期显式失败。默认 finalized 锚不消费确认数，最终性检查直接
+    // 通过。（达标面由既有生产 preflight 用例以 12 确认覆盖。）
     const floorEnv = productionEnv({
+      UVP_FINALITY_ANCHOR: "confirmations",
       UVP_FINALITY_CONFIRMATIONS: "1"
     });
     await expect(runConfigPreflight(loadConfigFromEnv(floorEnv), {
       env: floorEnv
-    })).rejects.toThrow(/UVP_FINALITY_CONFIRMATIONS must be at least 2 in production/);
+    })).rejects.toThrow(/UVP_FINALITY_CONFIRMATIONS must be at least 2 in production when UVP_FINALITY_ANCHOR=confirmations/);
+
+    const finalizedEnv = productionEnv({
+      UVP_FINALITY_CONFIRMATIONS: undefined
+    });
+    const finalizedConfig = loadConfigFromEnv(finalizedEnv);
+    expect(finalizedConfig.network.finalityAnchor).toBe("finalized");
+    // 默认 finalized 锚下最终性检查必须直接通过（不消费确认数）——
+    // 生产预检可能因其他配置缺口失败，但失败面不得再含
+    // finality_confirmations 检查。客户端用 stub 避免真实 RPC 访问。
+    const finalizedPreflightError = await runConfigPreflight(finalizedConfig, {
+      env: finalizedEnv,
+      clients: stagingPreflightClients()
+    }).then(() => undefined, (error: unknown) => error);
+    expect(String((finalizedPreflightError as Error)?.message ?? "")).not.toMatch(/finality_confirmations/);
   });
 
   it("fails staging preflight on signer mismatch, missing bytecode reads, or governance owner mismatch", async () => {
@@ -1278,30 +1294,58 @@ describe("chain-services config", () => {
     }))).toThrow(/Anvil default private key/);
   });
 
-  it("requires an explicit UVP_FINALITY_CONFIRMATIONS in production, staging and testnet; local keeps the default", () => {
-    // 非 local 公网环境一律不允许静默落到默认值 1
-    // （reorg 防线必须显式配置），testnet 与 production/staging 同口径。
-    const { UVP_FINALITY_CONFIRMATIONS: _finality, ...missingFinality } = productionEnv();
+  it("defaults the finality anchor to the finalized tag and validates the explicit override", () => {
+    // M44：默认锚是 finalized 标签——2 块深 reorg 不再越过 1 块确认缓冲
+    // 成为游标之下的永久幽灵。anvil/testnet 可用 UVP_FINALITY_ANCHOR=
+    // confirmations 显式覆盖（浅缓冲 + 哈希连续性校验兜底）。
+    expect(loadConfigFromEnv().network.finalityAnchor).toBe("finalized");
+    expect(loadConfigFromEnv({
+      UVP_FINALITY_ANCHOR: "confirmations"
+    }).network.finalityAnchor).toBe("confirmations");
+    expect(() => loadConfigFromEnv({
+      UVP_FINALITY_ANCHOR: "latest"
+    })).toThrow(/UVP_FINALITY_ANCHOR must be finalized or confirmations/);
+
+    // 默认 finalized 锚不再要求显式确认数（不消费该值）。
+    const { UVP_FINALITY_CONFIRMATIONS: _prodFinality, ...missingProdFinality } = productionEnv();
+    expect(loadConfigFromEnv(missingProdFinality).network.finalityAnchor).toBe("finalized");
+
+    const { UVP_FINALITY_CONFIRMATIONS: _testnetFinality, ...missingTestnetFinality } =
+      testnetEnv(testnetPostgresConfigUrl());
+    expect(loadConfigFromEnv(missingTestnetFinality).network.finalityAnchor).toBe("finalized");
+  });
+
+  it("requires an explicit UVP_FINALITY_CONFIRMATIONS in production, staging and testnet under the confirmations anchor; local keeps the default", () => {
+    // confirmations 锚是显式的浅缓冲覆盖：非 local 公网环境一律不允许
+    // 静默落到默认值 1（reorg 防线必须显式配置），testnet 与
+    // production/staging 同口径。
+    const { UVP_FINALITY_CONFIRMATIONS: _finality, ...missingFinality } = productionEnv({
+      UVP_FINALITY_ANCHOR: "confirmations"
+    });
     expect(() => loadConfigFromEnv(missingFinality)).toThrow(
       /UVP_FINALITY_CONFIRMATIONS must be explicitly configured/
     );
 
     expect(() => loadConfigFromEnv(productionEnv({
+      UVP_FINALITY_ANCHOR: "confirmations",
       UVP_FINALITY_CONFIRMATIONS: "0"
     }))).toThrow(/UVP_FINALITY_CONFIRMATIONS must be explicitly configured/);
 
     expect(() => loadConfigFromEnv(productionEnv({
+      UVP_FINALITY_ANCHOR: "confirmations",
       UVP_FINALITY_CONFIRMATIONS: "-2"
     }))).toThrow(/UVP_FINALITY_CONFIRMATIONS must be a non-negative safe integer/);
 
     expect(loadConfigFromEnv(stagingEnv(tempDirs)).network.finalityConfirmations).toBe(12);
 
-    const { UVP_FINALITY_CONFIRMATIONS: _testnetFinality, ...missingTestnetFinality } =
-      testnetEnv(testnetPostgresConfigUrl());
-    expect(() => loadConfigFromEnv(missingTestnetFinality)).toThrow(
+    expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
+      UVP_FINALITY_ANCHOR: "confirmations",
+      UVP_FINALITY_CONFIRMATIONS: undefined
+    }))).toThrow(
       /UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in testnet/
     );
     expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
+      UVP_FINALITY_ANCHOR: "confirmations",
       UVP_FINALITY_CONFIRMATIONS: "0"
     }))).toThrow(/UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in testnet/);
 

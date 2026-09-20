@@ -267,6 +267,62 @@ describe("ViemChainEventSource", () => {
     ]);
   });
 
+  it("anchors the finalized bound on the finalized tag by default and on confirmations when overridden", async () => {
+    // M44：默认锚是 finalized 标签——finalityConfirmations=1 的浅缓冲
+    // 会被 2 块深 reorg 越过，旧分叉事件成为游标之下的永久幽灵。
+    const blockCalls: unknown[] = [];
+    const finalizedSource = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 5_000n;
+        },
+        async getLogs() {
+          return [];
+        },
+        async getBlock(input) {
+          blockCalls.push(input);
+          return { hash: "0xab", number: 4_950n };
+        }
+      }
+    });
+    await expect(finalizedSource.getFinalizedBlock(chainServicesConfig())).resolves.toBe(4_950n);
+    expect(blockCalls).toEqual([{ blockTag: "finalized" }]);
+
+    const confirmationsSource = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 5_000n;
+        },
+        async getLogs() {
+          return [];
+        }
+      }
+    });
+    await expect(confirmationsSource.getFinalizedBlock({
+      ...chainServicesConfig(),
+      network: {
+        ...chainServicesConfig().network,
+        finalityAnchor: "confirmations",
+        finalityConfirmations: 2
+      }
+    } as unknown as ChainServicesConfig)).resolves.toBe(4_998n);
+  });
+
+  it("fails closed when the finalized anchor meets an RPC client without getBlock support", async () => {
+    const source = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 5_000n;
+        },
+        async getLogs() {
+          return [];
+        }
+      }
+    });
+    await expect(source.getFinalizedBlock(chainServicesConfig()))
+      .rejects.toThrow(/UVP_FINALITY_ANCHOR=confirmations/);
+  });
+
   it("skips an undecodable log with an explicit count instead of failing the index range", async () => {
     // 单条不可解码日志不得让索引器永久 degraded——跳过留痕
     // （计数 + warn），游标照常前进。

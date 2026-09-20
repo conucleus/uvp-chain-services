@@ -33,6 +33,7 @@ import {
 import { findPlanForOrder, type MutableStateMachinePlanProjection } from "./plan.js";
 import {
   findSignalAuthorizationForHook,
+  revokeSupersededDelegatedAuthorizations,
   signalProjectionKey,
   type SignalAuthorizationHookMatchInput,
   type StateMachineSignalDelegationProjection
@@ -317,6 +318,9 @@ export function applyStageExecutorSignalDelegated(
   const existing = order.signalDelegations[key];
   if (!existing || compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
     order.signalDelegations[key] = delegation;
+    // 委任槽是单槽替换：被替换执行者的 delegation-born 授权投影随本次
+    // 委任收回（stale nonce 的委任事件不得触发收回）。
+    revokeSupersededDelegatedAuthorizations(order, delegation);
     markTargetStageTasksAssignedFromDelegation(order, delegation);
   }
   order.updatedAt = provenanceOf(event);

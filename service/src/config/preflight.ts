@@ -552,27 +552,31 @@ function runProductionSafetyPreflight(
     pass(checks, "storage.migrations_auto_run");
   }
 
-  // production 不允许静默落到 env 默认值 1。finality 确认数是
-  // 索引器 reorg 缓冲必须显式配置；追加前哈希连续性校验与有界共同祖先
-  // 回滚由 indexer/service.ts 执行，非生产环境保持默认 1。
-  if (env.UVP_FINALITY_CONFIRMATIONS?.trim() && config.network.finalityConfirmations > 0) {
-    pass(checks, "network.finality_confirmations_explicit");
-  } else {
-    fail(checks, errors, "network.finality_confirmations_explicit", "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production");
-  }
+  // confirmations 锚是显式的浅缓冲覆盖：production 不允许静默落到 env
+  // 默认值 1。默认 finalized 锚以最终性标签为上界，不消费确认数。
+  if (config.network.finalityAnchor === "confirmations") {
+    if (env.UVP_FINALITY_CONFIRMATIONS?.trim() && config.network.finalityConfirmations > 0) {
+      pass(checks, "network.finality_confirmations_explicit");
+    } else {
+      fail(checks, errors, "network.finality_confirmations_explicit", "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production when UVP_FINALITY_ANCHOR=confirmations");
+    }
 
-  // 生产最终性下限。确认数是 reorg 缓冲——配 1 时边界块自身的
-  // 单块重组即可穿透缓冲（哈希连续性校验只能事后补救），形同虚设；
-  // 生产至少 2 个确认。
-  if (config.network.finalityConfirmations >= 2) {
-    pass(checks, "network.finality_confirmations_floor");
+    // 生产最终性下限。确认数是 reorg 缓冲——配 1 时边界块自身的
+    // 单块重组即可穿透缓冲（哈希连续性校验只能事后补救），形同虚设；
+    // 生产至少 2 个确认。
+    if (config.network.finalityConfirmations >= 2) {
+      pass(checks, "network.finality_confirmations_floor");
+    } else {
+      fail(
+        checks,
+        errors,
+        "network.finality_confirmations_floor",
+        "UVP_FINALITY_CONFIRMATIONS must be at least 2 in production when UVP_FINALITY_ANCHOR=confirmations; a 1-block buffer lets a single-block reorg slip past the finality window"
+      );
+    }
   } else {
-    fail(
-      checks,
-      errors,
-      "network.finality_confirmations_floor",
-      "UVP_FINALITY_CONFIRMATIONS must be at least 2 in production; a 1-block buffer lets a single-block reorg slip past the finality window"
-    );
+    pass(checks, "network.finality_confirmations_explicit");
+    pass(checks, "network.finality_confirmations_floor");
   }
 
   if (config.productBff.registrationAdapter !== "anvil") {

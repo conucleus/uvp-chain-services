@@ -51,6 +51,13 @@ export interface StateMachineSignalAuthorizationProjection {
   readonly role: Hex;
   readonly metadataHash: Hex;
   readonly authorizedAt: ProjectionProvenance;
+  /**
+   * 委任伴生授权：delegateStageExecutorSignalFromModule 同交易发出的
+   * SignalSubmitterAuthorized 只反映 (sourceId, signalId) 单槽委任的当时
+   * 快照（链上不写显式授权表），更高 patchNonce 的委任到达即被收回。
+   * 显式（注册期）授权无此标记，不受执行者轮换影响。
+   */
+  readonly delegated?: boolean;
   readonly proof: StateMachineProofProjection;
 }
 
@@ -187,6 +194,46 @@ export function markMatchingTasksAssigned(
 
 export function signalProjectionKey(sourceId: Hex, signalId: Hex): string {
   return `${sourceId}:${signalId}`;
+}
+
+/**
+ * StageExecutorSignalDelegated 落地后的授权收回：链上委任槽按
+ * (sourceId, signalId) 单槽替换（nonce 递增覆盖 executor），历史轮换
+ * 留下的 delegation-born 授权投影必须随之收回，否则被替换执行者仍在
+ * "当前在任提交者集"里（轮换 A→B 后 A 的 verdict authorized:true 而链上
+ * UnauthorizedSignalSubmitter revert）。同交易的伴生
+ * SignalSubmitterAuthorized 标记为 delegated；本键上其余 delegated 授权
+ * （被替换的旧执行者）删除。显式（注册期）授权在链上先于 executor 门
+ * 检查、从不因委任被收回，必须保留。
+ */
+export function revokeSupersededDelegatedAuthorizations(
+  order: MutableStateMachineOrderProjection,
+  delegation: Pick<
+    StateMachineSignalDelegationProjection,
+    "sourceId" | "signalId" | "executor" | "delegatedAt"
+  >
+): void {
+  const companionKey = signalAuthorizationProjectionKey(delegation.sourceId, delegation.signalId, delegation.executor);
+  for (const [key, authorization] of Object.entries(order.authorizations)) {
+    if (authorization.sourceId !== delegation.sourceId || authorization.signalId !== delegation.signalId) {
+      continue;
+    }
+    if (key === companionKey && isSameTransaction(authorization.authorizedAt, delegation.delegatedAt)) {
+      if (!authorization.delegated) {
+        order.authorizations[key] = { ...authorization, delegated: true };
+      }
+      continue;
+    }
+    if (authorization.delegated === true) {
+      delete order.authorizations[key];
+    }
+  }
+}
+
+function isSameTransaction(left: ProjectionProvenance, right: ProjectionProvenance): boolean {
+  return left.chainId === right.chainId &&
+    left.blockNumber === right.blockNumber &&
+    left.transactionHash.toLowerCase() === right.transactionHash.toLowerCase();
 }
 
 export function signalAuthorizationProjectionKey(sourceId: Hex, signalId: Hex, submitter: Address): string {

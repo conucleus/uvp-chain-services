@@ -1049,11 +1049,17 @@ function submitterForCapability(
   for (const entry of entries) {
     const sourceId = keccak256(stringToBytes(entry.source)).toLowerCase();
     const signalId = keccak256(stringToBytes(entry.signalName)).toLowerCase();
-    const authorization = Object.values(order.authorizations).find(
-      (item) =>
-        item.sourceId.toLowerCase() === sourceId &&
-        item.signalId.toLowerCase() === signalId,
-    );
+    // 解析当前在任提交者而非插入序首个：投影维护的是"当前有效授权集"
+    //（执行者轮换后旧执行者的委任伴生授权已被收回），多授权并存时取
+    // 最新落链的一笔——有委任在任时即现任执行者。
+    const authorization = Object.values(order.authorizations)
+      .filter(
+        (item) =>
+          item.sourceId.toLowerCase() === sourceId &&
+          item.signalId.toLowerCase() === signalId,
+      )
+      .sort((left, right) => compareChainPointers(left.authorizedAt, right.authorizedAt))
+      .at(-1);
     if (authorization) {
       return {
         wallet: authorization.submitter,

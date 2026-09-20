@@ -2252,7 +2252,9 @@ describe("indexer projection replay", () => {
       });
       await indexer.rebuildFromDeploymentBlockWithSummary();
 
-      // 直接落一行事件块号高于最终性上界的 pending 批次。
+      // 直接落一行事件块号高于最终性上界的 pending 批次（事件同时写入
+      // 事件表——真实失败批次的载荷事件必然已落库，补投的存在性检查
+      // 以此为前提）。
       const lateEvent = chainEvent(15n, 0, "SignalSubmitted", {
         orderId: stateMachineOrderId,
         sourceId: bytes32Hex("1606"),
@@ -2261,6 +2263,7 @@ describe("indexer projection replay", () => {
         idempotencyKey: bytes32Hex("1bbb"),
         submitter: signer
       });
+      await store.appendEvent(lateEvent);
       await store.savePendingPostCommitStep({
         stepId: "pending_signal_notification:finality-wait",
         chainId: 31337,
@@ -2309,6 +2312,178 @@ describe("indexer projection replay", () => {
       await store.close();
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("drops pending notification batches whose events vanish from the rebuilt event log on a full rebuild", async () => {
+    // M45 回归：resetFromEvents 整库替换事件表后，载荷引用已不存在事件
+    // 的 pending 通知步骤是脏存量——重建必须清理，否则 sweep 会把幽灵
+    // 通知投出去。事件仍在本批重建事件集里的步骤保留（含重建预落步骤）。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-rebuild-ghost-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      // 第一轮：通知通道故障，重建批次转 pending（事件已落事件表）。
+      const failingSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 9n;
+        },
+        async readEvents(range) {
+          return stateMachineEvents().filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource: failingSource,
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents() {
+            throw new Error("notification delivery down");
+          }
+        }
+      });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+      const pendingBeforeRebuild = await indexer.listPendingPostCommitSteps();
+      expect(pendingBeforeRebuild.length).toBe(1);
+      const ghostEvent = pendingBeforeRebuild[0]?.events
+        ?.find((event) => event.eventName === "SignalSubmitted");
+      // chainEvent 助手同块共享 txHash，事件身份用 txHash+logIndex 键。
+      const ghostEventKey = ghostEvent && `${ghostEvent.transactionHash}:${ghostEvent.logIndex}`;
+      expect(ghostEventKey).toBeDefined();
+
+      // 第二轮：通道恢复，但重建读到的事件集不再包含 pending 批次里的
+      // 旧分叉事件（同区间事件被替换）。
+      const deliveredBatches: (readonly ChainEvent[])[] = [];
+      const recoveringIndexer = new IndexerService({
+        config: testConfig(),
+        eventSource: {
+          async getFinalizedBlock() {
+            return 9n;
+          },
+          async readEvents(range) {
+            return stateMachineEvents()
+              .filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock)
+              .filter((event) => event.eventName !== "SignalSubmitted");
+          }
+        },
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents(events) {
+            deliveredBatches.push(events);
+          }
+        }
+      });
+      await recoveringIndexer.rebuildFromDeploymentBlockWithSummary();
+
+      // 脏存量被重建清理：不再有可补投的 pending 批次。
+      await expect(recoveringIndexer.listPendingPostCommitSteps()).resolves.toEqual([]);
+      const sweepSummary = await recoveringIndexer.sweepPendingPostCommitSteps();
+      expect(sweepSummary).toMatchObject({ swept: 0, delivered: 0, failed: 0, ghostDropped: 0 });
+      // 幽灵批次没有被投出去：投递只发生在重建自己的活跃事件上，且
+      // 不含旧分叉事件。
+      const deliveredEventKeys = deliveredBatches.flat().map((event) => `${event.transactionHash}:${event.logIndex}`);
+      expect(deliveredEventKeys).not.toContain(ghostEventKey);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("dead-letters ghost notification batches at sweep time instead of delivering them", async () => {
+    // M45 回归：补投前检查事件存在性——批次已达最终性上界、载荷事件却
+    // 不在投影事件表里（任何路径残留的脏存量）时判废出队，不投递、
+    // 不消耗重试预算。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-sweep-ghost-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 9n;
+        },
+        async readEvents(range) {
+          return stateMachineEvents().filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        }
+      };
+      const deliveredBatches: (readonly ChainEvent[])[] = [];
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents(events) {
+            deliveredBatches.push(events);
+          }
+        }
+      });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+      const rebuildDeliveryCount = deliveredBatches.length;
+
+      // 手工落一个"幽灵"批次：事件块号在最终性上界内，但从未进入
+      // 投影事件表（重建替换/reorg 后残留的形态）。
+      const ghostEvent = chainEvent(5n, 3, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        sourceId: bytes32Hex("2606"),
+        signalId: bytes32Hex("2707"),
+        payloadHash,
+        idempotencyKey: bytes32Hex("2bbb"),
+        submitter: signer
+      });
+      await store.savePendingPostCommitStep({
+        stepId: "pending_signal_notification:ghost-batch",
+        chainId: 31337,
+        kind: "signal_notification",
+        events: [ghostEvent]
+      });
+
+      const sweepSummary = await indexer.sweepPendingPostCommitSteps();
+      expect(sweepSummary).toMatchObject({ swept: 1, delivered: 0, failed: 0, waitingFinality: 0, ghostDropped: 1 });
+      expect(deliveredBatches.length).toBe(rebuildDeliveryCount);
+      await expect(indexer.listPendingPostCommitSteps()).resolves.toEqual([]);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports projectionRebuilt=false when the chain has not reached the deployment block", async () => {
+    // M45 回归：链未达部署块时重建早退——没有重放任何事件，
+    // projectionRebuilt=true 是 fail-open（掩盖未完成态）。
+    const store = new MemoryProjectionStore();
+    const eventSource: ChainEventSource = {
+      async getFinalizedBlock() {
+        return 5n;
+      },
+      async readEvents() {
+        throw new Error("readEvents must not be called before the chain reaches the deployment block");
+      }
+    };
+    const indexer = new IndexerService({
+      config: {
+        ...testConfig(),
+        network: { ...testConfig().network, deploymentBlock: 100n }
+      },
+      eventSource,
+      store
+    });
+    const { summary } = await indexer.rebuildFromDeploymentBlockWithSummary();
+
+    expect(summary.projectionRebuilt).toBe(false);
+    expect(summary.syncStatus).toBe("syncing");
+    expect(summary.eventCount).toBe(0);
+    const syncState = await store.getSyncState();
+    expect(syncState?.rebuild?.projectionRebuilt).toBe(false);
   });
 
   it("reuses one stable pending row for repeated projection automation failures", async () => {
@@ -2565,6 +2740,174 @@ describe("indexer projection replay", () => {
     ]);
   });
 
+  it("revokes the replaced executor's delegated authorization projection on rotation and rebuilds to the same state", () => {
+    // U3 回归：delegateStageExecutorSignalFromModule 的链上授权是
+    // (sourceId, signalId) 单槽替换（nonce 递增覆盖 executor），同交易的
+    // SignalSubmitterAuthorized 只是当时的槽快照（链上不写显式授权表）。
+    // A→B 轮换后投影只允许留下 B——A 的旧条目会让链下 verdict
+    // authorized:true 而链上 UnauthorizedSignalSubmitter revert。
+    const executorA = "0x6666666666666666666666666666666666666666";
+    const executorB = "0x7777777777777777777777777777777777777777";
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(2n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      chainEvent(3n, 0, "HookReady", {
+        orderId: stateMachineOrderId,
+        hookId,
+        stageId,
+        hookName
+      }),
+      // 轮换第一腿：委派给 A（同交易伴生授权 + 委任事实）。
+      chainEvent(4n, 0, "SignalSubmitterAuthorized", {
+        planId,
+        orderId: stateMachineOrderId,
+        sourceId,
+        signalId,
+        submitter: executorA,
+        role: bytes32Text("customs-executor"),
+        metadataHash: emptyHash
+      }),
+      chainEvent(4n, 1, "StageExecutorSignalDelegated", {
+        planId,
+        orderId: stateMachineOrderId,
+        targetStageId: stageId,
+        sourceId,
+        signalId,
+        executor: executorA,
+        role: bytes32Text("customs-executor"),
+        metadataHash: emptyHash,
+        patchNonce: 1n
+      }),
+      // 轮换第二腿：nonce 递增，A 被替换为 B。
+      chainEvent(5n, 0, "SignalSubmitterAuthorized", {
+        planId,
+        orderId: stateMachineOrderId,
+        sourceId,
+        signalId,
+        submitter: executorB,
+        role: bytes32Text("customs-executor"),
+        metadataHash: emptyHash
+      }),
+      chainEvent(5n, 1, "StageExecutorSignalDelegated", {
+        planId,
+        orderId: stateMachineOrderId,
+        targetStageId: stageId,
+        sourceId,
+        signalId,
+        executor: executorB,
+        role: bytes32Text("customs-executor"),
+        metadataHash: emptyHash,
+        patchNonce: 2n
+      })
+    ];
+
+    const orderKey = stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId);
+    const snapshot = rebuildOrderProjections(events);
+    const order = snapshot.stateMachineOrders[orderKey];
+    const authorizations = Object.values(order?.authorizations ?? {})
+      .filter((item) => item.sourceId === sourceId && item.signalId === signalId);
+
+    expect(authorizations).toHaveLength(1);
+    expect(authorizations[0]).toMatchObject({ submitter: executorB, delegated: true });
+    expect(order?.signalDelegations[`${sourceId}:${signalId}`]).toMatchObject({
+      executor: executorB,
+      patchNonce: "2"
+    });
+    expect(order?.tasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`]?.assigneeWallet).toBe(executorB);
+
+    // 全量重建必须回到同一干净态：同一事件流重放的结果与增量一致。
+    const rebuilt = rebuildOrderProjections(events);
+    expect(rebuilt.stateMachineOrders[orderKey]?.authorizations).toEqual(order?.authorizations);
+    expect(rebuilt.stateMachineOrders[orderKey]?.signalDelegations).toEqual(order?.signalDelegations);
+  });
+
+  it("keeps explicit registration authorizations through an executor rotation on the same signal key", () => {
+    // 链上 _isSignalSubmitterAuthorized 先查显式授权表（注册期写入、
+    // append-only），executor 轮换只替换单槽委任——显式提交者不受影响。
+    // 投影收回必须只作用于 delegation-born 条目，不得误伤显式授权。
+    const executorA = "0x6666666666666666666666666666666666666666";
+    const executorB = "0x7777777777777777777777777777777777777777";
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(2n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      // 显式（注册期）授权：独立交易，无委任伴生。
+      chainEvent(3n, 0, "SignalSubmitterAuthorized", {
+        planId,
+        orderId: stateMachineOrderId,
+        sourceId,
+        signalId,
+        submitter: signer,
+        role: bytes32Text("explicit-submitter"),
+        metadataHash: emptyHash
+      }),
+      chainEvent(4n, 0, "SignalSubmitterAuthorized", {
+        planId,
+        orderId: stateMachineOrderId,
+        sourceId,
+        signalId,
+        submitter: executorA,
+        role: bytes32Text("customs-executor"),
+        metadataHash: emptyHash
+      }),
+      chainEvent(4n, 1, "StageExecutorSignalDelegated", {
+        planId,
+        orderId: stateMachineOrderId,
+        targetStageId: stageId,
+        sourceId,
+        signalId,
+        executor: executorA,
+        role: bytes32Text("customs-executor"),
+        metadataHash: emptyHash,
+        patchNonce: 1n
+      }),
+      chainEvent(5n, 0, "SignalSubmitterAuthorized", {
+        planId,
+        orderId: stateMachineOrderId,
+        sourceId,
+        signalId,
+        submitter: executorB,
+        role: bytes32Text("customs-executor"),
+        metadataHash: emptyHash
+      }),
+      chainEvent(5n, 1, "StageExecutorSignalDelegated", {
+        planId,
+        orderId: stateMachineOrderId,
+        targetStageId: stageId,
+        sourceId,
+        signalId,
+        executor: executorB,
+        role: bytes32Text("customs-executor"),
+        metadataHash: emptyHash,
+        patchNonce: 2n
+      })
+    ];
+
+    const order = rebuildOrderProjections(events)
+      .stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
+    const submitters = Object.values(order?.authorizations ?? {})
+      .filter((item) => item.sourceId === sourceId && item.signalId === signalId)
+      .sort((left, right) => left.submitter.localeCompare(right.submitter));
+
+    expect(submitters.map((item) => [item.submitter, item.delegated ?? false])).toEqual([
+      [signer, false],
+      [executorB, true]
+    ]);
+  });
+
   it("resolves state-machine orders by the (planId, orderId) composite key and fails closed on bare-id ambiguity", async () => {
     // 订单身份是 (planId, orderId)。裸
     // orderId 多命中必须 fail-closed 返回 undefined（绝不取第一个），带
@@ -2706,6 +3049,7 @@ function testConfig(): ChainServicesConfig {
       chainId: 31337,
       rpcUrl: "http://127.0.0.1:8545",
       deploymentBlock: 0n,
+      finalityAnchor: "confirmations",
       finalityConfirmations: 2,
       contracts: {}
     },
