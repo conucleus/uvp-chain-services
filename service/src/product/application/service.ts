@@ -2076,6 +2076,8 @@ function displayAssigneeRole(role: string): string {
       return "链上授权执行方";
     case "stage_overlay_executor":
       return "订单指定执行方";
+    case "delegated_stage_executor":
+      return "委派执行方";
     default:
       return role;
   }

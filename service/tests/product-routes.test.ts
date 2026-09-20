@@ -1113,7 +1113,21 @@ describe("product API routes", () => {
 
   it("marks HookReady task submitted when a matching signal is projected", async () => {
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents({ includeMatchingSignal: true }) });
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineProductEvents({ includeMatchingSignal: true }),
+        // 任务指派授权：没有它任务无 assignee，me 视图两栏都不收录。
+        chainEvent(9n, "SignalSubmitterAuthorized", {
+          orderId: stateMachineOrderId,
+          sourceId: hookId,
+          signalId,
+          submitter,
+          role: `0x${"33".repeat(32)}`,
+          metadataHash: `0x${"44".repeat(32)}`
+        })
+      ]
+    });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
@@ -1127,11 +1141,12 @@ describe("product API routes", () => {
         submittedSignalTxHash: txHash(8n)
       });
 
-    // ORDER-FE 口径:submitted 只是链上确认中,不得计入已完成(completedTaskCount 仅统计 done)。
+    // 任务词表只有 open/submitted/blocked：submitted 即工作已提交、链上
+    // 确认中，按已完成口径计入（openTaskCount 不再计它）。
     const meResponse = await router.handle({ method: "GET", pathname: "/product/me", headers: assigneeHeaders });
     expect(meResponse.status).toBe(200);
     expect((meResponse.body as { summary: { completedTaskCount: number; openTaskCount: number } }).summary).toMatchObject({
-      completedTaskCount: 0,
+      completedTaskCount: 1,
       openTaskCount: 0
     });
   });
@@ -2140,6 +2155,15 @@ describe("product API routes", () => {
         error: "submitter_not_authorized"
       }
     });
+
+    // 委派执行者的角色在任务读面必须是用户可读文案，不裸出内部枚举。
+    const delegatedTask = await router.handle({
+      method: "GET",
+      pathname: `/product/tasks/${taskId}`,
+      headers: { "x-uvp-wallet-address": overlayExecutor }
+    });
+    expect(delegatedTask.status).toBe(200);
+    expect((delegatedTask.body as { task: { assigneeRole: string } }).task.assigneeRole).toBe("委派执行方");
   });
 
   it("rejects the replaced executor after an A-to-B delegation rotation while the current executor stays authorized", async () => {
