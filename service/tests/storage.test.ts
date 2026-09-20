@@ -525,6 +525,17 @@ describe("durable storage", () => {
     await store.createDraft(draft, [participant]);
     await store.createInviteIfNoneActive(invite, "2026-01-01T00:00:00.000Z");
     await store.createRegistrationIfNoneForDraft(registration);
+    // 条件状态迁移（CAS）：期望状态命中才整行落库，行已迁移时返回 false
+    // 且不覆盖。
+    await expect(
+      store.updateDraftIfStatus({ ...draft, status: "awaiting_participants" }, draft.status),
+    ).resolves.toBe(true);
+    await expect(
+      store.updateDraftIfStatus({ ...draft, status: "draft" }, "ready_to_trigger"),
+    ).resolves.toBe(false);
+    await expect(store.getDraft(draft.draftId)).resolves.toMatchObject({
+      status: "awaiting_participants",
+    });
     await store.close();
     stores.splice(stores.indexOf(store), 1);
 

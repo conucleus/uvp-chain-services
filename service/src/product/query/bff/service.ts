@@ -287,7 +287,16 @@ export function createProductBffService(
         ...(input.notes !== undefined ? { notes: input.notes } : {}),
         updatedAt: now().toISOString(),
       };
-      await store.updateDraft(draft);
+      // 编辑是整行覆盖写：并发状态迁移（触发/对账收敛）后，旧快照的
+      // 整行不得落库——CAS 败者按冲突拒绝，调用方回读后重试。
+      if (!(await store.updateDraftIfStatus(draft, current.status))) {
+        throw new ProductBffError(
+          409,
+          "draft_conflict",
+          "the draft changed while the update was being applied; re-read the draft and retry",
+          { draftId, currentStatus: (await requireDraft(store, draftId)).status },
+        );
+      }
       return draft;
     },
 
@@ -1394,8 +1403,14 @@ async function refreshDraftStatus(
         ? "awaiting_participants"
         : "draft";
   const next = { ...draft, status, updatedAt: now().toISOString() };
-  await store.updateDraft(next);
-  return next;
+  // 派生状态重算是非权威写入：整行覆盖必须以"读到快照后状态未变"为
+  // 条件——否则并发触发车道刚落的 triggering/triggered 会被旧快照盖回
+  // awaiting/ready（草稿"被取消触发"而订单已在链上）。败者回读最新档。
+  if (await store.updateDraftIfStatus(next, draft.status)) {
+    return next;
+  }
+  const latest = await requireDraft(store, draft.draftId);
+  return latest ?? next;
 }
 
 function nextId(prefix: string, idScope: string, sequence: number): string {

@@ -87,6 +87,20 @@ export class SqliteProductBffStore implements ProductBffStore {
     runSqliteWrite(() => this.#upsertDraft(draft));
   }
 
+  async updateDraftIfStatus(draft: ProductOrderDraftDTO, expected: ProductOrderDraftDTO["status"]): Promise<boolean> {
+    // 条件 UPDATE（CAS）：单写连接内原子，WHERE status 保证读到旧快照的
+    // 整行覆盖在行已迁移时不得落库（changes 0 即败者）。
+    const updated = runSqliteWrite(() => this.#database.prepare(
+      `UPDATE product_order_draft
+       SET zhixu_id = ?, plan_id = ?, plan_hash = ?, title = ?, business_type = ?, goods_json = ?,
+           total_amount = ?, currency = ?, export_region = ?, destination_region = ?,
+           expected_completion_date = ?, notes = ?, status = ?, created_by = ?, created_at = ?,
+           updated_at = ?, triggered_order_id = ?, trigger_tx_hash = ?
+       WHERE draft_id = ? AND status = ?`
+    ).run(...draftValues(draft).slice(1), draft.draftId, expected));
+    return updated.changes > 0;
+  }
+
   async listParticipants(draftId: string): Promise<readonly DraftParticipantDTO[]> {
     return this.#database.prepare(
       `SELECT *

@@ -28,7 +28,7 @@ import type {
 } from "../src/product/query/bff/trigger.js";
 import { MemoryStoreZhixuVersionMetadataStore } from "../src/store/console/version.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { MemoryProductBffStore } from "../src/product/query/bff/store.js";
+import { MemoryProductBffStore, type ProductBffStore } from "../src/product/query/bff/store.js";
 import {
   STAGE_EXECUTOR_PATCH_SIGNAL_ID,
   STAGE_RESOURCE_PATCH_SIGNAL_ID,
@@ -1230,7 +1230,141 @@ describe("product BFF order drafts and invites", () => {
       "permission_authorization_duplicate",
     );
   });
+
+  it("keeps a concurrent trigger transition when the derived draft refresh races it", async () => {
+    // 草稿派生状态重算（refreshDraftStatus）读到旧快照后，并发触发车道
+    // 把稿翻成 triggering：重算的整行覆盖不得把 triggering 盖回
+    // awaiting/ready——条件更新败者回读最新档。
+    const backing = new MemoryProductBffStore();
+    const projection = new MemoryProjectionStore();
+    await projection.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+    });
+    // listParticipants 是重算读取参与者的必经点：armed 时在委派后同步把
+    // 真实行翻 triggering，精确落在"快照已读、覆盖未落"的窗口内。
+    let armed = false;
+    const racingStore: ProductBffStore = {
+      ...delegatingProductBffStore(backing),
+      async listParticipants(draftId) {
+        const participants = await backing.listParticipants(draftId);
+        if (armed) {
+          armed = false;
+          const draft = await backing.getDraft(draftId);
+          if (draft && draft.status !== "triggering") {
+            await backing.updateDraft({ ...draft, status: "triggering" });
+          }
+        }
+        return participants;
+      },
+    };
+    const router = createApiRouter(projection, {
+      productSchemaResolver: crossBorderSchemaResolver(),
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "local",
+      productRegistrationAdapter: new MemoryProductOrderTriggerBroadcastAdapter(),
+      productBffStore: racingStore,
+    });
+    const draft = (await createDraft(router).then((r) => r.body as DraftResponse)).draft;
+    const [firstParticipant] = await listParticipants(router, draft.draftId);
+    const invitation = await createInvite(
+      router,
+      draft.draftId,
+      firstParticipant!.roleSlotId,
+      "race@example.com",
+    );
+
+    armed = true;
+    const accepted = await router.handle({
+      method: "POST",
+      pathname: `/product/invites/${invitation.invite.inviteId}/accept`,
+      headers: { "x-uvp-wallet-address": testWallet(0) },
+      body: {
+        displayName: "racing participant",
+        walletAddress: testWallet(0),
+        contact: "race@example.com",
+        token: invitation.inviteToken,
+      },
+    });
+    expect(accepted.status).toBe(200);
+    expect((accepted.body as InviteResponse).draft.status).toBe("triggering");
+    await expect(backing.getDraft(draft.draftId)).resolves.toMatchObject({
+      status: "triggering",
+    });
+  });
+
+  it("refuses a stale full-row draft edit that would clobber a concurrent transition", async () => {
+    // 编辑是整行覆盖写：读到快照后稿已被触发车道迁移时，旧快照整行不得
+    // 落库——条件更新败者按 409 拒绝，调用方回读重试。
+    const backing = new MemoryProductBffStore();
+    const projection = new MemoryProjectionStore();
+    await projection.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+    });
+    // 编辑器下一次 getDraft 返回翻转前的旧快照，并在返回的同时把真实行
+    // 翻 triggering——精确落在"编辑器已读快照、覆盖未落"的窗口内。
+    let staleReadPending = false;
+    const racingStore: ProductBffStore = {
+      ...delegatingProductBffStore(backing),
+      async getDraft(draftId) {
+        const draft = await backing.getDraft(draftId);
+        if (staleReadPending && draft) {
+          staleReadPending = false;
+          await backing.updateDraft({ ...draft, status: "triggering" });
+        }
+        return draft;
+      },
+    };
+    const router = createApiRouter(projection, {
+      productSchemaResolver: crossBorderSchemaResolver(),
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "local",
+      productRegistrationAdapter: new MemoryProductOrderTriggerBroadcastAdapter(),
+      productBffStore: racingStore,
+    });
+    const draft = (await createDraft(router).then((r) => r.body as DraftResponse)).draft;
+
+    staleReadPending = true;
+    const edited = await router.handle({
+      method: "PATCH",
+      pathname: `/product/order-drafts/${draft.draftId}`,
+      headers: creatorHeaders(),
+      body: { title: "renamed after trigger" },
+    });
+    expect(edited).toMatchObject({ status: 409, body: { error: "draft_conflict" } });
+    await expect(backing.getDraft(draft.draftId)).resolves.toMatchObject({
+      status: "triggering",
+      title: draft.title,
+    });
+  });
 });
+
+/** 全量委派 backing 的 ProductBffStore 桩（个别方法按测试需要覆盖）。 */
+function delegatingProductBffStore(backing: MemoryProductBffStore): ProductBffStore {
+  return {
+    createDraft: (draft, participants) => backing.createDraft(draft, participants),
+    getDraft: (draftId) => backing.getDraft(draftId),
+    updateDraft: (draft) => backing.updateDraft(draft),
+    updateDraftIfStatus: (draft, expected) => backing.updateDraftIfStatus(draft, expected),
+    listParticipants: (draftId) => backing.listParticipants(draftId),
+    listAcceptedParticipantsByWallet: (walletAddress) => backing.listAcceptedParticipantsByWallet(walletAddress),
+    getParticipant: (participantId) => backing.getParticipant(participantId),
+    updateParticipant: (participant) => backing.updateParticipant(participant),
+    createInviteIfNoneActive: (invite, nowIso) => backing.createInviteIfNoneActive(invite, nowIso),
+    getInvite: (inviteId) => backing.getInvite(inviteId),
+    updateInvite: (invite) => backing.updateInvite(invite),
+    updateInviteIfActive: (invite) => backing.updateInviteIfActive(invite),
+    listInvitesByDraft: (draftId) => backing.listInvitesByDraft(draftId),
+    createRegistrationIfNoneForDraft: (registration) => backing.createRegistrationIfNoneForDraft(registration),
+    getRegistration: (triggerId) => backing.getRegistration(triggerId),
+    getRegistrationByDraft: (draftId) => backing.getRegistrationByDraft(draftId),
+    listRegistrations: () => backing.listRegistrations(),
+    updateRegistration: (registration) => backing.updateRegistration(registration)
+  };
+}
 
 interface DraftResponse {
   readonly draft: ProductOrderDraftDTO;

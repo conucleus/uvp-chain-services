@@ -77,6 +77,21 @@ export class PostgresProductBffStore implements ProductBffStore {
     await this.#upsertDraft(draft);
   }
 
+  async updateDraftIfStatus(draft: ProductOrderDraftDTO, expected: ProductOrderDraftDTO["status"]): Promise<boolean> {
+    // 条件 UPDATE（CAS）：WHERE status 保证读到旧快照的整行覆盖在行已
+    // 迁移时不得落库（rowCount 0 即败者）。
+    const updated = await this.#database.query(
+      `UPDATE product_order_draft
+       SET zhixu_id = $2, plan_id = $3, plan_hash = $4, title = $5, business_type = $6, goods_json = $7::jsonb,
+           total_amount = $8, currency = $9, export_region = $10, destination_region = $11,
+           expected_completion_date = $12, notes = $13, status = $14, created_by = $15, created_at = $16,
+           updated_at = $17, triggered_order_id = $18, trigger_tx_hash = $19
+       WHERE draft_id = $1 AND status = $20`,
+      [...draftValues(draft), expected]
+    );
+    return (updated.rowCount ?? 0) > 0;
+  }
+
   async listParticipants(draftId: string): Promise<readonly DraftParticipantDTO[]> {
     const result = await this.#database.query(
       `SELECT *

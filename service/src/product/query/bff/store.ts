@@ -10,6 +10,13 @@ export interface ProductBffStore {
   createDraft(draft: ProductOrderDraftDTO, participants: readonly DraftParticipantDTO[]): Promise<void>;
   getDraft(draftId: string): Promise<ProductOrderDraftDTO | undefined>;
   updateDraft(draft: ProductOrderDraftDTO): Promise<void>;
+  /**
+   * 条件状态迁移（CAS）：仅当现行 status 仍是 expected 时整行落档
+   * （UPDATE ... WHERE draft_id=? AND status=?）。返回 false 表示并发方
+   * 已先改状态——派生状态重算（refreshDraftStatus）与编辑器不得把读到
+   * 旧快照的整行覆盖回去（如把已 triggering 的稿盖回 awaiting）。
+   */
+  updateDraftIfStatus(draft: ProductOrderDraftDTO, expected: ProductOrderDraftDTO["status"]): Promise<boolean>;
   listParticipants(draftId: string): Promise<readonly DraftParticipantDTO[]>;
   listAcceptedParticipantsByWallet(walletAddress: string): Promise<readonly DraftParticipantDTO[]>;
   getParticipant(participantId: string): Promise<DraftParticipantDTO | undefined>;
@@ -61,6 +68,16 @@ export class MemoryProductBffStore implements ProductBffStore {
 
   async updateDraft(draft: ProductOrderDraftDTO): Promise<void> {
     this.#drafts.set(draft.draftId, draft);
+  }
+
+  async updateDraftIfStatus(draft: ProductOrderDraftDTO, expected: ProductOrderDraftDTO["status"]): Promise<boolean> {
+    // 判定与写入同处一个同步临界区：并发迁移只有一个赢家。
+    const current = this.#drafts.get(draft.draftId);
+    if (!current || current.status !== expected) {
+      return false;
+    }
+    this.#drafts.set(draft.draftId, draft);
+    return true;
   }
 
   async listParticipants(draftId: string): Promise<readonly DraftParticipantDTO[]> {
