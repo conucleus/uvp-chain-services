@@ -561,8 +561,9 @@ const EMPTY_PLAN_CAPABILITY_TABLES: PlanCapabilityTables = {
  * - 投影表命中 relation=0 能力 → 属主阶段 + 能力叶 proof，并按属主阶段
  *   找 selector 绑定叶 proof（找不到 → 全零，合约按"未声明"放行）；
  * - 词表外事实 / 投影表空（外部发布 plan）→ 全零 attribution + 全零
- *   selectorBinding：链上词表闸自会拒绝词表内事实
- *   （InvalidSignalCapability），词表外事实按 source==stage 回退解析；
+ *   selectorBinding：携词表的 plan 一律被链上词表闸拒绝
+ *   （InvalidSignalCapability——合约无证时无法区分词表内外），零词表
+ *   plan 才按 source==stage 回退解析；
  * - 词表解析器故障 → 响亮失败：读失败时无法区分事实是否在词表内，
  *   全零造证会把本可预判的 InvalidSignalCapability 留到链上 revert
  *   才暴露（白烧代付 gas）；prepare 时点失败不产生签名、不消耗 nonce。
@@ -594,8 +595,9 @@ async function resolveSubmissionCapabilityProofs(
   const effectiveTables = tables ?? EMPTY_PLAN_CAPABILITY_TABLES;
   const attribution = factAttributionPayload(effectiveTables, sourceId, signalId);
   if (attribution.stageId === ZERO_BYTES32) {
-    // 词表外事实：合约按 source==stage 回退解析属主阶段——服务端无 plan
-    // 阶段全集可镜像，不猜测，selectorBinding 同步不携证。
+    // 投影词表未命中：不猜测属主（全零），也不携 selector 证明——携词表
+    // plan 上链即被 InvalidSignalCapability 拒绝，零词表 plan 才由合约按
+    // source==stage 回退解析；服务端无 plan 阶段全集可镜像。
     return { attribution, selectorBinding: zeroSelectorBinding() };
   }
   return {
