@@ -51,6 +51,10 @@ node --env-file=.env.local --import tsx src/api/server.ts
 
 非本地环境应使用持久数据库和对象存储，并通过安全预检。demo/fixture/mock 运行路径仅存在于 local 档（simulated 治理链适配器、内存广播/存储等开发适配器），非 local 环境不含。
 
+## 迁移口径
+
+系统未上线：`service/migrations/` 的迁移字节以 dev 活线为准，不承诺跨版本升级路径；已编号的迁移文件不再修改，需要结构变化时开新编号迁移。曾运行过历史构建的本地库在启动报 migration checksum mismatch 时，不做兼容处理——按 `chain_services_migrations` 台账清账后重建该库。
+
 ## 接口概览
 
 Product：
