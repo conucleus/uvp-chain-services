@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,7 +46,7 @@ import {
   loadSqlMigrations,
   runSqliteMigrations,
 } from "../src/storage/migrations.js";
-import { PostgresDatabase } from "../src/storage/postgres-client.js";
+import { PostgresDatabase, normalizePostgresError } from "../src/storage/postgres-client.js";
 import {
   listAppliedPostgresMigrations,
   runPostgresMigrations,
@@ -208,6 +208,23 @@ describe("durable storage", () => {
     ).toHaveLength(0);
   });
 
+  it("maps only the unique-violation SQLSTATE to StorageConstraintError", () => {
+    // StorageConstraintError 的消费方一律按"并发败者的 409 域冲突"收敛；
+    // 23xxx 里的 FK/NOT NULL/CHECK 是完整性故障，误译会把这些 schema/
+    // 数据问题伪装成可重试的域冲突。只认 23505，与 sqlite 侧只认
+    // UNIQUE 约束的口径对齐。
+    const pgError = (code: string) =>
+      Object.assign(new Error(`pg failure (${code})`), { code });
+    expect(normalizePostgresError(pgError("23505"))).toBeInstanceOf(
+      StorageConstraintError,
+    );
+    for (const code of ["23502", "23503", "23514", "23000", "23"]) {
+      const normalized = normalizePostgresError(pgError(code));
+      expect(normalized).not.toBeInstanceOf(StorageConstraintError);
+      expect(normalized).toBeInstanceOf(Error);
+    }
+  });
+
   it("rejects malformed migration filenames and duplicate sequence numbers", () => {
     const directory = mkdtempSync(join(tmpdir(), "uvp-migrations-probe-"));
     const write = (name: string) => writeFileSync(join(directory, name), "-- probe\n");
@@ -241,6 +258,50 @@ describe("durable storage", () => {
     expect(() =>
       runSqliteMigrations({ database, migrationsDirectory: directory }),
     ).toThrow(/applied migrations missing/);
+  });
+
+  it("converges duplicate rows before creating the single-active unique indexes", async () => {
+    // 脏库升级：单活/一钱包一角色索引之前的历史竞态已在存量数据里留下
+    // 重复组。直接建部分唯一索引会在重复组上失败、阻断部署——迁移必须
+    // 先确定性收敛（每组保最新行，旧行翻既有失效态）再上索引。
+    const database = openSqliteDatabase(sqliteUrl(tempDirs));
+    databases.push(database);
+    const base = migrationsDirectoryWithoutConvergenceFiles(tempDirs);
+    runSqliteMigrations({ database, migrationsDirectory: base });
+    database.exec(convergenceSeedSql("0"));
+
+    copyFileSync(
+      join(migrationsDirectory(), "0021_zhixu_version_single_active.sql"),
+      join(base, "0021_zhixu_version_single_active.sql"),
+    );
+    copyFileSync(
+      join(migrationsDirectory(), "0022_product_invite_single_active.sql"),
+      join(base, "0022_product_invite_single_active.sql"),
+    );
+    copyFileSync(
+      join(migrationsDirectory(), "0023_participant_wallet_single_role.sql"),
+      join(base, "0023_participant_wallet_single_role.sql"),
+    );
+    const result = runSqliteMigrations({ database, migrationsDirectory: base });
+    expect(result.applied.map((migration) => migration.version)).toEqual([
+      "0021_zhixu_version_single_active",
+      "0022_product_invite_single_active",
+      "0023_participant_wallet_single_role",
+    ]);
+
+    await expectConverged((sql) =>
+      database.prepare(sql).all() as Record<string, unknown>[],
+    );
+    // 收敛后索引真实生效：重复组上的新写入撞索引。
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO store_zhixu_version_metadata
+           (series_id, version_id, zhixu_id, version_label, status, plan_id, plan_hash, created_at)
+           VALUES ('series_race', 'v_extra', 'zhixu_race', '3.0', 'active', ?, ?, '2026-04-01T00:00:00.000Z')`,
+        )
+        .run(planId, planHash),
+    ).toThrow();
   });
 
   it("deduplicates the same event but retains same-position logs from different transactions", async () => {
@@ -1205,6 +1266,7 @@ describePostgres(
     const stores: Array<{ close(): Promise<void> }> = [];
     const databases: PostgresDatabase[] = [];
     const schemas: string[] = [];
+    const tempDirs: string[] = [];
 
     afterEach(async () => {
       for (const store of stores.splice(0)) {
@@ -1215,6 +1277,9 @@ describePostgres(
       }
       for (const schema of schemas.splice(0)) {
         await dropPostgresTestSchema(postgresTestUrl!, schema);
+      }
+      for (const dir of tempDirs.splice(0)) {
+        rmSync(dir, { recursive: true, force: true });
       }
     });
 
@@ -1247,6 +1312,46 @@ describePostgres(
           (record) => record.version,
         ),
       ).toEqual(expectedMigrationVersions);
+    });
+
+    it("converges duplicate rows before creating the single-active unique indexes (postgres)", async () => {
+      // 与 sqlite 侧同名测试同口径：脏库（重复 active/同钱包双 accepted）
+      // 上直接建部分唯一索引会失败、阻断部署，迁移先收敛再上索引。
+      const databaseUrl = await postgresSchemaUrl(schemas);
+      const database = new PostgresDatabase({ databaseUrl });
+      databases.push(database);
+      const base = migrationsDirectoryWithoutConvergenceFiles(tempDirs, "postgres");
+      await runPostgresMigrations({ database, migrationsDirectory: base });
+      await database.queryRaw(convergenceSeedSql("false"));
+
+      for (const file of [
+        "0021_zhixu_version_single_active.sql",
+        "0022_product_invite_single_active.sql",
+        "0023_participant_wallet_single_role.sql",
+      ]) {
+        copyFileSync(
+          join(postgresMigrationsDirectory(), file),
+          join(base, file),
+        );
+      }
+      const result = await runPostgresMigrations({ database, migrationsDirectory: base });
+      expect(result.applied.map((migration) => migration.version)).toEqual([
+        "0021_zhixu_version_single_active",
+        "0022_product_invite_single_active",
+        "0023_participant_wallet_single_role",
+      ]);
+
+      await expectConverged(async (sql) =>
+        (await database.queryRaw(sql)).rows as Record<string, unknown>[],
+      );
+      // 收敛后索引真实生效：重复组上的新写入撞索引。
+      await expect(
+        database.queryRaw(
+          `INSERT INTO store_zhixu_version_metadata
+           (series_id, version_id, zhixu_id, version_label, status, plan_id, plan_hash, created_at)
+           VALUES ('series_race', 'v_extra', 'zhixu_race', '3.0', 'active', '${planId}', '${planHash}', '2026-04-01T00:00:00.000Z')`,
+        ),
+      ).rejects.toThrow();
     });
 
     it("rolls back Postgres projection transactions and persists rebuild snapshots", async () => {
@@ -2582,6 +2687,107 @@ function migrationsDirectory(): string {
 
 function postgresMigrationsDirectory(): string {
   return fileURLToPath(new URL("../migrations/postgres", import.meta.url));
+}
+
+/** 复制迁移目录但去掉 0021-0023：构造"索引尚未上线"的历史基线库。 */
+function migrationsDirectoryWithoutConvergenceFiles(
+  tempDirs: string[],
+  subdir = "",
+): string {
+  const source = subdir
+    ? join(migrationsDirectory(), subdir)
+    : migrationsDirectory();
+  const base = mkdtempSync(join(tmpdir(), "uvp-migrations-converge-"));
+  tempDirs.push(base);
+  for (const entry of readdirSync(source, { withFileTypes: true })) {
+    // sqlite 目录内含 postgres/ 孪生目录，只复制本驱动的 .sql 文件。
+    if (entry.isFile() && !/^002[123]_/.test(entry.name)) {
+      copyFileSync(join(source, entry.name), join(base, entry.name));
+    }
+  }
+  return base;
+}
+
+const raceWalletLower = "0xaabbccddeeff001122334455667778899aabbccdd";
+const raceWalletMixed = "0xAaBbCcDdEeFf001122334455667778899AaBbCcDd";
+const otherWallet = "0x9999999999999999999999999999999999999999";
+
+/** 索引上线前的脏数据：并发竞态留下的双 active 版本、双 active 邀请、
+ * 同钱包（含大小写漂移）双 accepted 角色，以及不受影响的干净对照组。 */
+function convergenceSeedSql(requiredFalse: string): string {
+  return `
+    INSERT INTO product_order_draft
+      (draft_id, zhixu_id, plan_id, plan_hash, title, business_type, goods_json, total_amount, currency, status, created_at, updated_at)
+    VALUES
+      ('draft_race', 'zhixu_race', '${planId}', '${planHash}', 'race', 'parallel-export', '[]', '100', 'USDC', 'draft', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+      ('draft_clean', 'zhixu_race', '${planId}', '${planHash}', 'clean', 'parallel-export', '[]', '100', 'USDC', 'draft', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+
+    INSERT INTO store_zhixu_version_metadata
+      (series_id, version_id, zhixu_id, version_label, status, plan_id, plan_hash, created_at)
+    VALUES
+      ('series_race', 'v_old', 'zhixu_race', '1.0', 'active', '${planId}', '${planHash}', '2026-01-01T00:00:00.000Z'),
+      ('series_race', 'v_new', 'zhixu_race', '2.0', 'active', '${planId}', '${planHash}', '2026-02-01T00:00:00.000Z'),
+      ('series_tie_a', 'v_a', 'zhixu_race', '1.0', 'active', '${planId}', '${planHash}', '2026-03-01T00:00:00.000Z'),
+      ('series_tie_a', 'v_b', 'zhixu_race', '2.0', 'active', '${planId}', '${planHash}', '2026-03-01T00:00:00.000Z'),
+      ('series_single', 'v_only', 'zhixu_race', '1.0', 'active', '${planId}', '${planHash}', '2026-01-01T00:00:00.000Z'),
+      ('series_retired', 'v_dep', 'zhixu_race', '0.9', 'deprecated', '${planId}', '${planHash}', '2025-12-01T00:00:00.000Z');
+
+    INSERT INTO product_participant
+      (participant_id, draft_id, role_slot_id, role_label, display_name, wallet_address, contact, status, required, accepted_at)
+    VALUES
+      ('p_funds_old', 'draft_race', 'funds', 'funds', 'Funds', '${raceWalletLower}', 'funds@example.com', 'accepted', ${requiredFalse}, '2026-01-01T00:00:00.000Z'),
+      ('p_delivery_new', 'draft_race', 'delivery', 'delivery', 'Delivery', '${raceWalletMixed}', 'delivery@example.com', 'accepted', ${requiredFalse}, '2026-02-01T00:00:00.000Z'),
+      ('p_supply', 'draft_clean', 'supply', 'supply', 'Supply', '${raceWalletLower}', 'supply@example.com', 'accepted', ${requiredFalse}, '2026-01-01T00:00:00.000Z'),
+      ('p_customs', 'draft_clean', 'customs', 'customs', 'Customs', '${otherWallet}', 'customs@example.com', 'accepted', ${requiredFalse}, '2026-01-01T00:00:00.000Z');
+
+    INSERT INTO product_invite
+      (invite_id, draft_id, participant_id, role_slot_id, token_hash, status, expires_at, created_at)
+    VALUES
+      ('inv_old', 'draft_race', 'p_funds_old', 'funds', '0x${"a".repeat(64)}', 'active', '2100-01-01T00:00:00.000Z', '2026-01-05T00:00:00.000Z'),
+      ('inv_new', 'draft_race', 'p_funds_old', 'funds', '0x${"b".repeat(64)}', 'active', '2100-01-01T00:00:00.000Z', '2026-02-05T00:00:00.000Z'),
+      ('inv_clean', 'draft_clean', 'p_supply', 'supply', '0x${"c".repeat(64)}', 'active', '2100-01-01T00:00:00.000Z', '2026-01-05T00:00:00.000Z');
+  `;
+}
+
+async function expectConverged(
+  query: (sql: string) => Promise<readonly Record<string, unknown>[]> | readonly Record<string, unknown>[],
+): Promise<void> {
+  const zhixu = Object.fromEntries(
+    (await query("SELECT series_id, version_id, status FROM store_zhixu_version_metadata")).map(
+      (row) => [`${row.series_id}/${row.version_id}`, row.status],
+    ),
+  );
+  expect(zhixu).toMatchObject({
+    "series_race/v_old": "deprecated",
+    "series_race/v_new": "active",
+    "series_tie_a/v_a": "deprecated",
+    "series_tie_a/v_b": "active",
+    "series_single/v_only": "active",
+    "series_retired/v_dep": "deprecated",
+  });
+
+  const invites = Object.fromEntries(
+    (await query("SELECT invite_id, status FROM product_invite")).map(
+      (row) => [row.invite_id, row.status],
+    ),
+  );
+  expect(invites).toMatchObject({
+    inv_old: "revoked",
+    inv_new: "active",
+    inv_clean: "active",
+  });
+
+  const participants = Object.fromEntries(
+    (await query("SELECT participant_id, status, wallet_address FROM product_participant")).map(
+      (row) => [row.participant_id, { status: row.status, wallet: row.wallet_address }],
+    ),
+  );
+  expect(participants).toMatchObject({
+    p_funds_old: { status: "replaced", wallet: raceWalletLower },
+    p_delivery_new: { status: "accepted", wallet: raceWalletMixed },
+    p_supply: { status: "accepted", wallet: raceWalletLower },
+    p_customs: { status: "accepted", wallet: otherWallet },
+  });
 }
 
 async function postgresSchemaUrl(schemas: string[]): Promise<string> {
