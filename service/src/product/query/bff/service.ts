@@ -810,52 +810,64 @@ export function createProductBffService(
         status: "accepted",
         acceptedWalletAddress,
       };
-      return withProductStoreTransaction(store, async () => {
-        // 受约束的参与者写在前、invite 条件迁移在后：持久驱动同事务等价；
-        // 无事务的内存实现里，钱包冲突败者不至于先把 invite 消费成
-        // accepted。
-        try {
-          await store.updateParticipant(accepted);
-        } catch (error) {
-          // 前置钱包查重（assertWalletCanAcceptInvite）在事务外，并发
-          // 跨槽 accept 双双通过时由存储层的一钱包一角色约束裁决——
-          // 败者回读占用详情，与前置查重同响应 409，不外泄存储错误。
-          if (!(error instanceof StorageConstraintError)) {
-            throw error;
+      try {
+        return await withProductStoreTransaction(store, async () => {
+          // 受约束的参与者写在前、invite 条件迁移在后：持久驱动同事务等价；
+          // 无事务的内存实现里，钱包冲突败者不至于先把 invite 消费成
+          // accepted。
+          try {
+            await store.updateParticipant(accepted);
+          } catch (error) {
+            // 前置钱包查重（assertWalletCanAcceptInvite）在事务外，并发
+            // 跨槽 accept 双双通过时由存储层的一钱包一角色约束裁决。
+            // postgres 下 23505 已把当前事务打入 abort（后续语句 25P02），
+            // 事务内任何回读都以 InFailedSqlTransaction 失败——占用详情
+            // 只能等事务回滚后重读（外层 catch），这里仅上抛败者标记。
+            if (!(error instanceof StorageConstraintError)) {
+              throw error;
+            }
+            throw new WalletBoundRaceLostError();
           }
-          const binding = await inviteWalletBinding(
+          // 条件状态迁移（WHERE status='active'）：并发双 accept 只有一个
+          // 能落档，败者按现行状态返回冲突，不再相互覆写。
+          if (!(await store.updateInviteIfActive(acceptedInvite))) {
+            throw inactiveInviteError(await requireInvite(store, inviteId));
+          }
+          const draft = await refreshDraftStatus(
             store,
-            invite,
-            participant,
-            acceptedWalletAddress,
+            await requireDraft(store, invite.draftId),
+            now,
           );
-          throw new ProductBffError(
-            409,
-            "wallet_already_bound",
-            "wallet is already bound to another participant in this order",
-            {
-              walletAddress: acceptedWalletAddress,
-              ...(binding.boundParticipantId
-                ? { participantId: binding.boundParticipantId }
-                : {}),
-              ...(binding.boundRoleSlotId
-                ? { roleSlotId: binding.boundRoleSlotId }
-                : {}),
-            },
-          );
+          return { invite: acceptedInvite, participant: accepted, draft };
+        });
+      } catch (error) {
+        if (!(error instanceof WalletBoundRaceLostError)) {
+          throw error;
         }
-        // 条件状态迁移（WHERE status='active'）：并发双 accept 只有一个
-        // 能落档，败者按现行状态返回冲突，不再相互覆写。
-        if (!(await store.updateInviteIfActive(acceptedInvite))) {
-          throw inactiveInviteError(await requireInvite(store, inviteId));
-        }
-        const draft = await refreshDraftStatus(
+        // 败者回读占用详情：走到这里时失败事务已被 withTransaction 回滚，
+        // 新开的读可见胜者已提交的钱包归属，与前置查重同响应 409，
+        // 不外泄存储错误。
+        const binding = await inviteWalletBinding(
           store,
-          await requireDraft(store, invite.draftId),
-          now,
+          invite,
+          participant,
+          acceptedWalletAddress,
         );
-        return { invite: acceptedInvite, participant: accepted, draft };
-      });
+        throw new ProductBffError(
+          409,
+          "wallet_already_bound",
+          "wallet is already bound to another participant in this order",
+          {
+            walletAddress: acceptedWalletAddress,
+            ...(binding.boundParticipantId
+              ? { participantId: binding.boundParticipantId }
+              : {}),
+            ...(binding.boundRoleSlotId
+              ? { roleSlotId: binding.boundRoleSlotId }
+              : {}),
+          },
+        );
+      }
     },
 
     async rejectInvite(inviteId, input) {
@@ -1830,6 +1842,13 @@ async function withProductStoreTransaction<T>(
 ): Promise<T> {
   return store.withTransaction ? store.withTransaction(operation) : operation();
 }
+
+/**
+ * acceptInvite 竞态败者标记：updateParticipant 撞一钱包一角色约束后，
+ * postgres 事务已 abort，占用详情只能在事务回滚后重读（见 acceptInvite
+ * 外层 catch），用标记把"败者"从存储错误流里区分出来。
+ */
+class WalletBoundRaceLostError extends Error {}
 
 async function broadcastOutsideTrigger(input: {
   readonly triggerAdapter: ProductOrderTriggerBroadcastAdapter;

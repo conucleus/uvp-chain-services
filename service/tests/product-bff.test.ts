@@ -28,6 +28,7 @@ import type {
 } from "../src/product/query/bff/trigger.js";
 import { MemoryStoreZhixuVersionMetadataStore } from "../src/store/console/version.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { StorageConstraintError } from "../src/storage/errors.js";
 import { MemoryProductBffStore, type ProductBffStore } from "../src/product/query/bff/store.js";
 import {
   STAGE_EXECUTOR_PATCH_SIGNAL_ID,
@@ -656,6 +657,68 @@ describe("product BFF order drafts and invites", () => {
       },
     });
     expect(retryAccept.status).toBe(200);
+  });
+
+  it("reads the race loser's wallet binding after the failed postgres transaction rolls back", async () => {
+    // postgres 事务内撞 23505 后整个事务已 abort（后续语句 25P02），
+    // 事务内的任何回读都会以 InFailedSqlTransaction 失败——竞态败者的
+    // 409+占用详情必须在事务回滚后的新读里取得。用模拟该语义的 store
+    // 桩钉住：回读一旦被挪回失败事务内，本测试以 500 而非 409 暴露。
+    const store = new MemoryProjectionStore();
+    const backing = new MemoryProductBffStore();
+    const pgLikeStore = postgresAbortSemanticsStore(backing);
+    await store.resetFromEvents({ deploymentBlock: 0n, events: [planRegisteredEvent(1n)] });
+    const router = createApiRouter(store, {
+      productSchemaResolver: crossBorderSchemaResolver(),
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      productRuntimeEnvironment: "local",
+      productRegistrationAdapter: new MemoryProductOrderTriggerBroadcastAdapter(),
+      productBffStore: pgLikeStore,
+    });
+    const draft = (await createDraft(router).then(
+      (response) => response.body as DraftResponse,
+    )).draft;
+    await inviteAndAccept(router, draft.draftId, "funds", 0);
+    const deliveryInvite = await createInvite(
+      router,
+      draft.draftId,
+      "delivery",
+      "delivery@example.com",
+    );
+    // 武装竞态窗口：前置查重的下一次 listParticipants 读到旧快照
+    // （未见 funds 的已接受行），判定落到存储层约束。
+    pgLikeStore.armStaleSnapshotReads(1);
+    const racedAccept = await router.handle({
+      method: "POST",
+      pathname: `/product/invites/${deliveryInvite.invite.inviteId}/accept`,
+      headers: { "x-uvp-wallet-address": testWallet(0) },
+      body: {
+        displayName: "Delivery",
+        walletAddress: testWallet(0),
+        contact: "delivery@example.com",
+        token: deliveryInvite.inviteToken,
+      },
+    });
+    const fundsRow = (await backing.listParticipants(draft.draftId)).find(
+      (participant) => participant.roleSlotId === "funds",
+    );
+    expect(fundsRow?.status).toBe("accepted");
+    expect(racedAccept).toMatchObject({
+      status: 409,
+      body: {
+        error: "wallet_already_bound",
+        details: {
+          participantId: fundsRow?.participantId,
+          roleSlotId: "funds",
+        },
+      },
+    });
+    // 败者不落 accepted：占用行仍是唯一已接受归属。
+    const deliveryRow = (await backing.listParticipants(draft.draftId)).find(
+      (participant) => participant.roleSlotId === "delivery",
+    );
+    expect(deliveryRow?.status).toBe("invited");
   });
 
   it("carries publisher evidenceSpec into invite previews and prepared permissions (evidenceSpec passthrough)", async () => {
@@ -1457,9 +1520,94 @@ describe("product BFF order drafts and invites", () => {
   });
 });
 
-/** 全量委派 backing 的 ProductBffStore 桩（个别方法按测试需要覆盖）。 */
-function delegatingProductBffStore(backing: MemoryProductBffStore): ProductBffStore {
+/**
+ * postgres 事务 abort 语义桩：事务内任一语句以约束错误失败后，同一事务
+ * 的后续语句一律以 25P02 InFailedSqlTransaction 失败，直到事务结束
+ * （回滚）；事务外的读写不受影响。armStaleSnapshotReads 让事务外的
+ * listParticipants 接下来 n 次返回空快照，模拟并发窗口里前置查重读旧
+ * 数据、冲突裁决落到存储层约束的竞态路径（须在构造完测试数据后再武装，
+ * 避免误伤建单/邀请的 setup 读）。
+ */
+function postgresAbortSemanticsStore(
+  backing: MemoryProductBffStore,
+): ProductBffStore & { armStaleSnapshotReads(count: number): void } {
+  let inTransaction = false;
+  let aborted = false;
+  let staleReadsRemaining = 0;
+  const guarded = <Args extends unknown[], Result>(
+    method: (...args: Args) => Promise<Result>,
+  ) => {
+    return async (...args: Args): Promise<Result> => {
+      if (inTransaction && aborted) {
+        throw new Error(
+          "current transaction is aborted, commands ignored until end of transaction block",
+        );
+      }
+      try {
+        return await method(...args);
+      } catch (error) {
+        if (inTransaction && error instanceof StorageConstraintError) {
+          aborted = true;
+        }
+        throw error;
+      }
+    };
+  };
+  const listParticipants = async (draftId: string) => {
+    if (inTransaction && aborted) {
+      throw new Error(
+        "current transaction is aborted, commands ignored until end of transaction block",
+      );
+    }
+    if (!inTransaction && staleReadsRemaining > 0) {
+      staleReadsRemaining -= 1;
+      return [];
+    }
+    return backing.listParticipants(draftId);
+  };
   return {
+    armStaleSnapshotReads: (count: number) => {
+      staleReadsRemaining = count;
+    },
+    withTransaction: async <T>(operation: () => Promise<T>): Promise<T> => {
+      inTransaction = true;
+      aborted = false;
+      try {
+        return await operation();
+      } finally {
+        // 事务结束（COMMIT 或 ROLLBACK）：aborted 状态随事务消失，
+        // 事务外的新读恢复正常——这是竞态败者回读占用详情的位置。
+        inTransaction = false;
+        aborted = false;
+      }
+    },
+    createDraft: guarded(backing.createDraft.bind(backing)),
+    getDraft: guarded(backing.getDraft.bind(backing)),
+    updateDraft: guarded(backing.updateDraft.bind(backing)),
+    updateDraftIfStatus: guarded(backing.updateDraftIfStatus.bind(backing)),
+    listParticipants,
+    listAcceptedParticipantsByWallet: guarded(
+      backing.listAcceptedParticipantsByWallet.bind(backing),
+    ),
+    getParticipant: guarded(backing.getParticipant.bind(backing)),
+    updateParticipant: guarded(backing.updateParticipant.bind(backing)),
+    createInviteIfNoneActive: guarded(backing.createInviteIfNoneActive.bind(backing)),
+    getInvite: guarded(backing.getInvite.bind(backing)),
+    updateInvite: guarded(backing.updateInvite.bind(backing)),
+    updateInviteIfActive: guarded(backing.updateInviteIfActive.bind(backing)),
+    listInvitesByDraft: guarded(backing.listInvitesByDraft.bind(backing)),
+    createRegistrationIfNoneForDraft: guarded(
+      backing.createRegistrationIfNoneForDraft.bind(backing),
+    ),
+    getRegistration: guarded(backing.getRegistration.bind(backing)),
+    getRegistrationByDraft: guarded(backing.getRegistrationByDraft.bind(backing)),
+    listRegistrations: guarded(backing.listRegistrations.bind(backing)),
+    updateRegistration: guarded(backing.updateRegistration.bind(backing)),
+  };
+}
+
+/** 全量委派 backing 的 ProductBffStore 桩（个别方法按测试需要覆盖）。 */
+function delegatingProductBffStore(backing: MemoryProductBffStore): ProductBffStore {  return {
     createDraft: (draft, participants) => backing.createDraft(draft, participants),
     getDraft: (draftId) => backing.getDraft(draftId),
     updateDraft: (draft) => backing.updateDraft(draft),
