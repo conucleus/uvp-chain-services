@@ -129,5 +129,14 @@ function causeMessage(error: unknown): string {
 
 function isPostgresConstraintError(error: unknown): error is Error & { readonly code: string } {
   const postgresError = error as Error & { readonly code?: unknown };
-  return error instanceof Error && typeof postgresError.code === "string" && postgresError.code.startsWith("23");
+  // 只认唯一冲突（23505）：StorageConstraintError 的消费方一律按"并发
+  // 败者的 409 域冲突"收敛，23xxx 前缀会把 FK（23503）/NOT NULL
+  //（23502）/CHECK（23514）等完整性故障误译成域冲突——那些是数据或
+  // schema 问题，必须以原始错误上抛。与 sqlite 侧只认 UNIQUE 约束的
+  // 口径对齐。
+  return (
+    error instanceof Error &&
+    typeof postgresError.code === "string" &&
+    postgresError.code === "23505"
+  );
 }
