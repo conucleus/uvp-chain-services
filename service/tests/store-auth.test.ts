@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { privateKeyToAccount } from "viem/accounts";
 import { createApiRouter } from "../src/api/routes.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { StoreSessionDTO } from "../src/store/console/access.js";
@@ -133,6 +134,44 @@ describe("Store operator identity and capability auth", () => {
         authMode: "dev_headers_disabled"
       }
     });
+  });
+
+  it("binds wallet challenges to the issuing domain and rejects cross-domain replay", async () => {
+    // 同一部署被多个域名触达时，A 域签下的登录证明不得在 B 域换会话：
+    // 挑战按签发时的请求 Host 绑定（写入签名 message），verify 时点按
+    // 当前请求 Host 复核；跨域重放被拒且不烧挑战。
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const account = privateKeyToAccount("0x2222222222222222222222222222222222222222222222222222222222222222");
+
+    const challengeResponse = await router.handle({
+      method: "POST",
+      pathname: "/store/auth/challenge",
+      headers: { host: "console.good.example" },
+      body: { address: account.address }
+    });
+    expect(challengeResponse.status).toBe(201);
+    const challenge = (challengeResponse.body as { challenge: { nonce: string; message: string } }).challenge;
+    expect(challenge.message).toContain("Domain: console.good.example");
+
+    const signature = await account.signMessage({ message: challenge.message });
+
+    const replay = await router.handle({
+      method: "POST",
+      pathname: "/store/auth/verify",
+      headers: { host: "mirror.evil.example" },
+      body: { nonce: challenge.nonce, signature }
+    });
+    expect(replay.status).toBe(401);
+    expect(replay.body).toMatchObject({ error: "store_challenge_domain_mismatch" });
+
+    // 被重放方不承担烧挑战的代价：签发域内核验仍成功。
+    const verified = await router.handle({
+      method: "POST",
+      pathname: "/store/auth/verify",
+      headers: { host: "console.good.example" },
+      body: { nonce: challenge.nonce, signature }
+    });
+    expect(verified.status).toBe(201);
   });
 });
 

@@ -279,6 +279,59 @@ describe("product task submissions", () => {
     });
   });
 
+  it("fails prepare loudly when the plan capability-table resolver throws instead of minting zero proofs", async () => {
+    // 解析器故障 ≠ 无词表：读失败时无法判断事实是否在词表内，全零造证
+    // 会把本可预判的 InvalidSignalCapability 留到链上 revert 才暴露
+    //（白烧代付 gas）——prepare 时点响亮失败，不得用降级值造证。
+    const base = await submissionFixture({
+      authorization: permissiveProductProjectionAuthorization()
+    });
+    const resolverFailure = new Error("projection snapshot unreadable");
+    const failing = createProductSubmissionService({
+      productTasks: {
+        getTask: async (taskId) => taskId === task.taskId ? task : undefined
+      },
+      evidenceReader: base.evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => planId,
+      resolvePlanCapabilityTables: async () => {
+        throw resolverFailure;
+      },
+      authorization: permissiveProductProjectionAuthorization(),
+      now: () => baseNow
+    });
+
+    await expect(failing.prepareSubmit(task.taskId, {
+      evidenceIds: [base.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "capability_tables_unavailable",
+      status: 409
+    });
+
+    // 对照：解析不到词表（外部发布 plan → undefined）是合法全零路径，
+    // 不得因响亮失败而误伤。
+    const externalPlan = createProductSubmissionService({
+      productTasks: {
+        getTask: async (taskId) => taskId === task.taskId ? task : undefined
+      },
+      evidenceReader: base.evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => planId,
+      resolvePlanCapabilityTables: async () => undefined,
+      authorization: permissiveProductProjectionAuthorization(),
+      now: () => baseNow
+    });
+    await expect(externalPlan.prepareSubmit(task.taskId, {
+      evidenceIds: [base.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).resolves.toMatchObject({ status: "prepared" });
+  });
+
   it("recovers and verifies the submitter signature without broadcasting by default", async () => {
     const fixture = await submissionFixture();
     const prepared = await prepare(fixture);

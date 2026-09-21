@@ -29,6 +29,8 @@ import { StoreSessionServiceError } from "./types.js";
  * 会话配对：登录会话 ↔ 钱包地址（SIWE 式 personal_sign 证明）。
  *
  * - 挑战一次性、带 TTL；签名用 viem verifyMessage 校验（服务端不接触私钥）。
+ * - 挑战绑定签发域（服务端观测的请求 Host，写入签名 message 并在
+ *   verify 时点复核）：跨域重放的签名证明被拒，不换发会话。
  * - 会话 token 只下发一次，库中仅存 SHA-256 哈希。
  * - 会话能力继承所锚地址的 Store 运营方角色（MVP 单运营方地址清单）；
  *   plan 级权限（publisher/委托）在装修与加入路由内按 plan 核验。
@@ -52,11 +54,13 @@ export interface ResolveWalletSessionResult {
 }
 
 /**
- * 挑战签发的请求方上下文：只取服务端可见的连接信息（对端地址），
+ * 挑战签发的请求方上下文：只取服务端可见的连接信息（对端地址、Host 头），
  * 不接受任何自报字段——配额键自报等于没有配额。
  */
 export interface StoreChallengeRequesterContext {
   readonly clientAddress?: string | undefined;
+  /** 服务端观测到的请求 Host（含端口，如 console.example.com:8443）。 */
+  readonly domain?: string | undefined;
 }
 
 export interface StoreSessionService {
@@ -65,7 +69,11 @@ export interface StoreSessionService {
     requesterSession?: ResolveWalletSessionResult,
     requester?: StoreChallengeRequesterContext
   ): Promise<StoreWalletSessionChallengeDTO>;
-  verify(input: unknown, requesterSession?: ResolveWalletSessionResult): Promise<StoreWalletSessionVerifyResult>;
+  verify(
+    input: unknown,
+    requesterSession?: ResolveWalletSessionResult,
+    requester?: StoreChallengeRequesterContext
+  ): Promise<StoreWalletSessionVerifyResult>;
   resolveSessionFromToken(token: string | undefined): Promise<ResolveWalletSessionResult | undefined>;
   logout(token: string | undefined): Promise<boolean>;
   listAccountAddresses(accountId: string): Promise<readonly StoreAccountAddressView[]>;
@@ -117,11 +125,17 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       // 由调用方提供并拼进 message 的自由文本字段，必须限长+字符集白名单，
       // 否则任意长度写入直接放大成存储/内存 DoS（memory 驱动是无界 Map）。
       const chainId = boundedOptionalString(record, "chainId", CHALLENGE_CHAIN_ID_PATTERN, CHALLENGE_INPUT_MAX_LENGTH);
+      // 挑战按签发时的请求 Host 绑定（写入签名 message 并在 verify 时点
+      // 复核）：同一部署被多个域名触达时，A 域签下的登录证明不得在 B 域
+      // 换会话。取不到 Host（HTTP/1.1 必带，仅进程内直调缺省）时按空域
+      // 处理——签发与核验同口径，不因缺观测而放开跨域。
+      const domain = challengeDomainFromRequester(requester);
       const message = buildStoreLoginMessage({
         address,
         intent,
         ...(accountId ? { accountId } : {}),
         ...(chainId ? { chainId } : {}),
+        ...(domain ? { domain } : {}),
         nonce,
         issuedAt,
         expirationTime: expiresAt
@@ -162,7 +176,7 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       };
     },
 
-    async verify(input, requesterSession) {
+    async verify(input, requesterSession, requester) {
       if (!config.enabled) {
         throw new StoreSessionServiceError(403, "store_wallet_session_disabled", "wallet sessions are not enabled for this deployment");
       }
@@ -178,6 +192,18 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       }
       if (challenge.expiresAt < now().toISOString()) {
         throw new StoreSessionServiceError(401, "store_challenge_expired", "challenge has expired");
+      }
+      // 域绑定复核在烧挑战之前：跨域重放被拒后合法持有人仍可在签发域
+      // 完成 verify（烧挑战的代价不该由被重放方承担）。
+      const verifyDomain = challengeDomainFromRequester(requester);
+      const challengeDomain = challengeDomainFromMessage(challenge.message);
+      if (challengeDomain !== verifyDomain) {
+        throw new StoreSessionServiceError(
+          401,
+          "store_challenge_domain_mismatch",
+          "challenge was issued for a different domain",
+          { challengeDomain: challengeDomain || undefined, verifyDomain: verifyDomain || undefined }
+        );
       }
       const address = challenge.address;
       // 挑战单次使用：条件 UPDATE 原子占位
@@ -526,6 +552,8 @@ export function buildStoreLoginMessage(input: {
   readonly intent: "login" | "anchor_address";
   readonly accountId?: string;
   readonly chainId?: string;
+  /** 签发域（服务端观测的请求 Host）：钱包展示层可见的绑定目标。 */
+  readonly domain?: string;
   readonly nonce?: string;
   readonly issuedAt: string;
   readonly expirationTime: string;
@@ -540,6 +568,7 @@ export function buildStoreLoginMessage(input: {
     input.intent === "anchor_address"
       ? `Session intent: anchor this address to store account ${input.accountId}`
       : "Session intent: store login",
+    ...(input.domain ? [`Domain: ${input.domain}`] : []),
     "Version: 1",
     ...(input.chainId ? [`Chain ID: ${input.chainId}`] : []),
     `Nonce: ${input.nonce ?? ""}`,
@@ -633,6 +662,35 @@ const MAX_LIVE_CHALLENGES_PER_ADDRESS = 10;
 const MAX_LIVE_CHALLENGES_PER_REQUESTER = 30;
 /** 取不到对端地址时的共享请求方桶（fail-closed：不因缺追踪而放开）。 */
 const FALLBACK_CHALLENGE_REQUESTER_KEY = "";
+/** 签名 message 中的域绑定行前缀（verify 时点按此复核签发域）。 */
+const CHALLENGE_MESSAGE_DOMAIN_PREFIX = "Domain: ";
+/** Host 头归一后的安全子集：DNS 名/IPv4/IPv6 字面量 + 端口。 */
+const CHALLENGE_DOMAIN_PATTERN = /^[a-z0-9.\-:\[\]]+$/;
+const CHALLENGE_DOMAIN_MAX_LENGTH = 255;
+
+/**
+ * 请求方观测域（Host 头）归一：小写、限长、字符集白名单——拼进签名
+ * message 的自由文本面必须收窄。缺失归空串：签发与核验同口径比较，
+ * "无观测域签发的挑战"只能同样无域地核验，不构成跨域放行。
+ */
+function challengeDomainFromRequester(requester: StoreChallengeRequesterContext | undefined): string {
+  const domain = requester?.domain?.trim().toLowerCase() ?? "";
+  if (domain.length > CHALLENGE_DOMAIN_MAX_LENGTH) {
+    throw new StoreSessionServiceError(400, "invalid_body", "requester domain is too long");
+  }
+  if (domain && !CHALLENGE_DOMAIN_PATTERN.test(domain)) {
+    throw new StoreSessionServiceError(400, "invalid_body", "requester domain contains unsupported characters");
+  }
+  return domain;
+}
+
+/** 从已落库的挑战 message 里取回签发域（服务端铸造的文本，非调用方输入）。 */
+function challengeDomainFromMessage(message: string): string {
+  const line = message
+    .split("\n")
+    .find((candidate) => candidate.startsWith(CHALLENGE_MESSAGE_DOMAIN_PREFIX));
+  return line ? line.slice(CHALLENGE_MESSAGE_DOMAIN_PREFIX.length).trim() : "";
+}
 
 function boundedOptionalString(
   record: Record<string, unknown>,

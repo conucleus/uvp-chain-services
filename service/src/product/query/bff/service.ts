@@ -19,6 +19,7 @@ import {
 } from "../../../shared/types.js";
 import type { TxReconcileFields } from "../../../reconcile/status.js";
 import { normalizeEvidenceSpec, type ProductService } from "../../application/service.js";
+import { redactErrorMessage } from "../../../security/redaction.js";
 import { StorageConstraintError } from "../../../storage/errors.js";
 import {
   ProductAuthorizationBuilder,
@@ -278,6 +279,23 @@ export function createProductBffService(
     async updateDraft(draftId, input, actorWallet) {
       const current = await requireDraft(store, draftId);
       assertDraftCreator(current, actorWallet);
+      // 触发负载（payloadHash/授权）在 prepare 时点由草稿快照定形：稿行
+      // 是"链上订单从何而来"的档案，进入触发生命周期后再改内容会割裂
+      // 档案与已签名/已广播负载的对应关系，确定性拒绝而非只靠 CAS 竞态
+      // 兜底。failed 仍可编辑：重试 prepare 按当前稿重建授权，改稿重试
+      // 是失败恢复路径。
+      if (
+        current.status === "triggering" ||
+        current.status === "triggered" ||
+        current.status === "cancelled"
+      ) {
+        throw new ProductBffError(
+          409,
+          "draft_not_editable",
+          "the order draft has entered the trigger lifecycle and can no longer be edited",
+          { draftId, status: current.status },
+        );
+      }
       const draft: ProductOrderDraftDTO = {
         ...current,
         ...(input.title !== undefined ? { title: input.title } : {}),
@@ -1874,9 +1892,12 @@ const EMPTY_PLAN_CAPABILITY_TABLES: PlanCapabilityTables = {
 /**
  * 出生事实属主自证（triggerOrderFromOutsideFor 的 birthFactAttribution）：
  * 从 plan 投影词表造证（造证单源 submissions/capability-proofs.ts）。
- * 词表外事实/投影表空/解析器故障 → 全零结构（不声明属主）：链上对词表内
- * 出生事实回 InvalidSignalCapability——出生事实必须有词表内属主证，
- * 服务端造不出证明时不伪造。
+ * 词表外事实/投影表空 → 全零结构（不声明属主）：链上对词表内出生事实回
+ * InvalidSignalCapability——出生事实必须有词表内属主证，服务端造不出
+ * 证明时不伪造。词表解析器故障 → 响亮失败（与 submitSignalFor 造证同
+ * 口径）：读失败时无法判断出生事实是否词表内，全零会把必拒的
+ * InvalidSignalCapability 留到链上 revert 才暴露（白烧代付 gas）——
+ * broadcast 前失败落 failed+retryable 档案，稍后重试。
  */
 async function birthFactAttributionFor(
   resolvePlanCapabilityTables:
@@ -1891,8 +1912,13 @@ async function birthFactAttributionFor(
     tables = resolvePlanCapabilityTables
       ? await resolvePlanCapabilityTables(planId)
       : undefined;
-  } catch {
-    tables = undefined;
+  } catch (error) {
+    throw new ProductBffError(
+      409,
+      "capability_tables_unavailable",
+      "plan capability tables could not be read from the projection; refusing to mint a zero-value birth fact attribution while the vocabulary state is unknown",
+      { planId, sourceId, signalId, cause: redactErrorMessage(error) }
+    );
   }
   return factAttributionPayload(
     tables ?? EMPTY_PLAN_CAPABILITY_TABLES,
@@ -2012,7 +2038,8 @@ async function safeBroadcastOutsideTrigger(
       );
     }
     // 出生事实属主自证：从 plan 投影词表造（factAttribution 同口径）；
-    // 解析失败/无词表按全零降级——链上词表闸是最终守门人。
+    // 无词表/词表外按全零（链上词表闸兜底），解析器故障响亮失败
+    //（failed+retryable，不广播必拒交易）。
     const birthFactAttribution = await birthFactAttributionFor(
       resolvePlanCapabilityTables,
       registration.planId,

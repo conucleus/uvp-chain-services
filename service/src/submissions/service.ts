@@ -563,8 +563,9 @@ const EMPTY_PLAN_CAPABILITY_TABLES: PlanCapabilityTables = {
  * - 词表外事实 / 投影表空（外部发布 plan）→ 全零 attribution + 全零
  *   selectorBinding：链上词表闸自会拒绝词表内事实
  *   （InvalidSignalCapability），词表外事实按 source==stage 回退解析；
- * - 解析器故障按"无词表"处理（全零降级）——typedData 不承诺这两个
- *   广播参数，降级不烧签名；富集是投影侧增强，不得反过来阻断提交。
+ * - 词表解析器故障 → 响亮失败：读失败时无法区分事实是否在词表内，
+ *   全零造证会把本可预判的 InvalidSignalCapability 留到链上 revert
+ *   才暴露（白烧代付 gas）；prepare 时点失败不产生签名、不消耗 nonce。
  */
 async function resolveSubmissionCapabilityProofs(
   resolvePlanCapabilityTables:
@@ -582,8 +583,13 @@ async function resolveSubmissionCapabilityProofs(
     tables = resolvePlanCapabilityTables
       ? await resolvePlanCapabilityTables(planId)
       : undefined;
-  } catch {
-    tables = undefined;
+  } catch (error) {
+    throw new ProductSubmissionError(
+      409,
+      "capability_tables_unavailable",
+      "plan capability tables could not be read from the projection; refusing to mint zero-value proofs while the vocabulary state is unknown",
+      { planId, sourceId, signalId, cause: redactErrorMessage(error) }
+    );
   }
   const effectiveTables = tables ?? EMPTY_PLAN_CAPABILITY_TABLES;
   const attribution = factAttributionPayload(effectiveTables, sourceId, signalId);

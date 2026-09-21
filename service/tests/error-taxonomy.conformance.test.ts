@@ -222,6 +222,9 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   // 无法构造必携的 bindingProof/stageFacts——广播前 fail-closed 预检，
   // 不入重试/死信词表。
   'stage_patch_capability_tables_unavailable',
+  // 同族：submitSignalFor 造证时词表解析器故障（≠ 投影表空的合法全零
+  // 路径）——prepare 时点 fail-closed 拒绝零值造证，不入重试/死信词表。
+  'capability_tables_unavailable',
   'product_order_not_found',
   'selector_wallet_not_authorized',
   'state_machine_address_missing',

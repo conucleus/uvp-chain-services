@@ -1096,6 +1096,49 @@ describe("product BFF order drafts and invites", () => {
     expect(attempt!.authorizations).toHaveLength(trigger.permissions.length);
   });
 
+  it("refuses edits to a draft that has entered the trigger lifecycle", async () => {
+    // 触发负载（payloadHash/授权）在 prepare 时点由草稿快照定形：终态
+    //（triggered）与在途（triggering）的稿行是"链上订单从何而来"的档案，
+    // 编辑必须确定性拒绝——静默接受会割裂档案与已签名/已广播负载。
+    const triggerAdapter = new ScriptedOutcomeTriggerAdapter({
+      status: "confirmed",
+      txHash: "0x4242424242424242424242424242424242424242424242424242424242424242",
+      blockNumber: "42",
+      retryable: false,
+    });
+    const { router, productStore } = await createRouterFixture(
+      [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+      triggerAdapter,
+    );
+    const draft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    await triggerPreparedDraft(router, draft.draftId, prepared, testWallet(0));
+
+    const edited = await router.handle({
+      method: "PATCH",
+      pathname: `/product/order-drafts/${draft.draftId}`,
+      headers: creatorHeaders(),
+      body: { title: "renamed after trigger" },
+    });
+    expect(edited).toMatchObject({ status: 409, body: { error: "draft_not_editable" } });
+    await expect(productStore.getDraft(draft.draftId)).resolves.toMatchObject({
+      status: "triggered",
+      title: draft.title,
+    });
+
+    // 在途（triggering）同口径拒绝：不等 CAS 竞态兜底，静态拒绝先行。
+    const inFlight = await createReadyDraft(router);
+    const current = await productStore.getDraft(inFlight.draftId);
+    await productStore.updateDraft({ ...current!, status: "triggering" });
+    const inFlightEdit = await router.handle({
+      method: "PATCH",
+      pathname: `/product/order-drafts/${inFlight.draftId}`,
+      headers: creatorHeaders(),
+      body: { title: "renamed while triggering" },
+    });
+    expect(inFlightEdit).toMatchObject({ status: 409, body: { error: "draft_not_editable" } });
+  });
+
   it("serializes concurrent trigger submissions per order so the broadcast fires exactly once", async () => {
     // triggerOrder 的状态检查与
     // "置 submitted + 广播"之间隔了 await——并发提交同一 draft 会双双通过
