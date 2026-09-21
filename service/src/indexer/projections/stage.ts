@@ -138,7 +138,7 @@ export function applyStageExecutorPatchApplied(
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
   const planId = optionalBytes32Arg(event, "planId");
-  // P0 幻影订单：StageExecutorPatchApplied 由 UVPStagePatchModule 发出。
+  // 幻影订单：StageExecutorPatchApplied 由 UVPStagePatchModule 发出。
   const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId, planId);
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
@@ -194,7 +194,7 @@ export function applyStageResourcePatchApplied(
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
   const planId = optionalBytes32Arg(event, "planId");
-  // P0 幻影订单：StageResourcePatchApplied 由 UVPStagePatchModule 发出。
+  // 幻影订单：StageResourcePatchApplied 由 UVPStagePatchModule 发出。
   const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId, planId);
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");

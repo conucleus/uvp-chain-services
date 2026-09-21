@@ -25,8 +25,8 @@ export class InMemoryStoreListingStore implements StoreListingStore {
 
   async findListingByPlanId(planId: Hex): Promise<StoreListingRecord | undefined> {
     const normalized = planId.toLowerCase();
-    // 与 sqlite 驱动同择条：imported_at 升序取首条（约束生效时同 plan
-    // 仅一条，此择条只为与持久驱动的遗留数据行为一致）。
+    // 与 sqlite 驱动同择条：imported_at 升序取首条——同 plan 多条时取
+    // 最早导入的一条（唯一约束生效时同 plan 仅一条，此择条不会命中）。
     return [...this.#listings.values()]
       .filter((record) => record.planId.toLowerCase() === normalized)
       .sort((left, right) => left.importedAt.localeCompare(right.importedAt))[0];

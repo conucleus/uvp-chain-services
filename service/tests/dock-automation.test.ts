@@ -54,7 +54,7 @@ describe("dock liveness keeper", () => {
     expect(worker.getLastSummary()).toBeUndefined();
   });
 
-  it("fails closed on route records with missing or malformed identity fields (P2-2 B3)", async () => {
+  it("fails closed on route records with missing or malformed identity fields", async () => {
     // route 数据来自链下来源：keeper 只提交可由链上 committed 投影推导的
     // 就绪性——记录身份字段缺失/零值/跨链/new 模式缺 openCalldata 即整轮
     // 响亮报错，不静默跳过、不带可疑数据继续提交。

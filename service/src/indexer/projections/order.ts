@@ -134,7 +134,7 @@ export function applyStateMachineModuleSet(
 }
 
 /**
- * P0 幻影订单：订单/计划维度事件可能由模块合约发出（UVPStagePatchModule、
+ * 幻影订单：订单/计划维度事件可能由模块合约发出（UVPStagePatchModule、
  * UVPDockingModule、UVPOrderLinkModule、UVPDerivedSignalModule、
  * UVPPlanMetadataModule），此时 event.contractAddress 是模块地址。订单必须
  * 按所属状态机地址分桶，否则同一订单会在模块地址下分裂出 planId=0 的
@@ -163,7 +163,7 @@ export function resolveStateMachineAddressForModuleEvent(
 }
 
 /**
- * P0 幻影订单：订单维度事件（7 类）建桶前的统一归一化入口——解析失败的
+ * 幻影订单：订单维度事件（7 类）建桶前的统一归一化入口——解析失败的
  * 事件保持事件地址建桶（现状）并累计 unresolvedModuleOrderEventCount。
  */
 export function stateMachineAddressForOrderEvent(
@@ -343,7 +343,7 @@ export function applyOrderLinked(
   const originSourceId = requiredBytes32Arg(event, "originSourceId");
   const originSignalId = requiredBytes32Arg(event, "originSignalId");
   const planId = optionalBytes32Arg(event, "planId");
-  // P0 幻影订单：OrderLinked 由 UVPOrderLinkModule 发出，先归一化到所属
+  // 幻影订单：OrderLinked 由 UVPOrderLinkModule 发出，先归一化到所属
   // 状态机地址再做部署归属与建桶。
   const stateMachineAddress = stateMachineAddressForOrderEvent(state, event);
   const childOrder = ensureStateMachineOrder(
@@ -387,7 +387,7 @@ export function ensureStateMachineOrder(
   planId?: Hex,
   deploymentId?: Hex,
   /**
-   * P0 幻影订单：订单维度事件由模块合约发出时，桶与订单本体必须归一到
+   * 幻影订单：订单维度事件由模块合约发出时，桶与订单本体必须归一到
    * 所属状态机地址；缺省保持事件自带地址（状态机直发事件的现状）。
    */
   bucketStateMachineAddress?: Address

@@ -45,7 +45,7 @@ export interface ProjectionSnapshot {
   readonly stateMachineTasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly lastEvent?: ProjectionProvenance;
   /**
-   * P0 幻影订单诊断计数：订单维度事件（patch/dock/link/derived）本应由已
+   * 幻影订单诊断计数：订单维度事件（patch/dock/link/derived）本应由已
    * 登记的模块合约发出，但 replay 时其 emitting 地址无法通过
    * stateMachineModules 唯一归因到所属状态机（模块未登记/replay 顺序中
    * StateMachineModuleSet 尚未出现/一址多机）。这类事件保持事件自带地址
@@ -83,7 +83,7 @@ export type Writable<TValue> = {
 
 export type MutableStateMachineDeploymentProjection = Writable<StateMachineDeploymentProjection>;
 
-/** P0 幻影订单：单次 replay 内累计的显式诊断计数。 */
+/** 单次 replay 内累计的显式诊断计数（幻影订单等回放异常）。 */
 export interface ProjectionReplayDiagnostics {
   unresolvedModuleOrderEventCount: number;
   unresolvedDockEventCount: number;

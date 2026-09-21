@@ -152,7 +152,7 @@ export function applyDerivedSignalSubmitted(
 ): void {
   const targetOrderId = requiredBytes32Arg(event, "targetOrderId");
   const planId = optionalBytes32Arg(event, "targetPlanId") ?? optionalBytes32Arg(event, "planId");
-  // P0 幻影订单：DerivedSignalSubmitted 由 UVPDerivedSignalModule 发出。
+  // 幻影订单：DerivedSignalSubmitted 由 UVPDerivedSignalModule 发出。
   const order = ensureStateMachineOrderFromModuleEvent(state, event, targetOrderId, planId);
   const proof = proofOf(event, {
     orderId: targetOrderId,

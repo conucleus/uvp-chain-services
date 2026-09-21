@@ -373,7 +373,7 @@ const ZERO_BYTES32 = "0x00000000000000000000000000000000000000000000000000000000
 const CALLDATA_LIKE = /^0x(?:[0-9a-fA-F]{2})+$/;
 
 /**
- * route 来源记录的 fail-closed 校验（P2-2 B3，keeper 在役化前置）。
+ * route 来源记录的 fail-closed 校验。
  * route 数据是链下编译产物（DockRouteSource 由云侧实现），keeper 只提交
  * 可由链上 committed 投影推导的就绪性——记录本身的身份字段必须完整且
  * 形状合法：缺字段/零值/跨链记录/openCalldata 缺失（new 模式开仓唯一
