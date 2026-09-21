@@ -2457,6 +2457,77 @@ describe("indexer projection replay", () => {
     }
   });
 
+  it("dead-letters notification batches whose events only survive as reorg tombstones", async () => {
+    // reorg 把载荷事件打掉后，事件表里留下的是 removed=1 墓碑行——
+    // 存在性检查若把墓碑当"事件仍在"，幽灵批次会被照常补投。sweep
+    // 的存在集必须过滤墓碑；投影重放等其他调用方仍依赖含墓碑的全集。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-sweep-tombstone-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 9n;
+        },
+        async readEvents(range) {
+          return stateMachineEvents().filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        }
+      };
+      const deliveredBatches: (readonly ChainEvent[])[] = [];
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        notificationProcessor: {
+          async processSignalSubmittedEvents(events) {
+            deliveredBatches.push(events);
+          }
+        }
+      });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+      const rebuildDeliveryCount = deliveredBatches.length;
+
+      // 载荷事件以 reorg 墓碑形态残留在事件表（removed=true 且无活跃行：
+      // appendEvent 的墓碑 UPDATE 不命中时落的就是纯墓碑行）。
+      const tombstonedEvent = {
+        ...chainEvent(5n, 4, "SignalSubmitted", {
+          orderId: stateMachineOrderId,
+          sourceId: bytes32Hex("3606"),
+          signalId: bytes32Hex("3707"),
+          payloadHash,
+          idempotencyKey: bytes32Hex("3bbb"),
+          submitter: signer
+        }),
+        removed: true
+      };
+      await store.appendEvent(tombstonedEvent);
+      const storedAfterTombstone = await store.listEvents({ chainId: 31337 });
+      expect(
+        storedAfterTombstone.some((event) => event.removed === true),
+      ).toBe(true);
+      await store.savePendingPostCommitStep({
+        stepId: "pending_signal_notification:tombstone-batch",
+        chainId: 31337,
+        kind: "signal_notification",
+        events: [tombstonedEvent]
+      });
+
+      const sweepSummary = await indexer.sweepPendingPostCommitSteps();
+      expect(sweepSummary).toMatchObject({ swept: 1, delivered: 0, failed: 0, waitingFinality: 0, ghostDropped: 1 });
+      expect(deliveredBatches.length).toBe(rebuildDeliveryCount);
+      await expect(indexer.listPendingPostCommitSteps()).resolves.toEqual([]);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("reports projectionRebuilt=false when the chain has not reached the deployment block", async () => {
     // M45 回归：链未达部署块时重建早退——没有重放任何事件，
     // projectionRebuilt=true 是 fail-open（掩盖未完成态）。

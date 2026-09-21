@@ -1375,8 +1375,16 @@ export class IndexerService implements LifecycleService {
     const pendingSteps = await durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
     // 事件存在性检查的底册：本轮 sweep 只读一次事件表，供所有
     // signal_notification 批次共用（无批次时不付 O(全历史) 读取代价）。
+    // reorg 墓碑行（removed=1）不算"事件仍在"：载荷事件被 canonical 链
+    // 打掉后只剩墓碑，含墓碑的存在集会把幽灵步骤误判为可投递。投影
+    // 重放/回滚异常计数等调用方依赖含墓碑的全集（墓碑驱动撤销语义），
+    // 过滤只落在 sweep 的存在性语义上。
     const storedEventIds = pendingSteps.some((step) => step.kind === "signal_notification")
-      ? new Set((await durableStore.listEvents({ chainId: this.#scope.chainId })).map(chainEventKey))
+      ? new Set(
+          (await durableStore.listEvents({ chainId: this.#scope.chainId }))
+            .filter((event) => event.removed !== true)
+            .map(chainEventKey),
+        )
       : new Set<string>();
     for (const step of pendingSteps) {
       summary.swept += 1;
