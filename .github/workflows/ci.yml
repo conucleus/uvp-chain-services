@@ -41,6 +41,66 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          path: uvp-chain-services
+
+      # service 依赖 @uvp-eth/compiler / product-dto / protocol-bindings
+      # （均 workspace:*，定义在 uvp-protocol 仓且未发 npm），本仓
+      # pnpm-workspace.yaml 只含 service——独立安装必须以姊妹仓形态供包，
+      # 否则 ERR_PNPM_WORKSPACE_PKG_NOT_FOUND。compiler 又传递依赖
+      # hook-core → @conucleus/uvp-core-node（uvp-core 仓原生包），三个
+      # 姊妹仓都要检出。跨仓私有 checkout 用伞仓 CI_SUBMODULE_TOKEN
+      # 模式；ref 用默认分支，同 uvp-core 仓既有 ci.yml 检出姊妹仓的形态。
+      - name: Checkout uvp-protocol (compiler, hook-core, product-dto, protocol-bindings)
+        uses: actions/checkout@v4
+        with:
+          repository: conucleus/uvp-protocol
+          path: uvp-protocol
+          fetch-depth: 1
+          token: ${{ secrets.CI_SUBMODULE_TOKEN || github.token }}
+
+      - name: Checkout uvp-core (uvp-node native module)
+        uses: actions/checkout@v4
+        with:
+          repository: conucleus/uvp-core
+          path: uvp-core
+          fetch-depth: 1
+          token: ${{ secrets.CI_SUBMODULE_TOKEN || github.token }}
+
+      # 复现伞仓 workspace 形态：本包 + 跨仓 workspace 依赖包（含传递的
+      # hook-core 与 @conucleus/uvp-core-node）合成一个安装根。
+      # tsconfig.base.json 同步合成：hook-core / product-dto 的 tsconfig
+      # extends ../../../tsconfig.base.json，伞仓里由伞仓根提供，合成根
+      # 必须同名提供，否则 vitest 的 esbuild 转换在解析 extends 时崩。
+      # 命令仍照伞仓对该包的跑法（typecheck/test/build）。
+      - name: Compose workspace root
+        run: |
+          cat > pnpm-workspace.yaml <<'EOF'
+          packages:
+            - "uvp-chain-services/service"
+            - "uvp-protocol/packages/compiler"
+            - "uvp-protocol/packages/hook-core"
+            - "uvp-protocol/packages/product-dto"
+            - "uvp-protocol/packages/protocol-bindings"
+            - "uvp-core/crates/uvp-node"
+          EOF
+          printf '{"name":"ci-workspace","private":true,"packageManager":"pnpm@9.15.0"}' > package.json
+          cat > tsconfig.base.json <<'EOF'
+          {
+            "compilerOptions": {
+              "target": "ES2022",
+              "lib": ["ES2022", "DOM"],
+              "module": "ESNext",
+              "moduleResolution": "Bundler",
+              "resolveJsonModule": true,
+              "strict": true,
+              "noUncheckedIndexedAccess": true,
+              "exactOptionalPropertyTypes": true,
+              "skipLibCheck": true,
+              "forceConsistentCasingInFileNames": true
+            }
+          }
+          EOF
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -54,25 +114,46 @@ jobs:
           # 本仓不提交 pnpm-lock.yaml（workspace 锁定在 uvp-eth 伞仓根），
           # setup-node 的 pnpm 缓存以 lockfile 为键，这里不能开。
 
+      # 测试经 @uvp-eth/compiler → hook-core 加载 uvp-core 原生模块，且
+      # 其 build fingerprint 门只认 git 检出（actions/checkout 天然满足），
+      # Test 前必须完成构建；步骤照搬 uvp-protocol 仓 ci.yml。
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # vitest-event-source 测试读 uvp-protocol 合约编译产物
+      # （out/*.json）比对事件 ABI 布局；anvil 索引测试在 anvil 可用时
+      # 运行。同伞仓：Test 前先把合约产物 build 出来。
+      - name: Setup Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
       - name: Install dependencies
         # 伞仓 CI 用 --frozen-lockfile；子仓无 lockfile（CI 下 frozen 默认
         # 开启会 ERR_PNPM_NO_LOCKFILE），故显式 --no-frozen-lockfile。
         run: pnpm install --no-frozen-lockfile
         timeout-minutes: 5
 
+      - name: Build packaged uvp-node native module
+        run: pnpm --filter @conucleus/uvp-core-node run build
+        timeout-minutes: 8
+
+      - name: Build uvp-protocol contract artifacts
+        run: forge build
+        working-directory: uvp-protocol/contracts/uvp-contracts
+        timeout-minutes: 8
+
       - name: Typecheck
         # 等价伞仓 "pnpm check"（-r typecheck）对本仓 @uvp-eth/chain-services 的覆盖。
-        run: pnpm typecheck
+        run: pnpm --filter @uvp-eth/chain-services run typecheck
         timeout-minutes: 8
 
       - name: Test
         # 测试自建/自清随机 schema，只需 CREATE/DROP SCHEMA 权限，
         # 迁移为纯 SQL 无扩展依赖（同伞仓 Test 步骤说明）。
-        run: pnpm test
+        run: pnpm --filter @uvp-eth/chain-services run test
         env:
           CHAIN_SERVICES_POSTGRES_TEST_URL: postgres://uvp:uvp@127.0.0.1:5432/uvp
         timeout-minutes: 10
 
       - name: Build
-        run: pnpm build
+        run: pnpm --filter @uvp-eth/chain-services run build
         timeout-minutes: 12
