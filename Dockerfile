@@ -30,16 +30,21 @@ RUN test -n "${UVP_FFI_GIT_REV}"
 WORKDIR /ws
 
 # 先落 workspace 清单与依赖包源码，再以伞仓 lockfile 为冻结基准安装
-# chain-services 的依赖闭包。
+# chain-services 的依赖闭包。本仓在此层只给 service 清单：src/tests/
+# migrations 变更不再击穿昂贵的安装层，装完再拷全量源码进构建层。
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY uvp-protocol/packages uvp-protocol/packages
 COPY uvp-core/rust-toolchain.toml uvp-core/Cargo.toml uvp-core/Cargo.lock uvp-core/
 COPY uvp-core/crates uvp-core/crates
-COPY uvp-chain-services uvp-chain-services
+COPY uvp-chain-services/service/package.json uvp-chain-services/service/package.json
 
 RUN pnpm install --frozen-lockfile --filter @uvp-eth/chain-services...
 
+# 原生模块只依赖 uvp-core 与安装层，与本仓源码解耦，先行构建。
 RUN UVP_FFI_GIT_REV="${UVP_FFI_GIT_REV}" pnpm --filter @conucleus/uvp-core-node run build:release
+
+COPY uvp-chain-services uvp-chain-services
+
 RUN pnpm --filter @uvp-eth/chain-services run build
 
 FROM node:22-bookworm-slim AS runtime

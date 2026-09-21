@@ -21,3 +21,8 @@ uvp-chain-services/service/dist/
 uvp-protocol/packages/**/node_modules/
 uvp-protocol/packages/**/dist/
 uvp-core/target/
+# 头注释承诺 .git 不进上下文：allowlist 的 ** 递归重含会把子仓 gitlink
+#（uvp-chain-services/.git 文件）与任何嵌套 .git 重新放进来，且随
+# COPY uvp-chain-services 落进镜像——置于 allowlist 之后压回排除。
+**/.git
+**/.git/**
