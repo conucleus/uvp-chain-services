@@ -22,7 +22,8 @@ export type {
   StateMachinePlanProjection,
   StateMachineStageSelectorBindingProjection,
   StateMachineSignalTargetRelation,
-  StateMachineSignalCapabilityProjection
+  StateMachineSignalCapabilityProjection,
+  PlanCapabilityEnrichmentStatus
 } from "./plan.js";
 export type {
   StateMachineSignalProjection,

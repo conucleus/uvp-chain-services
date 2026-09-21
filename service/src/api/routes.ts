@@ -146,7 +146,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const submissionAuthorization = options.productBffStore
     ? productBffStoreSubmissionAuthorization(options.productBffStore, store)
     : undefined;
-  // 草稿期证据归属核验（U4）：draftId → 该草稿已触发的订单 id。装配在
+  // 草稿期证据归属核验：draftId → 该草稿已触发的订单 id。装配在
   // BFF 台账上——trigger 记录是草稿与订单对应关系的服务端事实源。
   const resolveDraftOrder = options.productBffStore
     ? productBffStoreDraftOrderResolver(options.productBffStore)
@@ -218,7 +218,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     resolveOrderPlanId: resolveOrderPlanIdFromStore(store),
     // 词表 Merkle 造证（attribution/selectorBinding）从 plan 投影两表构造。
     resolvePlanCapabilityTables: resolvePlanCapabilityTablesFromStore(store),
-    // draftId 来源凭证的提交归属核验（U4）：无解析器时提交侧 fail-closed。
+    // draftId 来源凭证的提交归属核验：无解析器时提交侧 fail-closed。
     ...(resolveDraftOrder ? { resolveDraftOrder } : {}),
     ...(options.submissionBroadcastAdapter ? { broadcastAdapter: options.submissionBroadcastAdapter } : {}),
     ...(submissionAuthorization ? { authorization: submissionAuthorization } : {}),
@@ -653,10 +653,14 @@ function resolveOrderPlanIdFromStore(
 /**
  * plan 投影词表两表解析（词表 Merkle 化的造证源）：按 planId 从投影
  * 快照读 selectorBindings/signalCapabilities（applyPlanFinalized 时产物
- * 富集 + capabilitiesRoot 断言的成果）。plan 不在投影/两表为空（外部
- * 发布 plan）→ undefined，消费方按全零结构降级（链上词表闸兜底）。
+ * 富集 + capabilitiesRoot 断言的成果）。plan 不在投影/两表为空且富集态
+ * 非 failed（外部发布 plan）→ undefined，消费方按全零结构降级（链上词表
+ * 闸兜底）。富集态 failed（resolver 故障轮 / 产物 root 断言不过）→ 抛
+ * 错：词表状态未知，全零造证会把必拒的 InvalidSignalCapability 留到链上
+ * revert 才暴露（白烧代付 gas）——提交与 trigger 车道的既有 catch 会把它
+ * 归一为 409 capability_tables_unavailable。
  */
-function resolvePlanCapabilityTablesFromStore(
+export function resolvePlanCapabilityTablesFromStore(
   store: ProjectionStore
 ): (planId: Hex) => Promise<PlanCapabilityTables | undefined> {
   return async (planId) => {
@@ -666,6 +670,11 @@ function resolvePlanCapabilityTablesFromStore(
     );
     if (!plan) {
       return undefined;
+    }
+    if (plan.capabilityEnrichment === "failed") {
+      throw new Error(
+        "plan capability enrichment failed in the last indexer replay; the plan vocabulary state is unknown"
+      );
     }
     return {
       selectorBindings: plan.selectorBindings,

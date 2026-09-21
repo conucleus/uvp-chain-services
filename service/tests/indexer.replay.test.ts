@@ -1175,6 +1175,91 @@ describe("indexer projection replay", () => {
     }
   });
 
+  it("persists the failed enrichment marker on resolver-failure rounds and recovers once the resolver is healthy", async () => {
+    // 回归（解析故障 ≠ 无词表）：resolver 故障轮的快照必须带 failed
+    // 富集态持久化——否则提交/触发车道无法与"外部发布 plan 的合法空词表"
+    // 区分，全零造证会把必拒的 InvalidSignalCapability 留到链上 revert。
+    // 故障不进富集缓存，恢复后的下一轮增量重放自动回到 enriched。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-enrichment-failed-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const vocabulary = planVocabulary({
+        selectorBindings: [{ selectorStageId, targetStageId: stageId }],
+        signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+      });
+      const planEvents = planPublishEvents(vocabulary);
+      const orderEvent = chainEvent(3n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      });
+      let finalizedBlock = 3n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return [...planEvents, orderEvent].filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        }
+      };
+      const healthyResolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> =>
+        anchorPlanId.toLowerCase() === planId.toLowerCase() && anchorPlanHash.toLowerCase() === planHash.toLowerCase()
+          ? vocabulary
+          : undefined;
+
+      const failingIndexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        resolvePlanCapabilityTables: async () => {
+          throw new Error("draft store unreadable");
+        }
+      });
+      const failed = await failingIndexer.rebuildFromDeploymentBlockWithSummary();
+      const planKey = stateMachineScopedKey(31337, contractAddress, planId);
+      expect(failed.snapshot.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("failed");
+      expect(failed.snapshot.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(0);
+      const persisted = await store.getOrderSnapshot();
+      expect(persisted.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("failed");
+      expect(persisted.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(0);
+
+      // 恢复：重启（富集缓存为空）+ resolver 正常，一轮增量刷新后同一
+      // plan 自动回到 enriched 可用态。
+      finalizedBlock = 4n;
+      const laterOrderEvent = chainEvent(4n, 0, "OrderRegistered", {
+        orderId: "0x0000000000000000000000000000000000000000000000000000000000000305",
+        planId
+      });
+      eventSource.readEvents = async (range) => [laterOrderEvent].filter(
+        (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+      );
+      const recoveredIndexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        resolvePlanCapabilityTables: healthyResolver
+      });
+      const refreshed = await recoveredIndexer.refreshFromCursorWithSummary();
+
+      expect(refreshed.snapshot.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("enriched");
+      expect(refreshed.snapshot.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(1);
+      const recovered = await store.getOrderSnapshot();
+      expect(recovered.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("enriched");
+      expect(recovered.stateMachinePlans[planKey]?.selectorBindings).toHaveLength(1);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("re-enriches the plan vocabulary from surviving events when a restarted indexer rolls back after a reorg", async () => {
     // 回归：回滚路径的词表富集若只靠进程内缓存，重启后（缓存为空）回滚
     // 事务会持久化无词表快照；随后 finalized 落后于回退游标时本轮不再
@@ -2154,12 +2239,14 @@ describe("indexer projection replay", () => {
     expect(plan?.selectorBindings).toEqual([
       expect.objectContaining({ selectorStageId, targetStageId: stageId })
     ]);
+    expect(plan?.capabilityEnrichment).toBe("enriched");
   });
 
   it("keeps the plan vocabulary empty and counts a mismatch when the artifact root diverges from the chain root", () => {
     // fail-closed：产物两表重算 root ≠ 链上 capabilitiesRoot（产物过期/被改
     // 写）时不得填进投影——下游会按错词表造出链上必拒的证明。显式计数，
-    // 不 crash indexer。
+    // 不 crash indexer。断言不过 = 词表状态未知，富集态标 failed（不是
+    // 外部发布 plan 的 empty），提交/触发车道据此拒绝零值造证。
     const chainVocabulary = planVocabulary({
       signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
     });
@@ -2178,11 +2265,13 @@ describe("indexer projection replay", () => {
     expect(plan?.signalCapabilities).toHaveLength(0);
     expect(plan?.selectorBindings).toHaveLength(0);
     expect(snapshot.capabilityEnrichmentMismatchCount).toBe(1);
+    expect(plan?.capabilityEnrichment).toBe("failed");
   });
 
   it("keeps externally published plans on an empty vocabulary without counting a mismatch", () => {
     // 外部发布 plan（store 域无产物）：两表留空是既定取舍而非异常——
-    // 词表相关推导对该 plan 不可用，链上词表闸不受影响。
+    // 词表相关推导对该 plan 不可用，链上词表闸不受影响。富集态 empty 与
+    // 故障态 failed 区分：empty 是"确认无产物"的合法全零路径。
     const chainVocabulary = planVocabulary({});
     const events: readonly ChainEvent[] = [
       ...planPublishEvents(chainVocabulary)
@@ -2194,6 +2283,32 @@ describe("indexer projection replay", () => {
     expect(plan?.signalCapabilities).toHaveLength(0);
     expect(plan?.selectorBindings).toHaveLength(0);
     expect(snapshot.capabilityEnrichmentMismatchCount).toBe(0);
+    expect(plan?.capabilityEnrichment).toBe("empty");
+  });
+
+  it("marks the vocabulary enrichment failed when the resolver threw for the plan this round", () => {
+    // 解析故障 ≠ 无词表：resolver 故障轮的空两表必须以 failed 富集态进
+    // 快照——与"外部发布 plan 的 empty"区分，提交/触发车道据此拒绝零值
+    // 造证（读失败时无法判断事实是否在词表内，全零会把本可预判的
+    // InvalidSignalCapability 留到链上 revert 才暴露，白烧代付 gas）。
+    const chainVocabulary = planVocabulary({
+      selectorBindings: [{ selectorStageId, targetStageId: stageId }],
+      signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+    });
+    const events: readonly ChainEvent[] = [
+      ...planPublishEvents(chainVocabulary)
+    ];
+
+    const snapshot = rebuildOrderProjections(events, {
+      planCapabilityResolutionFailures: [planId]
+    });
+    const plan = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
+
+    expect(plan?.signalCapabilities).toHaveLength(0);
+    expect(plan?.selectorBindings).toHaveLength(0);
+    // 故障不是 mismatch（产物没读到，无从断言），也不得混入 empty。
+    expect(snapshot.capabilityEnrichmentMismatchCount).toBe(0);
+    expect(plan?.capabilityEnrichment).toBe("failed");
   });
 
   it("recovers from a shallow reorg on a quiet chain whose stored events are far below the backtrack window", async () => {

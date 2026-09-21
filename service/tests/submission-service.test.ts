@@ -5,7 +5,11 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
 import { STATE_MACHINE_ABI } from "@uvp-eth/protocol-bindings";
+import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import { privateKeyToAccount } from "viem/accounts";
+import { resolvePlanCapabilityTablesFromStore } from "../src/api/routes.js";
+import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import type { ChainEvent } from "../src/indexer/events.js";
 import {
   allowListedSubmissionAuthorization,
   createSecureSubmissionBroadcastAdapter,
@@ -327,6 +331,83 @@ describe("product task submissions", () => {
     });
     await expect(externalPlan.prepareSubmit(task.taskId, {
       evidenceIds: [base.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).resolves.toMatchObject({ status: "prepared" });
+  });
+
+  it("refuses zero-proof minting when the persisted plan snapshot carries the failed enrichment marker", async () => {
+    // 解析故障 ≠ 无词表（indexer 侧贯穿）：resolver 故障轮的快照带 failed
+    // 富集态，路由装配的词表解析器（resolvePlanCapabilityTablesFromStore）
+    // 对它抛错——提交车道按既有 catch 口径归一为 409
+    // capability_tables_unavailable，不得把未知词表当"确认无词表"降级
+    // 全零造证。empty（外部发布 plan）与恢复后的 enriched 不受影响。
+    const fixture = await submissionFixture({
+      authorization: permissiveProductProjectionAuthorization()
+    });
+    const planHash = "0x8888888888888888888888888888888888888888888888888888888888888888" as Hex;
+    const selectorBindings = [{ selectorStageId: fixtureSourceId, targetStageId: fixtureSourceId }];
+    const signalCapabilities = [{
+      stageId: fixtureSourceId,
+      targetSourceId: fixtureSourceId,
+      signalId: fixtureSignalId,
+      targetOrderRelation: 0 as const
+    }];
+    const capabilitiesRoot = capabilitiesRootOf(selectorBindings, signalCapabilities);
+    const planEvents: readonly ChainEvent[] = [
+      chainPlanEvent(1n, 0, "PlanCommitted", {
+        planId, planHash, publisher: submitter,
+        hooksHash: zeroBytes32(), capabilitiesRoot, hookCount: 1n,
+        dockRoutesRoot: zeroBytes32(), dockInterfaceRoot: zeroBytes32()
+      }),
+      chainPlanEvent(2n, 0, "PlanFinalized", { planId, planHash, capabilitiesRoot }),
+      chainPlanEvent(2n, 1, "PlanRegistered", { planId, planHash, hookCount: 1n })
+    ];
+    const store = new MemoryProjectionStore();
+    const serviceForStore = () => createProductSubmissionService({
+      productTasks: {
+        getTask: async (taskId) => taskId === task.taskId ? task : undefined
+      },
+      evidenceReader: fixture.evidenceService,
+      chainId,
+      verifyingContract,
+      resolveOrderPlanId: async () => planId,
+      resolvePlanCapabilityTables: resolvePlanCapabilityTablesFromStore(store),
+      authorization: permissiveProductProjectionAuthorization(),
+      now: () => baseNow
+    });
+
+    // 故障轮快照（failed 标记 + 空两表）：拒识，与解析器直接抛错同口径。
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: planEvents,
+      planCapabilityResolutionFailures: [planId]
+    });
+    await expect(serviceForStore().prepareSubmit(task.taskId, {
+      evidenceIds: [fixture.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "capability_tables_unavailable",
+      status: 409
+    });
+
+    // 外部发布 plan（empty）：合法全零路径，不得因三态引入而误伤。
+    await store.resetFromEvents({ deploymentBlock: 0n, events: planEvents });
+    await expect(serviceForStore().prepareSubmit(task.taskId, {
+      evidenceIds: [fixture.evidence.evidence.evidenceId],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).resolves.toMatchObject({ status: "prepared" });
+
+    // 恢复轮（enriched）：回到可用态，词表内事实携带非零造证。
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: planEvents,
+      planCapabilityTables: [{ planId, planHash, selectorBindings, signalCapabilities }]
+    });
+    await expect(serviceForStore().prepareSubmit(task.taskId, {
+      evidenceIds: [fixture.evidence.evidence.evidenceId],
       walletAddress: submitter,
       intent: "confirm_stage"
     }, owner)).resolves.toMatchObject({ status: "prepared" });
@@ -2053,6 +2134,28 @@ async function signPrepared(prepared: PreparedSubmissionDTO): Promise<Hex> {
 
 function txHash(value: string): Hex {
   return `0x${value.padStart(64, "0")}`;
+}
+
+function zeroBytes32(): Hex {
+  return `0x${"0".repeat(64)}` as Hex;
+}
+
+/** 两步发布的计划族事件（词表 root 锚定 capabilitiesRoot，见 plan.ts）。 */
+function chainPlanEvent(
+  blockNumber: bigint,
+  logIndex: number,
+  eventName: string,
+  args: Record<string, unknown>
+): ChainEvent {
+  return {
+    chainId,
+    contractAddress: verifyingContract,
+    blockNumber,
+    transactionHash: txHash(`${blockNumber}`),
+    logIndex,
+    eventName,
+    args
+  };
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

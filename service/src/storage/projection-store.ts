@@ -71,6 +71,11 @@ export interface ProjectionRebuildInput {
    * plan 的既定口径）。
    */
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
+  /**
+   * 本轮 resolver 故障的 planId 集合：这些 plan 的空两表按 failed 富集态
+   * 进快照（解析故障 ≠ 无词表），提交/触发车道拒识。
+   */
+  readonly planCapabilityResolutionFailures?: readonly Hex[];
   readonly scope?: ProjectionScope;
   readonly syncState?: Omit<ProjectionSyncState, "updatedAt">;
   /**
@@ -224,7 +229,10 @@ export class MemoryProjectionStore implements ProjectionStore {
       (event) => event.blockNumber >= input.deploymentBlock,
     );
     this.#snapshot = rebuildOrderProjections(events, {
-      ...(input.planCapabilityTables ? { planCapabilityTables: input.planCapabilityTables } : {})
+      ...(input.planCapabilityTables ? { planCapabilityTables: input.planCapabilityTables } : {}),
+      ...(input.planCapabilityResolutionFailures
+        ? { planCapabilityResolutionFailures: input.planCapabilityResolutionFailures }
+        : {})
     });
     this.#identitySnapshot = rebuildIdentityProjections(events);
     this.#syncState = syncStateFromRebuildInput(input, events);

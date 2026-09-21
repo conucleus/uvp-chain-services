@@ -95,7 +95,10 @@ export class SqliteProjectionStore implements DurableProjectionStore {
       (event) => event.blockNumber >= input.deploymentBlock,
     );
     const orderSnapshot = rebuildOrderProjections(events, {
-      ...(input.planCapabilityTables ? { planCapabilityTables: input.planCapabilityTables } : {})
+      ...(input.planCapabilityTables ? { planCapabilityTables: input.planCapabilityTables } : {}),
+      ...(input.planCapabilityResolutionFailures
+        ? { planCapabilityResolutionFailures: input.planCapabilityResolutionFailures }
+        : {})
     });
     const identitySnapshot = rebuildIdentityProjections(events);
     const scope = input.scope ?? this.#scopeFromEvents(events);

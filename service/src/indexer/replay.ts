@@ -135,6 +135,11 @@ export function rebuildOrderProjections(
   for (const source of options.planCapabilityTables ?? []) {
     capabilityTables.set(source.planId.toLowerCase(), source);
   }
+  // 本轮 resolver 故障的 planId(lower)：这些 plan 的空两表是"未知词表"
+  // 而非"无词表"，富集态标 failed 供提交/触发车道拒识（见 plan.ts）。
+  const capabilityResolutionFailures = new Set<string>(
+    (options.planCapabilityResolutionFailures ?? []).map((planId) => planId.toLowerCase())
+  );
   let activeStateMachineDeploymentId: Hex | undefined;
   let eventCount = 0;
   let lastEvent: ProjectionProvenance | undefined;
@@ -148,6 +153,7 @@ export function rebuildOrderProjections(
       orders: stateMachineOrders,
       docks: stateMachineDocks,
       capabilityTables,
+      capabilityResolutionFailures,
       diagnostics
     }, event);
     eventCount += 1;
@@ -221,9 +227,12 @@ export function rebuildOrderProjections(
  * 重放选项。planCapabilityTables：planId 锚定的编译产物两表（词表富集源，
  * 见 projections/plan.ts 的 fail-closed 口径）；缺省时所有 plan 两表为空
  * ——与链上无注册事件面的事实一致，只是词表相关推导不可用。
+ * planCapabilityResolutionFailures：本轮 resolver 故障的 planId 集合——
+ * 这些 plan 的空两表按 failed 富集态进快照（解析故障 ≠ 无词表）。
  */
 export interface ProjectionReplayOptions {
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
+  readonly planCapabilityResolutionFailures?: readonly Hex[];
 }
 
 function applyStateMachineEvent(
@@ -234,6 +243,7 @@ function applyStateMachineEvent(
     orders: Map<string, MutableStateMachineOrderProjection>;
     docks: Map<string, MutableStateMachineDockProjection>;
     capabilityTables: ReadonlyMap<string, PlanCapabilityTablesInput>;
+    capabilityResolutionFailures: ReadonlySet<string>;
     diagnostics: ProjectionReplayDiagnostics;
   },
   event: ChainEvent

@@ -16,6 +16,7 @@ import {
   countReplayAnomalies,
   rebuildOrderProjections
 } from "./replay.js";
+import type { ProjectionReplayOptions } from "./replay.js";
 import type { PlanCapabilityTablesInput } from "./projections/plan.js";
 import { rebuildIdentityProjections } from "./identity-projections.js";
 import { createChainServicesStores } from "../storage/factory.js";
@@ -233,11 +234,14 @@ export class IndexerService implements LifecycleService {
    * 为本轮事件批解析词表产物富集源：从计划族事件收集 (planId, planHash)
    * 锚，未缓存的锚逐个过 resolver（store 域 onchainHookPlanArtifact）。
    * 解析失败按"产物缺失"处理（warn 留痕、该 plan 两表为空）——富集是
-   * 服务端增强，不能把索引器打 degraded。
+   * 服务端增强，不能把索引器打 degraded。但"resolver 故障的空词表"必须
+   * 与"外部发布 plan 的空词表"在快照里可区分（解析故障 ≠ 无词表）：
+   * 故障锚随轮次返回，重放把它们 plan 的富集态标 failed，提交/触发车道
+   * 据此拒绝零值造证；故障不进缓存，下一轮重试，恢复后自动回到可用态。
    */
   async #planCapabilityTablesFor(
     events: readonly ChainEvent[]
-  ): Promise<readonly PlanCapabilityTablesInput[] | undefined> {
+  ): Promise<ProjectionReplayOptions | undefined> {
     const resolver = this.#resolvePlanCapabilityTables;
     if (!resolver) {
       return undefined;
@@ -257,6 +261,7 @@ export class IndexerService implements LifecycleService {
       }
       anchors.set(planId.toLowerCase(), { planId, planHash });
     }
+    const resolutionFailures: Hex[] = [];
     for (const anchor of anchors.values()) {
       if (this.#planCapabilityTablesCache.has(anchor.planId.toLowerCase())) {
         continue;
@@ -267,13 +272,17 @@ export class IndexerService implements LifecycleService {
           this.#planCapabilityTablesCache.set(anchor.planId.toLowerCase(), source);
         }
       } catch (error) {
-        this.#logger.warn("plan capability tables resolution failed; the plan vocabulary stays unenriched for this replay (fail-closed)", {
+        resolutionFailures.push(anchor.planId);
+        this.#logger.warn("plan capability tables resolution failed; the plan vocabulary is marked unenriched-failed for this replay (fail-closed)", {
           planId: anchor.planId,
           message: error instanceof Error ? redactErrorMessage(error) : "unknown resolution error"
         });
       }
     }
-    return [...this.#planCapabilityTablesCache.values()];
+    return {
+      planCapabilityTables: [...this.#planCapabilityTablesCache.values()],
+      planCapabilityResolutionFailures: resolutionFailures
+    };
   }
 
   /** 词表富集 fail-closed 计数的告警出口（不 crash 索引器）。 */
@@ -455,7 +464,7 @@ export class IndexerService implements LifecycleService {
       };
       // 词表产物富集源（计划族事件锚定）：与游标读取同为事务外 IO。
       // 全量重建本轮就从部署块读出完整历史，锚点集天然覆盖全部重放事件。
-      const planCapabilityTables = await this.#planCapabilityTablesFor(events);
+      const enrichmentOptions = await this.#planCapabilityTablesFor(events);
       // 通知派生先于重建事务提交落 pending（对齐增量路径不变量：投递
       // 记录必须先于游标推进）：全量重建把游标随整库替换同事务落库，
       // 提交后才处理通知——该窗口内硬崩溃会让这批事件永不再被读取、
@@ -466,7 +475,7 @@ export class IndexerService implements LifecycleService {
       const snapshot = await this.#store.resetFromEvents({
         deploymentBlock,
         events,
-        ...(planCapabilityTables ? { planCapabilityTables } : {}),
+        ...(enrichmentOptions ?? {}),
         scope: this.#scope,
         syncState: syncStateInput,
         cursor: {
@@ -709,7 +718,7 @@ export class IndexerService implements LifecycleService {
     const enrichmentEvents = this.#resolvePlanCapabilityTables
       ? [...(await durableStore.listEvents({ chainId: this.#scope.chainId })), ...events]
       : events;
-    const planCapabilityTables = await this.#planCapabilityTablesFor(enrichmentEvents);
+    const enrichmentOptions = await this.#planCapabilityTablesFor(enrichmentEvents);
 
     const result = await durableStore.withTransaction(async () => {
       // 崩溃窗口残留清扫：事件事务先于游标提交（中间还夹着通知投递），
@@ -742,7 +751,7 @@ export class IndexerService implements LifecycleService {
       const activeEvents = [...replaySummary.activeEvents];
       const lastEvent = sortChainEvents(activeEvents).at(-1);
       const snapshot = rebuildOrderProjections(allEvents, {
-        ...(planCapabilityTables ? { planCapabilityTables } : {})
+        ...(enrichmentOptions ?? {})
       });
       const identitySnapshot = rebuildIdentityProjections(allEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
@@ -1124,7 +1133,7 @@ export class IndexerService implements LifecycleService {
     // 事件集覆盖事务内重放集（删除只减不增）。
     const survivingEvents = (await durableStore.listEvents({ chainId: this.#scope.chainId }))
       .filter((event) => event.blockNumber <= ancestorBlock);
-    const planCapabilityTables = await this.#planCapabilityTablesFor(survivingEvents);
+    const enrichmentOptions = await this.#planCapabilityTablesFor(survivingEvents);
     await durableStore.withTransaction(async () => {
       const deleted = await durableStore.deleteEventsAfterBlock(
         { chainId: this.#scope.chainId },
@@ -1132,7 +1141,7 @@ export class IndexerService implements LifecycleService {
       );
       const remainingEvents = await durableStore.listEvents({ chainId: this.#scope.chainId });
       const snapshot = rebuildOrderProjections(remainingEvents, {
-        ...(planCapabilityTables ? { planCapabilityTables } : {})
+        ...(enrichmentOptions ?? {})
       });
       const identitySnapshot = rebuildIdentityProjections(remainingEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);

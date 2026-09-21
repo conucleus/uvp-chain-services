@@ -1096,6 +1096,63 @@ describe("product BFF order drafts and invites", () => {
     expect(attempt!.authorizations).toHaveLength(trigger.permissions.length);
   });
 
+  it("fails the trigger without broadcasting when the plan vocabulary snapshot is marked failed", async () => {
+    // 解析故障 ≠ 无词表（trigger 车道贯穿）：resolver 故障轮的 plan 快照
+    // 富集态为 failed 时，出生事实属主自证的词表读取抛错，registration 落
+    // failed+retryable（capability_tables_unavailable）——不广播必被链上
+    // 词表闸拒绝的交易（白烧代付 gas）；恢复轮次快照回到可用态后重试即可。
+    const triggerAdapter = new ScriptedOutcomeTriggerAdapter({
+      status: "confirmed",
+      txHash: "0x4242424242424242424242424242424242424242424242424242424242424242",
+      blockNumber: "42",
+      retryable: false,
+    });
+    const { router, store, productStore } = await createRouterFixture(
+      [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+      triggerAdapter,
+    );
+    const draft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+
+    // 模拟 resolver 故障轮后的投影快照：同一事件集 + failed 富集态。
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+      planCapabilityResolutionFailures: [crossBorderPlanIds.planId],
+    });
+
+    const account = privateKeyToAccount(
+      testPrivateKey(walletAddressIndex(testWallet(0))),
+    );
+    const signature = await account.signTypedData(
+      prepared.prepared.typedData as Parameters<typeof account.signTypedData>[0],
+    );
+    const trigger = await router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/trigger`,
+      body: {
+        prepareId: prepared.prepared.prepareId,
+        walletAddress: testWallet(0),
+        signature,
+      },
+    });
+
+    // 失败广播以 502 响亮失败（errorCode 透传），registration 落
+    // failed+retryable 供恢复后重试——与广播适配器故障同档案面。
+    expect(trigger).toMatchObject({
+      status: 502,
+      body: { error: "capability_tables_unavailable" },
+    });
+    expect(triggerAdapter.listAttempts()).toHaveLength(0);
+    await expect(
+      productStore.getRegistration(prepared.trigger.triggerId),
+    ).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "capability_tables_unavailable",
+      retryable: true,
+    });
+  });
+
   it("refuses edits to a draft that has entered the trigger lifecycle", async () => {
     // 触发负载（payloadHash/授权）在 prepare 时点由草稿快照定形：终态
     //（triggered）与在途（triggering）的稿行是"链上订单从何而来"的档案，

@@ -54,6 +54,8 @@ export interface StateMachinePlanProjection {
   readonly finalizedAt?: ProjectionProvenance;
   readonly selectorBindings: readonly StateMachineStageSelectorBindingProjection[];
   readonly signalCapabilities: readonly StateMachineSignalCapabilityProjection[];
+  /** 词表富集三态（见 PlanCapabilityEnrichmentStatus）：富集运行过才置值。 */
+  readonly capabilityEnrichment?: PlanCapabilityEnrichmentStatus;
   /**
    * Commit provenance until PlanRegistered arrives, finalize provenance after.
    * Consumers that need to distinguish the phases read committedAt/finalizedAt.
@@ -85,6 +87,16 @@ export interface StateMachineSignalCapabilityProjection {
   readonly registeredAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
 }
+
+/**
+ * 词表富集三态（"解析故障 ≠ 无词表"的快照载体）：快照只看两表为空无法
+ * 区分"外部发布 plan 的合法空词表"与"resolver 故障/产物断言不过导致的
+ * 未知词表"——后者按全零造证会把必拒的 InvalidSignalCapability 留到链上
+ * revert 才暴露（白烧代付 gas）。提交/触发车道对 failed 态按
+ * capability_tables_unavailable 拒绝；enriched/empty（及富集尚未运行的
+ * 缺省）维持既有全零降级口径。
+ */
+export type PlanCapabilityEnrichmentStatus = "enriched" | "empty" | "failed";
 
 export type MutableStateMachinePlanProjection = Writable<StateMachinePlanProjection>;
 
@@ -159,6 +171,7 @@ export function applyPlanFinalized(
     deployments: Map<string, MutableStateMachineDeploymentProjection>;
     plans: Map<string, MutableStateMachinePlanProjection>;
     capabilityTables?: ReadonlyMap<string, PlanCapabilityTablesInput>;
+    capabilityResolutionFailures?: ReadonlySet<string>;
     diagnostics?: ProjectionReplayDiagnostics;
   },
   event: ChainEvent
@@ -211,6 +224,7 @@ export function applyPlanRegistered(
     plans: Map<string, MutableStateMachinePlanProjection>;
     orders: Map<string, MutableStateMachineOrderProjection>;
     capabilityTables?: ReadonlyMap<string, PlanCapabilityTablesInput>;
+    capabilityResolutionFailures?: ReadonlySet<string>;
     diagnostics?: ProjectionReplayDiagnostics;
   },
   event: ChainEvent
@@ -320,14 +334,19 @@ export function findPlanForOrder(
  * 重算断言与链上 root 一致。
  *
  * fail-closed 口径：
- * - 找不到产物（外部发布 plan / 产物未入库）→ 两表留空。词表相关推导
- *   （任务提交信号、阶段进度镜像、patch 造证）对该 plan 不可用——这是
- *   相对"逐条注册事件"形态的已知取舍：逐条注册能重建任何 plan 的词表，
- *   但逐条注册的 gas/事件成本正是链上只存 root 所规避的对象。链上闸
- *   （词表内事实携证验证）不受影响，只是服务端预检/造证退化为全零结构。
- * - 产物表重算 root ≠ 链上 root（或产物 planHash 不匹配）→ 不填并计
- *   capabilityEnrichmentMismatchCount（索引器消费为告警日志），不 crash
- *   indexer——把不一致的词表填进投影会让下游造出链上必拒的证明。
+ * - 找不到产物（外部发布 plan / 产物未入库）→ 两表留空，富集态置
+ *   empty。词表相关推导（任务提交信号、阶段进度镜像、patch 造证）对该
+ *   plan 不可用——这是相对"逐条注册事件"形态的已知取舍：逐条注册能重建
+ *   任何 plan 的词表，但逐条注册的 gas/事件成本正是链上只存 root 所规避
+ *   的对象。链上闸（词表内事实携证验证）不受影响，只是服务端预检/造证
+ *   退化为全零结构。
+ * - 本轮 resolver 故障，或产物表重算 root ≠ 链上 root（或产物 planHash
+ *   不匹配）→ 两表留空、富集态置 failed（后者另计
+ *   capabilityEnrichmentMismatchCount，索引器消费为告警日志），不 crash
+ *   indexer。三态标记是"解析故障 ≠ 无词表"的快照载体：failed 态下词表
+ *   状态未知，提交/触发车道拒绝造证（capability_tables_unavailable），
+ *   不得混入 empty 的全零降级路径——把不一致/未知的词表当"确认无词表"
+ *   会让下游造出链上必拒的证明。
  *
  * 幂等：已富集的计划直接跳过（finalize 与 register 各跑一次）。
  */
@@ -336,6 +355,7 @@ function enrichPlanCapabilityTables(
   event: ChainEvent,
   state: {
     capabilityTables?: ReadonlyMap<string, PlanCapabilityTablesInput>;
+    capabilityResolutionFailures?: ReadonlySet<string>;
     diagnostics?: ProjectionReplayDiagnostics;
   },
   options: { readonly countMismatch: boolean }
@@ -345,6 +365,9 @@ function enrichPlanCapabilityTables(
   }
   const source = state.capabilityTables?.get(plan.planId.toLowerCase());
   if (!source) {
+    plan.capabilityEnrichment = state.capabilityResolutionFailures?.has(plan.planId.toLowerCase())
+      ? "failed"
+      : "empty";
     return;
   }
   const countMismatch = (): void => {
@@ -356,6 +379,7 @@ function enrichPlanCapabilityTables(
     // 产物锚定的 planHash 与链上 plan 不一致：同 planId 不同版本草稿，
     // 富集错表会造出对不上 root 的证明。
     countMismatch();
+    plan.capabilityEnrichment = "failed";
     return;
   }
   const capabilitiesRoot = capabilitiesRootOf(source.selectorBindings, source.signalCapabilities);
@@ -363,6 +387,7 @@ function enrichPlanCapabilityTables(
     // 链上 root 缺失（截断流建桶，未见 commit/finalize 的 root）或产物表
     // 与链上词表不一致（产物过期/被改写）——都无法证明两表就是链上词表。
     countMismatch();
+    plan.capabilityEnrichment = "failed";
     return;
   }
   plan.selectorBindings = source.selectorBindings.map((binding) => ({
@@ -381,6 +406,7 @@ function enrichPlanCapabilityTables(
       proof: proofOf(event, { planId: plan.planId })
     }))
     .sort(compareSignalCapabilities);
+  plan.capabilityEnrichment = "enriched";
 }
 
 function compareSignalCapabilities(
