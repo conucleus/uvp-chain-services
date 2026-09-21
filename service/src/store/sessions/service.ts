@@ -213,7 +213,8 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       const token = `${STORE_SESSION_TOKEN_PREFIX}${randomBytes(32).toString("hex")}`;
       const sessionId = `sess_${randomUUID()}`;
       // 锚定 CAS：并发双 verify（同地址不同挑战）的败者在此收敛——
-      // 已有 active 行时不得覆盖（返回既有归属，409 收口），不再依赖
+      // 已有 active 行时不得覆盖；claim 撞上胜者行的跨账号败者按
+      // store_address_already_anchored 409 出局，不依赖
       // findActiveAccountAddress 的先查后写窗口。
       const claimed = existing
         ? undefined
@@ -235,8 +236,9 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       const session: StoreWalletSessionRecord = {
         sessionId,
         tokenHash: sha256Hex(token),
-        // CAS 败者复用胜者已落库的账号归属（同地址只属一个账号），
-        // 不为同一地址分裂出第二个账号。
+        // 走到这里 claim 必属于本次 accountId（跨账号败者已在上方 409
+        // 出局，不存在"复用胜者归属"的分支）；跨账号的收敛靠败者 409
+        // 后重试——重试读到胜者已落库的 active 行，按其归属建会话。
         accountId: claimed?.accountId ?? accountId,
         anchoredAddress: address,
         createdAt: timestamp,
