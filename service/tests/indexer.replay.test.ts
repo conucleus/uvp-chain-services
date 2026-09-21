@@ -675,7 +675,7 @@ describe("indexer projection replay", () => {
   });
 
   it("routes module-emitted order events to the owning state-machine order instead of phantom module buckets", () => {
-    // P0 幻影订单：7 类订单维度事件由模块合约发出（event.contractAddress =
+    // 幻影订单：7 类订单维度事件由模块合约发出（event.contractAddress =
     // 模块地址）。归一化后必须落到所属状态机的订单桶，且不得在模块地址下
     // 产生 planId=0 的 unknown 幻影订单。
     const moduleId = bytes32Text("uvp.module.stage-patch.v1");
@@ -1169,6 +1169,104 @@ describe("indexer projection replay", () => {
       expect(persisted.stateMachinePlans[planKey]?.selectorBindings).toHaveLength(1);
       expect(persisted.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(1);
       expect(refreshed.snapshot.capabilityEnrichmentMismatchCount ?? 0).toBe(0);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-enriches the plan vocabulary from surviving events when a restarted indexer rolls back after a reorg", async () => {
+    // 回归：回滚路径的词表富集若只靠进程内缓存，重启后（缓存为空）回滚
+    // 事务会持久化无词表快照；随后 finalized 落后于回退游标时本轮不再
+    // 重放事件，无词表快照成为最终状态。锚点必须与主刷新同口径，从
+    // 回滚后仍将重放的事件集收集。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-enrichment-reorg-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const vocabulary = planVocabulary({
+        selectorBindings: [{ selectorStageId, targetStageId: stageId }],
+        signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+      });
+      const planEvents = planPublishEvents(vocabulary).map((event) => ({
+        ...event,
+        blockHash: blockHashHex(`stable-${event.blockNumber}`)
+      }));
+      const staleBlock3Event = {
+        ...chainEvent(3n, 0, "OrderRegistered", {
+          orderId: stateMachineOrderId,
+          planId
+        }),
+        blockHash: blockHashHex("block-3-stale")
+      };
+      let canonicalBlocks = new Map<bigint, Hex>([
+        [1n, blockHashHex("stable-1")],
+        [2n, blockHashHex("stable-2")],
+        [3n, blockHashHex("block-3-stale")]
+      ]);
+      let finalizedBlock = 3n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return [...planEvents, staleBlock3Event].filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        },
+        async getBlockHash(blockNumber) {
+          return canonicalBlocks.get(blockNumber) ?? zeroBlockHash();
+        }
+      };
+      let resolverCalls = 0;
+      const resolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> => {
+        resolverCalls += 1;
+        return anchorPlanId.toLowerCase() === planId.toLowerCase() && anchorPlanHash.toLowerCase() === planHash.toLowerCase()
+          ? vocabulary
+          : undefined;
+      };
+
+      const firstIndexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        resolvePlanCapabilityTables: resolver
+      });
+      const rebuilt = await firstIndexer.rebuildFromDeploymentBlockWithSummary();
+      const planKey = stateMachineScopedKey(31337, contractAddress, planId);
+      expect(rebuilt.snapshot.stateMachinePlans[planKey]?.selectorBindings).toHaveLength(1);
+
+      // 重启（富集缓存为空）+ reorg：block 3 被分叉替换，finalized 读数
+      // 回落到 2——回滚到 block 2 后本轮无新事件可读，回滚事务写出的快照
+      // 就是最终持久状态。
+      resolverCalls = 0;
+      canonicalBlocks = new Map<bigint, Hex>([
+        [1n, blockHashHex("stable-1")],
+        [2n, blockHashHex("stable-2")],
+        [3n, blockHashHex("block-3-fork")]
+      ]);
+      finalizedBlock = 2n;
+      const restartedIndexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        resolvePlanCapabilityTables: resolver
+      });
+      await restartedIndexer.refreshFromCursorWithSummary();
+
+      const persisted = await store.getOrderSnapshot();
+      expect(persisted.stateMachinePlans[planKey]?.selectorBindings).toHaveLength(1);
+      expect(persisted.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(1);
+      expect(persisted.capabilityEnrichmentMismatchCount ?? 0).toBe(0);
+      // 词表来自回滚路径对存活事件锚点的解析，不是首个实例的进程内缓存。
+      expect(resolverCalls).toBeGreaterThan(0);
+      await expect(store.listEvents({ chainId: 31337 })).resolves.toHaveLength(planEvents.length);
     } finally {
       await store.close();
       rmSync(tempDir, { recursive: true, force: true });

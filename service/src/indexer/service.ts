@@ -198,9 +198,9 @@ export class IndexerService implements LifecycleService {
   #consecutiveCursorCasFailures = 0;
   /**
    * 词表产物富集缓存（planId(lower) → 两表）。plan 词表在 finalize 后
-   * 链上不可变，缓存只增不改；增量轮的锚点收集覆盖被重放的全事件集
-   * （存量 + 本轮新读），重启后首轮即由此重建缓存——缓存只是解析去重，
-   * 不承担跨重启的富集源职责。
+   * 链上不可变，缓存只增不改；增量轮与 reorg 回滚的锚点收集都覆盖各自
+   * 重放的全事件集，重启后首个到达路径即由此重建缓存——缓存只是解析
+   * 去重，不承担跨重启的富集源职责。
    */
   #planCapabilityTablesCache = new Map<string, PlanCapabilityTablesInput>();
   readonly #config: ChainServicesConfig;
@@ -701,9 +701,11 @@ export class IndexerService implements LifecycleService {
     // 内存，重启后为空，锚点若只收本轮新读事件，重启后首轮无新 plan 事件
     // 的增量刷新会让全历史重放拿到空富集源——已富集 plan 的两表被清空并
     // 随快照持久化覆盖（mismatchCount=0，完全静默）。存量事件 + 本轮新
-    // 事件的并集覆盖重放集（崩溃窗口残留行的锚至多多余不会缺）；未缓存
-    // 锚才过 resolver（本地 store 查询，稳态轮零查询），未装配富集源的
-    // 部署不为锚点付全历史读。
+    // 事件的并集覆盖重放集（崩溃窗口残留行的锚至多多余不会缺）。稳态轮
+    // 并非零查询：装配富集源的部署每轮付一次全历史 listEvents；未缓存锚
+    // 才过 resolver（本地 store 查询），且 resolver 返回 undefined 的锚
+    // （如 store 域无产物的外部 plan）不进缓存、每轮重试。未装配富集源
+    // 的部署不为锚点付全历史读。
     const enrichmentEvents = this.#resolvePlanCapabilityTables
       ? [...(await durableStore.listEvents({ chainId: this.#scope.chainId })), ...events]
       : events;
@@ -1115,15 +1117,22 @@ export class IndexerService implements LifecycleService {
     ancestorHash: Hex
   ): Promise<bigint> {
     const deploymentBlock = this.#config.network.deploymentBlock;
+    // 词表富集与主刷新同口径：锚点从回滚后仍将重放的事件集收集，未缓存
+    // 锚过 resolver（事务外 IO）。富集缓存是纯进程内存，重启后为空——只
+    // 传缓存会让回滚事务持久化无词表快照，且若进程恰在下一轮富集刷新
+    // 提交前崩溃，该快照就是最终状态。单写者不变量下，事务外读到的存活
+    // 事件集覆盖事务内重放集（删除只减不增）。
+    const survivingEvents = (await durableStore.listEvents({ chainId: this.#scope.chainId }))
+      .filter((event) => event.blockNumber <= ancestorBlock);
+    const planCapabilityTables = await this.#planCapabilityTablesFor(survivingEvents);
     await durableStore.withTransaction(async () => {
       const deleted = await durableStore.deleteEventsAfterBlock(
         { chainId: this.#scope.chainId },
         ancestorBlock
       );
       const remainingEvents = await durableStore.listEvents({ chainId: this.#scope.chainId });
-      // 词表富集走缓存（回滚只删事件不添新 plan，锚集只减不增）。
       const snapshot = rebuildOrderProjections(remainingEvents, {
-        planCapabilityTables: [...this.#planCapabilityTablesCache.values()]
+        ...(planCapabilityTables ? { planCapabilityTables } : {})
       });
       const identitySnapshot = rebuildIdentityProjections(remainingEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);

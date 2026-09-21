@@ -323,6 +323,26 @@ describe("ViemChainEventSource", () => {
       .rejects.toThrow(/UVP_FINALITY_ANCHOR=confirmations/);
   });
 
+  it("fails closed when the finalized block carries no number instead of silently anchoring at 0", async () => {
+    // 无块号的 finalized 块属 RPC 层异常；静默按 0 会让索引器把链当作
+    // 未达部署高度，游标与最终性上界被无声压回 0。
+    const source = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 5_000n;
+        },
+        async getLogs() {
+          return [];
+        },
+        async getBlock() {
+          return { hash: "0xab", number: null };
+        }
+      }
+    });
+    await expect(source.getFinalizedBlock(chainServicesConfig()))
+      .rejects.toThrow(/carries no number/);
+  });
+
   it("skips an undecodable log with an explicit count instead of failing the index range", async () => {
     // 单条不可解码日志不得让索引器永久 degraded——跳过留痕
     // （计数 + warn），游标照常前进。

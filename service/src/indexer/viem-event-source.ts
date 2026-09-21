@@ -59,8 +59,9 @@ const orderLinkModuleAbi = parseAbi([
   "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 planId,bytes32 originPlanId,bytes32 originSourceId,bytes32 originSignalId)",
 ]);
 
-// UVPDockingModule v4.2（具名接口 dock v2）。终态不由链上事件驱动，
-// 事件面只有 open/input/output 三类。
+// UVPDockingModule v4.3（具名接口 dock v2）。终态不由链上事件驱动；
+// 事件面为 open/input/output/outputSatisfied 四类——DockOutputSatisfied
+// 记录兄弟 output 绑定等价交付下的满足（无新镜像写入）。
 const dockingModuleAbi = parseAbi([
   "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 interfaceNameId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
   "event DockInputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed inputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 payloadHash,address submitter)",
@@ -187,7 +188,13 @@ export class ViemChainEventSource implements ChainEventSource {
         "configured RPC client does not support getBlock; the finalized finality anchor requires it (set UVP_FINALITY_ANCHOR=confirmations for chains without finalized-tag support)"
       );
     }
-    return finalizedBlock.number ?? 0n;
+    if (finalizedBlock.number === null || finalizedBlock.number === undefined) {
+      // finalized 标签取块却拿到无块号属 RPC 层异常（块号仅 pending 块可
+      // 缺）；静默按 0 会让索引器把链当作未达部署高度，游标与最终性上界
+      // 被无声压回 0。
+      throw new ConfigError("finalized block returned by the RPC node carries no number");
+    }
+    return finalizedBlock.number;
   }
 
   /**
