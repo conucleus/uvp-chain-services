@@ -67,8 +67,8 @@ export class PostgresProductStagePatchStore<
 
   async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
     // deadline 列随行写入（putPrepared），清扫不解析 record_json——每行
-    // 数 KB 的 typedData 只在命中点查时读取。持久表此前只进不出，prepare
-    // 入口无配额会让表无界堆叠。
+    // 数 KB 的 typedData 只在命中点查时读取。持久表本身只进不出，
+    // prepare 入口无配额会让表无界堆叠，由过期清扫约束。
     const result = await this.#database.query(
       `DELETE FROM stage_patch_prepared
        WHERE deadline_seconds < $1::bigint`,

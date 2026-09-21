@@ -3,17 +3,16 @@ import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from
 import { redactErrorMessage } from "../../security/redaction.js";
 
 /**
- * 状态机广播装配套件（单源）：submissions 与 stage-patches 两份
- * broadcast-adapter 此前各自复制的骨架（chainFor / findErrorName /
- * errorText / normalizeGasPayer / requiredRpcUrl / loadRelayerPrivateKey /
- * failedResult 核心字段拼装）收敛于此。两处分叉行为已按更正确一侧统一：
+ * 状态机广播装配套件（单源）：submissions 与 stage-patches 共用的装配
+ * 骨架（chainFor / findErrorName / errorText / normalizeGasPayer /
+ * requiredRpcUrl / loadRelayerPrivateKey / failedResult 核心字段拼装）。
+ * 行为口径：
  * - findErrorName：errorName 优先，其次自有（own）且非默认的 name——
- *   不再被 Error 原型链上的 "Error" 短路（旧 relayer 形态），也不忽略
- *   显式赋名的自定义错误；
+ *   不被 Error 原型链上的 "Error" 短路，也不忽略显式赋名的自定义错误；
  * - errorText：保留普通对象分支（拼接字符串字段值），非 Error 对象的
- *   错误面不再被静默丢弃（旧 stage-patches 形态）。
+ *   错误面不被静默丢弃。
  * 结果 DTO 面（errorLabel/retryState/deadLetter/revertReason）为
- * submissions 面专属字段，由各 adapter 自行附加，不在本套件硬统一。
+ * submissions 面专属字段，由各 adapter 自行附加，不在本套件统一。
  */
 
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";

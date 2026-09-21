@@ -110,8 +110,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const storeDockingSessionStore = options.storeDockingSessionStore ?? new MemoryStoreDockingSessionStore();
   const storeAuditStore = options.storeAuditStore ?? new MemoryStoreAuditStore();
   const productSchemaResolver = options.productSchemaResolver ?? {
-    getProductSchemaByPlan: (planId: string, planHash: string, artifactHash?: string) =>
-      storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash, artifactHash)
+    getProductSchemaByPlan: (planId: string, planHash: string) =>
+      storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash)
   };
   const productService = createProductService(store, { productSchemaResolver });
   const storeConsoleService = createStoreConsoleService({
@@ -651,7 +651,7 @@ function resolveOrderPlanIdFromStore(
 }
 
 /**
- * plan 投影词表两表解析（词表 Merkle 化后的造证源）：按 planId 从投影
+ * plan 投影词表两表解析（词表 Merkle 化的造证源）：按 planId 从投影
  * 快照读 selectorBindings/signalCapabilities（applyPlanFinalized 时产物
  * 富集 + capabilitiesRoot 断言的成果）。plan 不在投影/两表为空（外部
  * 发布 plan）→ undefined，消费方按全零结构降级（链上词表闸兜底）。
@@ -676,7 +676,7 @@ function resolvePlanCapabilityTablesFromStore(
 
 /**
  * store 域服务级审计事件（join/listing/装修）接入 AuditSink：这些域的
- * 服务自带 outcome/errorCode/元数据丰富的审计回调，路由层此前未接线，
+ * 服务自带 outcome/errorCode/元数据丰富的审计回调，路由层不接线时
  * 决策与联动事件零留痕。事件体（含 planId/applicationId 等定位字段）
  * 作为 subject 整体入账。
  */

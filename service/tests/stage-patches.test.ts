@@ -64,7 +64,9 @@ const planHash =
 const linkedPlanId = bytes32Hex("102");
 const linkedPlanHash =
   "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" as Hex;
-const artifactHash =
+// 产物体内部身份（canonical 载荷哈希）——与链事件携带的 runtime 域
+// planHash 异值；schema 的链侧身份在 artifactHash 字段。
+const canonicalPlanHash =
   "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Hex;
 const orderId = bytes32Hex("202");
 const linkedOrderId = bytes32Hex("203");
@@ -146,7 +148,7 @@ describe("stage executor/resource patch Product API", () => {
 
   it("accepts reordered prepared envelopes when comparing canonical typed data", async () => {
     // 广播装配为 submitted：本测试关注提交前的 canonical typed data
-    // 比较，不再依赖已修复前的 not_attempted 200 假成功路径。
+    // 比较，不把 not_attempted 200 假成功路径当作断言对象。
     const broadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => ({
         status: "submitted",
@@ -1235,10 +1237,10 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   // ---- 执行者治理镜像（合约 UVPStagePatchModule._stageSignalState 同构）----
-  // 编译 plan 事实键（keccak 形态）：此前 fixture 把 utf8 stageId 同时当
-  // 事实 sourceId，只建模了 source==stageId 的回退形态——真实 plan 的
-  // 事实键是 (keccak256(source), keccak256(signalName))，治理规则漂移
-  // 没被拦住的根因正是夹具建模错误（审计 R1/R6-C）。
+  // 编译 plan 事实键（keccak 形态）：事实键是
+  // (keccak256(source), keccak256(signalName))，夹具不得把 utf8 stageId
+  // 兼任事实 sourceId——那只建模了 source==stageId 的回退形态，会让
+  // 治理规则漂移绕过夹具的拦截。
   const compiledTargetStageIdentifier = "target.stage";
   const compiledFactSource = "origin.stage";
   const compiledFactSignalName = "origin.handoff-proof";
@@ -1709,12 +1711,15 @@ async function routerFixture(
   });
   const productSchemaResolver = options.productSchema
     ? {
+        // 生产口径：入参 planHash 是链侧身份（runtime 域），join 锚
+        // schema.artifactHash——schema.planHash 是 canonical 载荷哈希，
+        // 两者异值时 canonical 不得命中。
         getProductSchemaByPlan: async (
           requestedPlanId: string,
           requestedPlanHash: string,
         ) =>
           requestedPlanId === options.productSchema!.planId &&
-          requestedPlanHash === options.productSchema!.planHash
+          requestedPlanHash === options.productSchema!.artifactHash
             ? options.productSchema
             : undefined,
       }
@@ -1966,8 +1971,8 @@ function productSchemaFixture(): StoreProductSchemaDTO {
     title: "Stage Patch Test",
     maintainer: "test",
     planId,
-    planHash,
-    artifactHash,
+    planHash: canonicalPlanHash,
+    artifactHash: planHash,
     roleSlots: [
       {
         slotId: selectorRoleSlotId,
@@ -2051,7 +2056,7 @@ function productSchemaFixture(): StoreProductSchemaDTO {
 }
 
 /**
- * 词表产物富集夹具（协议重构后两表的来源）：baseEvents/compiledPlanEvents
+ * 词表产物富集夹具（两表的来源）：baseEvents/compiledPlanEvents
  * 构造的两步发布事件携带 capabilitiesRoot，resetFromEvents 按 root 从本
  * 注册表取富集源（与生产路径同口径：applyPlanFinalized 断言后填表）。
  */
@@ -2425,8 +2430,8 @@ describe("stage patch durable store (sqlite)", () => {
       await second.releaseNonce("executor:31337:0xabc:1");
       await expect(second.reserveNonce("executor:31337:0xabc:1")).resolves.toBe(true);
 
-      // 持久表清扫（此前只进不出）：过期 prepare 按 deadline 列删除，
-      // 存活行不受影响——每行数 KB（含完整 typedData）的表不再无界堆叠。
+      // 持久表清扫：过期 prepare 按 deadline 列删除，
+      // 存活行不受影响——每行数 KB（含完整 typedData）的表不无界堆叠。
       await second.putPrepared({
         ...prepared,
         prepareId: "prep_restart_expired",

@@ -16,9 +16,9 @@ import type { ChainEventRange, ChainEventSource } from "./service.js";
 // UVPStateMachine v0.11（SM ABI fixture：uvp-state-machine.v0.11.json）：
 // 订单维度事件全部 plan-scoped；patch/metadata/derived/link/dock 事件由
 // 各模块合约发出，按 deployment.modules 分地址挂 ABI。
-// v0.11 词表 Merkle 化：PlanCommitted/PlanFinalized 的 metadataHash 字段
-// 改名 capabilitiesRoot（事件 topic 不变）；词表注册事件已删除——两表由
-// 重放方从编译产物富集（projections/plan.ts）。
+// 词表 Merkle 化形态：PlanCommitted/PlanFinalized 携带 capabilitiesRoot
+// 字段；链上不发布词表注册事件——两表由重放方从编译产物富集
+// （projections/plan.ts）。
 const stateMachineAbi = parseAbi([
   "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
   "event StateMachineModuleSet(bytes32 indexed moduleId,address indexed previousModule,address indexed newModule)",
@@ -33,8 +33,8 @@ const stateMachineAbi = parseAbi([
   "event SignalSubmitterAuthorized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,address submitter,bytes32 role,bytes32 metadataHash)",
   "event SignalSubmitted(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
   "event StageMaterialized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed stageId,bytes32 triggerHookId,bytes32 sourceId,bytes32 signalId)",
-  // v0.10：OrderTriggered 增加 triggerHookId——回放方不必反查 plan 即可
-  // 定位出生 hook（多 hook 阶段下 stageId 不足以定位求值语义）。
+  // OrderTriggered 携带 triggerHookId——回放方不必反查 plan 即可定位
+  // 出生 hook（多 hook 阶段下 stageId 不足以定位求值语义）。
   "event OrderTriggered(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed triggerStageId,bytes32 triggerHookId,bytes32 sourceId,bytes32 signalId,address submitter)",
   "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)",
   "event StageExecutorSignalDelegated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,bytes32 sourceId,bytes32 signalId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce)",
@@ -48,8 +48,8 @@ const stagePatchModuleAbi = parseAbi([
   "event StageResourcePatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,bytes32 planId,address selector,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI)"
 ]);
 
-// UVPPlanMetadataModule v0.6 词表 Merkle 化后不再发出任何事件（注册事件
-// 已删除，合约只保留 view 验证例程），索引器不再 watch 该地址。
+// UVPPlanMetadataModule v0.6 不发出任何事件（合约只保留 view 验证
+// 例程），索引器不 watch 该地址。
 
 const derivedSignalModuleAbi = parseAbi([
   "event DerivedSignalSubmitted(bytes32 indexed fromOrderId,bytes32 indexed targetOrderId,bytes32 indexed signalId,bytes32 fromPlanId,bytes32 targetPlanId,bytes32 fromStageId,bytes32 targetSourceId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",

@@ -1199,8 +1199,8 @@ async function findProjectedPlan(
  * 投影表空（外部发布 plan，产物富集不可用）或绑定叶不在表内 →
  * fail-closed 抛错：合约入口对 bindingProof 强制验证
  * （StageSelectorBindingNotFound），发不携证/携伪证的交易只会白烧 gas、
- * 白占 patch nonce。这与旧世界行为一致——旧世界该 plan 的绑定表同样
- * 不存在于链上（无法通过 findAllowedSelectorBinding 的授权预检）。
+ * 白占 patch nonce。外部发布 plan 的绑定表本就不在链上（也无法通过
+ * findAllowedSelectorBinding 的授权预检），两条路径同口径拒绝。
  */
 function stagePatchProofsFromPlan(
   plan: StateMachinePlanProjection | undefined,

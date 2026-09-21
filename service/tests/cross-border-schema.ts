@@ -8,7 +8,7 @@ import type { ProductSchemaResolver } from "../src/product/application/service.j
 
 /**
  * Test-side explicit Store schema for the frozen cross-border fixture plan.
- * The runtime no longer carries any built-in catalog fallback, so tests that
+ * The runtime carries no built-in catalog fallback, so tests that
  * exercise schema-backed behavior must register this schema themselves and
  * pass it via createApiRouter's productSchemaResolver option.
  */

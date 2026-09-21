@@ -6,6 +6,7 @@ import {
   displayIdentity,
   hashCanonical,
   parseZhixuDefinition,
+  toSolidityRegisterPlanArgs,
   type OnchainHookPlanArtifact,
   type OnchainSignalInstruction
 } from "@uvp-eth/compiler";
@@ -71,7 +72,6 @@ export interface StoreCompilePreviewDTO {
   readonly roleSlotCount: number;
   readonly sourceCount: number;
   readonly signalCount: number;
-  readonly canonicalArtifactHash: string;
 }
 
 export interface StoreZhixuDraftDTO {
@@ -113,18 +113,23 @@ export interface SubmitStoreZhixuReviewInput {
 export interface StoreZhixuDraftStore {
   createDraft(draft: StoreZhixuDraftRecord): Promise<void>;
   getDraft(draftId: string): Promise<StoreZhixuDraftRecord | undefined>;
+  /**
+   * planHash 入参是链侧身份（事件/链上 plan.planHash，runtime 域）——
+   * 与 schema.planHash（canonical 载荷哈希）数值永不相等，join 必须锚
+   * schema.artifactHash（产物注册哈希，runtime 域）。
+   */
   findProductSchemaByPlan(
     planId: string,
-    planHash: string,
-    artifactHash?: string
+    planHash: string
   ): Promise<StoreProductSchemaDTO | undefined>;
   updateDraft(draft: StoreZhixuDraftRecord): Promise<void>;
 }
 
 /**
- * 词表产物富集源（协议重构：链上只存 capabilitiesRoot，两表由重放方按
- * planId 从产物富集）：按 (planId, planHash) 走 findProductSchemaByPlan
- * （同版本激活的 join 口径——最新 product schema 的
+ * 词表产物富集源：链上只存 capabilitiesRoot，两表由重放方按 planId
+ * 从产物富集。按 (planId, 链侧 planHash=runtime 域) 走
+ * findProductSchemaByPlan（store 侧锚 schema.artifactHash，同版本激活的
+ * join 口径——最新 product schema 的
  * onchainHookPlanArtifact），经 capabilityTablesOf 换装为链上词序。
  * 无产物/形状不符 → undefined（该 plan 两表留空，fail-closed）。
  */
@@ -164,16 +169,14 @@ export class MemoryStoreZhixuDraftStore implements StoreZhixuDraftStore {
 
   async findProductSchemaByPlan(
     planId: string,
-    planHash: string,
-    artifactHash?: string
+    planHash: string
   ): Promise<StoreProductSchemaDTO | undefined> {
     return Array.from(this.#drafts.values())
       .map((draft) => draft.productSchema)
       .filter((schema): schema is StoreProductSchemaDTO => Boolean(schema))
       .filter((schema) =>
         hexOrTextEquals(schema.planId, planId) &&
-        hexOrTextEquals(schema.planHash, planHash) &&
-        (artifactHash === undefined || hexOrTextEquals(schema.artifactHash, artifactHash))
+        hexOrTextEquals(schema.artifactHash, planHash)
       )
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
   }
@@ -215,8 +218,7 @@ export interface StoreZhixuDraftWorkflowService {
   ): Promise<StoreProductSchemaValidationDTO>;
   getProductSchemaByPlan(
     planId: string,
-    planHash: string,
-    artifactHash?: string
+    planHash: string
   ): Promise<StoreProductSchemaDTO | undefined>;
   submitReview(
     draftId: string,
@@ -242,15 +244,15 @@ export function createStoreZhixuDraftWorkflowService(options: {
   return {
     async importDraft(input) {
       const request = parseImportRequest(input);
-      // manifest 导入的在役门：清单锚定的 (planId, planHash) 已注册在役时，
+      // manifest 导入的在役门：清单锚定的 (planId, 链侧 planHash) 已注册在役时，
       // 该 plan 的产品 schema 已随发布冻结——放行导入会在首编译生成一份
       // inferred schema，按 updatedAt 取新即可遮蔽在役 explicit schema
       //（findProductSchemaByPlan 以最新者为先）。内容无法解析时不在导入
       // 期拒绝，维持"编译期报告内容错误"的既有口径。
       if (request.sourceKind === "onchain_hook_plan_manifest") {
-        const manifest = tryCompileManifest(request.content);
-        if (manifest) {
-          await assertPlanAnchorNotInService(manifest.planId, manifest.planHash, options.projectionStore);
+        const serviceAnchor = tryCompileManifestServiceAnchor(request.content);
+        if (serviceAnchor) {
+          await assertPlanAnchorNotInService(serviceAnchor.planId, serviceAnchor.planHash, options.projectionStore);
         }
       }
       const timestamp = now().toISOString();
@@ -356,8 +358,8 @@ export function createStoreZhixuDraftWorkflowService(options: {
       return validateProductSchemaBundle(draft.productSchema, draft.compilePreview, timestamp);
     },
 
-    async getProductSchemaByPlan(planId, planHash, artifactHash) {
-      return draftStore.findProductSchemaByPlan(planId, planHash, artifactHash);
+    async getProductSchemaByPlan(planId, planHash) {
+      return draftStore.findProductSchemaByPlan(planId, planHash);
     },
 
     async submitReview(draftId, input, principal) {
@@ -435,8 +437,10 @@ function assertDraftCompiledForReview(
  * active schema 守卫：草稿状态机不落 "active"，
  * 不能以 `draft.status === "active"` 判定，否则已发布 plan 的 schema
  * 仍可原地改写。守卫用发布状态判定：compile
- * preview 的 (planId, planHash) 已出现在链投影（stateMachinePlans）即
- * 视为已发布，schema 必须走新版本草稿。
+ * preview 的 (planId, artifactHash) 已出现在链投影（stateMachinePlans）
+ * 即视为已发布，schema 必须走新版本草稿。链侧身份锚 artifactHash
+ * （runtime 域）——preview.planHash 是 canonical 载荷哈希，与链上
+ * plan.planHash 永不相等。
  */
 async function assertDraftSchemaMutable(
   draft: StoreZhixuDraftRecord,
@@ -460,6 +464,7 @@ async function assertDraftSchemaMutable(
 
 /**
  * 导入内容锚定的 plan 是否已注册在役（发布权威是 PlanRegistered）。
+ * planHash 入参是链侧身份（runtime 域）——投影 plan.planHash 同域。
  * 在役 plan 的产品 schema 随发布冻结，重导入只允许作为只读参照，
  * 不允许生成可按 plan 解析到的新 schema。
  */
@@ -484,10 +489,19 @@ async function assertPlanAnchorNotInService(
   }
 }
 
-/** 解析失败返回 undefined（导入期不承担内容校验，编译期报告内容错误）。 */
-function tryCompileManifest(raw: string): OnchainHookPlanArtifact | undefined {
+/**
+ * 解析失败返回 undefined（导入期不承担内容校验，编译期报告内容错误）。
+ * 在役门比对链侧身份：manifest 体的 planHash 是 canonical 载荷哈希，
+ * 与链上 plan.planHash（runtime 域）永不相等——锚必须取注册边界重算的
+ * runtime 哈希（与链 PlanRegistered 事件携带值同源）。
+ */
+function tryCompileManifestServiceAnchor(raw: string): { readonly planId: string; readonly planHash: string } | undefined {
   try {
-    return compileManifest(raw);
+    const artifact = compileManifest(raw);
+    return {
+      planId: artifact.planId,
+      planHash: toSolidityRegisterPlanArgs(artifact).planHash
+    };
   } catch {
     return undefined;
   }
@@ -579,7 +593,11 @@ function compileManifest(raw: string): OnchainHookPlanArtifact {
 }
 
 function previewFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreCompilePreviewDTO {
-  const canonicalArtifactHash = hashCanonical("uvp:store-onchain-hook-plan-artifact:v1", artifact);
+  // artifactHash 是 artifact 的链上身份（uvp.plan.runtime.v3 注册哈希）。
+  // 产物体只携带 canonical planHash，不携带运行时哈希——重算委托编译器
+  // 注册边界 toSolidityRegisterPlanArgs（与 commitPlan/finalizePlan 同一
+  // 冻结公式），本仓不维护第二份哈希实现。
+  const artifactHash = toSolidityRegisterPlanArgs(artifact).planHash;
   const stages = new Set<string>();
   const sources = new Set<string>();
   const signals = new Set<string>();
@@ -605,12 +623,11 @@ function previewFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreCom
   return {
     planId: artifact.planId,
     planHash: artifact.planHash,
-    artifactHash: canonicalArtifactHash,
+    artifactHash,
     stageCount: stages.size,
     roleSlotCount: artifact.executorRoutes.length,
     sourceCount: sources.size,
-    signalCount: signals.size,
-    canonicalArtifactHash
+    signalCount: signals.size
   };
 }
 
@@ -734,7 +751,7 @@ function createOrderTriggerFromOnchainArtifact(
   stages: readonly ZhixuStageDTO[],
   roleSlots: readonly RoleSlotDTO[]
 ): StoreProductSchemaDTO["createOrderTrigger"] {
-  // uvp-semantic/0.7 + dock v1：入口表退役。mint 出生阶段的订阅已可上链
+  // uvp-semantic/0.7 + dock v1 无入口表。mint 出生阶段的订阅可上链
   // （编译为 SIGNAL 指令、orderTriggerKind=mint，现实成立后经
   // triggerOrderFrom* 开放提交）；非 mint 阶段的订阅不上链。这里为 Store
   // 产品 schema 选择 createOrderTrigger：首条携带正依赖的 receive hook
@@ -1621,11 +1638,12 @@ async function hasPublishedPlan(
   }
   const snapshot = await projectionStore.getOrderSnapshot();
   // 发布权威是 PlanRegistered(finalize)：桶存在只代表 commitPlan，
-  // 仅 commit 的 plan 不能把草稿置 active/锁 schema。
+  // 仅 commit 的 plan 不能把草稿置 active/锁 schema。链侧比对锚
+  // runtime 域的 artifactHash。
   return Object.values(snapshot.stateMachinePlans).some(
     (plan) =>
       plan.planId === draft.compilePreview?.planId &&
-      plan.planHash === draft.compilePreview.planHash &&
+      plan.planHash === draft.compilePreview.artifactHash &&
       isPlanRegisteredProjection(plan)
   );
 }

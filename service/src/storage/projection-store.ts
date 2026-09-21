@@ -65,7 +65,7 @@ export interface ProjectionRebuildInput {
   readonly deploymentBlock: bigint;
   readonly events: readonly ChainEvent[];
   /**
-   * 词表产物富集源（planId → 编译产物两表）：词表注册事件已从链上删除，
+   * 词表产物富集源（planId → 编译产物两表）：链上不发布词表注册事件，
    * plan 投影的两表由重放方按产物富集并断言 capabilitiesRoot（见
    * indexer/projections/plan.ts）。缺省时所有 plan 两表为空（外部发布
    * plan 的既定口径）。

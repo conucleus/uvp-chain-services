@@ -73,8 +73,8 @@ export async function startApiServer(
   const submissionStore = stores.submissionStore;
   const governanceStore = stores.governanceStore;
   const productSchemaResolver = {
-    getProductSchemaByPlan: (planId: string, planHash: string, artifactHash?: string) =>
-      stores.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash, artifactHash)
+    getProductSchemaByPlan: (planId: string, planHash: string) =>
+      stores.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash)
   };
   // 通用 webhook transport。产品渠道决策仍未做，默认关闭——
   // 只在显式配置 UVP_NOTIFY_WEBHOOK_URL 时装配 dispatcher；未配置时保持

@@ -220,7 +220,7 @@ export function rebuildOrderProjections(
 /**
  * 重放选项。planCapabilityTables：planId 锚定的编译产物两表（词表富集源，
  * 见 projections/plan.ts 的 fail-closed 口径）；缺省时所有 plan 两表为空
- * ——与"事件面已删除注册事件"后的链上事实一致，只是词表相关推导不可用。
+ * ——与链上无注册事件面的事实一致，只是词表相关推导不可用。
  */
 export interface ProjectionReplayOptions {
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];

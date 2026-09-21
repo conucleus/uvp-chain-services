@@ -277,7 +277,6 @@ describe("Store Zhixu draft workflow", () => {
       planId: expect.stringMatching(/^0x[0-9a-f]{64}$/),
       planHash: expect.stringMatching(/^0x[0-9a-f]{64}$/),
       artifactHash: expect.stringMatching(/^0x[0-9a-f]{64}$/),
-      canonicalArtifactHash: first.compilePreview?.artifactHash,
       stageCount: 2,
       roleSlotCount: 2
     });
@@ -353,9 +352,11 @@ describe("Store Zhixu draft workflow", () => {
         validation: { ok: true, status: "explicit", issues: [] }
       }
     });
+    // 链侧身份是 runtime 域哈希（preview.artifactHash）——preview.planHash
+    // 是 canonical 载荷哈希，两者异值，join 以 artifactHash 命中。
     await expect(router.handle({
       method: "GET",
-      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.planHash)}`,
+      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.artifactHash)}`,
       headers: storeOperatorHeaders
     })).resolves.toMatchObject({
       status: 200,
@@ -366,11 +367,19 @@ describe("Store Zhixu draft workflow", () => {
         }
       }
     });
+    await expect(router.handle({
+      method: "GET",
+      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.planHash)}`,
+      headers: storeOperatorHeaders
+    })).resolves.toMatchObject({
+      status: 404,
+      body: { error: "store_product_schema_not_found" }
+    });
   });
 
   it("classifies a plugin whose source is missing as status missing via the shared message contract", async () => {
-    // 弱分类修复钉（审计 R6-A）：missing 族判定按 code 圈定 + 共享文案
-    // 常量精确匹配，不再 message.includes("missing")——plugin.source 缺失
+    // missing 族分类钉：missing 族判定按 code 圈定 + 共享文案
+    // 常量精确匹配，不做 message.includes("missing")——plugin.source 缺失
     // 是 missing 唯一的非 missing_* code 入口，措辞即分类契约。
     const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);

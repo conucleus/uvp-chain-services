@@ -123,7 +123,7 @@ export async function resolveParticipantWalletIdentity(
 
 /**
  * evidence 身份取值——治理白名单口径的 admin（governance/
- * auth.ts 已收口：非 local 空白名单 fail-closed）或钱包会话锚定地址；
+ * auth.ts 收口：非 local 空白名单 fail-closed）或钱包会话锚定地址；
  * 非 local 无会话即拒绝（service 的 requireAuthenticated 抛 401）。
  */
 export async function resolveEvidencePrincipal(

@@ -145,14 +145,15 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const review = await resolveReview(store, record, "supplier", subjectId);
       if (!review) {
         // never fabricate an on-chain review hash from request-body
-        // fields. The removed fallback hashed the caller's own fields with a
-        // default "approved_for_broadcast" status, which put a descriptorHash
-        // on chain whose review material did not exist anywhere in the store.
-        // Identity registration therefore requires an existing review record
-        // (created via review-zhixu / review-supplier / store supplier
-        // review) — the same bar as assertReviewAllowsIdentityRegistration,
-        // except there is nothing to assert when no review exists, so the
-        // request is refused instead of being broadcast with a forged
+        // fields: hashing the caller's own fields with a default
+        // "approved_for_broadcast" status would put a descriptorHash
+        // on chain whose review material does not exist anywhere in the
+        // store. Identity registration therefore requires an existing
+        // review record (created via review-zhixu / review-supplier /
+        // store supplier review) — the same bar as
+        // assertReviewAllowsIdentityRegistration, except there is
+        // nothing to assert when no review exists, so the request is
+        // refused instead of being broadcast with a forged
         // "approved" hash.
         throw new GovernanceServiceError(
           409,

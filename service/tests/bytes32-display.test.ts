@@ -10,12 +10,9 @@ import {
 } from "../src/shared/display.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
-// bytes32 展示解码单源（shared/display.ts，审计 §1.1 "bytes32 展示解码
-// ×2" / §3 P1-4）的钉子：并集语义 = 可打印 ASCII 或 Unicode
-// Letter/Number/Punctuation/Separator → 显示文本，否则短哈希回落。
-// 旧阶段视图仅收可打印 ASCII（中文回落短哈希）、旧活动流仅收 Unicode
-// 字符类（"$=|~" 类 ASCII 符号回落）——本文件钉住统一后同一标识在
-// 两个视图同一显示。
+// bytes32 展示解码单源（shared/display.ts）的钉子：并集语义 = 可打印
+// ASCII 或 Unicode Letter/Number/Punctuation/Separator → 显示文本，
+// 否则短哈希回落——同一标识在阶段视图与活动流两个视图同一显示。
 const contractAddress = "0x1111111111111111111111111111111111111111" as Address;
 const participantWallet = "0x4444444444444444444444444444444444444444" as Address;
 const planId = "0x0000000000000000000000000000000000000000000000000000000000000aaa" as Hex;
@@ -26,22 +23,21 @@ const metadataHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 const zeroBytes32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
 
 describe("bytes32 展示解码单源（shared/display）", () => {
-  it("中文标识按 Unicode 字符集显示文本——旧阶段视图回落短哈希的分歧已修", () => {
+  it("中文标识按 Unicode 字符集显示文本", () => {
     expect(decodeBytes32Text(bytes32Text("预交付"))).toBe("预交付");
     expect(displayBytes32(bytes32Text("预交付"), "阶段")).toBe("预交付");
     expect(displayBytes32(bytes32Text("预交付"))).toBe("预交付");
   });
 
-  it("可打印 ASCII 标识显示文本（阶段视图既有行为不回归）", () => {
+  it("可打印 ASCII 标识显示文本", () => {
     expect(decodeBytes32Text(bytes32Text("export.customs"))).toBe("export.customs");
     expect(displayBytes32(bytes32Text("customs-review"), "阶段")).toBe("customs-review");
     expect(displayBytes32(bytes32Text("export.customs"))).toBe("export.customs");
   });
 
-  it("ASCII 符号类（$=^|~）按并集语义显示——旧活动流拒收侧不再回落", () => {
+  it("ASCII 符号类（$=^|~）按并集语义显示文本", () => {
     // "$ + = < > ^ ` | ~" 是 ASCII 可打印符号，但不在 Unicode
-    // Letter/Number/Punctuation/Separator 内：两份旧实现一边接受一边
-    // 拒绝，并集后必须统一显示文本。
+    // Letter/Number/Punctuation/Separator 内：按并集语义统一显示文本。
     expect(displayBytes32(bytes32Text("v2=beta$ok"), "阶段")).toBe("v2=beta$ok");
     expect(displayBytes32(bytes32Text("v2=beta$ok"))).toBe("v2=beta$ok");
   });
@@ -61,7 +57,7 @@ describe("bytes32 展示解码单源（shared/display）", () => {
     expect(displayBytes32(zeroBytes32)).toBe(shortBytes32(zeroBytes32));
   });
 
-  it("非 bytes32 输入原样透传，空值回落 fallback（通知流既有行为不回归）", () => {
+  it("非 bytes32 输入原样透传，空值回落 fallback", () => {
     expect(displayBytes32("export.customs", "阶段")).toBe("export.customs");
     expect(displayBytes32("已解码的普通标识", "阶段")).toBe("已解码的普通标识");
     expect(displayBytes32(undefined, "阶段")).toBe("阶段");

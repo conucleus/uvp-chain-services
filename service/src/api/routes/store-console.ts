@@ -226,10 +226,11 @@ export function createStoreConsoleRouteModule(options: {
         if (!isStoreAuthorizationResult(authorization)) {
           return authorization;
         }
+        // 路径 planHash 是链侧身份（runtime 域）；store 侧按
+        // schema.artifactHash join（见 findProductSchemaByPlan）。
         const productSchema = await context.storeZhixuDraftWorkflowService.getProductSchemaByPlan(
           decodePathParameter(productSchemaMatch[1] ?? ""),
-          decodePathParameter(productSchemaMatch[2] ?? ""),
-          request.query?.artifactHash
+          decodePathParameter(productSchemaMatch[2] ?? "")
         );
         if (!productSchema) {
           return {
@@ -436,7 +437,7 @@ async function handleStoreZhixuVersionRequest(
     if (request.method === "GET" && listMatch) {
       const seriesId = decodePathParameter(listMatch[1] ?? "");
       // 版本清单是运营台数据（版本状态、plan 锚、订单计数），与运行时
-      // 观察面同门（store.audit.read）——此前漏挂能力门，匿名可枚举。
+      // 观察面同门（store.audit.read）——不挂能力门即匿名可枚举。
       const capability: StoreCapability = "store.audit.read";
       const resource = { type: "store_zhixu_version", parentId: seriesId };
       const authorization = await authorizeStoreCapability(context, request, capability, resource);

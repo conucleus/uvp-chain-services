@@ -3,7 +3,7 @@
 -- lock out an arbitrary victim address by filling its quota. requester_key
 -- records the issuing requester (peer address; empty string when the transport
 -- does not expose one) so the quota can also bound each requester across all
--- addresses. System not launched: no legacy rows to backfill beyond the
+-- addresses. System not launched: no existing rows to backfill beyond the
 -- shared empty-string bucket.
 ALTER TABLE store_auth_challenge ADD COLUMN requester_key TEXT NOT NULL DEFAULT '';
 

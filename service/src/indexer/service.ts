@@ -110,7 +110,7 @@ export interface IndexerServiceOptions {
   readonly notificationProcessor?: ChainEventNotificationProcessor;
   readonly projectionAutomationProcessor?: ProjectionAutomationProcessor;
   /**
-   * 词表产物富集源（协议重构：链上不再逐条发词表注册事件）：按
+   * 词表产物富集源（链上不逐条发词表注册事件）：按
    * (planId, planHash) 从 store 域（zhixu 草稿的 onchainHookPlanArtifact）
    * 解析编译产物两表，重放时填进 plan 投影并断言 capabilitiesRoot。
    * 缺省时不富集——所有 plan 两表为空，词表相关推导退化为不可用
@@ -150,7 +150,7 @@ export class PendingPostCommitFinalityWaitError extends Error {
 }
 
 /**
- * 幽灵批次判废（M45）：pending 通知载荷指向的事件已不在投影事件表里
+ * 幽灵批次判废：pending 通知载荷指向的事件已不在投影事件表里
  * （重建整库替换 / reorg 回滚后的脏存量）。批次已无可补投的链上事实，
  * 必须判废出队——既不投递（把幽灵当链上事实投出去），也不消耗重试
  * 预算（永远无法靠重试恢复）。
@@ -580,7 +580,7 @@ export class IndexerService implements LifecycleService {
   }
 
   /**
-   * 全量重建的 pending 通知清理（M45）：resetFromEvents 整库替换事件表
+   * 全量重建的 pending 通知清理：resetFromEvents 整库替换事件表
    * 后，载荷引用已不存在事件的步骤会在后续 sweep 里补投成幽灵通知。
    * 判废条件是"事件缺失且块号在本轮重建覆盖区间内"——事件全部命中的
    * 步骤保留（含本次重建预落的步骤，其载荷就是本批事件）；块号越过
@@ -1599,7 +1599,7 @@ export class IndexerService implements LifecycleService {
           );
         }
       }
-      // 事件存在性检查（M45）：批次已达最终性上界，事件却不在投影事件表
+      // 事件存在性检查：批次已达最终性上界，事件却不在投影事件表
       // 里——这是重建替换/reorg 回滚后的脏存量，链上事实已不存在，补投
       // 只会把幽灵通知投出去。判废（哨兵错误，见 sweep 的分诊分支），
       // 不消耗重试预算。
@@ -1681,7 +1681,7 @@ async function main(): Promise<void> {
       throw new Error("no configured indexer contracts; set UVP_CONTRACTS_JSON or an address manifest");
     }
     // 全套 store（而非单 projection store）：词表产物富集源需要 zhixu
-    // 草稿域的 onchainHookPlanArtifact（链上注册事件已删除，两表从产物
+    // 草稿域的 onchainHookPlanArtifact（链上不发布注册事件，两表从产物
     // 富集——缺产物时该 plan 两表为空，fail-closed）。
     const stores = createChainServicesStores({
       database: config.database,

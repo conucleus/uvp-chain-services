@@ -1033,13 +1033,19 @@ describe("durable storage", () => {
         validation: { ok: true },
       },
     });
+    // findProductSchemaByPlan 的 planHash 是链侧身份（runtime 域）——
+    // 夹具 planHash（canonical）与 artifactHash（runtime）异值，只有
+    // artifactHash 能命中，canonical 值必须 miss。
     await expect(
-      reopened.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash),
+      reopened.storeZhixuDraftStore.findProductSchemaByPlan(planId, artifactHash),
     ).resolves.toMatchObject({
       planId,
       planHash,
       schemaHash: "0xstoreproductschema",
     });
+    await expect(
+      reopened.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash),
+    ).resolves.toBeUndefined();
     await expect(
       reopened.storeZhixuVersionMetadataStore.listVersions(draft.zhixuId!),
     ).resolves.toMatchObject([
@@ -1871,13 +1877,14 @@ describePostgres(
           },
         },
       });
+      // 链侧身份（artifactHash，runtime 域）命中；canonical planHash 在
+      // 异值夹具下不得命中。
       await expect(
         reopenedRouter.handle({
           method: "GET",
-          pathname: `/store/product-schemas/${encodeURIComponent(savedSchema.planId)}/${encodeURIComponent(savedSchema.planHash)}`,
+          pathname: `/store/product-schemas/${encodeURIComponent(savedSchema.planId)}/${encodeURIComponent(savedSchema.artifactHash)}`,
           // plan 级完整 schema 同为发布者创作资产，匿名不可读（operator 级）。
           headers: adminHeaders,
-          query: { artifactHash: savedSchema.artifactHash },
         }),
       ).resolves.toMatchObject({
         status: 200,
@@ -2477,7 +2484,6 @@ function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
       roleSlotCount: 2,
       sourceCount: 1,
       signalCount: 2,
-      canonicalArtifactHash: artifactHash,
     },
     productSchema: {
       schemaVersion: "store-product-schema.v1",

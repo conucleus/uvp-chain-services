@@ -56,7 +56,7 @@ export interface DockRouteRecord {
    * interfaceProof/bindings/permit 全部 word 由 route 来源按编译产物组装；
    * entrance permit 必须已含 publisher 签名）。keeper 不组装、不补签。
    *
-   * 词表 Merkle 化后该 calldata 还须携带词表面参数（openDockedOrder 的
+   * 词表 Merkle 化形态下该 calldata 还须携带词表面参数（openDockedOrder 的
    * outputAttributions——((sourceId,signalId,stageId,proof)[]，出生/出
    * 端事实的能力叶 proof）），同样由 route 来源随产物一并预组装；本域
    * no-op 未接线，keeper 不实现造证（造证单源在

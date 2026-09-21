@@ -183,9 +183,9 @@ describe("identity governance API", () => {
       governanceService: createGovernanceService({ adapter }),
     });
 
-    // No review exists for the subject: the request must be refused. The
-    // removed fallback would have hashed the request body itself into an
-    // "approved_for_broadcast" review hash and broadcast that on chain.
+    // No review exists for the subject: the request must be refused—
+    // hashing the request body itself into an "approved_for_broadcast"
+    // review hash would broadcast a review that does not exist on chain.
     const unreviewed = await router.handle({
       method: "POST",
       pathname: "/admin/governance/register-identity",

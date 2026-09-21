@@ -31,7 +31,10 @@ submissions — stage patches (`applyStageExecutorPatchFor` /
 (`triggerOrderFromOutsideFor`), dock keeper liveness submissions
 (`submitDockedInput` / `submitDockedSignal`), and governance identity
 registration/revocation (`registerIdentityBinding` /
-`revokeIdentityBinding`, see `service/README.md`). Delivery status of the dock
+`revokeIdentityBinding`, see `service/README.md`); signal, patch, and
+trigger submissions all carry capability proofs minted on the spot by the
+capability-proofs single source (`@uvp-eth/compiler`) inside the transaction.
+Delivery status of the dock
 keeper surface: `submitDockedInput` / `submitDockedSignal` are permissionless
 contract surfaces, and their service-side automation is not assembled in the
 current delivery — the `DockAutomationWorker` in the API server runs as an

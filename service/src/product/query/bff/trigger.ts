@@ -22,10 +22,10 @@ import type { ProductOrderTriggerStatus, SignalAuthorizationDTO } from "./types.
 export const DEFAULT_PRODUCT_REGISTRAR_ADDRESS = "0x000000000000000000000000000000000000bff1" as const;
 
 /**
- * SignalSubmitted 的 topic 从权威 ABI 推导（此前是冻结 fixture 体系外
- * 唯一手写的事件签名串——ABI 重命名即静默失配，回执探针漏判）。
- * UVPStateMachine v0.10：planId/orderId/sourceId indexed；signalId 是
- * data 载荷首参（非第四个 topic）。
+ * SignalSubmitted 的 topic 从权威 ABI 推导（手写事件签名串在 ABI 重命名
+ * 时会静默失配，导致回执探针漏判）。
+ * planId/orderId/sourceId indexed；signalId 是 data 载荷首参（非第四个
+ * topic）。
  */
 const signalSubmittedTopic = eventTopicFromAbi("SignalSubmitted");
 
@@ -72,7 +72,7 @@ export interface ProductBroadcastOutsideTriggerInput {
   readonly deploymentId?: Hex;
   readonly authorizations: readonly SignalAuthorizationDTO[];
   /**
-   * 出生事实的属主自证（词表 Merkle 化后的必携参数）：从 plan 投影词表
+   * 出生事实的属主自证（词表 Merkle 化形态的必携参数）：从 plan 投影词表
    * 造（relation=0 能力叶 proof）；无词表/词表外 → 全零结构——出生事实
    * 必须有词表内属主证，否则链上 InvalidSignalCapability（链上是最终
    * 守门人，服务端造不出证明时不伪造）。

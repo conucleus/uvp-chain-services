@@ -1324,11 +1324,11 @@ function displayParticipantRole(role: string): string {
   }
 }
 
-// bytes32 展示单源在 shared/display.ts（审计 §1.1 "bytes32 展示解码 ×2"）：
+// bytes32 展示单源在 shared/display.ts：
 // 中文等 Unicode 标识与 "$=|~" 类 ASCII 符号标识按并集语义显示文本；
-// 非 bytes32 原样透传、不可解码回落短哈希，与通知流既有行为一致。
+// 非 bytes32 原样透传、不可解码回落短哈希。
 // stageId 技术字段用无标签形态（解码文本或裸短哈希），stageLabel/
-// message 用标签形态（"当前阶段 0x…"）——统一后与阶段视图同标识同显示。
+// message 用标签形态（"当前阶段 0x…"）——与阶段视图同标识同显示。
 
 function shortId(value: string): string {
   return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;

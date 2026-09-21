@@ -359,7 +359,7 @@ export interface StageExecutorPatchBroadcastRequest {
   readonly recoveredSelector: Address;
   readonly recoveredPreviousExecutor?: Address;
   /**
-   * selector→target 绑定叶 proof（词表 Merkle 化后的必携参数，合约
+   * selector→target 绑定叶 proof（词表 Merkle 化形态的必携参数，合约
    * StageSelectorBindingNotFound fail-closed）。submit 时从 plan 投影
    * bindings 表构造；投影表空的外部 plan 无法造证，submit 直接拒绝。
    */

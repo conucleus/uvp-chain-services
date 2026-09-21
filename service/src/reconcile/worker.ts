@@ -473,7 +473,7 @@ export class TxReconcileWorker implements LifecycleService {
   }
 
   /**
-   * stage-patch 台账对账：执行者/资源补丁广播后的行此前没有收敛车道，
+   * stage-patch 台账对账：执行者/资源补丁广播后的行没有收敛车道时，
    * receipt_unknown（failed+txHash、retryable）与 submitted 行永滞在途。
    * 口径与 registration/submission 车道同源：投影 overlay 按 patchHash
    * （补丁内容身份）确认——overlay 呈现即补丁已上链生效；无投影再探

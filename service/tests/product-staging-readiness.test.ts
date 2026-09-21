@@ -442,7 +442,7 @@ function stagingManifestPath(tempDirs: string[]): string {
 
 /**
  * 词表产物富集夹具：两步发布事件（PlanCommitted/PlanFinalized 携带
- * capabilitiesRoot）+ 配对富集源——词表注册事件已从链上删除，任务的
+ * capabilitiesRoot）+ 配对富集源——链上不发布词表注册事件，任务的
  * submittable 判定依赖富集后的 submitSignals。
  */
 function readinessVocabulary(): PlanCapabilityTablesInput & { readonly capabilitiesRoot: Hex } {

@@ -66,7 +66,7 @@ export interface PreparedSubmissionDTO {
   readonly humanSummary: ProductSubmitHumanSummaryDTO;
   readonly typedData: ProductSubmitTypedData;
   /**
-   * 事实属主自证（词表 Merkle 化后的 submitSignalFor 参数）：prepare 时从
+   * 事实属主自证（词表 Merkle 化形态的 submitSignalFor 参数）：prepare 时从
    * plan 投影两表构造（词表内 relation=0 能力叶 proof；全零 = 词表外/
    * 投影表空的外部 plan，不声明属主）。缺省视为全零——广播适配器兜底。
    */

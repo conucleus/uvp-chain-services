@@ -97,7 +97,7 @@ describe("indexer projection replay", () => {
 
   it("replays order-level signal submitter authorizations and assigns matching HookReady tasks", async () => {
     // 授权 (sourceId=stageId, signalId=hookName) 通过词表事实键挂到任务：
-    // 词表 Merkle 化后两表经产物富集进入 plan 投影。
+    // 词表两表经产物富集进入 plan 投影。
     const vocabulary = planVocabulary({
       signalCapabilities: [{ stageId, targetSourceId: stageId, signalId: hookName, targetOrderRelation: 0 }]
     });
@@ -809,10 +809,9 @@ describe("indexer projection replay", () => {
   });
 
   it("enriches the same planId on every deployment from the artifact vocabulary (content-scoped, not address-scoped)", () => {
-    // 词表 Merkle 化后两表按 planId 从编译产物富集：planId 由 planHash 派生
+    // 词表两表按 planId 从编译产物富集：planId 由 planHash 派生
     // （同 planId = 同 plan 内容），跨部署复用同 planId 时每个部署的 plan 桶
-    // 都富集到同一份词表——旧事件面按 emitting 地址区分的维度随注册事件
-    // 一并消失。
+    // 都富集到同一份词表——词表维度按 plan 内容（而非 emitting 地址）区分。
     const vocabulary = planVocabulary({
       signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
     });
@@ -1510,7 +1509,7 @@ describe("indexer projection replay", () => {
 
     const degradedStore = new MemoryProjectionStore();
     // 投影 apply 失败（未知 plan 引用）同样计入并进入 degraded。
-    // 词表注册事件已删除；PlanPublisherRecorded 是仍要求 plan 桶存在的
+    // 链上无词表注册事件；PlanPublisherRecorded 是仍要求 plan 桶存在的
     // 计划族事件，裸投递时撞"unknown plan"。
     const corruptSource: ChainEventSource = {
       async getFinalizedBlock() {
@@ -2067,8 +2066,8 @@ describe("indexer projection replay", () => {
         .resolves.toMatchObject({ nextBlock: 2501n, blockHash: blockHashHex("orig-2500") });
 
       // 浅 reorg：tip 块 2600 换哈希。fromBlock=2601 > 1000 窗口，已存事件
-      //（块 1-3）全部在窗口下界之下——旧逻辑在此误判"reorg 深于窗口"要求
-      // 人工 full rebuild；新逻辑回退到全库最新锚点（块 3）核对一致后继续。
+      //（块 1-3）全部在窗口下界之下——不能据此判定"reorg 深于窗口"要求
+      // 人工 full rebuild，须回退到全库最新锚点（块 3）核对一致后继续。
       canonicalBlocks = new Map<bigint, Hex>([
         ...canonicalBlocks,
         [2600n, blockHashHex("fork-2600")]
@@ -2268,8 +2267,8 @@ describe("indexer projection replay", () => {
   });
 
   it("drops pending notification batches whose events vanish from the rebuilt event log on a full rebuild", async () => {
-    // M45 回归：resetFromEvents 整库替换事件表后，载荷引用已不存在事件
-    // 的 pending 通知步骤是脏存量——重建必须清理，否则 sweep 会把幽灵
+    // resetFromEvents 整库替换事件表后，载荷引用已不存在事件的
+    // pending 通知步骤是脏存量——重建必须清理，否则 sweep 会把幽灵
     // 通知投出去。事件仍在本批重建事件集里的步骤保留（含重建预落步骤）。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-rebuild-ghost-"));
     const store = new SqliteProjectionStore({
@@ -2348,7 +2347,7 @@ describe("indexer projection replay", () => {
   });
 
   it("dead-letters ghost notification batches at sweep time instead of delivering them", async () => {
-    // M45 回归：补投前检查事件存在性——批次已达最终性上界、载荷事件却
+    // 补投前检查事件存在性——批次已达最终性上界、载荷事件却
     // 不在投影事件表里（任何路径残留的脏存量）时判废出队，不投递、
     // 不消耗重试预算。
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-sweep-ghost-"));
@@ -2482,7 +2481,7 @@ describe("indexer projection replay", () => {
   });
 
   it("reports projectionRebuilt=false when the chain has not reached the deployment block", async () => {
-    // M45 回归：链未达部署块时重建早退——没有重放任何事件，
+    // 链未达部署块时重建早退——没有重放任何事件，
     // projectionRebuilt=true 是 fail-open（掩盖未完成态）。
     const store = new MemoryProjectionStore();
     const eventSource: ChainEventSource = {
@@ -3041,7 +3040,7 @@ function planVocabulary(input: {
 /**
  * 两步发布真实链序（v0.11）：commitPlan 交易 PlanCommitted →
  * PlanPublisherRecorded；finalizePlan 交易 PlanFinalized → PlanRegistered
- * （词表 Merkle 化后 finalize 交易内无 plan metadata 模块事件）。
+ * （finalize 交易内无 plan metadata 模块事件）。
  */
 function planPublishEvents(
   vocabulary: VocabularyFixture,

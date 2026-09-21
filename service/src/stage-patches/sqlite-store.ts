@@ -107,7 +107,7 @@ export class SqliteProductStagePatchStore<
 
   async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
     // deadline 列随行写入（putPrepared），清扫不解析 record_json；持久表
-    // 此前只进不出，prepare 入口无配额会让表无界堆叠。
+    // 本身只进不出，prepare 入口无配额会让表无界堆叠，由过期清扫约束。
     return runSqliteWrite(() =>
       this.#database
         .prepare(

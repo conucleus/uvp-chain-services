@@ -1,5 +1,5 @@
-// 能力表/绑定表 Merkle 造证单源（协议重构：链上只存 capabilitiesRoot，
-// 词表成员资格由提交方按"字段重算叶 + 携 proof"自证）。
+// 能力表/绑定表 Merkle 造证单源：链上只存 capabilitiesRoot，
+// 词表成员资格由提交方按"字段重算叶 + 携 proof"自证。
 //
 // 消费方：submissions（submitSignalFor 的 attribution/selectorBinding）、
 // stage-patches（applyStage*PatchFor 的 bindingProof/stageFacts）、

@@ -85,7 +85,7 @@ describe("product API routes", () => {
       .resolves.toMatchObject({ status: 404, body: { error: "zhixu_not_found" } });
   });
 
-  it("rebuilds the zhixu catalog from indexed plan projections and ignores the removed demo fallback", async () => {
+  it("rebuilds the zhixu catalog from indexed plan projections and ignores the fallback=demo query", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
       deploymentBlock: 0n,
@@ -1384,20 +1384,18 @@ describe("product API routes", () => {
 
   it("selects task plugins from explicit slot capability metadata for generic authorized roles", async () => {
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        ...stateMachineProductEvents(),
-        chainEvent(8n, "SignalSubmitterAuthorized", {
-          orderId: stateMachineOrderId,
-          sourceId: stageId,
-          signalId: hookName,
-          submitter,
-          role: bytes32Text("generic-executor"),
-          metadataHash
-        })
-      ]
-    });
+    const events = [
+      ...stateMachineProductEvents(),
+      chainEvent(8n, "SignalSubmitterAuthorized", {
+        orderId: stateMachineOrderId,
+        sourceId: stageId,
+        signalId: hookName,
+        submitter,
+        role: bytes32Text("generic-executor"),
+        metadataHash
+      })
+    ];
+    await store.resetFromEvents({ deploymentBlock: 0n, events, planCapabilityTables: planCapabilityTablesForEvents(events) });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
     const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth }).handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: assigneeHeaders });
@@ -1465,23 +1463,21 @@ describe("product API routes", () => {
     const unknownOfficialPlanId = bytes32Hex("0c01");
     const unknownOfficialPlanHash = bytes32Hex("0d01");
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        ...stateMachineProductEvents({
-          planId: unknownOfficialPlanId,
-          planHash: unknownOfficialPlanHash
-        }),
-        chainEvent(8n, "SignalSubmitterAuthorized", {
-          orderId: stateMachineOrderId,
-          sourceId: stageId,
-          signalId: hookName,
-          submitter,
-          role: bytes32Text("customs-broker"),
-          metadataHash
-        })
-      ]
-    });
+    const events = [
+      ...stateMachineProductEvents({
+        planId: unknownOfficialPlanId,
+        planHash: unknownOfficialPlanHash
+      }),
+      chainEvent(8n, "SignalSubmitterAuthorized", {
+        orderId: stateMachineOrderId,
+        sourceId: stageId,
+        signalId: hookName,
+        submitter,
+        role: bytes32Text("customs-broker"),
+        metadataHash
+      })
+    ];
+    await store.resetFromEvents({ deploymentBlock: 0n, events, planCapabilityTables: planCapabilityTablesForEvents(events) });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
     const taskResponse = await createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth }).handle({ method: "GET", pathname: `/product/tasks/${taskId}`, headers: assigneeHeaders });
@@ -1506,7 +1502,10 @@ describe("product API routes", () => {
 
   it("uses durable Store Product Schema Bundle metadata for non-demo plan tasks", async () => {
     const storePlanId = bytes32Hex("0e01");
+    // 链侧身份（runtime 域，事件携带值）与产物 canonical 载荷哈希异值：
+    // schema 以 artifactHash 承载链侧身份，join 不得落在 planHash。
     const storePlanHash = bytes32Hex("0e02");
+    const storeCanonicalPlanHash = bytes32Hex("0e04");
     const storeDraftStore = new MemoryStoreZhixuDraftStore();
     const productSchema: StoreProductSchemaDTO = {
       schemaVersion: "store-product-schema.v1",
@@ -1515,8 +1514,8 @@ describe("product API routes", () => {
       title: "Store schema plan",
       maintainer: "Store team",
       planId: storePlanId,
-      planHash: storePlanHash,
-      artifactHash: crossBorderPlanIds.artifactHash,
+      planHash: storeCanonicalPlanHash,
+      artifactHash: storePlanHash,
       roleSlots: [
         {
           slotId: "export.customs",
@@ -1595,9 +1594,8 @@ describe("product API routes", () => {
       tags: [],
       compilePreview: {
         planId: storePlanId,
-        planHash: storePlanHash,
-        artifactHash: crossBorderPlanIds.artifactHash,
-        canonicalArtifactHash: crossBorderPlanIds.artifactHash,
+        planHash: storeCanonicalPlanHash,
+        artifactHash: storePlanHash,
         stageCount: 1,
         roleSlotCount: 1,
         sourceCount: 1,
@@ -1609,23 +1607,21 @@ describe("product API routes", () => {
       updatedAt: "2026-04-30T00:00:00.000Z"
     });
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        ...stateMachineProductEvents({
-          planId: storePlanId,
-          planHash: storePlanHash
-        }),
-        chainEvent(8n, "SignalSubmitterAuthorized", {
-          orderId: stateMachineOrderId,
-          sourceId: stageId,
-          signalId: hookName,
-          submitter,
-          role: bytes32Text("neutral-executor"),
-          metadataHash
-        })
-      ]
-    });
+    const events = [
+      ...stateMachineProductEvents({
+        planId: storePlanId,
+        planHash: storePlanHash
+      }),
+      chainEvent(8n, "SignalSubmitterAuthorized", {
+        orderId: stateMachineOrderId,
+        sourceId: stageId,
+        signalId: hookName,
+        submitter,
+        role: bytes32Text("neutral-executor"),
+        metadataHash
+      })
+    ];
+    await store.resetFromEvents({ deploymentBlock: 0n, events, planCapabilityTables: planCapabilityTablesForEvents(events) });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
     const taskResponse = await createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeZhixuDraftStore: storeDraftStore })
@@ -1648,20 +1644,18 @@ describe("product API routes", () => {
 
   it("serves participant-scoped task and order views for an accepted wallet", async () => {
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        ...stateMachineProductEvents(),
-        chainEvent(8n, "SignalSubmitterAuthorized", {
-          orderId: stateMachineOrderId,
-          sourceId: stageId,
-          signalId: hookName,
-          submitter,
-          role: bytes32Text("customs-broker"),
-          metadataHash
-        })
-      ]
-    });
+    const events = [
+      ...stateMachineProductEvents(),
+      chainEvent(8n, "SignalSubmitterAuthorized", {
+        orderId: stateMachineOrderId,
+        sourceId: stageId,
+        signalId: hookName,
+        submitter,
+        role: bytes32Text("customs-broker"),
+        metadataHash
+      })
+    ];
+    await store.resetFromEvents({ deploymentBlock: 0n, events, planCapabilityTables: planCapabilityTablesForEvents(events) });
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
 
     const meResponse = await router.handle({
@@ -1702,20 +1696,18 @@ describe("product API routes", () => {
 
   it("accepted participants see the order detail under the same visibility rule as /product/me/orders", async () => {
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        ...stateMachineProductEvents(),
-        chainEvent(8n, "SignalSubmitterAuthorized", {
-          orderId: stateMachineOrderId,
-          sourceId: stageId,
-          signalId: hookName,
-          submitter,
-          role: bytes32Text("customs-broker"),
-          metadataHash
-        })
-      ]
-    });
+    const events = [
+      ...stateMachineProductEvents(),
+      chainEvent(8n, "SignalSubmitterAuthorized", {
+        orderId: stateMachineOrderId,
+        sourceId: stageId,
+        signalId: hookName,
+        submitter,
+        role: bytes32Text("customs-broker"),
+        metadataHash
+      })
+    ];
+    await store.resetFromEvents({ deploymentBlock: 0n, events, planCapabilityTables: planCapabilityTablesForEvents(events) });
     // 已接受参与（链下 product-bff 记录）绑定到投影订单：draft 已触发，
     // participant.status=accepted，acceptedWallet ≠ 链上 assignee。
     const acceptedWallet = "0x7777777777777777777777777777777777777777";
@@ -1776,20 +1768,18 @@ describe("product API routes", () => {
 
   it("uses accepted participant records for /product/me identity while filtering tasks by wallet authorization", async () => {
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        ...stateMachineProductEvents(),
-        chainEvent(8n, "SignalSubmitterAuthorized", {
-          orderId: stateMachineOrderId,
-          sourceId: stageId,
-          signalId: hookName,
-          submitter,
-          role: bytes32Text("customs-broker"),
-          metadataHash
-        })
-      ]
-    });
+    const events = [
+      ...stateMachineProductEvents(),
+      chainEvent(8n, "SignalSubmitterAuthorized", {
+        orderId: stateMachineOrderId,
+        sourceId: stageId,
+        signalId: hookName,
+        submitter,
+        role: bytes32Text("customs-broker"),
+        metadataHash
+      })
+    ];
+    await store.resetFromEvents({ deploymentBlock: 0n, events, planCapabilityTables: planCapabilityTablesForEvents(events) });
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: new MemoryProductBffStore() });
     const draftResponse = await router.handle({
       method: "POST",
@@ -1908,7 +1898,7 @@ describe("product API routes", () => {
     expect(proofResponse.status).toBe(404);
   });
 
-  it("serves projections only in production runtime even if the removed demo fallback is requested", async () => {
+  it("serves projections only in production runtime even if the fallback=demo query is requested", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       productRuntimeEnvironment: "production",
       evidenceService: createEvidenceService({
@@ -1943,7 +1933,8 @@ describe("product API routes", () => {
 
   it("uses Product BFF trigger authorizations to reject unauthorized task prepares", async () => {
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineProductEvents() });
+    const events = stateMachineProductEvents();
+    await store.resetFromEvents({ deploymentBlock: 0n, events, planCapabilityTables: planCapabilityTablesForEvents(events) });
     const productBffStore = new MemoryProductBffStore();
     const createdAt = "2026-04-29T00:00:00.000Z";
     await productBffStore.createRegistrationIfNoneForDraft({
@@ -2352,33 +2343,51 @@ interface ChainBackedOrder {
 }
 
 /**
- * 词表产物富集夹具（协议重构后两表的来源）：发布事件对携带
- * capabilitiesRoot，resetFromEvents 按 root 从注册表取富集源。
+ * 词表产物富集夹具（两表的来源）：发布事件对携带
+ * capabilitiesRoot，resetFromEvents 按 root 从注册表取富集源。注册键并入
+ * planId——不同 plan 可发布同形词表（root 相同），只按 root 单键会互相
+ * 覆盖，把别个 plan 的富集源喂给本 plan。
  */
 const productVocabularyRegistry = new Map<string, PlanCapabilityTablesInput>();
 
-function registerProductVocabulary(signalCapabilities: readonly {
-  readonly stageId: Hex;
-  readonly targetSourceId: Hex;
-  readonly signalId: Hex;
-  readonly targetOrderRelation: 0 | 1;
-}[]): string {
-  const capabilitiesRoot = capabilitiesRootOf([], signalCapabilities);
-  productVocabularyRegistry.set(capabilitiesRoot, {
-    planId: crossBorderPlanIds.planId as Hex,
-    planHash: crossBorderPlanIds.planHash as Hex,
+interface ProductVocabulary extends PlanCapabilityTablesInput {
+  readonly capabilitiesRoot: Hex;
+}
+
+function registerProductVocabulary(
+  planId: string,
+  planHash: string,
+  signalCapabilities: readonly {
+    readonly stageId: string;
+    readonly targetSourceId: string;
+    readonly signalId: string;
+    readonly targetOrderRelation: 0 | 1;
+  }[]
+): ProductVocabulary {
+  const capabilities = signalCapabilities.map((capability) => ({
+    stageId: capability.stageId as Hex,
+    targetSourceId: capability.targetSourceId as Hex,
+    signalId: capability.signalId as Hex,
+    targetOrderRelation: capability.targetOrderRelation
+  }));
+  const capabilitiesRoot = capabilitiesRootOf([], capabilities);
+  const vocabulary: ProductVocabulary = {
+    planId: planId as Hex,
+    planHash: planHash as Hex,
     selectorBindings: [],
-    signalCapabilities
-  });
-  return capabilitiesRoot;
+    signalCapabilities: capabilities,
+    capabilitiesRoot
+  };
+  productVocabularyRegistry.set(`${planId.toLowerCase()}:${capabilitiesRoot.toLowerCase()}`, vocabulary);
+  return vocabulary;
 }
 
 function planCapabilityTablesForEvents(events: readonly ChainEvent[]): readonly PlanCapabilityTablesInput[] {
-  const roots = new Set(events
+  const anchors = new Set(events
     .filter((event) => event.eventName === "PlanCommitted" || event.eventName === "PlanFinalized")
-    .map((event) => String(event.args["capabilitiesRoot"] ?? "").toLowerCase()));
+    .map((event) => `${String(event.args["planId"] ?? "").toLowerCase()}:${String(event.args["capabilitiesRoot"] ?? "").toLowerCase()}`));
   return [...productVocabularyRegistry.entries()]
-    .filter(([root]) => roots.has(root))
+    .filter(([key]) => anchors.has(key))
     .map(([, tables]) => tables);
 }
 
@@ -2395,30 +2404,30 @@ function chainEventAt(blockNumber: bigint, logIndex: number, eventName: string, 
 }
 
 /** 两步发布事件对（v0.11 真实链序），root 与富集源配对。 */
-function planPublishEvents(capabilitiesRoot: string, blockNumber = 1n): readonly ChainEvent[] {
+function planPublishEvents(vocabulary: ProductVocabulary, blockNumber = 1n): readonly ChainEvent[] {
   return [
     chainEventAt(blockNumber, 0, "PlanCommitted", {
-      planId: crossBorderPlanIds.planId,
-      planHash: crossBorderPlanIds.planHash,
+      planId: vocabulary.planId,
+      planHash: vocabulary.planHash,
       publisher: submitter,
       hooksHash: bytes32Text("hooks"),
-      capabilitiesRoot,
+      capabilitiesRoot: vocabulary.capabilitiesRoot,
       hookCount: 1n,
       dockRoutesRoot: bytes32Text("routes"),
       dockInterfaceRoot: bytes32Text("iface")
     }),
     chainEventAt(blockNumber, 1, "PlanPublisherRecorded", {
-      planId: crossBorderPlanIds.planId,
+      planId: vocabulary.planId,
       publisher: submitter
     }),
     chainEventAt(blockNumber, 2, "PlanFinalized", {
-      planId: crossBorderPlanIds.planId,
-      planHash: crossBorderPlanIds.planHash,
-      capabilitiesRoot
+      planId: vocabulary.planId,
+      planHash: vocabulary.planHash,
+      capabilitiesRoot: vocabulary.capabilitiesRoot
     }),
     chainEventAt(blockNumber, 3, "PlanRegistered", {
-      planId: crossBorderPlanIds.planId,
-      planHash: crossBorderPlanIds.planHash,
+      planId: vocabulary.planId,
+      planHash: vocabulary.planHash,
       hookCount: 1n
     })
   ];
@@ -2436,11 +2445,15 @@ function stateMachineProductEvents(options: {
   const eventTaskStageId = options.taskStageId ?? stageId;
   const eventTaskHookName = options.taskHookName ?? hookName;
   return [
-    chainEvent(1n, "PlanRegistered", {
-      planId: eventPlanId,
-      planHash: eventPlanHash,
-      hookCount: 1n
-    }),
+    // 词表已 Merkle 化进 capabilitiesRoot：任务提交信号（submitSignals）与
+    // 授权-任务绑定都依赖 resetFromEvents 按 planCapabilityTables 富集回
+    // 两表，发布事件对 + 注册表条目在这里成对产出。
+    ...planPublishEvents(registerProductVocabulary(eventPlanId, eventPlanHash, [{
+      stageId: eventTaskStageId,
+      targetSourceId: eventTaskStageId,
+      signalId: eventTaskHookName,
+      targetOrderRelation: 0
+    }])),
     chainEvent(3n, "OrderRegistered", {
       orderId: stateMachineOrderId,
       planId: eventPlanId

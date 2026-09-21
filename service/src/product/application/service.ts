@@ -263,10 +263,14 @@ export interface ProductService {
 }
 
 export interface ProductSchemaResolver {
+  /**
+   * planHash 是链侧身份（订单/计划投影的 planHash，runtime 域）——与
+   * schema.planHash（canonical 载荷哈希）数值永不相等，实现必须锚
+   * schema.artifactHash。
+   */
   getProductSchemaByPlan(
     planId: string,
     planHash: string,
-    artifactHash?: string,
   ): Promise<StoreProductSchemaDTO | undefined>;
 }
 
@@ -459,9 +463,9 @@ export function createProductService(
         : [];
       const visibleOrderKeys = new Set<string>();
       // 订单可见性与任务列表同一口径：任务归属按 DTO 的生效指派
-      // （执行者 overlay/能力提交者优先，回退链上指派）。此前任务列表用
-      // 生效指派、订单列表用原始投影指派——overlay 接管执行者后，接手者
-      // 看得到任务却看不到订单，被接管者反之，me 视图两栏互相矛盾。
+      // （执行者 overlay/能力提交者优先，回退链上指派）。两个列表口径
+      // 不一致会让 overlay 接管执行者后，接手者看得到任务却看不到订单、
+      // 被接管者反之，me 视图两栏互相矛盾。
       for (const { order, dto } of visibleTaskRows) {
         if (walletAddress && dto.assigneeWallet?.toLowerCase() === walletAddress && order) {
           visibleOrderKeys.add(stateMachineOrderProjectionKey(
@@ -2437,9 +2441,9 @@ function compareProvenance(
   return compareChainPointers(left, right);
 }
 
-// bytes32 展示解码/回落单源在 shared/display.ts（审计 §1.1 "bytes32 展示
-// 解码 ×2"）：displayBytes32 的标签回落 `${fallback} ${短哈希}` 与本视图
-// 既有形态一致，直接消费单源。displayStageId 是"解码失败原样透传"的
+// bytes32 展示解码/回落单源在 shared/display.ts：displayBytes32 的标签
+// 回落 `${fallback} ${短哈希}` 与本视图形态一致，直接消费单源。
+// displayStageId 是"解码失败原样透传"的
 // 恒等组合：它的输出参与 currentStageId 匹配、executorOverlays/
 // resourceRequirements 记录键与 schema 阶段比对，回落必须是原始值而非
 // 短哈希（前端与链上原始值关联依赖它），故仅委托单源解码、不套标签

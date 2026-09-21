@@ -1,6 +1,6 @@
 // 计划族：PlanCommitted/Finalized/Registered/PublisherRecorded 与计划投影
-// 构造。协议重构后链上不再逐条发词表注册事件（SignalCapabilityRegistered/
-// StageSelectorBindingRegistered 已删除）：计划事件只携带 capabilitiesRoot，
+// 构造。链上不逐条发词表注册事件（不存在 SignalCapabilityRegistered/
+// StageSelectorBindingRegistered 事件面）：计划事件只携带 capabilitiesRoot，
 // 两表（selectorBindings/signalCapabilities）由重放方按 planId 从编译产物
 // （store 域 onchainHookPlanArtifact）富集，并以 capabilitiesRootOf 重算
 // 断言与链上 root 一致（fail-closed）。
@@ -315,16 +315,16 @@ export function findPlanForOrder(
 }
 
 /**
- * 产物富集（协议重构后的两表唯一来源）：按 planId 从编译产物读出
+ * 产物富集（两表唯一来源）：按 planId 从编译产物读出
  * selectorBindings/signalCapabilities 填进投影，并用 capabilitiesRootOf
  * 重算断言与链上 root 一致。
  *
  * fail-closed 口径：
  * - 找不到产物（外部发布 plan / 产物未入库）→ 两表留空。词表相关推导
- *   （任务提交信号、阶段进度镜像、patch 造证）对该 plan 不可用——与旧
- *   世界"事件重建"相比是已知取舍：旧事件面能重建任何 plan 的词表，但
- *   逐条注册的 gas/事件成本正是本次重构删除的对象。链上闸（词表内事实
- *   携证验证）不受影响，只是服务端预检/造证退化为全零结构。
+ *   （任务提交信号、阶段进度镜像、patch 造证）对该 plan 不可用——这是
+ *   相对"逐条注册事件"形态的已知取舍：逐条注册能重建任何 plan 的词表，
+ *   但逐条注册的 gas/事件成本正是链上只存 root 所规避的对象。链上闸
+ *   （词表内事实携证验证）不受影响，只是服务端预检/造证退化为全零结构。
  * - 产物表重算 root ≠ 链上 root（或产物 planHash 不匹配）→ 不填并计
  *   capabilityEnrichmentMismatchCount（索引器消费为告警日志），不 crash
  *   indexer——把不一致的词表填进投影会让下游造出链上必拒的证明。
