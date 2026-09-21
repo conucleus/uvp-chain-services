@@ -199,9 +199,11 @@ export class IndexerService implements LifecycleService {
   #consecutiveCursorCasFailures = 0;
   /**
    * 词表产物富集缓存（planId(lower) → 两表）。plan 词表在 finalize 后
-   * 链上不可变，缓存只增不改；增量轮与 reorg 回滚的锚点收集都覆盖各自
-   * 重放的全事件集，重启后首个到达路径即由此重建缓存——缓存只是解析
-   * 去重，不承担跨重启的富集源职责。
+   * 链上不可变，已解析源跨轮复用；但断言不过（mismatch）的源在重放后
+   * 会被摘除，迫使下轮重解析产物库的最新状态（见
+   * #reconcileCapabilityEnrichmentMismatch）。增量轮与 reorg 回滚的锚点
+   * 收集都覆盖各自重放的全事件集，重启后首个到达路径即由此重建缓存——
+   * 缓存只是解析去重，不承担跨重启的富集源职责。
    */
   #planCapabilityTablesCache = new Map<string, PlanCapabilityTablesInput>();
   readonly #config: ChainServicesConfig;
@@ -233,11 +235,12 @@ export class IndexerService implements LifecycleService {
   /**
    * 为本轮事件批解析词表产物富集源：从计划族事件收集 (planId, planHash)
    * 锚，未缓存的锚逐个过 resolver（store 域 onchainHookPlanArtifact）。
-   * 解析失败按"产物缺失"处理（warn 留痕、该 plan 两表为空）——富集是
-   * 服务端增强，不能把索引器打 degraded。但"resolver 故障的空词表"必须
-   * 与"外部发布 plan 的空词表"在快照里可区分（解析故障 ≠ 无词表）：
-   * 故障锚随轮次返回，重放把它们 plan 的富集态标 failed，提交/触发车道
-   * 据此拒绝零值造证；故障不进缓存，下一轮重试，恢复后自动回到可用态。
+   * 解析失败按"解析故障"处理（warn 留痕、该 plan 富集态标 failed）——
+   * 富集是服务端增强，不能把索引器打 degraded。"resolver 故障的未知
+   * 词表"必须与"外部发布 plan 的确认空词表"在快照里可区分（解析故障 ≠
+   * 无词表）：故障锚随轮次返回，重放把它们 plan 的富集态标 failed，
+   * 提交/触发车道据此拒绝零值造证；故障不进缓存，下一轮重试，恢复后
+   * 自动回到可用态。
    */
   async #planCapabilityTablesFor(
     events: readonly ChainEvent[]
@@ -285,11 +288,22 @@ export class IndexerService implements LifecycleService {
     };
   }
 
-  /** 词表富集 fail-closed 计数的告警出口（不 crash 索引器）。 */
-  #warnCapabilityEnrichmentMismatch(snapshot: ProjectionSnapshot): void {
+  /**
+   * 重放后的词表富集失败对账（不 crash 索引器）：failed 态的 plan 把
+   * 富集缓存里的产物源摘除——缓存若保留这份断言不过（mismatch）的源，
+   * 产物库修正后活进程每轮仍用同一份陈旧源重放，failed 粘滞到重启才
+   * 解除；摘除迫使下轮重解析，修正后的产物即自愈。resolver 故障锚本就
+   * 未进缓存，摘除是幂等空操作。mismatch 计数在此告警留痕。
+   */
+  #reconcileCapabilityEnrichmentMismatch(snapshot: ProjectionSnapshot): void {
+    for (const plan of Object.values(snapshot.stateMachinePlans)) {
+      if (plan.capabilityEnrichment === "failed") {
+        this.#planCapabilityTablesCache.delete(plan.planId.toLowerCase());
+      }
+    }
     const mismatches = snapshot.capabilityEnrichmentMismatchCount ?? 0;
     if (mismatches > 0) {
-      this.#logger.warn("plan capability enrichment skipped for artifact/chain root mismatches; the affected plans keep an empty vocabulary (fail-closed)", {
+      this.#logger.warn("plan capability tables mismatched the chain anchor; the affected plans are marked unenriched-failed so the submission/trigger lanes refuse their vocabulary proofs, and the stale cached source is dropped to re-resolve the next round (fail-closed)", {
         capabilityEnrichmentMismatchCount: mismatches
       });
     }
@@ -531,7 +545,7 @@ export class IndexerService implements LifecycleService {
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
       });
-      this.#warnCapabilityEnrichmentMismatch(snapshot);
+      this.#reconcileCapabilityEnrichmentMismatch(snapshot);
 
       return { snapshot, summary };
     } catch (error) {
@@ -676,6 +690,11 @@ export class IndexerService implements LifecycleService {
       ? priorFinalizedBlock
       : finalizedBlock;
     if (finalizedBlock < effectiveFromBlock) {
+      // 静止链早退：finalized 未越过游标，本轮不重放事件，持久快照连同
+      // 其富集态（含 failed / mismatch 摘缓存后的待重解析）原样保持——
+      // failed 要等链推进出新的 finalized 区间、触发下一轮重放才可能翻
+      // 转（重启同理：重启只清富集缓存，不触发重放）。为每个静止轮付全
+      // 历史重放复查富集源代价不成比例，粘滞是已知取舍。
       // 游标侧保留已存最大值；本回合无新事件可索引。
       const nextCursor: EventCursor = {
         chainId: this.#config.network.chainId,
@@ -834,7 +853,7 @@ export class IndexerService implements LifecycleService {
       nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
     });
-    this.#warnCapabilityEnrichmentMismatch(result.snapshot);
+    this.#reconcileCapabilityEnrichmentMismatch(result.snapshot);
 
     return { snapshot: result.snapshot, summary: result.summary };
   }
@@ -1143,6 +1162,9 @@ export class IndexerService implements LifecycleService {
       const snapshot = rebuildOrderProjections(remainingEvents, {
         ...(enrichmentOptions ?? {})
       });
+      // 回滚重放与主刷新同口径对账：mismatch 源摘缓存，下轮重解析。摘除
+      // 是纯内存操作，事务随后回滚（游标 CAS 失败）也至多多付一次重解析。
+      this.#reconcileCapabilityEnrichmentMismatch(snapshot);
       const identitySnapshot = rebuildIdentityProjections(remainingEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);

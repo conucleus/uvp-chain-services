@@ -14,6 +14,7 @@ import {
   signalCapabilityProof as compilerSignalCapabilityProof
 } from "@uvp-eth/compiler";
 import type { StageFactPayload } from "@uvp-eth/protocol-bindings";
+import type { ProjectionStore } from "../storage/projection-store.js";
 import { normalizeBytes32, type Hex } from "../shared/types.js";
 
 export const ZERO_BYTES32 =
@@ -230,4 +231,38 @@ export function stageFactsForTargetStage(
 /** 投影两表是否可用（外部发布 plan 富集不到产物 → 两表为空）。 */
 export function hasPlanCapabilityTables(tables: PlanCapabilityTables | undefined): boolean {
   return Boolean(tables && (tables.selectorBindings.length > 0 || tables.signalCapabilities.length > 0));
+}
+
+/**
+ * plan 投影词表两表解析（词表 Merkle 化的造证源）：按 planId 从投影
+ * 快照读 selectorBindings/signalCapabilities（applyPlanFinalized 时产物
+ * 富集 + capabilitiesRoot 断言的成果）。plan 不在投影/两表为空且富集态
+ * 非 failed（外部发布 plan）→ undefined，消费方按全零结构降级（链上词表
+ * 闸兜底）。富集态 failed（resolver 故障轮 / 产物 root 断言不过）→ 抛
+ * 错：词表状态未知，全零造证会把必拒的 InvalidSignalCapability 留到链上
+ * revert 才暴露（白烧代付 gas）——提交车道（submissions/product BFF
+ * 的造证读取）catch 后归一为 409 capability_tables_unavailable；触发
+ * 车道落 failed+retryable 档案，HTTP 面以 502 透传该 errorCode。
+ */
+export function resolvePlanCapabilityTablesFromStore(
+  store: ProjectionStore
+): (planId: Hex) => Promise<PlanCapabilityTables | undefined> {
+  return async (planId) => {
+    const snapshot = await store.getOrderSnapshot();
+    const plan = Object.values(snapshot.stateMachinePlans).find(
+      (candidate) => candidate.planId.toLowerCase() === planId.toLowerCase()
+    );
+    if (!plan) {
+      return undefined;
+    }
+    if (plan.capabilityEnrichment === "failed") {
+      throw new Error(
+        "plan capability enrichment failed in the last indexer replay; the plan vocabulary state is unknown"
+      );
+    }
+    return {
+      selectorBindings: plan.selectorBindings,
+      signalCapabilities: plan.signalCapabilities
+    };
+  };
 }

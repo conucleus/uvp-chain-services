@@ -651,39 +651,6 @@ function resolveOrderPlanIdFromStore(
 }
 
 /**
- * plan 投影词表两表解析（词表 Merkle 化的造证源）：按 planId 从投影
- * 快照读 selectorBindings/signalCapabilities（applyPlanFinalized 时产物
- * 富集 + capabilitiesRoot 断言的成果）。plan 不在投影/两表为空且富集态
- * 非 failed（外部发布 plan）→ undefined，消费方按全零结构降级（链上词表
- * 闸兜底）。富集态 failed（resolver 故障轮 / 产物 root 断言不过）→ 抛
- * 错：词表状态未知，全零造证会把必拒的 InvalidSignalCapability 留到链上
- * revert 才暴露（白烧代付 gas）——提交与 trigger 车道的既有 catch 会把它
- * 归一为 409 capability_tables_unavailable。
- */
-export function resolvePlanCapabilityTablesFromStore(
-  store: ProjectionStore
-): (planId: Hex) => Promise<PlanCapabilityTables | undefined> {
-  return async (planId) => {
-    const snapshot = await store.getOrderSnapshot();
-    const plan = Object.values(snapshot.stateMachinePlans).find(
-      (candidate) => candidate.planId.toLowerCase() === planId.toLowerCase()
-    );
-    if (!plan) {
-      return undefined;
-    }
-    if (plan.capabilityEnrichment === "failed") {
-      throw new Error(
-        "plan capability enrichment failed in the last indexer replay; the plan vocabulary state is unknown"
-      );
-    }
-    return {
-      selectorBindings: plan.selectorBindings,
-      signalCapabilities: plan.signalCapabilities
-    };
-  };
-}
-
-/**
  * store 域服务级审计事件（join/listing/装修）接入 AuditSink：这些域的
  * 服务自带 outcome/errorCode/元数据丰富的审计回调，路由层不接线时
  * 决策与联动事件零留痕。事件体（含 planId/applicationId 等定位字段）
