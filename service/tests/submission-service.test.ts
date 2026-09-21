@@ -7,7 +7,7 @@ import type { ProductTaskDTO } from "@uvp-eth/product-dto";
 import { STATE_MACHINE_ABI } from "@uvp-eth/protocol-bindings";
 import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import { privateKeyToAccount } from "viem/accounts";
-import { resolvePlanCapabilityTablesFromStore } from "../src/api/routes.js";
+import { resolvePlanCapabilityTablesFromStore } from "../src/submissions/capability-proofs.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import {

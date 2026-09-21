@@ -1,6 +1,6 @@
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { Hex } from "../shared/types.js";
-import type { PlanCapabilityTables } from "../submissions/capability-proofs.js";
+import { resolvePlanCapabilityTablesFromStore, type PlanCapabilityTables } from "../submissions/capability-proofs.js";
 import { createProductService, ProductOrderLookupError } from "../product/application/service.js";
 import {
   createProductBffService,

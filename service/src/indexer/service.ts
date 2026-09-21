@@ -177,6 +177,19 @@ class ReorgCursorMovedError extends Error {
   }
 }
 
+/**
+ * 零新事件早退让位信号：本轮存在崩溃窗口残留行或持久游标竞争，早退
+ * 事务内抛出以整体回滚（残留行的投影只剩全路径事务内的清扫+重放能清，
+ * 游标竞争按 CAS 语义交回全路径递延处理），随后照走全路径。
+ */
+class IncrementalEarlyExitDeclinedError extends Error {
+  override readonly name = "IncrementalEarlyExitDeclinedError";
+
+  constructor() {
+    super("incremental early exit declined; the full refresh path must handle this round");
+  }
+}
+
 type MutablePendingPostCommitSweepSummary = Writable<PendingPostCommitSweepSummary>;
 
 export class IndexerService implements LifecycleService {
@@ -293,19 +306,36 @@ export class IndexerService implements LifecycleService {
    * 富集缓存里的产物源摘除——缓存若保留这份断言不过（mismatch）的源，
    * 产物库修正后活进程每轮仍用同一份陈旧源重放，failed 粘滞到重启才
    * 解除；摘除迫使下轮重解析，修正后的产物即自愈。resolver 故障锚本就
-   * 未进缓存，摘除是幂等空操作。mismatch 计数在此告警留痕。
+   * 未进缓存，摘除是幂等空操作。mismatch 告警带 planId 清单指向需要
+   * 修正产物的具体对象；解析故障的 plan 已有独立告警，不混入 mismatch
+   * 口径（它们的 failed 来自 resolver 侧，产物本身可能没有问题）。
    */
-  #reconcileCapabilityEnrichmentMismatch(snapshot: ProjectionSnapshot): void {
+  #reconcileCapabilityEnrichmentMismatch(
+    snapshot: ProjectionSnapshot,
+    resolutionFailures?: readonly Hex[]
+  ): void {
+    const resolutionFailed = new Set(
+      (resolutionFailures ?? []).map((planId) => planId.toLowerCase())
+    );
+    const mismatchedPlanIds: Hex[] = [];
     for (const plan of Object.values(snapshot.stateMachinePlans)) {
-      if (plan.capabilityEnrichment === "failed") {
-        this.#planCapabilityTablesCache.delete(plan.planId.toLowerCase());
+      if (plan.capabilityEnrichment !== "failed") {
+        continue;
+      }
+      this.#planCapabilityTablesCache.delete(plan.planId.toLowerCase());
+      if (!resolutionFailed.has(plan.planId.toLowerCase())) {
+        mismatchedPlanIds.push(plan.planId);
       }
     }
     const mismatches = snapshot.capabilityEnrichmentMismatchCount ?? 0;
     if (mismatches > 0) {
-      this.#logger.warn("plan capability tables mismatched the chain anchor; the affected plans are marked unenriched-failed so the submission/trigger lanes refuse their vocabulary proofs, and the stale cached source is dropped to re-resolve the next round (fail-closed)", {
-        capabilityEnrichmentMismatchCount: mismatches
-      });
+      this.#logger.warn(
+        "plan capability tables failed the on-chain anchor assertion (the artifact tables do not reproduce the chain capabilitiesRoot); correct the store-domain plan artifact for the listed plans - they stay unenriched-failed so the submission/trigger lanes refuse their vocabulary proofs, and the cached source is dropped so the next round re-resolves the corrected artifact",
+        {
+          capabilityEnrichmentMismatchCount: mismatches,
+          planIds: mismatchedPlanIds
+        }
+      );
     }
   }
 
@@ -545,7 +575,7 @@ export class IndexerService implements LifecycleService {
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
       });
-      this.#reconcileCapabilityEnrichmentMismatch(snapshot);
+      this.#reconcileCapabilityEnrichmentMismatch(snapshot, enrichmentOptions?.planCapabilityResolutionFailures);
 
       return { snapshot, summary };
     } catch (error) {
@@ -725,6 +755,60 @@ export class IndexerService implements LifecycleService {
     );
     const newReplaySummary = buildActiveChainEventReplaySummary(events);
     const activeNewEvents = [...newReplaySummary.activeEvents];
+    // 零新事件早退：区间内没有新链事件时，重放输出只会因富集源而变
+    // （事件集不变）。富集缓存覆盖存量快照的全部 plan 锚点、且崩溃窗口
+    // 无残留行时，本轮全量重放必然复现已持久化的快照——只推进游标并汇总
+    // 存量投影，跳过 O(全历史) 的锚点收集与重放。覆盖不成立（failed 摘
+    // 缓存 / resolver 空返回的锚 / 重启后的冷缓存）或清扫出残留行时照走
+    // 全路径，富集自愈、空词表重试与残留清除语义不变。清扫与游标推进同
+    // 事务：残留行存在或游标竞争时整体回滚，把清除让位给全路径事务内的
+    // 清扫+重放（残留行的投影只剩重放能清）。
+    if (events.length === 0 && await this.#planCapabilityTablesCacheCoversStoredPlans()) {
+      const earlyExitCursor: EventCursor = {
+        chainId: this.#config.network.chainId,
+        deploymentBlock,
+        nextBlock: finalizedBlock + 1n,
+        finalizedBlock: reportedFinalizedBlock,
+        ...(await this.#cursorBlockHash(finalizedBlock))
+      };
+      let earlyExitAccepted = false;
+      try {
+        await durableStore.withTransaction(async () => {
+          if (await this.#sweepCommittedButUnadvancedEvents(durableStore, effectiveFromBlock) > 0) {
+            throw new IncrementalEarlyExitDeclinedError();
+          }
+          const saved = await durableStore.saveCursor(
+            {
+              ...this.#scope,
+              deploymentBlock,
+              nextBlock: earlyExitCursor.nextBlock,
+              ...(earlyExitCursor.finalizedBlock !== undefined ? { finalizedBlock: earlyExitCursor.finalizedBlock } : {}),
+              ...(earlyExitCursor.blockHash !== undefined ? { blockHash: earlyExitCursor.blockHash } : {})
+            },
+            { expectNextBlock: effectiveFromBlock }
+          );
+          if (saved === undefined) {
+            throw new IncrementalEarlyExitDeclinedError();
+          }
+        });
+        earlyExitAccepted = true;
+      } catch (error) {
+        if (!(error instanceof IncrementalEarlyExitDeclinedError)) {
+          throw error;
+        }
+      }
+      if (earlyExitAccepted) {
+        this.#consecutiveCursorCasFailures = 0;
+        this.#cursor = earlyExitCursor;
+        const result = await this.#summarizeStoredProjection({
+          fromBlock: effectiveFromBlock,
+          toBlock: reportedFinalizedBlock,
+          newEventCount: 0
+        });
+        await this.#processProjectionAutomation(result.snapshot);
+        return result;
+      }
+    }
     // 词表产物富集锚点必须与事务内重放的全事件集同源：富集缓存是纯进程
     // 内存，重启后为空，锚点若只收本轮新读事件，重启后首轮无新 plan 事件
     // 的增量刷新会让全历史重放拿到空富集源——已富集 plan 的两表被清空并
@@ -740,28 +824,9 @@ export class IndexerService implements LifecycleService {
     const enrichmentOptions = await this.#planCapabilityTablesFor(enrichmentEvents);
 
     const result = await durableStore.withTransaction(async () => {
-      // 崩溃窗口残留清扫：事件事务先于游标提交（中间还夹着通知投递），
-      // 游标未推进而事件已落库的行只可能在 [fromBlock, ∞) 区间。单写者
-      // 不变量下这些行只来自本进程上一轮崩溃窗口；窗口内若发生浅 reorg，
-      // 旧分叉行会与本轮 canonical 追加（ON CONFLICT DO NOTHING 挡不住
-      // 不同 txHash 的分叉行）并存成永久幽灵，每轮重放都投进投影。以
-      // 持久游标仍停在本轮 fromBlock 为前置（否则是别的写者已接管，本
-      // 轮按 CAS 语义递延），整窗删除后重放 canonical 链数据——链是真相。
-      if (effectiveFromBlock > 0n) {
-        const cursorAtAppend = await durableStore.getCursor(this.#scope);
-        if (cursorAtAppend?.nextBlock === effectiveFromBlock) {
-          const swept = await durableStore.deleteEventsAfterBlock(
-            { chainId: this.#scope.chainId },
-            effectiveFromBlock - 1n
-          );
-          if (swept > 0) {
-            this.#logger.warn("indexer swept committed-but-unadvanced event rows before replaying canonical chain data", {
-              fromBlock: effectiveFromBlock.toString(),
-              sweptEvents: swept
-            });
-          }
-        }
-      }
+      // 崩溃窗口残留清扫（语义见 #sweepCommittedButUnadvancedEvents）：
+      // 残留行的投影只有重放能清，删除必须与重放同事务。
+      await this.#sweepCommittedButUnadvancedEvents(durableStore, effectiveFromBlock);
       for (const event of events) {
         await durableStore.appendEvent(event);
       }
@@ -853,7 +918,7 @@ export class IndexerService implements LifecycleService {
       nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
     });
-    this.#reconcileCapabilityEnrichmentMismatch(result.snapshot);
+    this.#reconcileCapabilityEnrichmentMismatch(result.snapshot, enrichmentOptions?.planCapabilityResolutionFailures);
 
     return { snapshot: result.snapshot, summary: result.summary };
   }
@@ -1164,7 +1229,7 @@ export class IndexerService implements LifecycleService {
       });
       // 回滚重放与主刷新同口径对账：mismatch 源摘缓存，下轮重解析。摘除
       // 是纯内存操作，事务随后回滚（游标 CAS 失败）也至多多付一次重解析。
-      this.#reconcileCapabilityEnrichmentMismatch(snapshot);
+      this.#reconcileCapabilityEnrichmentMismatch(snapshot, enrichmentOptions?.planCapabilityResolutionFailures);
       const identitySnapshot = rebuildIdentityProjections(remainingEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
@@ -1340,6 +1405,57 @@ export class IndexerService implements LifecycleService {
         });
       }
     }
+  }
+
+  /**
+   * 崩溃窗口残留清扫：事件事务先于游标提交（中间还夹着通知投递），游标
+   * 未推进而事件已落库的行只可能在 [fromBlock, ∞) 区间。单写者不变量下
+   * 这些行只来自本进程上一轮崩溃窗口；窗口内若发生浅 reorg，旧分叉行会
+   * 与本轮 canonical 追加（ON CONFLICT DO NOTHING 挡不住不同 txHash 的
+   * 分叉行）并存成永久幽灵，每轮重放都投进投影。以持久游标仍停在本轮
+   * fromBlock 为前置（否则是别的写者已接管，本轮按 CAS 语义递延），整窗
+   * 删除后重放 canonical 链数据——链是真相。返回删除行数；调用方据此
+   * 决定是否仍需重放清除残留行的投影。
+   */
+  async #sweepCommittedButUnadvancedEvents(
+    durableStore: DurableProjectionStore,
+    effectiveFromBlock: bigint
+  ): Promise<number> {
+    if (effectiveFromBlock <= 0n) {
+      return 0;
+    }
+    const cursorAtAppend = await durableStore.getCursor(this.#scope);
+    if (cursorAtAppend?.nextBlock !== effectiveFromBlock) {
+      return 0;
+    }
+    const swept = await durableStore.deleteEventsAfterBlock(
+      { chainId: this.#scope.chainId },
+      effectiveFromBlock - 1n
+    );
+    if (swept > 0) {
+      this.#logger.warn("indexer swept committed-but-unadvanced event rows before replaying canonical chain data", {
+        fromBlock: effectiveFromBlock.toString(),
+        sweptEvents: swept
+      });
+    }
+    return swept;
+  }
+
+  /**
+   * 富集缓存是否覆盖存量快照的全部 plan 锚点：零新事件轮的事件集不变，
+   * 重放输出只会因富集源而变——缓存覆盖即"本轮重放必然复现已持久化
+   * 快照"的充分条件。failed 摘缓存、resolver 空返回的锚（不进缓存）与
+   * 重启后的冷缓存都会打破覆盖，迫使该轮走全量重放完成自愈/重试。
+   * 未装配富集源的部署没有词表输入，重放是纯函数，恒为覆盖。
+   */
+  async #planCapabilityTablesCacheCoversStoredPlans(): Promise<boolean> {
+    if (!this.#resolvePlanCapabilityTables) {
+      return true;
+    }
+    const snapshot = await this.#store.getOrderSnapshot?.();
+    return Object.values(snapshot?.stateMachinePlans ?? {}).every((plan) =>
+      this.#planCapabilityTablesCache.has(plan.planId.toLowerCase())
+    );
   }
 
   async #summarizeStoredProjection(input: {

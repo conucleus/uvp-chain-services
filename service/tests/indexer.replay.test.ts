@@ -1358,6 +1358,170 @@ describe("indexer projection replay", () => {
     }
   });
 
+  it("re-resolves the corrected artifact on the next round in the same process after a mismatch", async () => {
+    // 回归：断言不过（mismatch）的缓存源必须摘除——缓存若保留陈旧源，
+    // 产物库修正后活进程每轮仍重放同一份源，failed 粘滞到重启才解除。
+    // 零新事件轮同样要走重放：failed 摘缓存打破了早退的覆盖前提。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-enrichment-evict-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      // 链上词表锚定 good 的 root；stale 的两表重算 root 对不上 → mismatch。
+      const good = planVocabulary({
+        selectorBindings: [{ selectorStageId, targetStageId: stageId }],
+        signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+      });
+      const stale = planVocabulary({
+        signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId: bytes32Hex("0707"), targetOrderRelation: 0 }]
+      });
+      const planEvents = planPublishEvents(good);
+      const orderEvent = chainEvent(3n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      });
+      let finalizedBlock = 3n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return [...planEvents, orderEvent].filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        }
+      };
+      let servingStale = true;
+      let resolverCalls = 0;
+      const resolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> => {
+        resolverCalls += 1;
+        if (anchorPlanId.toLowerCase() !== planId.toLowerCase() || anchorPlanHash.toLowerCase() !== planHash.toLowerCase()) {
+          return undefined;
+        }
+        return servingStale ? stale : good;
+      };
+      const warnings: { readonly message: string; readonly context?: Record<string, unknown> }[] = [];
+      const capturingLogger = {
+        debug: () => undefined,
+        info: () => undefined,
+        warn: (message: string, context?: Record<string, unknown>) => {
+          warnings.push({ message, ...(context ? { context } : {}) });
+        },
+        error: () => undefined
+      };
+
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        resolvePlanCapabilityTables: resolver,
+        logger: capturingLogger
+      });
+      const mismatched = await indexer.rebuildFromDeploymentBlockWithSummary();
+      const planKey = stateMachineScopedKey(31337, contractAddress, planId);
+      expect(mismatched.snapshot.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("failed");
+      expect(mismatched.snapshot.capabilityEnrichmentMismatchCount).toBe(1);
+      expect(resolverCalls).toBe(1);
+      expect(warnings.some((entry) =>
+        entry.message.includes("plan capability tables failed the on-chain anchor assertion") &&
+        entry.context?.planIds
+      )).toBe(true);
+
+      // 产物修正 + 链静止推进（无新事件）：同一进程下一轮必须重解析而非
+      // 复用进程内缓存的陈旧源。
+      servingStale = false;
+      finalizedBlock = 4n;
+      eventSource.readEvents = async () => [];
+      const refreshed = await indexer.refreshFromCursorWithSummary();
+
+      expect(resolverCalls).toBe(2);
+      expect(refreshed.snapshot.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("enriched");
+      expect(refreshed.snapshot.stateMachinePlans[planKey]?.selectorBindings).toHaveLength(1);
+      const recovered = await store.getOrderSnapshot();
+      expect(recovered.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("enriched");
+      expect(recovered.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(1);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the full replay on a no-new-events round once the enrichment cache covers every stored plan", async () => {
+    // 静止但 finalized 前进的轮：事件集不变、缓存覆盖全部锚点时，全量
+    // 重放必然复现已持久化快照——只推进游标，resolver 不再被调用。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-enrichment-idle-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const vocabulary = planVocabulary({
+        selectorBindings: [{ selectorStageId, targetStageId: stageId }],
+        signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+      });
+      const planEvents = planPublishEvents(vocabulary);
+      const orderEvent = chainEvent(3n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      });
+      let finalizedBlock = 3n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return [...planEvents, orderEvent].filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        }
+      };
+      let resolverCalls = 0;
+      const resolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> => {
+        resolverCalls += 1;
+        return anchorPlanId.toLowerCase() === planId.toLowerCase() && anchorPlanHash.toLowerCase() === planHash.toLowerCase()
+          ? vocabulary
+          : undefined;
+      };
+
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        resolvePlanCapabilityTables: resolver
+      });
+      const rebuilt = await indexer.rebuildFromDeploymentBlockWithSummary();
+      const planKey = stateMachineScopedKey(31337, contractAddress, planId);
+      expect(rebuilt.snapshot.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("enriched");
+      expect(resolverCalls).toBe(1);
+
+      finalizedBlock = 4n;
+      eventSource.readEvents = async () => [];
+      const refreshed = await indexer.refreshFromCursorWithSummary();
+
+      expect(resolverCalls).toBe(1);
+      expect(refreshed.snapshot.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("enriched");
+      expect(refreshed.snapshot.stateMachinePlans[planKey]?.selectorBindings).toHaveLength(1);
+      expect(refreshed.summary.eventCount).toBe(rebuilt.summary.eventCount);
+      expect(indexer.cursor?.nextBlock).toBe(5n);
+      const persisted = await store.getOrderSnapshot();
+      expect(persisted.stateMachinePlans[planKey]?.selectorBindings).toHaveLength(1);
+      const syncState = await store.getSyncState();
+      expect(syncState?.finalizedBlock).toBe(4n);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("rolls back stored events and replays the canonical fork when a reorg breaks cursor hash continuity", async () => {
     // 模拟 fork——block 3 之后链被替换。cursor 哈希校验发现断链，
     // 共同祖先定位到 block 2，删除 block 3 的旧事件，从 fork 链重放。
