@@ -118,6 +118,7 @@ const expectedMigrationVersions = [
   "0021_zhixu_version_single_active",
   "0022_product_invite_single_active",
   "0023_participant_wallet_single_role",
+  "0024_docking_session_interface_columns",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -302,6 +303,71 @@ describe("durable storage", () => {
         )
         .run(planId, planHash),
     ).toThrow();
+  });
+
+  it("upgrades a ledger that applied the pre-0024 docking schema without checksum drift", () => {
+    // 旧库路径：库按 0006 原始建表（source_version_id/target_version_id）
+    // 且带存量行，0024 起才切到接口列。台账逐字校验 checksum——已应用
+    // 版本的文件字节一旦漂移（原地改写）旧库升级即被拒启，列改造必须
+    // 走新迁移；升级后与新库 schema 同形，存量行按「未记录」回填。
+    const legacyDatabase = openSqliteDatabase(sqliteUrl(tempDirs));
+    databases.push(legacyDatabase);
+    const legacyDirectory = mkdtempSync(join(tmpdir(), "uvp-migrations-legacy-"));
+    tempDirs.push(legacyDirectory);
+    for (const entry of readdirSync(migrationsDirectory(), { withFileTypes: true })) {
+      if (entry.isFile() && !/^002[01234]_/.test(entry.name)) {
+        copyFileSync(join(migrationsDirectory(), entry.name), join(legacyDirectory, entry.name));
+      }
+    }
+    const legacyApplied = runSqliteMigrations({
+      database: legacyDatabase,
+      migrationsDirectory: legacyDirectory,
+    });
+    expect(legacyApplied.applied.map((migration) => migration.version)).toContain(
+      "0006_store_metadata",
+    );
+    legacyDatabase.exec(
+      `INSERT INTO store_docking_session (
+         session_id, source_zhixu_id, target_zhixu_id, source_version_id,
+         target_version_id, status, draft_signal_map_json, validation_json,
+         session_json, created_at, updated_at
+       ) VALUES (
+         'legacy-session', 'zhixu-a', 'zhixu-b', 'v1', 'v2', 'draft',
+         '[]', '{}', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+       )`,
+    );
+
+    // 升级 = 把当前文件集（含 0024）指向旧库：已应用版本 checksum 全部
+    // 命中（0006 等保持原始字节），仅 0019..0024 待应用。
+    const upgraded = runSqliteMigrations({
+      database: legacyDatabase,
+      migrationsDirectory: migrationsDirectory(),
+    });
+    expect(upgraded.applied.map((migration) => migration.version)).toEqual([
+      "0020_store_challenge_requester_key",
+      "0021_zhixu_version_single_active",
+      "0022_product_invite_single_active",
+      "0023_participant_wallet_single_role",
+      "0024_docking_session_interface_columns",
+    ]);
+    const legacyRow = legacyDatabase
+      .prepare("SELECT selected_interface_name, order_mode FROM store_docking_session WHERE session_id = 'legacy-session'")
+      .get() as Record<string, unknown>;
+    expect(legacyRow.selected_interface_name).toBe("");
+    expect(legacyRow.order_mode).toBe("");
+
+    // 新库路径：全量迁移一次跑完，最终 schema 与旧库升级后同形。
+    const freshDatabase = openSqliteDatabase(sqliteUrl(tempDirs));
+    databases.push(freshDatabase);
+    runSqliteMigrations({ database: freshDatabase, migrationsDirectory: migrationsDirectory() });
+    const dockingColumns = (database: SqliteDatabase) =>
+      (database.prepare("PRAGMA table_info(store_docking_session)").all() as Record<string, unknown>[])
+        .map((column) => `${column.name}:${column.type}:${column.notnull}:${column.dflt_value}`)
+        .sort();
+    expect(dockingColumns(legacyDatabase)).toEqual(dockingColumns(freshDatabase));
+    expect(dockingColumns(freshDatabase)).not.toContain(expect.stringContaining("source_version_id"));
+    expect(dockingColumns(freshDatabase)).toContain("selected_interface_name:TEXT:1:''");
+    expect(dockingColumns(freshDatabase)).toContain("order_mode:TEXT:1:''");
   });
 
   it("deduplicates the same event but retains same-position logs from different transactions", async () => {

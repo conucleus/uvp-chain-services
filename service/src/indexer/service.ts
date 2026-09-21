@@ -198,8 +198,9 @@ export class IndexerService implements LifecycleService {
   #consecutiveCursorCasFailures = 0;
   /**
    * 词表产物富集缓存（planId(lower) → 两表）。plan 词表在 finalize 后
-   * 链上不可变，缓存只增不改；增量路径的全历史重放需要旧 plan 的表，
-   * 每轮只解析本轮新见的 plan 锚。
+   * 链上不可变，缓存只增不改；增量轮的锚点收集覆盖被重放的全事件集
+   * （存量 + 本轮新读），重启后首轮即由此重建缓存——缓存只是解析去重，
+   * 不承担跨重启的富集源职责。
    */
   #planCapabilityTablesCache = new Map<string, PlanCapabilityTablesInput>();
   readonly #config: ChainServicesConfig;
@@ -453,7 +454,7 @@ export class IndexerService implements LifecycleService {
         ...(await this.#cursorBlockHash(finalizedBlock))
       };
       // 词表产物富集源（计划族事件锚定）：与游标读取同为事务外 IO。
-      const planCapabilityTables = await this.#planCapabilityTablesFor(events);
+      const planCapabilityTables = await this.#planCapabilityTablesFor([...storedEventsForEnrichment, ...events]);
       // 通知派生先于重建事务提交落 pending（对齐增量路径不变量：投递
       // 记录必须先于游标推进）：全量重建把游标随整库替换同事务落库，
       // 提交后才处理通知——该窗口内硬崩溃会让这批事件永不再被读取、
@@ -695,9 +696,14 @@ export class IndexerService implements LifecycleService {
     );
     const newReplaySummary = buildActiveChainEventReplaySummary(events);
     const activeNewEvents = [...newReplaySummary.activeEvents];
-    // 词表产物富集源：本轮新事件的 plan 锚在事务外解析（缓存覆盖旧 plan），
-    // 事务内全历史重放直接消费缓存。
-    const planCapabilityTables = await this.#planCapabilityTablesFor(events);
+    // 词表产物富集锚点必须与事务内重放的全事件集同源：富集缓存是纯进程
+    // 内存，重启后为空，锚点若只收本轮新读事件，重启后首轮无新 plan 事件
+    // 的增量刷新会让全历史重放拿到空富集源——已富集 plan 的两表被清空并
+    // 随快照持久化覆盖（mismatchCount=0，完全静默）。存量事件 + 本轮新
+    // 事件的并集覆盖重放集（崩溃窗口残留行的锚至多多余不会缺），未缓存
+    // 锚才过 resolver（本地 store 查询，稳态轮零查询）。
+    const storedEventsForEnrichment = await durableStore.listEvents({ chainId: this.#scope.chainId });
+    const planCapabilityTables = await this.#planCapabilityTablesFor([...storedEventsForEnrichment, ...events]);
 
     const result = await durableStore.withTransaction(async () => {
       // 崩溃窗口残留清扫：事件事务先于游标提交（中间还夹着通知投递），

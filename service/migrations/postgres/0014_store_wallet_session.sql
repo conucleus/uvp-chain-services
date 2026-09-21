@@ -1,4 +1,4 @@
--- Store 钱包会话（challenge / session / account address）
+-- PRD89: Store 钱包会话（challenge / session / account address）
 CREATE TABLE IF NOT EXISTS store_auth_challenge (
   nonce TEXT PRIMARY KEY,
   address TEXT NOT NULL,
