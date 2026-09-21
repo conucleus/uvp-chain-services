@@ -173,6 +173,35 @@ describe("Store operator identity and capability auth", () => {
     });
     expect(verified.status).toBe(201);
   });
+
+  it("rejects a malformed Host header with a header-scoped error code, not invalid_body", async () => {
+    // 异常 Host 的缺陷在请求头不在 JSON body：错误码按 store_challenge_*
+    // 族命名（store_challenge_domain_invalid），不冒充 invalid_body——
+    // 客户端按码定位问题时不会被指向 body。
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+
+    const hostileCharacters = await router.handle({
+      method: "POST",
+      pathname: "/store/auth/challenge",
+      headers: { host: "console.good.example/../../evil\r\nX-Injected: 1" },
+      body: { address: "0x0000000000000000000000000000000000000001" }
+    });
+    expect(hostileCharacters).toMatchObject({
+      status: 400,
+      body: { error: "store_challenge_domain_invalid" }
+    });
+
+    const overlong = await router.handle({
+      method: "POST",
+      pathname: "/store/auth/challenge",
+      headers: { host: `${"a".repeat(256)}.example` },
+      body: { address: "0x0000000000000000000000000000000000000001" }
+    });
+    expect(overlong).toMatchObject({
+      status: 400,
+      body: { error: "store_challenge_domain_invalid" }
+    });
+  });
 });
 
 async function session(

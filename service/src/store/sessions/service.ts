@@ -671,15 +671,18 @@ const CHALLENGE_DOMAIN_MAX_LENGTH = 255;
 /**
  * 请求方观测域（Host 头）归一：小写、限长、字符集白名单——拼进签名
  * message 的自由文本面必须收窄。缺失归空串：签发与核验同口径比较，
- * "无观测域签发的挑战"只能同样无域地核验，不构成跨域放行。
+ * "无观测域签发的挑战"只能同样无域地核验，不构成跨域放行。异常 Host
+ * 的错误码是 store_challenge_domain_invalid（问题在头不在 body，且与
+ * verify 时点的 store_challenge_domain_mismatch 同族）——HTTP 请求校验
+ * 码不入链上重试 taxonomy（与 invalid_body 同属词表外描述码）。
  */
 function challengeDomainFromRequester(requester: StoreChallengeRequesterContext | undefined): string {
   const domain = requester?.domain?.trim().toLowerCase() ?? "";
   if (domain.length > CHALLENGE_DOMAIN_MAX_LENGTH) {
-    throw new StoreSessionServiceError(400, "invalid_body", "requester domain is too long");
+    throw new StoreSessionServiceError(400, "store_challenge_domain_invalid", "requester domain is too long");
   }
   if (domain && !CHALLENGE_DOMAIN_PATTERN.test(domain)) {
-    throw new StoreSessionServiceError(400, "invalid_body", "requester domain contains unsupported characters");
+    throw new StoreSessionServiceError(400, "store_challenge_domain_invalid", "requester domain contains unsupported characters");
   }
   return domain;
 }
