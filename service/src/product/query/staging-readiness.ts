@@ -265,7 +265,7 @@ function productStateSummary(
     taskCount: tasks.length,
     openTaskCount: tasks.filter((task) => task.status === "open").length,
     blockedTaskCount: tasks.filter((task) => task.status === "blocked").length,
-    submittedTaskCount: tasks.filter((task) => task.status === "submitted" || task.status === "done").length,
+    submittedTaskCount: tasks.filter((task) => task.status === "submitted").length,
     submittableTaskCount: tasks.filter((task) => task.canSubmit === true).length,
     sampleOrders: orders.slice(0, 10).map((order) => ({
       orderId: order.orderId,
