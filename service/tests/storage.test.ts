@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { copyFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,7 +118,7 @@ const expectedMigrationVersions = [
   "0021_zhixu_version_single_active",
   "0022_product_invite_single_active",
   "0023_participant_wallet_single_role",
-  "0024_docking_session_interface_columns",
+  "0024_drop_join_application_open_plan_applicant_uk",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -305,17 +305,17 @@ describe("durable storage", () => {
     ).toThrow();
   });
 
-  it("upgrades a ledger that applied the pre-0024 docking schema without checksum drift", () => {
-    // 旧库路径：库按 0006 原始建表（source_version_id/target_version_id）
-    // 且带存量行，0024 起才切到接口列。台账逐字校验 checksum——已应用
-    // 版本的文件字节一旦漂移（原地改写）旧库升级即被拒启，列改造必须
-    // 走新迁移；升级后与新库 schema 同形，存量行按「未记录」回填。
+  it("upgrades a pre-0024 ledger without checksum drift and drops the duplicate open-application index", () => {
+    // 台账逐字校验已应用迁移的 checksum：库升级只在文件集保持原始字节时
+    // 放行。旧库先按 0024 前的文件集建库（0015/0018 各留一条同型打开态
+    // 唯一部分索引），升级后重复索引被 0024 收口、唯一裁决仍在，且与新库
+    // 一次跑完的最终索引集同形。
     const legacyDatabase = openSqliteDatabase(sqliteUrl(tempDirs));
     databases.push(legacyDatabase);
     const legacyDirectory = mkdtempSync(join(tmpdir(), "uvp-migrations-legacy-"));
     tempDirs.push(legacyDirectory);
     for (const entry of readdirSync(migrationsDirectory(), { withFileTypes: true })) {
-      if (entry.isFile() && !/^002[01234]_/.test(entry.name)) {
+      if (entry.isFile() && !entry.name.startsWith("0024_")) {
         copyFileSync(join(migrationsDirectory(), entry.name), join(legacyDirectory, entry.name));
       }
     }
@@ -326,48 +326,61 @@ describe("durable storage", () => {
     expect(legacyApplied.applied.map((migration) => migration.version)).toContain(
       "0006_store_metadata",
     );
-    legacyDatabase.exec(
-      `INSERT INTO store_docking_session (
-         session_id, source_zhixu_id, target_zhixu_id, source_version_id,
-         target_version_id, status, draft_signal_map_json, validation_json,
-         session_json, created_at, updated_at
-       ) VALUES (
-         'legacy-session', 'zhixu-a', 'zhixu-b', 'v1', 'v2', 'draft',
-         '[]', '{}', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
-       )`,
-    );
+    expect(uniquePartialIndexNames(legacyDatabase)).toEqual([
+      "store_join_application_open_plan_applicant_uk",
+      "store_join_application_open_unique",
+    ]);
+    legacyDatabase.exec(joinApplicationInsert("legacy-application", "applied"));
 
     // 升级 = 把当前文件集（含 0024）指向旧库：已应用版本 checksum 全部
-    // 命中（0006 等保持原始字节），仅 0019..0024 待应用。
+    // 命中，仅 0024 待应用——任何已应用文件被原地改写都会在这里被拒。
     const upgraded = runSqliteMigrations({
       database: legacyDatabase,
       migrationsDirectory: migrationsDirectory(),
     });
     expect(upgraded.applied.map((migration) => migration.version)).toEqual([
-      "0020_store_challenge_requester_key",
-      "0021_zhixu_version_single_active",
-      "0022_product_invite_single_active",
-      "0023_participant_wallet_single_role",
-      "0024_docking_session_interface_columns",
+      "0024_drop_join_application_open_plan_applicant_uk",
     ]);
-    const legacyRow = legacyDatabase
-      .prepare("SELECT selected_interface_name, order_mode FROM store_docking_session WHERE session_id = 'legacy-session'")
-      .get() as Record<string, unknown>;
-    expect(legacyRow.selected_interface_name).toBe("");
-    expect(legacyRow.order_mode).toBe("");
+    expect(uniquePartialIndexNames(legacyDatabase)).toEqual([
+      "store_join_application_open_unique",
+    ]);
+    // 唯一裁决仍生效：同 plan + 同申请人的第二条打开态申请撞索引。
+    expect(() =>
+      legacyDatabase.exec(joinApplicationInsert("legacy-application-duplicate", "applied")),
+    ).toThrow();
 
-    // 新库路径：全量迁移一次跑完，最终 schema 与旧库升级后同形。
+    // 新库路径：全量迁移一次跑完，最终索引集与旧库升级后同形。
     const freshDatabase = openSqliteDatabase(sqliteUrl(tempDirs));
     databases.push(freshDatabase);
     runSqliteMigrations({ database: freshDatabase, migrationsDirectory: migrationsDirectory() });
-    const dockingColumns = (database: SqliteDatabase) =>
-      (database.prepare("PRAGMA table_info(store_docking_session)").all() as Record<string, unknown>[])
-        .map((column) => `${column.name}:${column.type}:${column.notnull}:${column.dflt_value}`)
-        .sort();
-    expect(dockingColumns(legacyDatabase)).toEqual(dockingColumns(freshDatabase));
-    expect(dockingColumns(freshDatabase)).not.toContain(expect.stringContaining("source_version_id"));
-    expect(dockingColumns(freshDatabase)).toContain("selected_interface_name:TEXT:1:''");
-    expect(dockingColumns(freshDatabase)).toContain("order_mode:TEXT:1:''");
+    expect(uniquePartialIndexNames(freshDatabase)).toEqual(
+      uniquePartialIndexNames(legacyDatabase),
+    );
+  });
+
+  it("refuses to migrate a ledger whose applied migration file drifted", () => {
+    // 已应用迁移的文件字节一旦漂移（原地改写），checksum 硬失配——迁移
+    // 加载必须响亮拒绝而不是把 schema 叠在改写过的历史上；结构性收口
+    // 只能走全新编号迁移。
+    const database = openSqliteDatabase(sqliteUrl(tempDirs));
+    databases.push(database);
+    runSqliteMigrations({ database, migrationsDirectory: migrationsDirectory() });
+
+    const driftedDirectory = mkdtempSync(join(tmpdir(), "uvp-migrations-drift-"));
+    tempDirs.push(driftedDirectory);
+    for (const entry of readdirSync(migrationsDirectory(), { withFileTypes: true })) {
+      if (!entry.isFile()) {
+        continue;
+      }
+      const content = readFileSync(join(migrationsDirectory(), entry.name), "utf8");
+      writeFileSync(
+        join(driftedDirectory, entry.name),
+        entry.name === "0006_store_metadata.sql" ? `${content}-- drifted bytes\n` : content,
+      );
+    }
+    expect(() =>
+      runSqliteMigrations({ database, migrationsDirectory: driftedDirectory }),
+    ).toThrow(/0006_store_metadata checksum mismatch/);
   });
 
   it("deduplicates the same event but retains same-position logs from different transactions", async () => {
@@ -2778,6 +2791,35 @@ function migrationsDirectoryWithoutConvergenceFiles(
     }
   }
   return base;
+}
+
+/** store_join_application 上的唯一部分索引名（升序）：0024 收口后应只剩
+ * 0018 的打开态唯一裁决一条。 */
+function uniquePartialIndexNames(database: SqliteDatabase): string[] {
+  return (
+    database.prepare("PRAGMA index_list(store_join_application)").all() as Record<
+      string,
+      unknown
+    >[]
+  )
+    .filter((index) => index.unique === 1 && index.partial === 1)
+    .map((index) => String(index.name))
+    .sort();
+}
+
+/** 同 plan + 同申请人的打开态申请行：application_id/status 可变，便于
+ * 制造撞打开态唯一索引的写入对。 */
+function joinApplicationInsert(applicationId: string, status: string): string {
+  return `
+    INSERT INTO store_join_application (
+      application_id, plan_id, role_slot_id, authorization_kind,
+      applicant_address, applicant_subject_id, status, tx_evidence_json,
+      submitted_at, updated_at
+    ) VALUES (
+      '${applicationId}', '${planId}', 'role-slot', 'store_join',
+      '${seller}', 'subject-a', '${status}', '{}',
+      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+    )`;
 }
 
 const raceWalletLower = "0xaabbccddeeff001122334455667778899aabbccdd";
