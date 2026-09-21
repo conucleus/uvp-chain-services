@@ -268,8 +268,8 @@ describe("ViemChainEventSource", () => {
   });
 
   it("anchors the finalized bound on the finalized tag by default and on confirmations when overridden", async () => {
-    // M44：默认锚是 finalized 标签——finalityConfirmations=1 的浅缓冲
-    // 会被 2 块深 reorg 越过，旧分叉事件成为游标之下的永久幽灵。
+    // 默认锚定 finalized 标签：finalityConfirmations=1 这类浅确认缓冲会被
+    // 2 块深 reorg 越过，旧分叉事件从此成为游标之下的永久幽灵。
     const blockCalls: unknown[] = [];
     const finalizedSource = new ViemChainEventSource({
       publicClient: {
