@@ -37,7 +37,7 @@ export function createStoreDockingRouteModule(): RouteModule {
             return anchored;
           }
           try {
-            // 归属由服务端锚定地址派生（U5）：创建者即会话租户，不从请求体取。
+            // 归属由服务端锚定地址派生：创建者即会话租户，不从请求体取。
             const session = await context.storeDockingService.createSession(
               parseStoreDockingCreateBody(request.body),
               { anchoredAddress: anchored.anchoredAddress }
@@ -70,7 +70,7 @@ export function createStoreDockingRouteModule(): RouteModule {
           }
           try {
             const session = await context.storeDockingService.getSession(sessionId);
-            // 归属断言（U5）：非本租户会话与不存在同响应（404），不向他人
+            // 归属断言：非本租户会话与不存在同响应（404），不向他人
             // reader 泄露会话存在性；管理员保留跨租户治理可见性。
             if (!session || !canAccessDockingSession(session, authorization.access)) {
               const denied = new StoreDockingServiceError(

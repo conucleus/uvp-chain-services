@@ -283,7 +283,10 @@ export function createProductBffService(
       // 是"链上订单从何而来"的档案，进入触发生命周期后再改内容会割裂
       // 档案与已签名/已广播负载的对应关系，确定性拒绝而非只靠 CAS 竞态
       // 兜底。failed 仍可编辑：重试 prepare 按当前稿重建授权，改稿重试
-      // 是失败恢复路径。
+      // 是失败恢复路径。ready_to_trigger（prepared）同样保持可编辑：
+      // payloadHash 已在 prepare 时点定形，这里的可编辑字段（标题/品名/
+      // 金额等档案面）不进链上负载，prepared 期编辑不改已签名面——签名
+      // 校验锚 registration 定形的 typedData，而非稿行现状。
       if (
         current.status === "triggering" ||
         current.status === "triggered" ||

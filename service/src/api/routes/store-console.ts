@@ -134,7 +134,7 @@ export function createStoreConsoleRouteModule(options: {
         if (!isStoreAuthorizationResult(authorization)) {
           return authorization;
         }
-        // 审计流租户隔离（U5）：非管理员（reader/operator）只能读到自己
+        // 审计流租户隔离：非管理员（reader/operator）只能读到自己
         // actor 名下的记录——运营观察面的全局流是跨运营方枚举桥，只有
         // canAdmin（store_admin/governance_admin）保留全量视角。显式点名
         // 他人 actor 直接 403，不静默返回空集。
