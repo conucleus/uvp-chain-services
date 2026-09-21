@@ -1168,7 +1168,7 @@ describe("indexer projection replay", () => {
       const persisted = await store.getOrderSnapshot();
       expect(persisted.stateMachinePlans[planKey]?.selectorBindings).toHaveLength(1);
       expect(persisted.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(1);
-      expect(refreshed.summary.capabilityEnrichmentMismatchCount ?? 0).toBe(0);
+      expect(refreshed.snapshot.capabilityEnrichmentMismatchCount ?? 0).toBe(0);
     } finally {
       await store.close();
       rmSync(tempDir, { recursive: true, force: true });
