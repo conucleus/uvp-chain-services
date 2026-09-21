@@ -1,6 +1,13 @@
 import { createPublicClient, createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { STATE_MACHINE_ABI, buildSubmitSignalForCall } from "@uvp-eth/protocol-bindings";
+import {
+  STATE_MACHINE_ABI,
+  buildSubmitSignalForCall,
+  type SelectorBindingCallStruct,
+  type SelectorBindingPayload,
+  type SignalAttributionCallStruct,
+  type SignalAttributionPayload
+} from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import {
   ZERO_ADDRESS,
@@ -14,6 +21,7 @@ import {
   requiredRpcUrl
 } from "../shared/broadcast/kit.js";
 import { resolveDuplicateTransactionOutcome } from "../shared/broadcast/duplicate-transaction.js";
+import { zeroFactAttribution, zeroSelectorBinding } from "./capability-proofs.js";
 import type { SubmissionBroadcastAdapter, SubmissionBroadcastResult } from "./types.js";
 
 export interface StateMachineSubmissionPublicClient {
@@ -33,7 +41,19 @@ export interface StateMachineSubmitSignalForCall {
   readonly address: Address;
   readonly abi: typeof STATE_MACHINE_ABI;
   readonly functionName: "submitSignalFor";
-  readonly args: readonly [Hex, Hex, Hex, Hex, Hex, Hex, Address, bigint, Hex];
+  readonly args: readonly [
+    Hex,
+    Hex,
+    Hex,
+    Hex,
+    Hex,
+    Hex,
+    Address,
+    bigint,
+    Hex,
+    SignalAttributionCallStruct,
+    SelectorBindingCallStruct
+  ];
   readonly data?: Hex;
   readonly chainId?: number;
 }
@@ -159,6 +179,12 @@ export function createStateMachineSubmissionBroadcastAdapter(
 
       let txHash: Hex;
       try {
+        // 词表造证参数：prepare 时从 plan 投影两表构造；缺省（旧档案/
+        // 外部 plan）按全零结构兜底（词表外不声明，合约按词表闸裁决）。
+        const attribution: SignalAttributionPayload = request.prepared.attribution ??
+          zeroFactAttribution(request.prepared.sourceId, request.prepared.signalId);
+        const selectorBinding: SelectorBindingPayload = request.prepared.selectorBinding ??
+          zeroSelectorBinding();
         const call = buildSubmitSignalForCall({
           stateMachineAddress: request.prepared.typedData.domain.verifyingContract ?? stateMachineAddress,
           chainId: options.chainId
@@ -171,7 +197,9 @@ export function createStateMachineSubmissionBroadcastAdapter(
           idempotencyKey: request.prepared.idempotencyKey,
           submitter: request.prepared.submitter,
           deadline: request.prepared.deadline,
-          signature: request.signature
+          signature: request.signature,
+          attribution,
+          selectorBinding
         });
         txHash = await walletClient.writeContract(call);
       } catch (error) {

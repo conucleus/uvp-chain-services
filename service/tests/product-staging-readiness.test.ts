@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
+import { capabilitiesRootOf } from "@uvp-eth/compiler";
+import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import { crossBorderPlanIds } from "@uvp-eth/product-dto/fixtures";
 import { buildConfigDiagnostics, loadConfigFromEnv, type ConfigDiagnostics } from "../src/config/index.js";
 import { createApiRouter } from "../src/api/routes.js";
@@ -78,7 +80,7 @@ describe("Product API staging readiness", () => {
 
   it("serves a no-secret ready summary from non-demo chain projections", async () => {
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents() });
+    await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents(), planCapabilityTables: [readinessVocabulary()] });
     await store.saveSyncState({
       chainId,
       contractAddress: stateMachineAddress,
@@ -215,7 +217,7 @@ describe("Product API staging readiness", () => {
 
   it("fails closed when permissive authorization is presented as staging evidence", async () => {
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents({ includeActiveDeployment: false }) });
+    await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents({ includeActiveDeployment: false }), planCapabilityTables: [readinessVocabulary()] });
     const baseDiagnostics = stagingDiagnostics(tempDirs);
     const unsafeDiagnostics: ConfigDiagnostics = {
       ...baseDiagnostics,
@@ -303,7 +305,7 @@ describe("Product API staging readiness", () => {
       }
     };
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents() });
+    await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents(), planCapabilityTables: [readinessVocabulary()] });
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
@@ -438,23 +440,64 @@ function stagingManifestPath(tempDirs: string[]): string {
   return manifestPath;
 }
 
+/**
+ * 词表产物富集夹具：两步发布事件（PlanCommitted/PlanFinalized 携带
+ * capabilitiesRoot）+ 配对富集源——词表注册事件已从链上删除，任务的
+ * submittable 判定依赖富集后的 submitSignals。
+ */
+function readinessVocabulary(): PlanCapabilityTablesInput & { readonly capabilitiesRoot: Hex } {
+  const signalCapabilities = [
+    {
+      stageId: stageId as Hex,
+      targetSourceId: stageId as Hex,
+      signalId: hookName as Hex,
+      targetOrderRelation: 0 as const,
+    },
+  ];
+  return {
+    planId: crossBorderPlanIds.planId as Hex,
+    planHash: crossBorderPlanIds.planHash as Hex,
+    selectorBindings: [],
+    signalCapabilities,
+    capabilitiesRoot: capabilitiesRootOf([], signalCapabilities),
+  };
+}
+
+function planPublishEvents(vocabulary: { readonly capabilitiesRoot: Hex }): readonly ChainEvent[] {
+  return [
+    chainEvent(4n, 0, "PlanCommitted", {
+      planId: crossBorderPlanIds.planId,
+      planHash: crossBorderPlanIds.planHash,
+      publisher: submitter,
+      hooksHash: bytes32Text("hooks"),
+      capabilitiesRoot: vocabulary.capabilitiesRoot,
+      hookCount: 1n,
+      dockRoutesRoot: bytes32Text("routes"),
+      dockInterfaceRoot: bytes32Text("iface")
+    }),
+    chainEvent(4n, 1, "PlanPublisherRecorded", {
+      planId: crossBorderPlanIds.planId,
+      publisher: submitter
+    }),
+    chainEvent(4n, 2, "PlanFinalized", {
+      planId: crossBorderPlanIds.planId,
+      planHash: crossBorderPlanIds.planHash,
+      capabilitiesRoot: vocabulary.capabilitiesRoot
+    }),
+    chainEvent(4n, 3, "PlanRegistered", {
+      planId: crossBorderPlanIds.planId,
+      planHash: crossBorderPlanIds.planHash,
+      hookCount: 1n
+    })
+  ];
+}
+
 function readinessEvents(options: {
   readonly includeActiveDeployment?: boolean;
 } = {}): readonly ChainEvent[] {
   return [
     ...(options.includeActiveDeployment === false ? [] : activeDeploymentEvents()),
-    chainEvent(4n, 0, "PlanRegistered", {
-      planId: crossBorderPlanIds.planId,
-      planHash: crossBorderPlanIds.planHash,
-      hookCount: 1n
-    }),
-    chainEvent(5n, 0, "SignalCapabilityRegistered", {
-      planId: crossBorderPlanIds.planId,
-      stageId,
-      targetSourceId: stageId,
-      signalId: hookName,
-      targetOrderRelation: 0
-    }),
+    ...planPublishEvents(readinessVocabulary()),
     chainEvent(6n, 0, "OrderRegistered", {
       orderId: stateMachineOrderId,
       planId: crossBorderPlanIds.planId

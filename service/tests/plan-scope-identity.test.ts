@@ -95,20 +95,6 @@ function collisionEvents(): readonly ChainEvent[] {
     event(2n, "PlanRegistered", { planId: planB, planHash: word("b0"), hookCount: 1n }),
     event(3n, "OrderRegistered", { orderId, planId: planA }),
     event(4n, "OrderRegistered", { orderId, planId: planB }),
-    event(5n, "SignalCapabilityRegistered", {
-      planId: planA,
-      stageId,
-      targetSourceId: hookId,
-      signalId: hookId,
-      targetOrderRelation: 0,
-    }),
-    event(6n, "SignalCapabilityRegistered", {
-      planId: planB,
-      stageId,
-      targetSourceId: hookId,
-      signalId: hookId,
-      targetOrderRelation: 0,
-    }),
     event(7n, "SignalSubmitterAuthorized", {
       planId: planA,
       orderId,

@@ -1,3 +1,4 @@
+import type { SelectorBindingPayload, StageFactPayload } from "@uvp-eth/protocol-bindings";
 import type { Address, Hex } from "../shared/types.js";
 
 export interface StagePatchTypedDataField {
@@ -357,12 +358,22 @@ export interface StageExecutorPatchBroadcastRequest {
   readonly previousExecutorSignature?: Hex;
   readonly recoveredSelector: Address;
   readonly recoveredPreviousExecutor?: Address;
+  /**
+   * selector→target 绑定叶 proof（词表 Merkle 化后的必携参数，合约
+   * StageSelectorBindingNotFound fail-closed）。submit 时从 plan 投影
+   * bindings 表构造；投影表空的外部 plan 无法造证，submit 直接拒绝。
+   */
+  readonly bindingProof: SelectorBindingPayload;
+  /** 目标阶段 relation=0 能力全表携证（驱动链上委任与时序闸）。 */
+  readonly stageFacts: readonly StageFactPayload[];
 }
 
 export interface StageResourcePatchBroadcastRequest {
   readonly prepared: PreparedStageResourcePatchDTO;
   readonly signature: Hex;
   readonly recoveredSelector: Address;
+  readonly bindingProof: SelectorBindingPayload;
+  readonly stageFacts: readonly StageFactPayload[];
 }
 
 export interface StageExecutorPatchBroadcastAdapter {

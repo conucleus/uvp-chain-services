@@ -1,5 +1,6 @@
 import type { ChainEvent } from "../indexer/events.js";
 import { filterActiveChainEvents, sortChainEvents } from "../indexer/events.js";
+import type { PlanCapabilityTablesInput } from "../indexer/projections/plan.js";
 import {
   createEmptyProjectionSnapshot,
   type ProjectionSnapshot,
@@ -63,6 +64,13 @@ export interface ProjectionSyncState extends ProjectionScope {
 export interface ProjectionRebuildInput {
   readonly deploymentBlock: bigint;
   readonly events: readonly ChainEvent[];
+  /**
+   * 词表产物富集源（planId → 编译产物两表）：词表注册事件已从链上删除，
+   * plan 投影的两表由重放方按产物富集并断言 capabilitiesRoot（见
+   * indexer/projections/plan.ts）。缺省时所有 plan 两表为空（外部发布
+   * plan 的既定口径）。
+   */
+  readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
   readonly scope?: ProjectionScope;
   readonly syncState?: Omit<ProjectionSyncState, "updatedAt">;
   /**
@@ -215,7 +223,9 @@ export class MemoryProjectionStore implements ProjectionStore {
     const events = input.events.filter(
       (event) => event.blockNumber >= input.deploymentBlock,
     );
-    this.#snapshot = rebuildOrderProjections(events);
+    this.#snapshot = rebuildOrderProjections(events, {
+      ...(input.planCapabilityTables ? { planCapabilityTables: input.planCapabilityTables } : {})
+    });
     this.#identitySnapshot = rebuildIdentityProjections(events);
     this.#syncState = syncStateFromRebuildInput(input, events);
     return this.#snapshot;

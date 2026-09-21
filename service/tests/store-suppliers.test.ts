@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { capabilitiesRootOf } from "@uvp-eth/compiler";
+import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import type { StoreSupplierDTO } from "@uvp-eth/product-dto";
 import {
   crossBorderPlanIds,
@@ -489,10 +491,12 @@ describe("Store supplier directory API", () => {
   it("counts open tasks by the supplier wallet stored in Store metadata", async () => {
     const store = new MemoryProjectionStore();
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
+    const published = planPublishWithVocabulary();
     await store.resetFromEvents({
       deploymentBlock: 0n,
+      planCapabilityTables: published.tables,
       events: [
-        planRegisteredEvent(1n),
+        ...published.events,
         ...stateMachineTaskEvents({
           blockNumber: 3n,
           orderId: stateMachineOrderId,
@@ -853,6 +857,62 @@ function planRegisteredEvent(blockNumber: bigint): ChainEvent {
   });
 }
 
+/**
+ * 词表产物富集夹具：两步发布事件对（PlanCommitted/PlanFinalized 携带
+ * capabilitiesRoot）+ 配对的富集源，供 openTaskCount 等词表驱动断言。
+ */
+function planPublishWithVocabulary(): {
+  readonly events: readonly ChainEvent[];
+  readonly tables: readonly PlanCapabilityTablesInput[];
+} {
+  const selectorBindings: readonly { readonly selectorStageId: Hex; readonly targetStageId: Hex }[] = [];
+  const signalCapabilities = [
+    {
+      stageId: stageId as Hex,
+      targetSourceId: stageId as Hex,
+      signalId: hookName as Hex,
+      targetOrderRelation: 0 as const,
+    },
+  ];
+  const capabilitiesRoot = capabilitiesRootOf(selectorBindings, signalCapabilities);
+  return {
+    events: [
+      chainEvent(1n, 0, "PlanCommitted", {
+        planId: crossBorderPlanIds.planId,
+        planHash: crossBorderPlanIds.planHash,
+        publisher: supplierWallet,
+        hooksHash: bytes32Text("hooks"),
+        capabilitiesRoot,
+        hookCount: 1n,
+        dockRoutesRoot: bytes32Text("routes"),
+        dockInterfaceRoot: bytes32Text("iface"),
+      }),
+      chainEvent(1n, 1, "PlanPublisherRecorded", {
+        planId: crossBorderPlanIds.planId,
+        publisher: supplierWallet,
+      }),
+      chainEvent(2n, 0, "PlanFinalized", {
+        planId: crossBorderPlanIds.planId,
+        planHash: crossBorderPlanIds.planHash,
+        capabilitiesRoot,
+      }),
+      chainEvent(2n, 1, "PlanRegistered", {
+        planId: crossBorderPlanIds.planId,
+        planHash: crossBorderPlanIds.planHash,
+        hookCount: 1n,
+      }),
+    ],
+    tables: [
+      {
+        planId: crossBorderPlanIds.planId as Hex,
+        planHash: crossBorderPlanIds.planHash as Hex,
+        selectorBindings,
+        signalCapabilities,
+      },
+    ],
+  };
+}
+
 function activeDeploymentEvents(): readonly ChainEvent[] {
   return [
     chainEvent(
@@ -903,13 +963,6 @@ function stateMachineTaskEvents(input: {
   readonly wallet: string;
 }): readonly ChainEvent[] {
   return [
-    chainEvent(input.blockNumber, 0, "SignalCapabilityRegistered", {
-      planId: crossBorderPlanIds.planId,
-      stageId,
-      targetSourceId: stageId,
-      signalId: hookName,
-      targetOrderRelation: 0,
-    }),
     chainEvent(input.blockNumber + 1n, 0, "OrderRegistered", {
       orderId: input.orderId,
       planId: crossBorderPlanIds.planId,

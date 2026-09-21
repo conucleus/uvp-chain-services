@@ -1,5 +1,6 @@
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { Hex } from "../shared/types.js";
+import type { PlanCapabilityTables } from "../submissions/capability-proofs.js";
 import { createProductService, ProductOrderLookupError } from "../product/application/service.js";
 import {
   createProductBffService,
@@ -159,8 +160,10 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.productBffStore ? { store: options.productBffStore } : {}),
     ...(options.productRegistrationAdapter ? { registrationAdapter: options.productRegistrationAdapter } : {}),
     ...(options.productTriggerAdapter ? { triggerAdapter: options.productTriggerAdapter } : {}),
-    ...(options.productRegistrationCreatorAddress ? { registrationCreatorAddress: options.productRegistrationCreatorAddress } : {}),
+    ...(options.productRegistrationCreatorAddress ? { productRegistrationCreatorAddress: options.productRegistrationCreatorAddress } : {}),
     ...(options.productRegistrarAddress ? { registrarAddress: options.productRegistrarAddress } : {}),
+    // 出生事实属主自证从 plan 投影词表造（外部 plan 无词表 → 全零，链上闸兜底）。
+    resolvePlanCapabilityTables: resolvePlanCapabilityTablesFromStore(store),
     triggerChainId: productTriggerChainId,
     versionResolver: storeZhixuVersionService,
     ...(options.now ? { now: options.now } : {})
@@ -213,6 +216,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     // plan 作用域 submitSignal 的 planId 取自索引器投影
     // （OrderRegistered/OrderMaterialized 的 indexed planId）。
     resolveOrderPlanId: resolveOrderPlanIdFromStore(store),
+    // 词表 Merkle 造证（attribution/selectorBinding）从 plan 投影两表构造。
+    resolvePlanCapabilityTables: resolvePlanCapabilityTablesFromStore(store),
     // draftId 来源凭证的提交归属核验（U4）：无解析器时提交侧 fail-closed。
     ...(resolveDraftOrder ? { resolveDraftOrder } : {}),
     ...(options.submissionBroadcastAdapter ? { broadcastAdapter: options.submissionBroadcastAdapter } : {}),
@@ -642,6 +647,30 @@ function resolveOrderPlanIdFromStore(
       );
     }
     return candidates[0]?.planId;
+  };
+}
+
+/**
+ * plan 投影词表两表解析（词表 Merkle 化后的造证源）：按 planId 从投影
+ * 快照读 selectorBindings/signalCapabilities（applyPlanFinalized 时产物
+ * 富集 + capabilitiesRoot 断言的成果）。plan 不在投影/两表为空（外部
+ * 发布 plan）→ undefined，消费方按全零结构降级（链上词表闸兜底）。
+ */
+function resolvePlanCapabilityTablesFromStore(
+  store: ProjectionStore
+): (planId: Hex) => Promise<PlanCapabilityTables | undefined> {
+  return async (planId) => {
+    const snapshot = await store.getOrderSnapshot();
+    const plan = Object.values(snapshot.stateMachinePlans).find(
+      (candidate) => candidate.planId.toLowerCase() === planId.toLowerCase()
+    );
+    if (!plan) {
+      return undefined;
+    }
+    return {
+      selectorBindings: plan.selectorBindings,
+      signalCapabilities: plan.signalCapabilities
+    };
   };
 }
 

@@ -33,8 +33,7 @@ import {
   applyPlanFinalized,
   applyPlanPublisherRecorded,
   applyPlanRegistered,
-  applySignalCapabilityRegistered,
-  applyStageSelectorBindingRegistered
+  type PlanCapabilityTablesInput
 } from "./projections/plan.js";
 import {
   applyDerivedSignalSubmitted,
@@ -114,7 +113,10 @@ export function countDuplicateActiveEventAnomalies(events: readonly ChainEvent[]
   return anomalies;
 }
 
-export function rebuildOrderProjections(events: readonly ChainEvent[]): ProjectionSnapshot {
+export function rebuildOrderProjections(
+  events: readonly ChainEvent[],
+  options: ProjectionReplayOptions = {}
+): ProjectionSnapshot {
   const stateMachineDeployments = new Map<string, MutableStateMachineDeploymentProjection>();
   const stateMachineModules = new Map<string, MutableStateMachineModuleProjection>();
   const stateMachinePlans = new Map<string, MutableStateMachinePlanProjection>();
@@ -124,8 +126,15 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
     unresolvedModuleOrderEventCount: 0,
     unresolvedDockEventCount: 0,
     unresolvedStageActivationEventCount: 0,
-    unresolvedDockTargetDeploymentCount: 0
+    unresolvedDockTargetDeploymentCount: 0,
+    capabilityEnrichmentMismatchCount: 0
   };
+  // 词表产物富集索引：planId(lower) → 编译产物两表（applyPlanFinalized/
+  // applyPlanRegistered 时填进投影并断言 capabilitiesRoot，见 plan.ts）。
+  const capabilityTables = new Map<string, PlanCapabilityTablesInput>();
+  for (const source of options.planCapabilityTables ?? []) {
+    capabilityTables.set(source.planId.toLowerCase(), source);
+  }
   let activeStateMachineDeploymentId: Hex | undefined;
   let eventCount = 0;
   let lastEvent: ProjectionProvenance | undefined;
@@ -138,6 +147,7 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
       plans: stateMachinePlans,
       orders: stateMachineOrders,
       docks: stateMachineDocks,
+      capabilityTables,
       diagnostics
     }, event);
     eventCount += 1;
@@ -202,8 +212,18 @@ export function rebuildOrderProjections(events: readonly ChainEvent[]): Projecti
     unresolvedDockEventCount: diagnostics.unresolvedDockEventCount,
     unresolvedStageActivationEventCount: diagnostics.unresolvedStageActivationEventCount,
     unresolvedDockTargetDeploymentCount: diagnostics.unresolvedDockTargetDeploymentCount,
+    capabilityEnrichmentMismatchCount: diagnostics.capabilityEnrichmentMismatchCount,
     ...(lastEvent ? { lastEvent } : {})
   };
+}
+
+/**
+ * 重放选项。planCapabilityTables：planId 锚定的编译产物两表（词表富集源，
+ * 见 projections/plan.ts 的 fail-closed 口径）；缺省时所有 plan 两表为空
+ * ——与"事件面已删除注册事件"后的链上事实一致，只是词表相关推导不可用。
+ */
+export interface ProjectionReplayOptions {
+  readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
 }
 
 function applyStateMachineEvent(
@@ -213,6 +233,7 @@ function applyStateMachineEvent(
     plans: Map<string, MutableStateMachinePlanProjection>;
     orders: Map<string, MutableStateMachineOrderProjection>;
     docks: Map<string, MutableStateMachineDockProjection>;
+    capabilityTables: ReadonlyMap<string, PlanCapabilityTablesInput>;
     diagnostics: ProjectionReplayDiagnostics;
   },
   event: ChainEvent
@@ -256,12 +277,6 @@ function applyStateMachineEvent(
       return;
     case "OrderLinked":
       applyOrderLinked(state, event);
-      return;
-    case "SignalCapabilityRegistered":
-      applySignalCapabilityRegistered(state, event);
-      return;
-    case "StageSelectorBindingRegistered":
-      applyStageSelectorBindingRegistered(state, event);
       return;
     case "StageExecutorPatchApplied":
       applyStageExecutorPatchApplied(state, event);

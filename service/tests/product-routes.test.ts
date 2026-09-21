@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { capabilitiesRootOf } from "@uvp-eth/compiler";
+import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import { keccak256, stringToBytes } from "viem";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
@@ -2050,13 +2052,6 @@ describe("product API routes", () => {
           planHash: crossBorderPlanIds.planHash,
           hookCount: 1n
         }),
-        chainEvent(2n, "SignalCapabilityRegistered", {
-          planId: crossBorderPlanIds.planId,
-          stageId,
-          targetSourceId: delegatedSourceId,
-          signalId: delegatedSignalId,
-          targetOrderRelation: 0
-        }),
         chainEvent(3n, "OrderRegistered", {
           orderId: stateMachineOrderId,
           planId: crossBorderPlanIds.planId
@@ -2182,13 +2177,6 @@ describe("product API routes", () => {
           planId: crossBorderPlanIds.planId,
           planHash: crossBorderPlanIds.planHash,
           hookCount: 1n
-        }),
-        chainEvent(2n, "SignalCapabilityRegistered", {
-          planId: crossBorderPlanIds.planId,
-          stageId,
-          targetSourceId: delegatedSourceId,
-          signalId: delegatedSignalId,
-          targetOrderRelation: 0
         }),
         chainEvent(3n, "OrderRegistered", {
           orderId: stateMachineOrderId,
@@ -2363,6 +2351,79 @@ interface ChainBackedOrder {
   readonly projection: unknown;
 }
 
+/**
+ * 词表产物富集夹具（协议重构后两表的来源）：发布事件对携带
+ * capabilitiesRoot，resetFromEvents 按 root 从注册表取富集源。
+ */
+const productVocabularyRegistry = new Map<string, PlanCapabilityTablesInput>();
+
+function registerProductVocabulary(signalCapabilities: readonly {
+  readonly stageId: Hex;
+  readonly targetSourceId: Hex;
+  readonly signalId: Hex;
+  readonly targetOrderRelation: 0 | 1;
+}[]): string {
+  const capabilitiesRoot = capabilitiesRootOf([], signalCapabilities);
+  productVocabularyRegistry.set(capabilitiesRoot, {
+    planId: crossBorderPlanIds.planId as Hex,
+    planHash: crossBorderPlanIds.planHash as Hex,
+    selectorBindings: [],
+    signalCapabilities
+  });
+  return capabilitiesRoot;
+}
+
+function planCapabilityTablesForEvents(events: readonly ChainEvent[]): readonly PlanCapabilityTablesInput[] {
+  const roots = new Set(events
+    .filter((event) => event.eventName === "PlanCommitted" || event.eventName === "PlanFinalized")
+    .map((event) => String(event.args["capabilitiesRoot"] ?? "").toLowerCase()));
+  return [...productVocabularyRegistry.entries()]
+    .filter(([root]) => roots.has(root))
+    .map(([, tables]) => tables);
+}
+
+function chainEventAt(blockNumber: bigint, logIndex: number, eventName: string, args: Record<string, unknown>): ChainEvent {
+  return {
+    chainId: 31337,
+    contractAddress: contractAddress as Address,
+    blockNumber,
+    transactionHash: txHash(blockNumber),
+    logIndex,
+    eventName,
+    args
+  };
+}
+
+/** 两步发布事件对（v0.11 真实链序），root 与富集源配对。 */
+function planPublishEvents(capabilitiesRoot: string, blockNumber = 1n): readonly ChainEvent[] {
+  return [
+    chainEventAt(blockNumber, 0, "PlanCommitted", {
+      planId: crossBorderPlanIds.planId,
+      planHash: crossBorderPlanIds.planHash,
+      publisher: submitter,
+      hooksHash: bytes32Text("hooks"),
+      capabilitiesRoot,
+      hookCount: 1n,
+      dockRoutesRoot: bytes32Text("routes"),
+      dockInterfaceRoot: bytes32Text("iface")
+    }),
+    chainEventAt(blockNumber, 1, "PlanPublisherRecorded", {
+      planId: crossBorderPlanIds.planId,
+      publisher: submitter
+    }),
+    chainEventAt(blockNumber, 2, "PlanFinalized", {
+      planId: crossBorderPlanIds.planId,
+      planHash: crossBorderPlanIds.planHash,
+      capabilitiesRoot
+    }),
+    chainEventAt(blockNumber, 3, "PlanRegistered", {
+      planId: crossBorderPlanIds.planId,
+      planHash: crossBorderPlanIds.planHash,
+      hookCount: 1n
+    })
+  ];
+}
+
 function stateMachineProductEvents(options: {
   readonly includeMatchingSignal?: boolean;
   readonly taskStageId?: string;
@@ -2379,13 +2440,6 @@ function stateMachineProductEvents(options: {
       planId: eventPlanId,
       planHash: eventPlanHash,
       hookCount: 1n
-    }),
-    chainEvent(2n, "SignalCapabilityRegistered", {
-      planId: eventPlanId,
-      stageId: eventTaskStageId,
-      targetSourceId: eventTaskStageId,
-      signalId: eventTaskHookName,
-      targetOrderRelation: 0
     }),
     chainEvent(3n, "OrderRegistered", {
       orderId: stateMachineOrderId,

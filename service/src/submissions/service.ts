@@ -31,6 +31,12 @@ import type {
   PrepareProductTaskSubmitInput
 } from "./types.js";
 import { classifyStateMachineBroadcastError } from "./broadcast-adapter.js";
+import {
+  factAttributionPayload,
+  selectorBindingForTargetStage,
+  zeroSelectorBinding,
+  type PlanCapabilityTables
+} from "./capability-proofs.js";
 import type { EvidencePrincipal, EvidenceRecordDTO } from "../evidence/index.js";
 import { ProductOrderLookupError } from "../product/application/service.js";
 
@@ -64,6 +70,14 @@ export interface ProductSubmissionServiceOptions {
    * projection cannot supply a non-zero planId.
    */
   readonly resolveOrderPlanId?: (onchainOrderId: Hex) => Promise<Hex | undefined>;
+  /**
+   * 词表产物富集源（plan 投影两表）：prepare 时构造 submitSignalFor 的
+   * attribution/selectorBinding（Merkle 造证单源在
+   * ./capability-proofs.ts）。缺省或投影表空（外部发布 plan）→ 全零结构
+   * ——链上按词表闸自行裁决（词表内事实会被 InvalidSignalCapability
+   * 拒绝，服务端无法为没有词表的 plan 造证）。
+   */
+  readonly resolvePlanCapabilityTables?: (planId: Hex) => Promise<PlanCapabilityTables | undefined>;
   /**
    * 草稿期上传的凭证（draftId 来源）进入提交前的归属核验：把 draftId
    * 解析成该草稿已触发的订单 id，与目标订单比对。缺省或解析不到时
@@ -195,6 +209,15 @@ export function createProductSubmissionService(options: ProductSubmissionService
       const createdAt = now();
       const deadlineSeconds = Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const nonce = normalizeNonce(nonceFactory());
+      // 词表 Merkle 造证：attribution（事实属主自证）+ selectorBinding（属主
+      // 阶段的 selector 绑定证明）。词表外/投影表空 → 全零结构（链上按词表
+      // 闸裁决）；typedData 不承诺这两个参数，零结构只是广播参数降级。
+      const { attribution, selectorBinding } = await resolveSubmissionCapabilityProofs(
+        options.resolvePlanCapabilityTables,
+        planId,
+        chainSignal.sourceId,
+        chainSignal.signalId
+      );
       const idempotencyKey = idempotencyKeyForPrepared({
         orderId: task.orderId,
         onchainOrderId: chainSignal.orderId,
@@ -251,6 +274,8 @@ export function createProductSubmissionService(options: ProductSubmissionService
         }),
         typedData,
         evidence: evidence.map((record) => evidenceSummary(record)),
+        attribution,
+        selectorBinding,
         authorization: {
           source: authResult.source
         },
@@ -522,6 +547,55 @@ async function withSubmissionStoreTransaction<T>(
   operation: () => Promise<T>
 ): Promise<T> {
   return store.withTransaction ? store.withTransaction(operation) : operation();
+}
+
+const EMPTY_PLAN_CAPABILITY_TABLES: PlanCapabilityTables = {
+  selectorBindings: [],
+  signalCapabilities: []
+};
+
+/**
+ * submitSignalFor 的词表造证（prepare 时点）：plan 词表在 finalize 后
+ * 不可变，prepare 与 broadcast 之间证明不会过期。
+ *
+ * - 投影表命中 relation=0 能力 → 属主阶段 + 能力叶 proof，并按属主阶段
+ *   找 selector 绑定叶 proof（找不到 → 全零，合约按"未声明"放行）；
+ * - 词表外事实 / 投影表空（外部发布 plan）→ 全零 attribution + 全零
+ *   selectorBinding：链上词表闸自会拒绝词表内事实
+ *   （InvalidSignalCapability），词表外事实按 source==stage 回退解析；
+ * - 解析器故障按"无词表"处理（全零降级）——typedData 不承诺这两个
+ *   广播参数，降级不烧签名；富集是投影侧增强，不得反过来阻断提交。
+ */
+async function resolveSubmissionCapabilityProofs(
+  resolvePlanCapabilityTables:
+    | ((planId: Hex) => Promise<PlanCapabilityTables | undefined>)
+    | undefined,
+  planId: Hex,
+  sourceId: Hex,
+  signalId: Hex
+): Promise<{
+  readonly attribution: ReturnType<typeof factAttributionPayload>;
+  readonly selectorBinding: ReturnType<typeof selectorBindingForTargetStage>;
+}> {
+  let tables: PlanCapabilityTables | undefined;
+  try {
+    tables = resolvePlanCapabilityTables
+      ? await resolvePlanCapabilityTables(planId)
+      : undefined;
+  } catch {
+    tables = undefined;
+  }
+  const effectiveTables = tables ?? EMPTY_PLAN_CAPABILITY_TABLES;
+  const attribution = factAttributionPayload(effectiveTables, sourceId, signalId);
+  if (attribution.stageId === ZERO_BYTES32) {
+    // 词表外事实：合约按 source==stage 回退解析属主阶段——服务端无 plan
+    // 阶段全集可镜像，不猜测，selectorBinding 同步不携证。
+    return { attribution, selectorBinding: zeroSelectorBinding() };
+  }
+  return {
+    attribution,
+    selectorBinding: selectorBindingForTargetStage(effectiveTables, attribution.stageId)
+  };
 }
 
 async function bindSubmittedEvidence(

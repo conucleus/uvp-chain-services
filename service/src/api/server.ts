@@ -42,6 +42,7 @@ import { ConfigError, consoleLogger, type Address, type Logger } from "../shared
 import { createApiRouter } from "./routes.js";
 import { InvalidPathParameterError, invalidPathParameterResponse } from "./route-context.js";
 import { createListingAnchorChainView } from "../store/listings/index.js";
+import { createPlanCapabilityTablesResolver } from "../store/console/zhixu-drafts.js";
 
 export interface StartApiServerOptions {
   readonly config?: ChainServicesConfig;
@@ -112,6 +113,12 @@ export async function startApiServer(
       eventSource,
       store,
       notificationProcessor: notificationService,
+      // 词表产物富集源：join 口径与版本激活一致（zhixu 草稿 product
+      // schema 的 onchainHookPlanArtifact 按 (planId, planHash) 取最新，
+      // 见 store/console/zhixu-drafts.ts 的
+      // createPlanCapabilityTablesResolver）；重放侧再断言
+      // capabilitiesRoot 一致（fail-closed，见 indexer/projections/plan.ts）。
+      resolvePlanCapabilityTables: createPlanCapabilityTablesResolver(stores.storeZhixuDraftStore),
       logger
     })
     : undefined;

@@ -4,7 +4,9 @@ import {
   buildApplyStageExecutorPatchForCall,
   buildApplyStageResourcePatchForCall,
   type ApplyStageExecutorPatchForCall,
-  type ApplyStageResourcePatchForCall
+  type ApplyStageResourcePatchForCall,
+  type SelectorBindingPayload,
+  type StageFactPayload
 } from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import {
@@ -105,7 +107,9 @@ export const STAGE_EXECUTOR_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLa
       selector: prepared.selectorWallet,
       deadline: prepared.deadline,
       selectorSignature: request.signature,
-      previousExecutorSignature: request.previousExecutorSignature ?? "0x"
+      previousExecutorSignature: request.previousExecutorSignature ?? "0x",
+      bindingProof: request.bindingProof,
+      stageFacts: request.stageFacts
     }
   )
 };
@@ -135,7 +139,9 @@ export const STAGE_RESOURCE_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLa
       },
       selector: prepared.selectorWallet,
       deadline: prepared.deadline,
-      signature: request.signature
+      signature: request.signature,
+      bindingProof: request.bindingProof,
+      stageFacts: request.stageFacts
     }
   )
 };
@@ -160,6 +166,9 @@ type StagePatchBroadcastRequestBase<TPrepared extends PreparedPatchForBroadcast>
   readonly signature: Hex;
   readonly recoveredSelector: Address;
   readonly previousExecutorSignature?: Hex;
+  /** 词表 Merkle 造证（submit 时从 plan 投影两表构造，fail-closed）。 */
+  readonly bindingProof: SelectorBindingPayload;
+  readonly stageFacts: readonly StageFactPayload[];
 };
 
 interface StagePatchBroadcastAdapterLabels<TPrepared extends PreparedPatchForBroadcast> {

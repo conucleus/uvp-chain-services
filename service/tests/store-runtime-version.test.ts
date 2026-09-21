@@ -32,13 +32,6 @@ describe("Store runtime and version selection", () => {
           hookCount: 1n,
         }),
         event(2n, "OrderRegistered", { orderId, planId: crossBorderPlanIds.planId }),
-        event(3n, "SignalCapabilityRegistered", {
-          planId: crossBorderPlanIds.planId,
-          stageId,
-          targetSourceId: stageId,
-          signalId: hookName,
-          targetOrderRelation: 0,
-        }),
         event(4n, "SignalSubmitterAuthorized", {
           orderId,
           sourceId: stageId,
@@ -141,7 +134,7 @@ describe("Store runtime and version selection", () => {
           publisher: stateMachine,
           hookCount: 1n,
           hooksHash: bytes32("3001"),
-          metadataHash: bytes32("3002"),
+          capabilitiesRoot: bytes32("3002"),
           dockRoutesRoot: bytes32("3003"),
           dockInterfaceRoot: bytes32("3004"),
         }),

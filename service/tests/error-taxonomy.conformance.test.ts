@@ -218,6 +218,10 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   // 镜像合约 StageExecutorPatchForbiddenOnBirthStage 的广播前快速失败
   //（409 领域状态预检，与 target_stage_locked 同族）。
   'executor_patch_forbidden_on_birth_stage',
+  // 词表 Merkle 化：plan 投影无词表两表（外部发布 plan）时 stage patch
+  // 无法构造必携的 bindingProof/stageFacts——广播前 fail-closed 预检，
+  // 不入重试/死信词表。
+  'stage_patch_capability_tables_unavailable',
   'product_order_not_found',
   'selector_wallet_not_authorized',
   'state_machine_address_missing',

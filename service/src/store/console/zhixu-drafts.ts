@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   assertOnchainHookPlanArtifact,
+  capabilityTablesOf,
   compileZhixuOnchainHookPlan,
   displayIdentity,
   hashCanonical,
@@ -31,6 +32,8 @@ import type {
   GovernanceService
 } from "../../governance/index.js";
 import type { ProjectionStore } from "../../storage/projection-store.js";
+import type { Hex } from "../../shared/types.js";
+import type { PlanCapabilityTablesInput } from "../../indexer/projections/plan.js";
 import { isPlanRegisteredProjection } from "./version.js";
 
 export type StoreZhixuDraftSourceKind = "zhixu_yaml" | "onchain_hook_plan_manifest";
@@ -116,6 +119,36 @@ export interface StoreZhixuDraftStore {
     artifactHash?: string
   ): Promise<StoreProductSchemaDTO | undefined>;
   updateDraft(draft: StoreZhixuDraftRecord): Promise<void>;
+}
+
+/**
+ * 词表产物富集源（协议重构：链上只存 capabilitiesRoot，两表由重放方按
+ * planId 从产物富集）：按 (planId, planHash) 走 findProductSchemaByPlan
+ * （同版本激活的 join 口径——最新 product schema 的
+ * onchainHookPlanArtifact），经 capabilityTablesOf 换装为链上词序。
+ * 无产物/形状不符 → undefined（该 plan 两表留空，fail-closed）。
+ */
+export function createPlanCapabilityTablesResolver(
+  draftStore: StoreZhixuDraftStore
+): (planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput | undefined> {
+  return async (planId, planHash) => {
+    const schema = await draftStore.findProductSchemaByPlan(planId, planHash);
+    const artifact = schema?.onchainHookPlanArtifact as
+      | Parameters<typeof capabilityTablesOf>[0]
+      | undefined;
+    if (
+      !artifact ||
+      !Array.isArray(artifact.selectorBindings) ||
+      !Array.isArray(artifact.signalCapabilities)
+    ) {
+      return undefined;
+    }
+    return {
+      planId,
+      planHash,
+      ...capabilityTablesOf(artifact)
+    };
+  };
 }
 
 export class MemoryStoreZhixuDraftStore implements StoreZhixuDraftStore {

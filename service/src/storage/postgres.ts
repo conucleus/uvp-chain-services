@@ -101,7 +101,9 @@ export class PostgresProjectionStore implements DurableProjectionStore {
     const events = input.events.filter(
       (event) => event.blockNumber >= input.deploymentBlock,
     );
-    const orderSnapshot = rebuildOrderProjections(events);
+    const orderSnapshot = rebuildOrderProjections(events, {
+      ...(input.planCapabilityTables ? { planCapabilityTables: input.planCapabilityTables } : {})
+    });
     const identitySnapshot = rebuildIdentityProjections(events);
     const scope = input.scope ?? this.#scopeFromEvents(events);
     const syncState = syncStateFromRebuildInput({ ...input, scope }, events);

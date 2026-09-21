@@ -69,6 +69,12 @@ export interface ProjectionSnapshot {
    * 时，子订单归属未经证实——显式计数，不允许静默。
    */
   readonly unresolvedDockTargetDeploymentCount?: number;
+  /**
+   * 词表产物富集的 fail-closed 计数：store 域产物两表按 planId 命中，但
+   * planHash/capabilitiesRoot 断言不过（产物过期/被改写/锚错版本），
+   * 该 plan 两表保持为空（词表相关推导退化为不可用）。不允许静默。
+   */
+  readonly capabilityEnrichmentMismatchCount?: number;
 }
 
 export type Writable<TValue> = {
@@ -83,6 +89,7 @@ export interface ProjectionReplayDiagnostics {
   unresolvedDockEventCount: number;
   unresolvedStageActivationEventCount: number;
   unresolvedDockTargetDeploymentCount: number;
+  capabilityEnrichmentMismatchCount: number;
 }
 
 export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
@@ -98,7 +105,8 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     unresolvedModuleOrderEventCount: 0,
     unresolvedDockEventCount: 0,
     unresolvedStageActivationEventCount: 0,
-    unresolvedDockTargetDeploymentCount: 0
+    unresolvedDockTargetDeploymentCount: 0,
+    capabilityEnrichmentMismatchCount: 0
   };
 }
 

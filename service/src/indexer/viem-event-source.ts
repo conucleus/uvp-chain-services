@@ -13,15 +13,18 @@ import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
-// UVPStateMachine v0.10（SM ABI fixture：uvp-state-machine.v0.10.json）：
+// UVPStateMachine v0.11（SM ABI fixture：uvp-state-machine.v0.11.json）：
 // 订单维度事件全部 plan-scoped；patch/metadata/derived/link/dock 事件由
 // 各模块合约发出，按 deployment.modules 分地址挂 ABI。
+// v0.11 词表 Merkle 化：PlanCommitted/PlanFinalized 的 metadataHash 字段
+// 改名 capabilitiesRoot（事件 topic 不变）；词表注册事件已删除——两表由
+// 重放方从编译产物富集（projections/plan.ts）。
 const stateMachineAbi = parseAbi([
   "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
   "event StateMachineModuleSet(bytes32 indexed moduleId,address indexed previousModule,address indexed newModule)",
   "event StateMachineModulesFrozen(bytes32 indexed moduleSetHash)",
-  "event PlanCommitted(bytes32 indexed planId,bytes32 indexed planHash,address indexed publisher,bytes32 hooksHash,bytes32 metadataHash,uint256 hookCount,bytes32 dockRoutesRoot,bytes32 dockInterfaceRoot)",
-  "event PlanFinalized(bytes32 indexed planId,bytes32 indexed planHash,bytes32 metadataHash)",
+  "event PlanCommitted(bytes32 indexed planId,bytes32 indexed planHash,address indexed publisher,bytes32 hooksHash,bytes32 capabilitiesRoot,uint256 hookCount,bytes32 dockRoutesRoot,bytes32 dockInterfaceRoot)",
+  "event PlanFinalized(bytes32 indexed planId,bytes32 indexed planHash,bytes32 capabilitiesRoot)",
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",
   "event PlanPublisherRecorded(bytes32 indexed planId,address indexed publisher)",
   "event OrderRegistered(bytes32 indexed orderId,bytes32 indexed planId)",
@@ -37,18 +40,16 @@ const stateMachineAbi = parseAbi([
   "event StageExecutorSignalDelegated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,bytes32 sourceId,bytes32 signalId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce)",
   "event HookStatusChanged(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint8 previousStatus,uint8 newStatus,uint64 dueAt)",
   "event HookReady(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,bytes32 stageId,bytes32 hookName)",
-  "event TimerPoked(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint64 dueAt)",
+  "event TimerPoked(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint64 dueAt)"
 ]);
 
 const stagePatchModuleAbi = parseAbi([
   "event StageExecutorPatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,bytes32 planId,address selector,address executor,bytes32 role,bytes32 executorMetadataHash,bytes32 mode,address previousExecutor,bytes32 approvalSourceId,bytes32 approvalSignalId,bytes32 patchHash,uint256 patchNonce,string metadataURI)",
-  "event StageResourcePatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,bytes32 planId,address selector,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI)",
+  "event StageResourcePatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,bytes32 planId,address selector,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI)"
 ]);
 
-const planMetadataModuleAbi = parseAbi([
-  "event StageSelectorBindingRegistered(bytes32 indexed planId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId)",
-  "event SignalCapabilityRegistered(bytes32 indexed planId,bytes32 indexed stageId,bytes32 indexed targetSourceId,bytes32 signalId,uint8 relation)",
-]);
+// UVPPlanMetadataModule v0.6 词表 Merkle 化后不再发出任何事件（注册事件
+// 已删除，合约只保留 view 验证例程），索引器不再 watch 该地址。
 
 const derivedSignalModuleAbi = parseAbi([
   "event DerivedSignalSubmitted(bytes32 indexed fromOrderId,bytes32 indexed targetOrderId,bytes32 indexed signalId,bytes32 fromPlanId,bytes32 targetPlanId,bytes32 fromStageId,bytes32 targetSourceId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
@@ -93,7 +94,6 @@ export const INDEXER_EVENT_ABIS = {
   UVPIdentityRegistry: identityRegistryAbi,
   UVPDeploymentRegistry: deploymentRegistryAbi,
   UVPStagePatchModule: stagePatchModuleAbi,
-  UVPPlanMetadataModule: planMetadataModuleAbi,
   UVPDerivedSignalModule: derivedSignalModuleAbi,
   UVPOrderLinkModule: orderLinkModuleAbi,
   UVPDockingModule: dockingModuleAbi
@@ -106,7 +106,6 @@ type IndexedContractName =
   | "UVPIdentityRegistry"
   | "UVPDeploymentRegistry"
   | "UVPStagePatchModule"
-  | "UVPPlanMetadataModule"
   | "UVPDerivedSignalModule"
   | "UVPOrderLinkModule"
   | "UVPDockingModule";
@@ -308,11 +307,6 @@ function indexedContracts(
       stagePatchModuleAbi,
     ),
     indexedContract(
-      "UVPPlanMetadataModule",
-      config.network.contracts,
-      planMetadataModuleAbi,
-    ),
-    indexedContract(
       "UVPDerivedSignalModule",
       config.network.contracts,
       derivedSignalModuleAbi,
@@ -332,9 +326,6 @@ function indexedContracts(
       const moduleContracts = [
         modules.stagePatch
           ? moduleContract("UVPStagePatchModule", modules.stagePatch, stagePatchModuleAbi)
-          : undefined,
-        modules.planMetadata
-          ? moduleContract("UVPPlanMetadataModule", modules.planMetadata, planMetadataModuleAbi)
           : undefined,
         modules.derivedSignal
           ? moduleContract("UVPDerivedSignalModule", modules.derivedSignal, derivedSignalModuleAbi)

@@ -10,13 +10,16 @@ import {
 } from "./events.js";
 import type { ProjectionSnapshot } from "./projections/index.js";
 import { createEmptyProjectionSnapshot } from "./projections/index.js";
+import { optionalBytes32Arg } from "./projections/proof.js";
 import {
   countDuplicateActiveEventAnomalies,
   countReplayAnomalies,
   rebuildOrderProjections
 } from "./replay.js";
+import type { PlanCapabilityTablesInput } from "./projections/plan.js";
 import { rebuildIdentityProjections } from "./identity-projections.js";
-import { createProjectionStore } from "../storage/factory.js";
+import { createChainServicesStores } from "../storage/factory.js";
+import { createPlanCapabilityTablesResolver } from "../store/console/zhixu-drafts.js";
 import { isTransientSqliteBusyError } from "../storage/sqlite.js";
 import {
   defaultProjectionScope,
@@ -106,6 +109,17 @@ export interface IndexerServiceOptions {
   readonly store: ProjectionStore;
   readonly notificationProcessor?: ChainEventNotificationProcessor;
   readonly projectionAutomationProcessor?: ProjectionAutomationProcessor;
+  /**
+   * 词表产物富集源（协议重构：链上不再逐条发词表注册事件）：按
+   * (planId, planHash) 从 store 域（zhixu 草稿的 onchainHookPlanArtifact）
+   * 解析编译产物两表，重放时填进 plan 投影并断言 capabilitiesRoot。
+   * 缺省时不富集——所有 plan 两表为空，词表相关推导退化为不可用
+   * （fail-closed 口径见 indexer/projections/plan.ts）。
+   */
+  readonly resolvePlanCapabilityTables?: (
+    planId: Hex,
+    planHash: Hex
+  ) => Promise<PlanCapabilityTablesInput | undefined>;
   readonly logger?: Logger;
 }
 
@@ -182,11 +196,20 @@ export class IndexerService implements LifecycleService {
   #refreshQueued = false;
   #cursor: EventCursor | undefined;
   #consecutiveCursorCasFailures = 0;
+  /**
+   * 词表产物富集缓存（planId(lower) → 两表）。plan 词表在 finalize 后
+   * 链上不可变，缓存只增不改；增量路径的全历史重放需要旧 plan 的表，
+   * 每轮只解析本轮新见的 plan 锚。
+   */
+  #planCapabilityTablesCache = new Map<string, PlanCapabilityTablesInput>();
   readonly #config: ChainServicesConfig;
   readonly #eventSource: ChainEventSource;
   readonly #store: ProjectionStore;
   readonly #notificationProcessor: ChainEventNotificationProcessor | undefined;
   readonly #projectionAutomationProcessor: ProjectionAutomationProcessor | undefined;
+  readonly #resolvePlanCapabilityTables:
+    | ((planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput | undefined>)
+    | undefined;
   readonly #logger: Logger;
   readonly #scope: ProjectionScope;
 
@@ -196,12 +219,70 @@ export class IndexerService implements LifecycleService {
     this.#store = options.store;
     this.#notificationProcessor = options.notificationProcessor;
     this.#projectionAutomationProcessor = options.projectionAutomationProcessor;
+    this.#resolvePlanCapabilityTables = options.resolvePlanCapabilityTables;
     this.#logger = options.logger ?? noopLogger;
     this.#scope = defaultProjectionScope(options.config.network.chainId);
   }
 
   get cursor(): EventCursor | undefined {
     return this.#cursor;
+  }
+
+  /**
+   * 为本轮事件批解析词表产物富集源：从计划族事件收集 (planId, planHash)
+   * 锚，未缓存的锚逐个过 resolver（store 域 onchainHookPlanArtifact）。
+   * 解析失败按"产物缺失"处理（warn 留痕、该 plan 两表为空）——富集是
+   * 服务端增强，不能把索引器打 degraded。
+   */
+  async #planCapabilityTablesFor(
+    events: readonly ChainEvent[]
+  ): Promise<readonly PlanCapabilityTablesInput[] | undefined> {
+    const resolver = this.#resolvePlanCapabilityTables;
+    if (!resolver) {
+      return undefined;
+    }
+    const anchors = new Map<string, { readonly planId: Hex; readonly planHash: Hex }>();
+    for (const event of events) {
+      if (event.removed === true) {
+        continue;
+      }
+      if (event.eventName !== "PlanCommitted" && event.eventName !== "PlanFinalized" && event.eventName !== "PlanRegistered") {
+        continue;
+      }
+      const planId = optionalBytes32Arg(event, "planId");
+      const planHash = optionalBytes32Arg(event, "planHash");
+      if (!planId || !planHash) {
+        continue;
+      }
+      anchors.set(planId.toLowerCase(), { planId, planHash });
+    }
+    for (const anchor of anchors.values()) {
+      if (this.#planCapabilityTablesCache.has(anchor.planId.toLowerCase())) {
+        continue;
+      }
+      try {
+        const source = await resolver(anchor.planId, anchor.planHash);
+        if (source) {
+          this.#planCapabilityTablesCache.set(anchor.planId.toLowerCase(), source);
+        }
+      } catch (error) {
+        this.#logger.warn("plan capability tables resolution failed; the plan vocabulary stays unenriched for this replay (fail-closed)", {
+          planId: anchor.planId,
+          message: error instanceof Error ? redactErrorMessage(error) : "unknown resolution error"
+        });
+      }
+    }
+    return [...this.#planCapabilityTablesCache.values()];
+  }
+
+  /** 词表富集 fail-closed 计数的告警出口（不 crash 索引器）。 */
+  #warnCapabilityEnrichmentMismatch(snapshot: ProjectionSnapshot): void {
+    const mismatches = snapshot.capabilityEnrichmentMismatchCount ?? 0;
+    if (mismatches > 0) {
+      this.#logger.warn("plan capability enrichment skipped for artifact/chain root mismatches; the affected plans keep an empty vocabulary (fail-closed)", {
+        capabilityEnrichmentMismatchCount: mismatches
+      });
+    }
   }
 
   async start(): Promise<void> {
@@ -371,6 +452,8 @@ export class IndexerService implements LifecycleService {
         finalizedBlock,
         ...(await this.#cursorBlockHash(finalizedBlock))
       };
+      // 词表产物富集源（计划族事件锚定）：与游标读取同为事务外 IO。
+      const planCapabilityTables = await this.#planCapabilityTablesFor(events);
       // 通知派生先于重建事务提交落 pending（对齐增量路径不变量：投递
       // 记录必须先于游标推进）：全量重建把游标随整库替换同事务落库，
       // 提交后才处理通知——该窗口内硬崩溃会让这批事件永不再被读取、
@@ -381,6 +464,7 @@ export class IndexerService implements LifecycleService {
       const snapshot = await this.#store.resetFromEvents({
         deploymentBlock,
         events,
+        ...(planCapabilityTables ? { planCapabilityTables } : {}),
         scope: this.#scope,
         syncState: syncStateInput,
         cursor: {
@@ -431,10 +515,12 @@ export class IndexerService implements LifecycleService {
         unresolvedDockEventCount: snapshot.unresolvedDockEventCount ?? 0,
         unresolvedStageActivationEventCount: snapshot.unresolvedStageActivationEventCount ?? 0,
         unresolvedDockTargetDeploymentCount: snapshot.unresolvedDockTargetDeploymentCount ?? 0,
+        capabilityEnrichmentMismatchCount: snapshot.capabilityEnrichmentMismatchCount ?? 0,
         unresolvedLogCount: this.#consumeUnresolvedLogCount(),
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
       });
+      this.#warnCapabilityEnrichmentMismatch(snapshot);
 
       return { snapshot, summary };
     } catch (error) {
@@ -609,6 +695,9 @@ export class IndexerService implements LifecycleService {
     );
     const newReplaySummary = buildActiveChainEventReplaySummary(events);
     const activeNewEvents = [...newReplaySummary.activeEvents];
+    // 词表产物富集源：本轮新事件的 plan 锚在事务外解析（缓存覆盖旧 plan），
+    // 事务内全历史重放直接消费缓存。
+    const planCapabilityTables = await this.#planCapabilityTablesFor(events);
 
     const result = await durableStore.withTransaction(async () => {
       // 崩溃窗口残留清扫：事件事务先于游标提交（中间还夹着通知投递），
@@ -640,7 +729,9 @@ export class IndexerService implements LifecycleService {
       const replaySummary = buildActiveChainEventReplaySummary(allEvents);
       const activeEvents = [...replaySummary.activeEvents];
       const lastEvent = sortChainEvents(activeEvents).at(-1);
-      const snapshot = rebuildOrderProjections(allEvents);
+      const snapshot = rebuildOrderProjections(allEvents, {
+        ...(planCapabilityTables ? { planCapabilityTables } : {})
+      });
       const identitySnapshot = rebuildIdentityProjections(allEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
@@ -717,10 +808,12 @@ export class IndexerService implements LifecycleService {
       unresolvedDockEventCount: result.snapshot.unresolvedDockEventCount ?? 0,
       unresolvedStageActivationEventCount: result.snapshot.unresolvedStageActivationEventCount ?? 0,
       unresolvedDockTargetDeploymentCount: result.snapshot.unresolvedDockTargetDeploymentCount ?? 0,
+      capabilityEnrichmentMismatchCount: result.snapshot.capabilityEnrichmentMismatchCount ?? 0,
       unresolvedLogCount: this.#consumeUnresolvedLogCount(),
       nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
     });
+    this.#warnCapabilityEnrichmentMismatch(result.snapshot);
 
     return { snapshot: result.snapshot, summary: result.summary };
   }
@@ -1018,7 +1111,10 @@ export class IndexerService implements LifecycleService {
         ancestorBlock
       );
       const remainingEvents = await durableStore.listEvents({ chainId: this.#scope.chainId });
-      const snapshot = rebuildOrderProjections(remainingEvents);
+      // 词表富集走缓存（回滚只删事件不添新 plan，锚集只减不增）。
+      const snapshot = rebuildOrderProjections(remainingEvents, {
+        planCapabilityTables: [...this.#planCapabilityTablesCache.values()]
+      });
       const identitySnapshot = rebuildIdentityProjections(remainingEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
@@ -1584,21 +1680,28 @@ async function main(): Promise<void> {
     if (!eventSource) {
       throw new Error("no configured indexer contracts; set UVP_CONTRACTS_JSON or an address manifest");
     }
-    const store = createProjectionStore({
+    // 全套 store（而非单 projection store）：词表产物富集源需要 zhixu
+    // 草稿域的 onchainHookPlanArtifact（链上注册事件已删除，两表从产物
+    // 富集——缺产物时该 plan 两表为空，fail-closed）。
+    const stores = createChainServicesStores({
       database: config.database,
       chainId: config.network.chainId
     });
     try {
-      const service = createIndexerService({ config, eventSource, store, logger: consoleLogger });
+      const service = createIndexerService({
+        config,
+        eventSource,
+        store: stores.projectionStore,
+        resolvePlanCapabilityTables: createPlanCapabilityTablesResolver(stores.storeZhixuDraftStore),
+        logger: consoleLogger
+      });
       const targetBlock = parseTargetBlockArg(process.argv);
       const { summary } = await service.rebuildFromDeploymentBlockWithSummary(
         targetBlock === undefined ? {} : { targetBlock }
       );
       console.log(JSON.stringify(summary, null, 2));
     } finally {
-      if (isClosableStore(store)) {
-        await store.close();
-      }
+      await stores.close();
     }
     return;
   }
@@ -1723,10 +1826,6 @@ function summaryFromSnapshot(input: {
 
 function isDurableProjectionStore(store: ProjectionStore): store is DurableProjectionStore {
   return "saveCursor" in store && typeof (store as { readonly saveCursor?: unknown }).saveCursor === "function";
-}
-
-function isClosableStore(store: ProjectionStore): store is ProjectionStore & { close(): Promise<void> } {
-  return "close" in store && typeof (store as { readonly close?: unknown }).close === "function";
 }
 
 function parseTargetBlockArg(argv: readonly string[]): bigint | undefined {

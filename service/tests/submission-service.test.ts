@@ -201,7 +201,7 @@ describe("product task submissions", () => {
       typedData: {
         domain: {
           name: "UVPStateMachine",
-          version: "0.10",
+          version: "0.11",
           chainId,
           verifyingContract
         },
@@ -1141,7 +1141,19 @@ describe("product task submissions", () => {
       prepared.idempotencyKey,
       prepared.submitter,
       BigInt(prepared.deadline),
-      signature
+      signature,
+      // 词表 Merkle 造证参数：本夹具无 plan 词表（外部 plan 口径）→
+      // 全零 attribution + 全零 selectorBinding（prepare 时构造并随档案下发）。
+      prepared.attribution ?? {
+        sourceId: prepared.sourceId,
+        signalId: prepared.signalId,
+        stageId: "0x0000000000000000000000000000000000000000000000000000000000000000",
+        capabilityProof: []
+      },
+      prepared.selectorBinding ?? {
+        selectorStageId: "0x0000000000000000000000000000000000000000000000000000000000000000",
+        proof: []
+      }
     ]);
     expect(submission).toMatchObject({
       status: "submitted",

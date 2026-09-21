@@ -8,22 +8,22 @@ import { UnsupportedChainTargetError } from "../src/shared/types.js";
 
 describe("ViemChainEventSource", () => {
   it("binds every indexed event topic to the frozen protocol ABI fixtures", () => {
+    // UVPPlanMetadataModule v0.6 词表 Merkle 化后不再发事件（注册事件已
+    // 删除），索引器不再 watch 该合约，fixture 对照表同步收窄。
     const fixtures: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
-      UVPStateMachine: "uvp-state-machine.v0.10.json",
+      UVPStateMachine: "uvp-state-machine.v0.11.json",
       UVPIdentityRegistry: "uvp-identity-registry.v0.1.json",
       UVPDeploymentRegistry: "uvp-deployment-registry.v0.2.json",
-      UVPStagePatchModule: "uvp-stage-patch-module.v0.3.json",
-      UVPPlanMetadataModule: "uvp-plan-metadata-module.v0.5.json",
-      UVPDerivedSignalModule: "uvp-derived-signal-module.v0.2.json",
-      UVPOrderLinkModule: "uvp-order-link-module.v0.2.json",
-      UVPDockingModule: "uvp-docking-module.v4.2.json"
+      UVPStagePatchModule: "uvp-stage-patch-module.v0.4.json",
+      UVPDerivedSignalModule: "uvp-derived-signal-module.v0.3.json",
+      UVPOrderLinkModule: "uvp-order-link-module.v0.3.json",
+      UVPDockingModule: "uvp-docking-module.v4.3.json"
     };
     const artifacts: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
       UVPStateMachine: "UVPStateMachine.sol/UVPStateMachine.json",
       UVPIdentityRegistry: "UVPIdentityRegistry.sol/UVPIdentityRegistry.json",
       UVPDeploymentRegistry: "UVPDeploymentRegistry.sol/UVPDeploymentRegistry.json",
       UVPStagePatchModule: "UVPStagePatchModule.sol/UVPStagePatchModule.json",
-      UVPPlanMetadataModule: "UVPPlanMetadataModule.sol/UVPPlanMetadataModule.json",
       UVPDerivedSignalModule: "UVPDerivedSignalModule.sol/UVPDerivedSignalModule.json",
       UVPOrderLinkModule: "UVPOrderLinkModule.sol/UVPOrderLinkModule.json",
       UVPDockingModule: "UVPDockingModule.sol/UVPDockingModule.json"

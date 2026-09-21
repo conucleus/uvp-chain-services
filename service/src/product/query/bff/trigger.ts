@@ -10,9 +10,11 @@ import { privateKeyToAccount } from "viem/accounts";
 import {
   STATE_MACHINE_ABI,
   buildTriggerOrderFromOutsideForCall,
-  deriveTriggerOrderId
+  deriveTriggerOrderId,
+  type SignalAttributionPayload
 } from "@uvp-eth/protocol-bindings";
 import { onchainSignalId, onchainSourceId } from "@uvp-eth/compiler";
+import { zeroFactAttribution } from "../../../submissions/capability-proofs.js";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../../../shared/types.js";
 import { redactErrorMessage } from "../../../security/redaction.js";
 import type { ProductOrderTriggerStatus, SignalAuthorizationDTO } from "./types.js";
@@ -69,6 +71,13 @@ export interface ProductBroadcastOutsideTriggerInput {
   readonly stateMachineAddress?: Address;
   readonly deploymentId?: Hex;
   readonly authorizations: readonly SignalAuthorizationDTO[];
+  /**
+   * 出生事实的属主自证（词表 Merkle 化后的必携参数）：从 plan 投影词表
+   * 造（relation=0 能力叶 proof）；无词表/词表外 → 全零结构——出生事实
+   * 必须有词表内属主证，否则链上 InvalidSignalCapability（链上是最终
+   * 守门人，服务端造不出证明时不伪造）。
+   */
+  readonly birthFactAttribution?: SignalAttributionPayload;
 }
 
 export interface ProductOrderTriggerBroadcastResult {
@@ -206,6 +215,8 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
     try {
       const { publicClient, wallet } = this.#clients();
       const stateMachineAddress = input.stateMachineAddress ?? this.#options.stateMachineAddress;
+      // 出生事实属主自证缺省按全零结构广播（词表外/无词表 plan 的既有
+      // 语义）：链上词表闸对词表内事实回 InvalidSignalCapability。
       const call = buildTriggerOrderFromOutsideForCall({
         stateMachineAddress,
         chainId: this.#options.chainId
@@ -221,7 +232,9 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
         submitter: input.submitter,
         deadline: input.deadline,
         authorizations: input.authorizations,
-        signature: input.signature
+        signature: input.signature,
+        birthFactAttribution: input.birthFactAttribution ??
+          zeroFactAttribution(input.sourceId, input.signalId)
       });
       txHash = await wallet.writeContract({
         address: call.address,

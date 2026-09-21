@@ -33,6 +33,10 @@ import {
   type ProductOrderTriggerBroadcastResult,
 } from "./trigger.js";
 import { MemoryProductBffStore, type ProductBffStore } from "./store.js";
+import {
+  factAttributionPayload,
+  type PlanCapabilityTables,
+} from "../../../submissions/capability-proofs.js";
 import type {
   AcceptProductInviteInput,
   CreateProductInviteInput,
@@ -82,6 +86,15 @@ export interface ProductBffServiceOptions {
   readonly triggerAdapter?: ProductOrderTriggerBroadcastAdapter;
   readonly authorizationBuilder?: ProductAuthorizationBuilder;
   readonly versionResolver?: ProductDraftVersionResolver;
+  /**
+   * 词表产物富集源（plan 投影两表）：出生事实的属主自证
+   * （birthFactAttribution）从 plan 词表造（relation=0 能力叶 proof）。
+   * 缺省或投影表空 → 全零结构，链上词表闸裁决（词表内出生事实会被
+   * InvalidSignalCapability 拒绝——出生事实必须有词表内属主证）。
+   */
+  readonly resolvePlanCapabilityTables?: (
+    planId: Hex
+  ) => Promise<PlanCapabilityTables | undefined>;
   readonly registrationCreatorAddress?: Address;
   readonly registrarAddress?: Address;
   readonly triggerChainId: number;
@@ -635,6 +648,9 @@ export function createProductBffService(
         draft,
         registration: submitting,
         now,
+        ...(options.resolvePlanCapabilityTables
+          ? { resolvePlanCapabilityTables: options.resolvePlanCapabilityTables }
+          : {}),
       });
       return submitResultFromRegistration(
         broadcasted.draft,
@@ -1850,12 +1866,50 @@ async function withProductStoreTransaction<T>(
  */
 class WalletBoundRaceLostError extends Error {}
 
+const EMPTY_PLAN_CAPABILITY_TABLES: PlanCapabilityTables = {
+  selectorBindings: [],
+  signalCapabilities: [],
+};
+
+/**
+ * 出生事实属主自证（triggerOrderFromOutsideFor 的 birthFactAttribution）：
+ * 从 plan 投影词表造证（造证单源 submissions/capability-proofs.ts）。
+ * 词表外事实/投影表空/解析器故障 → 全零结构（不声明属主）：链上对词表内
+ * 出生事实回 InvalidSignalCapability——出生事实必须有词表内属主证，
+ * 服务端造不出证明时不伪造。
+ */
+async function birthFactAttributionFor(
+  resolvePlanCapabilityTables:
+    | ((planId: Hex) => Promise<PlanCapabilityTables | undefined>)
+    | undefined,
+  planId: Hex,
+  sourceId: Hex,
+  signalId: Hex,
+): Promise<ReturnType<typeof factAttributionPayload>> {
+  let tables: PlanCapabilityTables | undefined;
+  try {
+    tables = resolvePlanCapabilityTables
+      ? await resolvePlanCapabilityTables(planId)
+      : undefined;
+  } catch {
+    tables = undefined;
+  }
+  return factAttributionPayload(
+    tables ?? EMPTY_PLAN_CAPABILITY_TABLES,
+    sourceId,
+    signalId,
+  );
+}
+
 async function broadcastOutsideTrigger(input: {
   readonly triggerAdapter: ProductOrderTriggerBroadcastAdapter;
   readonly store: ProductBffStore;
   readonly draft: ProductOrderDraftDTO;
   readonly registration: ProductOrderTriggerRecord;
   readonly now: () => Date;
+  readonly resolvePlanCapabilityTables?: (
+    planId: Hex
+  ) => Promise<PlanCapabilityTables | undefined>;
 }): Promise<{
   readonly draft: ProductOrderDraftDTO;
   readonly registration: ProductOrderTriggerRecord;
@@ -1863,6 +1917,7 @@ async function broadcastOutsideTrigger(input: {
   const broadcast = await safeBroadcastOutsideTrigger(
     input.triggerAdapter,
     input.registration,
+    input.resolvePlanCapabilityTables,
   );
   const updatedAt = input.now().toISOString();
   const registration: ProductOrderTriggerRecord = {
@@ -1928,6 +1983,9 @@ async function broadcastOutsideTrigger(input: {
 async function safeBroadcastOutsideTrigger(
   triggerAdapter: ProductOrderTriggerBroadcastAdapter,
   registration: ProductOrderTriggerRecord,
+  resolvePlanCapabilityTables?: (
+    planId: Hex
+  ) => Promise<PlanCapabilityTables | undefined>,
 ): Promise<ProductOrderTriggerBroadcastResult> {
   try {
     if (!registration.signature) {
@@ -1953,6 +2011,14 @@ async function safeBroadcastOutsideTrigger(
         "prepared trigger record is incomplete",
       );
     }
+    // 出生事实属主自证：从 plan 投影词表造（factAttribution 同口径）；
+    // 解析失败/无词表按全零降级——链上词表闸是最终守门人。
+    const birthFactAttribution = await birthFactAttributionFor(
+      resolvePlanCapabilityTables,
+      registration.planId,
+      registration.sourceId,
+      registration.signalId,
+    );
     return await triggerAdapter.broadcastOutsideTrigger({
       triggerId: registration.triggerId,
       draftId: registration.draftId,
@@ -1975,6 +2041,7 @@ async function safeBroadcastOutsideTrigger(
         ? { deploymentId: registration.deploymentId }
         : {}),
       authorizations: registration.authorizations,
+      birthFactAttribution,
     });
   } catch (error) {
     return {

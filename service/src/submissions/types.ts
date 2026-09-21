@@ -11,7 +11,7 @@ import type {
   SubmitProductTaskInput,
   ProductTaskDTO
 } from "@uvp-eth/product-dto";
-import type { ProductSubmitTypedData, ProductSubmitTypedDataField } from "@uvp-eth/protocol-bindings";
+import type { ProductSubmitTypedData, ProductSubmitTypedDataField, SelectorBindingPayload, SignalAttributionPayload } from "@uvp-eth/protocol-bindings";
 import type { EvidencePrincipal, EvidenceRecordDTO, EvidenceService } from "../evidence/index.js";
 import type { Address, Hex } from "../shared/types.js";
 
@@ -65,6 +65,14 @@ export interface PreparedSubmissionDTO {
   readonly status: "prepared";
   readonly humanSummary: ProductSubmitHumanSummaryDTO;
   readonly typedData: ProductSubmitTypedData;
+  /**
+   * 事实属主自证（词表 Merkle 化后的 submitSignalFor 参数）：prepare 时从
+   * plan 投影两表构造（词表内 relation=0 能力叶 proof；全零 = 词表外/
+   * 投影表空的外部 plan，不声明属主）。缺省视为全零——广播适配器兜底。
+   */
+  readonly attribution?: SignalAttributionPayload;
+  /** selector 绑定证明（按属主阶段找绑定叶；全零 = 不携证）。 */
+  readonly selectorBinding?: SelectorBindingPayload;
   readonly evidence: readonly PreparedSubmissionEvidenceDTO[];
   readonly authorization: {
     readonly source: string;

@@ -632,8 +632,6 @@ describe("signal-routed notifications", () => {
     const { store, supplierStore } = await notificationStore({
       supportedStageIds: [readyHook.stageId, submittedHook.stageId],
       events: [
-        signalCapabilityEvent(3n, readyHook),
-        signalCapabilityEvent(3n, submittedHook, 1),
         authorizationEvent(4n, readyHook, supplierWallet),
         hookReadyEvent(5n, readyHook),
         authorizationEvent(6n, submittedHook, supplierWallet),
@@ -676,7 +674,6 @@ describe("signal-routed notifications", () => {
     const { store, supplierStore } = await notificationStore({
       supportedStageIds: [requiredHook(customsHook).stageId],
       events: [
-        signalCapabilityEvent(3n, requiredHook(customsHook)),
         authorizationEvent(4n, requiredHook(customsHook), supplierWallet),
         hookReadyEvent(5n, requiredHook(customsHook)),
         signalEvent(6n, requiredDependency(customsDependencyA))
@@ -839,7 +836,6 @@ describe("signal-routed notifications", () => {
     const { store, supplierStore } = await notificationStore({
       supportedStageIds: [requiredHook(customsHook).stageId],
       events: [
-        signalCapabilityEvent(3n, requiredHook(customsHook)),
         chainEvent(4n, "SignalSubmitterAuthorized", {
           orderId,
           sourceId: requiredHook(customsHook).hookId,
@@ -1185,23 +1181,6 @@ function authorizationEvent(
     role: bytes32Text("executor"),
     metadataHash
   });
-}
-
-function signalCapabilityEvent(
-  blockNumber: bigint,
-  hook: { readonly hookId: string; readonly stageId: string },
-  logIndex = 0
-): ChainEvent {
-  return {
-    ...chainEvent(blockNumber, "SignalCapabilityRegistered", {
-      planId: customsPlanIds.planId,
-      stageId: hook.stageId,
-      targetSourceId: hook.hookId,
-      signalId: hook.hookId,
-      targetOrderRelation: 0
-    }),
-    logIndex
-  };
 }
 
 function hookReadyEvent(

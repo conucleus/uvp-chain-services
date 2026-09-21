@@ -2288,7 +2288,7 @@ function preparedSubmission(): PreparedSubmissionRecord {
     typedData: {
       domain: {
         name: "UVPStateMachine",
-        version: "0.10",
+        version: "0.11",
         chainId,
         verifyingContract: contractAddress as Address,
       },

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { onchainStageId } from "@uvp-eth/compiler";
+import type { SelectorBindingPayload, StageFactPayload } from "@uvp-eth/protocol-bindings";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import type { ChainServicesRuntimeEnv } from "../config/index.js";
 import { canonicalJson } from "../shared/canonical-json.js";
@@ -26,6 +27,11 @@ import { signalProjectionKey } from "../indexer/projections/signal.js";
 import type { ProjectionProvenance } from "../indexer/projections/proof.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { ProductSchemaResolver } from "../product/application/service.js";
+import {
+  selectorBindingProofForPatch,
+  stageFactsForTargetStage,
+  type PlanCapabilityTables
+} from "../submissions/capability-proofs.js";
 import { InMemoryProductStagePatchStore } from "./store.js";
 import {
   buildStageExecutorPatchTypedData,
@@ -412,11 +418,21 @@ export function createProductStageExecutorPatchService(
       }
 
       const context = await resolveSelectorTaskContext(options.store, taskId);
+      const plan = await findProjectedPlan(options.store, context.order);
       await ensureExecutorPreparedStillCurrent(
         options,
         context.order,
         prepared,
-        await findProjectedPlan(options.store, context.order),
+        plan,
+      );
+      // 词表 Merkle 造证（bindingProof + stageFacts）：applyStageExecutorPatchFor
+      // 的必携参数，从 plan 投影两表构造；投影表空（外部发布 plan）无法
+      // 造证，fail-closed 拒绝提交（广播必被 StageSelectorBindingNotFound
+      // 拒绝，白烧 gas 白占 nonce）。
+      const { bindingProof, stageFacts } = stagePatchProofsFromPlan(
+        plan,
+        prepared.selectorStageId,
+        prepared.targetStageId,
       );
 
       const previousSignature = signatureForPreviousExecutor(
@@ -473,6 +489,8 @@ export function createProductStageExecutorPatchService(
             : {}),
           recoveredSelector,
           ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
+          bindingProof,
+          stageFacts,
         });
         broadcastTxHash = broadcast.status === "failed"
           ? broadcast.attempt?.txHash
@@ -772,10 +790,18 @@ export function createProductStageResourcePatchService(
       }
 
       const context = await resolveSelectorTaskContext(options.store, taskId);
+      const plan = await findProjectedPlan(options.store, context.order);
       ensureResourcePreparedStillCurrent(
         context.order,
         prepared,
-        (await findProjectedPlan(options.store, context.order))?.signalCapabilities ?? [],
+        plan?.signalCapabilities ?? [],
+      );
+      // 词表 Merkle 造证：同 executor patch 路径（bindingProof + stageFacts
+      // 均为 applyStageResourcePatchFor 必携参数，投影表空 fail-closed）。
+      const { bindingProof, stageFacts } = stagePatchProofsFromPlan(
+        plan,
+        prepared.selectorStageId,
+        prepared.targetStageId,
       );
       // 同 executor patch 路径：prepare TTL 即陈旧预留阈值，崩溃泄漏的
       // 预留由新请求条件接管（nextStageResourcePatchNonce 的链上派生不受
@@ -804,6 +830,8 @@ export function createProductStageResourcePatchService(
           prepared: resourceDtoFromPrepared(prepared),
           signature,
           recoveredSelector,
+          bindingProof,
+          stageFacts,
         });
         broadcastTxHash = broadcast.status === "failed"
           ? broadcast.attempt?.txHash
@@ -1163,6 +1191,44 @@ async function findProjectedPlan(
       plan.stateMachineAddress.toLowerCase() ===
         order.contractAddress.toLowerCase(),
   );
+}
+
+/**
+ * stage patch 的词表 Merkle 造证（bindingProof + stageFacts）。
+ *
+ * 投影表空（外部发布 plan，产物富集不可用）或绑定叶不在表内 →
+ * fail-closed 抛错：合约入口对 bindingProof 强制验证
+ * （StageSelectorBindingNotFound），发不携证/携伪证的交易只会白烧 gas、
+ * 白占 patch nonce。这与旧世界行为一致——旧世界该 plan 的绑定表同样
+ * 不存在于链上（无法通过 findAllowedSelectorBinding 的授权预检）。
+ */
+function stagePatchProofsFromPlan(
+  plan: StateMachinePlanProjection | undefined,
+  selectorStageId: Hex,
+  targetStageId: Hex,
+): {
+  readonly bindingProof: SelectorBindingPayload;
+  readonly stageFacts: readonly StageFactPayload[];
+} {
+  const tables: PlanCapabilityTables = {
+    selectorBindings: plan?.selectorBindings ?? [],
+    signalCapabilities: plan?.signalCapabilities ?? [],
+  };
+  const bindingProof = selectorBindingProofForPatch(
+    tables,
+    selectorStageId,
+    targetStageId,
+  );
+  const stageFacts = stageFactsForTargetStage(tables, targetStageId);
+  if (!bindingProof || !stageFacts) {
+    throw new ProductStagePatchError(
+      409,
+      "stage_patch_capability_tables_unavailable",
+      "plan capability vocabulary is unavailable in the projection; the stage patch cannot carry the required binding proof and stage facts",
+      { planId: plan?.planId, selectorStageId, targetStageId },
+    );
+  }
+  return { bindingProof, stageFacts };
 }
 
 async function findProductSchema(

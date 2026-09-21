@@ -3,10 +3,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import { createApiRouter } from "../src/api/routes.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import { IndexerService, type ChainEventSource } from "../src/indexer/service.js";
 import { rebuildOrderProjections } from "../src/indexer/replay.js";
+import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import { stateMachineScopedKey, stateMachineTaskProjectionKey } from "../src/indexer/projections/index.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { Hex } from "../src/shared/types.js";
@@ -94,22 +96,16 @@ describe("indexer projection replay", () => {
   });
 
   it("replays order-level signal submitter authorizations and assigns matching HookReady tasks", async () => {
+    // 授权 (sourceId=stageId, signalId=hookName) 通过词表事实键挂到任务：
+    // 词表 Merkle 化后两表经产物富集进入 plan 投影。
+    const vocabulary = planVocabulary({
+      signalCapabilities: [{ stageId, targetSourceId: stageId, signalId: hookName, targetOrderRelation: 0 }]
+    });
     const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }),
-      chainEvent(2n, 0, "OrderRegistered", {
+      ...planPublishEvents(vocabulary),
+      chainEvent(3n, 0, "OrderRegistered", {
         orderId: stateMachineOrderId,
         planId
-      }),
-      chainEvent(3n, 0, "SignalCapabilityRegistered", {
-        planId,
-        stageId,
-        targetSourceId: stageId,
-        signalId: hookName,
-        targetOrderRelation: 0
       }),
       chainEvent(4n, 0, "SignalSubmitterAuthorized", {
         orderId: stateMachineOrderId,
@@ -127,9 +123,9 @@ describe("indexer projection replay", () => {
       })
     ];
     const store = new MemoryProjectionStore();
-    const first = await store.resetFromEvents({ deploymentBlock: 0n, events });
+    const first = await store.resetFromEvents({ deploymentBlock: 0n, events, planCapabilityTables: [vocabulary] });
     await store.resetFromEvents({ deploymentBlock: 0n, events: [] });
-    const rebuilt = await store.resetFromEvents({ deploymentBlock: 0n, events });
+    const rebuilt = await store.resetFromEvents({ deploymentBlock: 0n, events, planCapabilityTables: [vocabulary] });
     const order = rebuilt.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
     const task = rebuilt.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
@@ -149,19 +145,13 @@ describe("indexer projection replay", () => {
   });
 
   it("marks HookReady tasks submitted from explicit plan signal capabilities", () => {
+    // 词表 Merkle 化：两表不再来自链上注册事件，而是 planId 锚定的编译
+    // 产物富集（applyPlanFinalized 时填进投影并断言 capabilitiesRoot）。
+    const vocabulary = planVocabulary({
+      signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+    });
     const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }),
-      chainEvent(2n, 0, "SignalCapabilityRegistered", {
-        planId,
-        stageId,
-        targetSourceId: sourceId,
-        signalId,
-        targetOrderRelation: 0
-      }),
+      ...planPublishEvents(vocabulary),
       chainEvent(3n, 0, "OrderRegistered", {
         orderId: stateMachineOrderId,
         planId
@@ -182,7 +172,7 @@ describe("indexer projection replay", () => {
       })
     ];
 
-    const snapshot = rebuildOrderProjections(events);
+    const snapshot = rebuildOrderProjections(events, { planCapabilityTables: [vocabulary] });
     const task = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
     expect(task).toMatchObject({
@@ -202,19 +192,11 @@ describe("indexer projection replay", () => {
   });
 
   it("backfills submitted status when a matching signal is projected before HookReady creates the task", () => {
+    const vocabulary = planVocabulary({
+      signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+    });
     const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }),
-      chainEvent(2n, 0, "SignalCapabilityRegistered", {
-        planId,
-        stageId,
-        targetSourceId: sourceId,
-        signalId,
-        targetOrderRelation: 0
-      }),
+      ...planPublishEvents(vocabulary),
       chainEvent(3n, 0, "OrderRegistered", {
         orderId: stateMachineOrderId,
         planId
@@ -235,7 +217,7 @@ describe("indexer projection replay", () => {
       })
     ];
 
-    const snapshot = rebuildOrderProjections(events);
+    const snapshot = rebuildOrderProjections(events, { planCapabilityTables: [vocabulary] });
     const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
     const task = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
@@ -252,19 +234,11 @@ describe("indexer projection replay", () => {
   it("keeps the earliest matching signal as the submitted proof when a later matching signal arrives", () => {
     // 任务 submitted 是首个完成事实——后到的匹配信号不得覆盖
     // 任务的完成证明与 updatedAt（与创建路径取最早证明同口径）。
+    const vocabulary = planVocabulary({
+      signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+    });
     const base: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }),
-      chainEvent(2n, 0, "SignalCapabilityRegistered", {
-        planId,
-        stageId,
-        targetSourceId: sourceId,
-        signalId,
-        targetOrderRelation: 0
-      }),
+      ...planPublishEvents(vocabulary),
       chainEvent(3n, 0, "OrderRegistered", {
         orderId: stateMachineOrderId,
         planId
@@ -294,7 +268,7 @@ describe("indexer projection replay", () => {
         idempotencyKey: bytes32Hex("0aaa"),
         submitter: signer
       })
-    ]);
+    ], { planCapabilityTables: [vocabulary] });
     const task = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
     expect(task).toMatchObject({
@@ -307,19 +281,11 @@ describe("indexer projection replay", () => {
   });
 
   it("matches task authorization only against declared submit signals", () => {
+    const vocabulary = planVocabulary({
+      signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+    });
     const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }),
-      chainEvent(2n, 0, "SignalCapabilityRegistered", {
-        planId,
-        stageId,
-        targetSourceId: sourceId,
-        signalId,
-        targetOrderRelation: 0
-      }),
+      ...planPublishEvents(vocabulary),
       chainEvent(3n, 0, "OrderRegistered", {
         orderId: stateMachineOrderId,
         planId
@@ -340,7 +306,7 @@ describe("indexer projection replay", () => {
       })
     ];
 
-    const snapshot = rebuildOrderProjections(events);
+    const snapshot = rebuildOrderProjections(events, { planCapabilityTables: [vocabulary] });
     const task = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
     expect(task).toMatchObject({
@@ -363,11 +329,6 @@ describe("indexer projection replay", () => {
         planId,
         planHash,
         hookCount: 2n
-      }),
-      chainEvent(1n, 1, "StageSelectorBindingRegistered", {
-        planId,
-        selectorStageId,
-        targetStageId: stageId
       }),
       chainEvent(2n, 0, "OrderRegistered", {
         orderId: stateMachineOrderId,
@@ -847,43 +808,26 @@ describe("indexer projection replay", () => {
     ]);
   });
 
-  it("resolves plan events from module addresses when the same planId exists across deployments", () => {
-    // 同 planId 双部署 + plan 维度事件（SignalCapabilityRegistered）由模块
-    // 合约发出：归一化后必须精确命中所属状态机的 plan，不再走歧义回退抛
-    // ProjectionError 把索引器打进永久 degraded。
-    const planMetadataModuleAddress = "0xaaaa111111111111111111111111111111111111";
+  it("enriches the same planId on every deployment from the artifact vocabulary (content-scoped, not address-scoped)", () => {
+    // 词表 Merkle 化后两表按 planId 从编译产物富集：planId 由 planHash 派生
+    // （同 planId = 同 plan 内容），跨部署复用同 planId 时每个部署的 plan 桶
+    // 都富集到同一份词表——旧事件面按 emitting 地址区分的维度随注册事件
+    // 一并消失。
+    const vocabulary = planVocabulary({
+      signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+    });
     const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }, contractAddress),
-      chainEvent(2n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }, contractAddressV2),
-      chainEvent(3n, 0, "StateMachineModuleSet", {
-        moduleId: bytes32Text("uvp.module.plan-metadata.v1"),
-        previousModule: "0x0000000000000000000000000000000000000000",
-        newModule: planMetadataModuleAddress
-      }, contractAddressV2),
-      chainEvent(4n, 0, "SignalCapabilityRegistered", {
-        planId,
-        stageId,
-        targetSourceId: sourceId,
-        signalId,
-        targetOrderRelation: 0
-      }, planMetadataModuleAddress)
+      ...planPublishEvents(vocabulary, contractAddress),
+      ...planPublishEvents(vocabulary, contractAddressV2)
     ];
 
-    const snapshot = rebuildOrderProjections(events);
+    const snapshot = rebuildOrderProjections(events, { planCapabilityTables: [vocabulary] });
 
     const planV2 = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddressV2, planId)];
     expect(planV2?.signalCapabilities).toHaveLength(1);
     expect(planV2?.signalCapabilities[0]).toMatchObject({ stageId, signalId });
     const planV1 = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
-    expect(planV1?.signalCapabilities).toHaveLength(0);
+    expect(planV1?.signalCapabilities).toHaveLength(1);
   });
 
   it("binds plans and orders to the active deployment for reused state-machine addresses", () => {
@@ -1566,18 +1510,17 @@ describe("indexer projection replay", () => {
 
     const degradedStore = new MemoryProjectionStore();
     // 投影 apply 失败（未知 plan 引用）同样计入并进入 degraded。
+    // 词表注册事件已删除；PlanPublisherRecorded 是仍要求 plan 桶存在的
+    // 计划族事件，裸投递时撞"unknown plan"。
     const corruptSource: ChainEventSource = {
       async getFinalizedBlock() {
         return 5n;
       },
       async readEvents() {
         return [
-          chainEvent(1n, 0, "SignalCapabilityRegistered", {
+          chainEvent(1n, 0, "PlanPublisherRecorded", {
             planId,
-            stageId,
-            targetSourceId: sourceId,
-            signalId,
-            targetOrderRelation: 0
+            publisher: signer
           })
         ];
       }
@@ -1980,67 +1923,29 @@ describe("indexer projection replay", () => {
   });
 
   it("replays the real two-step plan publish transaction log order without a ProjectionError", () => {
-    // 真实链序 commitPlan 先发 PlanCommitted →
-    // PlanPublisherRecorded；finalizePlan 内先调 plan metadata 模块（模块
-    // 事件 logIndex 更小），随后才发 PlanFinalized + PlanRegistered。投影
-    // 若只认 PlanRegistered 建桶，首次两步发布即在 finalize 交易内撞
+    // 真实链序 commitPlan 先发 PlanCommitted → PlanPublisherRecorded；
+    // finalizePlan 随后发 PlanFinalized + PlanRegistered（词表已 Merkle 化
+    // 进 capabilitiesRoot，finalize 交易内不再有 plan metadata 模块事件）。
+    // 投影若只认 PlanRegistered 建桶，首次两步发布即在 finalize 交易内撞
     // "unknown plan" → ProjectionError → 索引器永久 degraded。
-    const planMetadataModuleId = bytes32Text("uvp.module.plan-metadata.v1");
-    const planMetadataModuleAddress = "0x7676767676767676767676767676767676767676";
+    // 两表（词表/绑定表）由重放方按 planId 从编译产物富集并断言 root。
     const hooksHash = bytes32Hex("9001");
-    const metadataHash = bytes32Hex("9002");
     const dockRoutesRoot = bytes32Hex("9003");
     const dockInterfaceRoot = bytes32Hex("9004");
-    const publisher = "0x4444444444444444444444444444444444444444";
+    const vocabulary = planVocabulary({
+      selectorBindings: [{ selectorStageId, targetStageId: stageId }],
+      signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+    });
     const events: readonly ChainEvent[] = [
-      // 部署交易：登记 plan metadata 模块。
-      chainEvent(1n, 0, "StateMachineModuleSet", {
-        moduleId: planMetadataModuleId,
-        previousModule: "0x0000000000000000000000000000000000000000",
-        newModule: planMetadataModuleAddress
-      }),
-      // commitPlan 交易：PlanCommitted 先于 PlanPublisherRecorded。
-      chainEvent(2n, 0, "PlanCommitted", {
-        planId,
-        planHash,
-        publisher,
+      ...planPublishEvents(vocabulary, contractAddress, {
         hooksHash,
-        metadataHash,
-        hookCount: 2n,
         dockRoutesRoot,
-        dockInterfaceRoot
-      }),
-      chainEvent(2n, 1, "PlanPublisherRecorded", {
-        planId,
-        publisher
-      }),
-      // finalizePlan 交易：模块事件 logIndex 先于 PlanFinalized/PlanRegistered
-      //（合约 finalizePlanMetadata 调用在两个 emit 之前）。
-      chainEvent(3n, 0, "SignalCapabilityRegistered", {
-        planId,
-        stageId,
-        targetSourceId: sourceId,
-        signalId,
-        targetOrderRelation: 0
-      }, planMetadataModuleAddress),
-      chainEvent(3n, 1, "StageSelectorBindingRegistered", {
-        planId,
-        selectorStageId,
-        targetStageId: stageId
-      }, planMetadataModuleAddress),
-      chainEvent(3n, 2, "PlanFinalized", {
-        planId,
-        planHash,
-        metadataHash
-      }),
-      chainEvent(3n, 3, "PlanRegistered", {
-        planId,
-        planHash,
+        dockInterfaceRoot,
         hookCount: 2n
       })
     ];
 
-    const snapshot = rebuildOrderProjections(events);
+    const snapshot = rebuildOrderProjections(events, { planCapabilityTables: [vocabulary] });
     const planKey = stateMachineScopedKey(31337, contractAddress, planId);
     const plan = snapshot.stateMachinePlans[planKey];
 
@@ -2048,21 +1953,69 @@ describe("indexer projection replay", () => {
     expect(plan).toMatchObject({
       planId,
       planHash,
-      publisher,
+      publisher: signer,
       hookCount: "2",
-      metadataHash
+      capabilitiesRoot: vocabulary.capabilitiesRoot,
+      hooksHash,
+      dockRoutesRoot,
+      dockInterfaceRoot
     });
     // 两阶段 provenance：桶在 PlanCommitted 建立，PlanRegistered 覆写注册时点。
-    expect(plan?.committedAt).toMatchObject({ blockNumber: 2n, logIndex: 0 });
-    expect(plan?.finalizedAt).toMatchObject({ blockNumber: 3n, logIndex: 2 });
-    expect(plan?.registeredAt).toMatchObject({ blockNumber: 3n, logIndex: 3 });
-    // finalize 交易内的模块事件已并入 plan 元数据。
+    expect(plan?.committedAt).toMatchObject({ blockNumber: 1n, logIndex: 0 });
+    expect(plan?.finalizedAt).toMatchObject({ blockNumber: 2n, logIndex: 0 });
+    expect(plan?.registeredAt).toMatchObject({ blockNumber: 2n, logIndex: 1 });
+    // 两表来自产物富集（词表锚定 PlanFinalized 的 root），不再是链上事件。
     expect(plan?.signalCapabilities).toEqual([
-      expect.objectContaining({ stageId, targetSourceId: sourceId, signalId })
+      expect.objectContaining({
+        stageId,
+        targetSourceId: sourceId,
+        signalId,
+        registeredAt: expect.objectContaining({ blockNumber: 2n, logIndex: 0 })
+      })
     ]);
     expect(plan?.selectorBindings).toEqual([
       expect.objectContaining({ selectorStageId, targetStageId: stageId })
     ]);
+  });
+
+  it("keeps the plan vocabulary empty and counts a mismatch when the artifact root diverges from the chain root", () => {
+    // fail-closed：产物两表重算 root ≠ 链上 capabilitiesRoot（产物过期/被改
+    // 写）时不得填进投影——下游会按错词表造出链上必拒的证明。显式计数，
+    // 不 crash indexer。
+    const chainVocabulary = planVocabulary({
+      signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+    });
+    // 产物表多出一条绑定（root 与链上不一致）：模拟产物过期/被改写。
+    const staleArtifact = planVocabulary({
+      selectorBindings: [{ selectorStageId, targetStageId: stageId }],
+      signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+    });
+    const events: readonly ChainEvent[] = [
+      ...planPublishEvents(chainVocabulary)
+    ];
+
+    const snapshot = rebuildOrderProjections(events, { planCapabilityTables: [staleArtifact] });
+    const plan = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
+
+    expect(plan?.signalCapabilities).toHaveLength(0);
+    expect(plan?.selectorBindings).toHaveLength(0);
+    expect(snapshot.capabilityEnrichmentMismatchCount).toBe(1);
+  });
+
+  it("keeps externally published plans on an empty vocabulary without counting a mismatch", () => {
+    // 外部发布 plan（store 域无产物）：两表留空是既定取舍而非异常——
+    // 词表相关推导对该 plan 不可用，链上词表闸不受影响。
+    const chainVocabulary = planVocabulary({});
+    const events: readonly ChainEvent[] = [
+      ...planPublishEvents(chainVocabulary)
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const plan = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
+
+    expect(plan?.signalCapabilities).toHaveLength(0);
+    expect(plan?.selectorBindings).toHaveLength(0);
+    expect(snapshot.capabilityEnrichmentMismatchCount).toBe(0);
   });
 
   it("recovers from a shallow reorg on a quiet chain whose stored events are far below the backtrack window", async () => {
@@ -3048,6 +3001,87 @@ function deploymentRegistryEvents(): readonly ChainEvent[] {
       evidenceHash,
       evidenceURI: "uvp-eth://evidence/v2"
     }, deploymentRegistryAddress)
+  ];
+}
+
+/** 词表产物富集源 fixture：两表 + 按 compiler 权威实现重算的链上 root。 */
+interface VocabularyFixture extends PlanCapabilityTablesInput {
+  readonly capabilitiesRoot: Hex;
+}
+
+function planVocabulary(input: {
+  readonly selectorBindings?: readonly { readonly selectorStageId: string; readonly targetStageId: string }[];
+  readonly signalCapabilities?: readonly {
+    readonly stageId: string;
+    readonly targetSourceId: string;
+    readonly signalId: string;
+    readonly targetOrderRelation: 0 | 1;
+  }[];
+}): VocabularyFixture {
+  // 夹具常量按 string 声明（bytes32Text/裸字面量产物），此处统一收窄为 Hex。
+  const selectorBindings = (input.selectorBindings ?? []).map((binding) => ({
+    selectorStageId: binding.selectorStageId as Hex,
+    targetStageId: binding.targetStageId as Hex
+  }));
+  const signalCapabilities = (input.signalCapabilities ?? []).map((capability) => ({
+    stageId: capability.stageId as Hex,
+    targetSourceId: capability.targetSourceId as Hex,
+    signalId: capability.signalId as Hex,
+    targetOrderRelation: capability.targetOrderRelation
+  }));
+  return {
+    planId: planId as Hex,
+    planHash: planHash as Hex,
+    selectorBindings,
+    signalCapabilities,
+    capabilitiesRoot: capabilitiesRootOf(selectorBindings, signalCapabilities)
+  };
+}
+
+/**
+ * 两步发布真实链序（v0.11）：commitPlan 交易 PlanCommitted →
+ * PlanPublisherRecorded；finalizePlan 交易 PlanFinalized → PlanRegistered
+ * （词表 Merkle 化后 finalize 交易内无 plan metadata 模块事件）。
+ */
+function planPublishEvents(
+  vocabulary: VocabularyFixture,
+  stateMachineAddress = contractAddress,
+  overrides: {
+    readonly hooksHash?: Hex;
+    readonly dockRoutesRoot?: Hex;
+    readonly dockInterfaceRoot?: Hex;
+    readonly hookCount?: bigint;
+  } = {}
+): readonly ChainEvent[] {
+  const hooksHash = overrides.hooksHash ?? bytes32Hex("9001");
+  const dockRoutesRoot = overrides.dockRoutesRoot ?? bytes32Hex("9003");
+  const dockInterfaceRoot = overrides.dockInterfaceRoot ?? bytes32Hex("9004");
+  const hookCount = overrides.hookCount ?? 1n;
+  return [
+    chainEvent(1n, 0, "PlanCommitted", {
+      planId,
+      planHash,
+      publisher: signer,
+      hooksHash,
+      capabilitiesRoot: vocabulary.capabilitiesRoot,
+      hookCount,
+      dockRoutesRoot,
+      dockInterfaceRoot
+    }, stateMachineAddress),
+    chainEvent(1n, 1, "PlanPublisherRecorded", {
+      planId,
+      publisher: signer
+    }, stateMachineAddress),
+    chainEvent(2n, 0, "PlanFinalized", {
+      planId,
+      planHash,
+      capabilitiesRoot: vocabulary.capabilitiesRoot
+    }, stateMachineAddress),
+    chainEvent(2n, 1, "PlanRegistered", {
+      planId,
+      planHash,
+      hookCount
+    }, stateMachineAddress)
   ];
 }
 

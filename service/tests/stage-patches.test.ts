@@ -5,10 +5,12 @@ import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
+  capabilitiesRootOf,
   onchainSignalId,
   onchainSourceId,
   onchainStageId,
 } from "@uvp-eth/compiler";
+import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import {
   hashResourceManifest as hashProtocolResourceManifest,
   hashStageExecutorPatchPayload as hashProtocolStageExecutorPatchPayload,
@@ -659,6 +661,7 @@ describe("stage executor/resource patch Product API", () => {
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: baseEvents(),
+      planCapabilityTables: planCapabilityTablesFor(baseEvents()),
     });
     const failingService = createProductStageResourcePatchService({
       store,
@@ -877,9 +880,11 @@ describe("stage executor/resource patch Product API", () => {
   it("rejects stale executor prepared nonces and duplicate prepare reuse", async () => {
     const stale = await routerFixture();
     const stalePrepared = await prepareStageExecutorPatch(stale.router);
+    const staleEvents = [...baseEvents(), stageExecutorPatchAppliedEvent(5n, 1n)];
     await stale.store.resetFromEvents({
       deploymentBlock: 0n,
-      events: [...baseEvents(), stageExecutorPatchAppliedEvent(5n, 1n)],
+      events: staleEvents,
+      planCapabilityTables: planCapabilityTablesFor(staleEvents),
     });
     const staleResponse = await stale.router.handle({
       method: "POST",
@@ -1217,7 +1222,10 @@ describe("stage executor/resource patch Product API", () => {
     await expect(adapter.broadcast({
       prepared: healedPrepared,
       signature: await signExecutorPrepared(healedPrepared),
-      recoveredSelector: selectorWallet
+      recoveredSelector: selectorWallet,
+      // 服务 submit 路径同款造证材料（真实流由服务端从投影两表构造）。
+      bindingProof: { selectorStageId: healedPrepared.selectorStageId, proof: [] },
+      stageFacts: []
     })).resolves.toMatchObject({
       status: "submitted",
       txHash: duplicateTx,
@@ -1239,32 +1247,33 @@ describe("stage executor/resource patch Product API", () => {
   function compiledPlanEvents(
     extraSignals: readonly ChainEvent[],
   ): readonly ChainEvent[] {
-    return [
-      ...baseEvents({ targetStageId: targetStageOnchainId }),
-      chainEvent(
-        1n,
-        "SignalCapabilityRegistered",
+    // 编译 plan 词表（富集源）：selector→target 绑定 + selector 阶段事实键
+    // + 目标阶段 relation=0 事实键（两键同源，构造同秒平局场景）。
+    const vocabulary = registerPlanVocabulary({
+      selectorBindings: [{ selectorStageId, targetStageId: targetStageOnchainId }],
+      signalCapabilities: [
         {
-          planId,
+          stageId: selectorStageId,
+          targetSourceId: selectorStageId,
+          signalId: selectorHookName,
+          targetOrderRelation: 0,
+        },
+        {
           stageId: targetStageOnchainId,
           targetSourceId: onchainSourceId(compiledFactSource),
           signalId: onchainSignalId(compiledFactSignalName),
           targetOrderRelation: 0,
         },
-        2,
-      ),
-      chainEvent(
-        1n,
-        "SignalCapabilityRegistered",
         {
-          planId,
           stageId: targetStageOnchainId,
           targetSourceId: onchainSourceId(compiledFactSource),
           signalId: onchainSignalId(compiledTieFactSignalName),
           targetOrderRelation: 0,
         },
-        3,
-      ),
+      ],
+    });
+    return [
+      ...baseEvents({ targetStageId: targetStageOnchainId, vocabulary }),
       ...extraSignals,
     ];
   }
@@ -1535,6 +1544,7 @@ describe("stage executor/resource patch Product API", () => {
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: baseEvents(),
+      planCapabilityTables: planCapabilityTablesFor(baseEvents()),
     });
     const failingService = createProductStageExecutorPatchService({
       store,
@@ -1615,6 +1625,7 @@ describe("stage executor/resource patch Product API", () => {
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: baseEvents(),
+      planCapabilityTables: planCapabilityTablesFor(baseEvents()),
     });
     const service = createProductStageExecutorPatchService({
       store,
@@ -1689,9 +1700,12 @@ async function routerFixture(
   readonly store: MemoryProjectionStore;
 }> {
   const store = new MemoryProjectionStore();
+  const events = options.events ?? baseEvents();
   await store.resetFromEvents({
     deploymentBlock: 0n,
-    events: options.events ?? baseEvents(),
+    events,
+    // 词表产物富集：按事件流锚定的 capabilitiesRoot 取注册表夹具。
+    planCapabilityTables: planCapabilityTablesFor(events),
   });
   const productSchemaResolver = options.productSchema
     ? {
@@ -2036,12 +2050,50 @@ function productSchemaFixture(): StoreProductSchemaDTO {
   };
 }
 
+/**
+ * 词表产物富集夹具（协议重构后两表的来源）：baseEvents/compiledPlanEvents
+ * 构造的两步发布事件携带 capabilitiesRoot，resetFromEvents 按 root 从本
+ * 注册表取富集源（与生产路径同口径：applyPlanFinalized 断言后填表）。
+ */
+const vocabularyRegistry = new Map<string, PlanCapabilityTablesInput>();
+
+interface VocabularyFixture extends PlanCapabilityTablesInput {
+  readonly capabilitiesRoot: Hex;
+}
+
+function registerPlanVocabulary(tables: {
+  readonly selectorBindings: readonly { readonly selectorStageId: Hex; readonly targetStageId: Hex }[];
+  readonly signalCapabilities?: readonly {
+    readonly stageId: Hex;
+    readonly targetSourceId: Hex;
+    readonly signalId: Hex;
+    readonly targetOrderRelation: 0 | 1;
+  }[];
+}): VocabularyFixture {
+  const signalCapabilities = tables.signalCapabilities ?? [];
+  const capabilitiesRoot = capabilitiesRootOf(tables.selectorBindings, signalCapabilities);
+  vocabularyRegistry.set(capabilitiesRoot, { planId, planHash, selectorBindings: tables.selectorBindings, signalCapabilities });
+  return { planId, planHash, selectorBindings: tables.selectorBindings, signalCapabilities, capabilitiesRoot };
+}
+
+/** 事件流内 PlanCommitted/PlanFinalized 锚定的 root → 富集源注册表命中。 */
+function planCapabilityTablesFor(events: readonly ChainEvent[]): readonly PlanCapabilityTablesInput[] {
+  const roots = new Set(events
+    .filter((event) => event.eventName === "PlanCommitted" || event.eventName === "PlanFinalized")
+    .map((event) => String(event.args["capabilitiesRoot"] ?? "").toLowerCase()));
+  return [...vocabularyRegistry.entries()]
+    .filter(([root]) => roots.has(root))
+    .map(([, tables]) => tables);
+}
+
 function baseEvents(
   options: {
     readonly includePatchAuthorizations?: boolean;
     readonly includeSelectorTaskAuthorization?: boolean;
     readonly selectorStageId?: Hex;
     readonly targetStageId?: Hex;
+    /** 发布事件携带的词表（capabilitiesRoot 与两表配对）；缺省按 selector/target 键构造。 */
+    readonly vocabulary?: VocabularyFixture;
   } = {},
 ): readonly ChainEvent[] {
   const includePatchAuthorizations = options.includePatchAuthorizations ?? true;
@@ -2049,33 +2101,43 @@ function baseEvents(
     options.includeSelectorTaskAuthorization ?? true;
   const eventSelectorStageId = options.selectorStageId ?? selectorStageId;
   const eventTargetStageId = options.targetStageId ?? targetStageId;
+  const vocabulary = options.vocabulary ?? registerPlanVocabulary({
+    selectorBindings: [{ selectorStageId: eventSelectorStageId, targetStageId: eventTargetStageId }],
+    signalCapabilities: [{
+      stageId: eventSelectorStageId,
+      targetSourceId: eventSelectorStageId,
+      signalId: selectorHookName,
+      targetOrderRelation: 0
+    }]
+  });
   return [
+    // 两步发布（v0.11 真实链序）：commit 交易 PlanCommitted →
+    // PlanPublisherRecorded，finalize 交易 PlanFinalized → PlanRegistered；
+    // 词表 Merkle 化进 capabilitiesRoot，两表经 resetFromEvents 富集。
+    chainEvent(1n, "PlanCommitted", {
+      planId,
+      planHash,
+      publisher: selectorWallet,
+      hooksHash: bytes32Hex("806"),
+      capabilitiesRoot: vocabulary.capabilitiesRoot,
+      hookCount: 1n,
+      dockRoutesRoot: bytes32Hex("807"),
+      dockInterfaceRoot: bytes32Hex("808"),
+    }),
+    chainEvent(1n, "PlanPublisherRecorded", {
+      planId,
+      publisher: selectorWallet,
+    }, 1),
+    chainEvent(1n, "PlanFinalized", {
+      planId,
+      planHash,
+      capabilitiesRoot: vocabulary.capabilitiesRoot,
+    }, 2),
     chainEvent(1n, "PlanRegistered", {
       planId,
       planHash,
       hookCount: 1n,
-      selectorBindings: [
-        {
-          selectorStageIdentifier: "selector.stage",
-          targetStageIdentifier: "target.stage",
-          selectorStageId: eventSelectorStageId,
-          targetStageId: eventTargetStageId,
-          bindingHash: bytes32Hex("808"),
-        },
-      ],
-    }),
-    chainEvent(
-      1n,
-      "SignalCapabilityRegistered",
-      {
-        planId,
-        stageId: eventSelectorStageId,
-        targetSourceId: eventSelectorStageId,
-        signalId: selectorHookName,
-        targetOrderRelation: 0,
-      },
-      1,
-    ),
+    }, 3),
     chainEvent(2n, "OrderRegistered", {
       orderId,
       planId,
@@ -2137,7 +2199,6 @@ function linkedOrderEvents(blockNumber: bigint): readonly ChainEvent[] {
       planId: linkedPlanId,
       planHash: linkedPlanHash,
       hookCount: 1n,
-      selectorBindings: [],
     }),
     chainEvent(blockNumber + 1n, "OrderRegistered", {
       orderId: linkedOrderId,
