@@ -63,9 +63,10 @@ describe("dock liveness keeper", () => {
 
   it("fails closed on route records with missing or malformed identity fields", async () => {
     // route 数据来自链下来源：keeper 只提交可由链上 committed 投影推导的
-    // 就绪性——记录身份字段缺失/零值/跨链/new 模式缺 openCalldata 或
-    // existing 模式缺 attachCalldata（各自模式的唯一交易载荷）即整轮
-    // 响亮报错，不静默跳过、不带可疑数据继续提交。
+    // 就绪性——记录身份字段缺失/零值/跨链/new 模式缺 openCalldata（该
+    // 模式唯一交易载荷）即整轮响亮报错，不静默跳过、不带可疑数据继续
+    // 提交。existing 模式的 attachCalldata 缺失不在此列（permissionless
+    // attach 的合法形态，见下方专测）。
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: dockEvents() });
     const submitted: string[] = [];
@@ -99,10 +100,6 @@ describe("dock liveness keeper", () => {
       inputs: [...dockRoute().inputs.slice(1), { ...dockRoute().inputs[1]!, bindingHash: "0x1234" as Hex }]
     }]).runOnce())
       .rejects.toThrow(/routes\[0\]\.inputs\[1\]\.bindingHash must be a non-zero bytes32/);
-    const { attachCalldata: _omittedAttach, ...missingAttach } = existingDockRoute();
-    void _omittedAttach;
-    await expect(build([missingAttach as DockRouteRecord]).runOnce())
-      .rejects.toThrow(/routes\[0\]\.attachCalldata must be pre-assembled calldata hex for an existing-mode route/);
     // 无提交发生：校验在任何广播之前完成。
     expect(submitted).toEqual([]);
   });
@@ -155,6 +152,232 @@ describe("dock liveness keeper", () => {
     const attachedSummary = await attached.worker.runOnce();
     expect(attachedSummary).toMatchObject({ attachCandidates: 0, inputCandidates: 1, submitted: 1 });
     expect(attached.submitted).not.toContain(existingDockRoute().attachCalldata);
+  });
+
+  it("skips only the attach lane with a skipped trace when a pending existing route carries no attachCalldata", async () => {
+    // attach 是 permissionless 面：目标单 creator/在任执行者可自行上链挂接，
+    // 这类 route 在 route source 里合法地没有 attachCalldata。留痕只发生在
+    // 挂接仍未发生（无 dock 实例）且缺 calldata 的可行动场景——dock 已出生
+    // 的 route attach 车道已无关，留痕会是每轮重复的永久噪声；两条路径都
+    // 不阻断其他 route 的 attach/input/output 交付车道。
+    const pendingRouteId = bytes32Hex("2525");
+    const pendingOrderId = bytes32Hex("2626");
+    const attachedRouteId = bytes32Hex("2727");
+    const attachedOrderId = bytes32Hex("2828");
+    const withAttachRoute: DockRouteRecord = {
+      ...existingDockRoute(),
+      routeId: pendingRouteId,
+      localOrderId: pendingOrderId,
+      attachCalldata: "0xabef9999" as Hex
+    };
+    // 待挂接且无 calldata：唯一应留痕的形态。
+    const { attachCalldata: _omitted, ...pendingPermissionless } = {
+      ...existingDockRoute(),
+      routeId: attachedRouteId,
+      localOrderId: attachedOrderId
+    };
+    void _omitted;
+    // 已挂接且无 calldata：attach 车道无关，不留痕、input 交付照常。
+    const { attachCalldata: _omittedAttached, ...attachedPermissionless } = existingDockRoute();
+    void _omittedAttached;
+
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...attachedEvents(),
+        // 两条新 route 的父单出生（目标单已在基座事件中出生）。
+        chainEvent(8n, 0, "OrderRegistered", { orderId: pendingOrderId, planId }),
+        chainEvent(9n, 0, "OrderRegistered", { orderId: attachedOrderId, planId })
+      ]
+    });
+    const submitted: string[] = [];
+    const worker = new DockAutomationWorker({
+      config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
+      projectionStore: store,
+      dockingAddress: dockingModuleAddress,
+      chainId,
+      routeSource: { listRoutes: async () => [attachedPermissionless as DockRouteRecord, withAttachRoute, pendingPermissionless as DockRouteRecord] },
+      submitter: {
+        submit: async (submission) => {
+          submitted.push(submission.data);
+          return "0x" + "ab".repeat(32) as Hex;
+        }
+      }
+    });
+
+    const summary = await worker.runOnce();
+    // 已挂接 route：input 交付照常；待挂接且有 calldata 的 route：attach
+    // 照常广播；待挂接且无 calldata 的 route：只跳过 attach 车道并留痕。
+    expect(summary).toMatchObject({ inputCandidates: 1, attachCandidates: 1, submitted: 2 });
+    expect(summary.skipped).toContainEqual(
+      expect.stringContaining(`attach:route ${attachedRouteId} carries no pre-assembled attachCalldata`)
+    );
+    // 已挂接 route 的 routeId 不得出现在任何留痕里（attach 车道无关）。
+    expect(summary.skipped.join("\n")).not.toContain(existingDockRoute().routeId);
+    expect(submitted).toContain(withAttachRoute.attachCalldata);
+    // 已挂接 route 的 input 交付（submitDockedInput）照常广播。
+    const decoded = decodeFunctionData({ abi: DOCKING_MODULE_ABI as Abi, data: submitted[0] as Hex });
+    expect(decoded.functionName).toBe("submitDockedInput");
+  });
+
+  it("does not broadcast submitDockedInput when the target fact slot is already occupied", async () => {
+    // 投影侧预检（对称于 output 车道 targetFactExists 正向门）：目标单
+    // mailbox 槽 (targetSourceId, targetSignalId) 已被不同 provenance 的
+    // 事实占用时，submitDockedInput 链上永久 revert DockInputConflict——
+    // 不广播、留痕交人工裁决，不再每窗口烧一次 gas 撞同一堵墙。
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...attachedEvents(),
+        chainEvent(8n, 0, "SignalSubmitted", {
+          orderId: linkedOrderId,
+          sourceId,
+          signalId,
+          payloadHash,
+          idempotencyKey: bytes32Hex("0aaa"),
+          submitter: signer
+        })
+      ]
+    });
+    const submitted: string[] = [];
+    const worker = new DockAutomationWorker({
+      config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
+      projectionStore: store,
+      dockingAddress: dockingModuleAddress,
+      chainId,
+      routeSource: { listRoutes: async () => [existingDockRoute()] },
+      submitter: {
+        submit: async (submission) => {
+          submitted.push(submission.data);
+          return "0x" + "ab".repeat(32) as Hex;
+        }
+      }
+    });
+
+    const summary = await worker.runOnce();
+    expect(summary).toMatchObject({ inputCandidates: 0, submitted: 0 });
+    expect(summary.skipped[0]).toMatch(/input:.*already occupied; submitDockedInput would revert DockInputConflict permanently/);
+    expect(submitted).toEqual([]);
+  });
+
+  it("escalates a persistent DockInputConflict to an error-level alarm after consecutive windows", async () => {
+    // keeper 无死信机制：无收敛 revert（事实槽冲突）每窗口照常重播、仅
+    // skipped 留痕——连续 3 个窗口撞同一绑定同一原因即升级 error 级告警
+    // （带 dockInstanceId/bindingHash 与处置指引）；广播成功清零计数。
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({ deploymentBlock: 0n, events: attachedEvents() });
+    let nowMs = 1_000_000;
+    let fail = true;
+    const logger = new RecordingLogger();
+    const worker = new DockAutomationWorker({
+      config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
+      projectionStore: store,
+      dockingAddress: dockingModuleAddress,
+      chainId,
+      routeSource: { listRoutes: async () => [existingDockRoute()] },
+      submitter: {
+        submit: async () => {
+          if (fail) {
+            throw new Error("reverted: DockInputConflict(dockInstanceId, inputBindingHash)");
+          }
+          return "0x" + "ab".repeat(32) as Hex;
+        }
+      },
+      logger,
+      now: () => new Date(nowMs)
+    });
+
+    // 前两个窗口：只有 skipped 留痕，无 error。
+    await worker.runOnce();
+    nowMs += 70_000;
+    await worker.runOnce();
+    expect(logger.errors).toEqual([]);
+
+    // 第三个连续窗口：升级 error，带绑定身份与原因。
+    nowMs += 70_000;
+    const third = await worker.runOnce();
+    expect(third.skipped.length).toBe(1);
+    expect(logger.errors).toHaveLength(1);
+    expect(logger.errors[0]!.message).toMatch(/no-convergence revert for 3 consecutive redelivery windows/);
+    expect(logger.errors[0]!.context).toMatchObject({
+      dockInstanceId,
+      bindingHash: amendBindingHash,
+      reason: "DockInputConflict",
+      windows: 3
+    });
+
+    // 广播成功：计数清零，后续连续失败从头数起。
+    fail = false;
+    nowMs += 70_000;
+    await worker.runOnce();
+    fail = true;
+    nowMs += 70_000;
+    await worker.runOnce();
+    nowMs += 70_000;
+    await worker.runOnce();
+    expect(logger.errors).toHaveLength(1);
+    nowMs += 70_000;
+    await worker.runOnce();
+    expect(logger.errors).toHaveLength(2);
+    expect(logger.errors[1]!.context).toMatchObject({ windows: 3 });
+  });
+
+  it("escalates a persistent InvalidSignalCapability on the output lane to an error-level alarm", async () => {
+    // 全零造证撞链上词表闸同样是合约永久 revert：投影侧无法预判（词表
+    // 在链上），只能靠连续窗口的失败升级告警把"route source 词表/造证
+    // 需修正"抬出来。
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...attachedEvents(),
+        chainEvent(8n, 0, "SignalSubmitted", {
+          orderId: linkedOrderId,
+          sourceId,
+          signalId,
+          payloadHash,
+          idempotencyKey: bytes32Hex("0aaa"),
+          submitter: signer
+        })
+      ]
+    });
+    const route: DockRouteRecord = { ...existingDockRoute(), inputs: [], outputs: [{
+      bindingHash: outputBindingHash,
+      localSourceId: sourceId,
+      localSignalId: signalId,
+      targetSourceId: sourceId,
+      targetSignalId: signalId
+    }] };
+    let nowMs = 1_000_000;
+    const logger = new RecordingLogger();
+    const worker = new DockAutomationWorker({
+      config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
+      projectionStore: store,
+      dockingAddress: dockingModuleAddress,
+      chainId,
+      routeSource: { listRoutes: async () => [route] },
+      submitter: {
+        submit: async () => {
+          throw new Error("reverted: InvalidSignalCapability(planId, sourceId, signalId)");
+        }
+      },
+      logger,
+      now: () => new Date(nowMs)
+    });
+
+    for (let window = 1; window <= 3; window += 1) {
+      await worker.runOnce();
+      nowMs += 70_000;
+    }
+    expect(logger.errors).toHaveLength(1);
+    expect(logger.errors[0]!.context).toMatchObject({
+      dockInstanceId,
+      bindingHash: outputBindingHash,
+      reason: "InvalidSignalCapability",
+      windows: 3
+    });
   });
 
   it("does not re-broadcast the same binding inside the finality window and retries after it", async () => {
@@ -872,6 +1095,24 @@ function chainEvent(
 
 function bytes32Hex(value: string): Hex {
   return `0x${value.padStart(64, "0")}` as Hex;
+}
+
+/** 捕获 error 级告警（消息 + 结构化上下文）供升级断言。 */
+class RecordingLogger {
+  readonly errors: Array<{ readonly message: string; readonly context?: Record<string, unknown> }> = [];
+
+  error(message: string, context?: Record<string, unknown>): void {
+    this.errors.push({ message, ...(context ? { context } : {}) });
+  }
+
+  warn(): void {
+  }
+
+  info(): void {
+  }
+
+  debug(): void {
+  }
 }
 
 function bytes32Text(value: string): Hex {

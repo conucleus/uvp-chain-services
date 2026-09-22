@@ -72,6 +72,11 @@ export interface DockRouteRecord {
    * 预授权腿，与 openCalldata 的 EntrancePermit 处理同构：keeper 不组装、
    * 不补签、不自选动态目标（候选集 membership proof 随 calldata 一并
    * 预组装）。
+   *
+   * 可缺：attach 本身是 permissionless 面（目标单 creator/在任执行者可
+   * 自行上链挂接），permissionless 挂接的 route 合法地不携带该载荷——
+   * keeper 对这类 route 只跳过 attach 车道并留痕，其 dock 经
+   * DockAttached 入投影后 input/output 交付车道照常。
    */
   readonly attachCalldata?: Hex;
 }

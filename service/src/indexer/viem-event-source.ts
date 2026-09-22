@@ -9,6 +9,7 @@ import {
   type Log,
 } from "viem";
 import type { ChainServicesConfig } from "../config/index.js";
+import { DOCKING_MODULE_ABI } from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type Logger } from "../shared/types.js";
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
@@ -59,18 +60,20 @@ const orderLinkModuleAbi = parseAbi([
   "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 planId,bytes32 originPlanId,bytes32 originSourceId,bytes32 originSignalId)",
 ]);
 
-// UVPDockingModule v4.4（具名接口 dock v2）。终态不由链上事件驱动；
-// 事件面为 open/attach/input/output/outputSatisfied 五类——DockAttached
-// 是 existing 模式出生事件（形状与 DockOpened 同构，对等挂接既有目标单，
-// 不铸子单）；DockOutputSatisfied 记录兄弟 output 绑定等价交付下的满足
-// （无新镜像写入）。
-const dockingModuleAbi = parseAbi([
-  "event DockOpened(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 interfaceNameId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address opener)",
-  "event DockAttached(bytes32 indexed dockInstanceId,bytes32 indexed localOrderId,bytes32 indexed linkedOrderId,bytes32 interfaceNameId,bytes32 localPlanId,bytes32 targetPlanId,bytes32 routeId,bytes32 routeHash,uint8 depth,address attacher)",
-  "event DockInputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed inputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 payloadHash,address submitter)",
-  "event DockOutputSubmitted(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed outputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 localSignalId,bytes32 payloadHash,address submitter)",
-  "event DockOutputSatisfied(bytes32 indexed dockInstanceId,bytes32 indexed linkedOrderId,bytes32 indexed outputBindingHash,bytes32 localPlanId,bytes32 localOrderId,bytes32 targetPlanId,bytes32 targetSignalId,bytes32 localSignalId,bytes32 payloadHash,address submitter)",
-]);
+// UVPDockingModule v4.4（具名接口 dock v2）事件面：从 protocol-bindings
+// 单源（DOCKING_MODULE_ABI）滤出 event 条目，对齐写面已做的单源化
+// （dock-automation/service.ts 的 dockingWriteAbi）——手抄事件副本会随
+// 协议演进漂移成错 topic。终态不由链上事件驱动；事件面为 open/attach/
+// input/output/outputSatisfied 五类——DockAttached 是 existing 模式出生
+// 事件（形状与 DockOpened 同构，对等挂接既有目标单，不铸子单）；
+// DockOutputSatisfied 记录兄弟 output 绑定等价交付下的满足（无新镜像
+// 写入）。与写面同取舍：先放宽为泛型 Abi 再滤，直接在整表字面量类型上
+// 做 filter 会让 viem 的巨型条件类型爆栈（TS2589）；滤出面的 topic 与
+// indexed 布局由 viem-event-source 测试按 v4.4 fixture 钉住（守护单源
+// 滤出本身不漂移）。
+const dockingModuleAbi: Abi = (DOCKING_MODULE_ABI as Abi).filter(
+  (entry) => entry.type === "event"
+);
 
 const identityRegistryAbi = parseAbi([
   "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",

@@ -806,6 +806,15 @@ export class IndexerService implements LifecycleService {
           newEventCount: 0
         });
         await this.#processProjectionAutomation(result.snapshot);
+        // 对齐全路径的 "indexer incrementally refreshed..."：早退也是一轮
+        // 正常完成的刷新（游标已推进、稳态轮的日志面不应静默缺行）。
+        this.#logger.info("indexer skipped the full replay on a zero-new-events round; the stored projection already covers the finalized range", {
+          fromBlock: effectiveFromBlock.toString(),
+          toBlock: reportedFinalizedBlock.toString(),
+          eventCount: result.summary.eventCount,
+          nextBlock: earlyExitCursor.nextBlock.toString(),
+          syncStatus: result.summary.syncStatus
+        });
         return result;
       }
     }

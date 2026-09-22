@@ -165,10 +165,11 @@ export function rebuildOrderProjections(
   const stateMachineOrderRecord: Record<string, StateMachineOrderProjection> = {};
   const stateMachineTaskRecord: Record<string, StateMachineTaskProjection> = {};
   const stateMachineDockRecord: Record<string, StateMachineDockProjection> = {};
-  // 目标侧"谁挂了我"索引：从已出生的 dock 集合收口聚合（而非逐事件记账）
-  // ——dock 桶本身按 dockInstanceId 去重，聚合天然无重复；existing 的
-  // N:1 由集合值承载。键与目标单订单桶同形，持有目标订单键的消费方可
-  // 直查其名下 dock 集合。
+  // 目标侧"谁挂了我"索引：预留索引——从已出生的 dock 集合收口派生
+  // （而非逐事件记账），快照每次重建整体重算，天然幂等；existing 的 N:1
+  // 由集合值承载，键与目标单订单桶同形。当前没有读取方消费它，消费方
+  // （目标单视角的反查/展示面）接入前该索引不承载任何读取语义，只随
+  // 快照持久化保持形状稳定。
   const stateMachineDocksByTargetOrder: Record<string, string[]> = {};
   for (const [dockKey, dock] of stateMachineDocks) {
     stateMachineDockRecord[dockKey] = {

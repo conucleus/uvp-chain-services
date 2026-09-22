@@ -464,11 +464,11 @@ class CapturingLogger {
 type AbiEvent = {
   readonly type: "event";
   readonly name: string;
-  readonly anonymous?: boolean;
+  readonly anonymous?: boolean | undefined;
   readonly inputs: readonly {
-    readonly name?: string;
+    readonly name?: string | undefined;
     readonly type: string;
-    readonly indexed?: boolean;
+    readonly indexed?: boolean | undefined;
   }[];
 };
 

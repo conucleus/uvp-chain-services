@@ -1697,6 +1697,212 @@ describe("indexer projection replay", () => {
     }
   });
 
+  it("declines the zero-event early exit on crash-window residue and converges through the full path", async () => {
+    // 回归（早退让位分支 ①）：零新事件轮的早退事务内清扫出崩溃窗口
+    // 残留行（事件已落库、游标未推进）时必须整体回滚让位——残留行的投影
+    // 只有全路径事务内的清扫+重放能清，早退只推游标会把幽灵行永久留在
+    // 事件表里逐轮投进投影。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-early-exit-residue-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const events = stateMachineEvents();
+      let finalizedBlock = 7n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return events.filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        }
+      };
+      const infos: string[] = [];
+      const warns: string[] = [];
+      const logger = {
+        debug: () => undefined,
+        info: (message: string) => infos.push(message),
+        warn: (message: string) => warns.push(message),
+        error: () => undefined
+      };
+      const indexer = new IndexerService({ config: testConfig(), eventSource, store, logger });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+      await expect(store.listEvents({ chainId: 31337 })).resolves.toHaveLength(9);
+
+      // 崩溃窗口残留：块 8 的行已落库而游标仍停在 8（单写者不变量下
+      // 只可能来自本进程上一轮的崩溃窗口）；canonical 链 [8,9] 无事件。
+      const ghostOrderId = "0x000000000000000000000000000000000000000000000000000000000000e101";
+      await store.appendEvent(chainEvent(8n, 0, "OrderRegistered", { orderId: ghostOrderId, planId }));
+
+      finalizedBlock = 9n;
+      const refreshed = await indexer.refreshFromCursorWithSummary();
+
+      // 早退让位：走的是全路径（清扫+重放），不是早退汇总。
+      expect(infos.some((message) => message.includes("indexer incrementally refreshed projections"))).toBe(true);
+      expect(infos.some((message) => message.includes("indexer skipped the full replay"))).toBe(false);
+      expect(warns.some((message) => message.includes("swept committed-but-unadvanced event rows"))).toBe(true);
+
+      // 收敛：残留行被清扫，重放只含 canonical 事件，幽灵订单不入投影。
+      await expect(store.listEvents({ chainId: 31337 })).resolves.toHaveLength(9);
+      expect(refreshed.summary.eventCount).toBe(9);
+      const persisted = await store.getOrderSnapshot();
+      expect(Object.values(persisted.stateMachineOrders).some((order) => order.orderId === ghostOrderId)).toBe(false);
+      await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
+        .resolves.toMatchObject({ nextBlock: 10n, finalizedBlock: 9n });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("declines the zero-event early exit when the durable cursor moves concurrently and defers through the full path", async () => {
+    // 回归（早退让位分支 ②）：早退的游标写入带 CAS（expectNextBlock =
+    // 本轮 fromBlock）——读窗口内另一写者移动持久游标时 CAS 失败让位，
+    // 照走全路径（清扫+重放+汇总），推进按 #saveCursorAdvancingFrom 的
+    // CAS 语义递延到持久值，不越过事件表覆盖区间。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-early-exit-cas-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const events = stateMachineEvents();
+      let finalizedBlock = 7n;
+      const scope = { chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" as Hex };
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          if (range.fromBlock > 7n) {
+            // 零新事件轮的读窗口内，"另一进程"移动持久游标。
+            await store.saveCursor({ ...scope, deploymentBlock: 0n, nextBlock: 50n, finalizedBlock: 9n });
+          }
+          return events.filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        }
+      };
+      const infos: string[] = [];
+      const warns: string[] = [];
+      const logger = {
+        debug: () => undefined,
+        info: (message: string) => infos.push(message),
+        warn: (message: string) => warns.push(message),
+        error: () => undefined
+      };
+      const indexer = new IndexerService({ config: testConfig(), eventSource, store, logger });
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      finalizedBlock = 9n;
+      await indexer.refreshFromCursorWithSummary();
+
+      // CAS 让位后照走全路径，不是早退汇总。
+      expect(infos.some((message) => message.includes("indexer incrementally refreshed projections"))).toBe(true);
+      expect(infos.some((message) => message.includes("indexer skipped the full replay"))).toBe(false);
+      // 推进被 CAS 递延：内存游标收敛回持久值，让位告警可见。
+      expect(indexer.cursor?.nextBlock).toBe(50n);
+      expect(warns.some((message) => message.includes("cursor moved by another writer during refresh"))).toBe(true);
+      // 事件表未被越过：仍是重建时的 9 条。
+      await expect(store.listEvents({ chainId: 31337 })).resolves.toHaveLength(9);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("replays the full path on the first zero-new-events round after a restart broke the enrichment cache coverage", async () => {
+    // 回归（覆盖打破 → 全路径）：重启后富集缓存为空，零新事件轮的覆盖
+    // 前提不成立——照走全路径重放，resolver 重解析后富集态持久化保持。
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-early-exit-cold-"));
+    const store = new SqliteProjectionStore({
+      databaseUrl: `sqlite://${join(tempDir, "projection.sqlite3")}`,
+      chainId: 31337,
+      migrations: {
+        autoRun: true,
+        directory: resolve(__dirname, "../migrations")
+      }
+    });
+    try {
+      const vocabulary = planVocabulary({
+        selectorBindings: [{ selectorStageId, targetStageId: stageId }],
+        signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
+      });
+      const planEvents = planPublishEvents(vocabulary);
+      const orderEvent = chainEvent(3n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      });
+      let finalizedBlock = 3n;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          return [...planEvents, orderEvent].filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        }
+      };
+      let resolverCalls = 0;
+      const resolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> => {
+        resolverCalls += 1;
+        return anchorPlanId.toLowerCase() === planId.toLowerCase() && anchorPlanHash.toLowerCase() === planHash.toLowerCase()
+          ? vocabulary
+          : undefined;
+      };
+      const infos: string[] = [];
+      const logger = {
+        debug: () => undefined,
+        info: (message: string) => infos.push(message),
+        warn: () => undefined,
+        error: () => undefined
+      };
+
+      const firstIndexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        resolvePlanCapabilityTables: resolver
+      });
+      await firstIndexer.rebuildFromDeploymentBlockWithSummary();
+      expect(resolverCalls).toBe(1);
+
+      // 重启（富集缓存为空）+ 零新事件轮：覆盖不成立，照走全路径。
+      finalizedBlock = 4n;
+      eventSource.readEvents = async () => [];
+      const restartedIndexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store,
+        resolvePlanCapabilityTables: resolver,
+        logger
+      });
+      const refreshed = await restartedIndexer.refreshFromCursorWithSummary();
+
+      expect(resolverCalls).toBe(2);
+      expect(infos.some((message) => message.includes("indexer incrementally refreshed projections"))).toBe(true);
+      expect(infos.some((message) => message.includes("indexer skipped the full replay"))).toBe(false);
+      const planKey = stateMachineScopedKey(31337, contractAddress, planId);
+      expect(refreshed.snapshot.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("enriched");
+      expect(refreshed.snapshot.stateMachinePlans[planKey]?.selectorBindings).toHaveLength(1);
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("rolls back stored events and replays the canonical fork when a reorg breaks cursor hash continuity", async () => {
     // 模拟 fork——block 3 之后链被替换。cursor 哈希校验发现断链，
     // 共同祖先定位到 block 2，删除 block 3 的旧事件，从 fork 链重放。
