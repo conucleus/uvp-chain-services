@@ -42,6 +42,14 @@ export interface ProjectionSnapshot {
   readonly stateMachinePlans: Readonly<Record<string, StateMachinePlanProjection>>;
   readonly stateMachineOrders: Readonly<Record<string, StateMachineOrderProjection>>;
   readonly stateMachineDocks: Readonly<Record<string, StateMachineDockProjection>>;
+  /**
+   * 目标侧"谁挂了我"索引：键 = 目标单的 plan 作用域复合键
+   * (chainId, stateMachineAddress, targetPlanId, linkedOrderId)，值为该
+   * 目标单名下 dock 实例键的集合。existing 模式（DockAttached）天然
+   * N:1——多个父单可挂同一目标单，索引必须是集合；链上 dockByTargetOrder
+   * 是 new 模式子单出生键（单值、existing 不写），投影不镜像其单值语义。
+   */
+  readonly stateMachineDocksByTargetOrder: Readonly<Record<string, readonly string[]>>;
   readonly stateMachineTasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly lastEvent?: ProjectionProvenance;
   /**
@@ -53,8 +61,9 @@ export interface ProjectionSnapshot {
    */
   readonly unresolvedModuleOrderEventCount?: number;
   /**
-   * Dock 事件（input/output）无法定位已开启 dock 桶的显式计数
-   * （dock 未开启 / 模块未登记 / 回放顺序中 DockOpened 缺失）。不允许静默。
+   * Dock 事件（input/output）无法定位已出生 dock 桶的显式计数
+   * （dock 未开启/未挂接 / 模块未登记 / 回放顺序中出生事件缺失）。
+   * 不允许静默。
    */
   readonly unresolvedDockEventCount?: number;
   /**
@@ -101,6 +110,7 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     stateMachinePlans: {},
     stateMachineOrders: {},
     stateMachineDocks: {},
+    stateMachineDocksByTargetOrder: {},
     stateMachineTasks: {},
     unresolvedModuleOrderEventCount: 0,
     unresolvedDockEventCount: 0,

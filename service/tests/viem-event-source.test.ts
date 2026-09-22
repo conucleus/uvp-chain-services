@@ -17,7 +17,7 @@ describe("ViemChainEventSource", () => {
       UVPStagePatchModule: "uvp-stage-patch-module.v0.4.json",
       UVPDerivedSignalModule: "uvp-derived-signal-module.v0.3.json",
       UVPOrderLinkModule: "uvp-order-link-module.v0.3.json",
-      UVPDockingModule: "uvp-docking-module.v4.3.json"
+      UVPDockingModule: "uvp-docking-module.v4.4.json"
     };
     const artifacts: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
       UVPStateMachine: "UVPStateMachine.sol/UVPStateMachine.json",

@@ -42,6 +42,7 @@ export type {
 export type {
   StateMachineDockInputDeliveryProjection,
   StateMachineDockOutputDeliveryProjection,
+  StateMachineDockMode,
   StateMachineDockProjection
 } from "./docking.js";
 export type {

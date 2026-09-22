@@ -779,6 +779,181 @@ describe("indexer projection replay", () => {
     expect(snapshot.unresolvedModuleOrderEventCount).toBe(0);
   });
 
+  it("projects DockAttached births under the N:1 target-order index with multiple parents", () => {
+    // existing 模式挂接：多个父单可挂同一既有目标单（链上 dockByTargetOrder
+    // 是 new 模式子单出生键——单值、existing 不写——目标侧"谁挂了我"只能由
+    // DockAttached 事件按 (targetPlanId, linkedOrderId) 复合键聚合成集合）。
+    const moduleAddress = "0x6666666666666666666666666666666666666666";
+    const parentOrderIdA = bytes32Hex("901");
+    const parentOrderIdB = bytes32Hex("902");
+    const dockInstanceA = bytes32Hex("911");
+    const dockInstanceB = bytes32Hex("912");
+    const linkedOrderId = bytes32Hex("903");
+    const targetPlan = bytes32Hex("904");
+    const dockKeyA = stateMachineScopedKey(31337, contractAddress, dockInstanceA);
+    const dockKeyB = stateMachineScopedKey(31337, contractAddress, dockInstanceB);
+    const targetOrderKey = stateMachineScopedKey(31337, contractAddress, targetPlan, linkedOrderId);
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+      chainEvent(2n, 0, "PlanRegistered", { planId: targetPlan, planHash: bytes32Hex("905"), hookCount: 1n }),
+      chainEvent(3n, 0, "OrderRegistered", { orderId: parentOrderIdA, planId }),
+      chainEvent(4n, 0, "OrderRegistered", { orderId: parentOrderIdB, planId }),
+      chainEvent(5n, 0, "OrderRegistered", { orderId: linkedOrderId, planId: targetPlan }),
+      chainEvent(6n, 0, "StateMachineModuleSet", {
+        moduleId: bytes32Text("uvp.module.docking.v1"),
+        previousModule: "0x0000000000000000000000000000000000000000",
+        newModule: moduleAddress
+      }),
+      chainEvent(7n, 0, "DockAttached", {
+        dockInstanceId: dockInstanceA,
+        localOrderId: parentOrderIdA,
+        linkedOrderId,
+        interfaceNameId: bytes32Text("production_service"),
+        localPlanId: planId,
+        targetPlanId: targetPlan,
+        routeId: bytes32Hex("906"),
+        routeHash: planHash,
+        depth: 1n,
+        attacher: signer
+      }, moduleAddress),
+      chainEvent(8n, 0, "DockAttached", {
+        dockInstanceId: dockInstanceB,
+        localOrderId: parentOrderIdB,
+        linkedOrderId,
+        interfaceNameId: bytes32Text("production_service"),
+        localPlanId: planId,
+        targetPlanId: targetPlan,
+        routeId: bytes32Hex("908"),
+        routeHash: planHash,
+        depth: 2n,
+        attacher: overlayExecutor
+      }, moduleAddress),
+      chainEvent(9n, 0, "DockOutputSubmitted", {
+        dockInstanceId: dockInstanceA,
+        linkedOrderId,
+        outputBindingHash: bytes32Hex("907"),
+        localPlanId: planId,
+        localOrderId: parentOrderIdA,
+        targetPlanId: targetPlan,
+        targetSignalId: signalId,
+        localSignalId: signalId,
+        payloadHash,
+        submitter: signer
+      }, moduleAddress)
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+
+    expect(snapshot.stateMachineDocks[dockKeyA]).toMatchObject({
+      mode: "existing",
+      attacher: signer,
+      depth: 1,
+      localOrderId: parentOrderIdA,
+      targetPlanId: targetPlan,
+      linkedOrderId,
+      stateMachineAddress: contractAddress
+    });
+    expect(snapshot.stateMachineDocks[dockKeyB]).toMatchObject({
+      mode: "existing",
+      attacher: overlayExecutor,
+      depth: 2
+    });
+    // N:1 聚合：两父同键成集合；索引键与目标单订单桶同形。
+    expect(snapshot.stateMachineDocksByTargetOrder[targetOrderKey]).toEqual([dockKeyA, dockKeyB]);
+    expect(snapshot.stateMachineOrders[targetOrderKey]).toBeDefined();
+    // 挂接后的交付事件照常落入 dock 台账（dockInstanceId 唯一定位）。
+    expect(Object.keys(snapshot.stateMachineDocks[dockKeyA]?.outputDeliveries ?? {})).toEqual([
+      bytes32Hex("907")
+    ]);
+    // 目标单时间线同时承载两次挂接（谁挂了我）。
+    expect(
+      snapshot.stateMachineOrders[targetOrderKey]?.timeline.filter((item) => item.eventName === "DockAttached")
+    ).toHaveLength(2);
+    expect(snapshot.unresolvedDockEventCount).toBe(0);
+    expect(snapshot.unresolvedDockTargetDeploymentCount).toBe(0);
+  });
+
+  it("indexes new-mode dock births under their own target-order key alongside attached docks", () => {
+    // 索引对两种出生事件统一：new 模式的子单由 dock 创建，其目标键下聚合
+    // 恰一条；与 existing 的 N:1 共用同一复合键形态。
+    const moduleAddress = "0x6666666666666666666666666666666666666666";
+    const dockInstanceId = bytes32Hex("921");
+    const childOrderId = bytes32Hex("923");
+    const childPlan = bytes32Hex("924");
+    const childOrderKey = stateMachineScopedKey(31337, contractAddress, childPlan, childOrderId);
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+      chainEvent(2n, 0, "PlanRegistered", { planId: childPlan, planHash: bytes32Hex("925"), hookCount: 1n }),
+      chainEvent(3n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
+      chainEvent(4n, 0, "StateMachineModuleSet", {
+        moduleId: bytes32Text("uvp.module.docking.v1"),
+        previousModule: "0x0000000000000000000000000000000000000000",
+        newModule: moduleAddress
+      }),
+      chainEvent(5n, 0, "DockOpened", {
+        dockInstanceId,
+        localOrderId: stateMachineOrderId,
+        linkedOrderId: childOrderId,
+        interfaceNameId: bytes32Text("production_service"),
+        localPlanId: planId,
+        targetPlanId: childPlan,
+        routeId: bytes32Hex("926"),
+        routeHash: planHash,
+        depth: 1n,
+        opener: signer
+      }, moduleAddress)
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+
+    const dockKey = stateMachineScopedKey(31337, contractAddress, dockInstanceId);
+    expect(snapshot.stateMachineDocks[dockKey]).toMatchObject({ mode: "new", opener: signer });
+    expect(snapshot.stateMachineDocksByTargetOrder[childOrderKey]).toEqual([dockKey]);
+  });
+
+  it("drops an attached dock and its target-order index entry when the birth log is reorged away", () => {
+    const moduleAddress = "0x6666666666666666666666666666666666666666";
+    const dockInstanceId = bytes32Hex("931");
+    const linkedOrderId = bytes32Hex("933");
+    const targetPlan = bytes32Hex("934");
+    const attach = chainEvent(6n, 0, "DockAttached", {
+      dockInstanceId,
+      localOrderId: stateMachineOrderId,
+      linkedOrderId,
+      interfaceNameId: bytes32Text("production_service"),
+      localPlanId: planId,
+      targetPlanId: targetPlan,
+      routeId: bytes32Hex("936"),
+      routeHash: planHash,
+      depth: 1n,
+      attacher: signer
+    }, moduleAddress);
+    const base: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", { planId: targetPlan, planHash: bytes32Hex("935"), hookCount: 1n }),
+      chainEvent(2n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+      chainEvent(3n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
+      chainEvent(4n, 0, "OrderRegistered", { orderId: linkedOrderId, planId: targetPlan }),
+      chainEvent(5n, 0, "StateMachineModuleSet", {
+        moduleId: bytes32Text("uvp.module.docking.v1"),
+        previousModule: "0x0000000000000000000000000000000000000000",
+        newModule: moduleAddress
+      })
+    ];
+
+    const withAttach = rebuildOrderProjections([...base, attach]);
+    const dockKey = stateMachineScopedKey(31337, contractAddress, dockInstanceId);
+    const targetOrderKey = stateMachineScopedKey(31337, contractAddress, targetPlan, linkedOrderId);
+    expect(withAttach.stateMachineDocks[dockKey]).toBeDefined();
+    expect(withAttach.stateMachineDocksByTargetOrder[targetOrderKey]).toEqual([dockKey]);
+
+    // reorg 墓碑：出生事件被逐出活跃集后，dock 桶与目标侧索引条目同时消失
+    //——索引是重放产物而非独立事实源，不残留孤儿键。
+    const rolled = rebuildOrderProjections([...base, attach, { ...attach, removed: true }]);
+    expect(rolled.stateMachineDocks[dockKey]).toBeUndefined();
+    expect(rolled.stateMachineDocksByTargetOrder[targetOrderKey]).toBeUndefined();
+    expect(rolled.eventCount).toBe(base.length);
+  });
+
   it("counts module order events that cannot be attributed to a state machine instead of silently bucketing", () => {
     // 模块地址未（尚未）通过 StateMachineModuleSet 登记：事件保持现状建桶，
     // 但必须计入显式诊断计数，不允许静默。

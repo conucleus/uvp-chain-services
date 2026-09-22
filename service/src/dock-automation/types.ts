@@ -15,7 +15,8 @@ export interface DockAutomationConfig {
   readonly redeliveryWindowMs: number;
 }
 
-/** dock 下单模式（{new, existing}；链轨仅支持 new）。 */
+/** dock 下单模式：new（openDockedOrder 铸子单，出生锚 open 原子投递）/
+ * existing（attachDockedOrder 对等挂接既有目标单，input/output 全活交付）。 */
 export type DockOrderMode = "new" | "existing";
 
 /**
@@ -63,6 +64,16 @@ export interface DockRouteRecord {
    * submissions/capability-proofs.ts，供接线方复用）。
    */
   readonly openCalldata?: Hex;
+  /**
+   * existing 模式对位载荷：attachDockedOrder 的完整 calldata（route 来源
+   * 预组装）。attach 同意门三腿——目标单 creator / 在任执行者 / 目标 plan
+   * publisher 的 attach 预授权——都不含中继 keeper 钱包（基础设施地址无
+   * 业务身份），keeper 自发的 attach 只能走 calldata 内预组装的 publisher
+   * 预授权腿，与 openCalldata 的 EntrancePermit 处理同构：keeper 不组装、
+   * 不补签、不自选动态目标（候选集 membership proof 随 calldata 一并
+   * 预组装）。
+   */
+  readonly attachCalldata?: Hex;
 }
 
 /** route 数据端口：由云编译数据库/manifest 服务实现。 */
@@ -84,6 +95,7 @@ export interface DockAutomationSubmitter {
 export interface DockAutomationRunSummary {
   scannedRoutes: number;
   scannedDocks: number;
+  attachCandidates: number;
   openCandidates: number;
   inputCandidates: number;
   outputCandidates: number;

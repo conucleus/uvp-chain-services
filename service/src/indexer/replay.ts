@@ -23,6 +23,7 @@ import {
   applyOrderRelayerRecorded,
   applyOrderTriggered,
   applyStateMachineModuleSet,
+  stateMachineScopedKey,
   stateMachineTaskProjectionKey,
   type MutableStateMachineModuleProjection,
   type MutableStateMachineOrderProjection,
@@ -51,6 +52,7 @@ import {
   applyTimerPoked
 } from "./projections/stage.js";
 import {
+  applyDockAttached,
   applyDockInputSubmitted,
   applyDockOpened,
   applyDockOutputSatisfied,
@@ -163,12 +165,25 @@ export function rebuildOrderProjections(
   const stateMachineOrderRecord: Record<string, StateMachineOrderProjection> = {};
   const stateMachineTaskRecord: Record<string, StateMachineTaskProjection> = {};
   const stateMachineDockRecord: Record<string, StateMachineDockProjection> = {};
+  // 目标侧"谁挂了我"索引：从已出生的 dock 集合收口聚合（而非逐事件记账）
+  // ——dock 桶本身按 dockInstanceId 去重，聚合天然无重复；existing 的
+  // N:1 由集合值承载。键与目标单订单桶同形，持有目标订单键的消费方可
+  // 直查其名下 dock 集合。
+  const stateMachineDocksByTargetOrder: Record<string, string[]> = {};
   for (const [dockKey, dock] of stateMachineDocks) {
     stateMachineDockRecord[dockKey] = {
       ...dock,
       inputDeliveries: { ...dock.inputDeliveries },
       outputDeliveries: { ...dock.outputDeliveries }
     };
+    const targetOrderKey = stateMachineScopedKey(
+      dock.chainId,
+      dock.stateMachineAddress,
+      dock.targetPlanId,
+      dock.linkedOrderId
+    );
+    const dockKeys = (stateMachineDocksByTargetOrder[targetOrderKey] ??= []);
+    dockKeys.push(dockKey);
   }
   for (const [orderId, order] of stateMachineOrders) {
     const readonlyTasks: Record<string, StateMachineTaskProjection> = {};
@@ -213,6 +228,7 @@ export function rebuildOrderProjections(
     stateMachinePlans: Object.fromEntries(stateMachinePlans),
     stateMachineOrders: stateMachineOrderRecord,
     stateMachineDocks: stateMachineDockRecord,
+    stateMachineDocksByTargetOrder,
     stateMachineTasks: stateMachineTaskRecord,
     unresolvedModuleOrderEventCount: diagnostics.unresolvedModuleOrderEventCount,
     unresolvedDockEventCount: diagnostics.unresolvedDockEventCount,
@@ -302,6 +318,9 @@ function applyStateMachineEvent(
       return;
     case "DockOpened":
       applyDockOpened(state, event);
+      return;
+    case "DockAttached":
+      applyDockAttached(state, event);
       return;
     case "DockInputSubmitted":
       applyDockInputSubmitted(state, event);
