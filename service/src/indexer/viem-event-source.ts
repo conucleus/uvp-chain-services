@@ -14,7 +14,7 @@ import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
-// UVPStateMachine v0.11（SM ABI fixture：uvp-state-machine.v0.11.json）：
+// UVPStateMachine v0.12（SM ABI fixture：uvp-state-machine.v0.12.json）：
 // 订单维度事件全部 plan-scoped；patch/metadata/derived/link/dock 事件由
 // 各模块合约发出，按 deployment.modules 分地址挂 ABI。
 // 词表 Merkle 化形态：PlanCommitted/PlanFinalized 携带 capabilitiesRoot

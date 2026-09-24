@@ -114,7 +114,7 @@ spec:
           # sendSignals 无钩子可挂，编译器拒绝该形状）。
           receiveSignals:
             START: "buyer::order.intake.seed"
-          sendSignals: ["cmp", "seed"]
+          sendSignals: [{ name: "cmp" }, { name: "seed" }]
           executor:
             supplierType: organization
             supplierID: closure-ops

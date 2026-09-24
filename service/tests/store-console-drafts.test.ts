@@ -80,7 +80,7 @@ spec:
           # sendSignals 无钩子可挂，编译器拒绝该形状）。
           receiveSignals:
             START: "buyer::selector.gate.seed"
-          sendSignals: ["ready", "seed"]
+          sendSignals: [{ name: "ready" }, { name: "seed" }]
           executor:
             supplierType: organization
             supplierID: selector-ops
@@ -90,7 +90,7 @@ spec:
           source: buyer
           receiveSignals:
             START: "buyer::selector.gate.ready"
-          sendSignals: ["cmp"]
+          sendSignals: [{ name: "cmp" }]
           executor:
             supplierType: organization
             supplierID: intake-ops

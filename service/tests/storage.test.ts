@@ -141,7 +141,7 @@ spec:
           # BEGIN 自发种子入口（物化门：零 hook 阶段在链上永不可物化）。
           receiveSignals:
             BEGIN: "buyer::selector.gate.seed"
-          sendSignals: ["ready", "seed"]
+          sendSignals: [{ name: "ready" }, { name: "seed" }]
           executor:
             supplierType: organization
             supplierID: selector-ops
@@ -151,7 +151,7 @@ spec:
           source: buyer
           receiveSignals:
             START: "buyer::selector.gate.ready"
-          sendSignals: ["cmp"]
+          sendSignals: [{ name: "cmp" }]
           executor:
             supplierType: organization
             supplierID: intake-ops
@@ -2374,7 +2374,7 @@ function preparedSubmission(): PreparedSubmissionRecord {
     typedData: {
       domain: {
         name: "UVPStateMachine",
-        version: "0.11",
+        version: "0.12",
         chainId,
         verifyingContract: contractAddress as Address,
       },

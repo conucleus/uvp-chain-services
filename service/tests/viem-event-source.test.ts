@@ -11,7 +11,7 @@ describe("ViemChainEventSource", () => {
     // UVPPlanMetadataModule v0.6 不发事件（合约只保留 view 验证例程），
     // 索引器不 watch 该合约，fixture 对照表相应收窄。
     const fixtures: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
-      UVPStateMachine: "uvp-state-machine.v0.11.json",
+      UVPStateMachine: "uvp-state-machine.v0.12.json",
       UVPIdentityRegistry: "uvp-identity-registry.v0.1.json",
       UVPDeploymentRegistry: "uvp-deployment-registry.v0.2.json",
       UVPStagePatchModule: "uvp-stage-patch-module.v0.4.json",
