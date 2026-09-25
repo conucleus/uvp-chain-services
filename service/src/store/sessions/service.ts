@@ -301,15 +301,17 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       //（含运营方/管理员地址清单带来的能力）。
       const activeAnchor = await store.findActiveAccountAddress(record.anchoredAddress);
       if (!activeAnchor || activeAnchor.accountId !== record.accountId) {
-        await store.updateSession({
-          ...record,
-          revokedAt: now().toISOString(),
-          revokedReason: "anchor_address_revoked"
-        });
+        await store.revokeSession(record.sessionId, now().toISOString(), "anchor_address_revoked");
         return undefined;
       }
-      const refreshed = { ...record, lastSeenAt: now().toISOString() };
-      await store.updateSession(refreshed);
+      // lastSeen 刷新是 touch 而非整行回写：读到本快照后行可能已被并发
+      // logout/撤销翻成 revoked，整行回写会把 revoked_at 写回 NULL（已登出
+      // 会话在 TTL 内复活）。0 行受影响即按已撤销处理。
+      const lastSeenAt = now().toISOString();
+      if (!(await store.touchSession(record.sessionId, lastSeenAt))) {
+        return undefined;
+      }
+      const refreshed = { ...record, lastSeenAt };
       return { session: await this.sessionView(refreshed), record: refreshed };
     },
 
@@ -321,8 +323,9 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       if (!record || record.revokedAt) {
         return false;
       }
-      await store.updateSession({ ...record, revokedAt: now().toISOString(), revokedReason: "logout" });
-      return true;
+      // 撤销条件化：读到快照后行已被并发撤销翻终态时（0 行受影响）按已
+      // 登出收敛，不回写陈旧快照。
+      return store.revokeSession(record.sessionId, now().toISOString(), "logout");
     },
 
     async listAccountAddresses(accountId) {

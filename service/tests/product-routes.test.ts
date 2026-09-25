@@ -1502,8 +1502,8 @@ describe("product API routes", () => {
 
   it("uses durable Store Product Schema Bundle metadata for non-demo plan tasks", async () => {
     const storePlanId = bytes32Hex("0e01");
-    // 链侧身份（runtime 域，事件携带值）与产物 canonical 载荷哈希异值：
-    // schema 以 artifactHash 承载链侧身份，join 不得落在 planHash。
+    // 链侧身份（runtime 域，事件携带值）承载在 planHash；产物 canonical
+    // 载荷哈希承载在 artifactHash——两者异值，join 锚 planHash。
     const storePlanHash = bytes32Hex("0e02");
     const storeCanonicalPlanHash = bytes32Hex("0e04");
     const storeDraftStore = new MemoryStoreZhixuDraftStore();
@@ -1514,8 +1514,8 @@ describe("product API routes", () => {
       title: "Store schema plan",
       maintainer: "Store team",
       planId: storePlanId,
-      planHash: storeCanonicalPlanHash,
-      artifactHash: storePlanHash,
+      planHash: storePlanHash,
+      artifactHash: storeCanonicalPlanHash,
       roleSlots: [
         {
           slotId: "export.customs",
@@ -1594,8 +1594,8 @@ describe("product API routes", () => {
       tags: [],
       compilePreview: {
         planId: storePlanId,
-        planHash: storeCanonicalPlanHash,
-        artifactHash: storePlanHash,
+        planHash: storePlanHash,
+        artifactHash: storeCanonicalPlanHash,
         stageCount: 1,
         roleSlotCount: 1,
         sourceCount: 1,

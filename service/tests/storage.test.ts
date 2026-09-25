@@ -1113,17 +1113,17 @@ describe("durable storage", () => {
       },
     });
     // findProductSchemaByPlan 的 planHash 是链侧身份（runtime 域）——
-    // 夹具 planHash（canonical）与 artifactHash（runtime）异值，只有
-    // artifactHash 能命中，canonical 值必须 miss。
+    // 夹具 planHash（runtime）与 artifactHash（canonical）异值，只有
+    // planHash 能命中，canonical 值必须 miss。
     await expect(
-      reopened.storeZhixuDraftStore.findProductSchemaByPlan(planId, artifactHash),
+      reopened.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash),
     ).resolves.toMatchObject({
       planId,
       planHash,
       schemaHash: "0xstoreproductschema",
     });
     await expect(
-      reopened.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash),
+      reopened.storeZhixuDraftStore.findProductSchemaByPlan(planId, artifactHash),
     ).resolves.toBeUndefined();
     await expect(
       reopened.storeZhixuVersionMetadataStore.listVersions(draft.zhixuId!),

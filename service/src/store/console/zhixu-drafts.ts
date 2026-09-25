@@ -128,7 +128,7 @@ export interface StoreZhixuDraftStore {
 /**
  * 词表产物富集源：链上只存 capabilitiesRoot，两表由重放方按 planId
  * 从产物富集。按 (planId, 链侧 planHash=runtime 域) 走
- * findProductSchemaByPlan（store 侧锚 schema.artifactHash，同版本激活的
+ * findProductSchemaByPlan（store 侧锚 schema.planHash，同版本激活的
  * join 口径——最新 product schema 的
  * onchainHookPlanArtifact），经 capabilityTablesOf 换装为链上词序。
  * 无产物/形状不符 → undefined（该 plan 两表留空，fail-closed）。
@@ -176,7 +176,7 @@ export class MemoryStoreZhixuDraftStore implements StoreZhixuDraftStore {
       .filter((schema): schema is StoreProductSchemaDTO => Boolean(schema))
       .filter((schema) =>
         hexOrTextEquals(schema.planId, planId) &&
-        hexOrTextEquals(schema.artifactHash, planHash)
+        hexOrTextEquals(schema.planHash, planHash)
       )
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
   }
@@ -437,10 +437,10 @@ function assertDraftCompiledForReview(
  * active schema 守卫：草稿状态机不落 "active"，
  * 不能以 `draft.status === "active"` 判定，否则已发布 plan 的 schema
  * 仍可原地改写。守卫用发布状态判定：compile
- * preview 的 (planId, artifactHash) 已出现在链投影（stateMachinePlans）
- * 即视为已发布，schema 必须走新版本草稿。链侧身份锚 artifactHash
- * （runtime 域）——preview.planHash 是 canonical 载荷哈希，与链上
- * plan.planHash 永不相等。
+ * preview 的 (planId, planHash) 已出现在链投影（stateMachinePlans）
+ * 即视为已发布，schema 必须走新版本草稿。链侧身份锚 preview.planHash
+ * （runtime 域，与链上 plan.planHash 同域同值）——preview.artifactHash
+ * 是 canonical 载荷哈希，与链上值永不相等。
  */
 async function assertDraftSchemaMutable(
   draft: StoreZhixuDraftRecord,
@@ -593,11 +593,12 @@ function compileManifest(raw: string): OnchainHookPlanArtifact {
 }
 
 function previewFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreCompilePreviewDTO {
-  // artifactHash 是 artifact 的链上身份（uvp.plan.runtime.v3 注册哈希）。
-  // 产物体只携带 canonical planHash，不携带运行时哈希——重算委托编译器
-  // 注册边界 toSolidityRegisterPlanArgs（与 commitPlan/finalizePlan 同一
-  // 冻结公式），本仓不维护第二份哈希实现。
-  const artifactHash = toSolidityRegisterPlanArgs(artifact).planHash;
+  // planHash 是 artifact 的链上身份（uvp.plan.runtime.v3 注册哈希，与链上
+  // planHash(planId) getter 同名同值）。产物体只携带 canonical payload
+  // 哈希（制品 planHash 字段，进 preview.artifactHash），不携带运行时
+  // 哈希——重算委托编译器注册边界 toSolidityRegisterPlanArgs（与
+  // commitPlan/finalizePlan 同一冻结公式），本仓不维护第二份哈希实现。
+  const planHash = toSolidityRegisterPlanArgs(artifact).planHash;
   const stages = new Set<string>();
   const sources = new Set<string>();
   const signals = new Set<string>();
@@ -622,8 +623,8 @@ function previewFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreCom
 
   return {
     planId: artifact.planId,
-    planHash: artifact.planHash,
-    artifactHash,
+    planHash,
+    artifactHash: artifact.planHash,
     stageCount: stages.size,
     roleSlotCount: artifact.executorRoutes.length,
     sourceCount: sources.size,
@@ -688,7 +689,7 @@ function buildSuggestedProductSchema(
     title: draft.title === "未命名秩序草稿" ? artifact.zhixuName : draft.title,
     maintainer: draft.maintainer,
     planId: artifact.planId,
-    planHash: artifact.planHash,
+    planHash: preview.planHash,
     artifactHash: preview.artifactHash,
     onchainHookPlanArtifact: artifact,
     ...(createOrderTrigger ? { createOrderTrigger } : {}),
@@ -1639,11 +1640,11 @@ async function hasPublishedPlan(
   const snapshot = await projectionStore.getOrderSnapshot();
   // 发布权威是 PlanRegistered(finalize)：桶存在只代表 commitPlan，
   // 仅 commit 的 plan 不能把草稿置 active/锁 schema。链侧比对锚
-  // runtime 域的 artifactHash。
+  // runtime 域的 planHash。
   return Object.values(snapshot.stateMachinePlans).some(
     (plan) =>
       plan.planId === draft.compilePreview?.planId &&
-      plan.planHash === draft.compilePreview.artifactHash &&
+      plan.planHash === draft.compilePreview.planHash &&
       isPlanRegisteredProjection(plan)
   );
 }

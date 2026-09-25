@@ -152,10 +152,7 @@ export class SqliteStoreWalletSessionStore implements StoreWalletSessionStore {
       this.#database.prepare(
         `INSERT INTO store_wallet_session (session_id, token_hash, account_id, anchored_address, created_at, expires_at, last_seen_at, revoked_at, revoked_reason)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(session_id) DO UPDATE SET
-           last_seen_at = excluded.last_seen_at,
-           revoked_at = excluded.revoked_at,
-           revoked_reason = excluded.revoked_reason`
+         ON CONFLICT(session_id) DO NOTHING`
       ).run(...sessionValues(record));
     });
   }
@@ -167,8 +164,29 @@ export class SqliteStoreWalletSessionStore implements StoreWalletSessionStore {
     return row ? sessionRow(row) : undefined;
   }
 
-  async updateSession(record: StoreWalletSessionRecord): Promise<void> {
-    await this.putSession(record);
+  async touchSession(sessionId: string, lastSeenAt: string): Promise<boolean> {
+    // 条件 UPDATE（touch）：仅存活行可推进 last_seen_at，0 行受影响即
+    // 行已被并发撤销——不回写整行快照。
+    const updated = runSqliteWrite(() =>
+      this.#database.prepare(
+        `UPDATE store_wallet_session
+         SET last_seen_at = ?
+         WHERE session_id = ? AND revoked_at IS NULL`
+      ).run(lastSeenAt, sessionId)
+    );
+    return updated.changes === 1;
+  }
+
+  async revokeSession(sessionId: string, revokedAt: string, revokedReason: string): Promise<boolean> {
+    // 条件 UPDATE：撤销不可逆，仅首撤销落笔。
+    const updated = runSqliteWrite(() =>
+      this.#database.prepare(
+        `UPDATE store_wallet_session
+         SET revoked_at = ?, revoked_reason = ?
+         WHERE session_id = ? AND revoked_at IS NULL`
+      ).run(revokedAt, revokedReason, sessionId)
+    );
+    return updated.changes === 1;
   }
 
   async putAccountAddress(record: StoreAccountAddressRecord): Promise<void> {

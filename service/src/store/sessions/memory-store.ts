@@ -100,15 +100,33 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
   }
 
   async putSession(record: StoreWalletSessionRecord): Promise<void> {
-    this.#sessions.set(record.sessionId, record);
+    // 纯插入：判定与写入同步完成（无 await 间隙），行已存在时不覆盖——
+    // 覆盖路径会让陈旧快照把撤销事实抹掉。
+    if (!this.#sessions.has(record.sessionId)) {
+      this.#sessions.set(record.sessionId, record);
+    }
   }
 
   async findSessionByTokenHash(tokenHash: string): Promise<StoreWalletSessionRecord | undefined> {
     return [...this.#sessions.values()].find((session) => session.tokenHash === tokenHash);
   }
 
-  async updateSession(record: StoreWalletSessionRecord): Promise<void> {
-    this.#sessions.set(record.sessionId, record);
+  async touchSession(sessionId: string, lastSeenAt: string): Promise<boolean> {
+    const current = this.#sessions.get(sessionId);
+    if (!current || current.revokedAt) {
+      return false;
+    }
+    this.#sessions.set(sessionId, { ...current, lastSeenAt });
+    return true;
+  }
+
+  async revokeSession(sessionId: string, revokedAt: string, revokedReason: string): Promise<boolean> {
+    const current = this.#sessions.get(sessionId);
+    if (!current || current.revokedAt) {
+      return false;
+    }
+    this.#sessions.set(sessionId, { ...current, revokedAt, revokedReason });
+    return true;
   }
 
   async putAccountAddress(record: StoreAccountAddressRecord): Promise<void> {

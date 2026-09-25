@@ -141,7 +141,7 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
     planHash: string
   ): Promise<StoreProductSchemaDTO | undefined> {
     // planId 前置下推到 SQL，只反序列化同 plan 候选行；精确匹配
-    // （planHash=runtime 域，锚 schema.artifactHash）仍由 JS 侧统一判定。
+    // （planHash=runtime 域，锚 schema.planHash）仍由 JS 侧统一判定。
     const result = await this.#database.query(
       `SELECT product_schema_json::text AS product_schema_json
        FROM store_zhixu_draft
@@ -500,8 +500,9 @@ function productSchemaRowsByPlan(
   planId: string,
   planHash: string
 ): readonly StoreProductSchemaDTO[] {
-  // planHash 是链侧身份（runtime 域）：schema.planHash 是 canonical 载荷
-  // 哈希、与链上值永不相等，join 锚 schema.artifactHash。
+  // planHash 是链侧身份（runtime 域），schema.planHash 与链上值同域
+  // 同值——join 锚 schema.planHash；schema.artifactHash 是 canonical
+  // 载荷哈希，与链上值永不相等。
   return rows
     .map((row) => optionalJson<StoreProductSchemaDTO>(
       rowObject(row, "store_zhixu_draft product schema query"),
@@ -510,7 +511,7 @@ function productSchemaRowsByPlan(
     .filter((schema): schema is StoreProductSchemaDTO => Boolean(schema))
     .filter((schema) =>
       stringEquals(schema.planId, planId) &&
-      stringEquals(schema.artifactHash, planHash)
+      stringEquals(schema.planHash, planHash)
     );
 }
 

@@ -352,11 +352,11 @@ describe("Store Zhixu draft workflow", () => {
         validation: { ok: true, status: "explicit", issues: [] }
       }
     });
-    // 链侧身份是 runtime 域哈希（preview.artifactHash）——preview.planHash
-    // 是 canonical 载荷哈希，两者异值，join 以 artifactHash 命中。
+    // 链侧身份是 runtime 域哈希（preview.planHash）——preview.artifactHash
+    // 是 canonical 载荷哈希，两者异值，join 以 planHash 命中。
     await expect(router.handle({
       method: "GET",
-      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.artifactHash)}`,
+      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.planHash)}`,
       headers: storeOperatorHeaders
     })).resolves.toMatchObject({
       status: 200,
@@ -369,7 +369,7 @@ describe("Store Zhixu draft workflow", () => {
     });
     await expect(router.handle({
       method: "GET",
-      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.planHash)}`,
+      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.artifactHash)}`,
       headers: storeOperatorHeaders
     })).resolves.toMatchObject({
       status: 404,

@@ -100,9 +100,24 @@ export interface StoreWalletSessionStore {
    */
   deleteExpiredSessions(expiresBefore: string): Promise<number>;
 
+  /**
+   * 纯插入：会话行只由 verify 铸造（sessionId/tokenHash 全新），行已存在
+   * 即视为被抢先，不覆盖。可覆盖既有行的 upsert 会把并发撤销落下的
+   * revoked_at 写回 NULL——已登出会话在 TTL 内复活。
+   */
   putSession(record: StoreWalletSessionRecord): Promise<void>;
   findSessionByTokenHash(tokenHash: string): Promise<StoreWalletSessionRecord | undefined>;
-  updateSession(record: StoreWalletSessionRecord): Promise<void>;
+  /**
+   * lastSeen 刷新（touch 语义）：仅当行未撤销（revoked_at IS NULL）时推进
+   * last_seen_at 的条件更新，不携带其他列。返回 false 表示行已被并发撤销
+   * 或已过期清扫——调用方按已撤销处理，不得回写先前读到的整行快照。
+   */
+  touchSession(sessionId: string, lastSeenAt: string): Promise<boolean>;
+  /**
+   * 撤销的条件更新：仅当行未撤销时落下撤销事实（撤销不可逆，无取消
+   * 路径）。返回 false 表示并发撤销已先行，现行撤销事实保持不变。
+   */
+  revokeSession(sessionId: string, revokedAt: string, revokedReason: string): Promise<boolean>;
 
   putAccountAddress(record: StoreAccountAddressRecord): Promise<void>;
   /**

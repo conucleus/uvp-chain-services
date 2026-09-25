@@ -15,13 +15,14 @@ export { InMemoryStoreListingStore } from "./memory-store.js";
 export { SqliteStoreListingStore } from "./sqlite-store.js";
 export {
   StoreListingServiceError,
-  StoreListingPlanConflictError,
   type ListingAnchorChainView,
   type StoreAnchorCheck,
   type StoreAnchorVerificationDTO,
   type StoreAnchorVerificationStatus,
   type StoreListingActor,
+  type StoreListingPrecondition,
   type StoreListingRecord,
+  type StoreListingSave,
   type StoreListingStatus,
   type StoreListingStore
 } from "./types.js";

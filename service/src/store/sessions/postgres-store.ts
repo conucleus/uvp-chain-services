@@ -110,10 +110,7 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
     await this.#database.query(
       `INSERT INTO store_wallet_session (session_id, token_hash, account_id, anchored_address, created_at, expires_at, last_seen_at, revoked_at, revoked_reason)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (session_id) DO UPDATE SET
-         last_seen_at = EXCLUDED.last_seen_at,
-         revoked_at = EXCLUDED.revoked_at,
-         revoked_reason = EXCLUDED.revoked_reason`,
+       ON CONFLICT (session_id) DO NOTHING`,
       sessionValues(record)
     );
   }
@@ -123,8 +120,27 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
     return result.rows[0] ? sessionRow(result.rows[0]) : undefined;
   }
 
-  async updateSession(record: StoreWalletSessionRecord): Promise<void> {
-    await this.putSession(record);
+  async touchSession(sessionId: string, lastSeenAt: string): Promise<boolean> {
+    // 条件 UPDATE（touch）：仅存活行可推进 last_seen_at，0 行受影响即
+    // 行已被并发撤销——不回写整行快照。
+    const updated = await this.#database.query(
+      `UPDATE store_wallet_session
+       SET last_seen_at = $1
+       WHERE session_id = $2 AND revoked_at IS NULL`,
+      [lastSeenAt, sessionId]
+    );
+    return (updated.rowCount ?? 0) === 1;
+  }
+
+  async revokeSession(sessionId: string, revokedAt: string, revokedReason: string): Promise<boolean> {
+    // 条件 UPDATE：撤销不可逆，仅首撤销落笔。
+    const updated = await this.#database.query(
+      `UPDATE store_wallet_session
+       SET revoked_at = $1, revoked_reason = $2
+       WHERE session_id = $3 AND revoked_at IS NULL`,
+      [revokedAt, revokedReason, sessionId]
+    );
+    return (updated.rowCount ?? 0) === 1;
   }
 
   async putAccountAddress(record: StoreAccountAddressRecord): Promise<void> {

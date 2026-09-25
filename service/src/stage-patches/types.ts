@@ -232,6 +232,8 @@ export interface StageExecutorPatchSubmissionDTO {
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   readonly stateMachineAddress: Address;
+  /** 订单身份复合键 (planId, orderId) 的 plan 侧：对账车道按复合键查投影。 */
+  readonly planId: Hex;
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
   readonly selectorWallet: Address;
@@ -273,6 +275,8 @@ export interface StageResourcePatchSubmissionDTO {
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   readonly stateMachineAddress: Address;
+  /** 订单身份复合键 (planId, orderId) 的 plan 侧：对账车道按复合键查投影。 */
+  readonly planId: Hex;
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
   readonly resourceKey: Hex;

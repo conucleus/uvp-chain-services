@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -630,6 +631,48 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(publish.body).toMatchObject({ error: "anchor_verification_failed" });
   });
 
+  it("a listing transition racing a concurrent decision converges on one winner", async () => {
+    const { createStoreListingService, InMemoryStoreListingStore } = await import("../src/store/listings/index.js");
+    // 竞态形态：review(approve) 的读检查与写入之间，并发 review(reject)
+    // 已把行翻成 rejected——approve 的期望前态失配，按 409 收敛，不得
+    // 覆盖赢家，也不得再落一条 succeeded 审计。
+    let armed = false;
+    class RacingRejectStore extends InMemoryStoreListingStore {
+      override async getListing(listingId: string) {
+        const listing = await super.getListing(listingId);
+        if (armed && listing?.status === "imported") {
+          armed = false;
+          const save = await super.putListing(
+            { ...listing, status: "rejected", updatedAt: "2026-09-01T00:00:01.000Z" },
+            { status: "imported" }
+          );
+          expect(save.applied).toBe(true);
+        }
+        return listing;
+      }
+    }
+    const listingStore = new RacingRejectStore();
+    const projectionStore = new MemoryProjectionStore();
+    await seedPlanProjection(projectionStore);
+    const audits: { action: string; outcome: string }[] = [];
+    const service = createStoreListingService({
+      projectionStore,
+      listingStore,
+      now: () => new Date("2026-09-01T00:00:00Z"),
+      audit: async (event) => { audits.push(event); }
+    });
+    const actor = { accessLevel: "store_admin", anchoredAddress: publisherAddress };
+    const imported = await service.importListing({ planId }, actor);
+    armed = true;
+
+    await expect(service.reviewListing(imported.listing.listingId, { decision: "approve" }, actor))
+      .rejects.toMatchObject({ status: 409, code: "listing_transition_conflict" });
+
+    expect((await service.getListing(imported.listing.listingId)).listing.status).toBe("rejected");
+    // 败者不落第二条互斥成功的审核审计。
+    expect(audits.filter((event) => event.outcome === "succeeded" && event.action === "listing.reviewed")).toHaveLength(0);
+  });
+
   it("join loop applied → under_review → authorized (identity pairing tx evidence)", async () => {
     const store = new MemoryProjectionStore();
     await seedPlanProjection(store, { withSupplierBinding: true });
@@ -1220,7 +1263,7 @@ it("revoking an anchored address immediately invalidates sessions for it", async
   });
 });
 
-describe("store listing and join store uniqueness (sqlite driver)", () => {
+describe("store listing/join uniqueness and session CAS (sqlite driver)", () => {
   const tempDirs: string[] = [];
 
   afterEach(() => {
@@ -1258,8 +1301,8 @@ describe("store listing and join store uniqueness (sqlite driver)", () => {
     store.close();
   });
 
-  it("enforces one listing per plan and maps the race loser to a typed conflict", async () => {
-    const { SqliteStoreListingStore, StoreListingPlanConflictError } = await import("../src/store/listings/index.js");
+  it("keeps one listing per plan: the concurrent import loser reads back the winner", async () => {
+    const { SqliteStoreListingStore } = await import("../src/store/listings/index.js");
     const store = new SqliteStoreListingStore({
       databaseUrl: sqliteUrl(),
       migrations: { autoRun: true }
@@ -1271,12 +1314,77 @@ describe("store listing and join store uniqueness (sqlite driver)", () => {
       updatedAt: "2026-09-01T00:00:00.000Z"
     };
 
+    const first = await store.putListing({ ...base, listingId: "listing_a" });
+    expect(first.applied).toBe(true);
+    // 并发双导入的败者：同 plan 第二条不落库（条件写入 0 行受影响），
+    // 读回赢家交给服务层按 409 收敛。
+    const loser = await store.putListing({ ...base, listingId: "listing_b" });
+    expect(loser.applied).toBe(false);
+    expect(loser.record.listingId).toBe("listing_a");
+    // 无前提重插同 listingId：纯插入不覆盖。
+    const reinsert = await store.putListing({ ...base, listingId: "listing_a", status: "delisted" });
+    expect(reinsert.applied).toBe(false);
+    expect(reinsert.record.status).toBe("imported");
+    expect((await store.findListingByPlanId(planId))?.status).toBe("imported");
+    store.close();
+  });
+
+  it("applies listing transitions only from the expected prior status", async () => {
+    const { SqliteStoreListingStore } = await import("../src/store/listings/index.js");
+    const store = new SqliteStoreListingStore({
+      databaseUrl: sqliteUrl(),
+      migrations: { autoRun: true }
+    });
+    const base = {
+      planId,
+      status: "imported" as const,
+      importedAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z"
+    };
     await store.putListing({ ...base, listingId: "listing_a" });
-    await expect(store.putListing({ ...base, listingId: "listing_b" }))
-      .rejects.toBeInstanceOf(StoreListingPlanConflictError);
-    // 同一条 listing 的状态流转（同 listingId upsert）不受约束影响。
-    await store.putListing({ ...base, listingId: "listing_a", status: "delisted" });
-    expect((await store.findListingByPlanId(planId))?.status).toBe("delisted");
+
+    // 前提命中：imported → public。
+    await expect(
+      store.putListing({ ...base, listingId: "listing_a", status: "public", updatedAt: "2026-09-01T00:00:01.000Z" }, { status: "imported" })
+    ).resolves.toMatchObject({ applied: true });
+    // 前提失配：期望 imported、现行 public——0 行受影响并读回现行行，
+    // 并发互斥迁移只有一个赢家。
+    await expect(
+      store.putListing({ ...base, listingId: "listing_a", status: "rejected", updatedAt: "2026-09-01T00:00:02.000Z" }, { status: "imported" })
+    ).resolves.toMatchObject({ applied: false, record: { status: "public" } });
+    expect((await store.getListing("listing_a"))?.status).toBe("public");
+    store.close();
+  });
+
+  it("session touch/revoke are conditional on the live row and inserts never overwrite", async () => {
+    const { SqliteStoreWalletSessionStore } = await import("../src/store/sessions/index.js");
+    const store = new SqliteStoreWalletSessionStore({
+      databaseUrl: sqliteUrl(),
+      migrations: { autoRun: true }
+    });
+    const record = {
+      sessionId: "sess_sql_cas",
+      tokenHash: "hash_sql_cas",
+      accountId: "acct_1",
+      anchoredAddress: supplierWallet,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      expiresAt: "2026-09-02T00:00:00.000Z"
+    };
+    await store.putSession(record);
+    // touch 命中：存活行推进 last_seen_at。
+    await expect(store.touchSession("sess_sql_cas", "2026-09-01T00:01:00.000Z")).resolves.toBe(true);
+    await expect(store.revokeSession("sess_sql_cas", "2026-09-01T00:02:00.000Z", "logout")).resolves.toBe(true);
+    // touch 前提失配（已撤销）：不推进、不复活。
+    await expect(store.touchSession("sess_sql_cas", "2026-09-01T00:03:00.000Z")).resolves.toBe(false);
+    // 二次撤销失配：首撤销事实保持（撤销不可逆）。
+    await expect(store.revokeSession("sess_sql_cas", "2026-09-01T00:04:00.000Z", "anchor_address_revoked")).resolves.toBe(false);
+    // 复活向量：用撤销前的整行快照重插，不得覆盖撤销事实。
+    await store.putSession({ ...record, lastSeenAt: "2026-09-01T00:03:00.000Z" });
+    expect(await store.findSessionByTokenHash("hash_sql_cas")).toMatchObject({
+      lastSeenAt: "2026-09-01T00:01:00.000Z",
+      revokedAt: "2026-09-01T00:02:00.000Z",
+      revokedReason: "logout"
+    });
     store.close();
   });
 
@@ -1577,6 +1685,80 @@ describe("store auth challenge resource bounds", () => {
     expect(accepted).toBe(10);
     const rejected = results.filter((result) => result.status === "rejected");
     expect(rejected.every((result) => result.reason instanceof StoreSessionServiceError && result.reason.status === 429)).toBe(true);
+  });
+});
+
+describe("store wallet session concurrency semantics (memory driver)", () => {
+  it("touch/revoke are conditional on the live row and inserts never overwrite", async () => {
+    const { InMemoryStoreWalletSessionStore } = await import("../src/store/sessions/index.js");
+    const store = new InMemoryStoreWalletSessionStore();
+    const record = {
+      sessionId: "sess_mem_cas",
+      tokenHash: "hash_mem_cas",
+      accountId: "acct_1",
+      anchoredAddress: supplierWallet,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      expiresAt: "2026-09-02T00:00:00.000Z"
+    };
+    await store.putSession(record);
+    // touch 命中：存活行推进 last_seen_at。
+    await expect(store.touchSession("sess_mem_cas", "2026-09-01T00:01:00.000Z")).resolves.toBe(true);
+    await expect(store.revokeSession("sess_mem_cas", "2026-09-01T00:02:00.000Z", "logout")).resolves.toBe(true);
+    // touch 前提失配（已撤销）：不推进、不复活。
+    await expect(store.touchSession("sess_mem_cas", "2026-09-01T00:03:00.000Z")).resolves.toBe(false);
+    // 二次撤销失配：首撤销事实保持（撤销不可逆）。
+    await expect(store.revokeSession("sess_mem_cas", "2026-09-01T00:04:00.000Z", "anchor_address_revoked")).resolves.toBe(false);
+    // 复活向量：用撤销前的整行快照重插，不得覆盖撤销事实。
+    await store.putSession({ ...record, lastSeenAt: "2026-09-01T00:03:00.000Z" });
+    await expect(store.findSessionByTokenHash("hash_mem_cas")).resolves.toMatchObject({
+      lastSeenAt: "2026-09-01T00:01:00.000Z",
+      revokedAt: "2026-09-01T00:02:00.000Z",
+      revokedReason: "logout"
+    });
+  });
+
+  it("a logout racing session refresh cannot revive the session", async () => {
+    const { createStoreSessionService, InMemoryStoreWalletSessionStore } = await import("../src/store/sessions/index.js");
+    // 竞态形态：resolve 读到存活快照后、touch 落笔前，并发 logout 已把
+    // 行翻成 revoked——resolve 按 touch 失配收口，不得复活会话。
+    class RacingLogoutStore extends InMemoryStoreWalletSessionStore {
+      #read = false;
+      override async findSessionByTokenHash(tokenHash: string) {
+        const record = await super.findSessionByTokenHash(tokenHash);
+        if (record && !this.#read) {
+          this.#read = true;
+          await super.revokeSession(record.sessionId, "2026-09-01T00:00:01.000Z", "logout");
+        }
+        return record;
+      }
+    }
+    const token = `uvs_${"a".repeat(64)}`;
+    const store = new RacingLogoutStore();
+    await store.putSession({
+      sessionId: "sess_race",
+      tokenHash: createHash("sha256").update(token, "utf8").digest("hex"),
+      accountId: "acct_1",
+      anchoredAddress: supplierWallet,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      expiresAt: "2026-09-02T00:00:00.000Z",
+      lastSeenAt: "2026-09-01T00:00:00.000Z"
+    });
+    await store.putAccountAddress({
+      accountId: "acct_1",
+      address: supplierWallet,
+      status: "active",
+      anchoredAt: "2026-09-01T00:00:00.000Z"
+    });
+    const service = createStoreSessionService({ store, now: () => new Date("2026-09-01T00:00:00Z") });
+
+    await expect(service.resolveSessionFromToken(token)).resolves.toBeUndefined();
+
+    const after = await store.findSessionByTokenHash(createHash("sha256").update(token, "utf8").digest("hex"));
+    expect(after).toMatchObject({
+      revokedAt: "2026-09-01T00:00:01.000Z",
+      revokedReason: "logout",
+      lastSeenAt: "2026-09-01T00:00:00.000Z"
+    });
   });
 });
 

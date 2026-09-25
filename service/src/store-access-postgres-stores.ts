@@ -19,11 +19,11 @@ import type {
 } from "./store/join/types.js";
 import { StoreJoinOpenApplicationExistsError } from "./store/join/types.js";
 import type {
+  StoreListingPrecondition,
   StoreListingRecord,
   StoreListingStore,
   StoreListingStatus
 } from "./store/listings/types.js";
-import { StoreListingPlanConflictError } from "./store/listings/types.js";
 import { StorageConstraintError } from "./storage/errors.js";
 
 /**
@@ -220,31 +220,45 @@ export class PostgresStoreListingStore implements StoreListingStore {
     this.#database = options.database;
   }
 
-  async putListing(record: StoreListingRecord): Promise<void> {
-    try {
-      await this.#database.query(
-        `INSERT INTO store_zhixu_listing
+  async putListing(
+    record: StoreListingRecord,
+    expect?: StoreListingPrecondition
+  ): Promise<{ applied: boolean; record: StoreListingRecord }> {
+    // 条件写入（CAS on status）：DO UPDATE 带 WHERE 前提，前提不成立的
+    // 并发抢先落为 0 行受影响；无前提时只插入不覆盖。
+    const insert = `INSERT INTO store_zhixu_listing
            (listing_id, plan_id, plan_hash_claimed, deployment_id_claimed, state_machine_address_claimed,
             status, imported_by_address, imported_by_account_id, imported_at,
             reviewed_by_address, reviewed_at, review_note, delist_reason, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`;
+    const sql = expect
+      ? `${insert}
          ON CONFLICT (listing_id) DO UPDATE SET
            status = EXCLUDED.status,
            reviewed_by_address = EXCLUDED.reviewed_by_address,
            reviewed_at = EXCLUDED.reviewed_at,
            review_note = EXCLUDED.review_note,
            delist_reason = EXCLUDED.delist_reason,
-           updated_at = EXCLUDED.updated_at`,
-        listingValues(record)
-      );
+           updated_at = EXCLUDED.updated_at
+         WHERE store_zhixu_listing.status = $15`
+      : `${insert}
+         ON CONFLICT (listing_id) DO NOTHING`;
+    const values = expect ? [...listingValues(record), expect.status] : listingValues(record);
+    let result;
+    try {
+      result = await this.#database.query(sql, values);
     } catch (error) {
-      // listing_id 冲突已被 ON CONFLICT 吸收；约束命中只能是 UNIQUE(plan_id)
-      // ——并发导入同 plan 第二条 listing 的败者（与 sqlite 实现同口径）。
+      // listing_id 冲突已被 ON CONFLICT 吸收；约束命中只能是
+      // UNIQUE(plan_id)——并发导入同 plan 第二条 listing 的败者（与 sqlite 实现同口径）。
       if (error instanceof StorageConstraintError) {
-        throw new StoreListingPlanConflictError();
+        return { applied: false, record: await this.findListingByPlanId(record.planId) ?? record };
       }
       throw error;
     }
+    if ((result.rowCount ?? 0) === 0) {
+      return { applied: false, record: await this.getListing(record.listingId) ?? record };
+    }
+    return { applied: true, record };
   }
 
   async getListing(listingId: string): Promise<StoreListingRecord | undefined> {

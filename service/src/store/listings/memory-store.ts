@@ -1,22 +1,31 @@
 import type { Hex } from "../../shared/types.js";
-import type { StoreListingRecord, StoreListingStore, StoreListingStatus } from "./types.js";
-import { StoreListingPlanConflictError } from "./types.js";
+import type { StoreListingPrecondition, StoreListingRecord, StoreListingStore, StoreListingStatus } from "./types.js";
 
 export class InMemoryStoreListingStore implements StoreListingStore {
   readonly #listings = new Map<string, StoreListingRecord>();
 
-  async putListing(record: StoreListingRecord): Promise<void> {
-    // 与持久驱动 UNIQUE(plan_id) 同口径：一 plan 一 listing——查判与
-    // 写入之间无 await，单线程事件循环内原子；否则并发双导入的第二条
-    // 会落库并被按 planId 检索时择条，delist 抑制等按行状态失效。
-    const conflictingPlan = [...this.#listings.values()].some((existing) =>
-      existing.listingId !== record.listingId &&
-      existing.planId.toLowerCase() === record.planId.toLowerCase()
-    );
-    if (conflictingPlan) {
-      throw new StoreListingPlanConflictError();
+  async putListing(
+    record: StoreListingRecord,
+    expect?: StoreListingPrecondition
+  ): Promise<{ applied: boolean; record: StoreListingRecord }> {
+    const current = this.#listings.get(record.listingId);
+    if (!current) {
+      // 与持久驱动 UNIQUE(plan_id) 同口径：一 plan 一 listing。查判与
+      // 写入之间无 await，单线程事件循环内原子。
+      const conflictingPlan = [...this.#listings.values()].some((existing) =>
+        existing.planId.toLowerCase() === record.planId.toLowerCase()
+      );
+      if (conflictingPlan) {
+        return { applied: false, record: await this.findListingByPlanId(record.planId) ?? record };
+      }
+      this.#listings.set(record.listingId, record);
+      return { applied: true, record };
+    }
+    if (!expect || current.status !== expect.status) {
+      return { applied: false, record: current };
     }
     this.#listings.set(record.listingId, record);
+    return { applied: true, record };
   }
 
   async getListing(listingId: string): Promise<StoreListingRecord | undefined> {

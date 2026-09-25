@@ -227,7 +227,7 @@ export function createStoreConsoleRouteModule(options: {
           return authorization;
         }
         // 路径 planHash 是链侧身份（runtime 域）；store 侧按
-        // schema.artifactHash join（见 findProductSchemaByPlan）。
+        // schema.planHash join（见 findProductSchemaByPlan）。
         const productSchema = await context.storeZhixuDraftWorkflowService.getProductSchemaByPlan(
           decodePathParameter(productSchemaMatch[1] ?? ""),
           decodePathParameter(productSchemaMatch[2] ?? "")

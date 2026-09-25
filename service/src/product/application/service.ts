@@ -264,9 +264,10 @@ export interface ProductService {
 
 export interface ProductSchemaResolver {
   /**
-   * planHash 是链侧身份（订单/计划投影的 planHash，runtime 域）——与
-   * schema.planHash（canonical 载荷哈希）数值永不相等，实现必须锚
-   * schema.artifactHash。
+   * planHash 是链侧身份（订单/计划投影的 planHash，runtime 域）——
+   * schema.planHash 同域同值（链 getter 命名权威），实现锚
+   * schema.planHash join；schema.artifactHash 是 canonical 载荷哈希，
+   * 与链上值永不相等。
    */
   getProductSchemaByPlan(
     planId: string,

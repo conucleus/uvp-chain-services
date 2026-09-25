@@ -481,20 +481,18 @@ export class TxReconcileWorker implements LifecycleService {
    */
   async #reconcileStagePatches(summary: ReconcileRunSummaryDraft): Promise<void> {
     if (this.#stageExecutorPatchStore?.listOpenSubmissionsPage) {
-      const orders = await this.#projectionStore.listStateMachineOrders();
       await this.#reconcileStagePatchLane<
         PreparedStageExecutorPatchRecord,
         StageExecutorPatchSubmissionDTO
       >(this.#stageExecutorPatchStore, summary, (submission) =>
-        confirmExecutorPatchProjection(submission, orders));
+        confirmExecutorPatchProjection(this.#projectionStore, submission));
     }
     if (this.#stageResourcePatchStore?.listOpenSubmissionsPage) {
-      const orders = await this.#projectionStore.listStateMachineOrders();
       await this.#reconcileStagePatchLane<
         PreparedStageResourcePatchRecord,
         StageResourcePatchSubmissionDTO
       >(this.#stageResourcePatchStore, summary, (submission) =>
-        confirmResourcePatchProjection(submission, orders));
+        confirmResourcePatchProjection(this.#projectionStore, submission));
     }
   }
 
@@ -978,12 +976,12 @@ async function* iterateOpenStagePatches<TSubmission extends {
   }
 }
 
-/** 执行者补丁的投影确认：订单按 (orderId, 状态机地址) 定位，overlay 按 patchHash（内容身份）匹配。 */
+/** 执行者补丁的投影确认：订单按复合键 (planId, orderId) 定位，overlay 按 patchHash（内容身份）匹配。 */
 async function confirmExecutorPatchProjection(
-  submission: StageExecutorPatchSubmissionDTO,
-  orders: readonly StateMachineOrderProjection[]
+  projectionStore: ProjectionStore,
+  submission: StageExecutorPatchSubmissionDTO
 ): Promise<ProjectionConfirmation | undefined> {
-  const order = findStagePatchOrder(orders, submission);
+  const order = await findStagePatchOrder(projectionStore, submission);
   const overlay = order?.stageExecutorOverlays[submission.targetStageId.toLowerCase()];
   if (!overlay || overlay.patchHash.toLowerCase() !== submission.patchHash.toLowerCase()) {
     return undefined;
@@ -996,10 +994,10 @@ async function confirmExecutorPatchProjection(
 
 /** 资源补丁的投影确认：overlay 键是 (targetStageId, resourceKey)。 */
 async function confirmResourcePatchProjection(
-  submission: StageResourcePatchSubmissionDTO,
-  orders: readonly StateMachineOrderProjection[]
+  projectionStore: ProjectionStore,
+  submission: StageResourcePatchSubmissionDTO
 ): Promise<ProjectionConfirmation | undefined> {
-  const order = findStagePatchOrder(orders, submission);
+  const order = await findStagePatchOrder(projectionStore, submission);
   const overlay = order?.stageResourceOverlays[`${submission.targetStageId.toLowerCase()}:${submission.resourceKey.toLowerCase()}`];
   if (!overlay || overlay.patchHash.toLowerCase() !== submission.patchHash.toLowerCase()) {
     return undefined;
@@ -1010,13 +1008,24 @@ async function confirmResourcePatchProjection(
   };
 }
 
-function findStagePatchOrder(
-  orders: readonly StateMachineOrderProjection[],
-  submission: { readonly onchainOrderId: Hex; readonly stateMachineAddress: Address }
-): StateMachineOrderProjection | undefined {
-  return orders.find((order) =>
-    order.orderId.toLowerCase() === submission.onchainOrderId.toLowerCase() &&
-    order.contractAddress.toLowerCase() === submission.stateMachineAddress.toLowerCase());
+/**
+ * 订单身份是 (planId, orderId) 复合键，与 registration/submission 车道同
+ * 纪律走复合键查询：裸 (orderId, 合约地址) 查找在同号订单跨 plan 复用时
+ * 会把别的 plan 的投影行当成本补丁的确认依据。合约地址是部署侧的一致性
+ * 复核，失配即不确认。
+ */
+async function findStagePatchOrder(
+  projectionStore: ProjectionStore,
+  submission: { readonly onchainOrderId: Hex; readonly planId: Hex; readonly stateMachineAddress: Address }
+): Promise<StateMachineOrderProjection | undefined> {
+  const order = await projectionStore.getStateMachineOrder(submission.onchainOrderId, submission.planId);
+  if (!order) {
+    return undefined;
+  }
+  if (order.contractAddress.toLowerCase() !== submission.stateMachineAddress.toLowerCase()) {
+    return undefined;
+  }
+  return order;
 }
 
 /** 对账结论映射回补丁台账行（confirmed/failed 终态，pending 档如实保留在途）。 */

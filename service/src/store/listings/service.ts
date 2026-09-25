@@ -3,7 +3,7 @@ import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../.
 import type { ProjectionStore } from "../../storage/projection-store.js";
 import type { StateMachinePlanProjection } from "../../indexer/projections/index.js";
 import { InMemoryStoreListingStore } from "./memory-store.js";
-import type {
+import {
   ListingAnchorChainView,
   StoreAnchorVerificationDTO,
   StoreListingActor,
@@ -11,7 +11,7 @@ import type {
   StoreListingStore,
   StoreListingStatus
 } from "./types.js";
-import { StoreListingServiceError, StoreListingPlanConflictError } from "./types.js";
+import { StoreListingServiceError } from "./types.js";
 import { anchorVerificationAllowsPublish, verifyListingAnchors } from "./verify.js";
 
 export interface StoreListingServiceOptions {
@@ -107,15 +107,13 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
         importedAt: timestamp,
         updatedAt: timestamp
       };
-      try {
-        await listingStore.putListing(listing);
-      } catch (error) {
-        // 并发导入的败者：前置查重窗口被穿透时由 UNIQUE(plan_id) 裁决
-        //——与前置查重同响应 409，不得让约束错误漏成 503 失真。
-        if (!(error instanceof StoreListingPlanConflictError)) {
-          throw error;
-        }
-        const winner = await listingStore.findListingByPlanId(planId);
+      const save = await listingStore.putListing(listing);
+      if (!save.applied) {
+        // 并发导入的败者：前置查重窗口被穿透时由存储层一 plan 一 listing
+        // 约束裁决——与前置查重同响应 409。
+        const winner = save.record.listingId !== listing.listingId
+          ? save.record
+          : await listingStore.findListingByPlanId(planId);
         throw new StoreListingServiceError(409, "listing_exists", "a listing already exists for this planId", {
           ...(winner ? { listingId: winner.listingId, status: winner.status } : {})
         });
@@ -213,7 +211,7 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
           ...(note ? { reviewNote: note } : {}),
           updatedAt: now().toISOString()
         };
-        await listingStore.putListing(updated);
+        await transitionListing(updated, listing.status);
         await emitAudit({
           action: "listing.reviewed",
           listingId,
@@ -232,7 +230,7 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
           ...(note ? { reviewNote: note } : {}),
           updatedAt: now().toISOString()
         };
-        await listingStore.putListing(updated);
+        await transitionListing(updated, listing.status);
         await emitAudit({
           action: "listing.reviewed",
           listingId,
@@ -260,7 +258,7 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
         ...(reason ? { delistReason: reason } : {}),
         updatedAt: now().toISOString()
       };
-      await listingStore.putListing(updated);
+      await transitionListing(updated, "public");
       await emitAudit({
         action: "listing.delisted",
         listingId,
@@ -298,7 +296,7 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
         status: "public",
         updatedAt: now().toISOString()
       };
-      await listingStore.putListing(updated);
+      await transitionListing(updated, "delisted");
       await emitAudit({
         action: "listing.relisted",
         listingId,
@@ -310,6 +308,23 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
       return this.getListing(listingId);
     }
   };
+
+  /**
+   * 状态迁移的条件写入：期望前态即本次判定所依据的读快照。前提失配
+   * （0 行受影响）说明并发迁移已抢先——按 409 收敛且不落审计成功，
+   * 台账不出现两条互斥成功；调用方重读后重试。
+   */
+  async function transitionListing(updated: StoreListingRecord, expectedStatus: StoreListingStatus): Promise<void> {
+    const save = await listingStore.putListing(updated, { status: expectedStatus });
+    if (!save.applied) {
+      throw new StoreListingServiceError(
+        409,
+        "listing_transition_conflict",
+        "listing state changed concurrently; reload and retry",
+        { listingId: updated.listingId, expectedStatus, currentStatus: save.record.status }
+      );
+    }
+  }
 
   async function findPlanByPlanId(planId: Hex): Promise<StateMachinePlanProjection | undefined> {
     // 投影以 chainId:contract:planId 为键；按 planId 值匹配（大小写不敏感）。

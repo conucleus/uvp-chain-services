@@ -1154,14 +1154,15 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("rejects malformed roleSlots, covers onchainHookPlanArtifact in the hash, and blocks edits of published plans", async () => {
       const store = new MemoryProjectionStore();
       // 投影里放入 customs plan（draft 将编译到同一 planId）。链事件携带
-      // runtime 域哈希（= customs artifactHash）——与产物体 planHash
-      // （canonical）异值，守卫必须跨域换算后命中。
+      // runtime 域哈希（= customs planHash）——与产物体 planHash 字段
+      // （canonical 载荷哈希，发布面 artifactHash）异值，守卫按注册边界
+      // 重算的 runtime 哈希命中。
       await store.resetFromEvents({
         deploymentBlock: 0n,
         events: [
           chainEvent(1n, 0, "PlanRegistered", {
             planId: customsPlanIds.planId,
-            planHash: customsPlanIds.artifactHash,
+            planHash: customsPlanIds.planHash,
             hookCount: 2n
           }),
           chainEvent(1n, 1, "PlanPublisherRecorded", { planId: customsPlanIds.planId, publisher: publisherAddress })
@@ -1217,7 +1218,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         events: [
           chainEvent(1n, 0, "PlanRegistered", {
             planId: customsPlanIds.planId,
-            planHash: customsPlanIds.artifactHash,
+            planHash: customsPlanIds.planHash,
             hookCount: 2n
           }),
           chainEvent(1n, 1, "PlanPublisherRecorded", { planId: customsPlanIds.planId, publisher: publisherAddress })

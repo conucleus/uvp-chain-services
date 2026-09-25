@@ -30,8 +30,29 @@ export interface StoreListingRecord {
   readonly updatedAt: string;
 }
 
+/**
+ * 状态迁移的写入前提：服务层"读检查后写入"的窗口是 TOCTOU——并发互斥
+ * 迁移（review/delist/relist）双成功会让台账出现两条互斥成功。带前提的
+ * 写入只在该前态仍然成立时生效。
+ */
+export interface StoreListingPrecondition {
+  readonly status: StoreListingStatus;
+}
+
+/** 条件写入结果：applied=false 表示行已被并发写抢先或已存在，record 为读回的现行值。 */
+export interface StoreListingSave {
+  readonly applied: boolean;
+  readonly record: StoreListingRecord;
+}
+
 export interface StoreListingStore {
-  putListing(record: StoreListingRecord): Promise<void>;
+  /**
+   * 条件写入：省略 expect 时为纯插入（一 plan 一 listing，行已存在或
+   * UNIQUE(plan_id) 命中即不覆盖，读回现行值）；带 expect 时仅当现行行
+   * status 与之一致才更新。受影响行数为 0 时读回现行值并以 applied=false
+   * 返回，服务层把冲突映射为 409。
+   */
+  putListing(record: StoreListingRecord, expect?: StoreListingPrecondition): Promise<StoreListingSave>;
   getListing(listingId: string): Promise<StoreListingRecord | undefined>;
   findListingByPlanId(planId: Hex): Promise<StoreListingRecord | undefined>;
   listListings(status?: StoreListingStatus): Promise<readonly StoreListingRecord[]>;
@@ -106,14 +127,6 @@ export class StoreListingServiceError extends Error {
   ) {
     super(message);
   }
-}
-
-/**
- * 存储层 plan 唯一约束命中（同 plan 并发导入第二条 listing 的败者）：
- * 服务层统一映射为 409 listing_exists，不得失真为 503 存储故障。
- */
-export class StoreListingPlanConflictError extends Error {
-  override readonly name = "StoreListingPlanConflictError";
 }
 
 export type { Address, Hex };

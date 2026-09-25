@@ -12,8 +12,7 @@ import {
   stringColumn
 } from "../../storage/sqlite-rows.js";
 import type { Address, Hex } from "../../shared/types.js";
-import type { StoreListingRecord, StoreListingStore, StoreListingStatus } from "./types.js";
-import { StoreListingPlanConflictError } from "./types.js";
+import type { StoreListingPrecondition, StoreListingRecord, StoreListingStore, StoreListingStatus } from "./types.js";
 
 export class SqliteStoreListingStore implements StoreListingStore {
   readonly #database: SqliteDatabase;
@@ -39,32 +38,45 @@ export class SqliteStoreListingStore implements StoreListingStore {
     }
   }
 
-  async putListing(record: StoreListingRecord): Promise<void> {
-    try {
-      runSqliteWrite(() => {
-        this.#database.prepare(
-          `INSERT INTO store_zhixu_listing
+  async putListing(
+    record: StoreListingRecord,
+    expect?: StoreListingPrecondition
+  ): Promise<{ applied: boolean; record: StoreListingRecord }> {
+    // 条件写入（CAS on status）：DO UPDATE 带 WHERE 前提，前提不成立的
+    // 并发抢先落为 0 行受影响；无前提时只插入不覆盖。
+    const insert = `INSERT INTO store_zhixu_listing
              (listing_id, plan_id, plan_hash_claimed, deployment_id_claimed, state_machine_address_claimed,
               status, imported_by_address, imported_by_account_id, imported_at,
               reviewed_by_address, reviewed_at, review_note, delist_reason, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(listing_id) DO UPDATE SET
-             status = excluded.status,
-             reviewed_by_address = excluded.reviewed_by_address,
-             reviewed_at = excluded.reviewed_at,
-             review_note = excluded.review_note,
-             delist_reason = excluded.delist_reason,
-             updated_at = excluded.updated_at`
-        ).run(...listingValues(record));
-      });
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const sql = expect
+      ? `${insert}
+         ON CONFLICT(listing_id) DO UPDATE SET
+           status = excluded.status,
+           reviewed_by_address = excluded.reviewed_by_address,
+           reviewed_at = excluded.reviewed_at,
+           review_note = excluded.review_note,
+           delist_reason = excluded.delist_reason,
+           updated_at = excluded.updated_at
+         WHERE store_zhixu_listing.status = ?`
+      : `${insert}
+         ON CONFLICT(listing_id) DO NOTHING`;
+    const values = expect ? [...listingValues(record), expect.status] : listingValues(record);
+    let result;
+    try {
+      result = runSqliteWrite(() => this.#database.prepare(sql).run(...values));
     } catch (error) {
       // listing_id 冲突已被 ON CONFLICT 吸收；此处约束命中只能是
       // UNIQUE(plan_id)——并发导入同 plan 第二条 listing 的败者。
       if (error instanceof StorageConstraintError) {
-        throw new StoreListingPlanConflictError();
+        return { applied: false, record: await this.findListingByPlanId(record.planId) ?? record };
       }
       throw error;
     }
+    if (result.changes === 0) {
+      return { applied: false, record: await this.getListing(record.listingId) ?? record };
+    }
+    return { applied: true, record };
   }
 
   async getListing(listingId: string): Promise<StoreListingRecord | undefined> {
