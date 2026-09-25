@@ -216,6 +216,12 @@ export function applyOrderRegistered(
   const proof = proofOf(event, { orderId, planId, planHash: plan?.planHash });
   const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
   const order = ensureStateMachineOrder(state.orders, event, orderId, planId, deploymentId);
+  // 合约侧注册幂等、同单恒同 id：账本已立过该订单（registeredAt 已存在）
+  // 时，重复的 OrderRegistered（重放/跨块重注册）只作幂等吸收——不重置
+  // 状态与注册事实，也不向 timeline/proof 追加第二个"订单已创建"。
+  if (order.registeredAt) {
+    return;
+  }
   order.status = "registered";
   order.planId = planId;
   if (plan) {

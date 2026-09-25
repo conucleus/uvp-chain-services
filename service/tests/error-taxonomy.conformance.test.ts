@@ -204,6 +204,9 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'invalid_manifest_uri',
   'invalid_previous_executor_signature',
   'invalid_target_stage',
+  // typed-data 域参数（chainId/模块地址/状态机地址）缺失的 prepare 时点
+  // fail-closed 预检：确定性 409，不在广播重试/死信词表。
+  'chain_id_missing',
   'module_address_missing',
   'order_signal_authorization_missing',
   'prepared_patch_mismatch',

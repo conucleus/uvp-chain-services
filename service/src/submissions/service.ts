@@ -281,6 +281,11 @@ export function createProductSubmissionService(options: ProductSubmissionService
         },
         evidenceRecords: evidence
       };
+      // 写入时顺带清扫过期 prepare（同 stage-patches/sessions 清扫口径）：
+      // prepare 入口无配额，只插不删会让表无界堆叠。
+      await store.deleteExpiredPrepared?.(
+        String(Math.floor(createdAt.getTime() / 1000))
+      );
       await store.putPrepared(prepared);
       return dtoFromPreparedRecord(prepared);
     },

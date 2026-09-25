@@ -10,8 +10,10 @@ import type { Address, Hex } from "../shared/types.js";
 import type {
   NotificationDeliveryQuery,
   NotificationDeliveryRecord,
-  NotificationDeliveryStore,
+  NotificationDeliverySave,
   NotificationDeliveryStatus,
+  NotificationDeliveryStore,
+  NotificationDeliveryPrecondition,
   ParticipantNotificationReadState,
   ParticipantNotificationReadStateStore
 } from "./service.js";
@@ -59,14 +61,21 @@ export class PostgresNotificationStateStore implements NotificationDeliveryStore
     return result.rows[0] ? deliveryRow(result.rows[0]) : undefined;
   }
 
-  async saveDelivery(record: NotificationDeliveryRecord): Promise<NotificationDeliveryRecord> {
-    await this.#database.query(
-      `INSERT INTO notification_delivery (
+  async saveDelivery(
+    record: NotificationDeliveryRecord,
+    expect?: NotificationDeliveryPrecondition
+  ): Promise<NotificationDeliverySave> {
+    // 条件写入（CAS on status/attempts），与 sqlite 驱动同语义：DO UPDATE
+    // 带前提 WHERE，前提不成立的并发抢先 rowCount 为 0；无前提时只插
+    // 入不覆盖。
+    const insert = `INSERT INTO notification_delivery (
         delivery_id, kind, status, task_id, order_id, receiver_hook_id, receiver_stage_id,
         source_id, signal_id, payload_hash, idempotency_key, chain_id, state_machine_address,
         submitter, supplier_subject_id, supplier_wallet, transport_type, activation_status,
         external_receipt_ref, reason, payload_json, attempts, last_error, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)`;
+    const sql = expect
+      ? `${insert}
       ON CONFLICT(delivery_id) DO UPDATE SET
         kind = excluded.kind,
         status = excluded.status,
@@ -91,10 +100,18 @@ export class PostgresNotificationStateStore implements NotificationDeliveryStore
         attempts = excluded.attempts,
         last_error = excluded.last_error,
         created_at = excluded.created_at,
-        updated_at = excluded.updated_at`,
-      deliveryValues(record)
-    );
-    return record;
+        updated_at = excluded.updated_at
+      WHERE notification_delivery.status = $26 AND notification_delivery.attempts = $27`
+      : `${insert}
+      ON CONFLICT(delivery_id) DO NOTHING`;
+    const values = expect
+      ? [...deliveryValues(record), expect.status, expect.attempts]
+      : deliveryValues(record);
+    const result = await this.#database.query(sql, values);
+    if ((result.rowCount ?? 0) === 0) {
+      return { applied: false, record: await this.getDelivery(record.deliveryId) ?? record };
+    }
+    return { applied: true, record };
   }
 
   async listDeliveries(query: NotificationDeliveryQuery = {}): Promise<readonly NotificationDeliveryRecord[]> {

@@ -368,11 +368,11 @@ describe("signal-routed notifications", () => {
     const deliveryStore: NotificationDeliveryStore = {
       getDelivery: (deliveryId) => backing.getDelivery(deliveryId),
       // 模拟"外发已成功、sent 结果落库时存储故障"的窗口。
-      async saveDelivery(record) {
+      async saveDelivery(record, expect) {
         if (record.status === "sent") {
           throw new Error("delivery ledger unavailable");
         }
-        return backing.saveDelivery(record);
+        return backing.saveDelivery(record, expect);
       },
       listDeliveries: (query) => backing.listDeliveries(query)
     };
@@ -492,6 +492,108 @@ describe("signal-routed notifications", () => {
     expect(notDeadLetter.outcome).toBe("not_dead_letter");
     const notFound = await service.reopenDelivery("0x0000000000000000000000000000000000000000000000000000000000000001");
     expect(notFound.outcome).toBe("not_found");
+  });
+
+  it("keeps a concurrent sent fact when an explicit retry races the automatic redelivery", async () => {
+    // 终态判定与保存之间的 TOCTOU 栅栏：retry 读到 failed、保存前自动
+    // 补投把行推进为 sent——无条件 upsert 会把 sent 回退成 pending（并按
+    // 陈旧快照重发），CAS 失配必须读回现行 sent 事实。
+    const backing = new MemoryNotificationDeliveryStore();
+    const failed = { ...deliveryRecord(), status: "failed" as const, attempts: 2 };
+    await backing.saveDelivery(failed);
+    let raced = false;
+    const deliveryStore: NotificationDeliveryStore = {
+      getDelivery: (deliveryId) => backing.getDelivery(deliveryId),
+      async saveDelivery(record, expect) {
+        if (!raced && expect?.status === "failed" && expect.attempts === 2) {
+          raced = true;
+          await backing.saveDelivery(
+            { ...failed, status: "sent", attempts: 3 },
+            { status: "failed", attempts: 2 }
+          );
+        }
+        return backing.saveDelivery(record, expect);
+      },
+      listDeliveries: (query) => backing.listDeliveries(query)
+    };
+    const service = createNotificationService({
+      store: new MemoryProjectionStore(),
+      deliveryStore
+    });
+
+    const outcome = await service.retryDelivery(failed.deliveryId);
+    expect(outcome).toMatchObject({
+      outcome: "terminal",
+      delivery: expect.objectContaining({ status: "sent", attempts: 3 })
+    });
+    await expect(backing.getDelivery(failed.deliveryId)).resolves.toMatchObject({
+      status: "sent",
+      attempts: 3
+    });
+  });
+
+  it("does not double-dispatch when the in-flight attempts slot is taken concurrently", async () => {
+    // attempts 预增占位是外发的唯一凭据：占位 CAS 被并发分发抢先时本方
+    // 不得再发送（两个分发方各发一次而台账只记一次扣减），行收敛到并发
+    // 方的 pending+已扣预算。
+    const backing = new MemoryNotificationDeliveryStore();
+    const skipped = { ...deliveryRecord(), status: "skipped" as const, attempts: 0 };
+    await backing.saveDelivery(skipped);
+    const sent: NotificationDispatchRequest[] = [];
+    let raced = false;
+    const deliveryStore: NotificationDeliveryStore = {
+      getDelivery: (deliveryId) => backing.getDelivery(deliveryId),
+      async saveDelivery(record, expect) {
+        if (!raced &&
+          record.status === "pending" && record.attempts === 1 &&
+          expect?.status === "pending" && expect.attempts === 0) {
+          raced = true;
+          const current = await backing.getDelivery(record.deliveryId);
+          await backing.saveDelivery(
+            { ...current!, attempts: 1, updatedAt: record.updatedAt },
+            { status: "pending", attempts: 0 }
+          );
+        }
+        return backing.saveDelivery(record, expect);
+      },
+      listDeliveries: (query) => backing.listDeliveries(query)
+    };
+    const supplierStore = new InMemoryStoreSupplierMetadataStore();
+    await supplierStore.putSupplier({
+      supplierId: "supplier-a",
+      supplierSubjectId,
+      displayName: "Supplier A",
+      wallet: supplierWallet,
+      notificationProfile: notificationProfile(supplierWallet),
+      notificationProfileHash: metadataHash,
+      notificationUpdatedAt: "2026-05-01T00:00:00.000Z",
+      capabilityTags: [],
+      supportedRoleSlotIds: [],
+      supportedStageIds: [],
+      registryAddresses: [identityRegistryAddress],
+      reviewStatus: "approved_for_broadcast",
+      createdAt: "2026-05-01T00:00:00.000Z",
+      updatedAt: "2026-05-01T00:00:00.000Z"
+    });
+    const service = createNotificationService({
+      store: new MemoryProjectionStore(),
+      supplierMetadataStore: supplierStore,
+      deliveryStore,
+      dispatcher: {
+        async send(request) {
+          sent.push(request);
+          return { ok: true, externalReceiptRef: "receipt:webhook" };
+        }
+      }
+    });
+
+    const outcome = await service.retryDelivery(skipped.deliveryId);
+    expect(outcome.outcome).toBe("retried");
+    expect(sent).toHaveLength(0);
+    await expect(backing.getDelivery(skipped.deliveryId)).resolves.toMatchObject({
+      status: "pending",
+      attempts: 1
+    });
   });
 
   it("invalidates deliveries whose proof blocks were reorged out and leaves the rest intact", async () => {
@@ -1031,6 +1133,19 @@ describe("signal-routed notifications", () => {
     expect(guard.observe(fields.nonce, nowMs, nowMs + 5 * 60_000 + 1)).toBe(true);
   });
 
+  it("evicts expired nonces before live ones when tracked capacity overflows", () => {
+    // 插入序与过期序会分叉（时间戳落在窗口边沿外的条目到达即已过期）：
+    // 容量压力必须先驱逐死条目，存活已消费 nonce 的窗口内重放才不会
+    // 被永不可能再命中的条目挤出 guard。
+    const toleranceMs = 5 * 60_000;
+    const guard = createWebhookReplayGuard({ toleranceMs, maxTrackedNonces: 2 });
+    const nowMs = 1_800_000_000_000;
+    expect(guard.observe("f".repeat(32), nowMs, nowMs)).toBe(true);
+    expect(guard.observe("e".repeat(32), nowMs + toleranceMs + 1, nowMs)).toBe(true);
+    expect(guard.observe("g".repeat(32), nowMs, nowMs)).toBe(true);
+    expect(guard.observe("f".repeat(32), nowMs, nowMs + 1000)).toBe(false);
+  });
+
   it("persists notification delivery and read state across store rebuilds", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-notification-state-"));
     const databaseUrl = `sqlite://${join(tempDir, "state.sqlite3")}`;
@@ -1059,6 +1174,27 @@ describe("signal-routed notifications", () => {
       await expect(second.getReadState("wallet:0xabc", deliveryRecord().deliveryId)).resolves.toMatchObject({
         readAt: "2026-05-01T10:00:00.000Z"
       });
+
+      // 条件写入（CAS on status/attempts）：前提失配即 0 行受影响并读回
+      // 现行值，不覆盖并发写；前提命中才更新；无前提时只插入不覆盖。
+      const stale = await second.saveDelivery(
+        { ...deliveryRecord(), status: "pending" },
+        { status: "failed", attempts: 1 }
+      );
+      expect(stale.applied).toBe(false);
+      expect(stale.record).toMatchObject({ status: "sent", attempts: 2 });
+      const fresh = await second.saveDelivery(
+        { ...deliveryRecord(), status: "failed", updatedAt: "2026-05-01T00:02:00.000Z" },
+        { status: "sent", attempts: 2 }
+      );
+      expect(fresh.applied).toBe(true);
+      await expect(second.getDelivery(deliveryRecord().deliveryId)).resolves.toMatchObject({
+        status: "failed",
+        attempts: 2
+      });
+      const blindInsert = await second.saveDelivery({ ...deliveryRecord(), status: "pending" });
+      expect(blindInsert.applied).toBe(false);
+      expect(blindInsert.record.status).toBe("failed");
       await second.close();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });

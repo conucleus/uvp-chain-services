@@ -314,8 +314,19 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
   async function findPlanByPlanId(planId: Hex): Promise<StateMachinePlanProjection | undefined> {
     // 投影以 chainId:contract:planId 为键；按 planId 值匹配（大小写不敏感）。
     const snapshot = await projectionStore.getOrderSnapshot();
-    return Object.values(snapshot.stateMachinePlans)
-      .find((candidate) => candidate.planId.toLowerCase() === planId.toLowerCase());
+    const matches = Object.values(snapshot.stateMachinePlans)
+      .filter((candidate) => candidate.planId.toLowerCase() === planId.toLowerCase());
+    // 同 planId 跨部署多命中时锚无法唯一归位，静默取首个会把别的部署
+    // 的 planHash/publisher 当成本部署事实。
+    if (matches.length > 1) {
+      throw new StoreListingServiceError(
+        409,
+        "plan_projection_ambiguous",
+        "planId matches multiple deployments in the chain projection; the anchor cannot be attributed uniquely",
+        { planId, matches: matches.length }
+      );
+    }
+    return matches[0];
   }
 
   async function requireListing(listingId: string): Promise<StoreListingRecord> {

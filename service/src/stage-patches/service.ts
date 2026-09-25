@@ -192,7 +192,6 @@ export function createProductStageExecutorPatchService(
   const broadcastAdapter =
     options.broadcastAdapter ??
     notSupportedStageExecutorPatchBroadcastAdapter();
-  const chainId = options.chainId ?? 31337;
 
   return {
     async prepareStageExecutorPatch(taskId, input) {
@@ -254,6 +253,7 @@ export function createProductStageExecutorPatchService(
       const deadlineSeconds =
         Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
+      const chainId = requiredChainId(options.chainId);
       const stateMachineAddress = stateMachineAddressFor(context, options);
       const stagePatchModuleAddress = stagePatchModuleAddressFor(options);
       const typedData = buildStageExecutorPatchTypedData({
@@ -612,7 +612,6 @@ export function createProductStageResourcePatchService(
   const broadcastAdapter =
     options.broadcastAdapter ??
     notSupportedStageResourcePatchBroadcastAdapter();
-  const chainId = options.chainId ?? 31337;
   const runtimeEnvironment = options.runtimeEnvironment ?? "local";
 
   return {
@@ -655,6 +654,7 @@ export function createProductStageResourcePatchService(
       const deadlineSeconds =
         Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
+      const chainId = requiredChainId(options.chainId);
       const stateMachineAddress = stateMachineAddressFor(context, options);
       const stagePatchModuleAddress = stagePatchModuleAddressFor(options);
       const typedData = buildStageResourcePatchTypedData({
@@ -2108,6 +2108,19 @@ function moduleAddressFor(
   return normalizeAddress(configured, label);
 }
 
+function requiredChainId(configured: number | undefined): number {
+  // typed data 域的 chainId 同属"签错即废"的域参数：静默缺省会签向错误
+  // 链，与模块地址缺失同一口径 fail-closed。
+  if (configured === undefined) {
+    throw new ProductStagePatchError(
+      409,
+      "chain_id_missing",
+      "chainId is required for stage patch typed data",
+    );
+  }
+  return configured;
+}
+
 function stagePatchNonceKey(input: {
   readonly kind: "executor" | "resource";
   readonly chainId: number;
@@ -2343,8 +2356,11 @@ function expiredExecutorSubmission(
       createdAt: timestamp,
     }),
     status: "expired",
-    signatureStatus: "not_verified",
-    selectorSignatureStatus: "not_verified",
+    // 过期档案在 selector 签名恢复之后才落：失败的是时限，不是签名
+    //（对齐 submissions 口径）；previousExecutor 签名在过期分支之后才
+    // 校验，保持未核验。
+    signatureStatus: "signature_verified",
+    selectorSignatureStatus: "signature_verified",
     previousExecutorSignatureStatus: previousExecutorSignatureStatus(
       prepared,
       false,
@@ -2368,7 +2384,7 @@ function expiredExecutorSubmission(
       ...(prepared.approvalSignalId
         ? { approvalSignalId: prepared.approvalSignalId }
         : {}),
-      selectorSignatureStatus: "not_verified",
+      selectorSignatureStatus: "signature_verified",
       previousExecutorSignatureStatus: previousExecutorSignatureStatus(
         prepared,
         false,
@@ -2390,7 +2406,8 @@ function expiredResourceSubmission(
       createdAt: timestamp,
     }),
     status: "expired",
-    signatureStatus: "not_verified",
+    // 同 executor patch：selector 签名已核验，失败的是时限。
+    signatureStatus: "signature_verified",
     broadcastStatus: "not_attempted",
     errorCode: "stage_resource_patch_expired",
     errorMessage: "prepared stage resource patch deadline has expired",

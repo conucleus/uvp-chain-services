@@ -628,7 +628,8 @@ describe("Store Zhixu draft workflow", () => {
       planHash: customsStoreProductSchema.planHash,
       artifactHash: customsStoreProductSchema.artifactHash,
       stageCount: 3,
-      roleSlotCount: 2
+      // customs-complete 出生阶段自带静态执行者路由：推断槽位数随路由数。
+      roleSlotCount: 3
     });
 
     const productSchema = await updateDraftProductSchema(router, draft.draftId, customsStoreProductSchema);

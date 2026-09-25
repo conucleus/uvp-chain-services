@@ -156,6 +156,17 @@ export class SqliteSubmissionStore implements ProductSubmissionStore {
     });
   }
 
+  async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
+    // deadline 列为 unix 秒文本，按整数比较；过期行无论是否已消费都不再
+    // 参与判定（prepare 入口无配额，写入时顺带清扫约束无界堆叠）。
+    return runSqliteWrite(() =>
+      this.#database.prepare(
+        `DELETE FROM submission_prepare
+         WHERE CAST(deadline AS INTEGER) < CAST(? AS INTEGER)`
+      ).run(deadlineBeforeSeconds).changes
+    );
+  }
+
   async reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean> {
     const reservedAt = new Date().toISOString();
     const normalizedKey = key.toLowerCase();

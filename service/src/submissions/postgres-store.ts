@@ -147,6 +147,17 @@ export class PostgresSubmissionStore implements ProductSubmissionStore {
     );
   }
 
+  async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
+    // deadline 列为 unix 秒文本，按 bigint 比较；过期行无论是否已消费都
+    // 不再参与判定（prepare 入口无配额，写入时顺带清扫约束无界堆叠）。
+    const result = await this.#database.query(
+      `DELETE FROM submission_prepare
+       WHERE deadline::bigint < $1::bigint`,
+      [deadlineBeforeSeconds]
+    );
+    return result.rowCount ?? 0;
+  }
+
   async reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean> {
     const reservedAt = new Date().toISOString();
     const normalizedKey = key.toLowerCase();

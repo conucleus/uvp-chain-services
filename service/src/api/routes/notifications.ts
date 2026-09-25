@@ -160,6 +160,18 @@ async function handleNotificationRequest(
         }
       };
     }
+    // 写入栅栏拦下的并发抢先：行已被并发方推进，按现行状态重试而不是
+    // 假成功。
+    if (outcome.outcome === "conflict") {
+      return {
+        status: 409,
+        body: {
+          error: "notification_delivery_conflict",
+          message: "delivery changed concurrently; retry against the current state",
+          delivery: outcome.delivery
+        }
+      };
+    }
     return {
       status: 200,
       body: { delivery: outcome.delivery }
@@ -185,6 +197,16 @@ async function handleNotificationRequest(
         body: {
           error: "notification_delivery_not_dead_letter",
           message: "only dead-lettered deliveries can be reopened",
+          delivery: outcome.delivery
+        }
+      };
+    }
+    if (outcome.outcome === "conflict") {
+      return {
+        status: 409,
+        body: {
+          error: "notification_delivery_conflict",
+          message: "delivery changed concurrently; retry against the current state",
           delivery: outcome.delivery
         }
       };
@@ -216,6 +238,16 @@ async function handleNotificationRequest(
         body: {
           error: "notification_delivery_terminal",
           message: `delivery status ${outcome.delivery.status} is terminal and cannot be dead-lettered`,
+          delivery: outcome.delivery
+        }
+      };
+    }
+    if (outcome.outcome === "conflict") {
+      return {
+        status: 409,
+        body: {
+          error: "notification_delivery_conflict",
+          message: "delivery changed concurrently; retry against the current state",
           delivery: outcome.delivery
         }
       };

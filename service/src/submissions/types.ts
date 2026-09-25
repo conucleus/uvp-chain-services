@@ -206,6 +206,13 @@ export interface ProductSubmissionStore {
   getPrepared(prepareId: string): Promise<PreparedSubmissionRecord | undefined>;
   markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void>;
   /**
+   * 过期 prepare 清扫（可选能力，与 stage-patches deleteExpiredPrepared
+   * 同形态）：删除 deadline（unix 秒）早于 deadlineBeforeSeconds 的行，
+   * 无论是否已消费——过期行只剩档案价值，真正的过期档案在 submission
+   * 台账里。prepare 入口无配额，由服务层写入时顺带触发约束表无界堆叠。
+   */
+  deleteExpiredPrepared?(deadlineBeforeSeconds: string): Promise<number>;
+  /**
    * staleBefore：命中既有预留时，预留时间早于该阈值的行视为陈旧预留
    * （进程在 reserve 与落档之间硬崩溃的唯一泄漏形态——存活中的 submit
    * 要么在同一落档事务内收尾，要么显式释放，预留年龄不可能超过一个

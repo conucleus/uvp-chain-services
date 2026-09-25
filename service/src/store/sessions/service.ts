@@ -117,7 +117,9 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       // 配额防不住定向锁死：入口匿名且 address 自报，任何人连发满额即可
       // 顶掉任意受害地址的登录；请求方桶把囤积成本留在攻击者一侧。配额
       // 判定在存储层原子完成：服务层先数后写的窗口会被并发请求整体穿透。
+      // 过期会话同批清扫：resolve 对过期一律拒绝，行只增不删同样无界。
       await store.deleteExpiredChallenges(timestamp.toISOString());
+      await store.deleteExpiredSessions(timestamp.toISOString());
       const nonce = randomBytes(16).toString("hex");
       const issuedAt = timestamp.toISOString();
       const expiresAt = new Date(timestamp.getTime() + config.challengeTtlSeconds * 1000).toISOString();

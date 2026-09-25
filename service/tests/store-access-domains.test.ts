@@ -597,9 +597,19 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("conflicted anchors block publication (mismatched planHash claim)", async () => {
-    const router = await buildRouter();
-    // 为第二个 plan 建 listing，声称错误 planHash。
+    // 该 plan 必须真的在投影里注册：未投影只能判 pending_indexing（等
+    // 索引器），planHash 失配的 conflict 要在已投影的对照下才成立。
     const dockPlanId = "0x0000000000000000000000000000000000000000000000000000000000000102";
+    const dockPlanHash = `0x${"ab".repeat(32)}` as Hex;
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(1n, 0, "PlanRegistered", { planId: dockPlanId, planHash: dockPlanHash, hookCount: 2n })
+      ]
+    });
+    const router = createApiRouter(store, routerOptions());
+    // 为第二个 plan 建 listing，声称错误 planHash。
     const imported = await router.handle({
       method: "POST",
       pathname: "/store/listings/import",

@@ -126,8 +126,23 @@ export function createWebhookReplayGuard(options: {
       seen.delete(nonce);
       seen.set(nonce, timestampMs);
       if (seen.size > maxTrackedNonces) {
-        const oldest = seen.keys().next().value;
-        if (oldest !== undefined) {
+        // nonce 随验收窗（与 verifyWebhookSignature 同一 tolerance）一起失效：
+        // 窗口外签名本身已验不过，条目不可能再命中。容量溢出先逐出过期条目，
+        // 不让死条目占住追踪容量、把窗口内未消费的签名回调挤出 guard；仍超
+        // 上限才按插入序兜底驱逐。
+        for (const [trackedNonce, observedMs] of seen) {
+          if (seen.size <= maxTrackedNonces) {
+            break;
+          }
+          if (Math.abs(nowMs - observedMs) > toleranceMs) {
+            seen.delete(trackedNonce);
+          }
+        }
+        while (seen.size > maxTrackedNonces) {
+          const oldest = seen.keys().next().value;
+          if (oldest === undefined) {
+            break;
+          }
           seen.delete(oldest);
         }
       }

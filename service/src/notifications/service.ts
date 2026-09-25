@@ -250,9 +250,35 @@ export interface ParticipantNotificationReadStateStore {
   markRead(state: ParticipantNotificationReadState): Promise<ParticipantNotificationReadState>;
 }
 
+/**
+ * saveDelivery 的写入前提：调用方做出判定（终态检查、预算扣减、状态
+ * 迁移）所依据的现行行 (status, attempts)。保存与判定之间的窗口是
+ * TOCTOU——无条件 upsert 会让显式 retry/reopen 把并发已 sent 的行回退
+ * 成 pending、让两次外发共写同一个 attempts。带 expect 的写入只在该前提
+ * 仍然成立时生效。
+ */
+export interface NotificationDeliveryPrecondition {
+  readonly status: NotificationDeliveryStatus;
+  readonly attempts: number;
+}
+
+/** 条件写入结果：applied=false 表示行已被并发写抢先，record 为读回的现行值。 */
+export interface NotificationDeliverySave {
+  readonly applied: boolean;
+  readonly record: NotificationDeliveryRecord;
+}
+
 export interface NotificationDeliveryStore {
   getDelivery(deliveryId: Hex): Promise<NotificationDeliveryRecord | undefined>;
-  saveDelivery(record: NotificationDeliveryRecord): Promise<NotificationDeliveryRecord>;
+  /**
+   * 条件写入：省略 expect 时为纯插入（行已存在即被抢先，不覆盖）；带
+   * expect 时仅当现行行的 (status, attempts) 与之一致才更新，行不存在
+   * 则插入。受影响行数为 0 时读回现行值并以 applied=false 返回。
+   */
+  saveDelivery(
+    record: NotificationDeliveryRecord,
+    expect?: NotificationDeliveryPrecondition
+  ): Promise<NotificationDeliverySave>;
   listDeliveries(query?: NotificationDeliveryQuery): Promise<readonly NotificationDeliveryRecord[]>;
 }
 
@@ -296,12 +322,14 @@ export type NotificationProcessSummary = NotificationRunSummary;
 export type NotificationDeliveryReopenOutcome =
   | { readonly outcome: "not_found" }
   | { readonly outcome: "not_dead_letter"; readonly delivery: NotificationDeliveryRecord }
+  | { readonly outcome: "conflict"; readonly delivery: NotificationDeliveryRecord }
   | { readonly outcome: "reopened"; readonly delivery: NotificationDeliveryRecord };
 
 /** retry 结果：终态行是 no-op，路由层据此返回非 200 而非假成功。 */
 export type NotificationDeliveryRetryOutcome =
   | { readonly outcome: "not_found" }
   | { readonly outcome: "terminal"; readonly delivery: NotificationDeliveryRecord }
+  | { readonly outcome: "conflict"; readonly delivery: NotificationDeliveryRecord }
   | { readonly outcome: "retried"; readonly delivery: NotificationDeliveryRecord };
 
 /**
@@ -312,6 +340,7 @@ export type NotificationDeliveryRetryOutcome =
 export type NotificationDeliveryDeadLetterOutcome =
   | { readonly outcome: "not_found" }
   | { readonly outcome: "terminal"; readonly delivery: NotificationDeliveryRecord }
+  | { readonly outcome: "conflict"; readonly delivery: NotificationDeliveryRecord }
   | { readonly outcome: "dead_lettered"; readonly delivery: NotificationDeliveryRecord };
 
 export interface NotificationService {
@@ -351,9 +380,23 @@ export class MemoryNotificationDeliveryStore implements NotificationDeliveryStor
     return this.#deliveries.get(deliveryId);
   }
 
-  async saveDelivery(record: NotificationDeliveryRecord): Promise<NotificationDeliveryRecord> {
+  async saveDelivery(
+    record: NotificationDeliveryRecord,
+    expect?: NotificationDeliveryPrecondition
+  ): Promise<NotificationDeliverySave> {
+    const current = this.#deliveries.get(record.deliveryId);
+    if (current !== undefined) {
+      // 写入栅栏与持久驱动同语义：现行行必须仍处于调用方判定的
+      // (status, attempts)，否则读回现行值、不覆盖并发写。
+      const fenced = expect !== undefined &&
+        current.status === expect.status &&
+        current.attempts === expect.attempts;
+      if (!fenced) {
+        return { applied: false, record: current };
+      }
+    }
     this.#deliveries.set(record.deliveryId, record);
-    return record;
+    return { applied: true, record };
   }
 
   async listDeliveries(query: NotificationDeliveryQuery = {}): Promise<readonly NotificationDeliveryRecord[]> {
@@ -603,21 +646,37 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         return { outcome: "terminal", delivery: existing };
       }
       const { reason: _reason, lastError: _lastError, ...rest } = existing;
-      const pending = await deliveryStore.saveDelivery({
-        ...rest,
-        status: "pending",
-        updatedAt: now()
-      });
+      const save = await deliveryStore.saveDelivery(
+        {
+          ...rest,
+          status: "pending",
+          updatedAt: now()
+        },
+        { status: existing.status, attempts: existing.attempts }
+      );
+      if (!save.applied) {
+        // 终态判定与保存之间被并发写抢先：以读回的现行值重新裁决——
+        // 已终态即 terminal（sent 不回退），仍非终态说明并发方在推进，
+        // 由调用方对最新状态重试。
+        if (save.record.status === "sent" || save.record.status === "dead_letter" || save.record.status === "invalidated") {
+          return { outcome: "terminal", delivery: save.record };
+        }
+        return { outcome: "conflict", delivery: save.record };
+      }
+      const pending = save.record;
       const resolved = await resolveRetryTransport(options, pending);
       if (resolved.status !== "ok") {
         return {
           outcome: "retried",
-          delivery: await deliveryStore.saveDelivery({
-            ...pending,
-            status: "skipped",
-            reason: resolved.reason,
-            updatedAt: now()
-          })
+          delivery: (await deliveryStore.saveDelivery(
+            {
+              ...pending,
+              status: "skipped",
+              reason: resolved.reason,
+              updatedAt: now()
+            },
+            { status: pending.status, attempts: pending.attempts }
+          )).record
         };
       }
       return {
@@ -642,26 +701,42 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         return { outcome: "not_dead_letter", delivery: existing };
       }
       const { reason: _reason, lastError: _lastError, ...rest } = existing;
-      const pending = await deliveryStore.saveDelivery({
-        ...rest,
-        status: "pending",
-        // 重开即重置自动补投预算：死信是"上一轮预算耗尽"的结论，带着
-        // 已耗尽的 attempts 重开会在下一次失败后立即再次转死信——
-        // 重开→失败→dead-letter 循环里一次外部投递都不会发生；显式
-        // 重开就是运营授权的一轮全新预算。
-        attempts: 0,
-        updatedAt: now()
-      });
+      const save = await deliveryStore.saveDelivery(
+        {
+          ...rest,
+          status: "pending",
+          // 重开即重置自动补投预算：死信是"上一轮预算耗尽"的结论，带着
+          // 已耗尽的 attempts 重开会在下一次失败后立即再次转死信——
+          // 重开→失败→dead-letter 循环里一次外部投递都不会发生；显式
+          // 重开就是运营授权的一轮全新预算。
+          attempts: 0,
+          updatedAt: now()
+        },
+        { status: existing.status, attempts: existing.attempts }
+      );
+      if (!save.applied) {
+        // 并发抢先后的现行值不再是 dead_letter（如并发重开已投递成功）
+        // 按现行状态裁决；仍停留 dead_letter 说明并发方在推进，交由
+        // 调用方对最新状态重开。
+        if (save.record.status !== "dead_letter") {
+          return { outcome: "not_dead_letter", delivery: save.record };
+        }
+        return { outcome: "conflict", delivery: save.record };
+      }
+      const pending = save.record;
       const resolved = await resolveRetryTransport(options, pending);
       if (resolved.status !== "ok") {
         return {
           outcome: "reopened",
-          delivery: await deliveryStore.saveDelivery({
-            ...pending,
-            status: "skipped",
-            reason: resolved.reason,
-            updatedAt: now()
-          })
+          delivery: (await deliveryStore.saveDelivery(
+            {
+              ...pending,
+              status: "skipped",
+              reason: resolved.reason,
+              updatedAt: now()
+            },
+            { status: pending.status, attempts: pending.attempts }
+          )).record
         };
       }
       return {
@@ -688,13 +763,18 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         if (proofBlock <= input.blockNumber) {
           continue;
         }
-        await deliveryStore.saveDelivery({
-          ...delivery,
-          status: "invalidated",
-          reason: "reorg_rolled_back",
-          updatedAt: now()
-        });
-        invalidated += 1;
+        const save = await deliveryStore.saveDelivery(
+          {
+            ...delivery,
+            status: "invalidated",
+            reason: "reorg_rolled_back",
+            updatedAt: now()
+          },
+          { status: delivery.status, attempts: delivery.attempts }
+        );
+        // 被并发写抢先的行跳过不计数：并发方正基于更新的状态推进，
+        // 本轮快照已过期；失效判定由后续轮次对现行值重做。
+        invalidated += save.applied ? 1 : 0;
       }
       return invalidated;
     },
@@ -713,15 +793,25 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       if (existing.status === "dead_letter") {
         return { outcome: "dead_lettered", delivery: existing };
       }
-      return {
-        outcome: "dead_lettered",
-        delivery: await deliveryStore.saveDelivery({
+      const save = await deliveryStore.saveDelivery(
+        {
           ...existing,
           status: "dead_letter",
           ...(reason ? { reason } : existing.reason ? { reason: existing.reason } : {}),
           updatedAt: now()
-        })
-      };
+        },
+        { status: existing.status, attempts: existing.attempts }
+      );
+      if (!save.applied) {
+        if (save.record.status === "sent" || save.record.status === "invalidated") {
+          return { outcome: "terminal", delivery: save.record };
+        }
+        if (save.record.status === "dead_letter") {
+          return { outcome: "dead_lettered", delivery: save.record };
+        }
+        return { outcome: "conflict", delivery: save.record };
+      }
+      return { outcome: "dead_lettered", delivery: save.record };
     },
 
     async listParticipantNotifications(query = {}) {
@@ -1630,27 +1720,38 @@ async function dispatchSignalTransportDelivery(input: {
     (existing.status === "failed" || existing.status === "pending") &&
     existing.attempts >= MAX_AUTOMATIC_DELIVERY_ATTEMPTS
   ) {
-    return input.deliveryStore.saveDelivery({
-      ...existing,
-      status: "dead_letter",
-      reason: "delivery_attempts_exhausted",
-      updatedAt: input.now()
-    });
+    return (await input.deliveryStore.saveDelivery(
+      {
+        ...existing,
+        status: "dead_letter",
+        reason: "delivery_attempts_exhausted",
+        updatedAt: input.now()
+      },
+      { status: existing.status, attempts: existing.attempts }
+    )).record;
   }
 
-  const pending = await input.deliveryStore.saveDelivery({
-    ...(existing ?? baseSignalDeliveryRecord(
-      input.event,
-      input.order,
-      input.signal,
-      input.receiverHook,
-      input.supplierMetadata,
-      input.transport.type,
-      input.now
-    )),
-    status: "pending",
-    updatedAt: input.now()
-  });
+  const save = await input.deliveryStore.saveDelivery(
+    {
+      ...(existing ?? baseSignalDeliveryRecord(
+        input.event,
+        input.order,
+        input.signal,
+        input.receiverHook,
+        input.supplierMetadata,
+        input.transport.type,
+        input.now
+      )),
+      status: "pending",
+      updatedAt: input.now()
+    },
+    existing ? { status: existing.status, attempts: existing.attempts } : undefined
+  );
+  if (!save.applied) {
+    // 并发写已推进该行（在途/终态）：以现行台账为准，本路径不再外发。
+    return save.record;
+  }
+  const pending = save.record;
 
   return dispatchPreparedDelivery({
     deliveryStore: input.deliveryStore,
@@ -1671,26 +1772,39 @@ async function dispatchPreparedDelivery(input: {
   readonly now: () => string;
 }): Promise<NotificationDeliveryRecord> {
   if (!input.dispatcher) {
-    return input.deliveryStore.saveDelivery({
-      ...input.pending,
-      // No delivery attempt was made. Keep this distinct from a transport
-      // failure so retry budgets and operator evidence do not count a missing
-      // adapter as an exhausted send attempt.
-      status: "skipped",
-      reason: "transport_adapter_missing",
-      updatedAt: input.now()
-    });
+    return (await input.deliveryStore.saveDelivery(
+      {
+        ...input.pending,
+        // No delivery attempt was made. Keep this distinct from a transport
+        // failure so retry budgets and operator evidence do not count a missing
+        // adapter as an exhausted send attempt.
+        status: "skipped",
+        reason: "transport_adapter_missing",
+        updatedAt: input.now()
+      },
+      { status: input.pending.status, attempts: input.pending.attempts }
+    )).record;
   }
 
   // 外发前先记账（attempts 预增持久落库）：webhook 已送达而进程在外发与
   // 落账之间死亡时，预算已被扣减——重启重投由 attempts 上限收敛，不会
   // 以"零尝试"的姿态无限重发。这与广播车道的"nonce 先占位后外发"同构：
   // 不可撤销的外部副作用之前，账必须先落。
-  const inFlight = await input.deliveryStore.saveDelivery({
-    ...input.pending,
-    attempts: input.pending.attempts + 1,
-    updatedAt: input.now()
-  });
+  const inFlightSave = await input.deliveryStore.saveDelivery(
+    {
+      ...input.pending,
+      attempts: input.pending.attempts + 1,
+      updatedAt: input.now()
+    },
+    { status: input.pending.status, attempts: input.pending.attempts }
+  );
+  if (!inFlightSave.applied) {
+    // 预算占位被并发写抢先：本方未取得外发权（attempts 已被并发方按
+    // 同一预算推进），不得发送——否则两个分发方各自发送一次而台账只
+    // 记一次扣减。以现行台账返回。
+    return inFlightSave.record;
+  }
+  const inFlight = inFlightSave.record;
 
   let result: NotificationDispatchResult;
   try {
@@ -1700,26 +1814,33 @@ async function dispatchPreparedDelivery(input: {
       transport: input.transport
     });
   } catch (error) {
-    return input.deliveryStore.saveDelivery({
-      ...inFlight,
-      status: "failed",
-      lastError: error instanceof Error ? redactErrorMessage(error) : "notification dispatch failed",
-      updatedAt: input.now()
-    });
+    return (await input.deliveryStore.saveDelivery(
+      {
+        ...inFlight,
+        status: "failed",
+        lastError: error instanceof Error ? redactErrorMessage(error) : "notification dispatch failed",
+        updatedAt: input.now()
+      },
+      { status: inFlight.status, attempts: inFlight.attempts }
+    )).record;
   }
   // 外发已发生（成功或渠道自报失败）：此处落账抛错不得回退成 failed——
   // 外部已收到的投递被记成失败会驱动一次必然双发的重试。让错误上抛，
   // 行保持 pending+已扣预算，由重建/重放的预算闸与运营台账收敛。
-  return input.deliveryStore.saveDelivery({
-    ...inFlight,
-    status: result.ok ? "sent" : "failed",
-    ...activationStatusForResult(input.transport, result),
-    ...(result.externalReceiptRef ? { externalReceiptRef: result.externalReceiptRef } : {}),
-    // 错误消息先脱敏再持久化（对齐兄弟路径），防 transport 异常
-    // 文本把端点/凭证带进投递台账。
-    ...(result.error ? { lastError: redactErrorMessage(result.error) } : {}),
-    updatedAt: input.now()
-  });
+  // 落账被并发写抢先时同理以现行台账返回：并发方持有该行的更新视图。
+  return (await input.deliveryStore.saveDelivery(
+    {
+      ...inFlight,
+      status: result.ok ? "sent" : "failed",
+      ...activationStatusForResult(input.transport, result),
+      ...(result.externalReceiptRef ? { externalReceiptRef: result.externalReceiptRef } : {}),
+      // 错误消息先脱敏再持久化（对齐兄弟路径），防 transport 异常
+      // 文本把端点/凭证带进投递台账。
+      ...(result.error ? { lastError: redactErrorMessage(result.error) } : {}),
+      updatedAt: input.now()
+    },
+    { status: inFlight.status, attempts: inFlight.attempts }
+  )).record;
 }
 
 type RetryTransportResolution =
@@ -1791,20 +1912,23 @@ async function saveSkippedSignalDelivery(input: {
   if (existing && existing.status !== "pending") {
     return existing;
   }
-  return input.deliveryStore.saveDelivery({
-    ...baseSignalDeliveryRecord(
-      input.event,
-      input.order,
-      input.signal,
-      input.receiverHook,
-      input.supplierMetadata,
-      input.transportType,
-      input.now
-    ),
-    status: "skipped",
-    reason: input.reason,
-    updatedAt: input.now()
-  });
+  return (await input.deliveryStore.saveDelivery(
+    {
+      ...baseSignalDeliveryRecord(
+        input.event,
+        input.order,
+        input.signal,
+        input.receiverHook,
+        input.supplierMetadata,
+        input.transportType,
+        input.now
+      ),
+      status: "skipped",
+      reason: input.reason,
+      updatedAt: input.now()
+    },
+    existing ? { status: existing.status, attempts: existing.attempts } : undefined
+  )).record;
 }
 
 function baseSignalDeliveryRecord(

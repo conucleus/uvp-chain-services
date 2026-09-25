@@ -41,6 +41,19 @@ export class InMemoryProductSubmissionStore implements ProductSubmissionStore {
     });
   }
 
+  async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
+    // 过期行（deadline 为 unix 秒字符串）无论是否已消费都不再参与判定。
+    const boundary = Number(deadlineBeforeSeconds);
+    let deleted = 0;
+    for (const [prepareId, record] of this.#prepared) {
+      if (Number(record.deadline) < boundary) {
+        this.#prepared.delete(prepareId);
+        deleted += 1;
+      }
+    }
+    return deleted;
+  }
+
   async reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean> {
     const reservedAt = this.#now().toISOString();
     const existing = this.#reservedNonceKeys.get(key);

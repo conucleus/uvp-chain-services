@@ -120,6 +120,17 @@ export class SqliteStoreWalletSessionStore implements StoreWalletSessionStore {
     return result.changes;
   }
 
+  async deleteExpiredSessions(expiresBefore: string): Promise<number> {
+    // 过期会话（含已撤销）对 resolve 一律拒绝、无判定价值——与挑战
+    // 清扫同批约束会话表只增不删的无界放大。
+    const result = runSqliteWrite(() =>
+      this.#database.prepare(
+        `DELETE FROM store_wallet_session WHERE expires_at < ?`
+      ).run(expiresBefore)
+    );
+    return result.changes;
+  }
+
   async consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined> {
     // 条件 UPDATE 原子占位——
     // WHERE consumed_at IS NULL 保证并发重放同一 nonce 只有一个赢家。

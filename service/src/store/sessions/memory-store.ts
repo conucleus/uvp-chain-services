@@ -77,6 +77,17 @@ export class InMemoryStoreWalletSessionStore implements StoreWalletSessionStore 
     return deleted;
   }
 
+  async deleteExpiredSessions(expiresBefore: string): Promise<number> {
+    let deleted = 0;
+    for (const [sessionId, session] of this.#sessions) {
+      if (session.expiresAt < expiresBefore) {
+        this.#sessions.delete(sessionId);
+        deleted += 1;
+      }
+    }
+    return deleted;
+  }
+
   async consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined> {
     // 条件占位——只有未消费的挑战才能被置为已消费。
     const current = this.#challenges.get(nonce);

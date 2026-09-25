@@ -77,18 +77,31 @@ export async function verifyListingAnchors(options: {
   // 投影以 chainId:contract:planId 为键；按 planId 值匹配（大小写不敏感）。
   // 已注册判据：桶存在只代表 commitPlan 已执行——须见到
   // PlanRegistered（registeredAt 被 finalize 交易覆写）或 PlanFinalized。
-  const plan = Object.values(snapshot.stateMachinePlans)
-    .find((candidate) =>
+  const planMatches = Object.values(snapshot.stateMachinePlans)
+    .filter((candidate) =>
       candidate.planId.toLowerCase() === listing.planId.toLowerCase() &&
       isPlanRegisteredProjection(candidate));
+  // 同 planId 跨部署多命中时锚无法唯一归位：显式 conflict，不静默
+  // 取首个命中比对。
+  const planAmbiguous = planMatches.length > 1;
+  const plan = planMatches.length === 1 ? planMatches[0] : undefined;
   const checks: StoreAnchorCheck[] = [];
 
+  if (planAmbiguous) {
+    checks.push({
+      id: "plan_projection_ambiguous",
+      label: "同 planId 在多个链上部署注册，锚无法唯一归位",
+      outcome: "mismatch"
+    });
+  }
   checks.push({
     id: "plan_projected",
     label: "秩序已在链上注册并被索引（PlanRegistered 投影）",
     expected: "registered",
     actual: plan ? "registered" : "pending",
-    outcome: plan ? "match" : "mismatch"
+    // 投影滞后是等待不是冲突：未命中不计入 mismatch，交给
+    // pending_indexing 状态阻断公开，等索引器追上。
+    outcome: plan ? "match" : "unavailable"
   });
 
   let planHashReference: string | undefined = plan?.planHash;

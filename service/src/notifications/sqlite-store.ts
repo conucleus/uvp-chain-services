@@ -16,8 +16,10 @@ import type { Address, Hex } from "../shared/types.js";
 import type {
   NotificationDeliveryQuery,
   NotificationDeliveryRecord,
-  NotificationDeliveryStore,
+  NotificationDeliverySave,
   NotificationDeliveryStatus,
+  NotificationDeliveryStore,
+  NotificationDeliveryPrecondition,
   ParticipantNotificationReadState,
   ParticipantNotificationReadStateStore
 } from "./service.js";
@@ -88,16 +90,20 @@ export class SqliteNotificationStateStore implements NotificationDeliveryStore, 
     return row ? deliveryRow(row) : undefined;
   }
 
-  async saveDelivery(record: NotificationDeliveryRecord): Promise<NotificationDeliveryRecord> {
-    runSqliteWrite(() => {
-      this.#database
-        .prepare(
-          `INSERT INTO notification_delivery (
-           delivery_id, kind, status, task_id, order_id, receiver_hook_id, receiver_stage_id,
-           source_id, signal_id, payload_hash, idempotency_key, chain_id, state_machine_address,
-           submitter, supplier_subject_id, supplier_wallet, transport_type, activation_status,
-           external_receipt_ref, reason, payload_json, attempts, last_error, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  async saveDelivery(
+    record: NotificationDeliveryRecord,
+    expect?: NotificationDeliveryPrecondition
+  ): Promise<NotificationDeliverySave> {
+    // 条件写入（CAS on status/attempts）：DO UPDATE 带 WHERE 前提，前提
+    // 不成立的并发抢先落为 0 行受影响；无前提时只插入不覆盖。
+    const insert = `INSERT INTO notification_delivery (
+         delivery_id, kind, status, task_id, order_id, receiver_hook_id, receiver_stage_id,
+         source_id, signal_id, payload_hash, idempotency_key, chain_id, state_machine_address,
+         submitter, supplier_subject_id, supplier_wallet, transport_type, activation_status,
+         external_receipt_ref, reason, payload_json, attempts, last_error, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const sql = expect
+      ? `${insert}
          ON CONFLICT(delivery_id) DO UPDATE SET
            kind = excluded.kind,
            status = excluded.status,
@@ -122,11 +128,18 @@ export class SqliteNotificationStateStore implements NotificationDeliveryStore, 
            attempts = excluded.attempts,
            last_error = excluded.last_error,
            created_at = excluded.created_at,
-           updated_at = excluded.updated_at`
-        )
-        .run(...deliveryValues(record));
-    });
-    return record;
+           updated_at = excluded.updated_at
+         WHERE notification_delivery.status = ? AND notification_delivery.attempts = ?`
+      : `${insert}
+         ON CONFLICT(delivery_id) DO NOTHING`;
+    const values = expect
+      ? [...deliveryValues(record), expect.status, expect.attempts]
+      : deliveryValues(record);
+    const result = runSqliteWrite(() => this.#database.prepare(sql).run(...values));
+    if (result.changes === 0) {
+      return { applied: false, record: await this.getDelivery(record.deliveryId) ?? record };
+    }
+    return { applied: true, record };
   }
 
   async listDeliveries(query: NotificationDeliveryQuery = {}): Promise<readonly NotificationDeliveryRecord[]> {

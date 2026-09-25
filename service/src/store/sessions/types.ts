@@ -93,6 +93,12 @@ export interface StoreWalletSessionStore {
    * 是否消费都不再参与任何判定（verify 对过期/未知一律拒绝）。
    */
   deleteExpiredChallenges(expiresBefore: string): Promise<number>;
+  /**
+   * 过期会话清扫：删除 expires_at < expiresBefore 的行（含已撤销的），
+   * 返回删除行数。过期会话对 resolve 一律拒绝、无判定价值，会话行随
+   * 登录只增不删同样无界放大；与挑战清扫同批触发、同口径。
+   */
+  deleteExpiredSessions(expiresBefore: string): Promise<number>;
 
   putSession(record: StoreWalletSessionRecord): Promise<void>;
   findSessionByTokenHash(tokenHash: string): Promise<StoreWalletSessionRecord | undefined>;
