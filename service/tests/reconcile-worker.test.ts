@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { hashSignalAuthorizations } from "@uvp-eth/protocol-bindings";
 import { describe, expect, it } from "vitest";
 import { createEvidenceService, InMemoryEvidenceStorage, type EvidencePrincipal } from "../src/evidence/index.js";
 import { InMemoryGovernanceStore, type IdentityTxLogDTO } from "../src/governance/index.js";
@@ -1441,6 +1442,8 @@ function executorPatchSubmissionFixture(input: {
     executorWallet: creator,
     mode: "assign",
     modeHash: bytes32("7f02"),
+    executorAuthorizations: [],
+    authorizationsHash: hashSignalAuthorizations([]),
     roleHash: bytes32("7f03"),
     executorMetadataHash: metadataHash,
     patchHash: input.patchHash,

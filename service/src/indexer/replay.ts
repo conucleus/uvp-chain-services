@@ -17,6 +17,7 @@ import {
   type ProjectionProvenance
 } from "./projections/proof.js";
 import {
+  applyOrderForked,
   applyOrderLinked,
   applyOrderMaterialized,
   applyOrderRegistered,
@@ -46,7 +47,6 @@ import {
   applyHookStatusChanged,
   applyStageExecutorActivated,
   applyStageExecutorPatchApplied,
-  applyStageExecutorSignalDelegated,
   applyStageMaterialized,
   applyStageResourcePatchApplied,
   applyTimerPoked
@@ -207,10 +207,10 @@ export function rebuildOrderProjections(
       ...order,
       authorizations: { ...order.authorizations },
       signals: { ...order.signals },
-      signalDelegations: { ...order.signalDelegations },
       stageExecutorOverlays: { ...order.stageExecutorOverlays },
       stageResourceOverlays: { ...order.stageResourceOverlays },
       ...(order.triggerLink ? { triggerLink: order.triggerLink } : {}),
+      ...(order.forkLineage ? { forkLineage: order.forkLineage } : {}),
       hooks: Object.fromEntries(Object.entries(order.hooks).map(([hookId, hook]) => [hookId, { ...hook }])),
       tasks: readonlyTasks,
       timeline: [...order.timeline].sort(compareTimelineEvents),
@@ -307,6 +307,13 @@ function applyStateMachineEvent(
     case "OrderLinked":
       applyOrderLinked(state, event);
       return;
+    case "OrderForked":
+      // fork 出生血缘（UB-39）：REPLACEMENT 模式退役后非协作换人的唯一
+      // 车道。血缘进 fork 单投影（order.forkLineage）；fork 单的注册与
+      // 事实流沿用既有事件族（OrderRegistered/SignalSubmitted），本分支
+      // 只收血缘，不落未知事件桶。
+      applyOrderForked(state, event);
+      return;
     case "StageExecutorPatchApplied":
       applyStageExecutorPatchApplied(state, event);
       return;
@@ -315,9 +322,6 @@ function applyStateMachineEvent(
       return;
     case "StageExecutorActivated":
       applyStageExecutorActivated(state, event);
-      return;
-    case "StageExecutorSignalDelegated":
-      applyStageExecutorSignalDelegated(state, event);
       return;
     case "DockOpened":
       applyDockOpened(state, event);

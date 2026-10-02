@@ -5,9 +5,11 @@
 // （store 域 onchainHookPlanArtifact）富集，并以 capabilitiesRootOf 重算
 // 断言与链上 root 一致（fail-closed）。
 import { capabilitiesRootOf } from "@uvp-eth/compiler";
+import { executorCandidatesRootOf } from "../../submissions/capability-proofs.js";
 import type { ChainEvent } from "../events.js";
 import { ProjectionError, type Address, type Hex } from "../../shared/types.js";
 import {
+  optionalBytes32Arg,
   proofOf,
   provenanceOf,
   requiredAddressArg,
@@ -50,10 +52,22 @@ export interface StateMachinePlanProjection {
   readonly capabilitiesRoot?: Hex;
   readonly dockRoutesRoot?: Hex;
   readonly dockInterfaceRoot?: Hex;
+  /**
+   * 执行者候选集树根（UB-36②③，PlanCommitted 第 9 参）：逐单 executor
+   * patch 的候选集闸锚点——EMPTY_ROOT（无候选集计划）patch 恒拒，清单由
+   * 重放方从编译产物富集（同两表模式：事件只带 root）。
+   */
+  readonly executorCandidatesRoot?: Hex;
   readonly committedAt?: ProjectionProvenance;
   readonly finalizedAt?: ProjectionProvenance;
   readonly selectorBindings: readonly StateMachineStageSelectorBindingProjection[];
   readonly signalCapabilities: readonly StateMachineSignalCapabilityProjection[];
+  /**
+   * 执行者候选集清单（富集产物，形状 = commitPlan executorCandidates 参数）：
+   * stage-patch 的 candidateProof 造证源。空清单 = 产物未携带候选集或
+   * root 断言不过（fail-closed 方向由消费方处理，投影如实留空）。
+   */
+  readonly executorCandidates: readonly StateMachineExecutorCandidateProjection[];
   /** 词表富集三态（见 PlanCapabilityEnrichmentStatus）：富集运行过才置值。 */
   readonly capabilityEnrichment?: PlanCapabilityEnrichmentStatus;
   /**
@@ -79,6 +93,12 @@ export interface StateMachineStageSelectorBindingProjection {
 
 export type StateMachineSignalTargetRelation = "current" | "triggerOrigin" | "unknown";
 
+/** 执行者候选集清单行（= commitPlan 的 ExecutorCandidate 参数形态）。 */
+export interface StateMachineExecutorCandidateProjection {
+  readonly stageId: Hex;
+  readonly executor: Address;
+}
+
 export interface StateMachineSignalCapabilityProjection {
   readonly stageId: Hex;
   readonly targetSourceId: Hex;
@@ -101,9 +121,11 @@ export type PlanCapabilityEnrichmentStatus = "enriched" | "empty" | "failed";
 export type MutableStateMachinePlanProjection = Writable<StateMachinePlanProjection>;
 
 /**
- * 产物富集源：planId 锚定的编译产物两表（capabilityTablesOf(artifact) 的
+ * 产物富集源：planId 锚定的编译产物词表（capabilityTablesOf(artifact) 的
  * 输出形态，relation 为链上词序 0/1）。planHash 可选——提供时参与富集
- * 前的一致性断言。
+ * 前的一致性断言。executorCandidates 可选——产物携带候选集清单时随源
+ * 提供（编译器尚未产出该字段的阶段缺省，候选集留空、patch 消费方
+ * fail-closed）。
  */
 export interface PlanCapabilityTablesInput {
   readonly planId: Hex;
@@ -115,6 +137,10 @@ export interface PlanCapabilityTablesInput {
     readonly signalId: Hex;
     /** 0=current,1=triggerOrigin（链上叶词序）。 */
     readonly targetOrderRelation: 0 | 1;
+  }[];
+  readonly executorCandidates?: readonly {
+    readonly stageId: Hex;
+    readonly executor: Address;
   }[];
 }
 
@@ -155,9 +181,15 @@ export function applyPlanCommitted(
     capabilitiesRoot: requiredBytes32Arg(event, "capabilitiesRoot"),
     dockRoutesRoot: requiredBytes32Arg(event, "dockRoutesRoot"),
     dockInterfaceRoot: requiredBytes32Arg(event, "dockInterfaceRoot"),
+    // UB-36②③：候选集 root 随 commit 事件广播（第 9 参）。旧事件面
+    //（无该字段的历史流）按可选读取，缺省即无候选集承诺。
+    ...(optionalBytes32Arg(event, "executorCandidatesRoot")
+      ? { executorCandidatesRoot: optionalBytes32Arg(event, "executorCandidatesRoot")! }
+      : {}),
     committedAt: provenanceOf(event),
     selectorBindings: [],
     signalCapabilities: [],
+    executorCandidates: [],
     registeredAt: provenanceOf(event),
     updatedAt: provenanceOf(event),
     proof,
@@ -209,6 +241,7 @@ export function applyPlanFinalized(
     finalizedAt: provenanceOf(event),
     selectorBindings: [],
     signalCapabilities: [],
+    executorCandidates: [],
     registeredAt: provenanceOf(event),
     updatedAt: provenanceOf(event),
     proof,
@@ -256,6 +289,7 @@ export function applyPlanRegistered(
       hookCount: uintArgAsString(event, "hookCount"),
       selectorBindings: [],
       signalCapabilities: [],
+      executorCandidates: [],
       registeredAt: provenanceOf(event),
       updatedAt: provenanceOf(event),
       proof
@@ -360,10 +394,11 @@ function enrichPlanCapabilityTables(
   },
   options: { readonly countMismatch: boolean }
 ): void {
+  const source = state.capabilityTables?.get(plan.planId.toLowerCase());
+  enrichExecutorCandidates(plan, source, state, options);
   if (plan.selectorBindings.length > 0 || plan.signalCapabilities.length > 0) {
     return;
   }
-  const source = state.capabilityTables?.get(plan.planId.toLowerCase());
   if (!source) {
     plan.capabilityEnrichment = state.capabilityResolutionFailures?.has(plan.planId.toLowerCase())
       ? "failed"
@@ -407,6 +442,52 @@ function enrichPlanCapabilityTables(
     }))
     .sort(compareSignalCapabilities);
   plan.capabilityEnrichment = "enriched";
+}
+
+/**
+ * 执行者候选集清单富集（UB-36②③，与两表同模式）：链上只承诺 root，
+ * 清单从编译产物（发布侧 resolver）按 planId 富集，root 重算一致才落表。
+ *
+ * fail-closed 口径与两表同构但方向更严：产物未携带清单（编译器尚未产出
+ * 该字段 / 外部发布 plan）或重算 root 与链上 root 不一致 → 清单留空；
+ * 空清单 = 候选面未知——stage-patch 提交车道对空清单直接拒绝（合约
+ * EMPTY_ROOT/证明不过均恒拒 StageExecutorNotCandidate，发交易必 revert）。
+ * root 断言不过另计 capabilityEnrichmentMismatchCount（与两表共用计数面：
+ * 同属"产物与链上承诺不一致"的可观测异常）。
+ */
+function enrichExecutorCandidates(
+  plan: MutableStateMachinePlanProjection,
+  source: PlanCapabilityTablesInput | undefined,
+  state: {
+    capabilityResolutionFailures?: ReadonlySet<string>;
+    diagnostics?: ProjectionReplayDiagnostics;
+  },
+  options: { readonly countMismatch: boolean }
+): void {
+  if (plan.executorCandidates.length > 0) {
+    return;
+  }
+  const candidates = source?.executorCandidates;
+  if (!candidates || candidates.length === 0) {
+    return;
+  }
+  const countMismatch = (): void => {
+    if (options.countMismatch) {
+      state.diagnostics && (state.diagnostics.capabilityEnrichmentMismatchCount += 1);
+    }
+  };
+  const candidatesRoot = executorCandidatesRootOf(candidates);
+  if (
+    !plan.executorCandidatesRoot ||
+    plan.executorCandidatesRoot.toLowerCase() !== candidatesRoot.toLowerCase()
+  ) {
+    countMismatch();
+    return;
+  }
+  plan.executorCandidates = candidates.map((candidate) => ({
+    stageId: candidate.stageId,
+    executor: candidate.executor,
+  }));
 }
 
 function compareSignalCapabilities(

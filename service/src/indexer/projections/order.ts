@@ -25,7 +25,6 @@ import {
 import type { MutableStateMachinePlanProjection } from "./plan.js";
 import type {
   StateMachineSignalAuthorizationProjection,
-  StateMachineSignalDelegationProjection,
   StateMachineSignalProjection
 } from "./signal.js";
 import type {
@@ -54,6 +53,23 @@ export interface StateMachineOrderTriggerLinkProjection {
   readonly proof: StateMachineProofProjection;
 }
 
+/**
+ * fork 出生血缘（UB-39，OrderForked 事件）：fork 单号由合约
+ * forkOrderIdFor(planId, parentOrderId, forkPayloadHash) 纯函数派生，
+ * 裁决信号 (approvalSourceId, approvalSignalId) 必须存在于父单；血缘只读
+ * 本事件（fork 单的注册/事实流沿用 OrderRegistered/SignalSubmitted 事件
+ * 口径，索引器把 fork 单当普通单重建）。
+ */
+export interface StateMachineOrderForkProjection {
+  readonly orderId: Hex;
+  readonly parentOrderId: Hex;
+  readonly approvalSourceId: Hex;
+  readonly approvalSignalId: Hex;
+  readonly initiator: Address;
+  readonly forkedAt: ProjectionProvenance;
+  readonly proof: StateMachineProofProjection;
+}
+
 export interface StateMachineOrderProjection {
   readonly orderId: Hex;
   readonly chainId: number;
@@ -68,10 +84,11 @@ export interface StateMachineOrderProjection {
   readonly creator?: Address;
   readonly authorizations: Readonly<Record<string, StateMachineSignalAuthorizationProjection>>;
   readonly signals: Readonly<Record<string, StateMachineSignalProjection>>;
-  readonly signalDelegations: Readonly<Record<string, StateMachineSignalDelegationProjection>>;
   readonly stageExecutorOverlays: Readonly<Record<string, StateMachineStageExecutorOverlayProjection>>;
   readonly stageResourceOverlays: Readonly<Record<string, StateMachineStageResourceOverlayProjection>>;
   readonly triggerLink?: StateMachineOrderTriggerLinkProjection;
+  /** fork 出生血缘（OrderForked）：非 fork 单缺省。 */
+  readonly forkLineage?: StateMachineOrderForkProjection;
   readonly hooks: Readonly<Record<string, StateMachineHookProjection>>;
   readonly tasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly timeline: readonly StateMachineTimelineEventProjection[];
@@ -97,10 +114,10 @@ export type MutableStateMachineOrderProjection = Writable<
     StateMachineOrderProjection,
     | "authorizations"
     | "signals"
-    | "signalDelegations"
     | "stageExecutorOverlays"
     | "stageResourceOverlays"
     | "triggerLink"
+    | "forkLineage"
     | "hooks"
     | "tasks"
     | "timeline"
@@ -109,10 +126,10 @@ export type MutableStateMachineOrderProjection = Writable<
 > & {
   authorizations: Record<string, StateMachineSignalAuthorizationProjection>;
   signals: Record<string, StateMachineSignalProjection>;
-  signalDelegations: Record<string, StateMachineSignalDelegationProjection>;
   stageExecutorOverlays: Record<string, StateMachineStageExecutorOverlayProjection>;
   stageResourceOverlays: Record<string, StateMachineStageResourceOverlayProjection>;
   triggerLink?: StateMachineOrderTriggerLinkProjection;
+  forkLineage?: StateMachineOrderForkProjection;
   hooks: Record<string, MutableStateMachineHookProjection>;
   tasks: Record<string, MutableStateMachineTaskProjection>;
   timeline: StateMachineTimelineEventProjection[];
@@ -396,6 +413,63 @@ export function applyOrderLinked(
   }));
 }
 
+/**
+ * OrderForked 投影（UB-39）：fork 单血缘进 fork 单自己的行——
+ * forkOrderGate 同一交易先 L_createOrder（OrderRegistered +
+ * OrderRelayerRecorded）再发本事件，桶通常已存在，缺失时按链上事实补建
+ * （订单已注册）。父单行不回写：血缘是 fork 单的出生属性，父单视角的
+ * 反查由快照按 forkLineage 派生。非协作换人（replacement 退役）的
+ * 裁决材料 (approvalSourceId, approvalSignalId) 只做血缘留痕，不在投影
+ * 侧复刻授权判定——链上 forkOrderGate 已 fail-closed。
+ */
+export function applyOrderForked(
+  state: {
+    deployments: Map<string, MutableStateMachineDeploymentProjection>;
+    plans: Map<string, MutableStateMachinePlanProjection>;
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent
+): void {
+  const planId = requiredBytes32Arg(event, "planId");
+  const orderId = requiredBytes32Arg(event, "orderId");
+  const parentOrderId = requiredBytes32Arg(event, "parentOrderId");
+  const approvalSourceId = requiredBytes32Arg(event, "approvalSourceId");
+  const approvalSignalId = requiredBytes32Arg(event, "approvalSignalId");
+  const initiator = requiredAddressArg(event, "initiator");
+  const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
+  const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
+  const order = ensureStateMachineOrder(
+    state.orders,
+    event,
+    orderId,
+    planId,
+    deploymentId
+  );
+  const proof = proofOf(event, {
+    orderId,
+    planId,
+    parentOrderId,
+    submitter: initiator,
+  });
+  order.status = "registered";
+  order.forkLineage = {
+    orderId,
+    parentOrderId,
+    approvalSourceId,
+    approvalSignalId,
+    initiator,
+    forkedAt: provenanceOf(event),
+    proof,
+  };
+  order.updatedAt = provenanceOf(event);
+  appendOrderProof(order, proof);
+  appendOrderTimeline(order, timelineOf(event, "订单已从父单分叉", proof, {
+    orderId,
+    planId,
+    parentOrderId,
+  }));
+}
+
 export function ensureStateMachineOrder(
   orders: Map<string, MutableStateMachineOrderProjection>,
   event: ChainEvent,
@@ -477,7 +551,6 @@ export function ensureStateMachineOrder(
     status: planId ? "registered" : "unknown",
     authorizations: {},
     signals: {},
-    signalDelegations: {},
     stageExecutorOverlays: {},
     stageResourceOverlays: {},
     hooks: {},

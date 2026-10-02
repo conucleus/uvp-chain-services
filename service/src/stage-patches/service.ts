@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { onchainStageId } from "@uvp-eth/compiler";
-import type { SelectorBindingPayload, StageFactPayload } from "@uvp-eth/protocol-bindings";
+import {
+  hashSignalAuthorizations,
+  type SelectorBindingPayload,
+  type SignalAuthorizationPayload
+} from "@uvp-eth/protocol-bindings";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import type { ChainServicesRuntimeEnv } from "../config/index.js";
 import { canonicalJson } from "../shared/canonical-json.js";
@@ -28,8 +32,8 @@ import type { ProjectionProvenance } from "../indexer/projections/proof.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { ProductSchemaResolver } from "../product/application/service.js";
 import {
+  executorCandidateProofFor,
   selectorBindingProofForPatch,
-  stageFactsForTargetStage,
   type PlanCapabilityTables
 } from "../submissions/capability-proofs.js";
 import { InMemoryProductStagePatchStore } from "./store.js";
@@ -202,6 +206,7 @@ export function createProductStageExecutorPatchService(
         patchSignalId: EXECUTOR_PATCH_SIGNAL_ID,
         allowSubmittedTargetSignals: true,
       });
+      const plan = await findProjectedPlan(options.store, context.order);
       const governance = resolveExecutorPatchGovernance(
         context.order,
         context.targetStageId,
@@ -210,18 +215,22 @@ export function createProductStageExecutorPatchService(
           ...(input.previousExecutorWallet
             ? { previousExecutor: input.previousExecutorWallet }
             : {}),
-          ...(input.approvalSourceId
-            ? { approvalSourceId: input.approvalSourceId }
-            : {}),
-          ...(input.approvalSignalId
-            ? { approvalSignalId: input.approvalSignalId }
-            : {}),
         },
         context.planSignalCapabilities,
       );
       const executorWallet = normalizeNonZeroAddress(
         input.executorWallet,
         "executorWallet",
+      );
+      // 候选集闸（UB-36②③）：(targetStageId, executor) 必须命中 plan 承诺的
+      // 执行者候选集——无候选集（EMPTY_ROOT）或不在集内的链上恒拒
+      // StageExecutorNotCandidate。prepare 时点 fail-closed，不发必 revert
+      // 的签名载荷。
+      assertExecutorInCandidateSet(
+        plan,
+        context.targetStageId,
+        executorWallet,
+        /* failOnMissingList */ true,
       );
       const executorMetadataHash = normalizeNonZeroBytes32(
         input.executorMetadataHash ?? input.supplierReferenceHash,
@@ -230,6 +239,18 @@ export function createProductStageExecutorPatchService(
       const roleHash = input.roleHash
         ? normalizeNonZeroBytes32(input.roleHash, "roleHash")
         : context.targetStageId;
+      // 授权集（UB-36①）：patch 生效时对新城执行者写入的显式订单级授权
+      //——目标阶段 relation=0 事实全表映射为 executorWallet 的授权（替代
+      // 已退役的委托通道），prepare 时点冻结进档案，selector 签名覆盖的
+      // 就是这份集。
+      const executorAuthorizations = executorAuthorizationsForTargetStage(
+        plan,
+        context.targetStageId,
+        executorWallet,
+        roleHash,
+        executorMetadataHash,
+      );
+      const authorizationsHash = hashSignalAuthorizations(executorAuthorizations);
       const patchNonce = nextStageExecutorPatchNonce(
         context.order,
         context.targetStageId,
@@ -244,8 +265,7 @@ export function createProductStageExecutorPatchService(
         executorMetadataHash,
         mode: governance.modeHash,
         previousExecutor: governance.previousExecutorForPatch,
-        approvalSourceId: governance.approvalSourceIdForPatch,
-        approvalSignalId: governance.approvalSignalIdForPatch,
+        authorizationsHash,
         patchNonce,
         metadataURI,
       });
@@ -268,8 +288,7 @@ export function createProductStageExecutorPatchService(
         executorMetadataHash,
         mode: governance.modeHash,
         previousExecutor: governance.previousExecutorForPatch,
-        approvalSourceId: governance.approvalSourceIdForPatch,
-        approvalSignalId: governance.approvalSignalIdForPatch,
+        authorizationsHash,
         patchHash,
         patchNonce,
         metadataURI,
@@ -293,12 +312,8 @@ export function createProductStageExecutorPatchService(
         ...(governance.previousExecutor
           ? { previousExecutor: governance.previousExecutor }
           : {}),
-        ...(governance.approvalSourceId
-          ? { approvalSourceId: governance.approvalSourceId }
-          : {}),
-        ...(governance.approvalSignalId
-          ? { approvalSignalId: governance.approvalSignalId }
-          : {}),
+        executorAuthorizations,
+        authorizationsHash,
         roleHash,
         executorMetadataHash,
         patchHash,
@@ -320,12 +335,7 @@ export function createProductStageExecutorPatchService(
           ...(governance.previousExecutor
             ? { previousExecutor: governance.previousExecutor }
             : {}),
-          ...(governance.approvalSourceId
-            ? { approvalSourceId: governance.approvalSourceId }
-            : {}),
-          ...(governance.approvalSignalId
-            ? { approvalSignalId: governance.approvalSignalId }
-            : {}),
+          authorizationsHash,
           patchHash,
           patchNonce,
           metadataURI,
@@ -425,14 +435,24 @@ export function createProductStageExecutorPatchService(
         prepared,
         plan,
       );
-      // 词表 Merkle 造证（bindingProof + stageFacts）：applyStageExecutorPatchFor
-      // 的必携参数，从 plan 投影两表构造；投影表空（外部发布 plan）无法
-      // 造证，fail-closed 拒绝提交（广播必被 StageSelectorBindingNotFound
+      // 词表 Merkle 造证（bindingProof）：applyStageExecutorPatchFor 的
+      // 必携参数，从 plan 投影 bindings 表构造；投影表空（外部发布 plan）
+      // 无法造证，fail-closed 拒绝提交（广播必被 StageSelectorBindingNotFound
       // 拒绝，白烧 gas 白占 nonce）。
-      const { bindingProof, stageFacts } = stagePatchProofsFromPlan(
+      const bindingProof = stagePatchBindingProofFromPlan(
         plan,
         prepared.selectorStageId,
         prepared.targetStageId,
+      );
+      // 候选集成员证明（UB-36②③）：从 plan 投影候选集清单现场构造。清单
+      // 缺失（产物未携带候选集/外部发布 plan）或执行者已被移出集 →
+      // fail-closed 拒绝：合约 StageExecutorNotCandidate 恒拒，发交易必
+      // revert。授权集取 prepared 档案的冻结集（selector 签名覆盖的集），
+      // 广播原样携带——合约复算 signalAuthorizationsHash 与 digest 承诺比对。
+      const candidateProof = candidateProofForPrepared(
+        plan,
+        prepared.targetStageId,
+        prepared.executorWallet,
       );
 
       const previousSignature = signatureForPreviousExecutor(
@@ -490,7 +510,8 @@ export function createProductStageExecutorPatchService(
           recoveredSelector,
           ...(recoveredPreviousExecutor ? { recoveredPreviousExecutor } : {}),
           bindingProof,
-          stageFacts,
+          candidateProof,
+          executorAuthorizations: prepared.executorAuthorizations,
         });
         broadcastTxHash = broadcast.status === "failed"
           ? broadcast.attempt?.txHash
@@ -796,9 +817,9 @@ export function createProductStageResourcePatchService(
         prepared,
         plan?.signalCapabilities ?? [],
       );
-      // 词表 Merkle 造证：同 executor patch 路径（bindingProof + stageFacts
-      // 均为 applyStageResourcePatchFor 必携参数，投影表空 fail-closed）。
-      const { bindingProof, stageFacts } = stagePatchProofsFromPlan(
+      // 词表 Merkle 造证：同 executor patch 路径（bindingProof 为
+      // applyStageResourcePatchFor 必携参数，投影表空 fail-closed）。
+      const bindingProof = stagePatchBindingProofFromPlan(
         plan,
         prepared.selectorStageId,
         prepared.targetStageId,
@@ -831,7 +852,6 @@ export function createProductStageResourcePatchService(
           signature,
           recoveredSelector,
           bindingProof,
-          stageFacts,
         });
         broadcastTxHash = broadcast.status === "failed"
           ? broadcast.attempt?.txHash
@@ -1194,7 +1214,7 @@ async function findProjectedPlan(
 }
 
 /**
- * stage patch 的词表 Merkle 造证（bindingProof + stageFacts）。
+ * stage patch 的词表 Merkle 造证（bindingProof）。
  *
  * 投影表空（外部发布 plan，产物富集不可用）或绑定叶不在表内 →
  * fail-closed 抛错：合约入口对 bindingProof 强制验证
@@ -1202,14 +1222,11 @@ async function findProjectedPlan(
  * 白占 patch nonce。外部发布 plan 的绑定表本就不在链上（也无法通过
  * findAllowedSelectorBinding 的授权预检），两条路径同口径拒绝。
  */
-function stagePatchProofsFromPlan(
+function stagePatchBindingProofFromPlan(
   plan: StateMachinePlanProjection | undefined,
   selectorStageId: Hex,
   targetStageId: Hex,
-): {
-  readonly bindingProof: SelectorBindingPayload;
-  readonly stageFacts: readonly StageFactPayload[];
-} {
+): SelectorBindingPayload {
   const tables: PlanCapabilityTables = {
     selectorBindings: plan?.selectorBindings ?? [],
     signalCapabilities: plan?.signalCapabilities ?? [],
@@ -1219,16 +1236,112 @@ function stagePatchProofsFromPlan(
     selectorStageId,
     targetStageId,
   );
-  const stageFacts = stageFactsForTargetStage(tables, targetStageId);
-  if (!bindingProof || !stageFacts) {
+  if (!bindingProof) {
     throw new ProductStagePatchError(
       409,
       "stage_patch_capability_tables_unavailable",
-      "plan capability vocabulary is unavailable in the projection; the stage patch cannot carry the required binding proof and stage facts",
+      "plan capability vocabulary is unavailable in the projection; the stage patch cannot carry the required binding proof",
       { planId: plan?.planId, selectorStageId, targetStageId },
     );
   }
-  return { bindingProof, stageFacts };
+  return bindingProof;
+}
+
+/**
+ * 候选集成员证明（UB-36②③，applyStageExecutorPatch 族 candidateProof
+ * 参数）：从 plan 投影的候选集清单构造。清单为空（产物未携带候选集/
+ * 外部发布 plan/富集 root 断言不过）或叶不在集内 → fail-closed 抛错：
+ * 两类失败在合约侧同报 StageExecutorNotCandidate 恒拒，服务端不发必
+ * revert 的交易，仅以错误码区分"候选面未知"与"不在集内"。
+ */
+function candidateProofForPrepared(
+  plan: StateMachinePlanProjection | undefined,
+  targetStageId: Hex,
+  executorWallet: Address,
+): readonly Hex[] {
+  assertExecutorInCandidateSet(plan, targetStageId, executorWallet, true);
+  const proof = executorCandidateProofFor(
+    plan?.executorCandidates ?? [],
+    targetStageId,
+    executorWallet,
+  );
+  if (!proof) {
+    throw new ProductStagePatchError(
+      409,
+      "executor_not_in_candidate_set",
+      "the patch executor is not a member of the plan's committed executor candidate set for the target stage",
+      { planId: plan?.planId, targetStageId, executorWallet },
+    );
+  }
+  return proof;
+}
+
+/**
+ * 候选集闸的 prepare/submit 双口径：清单为空按 failOnMissingList 决定
+ * （prepare 时点即拒；submit 由 candidateProofForPrepared 的证明构造
+ * 兜底）——无候选集（EMPTY_ROOT）的计划没有逐单换人面。
+ */
+function assertExecutorInCandidateSet(
+  plan: StateMachinePlanProjection | undefined,
+  targetStageId: Hex,
+  executorWallet: Address,
+  failOnMissingList: boolean,
+): void {
+  const candidates = plan?.executorCandidates ?? [];
+  if (candidates.length === 0) {
+    if (!failOnMissingList) {
+      return;
+    }
+    throw new ProductStagePatchError(
+      409,
+      "executor_candidate_set_unavailable",
+      "the plan's executor candidate list is unavailable in the projection (not carried by the compiled artifact or not committed on chain); executor patches for this plan would revert on chain",
+      { planId: plan?.planId, targetStageId },
+    );
+  }
+  const inSet = executorCandidateProofFor(
+    candidates,
+    targetStageId,
+    executorWallet,
+  ) !== undefined;
+  if (!inSet) {
+    throw new ProductStagePatchError(
+      409,
+      "executor_not_in_candidate_set",
+      "the patch executor is not a member of the plan's committed executor candidate set for the target stage",
+      { planId: plan?.planId, targetStageId, executorWallet },
+    );
+  }
+}
+
+/**
+ * patch 生效授权集推导（UB-36①，委托通道的替代）：目标阶段 relation=0
+ *（current）事实全表 → executorWallet 的显式订单级授权。role/metadataHash
+ * 承载 patch 的执行者角色与元数据承诺——授权来源 = selector 的 patch
+ * 签名（签名覆盖本集），provenance 可审计。词表为空的 plan（回退
+ * source==stage 形态）推导为空集：合约接受空集（patch 合法、不授予任何
+ * 提交权），链上按需另行显式授权。
+ */
+function executorAuthorizationsForTargetStage(
+  plan: StateMachinePlanProjection | undefined,
+  targetStageId: Hex,
+  executorWallet: Address,
+  roleHash: Hex,
+  executorMetadataHash: Hex,
+): readonly SignalAuthorizationPayload[] {
+  const normalizedTarget = targetStageId.toLowerCase();
+  const facts = (plan?.signalCapabilities ?? []).filter(
+    (capability) =>
+      capability.stageId.toLowerCase() === normalizedTarget &&
+      capability.targetOrderRelation === "current",
+  );
+  return facts.map((fact) => ({
+    sourceId: fact.targetSourceId,
+    signalId: fact.signalId,
+    submitter: executorWallet,
+    role: roleHash,
+    metadataHash: executorMetadataHash,
+  }));
 }
 
 async function findProductSchema(
@@ -1472,15 +1585,13 @@ interface ExecutorPatchGovernance {
   readonly modeHash: Hex;
   readonly previousExecutor?: Address;
   readonly previousExecutorForPatch: Address;
-  readonly approvalSourceId?: Hex;
-  readonly approvalSignalId?: Hex;
-  readonly approvalSourceIdForPatch: Hex;
-  readonly approvalSignalIdForPatch: Hex;
 }
 
 /**
  * 执行者补丁治理预检（合约 UVPStagePatchModule._validateStageExecutorPatchMode
- * 的服务层镜像；合约为权威，此处只做广播前快速失败）。
+ * 的服务层镜像；合约为权威，此处只做广播前快速失败）。patch 词表封闭为
+ * assign/handoff——REPLACEMENT 已退役（UB-36④/UB-39），非协作换人走
+ * forkOrder 车道，不在本面重建第三模式。
  * 事实键与定序与合约 _stageSignalState 同构：
  * - 事实键 = 编译 plan 能力表键（relation=0/current 的 (targetSourceId,
  *   signalId)，即 keccak256(source)×keccak256(signalName) 事实键）∪
@@ -1495,8 +1606,6 @@ function resolveExecutorPatchGovernance(
   input: {
     readonly mode?: string;
     readonly previousExecutor?: string;
-    readonly approvalSourceId?: string;
-    readonly approvalSignalId?: string;
   },
   planSignalCapabilities: readonly StateMachineSignalCapabilityProjection[],
 ): ExecutorPatchGovernance {
@@ -1513,17 +1622,10 @@ function resolveExecutorPatchGovernance(
       );
     }
     rejectUnexpectedPreviousExecutor(input.previousExecutor, mode);
-    rejectUnexpectedApprovalSignal(
-      input.approvalSourceId,
-      input.approvalSignalId,
-      mode,
-    );
     return {
       mode,
       modeHash,
       previousExecutorForPatch: ZERO_ADDRESS,
-      approvalSourceIdForPatch: ZERO_BYTES32,
-      approvalSignalIdForPatch: ZERO_BYTES32,
     };
   }
 
@@ -1572,47 +1674,13 @@ function resolveExecutorPatchGovernance(
     );
   }
 
-  if (mode === "handoff") {
-    rejectUnexpectedApprovalSignal(
-      input.approvalSourceId,
-      input.approvalSignalId,
-      mode,
-    );
-    return {
-      mode,
-      modeHash,
-      previousExecutor,
-      previousExecutorForPatch: previousExecutor,
-      approvalSourceIdForPatch: ZERO_BYTES32,
-      approvalSignalIdForPatch: ZERO_BYTES32,
-    };
-  }
-
-  const approvalSourceId = normalizeNonZeroBytes32(
-    input.approvalSourceId,
-    "approvalSourceId",
-  );
-  const approvalSignalId = normalizeNonZeroBytes32(
-    input.approvalSignalId,
-    "approvalSignalId",
-  );
-  if (!hasSignal(order, approvalSourceId, approvalSignalId)) {
-    throw new ProductStagePatchError(
-      409,
-      "approval_signal_missing",
-      "replacement mode requires the referenced approval signal to exist in the projected order",
-      { approvalSourceId, approvalSignalId },
-    );
-  }
+  // handoff：上一执行者对同一 digest 的会签是唯一授权材料（链上审批
+  // 信号的存在性授权面已随 REPLACEMENT 退役）。
   return {
     mode,
     modeHash,
     previousExecutor,
     previousExecutorForPatch: previousExecutor,
-    approvalSourceId,
-    approvalSignalId,
-    approvalSourceIdForPatch: approvalSourceId,
-    approvalSignalIdForPatch: approvalSignalId,
   };
 }
 
@@ -1620,17 +1688,13 @@ function normalizeExecutorPatchMode(
   value: string | undefined,
 ): StageExecutorPatchMode {
   const normalized = (value ?? "assign").trim().toLowerCase();
-  if (
-    normalized === "assign" ||
-    normalized === "handoff" ||
-    normalized === "replacement"
-  ) {
+  if (normalized === "assign" || normalized === "handoff") {
     return normalized;
   }
   throw new ProductStagePatchError(
     400,
     "invalid_executor_patch_mode",
-    "mode must be assign, handoff, or replacement",
+    "mode must be assign or handoff (replacement was retired: non-cooperative executor changes go through the fork-order lane)",
   );
 }
 
@@ -1649,24 +1713,6 @@ function rejectUnexpectedPreviousExecutor(
       `previousExecutor is not used for ${mode} mode`,
     );
   }
-}
-
-function rejectUnexpectedApprovalSignal(
-  approvalSourceId: string | undefined,
-  approvalSignalId: string | undefined,
-  mode: StageExecutorPatchMode,
-): void {
-  if (!approvalSourceId && !approvalSignalId) {
-    return;
-  }
-  throw new ProductStagePatchError(
-    400,
-    "approval_signal_not_allowed",
-    `approvalSourceId and approvalSignalId are only used for replacement mode`,
-    {
-      mode,
-    },
-  );
 }
 
 function normalizeRequiredPreviousExecutor(
@@ -1689,16 +1735,6 @@ function hasSubmittedTargetSignal(
   planSignalCapabilities: readonly StateMachineSignalCapabilityProjection[],
 ): boolean {
   return targetStageProgress(order, targetStageId, planSignalCapabilities).signalCount > 0;
-}
-
-function hasSignal(
-  order: StateMachineOrderProjection,
-  sourceId: Hex,
-  signalId: Hex,
-): boolean {
-  return Object.values(order.signals).some(
-    (signal) => signal.sourceId === sourceId && signal.signalId === signalId,
-  );
 }
 
 interface TargetStageProgress {
@@ -1925,14 +1961,17 @@ async function ensureExecutorPreparedStillCurrent(
     ...(prepared.previousExecutor
       ? { previousExecutor: prepared.previousExecutor }
       : {}),
-    ...(prepared.approvalSourceId
-      ? { approvalSourceId: prepared.approvalSourceId }
-      : {}),
-    ...(prepared.approvalSignalId
-      ? { approvalSignalId: prepared.approvalSignalId }
-      : {}),
   }, planSignalCapabilities);
   await assertTargetStageNotBirthStage(options, order, prepared.targetStageId, plan);
+  // 候选集闸随投影刷新复核（prepare 与 submit 之间清单可能被重新富集/
+  // 修正）；授权集不复核——selector 签名覆盖的是 prepare 时点冻结的集，
+  // 中途换集等于伪造授权来源。
+  assertExecutorInCandidateSet(
+    plan,
+    prepared.targetStageId,
+    prepared.executorWallet,
+    true,
+  );
   const currentNonce =
     order.stageExecutorOverlays[prepared.targetStageId.toLowerCase()]
       ?.patchNonce;
@@ -2378,12 +2417,7 @@ function expiredExecutorSubmission(
       ...(prepared.previousExecutor
         ? { previousExecutor: prepared.previousExecutor }
         : {}),
-      ...(prepared.approvalSourceId
-        ? { approvalSourceId: prepared.approvalSourceId }
-        : {}),
-      ...(prepared.approvalSignalId
-        ? { approvalSignalId: prepared.approvalSignalId }
-        : {}),
+      authorizationsHash: prepared.authorizationsHash,
       selectorSignatureStatus: "signature_verified",
       previousExecutorSignatureStatus: previousExecutorSignatureStatus(
         prepared,
@@ -2585,12 +2619,8 @@ function executorSubmissionCommon(
     ...(prepared.previousExecutor
       ? { previousExecutor: prepared.previousExecutor }
       : {}),
-    ...(prepared.approvalSourceId
-      ? { approvalSourceId: prepared.approvalSourceId }
-      : {}),
-    ...(prepared.approvalSignalId
-      ? { approvalSignalId: prepared.approvalSignalId }
-      : {}),
+    executorAuthorizations: prepared.executorAuthorizations,
+    authorizationsHash: prepared.authorizationsHash,
     roleHash: prepared.roleHash,
     executorMetadataHash: prepared.executorMetadataHash,
     patchHash: prepared.patchHash,
@@ -2676,8 +2706,7 @@ function proofRowsForCommon(
     readonly executorWallet?: Address;
     readonly mode?: StageExecutorPatchMode;
     readonly previousExecutor?: Address;
-    readonly approvalSourceId?: Hex;
-    readonly approvalSignalId?: Hex;
+    readonly authorizationsHash?: Hex;
     readonly selectorSignatureStatus?: string;
     readonly previousExecutorSignatureStatus?: string;
   },
@@ -2697,11 +2726,8 @@ function proofRowsForCommon(
     ...(common.previousExecutor
       ? { previousExecutor: common.previousExecutor }
       : {}),
-    ...(common.approvalSourceId
-      ? { approvalSourceId: common.approvalSourceId }
-      : {}),
-    ...(common.approvalSignalId
-      ? { approvalSignalId: common.approvalSignalId }
+    ...(common.authorizationsHash
+      ? { authorizationsHash: common.authorizationsHash }
       : {}),
     ...(common.selectorSignatureStatus
       ? { selectorSignatureStatus: common.selectorSignatureStatus }
@@ -2725,8 +2751,7 @@ function proofRows(input: {
   readonly executor?: Address;
   readonly mode?: StageExecutorPatchMode;
   readonly previousExecutor?: Address;
-  readonly approvalSourceId?: Hex;
-  readonly approvalSignalId?: Hex;
+  readonly authorizationsHash?: Hex;
   readonly selectorSignatureStatus?: string;
   readonly previousExecutorSignatureStatus?: string;
   readonly patchHash: Hex;
@@ -2743,13 +2768,8 @@ function proofRows(input: {
     ...(input.previousExecutor
       ? [{ label: "Previous executor", value: input.previousExecutor }]
       : []),
-    ...(input.approvalSourceId && input.approvalSignalId
-      ? [
-          {
-            label: "Approval signal",
-            value: `${input.approvalSourceId}:${input.approvalSignalId}`,
-          },
-        ]
+    ...(input.authorizationsHash
+      ? [{ label: "Authorizations hash", value: input.authorizationsHash }]
       : []),
     ...(input.selectorSignatureStatus
       ? [{ label: "Selector signature", value: input.selectorSignatureStatus }]

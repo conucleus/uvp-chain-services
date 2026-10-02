@@ -15,8 +15,7 @@ import {
 } from "@uvp-eth/protocol-bindings";
 import {
   EXECUTOR_PATCH_MODE_ASSIGN,
-  EXECUTOR_PATCH_MODE_HANDOFF,
-  EXECUTOR_PATCH_MODE_REPLACEMENT
+  EXECUTOR_PATCH_MODE_HANDOFF
 } from "../shared/protocol-constants.js";
 import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import type {
@@ -30,8 +29,7 @@ export const STAGE_PATCH_DOMAIN_NAME = STAGE_EXECUTOR_PATCH_DOMAIN_NAME;
 export const STAGE_PATCH_DOMAIN_VERSION = STAGE_EXECUTOR_PATCH_DOMAIN_VERSION;
 export {
   EXECUTOR_PATCH_MODE_ASSIGN,
-  EXECUTOR_PATCH_MODE_HANDOFF,
-  EXECUTOR_PATCH_MODE_REPLACEMENT
+  EXECUTOR_PATCH_MODE_HANDOFF
 } from "../shared/protocol-constants.js";
 
 // patch 模块的 EIP-712 结构以 planId 开头
@@ -53,8 +51,13 @@ export interface StageExecutorPatchPayload {
   readonly executorMetadataHash: Hex;
   readonly mode: Hex;
   readonly previousExecutor: Address;
-  readonly approvalSourceId: Hex;
-  readonly approvalSignalId: Hex;
+  /**
+   * patch 生效时对新城执行者写入的显式订单级授权集哈希（UB-36①）：
+   * = stateMachine.signalAuthorizationsHash(executorAuthorizations)，进
+   * patchHash preimage 与 EIP-712 摘要——selector 签名覆盖授权集，
+   * 授权来源可审计（替代已退役的委托授权通道）。
+   */
+  readonly authorizationsHash: Hex;
   readonly patchNonce: string;
   readonly metadataURI: string;
 }
@@ -152,8 +155,7 @@ export function buildStageExecutorPatchTypedData(input: BuildStageExecutorPatchT
         executorMetadataHash: input.executorMetadataHash,
         mode: input.mode,
         previousExecutor: input.previousExecutor,
-        approvalSourceId: input.approvalSourceId,
-        approvalSignalId: input.approvalSignalId,
+        authorizationsHash: input.authorizationsHash,
         patchHash: input.patchHash,
         patchNonce: input.patchNonce,
         metadataURI: input.metadataURI,
@@ -258,13 +260,13 @@ export function signatureHashFor(signature: Hex): Hex {
 }
 
 export function executorPatchModeHash(mode: StageExecutorPatchMode): Hex {
+  // patch 词表封闭为 assign/handoff（UB-36④/UB-39：REPLACEMENT 退役，
+  // 非协作换人走 forkOrder 车道，不在本面重建第三模式）。
   switch (mode) {
     case "assign":
       return EXECUTOR_PATCH_MODE_ASSIGN;
     case "handoff":
       return EXECUTOR_PATCH_MODE_HANDOFF;
-    case "replacement":
-      return EXECUTOR_PATCH_MODE_REPLACEMENT;
   }
 }
 

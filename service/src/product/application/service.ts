@@ -114,8 +114,8 @@ export interface ProductStageExecutorOverlayApiDTO {
   readonly mode: string;
   readonly modeHash?: string;
   readonly previousExecutor?: string;
-  readonly approvalSourceId?: string;
-  readonly approvalSignalId?: string;
+  /** patch 生效授权集哈希（UB-36①，随 StageExecutorPatchApplied 广播）。 */
+  readonly authorizationsHash?: string;
   readonly roleHash: string;
   readonly executorMetadataHash: string;
   readonly patchHash: string;
@@ -1715,11 +1715,8 @@ function productStageExecutorOverlayFromStateMachine(
     ...(overlay.previousExecutor
       ? { previousExecutor: overlay.previousExecutor }
       : {}),
-    ...(overlay.approvalSourceId
-      ? { approvalSourceId: overlay.approvalSourceId }
-      : {}),
-    ...(overlay.approvalSignalId
-      ? { approvalSignalId: overlay.approvalSignalId }
+    ...(overlay.authorizationsHash
+      ? { authorizationsHash: overlay.authorizationsHash }
       : {}),
     roleHash: overlay.roleHash,
     executorMetadataHash: overlay.executorMetadataHash,
@@ -1734,13 +1731,8 @@ function productStageExecutorOverlayFromStateMachine(
       ...(overlay.previousExecutor
         ? [{ label: "Previous executor", value: overlay.previousExecutor }]
         : []),
-      ...(overlay.approvalSourceId && overlay.approvalSignalId
-        ? [
-            {
-              label: "Approval signal",
-              value: `${overlay.approvalSourceId}:${overlay.approvalSignalId}`,
-            },
-          ]
+      ...(overlay.authorizationsHash
+        ? [{ label: "Authorizations hash", value: overlay.authorizationsHash }]
         : []),
       ...proofRowsFromProof(proofFromStateMachineProof(overlay.proof)),
     ],
@@ -1771,11 +1763,8 @@ function productExecutorOverlayFromStateMachine(
     newExecutorWallet: overlay.activeExecutorWallet,
     roleHash: overlay.roleHash,
     executorMetadataHash: overlay.executorMetadataHash,
-    ...(overlay.approvalSourceId
-      ? { approvalSourceId: overlay.approvalSourceId }
-      : {}),
-    ...(overlay.approvalSignalId
-      ? { approvalSignalId: overlay.approvalSignalId }
+    ...(overlay.authorizationsHash
+      ? { authorizationsHash: overlay.authorizationsHash }
       : {}),
     patchHash: overlay.patchHash,
     patchNonce: overlay.patchNonce,
@@ -2103,13 +2092,16 @@ function displayAssigneeRole(role: string): string {
 function executorPatchModeLabel(
   mode: StateMachineStageExecutorOverlayProjection["mode"],
 ): string {
+  // patch 词表封闭为 assign/handoff（REPLACEMENT 已退役，UB-36④/UB-39：
+  // 非协作换人走 fork 车道）。default 分支兜底旧快照/未知词，不裸出
+  // 内部枚举。
   switch (mode) {
     case "assign":
       return "指派执行方";
     case "handoff":
       return "执行方交接";
-    case "replacement":
-      return "替换执行方";
+    default:
+      return mode;
   }
 }
 

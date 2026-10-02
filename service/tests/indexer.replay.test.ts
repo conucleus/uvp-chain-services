@@ -3621,250 +3621,6 @@ describe("indexer projection replay", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
-
-  it("moves a task off ready when an out-of-vocabulary explicit authorization submits on chain", () => {
-    // 合约 _authorizeSignalSubmitter 不校验 plan 能力词表
-    // ——显式授权可以落在词表之外。SignalSubmitted 落链后任务匹配必须以
-    // 链上事实为准（StageExecutorSignalDelegated 的 targetStageId 阶段归属
-    // + hookId===sourceId/signalId 绑定键），否则任务永远停在 ready，与链
-    // 不一致。
-    const outOfVocabSourceId = bytes32Hex("8101");
-    const outOfVocabSignalId = bytes32Hex("8102");
-    const delegatedExecutor = "0x5555555555555555555555555555555555555555";
-    const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }),
-      chainEvent(2n, 0, "OrderRegistered", {
-        orderId: stateMachineOrderId,
-        planId
-      }),
-      chainEvent(3n, 0, "HookReady", {
-        orderId: stateMachineOrderId,
-        hookId,
-        stageId,
-        hookName
-      }),
-      // 词表外显式授权（plan 词表为空——"超能力"声明）。
-      chainEvent(4n, 0, "SignalSubmitterAuthorized", {
-        planId,
-        orderId: stateMachineOrderId,
-        sourceId: outOfVocabSourceId,
-        signalId: outOfVocabSignalId,
-        submitter: delegatedExecutor,
-        role: bytes32Text("delegated-executor"),
-        metadataHash: emptyHash
-      }),
-      // 链上事实：词表外信号已提交。
-      chainEvent(5n, 0, "SignalSubmitted", {
-        planId,
-        orderId: stateMachineOrderId,
-        sourceId: outOfVocabSourceId,
-        signalId: outOfVocabSignalId,
-        payloadHash,
-        idempotencyKey,
-        submitter: delegatedExecutor
-      }),
-      // 显式阶段归属：把 (sourceId, signalId) 委派到目标阶段。
-      chainEvent(6n, 0, "StageExecutorSignalDelegated", {
-        planId,
-        orderId: stateMachineOrderId,
-        targetStageId: stageId,
-        sourceId: outOfVocabSourceId,
-        signalId: outOfVocabSignalId,
-        executor: delegatedExecutor,
-        role: bytes32Text("delegated-executor"),
-        metadataHash: emptyHash,
-        patchNonce: 1n
-      })
-    ];
-
-    const snapshot = rebuildOrderProjections(events);
-    const order = snapshot.stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
-    const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
-    const task = order?.tasks[taskId];
-
-    // 任务不再停在 ready：委派阶段归属让已提交的链上事实推进任务。
-    expect(task).toMatchObject({
-      stageIdentifier: stageId,
-      status: "submitted",
-      assigneeWallet: delegatedExecutor
-    });
-    expect(task?.submitSignals).toEqual([
-      { sourceId: outOfVocabSourceId, signalId: outOfVocabSignalId, source: "authorization" }
-    ]);
-  });
-
-  it("revokes the replaced executor's delegated authorization projection on rotation and rebuilds to the same state", () => {
-    // U3 回归：delegateStageExecutorSignalFromModule 的链上授权是
-    // (sourceId, signalId) 单槽替换（nonce 递增覆盖 executor），同交易的
-    // SignalSubmitterAuthorized 只是当时的槽快照（链上不写显式授权表）。
-    // A→B 轮换后投影只允许留下 B——A 的旧条目会让链下 verdict
-    // authorized:true 而链上 UnauthorizedSignalSubmitter revert。
-    const executorA = "0x6666666666666666666666666666666666666666";
-    const executorB = "0x7777777777777777777777777777777777777777";
-    const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }),
-      chainEvent(2n, 0, "OrderRegistered", {
-        orderId: stateMachineOrderId,
-        planId
-      }),
-      chainEvent(3n, 0, "HookReady", {
-        orderId: stateMachineOrderId,
-        hookId,
-        stageId,
-        hookName
-      }),
-      // 轮换第一腿：委派给 A（同交易伴生授权 + 委任事实）。
-      chainEvent(4n, 0, "SignalSubmitterAuthorized", {
-        planId,
-        orderId: stateMachineOrderId,
-        sourceId,
-        signalId,
-        submitter: executorA,
-        role: bytes32Text("customs-executor"),
-        metadataHash: emptyHash
-      }),
-      chainEvent(4n, 1, "StageExecutorSignalDelegated", {
-        planId,
-        orderId: stateMachineOrderId,
-        targetStageId: stageId,
-        sourceId,
-        signalId,
-        executor: executorA,
-        role: bytes32Text("customs-executor"),
-        metadataHash: emptyHash,
-        patchNonce: 1n
-      }),
-      // 轮换第二腿：nonce 递增，A 被替换为 B。
-      chainEvent(5n, 0, "SignalSubmitterAuthorized", {
-        planId,
-        orderId: stateMachineOrderId,
-        sourceId,
-        signalId,
-        submitter: executorB,
-        role: bytes32Text("customs-executor"),
-        metadataHash: emptyHash
-      }),
-      chainEvent(5n, 1, "StageExecutorSignalDelegated", {
-        planId,
-        orderId: stateMachineOrderId,
-        targetStageId: stageId,
-        sourceId,
-        signalId,
-        executor: executorB,
-        role: bytes32Text("customs-executor"),
-        metadataHash: emptyHash,
-        patchNonce: 2n
-      })
-    ];
-
-    const orderKey = stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId);
-    const snapshot = rebuildOrderProjections(events);
-    const order = snapshot.stateMachineOrders[orderKey];
-    const authorizations = Object.values(order?.authorizations ?? {})
-      .filter((item) => item.sourceId === sourceId && item.signalId === signalId);
-
-    expect(authorizations).toHaveLength(1);
-    expect(authorizations[0]).toMatchObject({ submitter: executorB, delegated: true });
-    expect(order?.signalDelegations[`${sourceId}:${signalId}`]).toMatchObject({
-      executor: executorB,
-      patchNonce: "2"
-    });
-    expect(order?.tasks[`${contractAddress}:${stateMachineOrderId}:${hookId}`]?.assigneeWallet).toBe(executorB);
-
-    // 全量重建必须回到同一干净态：同一事件流重放的结果与增量一致。
-    const rebuilt = rebuildOrderProjections(events);
-    expect(rebuilt.stateMachineOrders[orderKey]?.authorizations).toEqual(order?.authorizations);
-    expect(rebuilt.stateMachineOrders[orderKey]?.signalDelegations).toEqual(order?.signalDelegations);
-  });
-
-  it("keeps explicit registration authorizations through an executor rotation on the same signal key", () => {
-    // 链上 _isSignalSubmitterAuthorized 先查显式授权表（注册期写入、
-    // append-only），executor 轮换只替换单槽委任——显式提交者不受影响。
-    // 投影收回必须只作用于 delegation-born 条目，不得误伤显式授权。
-    const executorA = "0x6666666666666666666666666666666666666666";
-    const executorB = "0x7777777777777777777777777777777777777777";
-    const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }),
-      chainEvent(2n, 0, "OrderRegistered", {
-        orderId: stateMachineOrderId,
-        planId
-      }),
-      // 显式（注册期）授权：独立交易，无委任伴生。
-      chainEvent(3n, 0, "SignalSubmitterAuthorized", {
-        planId,
-        orderId: stateMachineOrderId,
-        sourceId,
-        signalId,
-        submitter: signer,
-        role: bytes32Text("explicit-submitter"),
-        metadataHash: emptyHash
-      }),
-      chainEvent(4n, 0, "SignalSubmitterAuthorized", {
-        planId,
-        orderId: stateMachineOrderId,
-        sourceId,
-        signalId,
-        submitter: executorA,
-        role: bytes32Text("customs-executor"),
-        metadataHash: emptyHash
-      }),
-      chainEvent(4n, 1, "StageExecutorSignalDelegated", {
-        planId,
-        orderId: stateMachineOrderId,
-        targetStageId: stageId,
-        sourceId,
-        signalId,
-        executor: executorA,
-        role: bytes32Text("customs-executor"),
-        metadataHash: emptyHash,
-        patchNonce: 1n
-      }),
-      chainEvent(5n, 0, "SignalSubmitterAuthorized", {
-        planId,
-        orderId: stateMachineOrderId,
-        sourceId,
-        signalId,
-        submitter: executorB,
-        role: bytes32Text("customs-executor"),
-        metadataHash: emptyHash
-      }),
-      chainEvent(5n, 1, "StageExecutorSignalDelegated", {
-        planId,
-        orderId: stateMachineOrderId,
-        targetStageId: stageId,
-        sourceId,
-        signalId,
-        executor: executorB,
-        role: bytes32Text("customs-executor"),
-        metadataHash: emptyHash,
-        patchNonce: 2n
-      })
-    ];
-
-    const order = rebuildOrderProjections(events)
-      .stateMachineOrders[stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)];
-    const submitters = Object.values(order?.authorizations ?? {})
-      .filter((item) => item.sourceId === sourceId && item.signalId === signalId)
-      .sort((left, right) => left.submitter.localeCompare(right.submitter));
-
-    expect(submitters.map((item) => [item.submitter, item.delegated ?? false])).toEqual([
-      [signer, false],
-      [executorB, true]
-    ]);
-  });
-
   it("resolves state-machine orders by the (planId, orderId) composite key and fails closed on bare-id ambiguity", async () => {
     // 订单身份是 (planId, orderId)。裸
     // orderId 多命中必须 fail-closed 返回 undefined（绝不取第一个），带
@@ -3891,6 +3647,52 @@ describe("indexer projection replay", () => {
       .resolves.toMatchObject({ orderId: stateMachineOrderId, planId });
     // 裸 orderId 同号跨 plan 复用：歧义即拒（undefined），不猜第一个。
     await expect(store.getStateMachineOrder(stateMachineOrderId)).resolves.toBeUndefined();
+  });
+
+  it("projects OrderForked lineage onto the forked order without landing in the unknown-event bucket", () => {
+    // UB-39：fork 单号由 forkOrderIdFor 纯函数派生，血缘只读 OrderForked
+    // 事件（REPLACEMENT 退役后非协作换人的唯一车道）。显式投影分支必须
+    // 存在——静默落 default 会与真未知事件不可区分（unknownEventCount）。
+    const forkedOrderId = "0x0000000000000000000000000000000000000000000000000000000000000212";
+    const approvalSourceId = bytes32Hex("8101");
+    const approvalSignalId = bytes32Hex("8102");
+    const initiator = signer;
+    const snapshot = rebuildOrderProjections([
+      chainEvent(1n, 0, "PlanRegistered", {
+        planId,
+        planHash,
+        hookCount: 1n
+      }),
+      chainEvent(2n, 0, "OrderRegistered", {
+        orderId: stateMachineOrderId,
+        planId
+      }),
+      chainEvent(3n, 0, "OrderForked", {
+        planId,
+        orderId: forkedOrderId,
+        parentOrderId: stateMachineOrderId,
+        approvalSourceId,
+        approvalSignalId,
+        initiator
+      })
+    ]);
+    const orderKey = stateMachineScopedKey(31337, contractAddress, planId, forkedOrderId);
+    const fork = snapshot.stateMachineOrders[orderKey];
+    expect(fork).toBeDefined();
+    expect(fork?.forkLineage).toMatchObject({
+      parentOrderId: stateMachineOrderId,
+      approvalSourceId,
+      approvalSignalId,
+      initiator
+    });
+    // 父单行不回写血缘：血缘是 fork 单的出生属性。
+    const parent = snapshot.stateMachineOrders[
+      stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)
+    ];
+    expect(parent?.forkLineage).toBeUndefined();
+    // 显式分支不落未知事件桶。
+    expect(snapshot.unknownEventCount).toBe(0);
+    expect(fork?.timeline.some((item) => item.text === "订单已从父单分叉")).toBe(true);
   });
 });
 

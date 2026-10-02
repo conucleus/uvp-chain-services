@@ -458,12 +458,11 @@ export function productBffStoreSubmissionAuthorization(
           return { authorized: true, source: "product_bff_trigger" };
         }
       }
-      // 《授权与签名规则》§四/§五 + 合约 _isSignalSubmitterAuthorized 的
-      // 两腿结构：显式授权未命中不是终局否决——链上还可能有阶段委任
-      // 记录。链上腿（显式+委任）与任务 overlay 兜底依序合并裁决，
-      // 任一命中即放行；全部未命中才拒绝，并以最具信息量的腿作为
-      // 拒绝理由。显式命中即短路是安全的；显式未命中短路才是缺陷
-      // （会把委任执行者系统性 403）。
+      // 《授权与签名规则》§四/§五 + 合约 _isSignalSubmitterAuthorized：
+      // 显式授权未命中不是终局否决。链上腿（显式授权投影）与任务
+      // overlay 兜底依序合并裁决，任一命中即放行；全部未命中才拒绝，
+      // 并以最具信息量的腿作为拒绝理由。显式命中即短路是安全的；显式
+      // 未命中短路才是缺陷（会把事后获授权者系统性 403）。
       const chainAuthorization = await chainSignalSubmitterAuthorization(projectionStore, request);
       if (chainAuthorization?.verdict) {
         return chainAuthorization.verdict;
@@ -489,14 +488,12 @@ export function productBffStoreSubmissionAuthorization(
  * 台账里没有对应记录——不读投影会让合法参与方的 prepare-submit 403。
  * 同号订单跨 plan 复用与 BFF 路径同口径歧义即拒。
  *
- * 与合约 _isSignalSubmitterAuthorized 同构的两腿结构：
- * - 显式腿：order.authorizations，键 `${sourceId}:${signalId}:${submitter}`；
- * - 委任腿：order.signalDelegations，键 `${sourceId}:${signalId}`（真实
- *   链上 sourceId，不是 targetStageId——合约 _delegatedStageSignalAuthorizations
- *   按信号键落库，StageExecutorSignalDelegated 由 patch 模块按阶段能力
- *   的真实 (targetSourceId, signalId) 逐条委派），executor 匹配即命中。
+ * 显式腿：order.authorizations，键 `${sourceId}:${signalId}:${submitter}`。
+ * 委托腿（order.signalDelegations）已随合约 UB-36① 批删除——patch 生效
+ * 授权由合约 authorizeSignalSubmittersFromModule 写入显式订单级授权，
+ * 经同一 SignalSubmitterAuthorized 事件流投影，显式腿即其完整重建源。
  *
- * verdict 是立即裁决（命中/歧义拒绝）；miss 只在两腿都评估过且未命中时
+ * verdict 是立即裁决（命中/歧义拒绝）；miss 只在显式腿评估过且未命中时
  * 出现——未命中不是终局否决，调用方继续评估任务 overlay 兜底，仍未决
  * 时才以 miss 作为最终拒绝理由。
  */
@@ -532,17 +529,6 @@ async function chainSignalSubmitterAuthorization(
       verdict: { authorized: true, source: "chain_signal_authorization" }
     };
   }
-  // 委任腿：键与 indexer signalProjectionKey 同构 `${sourceId}:${signalId}`。
-  const delegationKey = `${request.sourceId}:${request.signalId}`;
-  const delegated = orders.some((order) => {
-    const delegation = order.signalDelegations[delegationKey];
-    return delegation !== undefined && delegation.executor.toLowerCase() === request.submitter.toLowerCase();
-  });
-  if (delegated) {
-    return {
-      verdict: { authorized: true, source: "chain_signal_delegation" }
-    };
-  }
   return {
     miss: {
       authorized: false,
@@ -566,9 +552,8 @@ type ProductTaskExecutorOverlay = {
 };
 
 /**
- * 任务 overlay 兜底（无链上投影裁决时的近似授权）：投影在场时委任
- * 已由 chainSignalSubmitterAuthorization 的委任腿按真实 (sourceId,
- * signalId) 键精确裁决（合约 _delegatedStageSignalAuthorizations 同构）；
+ * 任务 overlay 兜底（无链上投影裁决时的近似授权）：投影在场时事后
+ * 授权已由 chainSignalSubmitterAuthorization 的显式腿按键精确裁决；
  * 本腿只覆盖任务自带 overlay 而投影未裁决的场景。targetStageId ==
  * request.sourceId 是保守的阶段绑定——放宽为"在任执行者可提交任意
  * 记录信号"会授权链上必 revert 的签名（active patch 单独不构成提交

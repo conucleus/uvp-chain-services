@@ -10,6 +10,7 @@ export type {
 export type {
   StateMachineOrderStatus,
   StateMachineOrderTriggerLinkProjection,
+  StateMachineOrderForkProjection,
   StateMachineOrderProjection,
   StateMachineModuleProjection
 } from "./order.js";
@@ -23,12 +24,12 @@ export type {
   StateMachineStageSelectorBindingProjection,
   StateMachineSignalTargetRelation,
   StateMachineSignalCapabilityProjection,
+  StateMachineExecutorCandidateProjection,
   PlanCapabilityEnrichmentStatus
 } from "./plan.js";
 export type {
   StateMachineSignalProjection,
   StateMachineSignalAuthorizationProjection,
-  StateMachineSignalDelegationProjection,
   SignalAuthorizationHookMatchInput
 } from "./signal.js";
 export { signalAuthorizationMatchesHook } from "./signal.js";

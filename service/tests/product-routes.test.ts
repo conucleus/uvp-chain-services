@@ -2086,68 +2086,52 @@ describe("product API routes", () => {
     });
   });
 
-  it("authorizes prepare-submit for the delegated executor after a stage patch takeover", async () => {
-    // D-1 修复回归：executor patch 接管后，新执行者按合约委任记录
-    // （_delegatedStageSignalAuthorizations，键=真实 (sourceId, signalId)，
-    // 不是 targetStageId）获得提交权——链下不得以"显式授权未命中"一票
-    // 否决。委任键与阶段键不同（sourceId=customs-source ≠ stageId），
-    // 同时钉住键位口径。
-    const delegatedSourceId = sourceId;
-    const delegatedSignalId = signalId;
+  it("authorizes prepare-submit for the patch-takeover executor through the explicit order-level authorization", async () => {
+    // UB-36①：委托通道（StageExecutorSignalDelegated）已从合约删除——
+    // executor patch 生效时由 authorizeSignalSubmittersFromModule 对新城
+    // 执行者写显式订单级授权，链下读面按 SignalSubmitterAuthorized 事件
+    // 投影（显式腿）裁决；委任腿不复存在，也不再有委任投影。
     const store = new MemoryProjectionStore();
+    const events = [
+      ...stateMachineProductEvents(),
+      chainEventAt(8n, 0, "StageExecutorPatchApplied", {
+        orderId: stateMachineOrderId,
+        planId: crossBorderPlanIds.planId,
+        selectorStageId,
+        targetStageId: stageId,
+        selector: submitter,
+        executor: overlayExecutor,
+        role: bytes32Text("customs-executor"),
+        executorMetadataHash: metadataHash,
+        authorizationsHash: bytes32Hex("9302"),
+        patchHash: bytes32Hex("9301"),
+        patchNonce: 1n,
+        metadataURI: "ipfs://stage-executor/takeover-1"
+      }),
+      // patch 生效授权（authorizeSignalSubmittersFromModule 同交易伴生的
+      // 显式订单级授权事件）：事实键 = 任务提交信号键（stage×hookName）。
+      chainEventAt(8n, 1, "SignalSubmitterAuthorized", {
+        planId: crossBorderPlanIds.planId,
+        orderId: stateMachineOrderId,
+        sourceId: stageId,
+        signalId: hookName,
+        submitter: overlayExecutor,
+        role: bytes32Text("customs-executor"),
+        metadataHash
+      })
+    ];
     await store.resetFromEvents({
       deploymentBlock: 0n,
-      events: [
-        chainEvent(1n, "PlanRegistered", {
-          planId: crossBorderPlanIds.planId,
-          planHash: crossBorderPlanIds.planHash,
-          hookCount: 1n
-        }),
-        chainEvent(3n, "OrderRegistered", {
-          orderId: stateMachineOrderId,
-          planId: crossBorderPlanIds.planId
-        }),
-        chainEvent(4n, "HookReady", {
-          orderId: stateMachineOrderId,
-          hookId,
-          stageId,
-          hookName
-        }),
-        chainEvent(5n, "StageExecutorPatchApplied", {
-          orderId: stateMachineOrderId,
-          selectorStageId,
-          targetStageId: stageId,
-          selector: submitter,
-          executor: overlayExecutor,
-          role: bytes32Text("customs-executor"),
-          executorMetadataHash: metadataHash,
-          patchHash: bytes32Hex("9301"),
-          patchNonce: 1n,
-          metadataURI: "ipfs://stage-executor/takeover-1"
-        }),
-        // delegateStageExecutorSignalFromModule 的链上事实（同笔交易
-        // 也会落 SignalSubmitterAuthorized——本测试刻意不落，验证委任腿
-        // 本身而不是被显式腿命中掩盖）。
-        chainEvent(6n, "StageExecutorSignalDelegated", {
-          orderId: stateMachineOrderId,
-          planId: crossBorderPlanIds.planId,
-          targetStageId: stageId,
-          sourceId: delegatedSourceId,
-          signalId: delegatedSignalId,
-          executor: overlayExecutor,
-          role: bytes32Text("customs-executor"),
-          metadataHash,
-          patchNonce: 1n
-        })
-      ]
+      events,
+      planCapabilityTables: planCapabilityTablesForEvents(events),
     });
     const evidenceService = createEvidenceService({
-    runtimeEnvironment: "local",
+      runtimeEnvironment: "local",
       storage: new InMemoryEvidenceStorage(),
       now: () => new Date("2026-04-29T00:00:00.000Z"),
-      evidenceIdFactory: () => "ev_delegated_prepare"
+      evidenceIdFactory: () => "ev_takeover_prepare"
     });
-    // BFF trigger 台账为空：授权只能来自链上投影（委任腿）。
+    // BFF trigger 台账为空：授权只能来自链上投影（显式腿）。
     const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: new MemoryProductBffStore(), evidenceService });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
     const uploadResponse = await router.handle({
@@ -2160,11 +2144,10 @@ describe("product API routes", () => {
         stageIdentifier: "export.customs",
         documentType: "customs-declaration",
         textPayload: "customs declaration",
-        metadata: { fields: { declarationNo: "CD-DELEGATED" } }
+        metadata: { fields: { declarationNo: "CD-TAKEOVER" } }
       }
     });
     const evidenceId = (uploadResponse.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
-    expect(evidenceId).toBe("ev_delegated_prepare");
 
     await expect(router.handle({
       method: "POST",
@@ -2179,13 +2162,12 @@ describe("product API routes", () => {
       status: 201,
       body: {
         authorization: {
-          source: "chain_signal_delegation"
+          source: "chain_signal_authorization"
         }
       }
     });
 
-    // 未获委任的钱包仍被拒（显式腿未命中→委任腿未命中→overlay 兜底
-    // 不放行非在任执行者）。
+    // 未获授权的钱包仍被拒（显式腿未命中→overlay 兜底不放行非在任执行者）。
     await expect(router.handle({
       method: "POST",
       pathname: `/product/tasks/${taskId}/prepare-submit`,
@@ -2199,146 +2181,6 @@ describe("product API routes", () => {
       status: 403,
       body: {
         error: "submitter_not_authorized"
-      }
-    });
-
-    // 委派执行者的角色在任务读面必须是用户可读文案，不裸出内部枚举。
-    const delegatedTask = await router.handle({
-      method: "GET",
-      pathname: `/product/tasks/${taskId}`,
-      headers: { "x-uvp-wallet-address": overlayExecutor }
-    });
-    expect(delegatedTask.status).toBe(200);
-    expect((delegatedTask.body as { task: { assigneeRole: string } }).task.assigneeRole).toBe("委派执行方");
-  });
-
-  it("rejects the replaced executor after an A-to-B delegation rotation while the current executor stays authorized", async () => {
-    // U3 回归：轮换 A→B 后，A 的 verdict 不得命中 chain_signal_authorization
-    // ——链上委任槽已替换为 B，A 再提交会 UnauthorizedSignalSubmitter
-    // revert；同交易的伴生 SignalSubmitterAuthorized 是当时的槽快照，
-    // 投影必须随更高 nonce 的委任收回。B 命中委任腿获准。
-    const replacementExecutor = "0x6666666666666666666666666666666666666666";
-    const delegatedSourceId = sourceId;
-    const delegatedSignalId = signalId;
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        chainEvent(1n, "PlanRegistered", {
-          planId: crossBorderPlanIds.planId,
-          planHash: crossBorderPlanIds.planHash,
-          hookCount: 1n
-        }),
-        chainEvent(3n, "OrderRegistered", {
-          orderId: stateMachineOrderId,
-          planId: crossBorderPlanIds.planId
-        }),
-        chainEvent(4n, "HookReady", {
-          orderId: stateMachineOrderId,
-          hookId,
-          stageId,
-          hookName
-        }),
-        // 轮换第一腿：委派给 A（同交易伴生授权 + 委任事实）。
-        chainEvent(5n, "SignalSubmitterAuthorized", {
-          planId: crossBorderPlanIds.planId,
-          orderId: stateMachineOrderId,
-          sourceId: delegatedSourceId,
-          signalId: delegatedSignalId,
-          submitter: overlayExecutor,
-          role: bytes32Text("customs-executor"),
-          metadataHash
-        }),
-        chainEvent(5n, "StageExecutorSignalDelegated", {
-          planId: crossBorderPlanIds.planId,
-          orderId: stateMachineOrderId,
-          targetStageId: stageId,
-          sourceId: delegatedSourceId,
-          signalId: delegatedSignalId,
-          executor: overlayExecutor,
-          role: bytes32Text("customs-executor"),
-          metadataHash,
-          patchNonce: 1n
-        }),
-        // 轮换第二腿：nonce 递增，A 被替换为 B。
-        chainEvent(6n, "SignalSubmitterAuthorized", {
-          planId: crossBorderPlanIds.planId,
-          orderId: stateMachineOrderId,
-          sourceId: delegatedSourceId,
-          signalId: delegatedSignalId,
-          submitter: replacementExecutor,
-          role: bytes32Text("customs-executor"),
-          metadataHash
-        }),
-        chainEvent(6n, "StageExecutorSignalDelegated", {
-          planId: crossBorderPlanIds.planId,
-          orderId: stateMachineOrderId,
-          targetStageId: stageId,
-          sourceId: delegatedSourceId,
-          signalId: delegatedSignalId,
-          executor: replacementExecutor,
-          role: bytes32Text("customs-executor"),
-          metadataHash,
-          patchNonce: 2n
-        })
-      ]
-    });
-    const evidenceService = createEvidenceService({
-      runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
-      now: () => new Date("2026-04-29T00:00:00.000Z"),
-      evidenceIdFactory: () => "ev_rotation_prepare"
-    });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: new MemoryProductBffStore(), evidenceService });
-    const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
-    const uploadResponse = await router.handle({
-      method: "POST",
-      pathname: "/product/evidence",
-      headers: { "x-uvp-principal-id": "customs" },
-      body: {
-        orderId: stateMachineOrderId,
-        taskId,
-        stageIdentifier: "export.customs",
-        documentType: "customs-declaration",
-        textPayload: "customs declaration",
-        metadata: { fields: { declarationNo: "CD-ROTATION" } }
-      }
-    });
-    const evidenceId = (uploadResponse.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
-
-    // 被替换的 A：显式腿的旧投影条目已被收回，委任腿执行者是 B——拒绝。
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${taskId}/prepare-submit`,
-      headers: { "x-uvp-principal-id": "customs" },
-      body: {
-        evidenceIds: [evidenceId],
-        walletAddress: overlayExecutor,
-        intent: "confirm_stage"
-      }
-    })).resolves.toMatchObject({
-      status: 403,
-      body: {
-        error: "submitter_not_authorized"
-      }
-    });
-
-    // 现任执行者 B：命中委任腿。
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${taskId}/prepare-submit`,
-      headers: { "x-uvp-principal-id": "customs" },
-      body: {
-        evidenceIds: [evidenceId],
-        walletAddress: replacementExecutor,
-        intent: "confirm_stage"
-      }
-    })).resolves.toMatchObject({
-      status: 201,
-      body: {
-        authorization: {
-          source: "chain_signal_delegation"
-        }
       }
     });
   });

@@ -1,10 +1,11 @@
-// 阶段族：StageMaterialized、阶段补丁/资源/激活/信号委派与 hook 生命周期
+// 阶段族：StageMaterialized、阶段补丁/资源/激活与 hook 生命周期
 // 事件（HookStatusChanged/HookReady/TimerPoked）及 overlay 投影。
+// StageExecutorSignalDelegated（委托通道）已随合约 UB-36① 批删除：
+// patch 生效授权改走 SignalSubmitterAuthorized 事件流（显式订单级授权）。
 import type { ChainEvent } from "../events.js";
 import {
   EXECUTOR_PATCH_MODE_ASSIGN,
-  EXECUTOR_PATCH_MODE_HANDOFF,
-  EXECUTOR_PATCH_MODE_REPLACEMENT
+  EXECUTOR_PATCH_MODE_HANDOFF
 } from "../../shared/protocol-constants.js";
 import { ProjectionError, type Address, type Hex } from "../../shared/types.js";
 import {
@@ -33,13 +34,9 @@ import {
 import { findPlanForOrder, type MutableStateMachinePlanProjection } from "./plan.js";
 import {
   findSignalAuthorizationForHook,
-  revokeSupersededDelegatedAuthorizations,
-  signalProjectionKey,
-  type SignalAuthorizationHookMatchInput,
-  type StateMachineSignalDelegationProjection
+  type SignalAuthorizationHookMatchInput
 } from "./signal.js";
 import {
-  addTaskSubmitSignal,
   cancelTask,
   markTaskSubmittedFromExistingSignals,
   planSubmitSignalsForStage,
@@ -51,7 +48,8 @@ import type { ProjectionReplayDiagnostics, Writable } from "./snapshot.js";
 
 export type StateMachineHookStatus = "init" | "waiting" | "ready" | "cancelled" | "unknown";
 
-export type StateMachineStageExecutorPatchMode = "assign" | "handoff" | "replacement";
+/** patch 模式词表（合约闭集）：REPLACEMENT 已退役（UB-36④/UB-39）。 */
+export type StateMachineStageExecutorPatchMode = "assign" | "handoff";
 
 export interface StateMachineStageExecutorOverlayProjection {
   readonly orderId: Hex;
@@ -62,8 +60,8 @@ export interface StateMachineStageExecutorOverlayProjection {
   readonly mode: StateMachineStageExecutorPatchMode;
   readonly modeHash?: Hex;
   readonly previousExecutor?: Address;
-  readonly approvalSourceId?: Hex;
-  readonly approvalSignalId?: Hex;
+  /** patch 生效授权集哈希（UB-36①，随 StageExecutorPatchApplied 广播）。 */
+  readonly authorizationsHash?: Hex;
   readonly roleHash: Hex;
   readonly executorMetadataHash: Hex;
   readonly patchHash: Hex;
@@ -106,8 +104,7 @@ export type MutableStateMachineHookProjection = Writable<StateMachineHookProject
 
 const EXECUTOR_PATCH_MODE_VALUES = {
   assign: EXECUTOR_PATCH_MODE_ASSIGN,
-  handoff: EXECUTOR_PATCH_MODE_HANDOFF,
-  replacement: EXECUTOR_PATCH_MODE_REPLACEMENT
+  handoff: EXECUTOR_PATCH_MODE_HANDOFF
 } as const satisfies Record<StateMachineStageExecutorPatchMode, Hex>;
 
 export function applyStageMaterialized(
@@ -147,8 +144,9 @@ export function applyStageExecutorPatchApplied(
   const modeHash = optionalBytes32Arg(event, "mode");
   const mode = executorPatchModeFromArg(modeHash);
   const previousExecutor = optionalAddressArg(event, "previousExecutor");
-  const approvalSourceId = optionalNonZeroBytes32Arg(event, "approvalSourceId");
-  const approvalSignalId = optionalNonZeroBytes32Arg(event, "approvalSignalId");
+  // UB-36①：授权集哈希随事件广播（授权明细经 SignalSubmitterAuthorized
+  // 事件流可完整重建）。旧事件面（无该字段的历史流）缺省。
+  const authorizationsHash = optionalNonZeroBytes32Arg(event, "authorizationsHash");
   const proof = proofOf(event, {
     orderId,
     planId: order.planId,
@@ -166,8 +164,7 @@ export function applyStageExecutorPatchApplied(
       mode,
       ...(modeHash ? { modeHash } : {}),
       ...(previousExecutor ? { previousExecutor } : {}),
-      ...(approvalSourceId ? { approvalSourceId } : {}),
-      ...(approvalSignalId ? { approvalSignalId } : {}),
+      ...(authorizationsHash ? { authorizationsHash } : {}),
       roleHash: requiredBytes32Arg(event, "role"),
       executorMetadataHash: requiredBytes32Arg(event, "executorMetadataHash"),
       patchHash: requiredBytes32Arg(event, "patchHash"),
@@ -274,58 +271,6 @@ export function applyStageExecutorActivated(
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "阶段执行方已激活", proof, { orderId, planId: order.planId }));
-}
-
-/**
- * delegateStageExecutorSignalFromModule 在链上把 (sourceId, signalId) 的
- * 提交权委派给 executor，并携带 targetStageId 阶段绑定。同一交易内先发
- * SignalSubmitterAuthorized（order.authorizations 已有记录）再发本事件；
- * 投影用本事件补齐阶段归属，供任务 submitSignals 挂接。
- */
-export function applyStageExecutorSignalDelegated(
-  state: {
-    orders: Map<string, MutableStateMachineOrderProjection>;
-  },
-  event: ChainEvent
-): void {
-  const orderId = requiredBytes32Arg(event, "orderId");
-  const planId = optionalBytes32Arg(event, "planId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
-  const targetStageId = requiredBytes32Arg(event, "targetStageId");
-  const sourceId = requiredBytes32Arg(event, "sourceId");
-  const signalId = requiredBytes32Arg(event, "signalId");
-  const executor = requiredAddressArg(event, "executor");
-  const patchNonce = uintArgAsString(event, "patchNonce");
-  const proof = proofOf(event, {
-    orderId,
-    planId: order.planId,
-    planHash: order.planHash,
-    submitter: executor
-  });
-  const delegation: StateMachineSignalDelegationProjection = {
-    orderId,
-    targetStageId,
-    sourceId,
-    signalId,
-    executor,
-    roleHash: requiredBytes32Arg(event, "role"),
-    metadataHash: requiredBytes32Arg(event, "metadataHash"),
-    patchNonce,
-    delegatedAt: provenanceOf(event),
-    proof
-  };
-  const key = signalProjectionKey(sourceId, signalId);
-  const existing = order.signalDelegations[key];
-  if (!existing || compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
-    order.signalDelegations[key] = delegation;
-    // 委任槽是单槽替换：被替换执行者的 delegation-born 授权投影随本次
-    // 委任收回（stale nonce 的委任事件不得触发收回）。
-    revokeSupersededDelegatedAuthorizations(order, delegation);
-    markTargetStageTasksAssignedFromDelegation(order, delegation);
-  }
-  order.updatedAt = provenanceOf(event);
-  appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "阶段信号已委派执行方", proof, { orderId, planId: order.planId }));
 }
 
 export function applyHookStatusChanged(
@@ -493,33 +438,6 @@ export function markTargetStageTasksAssignedFromOverlay(
   }
 }
 
-/**
- * StageExecutorSignalDelegated 的阶段绑定把委派信号挂到目标阶段的
- * 任务上（submitSignals + 指派委派执行方），使词表外已授权/已提交的信号
- * 能把任务推进到 submitted——投影忠于链上事实。
- */
-export function markTargetStageTasksAssignedFromDelegation(
-  order: MutableStateMachineOrderProjection,
-  delegation: StateMachineSignalDelegationProjection
-): void {
-  for (const task of Object.values(order.tasks)) {
-    if (task.stageIdentifier !== delegation.targetStageId) {
-      continue;
-    }
-    task.assigneeRole = "delegated_stage_executor";
-    task.assigneeWallet = delegation.executor;
-    task.assigneeRoleHash = delegation.roleHash;
-    task.authorizationMetadataHash = delegation.metadataHash;
-    task.updatedAt = delegation.delegatedAt;
-    addTaskSubmitSignal(task, {
-      sourceId: delegation.sourceId,
-      signalId: delegation.signalId,
-      source: "authorization"
-    });
-    markTaskSubmittedFromExistingSignals(order, task);
-  }
-}
-
 function stageExecutorOverlayProjectionKey(targetStageId: Hex): string {
   return targetStageId.toLowerCase();
 }
@@ -597,9 +515,6 @@ function executorPatchModeFromArg(modeHash: Hex | undefined): StateMachineStageE
   }
   if (modeHash === EXECUTOR_PATCH_MODE_VALUES.handoff) {
     return "handoff";
-  }
-  if (modeHash === EXECUTOR_PATCH_MODE_VALUES.replacement) {
-    return "replacement";
   }
   throw new ProjectionError(`StageExecutorPatchApplied.mode is not a supported executor patch mode`);
 }

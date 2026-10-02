@@ -81,24 +81,17 @@ export function refreshTaskSubmitSignals(
     });
   }
   // 合约 _authorizeSignalSubmitter 不校验 plan 能力词表——授权可以
-  // 落链在词表之外。任务完成判定以链上事实为准：词表外授权通过两个链上
-  // 绑定键挂到任务：sourceId/signalId 即任务 hookId（既有回退键），或
-  // StageExecutorSignalDelegated 显式携带的 targetStageId 阶段归属。
-  // 否则 SignalSubmitted 落链后任务永远停在 ready。
+  // 落链在词表之外。任务完成判定以链上事实为准：词表外授权通过链上
+  // 绑定键（sourceId/signalId 即任务 hookId）挂到任务，否则
+  // SignalSubmitted 落链后任务永远停在 ready。委托通道
+  //（StageExecutorSignalDelegated 的 targetStageId 阶段归属）已随合约
+  // UB-36① 批删除：patch 生效授权走显式 SignalSubmitterAuthorized 事件
+  // 流，由上方 authorizationMatchesSubmitSignals/词表两径挂接。
   for (const authorization of Object.values(order.authorizations)) {
     if (task.hookId === authorization.sourceId || task.hookId === authorization.signalId) {
       signals.push({
         sourceId: authorization.sourceId,
         signalId: authorization.signalId,
-        source: "authorization"
-      });
-    }
-  }
-  for (const delegation of Object.values(order.signalDelegations)) {
-    if (delegation.targetStageId === task.stageIdentifier) {
-      signals.push({
-        sourceId: delegation.sourceId,
-        signalId: delegation.signalId,
         source: "authorization"
       });
     }

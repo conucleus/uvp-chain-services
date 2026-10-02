@@ -33,7 +33,7 @@ import type {
   GovernanceService
 } from "../../governance/index.js";
 import type { ProjectionStore } from "../../storage/projection-store.js";
-import type { Hex } from "../../shared/types.js";
+import type { Address, Hex } from "../../shared/types.js";
 import type { PlanCapabilityTablesInput } from "../../indexer/projections/plan.js";
 import { isPlanRegisteredProjection } from "./version.js";
 
@@ -133,6 +133,10 @@ export interface StoreZhixuDraftStore {
  * join 口径——最新 product schema 的
  * onchainHookPlanArtifact），经 capabilityTablesOf 换装为链上词序。
  * 无产物/形状不符 → undefined（该 plan 两表留空，fail-closed）。
+ *
+ * 执行者候选集（UB-36②③）同数据流：产物侧 executorCandidates 字段
+ *（commitPlan 的候选集清单，编译器产出该字段后即生效）存在且形状合法
+ * 时随源携带——链上只承诺 root，清单的落库锚点与两表一致。
  */
 export function createPlanCapabilityTablesResolver(
   draftStore: StoreZhixuDraftStore
@@ -152,9 +156,38 @@ export function createPlanCapabilityTablesResolver(
     return {
       planId,
       planHash,
-      ...capabilityTablesOf(artifact)
+      ...capabilityTablesOf(artifact),
+      ...executorCandidatesFromArtifact(artifact),
     };
   };
+}
+
+/** 产物候选集清单的防御性读取：字段缺失/形状不符时省略（不猜值）。 */
+function executorCandidatesFromArtifact(
+  artifact: Parameters<typeof capabilityTablesOf>[0],
+): { readonly executorCandidates?: NonNullable<PlanCapabilityTablesInput["executorCandidates"]> } {
+  const raw = (artifact as { readonly executorCandidates?: unknown }).executorCandidates;
+  if (!Array.isArray(raw)) {
+    return {};
+  }
+  const candidates: { readonly stageId: Hex; readonly executor: Address }[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return {};
+    }
+    const record = entry as { readonly stageId?: unknown; readonly executor?: unknown };
+    if (typeof record.stageId !== "string" || typeof record.executor !== "string") {
+      return {};
+    }
+    if (!/^0x[0-9a-fA-F]{64}$/.test(record.stageId) || !/^0x[0-9a-fA-F]{40}$/.test(record.executor)) {
+      return {};
+    }
+    candidates.push({
+      stageId: record.stageId.toLowerCase() as Hex,
+      executor: record.executor.toLowerCase() as Address,
+    });
+  }
+  return { executorCandidates: candidates };
 }
 
 export class MemoryStoreZhixuDraftStore implements StoreZhixuDraftStore {

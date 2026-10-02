@@ -63,6 +63,8 @@ interface StateMachineProofMetadata {
   readonly orderId?: Hex | undefined;
   readonly linkedOrderId?: Hex | undefined;
   readonly triggerOriginOrderId?: Hex | undefined;
+  /** fork 出生血缘（OrderForked）：父单号随证明元数据声明。 */
+  readonly parentOrderId?: Hex | undefined;
   readonly originSourceId?: Hex | undefined;
   readonly originSignalId?: Hex | undefined;
   readonly planId?: Hex | undefined;

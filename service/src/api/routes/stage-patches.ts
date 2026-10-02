@@ -181,21 +181,35 @@ function parsePrepareExecutorBody(body: unknown): PrepareProductStageExecutorPat
   const record = requireBodyRecord(body);
   const mode = optionalString(record, "mode");
   const previousExecutor = optionalString(record, "previousExecutorWallet");
-  const approval = approvalFields(record);
+  // REPLACEMENT 已退役（UB-36④/UB-39）：链上审批信号不再是授权材料，
+  // 非协作换人走 fork 车道。旧字段仍随请求到达时显式拒绝——静默忽略
+  // 会让调用方误以为审批材料参与了授权。
+  rejectRetiredApprovalFields(record);
   return {
     selectorWallet: requiredString(record, "selectorWallet"),
     targetStageId: requiredString(record, "targetStageId"),
     executorWallet: requiredString(record, "executorWallet"),
     ...(mode ? { mode } : {}),
     ...(previousExecutor ? { previousExecutorWallet: previousExecutor } : {}),
-    ...(approval.approvalSourceId ? { approvalSourceId: approval.approvalSourceId } : {}),
-    ...(approval.approvalSignalId ? { approvalSignalId: approval.approvalSignalId } : {}),
-    ...("approval" in record ? { approval: record.approval } : {}),
     ...(optionalString(record, "roleHash") ? { roleHash: optionalString(record, "roleHash")! } : {}),
     ...(optionalString(record, "executorMetadataHash") ? { executorMetadataHash: optionalString(record, "executorMetadataHash")! } : {}),
     ...(optionalString(record, "supplierReferenceHash") ? { supplierReferenceHash: optionalString(record, "supplierReferenceHash")! } : {}),
     metadataURI: requiredString(record, "metadataURI")
   };
+}
+
+function rejectRetiredApprovalFields(record: Record<string, unknown>): void {
+  if (
+    "approvalSourceId" in record ||
+    "approvalSignalId" in record ||
+    "approval" in record
+  ) {
+    throw new ProductStagePatchError(
+      400,
+      "approval_signal_retired",
+      "approvalSourceId/approvalSignalId were retired with replacement mode; non-cooperative executor changes go through the fork-order lane and executor patches now carry an authorizations hash signed by the selector",
+    );
+  }
 }
 
 function parsePrepareResourceBody(body: unknown): PrepareProductStageResourcePatchInput {
@@ -269,36 +283,4 @@ function optionalPatch<TPatch>(record: Record<string, unknown>, field: string): 
     return value as TPatch;
   }
   throw new ProductStagePatchError(400, "invalid_body", `${field} must be a prepared patch object`);
-}
-
-function approvalFields(record: Record<string, unknown>): {
-  readonly approvalSourceId?: string;
-  readonly approvalSignalId?: string;
-} {
-  const topLevelSourceId = optionalString(record, "approvalSourceId");
-  const topLevelSignalId = optionalString(record, "approvalSignalId");
-  if (!("approval" in record) || record.approval === undefined || record.approval === null) {
-    return {
-      ...(topLevelSourceId ? { approvalSourceId: topLevelSourceId } : {}),
-      ...(topLevelSignalId ? { approvalSignalId: topLevelSignalId } : {})
-    };
-  }
-  if (typeof record.approval !== "object" || Array.isArray(record.approval)) {
-    throw new ProductStagePatchError(400, "invalid_body", "approval must be an object when provided");
-  }
-  const approvalRecord = record.approval as Record<string, unknown>;
-  const objectSourceId = optionalString(approvalRecord, "sourceId") ?? optionalString(approvalRecord, "approvalSourceId");
-  const objectSignalId = optionalString(approvalRecord, "signalId") ?? optionalString(approvalRecord, "approvalSignalId");
-  if (topLevelSourceId && objectSourceId && topLevelSourceId.toLowerCase() !== objectSourceId.toLowerCase()) {
-    throw new ProductStagePatchError(400, "approval_mismatch", "approvalSourceId must match approval.sourceId");
-  }
-  if (topLevelSignalId && objectSignalId && topLevelSignalId.toLowerCase() !== objectSignalId.toLowerCase()) {
-    throw new ProductStagePatchError(400, "approval_mismatch", "approvalSignalId must match approval.signalId");
-  }
-  const approvalSourceId = objectSourceId ?? topLevelSourceId;
-  const approvalSignalId = objectSignalId ?? topLevelSignalId;
-  return {
-    ...(approvalSourceId ? { approvalSourceId } : {}),
-    ...(approvalSignalId ? { approvalSignalId } : {})
-  };
 }

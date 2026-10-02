@@ -204,8 +204,7 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   // any broadcast attempt): deterministic request defects outside the
   // broadcast retry/dead-letter lanes.
   'ambiguous_order_id',
-  'approval_signal_missing',
-  'approval_signal_not_allowed',
+  'executor_candidate_set_unavailable',
   'executor_patch_task_not_ready',
   'invalid_executor_patch_mode',
   'invalid_manifest_uri',
@@ -228,6 +227,10 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   // 镜像合约 StageExecutorPatchForbiddenOnBirthStage 的广播前快速失败
   //（409 领域状态预检，与 target_stage_locked 同族）。
   'executor_patch_forbidden_on_birth_stage',
+  // 候选集闸（UB-36②③）的服务端 fail-closed 预检（prepare/submit 时点
+  // 409，合约侧同名 revert 由广播分类器的 executor_not_in_candidate_set
+  // 承接）——广播前领域状态预检，不入重试/死信词表。
+  'executor_not_in_candidate_set',
   // 词表 Merkle 化：plan 投影无词表两表（外部发布 plan）时 stage patch
   // 无法构造必携的 bindingProof/stageFacts——广播前 fail-closed 预检，
   // 不入重试/死信词表。
@@ -435,7 +438,7 @@ describe('stage-patch contract revert names against the authoritative ABI (third
     'InvalidStageResourcePatchSignature',
     'InvalidStageResourcePatchSignatureLength',
     'StageAlreadyHasSignal',
-    'StageExecutorPatchApprovalSignalMissing',
+    'StageExecutorNotCandidate',
     'StageExecutorPatchNonceNotIncreasing',
     'StageExecutorPatchPreviousExecutorMismatch',
     'StageHasNoSignal',
@@ -516,10 +519,12 @@ describe('stage-patch contract revert names against the authoritative ABI (third
     { name: 'UnauthorizedStageResourcePatchSelector', internalName: 'selector_not_authorized', retryable: false, labels: 'resource' },
     // 瞬态优先于泛 revert：viem 复合文本同时含 "reverted." 与错误名。
     { name: 'UnknownOrder', internalName: 'unknown_order', retryable: true },
+    // 候选集闸（UB-36②③）：无候选集/不在集内同报此错——持久 revert
+    //（候选集随 plan commit 冻结，重试同载荷无意义）。
+    { name: 'StageExecutorNotCandidate', internalName: 'executor_not_in_candidate_set', retryable: false },
     // 其余持久 revert 走泛规则（estimateGas 阶段的未登记 revert）——永久。
     { name: 'InvalidStageExecutorPatchMode', internalName: 'transaction_reverted', retryable: false },
     { name: 'StageSelectorBindingNotFound', internalName: 'transaction_reverted', retryable: false },
-    { name: 'StageExecutorPatchApprovalSignalMissing', internalName: 'transaction_reverted', retryable: false },
     { name: 'StageExecutorPatchPreviousExecutorMismatch', internalName: 'transaction_reverted', retryable: false },
     { name: 'ZeroPatchHash', internalName: 'transaction_reverted', retryable: false },
     { name: 'ZeroStageExecutor', internalName: 'transaction_reverted', retryable: false }
@@ -555,10 +560,14 @@ describe('stage-patch contract revert names against the authoritative ABI (third
       expect(viaRevertText.retryable).toBe(expectation.retryable);
 
       // 判定与 taxonomy 属性字段一致。例外：expired_stage_* 由模板拼接
-      //（沿用广播前 deadline 预检的既有内部名约定），不在冻结词表的
-      // chain-services internal_names 登记内——词表仓（uvp-protocol）补
-      // 登记前跳过查表，仅锁定 retryable=false 的判定。
-      if (expectation.internalName.startsWith('expired_stage_')) {
+      //（沿用广播前 deadline 预检的既有内部名约定），与候选集闸的
+      // executor_not_in_candidate_set（UB-36②③ 新增分类点）都不在冻结
+      // 词表的 chain-services internal_names 登记内——词表仓（uvp-protocol）
+      // 补登记前跳过查表，仅锁定 retryable=false 的判定。
+      if (
+        expectation.internalName.startsWith('expired_stage_') ||
+        expectation.internalName === 'executor_not_in_candidate_set'
+      ) {
         continue;
       }
       const entry = entryForInternalName(expectation.internalName);

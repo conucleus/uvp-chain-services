@@ -13,11 +13,16 @@ import {
 import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import {
   hashResourceManifest as hashProtocolResourceManifest,
+  hashSignalAuthorizations,
   hashStageExecutorPatchPayload as hashProtocolStageExecutorPatchPayload,
   hashStageResourcePatchPayload as hashProtocolStageResourcePatchPayload,
   EXECUTOR_PATCH_MODE_ASSIGN,
   type ResourceManifestV1
 } from "@uvp-eth/protocol-bindings";
+import {
+  executorCandidateProofFor,
+  executorCandidatesRootOf
+} from "../src/submissions/capability-proofs.js";
 import { privateKeyToAccount } from "viem/accounts";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
 import type { ChainServicesRuntimeEnv } from "../src/config/index.js";
@@ -184,6 +189,17 @@ describe("stage executor/resource patch Product API", () => {
         expect(request.recoveredSelector).toBe(selectorWallet);
         expect(request.previousExecutorSignature).toBeUndefined();
         expect(JSON.stringify(request.prepared)).not.toContain("fileResources");
+        // UB-36①②③：候选集成员证明 + 冻结授权集随广播携带（合约新尾参）。
+        expect(request.candidateProof).toEqual(
+          executorCandidateProofFor(
+            [{ stageId: targetStageId, executor: executorWallet }],
+            targetStageId,
+            executorWallet,
+          ),
+        );
+        expect(request.executorAuthorizations).toBe(
+          request.prepared.executorAuthorizations,
+        );
         return {
           status: "submitted",
           txHash,
@@ -224,21 +240,24 @@ describe("stage executor/resource patch Product API", () => {
       typedData: {
         domain: {
           name: "UVPStagePatchModule",
-          version: "0.1",
+          version: "0.2",
           chainId,
           verifyingContract: contractAddress,
         },
         primaryType: "UVPStagePatchModuleStageExecutorPatch",
       },
     });
+    // UB-36①：digest 面换血——approval 双字段删除、authorizationsHash 进
+    // 摘要（= hashSignalAuthorizations(推导集)，selector 签名覆盖授权集）。
     expect(prepared.typedData.message).toMatchObject({
       mode: prepared.modeHash,
       previousExecutor: "0x0000000000000000000000000000000000000000",
-      approvalSourceId:
-        "0x0000000000000000000000000000000000000000000000000000000000000000",
-      approvalSignalId:
-        "0x0000000000000000000000000000000000000000000000000000000000000000",
+      authorizationsHash: prepared.authorizationsHash,
     });
+    expect(JSON.stringify(prepared.typedData.message)).not.toContain("approvalSourceId");
+    expect(prepared.authorizationsHash).toBe(
+      hashSignalAuthorizations(prepared.executorAuthorizations),
+    );
     expect(prepared.patchHash).toMatch(/^0x[0-9a-f]{64}$/);
     expect(JSON.stringify(prepared)).not.toContain("fileResources");
     expect(submitResponse.status).toBe(200);
@@ -479,91 +498,87 @@ describe("stage executor/resource patch Product API", () => {
     expect(broadcast.broadcast).toHaveBeenCalledOnce();
   });
 
-  it("requires an existing approval signal for replacement mode", async () => {
-    const missing = await routerFixture({
+  it("retires replacement mode and the approval-signal authorization surface", async () => {
+    // UB-36④/UB-39：REPLACEMENT 退役——链上审批信号不再是授权材料，非
+    // 协作换人走 fork 车道。服务面在词表/校验/准备流同步退役：mode 词表
+    // 拒识、旧 approval 字段显式 400（静默忽略会让调用方误以为材料参与
+    // 了授权）。
+    const { router } = await routerFixture({
       events: [...baseEvents(), targetSignalSubmittedEvent(5n)],
     });
-    const missingResponse = await missing.router.handle({
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody({ mode: "replacement", previousExecutorWallet }),
+    })).resolves.toMatchObject({
+      status: 400,
+      body: { error: "invalid_executor_patch_mode" },
+    });
+
+    await expect(router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
       body: prepareExecutorBody({
-        mode: "replacement",
+        mode: "handoff",
         previousExecutorWallet,
-        approval: {
-          sourceId: approvalSourceId,
-          signalId: approvalSignalId,
-        },
+        approval: { sourceId: approvalSourceId, signalId: approvalSignalId },
       }),
+    })).resolves.toMatchObject({
+      status: 400,
+      body: { error: "approval_signal_retired" },
     });
-    expect(missingResponse).toMatchObject({
-      status: 409,
-      body: { error: "approval_signal_missing" },
-    });
+  });
 
-    const broadcast: StageExecutorPatchBroadcastAdapter = {
-      broadcast: vi.fn(async (request): Promise<StagePatchBroadcastResult> => {
-        expect(request.prepared.mode).toBe("replacement");
-        expect(request.prepared.approvalSourceId).toBe(approvalSourceId);
-        expect(request.prepared.approvalSignalId).toBe(approvalSignalId);
-        expect(request.previousExecutorSignature).toBeUndefined();
-        return {
-          status: "submitted",
-          txHash,
-        };
-      }),
-    };
-    const valid = await routerFixture({
-      events: [
-        ...baseEvents(),
-        targetSignalSubmittedEvent(5n),
-        approvalSignalSubmittedEvent(6n),
-      ],
-      executorBroadcastAdapter: broadcast,
+  it("fails closed on executor patches when the plan candidate list is unavailable", async () => {
+    // UB-36②③：无候选集（EMPTY_ROOT）或清单不可富集（产物未携带候选集）
+    // 的计划没有逐单换人面——合约 StageExecutorNotCandidate 恒拒，服务端
+    // fail-closed 拒绝 prepare/submit，不发必 revert 的交易。
+    const emptyCandidates = registerPlanVocabulary({
+      selectorBindings: [{ selectorStageId, targetStageId }],
+      signalCapabilities: [{
+        stageId: selectorStageId,
+        targetSourceId: selectorStageId,
+        signalId: selectorHookName,
+        targetOrderRelation: 0,
+      }],
+      executorCandidates: [],
     });
-    const prepared = await prepareStageExecutorPatch(valid.router, {
-      mode: "replacement",
-      previousExecutorWallet,
-      approval: {
-        sourceId: approvalSourceId,
-        signalId: approvalSignalId,
-      },
+    const { router } = await routerFixture({
+      events: baseEvents({ vocabulary: emptyCandidates }),
     });
-    const response = await valid.router.handle({
+    await expect(router.handle({
       method: "POST",
-      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
-      body: {
-        prepareId: prepared.prepareId,
-        selectorWallet,
-        signature: await signExecutorPrepared(prepared),
-      },
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody(),
+    })).resolves.toMatchObject({
+      status: 409,
+      body: { error: "executor_candidate_set_unavailable" },
     });
+  });
 
-    expect(response).toMatchObject({
-      status: 200,
-      body: {
-        mode: "replacement",
-        previousExecutor: previousExecutorWallet,
-        approvalSourceId,
-        approvalSignalId,
-        previousExecutorSignatureStatus: "not_required",
-        txHash,
-      },
+  it("fails closed when the executor is outside the plan candidate set for the target stage", async () => {
+    // 候选集外没有任何人（包括 creator 指定）可以成为逐单执行者。
+    const strangerCandidates = registerPlanVocabulary({
+      selectorBindings: [{ selectorStageId, targetStageId }],
+      signalCapabilities: [{
+        stageId: selectorStageId,
+        targetSourceId: selectorStageId,
+        signalId: selectorHookName,
+        targetOrderRelation: 0,
+      }],
+      executorCandidates: [{ stageId: targetStageId, executor: wrongWallet }],
     });
-    expect(
-      (response.body as { readonly proofRows: readonly unknown[] }).proofRows,
-    ).toEqual(
-      expect.arrayContaining([
-        { label: "Mode", value: "replacement" },
-        { label: "Previous executor", value: previousExecutorWallet },
-        {
-          label: "Approval signal",
-          value: `${approvalSourceId}:${approvalSignalId}`,
-        },
-        { label: "Selector signature", value: "signature_verified" },
-        { label: "Previous executor signature", value: "not_required" },
-      ]),
-    );
-    expect(broadcast.broadcast).toHaveBeenCalledOnce();
+    const { router } = await routerFixture({
+      events: baseEvents({ vocabulary: strangerCandidates }),
+    });
+    await expect(router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
+      body: prepareExecutorBody(),
+    })).resolves.toMatchObject({
+      status: 409,
+      body: { error: "executor_not_in_candidate_set" },
+    });
   });
 
   it("prepares and submits a selector-signed stage resource patch through the broadcast adapter", async () => {
@@ -1225,9 +1240,10 @@ describe("stage executor/resource patch Product API", () => {
       prepared: healedPrepared,
       signature: await signExecutorPrepared(healedPrepared),
       recoveredSelector: selectorWallet,
-      // 服务 submit 路径同款造证材料（真实流由服务端从投影两表构造）。
+      // 服务 submit 路径同款造证材料（真实流由服务端从投影构造）。
       bindingProof: { selectorStageId: healedPrepared.selectorStageId, proof: [] },
-      stageFacts: []
+      candidateProof: [],
+      executorAuthorizations: healedPrepared.executorAuthorizations
     })).resolves.toMatchObject({
       status: "submitted",
       txHash: duplicateTx,
@@ -2064,6 +2080,7 @@ const vocabularyRegistry = new Map<string, PlanCapabilityTablesInput>();
 
 interface VocabularyFixture extends PlanCapabilityTablesInput {
   readonly capabilitiesRoot: Hex;
+  readonly executorCandidatesRoot: Hex;
 }
 
 function registerPlanVocabulary(tables: {
@@ -2074,11 +2091,31 @@ function registerPlanVocabulary(tables: {
     readonly signalId: Hex;
     readonly targetOrderRelation: 0 | 1;
   }[];
+  /** 候选集清单（UB-36②③）；缺省按绑定目标阶段 + 夹具执行者构造。 */
+  readonly executorCandidates?: readonly { readonly stageId: Hex; readonly executor: Address }[];
 }): VocabularyFixture {
   const signalCapabilities = tables.signalCapabilities ?? [];
+  const executorCandidates = tables.executorCandidates ?? tables.selectorBindings.map(
+    (binding) => ({ stageId: binding.targetStageId, executor: executorWallet }),
+  );
   const capabilitiesRoot = capabilitiesRootOf(tables.selectorBindings, signalCapabilities);
-  vocabularyRegistry.set(capabilitiesRoot, { planId, planHash, selectorBindings: tables.selectorBindings, signalCapabilities });
-  return { planId, planHash, selectorBindings: tables.selectorBindings, signalCapabilities, capabilitiesRoot };
+  const executorCandidatesRoot = executorCandidatesRootOf(executorCandidates);
+  vocabularyRegistry.set(capabilitiesRoot, {
+    planId,
+    planHash,
+    selectorBindings: tables.selectorBindings,
+    signalCapabilities,
+    executorCandidates,
+  });
+  return {
+    planId,
+    planHash,
+    selectorBindings: tables.selectorBindings,
+    signalCapabilities,
+    executorCandidates,
+    capabilitiesRoot,
+    executorCandidatesRoot,
+  };
 }
 
 /** 事件流内 PlanCommitted/PlanFinalized 锚定的 root → 富集源注册表命中。 */
@@ -2128,6 +2165,8 @@ function baseEvents(
       hookCount: 1n,
       dockRoutesRoot: bytes32Hex("807"),
       dockInterfaceRoot: bytes32Hex("808"),
+      // UB-36②③：候选集 root 随 commit 广播，清单从注册表富集。
+      executorCandidatesRoot: vocabulary.executorCandidatesRoot,
     }),
     chainEvent(1n, "PlanPublisherRecorded", {
       planId,
@@ -2261,17 +2300,6 @@ function targetSignalSubmittedEvent(blockNumber: bigint): ChainEvent {
   });
 }
 
-function approvalSignalSubmittedEvent(blockNumber: bigint): ChainEvent {
-  return chainEvent(blockNumber, "SignalSubmitted", {
-    orderId,
-    sourceId: approvalSourceId,
-    signalId: approvalSignalId,
-    payloadHash: bytes32Hex("717"),
-    idempotencyKey: bytes32Hex("818"),
-    submitter: selectorWallet,
-  });
-}
-
 function selectorTaskId(): string {
   return `${contractAddress}:${orderId}:${selectorHookId}`;
 }
@@ -2312,8 +2340,15 @@ describe("stage patch payload hash parity with protocol-bindings", () => {
       executorMetadataHash: bytes32Text("executor-metadata"),
       mode: EXECUTOR_PATCH_MODE_ASSIGN,
       previousExecutor: stateMachineAddress,
-      approvalSourceId: bytes32Hex("0"),
-      approvalSignalId: bytes32Text("approval-signal"),
+      authorizationsHash: hashSignalAuthorizations([
+        {
+          sourceId: bytes32Text("grant-source"),
+          signalId: bytes32Text("grant-signal"),
+          submitter: executorWallet,
+          role: bytes32Text("role"),
+          metadataHash: bytes32Text("executor-metadata"),
+        },
+      ]),
       patchNonce: "7",
       metadataURI: "ipfs://executor-patch",
     };

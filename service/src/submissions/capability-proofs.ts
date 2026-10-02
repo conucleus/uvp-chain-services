@@ -2,20 +2,24 @@
 // 词表成员资格由提交方按"字段重算叶 + 携 proof"自证。
 //
 // 消费方：submissions（submitSignalFor 的 attribution/selectorBinding）、
-// stage-patches（applyStage*PatchFor 的 bindingProof/stageFacts）、
-// product BFF trigger（triggerOrderFromOutsideFor 的 birthFactAttribution）。
+// stage-patches（applyStage*PatchFor 的 bindingProof/candidateProof/授权集
+// 推导）、product BFF trigger（triggerOrderFromOutsideFor 的
+// birthFactAttribution）。stageFacts 携证面已随合约 UB-2/UB-36 批从
+// applyStage*PatchFor 尾参删除（时序闸改读合约原生 per-stage 计数）。
 // 叶公式/树形状不在本仓重实现——全部委托 @uvp-eth/compiler 的
 // factAttribution/selectorBindingProof/signalCapabilityProof（与合约
 // UVPPlanMetadataModule 的 leaf 例程逐字节一致），本模块只做投影形态
 // （relation 字符串）与调用形态（protocol-bindings payload）之间的换装。
 import {
   factAttribution as compilerFactAttribution,
+  merkleProof as compilerMerkleProof,
+  merkleRoot as compilerMerkleRoot,
   selectorBindingProof as compilerSelectorBindingProof,
   signalCapabilityProof as compilerSignalCapabilityProof
 } from "@uvp-eth/compiler";
-import type { StageFactPayload } from "@uvp-eth/protocol-bindings";
+import { keccak256, concatHex, stringToHex } from "viem";
 import type { ProjectionStore } from "../storage/projection-store.js";
-import { normalizeBytes32, type Hex } from "../shared/types.js";
+import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 
 export const ZERO_BYTES32 =
   "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
@@ -191,46 +195,83 @@ export function selectorBindingProofForPatch(
   return { selectorStageId: normalizedSelector, proof: [...proof] };
 }
 
-/**
- * stage patch 的 stageFacts：目标阶段 relation=0（current）能力全表携证
- * ——驱动链上委任与时序闸，漏项 = 漏委任（fail-closed 方向）。任何一条
- * 证明缺失（表内不一致，理论不可达——富集时已断言 root 一致）返回
- * undefined 由调用方 fail-closed。
- */
-export function stageFactsForTargetStage(
-  tables: PlanCapabilityTables,
-  targetStageId: Hex
-): readonly StageFactPayload[] | undefined {
-  const compiler = compilerTablesFromProjection(tables);
-  const normalizedTarget = normalizeBytes32(targetStageId, "targetStageId");
-  const facts: StageFactPayload[] = [];
-  for (const capability of compiler.signalCapabilities) {
-    if (capability.targetOrderRelation !== 0 || capability.stageId !== normalizedTarget) {
-      continue;
-    }
-    const proof = compilerSignalCapabilityProof(
-      compiler.selectorBindings,
-      compiler.signalCapabilities,
-      capability.stageId,
-      capability.targetSourceId,
-      capability.signalId,
-      0
-    );
-    if (!proof) {
-      return undefined;
-    }
-    facts.push({
-      sourceId: capability.targetSourceId,
-      signalId: capability.signalId,
-      capabilityProof: [...proof]
-    });
-  }
-  return facts;
-}
-
 /** 投影两表是否可用（外部发布 plan 富集不到产物 → 两表为空）。 */
 export function hasPlanCapabilityTables(tables: PlanCapabilityTables | undefined): boolean {
   return Boolean(tables && (tables.selectorBindings.length > 0 || tables.signalCapabilities.length > 0));
+}
+
+// ---------------------------------------------------------------------------
+// 执行者候选集（UB-36②③）造证：叶 = keccak256(abi.encodePacked(
+// keccak256("UVP_EXECUTOR_CANDIDATE_V1"), stageId, executor))——注意是
+// encodePacked 紧凑形态（address 20 字节右贴，84 字节 preimage），与能力叶
+// 的 abi.encode 形态不同；树形状仍是 DockMerkle 排序配对树（compiler
+// merkleRoot/merkleProof 单源）。叶域常量与合约
+// UVPStagePatchModule.EXECUTOR_CANDIDATE_LEAF_DOMAIN /
+// UVPPlanRegistration._executorCandidatesRoot 同源——protocol-bindings/
+// compiler 尚未导出候选集工具，本模块是该叶公式在链下侧的唯一实现点，
+// 由 stage-patches 测试对合约建树口径（同模块 merkleRoot）对拍钉住。
+// ---------------------------------------------------------------------------
+
+/** 候选集叶域字（与合约 _EXECUTOR_CANDIDATE_LEAF_DOMAIN 同源）。 */
+export const EXECUTOR_CANDIDATE_LEAF_DOMAIN = "UVP_EXECUTOR_CANDIDATE_V1";
+
+/** 候选集清单行的最小形状（plan 投影 executorCandidates / 产物清单共用）。 */
+export interface PlanExecutorCandidateRow {
+  readonly stageId: Hex;
+  readonly executor: Address;
+}
+
+export function executorCandidateLeaf(
+  stageId: Hex,
+  executor: Address,
+): Hex {
+  // encodePacked(bytes32, bytes32, address)：address 紧凑 20 字节，
+  // preimage 84 字节——与合约逐字节一致；多补零会产出另一棵树，
+  // 证明在链上必拒（StageExecutorNotCandidate）。
+  return keccak256(
+    concatHex([
+      keccak256(stringToHex(EXECUTOR_CANDIDATE_LEAF_DOMAIN)),
+      normalizeBytes32(stageId, "executorCandidate.stageId"),
+      normalizeAddress(executor, "executorCandidate.executor"),
+    ]),
+  );
+}
+
+/** 候选集全部叶子的树根；空集返回 EMPTY_MERKLE_ROOT（= DockMerkle.EMPTY_ROOT）。 */
+export function executorCandidatesRootOf(
+  candidates: readonly PlanExecutorCandidateRow[],
+): Hex {
+  return compilerMerkleRoot(
+    candidates.map((candidate) =>
+      executorCandidateLeaf(candidate.stageId, candidate.executor),
+    ),
+  );
+}
+
+/**
+ * (stageId, executor) ∈ 候选集 的成员证明（applyStageExecutorPatch 族
+ * candidateProof 参数）。清单空/叶不在集内 → undefined：候选集外没有
+ * 任何人可以成为逐单执行者（合约恒拒 StageExecutorNotCandidate），
+ * 调用方 fail-closed，不得发必 revert 的交易。
+ */
+export function executorCandidateProofFor(
+  candidates: readonly PlanExecutorCandidateRow[],
+  stageId: Hex,
+  executor: Address,
+): readonly Hex[] | undefined {
+  const leaf = executorCandidateLeaf(stageId, executor);
+  if (!candidates.some((candidate) =>
+    executorCandidateLeaf(candidate.stageId, candidate.executor) === leaf
+  )) {
+    return undefined;
+  }
+  const proof = compilerMerkleProof(
+    candidates.map((candidate) =>
+      executorCandidateLeaf(candidate.stageId, candidate.executor),
+    ),
+    leaf,
+  );
+  return proof ? [...proof] : undefined;
 }
 
 /**

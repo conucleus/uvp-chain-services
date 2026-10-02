@@ -1,5 +1,9 @@
 // 信号族：SignalSubmitterAuthorized/SignalSubmitted/DerivedSignalSubmitted 与
-// 授权-任务匹配、信号/授权投影键。
+// 授权-任务匹配、信号投影键。
+// 委托通道（StageExecutorSignalDelegated/delegateStageExecutorSignalFromModule）
+// 已随合约 UB-36① 批删除：patch 生效授权改由
+// authorizeSignalSubmittersFromModule 写显式订单级授权（本文件投影的
+// SignalSubmitterAuthorized 事件流即其完整重建源）。
 import type { ChainEvent } from "../events.js";
 import type { Address, Hex } from "../../shared/types.js";
 import {
@@ -51,32 +55,6 @@ export interface StateMachineSignalAuthorizationProjection {
   readonly role: Hex;
   readonly metadataHash: Hex;
   readonly authorizedAt: ProjectionProvenance;
-  /**
-   * 委任伴生授权：delegateStageExecutorSignalFromModule 同交易发出的
-   * SignalSubmitterAuthorized 只反映 (sourceId, signalId) 单槽委任的当时
-   * 快照（链上不写显式授权表），更高 patchNonce 的委任到达即被收回。
-   * 显式（注册期）授权无此标记，不受执行者轮换影响。
-   */
-  readonly delegated?: boolean;
-  readonly proof: StateMachineProofProjection;
-}
-
-/**
- * StageExecutorSignalDelegated 事实：delegateStageExecutorSignalFromModule 在
- * 链上把 (sourceId, signalId) 的提交权委派给 executor，并显式携带
- * targetStageId——这是词表外授权唯一的链上阶段绑定。任务投影用它把授权
- * 信号挂到对应阶段的任务上（见 refreshTaskSubmitSignals）。
- */
-export interface StateMachineSignalDelegationProjection {
-  readonly orderId: Hex;
-  readonly targetStageId: Hex;
-  readonly sourceId: Hex;
-  readonly signalId: Hex;
-  readonly executor: Address;
-  readonly roleHash: Hex;
-  readonly metadataHash: Hex;
-  readonly patchNonce: string;
-  readonly delegatedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
 }
 
@@ -194,46 +172,6 @@ export function markMatchingTasksAssigned(
 
 export function signalProjectionKey(sourceId: Hex, signalId: Hex): string {
   return `${sourceId}:${signalId}`;
-}
-
-/**
- * StageExecutorSignalDelegated 落地后的授权收回：链上委任槽按
- * (sourceId, signalId) 单槽替换（nonce 递增覆盖 executor），历史轮换
- * 留下的 delegation-born 授权投影必须随之收回，否则被替换执行者仍在
- * "当前在任提交者集"里（轮换 A→B 后 A 的 verdict authorized:true 而链上
- * UnauthorizedSignalSubmitter revert）。同交易的伴生
- * SignalSubmitterAuthorized 标记为 delegated；本键上其余 delegated 授权
- * （被替换的旧执行者）删除。显式（注册期）授权在链上先于 executor 门
- * 检查、从不因委任被收回，必须保留。
- */
-export function revokeSupersededDelegatedAuthorizations(
-  order: MutableStateMachineOrderProjection,
-  delegation: Pick<
-    StateMachineSignalDelegationProjection,
-    "sourceId" | "signalId" | "executor" | "delegatedAt"
-  >
-): void {
-  const companionKey = signalAuthorizationProjectionKey(delegation.sourceId, delegation.signalId, delegation.executor);
-  for (const [key, authorization] of Object.entries(order.authorizations)) {
-    if (authorization.sourceId !== delegation.sourceId || authorization.signalId !== delegation.signalId) {
-      continue;
-    }
-    if (key === companionKey && isSameTransaction(authorization.authorizedAt, delegation.delegatedAt)) {
-      if (!authorization.delegated) {
-        order.authorizations[key] = { ...authorization, delegated: true };
-      }
-      continue;
-    }
-    if (authorization.delegated === true) {
-      delete order.authorizations[key];
-    }
-  }
-}
-
-function isSameTransaction(left: ProjectionProvenance, right: ProjectionProvenance): boolean {
-  return left.chainId === right.chainId &&
-    left.blockNumber === right.blockNumber &&
-    left.transactionHash.toLowerCase() === right.transactionHash.toLowerCase();
 }
 
 export function signalAuthorizationProjectionKey(sourceId: Hex, signalId: Hex, submitter: Address): string {

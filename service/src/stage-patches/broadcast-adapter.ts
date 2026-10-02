@@ -6,7 +6,7 @@ import {
   type ApplyStageExecutorPatchForCall,
   type ApplyStageResourcePatchForCall,
   type SelectorBindingPayload,
-  type StageFactPayload
+  type SignalAuthorizationPayload
 } from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import {
@@ -77,7 +77,10 @@ export type StateMachineStageExecutorPatchBroadcastAdapterOptions = StateMachine
 export type StateMachineStageResourcePatchBroadcastAdapterOptions = StateMachineStagePatchBroadcastAdapterOptions;
 
 /** 分类标签随工厂导出：conformance 测试复用同一份标签做"revert 名→检测模式"锁定。 */
-export const STAGE_EXECUTOR_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLabels<PreparedStageExecutorPatchDTO> = {
+export const STAGE_EXECUTOR_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLabels<
+  PreparedStageExecutorPatchDTO,
+  import("./types.js").StageExecutorPatchBroadcastRequest
+> = {
   label: "stage executor patch",
   invalidSignatureError: "invalid_stage_executor_patch_signature",
   staleNonceError: "stale_stage_executor_patch_nonce",
@@ -98,8 +101,7 @@ export const STAGE_EXECUTOR_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLa
         executorMetadataHash: prepared.executorMetadataHash,
         mode: prepared.modeHash,
         previousExecutor: prepared.previousExecutor ?? ZERO_ADDRESS,
-        approvalSourceId: prepared.approvalSourceId ?? ZERO_BYTES32,
-        approvalSignalId: prepared.approvalSignalId ?? ZERO_BYTES32,
+        authorizationsHash: prepared.authorizationsHash,
         patchHash: prepared.patchHash,
         patchNonce: prepared.patchNonce,
         metadataURI: prepared.metadataURI
@@ -109,12 +111,16 @@ export const STAGE_EXECUTOR_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLa
       selectorSignature: request.signature,
       previousExecutorSignature: request.previousExecutorSignature ?? "0x",
       bindingProof: request.bindingProof,
-      stageFacts: request.stageFacts
+      candidateProof: request.candidateProof,
+      executorAuthorizations: request.executorAuthorizations
     }
   )
 };
 
-export const STAGE_RESOURCE_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLabels<PreparedStageResourcePatchDTO> = {
+export const STAGE_RESOURCE_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLabels<
+  PreparedStageResourcePatchDTO,
+  import("./types.js").StageResourcePatchBroadcastRequest
+> = {
   label: "stage resource patch",
   invalidSignatureError: "invalid_stage_resource_patch_signature",
   staleNonceError: "stale_stage_resource_patch_nonce",
@@ -140,8 +146,7 @@ export const STAGE_RESOURCE_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLa
       selector: prepared.selectorWallet,
       deadline: prepared.deadline,
       signature: request.signature,
-      bindingProof: request.bindingProof,
-      stageFacts: request.stageFacts
+      bindingProof: request.bindingProof
     }
   )
 };
@@ -149,13 +154,19 @@ export const STAGE_RESOURCE_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLa
 export function createStateMachineStageExecutorPatchBroadcastAdapter(
   options: StateMachineStageExecutorPatchBroadcastAdapterOptions
 ): StageExecutorPatchBroadcastAdapter {
-  return createStagePatchBroadcastAdapter(options, STAGE_EXECUTOR_PATCH_BROADCAST_LABELS);
+  return createStagePatchBroadcastAdapter(
+    options,
+    STAGE_EXECUTOR_PATCH_BROADCAST_LABELS,
+  );
 }
 
 export function createStateMachineStageResourcePatchBroadcastAdapter(
   options: StateMachineStageResourcePatchBroadcastAdapterOptions
 ): StageResourcePatchBroadcastAdapter {
-  return createStagePatchBroadcastAdapter(options, STAGE_RESOURCE_PATCH_BROADCAST_LABELS);
+  return createStagePatchBroadcastAdapter(
+    options,
+    STAGE_RESOURCE_PATCH_BROADCAST_LABELS,
+  );
 }
 
 type PreparedPatchForBroadcast =
@@ -166,12 +177,18 @@ type StagePatchBroadcastRequestBase<TPrepared extends PreparedPatchForBroadcast>
   readonly signature: Hex;
   readonly recoveredSelector: Address;
   readonly previousExecutorSignature?: Hex;
-  /** 词表 Merkle 造证（submit 时从 plan 投影两表构造，fail-closed）。 */
+  /** 词表 Merkle 造证（submit 时从 plan 投影构造，fail-closed）。 */
   readonly bindingProof: SelectorBindingPayload;
-  readonly stageFacts: readonly StageFactPayload[];
+  /** 候选集成员证明（UB-36②③，仅 executor 档消费）。 */
+  readonly candidateProof?: readonly Hex[];
+  /** patch 生效授权集（UB-36①，仅 executor 档消费）。 */
+  readonly executorAuthorizations?: readonly SignalAuthorizationPayload[];
 };
 
-interface StagePatchBroadcastAdapterLabels<TPrepared extends PreparedPatchForBroadcast> {
+interface StagePatchBroadcastAdapterLabels<
+  TPrepared extends PreparedPatchForBroadcast,
+  TRequest extends StagePatchBroadcastRequestBase<TPrepared>
+> {
   readonly label: string;
   readonly invalidSignatureError: string;
   readonly staleNonceError: string;
@@ -179,14 +196,17 @@ interface StagePatchBroadcastAdapterLabels<TPrepared extends PreparedPatchForBro
   buildCall(
     config: { readonly stagePatchModuleAddress: Address; readonly chainId?: number },
     prepared: TPrepared,
-    request: StagePatchBroadcastRequestBase<TPrepared>
+    request: TRequest
   ): StateMachineStagePatchCall;
 }
 
-function createStagePatchBroadcastAdapter<TPrepared extends PreparedPatchForBroadcast>(
+function createStagePatchBroadcastAdapter<
+  TPrepared extends PreparedPatchForBroadcast,
+  TRequest extends StagePatchBroadcastRequestBase<TPrepared>
+>(
   options: StateMachineStagePatchBroadcastAdapterOptions,
-  labels: StagePatchBroadcastAdapterLabels<TPrepared>
-): { broadcast(request: StagePatchBroadcastRequestBase<TPrepared>): Promise<StagePatchBroadcastResult> } {
+  labels: StagePatchBroadcastAdapterLabels<TPrepared, TRequest>
+): { broadcast(request: TRequest): Promise<StagePatchBroadcastResult> } {
   const stateMachineAddress = normalizeAddress(options.stateMachineAddress, "stateMachineAddress");
   if (stateMachineAddress === ZERO_ADDRESS) {
     throw new ConfigError("stateMachineAddress must not be zero");
@@ -424,7 +444,10 @@ interface ClassifiedBroadcastError {
  */
 export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroadcast>(
   error: unknown,
-  labels: StagePatchBroadcastAdapterLabels<TPrepared>
+  labels: StagePatchBroadcastAdapterLabels<
+    TPrepared,
+    StagePatchBroadcastRequestBase<TPrepared>
+  >
 ): ClassifiedBroadcastError {
   const text = errorText(error);
   const name = findErrorName(error);
@@ -468,6 +491,17 @@ export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatch
     return {
       errorCode: "selector_not_authorized",
       message: "selector wallet is not authorized to patch this stage",
+      retryable: false
+    };
+  }
+  // 候选集闸（UB-36②③）：无候选集（EMPTY_ROOT）或 (targetStageId,
+  // executor) 不在集内同报 StageExecutorNotCandidate——持久 revert，重试
+  // 同一签名载荷无意义（候选集随 plan commit 冻结，只能换执行者重新
+  // prepare）。
+  if (haystack.includes("StageExecutorNotCandidate")) {
+    return {
+      errorCode: "executor_not_in_candidate_set",
+      message: "the patch executor is not a member of the plan's committed executor candidate set",
       retryable: false
     };
   }

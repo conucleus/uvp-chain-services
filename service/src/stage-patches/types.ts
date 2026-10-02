@@ -1,4 +1,7 @@
-import type { SelectorBindingPayload, StageFactPayload } from "@uvp-eth/protocol-bindings";
+import type {
+  SelectorBindingPayload,
+  SignalAuthorizationPayload
+} from "@uvp-eth/protocol-bindings";
 import type { Address, Hex } from "../shared/types.js";
 
 export interface StagePatchTypedDataField {
@@ -6,7 +9,8 @@ export interface StagePatchTypedDataField {
   readonly type: string;
 }
 
-export type StageExecutorPatchMode = "assign" | "handoff" | "replacement";
+/** patch 模式词表（合约 _isStageExecutorPatchMode 闭集）：assign/handoff。 */
+export type StageExecutorPatchMode = "assign" | "handoff";
 
 export type StageExecutorPatchSignatureStatus = "not_verified" | "signature_verified";
 
@@ -15,7 +19,8 @@ export type PreviousExecutorSignatureStatus = "not_required" | "not_verified" | 
 export interface StageExecutorPatchTypedData {
   readonly domain: {
     readonly name: "UVPStagePatchModule";
-    readonly version: "0.1";
+    /** 域版本随协议包单源（protocol-bindings STAGE_EXECUTOR_PATCH_DOMAIN_VERSION）。 */
+    readonly version: "0.2";
     readonly chainId: number;
     readonly verifyingContract: Address;
   };
@@ -33,8 +38,8 @@ export interface StageExecutorPatchTypedData {
     readonly executorMetadataHash: Hex;
     readonly mode: Hex;
     readonly previousExecutor: Address;
-    readonly approvalSourceId: Hex;
-    readonly approvalSignalId: Hex;
+    /** selector 签名覆盖的授权集哈希（UB-36①，进 EIP-712 摘要）。 */
+    readonly authorizationsHash: Hex;
     readonly patchHash: Hex;
     readonly patchNonce: string;
     readonly metadataURI: string;
@@ -46,7 +51,8 @@ export interface StageExecutorPatchTypedData {
 export interface StageResourcePatchTypedData {
   readonly domain: {
     readonly name: "UVPStagePatchModule";
-    readonly version: "0.1";
+    /** 域版本随协议包单源（与 executor 档共用同一 EIP-712 域）。 */
+    readonly version: "0.2";
     readonly chainId: number;
     readonly verifyingContract: Address;
   };
@@ -76,9 +82,6 @@ export interface PrepareProductStageExecutorPatchInput {
   readonly executorWallet: string;
   readonly mode?: string;
   readonly previousExecutorWallet?: string;
-  readonly approvalSourceId?: string;
-  readonly approvalSignalId?: string;
-  readonly approval?: unknown;
   readonly roleHash?: string;
   readonly executorMetadataHash?: string;
   readonly supplierReferenceHash?: string;
@@ -121,8 +124,8 @@ export interface StageExecutorPatchHumanSummaryDTO {
   readonly mode: StageExecutorPatchMode;
   readonly modeHash: Hex;
   readonly previousExecutor?: Address;
-  readonly approvalSourceId?: Hex;
-  readonly approvalSignalId?: Hex;
+  /** 授权集哈希（selector 签名覆盖的授权面，UB-36①）。 */
+  readonly authorizationsHash: Hex;
   readonly patchHash: Hex;
   readonly patchNonce: string;
   readonly metadataURI: string;
@@ -167,8 +170,15 @@ export interface PreparedStageExecutorPatchDTO {
   readonly mode: StageExecutorPatchMode;
   readonly modeHash: Hex;
   readonly previousExecutor?: Address;
-  readonly approvalSourceId?: Hex;
-  readonly approvalSignalId?: Hex;
+  /**
+   * patch 生效时对新城执行者写入的显式订单级授权集（UB-36①）：prepare
+   * 时点从 plan 投影推导并冻结进档案——selector 签名覆盖的就是这份集，
+   * submit 广播必须原样携带（合约复算 signalAuthorizationsHash 与
+   * digest 承诺比对，中途换集等于伪造授权来源）。
+   */
+  readonly executorAuthorizations: readonly SignalAuthorizationPayload[];
+  /** 授权集哈希（= hashSignalAuthorizations(executorAuthorizations)）。 */
+  readonly authorizationsHash: Hex;
   readonly roleHash: Hex;
   readonly executorMetadataHash: Hex;
   readonly patchHash: Hex;
@@ -241,8 +251,8 @@ export interface StageExecutorPatchSubmissionDTO {
   readonly mode: StageExecutorPatchMode;
   readonly modeHash: Hex;
   readonly previousExecutor?: Address;
-  readonly approvalSourceId?: Hex;
-  readonly approvalSignalId?: Hex;
+  readonly executorAuthorizations: readonly SignalAuthorizationPayload[];
+  readonly authorizationsHash: Hex;
   readonly roleHash: Hex;
   readonly executorMetadataHash: Hex;
   readonly patchHash: Hex;
@@ -368,8 +378,19 @@ export interface StageExecutorPatchBroadcastRequest {
    * bindings 表构造；投影表空的外部 plan 无法造证，submit 直接拒绝。
    */
   readonly bindingProof: SelectorBindingPayload;
-  /** 目标阶段 relation=0 能力全表携证（驱动链上委任与时序闸）。 */
-  readonly stageFacts: readonly StageFactPayload[];
+  /**
+   * 候选集成员证明（UB-36②③）：(targetStageId, executor) ∈ plan 承诺的
+   * 执行者候选集——无候选集（EMPTY_ROOT）或证明不过，合约
+   * StageExecutorNotCandidate 恒拒。submit 时从 plan 投影候选集清单构造；
+   * 清单缺失（编译产物尚未携带候选集/外部发布 plan）fail-closed 拒绝，
+   * 不发必 revert 的交易。
+   */
+  readonly candidateProof: readonly Hex[];
+  /**
+   * patch 生效时对新城执行者写入的显式订单级授权集（UB-36①）：来自
+   * prepared 档案（selector 签名覆盖的冻结集），广播原样携带。
+   */
+  readonly executorAuthorizations: readonly SignalAuthorizationPayload[];
 }
 
 export interface StageResourcePatchBroadcastRequest {
@@ -377,7 +398,6 @@ export interface StageResourcePatchBroadcastRequest {
   readonly signature: Hex;
   readonly recoveredSelector: Address;
   readonly bindingProof: SelectorBindingPayload;
-  readonly stageFacts: readonly StageFactPayload[];
 }
 
 export interface StageExecutorPatchBroadcastAdapter {
