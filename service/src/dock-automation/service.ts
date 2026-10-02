@@ -17,6 +17,7 @@ import type {
   DockAutomationConfig,
   DockAutomationRunSummary,
   DockAutomationSubmitter,
+  DockRouteInputBinding,
   DockRouteOutputBinding,
   DockRouteRecord,
   DockRouteSource
@@ -327,7 +328,12 @@ export class DockAutomationWorker implements LifecycleService {
             const data = encodeFunctionData({
               abi: dockingWriteAbi,
               functionName: "submitDockedInput",
-              args: [dock.dockInstanceId, binding.localHookId, binding.bindingHash]
+              args: [
+                dock.dockInstanceId,
+                binding.localHookId,
+                binding.bindingHash,
+                await this.#dockedInputAttribution(route.targetPlanId, binding)
+              ]
             });
             await this.#submitCalldata(
               data,
@@ -538,6 +544,31 @@ export class DockAutomationWorker implements LifecycleService {
       attribution,
       selectorBinding: selectorBindingForTargetStage(effectiveTables, attribution.stageId)
     };
+  }
+
+  /**
+   * submitDockedInput 的镜像事实造证：attribution 证目标事实键
+   * (targetSourceId, targetSignalId) 在目标 plan 词表内的成员资格与
+   * 属主阶段（与 output 车道 #dockedSignalProofs 同口径：词表外/无词表
+   * → 全零由链上词表闸裁决）。
+   */
+  async #dockedInputAttribution(
+    targetPlanId: Hex,
+    binding: DockRouteInputBinding
+  ): Promise<BuiltFactAttribution> {
+    const planKey = targetPlanId.toLowerCase();
+    let tables: PlanCapabilityTables | undefined;
+    if (this.#runPlanTables.has(planKey)) {
+      tables = this.#runPlanTables.get(planKey);
+    } else {
+      tables = await this.#resolvePlanTables(targetPlanId);
+      this.#runPlanTables.set(planKey, tables);
+    }
+    return factAttributionPayload(
+      tables ?? EMPTY_PLAN_CAPABILITY_TABLES,
+      binding.targetSourceId,
+      binding.targetSignalId
+    );
   }
 
   inputHookReady(

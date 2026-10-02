@@ -413,14 +413,20 @@ describe("dock liveness keeper", () => {
     const first = await worker.runOnce();
     expect(first).toMatchObject({ inputCandidates: 1, submitted: 1, deduplicated: 0 });
     expect(submitted.length).toBe(1);
-    // 4.4 写面形状：submitDockedInput 三参数（dockInstanceId/localHookId/
-    // inputBindingHash），selector 由 bindings 单源切片决定。
+    // 4.5 写面形状：submitDockedInput 四参数（dockInstanceId/localHookId/
+    // inputBindingHash/attribution），selector 由 bindings 单源切片决定；
+    // 词表外/无词表的目标事实按全零 attribution 提交，由链上词表闸裁决。
     const decoded = decodeFunctionData({
       abi: DOCKING_MODULE_ABI as Abi,
       data: submitted[0] as Hex
     });
     expect(decoded.functionName).toBe("submitDockedInput");
-    expect(decoded.args).toEqual([dockInstanceId, amendHookId, amendBindingHash]);
+    const inputArgs = decoded.args as unknown[];
+    expect(inputArgs.slice(0, 3)).toEqual([dockInstanceId, amendHookId, amendBindingHash]);
+    expect(inputArgs[3]).toMatchObject({
+      sourceId: expect.any(String),
+      signalId: expect.any(String)
+    });
 
     // 第二轮（10s 后，仍在 60s 窗口内）：投影未呈现 delivery，去重跳过。
     nowMs += 10_000;
