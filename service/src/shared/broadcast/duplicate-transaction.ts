@@ -6,8 +6,8 @@ import type { Hex } from "../types.js";
  * broadcaster 报 "nonce too low" / "already known" / "replacement transaction
  * underpriced" 不等于失败：同一签名载荷（或同 nonce 交易）可能已经上链或
  * 仍在池中。直接钉终态死信会把已上链交易永久标记 failed、误导参与方对已
- * 消费 nonce 重签。本模块提供三条在役广播链路（submissions signal 面、
- * stage-patches patch 面）与 relayer 共用的判定机制：
+ * 消费 nonce 重签。本模块提供在役广播链路（submissions signal 面、
+ * stage-patches patch 面）共用的判定机制：
  *
  * 1. 车道识别（isDuplicateTransactionReport）：文本匹配三报错形态；
  * 2. 候选 txHash 提取（duplicateTransactionTxHashCandidates）：错误对象
