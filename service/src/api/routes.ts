@@ -489,9 +489,9 @@ export function productBffStoreSubmissionAuthorization(
  * 同号订单跨 plan 复用与 BFF 路径同口径歧义即拒。
  *
  * 显式腿：order.authorizations，键 `${sourceId}:${signalId}:${submitter}`。
- * 委托腿（order.signalDelegations）已随合约 UB-36① 批删除——patch 生效
- * 授权由合约 authorizeSignalSubmittersFromModule 写入显式订单级授权，
- * 经同一 SignalSubmitterAuthorized 事件流投影，显式腿即其完整重建源。
+ * patch 生效授权由合约 authorizeSignalSubmittersFromModule 写入显式
+ * 订单级授权，经同一 SignalSubmitterAuthorized 事件流投影，显式腿即其
+ * 完整重建源。
  *
  * verdict 是立即裁决（命中/歧义拒绝）；miss 只在显式腿评估过且未命中时
  * 出现——未命中不是终局否决，调用方继续评估任务 overlay 兜底，仍未决

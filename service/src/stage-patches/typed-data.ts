@@ -55,7 +55,7 @@ export interface StageExecutorPatchPayload {
    * patch 生效时对新城执行者写入的显式订单级授权集哈希（UB-36①）：
    * = stateMachine.signalAuthorizationsHash(executorAuthorizations)，进
    * patchHash preimage 与 EIP-712 摘要——selector 签名覆盖授权集，
-   * 授权来源可审计（替代已退役的委托授权通道）。
+   * 授权来源可审计。
    */
   readonly authorizationsHash: Hex;
   readonly patchNonce: string;
@@ -260,8 +260,7 @@ export function signatureHashFor(signature: Hex): Hex {
 }
 
 export function executorPatchModeHash(mode: StageExecutorPatchMode): Hex {
-  // patch 词表封闭为 assign/handoff（UB-36④/UB-39：REPLACEMENT 退役，
-  // 非协作换人走 forkOrder 车道，不在本面重建第三模式）。
+  // patch 词表封闭为 assign/handoff（非协作换人走 forkOrder 车道）。
   switch (mode) {
     case "assign":
       return EXECUTOR_PATCH_MODE_ASSIGN;

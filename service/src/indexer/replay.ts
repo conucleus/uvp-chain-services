@@ -308,10 +308,9 @@ function applyStateMachineEvent(
       applyOrderLinked(state, event);
       return;
     case "OrderForked":
-      // fork 出生血缘（UB-39）：REPLACEMENT 模式退役后非协作换人的唯一
-      // 车道。血缘进 fork 单投影（order.forkLineage）；fork 单的注册与
-      // 事实流沿用既有事件族（OrderRegistered/SignalSubmitted），本分支
-      // 只收血缘，不落未知事件桶。
+      // fork 出生血缘（UB-39）：血缘进 fork 单投影（order.forkLineage）；
+      // fork 单的注册与事实流沿用既有事件族（OrderRegistered/
+      // SignalSubmitted），本分支只收血缘，不落未知事件桶。
       applyOrderForked(state, event);
       return;
     case "StageExecutorPatchApplied":

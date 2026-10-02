@@ -181,10 +181,6 @@ function parsePrepareExecutorBody(body: unknown): PrepareProductStageExecutorPat
   const record = requireBodyRecord(body);
   const mode = optionalString(record, "mode");
   const previousExecutor = optionalString(record, "previousExecutorWallet");
-  // REPLACEMENT 已退役（UB-36④/UB-39）：链上审批信号不再是授权材料，
-  // 非协作换人走 fork 车道。旧字段仍随请求到达时显式拒绝——静默忽略
-  // 会让调用方误以为审批材料参与了授权。
-  rejectRetiredApprovalFields(record);
   return {
     selectorWallet: requiredString(record, "selectorWallet"),
     targetStageId: requiredString(record, "targetStageId"),
@@ -196,20 +192,6 @@ function parsePrepareExecutorBody(body: unknown): PrepareProductStageExecutorPat
     ...(optionalString(record, "supplierReferenceHash") ? { supplierReferenceHash: optionalString(record, "supplierReferenceHash")! } : {}),
     metadataURI: requiredString(record, "metadataURI")
   };
-}
-
-function rejectRetiredApprovalFields(record: Record<string, unknown>): void {
-  if (
-    "approvalSourceId" in record ||
-    "approvalSignalId" in record ||
-    "approval" in record
-  ) {
-    throw new ProductStagePatchError(
-      400,
-      "approval_signal_retired",
-      "approvalSourceId/approvalSignalId were retired with replacement mode; non-cooperative executor changes go through the fork-order lane and executor patches now carry an authorizations hash signed by the selector",
-    );
-  }
 }
 
 function parsePrepareResourceBody(body: unknown): PrepareProductStageResourcePatchInput {

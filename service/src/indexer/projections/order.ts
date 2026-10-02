@@ -418,9 +418,9 @@ export function applyOrderLinked(
  * forkOrderGate 同一交易先 L_createOrder（OrderRegistered +
  * OrderRelayerRecorded）再发本事件，桶通常已存在，缺失时按链上事实补建
  * （订单已注册）。父单行不回写：血缘是 fork 单的出生属性，父单视角的
- * 反查由快照按 forkLineage 派生。非协作换人（replacement 退役）的
- * 裁决材料 (approvalSourceId, approvalSignalId) 只做血缘留痕，不在投影
- * 侧复刻授权判定——链上 forkOrderGate 已 fail-closed。
+ * 反查由快照按 forkLineage 派生。fork 裁决材料 (approvalSourceId,
+ * approvalSignalId) 只做血缘留痕，不在投影侧复刻授权判定——链上
+ * forkOrderGate 已 fail-closed。
  */
 export function applyOrderForked(
   state: {

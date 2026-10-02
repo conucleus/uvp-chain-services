@@ -2092,9 +2092,8 @@ function displayAssigneeRole(role: string): string {
 function executorPatchModeLabel(
   mode: StateMachineStageExecutorOverlayProjection["mode"],
 ): string {
-  // patch 词表封闭为 assign/handoff（REPLACEMENT 已退役，UB-36④/UB-39：
-  // 非协作换人走 fork 车道）。default 分支兜底旧快照/未知词，不裸出
-  // 内部枚举。
+  // patch 词表封闭为 assign/handoff（非协作换人走 fork 车道）。
+  // default 分支兜底未知词，不裸出内部枚举。
   switch (mode) {
     case "assign":
       return "指派执行方";

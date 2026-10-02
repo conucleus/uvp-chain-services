@@ -89,8 +89,6 @@ const executorPatchSignalId =
   "0xbbb1770c9313f4029a89e03f4719037cdad52864ab4da5f623bc7c8a0c489e97" as Hex;
 const resourcePatchSignalId =
   "0x6dff331f2bb7b785cbcd99a911e6d30dc8714f43b3b9ba80c658215445ddd0ba" as Hex;
-const approvalSourceId = bytes32Text("approval.stage");
-const approvalSignalId = bytes32Text("approve-replacement");
 const roleHash = bytes32Text("target.executor");
 const executorMetadataHash = bytes32Hex("404");
 const executorPatchHash = bytes32Hex("505");
@@ -247,14 +245,13 @@ describe("stage executor/resource patch Product API", () => {
         primaryType: "UVPStagePatchModuleStageExecutorPatch",
       },
     });
-    // UB-36①：digest 面换血——approval 双字段删除、authorizationsHash 进
-    // 摘要（= hashSignalAuthorizations(推导集)，selector 签名覆盖授权集）。
+    // UB-36①：digest 面携带授权集哈希——authorizationsHash 进摘要
+    //（= hashSignalAuthorizations(推导集)，selector 签名覆盖授权集）。
     expect(prepared.typedData.message).toMatchObject({
       mode: prepared.modeHash,
       previousExecutor: "0x0000000000000000000000000000000000000000",
       authorizationsHash: prepared.authorizationsHash,
     });
-    expect(JSON.stringify(prepared.typedData.message)).not.toContain("approvalSourceId");
     expect(prepared.authorizationsHash).toBe(
       hashSignalAuthorizations(prepared.executorAuthorizations),
     );
@@ -498,34 +495,19 @@ describe("stage executor/resource patch Product API", () => {
     expect(broadcast.broadcast).toHaveBeenCalledOnce();
   });
 
-  it("retires replacement mode and the approval-signal authorization surface", async () => {
-    // UB-36④/UB-39：REPLACEMENT 退役——链上审批信号不再是授权材料，非
-    // 协作换人走 fork 车道。服务面在词表/校验/准备流同步退役：mode 词表
-    // 拒识、旧 approval 字段显式 400（静默忽略会让调用方误以为材料参与
-    // 了授权）。
+  it("rejects executor patch modes outside the assign/handoff vocabulary", async () => {
+    // patch 词表封闭为 assign/handoff：词表外的 mode 一律 400 拒识，
+    // 非协作换人走 fork 车道。
     const { router } = await routerFixture({
       events: [...baseEvents(), targetSignalSubmittedEvent(5n)],
     });
     await expect(router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-      body: prepareExecutorBody({ mode: "replacement", previousExecutorWallet }),
+      body: prepareExecutorBody({ mode: "rotate", previousExecutorWallet }),
     })).resolves.toMatchObject({
       status: 400,
       body: { error: "invalid_executor_patch_mode" },
-    });
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-      body: prepareExecutorBody({
-        mode: "handoff",
-        previousExecutorWallet,
-        approval: { sourceId: approvalSourceId, signalId: approvalSignalId },
-      }),
-    })).resolves.toMatchObject({
-      status: 400,
-      body: { error: "approval_signal_retired" },
     });
   });
 

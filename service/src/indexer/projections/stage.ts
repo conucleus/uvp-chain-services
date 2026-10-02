@@ -1,7 +1,6 @@
 // 阶段族：StageMaterialized、阶段补丁/资源/激活与 hook 生命周期
 // 事件（HookStatusChanged/HookReady/TimerPoked）及 overlay 投影。
-// StageExecutorSignalDelegated（委托通道）已随合约 UB-36① 批删除：
-// patch 生效授权改走 SignalSubmitterAuthorized 事件流（显式订单级授权）。
+// patch 生效授权走 SignalSubmitterAuthorized 事件流（显式订单级授权）。
 import type { ChainEvent } from "../events.js";
 import {
   EXECUTOR_PATCH_MODE_ASSIGN,
@@ -48,7 +47,7 @@ import type { ProjectionReplayDiagnostics, Writable } from "./snapshot.js";
 
 export type StateMachineHookStatus = "init" | "waiting" | "ready" | "cancelled" | "unknown";
 
-/** patch 模式词表（合约闭集）：REPLACEMENT 已退役（UB-36④/UB-39）。 */
+/** patch 模式词表（合约闭集 assign/handoff）。 */
 export type StateMachineStageExecutorPatchMode = "assign" | "handoff";
 
 export interface StateMachineStageExecutorOverlayProjection {

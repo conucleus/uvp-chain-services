@@ -240,9 +240,8 @@ export function createProductStageExecutorPatchService(
         ? normalizeNonZeroBytes32(input.roleHash, "roleHash")
         : context.targetStageId;
       // 授权集（UB-36①）：patch 生效时对新城执行者写入的显式订单级授权
-      //——目标阶段 relation=0 事实全表映射为 executorWallet 的授权（替代
-      // 已退役的委托通道），prepare 时点冻结进档案，selector 签名覆盖的
-      // 就是这份集。
+      //——目标阶段 relation=0 事实全表映射为 executorWallet 的授权，
+      // prepare 时点冻结进档案，selector 签名覆盖的就是这份集。
       const executorAuthorizations = executorAuthorizationsForTargetStage(
         plan,
         context.targetStageId,
@@ -1590,8 +1589,7 @@ interface ExecutorPatchGovernance {
 /**
  * 执行者补丁治理预检（合约 UVPStagePatchModule._validateStageExecutorPatchMode
  * 的服务层镜像；合约为权威，此处只做广播前快速失败）。patch 词表封闭为
- * assign/handoff——REPLACEMENT 已退役（UB-36④/UB-39），非协作换人走
- * forkOrder 车道，不在本面重建第三模式。
+ * assign/handoff，非协作换人走 forkOrder 车道。
  * 事实键与定序与合约 _stageSignalState 同构：
  * - 事实键 = 编译 plan 能力表键（relation=0/current 的 (targetSourceId,
  *   signalId)，即 keccak256(source)×keccak256(signalName) 事实键）∪
@@ -1674,8 +1672,7 @@ function resolveExecutorPatchGovernance(
     );
   }
 
-  // handoff：上一执行者对同一 digest 的会签是唯一授权材料（链上审批
-  // 信号的存在性授权面已随 REPLACEMENT 退役）。
+  // handoff：上一执行者对同一 digest 的会签是唯一授权材料。
   return {
     mode,
     modeHash,
@@ -1694,7 +1691,7 @@ function normalizeExecutorPatchMode(
   throw new ProductStagePatchError(
     400,
     "invalid_executor_patch_mode",
-    "mode must be assign or handoff (replacement was retired: non-cooperative executor changes go through the fork-order lane)",
+    "mode must be assign or handoff",
   );
 }
 

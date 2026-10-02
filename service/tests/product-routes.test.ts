@@ -2087,10 +2087,9 @@ describe("product API routes", () => {
   });
 
   it("authorizes prepare-submit for the patch-takeover executor through the explicit order-level authorization", async () => {
-    // UB-36①：委托通道（StageExecutorSignalDelegated）已从合约删除——
-    // executor patch 生效时由 authorizeSignalSubmittersFromModule 对新城
-    // 执行者写显式订单级授权，链下读面按 SignalSubmitterAuthorized 事件
-    // 投影（显式腿）裁决；委任腿不复存在，也不再有委任投影。
+    // UB-36①：executor patch 生效时由 authorizeSignalSubmittersFromModule
+    // 对新城执行者写显式订单级授权，链下读面按
+    // SignalSubmitterAuthorized 事件投影（显式腿）裁决。
     const store = new MemoryProjectionStore();
     const events = [
       ...stateMachineProductEvents(),

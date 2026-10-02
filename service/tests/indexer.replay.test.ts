@@ -3651,8 +3651,8 @@ describe("indexer projection replay", () => {
 
   it("projects OrderForked lineage onto the forked order without landing in the unknown-event bucket", () => {
     // UB-39：fork 单号由 forkOrderIdFor 纯函数派生，血缘只读 OrderForked
-    // 事件（REPLACEMENT 退役后非协作换人的唯一车道）。显式投影分支必须
-    // 存在——静默落 default 会与真未知事件不可区分（unknownEventCount）。
+    // 事件。显式投影分支必须存在——静默落 default 会与真未知事件不可区分
+    //（unknownEventCount）。
     const forkedOrderId = "0x0000000000000000000000000000000000000000000000000000000000000212";
     const approvalSourceId = bytes32Hex("8101");
     const approvalSignalId = bytes32Hex("8102");

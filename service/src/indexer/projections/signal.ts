@@ -1,9 +1,7 @@
 // 信号族：SignalSubmitterAuthorized/SignalSubmitted/DerivedSignalSubmitted 与
 // 授权-任务匹配、信号投影键。
-// 委托通道（StageExecutorSignalDelegated/delegateStageExecutorSignalFromModule）
-// 已随合约 UB-36① 批删除：patch 生效授权改由
-// authorizeSignalSubmittersFromModule 写显式订单级授权（本文件投影的
-// SignalSubmitterAuthorized 事件流即其完整重建源）。
+// patch 生效授权由 authorizeSignalSubmittersFromModule 写显式订单级
+// 授权（本文件投影的 SignalSubmitterAuthorized 事件流即其完整重建源）。
 import type { ChainEvent } from "../events.js";
 import type { Address, Hex } from "../../shared/types.js";
 import {
