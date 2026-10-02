@@ -295,11 +295,14 @@ export function createProductReadRouteModule(options: {
           }
           const acceptedOrderIds = await acceptedParticipantOrderIds(context, wallet.identity.walletAddress);
           const orders = await context.productService.listOrders();
-          const visibleOrderIds = new Set(
+          // 可见集按 (planId, orderId) 复合键合并（与 reconcile/dock-automation
+          // 的订单定位口径一致）：裸 orderId 集合在两个 plan 复用同一订单号时，
+          // 会把另一 plan 名下同号订单的未指派任务一并放行（跨 plan 越权读）。
+          const visibleOrderKeys = new Set(
             orders
               .filter((order) => orderVisibleToParticipant(order, walletAddress.toLowerCase(), acceptedOrderIds))
-              .map((order) => order.orderId?.toLowerCase())
-              .filter((orderId): orderId is string => Boolean(orderId))
+              .map((order) => orderTaskVisibilityKey(order.planId, order.orderId))
+              .filter((key): key is string => Boolean(key))
           );
           const tasks = (await context.productService.listTasks(cleanQuery({
             orderId: request.query?.orderId,
@@ -307,7 +310,7 @@ export function createProductReadRouteModule(options: {
           }))).filter((task) =>
             task.assigneeWallet
               ? task.assigneeWallet.toLowerCase() === walletAddress.toLowerCase()
-              : visibleOrderIds.has(task.orderId.toLowerCase())
+              : visibleOrderKeys.has(orderTaskVisibilityKey(task.planId, task.orderId) ?? "")
           );
           return {
             status: 200,
@@ -463,6 +466,19 @@ function productParticipantIdentityFromAssignment(assignment: ProductParticipant
     draftTitle: assignment.draft.title,
     ...(orderId ? { orderId } : {})
   };
+}
+
+/**
+ * 订单/任务可见性复合键 (planId, orderId)：两侧都归一到小写、缺 planId
+ * 归一为空段——订单与任务只有 plan 维度一致才命中。同号订单跨 plan
+ * 复用时，裸 orderId 命中会被本键拒绝（另一 plan 的同号订单不因
+ * orderId 相同而可见）。
+ */
+function orderTaskVisibilityKey(planId: string | undefined, orderId: string | undefined): string | undefined {
+  if (!orderId) {
+    return undefined;
+  }
+  return `${(planId ?? "").toLowerCase()}:${orderId.toLowerCase()}`;
 }
 
 /**

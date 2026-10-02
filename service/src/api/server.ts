@@ -39,8 +39,8 @@ import { createLoggerAuditSink, type AuditSink } from "../security/audit.js";
 import { createRedactingLogger, redactErrorMessage, redactSecrets } from "../security/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
 import { ConfigError, consoleLogger, type Address, type Logger } from "../shared/types.js";
-import { createApiRouter } from "./routes.js";
-import { InvalidPathParameterError, invalidPathParameterResponse } from "./route-context.js";
+import { createApiRouter, productBffStoreDraftOrderResolver } from "./routes.js";
+import { InvalidPathParameterError, invalidPathParameterResponse, normalizeRequestId } from "./route-context.js";
 import { createListingAnchorChainView } from "../store/listings/index.js";
 import { createPlanCapabilityTablesResolver } from "../store/console/zhixu-drafts.js";
 
@@ -180,11 +180,15 @@ export async function startApiServer(
     ...(stores.stageExecutorPatchStore ? { stageExecutorPatchStore: stores.stageExecutorPatchStore } : {}),
     ...(stores.stageResourcePatchStore ? { stageResourcePatchStore: stores.stageResourcePatchStore } : {}),
     // 证据绑定清扫：与 API 路由共用同一持久元数据仓与对象存储，
-    // 广播成功但绑定缺失的提交由 worker 周期性补绑。
+    // 广播成功但绑定缺失的提交由 worker 周期性补绑。草稿期证据的归属
+    // 核验与 API 路由同源（resolveDraftOrder 装配在 BFF 台账上——trigger
+    // 记录是草稿与订单对应关系的服务端事实源）：缺解析器时补绑车道对
+    // draftId 来源凭证恒 409，草稿期证据补绑会永久卡死。
     evidenceBinder: createEvidenceService({
       metadataStore: stores.evidenceMetadataStore,
       storage: evidenceStorage,
-      runtimeEnvironment: config.security.environment
+      runtimeEnvironment: config.security.environment,
+      resolveDraftOrder: productBffStoreDraftOrderResolver(productBffStore)
     }),
     audit,
     logger
@@ -752,7 +756,10 @@ function normalizeHeaders(headers: IncomingMessage["headers"]): Record<string, s
 function requestIdFromHeaders(request: IncomingMessage): string {
   const header = request.headers["x-request-id"] ?? request.headers["x-uvp-request-id"];
   const value = Array.isArray(header) ? header[0] : header;
-  return value && value.trim().length > 0 ? value.trim() : randomUUID();
+  // 客户端自报请求 id 会原样回写响应头并落入每行日志：只采信通过
+  // normalizeRequestId 清洗（≤128、可打印 ASCII 白名单）的值，非法即
+  // 丢弃重建（服务端 UUID），不把任意客户端字节放进日志/响应头。
+  return normalizeRequestId(value) ?? randomUUID();
 }
 
 function runIdFromHeaders(request: IncomingMessage): string | undefined {

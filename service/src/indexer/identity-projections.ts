@@ -37,6 +37,12 @@ export interface IdentityProjectionSnapshot {
   readonly rebuildable: true;
   readonly eventCount: number;
   readonly bindings: Readonly<Record<string, IdentityBindingProjection>>;
+  /**
+   * 撤销事件指向未知 binding 的显式计数（binding 未注册/回放顺序中注册
+   * 事件缺失/键不一致）。撤销被跳过时不得静默——快照与索引器日志携带
+   * 该计数，与订单族回放的诊断计数口径一致。
+   */
+  readonly unresolvedRevokeEventCount?: number;
   readonly lastEvent?: IdentityProjectionProvenance;
 }
 
@@ -57,6 +63,7 @@ export function createEmptyIdentityProjectionSnapshot(): IdentityProjectionSnaps
     rebuildable: true,
     eventCount: 0,
     bindings: {},
+    unresolvedRevokeEventCount: 0,
   };
 }
 
@@ -65,13 +72,18 @@ export function rebuildIdentityProjections(
 ): IdentityProjectionSnapshot {
   const bindings = new Map<string, Mutable<IdentityBindingProjection>>();
   let eventCount = 0;
+  let unresolvedRevokeEventCount = 0;
   let lastEvent: IdentityProjectionProvenance | undefined;
 
   for (const event of filterActiveChainEvents(events)) {
     if (event.eventName === "IdentityBindingRegistered") {
       applyIdentityBindingRegistered(bindings, event);
     } else if (event.eventName === "IdentityBindingRevoked") {
-      applyIdentityBindingRevoked(bindings, event);
+      if (!applyIdentityBindingRevoked(bindings, event)) {
+        // 撤销指向未知 binding：跳过但必须计数留痕（不允许静默）——
+        // binding 未注册/回放顺序缺口/键不一致都从这里暴露。
+        unresolvedRevokeEventCount += 1;
+      }
     } else {
       continue;
     }
@@ -83,6 +95,7 @@ export function rebuildIdentityProjections(
     rebuildable: true,
     eventCount,
     bindings: Object.fromEntries(bindings),
+    unresolvedRevokeEventCount,
     ...(lastEvent ? { lastEvent } : {}),
   };
 }
@@ -141,7 +154,7 @@ function applyIdentityBindingRegistered(
 function applyIdentityBindingRevoked(
   bindings: Map<string, Mutable<IdentityBindingProjection>>,
   event: ChainEvent,
-): void {
+): boolean {
   const registryAddress = normalizeAddress(
     event.contractAddress,
     "IdentityBindingRevoked.contractAddress",
@@ -150,7 +163,7 @@ function applyIdentityBindingRevoked(
   const binding = bindings.get(
     identityKey(event.chainId, registryAddress, bindingId),
   );
-  if (!binding) return;
+  if (!binding) return false;
 
   const provenance = provenanceOf(event);
   binding.status = "revoked";
@@ -158,6 +171,7 @@ function applyIdentityBindingRevoked(
   binding.revokeReasonURI = optionalStringArg(event, "reasonURI") ?? "";
   binding.revokedAt = provenance;
   binding.updatedAt = provenance;
+  return true;
 }
 
 function identityKey(

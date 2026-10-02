@@ -114,9 +114,10 @@ export interface StoreZhixuDraftStore {
   createDraft(draft: StoreZhixuDraftRecord): Promise<void>;
   getDraft(draftId: string): Promise<StoreZhixuDraftRecord | undefined>;
   /**
-   * planHash 入参是链侧身份（事件/链上 plan.planHash，runtime 域）——
-   * 与 schema.planHash（canonical 载荷哈希）数值永不相等，join 必须锚
-   * schema.artifactHash（产物注册哈希，runtime 域）。
+   * planHash 入参是链侧身份（事件/链上 plan.planHash，runtime 域）。
+   * schema.planHash 与链上值同域同值——join 锚 schema.planHash（与
+   * sqlite/postgres 实现的精确匹配一致）；schema.artifactHash 是 canonical
+   * 载荷哈希（产物注册域），与链侧 planHash 永不相等，不参与该 join。
    */
   findProductSchemaByPlan(
     planId: string,

@@ -129,7 +129,8 @@ export function rebuildOrderProjections(
     unresolvedDockEventCount: 0,
     unresolvedStageActivationEventCount: 0,
     unresolvedDockTargetDeploymentCount: 0,
-    capabilityEnrichmentMismatchCount: 0
+    capabilityEnrichmentMismatchCount: 0,
+    unknownEventCount: 0
   };
   // 词表产物富集索引：planId(lower) → 编译产物两表（applyPlanFinalized/
   // applyPlanRegistered 时填进投影并断言 capabilitiesRoot，见 plan.ts）。
@@ -236,6 +237,7 @@ export function rebuildOrderProjections(
     unresolvedStageActivationEventCount: diagnostics.unresolvedStageActivationEventCount,
     unresolvedDockTargetDeploymentCount: diagnostics.unresolvedDockTargetDeploymentCount,
     capabilityEnrichmentMismatchCount: diagnostics.capabilityEnrichmentMismatchCount,
+    unknownEventCount: diagnostics.unknownEventCount,
     ...(lastEvent ? { lastEvent } : {})
   };
 }
@@ -344,10 +346,41 @@ function applyStateMachineEvent(
     case "TimerPoked":
       applyTimerPoked(state, event);
       return;
+    // 零投影分支（显式声明，不落入未知计数）：状态机的治理面事实
+    // ——OwnershipTransferred（owner 轮换）与 StateMachineModulesFrozen
+    // （模块集冻结）不产生订单/plan/模块投影，但它们是已索引事件面
+    // （SM ABI）的一部分，静默穿过 default 会与"真未知事件"不可区分。
+    case "OwnershipTransferred":
+      return;
+    case "StateMachineModulesFrozen":
+      return;
     default:
+      // 真未知事件：既不在状态机事件族，也不属于其他重放遍已收口的
+      // 家族（部署注册表族由 applyDeploymentRegistryEvent 处理、身份族
+      // 由 rebuildIdentityProjections 处理）。新合约事件上线而投影未跟
+      // 进时必须显式计数（不静默），快照与索引器日志都会携带该计数。
+      if (!NON_STATE_MACHINE_REPLAYED_EVENT_NAMES.has(event.eventName)) {
+        state.diagnostics.unknownEventCount += 1;
+      }
       return;
   }
 }
+
+/**
+ * 其他重放遍已收口、允许穿过 applyStateMachineEvent default 分支且不计入
+ * 未知计数的事件名：部署注册表族（applyDeploymentRegistryEvent）与身份
+ * 注册表族（rebuildIdentityProjections）。rebuildOrderProjections 的输入是
+ * 全量事件流，这两族事件到达这里属正常编排，不是漏跟。
+ */
+const NON_STATE_MACHINE_REPLAYED_EVENT_NAMES: ReadonlySet<string> = new Set([
+  "DeploymentRegistered",
+  "DeploymentCanaryMarked",
+  "DeploymentActivated",
+  "DeploymentDeprecated",
+  "DeploymentRetired",
+  "IdentityBindingRegistered",
+  "IdentityBindingRevoked"
+]);
 
 function applyDeploymentRegistryEvent(
   deployments: Map<string, MutableStateMachineDeploymentProjection>,

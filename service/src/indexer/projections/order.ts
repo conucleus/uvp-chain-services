@@ -42,6 +42,12 @@ export interface StateMachineOrderTriggerLinkProjection {
   readonly triggeredOrderId: Hex;
   readonly triggerOriginOrderId: Hex;
   readonly triggerStageId: Hex;
+  /**
+   * 触发源单所属 plan（OrderLinked.originPlanId）：跨 plan 链接触发时
+   * 定位源单投影的唯一 plan 维度——裸 triggerOriginOrderId 在同号订单
+   * 跨 plan 复用时定位不了源单。旧事件面（无该字段）缺省。
+   */
+  readonly originPlanId?: Hex;
   readonly originSourceId: Hex;
   readonly originSignalId: Hex;
   readonly linkedAt: ProjectionProvenance;
@@ -348,6 +354,9 @@ export function applyOrderLinked(
   const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
   const originSourceId = requiredBytes32Arg(event, "originSourceId");
   const originSignalId = requiredBytes32Arg(event, "originSignalId");
+  // originPlanId：触发源单的 plan 维度（跨 plan 链接触发的源单定位键），
+  // 旧事件面缺省——投影字段补齐，不再丢弃。
+  const originPlanId = optionalBytes32Arg(event, "originPlanId");
   const planId = optionalBytes32Arg(event, "planId");
   // 幻影订单：OrderLinked 由 UVPOrderLinkModule 发出，先归一化到所属
   // 状态机地址再做部署归属与建桶。
@@ -370,6 +379,7 @@ export function applyOrderLinked(
     triggeredOrderId,
     triggerOriginOrderId,
     triggerStageId,
+    ...(originPlanId !== undefined ? { originPlanId } : {}),
     originSourceId,
     originSignalId,
     linkedAt: provenanceOf(event),

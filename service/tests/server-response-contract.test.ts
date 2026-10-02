@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
+import { connect } from "node:net";
 import type { Server } from "node:http";
 import { loadConfigFromEnv } from "../src/config/index.js";
 import { startApiServer } from "../src/api/server.js";
@@ -77,7 +78,85 @@ describe("api server response contract", () => {
     const session = (await sessionResponse.json()) as { session: { anchoredAddress?: string } };
     expect(session.session.anchoredAddress?.toLowerCase()).toBe(wallet.toLowerCase());
   });
+
+  it("echoes a sanitized client request id and rebuilds unsafe ones instead of trusting raw header bytes", async () => {
+    server = await startApiServer({
+      config: localMemoryConfig(),
+      store: new MemoryProjectionStore(),
+      eventSource: noOpEventSource
+    });
+    const base = `http://127.0.0.1:${serverPort(server)}`;
+
+    // 合法 id（字母/数字/._:-，≤128）：原样回写。
+    const validId = "req-abc_DEF.012:3";
+    const validResponse = await fetch(`${base}/healthz`, {
+      headers: { "x-request-id": validId }
+    });
+    expect(validResponse.status).toBe(200);
+    expect(validResponse.headers.get("x-request-id")).toBe(validId);
+
+    // 日志注入面：换行/控制字符/超长/非白名单字符的自报 id 不得采信——
+    // 响应头回写的是服务端重建的 UUID，不是客户端原始字节。undici 的
+    // fetch 会在客户端就拒绝带换行的头值，注入载荷改走裸 http 请求。
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    for (const unsafeId of [
+      `ok${String.fromCharCode(10)}2026-01-01T00:00:00Z injected-log-line`,
+      `ok${String.fromCharCode(13)}crlf`,
+      `tab${String.fromCharCode(9)}id`,
+      `bad id with spaces`,
+      `id;drop--'quote"double`,
+      `x`.repeat(129)
+    ]) {
+      const raw = await rawHttpRequest(base, "/healthz", unsafeId);
+      if (raw.status === 400) {
+        // 换行/回车载荷被 node http 解析器在协议层直接 400——注入从未
+        // 到达应用层，同样是安全结果（无回写、无日志行）。
+        continue;
+      }
+      expect(raw.status, `unsafe id must not fail the request`).toBe(200);
+      expect(raw.requestId, `unsafe id must be rebuilt, got: ${JSON.stringify(raw.requestId)}`).toMatch(uuidPattern);
+      expect(raw.requestId).not.toContain(String.fromCharCode(10));
+      expect(raw.requestId).not.toContain(String.fromCharCode(13));
+    }
+
+    // 缺省：不带头时同样回写服务端 UUID（回执可关联日志行）。
+    const absentResponse = await fetch(`${base}/healthz`);
+    expect(absentResponse.headers.get("x-request-id")).toMatch(uuidPattern);
+  });
 });
+
+/** 裸 socket 请求：绕过 fetch/undici 与 node:http 的头值校验，直接投递注入载荷。 */
+function rawHttpRequest(
+  base: string,
+  path: string,
+  requestId: string
+): Promise<{ readonly status: number; readonly requestId: string | undefined }> {
+  const url = new URL(path, base);
+  return new Promise((resolve, reject) => {
+    const socket = connect(Number(url.port), url.hostname);
+    socket.on("error", reject);
+    socket.on("connect", () => {
+      socket.write(
+        `GET ${path} HTTP/1.1\r\nHost: ${url.host}\r\nx-request-id: ${requestId}\r\nConnection: close\r\n\r\n`
+      );
+    });
+    let raw = "";
+    socket.on("data", (chunk: Buffer) => {
+      raw += chunk.toString("utf8");
+    });
+    socket.on("close", () => {
+      const statusLine = raw.split("\r\n", 1)[0] ?? "";
+      const status = Number(statusLine.split(" ")[1] ?? 0);
+      const headerLine = raw
+        .split("\r\n")
+        .find((line) => line.toLowerCase().startsWith("x-request-id:"));
+      resolve({
+        status,
+        requestId: headerLine ? headerLine.slice("x-request-id:".length).trim() : undefined
+      });
+    });
+  });
+}
 
 function serverPort(server: Server): number {
   const address = server.address();

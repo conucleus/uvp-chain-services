@@ -79,7 +79,6 @@ export interface ApiConfig {
 export interface RelayerConfig {
   readonly businessSigning: "forbidden";
   readonly broadcastEnabled: boolean;
-  readonly gasSignerRef?: string;
   readonly stateMachinePrivateKeyEnv: string;
   readonly expectedGasPayer?: Address;
   readonly maxRetries: number;
@@ -253,7 +252,6 @@ export interface PostgresDatabaseClassification {
 }
 
 export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
-  const gasSignerRef = optionalEnv(env, "UVP_RELAYER_TX_SIGNER_REF");
   const stateMachinePrivateKeyEnv =
     optionalEnv(env, "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY_ENV") ??
     "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY";
@@ -324,7 +322,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         "UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED",
         Boolean(optionalEnv(env, stateMachinePrivateKeyEnv)),
       ),
-      ...(gasSignerRef ? { gasSignerRef } : {}),
       stateMachinePrivateKeyEnv,
       ...(operatorRoles.relayerGasPayerAddress
         ? { expectedGasPayer: operatorRoles.relayerGasPayerAddress }

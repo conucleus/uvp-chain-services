@@ -189,6 +189,12 @@ export type ProductOrderApiDTO = ProductOrderDTO & {
 };
 
 export type ProductTaskApiDTO = ProductTaskDTO & {
+  /**
+   * 任务行是 plan 作用域投影的展平行：携带 planId 让消费方在两个 plan
+   * 复用同一 orderId 时仍能把任务 join 回正确的订单（复合键
+   * (planId, orderId)，与 reconcile/dock-automation 的订单定位口径一致）。
+   */
+  readonly planId?: string;
   readonly hookId?: string;
   readonly hookName?: string;
   readonly stageIdentifier?: string;
@@ -833,10 +839,16 @@ async function productTaskFromStateMachineTask(
     ? productResourceRequirementsForStage(order, task.stageIdentifier)
     : [];
 
+  // 任务行的 plan 维度：任务投影自带 planId（plan 作用域展平行），
+  // 缺省回退所属订单投影的 planId——消费方按 (planId, orderId) 复合键
+  // join，裸 orderId 在同号订单跨 plan 复用时定位错订单。
+  const taskPlanId = task.planId ?? order?.planId;
+
   return {
     taskId: task.taskId,
     orderId: task.orderId,
     stateMachineAddress: task.stateMachineAddress,
+    ...(taskPlanId ? { planId: taskPlanId } : {}),
     ...(task.deploymentId ? { deploymentId: task.deploymentId } : {}),
     orderTitle,
     zhixuId: order ? await zhixuIdForOrderProjection(order, productSchemaResolver) : "not_found",

@@ -1382,6 +1382,66 @@ describe("product API routes", () => {
     expect((creatorDetail.body as { task: Record<string, unknown> }).task.assigneeWallet).toBeUndefined();
   });
 
+  it("keeps /product/tasks visibility on the (planId, orderId) composite key when two plans reuse the same order id", async () => {
+    // 同号订单跨 plan 复用：可见集按 (planId, orderId) 复合键合并（对齐
+    // reconcile/dock-automation 的订单定位口径）——plan A 订单的参与者
+    // 不得因裸 orderId 相同而看见 plan B 同号订单的未指派任务。
+    const otherPlanId = bytes32Hex("0b0b");
+    const otherHookId = bytes32Hex("0305");
+    const participantWallet = routeTestWallet(5);
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineProductEvents(),
+        // plan B：同号订单 + 未指派任务；参与者集合只含另一位创建者——
+        // 对 plan A 参与者不可见（participants 非空且不含其钱包）。
+        chainEvent(8n, "OrderRegistered", {
+          orderId: stateMachineOrderId,
+          planId: otherPlanId
+        }),
+        chainEvent(9n, "HookReady", {
+          orderId: stateMachineOrderId,
+          planId: otherPlanId,
+          hookId: otherHookId,
+          stageId,
+          hookName
+        }),
+        chainEvent(10n, "OrderRelayerRecorded", {
+          orderId: stateMachineOrderId,
+          planId: otherPlanId,
+          relayer: routeTestWallet(6),
+          creator: routeTestWallet(8)
+        }),
+        // plan A 的订单参与者（创建者）：其可见集只含 plan A 的订单。
+        chainEvent(11n, "OrderRelayerRecorded", {
+          orderId: stateMachineOrderId,
+          planId: crossBorderPlanIds.planId,
+          relayer: routeTestWallet(6),
+          creator: participantWallet
+        })
+      ]
+    });
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth });
+    const planATaskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
+    const planBTaskId = `${contractAddress}:${stateMachineOrderId}:${otherHookId}`;
+
+    // plan A 参与者：本 plan 的未指派任务可见（复合键命中）……
+    const list = await router.handle({ method: "GET", pathname: "/product/tasks", headers: { "x-uvp-wallet-address": participantWallet } });
+    const listedTaskIds = (list.body as { tasks: Array<{ taskId: string }> }).tasks.map((task) => task.taskId);
+    expect(listedTaskIds).toContain(planATaskId);
+    // ……plan B 的同号订单任务不可见（裸 orderId 命中不再是放行条件）。
+    expect(listedTaskIds).not.toContain(planBTaskId);
+
+    // 详情同口径：plan B 同号任务按不可见收口（404 不泄露存在性）。
+    const planBTaskDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${planBTaskId}`, headers: { "x-uvp-wallet-address": participantWallet } });
+    expect(planBTaskDetail.status).toBe(404);
+    // 详情路径按裸 orderId 反查订单：同号歧义下无法唯一定位即 fail-closed
+    // 404（与订单详情的 ambiguous 收口一致——歧义不是放行条件）。
+    const planATaskDetail = await router.handle({ method: "GET", pathname: `/product/tasks/${planATaskId}`, headers: { "x-uvp-wallet-address": participantWallet } });
+    expect(planATaskDetail.status).toBe(404);
+  });
+
   it("selects task plugins from explicit slot capability metadata for generic authorized roles", async () => {
     const store = new MemoryProjectionStore();
     const events = [

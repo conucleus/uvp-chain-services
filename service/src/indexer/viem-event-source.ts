@@ -9,7 +9,13 @@ import {
   type Log,
 } from "viem";
 import type { ChainServicesConfig } from "../config/index.js";
-import { DOCKING_MODULE_ABI } from "@uvp-eth/protocol-bindings";
+import {
+  DERIVED_SIGNAL_MODULE_ABI,
+  DOCKING_MODULE_ABI,
+  ORDER_LINK_MODULE_ABI,
+  STAGE_PATCH_MODULE_ABI,
+  STATE_MACHINE_ABI
+} from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type Logger } from "../shared/types.js";
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
@@ -20,45 +26,32 @@ import type { ChainEventRange, ChainEventSource } from "./service.js";
 // 词表 Merkle 化形态：PlanCommitted/PlanFinalized 携带 capabilitiesRoot
 // 字段；链上不发布词表注册事件——两表由重放方从编译产物富集
 // （projections/plan.ts）。
-const stateMachineAbi = parseAbi([
-  "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
-  "event StateMachineModuleSet(bytes32 indexed moduleId,address indexed previousModule,address indexed newModule)",
-  "event StateMachineModulesFrozen(bytes32 indexed moduleSetHash)",
-  "event PlanCommitted(bytes32 indexed planId,bytes32 indexed planHash,address indexed publisher,bytes32 hooksHash,bytes32 capabilitiesRoot,uint256 hookCount,bytes32 dockRoutesRoot,bytes32 dockInterfaceRoot)",
-  "event PlanFinalized(bytes32 indexed planId,bytes32 indexed planHash,bytes32 capabilitiesRoot)",
-  "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",
-  "event PlanPublisherRecorded(bytes32 indexed planId,address indexed publisher)",
-  "event OrderRegistered(bytes32 indexed orderId,bytes32 indexed planId)",
-  "event OrderMaterialized(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed stageId)",
-  "event OrderRelayerRecorded(bytes32 indexed planId,bytes32 indexed orderId,address indexed relayer,address creator)",
-  "event SignalSubmitterAuthorized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,address submitter,bytes32 role,bytes32 metadataHash)",
-  "event SignalSubmitted(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
-  "event StageMaterialized(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed stageId,bytes32 triggerHookId,bytes32 sourceId,bytes32 signalId)",
-  // OrderTriggered 携带 triggerHookId——回放方不必反查 plan 即可定位
-  // 出生 hook（多 hook 阶段下 stageId 不足以定位求值语义）。
-  "event OrderTriggered(bytes32 indexed orderId,bytes32 indexed planId,bytes32 indexed triggerStageId,bytes32 triggerHookId,bytes32 sourceId,bytes32 signalId,address submitter)",
-  "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)",
-  "event StageExecutorSignalDelegated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,bytes32 sourceId,bytes32 signalId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce)",
-  "event HookStatusChanged(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint8 previousStatus,uint8 newStatus,uint64 dueAt)",
-  "event HookReady(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,bytes32 stageId,bytes32 hookName)",
-  "event TimerPoked(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed hookId,uint64 dueAt)"
-]);
+//
+// 事件面单源化（对齐 docking 的 DOCKING_MODULE_ABI 先例）：状态机与
+// stage-patch/derived-signal/order-link 模块的事件条目直接从
+// @uvp-eth/protocol-bindings 的整表 ABI 滤出，手抄事件副本会随协议演进
+// 漂移成错 topic。滤出面（topic 与 indexed 布局）由 viem-event-source
+// 测试按 forge fixture + 编译 artifact 双源钉住。与写面同取舍：先放宽为
+// 泛型 Abi 再滤，直接在整表字面量类型上做 filter 会让 viem 的巨型条件
+// 类型爆栈（TS2589）。
+const stateMachineAbi: Abi = (STATE_MACHINE_ABI as Abi).filter(
+  (entry) => entry.type === "event"
+);
 
-const stagePatchModuleAbi = parseAbi([
-  "event StageExecutorPatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,bytes32 planId,address selector,address executor,bytes32 role,bytes32 executorMetadataHash,bytes32 mode,address previousExecutor,bytes32 approvalSourceId,bytes32 approvalSignalId,bytes32 patchHash,uint256 patchNonce,string metadataURI)",
-  "event StageResourcePatchApplied(bytes32 indexed orderId,bytes32 indexed selectorStageId,bytes32 indexed targetStageId,bytes32 planId,address selector,bytes32 resourceKey,bytes32 manifestHash,bytes32 policyHash,bytes32 patchHash,uint256 patchNonce,string manifestURI)"
-]);
+const stagePatchModuleAbi: Abi = (STAGE_PATCH_MODULE_ABI as Abi).filter(
+  (entry) => entry.type === "event"
+);
 
 // UVPPlanMetadataModule v0.6 不发出任何事件（合约只保留 view 验证
 // 例程），索引器不 watch 该地址。
 
-const derivedSignalModuleAbi = parseAbi([
-  "event DerivedSignalSubmitted(bytes32 indexed fromOrderId,bytes32 indexed targetOrderId,bytes32 indexed signalId,bytes32 fromPlanId,bytes32 targetPlanId,bytes32 fromStageId,bytes32 targetSourceId,bytes32 payloadHash,bytes32 idempotencyKey,address submitter)",
-]);
+const derivedSignalModuleAbi: Abi = (DERIVED_SIGNAL_MODULE_ABI as Abi).filter(
+  (entry) => entry.type === "event"
+);
 
-const orderLinkModuleAbi = parseAbi([
-  "event OrderLinked(bytes32 indexed triggeredOrderId,bytes32 indexed triggerOriginOrderId,bytes32 indexed triggerStageId,bytes32 planId,bytes32 originPlanId,bytes32 originSourceId,bytes32 originSignalId)",
-]);
+const orderLinkModuleAbi: Abi = (ORDER_LINK_MODULE_ABI as Abi).filter(
+  (entry) => entry.type === "event"
+);
 
 // UVPDockingModule v4.4（具名接口 dock v2）事件面：从 protocol-bindings
 // 单源（DOCKING_MODULE_ABI）滤出 event 条目，对齐写面已做的单源化

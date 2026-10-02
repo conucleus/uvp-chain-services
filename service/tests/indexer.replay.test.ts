@@ -983,6 +983,83 @@ describe("indexer projection replay", () => {
     ]);
   });
 
+  it("counts genuinely unknown events instead of silently skipping them", () => {
+    // 新合约事件上线而投影未跟进：default 分支不得静默穿过——真未知事件
+    // 计入 unknownEventCount。已收口家族不计入：零投影分支
+    // （OwnershipTransferred/StateMachineModulesFrozen）与其他重放遍处理的
+    // 部署注册表族/身份注册表族。
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+      chainEvent(2n, 0, "OwnershipTransferred", {
+        previousOwner: "0x0000000000000000000000000000000000000000",
+        newOwner: signer
+      }),
+      chainEvent(3n, 0, "StateMachineModulesFrozen", { moduleSetHash: patchHash }),
+      chainEvent(4n, 0, "DeploymentDeprecated", {
+        deploymentId: deploymentIdV1,
+        reasonHash: patchHash,
+        reasonURI: "ipfs://deployment-reason"
+      }),
+      chainEvent(5n, 0, "IdentityBindingRevoked", {
+        bindingId: bytes32Hex("7001"),
+        reasonHash: patchHash,
+        reasonURI: "",
+        revoker: signer
+      }),
+      chainEvent(6n, 0, "SomeFutureEvent", { planId })
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+
+    expect(snapshot.unknownEventCount).toBe(1);
+    expect(snapshot.eventCount).toBe(6);
+    // 零投影分支不产生订单/模块投影（PlanRegistered 只建 plan 桶）。
+    expect(Object.keys(snapshot.stateMachineOrders)).toEqual([]);
+    expect(Object.keys(snapshot.stateMachineModules)).toEqual([]);
+  });
+
+  it("projects the OrderLinked originPlanId onto the child order trigger link", () => {
+    // OrderLinked 携带 originPlanId（触发源单的 plan 维度）：triggerLink
+    // 投影不得丢弃该字段——跨 plan 链接触发时，源单定位必须带 plan 维度，
+    // 裸 triggerOriginOrderId 在同号订单跨 plan 复用时定位不了源单。
+    const orderLinkModuleAddress = "0x6666666666666666666666666666666666666666";
+    const originPlanId = bytes32Hex("707");
+    const originOrderId = bytes32Hex("808");
+    const triggeredOrderId = bytes32Hex("909");
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "StateMachineModuleSet", {
+        moduleId: bytes32Text("uvp.module.order-link.v1"),
+        previousModule: "0x0000000000000000000000000000000000000000",
+        newModule: orderLinkModuleAddress
+      }),
+      chainEvent(2n, 0, "OrderLinked", {
+        triggeredOrderId,
+        triggerOriginOrderId: originOrderId,
+        triggerStageId: stageId,
+        planId,
+        originPlanId,
+        originSourceId: sourceId,
+        originSignalId: signalId
+      }, orderLinkModuleAddress)
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const childOrder = snapshot.stateMachineOrders[
+      stateMachineScopedKey(31337, contractAddress, planId, triggeredOrderId)
+    ];
+
+    expect(childOrder?.triggerLink).toMatchObject({
+      triggeredOrderId,
+      triggerOriginOrderId: originOrderId,
+      triggerStageId: stageId,
+      originPlanId,
+      originSourceId: sourceId,
+      originSignalId: signalId
+    });
+    // 模块已登记：归一化命中，无未归因诊断。
+    expect(snapshot.unresolvedModuleOrderEventCount).toBe(0);
+  });
+
   it("enriches the same planId on every deployment from the artifact vocabulary (content-scoped, not address-scoped)", () => {
     // 词表两表按 planId 从编译产物富集：planId 由 planHash 派生
     // （同 planId = 同 plan 内容），跨部署复用同 planId 时每个部署的 plan 桶
@@ -2891,10 +2968,12 @@ describe("indexer projection replay", () => {
           return canonicalBlocks.get(blockNumber) ?? zeroBlockHash();
         }
       };
+      const rollbackProbe = new ReorgRollbackProbe();
       const indexer = new IndexerService({
         config: testConfig(),
         eventSource,
-        store
+        store,
+        logger: rollbackProbe
       });
       await indexer.rebuildFromDeploymentBlockWithSummary();
 
@@ -2903,17 +2982,25 @@ describe("indexer projection replay", () => {
       await indexer.refreshFromCursorWithSummary();
       await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
         .resolves.toMatchObject({ nextBlock: 2501n, blockHash: blockHashHex("orig-2500") });
+      expect(rollbackProbe.rollbackCount).toBe(0);
 
-      // 浅 reorg：tip 块 2600 换哈希。fromBlock=2601 > 1000 窗口，已存事件
-      //（块 1-3）全部在窗口下界之下——不能据此判定"reorg 深于窗口"要求
-      // 人工 full rebuild，须回退到全库最新锚点（块 3）核对一致后继续。
+      // 浅 reorg：必须触及 cursor 高度块 2500（追加前哈希连续性校验的
+      // 锚点）才会被发现——只换 tip 块 2600 的哈希时校验在 2500 上照常
+      // 通过，回滚路径根本不进入（假绿）。fromBlock=2501 > 1000 窗口，
+      // 已存事件（块 1-3）全部在窗口下界之下——不能据此判定"reorg 深于
+      // 窗口"要求人工 full rebuild，须回退到全库最新锚点（块 3）核对
+      // 一致后继续。
       canonicalBlocks = new Map<bigint, Hex>([
         ...canonicalBlocks,
+        [2500n, blockHashHex("fork-2500")],
         [2600n, blockHashHex("fork-2600")]
       ]);
       finalizedBlock = 2600n;
       const result = await indexer.refreshFromCursorWithSummary();
 
+      // 回滚路径必须真实进入（更旧锚点回验）：探测 reorg 回滚警告，
+      // 防止"分叉不触及 cursor 高度、校验照常通过"的假绿复现。
+      expect(rollbackProbe.rollbackCount).toBe(1);
       expect(result.summary).toMatchObject({ syncStatus: "indexed" });
       await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
         .resolves.toMatchObject({ nextBlock: 2601n, blockHash: blockHashHex("fork-2600") });
@@ -3499,25 +3586,33 @@ describe("indexer projection replay", () => {
           return canonicalBlocks.get(blockNumber) ?? zeroBlockHash();
         }
       };
+      const rollbackProbe = new ReorgRollbackProbe();
       const indexer = new IndexerService({
         config: testConfig(),
         eventSource,
-        store
+        store,
+        logger: rollbackProbe
       });
       await indexer.rebuildFromDeploymentBlockWithSummary();
 
       finalizedBlock = 2500n;
       await indexer.refreshFromCursorWithSummary();
+      expect(rollbackProbe.rollbackCount).toBe(0);
 
-      // reorg 同时触及块 3（最新锚点）与 tip：块 2 仍一致 → 回滚到块 2。
+      // reorg 必须触及 cursor 高度块 2500 才会被哈希连续性校验发现（只
+      // 换块 3/2600 时校验在 2500 上照常通过，回滚路径不进入——假绿）。
+      // 同时触及块 3（最新锚点）：块 2 仍一致 → 回滚到块 2（更旧锚点）。
       canonicalBlocks = new Map<bigint, Hex>([
         ...canonicalBlocks,
         [3n, blockHashHex("fork-3")],
+        [2500n, blockHashHex("fork-2500")],
         [2600n, blockHashHex("fork-2600")]
       ]);
       finalizedBlock = 2600n;
       const result = await indexer.refreshFromCursorWithSummary();
 
+      // 更旧锚点回验路径必须真实进入：探测 reorg 回滚警告。
+      expect(rollbackProbe.rollbackCount).toBe(1);
       expect(result.summary.syncStatus).toBe("indexed");
       await expect(store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" }))
         .resolves.toMatchObject({ nextBlock: 2601n, blockHash: blockHashHex("fork-2600") });
@@ -4071,6 +4166,30 @@ async function waitForCondition(predicate: () => boolean): Promise<void> {
 
 function bytes32Text(value: string): string {
   return `0x${Buffer.from(value, "utf8").toString("hex").padEnd(64, "0")}`;
+}
+
+/** reorg 回滚路径探测：捕获 "rolled back projections after chain reorg" 警告。 */
+class ReorgRollbackProbe {
+  #rollbacks = 0;
+
+  get rollbackCount(): number {
+    return this.#rollbacks;
+  }
+
+  warn(message: string): void {
+    if (message.includes("rolled back projections after chain reorg")) {
+      this.#rollbacks += 1;
+    }
+  }
+
+  info(): void {
+  }
+
+  error(): void {
+  }
+
+  debug(): void {
+  }
 }
 
 function blockHashHex(label: string): Hex {

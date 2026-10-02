@@ -565,12 +565,14 @@ export class IndexerService implements LifecycleService {
         eventCount: summary.eventCount,
         stateMachineOrderCount: summary.stateMachineOrderCount,
         identityBindingCount: summary.identityBindingCount,
+        unresolvedIdentityRevokeEventCount: identitySnapshot.unresolvedRevokeEventCount ?? 0,
         mismatchCount: summary.mismatchCount,
         unresolvedModuleOrderEventCount: snapshot.unresolvedModuleOrderEventCount ?? 0,
         unresolvedDockEventCount: snapshot.unresolvedDockEventCount ?? 0,
         unresolvedStageActivationEventCount: snapshot.unresolvedStageActivationEventCount ?? 0,
         unresolvedDockTargetDeploymentCount: snapshot.unresolvedDockTargetDeploymentCount ?? 0,
         capabilityEnrichmentMismatchCount: snapshot.capabilityEnrichmentMismatchCount ?? 0,
+        unknownEventCount: snapshot.unknownEventCount ?? 0,
         unresolvedLogCount: this.#consumeUnresolvedLogCount(),
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
@@ -832,6 +834,7 @@ export class IndexerService implements LifecycleService {
       : events;
     const enrichmentOptions = await this.#planCapabilityTablesFor(enrichmentEvents);
 
+    let identitySnapshot: Awaited<ReturnType<typeof rebuildIdentityProjections>> | undefined;
     const result = await durableStore.withTransaction(async () => {
       // 崩溃窗口残留清扫（语义见 #sweepCommittedButUnadvancedEvents）：
       // 残留行的投影只有重放能清，删除必须与重放同事务。
@@ -846,7 +849,7 @@ export class IndexerService implements LifecycleService {
       const snapshot = rebuildOrderProjections(allEvents, {
         ...(enrichmentOptions ?? {})
       });
-      const identitySnapshot = rebuildIdentityProjections(allEvents);
+      identitySnapshot = rebuildIdentityProjections(allEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
       // 重复/矛盾投递计数：投影重建已在上面同一事务内执行（apply 失败
@@ -923,6 +926,8 @@ export class IndexerService implements LifecycleService {
       unresolvedStageActivationEventCount: result.snapshot.unresolvedStageActivationEventCount ?? 0,
       unresolvedDockTargetDeploymentCount: result.snapshot.unresolvedDockTargetDeploymentCount ?? 0,
       capabilityEnrichmentMismatchCount: result.snapshot.capabilityEnrichmentMismatchCount ?? 0,
+      unknownEventCount: result.snapshot.unknownEventCount ?? 0,
+      unresolvedIdentityRevokeEventCount: identitySnapshot?.unresolvedRevokeEventCount ?? 0,
       unresolvedLogCount: this.#consumeUnresolvedLogCount(),
       nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus

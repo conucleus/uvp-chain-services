@@ -8,7 +8,7 @@ import {
   buildOperatorOpsSummary
 } from "../diagnostics.js";
 import type { AdminOpsActionEffect, ApiRequest, ApiResponse } from "../route-context.js";
-import { decodePathParameter, readApiHeader } from "../route-context.js";
+import { decodePathParameter, normalizeRequestId, readApiHeader } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions.retry" | "indexer.sweep_pending";
@@ -335,14 +335,6 @@ function requestIdFromApiHeaders(headers: ApiRequest["headers"]): string {
   const explicit = normalizeRequestId(readApiHeader(headers, "x-request-id")) ??
     normalizeRequestId(readApiHeader(headers, "x-uvp-request-id"));
   return explicit ?? `req_${randomUUID()}`;
-}
-
-function normalizeRequestId(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  if (!trimmed || !/^[A-Za-z0-9._:-]{1,128}$/.test(trimmed)) {
-    return undefined;
-  }
-  return trimmed;
 }
 
 function actionIdFor(action: AdminOpsActionName, requestId: string, targetId: string | undefined): string {

@@ -267,3 +267,17 @@ export function readApiHeader(headers: ApiRequest["headers"], name: string): str
   return headers[name] ?? headers[name.toLowerCase()] ?? Object.entries(headers)
     .find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
 }
+
+/**
+ * 客户端自报请求标识的清洗口径（x-request-id / x-uvp-request-id 等共用）：
+ * trim 后非空、≤128 字符、可打印 ASCII 白名单（字母/数字/`._:-`）才采信；
+ * 非法值返回 undefined 由调用方丢弃重建。请求 id 会原样回写响应头并落
+ * 日志——不清洗的采信等于把客户端任意字节放进日志与响应头（注入面）。
+ */
+export function normalizeRequestId(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || !/^[A-Za-z0-9._:-]{1,128}$/.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}

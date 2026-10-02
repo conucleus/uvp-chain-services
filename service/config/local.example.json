@@ -17,7 +17,6 @@
   },
   "relayer": {
     "businessSigning": "forbidden",
-    "gasSignerRef": "local-keystore:relayer-gas-payer",
     "maxRetries": 3
   },
   "api": {

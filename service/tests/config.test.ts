@@ -341,6 +341,15 @@ describe("chain-services config", () => {
     expect(config.relayer.maxRetries).toBe(5);
   });
 
+  it("ignores the removed UVP_RELAYER_TX_SIGNER_REF dead knob (no consumer ever read gasSignerRef)", () => {
+    // 死配置链销项：UVP_RELAYER_TX_SIGNER_REF 曾被解析进 relayer.gasSignerRef
+    // 但全仓无消费方。钉住"设置了也不再进入配置对象"，防止该死键复活。
+    const config = loadConfigFromEnv({
+      UVP_RELAYER_TX_SIGNER_REF: "local-keystore:relayer-gas-payer"
+    });
+    expect(config.relayer).not.toHaveProperty("gasSignerRef");
+  });
+
   it("loads Store auth config with local dev-header default and JWT settings", () => {
     expect(loadConfigFromEnv({}).storeAuth).toEqual({
       mode: "dev_headers",

@@ -281,6 +281,29 @@ function buildReconcileDiagnostics(
   };
 }
 
+/**
+ * 探针/恢复入口（/healthz /readyz /admin/ops）的存储读包装：读失败不抛
+ * （抛错会让 HTTP 包装层回 500，故障时恰好丢失恢复入口），而是携带
+ * 脱敏原因的 unavailable 事实，由汇总层计入 not-ready 原因。
+ */
+async function readDiagnosticsStoreValue<TValue>(
+  read: () => Promise<TValue>
+): Promise<{ readonly ok: true; readonly value: TValue } | { readonly ok: false; readonly degradedReason: string }> {
+  try {
+    return { ok: true, value: await read() };
+  } catch (error) {
+    return { ok: false, degradedReason: redactErrorMessage(error) };
+  }
+}
+
+function storeUnavailableDiagnostics(degradedReason: string): Record<string, unknown> {
+  return {
+    configured: true,
+    unavailable: true,
+    degradedReason
+  };
+}
+
 async function buildSubmissionDiagnostics(
   store: ProductSubmissionStore | undefined
 ): Promise<Record<string, unknown>> {
@@ -297,7 +320,11 @@ async function buildSubmissionDiagnostics(
     };
   }
 
-  const submissions = await store.listSubmissions();
+  const submissionsResult = await readDiagnosticsStoreValue(() => store.listSubmissions());
+  if (!submissionsResult.ok) {
+    return storeUnavailableDiagnostics(submissionsResult.degradedReason);
+  }
+  const submissions = submissionsResult.value;
   const attempts = submissions.flatMap((submission) => [...submission.attempts]);
   const deadLetters = submissions.filter((submission) =>
     submission.deadLetter || submission.attempts.some((attempt) => attempt.deadLetter)
@@ -334,8 +361,13 @@ async function buildGovernanceTxDiagnostics(
     };
   }
 
-  const logs = [...(await store.listIdentityTxLogs())]
-    .sort(compareGovernanceUpdatedDesc);
+  // 与 submissions 同口径：治理台账读失败按 degraded 事实呈现，
+  // 不让 /healthz /readyz /admin/ops 落进兜底 500。
+  const logsResult = await readDiagnosticsStoreValue(() => store.listIdentityTxLogs());
+  if (!logsResult.ok) {
+    return storeUnavailableDiagnostics(logsResult.degradedReason);
+  }
+  const logs = [...logsResult.value].sort(compareGovernanceUpdatedDesc);
 
   return {
     configured: true,
@@ -482,6 +514,8 @@ function operationalNotReadyReasons(diagnostics: Record<string, unknown>): reado
   const reconcile = (diagnostics.reconcile ?? {}) as { readonly lastError?: string | null };
   const evidenceStorage = (diagnostics.evidenceStorage ?? {}) as { readonly readiness?: string };
   const storeMetadata = (diagnostics.storeMetadata ?? {}) as { readonly readiness?: string };
+  const submissions = (diagnostics.submissions ?? {}) as { readonly unavailable?: boolean };
+  const governanceTxs = (diagnostics.governanceTxs ?? {}) as { readonly unavailable?: boolean };
 
   if (preflight.status === "failed") {
     reasons.push("preflight_failed");
@@ -497,6 +531,14 @@ function operationalNotReadyReasons(diagnostics: Record<string, unknown>): reado
   }
   if (storeMetadata.readiness === "degraded") {
     reasons.push("store_metadata_degraded");
+  }
+  // 存储故障 = 服务不可用（不是内部错误）：/readyz 503 携带原因，
+  // /admin/ops 恢复入口在故障时仍可访问（呈现 degraded 事实）。
+  if (submissions.unavailable === true) {
+    reasons.push("submission_store_unavailable");
+  }
+  if (governanceTxs.unavailable === true) {
+    reasons.push("governance_store_unavailable");
   }
   return reasons;
 }

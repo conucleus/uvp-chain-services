@@ -314,6 +314,11 @@ export interface NotificationRunSummary {
   readonly failed: number;
   readonly skipped: number;
   readonly existing: number;
+  /**
+   * reorg 失效桶：本轮命中了 status=invalidated 的既有投递（终态守卫原样
+   * 返回）。不设此桶时 deliveryIntents 与各桶之和会出现不可解释差额。
+   */
+  readonly invalidated: number;
 }
 
 export type NotificationProcessSummary = NotificationRunSummary;
@@ -443,7 +448,8 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         sent: 0,
         failed: 0,
         skipped: 0,
-        existing: 0
+        existing: 0,
+        invalidated: 0
       };
 
       const signalEvents = finalizedSignalSubmittedEvents(events, finalizedBlock);
@@ -2170,6 +2176,11 @@ function updateIntentSummary(
       return;
     case "dead_letter":
       summary.existing += 1;
+      return;
+    case "invalidated":
+      // reorg 回滚失效的既有投递（终态守卫原样返回）：单独计数，
+      // 汇总不再出现 deliveryIntents 与各桶之和的不可解释差额。
+      summary.invalidated += 1;
       return;
   }
 }

@@ -40,6 +40,39 @@ describe("identity registry projection", () => {
         revokeReasonHash: reasonHash,
       }),
     ]);
+    // 已注册 binding 的撤销正常落地，不产生未知计数。
+    expect(snapshot.unresolvedRevokeEventCount).toBe(0);
+  });
+
+  it("counts revocations that point at an unknown binding instead of silently dropping them", () => {
+    // 撤销指向未知 binding（未注册/回放顺序缺口/键不一致）：撤销被跳过，
+    // 但必须显式计数留痕——静默 return 会让"链上已撤销、投影仍 active"
+    // 的缺口不可观测。
+    const snapshot = rebuildIdentityProjections([
+      event(2n, 0, "IdentityBindingRegistered", {
+        bindingId,
+        subjectId,
+        account,
+        descriptorHash,
+        descriptorURI: "https://store/identities/1",
+        registrar,
+      }),
+      event(3n, 0, "IdentityBindingRevoked", {
+        // 该 bindingId 从未注册。
+        bindingId: "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        reasonHash,
+        reasonURI: "https://store/identity-revocations/2",
+        revoker: registrar,
+      }),
+    ]);
+
+    expect(snapshot.unresolvedRevokeEventCount).toBe(1);
+    // 已注册 binding 不受未知撤销影响。
+    expect(Object.values(snapshot.bindings)).toEqual([
+      expect.objectContaining({ bindingId, status: "active" }),
+    ]);
+    // 未知撤销仍是已处理事件（eventCount 覆盖全部身份事件）。
+    expect(snapshot.eventCount).toBe(2);
   });
 
   it("exposes bindings through the projection store and public API", async () => {

@@ -84,6 +84,12 @@ export interface ProjectionSnapshot {
    * 该 plan 两表保持为空（词表相关推导退化为不可用）。不允许静默。
    */
   readonly capabilityEnrichmentMismatchCount?: number;
+  /**
+   * 真未知事件计数：事件流的 eventName 不属于任何已收口的重放族
+   * （状态机/模块/部署注册表/身份注册表），也没有显式零投影分支。
+   * 新合约事件上线而投影未跟进时在此显式计数，不静默。
+   */
+  readonly unknownEventCount?: number;
 }
 
 export type Writable<TValue> = {
@@ -99,6 +105,7 @@ export interface ProjectionReplayDiagnostics {
   unresolvedStageActivationEventCount: number;
   unresolvedDockTargetDeploymentCount: number;
   capabilityEnrichmentMismatchCount: number;
+  unknownEventCount: number;
 }
 
 export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
@@ -116,7 +123,8 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     unresolvedDockEventCount: 0,
     unresolvedStageActivationEventCount: 0,
     unresolvedDockTargetDeploymentCount: 0,
-    capabilityEnrichmentMismatchCount: 0
+    capabilityEnrichmentMismatchCount: 0,
+    unknownEventCount: 0
   };
 }
 

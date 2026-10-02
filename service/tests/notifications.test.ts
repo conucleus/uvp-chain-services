@@ -656,6 +656,51 @@ describe("signal-routed notifications", () => {
     expect(invalidatedFeedItem?.message).toContain("订单证明");
   });
 
+  it("counts re-processed signals landing on invalidated deliveries in their own summary bucket", async () => {
+    // reorg 失效后的同一信号在 canonical fork 上重新出现（重放/补读）：
+    // 终态守卫原样返回 invalidated 行——run summary 必须把该投递计入
+    // invalidated 桶，deliveryIntents 与各桶之和不得出现不可解释差额
+    //（此前后者静默缺桶）。
+    const highEvent = signalEvent(9n, requiredDependency(customsDependencyB), bytes32Hex("6009"));
+    const { store, supplierStore } = await notificationStore({
+      supportedStageIds: [requiredHook(customsHook).stageId],
+      events: [highEvent],
+      finalizedBlock: 10n
+    });
+    const service = createNotificationService({
+      store,
+      supplierMetadataStore: supplierStore,
+      productSchemaResolver: {
+        async getProductSchemaByPlan() {
+          return customsStoreProductSchema;
+        }
+      },
+      dispatcher: {
+        async send() {
+          return { ok: true };
+        }
+      }
+    });
+
+    const first = await service.processSignalSubmittedEvents([highEvent]);
+    expect(first).toMatchObject({ deliveryIntents: 1, sent: 1, invalidated: 0 });
+    await service.invalidateDeliveriesAboveBlock({ chainId: 31337, blockNumber: 7n });
+    await expect(service.listDeliveries({ status: "invalidated" })).resolves.toHaveLength(1);
+
+    const replay = await service.processSignalSubmittedEvents([highEvent]);
+    expect(replay).toMatchObject({
+      signalsProcessed: 1,
+      deliveryIntents: 1,
+      sent: 0,
+      failed: 0,
+      skipped: 0,
+      existing: 0,
+      invalidated: 1
+    });
+    // invalidated 行保持终态，不重复投递。
+    await expect(service.listDeliveries({ status: "invalidated" })).resolves.toHaveLength(1);
+  });
+
   it("redacts transport error messages before persisting them as lastError", async () => {
     // transport 失败文本（可能携带端点 URL 与凭权查询参数）先过
     // redactErrorMessage 再落投递台账，对齐兄弟路径。

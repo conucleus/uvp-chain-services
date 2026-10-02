@@ -567,6 +567,56 @@ describe("ops health diagnostics", () => {
     });
   });
 
+  it("reports storage failures as 503-with-reason on /readyz instead of letting the probe die with 500", async () => {
+    // 探针/恢复入口在存储故障时恰须可用：submission/governance 台账读
+    // 失败不得把 /healthz /readyz /admin/ops 打成 HTTP 包装层的 500——
+    // 按服务不可用（503）+ 原因呈现，/admin/ops/status 仍可访问。
+    const failingSubmissionStore = new InMemoryProductSubmissionStore();
+    (failingSubmissionStore as unknown as { listSubmissions(): Promise<readonly ProductSubmissionDTO[]> }).listSubmissions =
+      async () => {
+        throw new Error("postgres unavailable: connection refused (password=secret)");
+      };
+    const failingGovernanceStore = new InMemoryGovernanceStore();
+    (failingGovernanceStore as unknown as { listIdentityTxLogs(): Promise<readonly IdentityTxLogDTO[]> }).listIdentityTxLogs =
+      async () => {
+        throw new Error("governance ledger unreachable");
+      };
+
+    const router = createApiRouter(new MemoryProjectionStore(), {
+      productRuntimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      submissionStore: failingSubmissionStore,
+      governanceStore: failingGovernanceStore
+    });
+
+    const readyResponse = await router.handle({ method: "GET", pathname: "/readyz" });
+    expect(readyResponse.status).toBe(503);
+    expect(readyResponse.body).toMatchObject({
+      ready: false,
+      status: "not_ready",
+      reasons: expect.arrayContaining(["submission_store_unavailable", "governance_store_unavailable"])
+    });
+
+    // healthz 聚合健康位如实 degraded（不是 500）。
+    const healthResponse = await router.handle({ method: "GET", pathname: "/healthz" });
+    expect(healthResponse.status).toBe(200);
+    expect(healthResponse.body).toMatchObject({ status: "degraded" });
+
+    // 恢复入口保持可用，且呈现脱敏后的存储故障事实。
+    const opsResponse = await router.handle({
+      method: "GET",
+      pathname: "/admin/ops/status",
+      headers: adminHeaders
+    });
+    expect(opsResponse.status).toBe(200);
+    expect(opsResponse.body).toMatchObject({
+      submissions: { unavailable: true, degradedReason: expect.stringContaining("connection refused") },
+      governanceTxs: { unavailable: true, degradedReason: "governance ledger unreachable" }
+    });
+    expect(JSON.stringify(opsResponse.body)).not.toContain("password=secret");
+  });
+
   it("redacts private keys, full signatures, RPC tokens, presigned URLs, and evidence plaintext", () => {
     const redacted = redactSecrets({
       privateKey: "0x1111111111111111111111111111111111111111111111111111111111111111",

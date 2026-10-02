@@ -113,9 +113,10 @@ describe('uvp error taxonomy pinning (chain-services)', () => {
 /**
  * Classification-point sources whose emitted error codes the taxonomy must
  * fully register. Scoped to the retry/terminal classification lanes (relayer,
- * submissions/safe-broadcast, stage-patches, reconcile); pure HTTP
- * request-validation codes from the API routes are out of the chain retry
- * taxonomy's scope and live in OUT_OF_TAXONOMY_SCOPE below.
+ * submissions/safe-broadcast, stage-patches, reconcile, governance identity
+ * broadcast, Product BFF trigger broadcast); pure HTTP request-validation
+ * codes from the API routes are out of the chain retry taxonomy's scope and
+ * live in OUT_OF_TAXONOMY_SCOPE below.
  */
 const CLASSIFICATION_SOURCES: readonly string[] = [
   'src/submissions/broadcast-adapter.ts',
@@ -124,6 +125,12 @@ const CLASSIFICATION_SOURCES: readonly string[] = [
   'src/stage-patches/broadcast-adapter.ts',
   'src/stage-patches/service.ts',
   'src/reconcile/worker.ts',
+  // 治理身份注册/撤销的链上广播车道（broadcast 分类点在 adapter，persist
+  // 侧失败码在 service）与 Product BFF 触发订单广播车道（trigger.ts 的
+  // receipt/revert 分类）——同属在役重试/终态分类面，纳入扫描。
+  'src/governance/adapter.ts',
+  'src/governance/service.ts',
+  'src/product/query/bff/trigger.ts',
 ];
 
 /** Patterns that surface every emitted errorCode literal in the sources above. */
@@ -235,6 +242,22 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'target_stage_not_started',
   'target_stage_started_assign_rejected',
   'typed_data_mismatch',
+  // 治理身份广播与 Product BFF 触发广播车道的在役分类码：governance/
+  // BFF-trigger 广播已纳入 CLASSIFICATION_SOURCES 扫描面，但词表本体
+  //（uvp-protocol 仓的 uvp-error-taxonomy.v1.json，sha256 冻结）尚未为
+  // 它们登记 chain-services internal_names——词表收口不归本仓改，先在
+  // 此显式登记为"未入冻结词表"，防止扫描面扩大后测试假红/静默漂移。
+  // 已入词表的车道码（transaction_reverted / relayer_business_signer_reuse /
+  // transaction_receipt_unknown / persist_failed）不受此影响。
+  'broadcast_failed',
+  'governance_adapter_failed',
+  'governance_broadcast_disabled',
+  'governance_chain_id_mismatch',
+  'governance_chain_id_unavailable',
+  'governance_registry_owner_unavailable',
+  'governance_signer_not_authorized',
+  'trigger_order_broadcast_failed',
+  'trigger_order_reverted',
 ]);
 
 function serviceRoot(): string {
