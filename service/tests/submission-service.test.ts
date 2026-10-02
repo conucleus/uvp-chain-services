@@ -496,6 +496,148 @@ describe("product task submissions", () => {
     expect(broadcast.broadcast).not.toHaveBeenCalled();
   });
 
+  it("probes the chain before expiring a TTL-dead retry and recovers the on-chain submission", async () => {
+    // UB-4：TTL 到期重试先探链。崩溃孤儿（广播已发出、落档前进程
+    // 死亡，或 rpc 超时不携哈希）可能已把这笔业务提交送上网——deadline
+    // 检查先于探链会让这类重试永不探链、误落 expired 终态。六元业务
+    // 身份在链上已呈现时按链重算收口（confirmed + prepare 消费）。
+    let current = new Date("2026-04-28T00:00:00Z");
+    const broadcast: SubmissionBroadcastAdapter = {
+      broadcast: vi.fn(async (): Promise<SubmissionBroadcastResult> => ({ status: "submitted" as const, txHash: txHash("1") }))
+    };
+    const fixture = await submissionFixture({
+      now: () => current,
+      broadcastAdapter: broadcast,
+      probePriorSubmissionOnChain: async () => ({
+        outcome: "confirmed",
+        txHash: txHash("7"),
+        blockNumber: "31"
+      })
+    });
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+    current = new Date("2026-04-28T00:11:00Z");
+
+    const submission = await fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    });
+
+    expect(submission).toMatchObject({
+      status: "confirmed",
+      broadcastStatus: "confirmed",
+      txHash: txHash("7"),
+      blockNumber: "31",
+      signatureStatus: "signature_verified"
+    });
+    expect(broadcast.broadcast).not.toHaveBeenCalled();
+    // 链上已收口：prepare 被消费，同 prepareId 的再重放不再出广播。
+    await expect(fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    })).rejects.toMatchObject({ code: "prepare_already_used", status: 409 });
+  });
+
+  it("keeps expiring a TTL-dead retry when the chain probe finds no business submission", async () => {
+    // 探链 absent（六元业务身份未在链上呈现）：expired 如旧——探链只是
+    // 收回"可能已上链"的孤儿，不是无限延长授权窗口。
+    let current = new Date("2026-04-28T00:00:00Z");
+    const broadcast: SubmissionBroadcastAdapter = {
+      broadcast: vi.fn(async (): Promise<SubmissionBroadcastResult> => ({ status: "submitted" as const, txHash: txHash("1") }))
+    };
+    const fixture = await submissionFixture({
+      now: () => current,
+      broadcastAdapter: broadcast,
+      probePriorSubmissionOnChain: async () => ({ outcome: "absent" })
+    });
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+    current = new Date("2026-04-28T00:11:00Z");
+
+    const submission = await fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    });
+
+    expect(submission).toMatchObject({
+      status: "expired",
+      errorCode: "submission_expired",
+      broadcastStatus: "not_attempted"
+    });
+    expect(broadcast.broadcast).not.toHaveBeenCalled();
+  });
+
+  it("treats a failing chain probe on a TTL-dead retry as retryable instead of expiring", async () => {
+    // 探链本身失败（transport/投影读故障）≠ 链上没有：按可重试失败落档
+    //（transaction_receipt_unknown），prepare 不消费——同一 prepareId 的
+    // 下一次重试再探；探链恢复后按链收口。
+    let current = new Date("2026-04-28T00:00:00Z");
+    const broadcast: SubmissionBroadcastAdapter = {
+      broadcast: vi.fn(async (): Promise<SubmissionBroadcastResult> => ({ status: "submitted" as const, txHash: txHash("1") }))
+    };
+    const probeResults: Array<{ outcome: "unknown" } | { outcome: "confirmed"; txHash: Hex; blockNumber?: string }> = [
+      { outcome: "unknown" },
+      { outcome: "unknown" },
+      { outcome: "confirmed", txHash: txHash("8"), blockNumber: "32" }
+    ];
+    const fixture = await submissionFixture({
+      now: () => current,
+      broadcastAdapter: broadcast,
+      probePriorSubmissionOnChain: async () => {
+        const next = probeResults.shift();
+        if (!next) {
+          throw new Error("no scripted probe outcome");
+        }
+        if (next.outcome === "unknown") {
+          throw new Error("projection store transport down");
+        }
+        return next;
+      }
+    });
+    const prepared = await prepare(fixture);
+    const signature = await signPrepared(prepared);
+    current = new Date("2026-04-28T00:11:00Z");
+
+    const first = await fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    });
+    expect(first).toMatchObject({
+      status: "failed",
+      errorCode: "transaction_receipt_unknown",
+      retryable: true,
+      retryState: "retryable",
+      deadLetter: false,
+      broadcastStatus: "failed"
+    });
+
+    // prepare 未消费：同一 prepareId 重试再探，探链恢复即按链收口。
+    const recovered = await fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    });
+    expect(recovered).toMatchObject({
+      status: "failed",
+      errorCode: "transaction_receipt_unknown"
+    });
+    const healed = await fixture.service.submit(task.taskId, {
+      prepareId: prepared.prepareId,
+      walletAddress: submitter,
+      signature
+    });
+    expect(healed).toMatchObject({
+      status: "confirmed",
+      txHash: txHash("8"),
+      blockNumber: "32"
+    });
+    expect(broadcast.broadcast).not.toHaveBeenCalled();
+  });
+
   it("keeps the prepared signal reusable when broadcasting is disabled and rejects duplicates when it is not", async () => {
     const fixture = await submissionFixture();
     const prepared = await prepare(fixture);
@@ -2016,6 +2158,7 @@ async function submissionFixture(options: {
   readonly authorization?: Parameters<typeof createProductSubmissionService>[0]["authorization"];
   readonly task?: ProductTaskDTO;
   readonly store?: ProductSubmissionStore;
+  readonly probePriorSubmissionOnChain?: Parameters<typeof createProductSubmissionService>[0]["probePriorSubmissionOnChain"];
 } = {}): Promise<{
   readonly service: ProductSubmissionService;
   readonly evidenceService: EvidenceService;
@@ -2060,6 +2203,9 @@ async function submissionFixture(options: {
     authorization,
     ...(options.broadcastAdapter ? { broadcastAdapter: options.broadcastAdapter } : {}),
     ...(options.store ? { store: options.store } : {}),
+    ...(options.probePriorSubmissionOnChain
+      ? { probePriorSubmissionOnChain: options.probePriorSubmissionOnChain }
+      : {}),
     now,
     prepareIdFactory: () => "prep_1",
     submissionIdFactory: () => "sub_1",

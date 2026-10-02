@@ -81,6 +81,31 @@ class ScriptedOutcomeTriggerAdapter implements ProductOrderTriggerBroadcastAdapt
   }
 }
 
+/**
+ * 按调用次序回放脚本化结果的触发适配器：重试流（先失败后成功）需要
+ * 同一适配器在不同 attempt 上给出不同结局，attempt 记录语义与
+ * ScriptedOutcomeTriggerAdapter 一致。
+ */
+class SequencedOutcomeTriggerAdapter extends MemoryProductOrderTriggerBroadcastAdapter {
+  readonly #outcomes: ProductOrderTriggerBroadcastResult[];
+
+  constructor(outcomes: readonly ProductOrderTriggerBroadcastResult[]) {
+    super();
+    this.#outcomes = [...outcomes];
+  }
+
+  override async broadcastOutsideTrigger(
+    input: ProductBroadcastOutsideTriggerInput,
+  ): Promise<ProductOrderTriggerBroadcastResult> {
+    await super.broadcastOutsideTrigger(input);
+    const outcome = this.#outcomes.shift();
+    if (!outcome) {
+      throw new Error("no scripted outcome left for trigger broadcast");
+    }
+    return outcome;
+  }
+}
+
 describe("product BFF order drafts and invites", () => {
   it("creates an order draft from a published plan and exposes draft participants", async () => {
     const { router } = await createRouterFixture([planRegisteredEvent(1n)]);
@@ -1153,6 +1178,201 @@ describe("product BFF order drafts and invites", () => {
     });
   });
 
+  it("retries a retryable tx-less trigger failure by replaying the same identity (one order per draft)", async () => {
+    // UB-3「重试=同身份重放」：首触发以 rpc 超时形态失败（retryable、
+    // 无 txHash）后，同 draft 的 re-prepare 必须复用既有行的
+    // prepareId/payloadHash/orderId——payloadHash 掺新 prepareId 会派生
+    // 新 chainOrderId，同一稿两笔链上订单（一事两单）。重开只重置
+    // preparedAt 时钟与 deadline，createdAt 保留审计。
+    const retryableTimeout: ProductOrderTriggerBroadcastResult = {
+      status: "failed",
+      errorCode: "rpc_timeout",
+      errorMessage: "RPC request timed out while broadcasting the trigger",
+      retryable: true,
+    };
+    const confirmed: ProductOrderTriggerBroadcastResult = {
+      status: "confirmed",
+      txHash: "0x4242424242424242424242424242424242424242424242424242424242424242",
+      blockNumber: "42",
+      retryable: false,
+    };
+    const triggerAdapter = new SequencedOutcomeTriggerAdapter([retryableTimeout, confirmed]);
+    const { router, productStore } = await createRouterFixture(
+      [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+      triggerAdapter,
+    );
+    const draft = await createReadyDraft(router);
+    const first = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    const firstRegistration = await productStore.getRegistration(
+      first.trigger.triggerId,
+    );
+
+    const failedTrigger = await triggerPreparedDraftRaw(
+      router,
+      draft.draftId,
+      first,
+      testWallet(0),
+    );
+    expect(failedTrigger).toMatchObject({
+      status: 502,
+      body: { error: "rpc_timeout" },
+    });
+    await expect(
+      productStore.getRegistration(first.trigger.triggerId),
+    ).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "rpc_timeout",
+      retryable: true,
+    });
+    // 无 txHash 的失败行才可重开：失败档不得携带 txHash。
+    const failedRegistration = await productStore.getRegistration(
+      first.trigger.triggerId,
+    );
+    expect(failedRegistration?.txHash).toBeUndefined();
+
+    // 同 draft 重试：同身份重放，不再生 prepareId/payloadHash/orderId。
+    const retried = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    const retriedRegistration = await productStore.getRegistration(
+      first.trigger.triggerId,
+    );
+    expect(retried.prepared.prepareId).toBe(first.prepared.prepareId);
+    expect(retried.trigger.triggerId).toBe(first.trigger.triggerId);
+    expect(retried.trigger.orderId).toBe(first.trigger.orderId);
+    expect(retriedRegistration).toMatchObject({
+      status: "prepared",
+      prepareId: firstRegistration!.prepareId,
+      payloadHash: firstRegistration!.payloadHash,
+      idempotencyKey: firstRegistration!.idempotencyKey,
+      orderId: firstRegistration!.orderId,
+      // createdAt 继承旧行（审计），preparedAt/updatedAt 重置为重开时点。
+      createdAt: firstRegistration!.createdAt,
+    });
+    expect(Date.parse(retriedRegistration!.preparedAt ?? "")).toBeGreaterThanOrEqual(
+      Date.parse(firstRegistration!.createdAt),
+    );
+
+    // 重放后的触发走同一 prepareId/同一身份，链上收敛为同一订单。
+    const triggered = await triggerPreparedDraft(
+      router,
+      draft.draftId,
+      retried,
+      testWallet(0),
+    );
+    expect(triggered.trigger).toMatchObject({
+      status: "confirmed",
+      orderId: first.trigger.orderId,
+      txHash: confirmed.txHash,
+    });
+    expect(triggerAdapter.listAttempts()).toHaveLength(2);
+    expect(
+      triggerAdapter.listAttempts().map((attempt) => attempt.orderId),
+    ).toEqual([first.trigger.orderId, first.trigger.orderId]);
+  });
+
+  it("refuses to reopen a failed trigger that carries a txHash (reconcile owns the record)", async () => {
+    // UA-2/UB-3：带 txHash 的失败行永不重开——链上已有可探事实，回执/
+    // 投影复核（对账接管）是其唯一收敛车道。re-prepare 与直提重放都被
+    // 确定性拒绝，不得再生身份（新 payloadHash → 新 chainOrderId）。
+    const triggerAdapter = new ScriptedOutcomeTriggerAdapter({
+      status: "failed",
+      errorCode: "transaction_receipt_unknown",
+      errorMessage: "transaction receipt is missing or has an unknown status",
+      txHash: "0x4343434343434343434343434343434343434343434343434343434343434343",
+      retryable: true,
+    });
+    const { router, productStore } = await createRouterFixture(
+      [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+      triggerAdapter,
+    );
+    const draft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    const failedTrigger = await triggerPreparedDraftRaw(
+      router,
+      draft.draftId,
+      prepared,
+      testWallet(0),
+    );
+    expect(failedTrigger).toMatchObject({
+      status: 502,
+      body: { error: "transaction_receipt_unknown" },
+    });
+    await expect(
+      productStore.getRegistration(prepared.trigger.triggerId),
+    ).resolves.toMatchObject({
+      status: "failed",
+      retryable: true,
+      txHash: "0x4343434343434343434343434343434343434343434343434343434343434343",
+    });
+
+    const rePrepare = await router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+      body: { walletAddress: testWallet(0) },
+    });
+    expect(rePrepare).toMatchObject({
+      status: 409,
+      body: { error: "trigger_already_exists" },
+    });
+
+    const replay = await triggerPreparedDraftRaw(
+      router,
+      draft.draftId,
+      prepared,
+      testWallet(0),
+    );
+    expect(replay).toMatchObject({
+      status: 409,
+      body: { error: "trigger_not_prepared" },
+    });
+    // 只有一次真实广播：被拒的重开没有再生任何链上尝试。
+    expect(triggerAdapter.listAttempts()).toHaveLength(1);
+  });
+
+  it("rejects reusing a failed trigger identity when the retrying wallet is not the original submitter", async () => {
+    // payload 变化不是重试：身份键掺 submitter，换了签名钱包的"重试"
+    // 只能显式走新意图（新 draft）——复用旧行身份会签出另一份
+    // payload/授权面却指向同一 draft 的混乱状态。行内 submitter 漂移
+    // （执行者钱包更换等历史形态）时 prepare 必须响亮拒绝。
+    const triggerAdapter = new ScriptedOutcomeTriggerAdapter({
+      status: "failed",
+      errorCode: "rpc_timeout",
+      errorMessage: "RPC request timed out while broadcasting the trigger",
+      retryable: true,
+    });
+    const { router, productStore } = await createRouterFixture(
+      [...activeDeploymentEvents(), planRegisteredEvent(11n)],
+      triggerAdapter,
+    );
+    const draft = await createReadyDraft(router);
+    const prepared = await prepareDraftTrigger(router, draft.draftId, testWallet(0));
+    await triggerPreparedDraftRaw(
+      router,
+      draft.draftId,
+      prepared,
+      testWallet(0),
+    );
+    // 模拟执行者钱包更换后的旧行漂移：行内 submitter 已非当前触发
+    // 执行者钱包（其余身份字段不变）。
+    const drifted = await productStore.getRegistration(prepared.trigger.triggerId);
+    await productStore.updateRegistration({
+      ...drifted!,
+      submitter: testWallet(9) as Address,
+    });
+
+    const retry = await router.handle({
+      method: "POST",
+      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
+      body: { walletAddress: testWallet(0) },
+    });
+    expect(retry).toMatchObject({
+      status: 409,
+      body: {
+        error: "trigger_retry_payload_changed",
+        details: { triggerId: prepared.trigger.triggerId },
+      },
+    });
+  });
+
   it("refuses edits to a draft that has entered the trigger lifecycle", async () => {
     // 触发负载（payloadHash/授权）在 prepare 时点由草稿快照定形：终态
     //（triggered）与在途（triggering）的稿行是"链上订单从何而来"的档案，
@@ -1899,13 +2119,25 @@ async function triggerPreparedDraft(
   prepared: PreparedTriggerResponse,
   walletAddress: string,
 ): Promise<SubmitProductOrderDraftResult> {
+  const response = await triggerPreparedDraftRaw(router, draftId, prepared, walletAddress);
+  expect(response.status, JSON.stringify(response.body)).toBe(200);
+  return response.body as SubmitProductOrderDraftResult;
+}
+
+/** 触发失败的响亮路径（502 errorCode 透传）：不断言 200，交由用例核对失败面。 */
+async function triggerPreparedDraftRaw(
+  router: ApiRouter,
+  draftId: string,
+  prepared: PreparedTriggerResponse,
+  walletAddress: string,
+): Promise<{ readonly status: number; readonly body: unknown }> {
   const account = privateKeyToAccount(
     testPrivateKey(walletAddressIndex(walletAddress)),
   );
   const signature = await account.signTypedData(
     prepared.prepared.typedData as Parameters<typeof account.signTypedData>[0],
   );
-  const response = await router.handle({
+  return router.handle({
     method: "POST",
     pathname: `/product/order-drafts/${draftId}/trigger`,
     body: {
@@ -1914,8 +2146,6 @@ async function triggerPreparedDraft(
       signature,
     },
   });
-  expect(response.status).toBe(200);
-  return response.body as SubmitProductOrderDraftResult;
 }
 
 async function createInvite(

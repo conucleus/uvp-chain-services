@@ -119,6 +119,7 @@ const expectedMigrationVersions = [
   "0022_product_invite_single_active",
   "0023_participant_wallet_single_role",
   "0024_drop_join_application_open_plan_applicant_uk",
+  "0025_product_trigger_prepared_at",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -315,7 +316,7 @@ describe("durable storage", () => {
     const legacyDirectory = mkdtempSync(join(tmpdir(), "uvp-migrations-legacy-"));
     tempDirs.push(legacyDirectory);
     for (const entry of readdirSync(migrationsDirectory(), { withFileTypes: true })) {
-      if (entry.isFile() && !entry.name.startsWith("0024_")) {
+      if (entry.isFile() && !entry.name.startsWith("0024_") && !entry.name.startsWith("0025_")) {
         copyFileSync(join(migrationsDirectory(), entry.name), join(legacyDirectory, entry.name));
       }
     }
@@ -332,14 +333,16 @@ describe("durable storage", () => {
     ]);
     legacyDatabase.exec(joinApplicationInsert("legacy-application", "applied"));
 
-    // 升级 = 把当前文件集（含 0024）指向旧库：已应用版本 checksum 全部
-    // 命中，仅 0024 待应用——任何已应用文件被原地改写都会在这里被拒。
+    // 升级 = 把当前文件集（含 0024/0025）指向旧库：已应用版本 checksum
+    // 全部命中，仅 0024/0025 待应用——任何已应用文件被原地改写都会在
+    // 这里被拒。
     const upgraded = runSqliteMigrations({
       database: legacyDatabase,
       migrationsDirectory: migrationsDirectory(),
     });
     expect(upgraded.applied.map((migration) => migration.version)).toEqual([
       "0024_drop_join_application_open_plan_applicant_uk",
+      "0025_product_trigger_prepared_at",
     ]);
     expect(uniquePartialIndexNames(legacyDatabase)).toEqual([
       "store_join_application_open_unique",

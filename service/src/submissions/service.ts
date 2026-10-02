@@ -55,6 +55,17 @@ export class ProductSubmissionError extends Error {
   }
 }
 
+/**
+ * TTL 到期重试的探链结论：confirmed = 六元业务身份已在链上呈现
+ *（按链重算收口，txHash 取投影出处）；absent = 链上未见（expired 如旧）；
+ * unknown = 探链本身失败（transport/存储故障）——按可重试处理，不得
+ * 落 expired 终态。
+ */
+export type PriorSubmissionChainProbe =
+  | { readonly outcome: "confirmed"; readonly txHash: Hex; readonly blockNumber?: string }
+  | { readonly outcome: "absent" }
+  | { readonly outcome: "unknown" };
+
 export interface ProductSubmissionServiceOptions {
   readonly productTasks: ProductTaskReader;
   readonly evidenceReader: ProductSubmissionEvidenceReader;
@@ -63,6 +74,17 @@ export interface ProductSubmissionServiceOptions {
   readonly authorization?: SubmissionAuthorizationAdapter;
   readonly broadcastAdapter?: SubmissionBroadcastAdapter;
   readonly store?: ProductSubmissionStore;
+  /**
+   * TTL 到期重试的先探链车道（「重试=同身份重放」UB-4）：deadline 已过
+   * 的同 prepareId 重试不再直接落 expired——崩溃孤儿（reserve 与落档
+   * 之间进程死亡、广播超时不携哈希）可能已把这笔业务提交送上网。按
+   * 六元业务身份查索引器投影：链上已呈现 → 按链重算收口；未呈现 →
+   * expired 如旧；探链本身失败 → 可重试失败（prepare 不消费，稍后
+   * 重试再探）。缺省不装配（保持纯 expired 语义，测试/嵌入场景）。
+   */
+  readonly probePriorSubmissionOnChain?: (
+    prepared: PreparedSubmissionRecord
+  ) => Promise<PriorSubmissionChainProbe>;
   /**
    * resolves the order planId for the on-chain order id from the
    * indexer projection (OrderRegistered/OrderMaterialized carry the indexed
@@ -322,6 +344,88 @@ export function createProductSubmissionService(options: ProductSubmissionService
       // 未验签就烧毁他人的已过期 prepare 等于让无关方替持有人做决定。
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(prepared.deadline) < currentSeconds) {
+        // TTL 到期重试先探链（UB-4）：deadline 检查先于探链会让崩溃孤儿
+        //（广播已发出、落档前进程死亡，或 rpc 超时不携哈希）在 TTL 到期
+        // 后的重试永不探链——链上可能已有这笔业务提交，直接 expired 会
+        // 把"回执存在性"问题误报成"时限"问题。按六元业务身份探链后再
+        // 决定失败语义；探链失败按可重试处理。
+        if (options.probePriorSubmissionOnChain) {
+          let probe: PriorSubmissionChainProbe;
+          try {
+            probe = await options.probePriorSubmissionOnChain(prepared);
+          } catch {
+            probe = { outcome: "unknown" };
+          }
+          if (probe.outcome === "confirmed") {
+            // 链为真相：六元业务身份已呈现即同笔业务提交已生效，按链
+            // 重算收口（confirmed 档 + prepare 消费），台账跟随链。
+            const submissionId = submissionIdFactory();
+            const timestamp = now().toISOString();
+            const submission = withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
+              submissionId,
+              recoveredSubmitter,
+              signatureHash: signatureHashFor(signature),
+              createdAt: timestamp,
+              broadcast: {
+                status: "confirmed",
+                txHash: probe.txHash,
+                ...(probe.blockNumber ? { blockNumber: probe.blockNumber } : {})
+              }
+            }));
+            await withSubmissionStoreTransaction(store, async () => {
+              await store.putSubmission(submission);
+              await store.markPreparedUsed(prepared.prepareId, submissionId, submission.updatedAt);
+            });
+            await audit.record({
+              type: "relayer.submit.result",
+              action: prepared.signalName,
+              outcome: "succeeded",
+              subject: {
+                ...submissionAuditSubject(prepared),
+                submissionId
+              },
+              txHash: probe.txHash,
+              retryable: false,
+              metadata: {
+                recoveredBy: "ttl_expiry_chain_probe",
+                message: "prepared submission deadline expired, but the chain projection already carries this business submission; the ledger follows the chain"
+              }
+            });
+            return submission;
+          }
+          if (probe.outcome === "unknown") {
+            // 探链失败 ≠ 链上没有：按可重试失败落档（不消费 prepare，
+            // 同一 prepareId 的下一次重试再探），不得误落 expired 终态。
+            const submissionId = submissionIdFactory();
+            const timestamp = now().toISOString();
+            const probeUnknown = withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
+              submissionId,
+              recoveredSubmitter,
+              signatureHash: signatureHashFor(signature),
+              createdAt: timestamp,
+              broadcast: {
+                status: "failed",
+                errorCode: "transaction_receipt_unknown",
+                message: "prepared submission deadline expired and the chain probe could not determine whether the prior attempt landed; retry the same prepareId to probe again",
+                retryable: true
+              }
+            }));
+            await store.putSubmission(probeUnknown);
+            await audit.record({
+              type: "relayer.submit.result",
+              action: prepared.signalName,
+              outcome: "failed",
+              subject: {
+                ...submissionAuditSubject(prepared),
+                submissionId
+              },
+              errorCode: "transaction_receipt_unknown",
+              retryable: true
+            });
+            return probeUnknown;
+          }
+          // absent：链上未见此业务提交——expired 如旧（下方原路径）。
+        }
         const expired = withSubmissionReconcileDefaults(
           buildExpiredSubmission(prepared, submissionIdFactory(), now().toISOString(), {
             recoveredSubmitter,

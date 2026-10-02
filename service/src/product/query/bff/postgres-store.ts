@@ -204,8 +204,8 @@ export class PostgresProductBffStore implements ProductBffStore {
          trigger_hook_id, trigger_stage_id, submitter, payload_hash, idempotency_key,
          deadline, typed_data_json, signature, error_code, error_message, retryable,
          creator, authorizations_json, permissions_json, reconcile_status, last_checked_at,
-         receipt_status, projection_status, created_at, updated_at
-       ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33
+         receipt_status, projection_status, created_at, prepared_at, updated_at
+       ) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33, $34
        WHERE NOT EXISTS (SELECT 1 FROM product_order_trigger WHERE draft_id = $3)`,
       registrationValues(registration)
     );
@@ -371,8 +371,8 @@ export class PostgresProductBffStore implements ProductBffStore {
          trigger_hook_id, trigger_stage_id, submitter, payload_hash, idempotency_key,
          deadline, typed_data_json, signature, error_code, error_message, retryable,
          creator, authorizations_json, permissions_json, reconcile_status, last_checked_at,
-         receipt_status, projection_status, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33)
+         receipt_status, projection_status, created_at, prepared_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb, $21, $22, $23, $24, $25, $26::jsonb, $27::jsonb, $28, $29, $30, $31, $32, $33, $34)
        ON CONFLICT(trigger_id)
        DO UPDATE SET
          prepare_id = excluded.prepare_id,
@@ -406,6 +406,7 @@ export class PostgresProductBffStore implements ProductBffStore {
          receipt_status = excluded.receipt_status,
          projection_status = excluded.projection_status,
          created_at = excluded.created_at,
+         prepared_at = excluded.prepared_at,
          updated_at = excluded.updated_at`,
       registrationValues(registration)
     );
@@ -485,6 +486,7 @@ function registrationValues(registration: ProductOrderTriggerRecord) {
     registration.receiptStatus ?? null,
     registration.projectionStatus ?? null,
     registration.createdAt,
+    registration.preparedAt ?? null,
     registration.updatedAt
   ] as const;
 }
@@ -581,6 +583,7 @@ function registrationRow(row: unknown): ProductOrderTriggerRecord {
   const signature = optionalStringColumn(record, "signature");
   const errorCode = optionalStringColumn(record, "error_code");
   const errorMessage = optionalStringColumn(record, "error_message");
+  const preparedAt = optionalStringColumn(record, "prepared_at");
   const reconcileStatus = optionalStringColumn(record, "reconcile_status");
   const lastCheckedAt = optionalStringColumn(record, "last_checked_at");
   const receiptStatus = optionalStringColumn(record, "receipt_status");
@@ -612,8 +615,8 @@ function registrationRow(row: unknown): ProductOrderTriggerRecord {
       ? { triggerStageId: triggerStageId as NonNullable<ProductOrderTriggerRecord["triggerStageId"]> }
       : {}),
     ...(submitter !== undefined ? { submitter: submitter as NonNullable<ProductOrderTriggerRecord["submitter"]> } : {}),
-    payloadHash: (payloadHash ?? zeroBytes32) as ProductOrderTriggerRecord["orderId"],
-    idempotencyKey: (idempotencyKey ?? zeroBytes32) as ProductOrderTriggerRecord["orderId"],
+    payloadHash: (payloadHash ?? zeroBytes32) as ProductOrderTriggerRecord["payloadHash"],
+    idempotencyKey: (idempotencyKey ?? zeroBytes32) as ProductOrderTriggerRecord["idempotencyKey"],
     deadline: deadline ?? "0",
     typedData: typedDataJson ? parseStorageJson<unknown>(typedDataJson) : {},
     ...(signature !== undefined ? { signature: signature as NonNullable<ProductOrderTriggerRecord["signature"]> } : {}),
@@ -621,6 +624,7 @@ function registrationRow(row: unknown): ProductOrderTriggerRecord {
     ...(errorMessage !== undefined ? { errorMessage } : {}),
     retryable: booleanColumn(record, "retryable"),
     createdAt: stringColumn(record, "created_at"),
+    ...(preparedAt !== undefined ? { preparedAt } : {}),
     updatedAt: stringColumn(record, "updated_at"),
     creator: stringColumn(record, "creator") as ProductOrderTriggerRecord["creator"],
     authorizations,

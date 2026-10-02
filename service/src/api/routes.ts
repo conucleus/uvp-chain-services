@@ -1,5 +1,6 @@
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { Hex } from "../shared/types.js";
+import { submissionProjectionConfirmation } from "../reconcile/worker.js";
 import { resolvePlanCapabilityTablesFromStore, type PlanCapabilityTables } from "../submissions/capability-proofs.js";
 import { createProductService, ProductOrderLookupError } from "../product/application/service.js";
 import {
@@ -220,6 +221,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     resolvePlanCapabilityTables: resolvePlanCapabilityTablesFromStore(store),
     // draftId 来源凭证的提交归属核验：无解析器时提交侧 fail-closed。
     ...(resolveDraftOrder ? { resolveDraftOrder } : {}),
+    // TTL 到期重试的先探链车道（UB-4）：六元业务身份查投影单源复用
+    // reconcile 的 submissionProjectionConfirmation，两侧不得各自口径。
+    probePriorSubmissionOnChain: priorSubmissionChainProbeFromStore(store),
     ...(options.submissionBroadcastAdapter ? { broadcastAdapter: options.submissionBroadcastAdapter } : {}),
     ...(submissionAuthorization ? { authorization: submissionAuthorization } : {}),
     audit
@@ -647,6 +651,31 @@ function resolveOrderPlanIdFromStore(
       );
     }
     return candidates[0]?.planId;
+  };
+}
+
+/**
+ * TTL 到期重试的先探链适配（UB-4）：按六元业务身份查索引器投影——
+ * 匹配单源复用 reconcile 的 submissionProjectionConfirmation（worker 与
+ * 提交重试侧同一口径）。confirmed = 链上已呈现（带投影出处哈希）；
+ * absent = 未见；探链本身抛错按 unknown（可重试）收敛，不放大成 500。
+ */
+function priorSubmissionChainProbeFromStore(
+  store: ProjectionStore
+): (prepared: import("../submissions/types.js").PreparedSubmissionRecord) => Promise<import("../submissions/service.js").PriorSubmissionChainProbe> {
+  return async (prepared) => {
+    try {
+      const confirmation = await submissionProjectionConfirmation(store, prepared);
+      return confirmation
+        ? {
+            outcome: "confirmed",
+            txHash: confirmation.transactionHash,
+            ...(confirmation.blockNumber ? { blockNumber: confirmation.blockNumber } : {})
+          }
+        : { outcome: "absent" };
+    } catch {
+      return { outcome: "unknown" };
+    }
   };
 }
 

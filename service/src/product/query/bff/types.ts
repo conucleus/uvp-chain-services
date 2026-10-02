@@ -131,6 +131,13 @@ export interface ProductOrderTriggerDTO extends TxReconcileFields {
   readonly errorMessage?: string;
   readonly retryable: boolean;
   readonly createdAt: string;
+  /**
+   * 最近一次 prepare（含同身份重开）的时间：对账超时判定（reconcile
+   * timedOut）读此时钟而非 createdAt——createdAt 在同身份重开时按审计
+   * 目的继承旧行，继承的旧时钟不得毒化重试后的超时判定。缺省（存量
+   * 行）回退 createdAt。
+   */
+  readonly preparedAt?: string;
   readonly updatedAt: string;
 }
 

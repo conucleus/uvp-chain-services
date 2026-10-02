@@ -159,11 +159,17 @@ describe("tx/indexer reconcile worker", () => {
       receiptStatus: "success",
       projectionStatus: "present"
     });
+    // UB-4 按业务身份重算：第二条记录同 (planId, orderId) 复合键命中
+    // 投影、仅台账 txHash 不一致——哈希逐字相等不再一票否决，按链
+    // 确认并改写行内 txHash 为链上胜出哈希（旧口径在此断言
+    // submitted/missing，替换回执会永久滞留 stale_pending）。
     await expect(productStore.getRegistration("registration_mismatch")).resolves.toMatchObject({
-      status: "submitted",
-      reconcileStatus: "submitted",
-      receiptStatus: "missing",
-      projectionStatus: "not_checked"
+      status: "confirmed",
+      txHash,
+      blockNumber: "11",
+      reconcileStatus: "confirmed",
+      receiptStatus: "success",
+      projectionStatus: "present"
     });
   });
 
@@ -399,6 +405,110 @@ describe("tx/indexer reconcile worker", () => {
       receiptStatus: "success",
       projectionStatus: "present",
       blockNumber: "12"
+    });
+  });
+
+  it("reads the reopen clock (preparedAt), not the inherited createdAt, for timeouts", async () => {
+    // UB-3 同身份重开：重开行继承旧 createdAt（仅审计），超时判定必须读
+    // preparedAt——按继承时钟判超时会让重放后的行立即"已被超时"，被
+    // 超时车道误标 tx_reconcile_timeout 永久 failed。
+    const productStore = new MemoryProductBffStore();
+    const projectionStore = new MemoryProjectionStore();
+    await productStore.createDraft(draftFixture(), []);
+    await productStore.createRegistrationIfNoneForDraft(registrationFixture({
+      triggerId: "registration_reopened",
+      createdAt: "2026-04-27T23:00:00Z",
+      preparedAt: baseNow.toISOString()
+    }));
+    await productStore.createDraft({ ...draftFixture(), draftId: "draft_never_reopened" }, []);
+    await productStore.createRegistrationIfNoneForDraft({
+      ...registrationFixture({
+        triggerId: "registration_never_reopened",
+        createdAt: "2026-04-27T23:00:00Z"
+      }),
+      draftId: "draft_never_reopened"
+    });
+    const worker = new TxReconcileWorker({
+      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000 },
+      receiptClient: receiptClient(new Map()),
+      projectionStore,
+      productStore,
+      now: () => baseNow
+    });
+
+    await worker.runOnce();
+
+    // preparedAt 新鲜：重开行 pending（broadcasting），不进超时车道。
+    await expect(productStore.getRegistration("registration_reopened")).resolves.toMatchObject({
+      status: "submitted",
+      reconcileStatus: "broadcasting",
+      receiptStatus: "not_checked",
+      retryable: true
+    });
+    // 同龄但从未重开（无 preparedAt，回退 createdAt）：照常超时收口。
+    await expect(productStore.getRegistration("registration_never_reopened")).resolves.toMatchObject({
+      status: "failed",
+      reconcileStatus: "stale_pending",
+      errorCode: "tx_reconcile_timeout"
+    });
+  });
+
+  it("confirms a business-identity projection match whose tx hash differs from the ledger (replacement receipt)", async () => {
+    // UB-4：六元业务身份匹配后哈希逐字相等不得一票否决——台账记 tx A
+    //（回执缺失/替换前的旧哈希），链上订单/信号实际由 tx B 上链。旧逻辑
+    // 否决投影 → 回执车道查 A 落空 → 超时后 stale_pending 永久滞留；
+    // 按链重算后确认收口，行内 txHash 改写为链上胜出哈希，并落诊断
+    // 日志（可观测，防静默吞真分叉）。
+    const projectionStore = new MemoryProjectionStore();
+    const submissionStore = new InMemoryProductSubmissionStore();
+    const ledgerTx = bytes32("b111");
+    const chainTx = bytes32("b222");
+    await submissionStore.putSubmission(submissionFixture({ submissionId: "sub_replaced", txHash: ledgerTx }));
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [chainEvent(23n, chainTx, 0, "SignalSubmitted", {
+        planId,
+        orderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter
+      })]
+    });
+    const warns: { readonly message: string; readonly context?: Record<string, unknown> }[] = [];
+    const worker = new TxReconcileWorker({
+      config: { enabled: true, pollIntervalMs: 0, txTimeoutMs: 60_000 },
+      receiptClient: receiptClient(new Map()),
+      projectionStore,
+      submissionStore,
+      logger: {
+        debug: () => undefined,
+        info: () => undefined,
+        warn: (message, context) => warns.push({ message, ...(context ? { context } : {}) }),
+        error: () => undefined
+      },
+      now: () => baseNow
+    });
+
+    const summary = await worker.runOnce();
+
+    expect(summary.submissionsChecked).toBe(1);
+    await expect(submissionStore.getSubmission("sub_replaced")).resolves.toMatchObject({
+      status: "confirmed",
+      broadcastStatus: "confirmed",
+      txHash: chainTx,
+      blockNumber: "23",
+      reconcileStatus: "confirmed",
+      receiptStatus: "success",
+      projectionStatus: "present"
+    });
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!.context).toMatchObject({
+      record: "submission:sub_replaced",
+      ledgerTxHash: ledgerTx,
+      chainTxHash: chainTx,
+      blockNumber: "23"
     });
   });
 
@@ -756,6 +866,53 @@ describe("tx/indexer reconcile worker", () => {
     const secondSummary = await worker.runOnce();
     expect(secondSummary.evidenceBindsRepaired).toBe(0);
     expect(audit.list()).toHaveLength(eventsBefore);
+  });
+
+  it("repairs draft-origin evidence binds when the sweeper carries the draft-order resolver", async () => {
+    // 草稿期上传的凭证（draftId 来源、无 orderId）经补绑车道回绑：
+    // server.ts 的 evidenceBinder 装配 resolveDraftOrder（BFF 台账
+    // trigger 记录）后，补绑不再因"草稿与订单对应关系无法证明"永久 409。
+    // 反例（无解析器恒 409）由 evidence-service 测试钉；这里钉清扫车道
+    // 携解析器时的完整语义。
+    const owner: EvidencePrincipal = { id: submitter.toLowerCase(), role: "participant" };
+    const evidenceService = createEvidenceService({
+      runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => baseNow,
+      evidenceIdFactory: () => "ev_draft_sweep",
+      resolveDraftOrder: async (draftId) => draftId === "draft_sweep" ? orderId : undefined
+    });
+    const draftEvidence = await evidenceService.uploadEvidence({
+      draftId: "draft_sweep",
+      stageIdentifier: "stage",
+      documentType: "customs-declaration",
+      fileName: "draft-origin.txt",
+      textPayload: "draft origin evidence awaiting the order its draft triggered"
+    }, owner);
+
+    const projectionStore = new MemoryProjectionStore();
+    const submissionStore = new InMemoryProductSubmissionStore();
+    const draftTx = bytes32("7005");
+    await submissionStore.putSubmission(submissionFixture({
+      submissionId: "sub_draft_bind",
+      txHash: draftTx,
+      evidenceIds: [draftEvidence.evidence.evidenceId]
+    }));
+    const worker = workerFixture({
+      projectionStore,
+      submissionStore,
+      receipts: new Map(),
+      evidenceBinder: evidenceService
+    });
+
+    const summary = await worker.runOnce();
+
+    expect(summary.evidenceBindsRepaired).toBe(1);
+    await expect(evidenceService.getProof(draftEvidence.evidence.evidenceId, owner)).resolves.toMatchObject({
+      verificationStatus: "matched",
+      boundSubmissionId: "sub_draft_bind",
+      boundSignalTxHash: draftTx
+    });
   });
 
   it("does not sweep submissions without a successful commit or without persisted evidence references", async () => {
@@ -1131,6 +1288,7 @@ function registrationFixture(input: {
   readonly triggerId?: string;
   readonly txHash?: Hex;
   readonly createdAt?: string;
+  readonly preparedAt?: string;
   readonly authorizations?: ProductOrderTriggerRecord["authorizations"];
   readonly permissions?: ProductOrderTriggerRecord["permissions"];
 } = {}): ProductOrderTriggerRecord {
@@ -1157,6 +1315,7 @@ function registrationFixture(input: {
     typedData: {},
     retryable: false,
     createdAt,
+    ...(input.preparedAt ? { preparedAt: input.preparedAt } : {}),
     updatedAt: createdAt,
     creator,
     authorizations,

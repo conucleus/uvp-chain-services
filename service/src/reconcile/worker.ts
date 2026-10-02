@@ -24,7 +24,12 @@ import type {
 } from "../stage-patches/types.js";
 import type { StateMachineOrderProjection } from "../indexer/projection-types.js";
 import { redactErrorMessage } from "../security/redaction.js";
-import type { ReconcileRunSummary, ReconcileWorkerDiagnostics, TxReconcileFields } from "./status.js";
+import {
+  isReopenableFailedTriggerRecord,
+  type ReconcileRunSummary,
+  type ReconcileWorkerDiagnostics,
+  type TxReconcileFields
+} from "./status.js";
 
 export interface ReconcileWorkerConfig {
   readonly enabled: boolean;
@@ -83,6 +88,13 @@ export interface TxReconcileWorkerOptions {
 type ReconcileableTxRecord = {
   readonly txHash?: Hex;
   readonly createdAt: string;
+  /**
+   * 最近一次身份生效（BFF prepare/同身份重开）的时间：优先于 createdAt
+   * 作为超时判定时钟——重开的行继承旧 createdAt 仅作审计，不得毒化
+   * 重试后的超时判定。缺省（submissions/governance 等无重开语义的
+   * 台账）回退 createdAt。
+   */
+  readonly preparedAt?: string;
   readonly status: string;
 };
 
@@ -520,7 +532,11 @@ export class TxReconcileWorker implements LifecycleService {
     )) {
       summary.stagePatchesChecked += 1;
       try {
-        const outcome = await this.#resolveOutcome(submission, () => confirm(submission));
+        const outcome = await this.#resolveOutcome(
+          submission,
+          () => confirm(submission),
+          `stage-patch:${submission.submissionId}`
+        );
         if (!outcome) {
           continue;
         }
@@ -558,10 +574,14 @@ export class TxReconcileWorker implements LifecycleService {
   async #reconcileRegistration(
     registration: ProductOrderTriggerRecord
   ): Promise<ProductOrderTriggerRecord | undefined> {
-    const outcome = await this.#resolveOutcome(registration, () => registrationProjectionConfirmation(
-      this.#projectionStore,
-      registration
-    ));
+    const outcome = await this.#resolveOutcome(
+      registration,
+      () => registrationProjectionConfirmation(
+        this.#projectionStore,
+        registration
+      ),
+      `registration:${registration.triggerId}`
+    );
     if (!outcome) {
       return undefined;
     }
@@ -570,6 +590,7 @@ export class TxReconcileWorker implements LifecycleService {
       ...registration,
       status: outcome.registrationStatus,
       ...outcome.fields,
+      ...(outcome.txHash ? { txHash: outcome.txHash } : {}),
       ...(outcome.blockNumber ? { blockNumber: outcome.blockNumber } : {}),
       ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
       ...(outcome.errorMessage ? { errorMessage: outcome.errorMessage } : {}),
@@ -587,10 +608,14 @@ export class TxReconcileWorker implements LifecycleService {
   }
 
   async #reconcileSubmission(submission: ProductSubmissionDTO): Promise<ProductSubmissionDTO | undefined> {
-    const outcome = await this.#resolveOutcome(submission, () => submissionProjectionConfirmation(
-      this.#projectionStore,
-      submission
-    ));
+    const outcome = await this.#resolveOutcome(
+      submission,
+      () => submissionProjectionConfirmation(
+        this.#projectionStore,
+        submission
+      ),
+      `submission:${submission.submissionId}`
+    );
     if (!outcome) {
       return undefined;
     }
@@ -606,6 +631,7 @@ export class TxReconcileWorker implements LifecycleService {
           ? "failed"
           : submission.broadcastStatus,
       ...outcome.fields,
+      ...(outcome.txHash ? { txHash: outcome.txHash } : {}),
       ...(outcome.blockNumber ? { blockNumber: outcome.blockNumber } : {}),
       ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
       ...(outcome.errorMessage ? { errorMessage: outcome.errorMessage } : {}),
@@ -620,10 +646,14 @@ export class TxReconcileWorker implements LifecycleService {
   }
 
   async #reconcileGovernanceLog(log: GovernanceTxLogDTO): Promise<GovernanceTxLogDTO | undefined> {
-    const outcome = await this.#resolveOutcome(log, () => governanceProjectionConfirmation(
-      this.#projectionStore,
-      log
-    ));
+    const outcome = await this.#resolveOutcome(
+      log,
+      () => governanceProjectionConfirmation(
+        this.#projectionStore,
+        log
+      ),
+      `governance-log:${log.logId}`
+    );
     if (!outcome) {
       return undefined;
     }
@@ -634,6 +664,7 @@ export class TxReconcileWorker implements LifecycleService {
       status,
       broadcastStatus: governanceBroadcastStatusFromOutcome(log.broadcastStatus, outcome),
       ...outcome.fields,
+      ...(outcome.txHash ? { txHash: outcome.txHash } : {}),
       ...(outcome.blockNumber ? { blockNumber: outcome.blockNumber } : {}),
       ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
       ...(outcome.errorMessage ? { errorMessage: outcome.errorMessage } : {}),
@@ -680,7 +711,8 @@ export class TxReconcileWorker implements LifecycleService {
 
   async #resolveOutcome(
     record: ReconcileableTxRecord,
-    projectionConfirmation: () => Promise<ProjectionConfirmation | undefined>
+    projectionConfirmation: () => Promise<ProjectionConfirmation | undefined>,
+    recordLabel: string
   ): Promise<ResolvedReconcileOutcome | undefined> {
     const checkedAt = this.#now().toISOString();
     if (!record.txHash) {
@@ -708,14 +740,15 @@ export class TxReconcileWorker implements LifecycleService {
       // 进复核，迟到投影永远无人认领）。
       const projectedWithoutHash = await projectionConfirmation();
       if (projectedWithoutHash) {
-        return confirmedOutcome(checkedAt, projectedWithoutHash.blockNumber);
+        return this.#confirmedFromProjection(checkedAt, projectedWithoutHash);
       }
       return staleOutcome(checkedAt);
     }
 
     const projectedBeforeReceipt = await projectionConfirmation();
     if (projectedBeforeReceipt) {
-      return confirmedOutcome(checkedAt, projectedBeforeReceipt.blockNumber);
+      this.#logProjectionHashMismatch(record, projectedBeforeReceipt, recordLabel);
+      return this.#confirmedFromProjection(checkedAt, projectedBeforeReceipt);
     }
 
     const receipt = await this.#receiptClient.getTransactionReceipt(record.txHash);
@@ -794,7 +827,48 @@ export class TxReconcileWorker implements LifecycleService {
       };
     }
 
-    return confirmedOutcome(checkedAt, projected.blockNumber ?? blockNumber);
+    this.#logProjectionHashMismatch(record, projected, recordLabel);
+    return this.#confirmedFromProjection(checkedAt, projected, blockNumber);
+  }
+
+  /**
+   * 业务身份匹配后的按链重算出口（「链为真相、台账是缓存」UB-4）：
+   * 投影按业务身份（六元组/复合键）命中即视为同笔业务提交在链上生效，
+   * 确认结论取投影出处；台账 txHash 与链上不一致（替换回执/分叉重放）
+   * 不再一票否决——行内 txHash 改写为链上胜出哈希，并落诊断日志
+   * （可观测，防静默吞真分叉）。
+   */
+  #confirmedFromProjection(
+    checkedAt: string,
+    projection: ProjectionConfirmation,
+    fallbackBlockNumber?: string
+  ): ResolvedReconcileOutcome {
+    return {
+      ...confirmedOutcome(checkedAt, projection.blockNumber ?? fallbackBlockNumber),
+      ...(projection.hashMismatch ? { txHash: projection.transactionHash } : {})
+    };
+  }
+
+  #logProjectionHashMismatch(
+    record: ReconcileableTxRecord,
+    projection: ProjectionConfirmation,
+    recordLabel: string
+  ): void {
+    if (!projection.hashMismatch) {
+      return;
+    }
+    // 业务身份已匹配、仅回执哈希不一致：不是否决理由（链为真相），但
+    // 必须留痕——哈希漂移可能是替换回执（正常收敛），也可能是真分叉
+    // （同身份被两笔不同内容上链），静默确认会吞掉后者的可观测性。
+    this.#logger.warn(
+      "reconcile confirmed a business-identity projection match whose transaction hash differs from the ledger record; state recalculated from chain and the ledger hash follows the chain",
+      {
+        record: recordLabel,
+        ledgerTxHash: record.txHash,
+        chainTxHash: projection.transactionHash,
+        blockNumber: projection.blockNumber
+      }
+    );
   }
 }
 
@@ -817,6 +891,11 @@ function confirmedOutcome(checkedAt: string, blockNumber?: string): ResolvedReco
 interface ProjectionConfirmation {
   readonly transactionHash: Hex;
   readonly blockNumber: string;
+  /**
+   * 业务身份匹配但链上回执哈希与台账记录不一致（替换回执/分叉重放）：
+   * 按链重算仍确认（台账跟随链），调用方负责落诊断日志与 txHash 改写。
+   */
+  readonly hashMismatch?: boolean;
 }
 
 interface ProjectionProvenanceLike {
@@ -831,13 +910,20 @@ function projectionConfirmationFromProvenance(
   if (!provenance) {
     return undefined;
   }
-  if (expectedTxHash && provenance.transactionHash.toLowerCase() !== expectedTxHash.toLowerCase()) {
-    return undefined;
-  }
-  return {
+  const confirmation: ProjectionConfirmation = {
     transactionHash: provenance.transactionHash,
     blockNumber: provenance.blockNumber.toString()
   };
+  if (
+    expectedTxHash &&
+    provenance.transactionHash.toLowerCase() !== expectedTxHash.toLowerCase()
+  ) {
+    // 哈希逐字相等不再一票否决（UB-4）：业务身份（六元组/复合键）已在
+    // 调用方匹配命中，替换回执（重广播/分叉后链上胜出的那笔）不得让行
+    // 永久滞留 stale_pending。标记不一致交由调用方按链重算并留诊断。
+    return { ...confirmation, hashMismatch: true };
+  }
+  return confirmation;
 }
 
 export function createViemReconcileReceiptClient(
@@ -874,6 +960,8 @@ interface ResolvedReconcileOutcome {
   readonly checkedAt: string;
   readonly fields: Required<Pick<TxReconcileFields, "reconcileStatus" | "lastCheckedAt" | "receiptStatus" | "projectionStatus">>;
   readonly blockNumber?: string;
+  /** 按链重算胜出的链上哈希（业务身份匹配但台账哈希不一致时改写行内 txHash）。 */
+  readonly txHash?: Hex;
   readonly errorCode?: string;
   readonly errorMessage?: string;
   readonly retryable: boolean;
@@ -903,12 +991,15 @@ function staleOutcome(checkedAt: string): ResolvedReconcileOutcome {
 
 function isReconcileableRegistration(registration: ProductOrderTriggerRecord): boolean {
   // 与 submissions/governance 口径对齐：failed + txHash 必须继续复核——
-  // 链上真相可能推翻本地失败标记（迟到成功自愈为 confirmed）；只认
-  // submitted/indexing 会让超时置 failed 的注册永不再复核，product 侧重试
-  // 只能开新单，同一稿产生两个 orderId。无 txHash 的 failed 从未上链，
-  // 无回执可查。
+  // 链上真相可能推翻本地失败标记（迟到成功自愈为 confirmed）。归属与
+  // BFF 同身份重开闸（isReopenableFailedTriggerRecord）同源裁决：
+  // 无 txHash 的可重试失败归 BFF 同身份重开放行（无回执可查，不进本
+  // 车道）；带 txHash 的失败行不满足重开闸（永不重开），回执/投影复核
+  // 是其唯一收敛车道——两侧共用同一判定，不留第二身份再生入口
+  //（UA-2/UB-3）。无 txHash 且不可重试的失败同样无回执可查。
   if (registration.status === "failed") {
-    return Boolean(registration.txHash);
+    return !isReopenableFailedTriggerRecord(registration)
+      && Boolean(registration.txHash);
   }
   return registration.status === "submitted" || registration.status === "indexing";
 }
@@ -1059,6 +1150,7 @@ function stagePatchSubmissionFromOutcome<TSubmission extends StageExecutorPatchS
     ...submission,
     status,
     broadcastStatus,
+    ...(outcome.txHash ? { txHash: outcome.txHash } : {}),
     ...(outcome.blockNumber ? { blockNumber: outcome.blockNumber } : {}),
     ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
     ...(outcome.errorMessage ? { errorMessage: outcome.errorMessage } : {}),
@@ -1151,9 +1243,26 @@ async function registrationProjectionConfirmation(
   return projectionConfirmationFromProvenance(order.registeredAt, registration.txHash);
 }
 
-async function submissionProjectionConfirmation(
+/**
+ * 提交车道的业务身份投影确认（六元组）：订单按复合键 (planId, orderId)
+ * 定位，信号按 sourceId:signalId 定位后核对 orderId/sourceId/signalId/
+ * submitter/payloadHash/idempotencyKey 六元全等——命中即视为同笔业务
+ * 提交在链上生效。导出供 submissions TTL 到期先探链车道复用同一匹配
+ * 单源（「重试=同身份重放」两侧不得各自口径）。
+ */
+export async function submissionProjectionConfirmation(
   projectionStore: ProjectionStore,
-  submission: ProductSubmissionDTO
+  submission: {
+    readonly onchainOrderId: Hex;
+    readonly planId: Hex;
+    readonly sourceId: Hex;
+    readonly signalId: Hex;
+    readonly submitter: Address;
+    readonly payloadHash: Hex;
+    readonly idempotencyKey: Hex;
+    /** 台账已知的回执哈希（缺省 = 未观察到链上事实，不做一致性标记）。 */
+    readonly txHash?: Hex;
+  }
 ): Promise<ProjectionConfirmation | undefined> {
   // The state-machine identity is (planId, orderId), not bare orderId. The
   // composite lookup never returns another plan's projection for this signed
@@ -1353,8 +1462,10 @@ function timedOut(record: ReconcileableTxRecord, timeoutMs: number, now: Date): 
   if (timeoutMs <= 0) {
     return false;
   }
-  const createdAtMs = Date.parse(record.createdAt);
-  return Number.isFinite(createdAtMs) && now.getTime() - createdAtMs >= timeoutMs;
+  // 超时时钟优先读 preparedAt：同身份重开的行继承旧 createdAt 仅作审计
+  //（首次建档时间），按旧时钟判超时会让重放后的行立即"已被超时"。
+  const clockMs = Date.parse(record.preparedAt ?? record.createdAt);
+  return Number.isFinite(clockMs) && now.getTime() - clockMs >= timeoutMs;
 }
 
 function normalizeBlockNumber(blockNumber: ReconcileReceipt["blockNumber"]): string | undefined {

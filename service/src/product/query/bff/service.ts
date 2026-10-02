@@ -18,6 +18,7 @@ import {
   type Hex,
 } from "../../../shared/types.js";
 import type { TxReconcileFields } from "../../../reconcile/status.js";
+import { isReopenableFailedTriggerRecord } from "../../../reconcile/status.js";
 import { normalizeEvidenceSpec, type ProductService } from "../../application/service.js";
 import { redactErrorMessage } from "../../../security/redaction.js";
 import { StorageConstraintError } from "../../../storage/errors.js";
@@ -373,11 +374,32 @@ export function createProductBffService(
             existingRegistration,
           );
         }
+        // 同身份重开闸（与 reconcile/worker 的 failed 行复核同源，
+        // isReopenableFailedTriggerRecord）：只有「无 txHash 的可重试失败」
+        // 可以重开同一行。带 txHash 的失败行永不重开——对账（回执/投影
+        // 复核）接管其收敛，重开会再生身份（新 payloadHash → 新
+        // chainOrderId，一事两单）。
+        const reopenableFailedTrigger =
+          existingRegistration !== undefined &&
+          isReopenableFailedTriggerRecord(existingRegistration);
         if (
-          !expiredPreparedTrigger &&
-          (existingRegistration.status !== "failed" ||
-            !existingRegistration.retryable)
+          reopenableFailedTrigger &&
+          existingRegistration.submitter !== walletAddress
         ) {
+          // payload 变化不是重试：身份键（prepareId/payloadHash/orderId）
+          // 掺 submitter，换签名钱包的"重试"只能显式走新意图（新 draft），
+          // 不得复用旧行身份——错误响亮，防静默分叉。
+          throw new ProductBffError(
+            409,
+            "trigger_retry_payload_changed",
+            "retrying a failed trigger replays the same identity; a changed payload (different submitter wallet) requires a new order draft",
+            {
+              triggerId: existingRegistration.triggerId,
+              status: existingRegistration.status,
+            },
+          );
+        }
+        if (!expiredPreparedTrigger && !reopenableFailedTrigger) {
           throw new ProductBffError(
             409,
             "trigger_already_exists",
@@ -392,8 +414,8 @@ export function createProductBffService(
 
       requireAcceptedRequiredParticipants(participants);
       const retryingFailedTrigger =
-        existingRegistration?.status === "failed" &&
-        existingRegistration.retryable;
+        existingRegistration !== undefined &&
+        isReopenableFailedTriggerRecord(existingRegistration);
       if (
         draft.status !== "ready_to_trigger" &&
         !(draft.status === "failed" && retryingFailedTrigger)
@@ -411,7 +433,31 @@ export function createProductBffService(
       const activeDeployment = await requireActiveStateMachineDeployment(
         options.productService,
       );
-      const orderId = randomOrderId(draft, idScope, sequence);
+      // 同身份重放（「重试=同身份重放」UB-3）：走到这里仍带着既有
+      // registration 的只可能是「过期未触发」或「无 txHash 的可重试失败」
+      // 的重开——复用既有身份三件套（prepareId/payloadHash/orderId），
+      // 链上按同一 (planId, sourceId, signalId, payloadHash) 派生同一
+      // chainOrderId（triggerOrderIdFor 同公式）。首次尝试即使实际已上链
+      // （rpc 超时不携哈希的形态），同身份重放也被链幂等吸收，不再
+      // 一事两单。draft 内容/参与者变化只重建授权面（可编辑失败稿的
+      // 既有语义），不触碰链上身份。
+      const replayingRegistration = existingRegistration !== undefined;
+      if (
+        replayingRegistration &&
+        (!existingRegistration.prepareId ||
+          !existingRegistration.payloadHash ||
+          !existingRegistration.idempotencyKey)
+      ) {
+        throw new ProductBffError(
+          409,
+          "trigger_record_incomplete",
+          "the existing trigger record lacks the identity fields required for a same-identity retry; it cannot be replayed",
+          { triggerId: existingRegistration.triggerId },
+        );
+      }
+      const orderId = replayingRegistration
+        ? existingRegistration.orderId
+        : randomOrderId(draft, idScope, sequence);
       const creator = creatorForDraft(
         draft,
         registrationCreatorAddress ?? registrarAddress,
@@ -443,24 +489,35 @@ export function createProductBffService(
       const triggerId =
         existingRegistration?.triggerId ??
         `${nextId("trigger", idScope, sequence++)}_${randomBytes(16).toString("hex")}`;
-      const prepareId = nextId("prepare", idScope, sequence++);
+      // 重放沿用既有 prepareId：payloadHash/idempotencyKey 的派生掺
+      // prepareId，重开再生 prepareId 即再生身份（一事两单根因）。
+      const prepareId = replayingRegistration
+        ? existingRegistration.prepareId!
+        : nextId("prepare", idScope, sequence++);
       const sourceId = productSignalSourceId(createOrderTrigger.source);
       const signalId = productSignalId(createOrderTrigger.signalName);
-      const payloadHash = hashHex(
-        `uvp:product-bff:trigger:payload:v2:${draftId}:${orderId}:${submitter}:${prepareId}`,
-      );
-      const idempotencyKey = hashHex(
-        `uvp:product-bff:trigger:idempotency:v2:${draftId}:${orderId}:${prepareId}`,
-      );
+      const payloadHash = replayingRegistration
+        ? existingRegistration.payloadHash!
+        : hashHex(
+            `uvp:product-bff:trigger:payload:v2:${draftId}:${orderId}:${submitter}:${prepareId}`,
+          );
+      const idempotencyKey = replayingRegistration
+        ? existingRegistration.idempotencyKey!
+        : hashHex(
+            `uvp:product-bff:trigger:idempotency:v2:${draftId}:${orderId}:${prepareId}`,
+          );
       // 一事一单：链上订单 id 不由调用方自报——按合约 triggerOrderIdFor 同公式
       // 派生（同一 plan+事实恒定同 id，重放幂等）。本地随机 orderId 仍作为
-      // 产品侧关联 id 参与 payload/idempotency 派生，不进链上请求。
-      const chainOrderId = deriveTriggerOrderId(
-        normalizeBytes32(draft.planId, "draft.planId"),
-        sourceId,
-        signalId,
-        payloadHash,
-      );
+      // 产品侧关联 id 参与 payload/idempotency 派生，不进链上请求。重放时
+      // 直接沿用行内 orderId（即首次派生的 chainOrderId）。
+      const chainOrderId = replayingRegistration
+        ? existingRegistration.orderId
+        : deriveTriggerOrderId(
+            normalizeBytes32(draft.planId, "draft.planId"),
+            sourceId,
+            signalId,
+            payloadHash,
+          );
       const triggerHookId = normalizeBytes32(
         createOrderTrigger.triggerHookId,
         "createOrderTrigger.triggerHookId",
@@ -504,7 +561,11 @@ export function createProductBffService(
         idempotencyKey,
         deadline,
         typedData,
+        // createdAt 按审计目的继承旧行（首次建档时间）；超时判定时钟是
+        // preparedAt——每次 prepare（含同身份重开）重置，对账 timedOut
+        // 读它而非被继承的 createdAt（重试后的行不得立即"已被超时"）。
         createdAt: existingRegistration?.createdAt ?? createdAt,
+        preparedAt: createdAt,
         updatedAt: createdAt,
         creator,
         authorizations: builtAuthorization.authorizations,
@@ -599,7 +660,10 @@ export function createProductBffService(
       }
       if (
         registration.status !== "prepared" &&
-        !(registration.status === "failed" && registration.retryable)
+        // 同身份重放门（与 prepare 重建门同源）：直提重放只接受
+        // 「无 txHash 的可重试失败」——带 txHash 的失败行归对账接管，
+        // 直提重广播会二次消费链上 nonce。
+        !isReopenableFailedTriggerRecord(registration)
       ) {
         throw new ProductBffError(
           409,
