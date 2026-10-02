@@ -182,6 +182,37 @@ describe("dock delivery & projection blackbox", () => {
     });
   });
 
+  it("keeps the keeper alive when the input-lane vocabulary resolution failed: skip with a trace, never reject the round", async () => {
+    // 目标 plan 词表富集 failed（indexer 按设计持久化该态直到 resolver
+    // 恢复）：input 车道造证跳过留痕，runOnce 正常返回——整轮 reject 会
+    // 冻结同 route 之后所有交付车道，keeper 活性归零。
+    const baseEvents: readonly ChainEvent[] = [
+      planRegistered(1n, planId, planHash),
+      planRegistered(2n, targetPlanId, targetPlanHash),
+      orderRegistered(3n, parentOrderId, planId),
+      orderRegistered(4n, targetOrderId, targetPlanId),
+      moduleSet(5n),
+      hookReady(6n, parentOrderId, hookId, planId),
+      dockAttached(7n, dockInstanceId, parentOrderId, targetOrderId, routeId)
+    ];
+    const route = existingRoute({
+      routeId,
+      inputs: [inputBinding("03", hookId, sourceId, signalId)]
+    });
+    const { worker, submitted } = await buildWorker({
+      events: baseEvents,
+      routes: [route],
+      planCapabilityResolutionFailures: [targetPlanId]
+    });
+    const summary = await worker.runOnce();
+    expect(summary.inputCandidates).toBe(1);
+    expect(summary.submitted).toBe(0);
+    expect(summary.skipped).toHaveLength(1);
+    expect(summary.skipped[0]).toContain("input:");
+    expect(submitted).toHaveLength(0);
+    // 恢复后（词表富集可用）同一 worker 下一轮自然续上。
+  });
+
   it("suppresses re-broadcasts inside the finality window, retries after it, and counts deduplicated", async () => {
     // 去重语义基线：同 (dockInstanceId, bindingHash) 在最终性窗口内已尝试
     // （成败同占窗）→ deduplicated 计数、不再广播；窗口过后投影仍未呈现

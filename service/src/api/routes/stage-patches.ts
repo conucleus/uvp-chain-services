@@ -179,6 +179,15 @@ async function handleStagePatchRequest(action: () => Promise<ApiResponse>): Prom
 
 function parsePrepareExecutorBody(body: unknown): PrepareProductStageExecutorPatchInput {
   const record = requireBodyRecord(body);
+  assertKnownFields(record, PREPARE_EXECUTOR_FIELDS, "prepare executor patch body");
+  // mode 显式提供但类型非法/空白 = 词表外取值：类型化拒绝，不走
+  // "非字符串静默丢弃 → 缺省 assign"的宽松归一（调用方无从感知归一）。
+  if (
+    record.mode !== undefined &&
+    (typeof record.mode !== "string" || record.mode.trim().length === 0)
+  ) {
+    throw new ProductStagePatchError(400, "invalid_executor_patch_mode", "mode must be assign or handoff");
+  }
   const mode = optionalString(record, "mode");
   const previousExecutor = optionalString(record, "previousExecutorWallet");
   return {
@@ -196,6 +205,7 @@ function parsePrepareExecutorBody(body: unknown): PrepareProductStageExecutorPat
 
 function parsePrepareResourceBody(body: unknown): PrepareProductStageResourcePatchInput {
   const record = requireBodyRecord(body);
+  assertKnownFields(record, PREPARE_RESOURCE_FIELDS, "prepare resource patch body");
   return {
     selectorWallet: requiredString(record, "selectorWallet"),
     targetStageId: requiredString(record, "targetStageId"),
@@ -209,6 +219,7 @@ function parsePrepareResourceBody(body: unknown): PrepareProductStageResourcePat
 
 function parseSubmitExecutorBody(body: unknown): SubmitProductStageExecutorPatchInput {
   const record = requireBodyRecord(body);
+  assertKnownFields(record, SUBMIT_EXECUTOR_FIELDS, "submit executor patch body");
   const previousExecutorSignature = optionalString(record, "previousExecutorSignature");
   const prepareId = optionalString(record, "prepareId");
   const patch = optionalPatch<PreparedStageExecutorPatchDTO>(record, "patch");
@@ -224,6 +235,7 @@ function parseSubmitExecutorBody(body: unknown): SubmitProductStageExecutorPatch
 
 function parseSubmitResourceBody(body: unknown): SubmitProductStageResourcePatchInput {
   const record = requireBodyRecord(body);
+  assertKnownFields(record, SUBMIT_RESOURCE_FIELDS, "submit resource patch body");
   const prepareId = optionalString(record, "prepareId");
   const patch = optionalPatch<PreparedStageResourcePatchDTO>(record, "patch");
   return {
@@ -235,6 +247,59 @@ function parseSubmitResourceBody(body: unknown): SubmitProductStageResourcePatch
   };
 }
 
+
+// 请求体封闭字段集：未知字段一律 400 而非静默忽略——静默忽略会把
+// "调用方以为表达了别的语义"变成一次普通补丁（误导性接受面），digest
+// 不含杂音不等于语义没有杂音。
+const PREPARE_EXECUTOR_FIELDS: readonly string[] = [
+  "selectorWallet",
+  "targetStageId",
+  "executorWallet",
+  "mode",
+  "previousExecutorWallet",
+  "roleHash",
+  "executorMetadataHash",
+  "supplierReferenceHash",
+  "metadataURI"
+];
+const PREPARE_RESOURCE_FIELDS: readonly string[] = [
+  "selectorWallet",
+  "targetStageId",
+  "resourceKey",
+  "manifestHash",
+  "policyHash",
+  "manifestURI"
+];
+const SUBMIT_EXECUTOR_FIELDS: readonly string[] = [
+  "prepareId",
+  "selectorWallet",
+  "typedData",
+  "signature",
+  "patch",
+  "previousExecutorSignature"
+];
+const SUBMIT_RESOURCE_FIELDS: readonly string[] = [
+  "prepareId",
+  "selectorWallet",
+  "typedData",
+  "patch",
+  "signature"
+];
+
+function assertKnownFields(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string
+): void {
+  const unknown = Object.keys(record).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw new ProductStagePatchError(
+      400,
+      "invalid_body",
+      `${label} has unknown fields: ${unknown.sort().join(", ")}`
+    );
+  }
+}
 
 function requireBodyRecord(body: unknown): Record<string, unknown> {
   if (body && typeof body === "object" && !Array.isArray(body)) {

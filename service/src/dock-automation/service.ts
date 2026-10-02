@@ -325,6 +325,16 @@ export class DockAutomationWorker implements LifecycleService {
               continue;
             }
             summary.inputCandidates += 1;
+            // attribution 造证与 output 车道同口径：词表富集 failed =
+            // 词表状态未知，跳过留痕待富集恢复，不让单条绑定毒害整轮
+            // keeper（runOnce reject 会冻结同 route 之后所有交付车道）。
+            let inputAttribution: BuiltFactAttribution;
+            try {
+              inputAttribution = await this.#dockedInputAttribution(route.targetPlanId, binding);
+            } catch (error) {
+              summary.skipped.push(`input:${redactErrorMessage(error)}`);
+              continue;
+            }
             const data = encodeFunctionData({
               abi: dockingWriteAbi,
               functionName: "submitDockedInput",
@@ -332,7 +342,7 @@ export class DockAutomationWorker implements LifecycleService {
                 dock.dockInstanceId,
                 binding.localHookId,
                 binding.bindingHash,
-                await this.#dockedInputAttribution(route.targetPlanId, binding)
+                inputAttribution
               ]
             });
             await this.#submitCalldata(

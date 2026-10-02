@@ -122,14 +122,10 @@ describe("stage-patches black-box adversarial", () => {
     }
   });
 
-  it("silently defaults non-string and empty-string mode to assign (documents acceptance-surface leniency)", async () => {
-    // 现状：路由 optionalString 把非字符串/空串 mode 丢弃，服务层缺省
-    // 补 "assign"——显式 mode:"" / mode:5 / mode:{} 不会得到
-    // invalid_executor_patch_mode，而是静默落成 assign。语义上 mode 是
-    // 可选字段、缺省 assign 成立；但显式传入的类型外值被静默归一，
-    // 调用方无从感知。此处钉住现状，评估结论见测试报告：
-    // 宽松解析隐患（低危），非越权漏洞——assign 仍是 selector 签名
-    // 授权的合作换人，不产生任何非协作车道。
+  it("rejects an explicitly provided non-string or blank mode as out-of-vocabulary", async () => {
+    // mode 缺省 = assign（可选字段）；但显式提供而类型非法/空白的 mode
+    // 是词表外取值：类型化 400，不走"静默丢弃 → 缺省归一"的宽松路径
+    //（调用方必须能感知自己的取值没有被采纳）。
     const { router } = await routerFixture();
     for (const mode of ["", 5, null, {}, true]) {
       const response = await router.handle({
@@ -137,8 +133,8 @@ describe("stage-patches black-box adversarial", () => {
         pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
         body: prepareExecutorBody({ mode: mode as unknown as string }),
       });
-      expect(response.status).toBe(201);
-      expect(response.body).toMatchObject({ mode: "assign" });
+      expect(response.status).toBe(400);
+      expect(response.body).toMatchObject({ error: "invalid_executor_patch_mode" });
     }
   });
 
@@ -843,19 +839,11 @@ describe("stage-patches black-box adversarial", () => {
     });
   });
 
-  it("ignores unknown prepare fields, including non-cooperative lane phrasing (documents the acceptance surface)", async () => {
-    // 现状：路由只挑已知字段，未知字段静默忽略——即使字段名暗示非协作
-    // 换人（规格 4：本服务面无此车道），也只产生一个普通 assign 补丁。
-    // 不存在越权（补丁仍是 selector 签名的合作换人），但"看似请求了
-    // force-replace 实际得到 assign"是接受面误导：调用方以为表达了
-    // 非协作语义，服务面无任何提示。评估见报告。
-    const broadcast = vi.fn(async (): Promise<StagePatchBroadcastResult> => ({
-      status: "submitted",
-      txHash,
-    }));
-    const { router } = await routerFixture({
-      executorBroadcastAdapter: { broadcast },
-    });
+  it("rejects unknown prepare fields outright instead of silently ignoring them", async () => {
+    // 请求体封闭字段集：未知字段一律 400 invalid_body——静默忽略会把
+    // "调用方以为表达了别的语义"（例如暗示非协作换人的字段名）变成一次
+    // 普通 assign 补丁且无任何提示（误导性接受面）。
+    const { router } = await routerFixture();
     const response = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
@@ -868,17 +856,29 @@ describe("stage-patches black-box adversarial", () => {
         previousExecutorSignature: "0xdeadbeef",
       },
     });
-    expect(response.status).toBe(201);
-    const prepared = response.body as PreparedStageExecutorPatchDTO;
-    expect(prepared.mode).toBe("assign");
-    expect(prepared.executorWallet).toBe(executorWallet);
-    expect(JSON.stringify(prepared)).not.toContain("force-replace");
-    expect(JSON.stringify(prepared)).not.toContain(outsiderWallet.slice(2, 10));
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ error: "invalid_body" });
+    const message = JSON.stringify(response.body);
+    for (const field of ["executorPatchStrategy", "replacementExecutor", "forkOrder", "nonCooperative"]) {
+      expect(message).toContain(field);
+    }
+  });
 
-    // 附加字段不改变 digest：同参干净请求的 patchHash 与带杂音的一致。
-    const clean = await prepareStageExecutorPatch(await routerFixture().then((f) => f.router));
-    expect(clean.patchHash).toBe(prepared.patchHash);
-    expect(clean.authorizationsHash).toBe(prepared.authorizationsHash);
+  it("rejects unknown fields on the submit body with the same closed key set", async () => {
+    const { router } = await routerFixture();
+    const response = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
+      body: {
+        selectorWallet,
+        signature: "0xdeadbeef",
+        typedData: { domain: {}, types: {}, message: {} },
+        strategyHint: "bypass",
+      },
+    });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ error: "invalid_body" });
+    expect(JSON.stringify(response.body)).toContain("strategyHint");
   });
 
   it("keeps stage resource patches blocked once the target stage started (non-executor lane stays closed)", async () => {
