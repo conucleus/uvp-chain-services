@@ -2795,7 +2795,7 @@ function stringField(
 
 /**
  * 未分类异常的兜底 500 分类器：`stage_patch_failed` 在跨仓错误词表
- * （uvp-protocol/protocol/uvp-error-taxonomy.v1.json，chain-services 名下）
+ * （自宿主于 uvp-core 仓 protocol/uvp-error-taxonomy.v1.json）
  * 注册，本函数是该 internal name 在服务端的唯一出处——词表登记与代码
  * 出处由 error-taxonomy.conformance 测试双向锁定，删改需与词表仓同步。
  */

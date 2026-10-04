@@ -14,7 +14,7 @@ import {
 
 /**
  * Conformance suite for the unified UVP error taxonomy
- * (uvp-protocol/protocol/uvp-error-taxonomy.v1.json).
+ * (self-hosted in the uvp-core repo under protocol/uvp-error-taxonomy.v1.json).
  *
  * chain-services keeps its handwritten classification points (submissions
  * broadcast + safe-broadcast, stage-patches, reconcile, indexer sweep) — the
@@ -60,7 +60,7 @@ function taxonomyPath(): string {
   }
   // tests/ -> service -> uvp-chain-services -> uvp-eth (workspace root)
   const workspaceRoot = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))));
-  return join(workspaceRoot, 'uvp-protocol', 'protocol', 'uvp-error-taxonomy.v1.json');
+  return join(workspaceRoot, 'uvp-core', 'protocol', 'uvp-error-taxonomy.v1.json');
 }
 
 let taxonomy: TaxonomyFile;
@@ -73,7 +73,7 @@ beforeAll(() => {
   } catch (error) {
     throw new Error(
       `uvp error taxonomy not readable at ${path} (${(error as Error).message}). `
-      + 'The table lives in the uvp-protocol repo under protocol/uvp-error-taxonomy.v1.json; '
+      + 'The table is self-hosted in the uvp-core repo under protocol/uvp-error-taxonomy.v1.json; '
       + 'run the test from the pnpm workspace or point UVP_ERROR_TAXONOMY_JSON at the file. '
       + 'Do not skip this suite: it is the chain-services side of the pinned conformance contract.',
     );
