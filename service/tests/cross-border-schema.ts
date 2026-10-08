@@ -95,10 +95,10 @@ const dockTargetOnchainHookPlanArtifact = {
         inputs: [
           {
             port: "execute",
-            stageIdentifier: "fulfillment.intake",
+            stageIdentifier: "intake",
             hookName: "EXECUTE",
-            hookId: "fulfillment.intake#EXECUTE",
-            canonicalInputSignal: "seller::fulfillment.intake.execute",
+            hookId: "intake#EXECUTE",
+            canonicalInputSignal: "seller::intake.execute",
             canonicalInputSignalHash: "0x0000000000000000000000000000000000000000000000000000000000000602",
             source: "seller",
             sourceId: "0x0000000000000000000000000000000000000000000000000000000000000702",
@@ -109,7 +109,7 @@ const dockTargetOnchainHookPlanArtifact = {
         outputs: [
           {
             port: "completed",
-            canonicalOutputSignal: "seller::fulfillment.delivery.cmp",
+            canonicalOutputSignal: "seller::delivery.cmp",
             canonicalOutputSignalHash: "0x0000000000000000000000000000000000000000000000000000000000000a02",
             source: "seller",
             sourceId: "0x0000000000000000000000000000000000000000000000000000000000000702",

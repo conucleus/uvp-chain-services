@@ -134,28 +134,24 @@ spec:
     provider: eth
   nucleation:
     id: route-durable
-  taskPatterns:
-    - name: selector
-      stages:
-        - name: gate
-          source: buyer
-          # BEGIN 自发种子入口（物化门：零 hook 阶段在链上永不可物化）。
-          receiveSignals:
-            BEGIN: "buyer::selector.gate.seed"
-          sendSignals: [{ name: "ready" }, { name: "seed" }]
-          executor:
-            supplierType: organization
-            supplierID: selector-ops
-    - name: order
-      stages:
-        - name: intake
-          source: buyer
-          receiveSignals:
-            START: "buyer::selector.gate.ready"
-          sendSignals: [{ name: "cmp" }]
-          executor:
-            supplierType: organization
-            supplierID: intake-ops
+  stages:
+    - name: gate
+      source: buyer
+      # BEGIN 自发种子入口（物化门：零 hook 阶段在链上永不可物化）。
+      receiveSignals:
+        BEGIN: "buyer::gate.seed"
+      sendSignals: [{ name: "ready" }, { name: "seed" }]
+      executor:
+        supplierType: organization
+        supplierID: selector-ops
+    - name: intake
+      source: buyer
+      receiveSignals:
+        START: "buyer::gate.ready"
+      sendSignals: [{ name: "cmp" }]
+      executor:
+        supplierType: organization
+        supplierID: intake-ops
 `;
 
 describe("durable storage", () => {
@@ -2578,7 +2574,7 @@ function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
       artifactHash,
       roleSlots: [
         {
-          slotId: "order.intake",
+          slotId: "intake",
           title: "Intake executor",
           label: "Intake executor",
           duty: "Submit intake evidence.",
@@ -2592,7 +2588,7 @@ function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
             {
               pluginKind: "evidence_submission",
               source: "explicit",
-              stageIds: ["order.intake"],
+              stageIds: ["intake"],
               title: "Intake evidence",
               summary: "Submit intake evidence.",
               requiredEvidence: ["Intake evidence"],
@@ -2602,9 +2598,9 @@ function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
       ],
       orderPermissionTable: [
         {
-          permissionId: "order.intake#TRIGGER",
-          roleSlotId: "order.intake",
-          stageId: "order.intake",
+          permissionId: "intake#TRIGGER",
+          roleSlotId: "intake",
+          stageId: "intake",
           source: "buyer",
           signalName: "TRIGGER",
           payloadPolicy: "required",
@@ -2615,7 +2611,7 @@ function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
         {
           pluginKind: "evidence_submission",
           source: "explicit",
-          stageIds: ["order.intake"],
+          stageIds: ["intake"],
           title: "Intake evidence",
           summary: "Submit intake evidence.",
           requiredEvidence: ["Intake evidence"],
@@ -2624,11 +2620,11 @@ function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
       businessPersonaLabels: ["Buyer ops"],
       stages: [
         {
-          stageId: "order.intake",
+          stageId: "intake",
           index: 0,
           name: "Intake",
           evidence: ["Intake evidence"],
-          ownerRole: "order.intake",
+          ownerRole: "intake",
           status: "pending",
         },
       ],
@@ -2736,8 +2732,8 @@ function storeDockingSession(): StoreDockingSessionDTO {
       {
         interfaceName: "fulfillment_service",
         orderModes: ["new"],
-        inputs: [{ portName: "execute", label: "执行入口", hook: "target.intake#EXECUTE" }],
-        outputs: [{ portName: "completed", label: "完成", signal: "target::target.intake.cmp" }],
+        inputs: [{ portName: "execute", label: "执行入口", hook: "intake#EXECUTE" }],
+        outputs: [{ portName: "completed", label: "完成", signal: "target::intake.cmp" }],
       },
     ],
     selectedInterfaceName: "fulfillment_service",

@@ -71,29 +71,25 @@ spec:
     provider: eth
   nucleation:
     id: store-draft
-  taskPatterns:
-    - name: selector
-      stages:
-        - name: gate
-          source: buyer
-          # 自发种子入口（uvp-core 物化门：零 hook 阶段永不可物化，其
-          # sendSignals 无钩子可挂，编译器拒绝该形状）。
-          receiveSignals:
-            START: "buyer::selector.gate.seed"
-          sendSignals: [{ name: "ready" }, { name: "seed" }]
-          executor:
-            supplierType: organization
-            supplierID: selector-ops
-    - name: order
-      stages:
-        - name: intake
-          source: buyer
-          receiveSignals:
-            START: "buyer::selector.gate.ready"
-          sendSignals: [{ name: "cmp" }]
-          executor:
-            supplierType: organization
-            supplierID: intake-ops
+  stages:
+    - name: gate
+      source: buyer
+      # 自发种子入口（uvp-core 物化门：零 hook 阶段永不可物化，其
+      # sendSignals 无钩子可挂，编译器拒绝该形状）。
+      receiveSignals:
+        START: "buyer::gate.seed"
+      sendSignals: [{ name: "ready" }, { name: "seed" }]
+      executor:
+        supplierType: organization
+        supplierID: selector-ops
+    - name: intake
+      source: buyer
+      receiveSignals:
+        START: "buyer::gate.ready"
+      sendSignals: [{ name: "cmp" }]
+      executor:
+        supplierType: organization
+        supplierID: intake-ops
 `;
 
 const invalidZhixuYaml = `
@@ -106,11 +102,9 @@ spec:
     type: blockchain
   nucleation:
     id: broken
-  taskPatterns:
-    - name: order
-      stages:
-        - name: intake
-          source: buyer
+  stages:
+    - name: intake
+      source: buyer
 `;
 
 describe("Store Zhixu draft workflow", () => {
