@@ -18,12 +18,13 @@ import {
 } from "./replay.js";
 import type { ProjectionReplayOptions } from "./replay.js";
 import type { PlanCapabilityTablesInput } from "./projections/plan.js";
-import { rebuildIdentityProjections } from "./identity-projections.js";
+import { createEmptyIdentityProjectionSnapshot, rebuildIdentityProjections } from "./identity-projections.js";
 import { createChainServicesStores } from "../storage/factory.js";
 import { createPlanCapabilityTablesResolver } from "../store/console/zhixu-drafts.js";
 import { isTransientSqliteBusyError } from "../storage/sqlite.js";
 import {
   defaultProjectionScope,
+  projectionDiagnosticsFromSnapshots,
   type DurableProjectionStore,
   type PendingPostCommitKind,
   type PendingPostCommitStep,
@@ -400,6 +401,10 @@ export class IndexerService implements LifecycleService {
         finalizedBlock,
         confirmationDepth: this.#config.network.finalityConfirmations,
         eventCount: 0,
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(
+          createEmptyProjectionSnapshot(),
+          createEmptyIdentityProjectionSnapshot()
+        ),
         rebuild: {
           status: "idle",
           deploymentBlock,
@@ -545,7 +550,13 @@ export class IndexerService implements LifecycleService {
       await this.#processProjectionAutomation(snapshot);
       this.#cursor = nextCursor;
 
-      const syncState = await this.#store.getSyncState(this.#scope) ?? await this.#store.saveSyncState(syncStateInput);
+      // 重建事务内落库的 sync state 不含诊断计数（快照在事务内才构建）；
+      // 提交后按重放结果补写一次，/healthz 与 /admin/diagnostics 只读
+      // sync state，不重放全历史。
+      const syncState = await this.#store.saveSyncState({
+        ...syncStateInput,
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot)
+      });
       const summary = summaryFromSnapshot({
         chainId: this.#config.network.chainId,
         deploymentBlock,
@@ -863,6 +874,7 @@ export class IndexerService implements LifecycleService {
         confirmationDepth: this.#config.network.finalityConfirmations,
         ...(lastEvent ? { lastEventName: lastEvent.eventName } : {}),
         eventCount: activeEvents.length,
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot),
         rebuild: {
           status: "idle",
           deploymentBlock,
@@ -1260,6 +1272,7 @@ export class IndexerService implements LifecycleService {
         confirmationDepth: this.#config.network.finalityConfirmations,
         ...(existing?.lastEventName ? { lastEventName: existing.lastEventName } : {}),
         eventCount: replaySummary.activeEventCount,
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot),
         rebuild: {
           status: "idle",
           deploymentBlock,
@@ -1494,6 +1507,7 @@ export class IndexerService implements LifecycleService {
       confirmationDepth: this.#config.network.finalityConfirmations,
       ...(existing?.lastEventName ? { lastEventName: existing.lastEventName } : {}),
       eventCount: existing?.eventCount ?? 0,
+      ...(existing?.projectionDiagnostics ? { projectionDiagnostics: existing.projectionDiagnostics } : {}),
       rebuild: {
         status: "idle",
         deploymentBlock: this.#config.network.deploymentBlock,
@@ -1766,18 +1780,23 @@ export class IndexerService implements LifecycleService {
       // 通知上界跳批补处理：通知服务会按最终性上界过滤掉
       // 未达上界的事件且不产生投递记录；此时把该步骤按成功出队会永久
       // 丢失这批补投。保持排队并报错，待最终性追上后下一轮 sweep 再投。
+      // 上界本身缺失（sync state 无 finalizedBlock）同样等待——通知服务
+      // 对缺失上界 fail-closed 拒绝裁决，这里放行只会整批失败烧预算。
       const finalizedBlock = (await this.#store.getSyncState(this.#scope))?.finalizedBlock;
-      if (finalizedBlock !== undefined) {
-        const maxEventBlock = events.reduce(
-          (max, event) => (event.blockNumber > max ? event.blockNumber : max),
-          0n
+      if (finalizedBlock === undefined) {
+        throw new PendingPostCommitFinalityWaitError(
+          `pending signal notification batch ${step.stepId} cannot be judged without a finalized bound; it stays queued until the projection sync state provides one`
         );
-        if (maxEventBlock > finalizedBlock) {
-          // 哨兵错误：最终性等待不消耗补投预算（见 sweep 的分诊分支）。
-          throw new PendingPostCommitFinalityWaitError(
-            `pending signal notification batch ${step.stepId} extends to block ${maxEventBlock} above the finalized bound ${finalizedBlock}; it stays queued until finalization catches up`
-          );
-        }
+      }
+      const maxEventBlock = events.reduce(
+        (max, event) => (event.blockNumber > max ? event.blockNumber : max),
+        0n
+      );
+      if (maxEventBlock > finalizedBlock) {
+        // 哨兵错误：最终性等待不消耗补投预算（见 sweep 的分诊分支）。
+        throw new PendingPostCommitFinalityWaitError(
+          `pending signal notification batch ${step.stepId} extends to block ${maxEventBlock} above the finalized bound ${finalizedBlock}; it stays queued until finalization catches up`
+        );
       }
       // 事件存在性检查：批次已达最终性上界，事件却不在投影事件表
       // 里——这是重建替换/reorg 回滚后的脏存量，链上事实已不存在，补投
@@ -1820,6 +1839,7 @@ export class IndexerService implements LifecycleService {
       confirmationDepth: this.#config.network.finalityConfirmations,
       ...(existing?.lastEventName ? { lastEventName: existing.lastEventName } : {}),
       eventCount: existing?.eventCount ?? 0,
+      ...(existing?.projectionDiagnostics ? { projectionDiagnostics: existing.projectionDiagnostics } : {}),
       rebuild: {
         status: "failed",
         ...(existing?.rebuild?.startedAt ? { startedAt: existing.rebuild.startedAt } : {}),

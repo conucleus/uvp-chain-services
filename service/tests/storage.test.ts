@@ -120,6 +120,7 @@ const expectedMigrationVersions = [
   "0023_participant_wallet_single_role",
   "0024_drop_join_application_open_plan_applicant_uk",
   "0025_product_trigger_prepared_at",
+  "0026_projection_sync_diagnostics",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -2373,7 +2374,7 @@ function preparedSubmission(): PreparedSubmissionRecord {
     typedData: {
       domain: {
         name: "UVPStateMachine",
-        version: "0.13",
+        version: "0.14",
         chainId,
         verifyingContract: contractAddress as Address,
       },

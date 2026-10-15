@@ -49,6 +49,52 @@ export interface ProjectionRebuildMetadata {
   readonly mismatchCount?: number;
 }
 
+/**
+ * 随重放快照产生的显式诊断计数（unknown/unresolved 族与词表富集
+ * mismatch）。快照本身随事件表重建即可复原，但这些计数必须随 sync
+ * state 持久化：/healthz 与 /admin/diagnostics 只读 sync state，不重放
+ * 全历史——计数只留在快照/日志里时，投影悄然不完整仍报 ok/ready。
+ */
+export interface ProjectionSyncDiagnosticsCounts {
+  readonly unresolvedModuleOrderEventCount: number;
+  readonly unresolvedDockEventCount: number;
+  readonly unresolvedStageActivationEventCount: number;
+  readonly unresolvedDockTargetDeploymentCount: number;
+  readonly unresolvedIdentityRevokeEventCount: number;
+  readonly capabilityEnrichmentMismatchCount: number;
+  readonly unknownEventCount: number;
+}
+
+export function projectionDiagnosticsFromSnapshots(
+  orderSnapshot: ProjectionSnapshot,
+  identitySnapshot: Pick<IdentityProjectionSnapshot, "unresolvedRevokeEventCount">
+): ProjectionSyncDiagnosticsCounts {
+  return {
+    unresolvedModuleOrderEventCount: orderSnapshot.unresolvedModuleOrderEventCount ?? 0,
+    unresolvedDockEventCount: orderSnapshot.unresolvedDockEventCount ?? 0,
+    unresolvedStageActivationEventCount: orderSnapshot.unresolvedStageActivationEventCount ?? 0,
+    unresolvedDockTargetDeploymentCount: orderSnapshot.unresolvedDockTargetDeploymentCount ?? 0,
+    unresolvedIdentityRevokeEventCount: identitySnapshot.unresolvedRevokeEventCount ?? 0,
+    capabilityEnrichmentMismatchCount: orderSnapshot.capabilityEnrichmentMismatchCount ?? 0,
+    unknownEventCount: orderSnapshot.unknownEventCount ?? 0
+  };
+}
+
+export function hasProjectionDiagnosticsAnomalies(
+  counts: ProjectionSyncDiagnosticsCounts | undefined
+): boolean {
+  if (!counts) {
+    return false;
+  }
+  return counts.unresolvedModuleOrderEventCount > 0 ||
+    counts.unresolvedDockEventCount > 0 ||
+    counts.unresolvedStageActivationEventCount > 0 ||
+    counts.unresolvedDockTargetDeploymentCount > 0 ||
+    counts.unresolvedIdentityRevokeEventCount > 0 ||
+    counts.capabilityEnrichmentMismatchCount > 0 ||
+    counts.unknownEventCount > 0;
+}
+
 export interface ProjectionSyncState extends ProjectionScope {
   readonly syncStatus: ProjectionSyncStatus;
   readonly latestIndexedBlock?: bigint;
@@ -57,6 +103,7 @@ export interface ProjectionSyncState extends ProjectionScope {
   readonly lastEventName?: string;
   readonly eventCount: number;
   readonly rebuild?: ProjectionRebuildMetadata;
+  readonly projectionDiagnostics?: ProjectionSyncDiagnosticsCounts;
   readonly degradedReason?: string;
   readonly updatedAt: string;
 }
@@ -235,7 +282,20 @@ export class MemoryProjectionStore implements ProjectionStore {
         : {})
     });
     this.#identitySnapshot = rebuildIdentityProjections(events);
-    this.#syncState = syncStateFromRebuildInput(input, events);
+    const derived = syncStateFromRebuildInput(input, events);
+    // 内存重放存储无链侧确认深度视图：所给事件即已提交历史，显式
+    // syncState.finalizedBlock 缺席时以最新已索引块为最终性上界（keeper
+    // 的最终性门在测试装配下仍可放行；durable 存储不走该缺省）。
+    const withFinality: ProjectionSyncState =
+      derived.finalizedBlock === undefined && derived.latestIndexedBlock !== undefined
+        ? { ...derived, finalizedBlock: derived.latestIndexedBlock }
+        : derived;
+    this.#syncState = withFinality.projectionDiagnostics
+      ? withFinality
+      : {
+        ...withFinality,
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(this.#snapshot, this.#identitySnapshot)
+      };
     return this.#snapshot;
   }
 
@@ -356,6 +416,7 @@ export function syncStateFromRebuildInput(
         : {}),
     eventCount: base?.eventCount ?? activeEvents.length,
     ...(base?.rebuild ? { rebuild: base.rebuild } : {}),
+    ...(base?.projectionDiagnostics ? { projectionDiagnostics: base.projectionDiagnostics } : {}),
     ...(base?.degradedReason ? { degradedReason: base.degradedReason } : {}),
     updatedAt: new Date().toISOString(),
   };

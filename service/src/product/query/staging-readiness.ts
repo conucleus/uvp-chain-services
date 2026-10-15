@@ -27,6 +27,7 @@ export interface ProductApiStagingReadiness {
   readonly proof: JsonRecord;
   readonly evidenceStorage: JsonRecord;
   readonly roleInputs: JsonRecord;
+  readonly automation: JsonRecord;
 }
 
 export interface BuildProductApiStagingReadinessOptions {
@@ -64,6 +65,7 @@ export async function buildProductApiStagingReadiness(
   const proof = proofSummary(orders, tasks);
   const evidenceStorage = evidenceStorageSummary(diagnostics);
   const roleInputs = roleInputSummary(diagnostics);
+  const automation = automationSummary(diagnostics);
 
   const reasons = readinessReasons({
     profile,
@@ -73,7 +75,8 @@ export async function buildProductApiStagingReadiness(
     productState,
     proof,
     evidenceStorage,
-    roleInputs
+    roleInputs,
+    automation
   });
   const ready = reasons.length === 0;
 
@@ -91,7 +94,8 @@ export async function buildProductApiStagingReadiness(
     productState,
     proof,
     evidenceStorage,
-    roleInputs
+    roleInputs,
+    automation
   });
 }
 
@@ -104,6 +108,7 @@ function readinessReasons(input: {
   readonly proof: JsonRecord;
   readonly evidenceStorage: JsonRecord;
   readonly roleInputs: JsonRecord;
+  readonly automation: JsonRecord;
 }): readonly string[] {
   const reasons: string[] = [];
   if (input.profile.environment !== "staging") {
@@ -146,6 +151,12 @@ function readinessReasons(input: {
   }
   if (input.proof.orderProofEventCount === 0 || input.proof.taskProofRowCount === 0) {
     reasons.push("no_chain_proof");
+  }
+  // B5 裁决：staging 的链上时钟拨表面必须在场——timer keeper 未启用或
+  // 私钥角色未装配（enabled+key 一致）即红。dock keeper 的 no-op 是链轨
+  // 无 route 投影源的既定形态（reason 见 automation 摘要），不计红。
+  if (input.profile.environment === "staging" && input.automation.timerKeeperReady !== true) {
+    reasons.push("timer_keeper_not_assembled");
   }
   return reasons;
 }
@@ -359,6 +370,27 @@ function roleInputSummary(diagnostics: JsonRecord): JsonRecord {
     governanceSignerConfigured: privateKeyRoleReady(governanceSigner),
     governanceAdminReviewerCount: numberOf(governanceAdminReviewer?.configuredCount),
     opsConsoleAdminCount: numberOf(opsConsoleAdmin?.configuredCount)
+  };
+}
+
+function automationSummary(diagnostics: JsonRecord): JsonRecord {
+  const timerKeeper = recordOf(diagnostics.timerKeeper);
+  const dockAutomation = recordOf(diagnostics.dockAutomation);
+  const enabled = timerKeeper?.enabled === true;
+  const assembled = privateKeyRoleReady(timerKeeper);
+  return {
+    timerKeeperReady: enabled && assembled,
+    timerKeeper: {
+      enabled,
+      assembled,
+      privateKeyConfigured: timerKeeper?.privateKeyConfigured === true,
+      addressMatches: timerKeeper?.addressMatches !== false
+    },
+    dockAutomation: {
+      enabled: dockAutomation?.enabled === true,
+      routeSourceAssembled: false,
+      reason: "dock route bindings (binding roster plus pre-assembled open/attach calldata) exist only in cloud-compile artifacts (uvp.dockRoute.v2); the chain events expose delivered bindings only, so the chain track has no projection source to rebuild the route roster - the dock keeper stays an explicit no-op here instead of fabricating a second source of truth"
+    }
   };
 }
 

@@ -104,6 +104,9 @@ export interface DockAutomationRunSummary {
   openCandidates: number;
   inputCandidates: number;
   outputCandidates: number;
+  /** 本轮去重窗口放行后实际尝试广播的次数（成败同计）——
+   * maxCandidatesPerRun 对该数封顶，全失败轮不会扫穿全部候选。 */
+  attempted: number;
   submitted: number;
   /** 最终性窗口内被去重跳过的重复广播次数。 */
   deduplicated: number;

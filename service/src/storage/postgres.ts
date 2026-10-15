@@ -30,6 +30,7 @@ import {
   stringColumn,
 } from "./postgres-rows.js";
 import {
+  projectionDiagnosticsFromSnapshots,
   projectionScopeContractAddress,
   syncStateFromRebuildInput,
 } from "./projection-store.js";
@@ -154,6 +155,8 @@ export class PostgresProjectionStore implements DurableProjectionStore {
                 : {}),
               eventCount: syncState.eventCount,
               ...(syncState.rebuild ? { rebuild: syncState.rebuild } : {}),
+              projectionDiagnostics: syncState.projectionDiagnostics ??
+                projectionDiagnosticsFromSnapshots(orderSnapshot, identitySnapshot),
               ...(syncState.degradedReason
                 ? { degradedReason: syncState.degradedReason }
                 : {}),
@@ -180,8 +183,9 @@ export class PostgresProjectionStore implements DurableProjectionStore {
     await this.#database.query(
       `INSERT INTO chain_projection_sync_state (
          chain_id, contract_address, sync_status, latest_indexed_block, finalized_block,
-         confirmation_depth, last_event_name, event_count, rebuild_json, degraded_reason, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+         confirmation_depth, last_event_name, event_count, rebuild_json,
+         projection_diagnostics_json, degraded_reason, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12)
        ON CONFLICT(chain_id, contract_address)
        DO UPDATE SET
          sync_status = excluded.sync_status,
@@ -191,6 +195,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
          last_event_name = excluded.last_event_name,
          event_count = excluded.event_count,
          rebuild_json = excluded.rebuild_json,
+         projection_diagnostics_json = excluded.projection_diagnostics_json,
          degraded_reason = excluded.degraded_reason,
          updated_at = excluded.updated_at`,
       [
@@ -203,6 +208,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
         state.lastEventName ?? null,
         state.eventCount,
         state.rebuild ? stringifyStorageJson(state.rebuild) : null,
+        state.projectionDiagnostics ? stringifyStorageJson(state.projectionDiagnostics) : null,
         state.degradedReason ?? null,
         updatedAt,
       ],
@@ -234,6 +240,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
          last_event_name AS "lastEventName",
          event_count AS "eventCount",
          rebuild_json::text AS "rebuildJson",
+         projection_diagnostics_json::text AS "projectionDiagnosticsJson",
          degraded_reason AS "degradedReason",
          updated_at AS "updatedAt"
        FROM chain_projection_sync_state
@@ -788,11 +795,18 @@ function syncStateRow(row: unknown): ProjectionSyncState {
   const finalizedBlock = nullableStringColumn(record, "finalizedBlock");
   const lastEventName = nullableStringColumn(record, "lastEventName");
   const rebuildJson = nullableStringColumn(record, "rebuildJson");
+  const projectionDiagnosticsJson = nullableStringColumn(record, "projectionDiagnosticsJson");
   const degradedReason = nullableStringColumn(record, "degradedReason");
   const rebuild =
     rebuildJson !== null
       ? parseStorageJson<NonNullable<ProjectionSyncState["rebuild"]>>(
           rebuildJson,
+        )
+      : undefined;
+  const projectionDiagnostics =
+    projectionDiagnosticsJson !== null
+      ? parseStorageJson<NonNullable<ProjectionSyncState["projectionDiagnostics"]>>(
+          projectionDiagnosticsJson,
         )
       : undefined;
   return {
@@ -812,6 +826,7 @@ function syncStateRow(row: unknown): ProjectionSyncState {
     ...(lastEventName !== null ? { lastEventName } : {}),
     eventCount: numberColumn(record, "eventCount"),
     ...(rebuild ? { rebuild } : {}),
+    ...(projectionDiagnostics ? { projectionDiagnostics } : {}),
     ...(degradedReason !== null ? { degradedReason } : {}),
     updatedAt: stringColumn(record, "updatedAt"),
   };

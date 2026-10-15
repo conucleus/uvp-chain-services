@@ -13,6 +13,7 @@ import {
   ANVIL_DEFAULT_PRIVATE_KEYS,
 } from "./anvil-defaults.js";
 import { storeAuthUrlEvidenceFailure } from "./store-auth-evidence.js";
+import type { TimerKeeperConfig } from "../timer-keeper/types.js";
 
 export type FinalityAnchor = "finalized" | "confirmations";
 
@@ -229,6 +230,7 @@ export interface ChainServicesConfig {
   readonly operatorRoles: OperatorRoleConfig;
   readonly reconcile: ReconcileConfig;
   readonly dockAutomation: DockAutomationConfig;
+  readonly timerKeeper: TimerKeeperConfig;
   readonly evidenceStorage: EvidenceStorageConfig;
   readonly notifications?: NotificationsConfig;
   readonly storeAuth?: StoreAuthConfig;
@@ -275,6 +277,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     env,
     "UVP_PRODUCT_BFF_CREATOR_ADDRESS",
   );
+  const timerKeeperAddress = optionalAddressEnv(env, "UVP_TIMER_KEEPER_ADDRESS");
   const broadcastMaxRetry = parseInteger(env, "BROADCAST_MAX_RETRY_ATTEMPTS", 3);
 
   const config: ChainServicesConfig = {
@@ -366,6 +369,25 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         "UVP_DOCK_AUTOMATION_REDELIVERY_WINDOW_MS",
         120_000,
       ),
+    },
+    timerKeeper: {
+      enabled: parseBoolean(env, "UVP_TIMER_KEEPER_ENABLED", false),
+      pollIntervalMs: parseInteger(env, "UVP_TIMER_KEEPER_POLL_INTERVAL_MS", 5_000),
+      maxCandidatesPerRun: parseInteger(
+        env,
+        "UVP_TIMER_KEEPER_MAX_CANDIDATES_PER_RUN",
+        4,
+      ),
+      ...optionalGasCap(env, "UVP_TIMER_KEEPER_MAX_GAS_PER_TX", 500_000n),
+      redeliveryWindowMs: parseInteger(
+        env,
+        "UVP_TIMER_KEEPER_REDELIVERY_WINDOW_MS",
+        120_000,
+      ),
+      privateKeyEnv:
+        optionalEnv(env, "UVP_TIMER_KEEPER_PRIVATE_KEY_ENV") ??
+        "UVP_TIMER_KEEPER_PRIVATE_KEY",
+      ...(timerKeeperAddress ? { expectedAddress: timerKeeperAddress } : {}),
     },
     evidenceStorage: parseEvidenceStorageConfig(env),
     notifications: parseNotificationsConfig(env),
@@ -1433,6 +1455,7 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
     config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
+    config.timerKeeper.privateKeyEnv,
   ]);
   for (const envName of privateKeyEnvNames) {
     const privateKey = optionalEnv(env, envName)?.toLowerCase();
@@ -1769,6 +1792,7 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
     config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
+    config.timerKeeper.privateKeyEnv,
   ]);
   for (const envName of privateKeyEnvNames) {
     const privateKey = optionalEnv(env, envName)?.toLowerCase();
@@ -1905,6 +1929,7 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
     config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
+    config.timerKeeper.privateKeyEnv,
   ]);
   for (const envName of privateKeyEnvNames) {
     const privateKey = optionalEnv(env, envName)?.toLowerCase();

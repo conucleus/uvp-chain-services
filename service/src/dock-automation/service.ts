@@ -6,11 +6,8 @@ import { redactErrorMessage } from "../security/redaction.js";
 import {
   factAttributionPayload,
   resolvePlanCapabilityTablesFromStore,
-  selectorBindingForTargetStage,
-  zeroSelectorBinding,
   ZERO_BYTES32 as CAPABILITY_ZERO_BYTES32,
   type BuiltFactAttribution,
-  type BuiltSelectorBinding,
   type PlanCapabilityTables
 } from "../submissions/capability-proofs.js";
 import type {
@@ -26,12 +23,11 @@ import type {
 /** submitDockedSignal 的镜像事实造证结果（payload 形状见造证单源）。 */
 interface DockedSignalProofs {
   readonly attribution: BuiltFactAttribution;
-  readonly selectorBinding: BuiltSelectorBinding;
 }
 
 /** keeper 写面切片：submitDockedInput/submitDockedSignal 取自
- * protocol-bindings 单源（DOCKING_MODULE_ABI）——4.4 起 submitDockedSignal
- * 携 attribution/selectorBinding 造证参数，手抄副本会随协议演进漂移成错
+ * protocol-bindings 单源（DOCKING_MODULE_ABI）——submitDockedSignal
+ * 携 attribution 造证参数，手抄副本会随协议演进漂移成错
  * selector。先放宽为泛型 Abi 再切片：直接在整表字面量类型上做
  * filter/encodeFunctionData 参数推导会让 viem 的巨型条件类型爆栈
  * （TS2589）；切片的 selector 与参数布局由 dock-automation 测试按
@@ -155,6 +151,14 @@ export class DockAutomationWorker implements LifecycleService {
       return;
     }
     this.#running = true;
+    if (this.#config.pollIntervalMs <= 0) {
+      // 轮询间隔非正数会让 setInterval 退化成热循环（对齐 reconcile worker
+      // 与 indexer 轮询的守卫）：响亮告警并保持不轮询。
+      this.#logger.warn(
+        "dock automation polling is disabled (UVP_DOCK_AUTOMATION_POLL_INTERVAL_MS<=0): no route candidate will ever be delivered until the interval is positive"
+      );
+      return;
+    }
     this.#timer = setInterval(() => {
       void this.runOnce().catch((error) => {
         this.#logger.warn(`dock automation run failed: ${redactErrorMessage(error)}`);
@@ -188,6 +192,7 @@ export class DockAutomationWorker implements LifecycleService {
       openCandidates: 0,
       inputCandidates: 0,
       outputCandidates: 0,
+      attempted: 0,
       submitted: 0,
       deduplicated: 0,
       skipped: []
@@ -210,6 +215,8 @@ export class DockAutomationWorker implements LifecycleService {
         validateDockRouteRecord(route, this.#chainId, index)
       );
       const snapshot = await this.#projectionStore.getOrderSnapshot();
+      const syncState = await this.#projectionStore.getSyncState();
+      const finalizedBlock = syncState?.finalizedBlock;
       const docks = Object.values(snapshot.stateMachineDocks).filter(
         (dock) => dock.chainId === this.#chainId
       );
@@ -220,17 +227,34 @@ export class DockAutomationWorker implements LifecycleService {
         openCandidates: 0,
         inputCandidates: 0,
         outputCandidates: 0,
+        attempted: 0,
         submitted: 0,
         deduplicated: 0,
         skipped: []
       };
+      // 最终性门（镜像 timer keeper）：sync state 缺失（最终性上界未知）
+      // 或人工 rebuild 进行中（syncStatus=rebuilding，投影是半重建的
+      // 中间态）时整轮不放行任何候选并留痕——hook ready/target fact 判据
+      // 读的是未最终投影时不抢跑，fail-closed。
+      if (finalizedBlock === undefined || syncState?.syncStatus === "rebuilding") {
+        summary.skipped.push(
+          finalizedBlock === undefined
+            ? "finality: projection sync state carries no finalizedBlock; no dock candidate is released this run"
+            : "finality: projection rebuild is in progress; no dock candidate is released this run"
+        );
+        this.#lastSummary = summary;
+        return summary;
+      }
+      /** 本轮触过的去重键（收尾淘汰用：未触过的键对应候选已消失）。 */
+      const touchedDedupeKeys = new Set<string>();
       if (routes.length === 0 || !this.#submitter) {
+        this.#evictStaleTracking(touchedDedupeKeys, this.#now().getTime());
         this.#lastSummary = summary;
         return summary;
       }
 
       for (const route of routes) {
-        if (summary.submitted >= this.#config.maxCandidatesPerRun) {
+        if (summary.attempted >= this.#config.maxCandidatesPerRun) {
           break;
         }
         // dock 实例身份是 (routeId, localPlanId, localOrderId) 且模式钉死：
@@ -251,7 +275,7 @@ export class DockAutomationWorker implements LifecycleService {
             // open 候选（new）：入口 hook 已 Ready + route 来源携带 calldata。
             if (
               route.openCalldata &&
-              this.entranceHookReady(snapshot, route)
+              this.entranceHookReady(snapshot, route, finalizedBlock)
             ) {
               summary.openCandidates += 1;
               await this.#submitCalldata(
@@ -260,7 +284,9 @@ export class DockAutomationWorker implements LifecycleService {
                 "open",
                 // 去重键与实例身份同构（含 localOrderId）：同 route 不同订单
                 // 的 open 各自独立，不得互相吃掉对方的广播窗口。
-                `open:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}:${route.localOrderId.toLowerCase()}`
+                `open:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}:${route.localOrderId.toLowerCase()}`,
+                undefined,
+                touchedDedupeKeys
               );
             }
           } else if (!route.attachCalldata) {
@@ -283,7 +309,9 @@ export class DockAutomationWorker implements LifecycleService {
               "attach",
               // 去重键与 open 车道同构（含 localOrderId + 模式由路由分岔
               // 前置保证互斥）。
-              `attach:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}:${route.localOrderId.toLowerCase()}`
+              `attach:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}:${route.localOrderId.toLowerCase()}`,
+              undefined,
+              touchedDedupeKeys
             );
           }
           continue;
@@ -294,13 +322,13 @@ export class DockAutomationWorker implements LifecycleService {
         // 出生锚，逐端口全量活交付。
         if (route.orderMode === "existing") {
           for (const binding of route.inputs) {
-            if (summary.submitted >= this.#config.maxCandidatesPerRun) {
+            if (summary.attempted >= this.#config.maxCandidatesPerRun) {
               break;
             }
             if (dock.inputDeliveries[binding.bindingHash.toLowerCase()]) {
               continue;
             }
-            if (!this.inputHookReady(snapshot, route, binding.localHookId, dock.stateMachineAddress)) {
+            if (!this.inputHookReady(snapshot, route, binding.localHookId, dock.stateMachineAddress, finalizedBlock)) {
               continue;
             }
             // 事实槽预检（对称于 output 车道 targetFactExists 的正向门）：
@@ -316,7 +344,8 @@ export class DockAutomationWorker implements LifecycleService {
                 route,
                 binding.targetSourceId,
                 binding.targetSignalId,
-                dock.stateMachineAddress
+                dock.stateMachineAddress,
+                finalizedBlock
               )
             ) {
               summary.skipped.push(
@@ -350,7 +379,8 @@ export class DockAutomationWorker implements LifecycleService {
               summary,
               "input",
               `input:${dock.dockInstanceId.toLowerCase()}:${binding.bindingHash.toLowerCase()}`,
-              { dockInstanceId: dock.dockInstanceId, bindingHash: binding.bindingHash }
+              { dockInstanceId: dock.dockInstanceId, bindingHash: binding.bindingHash },
+              touchedDedupeKeys
             );
           }
         }
@@ -359,7 +389,7 @@ export class DockAutomationWorker implements LifecycleService {
         // attach 前已成立的目标输出在此重放回填；未成立时链上 revert
         // DockOutputNotReady，由最终性窗口重试，投影呈现事实后收敛。
         for (const binding of route.outputs) {
-          if (summary.submitted >= this.#config.maxCandidatesPerRun) {
+          if (summary.attempted >= this.#config.maxCandidatesPerRun) {
             break;
           }
           if (dock.outputDeliveries[binding.bindingHash.toLowerCase()]) {
@@ -371,15 +401,16 @@ export class DockAutomationWorker implements LifecycleService {
               route,
               binding.targetSourceId,
               binding.targetSignalId,
-              dock.stateMachineAddress
+              dock.stateMachineAddress,
+              finalizedBlock
             )
           ) {
             continue;
           }
           summary.outputCandidates += 1;
-          // submitDockedSignal 4.4 起携 attribution/selectorBinding 造证：
-          // 镜像事实落在父单（localPlanId/localSourceId/localSignalId），
-          // 词表按父 plan 解析；造证单源见 submissions/capability-proofs.ts。
+          // submitDockedSignal 携 attribution 造证：镜像事实落在父单
+          // （localPlanId/localSourceId/localSignalId），词表按父 plan 解析；
+          // 造证单源见 submissions/capability-proofs.ts。
           let proofs: DockedSignalProofs;
           try {
             proofs = await this.#dockedSignalProofs(dock.localPlanId, binding);
@@ -393,18 +424,20 @@ export class DockAutomationWorker implements LifecycleService {
           const data = encodeFunctionData({
             abi: dockingWriteAbi,
             functionName: "submitDockedSignal",
-            args: [dock.dockInstanceId, binding.bindingHash, proofs.attribution, proofs.selectorBinding]
+            args: [dock.dockInstanceId, binding.bindingHash, proofs.attribution]
           });
           await this.#submitCalldata(
             data,
             summary,
             "output",
             `output:${dock.dockInstanceId.toLowerCase()}:${binding.bindingHash.toLowerCase()}`,
-            { dockInstanceId: dock.dockInstanceId, bindingHash: binding.bindingHash }
+            { dockInstanceId: dock.dockInstanceId, bindingHash: binding.bindingHash },
+            touchedDedupeKeys
           );
         }
       }
 
+      this.#evictStaleTracking(touchedDedupeKeys, this.#now().getTime());
       this.#lastSummary = summary;
       return summary;
     } finally {
@@ -413,17 +446,37 @@ export class DockAutomationWorker implements LifecycleService {
   }
 
   /**
+   * 进程内跟踪态淘汰：本轮未触过的去重键（候选已消失——绑定已交付/
+   * route 已下线）或距上次广播超过 4×去重窗的键即清理——去重窗语义只
+   * 覆盖 redeliveryWindowMs 内的记录，无淘汰的 Map 会随历史 route 单调
+   * 增长。
+   */
+  #evictStaleTracking(touchedDedupeKeys: ReadonlySet<string>, nowMs: number): void {
+    const evictionHorizonMs = 4 * this.#config.redeliveryWindowMs;
+    for (const [key, lastBroadcastAt] of this.#lastBroadcastAt) {
+      if (!touchedDedupeKeys.has(key) || nowMs - lastBroadcastAt > evictionHorizonMs) {
+        this.#lastBroadcastAt.delete(key);
+        this.#terminalRevertWindows.delete(key);
+      }
+    }
+  }
+
+  /**
    * 广播 + 最终性窗口去重：同一 key 在 redeliveryWindowMs 内已尝试过
-   * （成败同占窗）则本轮跳过（计数 deduplicated，不静默）。
-   * binding（input/output 车道传入）携绑定身份供无收敛 revert 的升级
-   * 告警引用（attach/open 车道无绑定粒度，不参与升级）。
+   * （成败同占窗）则本轮跳过（计数 deduplicated，不静默）。窗口放行即
+   * 计入 summary.attempted（成败同计）——maxCandidatesPerRun 预算对
+   * attempted 封顶，全失败轮不会扫穿全部候选。binding（input/output
+   * 车道传入）携绑定身份供无收敛 revert 的升级告警引用（attach/open
+   * 车道无绑定粒度，不参与升级）。touchedDedupeKeys 记录本轮触过的键
+   * 供收尾淘汰。
    */
   #submitCalldata(
     data: Hex,
     summary: DockAutomationRunSummary,
     label: string,
     dedupeKey: string,
-    binding?: { readonly dockInstanceId: Hex; readonly bindingHash: Hex }
+    binding?: { readonly dockInstanceId: Hex; readonly bindingHash: Hex },
+    touchedDedupeKeys?: Set<string>
   ): Promise<void> {
     const submitter = this.#submitter;
     if (!submitter) {
@@ -433,8 +486,11 @@ export class DockAutomationWorker implements LifecycleService {
     const lastBroadcastAt = this.#lastBroadcastAt.get(dedupeKey);
     if (lastBroadcastAt !== undefined && nowMs - lastBroadcastAt < this.#config.redeliveryWindowMs) {
       summary.deduplicated += 1;
+      touchedDedupeKeys?.add(dedupeKey);
       return Promise.resolve();
     }
+    summary.attempted += 1;
+    touchedDedupeKeys?.add(dedupeKey);
     this.#lastBroadcastAt.set(dedupeKey, nowMs);
     return submitter
       .submit({
@@ -497,7 +553,8 @@ export class DockAutomationWorker implements LifecycleService {
 
   entranceHookReady(
     snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
-    route: DockRouteRecord
+    route: DockRouteRecord,
+    finalizedBlock: bigint
   ): boolean {
     // new 模式恰一条 input 绑定（出生锚），其本地 hook 即 entrance。
     const entranceHookId = route.inputs[0]?.localHookId;
@@ -505,7 +562,10 @@ export class DockAutomationWorker implements LifecycleService {
       return false;
     }
     const order = this.#orderFor(snapshot, route.localPlanId, route.localOrderId);
-    return order?.hooks[entranceHookId.toLowerCase()]?.status === "ready";
+    const hook = order?.hooks[entranceHookId.toLowerCase()];
+    // Ready 判据带最终性门：hook 的最近状态变更必须在 finalizedBlock 内，
+    // 未最终的 ready 不触发 open（镜像 timer keeper 的候选门）。
+    return hook?.status === "ready" && hook.updatedAt.blockNumber <= finalizedBlock;
   }
 
   /** attach 就绪门：父单与目标单都已 birth 在投影中。挂接前 dock 尚未
@@ -528,10 +588,9 @@ export class DockAutomationWorker implements LifecycleService {
 
   /**
    * submitDockedSignal 的镜像事实造证：attribution 证本地事实键
-   * (localSourceId, localSignalId) 在父 plan 词表内的成员资格与属主阶段，
-   * selectorBinding 按属主阶段携绑定叶 proof（与 submissions 车道的
-   * resolveSubmissionCapabilityProofs 同口径：词表外/无词表 → 全零由链上
-   * 词表闸裁决；富集 failed → 抛错由调用方跳过留痕）。
+   * (localSourceId, localSignalId) 在父 plan 词表内的成员资格与属主阶段
+   * （与 submissions 车道同口径：词表外/无词表 → 全零由链上词表闸裁决；
+   * 富集 failed → 抛错由调用方跳过留痕）。
    */
   async #dockedSignalProofs(
     localPlanId: Hex,
@@ -546,13 +605,8 @@ export class DockAutomationWorker implements LifecycleService {
       this.#runPlanTables.set(planKey, tables);
     }
     const effectiveTables = tables ?? EMPTY_PLAN_CAPABILITY_TABLES;
-    const attribution = factAttributionPayload(effectiveTables, binding.localSourceId, binding.localSignalId);
-    if (attribution.stageId === CAPABILITY_ZERO_BYTES32) {
-      return { attribution, selectorBinding: zeroSelectorBinding() };
-    }
     return {
-      attribution,
-      selectorBinding: selectorBindingForTargetStage(effectiveTables, attribution.stageId)
+      attribution: factAttributionPayload(effectiveTables, binding.localSourceId, binding.localSignalId)
     };
   }
 
@@ -585,27 +639,34 @@ export class DockAutomationWorker implements LifecycleService {
     snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
     route: DockRouteRecord,
     localHookId: Hex,
-    stateMachineAddress?: Hex
+    stateMachineAddress: Hex | undefined,
+    finalizedBlock: bigint
   ): boolean {
     const order = this.#orderFor(snapshot, route.localPlanId, route.localOrderId, stateMachineAddress);
-    return order?.hooks[localHookId.toLowerCase()]?.status === "ready";
+    const hook = order?.hooks[localHookId.toLowerCase()];
+    // Ready 判据带最终性门（未最终的 ready 不触发 input 交付）。
+    return hook?.status === "ready" && hook.updatedAt.blockNumber <= finalizedBlock;
   }
 
   /** 目标单事实 (targetSourceId, targetSignalId) 是否已在投影中。
    * output 车道作正向就绪门（未成立 revert DockOutputNotReady 由窗口
    * 重试）；input 车道作冲突预检（已成立且本绑定未投递即永久
    * DockInputConflict）。有 dock 上下文时传其状态机地址收敛跨部署同
-   * (planId, orderId) 的误命中（与 inputHookReady 同口径）。 */
+   * (planId, orderId) 的误命中（与 inputHookReady 同口径）。事实判据
+   * 带最终性门：信号的 submittedAt.blockNumber 必须在 finalizedBlock
+   * 内，未最终的目标事实不触发回填/预检。 */
   targetFactExists(
     snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
     route: DockRouteRecord,
     targetSourceId: Hex,
     targetSignalId: Hex,
-    stateMachineAddress?: Hex
+    stateMachineAddress: Hex | undefined,
+    finalizedBlock: bigint
   ): boolean {
     const linkedOrder = this.#orderFor(snapshot, route.targetPlanId, route.linkedOrderId, stateMachineAddress);
+    const signal = linkedOrder?.signals[`${targetSourceId.toLowerCase()}:${targetSignalId.toLowerCase()}`];
     return Boolean(
-      linkedOrder?.signals[`${targetSourceId.toLowerCase()}:${targetSignalId.toLowerCase()}`]
+      signal && signal.submittedAt.blockNumber <= finalizedBlock
     );
   }
 }

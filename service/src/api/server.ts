@@ -22,6 +22,11 @@ import {
 } from "../product/query/bff/trigger.js";
 import { createViemReconcileReceiptClient, TxReconcileWorker } from "../reconcile/index.js";
 import { DockAutomationWorker } from "../dock-automation/index.js";
+import {
+  TimerKeeperWorker,
+  createTimerKeeperWalletSubmitter,
+  type TimerKeeperSubmitter
+} from "../timer-keeper/index.js";
 import { createChainServicesStores } from "../storage/factory.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import {
@@ -201,6 +206,18 @@ export async function startApiServer(
     projectionStore: store,
     dockingAddress: dockingModuleAddressValue ?? "0x0000000000000000000000000000000000000000",
     chainId: config.network.chainId,
+    logger
+  });
+  // 链上时钟拨表 keeper：pokeTimer 经 wallet client 代付（链上时钟活性
+  // 面，非业务签名），候选完全来自投影（waiting+dueAt）。未启用/未配
+  // keeper 私钥/未配状态机地址时 submitter 不装配，worker 显式 no-op。
+  const timerKeeperSubmitter = createConfiguredTimerKeeperSubmitter(config, submissionVerifyingContract);
+  const timerKeeperWorker = new TimerKeeperWorker({
+    config: config.timerKeeper,
+    projectionStore: store,
+    stateMachineAddress: submissionVerifyingContract ?? "0x0000000000000000000000000000000000000000",
+    chainId: config.network.chainId,
+    ...(timerKeeperSubmitter ? { submitter: timerKeeperSubmitter } : {}),
     logger
   });
   // admin recovery actions 从既有 worker/indexer 原语构造，路由
@@ -435,18 +452,26 @@ export async function startApiServer(
   // 轮询在初始后台重建结束后启动（见上方注释），避免增量刷新与
   // 全量重建并发写同一投影存储。reconcile/dock-automation 首轮同门：重建
   // 进行中读投影会把本应 confirmed 的记录误标 indexing（下一轮自愈，但
-  // 状态与外部通知面失真一轮）。
+  // 状态与外部通知面失真一轮）。close 若发生在重建期间，置位 closed：
+  // 重建 settle 后的启动序列不得复活已 stop 的 worker/轮询。
+  let closed = false;
   void (async () => {
     await initialProjectionRebuild;
+    if (closed) {
+      return;
+    }
     const pollInterval = indexer ? startProjectionRefresh(indexer, config, logger) : undefined;
     if (pollInterval) {
       server.on("close", () => clearInterval(pollInterval));
     }
     await reconcileWorker.start();
     await dockAutomationWorker.start();
+    await timerKeeperWorker.start();
   })();
   server.on("close", () => {
+    closed = true;
     void (async () => {
+      await timerKeeperWorker.stop();
       await dockAutomationWorker.stop();
       await reconcileWorker.stop();
       await stores.close();
@@ -691,6 +716,27 @@ function createConfiguredSubmissionBroadcastAdapter(
     retryMaxMs: config.security.broadcastRetryMaxMs,
     ...(dedupeStore ? { dedupeStore } : {}),
     audit
+  });
+}
+
+function createConfiguredTimerKeeperSubmitter(
+  config: ChainServicesConfig,
+  stateMachine: Address | undefined
+): TimerKeeperSubmitter | undefined {
+  if (!config.timerKeeper.enabled) {
+    return undefined;
+  }
+  if (!stateMachine) {
+    return undefined;
+  }
+  if (!process.env[config.timerKeeper.privateKeyEnv]?.trim()) {
+    return undefined;
+  }
+  return createTimerKeeperWalletSubmitter({
+    stateMachineAddress: stateMachine,
+    chainId: config.network.chainId,
+    rpcUrl: config.network.rpcUrl,
+    privateKeyEnv: config.timerKeeper.privateKeyEnv
   });
 }
 

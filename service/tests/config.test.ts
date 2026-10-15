@@ -309,6 +309,60 @@ describe("chain-services config", () => {
     });
   });
 
+  it("loads timer keeper config and keeps the role consistent in preflight", async () => {
+    const config = loadConfigFromEnv({
+      UVP_TIMER_KEEPER_ENABLED: "true",
+      UVP_TIMER_KEEPER_POLL_INTERVAL_MS: "250",
+      UVP_TIMER_KEEPER_MAX_CANDIDATES_PER_RUN: "2",
+      UVP_TIMER_KEEPER_MAX_GAS_PER_TX: "250000",
+      UVP_TIMER_KEEPER_REDELIVERY_WINDOW_MS: "60000",
+      UVP_TIMER_KEEPER_PRIVATE_KEY_ENV: "UVP_STAGING_TIMER_KEEPER_PRIVATE_KEY",
+      UVP_STAGING_TIMER_KEEPER_PRIVATE_KEY: anvilPrivateKey
+    });
+
+    expect(config.timerKeeper).toEqual({
+      enabled: true,
+      pollIntervalMs: 250,
+      maxCandidatesPerRun: 2,
+      maxGasPerTx: 250_000n,
+      redeliveryWindowMs: 60_000,
+      privateKeyEnv: "UVP_STAGING_TIMER_KEEPER_PRIVATE_KEY"
+    });
+
+    // 启用但私钥缺失：preflight 红（local 档 static 预检即可复现）。
+    const missing = loadConfigFromEnv({
+      UVP_TIMER_KEEPER_ENABLED: "true"
+    });
+    await expect(runConfigPreflight(missing, { env: { ...MANDATORY_STORAGE_AND_REGISTRATION_ENV, UVP_TIMER_KEEPER_ENABLED: "true" } }))
+      .rejects.toThrow(/UVP_TIMER_KEEPER_PRIVATE_KEY is required when UVP_TIMER_KEEPER_ENABLED=true/);
+
+    // Anvil 缺省私钥：preflight 红——keeper 是链上写者，缺省键即公开钱包。
+    const anvilDefaultEnv = {
+      ...MANDATORY_STORAGE_AND_REGISTRATION_ENV,
+      UVP_TIMER_KEEPER_ENABLED: "true",
+      UVP_TIMER_KEEPER_PRIVATE_KEY: anvilPrivateKey
+    };
+    await expect(runConfigPreflight(loadConfigFromEnv(anvilDefaultEnv), { env: anvilDefaultEnv }))
+      .rejects.toThrow(/UVP_TIMER_KEEPER_PRIVATE_KEY must not use an Anvil default private key/);
+
+    // 派生地址与 UVP_TIMER_KEEPER_ADDRESS 失配：preflight 红。
+    const mismatchedEnv = {
+      ...MANDATORY_STORAGE_AND_REGISTRATION_ENV,
+      UVP_TIMER_KEEPER_ENABLED: "true",
+      UVP_TIMER_KEEPER_PRIVATE_KEY: productionRegistrarPrivateKey,
+      UVP_TIMER_KEEPER_ADDRESS: productionRelayerAddress
+    };
+    await expect(runConfigPreflight(loadConfigFromEnv(mismatchedEnv), { env: mismatchedEnv }))
+      .rejects.toThrow(/UVP_TIMER_KEEPER_PRIVATE_KEY does not match UVP_TIMER_KEEPER_ADDRESS/);
+
+    // 未启用：角色检查 skip，不因缺私钥拦截启动。
+    const disabled = loadConfigFromEnv({});
+    await expect(runConfigPreflight(disabled, { env: MANDATORY_STORAGE_AND_REGISTRATION_ENV })).resolves.toMatchObject({
+      timerKeeper: { enabled: false, privateKeyConfigured: false },
+      dockAutomation: { enabled: false, routeSourceAssembled: false }
+    });
+  });
+
   it("does not infer a storage driver from the database URL", () => {
     expect(() => loadRawConfigFromEnv({
       CHAIN_SERVICES_RUNTIME_ENV: "local",

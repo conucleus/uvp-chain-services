@@ -28,18 +28,22 @@ bindings. The relayed transaction surfaces are the plan-scoped `submitSignalFor`
 broadcast of participant-signed signals plus several narrowly scoped paid-gas
 submissions — stage patches (`applyStageExecutorPatchFor` /
 `applyStageResourcePatchFor`), order registration
-(`triggerOrderFromOutsideFor`), dock keeper liveness submissions
+(`triggerOrderFromOutsideFor`), timer keeper clock pokes (`pokeTimer`, driven
+by the `TimerKeeperWorker` polling dueAt-elapsed waiting hooks from the
+projection), dock keeper liveness submissions
 (`submitDockedInput` / `submitDockedSignal`), and governance identity
 registration/revocation (`registerIdentityBinding` /
 `revokeIdentityBinding`, see `service/README.md`); signal, patch, and
 trigger submissions all carry capability proofs minted on the spot by the
 capability-proofs single source (`@uvp-eth/compiler`) inside the transaction.
-Delivery status of the dock
-keeper surface: `submitDockedInput` / `submitDockedSignal` are permissionless
-contract surfaces, and their service-side automation is not assembled in the
-current delivery — the `DockAutomationWorker` in the API server runs as an
-explicit no-op until a route source and a paid-gas submitter are wired (the
-assembly point is provided by the cloud-compile route database integrator).
+Dock keeper assembly: `submitDockedInput` / `submitDockedSignal` are
+permissionless contract surfaces, and their route rosters (the binding sets plus
+the pre-assembled open/attach calldata) exist only in cloud-compile artifacts
+(`uvp.dockRoute.v2`) — chain events expose delivered bindings only, so the
+chain track has no projection source from which the roster could be rebuilt.
+The `DockAutomationWorker` in the API server therefore stays an explicit no-op
+until the cloud-compile route database integrator wires a route source and a
+paid-gas submitter; the staging readiness probe surfaces this assembly state.
 Relayers pay gas and carry no business-action vocabulary of their own.
 Rebuildability from contract events is the default rule.
 

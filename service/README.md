@@ -7,7 +7,7 @@ Chain Services 把 UVP 链上事实投影成 Product、Store 和运维接口，�
 - `UVPStateMachine` 及其冻结模块定义 Order、Stage、Signal、Plan 发布、提交授权和资源补丁。
 - `UVPIdentityRegistry` 只记录线下主体标识与链上账户的绑定和撤销。
 - Store 的供应商档案、能力标签、搜索、推荐、审核记录均为链下经营数据，不形成协议级信用或平台担保。
-- Chain Services 可以代付 gas，但业务签名仍由对应参与者产生，服务在任何路径上都不生成业务签名。代付广播的交易面不止一处：plan-scoped 的 `submitSignalFor`（Signal 提交）、`applyStageExecutorPatchFor` / `applyStageResourcePatchFor`（stage 补丁代发）、`triggerOrderFromOutsideFor`（订单注册）、`submitDockedInput` / `submitDockedSignal`（dock keeper 活性提交），以及治理身份注册/撤销（`registerIdentityBinding` / `revokeIdentityBinding`）。信号/补丁/触发提交均由 capability-proofs 单源（`@uvp-eth/compiler`，见 `src/submissions/capability-proofs.ts`）现场造证随交易携带。dock keeper 面的交付现状：`submitDockedInput` / `submitDockedSignal` 是 permissionless 合约面，其服务侧自动化在当前交付中未装配——API server 内的 `DockAutomationWorker` 在 route source 与代付 submitter 接线之前显式 no-op（装配点由云编译 route 数据库接入方提供）。
+- Chain Services 可以代付 gas，但业务签名仍由对应参与者产生，服务在任何路径上都不生成业务签名。代付广播的交易面不止一处：plan-scoped 的 `submitSignalFor`（Signal 提交）、`applyStageExecutorPatchFor` / `applyStageResourcePatchFor`（stage 补丁代发）、`triggerOrderFromOutsideFor`（订单注册）、`pokeTimer`（timer keeper 链上时钟拨表，`src/timer-keeper/` 的 `TimerKeeperWorker` 按投影轮询 waiting 且 dueAt 已到的 hook，keeper 用独立 env 私钥角色 `UVP_TIMER_KEEPER_PRIVATE_KEY`/`UVP_TIMER_KEEPER_ADDRESS`）、`submitDockedInput` / `submitDockedSignal`（dock keeper 活性提交），以及治理身份注册/撤销（`registerIdentityBinding` / `revokeIdentityBinding`）。信号/补丁/触发提交均由 capability-proofs 单源（`@uvp-eth/compiler`，见 `src/submissions/capability-proofs.ts`）现场造证随交易携带。dock keeper 装配口径：`submitDockedInput` / `submitDockedSignal` 是 permissionless 合约面，其 route 清单（binding 全集 + 预组装 open/attach calldata）只存在于云编译产物（`uvp.dockRoute.v2`）——链上事件只暴露已投递的 binding，链轨没有可重建清单的投影源，`DockAutomationWorker` 因此保持显式 no-op 直到云编译 route 数据库接入方接线 route source 与代付 submitter；staging readiness 探针（`/product/staging/readiness` 的 automation 摘要）呈现该装配状态。
 - 证据正文保存在链下，链上和投影层只保存可校验的哈希与资源句柄。
 
 ## 目录结构
@@ -19,7 +19,7 @@ Chain Services 把 UVP 链上事实投影成 Product、Store 和运维接口，�
 - `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件）、`signal`（信号/授权/委派）、`stage`（阶段补丁与 hook 生命周期）、`docking`（dock 具名接口委托）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
 - `product/application/`：产品用例与命令（订单草稿、证据、Signal/补丁/dock 提交编排）；`product/query/`：读模型与 BFF（含 `bff/` 各存储实现与 staging 就绪检查）。
 - `store/`：Store 链下业务数据的聚合目录——`sessions`（钱包会话与挑战）、`suppliers`（供应商档案）、`listings`、`join`（入驻申请）、`decoration`（店铺装修）、`console`（运营台：草稿编译、审计、closure、运行时视图）。供应商、会话和经营资料是链下业务数据，不属于"删除后从链重建"的范围。
-- 其余：`api/`（HTTP 路由与边界）、`submissions/`、`reconcile/`、`dock-automation/`、`evidence/`、`stage-patches/`、`notifications/`、`governance/`、`storage/`、`config/`、`security/`、`chain-adapters/`、`proof-verifier/`、`shared/broadcast/`（两条在役广播链路的装配套件与 duplicate-transaction 车道单源）。
+- 其余：`api/`（HTTP 路由与边界）、`submissions/`、`reconcile/`、`dock-automation/`、`timer-keeper/`（链上时钟拨表 keeper）、`evidence/`、`stage-patches/`、`notifications/`、`governance/`、`storage/`、`config/`、`security/`、`chain-adapters/`、`proof-verifier/`、`shared/broadcast/`（两条在役广播链路的装配套件与 duplicate-transaction 车道单源）。
 
 ## 运行
 

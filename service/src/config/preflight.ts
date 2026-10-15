@@ -77,6 +77,18 @@ export interface ConfigDiagnostics {
       readonly configuredCount: number;
     };
   };
+  /**
+   * 链上时钟拨表 keeper：enabled 来自配置段，私钥角色姿态与
+   * relayerGasPayer 同口径（privateKeyConfigured/addressMatches）。
+   * staging-readiness 以此为装配判据（缺即红）。
+   */
+  readonly timerKeeper: PrivateKeyRoleDiagnostics & { readonly enabled: boolean };
+  /**
+   * dock keeper 装配事实：route 明细（binding 全集 + 预组装
+   * open/attach calldata）只存在于云编译产物，链轨无投影源可重建
+   * route 清单——routeSourceAssembled 如实反映当前装配（false）。
+   */
+  readonly dockAutomation: { readonly enabled: boolean; readonly routeSourceAssembled: false };
   readonly storage: {
     readonly driver: string;
     readonly durable: boolean;
@@ -286,6 +298,14 @@ export function buildConfigDiagnostics(
       allowedOperatorCount: config.governance.allowedOperators.length
     },
     operatorRoles: operatorRoleDiagnostics(config, env),
+    timerKeeper: {
+      enabled: config.timerKeeper.enabled,
+      ...privateKeyRoleDiagnostics(config.timerKeeper.privateKeyEnv, env, config.timerKeeper.expectedAddress)
+    },
+    dockAutomation: {
+      enabled: config.dockAutomation.enabled,
+      routeSourceAssembled: false
+    },
     storage: {
       driver: config.database.driver,
       durable: config.database.driver !== "memory",
@@ -391,6 +411,7 @@ function runStaticPreflight(
   }
 
   runProductRegistrationPreflight(config, env, checks, errors);
+  runTimerKeeperPreflight(config, env, checks, errors);
 
   if (config.governance.broadcastEnabled) {
     const identityRegistry = identityRegistryAddress(config.network.contracts);
@@ -1259,6 +1280,48 @@ function runProductRegistrationPreflight(
   }
 }
 
+/**
+ * timer keeper 私钥角色一致性检查（照 relayerGasPayer 的角色接线模式）：
+ * keeper 是可选装配面，未启用即 skip；启用后私钥必须存在、合法、非
+ * Anvil 缺省，且派生地址与 UVP_TIMER_KEEPER_ADDRESS（如配置）一致。
+ * staging 是否必须启用由 staging-readiness 装配检查裁决，不在启动门。
+ */
+function runTimerKeeperPreflight(
+  config: ChainServicesConfig,
+  env: Env,
+  checks: ConfigDiagnosticCheck[],
+  errors: string[]
+): void {
+  const envName = config.timerKeeper.privateKeyEnv;
+  const privateKey = env[envName]?.trim();
+  if (!config.timerKeeper.enabled) {
+    skip(checks, "operator.timer_keeper", "timer keeper is disabled");
+    return;
+  }
+  if (!privateKey) {
+    fail(checks, errors, "operator.timer_keeper", `${envName} is required when UVP_TIMER_KEEPER_ENABLED=true`);
+    return;
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
+    fail(checks, errors, "operator.timer_keeper", `${envName} must be a 32-byte private key`);
+    return;
+  }
+  if (ANVIL_DEFAULT_PRIVATE_KEYS.has(privateKey.toLowerCase())) {
+    fail(checks, errors, "operator.timer_keeper", `${envName} must not use an Anvil default private key`);
+    return;
+  }
+  const address = privateKeyAddress(privateKey, envName);
+  if (!address) {
+    fail(checks, errors, "operator.timer_keeper", `${envName} must derive a valid EVM address`);
+    return;
+  }
+  if (config.timerKeeper.expectedAddress && address !== config.timerKeeper.expectedAddress) {
+    fail(checks, errors, "operator.timer_keeper", `${envName} does not match UVP_TIMER_KEEPER_ADDRESS`);
+    return;
+  }
+  pass(checks, "operator.timer_keeper");
+}
+
 async function runRpcPreflight(
   config: ChainServicesConfig,
   clients: RunConfigPreflightOptions["clients"],
@@ -1645,7 +1708,8 @@ function privateKeyEnvNames(config: ChainServicesConfig): readonly string[] {
     config.relayer.stateMachinePrivateKeyEnv,
     config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
-    config.operatorRoles.deployerPrivateKeyEnv
+    config.operatorRoles.deployerPrivateKeyEnv,
+    config.timerKeeper.privateKeyEnv
   ])];
 }
 

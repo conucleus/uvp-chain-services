@@ -3,8 +3,6 @@ import { privateKeyToAccount } from "viem/accounts";
 import {
   STATE_MACHINE_ABI,
   buildSubmitSignalForCall,
-  type SelectorBindingCallStruct,
-  type SelectorBindingPayload,
   type SignalAttributionCallStruct,
   type SignalAttributionPayload
 } from "@uvp-eth/protocol-bindings";
@@ -21,7 +19,7 @@ import {
   requiredRpcUrl
 } from "../shared/broadcast/kit.js";
 import { resolveDuplicateTransactionOutcome } from "../shared/broadcast/duplicate-transaction.js";
-import { zeroFactAttribution, zeroSelectorBinding } from "./capability-proofs.js";
+import { zeroFactAttribution } from "./capability-proofs.js";
 import type { SubmissionBroadcastAdapter, SubmissionBroadcastResult } from "./types.js";
 
 export interface StateMachineSubmissionPublicClient {
@@ -51,8 +49,7 @@ export interface StateMachineSubmitSignalForCall {
     Address,
     bigint,
     Hex,
-    SignalAttributionCallStruct,
-    SelectorBindingCallStruct
+    SignalAttributionCallStruct
   ];
   readonly data?: Hex;
   readonly chainId?: number;
@@ -183,8 +180,6 @@ export function createStateMachineSubmissionBroadcastAdapter(
         // 外部 plan）按全零结构兜底（词表外不声明，合约按词表闸裁决）。
         const attribution: SignalAttributionPayload = request.prepared.attribution ??
           zeroFactAttribution(request.prepared.sourceId, request.prepared.signalId);
-        const selectorBinding: SelectorBindingPayload = request.prepared.selectorBinding ??
-          zeroSelectorBinding();
         const call = buildSubmitSignalForCall({
           stateMachineAddress: request.prepared.typedData.domain.verifyingContract ?? stateMachineAddress,
           chainId: options.chainId
@@ -198,8 +193,7 @@ export function createStateMachineSubmissionBroadcastAdapter(
           submitter: request.prepared.submitter,
           deadline: request.prepared.deadline,
           signature: request.signature,
-          attribution,
-          selectorBinding
+          attribution
         });
         txHash = await walletClient.writeContract(call);
       } catch (error) {

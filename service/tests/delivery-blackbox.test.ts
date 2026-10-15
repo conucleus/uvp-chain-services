@@ -93,7 +93,7 @@ describe("dock delivery & projection blackbox", () => {
   it("backfills a target fact that was established before the dock was attached", async () => {
     // 乱序对抗的另一侧：目标事实（SignalSubmitted）先于 DockAttached 上链。
     // output 车道以投影快照为准做正向回填，attach 前已成立的事实也要重放
-    // submitDockedSignal（4 参数造证形态，无词表 plan 全零造证由链上裁决）。
+    // submitDockedSignal（attribution 造证形态，无词表 plan 全零造证由链上裁决）。
     const events: readonly ChainEvent[] = [
       planRegistered(1n, planId, planHash),
       planRegistered(2n, targetPlanId, targetPlanHash),
@@ -117,8 +117,7 @@ describe("dock delivery & projection blackbox", () => {
     expect(decoded.args).toEqual([
       dockInstanceId,
       bindingHash("02"),
-      { sourceId, signalId, stageId: zeroBytes32, capabilityProof: [] },
-      { selectorStageId: zeroBytes32, proof: [] }
+      { sourceId, signalId, stageId: zeroBytes32, capabilityProof: [] }
     ]);
   });
 
@@ -398,6 +397,7 @@ describe("dock delivery & projection blackbox", () => {
       openCandidates: 0,
       inputCandidates: 0,
       outputCandidates: 0,
+      attempted: 0,
       submitted: 0,
       deduplicated: 0,
       skipped: []

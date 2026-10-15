@@ -3,7 +3,13 @@ import type { EvidenceStorage, EvidenceStorageRuntimeEnvironment } from "../evid
 import type { GovernanceStore, GovernanceTxLogDTO } from "../governance/index.js";
 import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
 import { redactErrorMessage, redactSecrets } from "../security/redaction.js";
-import type { ProjectionRebuildMetadata, ProjectionStore, ProjectionSyncState } from "../storage/projection-store.js";
+import {
+  hasProjectionDiagnosticsAnomalies,
+  type ProjectionRebuildMetadata,
+  type ProjectionStore,
+  type ProjectionSyncDiagnosticsCounts,
+  type ProjectionSyncState
+} from "../storage/projection-store.js";
 import type { StoreDockingSessionStore } from "../store/console/docking.js";
 import type { StoreZhixuDraftStore } from "../store/console/zhixu-drafts.js";
 import type { StoreZhixuVersionMetadataStore } from "../store/console/version.js";
@@ -233,6 +239,7 @@ function buildIndexerDiagnostics(
     lastEventName: state?.lastEventName ?? null,
     updatedAt: state?.updatedAt ?? null,
     rebuild: formatRebuild(state?.rebuild),
+    projectionDiagnostics: state?.projectionDiagnostics ?? null,
     ...(state?.degradedReason ? { degradedReason: redactErrorMessage(state.degradedReason) } : {})
   };
 }
@@ -497,12 +504,19 @@ function operationalDegradedReasons(diagnostics: Record<string, unknown>): reado
   const reasons = operationalNotReadyReasons(diagnostics);
   const submissions = diagnostics.submissions as { readonly deadLetterCount?: number } | undefined;
   const governanceTxs = diagnostics.governanceTxs as { readonly failed?: readonly unknown[] } | undefined;
+  const indexer = diagnostics.indexer as { readonly projectionDiagnostics?: ProjectionSyncDiagnosticsCounts | null } | undefined;
   const degraded = [...reasons];
   if ((submissions?.deadLetterCount ?? 0) > 0) {
     degraded.push("submission_dead_letters");
   }
   if ((governanceTxs?.failed?.length ?? 0) > 0) {
     degraded.push("governance_failed_txs");
+  }
+  // 重放的显式诊断计数（unknown/unresolved/词表富集 mismatch）非零 =
+  // 投影对已索引事件不完整或未经证实。计数明细在 indexer.projectionDiagnostics
+  // （/admin/diagnostics），/healthz 只携带聚合健康位。
+  if (hasProjectionDiagnosticsAnomalies(indexer?.projectionDiagnostics ?? undefined)) {
+    degraded.push("projection_unresolved_counts");
   }
   return degraded;
 }

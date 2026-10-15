@@ -564,11 +564,10 @@ describe("dock liveness keeper", () => {
     expect(submitted).toEqual([]);
   });
 
-  it("backfills attached-dock outputs with the 4-arg submitDockedSignal and converges on the delivery event", async () => {
+  it("backfills attached-dock outputs with submitDockedSignal and converges on the delivery event", async () => {
     // attach 不内联已成立输出清单：回填 = 按路由产物枚举 output 绑定逐条
-    // 重放 submitDockedSignal（payload 读 StateMachine 存储）。4.4 起该调用
-    // 携 attribution/selectorBinding 造证——无词表 plan 造全零结构，由链上
-    // 词表闸裁决。
+    // 重放 submitDockedSignal（payload 读 StateMachine 存储）。该调用携
+    // attribution 造证——无词表 plan 造全零结构，由链上词表闸裁决。
     const baseEvents: readonly ChainEvent[] = [
       ...attachedEvents(),
       chainEvent(8n, 0, "SignalSubmitted", {
@@ -624,8 +623,7 @@ describe("dock liveness keeper", () => {
     expect(decoded.args).toEqual([
       dockInstanceId,
       outputBindingHash,
-      { sourceId, signalId, stageId: zeroBytes32, capabilityProof: [] },
-      { selectorStageId: zeroBytes32, proof: [] }
+      { sourceId, signalId, stageId: zeroBytes32, capabilityProof: [] }
     ]);
 
     // 窗口内：投影尚未呈现 delivery，去重跳过（交易可能仍在途）。
@@ -655,6 +653,95 @@ describe("dock liveness keeper", () => {
     ] });
     const converged = await worker.runOnce();
     expect(converged).toMatchObject({ outputCandidates: 0, submitted: 0, deduplicated: 0 });
+  });
+
+  it("holds output backfill while the target fact sits in an unfinalized block", async () => {
+    // 最终性门：目标事实所在区块未 finalize 时不抢跑回填——未最终事实
+    // 可能被 reorg 掉，抢跑即广播必 revert 的 submitDockedSignal；
+    // finality 追上后候选照常成立。
+    const events: readonly ChainEvent[] = [
+      ...attachedEvents(),
+      chainEvent(8n, 0, "SignalSubmitted", {
+        orderId: linkedOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey: bytes32Hex("0aaa"),
+        submitter: signer
+      })
+    ];
+    const route: DockRouteRecord = { ...existingDockRoute(), inputs: [], outputs: [{
+      bindingHash: outputBindingHash,
+      localSourceId: sourceId,
+      localSignalId: signalId,
+      targetSourceId: sourceId,
+      targetSignalId: signalId
+    }] };
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({ deploymentBlock: 0n, events });
+    const submitted: string[] = [];
+    const worker = new DockAutomationWorker({
+      config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
+      projectionStore: store,
+      dockingAddress: dockingModuleAddress,
+      chainId,
+      routeSource: { listRoutes: async () => [route] },
+      submitter: {
+        submit: async (submission) => {
+          submitted.push(submission.data);
+          return "0x" + "ab".repeat(32) as Hex;
+        }
+      }
+    });
+
+    // 事实在区块 8、finalizedBlock=7：不触发回填。
+    await store.saveSyncState(dockSyncState(7n));
+    const held = await worker.runOnce();
+    expect(held).toMatchObject({ outputCandidates: 0, attempted: 0, submitted: 0 });
+    expect(submitted).toEqual([]);
+
+    // finality 追上（区块 8 已最终）：候选成立并广播。
+    await store.saveSyncState(dockSyncState(8n));
+    const released = await worker.runOnce();
+    expect(released).toMatchObject({ outputCandidates: 1, attempted: 1, submitted: 1 });
+    expect(submitted).toHaveLength(1);
+  });
+
+  it("fails the whole round closed while finality is unknown or a rebuild is in progress", async () => {
+    // 镜像 timer keeper 的最终性门：sync state 无 finalizedBlock（最终性
+    // 上界未知）或人工 rebuild 进行中（投影是半重建中间态）时整轮不放行
+    // 任何候选并留痕，不放行 = fail-closed。
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({ deploymentBlock: 0n, events: attachedEvents() });
+    const submitted: string[] = [];
+    const worker = new DockAutomationWorker({
+      config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
+      projectionStore: store,
+      dockingAddress: dockingModuleAddress,
+      chainId,
+      routeSource: { listRoutes: async () => [existingDockRoute()] },
+      submitter: {
+        submit: async (submission) => {
+          submitted.push(submission.data);
+          return "0x" + "ab".repeat(32) as Hex;
+        }
+      }
+    });
+
+    // 无 finalizedBlock：整轮不放行并留痕。
+    const { finalizedBlock: _unfinal, ...withoutFinality } = dockSyncState(7n);
+    void _unfinal;
+    await store.saveSyncState(withoutFinality);
+    const unfinal = await worker.runOnce();
+    expect(unfinal).toMatchObject({ inputCandidates: 0, attempted: 0, submitted: 0 });
+    expect(unfinal.skipped[0]).toMatch(/finality: projection sync state carries no finalizedBlock/);
+
+    // 人工 rebuild 进行中：同样整轮不放行。
+    await store.saveSyncState({ ...dockSyncState(7n), syncStatus: "rebuilding" });
+    const rebuilding = await worker.runOnce();
+    expect(rebuilding).toMatchObject({ inputCandidates: 0, attempted: 0, submitted: 0 });
+    expect(rebuilding.skipped[0]).toMatch(/finality: projection rebuild is in progress/);
+    expect(submitted).toEqual([]);
   });
 
   it("retries a DockOutputNotReady revert only once per finality window", async () => {
@@ -781,8 +868,7 @@ describe("dock liveness keeper", () => {
       return { worker, submitted };
     };
 
-    // 词表命中：attribution 携属主阶段与能力叶 proof（selectorBindings 空 →
-    // selectorBinding 全零，合约按"未声明"放行）。
+    // 词表命中：attribution 携属主阶段与能力叶 proof。
     const enriched = await buildWorker([vocabulary]);
     const enrichedSummary = await enriched.worker.runOnce();
     expect(enrichedSummary).toMatchObject({ outputCandidates: 1, submitted: 1, skipped: [] });
@@ -793,8 +879,7 @@ describe("dock liveness keeper", () => {
     expect(decoded.args).toEqual([
       dockInstanceId,
       outputBindingHash,
-      { sourceId, signalId, stageId: hookId, capabilityProof: [expect.any(String)] },
-      { selectorStageId: zeroBytes32, proof: [] }
+      { sourceId, signalId, stageId: hookId, capabilityProof: [expect.any(String)] }
     ]);
 
     // 富集 failed（resolver 故障轮，无产物两表可富集）：词表状态未知，绑定
@@ -1096,6 +1181,20 @@ function chainEvent(
     logIndex,
     eventName,
     args
+  };
+}
+
+/** keeper 最终性门测试用的 sync state（finalizedBlock 可调）。 */
+function dockSyncState(finalizedBlock: bigint) {
+  return {
+    chainId,
+    contractAddress,
+    syncStatus: "indexed" as const,
+    latestIndexedBlock: finalizedBlock,
+    finalizedBlock,
+    confirmationDepth: 1,
+    eventCount: 7,
+    rebuild: { status: "completed" as const }
   };
 }
 

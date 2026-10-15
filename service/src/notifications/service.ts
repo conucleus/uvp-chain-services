@@ -1551,10 +1551,22 @@ function finalizedSignalSubmittedEvents(
   events: readonly ChainEvent[],
   finalizedBlock: bigint | undefined
 ): readonly ChainEvent[] {
-  return filterActiveChainEvents(events).filter((event) =>
-    event.eventName === "SignalSubmitted" &&
-    (finalizedBlock === undefined || event.blockNumber <= finalizedBlock)
+  const signalEvents = filterActiveChainEvents(events).filter(
+    (event) => event.eventName === "SignalSubmitted"
   );
+  if (finalizedBlock === undefined) {
+    if (signalEvents.length === 0) {
+      return [];
+    }
+    // fail-closed：sync state（最终性上界）缺失时不得把事件当作已最终。
+    // 放行 = 未确认事件凭空进入通知最终性判定；此处抛错让调用方
+    // （索引器 post-commit 重试 / pending sweep）整批保序等待，最终性
+    // 上界恢复后补投，而不是留下不可补投的 skipped 台账。
+    throw new Error(
+      "notification finality gate is missing the projection sync state (finalizedBlock); refusing to judge event finality - the batch is held for retry instead of being treated as finalized"
+    );
+  }
+  return signalEvents.filter((event) => event.blockNumber <= finalizedBlock);
 }
 
 async function resolvePlanArtifact(
