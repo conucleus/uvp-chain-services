@@ -50,10 +50,11 @@ export interface ProjectionRebuildMetadata {
 }
 
 /**
- * 随重放快照产生的显式诊断计数（unknown/unresolved 族与词表富集
- * mismatch）。快照本身随事件表重建即可复原，但这些计数必须随 sync
- * state 持久化：/healthz 与 /admin/diagnostics 只读 sync state，不重放
- * 全历史——计数只留在快照/日志里时，投影悄然不完整仍报 ok/ready。
+ * 随重放快照产生的显式诊断计数（unknown/unresolved 族、词表富集
+ * mismatch 与语义 oracle 分叉）。快照本身随事件表重建即可复原，但这些
+ * 计数必须随 sync state 持久化：/healthz 与 /admin/diagnostics 只读
+ * sync state，不重放全历史——计数只留在快照/日志里时，投影悄然不完整
+ * 仍报 ok/ready。
  */
 export interface ProjectionSyncDiagnosticsCounts {
   readonly unresolvedModuleOrderEventCount: number;
@@ -63,11 +64,31 @@ export interface ProjectionSyncDiagnosticsCounts {
   readonly unresolvedIdentityRevokeEventCount: number;
   readonly capabilityEnrichmentMismatchCount: number;
   readonly unknownEventCount: number;
+  /**
+   * 语义 oracle（replayChainEvents）对可校验 plan 子集的分叉计数：非零 =
+   * 链上 hook 观测与产物语义期望不一致（只报告不覆盖投影，投影以链为真）。
+   */
+  readonly semanticOracleMismatchCount: number;
+  /** 诚实覆盖面：本轮实际喂给 oracle 的 plan 数（缺产物/DELAY plan 不计）。 */
+  readonly semanticOracleCheckedPlanCount: number;
+  /**
+   * oracle 回放的非分叉抛错计数（结构性毒流/native 运行时不可用）：非零
+   * = oracle 无法为投影作证，算异常（与 mismatch 不同车道，不混同）。
+   */
+  readonly semanticOracleErrorCount: number;
+  /** DELAY 语义排除的 plan 数（不算异常，但随诊断暴露覆盖面分母）。 */
+  readonly semanticOracleExcludedPlanCount: number;
 }
 
 export function projectionDiagnosticsFromSnapshots(
   orderSnapshot: ProjectionSnapshot,
-  identitySnapshot: Pick<IdentityProjectionSnapshot, "unresolvedRevokeEventCount">
+  identitySnapshot: Pick<IdentityProjectionSnapshot, "unresolvedRevokeEventCount">,
+  semanticOracle?: {
+    readonly semanticOracleCheckedPlanCount: number;
+    readonly semanticOracleMismatchCount: number;
+    readonly semanticOracleErrorCount: number;
+    readonly semanticOracleExcludedPlanCount: number;
+  }
 ): ProjectionSyncDiagnosticsCounts {
   return {
     unresolvedModuleOrderEventCount: orderSnapshot.unresolvedModuleOrderEventCount ?? 0,
@@ -76,7 +97,11 @@ export function projectionDiagnosticsFromSnapshots(
     unresolvedDockTargetDeploymentCount: orderSnapshot.unresolvedDockTargetDeploymentCount ?? 0,
     unresolvedIdentityRevokeEventCount: identitySnapshot.unresolvedRevokeEventCount ?? 0,
     capabilityEnrichmentMismatchCount: orderSnapshot.capabilityEnrichmentMismatchCount ?? 0,
-    unknownEventCount: orderSnapshot.unknownEventCount ?? 0
+    unknownEventCount: orderSnapshot.unknownEventCount ?? 0,
+    semanticOracleMismatchCount: semanticOracle?.semanticOracleMismatchCount ?? 0,
+    semanticOracleCheckedPlanCount: semanticOracle?.semanticOracleCheckedPlanCount ?? 0,
+    semanticOracleErrorCount: semanticOracle?.semanticOracleErrorCount ?? 0,
+    semanticOracleExcludedPlanCount: semanticOracle?.semanticOracleExcludedPlanCount ?? 0
   };
 }
 
@@ -92,7 +117,9 @@ export function hasProjectionDiagnosticsAnomalies(
     counts.unresolvedDockTargetDeploymentCount > 0 ||
     counts.unresolvedIdentityRevokeEventCount > 0 ||
     counts.capabilityEnrichmentMismatchCount > 0 ||
-    counts.unknownEventCount > 0;
+    counts.unknownEventCount > 0 ||
+    counts.semanticOracleMismatchCount > 0 ||
+    counts.semanticOracleErrorCount > 0;
 }
 
 export interface ProjectionSyncState extends ProjectionScope {

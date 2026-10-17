@@ -35,6 +35,7 @@ import type {
 import type { ProjectionStore } from "../../storage/projection-store.js";
 import type { Address, Hex } from "../../shared/types.js";
 import type { PlanCapabilityTablesInput } from "../../indexer/projections/plan.js";
+import type { SemanticOraclePlan } from "../../indexer/semantic-oracle.js";
 import { isPlanRegisteredProjection } from "./version.js";
 
 export type StoreZhixuDraftSourceKind = "zhixu_yaml" | "onchain_hook_plan_manifest";
@@ -188,6 +189,110 @@ function executorCandidatesFromArtifact(
     });
   }
   return { executorCandidates: candidates };
+}
+
+/**
+ * 语义 oracle 产物源：与词表富集同 join 口径（findProductSchemaByPlan 取
+ * 最新 product schema 的 onchainHookPlanArtifact），但携带完整产物
+ * （compiledHooks/dependencyIndex/admissions）——回放语义校验的单一入口。
+ * 形状不可用 → undefined（该 plan 不可校验，不猜值）。
+ */
+export function createSemanticOraclePlanResolver(
+  draftStore: StoreZhixuDraftStore
+): (planId: Hex, planHash: Hex) => Promise<SemanticOraclePlan | undefined> {
+  return async (planId, planHash) => {
+    const schema = await draftStore.findProductSchemaByPlan(planId, planHash);
+    return semanticOraclePlanFromArtifact(
+      planId,
+      schema?.zhixuId,
+      schema?.onchainHookPlanArtifact
+    );
+  };
+}
+
+function semanticOraclePlanFromArtifact(
+  planId: Hex,
+  zhixuId: string | undefined,
+  artifact: unknown
+): SemanticOraclePlan | undefined {
+  if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) {
+    return undefined;
+  }
+  const record = artifact as Record<string, unknown>;
+  const rawHooks = record.compiledHooks;
+  const rawDependencyIndex = record.dependencyIndex;
+  if (!Array.isArray(rawHooks) || rawHooks.length === 0) {
+    return undefined;
+  }
+  if (!rawDependencyIndex || typeof rawDependencyIndex !== "object" || Array.isArray(rawDependencyIndex)) {
+    return undefined;
+  }
+  const compiledHooks: SemanticOraclePlan["compiledHooks"][number][] = [];
+  for (const rawHook of rawHooks) {
+    if (!rawHook || typeof rawHook !== "object" || Array.isArray(rawHook)) {
+      return undefined;
+    }
+    const hook = rawHook as Record<string, unknown>;
+    if (typeof hook.hookId !== "string" || !Array.isArray(hook.instructions)) {
+      return undefined;
+    }
+    compiledHooks.push({
+      hookId: hook.hookId as Hex,
+      ...(typeof hook.stageId === "string" ? { stageId: hook.stageId as Hex } : {}),
+      ...(typeof hook.stageIdentifier === "string" ? { stageIdentifier: hook.stageIdentifier } : {}),
+      ...(typeof hook.hookName === "string" ? { hookName: hook.hookName } : {}),
+      ...(hook.orderTriggerKind === "none" || hook.orderTriggerKind === "mint" || hook.orderTriggerKind === "dock"
+        ? { orderTriggerKind: hook.orderTriggerKind }
+        : {}),
+      ...(typeof hook.emitReady === "boolean" ? { emitReady: hook.emitReady } : {}),
+      instructions: hook.instructions.filter(
+        (instruction): instruction is Record<string, unknown> =>
+          Boolean(instruction) && typeof instruction === "object" && !Array.isArray(instruction)
+      )
+    });
+  }
+  const dependencyIndex: Record<string, readonly unknown[]> = {};
+  for (const [key, targets] of Object.entries(rawDependencyIndex)) {
+    if (!Array.isArray(targets)) {
+      return undefined;
+    }
+    dependencyIndex[key] = targets;
+  }
+  const admissions = semanticOracleAdmissionsOf(record.admissions);
+  return {
+    planId,
+    zhixuId: zhixuId && zhixuId.length > 0 ? zhixuId : planId,
+    compiledHooks,
+    dependencyIndex,
+    ...(admissions ? { admissions } : {})
+  };
+}
+
+function semanticOracleAdmissionsOf(raw: unknown): SemanticOraclePlan["admissions"] | undefined {
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+  const admissions: NonNullable<SemanticOraclePlan["admissions"]>[number][] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return undefined;
+    }
+    const admission = entry as Record<string, unknown>;
+    admissions.push({
+      ...(typeof admission.admissionId === "string" ? { admissionId: admission.admissionId as Hex } : {}),
+      ...(typeof admission.stageIdentifier === "string" ? { stageIdentifier: admission.stageIdentifier } : {}),
+      ...(typeof admission.signalName === "string" ? { signalName: admission.signalName } : {}),
+      ...(Array.isArray(admission.instructions)
+        ? {
+          instructions: admission.instructions.filter(
+            (instruction): instruction is Record<string, unknown> =>
+              Boolean(instruction) && typeof instruction === "object" && !Array.isArray(instruction)
+          )
+        }
+        : {})
+    });
+  }
+  return admissions;
 }
 
 export class MemoryStoreZhixuDraftStore implements StoreZhixuDraftStore {

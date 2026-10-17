@@ -2,10 +2,11 @@ import type { ProjectionStore } from "../storage/projection-store.js";
 import { noopLogger, type Hex, type LifecycleService, type Logger } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { findErrorName } from "../shared/broadcast/kit.js";
-import type {
-  TimerKeeperConfig,
-  TimerKeeperRunSummary,
-  TimerKeeperSubmitter
+import {
+  TimerPokeReceiptRevertedError,
+  type TimerKeeperConfig,
+  type TimerKeeperRunSummary,
+  type TimerKeeperSubmitter
 } from "./types.js";
 
 /**
@@ -20,7 +21,7 @@ import type {
  * 非 waiting 态 revert TimerNotWaiting、未到期 revert TimerNotDue——两类
  * revert 说明链上口径已越过投影判据（投影 lag / 到期秒边界），按收敛
  * 处理：移出本轮候选、不计失败、不升级告警，最终性窗口照常占窗限速。
- * 其余 revert/gas 错误记逐 hook 连续失败窗口，连续
+ * 其余 revert/gas 错误与持续回执 unknown 记逐 hook 连续失败窗口，连续
  * FAILURE_ESCALATION_WINDOWS 个窗口仍失败即升级 error 级告警（无死信
  * 机制，留痕之外需人工裁决）。
  *
@@ -46,7 +47,8 @@ export class TimerKeeperWorker implements LifecycleService {
   #lastSummary: TimerKeeperRunSummary | undefined;
   /** 广播 + 最终性窗口去重（成败同占窗，与 dock keeper 同口径）。 */
   readonly #lastBroadcastAt = new Map<string, number>();
-  /** 逐 hook 连续失败窗口计数（收敛 revert 不计；广播成功清零）。 */
+  /** 逐 hook 连续失败窗口计数（收敛 revert 不计；回执 confirmed 清零，
+   * 持续回执 unknown 不清窗）。 */
   readonly #failureWindows = new Map<string, { windows: number }>();
 
   constructor(options: {
@@ -129,6 +131,8 @@ export class TimerKeeperWorker implements LifecycleService {
         pokeCandidates: 0,
         attempted: 0,
         submitted: 0,
+        receiptReverted: 0,
+        receiptUnknown: 0,
         deduplicated: 0,
         converged: [],
         skipped: []
@@ -207,16 +211,42 @@ export class TimerKeeperWorker implements LifecycleService {
         summary.attempted += 1;
         this.#lastBroadcastAt.set(candidate.key, nowMs);
         try {
-          await submitter.pokeTimer({
+          const outcome = await submitter.pokeTimer({
             planId: candidate.planId,
             orderId: candidate.orderId,
             hookId: candidate.hookId,
             ...(this.#config.maxGasPerTx ? { gas: this.#config.maxGasPerTx } : {})
           });
           summary.submitted += 1;
-          this.#failureWindows.delete(candidate.key);
+          if (outcome.receipt === "unknown") {
+            // 回执 unknown：已广播但结果不可判读——不是成功事实，不清窗；
+            // 持续 unknown 与其余失败同走 failureWindows 升级路径（连续
+            // FAILURE_ESCALATION_WINDOWS 个窗口仍不可判读即升级 error）。
+            summary.receiptUnknown += 1;
+            const streak = this.#failureWindows.get(candidate.key);
+            const windows = streak ? streak.windows + 1 : 1;
+            this.#failureWindows.set(candidate.key, { windows });
+            if (windows >= FAILURE_ESCALATION_WINDOWS) {
+              this.#logger.error(
+                `timer keeper poke receipt has stayed unreadable for ${windows} consecutive redelivery windows; manual adjudication is required (check the keeper RPC or the transaction receipt scanner)`,
+                {
+                  planId: candidate.planId,
+                  orderId: candidate.orderId,
+                  hookId: candidate.hookId,
+                  windows
+                }
+              );
+            }
+          } else {
+            this.#failureWindows.delete(candidate.key);
+          }
         } catch (error) {
           const message = redactErrorMessage(error);
+          // 回执面已裁决 reverted：链上失败既成事实，计 receiptReverted 并
+          // 与其余广播失败同走 failureWindows 升级路径（不落入收敛车道）。
+          if (error instanceof TimerPokeReceiptRevertedError) {
+            summary.receiptReverted += 1;
+          }
           const convergedReason = convergedRevertReasonOf(error, message);
           if (convergedReason) {
             // 收敛：链上口径已越过投影判据，移出本轮候选、不算失败；
@@ -297,6 +327,8 @@ function emptySummary(): TimerKeeperRunSummary {
     pokeCandidates: 0,
     attempted: 0,
     submitted: 0,
+    receiptReverted: 0,
+    receiptUnknown: 0,
     deduplicated: 0,
     converged: [],
     skipped: []

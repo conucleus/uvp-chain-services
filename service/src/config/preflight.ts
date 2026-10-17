@@ -1,6 +1,6 @@
 import { createPublicClient, http, parseAbi, type Address as ViemAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { listContractJsonOverrides, type ChainServicesConfig } from "./env.js";
+import { isChainIdExplicitlyConfigured, listContractJsonOverrides, type ChainServicesConfig } from "./env.js";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { assessStoreAuthEvidence, type StoreAuthEvidenceClassification, type StoreAuthKeySource } from "./store-auth-evidence.js";
@@ -373,7 +373,6 @@ function runStaticPreflight(
   runTestnetSafetyPreflight(config, env, checks, errors);
   runStagingSafetyPreflight(config, env, checks, errors);
   runStoreAuthPreflight(config, env, checks, errors);
-  runNonLocalRoleSafetyPreflight(config, env, checks, errors);
   runStateMachineModulesManifestPreflight(config, checks, errors);
   runModuleAddressDriftPreflight(config, checks, errors);
   runStateMachineAddressDriftPreflight(config, checks, errors);
@@ -546,6 +545,14 @@ function runProductionSafetyPreflight(
   } else {
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must be explicitly configured to a non-local RPC endpoint in production");
   }
+  checkEndpointScheme(config, checks, errors);
+  // env 层禁令镜像：chainId 必须显式来自 env 或地址清单（缺省回落 31337
+  // 会把生产链身份锚到 Anvil 语义）。
+  if (isChainIdExplicitlyConfigured(env)) {
+    pass(checks, "network.chain_id_explicit");
+  } else {
+    fail(checks, errors, "network.chain_id_explicit", "UVP_CHAIN_ID must be explicitly configured in production (env var or address manifest network.chainId); refusing the 31337 fallback");
+  }
   // production 强制 admin 白名单非空（空=任意自报
   // admin 通过的 fail-open 已在 governance/auth.ts 收口，这里拦配置）。
   if (config.operatorRoles.adminReviewers.length > 0) {
@@ -646,6 +653,37 @@ function runProductionSafetyPreflight(
   } else {
     fail(checks, errors, "contracts.identity_registry", "UVPIdentityRegistry contract address is required in production");
   }
+
+  // env 层禁令镜像（validateProductionSafety）：env 私钥治理广播在
+  // production 被禁——静默放行会让治理写面回落 env-key 签名者。
+  if (config.governance.broadcastEnabled) {
+    fail(checks, errors, "governance.broadcast_enabled", "GOVERNANCE_BROADCAST_ENABLED=true uses env private-key governance and is forbidden in production");
+  } else {
+    pass(checks, "governance.broadcast_enabled");
+  }
+
+  // env 层禁令镜像（validateProductionSafety 的证据 s3 基线，对齐 staging
+  // 段同名检查项）：非 durable/无凭据的证据面不得进生产。
+  if (config.evidenceStorage.adapter === "s3") {
+    pass(checks, "evidence.storage_adapter");
+  } else {
+    fail(checks, errors, "evidence.storage_adapter", "UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in production");
+  }
+  if (config.evidenceStorage.s3Bucket && config.evidenceStorage.s3Region) {
+    pass(checks, "evidence.s3_location");
+  } else {
+    fail(checks, errors, "evidence.s3_location", "UVP_EVIDENCE_S3_BUCKET and UVP_EVIDENCE_S3_REGION are required in production");
+  }
+  if (config.evidenceStorage.s3AccessKeyIdEnv && env[config.evidenceStorage.s3AccessKeyIdEnv]?.trim()) {
+    pass(checks, "evidence.s3_access_key");
+  } else {
+    fail(checks, errors, "evidence.s3_access_key", `${config.evidenceStorage.s3AccessKeyIdEnv ?? "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV"} is required in production`);
+  }
+  if (config.evidenceStorage.s3SecretAccessKeyEnv && env[config.evidenceStorage.s3SecretAccessKeyEnv]?.trim()) {
+    pass(checks, "evidence.s3_secret_key");
+  } else {
+    fail(checks, errors, "evidence.s3_secret_key", `${config.evidenceStorage.s3SecretAccessKeyEnv ?? "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV"} is required in production`);
+  }
 }
 
 function requireDurableStoreMetadata(
@@ -716,6 +754,7 @@ function runTestnetSafetyPreflight(
   } else {
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia RPC in testnet");
   }
+  checkEndpointScheme(config, checks, errors);
 
   // testnet 强制 admin 白名单非空 + STORE_AUTH_MODE
   // 显式配置（dev_headers 仅限 local）。
@@ -753,6 +792,20 @@ function runTestnetSafetyPreflight(
     fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in testnet");
   } else {
     pass(checks, "product.registration_adapter");
+  }
+
+  // 档位不对称收口（镜像 production/staging 段）：等回执与对账 worker
+  // 缺席的漂移只能靠人工发现，公开测试网同样强制。
+  if (config.productBff.waitForReceipt) {
+    pass(checks, "product.registration_receipt");
+  } else {
+    fail(checks, errors, "product.registration_receipt", "UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in testnet");
+  }
+
+  if (config.reconcile.enabled) {
+    pass(checks, "reconcile.worker_enabled");
+  } else {
+    fail(checks, errors, "reconcile.worker_enabled", "RECONCILE_WORKER_ENABLED=true is required in testnet");
   }
 
   if (config.relayer.broadcastEnabled) {
@@ -832,6 +885,7 @@ function runStagingSafetyPreflight(
   } else {
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia or staging RPC in staging");
   }
+  checkEndpointScheme(config, checks, errors);
   // finalityConfirmations controls the normal indexing buffer. The indexer
   // additionally verifies block-hash continuity and performs a bounded
   // common-ancestor rollback when a reorg is observed. The former
@@ -1099,30 +1153,6 @@ function runStateMachineAddressDriftPreflight(
     return;
   }
   pass(checks, "contracts.state_machine_address_consistency");
-}
-
-function runNonLocalRoleSafetyPreflight(
-  config: ChainServicesConfig,
-  env: Env,
-  checks: ConfigDiagnosticCheck[],
-  errors: string[]
-): void {
-  if (config.security.environment === "local" || config.security.environment === "production" || config.security.environment === "testnet" || config.security.environment === "staging") {
-    return;
-  }
-
-  if (config.security.logRedactionEnabled) {
-    pass(checks, "security.log_redaction");
-  } else {
-    fail(checks, errors, "security.log_redaction", "LOG_REDACTION_ENABLED=false is forbidden outside local mode");
-  }
-
-  for (const envName of privateKeyEnvNames(config)) {
-    const privateKey = env[envName]?.trim().toLowerCase();
-    if (privateKey && ANVIL_DEFAULT_PRIVATE_KEYS.has(privateKey)) {
-      fail(checks, errors, `private_key.${envName}`, `${envName} must not use an Anvil default private key outside local mode`);
-    }
-  }
 }
 
 function runStagingRolePreflight(
@@ -1728,6 +1758,60 @@ function isNonLocalRpcUrl(rpcUrl: string): boolean {
     hostname !== "::1" &&
     hostname !== "[::1]" &&
     !hostname.endsWith(".local");
+}
+
+/**
+ * 非 local 档 RPC/S3 endpoint 的 scheme 门（与 env.ts
+ * validateNonLocalHttpsEndpointUrl 同口径）：https 必须；http 仅回环 host
+ * 放行。URL 不可解析同样判不过（rpc_url_configured 已覆盖存在性）。
+ */
+function isHttpsEndpointUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === "https:") {
+    return true;
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  return parsed.protocol === "http:" && (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]" ||
+    hostname.endsWith(".local")
+  );
+}
+
+function checkEndpointScheme(
+  config: ChainServicesConfig,
+  checks: ConfigDiagnosticCheck[],
+  errors: string[]
+): void {
+  if (isHttpsEndpointUrl(config.network.rpcUrl)) {
+    pass(checks, "network.rpc_scheme");
+  } else {
+    fail(
+      checks,
+      errors,
+      "network.rpc_scheme",
+      `UVP_RPC_URL must use https in ${config.security.environment} (http is only allowed for loopback hosts)`
+    );
+  }
+  if (config.evidenceStorage.s3Endpoint) {
+    if (isHttpsEndpointUrl(config.evidenceStorage.s3Endpoint)) {
+      pass(checks, "evidence.s3_endpoint_scheme");
+    } else {
+      fail(
+        checks,
+        errors,
+        "evidence.s3_endpoint_scheme",
+        "UVP_EVIDENCE_S3_ENDPOINT must use https outside local development (http is only allowed for loopback hosts)"
+      );
+    }
+  }
 }
 
 function pass(checks: ConfigDiagnosticCheck[], name: string): void {

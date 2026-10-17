@@ -182,7 +182,12 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222",
         UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222",
         UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
-        UVP_FINALITY_CONFIRMATIONS: "12"
+        UVP_FINALITY_CONFIRMATIONS: "12",
+        // testnet 档位不对称收口：等回执注册与对账 worker 同 production/
+        // staging 强制（受管 PG 上对账轮询同样走 ≥30s 的成本门）。
+        UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: "true",
+        RECONCILE_WORKER_ENABLED: "true",
+        RECONCILE_POLL_INTERVAL_MS: "30000"
       };
       // STORE_AUTH_MODE 缺省无回落 → 启动失败。
       expect(() => loadConfigFromEnv(base)).toThrow(/STORE_AUTH_MODE/);
@@ -254,7 +259,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         RECONCILE_WORKER_ENABLED: "true",
         RECONCILE_POLL_INTERVAL_MS: "30000",
         // production 受管 PG 的显式轮询基线（受管库成本安全门三档同口径）。
-        UVP_INDEXER_POLL_INTERVAL_MS: "5000"
+        UVP_INDEXER_POLL_INTERVAL_MS: "5000",
+        // production 要求 chainId 显式（env 或地址清单），基线一并带上。
+        UVP_CHAIN_ID: "8453"
       };
       // 无 UVP_RPC_URL：不再静默回落 127.0.0.1:8545。
       expect(() => loadConfigFromEnv(base)).toThrow(/UVP_RPC_URL is required in production/);

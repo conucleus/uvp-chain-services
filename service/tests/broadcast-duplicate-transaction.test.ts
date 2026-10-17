@@ -11,10 +11,15 @@ import {
   classifyStagePatchBroadcastError,
   STAGE_EXECUTOR_PATCH_BROADCAST_LABELS
 } from "../src/stage-patches/broadcast-adapter.js";
-import type { Hex } from "../src/shared/types.js";
+import { createGovernanceBroadcasterAdapter } from "../src/governance/index.js";
+import type { Address, Hex } from "../src/shared/types.js";
 
 const candidateTx = `0x${"ab".repeat(32)}` as Hex;
 const otherTx = `0x${"cd".repeat(32)}` as Hex;
+
+function hex(byte: string): Hex {
+  return `0x${byte.padStart(64, "0")}` as Hex;
+}
 
 describe("duplicate-transaction lane matcher (shared)", () => {
   it("recognizes the three broadcaster nonce-conflict reports and nothing else", () => {
@@ -160,5 +165,100 @@ describe("duplicate-transaction receipt adjudication (shared)", () => {
       builders
     )).resolves.toBe("r:receipt_unknown");
     expect(labels).toEqual(["reassemblable", "submitted", "receipt_failed", "receipt_unknown"]);
+  });
+});
+
+describe("governance identity broadcast duplicate-transaction lane", () => {
+  // governance 广播捕获口的四态裁决（A6-8a）：nonce 冲突三形态不再落默认
+  // retryable 的 broadcast_failed，而是经 getReceipt 探针裁决——错误码沿用
+  // 词表已有车道码（transaction_reverted / transaction_receipt_unknown /
+  // duplicate_transaction）。
+  const registryAddress = "0x5555555555555555555555555555555555555555" as Address;
+  const signerPrivateKey = `0x${"11".repeat(32)}` as Hex;
+  const signer = "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a" as Address;
+  const request = {
+    kind: "registerIdentity" as const,
+    subjectId: hex("3001"),
+    account: "0x4444444444444444444444444444444444444444" as Address,
+    descriptorHash: hex("aa"),
+    descriptorURI: "uvp-store://identity/acme"
+  };
+
+  function adapterWith(
+    walletClient: { writeContract: () => Promise<never> },
+    receipt?: () => Promise<{ status: string; blockNumber?: bigint } | undefined | null>
+  ) {
+    return createGovernanceBroadcasterAdapter({
+      rpcUrl: "http://127.0.0.1:8545",
+      chainId: 31337,
+      contractAddress: registryAddress,
+      privateKey: signerPrivateKey,
+      txConfirmations: 1,
+      publicClient: {
+        async getChainId() { return 31337; },
+        async readContract() { return signer; },
+        async waitForTransactionReceipt() { return { status: "success" as const }; },
+        ...(receipt ? { getTransactionReceipt: receipt } : {})
+      },
+      walletClient
+    });
+  }
+
+  function nonceRaceError(): Error & { txHash?: string } {
+    const error = new Error("nonce too low") as Error & { txHash?: string };
+    error.txHash = candidateTx;
+    return error;
+  }
+
+  it("adjudicates a probed success receipt as confirmed instead of retryable broadcast_failed", async () => {
+    const adapter = adapterWith(
+      { writeContract: async () => { throw nonceRaceError(); } },
+      async () => ({ status: "success", blockNumber: 42n })
+    );
+    await expect(adapter.registerIdentity(request)).resolves.toMatchObject({
+      status: "confirmed",
+      txHash: candidateTx,
+      blockNumber: "42",
+      retryable: false
+    });
+  });
+
+  it("adjudicates a probed reverted receipt as terminal transaction_reverted", async () => {
+    const adapter = adapterWith(
+      { writeContract: async () => { throw nonceRaceError(); } },
+      async () => ({ status: "reverted", blockNumber: 43n })
+    );
+    await expect(adapter.registerIdentity(request)).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "transaction_reverted",
+      txHash: candidateTx,
+      blockNumber: "43",
+      retryable: false
+    });
+  });
+
+  it("keeps the candidate hash as retryable transaction_receipt_unknown when the probe cannot judge", async () => {
+    const adapter = adapterWith(
+      { writeContract: async () => { throw nonceRaceError(); } },
+      undefined
+    );
+    await expect(adapter.registerIdentity(request)).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "transaction_receipt_unknown",
+      txHash: candidateTx,
+      retryable: true
+    });
+  });
+
+  it("returns retryable duplicate_transaction for a nonce race without an attributable hash", async () => {
+    const adapter = adapterWith(
+      { writeContract: async () => { throw new Error("replacement transaction underpriced"); } },
+      async () => ({ status: "success" })
+    );
+    await expect(adapter.registerIdentity(request)).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "duplicate_transaction",
+      retryable: true
+    });
   });
 });

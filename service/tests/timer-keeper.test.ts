@@ -3,7 +3,7 @@ import { decodeFunctionData } from "viem";
 import { STATE_MACHINE_ABI } from "@uvp-eth/protocol-bindings";
 import { TimerKeeperWorker } from "../src/timer-keeper/service.js";
 import { createTimerKeeperWalletSubmitter } from "../src/timer-keeper/index.js";
-import type { TimerKeeperSubmitter, TimerPokeTarget } from "../src/timer-keeper/types.js";
+import { TimerPokeReceiptRevertedError, type TimerKeeperSubmitter, type TimerPokeOutcome, type TimerPokeTarget } from "../src/timer-keeper/types.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import type { Address, Hex } from "../src/shared/types.js";
@@ -187,7 +187,7 @@ describe("timer keeper", () => {
           if (fail) {
             throw new Error("broadcast failed: keeper gas role unavailable");
           }
-          return "0x" + "ab".repeat(32) as Hex;
+          return confirmedOutcome();
         }
       },
       logger,
@@ -326,8 +326,8 @@ describe("timer keeper", () => {
 
   it("pins pokeTimer calldata, simulation args, and the gas cap on the wallet submitter", async () => {
     // 写面形状：广播前先 simulateContract 预演（同一 address/abi/args/
-    // account），estimateGas 取模拟 gas 与上限比较，通过后以模拟 gas 为
-    // limit 广播预演产出的 to/data；selector 与参数布局由
+    // account），estimateGas 取模拟 gas 与上限比较，通过后以模拟 gas 加
+    // 20% 缓冲为 limit 广播预演产出的 to/data；selector 与参数布局由
     // STATE_MACHINE_ABI 单源钉死。
     const keeperAddress = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
     const sent: Array<{ readonly to: Address; readonly data: Hex; readonly gas?: bigint }> = [];
@@ -342,7 +342,8 @@ describe("timer keeper", () => {
         sendTransaction: async (args) => {
           sent.push(args);
           return "0x" + "ab".repeat(32) as Hex;
-        }
+        },
+        waitForTransactionReceipt: async () => ({ status: "success" as const, blockNumber: 4n })
       },
       simulationClient: {
         simulateContract: async (input) => {
@@ -356,13 +357,13 @@ describe("timer keeper", () => {
       }
     });
 
-    const txHash = await submitter.pokeTimer({
+    const outcome = await submitter.pokeTimer({
       planId,
       orderId,
       hookId: timerHookId,
       gas: 500_000n
     });
-    expect(txHash).toBe("0x" + "ab".repeat(32));
+    expect(outcome).toEqual({ txHash: "0x" + "ab".repeat(32), receipt: "confirmed" });
     expect(simulations).toEqual([
       {
         address: contractAddress,
@@ -379,13 +380,135 @@ describe("timer keeper", () => {
     expect(decoded.functionName).toBe("pokeTimer");
     expect(decoded.args).toEqual([planId, orderId, timerHookId]);
     expect(sent[0]!.to).toBe(contractAddress);
-    expect(sent[0]!.gas).toBe(120_000n);
+    expect(sent[0]!.gas).toBe(144_000n);
 
-    // 模拟 gas 超过 keeper 上限：拒发（不进入广播面）。
+    // 广播 limit（模拟 gas 120k + 20% 缓冲 = 144k）超过 keeper 上限：拒发
+    // （不进入广播面，硬顶按 limit 比较）。
     await expect(
       submitter.pokeTimer({ planId, orderId, hookId: timerHookId, gas: 100_000n })
-    ).rejects.toThrow(/simulated gas 120000 exceeds the timer keeper gas cap 100000/);
+    ).rejects.toThrow(/broadcast gas limit 144000 exceeds the timer keeper gas cap 100000/);
     expect(sent).toHaveLength(1);
+  });
+
+  it("classifies a reverted receipt as a keeper failure and an unreadable receipt as unknown", async () => {
+    // 广播后的有界回执等待：reverted 抛 TimerPokeReceiptRevertedError（交
+    // worker 失败窗口升级）；等待超时/回执不可判读按 unknown 返回，不 throw。
+    const keeperAddress = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
+    const baseClient = {
+      account: { address: keeperAddress },
+      sendTransaction: async () => "0x" + "ab".repeat(32) as Hex
+    };
+    const simulationClient = {
+      simulateContract: async () => ({}),
+      estimateGas: async () => 120_000n
+    };
+    const reverted = createTimerKeeperWalletSubmitter({
+      stateMachineAddress: contractAddress,
+      chainId,
+      rpcUrl: "http://127.0.0.1:8545",
+      walletClient: {
+        ...baseClient,
+        waitForTransactionReceipt: async () => ({ status: "reverted" as const, blockNumber: 4n })
+      },
+      simulationClient
+    });
+    await expect(reverted.pokeTimer({ planId, orderId, hookId: timerHookId })).rejects.toBeInstanceOf(
+      TimerPokeReceiptRevertedError
+    );
+
+    const timedOut = createTimerKeeperWalletSubmitter({
+      stateMachineAddress: contractAddress,
+      chainId,
+      rpcUrl: "http://127.0.0.1:8545",
+      walletClient: {
+        ...baseClient,
+        waitForTransactionReceipt: async () => {
+          throw new Error("Transaction reception timed out after 60,000 milliseconds");
+        }
+      },
+      simulationClient
+    });
+    await expect(timedOut.pokeTimer({ planId, orderId, hookId: timerHookId })).resolves.toEqual({
+      txHash: "0x" + "ab".repeat(32),
+      receipt: "unknown"
+    });
+
+    const unreadable = createTimerKeeperWalletSubmitter({
+      stateMachineAddress: contractAddress,
+      chainId,
+      rpcUrl: "http://127.0.0.1:8545",
+      walletClient: {
+        ...baseClient,
+        waitForTransactionReceipt: async () => undefined
+      },
+      simulationClient
+    });
+    await expect(unreadable.pokeTimer({ planId, orderId, hookId: timerHookId })).resolves.toEqual({
+      txHash: "0x" + "ab".repeat(32),
+      receipt: "unknown"
+    });
+  });
+
+  it("counts receipt-reverted pokes into the failure escalation lane and receipt-unknown pokes as submitted", async () => {
+    // 回执 reverted：计 receiptReverted，进 failureWindows（连续窗口升级），
+    // 不落入收敛车道；回执 unknown：已广播不判失败，submitted 与
+    // receiptUnknown 同计。
+    let nowMs = 1_700_001_000_000;
+    const logger = new RecordingLogger();
+    const revertedWorker = new TimerKeeperWorker({
+      config: keeperConfig(),
+      projectionStore: await freshStore(baseEvents(), 4n),
+      stateMachineAddress: contractAddress,
+      chainId,
+      submitter: {
+        pokeTimer: async () => {
+          throw new TimerPokeReceiptRevertedError(
+            "timer poke transaction 0x" + "ab".repeat(31) + " was mined but reverted on chain"
+          );
+        }
+      },
+      logger,
+      now: () => new Date(nowMs)
+    });
+    const first = await revertedWorker.runOnce();
+    expect(first).toMatchObject({ attempted: 1, submitted: 0, receiptReverted: 1, receiptUnknown: 0 });
+    expect(first.converged).toEqual([]);
+    expect(first.skipped.length).toBe(1);
+    nowMs += 130_000;
+    await revertedWorker.runOnce();
+    nowMs += 130_000;
+    const third = await revertedWorker.runOnce();
+    expect(third.receiptReverted).toBe(1);
+    expect(logger.errors).toHaveLength(1);
+    expect(logger.errors[0]!.message).toMatch(/3 consecutive redelivery windows/);
+
+    const unknownWorker = new TimerKeeperWorker({
+      config: keeperConfig(),
+      projectionStore: await freshStore(baseEvents(), 4n),
+      stateMachineAddress: contractAddress,
+      chainId,
+      submitter: {
+        pokeTimer: async () => ({ txHash: "0x" + "ab".repeat(32) as Hex, receipt: "unknown" })
+      },
+      logger,
+      now: () => new Date(nowMs)
+    });
+    const unknown = await unknownWorker.runOnce();
+    expect(unknown).toMatchObject({ attempted: 1, submitted: 1, receiptUnknown: 1, receiptReverted: 0 });
+    expect(unknown.skipped).toEqual([]);
+    expect(unknown.converged).toEqual([]);
+
+    // 持续 unknown 不清窗：连续 3 个去重窗口仍不可判读即升级 error 级
+    // 告警（已广播但结果不可判读不是成功事实；既有 reverted 车道告警
+    // 保留，unknown 车道单独计数升级）。
+    nowMs += 130_000;
+    await unknownWorker.runOnce();
+    expect(logger.errors).toHaveLength(1);
+    nowMs += 130_000;
+    const thirdUnknown = await unknownWorker.runOnce();
+    expect(thirdUnknown.receiptUnknown).toBe(1);
+    expect(logger.errors).toHaveLength(2);
+    expect(logger.errors[1]!.message).toMatch(/stayed unreadable for 3 consecutive redelivery windows/);
   });
 });
 
@@ -404,9 +527,13 @@ function recordingSubmitter(poked: TimerPokeTarget[]): TimerKeeperSubmitter {
   return {
     pokeTimer: async (target) => {
       poked.push(target);
-      return "0x" + "ab".repeat(32) as Hex;
+      return confirmedOutcome();
     }
   };
+}
+
+function confirmedOutcome(): TimerPokeOutcome {
+  return { txHash: "0x" + "ab".repeat(32) as Hex, receipt: "confirmed" };
 }
 
 async function freshStore(events: readonly ChainEvent[], finalizedBlock: bigint): Promise<MemoryProjectionStore> {

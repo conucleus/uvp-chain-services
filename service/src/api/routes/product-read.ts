@@ -148,9 +148,9 @@ export function createProductReadRouteModule(options: {
             return wallet.response;
           }
           const walletAddress = wallet.identity.walletAddress.toLowerCase();
-          const acceptedOrderIds = await acceptedParticipantOrderIds(context, wallet.identity.walletAddress);
+          const acceptedOrderKeys = await acceptedParticipantOrderKeys(context, wallet.identity.walletAddress);
           const orders = (await context.productService.listOrders())
-            .filter((order) => orderVisibleToParticipant(order, walletAddress, acceptedOrderIds));
+            .filter((order) => orderVisibleToParticipant(order, walletAddress, acceptedOrderKeys));
           return {
             status: 200,
             body: { orders }
@@ -293,14 +293,14 @@ export function createProductReadRouteModule(options: {
               body: { error: "forbidden", message: "assignee filter must match the session-anchored wallet" }
             };
           }
-          const acceptedOrderIds = await acceptedParticipantOrderIds(context, wallet.identity.walletAddress);
+          const acceptedOrderKeys = await acceptedParticipantOrderKeys(context, wallet.identity.walletAddress);
           const orders = await context.productService.listOrders();
           // 可见集按 (planId, orderId) 复合键合并（与 reconcile/dock-automation
           // 的订单定位口径一致）：裸 orderId 集合在两个 plan 复用同一订单号时，
           // 会把另一 plan 名下同号订单的未指派任务一并放行（跨 plan 越权读）。
           const visibleOrderKeys = new Set(
             orders
-              .filter((order) => orderVisibleToParticipant(order, walletAddress.toLowerCase(), acceptedOrderIds))
+              .filter((order) => orderVisibleToParticipant(order, walletAddress.toLowerCase(), acceptedOrderKeys))
               .map((order) => orderTaskVisibilityKey(order.planId, order.orderId))
               .filter((key): key is string => Boolean(key))
           );
@@ -357,7 +357,7 @@ export function createProductReadRouteModule(options: {
           if (!order || !orderVisibleToParticipant(
             order,
             walletAddress,
-            await acceptedParticipantOrderIds(context, wallet.identity.walletAddress)
+            await acceptedParticipantOrderKeys(context, wallet.identity.walletAddress)
           )) {
             return taskNotFound();
           }
@@ -469,31 +469,36 @@ function productParticipantIdentityFromAssignment(assignment: ProductParticipant
 }
 
 /**
- * 订单/任务可见性复合键 (planId, orderId)：两侧都归一到小写、缺 planId
- * 归一为空段——订单与任务只有 plan 维度一致才命中。同号订单跨 plan
- * 复用时，裸 orderId 命中会被本键拒绝（另一 plan 的同号订单不因
- * orderId 相同而可见）。
+ * 订单/任务可见性复合键 (planId, orderId)：两侧都归一到小写；任一侧缺
+ * planId 即不成键（undefined）——订单与任务只有 plan 维度一致才命中。同号
+ * 订单跨 plan 复用时，裸 orderId 命中会被本键拒绝（另一 plan 的同号订单
+ * 不因 orderId 相同而可见）；双侧都缺 planId 时 ":orderId" 裸段键会把纯
+ * orderId 碰撞伪装成复合键命中，同样拒绝。
  */
 function orderTaskVisibilityKey(planId: string | undefined, orderId: string | undefined): string | undefined {
-  if (!orderId) {
+  if (!orderId || !planId) {
     return undefined;
   }
-  return `${(planId ?? "").toLowerCase()}:${orderId.toLowerCase()}`;
+  return `${planId.toLowerCase()}:${orderId.toLowerCase()}`;
 }
 
 /**
  * 已接受参与（草稿 accept 带来的订单归属）——/product/me/orders 与
  * /product/orders(:id) 共用同一判据：受邀并 accept 的钱包在链上指派
- * 落定前就该看到订单，列表与详情不得一边可见一边 404。
+ * 落定前就该看到订单，列表与详情不得一边可见一边 404。键与
+ * orderTaskVisibilityKey 同为 (planId, orderId) 复合键：同号订单跨 plan
+ * 复用时，另一 plan 的同号订单不因 orderId 相同而命中。
  */
-async function acceptedParticipantOrderIds(
+async function acceptedParticipantOrderKeys(
   context: Parameters<RouteModule["handle"]>[1],
   walletAddress: string
 ): Promise<Set<string>> {
   const assignments = await context.productBffService.listParticipantAssignments(walletAddress);
   return new Set(assignments.flatMap((assignment) => {
     const orderId = assignment.trigger?.orderId ?? assignment.draft.triggeredOrderId;
-    return orderId ? [orderId.toLowerCase()] : [];
+    const planId = assignment.trigger?.planId ?? assignment.draft.planId;
+    const key = orderTaskVisibilityKey(planId, orderId);
+    return key ? [key] : [];
   }));
 }
 
@@ -527,7 +532,7 @@ async function resolveOrderVisibility(
   if (!order || !orderVisibleToParticipant(
     order,
     walletAddress.toLowerCase(),
-    await acceptedParticipantOrderIds(context, walletAddress)
+    await acceptedParticipantOrderKeys(context, walletAddress)
   )) {
     return {
       response: {
@@ -545,12 +550,13 @@ async function resolveOrderVisibility(
  * 是纯链上事实（同"未指派任务"），对已认证参与者开放；有指派钱包
  * 的订单只有参与者本人（链上指派、订单创建者或已接受参与的订单归属）
  * 可见——创建者无任务指派时同样是订单参与者，读不到自己建的单与
- * 上述口径相悖。
+ * 上述口径相悖。已接受参与的订单归属按 (planId, orderId) 复合键命中
+ * （orderTaskVisibilityKey 同口径）。
  */
 function orderVisibleToParticipant(
   order: ProductOrderApiDTO,
   walletAddress: string,
-  acceptedOrderIds: ReadonlySet<string>
+  acceptedOrderKeys: ReadonlySet<string>
 ): boolean {
   const participants = new Set<string>();
   for (const task of order.tasks ?? []) {
@@ -573,9 +579,10 @@ function orderVisibleToParticipant(
   if (order.creatorWallet) {
     participants.add(order.creatorWallet.toLowerCase());
   }
+  const acceptedKey = orderTaskVisibilityKey(order.planId, order.orderId);
   return participants.size === 0 ||
     participants.has(walletAddress) ||
-    (order.orderId ? acceptedOrderIds.has(order.orderId.toLowerCase()) : false);
+    (acceptedKey !== undefined && acceptedOrderKeys.has(acceptedKey));
 }
 
 function taskNotFound(): ApiResponse {

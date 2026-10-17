@@ -7,9 +7,14 @@ import {
   loadRelayerPrivateKey,
   requiredRpcUrl
 } from "../shared/broadcast/kit.js";
-import type { TimerKeeperSubmitter } from "./types.js";
+import { TimerPokeReceiptRevertedError, type TimerKeeperSubmitter } from "./types.js";
 
 const TIMER_KEEPER_BROADCAST_LABEL = "timer keeper poke";
+/** 广播 gas 相对模拟 gas 的缓冲系数：simulatedGas * 12 / 10。 */
+const GAS_BUFFER_NUMERATOR = 12n;
+const GAS_BUFFER_DENOMINATOR = 10n;
+/** 广播后有界回执等待上限：超时按结果未知收口（不判失败）。 */
+const RECEIPT_WAIT_TIMEOUT_MS = 60_000;
 
 /** 写面滤 ABI：pokeTimer 取自 protocol-bindings 单源（STATE_MACHINE_ABI）
  * ——先放宽为泛型 Abi 再切片，直接在整表字面量类型上做 filter/
@@ -46,6 +51,15 @@ export interface TimerKeeperWalletClient {
     readonly data: Hex;
     readonly gas?: bigint;
   }): Promise<Hex>;
+  /** 回执等待（viem publicClient 同签名）：超时/故障抛错，由写面按
+   * 结果未知收口，不外抛。 */
+  waitForTransactionReceipt(args: {
+    readonly hash: Hex;
+    readonly timeout?: number;
+  }): Promise<{
+    readonly status?: "success" | "reverted" | string;
+    readonly blockNumber?: bigint;
+  } | undefined>;
 }
 
 export interface TimerKeeperWalletSubmitterOptions {
@@ -64,7 +78,10 @@ export interface TimerKeeperWalletSubmitterOptions {
  * 签名面）。广播前先经 simulateContract 预演——raw 广播不等回执，链上会
  * revert 的 poke 会被节点接受并以 txHash 正常 resolve，收敛判定
  * （TimerNotWaiting/TimerNotDue）与连续失败升级将永远不触发；预演把
- * revert 抛成携 errorName 的错误交由 worker 分类。广播后仍不等回执——
+ * revert 抛成携 errorName 的错误交由 worker 分类。广播 gas 取模拟 gas
+ * 加 20% 缓冲（执行期 gas 与估算漂移会让贴线广播 out-of-gas）。广播后
+ * 有界等待回执：reverted 抛 TimerPokeReceiptRevertedError 交 worker 计
+ * 失败窗口；等待超时/回执不可判读按结果未知返回（已广播，不判失败），
  * 最终性窗口去重由 worker 承担，投影呈现 poke 后状态即收敛。
  */
 export function createTimerKeeperWalletSubmitter(
@@ -87,17 +104,29 @@ export function createTimerKeeperWalletSubmitter(
     );
   const accountAddress: Address | undefined = account?.address ??
     (options.walletClient?.account?.address as Address | undefined);
-  const walletClient: TimerKeeperWalletClient = options.walletClient ??
-    (createWalletClient({
-      account,
-      chain,
-      transport: http(rpcUrl)
-    }) as unknown as TimerKeeperWalletClient);
+  const viemPublicClient = createPublicClient({
+    chain,
+    transport: http(rpcUrl)
+  });
+  const viemWalletClient = createWalletClient({
+    account,
+    chain,
+    transport: http(rpcUrl)
+  });
+  const walletClient: TimerKeeperWalletClient = options.walletClient ?? ({
+    ...(account ? { account: { address: account.address } } : {}),
+    // wallet client 构造期已注入 keeper 账户；此处透传最小 tx 参数
+    //（viem 的巨型参数联合会让直传爆 TS2589/精确可选属性，与整表
+    // ABI 切片同口径做一次窄化断言）。
+    sendTransaction: (args: Parameters<TimerKeeperWalletClient["sendTransaction"]>[0]) =>
+      viemWalletClient.sendTransaction(
+        args as Parameters<typeof viemWalletClient.sendTransaction>[0]
+      ),
+    waitForTransactionReceipt: (args: Parameters<TimerKeeperWalletClient["waitForTransactionReceipt"]>[0]) =>
+      viemPublicClient.waitForTransactionReceipt(args)
+  } as unknown as TimerKeeperWalletClient);
   const simulationClient: TimerKeeperSimulationClient = options.simulationClient ??
-    (createPublicClient({
-      chain,
-      transport: http(rpcUrl)
-    }) as unknown as TimerKeeperSimulationClient);
+    (viemPublicClient as unknown as TimerKeeperSimulationClient);
   return {
     async pokeTimer(target) {
       const data = encodeFunctionData({
@@ -117,18 +146,39 @@ export function createTimerKeeperWalletSubmitter(
         data,
         ...(accountAddress ? { account: accountAddress } : {})
       });
-      // gas 上限语义保留：模拟 gas 超过 keeper 上限即拒发（不广播注定
-      // out-of-gas / 异常昂贵的 poke）；未超则以模拟 gas 为 limit 广播。
-      if (target.gas !== undefined && simulatedGas > target.gas) {
+      // gas 上限语义（硬顶）：广播 limit = 模拟 gas 加 20% 缓冲，上限比较
+      // 对 limit 生效——limit 超过 keeper 上限即拒发（不广播越过硬顶的
+      // poke），未超则以该 limit 广播。
+      const broadcastGas = simulatedGas * GAS_BUFFER_NUMERATOR / GAS_BUFFER_DENOMINATOR;
+      if (target.gas !== undefined && broadcastGas > target.gas) {
         throw new Error(
-          `pokeTimer simulated gas ${simulatedGas} exceeds the timer keeper gas cap ${target.gas}`
+          `pokeTimer broadcast gas limit ${broadcastGas} exceeds the timer keeper gas cap ${target.gas}`
         );
       }
-      return walletClient.sendTransaction({
+      const txHash = await walletClient.sendTransaction({
         to: stateMachineAddress,
         data,
-        gas: simulatedGas
+        gas: broadcastGas
       });
+      try {
+        const receipt = await walletClient.waitForTransactionReceipt({
+          hash: txHash,
+          timeout: RECEIPT_WAIT_TIMEOUT_MS
+        });
+        if (receipt?.status === "reverted" || receipt?.status === "failed") {
+          throw new TimerPokeReceiptRevertedError(
+            `timer poke transaction ${txHash} was mined but reverted on chain`
+          );
+        }
+        return receipt?.status === "success"
+          ? { txHash, receipt: "confirmed" }
+          : { txHash, receipt: "unknown" };
+      } catch (error) {
+        if (error instanceof TimerPokeReceiptRevertedError) {
+          throw error;
+        }
+        return { txHash, receipt: "unknown" };
+      }
     }
   };
 }

@@ -47,7 +47,7 @@ import { ConfigError, consoleLogger, type Address, type Logger } from "../shared
 import { createApiRouter, productBffStoreDraftOrderResolver } from "./routes.js";
 import { InvalidPathParameterError, invalidPathParameterResponse, normalizeRequestId } from "./route-context.js";
 import { createListingAnchorChainView } from "../store/listings/index.js";
-import { createPlanCapabilityTablesResolver } from "../store/console/zhixu-drafts.js";
+import { createPlanCapabilityTablesResolver, createSemanticOraclePlanResolver } from "../store/console/zhixu-drafts.js";
 
 export interface StartApiServerOptions {
   readonly config?: ChainServicesConfig;
@@ -124,6 +124,9 @@ export async function startApiServer(
       // createPlanCapabilityTablesResolver）；重放侧再断言
       // capabilitiesRoot 一致（fail-closed，见 indexer/projections/plan.ts）。
       resolvePlanCapabilityTables: createPlanCapabilityTablesResolver(stores.storeZhixuDraftStore),
+      // 语义 oracle 产物源：同一产物入口的完整形态（compiledHooks/
+      // dependencyIndex），重放后校验投影语义并计数分叉（只报告不覆盖）。
+      resolveSemanticOraclePlan: createSemanticOraclePlanResolver(stores.storeZhixuDraftStore),
       logger
     })
     : undefined;
@@ -340,6 +343,7 @@ export async function startApiServer(
       pollIntervalMs: config.api.indexerPollIntervalMs
     },
     reconcileDiagnostics: () => reconcileWorker.getDiagnostics(),
+    timerKeeperDiagnostics: () => timerKeeperWorker.getLastSummary(),
     audit,
     configDiagnostics,
     ...(indexer ? { onTxMined: () => indexer.refreshIfIdle() } : {})

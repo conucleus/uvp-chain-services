@@ -14,6 +14,7 @@ import type { StoreDockingSessionStore } from "../store/console/docking.js";
 import type { StoreZhixuDraftStore } from "../store/console/zhixu-drafts.js";
 import type { StoreZhixuVersionMetadataStore } from "../store/console/version.js";
 import type { StoreSupplierMetadataStore } from "../store/suppliers/index.js";
+import type { TimerKeeperRunSummary } from "../timer-keeper/types.js";
 import type {
   ProductSubmissionAttemptDTO,
   ProductSubmissionDTO,
@@ -40,6 +41,10 @@ export interface BuildOperationalDiagnosticsOptions {
   readonly runtimeEnvironment: ChainServicesRuntimeEnv;
   readonly indexer?: IndexerRuntimeDiagnostics;
   readonly reconcile?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
+  /** timer keeper 的末轮 summary（receiptReverted/receiptUnknown/deduplicated
+   * 等计数面）：以 timerKeeperRuntime 键只读暴露进 diagnostics，不进
+   * /healthz 聚合健康位。 */
+  readonly timerKeeper?: TimerKeeperRunSummary | (() => TimerKeeperRunSummary | undefined);
   readonly submissionStore?: ProductSubmissionStore;
   readonly governanceStore?: GovernanceStore;
   readonly evidenceStorage?: Pick<EvidenceStorage, "adapterKind" | "productionSafe">;
@@ -77,6 +82,7 @@ export async function buildOperationalDiagnostics(
   });
   const reconcile = buildReconcileDiagnostics(options.reconcile);
   const indexer = buildIndexerDiagnostics(syncStateResult, options.indexer);
+  const timerKeeperRuntime = buildTimerKeeperDiagnostics(options.timerKeeper);
 
   const diagnostics = {
     ...(options.configDiagnostics ?? fallbackConfigDiagnostics(options.runtimeEnvironment)),
@@ -91,6 +97,7 @@ export async function buildOperationalDiagnostics(
     indexer,
     projectionRebuild: indexer.rebuild,
     reconcile,
+    timerKeeperRuntime,
     submissions,
     governanceTxs,
     evidenceStorage,
@@ -285,6 +292,22 @@ function buildReconcileDiagnostics(
     lastRunAt: diagnostics.lastRunAt ?? null,
     lastSummary: diagnostics.lastSummary ?? null,
     lastError: diagnostics.lastError ? redactErrorMessage(diagnostics.lastError) : null
+  };
+}
+
+/**
+ * timer keeper 的运行时诊断面（getLastSummary 的只读暴露）：末轮 summary
+ * 携带 receiptReverted/receiptUnknown/deduplicated 等计数，供
+ * /admin/diagnostics 人工研判。输出键为 timerKeeperRuntime——
+ * configDiagnostics.timerKeeper 是配置形状（enabled/私钥角色装配，staging
+ * readiness 消费），不得覆写；运行时 summary 不参与 /healthz 聚合健康位。
+ */
+function buildTimerKeeperDiagnostics(
+  source: BuildOperationalDiagnosticsOptions["timerKeeper"]
+): Record<string, unknown> {
+  const summary = typeof source === "function" ? source() : source;
+  return {
+    lastSummary: summary ?? null
   };
 }
 

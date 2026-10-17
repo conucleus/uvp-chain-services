@@ -1234,6 +1234,62 @@ describe("chain-services config", () => {
     }))).toThrow(/RECONCILE_WORKER_ENABLED=true is required in production/);
   });
 
+  it("requires wait-for-receipt registration and the reconcile worker in testnet", () => {
+    // 档位不对称收口：testnet 与 production/staging 同口径。
+    expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
+      UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: undefined
+    }))).toThrow(/UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in testnet/);
+
+    expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
+      RECONCILE_WORKER_ENABLED: undefined
+    }))).toThrow(/RECONCILE_WORKER_ENABLED=true is required in testnet/);
+  });
+
+  it("requires an explicit production chainId and refuses the 31337 fallback", () => {
+    // chainId 缺省回落 31337（Anvil）不是 production 的合法姿态；地址清单
+    // network.chainId 同样算显式。
+    expect(() => loadConfigFromEnv(productionEnv({
+      UVP_CHAIN_ID: undefined
+    }))).toThrow(/UVP_CHAIN_ID must be explicitly configured in production/);
+  });
+
+  it("rejects plain-http RPC and S3 endpoints outside local development", () => {
+    // 非 local 档 scheme 门：http 仅回环 host 放行（回环 RPC 另有
+    // non-local 检查拦截）；明文 http 的公网端点直接拒绝。
+    expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
+      UVP_RPC_URL: "http://base-sepolia.example/rpc"
+    }))).toThrow(/UVP_RPC_URL must use https outside local development/);
+
+    // 治理广播 RPC 显式配置同样过 scheme 门（缺省回落已检的 UVP_RPC_URL，
+    // 显式 http 公网端点不得成为绕行面）。
+    expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
+      GOVERNANCE_RPC_URL: "http://base-sepolia.example/rpc"
+    }))).toThrow(/GOVERNANCE_RPC_URL must use https outside local development/);
+
+    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+      UVP_EVIDENCE_S3_ENDPOINT: "http://objects.example"
+    }))).toThrow(/UVP_EVIDENCE_S3_ENDPOINT must use https outside local development/);
+
+    // 回环 http endpoint 放行（本地 MinIO 一类）。
+    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
+      UVP_EVIDENCE_S3_ENDPOINT: "http://127.0.0.1:9000"
+    }))).not.toThrow();
+  });
+
+  it("rejects zero-or-negative keeper gas caps instead of treating them as uncapped", () => {
+    // 「0=无上限」语义已废除：显式 ≤0 即响亮拒绝，未配置走 fallback。
+    expect(() => loadConfigFromEnv({
+      UVP_TIMER_KEEPER_MAX_GAS_PER_TX: "0"
+    })).toThrow(/UVP_TIMER_KEEPER_MAX_GAS_PER_TX must be a positive integer/);
+
+    expect(() => loadConfigFromEnv({
+      UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX: "0"
+    })).toThrow(/UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX must be a positive integer/);
+
+    expect(loadConfigFromEnv({}).timerKeeper.maxGasPerTx).toBe(500_000n);
+    expect(loadConfigFromEnv({}).dockAutomation.maxGasPerTx).toBe(500_000n);
+  });
+
   it("requires an informed acknowledgement for testnet auto migrations", () => {
     // 自动迁移知情门（对照 production/staging 档）：受管 PG 的启动期 DDL
     // 必须显式确认知情。
@@ -1863,6 +1919,8 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Reco
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: productionRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: productionRelayerPrivateKey,
+    // production 要求 chainId 显式（env 或地址清单），基线 env 一并带上。
+    UVP_CHAIN_ID: "8453",
     // production 要求显式配置 finality 确认数，基线 env 一并带上。
     UVP_FINALITY_CONFIRMATIONS: "12",
     // production 强制显式非本地 RPC + admin 白名单
@@ -1917,6 +1975,11 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: testnetRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: testnetRelayerPrivateKey,
     UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
+    // testnet 档位不对称收口：等回执与对账 worker 与 production/staging
+    // 同口径强制（受管 PG 上对账轮询同样走 ≥30s 的成本门）。
+    UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: "true",
+    RECONCILE_WORKER_ENABLED: "true",
+    RECONCILE_POLL_INTERVAL_MS: "30000",
     // testnet 强制显式 finality 确认数。
     UVP_FINALITY_CONFIRMATIONS: "12",
     // testnet 必须显式 STORE_AUTH_MODE=jwt 且

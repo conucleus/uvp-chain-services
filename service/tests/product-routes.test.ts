@@ -1442,6 +1442,82 @@ describe("product API routes", () => {
     expect(planATaskDetail.status).toBe(404);
   });
 
+  it("does not let an accepted participation without planId hit tasks that also lack planId", async () => {
+    // 双侧缺 planId 碰撞：assignment 侧（legacy 草稿行 plan_id 为 NULL 的
+    // 忠实模拟）与任务侧（同号订单跨 plan 复用同一 hookId → 任务行订单
+    // 定位歧义 → 任务 DTO 不带 planId）都缺 plan 维度时，":orderId" 裸段
+    // 键不得伪装成复合键命中——键 undefined 即不入集合、不参与查找。
+    const otherPlanId = bytes32Hex("0b0b");
+    const acceptedWallet = "0x7777777777777777777777777777777777777777";
+    const store = new MemoryProjectionStore();
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineProductEvents(),
+        // plan B：同号订单 + 同一 hookId（taskId 相同）——两个 plan 的订单
+        // 各自持有同 taskId 的任务行，按 taskId 定位订单即歧义。
+        chainEvent(8n, "OrderRegistered", {
+          orderId: stateMachineOrderId,
+          planId: otherPlanId
+        }),
+        chainEvent(9n, "HookReady", {
+          orderId: stateMachineOrderId,
+          planId: otherPlanId,
+          hookId,
+          stageId,
+          hookName
+        }),
+        // 两 plan 订单的参与者都是他人钱包：可见性只剩已接受参与键一条路。
+        chainEvent(10n, "OrderRelayerRecorded", {
+          orderId: stateMachineOrderId,
+          planId: otherPlanId,
+          relayer: routeTestWallet(6),
+          creator: routeTestWallet(8)
+        }),
+        chainEvent(11n, "OrderRelayerRecorded", {
+          orderId: stateMachineOrderId,
+          planId: crossBorderPlanIds.planId,
+          relayer: routeTestWallet(6),
+          creator: routeTestWallet(9)
+        })
+      ]
+    });
+    const productStore = new MemoryProductBffStore();
+    await productStore.createDraft({
+      draftId: "draft-accepted-legacy-no-plan",
+      zhixuId: CROSS_BORDER_ZHIXU_ID,
+      // planId 缺席（legacy plan_id=NULL 行）：assignment 侧不成键。
+      planHash: crossBorderPlanIds.planHash,
+      title: "Legacy accepted participant order",
+      businessType: "parallel-export",
+      goods: [],
+      totalAmount: "10000",
+      currency: "USDC",
+      status: "triggered",
+      triggeredOrderId: stateMachineOrderId,
+      createdAt: "2026-04-28T00:00:00.000Z",
+      updatedAt: "2026-04-28T00:00:00.000Z"
+    } as unknown as Parameters<typeof productStore.createDraft>[0], [{
+      participantId: "participant-accepted-legacy-no-plan",
+      draftId: "draft-accepted-legacy-no-plan",
+      roleSlotId: "delivery",
+      roleLabel: "物流/报关",
+      displayName: "Delivery Operator",
+      walletAddress: acceptedWallet,
+      contact: "delivery@example.com",
+      status: "accepted",
+      required: true,
+      acceptedAt: "2026-04-28T01:00:00.000Z"
+    }]);
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: productStore });
+
+    // 双侧都缺 planId 不命中：同号任务不因 orderId 碰撞而对已接受参与者
+    // 可见（旧 ":orderId" 裸段键会放行）。
+    const list = await router.handle({ method: "GET", pathname: "/product/tasks", headers: { "x-uvp-wallet-address": acceptedWallet } });
+    expect(list.status).toBe(200);
+    expect((list.body as { tasks: unknown[] }).tasks).toEqual([]);
+  });
+
   it("selects task plugins from explicit slot capability metadata for generic authorized roles", async () => {
     const store = new MemoryProjectionStore();
     const events = [
@@ -1775,8 +1851,10 @@ describe("product API routes", () => {
     await productStore.createDraft({
       draftId: "draft-accepted-1",
       zhixuId: CROSS_BORDER_ZHIXU_ID,
-      planId: ("0x" + "5".repeat(64)) as Hex,
-      planHash: ("0x" + "6".repeat(64)) as Hex,
+      // 已接受参与的归属键是 (planId, orderId) 复合键：draft 的 planId 必须与
+      // 投影订单的 plan 维度一致才命中。
+      planId: crossBorderPlanIds.planId,
+      planHash: crossBorderPlanIds.planHash,
       title: "Accepted participant order",
       businessType: "parallel-export",
       goods: [],
@@ -1824,6 +1902,63 @@ describe("product API routes", () => {
       headers: { "x-uvp-wallet-address": "0x2777777777777777777777777777777777777777" }
     });
     expect(outsider).toMatchObject({ status: 404, body: { error: "product_order_not_found" } });
+  });
+
+  it("does not let an accepted participation on another plan leak a same-numbered order", async () => {
+    // 已接受参与的归属键是 (planId, orderId) 复合键：另一 plan 的草稿 accept
+    // 绑定了同号 orderId，不因 orderId 相同而看见本 plan 的订单（404 不泄露
+    // 存在性）。
+    const store = new MemoryProjectionStore();
+    const events = [
+      ...stateMachineProductEvents(),
+      // 链上指派在场（订单非"纯链上公开事实"），可见性只剩已接受参与的
+      // (planId, orderId) 复合键一条路——跨 plan 同号单不得命中。
+      chainEvent(8n, "SignalSubmitterAuthorized", {
+        orderId: stateMachineOrderId,
+        sourceId: stageId,
+        signalId: hookName,
+        submitter,
+        role: bytes32Text("customs-broker"),
+        metadataHash
+      })
+    ];
+    await store.resetFromEvents({ deploymentBlock: 0n, events, planCapabilityTables: planCapabilityTablesForEvents(events) });
+    const acceptedWallet = "0x7777777777777777777777777777777777777777";
+    const productStore = new MemoryProductBffStore();
+    await productStore.createDraft({
+      draftId: "draft-accepted-cross-plan",
+      zhixuId: CROSS_BORDER_ZHIXU_ID,
+      planId: ("0x" + "5".repeat(64)) as Hex,
+      planHash: ("0x" + "6".repeat(64)) as Hex,
+      title: "Cross-plan accepted participant order",
+      businessType: "parallel-export",
+      goods: [],
+      totalAmount: "10000",
+      currency: "USDC",
+      status: "triggered",
+      triggeredOrderId: stateMachineOrderId,
+      createdAt: "2026-04-28T00:00:00.000Z",
+      updatedAt: "2026-04-28T00:00:00.000Z"
+    }, [{
+      participantId: "participant-accepted-cross-plan",
+      draftId: "draft-accepted-cross-plan",
+      roleSlotId: "delivery",
+      roleLabel: "物流/报关",
+      displayName: "Delivery Operator",
+      walletAddress: acceptedWallet,
+      contact: "delivery@example.com",
+      status: "accepted",
+      required: true,
+      acceptedAt: "2026-04-28T01:00:00.000Z"
+    }]);
+    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const, storeAuthConfig: devAnchoredStoreAuth, productBffStore: productStore });
+
+    const detail = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${stateMachineOrderId}`,
+      headers: { "x-uvp-wallet-address": acceptedWallet }
+    });
+    expect(detail).toMatchObject({ status: 404, body: { error: "product_order_not_found" } });
   });
 
   it("uses accepted participant records for /product/me identity while filtering tasks by wallet authorization", async () => {

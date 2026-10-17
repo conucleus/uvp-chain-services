@@ -26,14 +26,34 @@ export interface TimerPokeTarget {
   readonly planId: Hex;
   readonly orderId: Hex;
   readonly hookId: Hex;
-  /** 广播 gas 上限：写面先经 simulateContract 预演并取模拟 gas，模拟
-   * gas 超过本上限即拒发；未超则以模拟 gas 为 limit 广播。 */
+  /** 广播 gas 上限（硬顶）：写面先经 simulateContract 预演并取模拟 gas 加
+   * 20% 缓冲为广播 limit，limit 超过本上限即拒发。 */
   readonly gas?: bigint;
+}
+
+/** poke 写面结局：confirmed=回执 success；unknown=有界等待内未取得可判
+ * 读的回执（交易已广播，不判失败，响亮计数留痕）。 */
+export interface TimerPokeOutcome {
+  readonly txHash: Hex;
+  readonly receipt: "confirmed" | "unknown";
+}
+
+/**
+ * 回执 reverted 的哨兵错误：链上已裁决该 poke 失败（nonce 已被消费），
+ * 与"广播失败可重试"不同车道——service 侧据此计 receiptReverted 并进
+ * failureWindows 升级路径，不落入收敛判定。
+ */
+export class TimerPokeReceiptRevertedError extends Error {
+  override readonly name = "TimerPokeReceiptRevertedError";
+
+  constructor(message: string) {
+    super(message);
+  }
 }
 
 /** 写面端口：由 relayer broadcast 原语实现（见 timer-keeper/broadcast.ts）。 */
 export interface TimerKeeperSubmitter {
-  pokeTimer(target: TimerPokeTarget): Promise<Hex>;
+  pokeTimer(target: TimerPokeTarget): Promise<TimerPokeOutcome>;
 }
 
 export interface TimerKeeperRunSummary {
@@ -45,6 +65,11 @@ export interface TimerKeeperRunSummary {
    * maxCandidatesPerRun 对该数封顶，全失败轮不会扫穿全部候选。 */
   attempted: number;
   submitted: number;
+  /** 回执面已裁决 reverted 的 poke 数（进入失败窗口升级路径）。 */
+  receiptReverted: number;
+  /** 有界等待内未取得可判读回执的 poke 数（已广播、结果未知：不判广播
+   * 失败，但持续 unknown 计入失败窗口升级路径）。 */
+  receiptUnknown: number;
   /** 最终性窗口内被去重跳过的重复广播次数。 */
   deduplicated: number;
   /**

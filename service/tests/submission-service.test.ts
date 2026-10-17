@@ -205,7 +205,7 @@ describe("product task submissions", () => {
       typedData: {
         domain: {
           name: "UVPStateMachine",
-          version: "0.14",
+          version: "0.15",
           chainId,
           verifyingContract
         },

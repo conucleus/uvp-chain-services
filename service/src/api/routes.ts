@@ -264,6 +264,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     runtimeEnvironment: productRuntimeEnvironment,
     ...(options.indexerDiagnostics ? { indexer: options.indexerDiagnostics } : {}),
     ...(options.reconcileDiagnostics ? { reconcile: options.reconcileDiagnostics } : {}),
+    ...(options.timerKeeperDiagnostics ? { timerKeeper: options.timerKeeperDiagnostics } : {}),
     ...(options.submissionStore ? { submissionStore: options.submissionStore } : {}),
     ...(options.governanceStore ? { governanceStore: options.governanceStore } : {}),
     storeMetadataStores: {

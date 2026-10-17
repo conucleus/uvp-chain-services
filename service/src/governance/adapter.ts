@@ -11,6 +11,10 @@ import type { ChainServicesConfig } from "../config/index.js";
 import { hashGovernanceCanonicalJson } from "./hashing.js";
 import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
+import {
+  isDuplicateTransactionReport,
+  resolveDuplicateTransactionOutcome
+} from "../shared/broadcast/duplicate-transaction.js";
 import type {
   GovernanceBroadcastResultDTO,
   IdentityRegistrationRequestDTO,
@@ -40,6 +44,13 @@ export interface GovernancePublicClient {
     readonly status: "success" | "reverted";
     readonly blockNumber?: bigint;
   }>;
+  /** duplicate-transaction 车道的回执探针（viem publicClient 自带同签名）。 */
+  getTransactionReceipt?(parameters: {
+    readonly hash: Hex;
+  }): Promise<{
+    readonly status?: "success" | "reverted" | string;
+    readonly blockNumber?: bigint;
+  } | undefined | null>;
 }
 
 export interface GovernanceWalletClient {
@@ -254,6 +265,13 @@ export function createGovernanceBroadcasterAdapter(
         simulated: false
       };
     } catch (error) {
+      // duplicate-transaction 车道（nonce too low / already known /
+      // replacement underpriced）不是终态失败：交易可能已上链或仍在池中，
+      // 走回执探针四态裁决（机制单源 shared/broadcast，与 submissions/
+      // stage-patches 的捕获口同口径），不得按默认 retryable 落台账。
+      if (isDuplicateTransactionReport(governanceErrorHaystack(error))) {
+        return adjudicatedDuplicateGovernanceBroadcast(error, publicClient, signer);
+      }
       return {
         ...failedBroadcast({
           errorCode: "broadcast_failed",
@@ -347,15 +365,71 @@ function failedBroadcast(input: {
   readonly message: string;
   readonly retryable: boolean;
   readonly signer?: Address;
+  readonly txHash?: Hex;
+  readonly blockNumber?: string;
 }): GovernanceBroadcastResultDTO {
   return {
     status: "failed",
     ...(input.signer ? { signer: input.signer } : {}),
+    ...(input.txHash ? { txHash: input.txHash } : {}),
+    ...(input.blockNumber ? { blockNumber: input.blockNumber } : {}),
     errorCode: input.errorCode,
     message: input.message,
     retryable: input.retryable,
     simulated: false
   };
+}
+
+/**
+ * duplicate-transaction 车道的回执探针裁决映射：探到 success 回执按
+ * confirmed 落账（交易已上链，不重复登记）；reverted 终态
+ * （transaction_reverted，nonce 已被该失败交易消费）；回执未知可重试并
+ * 保留候选哈希（transaction_receipt_unknown）；无可探哈希的 nonce 竞争
+ * 可重组装重发（duplicate_transaction）。错误码沿用词表已有车道码。
+ */
+async function adjudicatedDuplicateGovernanceBroadcast(
+  error: unknown,
+  publicClient: GovernancePublicClient,
+  signer: Address
+): Promise<GovernanceBroadcastResultDTO> {
+  const getReceipt = publicClient.getTransactionReceipt
+    ? (txHash: Hex) => publicClient.getTransactionReceipt!({ hash: txHash })
+    : undefined;
+  return resolveDuplicateTransactionOutcome(
+    error,
+    getReceipt,
+    {
+      onSubmitted: ({ txHash, blockNumber }) => ({
+        status: "confirmed",
+        txHash,
+        ...(blockNumber !== undefined ? { blockNumber } : {}),
+        signer,
+        retryable: false,
+        simulated: false
+      }),
+      onReceiptFailed: ({ txHash, blockNumber }) => failedBroadcast({
+        errorCode: "transaction_reverted",
+        message: "the duplicate governance transaction was mined and reverted on chain",
+        retryable: false,
+        signer,
+        txHash,
+        ...(blockNumber !== undefined ? { blockNumber } : {})
+      }),
+      onReceiptUnknown: ({ txHash }) => failedBroadcast({
+        errorCode: "transaction_receipt_unknown",
+        message: "broadcaster reported a duplicate governance transaction but no receipt is available yet; the candidate hash is retained for the next probe",
+        retryable: true,
+        signer,
+        txHash
+      }),
+      onReassemblableNonceRace: () => failedBroadcast({
+        errorCode: "duplicate_transaction",
+        message: "broadcaster reported a nonce race without an attributable transaction hash; the governance request can be re-assembled with a fresh gas nonce",
+        retryable: true,
+        signer
+      })
+    }
+  );
 }
 
 function identityRegistryAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
@@ -386,16 +460,14 @@ function sanitizedErrorMessage(error: unknown, privateKey: Hex): string {
 }
 
 function isRetryableBroadcastError(error: unknown): boolean {
-  const name = findGovernanceErrorName(error);
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
-  const haystack = `${name ?? ""} ${message}`;
+  const haystack = governanceErrorHaystack(error);
   // 传输层信封是瞬态故障，必须先于 revert 判定短路为可重试：viem 对
   // 非标准节点错误的通用信封 UnknownRpcError（"An unknown RPC error
   // occurred."）与 HTTP/超时类错误不代表交易被链上裁决，钉成
   // retryable:false 落库后，同请求会被失败台账复用短路（对照
   // relayer/submissions 的同类处理：只有链上裁决的确定性 revert 才永久）。
   if (
-    /unknownrpcerror|rpcerror|httprequesterror|websocketerror|timeouterror|resourceunavailable/i.test(name ?? "") ||
+    /unknownrpcerror|rpcerror|httprequesterror|websocketerror|timeouterror|resourceunavailable/i.test(haystack) ||
     /timeout|timed out|etimedout|econnreset|econnrefused|aborterror|fetch failed|network error|rpc unavailable/i.test(haystack)
   ) {
     return true;
@@ -407,6 +479,12 @@ function isRetryableBroadcastError(error: unknown): boolean {
     return false;
   }
   return true;
+}
+
+function governanceErrorHaystack(error: unknown): string {
+  const name = findGovernanceErrorName(error);
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return `${name ?? ""} ${message}`;
 }
 
 function findGovernanceErrorName(error: unknown): string | undefined {

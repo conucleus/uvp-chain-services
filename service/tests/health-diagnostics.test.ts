@@ -77,6 +77,18 @@ describe("ops health diagnostics", () => {
       governanceStore,
       evidenceStorage: new InMemoryEvidenceStorage(),
       indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 },
+      timerKeeperDiagnostics: {
+        scannedOrders: 1,
+        waitingHooks: 1,
+        pokeCandidates: 1,
+        attempted: 1,
+        submitted: 0,
+        receiptReverted: 1,
+        receiptUnknown: 0,
+        deduplicated: 0,
+        converged: [],
+        skipped: ["poke:0xorder:0xhook:[redacted:error]"]
+      },
       reconcileDiagnostics: {
         enabled: true,
         running: true,
@@ -138,6 +150,12 @@ describe("ops health diagnostics", () => {
           enabled: true,
           running: true,
           lastSummary: { submissionsChecked: 1, governanceLogsChecked: 1 }
+        },
+        // timer keeper 的末轮 summary 以 timerKeeperRuntime 并入 admin
+        // diagnostics（receiptReverted/receiptUnknown/deduplicated 暴露），
+        // 不进 /healthz 聚合健康位。
+        timerKeeperRuntime: {
+          lastSummary: { receiptReverted: 1, receiptUnknown: 0, deduplicated: 0 }
         },
         submissions: {
           submissionCount: 1,

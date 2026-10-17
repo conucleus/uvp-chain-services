@@ -18,9 +18,18 @@ import {
 } from "./replay.js";
 import type { ProjectionReplayOptions } from "./replay.js";
 import type { PlanCapabilityTablesInput } from "./projections/plan.js";
+import {
+  emptySemanticOracleSummary,
+  runSemanticOracleReplay,
+  type SemanticOraclePlan,
+  type SemanticOracleSummary
+} from "./semantic-oracle.js";
 import { createEmptyIdentityProjectionSnapshot, rebuildIdentityProjections } from "./identity-projections.js";
 import { createChainServicesStores } from "../storage/factory.js";
-import { createPlanCapabilityTablesResolver } from "../store/console/zhixu-drafts.js";
+import {
+  createPlanCapabilityTablesResolver,
+  createSemanticOraclePlanResolver
+} from "../store/console/zhixu-drafts.js";
 import { isTransientSqliteBusyError } from "../storage/sqlite.js";
 import {
   defaultProjectionScope,
@@ -122,6 +131,16 @@ export interface IndexerServiceOptions {
     planId: Hex,
     planHash: Hex
   ) => Promise<PlanCapabilityTablesInput | undefined>;
+  /**
+   * 语义 oracle 产物源（同 join 口径，(planId, planHash) 锚 store 域
+   * onchainHookPlanArtifact 的完整产物——compiledHooks/dependencyIndex）：
+   * 重放后把事件流 + 合成 PlanRegistered 喂 replayChainEvents 校验投影
+   * 语义，分叉计数进 sync state 诊断（只报告不覆盖投影）。缺省不校验。
+   */
+  readonly resolveSemanticOraclePlan?: (
+    planId: Hex,
+    planHash: Hex
+  ) => Promise<SemanticOraclePlan | undefined>;
   readonly logger?: Logger;
 }
 
@@ -220,6 +239,8 @@ export class IndexerService implements LifecycleService {
    * 缓存只是解析去重，不承担跨重启的富集源职责。
    */
   #planCapabilityTablesCache = new Map<string, PlanCapabilityTablesInput>();
+  /** 语义 oracle 产物缓存（planId(lower) → 完整产物），同富集缓存口径。 */
+  #semanticOraclePlansCache = new Map<string, SemanticOraclePlan>();
   readonly #config: ChainServicesConfig;
   readonly #eventSource: ChainEventSource;
   readonly #store: ProjectionStore;
@@ -227,6 +248,9 @@ export class IndexerService implements LifecycleService {
   readonly #projectionAutomationProcessor: ProjectionAutomationProcessor | undefined;
   readonly #resolvePlanCapabilityTables:
     | ((planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput | undefined>)
+    | undefined;
+  readonly #resolveSemanticOraclePlan:
+    | ((planId: Hex, planHash: Hex) => Promise<SemanticOraclePlan | undefined>)
     | undefined;
   readonly #logger: Logger;
   readonly #scope: ProjectionScope;
@@ -238,6 +262,7 @@ export class IndexerService implements LifecycleService {
     this.#notificationProcessor = options.notificationProcessor;
     this.#projectionAutomationProcessor = options.projectionAutomationProcessor;
     this.#resolvePlanCapabilityTables = options.resolvePlanCapabilityTables;
+    this.#resolveSemanticOraclePlan = options.resolveSemanticOraclePlan;
     this.#logger = options.logger ?? noopLogger;
     this.#scope = defaultProjectionScope(options.config.network.chainId);
   }
@@ -263,23 +288,8 @@ export class IndexerService implements LifecycleService {
     if (!resolver) {
       return undefined;
     }
-    const anchors = new Map<string, { readonly planId: Hex; readonly planHash: Hex }>();
-    for (const event of events) {
-      if (event.removed === true) {
-        continue;
-      }
-      if (event.eventName !== "PlanCommitted" && event.eventName !== "PlanFinalized" && event.eventName !== "PlanRegistered") {
-        continue;
-      }
-      const planId = optionalBytes32Arg(event, "planId");
-      const planHash = optionalBytes32Arg(event, "planHash");
-      if (!planId || !planHash) {
-        continue;
-      }
-      anchors.set(planId.toLowerCase(), { planId, planHash });
-    }
     const resolutionFailures: Hex[] = [];
-    for (const anchor of anchors.values()) {
+    for (const anchor of this.#collectPlanAnchors(events).values()) {
       if (this.#planCapabilityTablesCache.has(anchor.planId.toLowerCase())) {
         continue;
       }
@@ -300,6 +310,96 @@ export class IndexerService implements LifecycleService {
       planCapabilityTables: [...this.#planCapabilityTablesCache.values()],
       planCapabilityResolutionFailures: resolutionFailures
     };
+  }
+
+  /**
+   * 语义 oracle 的本轮产物集：锚点与词表富集同源（计划族事件的
+   * (planId, planHash)），已缓存锚不重复解析；解析故障的 plan 不进喂给面
+   * （warn 留痕），下轮重试——校验是增强面，不能把索引器打 degraded。
+   */
+  async #semanticOraclePlansFor(
+    events: readonly ChainEvent[]
+  ): Promise<readonly SemanticOraclePlan[] | undefined> {
+    const resolver = this.#resolveSemanticOraclePlan;
+    if (!resolver) {
+      return undefined;
+    }
+    for (const anchor of this.#collectPlanAnchors(events).values()) {
+      if (this.#semanticOraclePlansCache.has(anchor.planId.toLowerCase())) {
+        continue;
+      }
+      try {
+        const plan = await resolver(anchor.planId, anchor.planHash);
+        if (plan) {
+          this.#semanticOraclePlansCache.set(anchor.planId.toLowerCase(), plan);
+        }
+      } catch (error) {
+        this.#logger.warn("semantic oracle plan artifact resolution failed; the plan is excluded from this round's semantic verification", {
+          planId: anchor.planId,
+          message: error instanceof Error ? redactErrorMessage(error) : "unknown resolution error"
+        });
+      }
+    }
+    return [...this.#semanticOraclePlansCache.values()];
+  }
+
+  #collectPlanAnchors(events: readonly ChainEvent[]): Map<string, { readonly planId: Hex; readonly planHash: Hex }> {
+    const anchors = new Map<string, { readonly planId: Hex; readonly planHash: Hex }>();
+    for (const event of events) {
+      if (event.removed === true) {
+        continue;
+      }
+      if (event.eventName !== "PlanCommitted" && event.eventName !== "PlanFinalized" && event.eventName !== "PlanRegistered") {
+        continue;
+      }
+      const planId = optionalBytes32Arg(event, "planId");
+      const planHash = optionalBytes32Arg(event, "planHash");
+      if (!planId || !planHash) {
+        continue;
+      }
+      anchors.set(planId.toLowerCase(), { planId, planHash });
+    }
+    return anchors;
+  }
+
+  /** 语义投影校验（只验证并报告，不覆盖投影——投影以链为真）。 */
+  #runSemanticOracle(
+    events: readonly ChainEvent[],
+    plans: readonly SemanticOraclePlan[] | undefined
+  ): SemanticOracleSummary {
+    if (!plans || plans.length === 0 || events.length === 0) {
+      return emptySemanticOracleSummary();
+    }
+    return runSemanticOracleReplay(events, plans);
+  }
+
+  /**
+   * 语义 oracle 分叉/抛错的逐轮告警（镜像 capabilityEnrichmentMismatch 的 warn
+   * 形态）：分叉非零即 warn；非分叉抛错（结构性毒流/native 运行时不可用）
+   * 单独告警，不与 mismatch 混同；计数明细随 sync state 诊断持久化
+   * （semanticOracleMismatchCount / semanticOracleErrorCount /
+   * semanticOracleCheckedPlanCount / semanticOracleExcludedPlanCount——
+   * excluded 不算异常，但覆盖面分母随诊断暴露）。
+   */
+  #reconcileSemanticOracle(semanticOracle: SemanticOracleSummary): void {
+    if (semanticOracle.semanticOracleMismatchCount > 0) {
+      this.#logger.warn(
+        "semantic replay oracle diverged from the indexed hook observations; the projection stays chain-authoritative and is NOT overwritten - inspect the on-chain events versus the store-domain plan artifacts for the checked plan subset",
+        {
+          semanticOracleMismatchCount: semanticOracle.semanticOracleMismatchCount,
+          semanticOracleCheckedPlanCount: semanticOracle.semanticOracleCheckedPlanCount
+        }
+      );
+    }
+    if (semanticOracle.semanticOracleErrorCount > 0) {
+      this.#logger.warn(
+        "semantic replay oracle could not verify the indexed hook observations (replay errored outside a chain mismatch); the projection stays chain-authoritative and the failure is counted separately from mismatches",
+        {
+          semanticOracleErrorCount: semanticOracle.semanticOracleErrorCount,
+          semanticOracleCheckedPlanCount: semanticOracle.semanticOracleCheckedPlanCount
+        }
+      );
+    }
   }
 
   /**
@@ -514,6 +614,7 @@ export class IndexerService implements LifecycleService {
       // 词表产物富集源（计划族事件锚定）：与游标读取同为事务外 IO。
       // 全量重建本轮就从部署块读出完整历史，锚点集天然覆盖全部重放事件。
       const enrichmentOptions = await this.#planCapabilityTablesFor(events);
+      const semanticOraclePlans = await this.#semanticOraclePlansFor(events);
       // 通知派生先于重建事务提交落 pending（对齐增量路径不变量：投递
       // 记录必须先于游标推进）：全量重建把游标随整库替换同事务落库，
       // 提交后才处理通知——该窗口内硬崩溃会让这批事件永不再被读取、
@@ -553,9 +654,10 @@ export class IndexerService implements LifecycleService {
       // 重建事务内落库的 sync state 不含诊断计数（快照在事务内才构建）；
       // 提交后按重放结果补写一次，/healthz 与 /admin/diagnostics 只读
       // sync state，不重放全历史。
+      const semanticOracle = this.#runSemanticOracle(events, semanticOraclePlans);
       const syncState = await this.#store.saveSyncState({
         ...syncStateInput,
-        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot)
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot, semanticOracle)
       });
       const summary = summaryFromSnapshot({
         chainId: this.#config.network.chainId,
@@ -584,11 +686,16 @@ export class IndexerService implements LifecycleService {
         unresolvedDockTargetDeploymentCount: snapshot.unresolvedDockTargetDeploymentCount ?? 0,
         capabilityEnrichmentMismatchCount: snapshot.capabilityEnrichmentMismatchCount ?? 0,
         unknownEventCount: snapshot.unknownEventCount ?? 0,
+        semanticOracleMismatchCount: semanticOracle.semanticOracleMismatchCount,
+        semanticOracleCheckedPlanCount: semanticOracle.semanticOracleCheckedPlanCount,
+        semanticOracleErrorCount: semanticOracle.semanticOracleErrorCount,
+        semanticOracleExcludedPlanCount: semanticOracle.semanticOracleExcludedPlanCount,
         unresolvedLogCount: this.#consumeUnresolvedLogCount(),
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
       });
       this.#reconcileCapabilityEnrichmentMismatch(snapshot, enrichmentOptions?.planCapabilityResolutionFailures);
+      this.#reconcileSemanticOracle(semanticOracle);
 
       return { snapshot, summary };
     } catch (error) {
@@ -844,8 +951,10 @@ export class IndexerService implements LifecycleService {
       ? [...(await durableStore.listEvents({ chainId: this.#scope.chainId })), ...events]
       : events;
     const enrichmentOptions = await this.#planCapabilityTablesFor(enrichmentEvents);
+    const semanticOraclePlans = await this.#semanticOraclePlansFor(enrichmentEvents);
 
     let identitySnapshot: Awaited<ReturnType<typeof rebuildIdentityProjections>> | undefined;
+    let oracleResult: SemanticOracleSummary = emptySemanticOracleSummary();
     const result = await durableStore.withTransaction(async () => {
       // 崩溃窗口残留清扫（语义见 #sweepCommittedButUnadvancedEvents）：
       // 残留行的投影只有重放能清，删除必须与重放同事务。
@@ -861,6 +970,8 @@ export class IndexerService implements LifecycleService {
         ...(enrichmentOptions ?? {})
       });
       identitySnapshot = rebuildIdentityProjections(allEvents);
+      const semanticOracle = this.#runSemanticOracle(allEvents, semanticOraclePlans);
+      oracleResult = semanticOracle;
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
       // 重复/矛盾投递计数：投影重建已在上面同一事务内执行（apply 失败
@@ -874,7 +985,7 @@ export class IndexerService implements LifecycleService {
         confirmationDepth: this.#config.network.finalityConfirmations,
         ...(lastEvent ? { lastEventName: lastEvent.eventName } : {}),
         eventCount: activeEvents.length,
-        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot),
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot, semanticOracle),
         rebuild: {
           status: "idle",
           deploymentBlock,
@@ -939,12 +1050,17 @@ export class IndexerService implements LifecycleService {
       unresolvedDockTargetDeploymentCount: result.snapshot.unresolvedDockTargetDeploymentCount ?? 0,
       capabilityEnrichmentMismatchCount: result.snapshot.capabilityEnrichmentMismatchCount ?? 0,
       unknownEventCount: result.snapshot.unknownEventCount ?? 0,
+      semanticOracleMismatchCount: oracleResult.semanticOracleMismatchCount,
+      semanticOracleCheckedPlanCount: oracleResult.semanticOracleCheckedPlanCount,
+      semanticOracleErrorCount: oracleResult.semanticOracleErrorCount,
+      semanticOracleExcludedPlanCount: oracleResult.semanticOracleExcludedPlanCount,
       unresolvedIdentityRevokeEventCount: identitySnapshot?.unresolvedRevokeEventCount ?? 0,
       unresolvedLogCount: this.#consumeUnresolvedLogCount(),
       nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
     });
     this.#reconcileCapabilityEnrichmentMismatch(result.snapshot, enrichmentOptions?.planCapabilityResolutionFailures);
+    this.#reconcileSemanticOracle(oracleResult);
 
     return { snapshot: result.snapshot, summary: result.summary };
   }
@@ -1244,6 +1360,7 @@ export class IndexerService implements LifecycleService {
     const survivingEvents = (await durableStore.listEvents({ chainId: this.#scope.chainId }))
       .filter((event) => event.blockNumber <= ancestorBlock);
     const enrichmentOptions = await this.#planCapabilityTablesFor(survivingEvents);
+    const semanticOraclePlans = await this.#semanticOraclePlansFor(survivingEvents);
     await durableStore.withTransaction(async () => {
       const deleted = await durableStore.deleteEventsAfterBlock(
         { chainId: this.#scope.chainId },
@@ -1256,6 +1373,8 @@ export class IndexerService implements LifecycleService {
       // 回滚重放与主刷新同口径对账：mismatch 源摘缓存，下轮重解析。摘除
       // 是纯内存操作，事务随后回滚（游标 CAS 失败）也至多多付一次重解析。
       this.#reconcileCapabilityEnrichmentMismatch(snapshot, enrichmentOptions?.planCapabilityResolutionFailures);
+      const semanticOracle = this.#runSemanticOracle(remainingEvents, semanticOraclePlans);
+      this.#reconcileSemanticOracle(semanticOracle);
       const identitySnapshot = rebuildIdentityProjections(remainingEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
@@ -1272,7 +1391,7 @@ export class IndexerService implements LifecycleService {
         confirmationDepth: this.#config.network.finalityConfirmations,
         ...(existing?.lastEventName ? { lastEventName: existing.lastEventName } : {}),
         eventCount: replaySummary.activeEventCount,
-        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot),
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot, semanticOracle),
         rebuild: {
           status: "idle",
           deploymentBlock,
@@ -1893,6 +2012,7 @@ async function main(): Promise<void> {
         eventSource,
         store: stores.projectionStore,
         resolvePlanCapabilityTables: createPlanCapabilityTablesResolver(stores.storeZhixuDraftStore),
+        resolveSemanticOraclePlan: createSemanticOraclePlanResolver(stores.storeZhixuDraftStore),
         logger: consoleLogger
       });
       const targetBlock = parseTargetBlockArg(process.argv);

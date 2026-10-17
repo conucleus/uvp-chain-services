@@ -418,7 +418,10 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     },
   };
 
-  validateProductionSafety(config, env);
+  validateProductionSafety(config, env, {
+    chainIdExplicit:
+      optionalEnv(env, "UVP_CHAIN_ID") !== undefined || manifest.chainId !== undefined
+  });
   return config;
 }
 
@@ -852,6 +855,39 @@ function validateNonLocalHttpsStoreAuthUrl(
   }
 }
 
+/**
+ * 非 local 档的 RPC/S3 endpoint scheme 门（镜像 store-auth 的 https 先例）：
+ * 必须 https://，http:// 仅回环 host（127.0.0.1/localhost/::1/[::1]/*.local）
+ * 放行——明文 http 的节点/对象存储端点会把链凭据与证据流量暴露给链路窃听。
+ */
+function validateNonLocalHttpsEndpointUrl(value: string, envName: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new ConfigError(`${envName} must be a valid URL`);
+  }
+  if (parsed.protocol === "https:") {
+    return;
+  }
+  if (parsed.protocol === "http:" && isLoopbackEndpointHost(parsed.hostname.toLowerCase())) {
+    return;
+  }
+  throw new ConfigError(
+    `${envName} must use https outside local development (http is only allowed for loopback hosts)`,
+  );
+}
+
+function isLoopbackEndpointHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]" ||
+    hostname.endsWith(".local")
+  );
+}
+
 function discoveryUrlFromIssuer(issuer: string): string {
   return `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
 }
@@ -902,13 +938,23 @@ function parseBigIntValue(env: Env, name: string, fallback: bigint): bigint {
   }
 }
 
+/**
+ * keeper/automation 的逐交易 gas 上限：显式配置 ≤0 即响亮拒绝（不存在
+ * "0=无上限"语义——无上限的 keeper 会把异常昂贵的 poke/dock 全部放行）；
+ * 未配置走 fallback，单一路径。
+ */
 function optionalGasCap(
   env: Env,
   name: string,
   fallback: bigint,
-): { readonly maxGasPerTx?: bigint } {
+): { readonly maxGasPerTx: bigint } {
   const value = parseBigIntValue(env, name, fallback);
-  return value > 0n ? { maxGasPerTx: value } : {};
+  if (value <= 0n) {
+    throw new ConfigError(
+      `${name} must be a positive integer; unset it to fall back to the default cap of ${fallback}`,
+    );
+  }
+  return { maxGasPerTx: value };
 }
 
 function parseGovernanceConfig(
@@ -1131,6 +1177,22 @@ export function listContractJsonOverrides(env: Env): readonly string[] {
     }
   });
   return overridden;
+}
+
+/**
+ * chainId 是否显式配置（env 直配或地址清单 network.chainId）：preflight
+ * 对 production 显式性禁令的判定入口。清单不可解析时只剩 env 判定
+ *（loadConfigFromEnv 的强校验会先对坏清单报错）。
+ */
+export function isChainIdExplicitlyConfigured(env: Env): boolean {
+  if (optionalEnv(env, "UVP_CHAIN_ID") !== undefined) {
+    return true;
+  }
+  try {
+    return parseAddressManifest(env).chainId !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 const zeroAddress = "0x0000000000000000000000000000000000000000";
@@ -1371,7 +1433,11 @@ function minBigint(values: readonly bigint[]): bigint {
   );
 }
 
-function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
+function validateProductionSafety(
+  config: ChainServicesConfig,
+  env: Env,
+  options: { readonly chainIdExplicit: boolean }
+): void {
   if (config.security.environment === "staging") {
     validateStagingSafety(config, env);
   }
@@ -1396,6 +1462,13 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   // 受管库通用要求）：production 的受管 PG 同样要求显式轮询配置与
   // 禁轮询知情确认，漏检会把最贵的环境留在无界计费面上。
   validateManagedDatabaseCostSafety(config, env, "production");
+  // production 的 chainId 必须显式来自 env 或地址清单——静默回落 31337
+  //（Anvil 缺省）会把生产链身份锚到本地链语义。
+  if (!options.chainIdExplicit) {
+    throw new ConfigError(
+      "UVP_CHAIN_ID must be explicitly configured in production (env var or address manifest network.chainId); refusing the 31337 fallback",
+    );
+  }
   // production 必须显式配置 UVP_RPC_URL 且拒绝本地/回环地址——静默回落
   // 127.0.0.1:8545 会把生产指向不存在的节点（staging/testnet 同样强检）。
   if (!optionalEnv(env, "UVP_RPC_URL")) {
@@ -1406,6 +1479,10 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_RPC_URL must point to a non-local RPC endpoint in production",
     );
   }
+  validateNonLocalHttpsEndpointUrl(config.network.rpcUrl, "UVP_RPC_URL");
+  // 治理广播 RPC 显式配置时同样受非 local 档 https 门约束：缺省回落
+  // network.rpcUrl（已检），显式 http 公网端点是 scheme 校验的绕行面。
+  validateNonLocalHttpsEndpointUrl(config.governance.rpcUrl, "GOVERNANCE_RPC_URL");
   // admin 白名单在 production 必须显式非空——
   // 空白名单意味着任意 x-uvp-admin-id 自报即管理员（governance/auth.ts
   // 是 fail-closed 的，这里把配置错误拦在启动前）。
@@ -1543,6 +1620,9 @@ function validateProductionSafety(config: ChainServicesConfig, env: Env): void {
   if (!config.evidenceStorage.s3Region) {
     throw new ConfigError("UVP_EVIDENCE_S3_REGION is required in production");
   }
+  if (config.evidenceStorage.s3Endpoint) {
+    validateNonLocalHttpsEndpointUrl(config.evidenceStorage.s3Endpoint, "UVP_EVIDENCE_S3_ENDPOINT");
+  }
   if (!config.evidenceStorage.s3AccessKeyIdEnv) {
     throw new ConfigError(
       "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV is required in production",
@@ -1608,6 +1688,8 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_RPC_URL must point to a non-local Base Sepolia or staging RPC in staging",
     );
   }
+  validateNonLocalHttpsEndpointUrl(config.network.rpcUrl, "UVP_RPC_URL");
+  validateNonLocalHttpsEndpointUrl(config.governance.rpcUrl, "GOVERNANCE_RPC_URL");
   if (
     optionalEnv(env, "UVP_CHAIN_ID") !== "84532" ||
     config.network.chainId !== 84532
@@ -1694,6 +1776,9 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   }
   if (!config.evidenceStorage.s3Region) {
     throw new ConfigError("UVP_EVIDENCE_S3_REGION is required in staging");
+  }
+  if (config.evidenceStorage.s3Endpoint) {
+    validateNonLocalHttpsEndpointUrl(config.evidenceStorage.s3Endpoint, "UVP_EVIDENCE_S3_ENDPOINT");
   }
   if (!config.evidenceStorage.s3AccessKeyIdEnv) {
     throw new ConfigError(
@@ -1852,6 +1937,8 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_RPC_URL must point to a non-local Base Sepolia RPC in testnet",
     );
   }
+  validateNonLocalHttpsEndpointUrl(config.network.rpcUrl, "UVP_RPC_URL");
+  validateNonLocalHttpsEndpointUrl(config.governance.rpcUrl, "GOVERNANCE_RPC_URL");
   if (
     optionalEnv(env, "UVP_CHAIN_ID") !== "84532" ||
     config.network.chainId !== 84532
@@ -1918,10 +2005,26 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in testnet",
     );
   }
+  // 档位不对称收口（镜像 production/staging）：fire-and-forget 注册会让
+  // BFF 在交易未上链时就回报成功；对账 worker 缺席时链上回执与投影的
+  // 漂移只能靠人工发现——公开测试网同样要求两者在场。
+  if (!config.productBff.waitForReceipt) {
+    throw new ConfigError(
+      "UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in testnet",
+    );
+  }
+  if (!config.reconcile.enabled) {
+    throw new ConfigError(
+      "RECONCILE_WORKER_ENABLED=true is required in testnet",
+    );
+  }
   if (config.evidenceStorage.adapter !== "rehearsal-object") {
     throw new ConfigError(
       "UVP_EVIDENCE_STORAGE_ADAPTER=rehearsal-object is required in testnet",
     );
+  }
+  if (config.evidenceStorage.s3Endpoint) {
+    validateNonLocalHttpsEndpointUrl(config.evidenceStorage.s3Endpoint, "UVP_EVIDENCE_S3_ENDPOINT");
   }
 
   const privateKeyEnvNames = new Set([

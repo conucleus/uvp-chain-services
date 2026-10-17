@@ -64,6 +64,7 @@ import type { StoreDecorationService, StoreZhixuDecorationStore, StorePublisherD
 import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
 import type { ListingAnchorChainView, StoreListingService, StoreListingStore } from "../store/listings/index.js";
 import type { StoreJoinService, StoreJoinApplicationStore } from "../store/join/index.js";
+import type { TimerKeeperRunSummary } from "../timer-keeper/types.js";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
 export interface ApiRequest {
@@ -120,6 +121,7 @@ export interface CreateApiRouterOptions {
   readonly configDiagnostics?: ConfigDiagnostics;
   readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
   readonly reconcileDiagnostics?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
+  readonly timerKeeperDiagnostics?: TimerKeeperRunSummary | (() => TimerKeeperRunSummary | undefined);
   readonly evidenceStorage?: EvidenceStorage;
   readonly evidenceRuntimeEnvironment?: ChainServicesRuntimeEnv;
   readonly notificationService?: NotificationService;
