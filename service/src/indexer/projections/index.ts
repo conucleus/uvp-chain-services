@@ -30,6 +30,7 @@ export type {
 export type {
   StateMachineSignalProjection,
   StateMachineSignalAuthorizationProjection,
+  StateMachineDerivedSignalProjection,
   SignalAuthorizationHookMatchInput
 } from "./signal.js";
 export { signalAuthorizationMatchesHook } from "./signal.js";
@@ -37,6 +38,7 @@ export type {
   StateMachineStageExecutorPatchMode,
   StateMachineStageExecutorOverlayProjection,
   StateMachineStageResourceOverlayProjection,
+  StateMachineStageMaterializationProjection,
   StateMachineHookStatus,
   StateMachineHookProjection
 } from "./stage.js";
@@ -54,6 +56,7 @@ export type {
 export type {
   StateMachineDeploymentStatus,
   StateMachineDeploymentProjection,
+  ContractGovernanceProjection,
   ProjectionSnapshot
 } from "./snapshot.js";
 export { createEmptyProjectionSnapshot } from "./snapshot.js";

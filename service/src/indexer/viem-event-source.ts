@@ -20,9 +20,9 @@ import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
-// UVPStateMachine v0.12（SM ABI fixture：uvp-state-machine.v0.12.json）：
-// 订单维度事件全部 plan-scoped；patch/metadata/derived/link/dock 事件由
-// 各模块合约发出，按 deployment.modules 分地址挂 ABI。
+// 事件面按合约族划分：订单维度事件全部 plan-scoped；patch/metadata/
+// derived/link/dock 事件由各模块合约发出，按 deployment.modules 分地址挂
+// ABI。
 // 词表 Merkle 化形态：PlanCommitted/PlanFinalized 携带 capabilitiesRoot
 // 字段；链上不发布词表注册事件——两表由重放方从编译产物富集
 // （projections/plan.ts）。
@@ -100,6 +100,12 @@ export const INDEXER_EVENT_ABIS = {
 } as const;
 
 const maxGetLogsBlockSpan = 9_999n;
+// chunk 级并发上限与重试：全部 chunk×contract 一次性 Promise.all 会同时
+// 打满公网 RPC 限流（失败即整轮重来）；按 chunk 限流并做短退避重试，
+// 重试耗尽才让本轮失败。
+const maxConcurrentLogReads = 4;
+const logReadAttemptLimit = 3;
+const logReadRetryBaseDelayMs = 250;
 
 type IndexedContractName =
   | "UVPStateMachine"
@@ -227,47 +233,91 @@ export class ViemChainEventSource implements ChainEventSource {
     }
 
     const client = this.#client(config);
-    const batches = await Promise.all(
-      contracts.map(async (contract) => {
-        const logs = (
-          await Promise.all(
-            blockRanges(
-              range.fromBlock,
-              range.toBlock,
-              maxGetLogsBlockSpan,
-            ).map((blockRange) =>
-              client.getLogs({
-                address: contract.address as ViemAddress,
-                fromBlock: blockRange.fromBlock,
-                toBlock: blockRange.toBlock,
-              }),
-            ),
-          )
-        ).flat();
-        const decoded: ChainEvent[] = [];
-        for (const log of logs) {
-          // 不可解码日志跳过留痕（计数 + warn），游标前进；不阻塞整轮。
-          const event = decodeChainEventLog(log, range.chainId, contract);
-          if (event) {
-            decoded.push(event);
-          } else {
-            this.#unresolvedLogCount += 1;
-            this.#logger.warn("skipped undecodable chain log; cursor still advances", {
-              chainId: range.chainId,
-              contract: contract.name,
-              address: contract.address,
-              blockNumber: log.blockNumber?.toString(),
-              transactionHash: log.transactionHash,
-              logIndex: log.logIndex?.toString(),
-              unresolvedLogCount: this.#unresolvedLogCount,
-            });
-          }
-        }
-        return decoded;
-      }),
+    // 有界并发读：以 (contract, chunk) 为任务粒度跑工作池，避免全量任务
+    // 一次性 Promise.all 打爆公网 RPC；单任务失败带重试（见
+    // #getLogsWithRetry），重试耗尽才向上抛错让本轮重来。
+    const readTasks = contracts.flatMap((contract) =>
+      blockRanges(range.fromBlock, range.toBlock, maxGetLogsBlockSpan).map(
+        (blockRange) => ({ contract, blockRange })
+      )
     );
+    const logsByTask = new Array<readonly Log[]>(readTasks.length);
+    let nextTaskIndex = 0;
+    const workers = Array.from(
+      { length: Math.min(maxConcurrentLogReads, readTasks.length) },
+      async () => {
+        while (nextTaskIndex < readTasks.length) {
+          const index = nextTaskIndex;
+          nextTaskIndex += 1;
+          const task = readTasks[index];
+          if (!task) {
+            continue;
+          }
+          const { contract, blockRange } = task;
+          logsByTask[index] = await this.#getLogsWithRetry(client, contract, blockRange);
+        }
+      }
+    );
+    await Promise.all(workers);
 
-    return batches.flat();
+    const decoded: ChainEvent[] = [];
+    for (const [index, { contract }] of readTasks.entries()) {
+      const taskLogs = logsByTask[index];
+      if (!taskLogs) {
+        continue;
+      }
+      for (const log of taskLogs) {
+        // 不可解码日志跳过留痕（计数 + warn），游标前进；不阻塞整轮。
+        const event = decodeChainEventLog(log, range.chainId, contract);
+        if (event) {
+          decoded.push(event);
+        } else {
+          this.#unresolvedLogCount += 1;
+          this.#logger.warn("skipped undecodable chain log; cursor still advances", {
+            chainId: range.chainId,
+            contract: contract.name,
+            address: contract.address,
+            blockNumber: log.blockNumber?.toString(),
+            transactionHash: log.transactionHash,
+            logIndex: log.logIndex?.toString(),
+            unresolvedLogCount: this.#unresolvedLogCount,
+          });
+        }
+      }
+    }
+    return decoded;
+  }
+
+  async #getLogsWithRetry(
+    client: ViemLogReader,
+    contract: IndexedContract,
+    blockRange: { readonly fromBlock: bigint; readonly toBlock: bigint },
+  ): Promise<readonly Log[]> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= logReadAttemptLimit; attempt += 1) {
+      if (attempt > 1) {
+        await delay(logReadRetryBaseDelayMs * 2 ** (attempt - 2));
+      }
+      try {
+        return await client.getLogs({
+          address: contract.address as ViemAddress,
+          fromBlock: blockRange.fromBlock,
+          toBlock: blockRange.toBlock,
+        });
+      } catch (error) {
+        lastError = error;
+        this.#logger.warn("getLogs chunk read failed; retrying with backoff", {
+          contract: contract.name,
+          address: contract.address,
+          fromBlock: blockRange.fromBlock.toString(),
+          toBlock: blockRange.toBlock.toString(),
+          attempt,
+          attemptLimit: logReadAttemptLimit,
+          message: error instanceof Error ? error.message : "unknown getLogs error"
+        });
+      }
+    }
+    throw lastError;
   }
 
   #client(config: ChainServicesConfig): ViemLogReader {
@@ -401,6 +451,10 @@ function blockRanges(
     ranges.push({ fromBlock: start, toBlock: end });
   }
   return ranges;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

@@ -16,6 +16,7 @@ import {
   type ZhixuStageDTO,
   type ZhixuSummaryDTO,
 } from "@uvp-eth/product-dto";
+import { ONCHAIN_HOOK_PLAN_SCHEMA_VERSION } from "@uvp-eth/compiler";
 import { keccak256, stringToBytes, type Hex } from "viem";
 import type {
   EventProofArgs,
@@ -226,6 +227,8 @@ export interface ProductParticipantIdentityDTO {
   readonly roleSlotId: string;
   readonly draftId: string;
   readonly draftTitle: string;
+  /** 订单归属按 (planId, orderId) 复合键命中（与 /product/orders 通道同口径）。 */
+  readonly planId?: string;
   readonly orderId?: string;
 }
 
@@ -498,15 +501,12 @@ export function createProductService(
         }
       }
       for (const participant of acceptedParticipants) {
-        if (!participant.orderId) {
+        if (!participant.planId || !participant.orderId) {
           continue;
         }
         const matchingOrders = orders.filter((order) =>
-          orderIdentifierMatches(order, participant.orderId!),
+          orderIdentifierMatches(order, participant.planId!, participant.orderId!),
         );
-        // A bare order id is intentionally not enough to expose one of two
-        // plans.  The accepted participant record must carry a canonical key
-        // in that case, otherwise no order is returned.
         if (matchingOrders.length === 1) {
           const order = matchingOrders[0];
           if (!order) {
@@ -735,20 +735,19 @@ function findStateMachineOrderForTask(
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+/**
+ * 已接受参与者的订单命中只认 (planId, orderId) 复合键（与
+ * /product/orders 通道的 orderTaskVisibilityKey 同口径）：裸 orderId 在
+ * 跨 plan 同号订单时会命中另一 plan 名下的订单。缺 planId 即不成键，
+ * 不回退裸 orderId 相等。
+ */
 function orderIdentifierMatches(
   order: StateMachineOrderProjection,
-  identifier: string,
+  planId: string,
+  orderId: string,
 ): boolean {
-  if (order.orderId.toLowerCase() === identifier.toLowerCase()) {
-    return true;
-  }
-  return stateMachineOrderProjectionKey(
-    order.chainId,
-    order.contractAddress,
-    order.planId,
-    order.orderId,
-  ).toLowerCase() === identifier.toLowerCase() ||
-    `${order.chainId}:${order.contractAddress.toLowerCase()}:${order.orderId.toLowerCase()}` === identifier.toLowerCase();
+  return order.planId.toLowerCase() === planId.toLowerCase() &&
+    order.orderId.toLowerCase() === orderId.toLowerCase();
 }
 
 async function productTaskFromStateMachineTask(
@@ -1334,6 +1333,7 @@ function zhixuIdFromPlanId(planId: string): string {
 function dockableModulesFromArtifact(
   artifact: unknown
 ): readonly DockableZhixuModuleDTO[] {
+  assertOnchainArtifactSchemaVersion(artifact);
   const dockInterface = recordField(artifact, "dockInterface");
   const interfaces = dockInterface ? arrayField(dockInterface, "interfaces") : [];
   return interfaces.flatMap((entry) => {
@@ -1388,6 +1388,23 @@ function recordField(value: unknown, key: string): Record<string, unknown> | und
   return isRecordValue(value) && isRecordValue(value[key])
     ? (value[key] as Record<string, unknown>)
     : undefined;
+}
+
+/**
+ * 消费线 schemaVersion 钉扎（单源常量 ONCHAIN_HOOK_PLAN_SCHEMA_VERSION，
+ * 与编译器 artifact 校验同口径）：版本不符的制品按旧口径解释会静默
+ * 错读结构，响亮拒绝。缺制品（undefined/null）维持无 dock 模块的现状。
+ */
+function assertOnchainArtifactSchemaVersion(artifact: unknown): void {
+  if (artifact === undefined || artifact === null) {
+    return;
+  }
+  const version = isRecordValue(artifact) ? artifact.schemaVersion : undefined;
+  if (version !== ONCHAIN_HOOK_PLAN_SCHEMA_VERSION) {
+    throw new Error(
+      `onchainHookPlanArtifact schemaVersion ${JSON.stringify(version) ?? "missing"} is not supported by this consumer; expected ${ONCHAIN_HOOK_PLAN_SCHEMA_VERSION} — recompile the plan or upgrade the service`,
+    );
+  }
 }
 
 function arrayField(record: Record<string, unknown>, key: string): readonly unknown[] {

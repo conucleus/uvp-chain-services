@@ -12,6 +12,7 @@ import type { ProductSchemaResolver, ProductService } from "../product/applicati
 import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
 import type { AuditSink } from "../security/audit.js";
 import type { Address } from "../shared/types.js";
+import type { ChainClock } from "../shared/chain-clock.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type {
   ProductSubmissionDTO,
@@ -166,6 +167,8 @@ export interface CreateApiRouterOptions {
   readonly governanceAdminTokenHashes?: readonly string[];
   readonly onTxMined?: () => void;
   readonly now?: () => Date;
+  /** stage-patch 签名 deadline 的链时钟源（默认服务构造用）。 */
+  readonly productChainClock?: ChainClock;
 }
 
 export interface AdminOpsActionEffect {

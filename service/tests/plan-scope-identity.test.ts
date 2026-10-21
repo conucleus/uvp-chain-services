@@ -52,6 +52,8 @@ describe("plan-scoped state-machine identities", () => {
     await store.resetFromEvents({ deploymentBlock: 0n, events });
     const product = createProductService(store);
 
+    // 任务指派通道不因身份抽取口径变化：walletA 仍能看到自己被指派
+    // 任务所在的 planA 订单（裸 orderId 不再参与命中也不影响该通道）。
     const ambiguous = await product.getParticipantView({
       walletAddress: walletA,
       acceptedParticipants: [{
@@ -70,17 +72,39 @@ describe("plan-scoped state-machine identities", () => {
     expect(ambiguous.tasks).toHaveLength(1);
     expect(ambiguous.tasks[0]?.assigneeWallet).toBe(walletA);
 
-    const canonical = await product.getParticipantView({
-      walletAddress: "0xcccccccccccccccccccccccccccccccccccccccc",
+    // 裸 orderId（缺 planId）不成复合键：已接受参与通道 fail-closed，
+    // 不回退裸 orderId 相等——无指派的参与方一个订单都看不到。
+    const walletC = "0xcccccccccccccccccccccccccccccccccccccccccc";
+    const bare = await product.getParticipantView({
+      walletAddress: walletC,
       acceptedParticipants: [{
         participantId: "participant-c",
         displayName: "Participant C",
-        walletAddress: "0xcccccccccccccccccccccccccccccccccccccccc",
+        walletAddress: walletC,
         roleLabel: "查看方",
         roleSlotId: "slot-c",
         draftId: "draft-c",
         draftTitle: "Draft C",
-        orderId: stateMachineScopedKey(31337, stateMachineAddress, planB, orderId),
+        orderId,
+      }],
+    });
+    expect(bare.orders).toHaveLength(0);
+    expect(bare.tasks).toHaveLength(0);
+
+    // (planId, orderId) 复合键命中对应 plan 的订单，不串到同号的另一
+    // plan 名下。
+    const canonical = await product.getParticipantView({
+      walletAddress: walletC,
+      acceptedParticipants: [{
+        participantId: "participant-c",
+        displayName: "Participant C",
+        walletAddress: walletC,
+        roleLabel: "查看方",
+        roleSlotId: "slot-c",
+        draftId: "draft-c",
+        draftTitle: "Draft C",
+        planId: planB,
+        orderId,
       }],
     });
     expect(canonical.orders).toHaveLength(1);

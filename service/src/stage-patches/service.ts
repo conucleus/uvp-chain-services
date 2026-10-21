@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { onchainStageId } from "@uvp-eth/compiler";
+import { onchainStageId, ONCHAIN_HOOK_PLAN_SCHEMA_VERSION } from "@uvp-eth/compiler";
 import {
   hashSignalAuthorizations,
   type SelectorBindingPayload,
@@ -31,6 +31,7 @@ import { signalProjectionKey } from "../indexer/projections/signal.js";
 import type { ProjectionProvenance } from "../indexer/projections/proof.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { ProductSchemaResolver } from "../product/application/service.js";
+import type { ChainClock } from "../shared/chain-clock.js";
 import {
   executorCandidateProofFor,
   selectorBindingProofForPatch,
@@ -77,6 +78,18 @@ import type {
 } from "./types.js";
 
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
+
+/** deadline 的链时钟源：缺失即响亮拒绝，不回落宿主墙钟。 */
+function requireChainClockNowSeconds(
+  options: ProductStagePatchServiceOptions,
+): Promise<number> {
+  if (!options.chainClock) {
+    throw new ConfigError(
+      "stage patch prepare requires a chain clock (latest block timestamp) to derive the signature deadline; wire options.chainClock"
+    );
+  }
+  return options.chainClock.latestBlockTimestampSeconds();
+}
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const ZERO_BYTES32 =
   "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
@@ -110,6 +123,12 @@ export interface ProductStagePatchServiceOptions {
   readonly stagePatchModuleAddress?: Address;
   readonly dockingModuleAddress?: Address;
   readonly now?: () => Date;
+  /**
+   * 签名 deadline 的链时钟源（latest block timestamp，秒）。deadline 由
+   * 合约按 block.timestamp 校验，宿主墙钟偏移会让签名早/晚过期——缺省
+   * 时 prepare 响亮拒绝，不回落宿主钟。
+   */
+  readonly chainClock?: ChainClock;
   readonly prepareTtlSeconds?: number;
   readonly prepareIdFactory?: () => string;
   readonly submissionIdFactory?: () => string;
@@ -269,8 +288,10 @@ export function createProductStageExecutorPatchService(
         metadataURI,
       });
       const createdAt = now();
+      // deadline 属协议面：链时钟（latest block timestamp）起算，宿主墙钟
+      // 偏移不影响签名有效期。
       const deadlineSeconds =
-        Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
+        (await requireChainClockNowSeconds(options)) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
       const chainId = requiredChainId(options.chainId);
       const stateMachineAddress = stateMachineAddressFor(context, options);
@@ -537,14 +558,13 @@ export function createProductStageExecutorPatchService(
         // 落档与 nonce 收尾同事务：分开提交时两次写之间崩溃会留下
         // "nonce 行已插、prepare 未标 used"的组合，同 prepareId 的合法
         // 重试将永久 409（全库无其他释放口，只剩 staleBefore 接管兜底）。
-        // A retryable failure without a transaction hash means the relayer
-        // never obtained a chain transaction: release the reservation in the
-        // same transaction and keep the prepare reusable. A retryable result
-        // that carries a txHash is different: the chain may already own the
-        // nonce, so it remains consumed and is reconciled instead of being
-        // broadcast a second time.
+        // 任何未拿到 txHash 的失败（含确定失败）都意味着链上不存在占用
+        // nonce 的交易：同事务释放预留并保留 prepare 可复用。若确定失败
+        // 不释放，markPreparedUsed 已消费 prepare 而 nonce 行残留，同
+        // nonceKey 的 reserveNonce 永久 409（车道楔死）。带 txHash 的失败
+        // 不同：链上可能已占用 nonce，保持消费、交复核车道处置。
         const reopenForRetry =
-          broadcast.status === "failed" && broadcast.retryable && !submission.txHash;
+          broadcast.status === "failed" && !submission.txHash;
         await withStagePatchStoreTransaction(stageExecutorPatchStore, async () => {
           await stageExecutorPatchStore.putSubmission(submission);
           if (notAttempted || reopenForRetry) {
@@ -671,8 +691,9 @@ export function createProductStageResourcePatchService(
         manifestURI,
       });
       const createdAt = now();
+      // 同 executor patch 路径：deadline 以链时钟起算。
       const deadlineSeconds =
-        Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
+        (await requireChainClockNowSeconds(options)) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
       const chainId = requiredChainId(options.chainId);
       const stateMachineAddress = stateMachineAddressFor(context, options);
@@ -868,10 +889,9 @@ export function createProductStageResourcePatchService(
           timestamp,
         });
         // 同 executor patch 路径：落档与 nonce 收尾同事务（见该路径注释）。
-        // Only a retryable failure with no txHash is safe to reopen for the
-        // same prepareId.
+        // 未拿到 txHash 的失败（含确定失败）同释放 nonce，防车道楔死。
         const reopenForRetry =
-          broadcast.status === "failed" && broadcast.retryable && !submission.txHash;
+          broadcast.status === "failed" && !submission.txHash;
         await withStagePatchStoreTransaction(stageResourcePatchStore, async () => {
           await stageResourcePatchStore.putSubmission(submission);
           if (notAttempted || reopenForRetry) {
@@ -2007,6 +2027,7 @@ async function assertTargetStageNotBirthStage(
     | { readonly onchainHookPlanArtifact?: unknown }
     | undefined)?.onchainHookPlanArtifact as
     | {
+        readonly schemaVersion?: unknown;
         readonly compiledHooks?: readonly {
           readonly stageId?: unknown;
           readonly stageIdentifier?: unknown;
@@ -2014,6 +2035,16 @@ async function assertTargetStageNotBirthStage(
         }[];
       }
     | undefined;
+  // 消费处 schemaVersion 断言（A-39，单源常量）：schema 升级后的产物不得
+  // 被本消费线按旧口径解释——缺产物不拦截（合约守门），错版本响亮拒绝。
+  if (
+    artifact &&
+    artifact.schemaVersion !== ONCHAIN_HOOK_PLAN_SCHEMA_VERSION
+  ) {
+    throw new ConfigError(
+      `product schema artifact carries schemaVersion ${String(artifact.schemaVersion)}; this consumer only interprets ${ONCHAIN_HOOK_PLAN_SCHEMA_VERSION}`
+    );
+  }
   const isBirthStage = (artifact?.compiledHooks ?? []).some((hook) =>
     (hook.orderTriggerKind === "mint" || hook.orderTriggerKind === "dock") &&
     hookStageMatchesTarget(hook, targetStageId));

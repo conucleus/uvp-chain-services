@@ -250,8 +250,20 @@ export function createStoreDecorationService(options: StoreDecorationServiceOpti
   async function findPlanByPlanId(planId: Hex): Promise<{ readonly planId: Hex; readonly publisher?: Address } | undefined> {
     // 投影以 chainId:contract:planId 为键；按 planId 值匹配（大小写不敏感）。
     const snapshot = await projectionStore.getOrderSnapshot();
-    return Object.values(snapshot.stateMachinePlans)
-      .find((plan) => plan.planId.toLowerCase() === planId.toLowerCase());
+    const matches = Object.values(snapshot.stateMachinePlans)
+      .filter((plan) => plan.planId.toLowerCase() === planId.toLowerCase());
+    // 同 planId 跨部署多命中时 publisher 无法唯一归位（与 listings 同口径
+    // fail-closed）：静默取首个会把别的部署的 publisher 当成本部署事实，
+    // 委托/加入审核的权限判断随之错位。
+    if (matches.length > 1) {
+      throw new StoreDecorationServiceError(
+        409,
+        "plan_projection_ambiguous",
+        "planId matches multiple deployments in the chain projection; the plan publisher cannot be attributed uniquely",
+        { planId, matches: matches.length }
+      );
+    }
+    return matches[0];
   }
 
   async function assertCanWriteDecoration(

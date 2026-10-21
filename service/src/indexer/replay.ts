@@ -24,6 +24,7 @@ import {
   applyOrderRelayerRecorded,
   applyOrderTriggered,
   applyStateMachineModuleSet,
+  stateMachineOrderProjectionKey,
   stateMachineScopedKey,
   stateMachineTaskProjectionKey,
   type MutableStateMachineModuleProjection,
@@ -64,6 +65,7 @@ import type { MutableStateMachinePlanProjection } from "./projections/plan.js";
 import type { StateMachineTaskProjection } from "./projections/task.js";
 import {
   type MutableStateMachineDeploymentProjection,
+  type MutableContractGovernanceProjection,
   type ProjectionReplayDiagnostics,
   type ProjectionSnapshot,
   type StateMachineDeploymentStatus
@@ -121,6 +123,7 @@ export function rebuildOrderProjections(
 ): ProjectionSnapshot {
   const stateMachineDeployments = new Map<string, MutableStateMachineDeploymentProjection>();
   const stateMachineModules = new Map<string, MutableStateMachineModuleProjection>();
+  const contractGovernance = new Map<string, MutableContractGovernanceProjection>();
   const stateMachinePlans = new Map<string, MutableStateMachinePlanProjection>();
   const stateMachineOrders = new Map<string, MutableStateMachineOrderProjection>();
   const stateMachineDocks = new Map<string, MutableStateMachineDockProjection>();
@@ -152,6 +155,7 @@ export function rebuildOrderProjections(
     applyStateMachineEvent({
       deployments: stateMachineDeployments,
       modules: stateMachineModules,
+      governance: contractGovernance,
       plans: stateMachinePlans,
       orders: stateMachineOrders,
       docks: stateMachineDocks,
@@ -187,6 +191,7 @@ export function rebuildOrderProjections(
     const dockKeys = (stateMachineDocksByTargetOrder[targetOrderKey] ??= []);
     dockKeys.push(dockKey);
   }
+  const stateMachineOrderDockChainDepth = deriveOrderDockChainDepth(stateMachineDocks);
   for (const [orderId, order] of stateMachineOrders) {
     const readonlyTasks: Record<string, StateMachineTaskProjection> = {};
     for (const [taskId, task] of Object.entries(order.tasks)) {
@@ -207,6 +212,8 @@ export function rebuildOrderProjections(
       ...order,
       authorizations: { ...order.authorizations },
       signals: { ...order.signals },
+      derivedSignals: { ...order.derivedSignals },
+      stageMaterializations: { ...order.stageMaterializations },
       stageExecutorOverlays: { ...order.stageExecutorOverlays },
       stageResourceOverlays: { ...order.stageResourceOverlays },
       ...(order.triggerLink ? { triggerLink: order.triggerLink } : {}),
@@ -227,10 +234,12 @@ export function rebuildOrderProjections(
     ...(activeStateMachineDeploymentId ? { activeStateMachineDeploymentId } : {}),
     stateMachineDeployments: Object.fromEntries(stateMachineDeployments),
     stateMachineModules: Object.fromEntries(stateMachineModules),
+    contractGovernance: Object.fromEntries(contractGovernance),
     stateMachinePlans: Object.fromEntries(stateMachinePlans),
     stateMachineOrders: stateMachineOrderRecord,
     stateMachineDocks: stateMachineDockRecord,
     stateMachineDocksByTargetOrder,
+    stateMachineOrderDockChainDepth,
     stateMachineTasks: stateMachineTaskRecord,
     unresolvedModuleOrderEventCount: diagnostics.unresolvedModuleOrderEventCount,
     unresolvedDockEventCount: diagnostics.unresolvedDockEventCount,
@@ -254,10 +263,70 @@ export interface ProjectionReplayOptions {
   readonly planCapabilityResolutionFailures?: readonly Hex[];
 }
 
+/**
+ * B-02 派生投影：每单「最长 dock 链路」从 dock 事件图（父单 → 目标单边）
+ * 计算——4.7 起链上不再维护路径深度（dockEdgeCountOfOrder 是每单总挂接
+ * 边数的父链账本），路径语义归索引器。有 memo 的 DFS：无入边订单 = 0
+ * （不出现在结果里），有入边订单 = max(入边父链 + 1)。链上有界祖先检查
+ * 保证跨单无环；防御性 visiting 集合对异常事件流（理论上的环）截断，
+ * 不抛错不静默丢边。
+ */
+function deriveOrderDockChainDepth(
+  docks: Map<string, MutableStateMachineDockProjection>
+): Record<string, number> {
+  const edgesByTarget = new Map<string, { parentKey: string; targetKey: string }[]>();
+  for (const dock of docks.values()) {
+    const parentKey = stateMachineOrderProjectionKey(
+      dock.chainId,
+      dock.stateMachineAddress,
+      dock.localPlanId,
+      dock.localOrderId
+    );
+    const targetKey = stateMachineOrderProjectionKey(
+      dock.chainId,
+      dock.stateMachineAddress,
+      dock.targetPlanId,
+      dock.linkedOrderId
+    );
+    const edges = edgesByTarget.get(targetKey) ?? [];
+    edges.push({ parentKey, targetKey });
+    edgesByTarget.set(targetKey, edges);
+  }
+  const memo = new Map<string, number>();
+  const longestPathOf = (orderKey: string, visiting: Set<string>): number => {
+    const cached = memo.get(orderKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+    // 防御性环截断：理论不可达（链上 DockAncestorCycle 拒绝跨单环），
+    // 异常事件流按当前展开值收敛而不是死循环。
+    if (visiting.has(orderKey)) {
+      return 0;
+    }
+    visiting.add(orderKey);
+    let longest = 0;
+    for (const edge of edgesByTarget.get(orderKey) ?? []) {
+      longest = Math.max(longest, longestPathOf(edge.parentKey, visiting) + 1);
+    }
+    visiting.delete(orderKey);
+    memo.set(orderKey, longest);
+    return longest;
+  };
+  const depths: Record<string, number> = {};
+  for (const targetKey of edgesByTarget.keys()) {
+    const depth = longestPathOf(targetKey, new Set());
+    if (depth > 0) {
+      depths[targetKey] = depth;
+    }
+  }
+  return depths;
+}
+
 function applyStateMachineEvent(
   state: {
     deployments: Map<string, MutableStateMachineDeploymentProjection>;
     modules: Map<string, MutableStateMachineModuleProjection>;
+    governance: Map<string, MutableContractGovernanceProjection>;
     plans: Map<string, MutableStateMachinePlanProjection>;
     orders: Map<string, MutableStateMachineOrderProjection>;
     docks: Map<string, MutableStateMachineDockProjection>;
@@ -349,13 +418,17 @@ function applyStateMachineEvent(
     case "TimerPoked":
       applyTimerPoked(state, event);
       return;
-    // 零投影分支（显式声明，不落入未知计数）：状态机的治理面事实
-    // ——OwnershipTransferred（owner 轮换）与 StateMachineModulesFrozen
-    // （模块集冻结）不产生订单/plan/模块投影，但它们是已索引事件面
-    // （SM ABI）的一部分，静默穿过 default 会与"真未知事件"不可区分。
+    // 治理面投影（B-03）：此前 OwnershipTransferred（owner 轮换）与
+    // StateMachineModulesFrozen（模块集冻结）是显式零投影分支，治理状态
+    // 无法从事件流重建。两族按发出合约分桶写入 contractGovernance——
+    // OwnershipTransferred 同名事件族也由 identity/deployment registry 发出，
+    // 一并入桶（治理状态可全量重建）。它们不产生订单/plan/模块投影，
+    // 也不落入未知计数。
     case "OwnershipTransferred":
+      applyOwnershipTransferred(state.governance, event);
       return;
     case "StateMachineModulesFrozen":
+      applyStateMachineModulesFrozen(state.governance, event);
       return;
     default:
       // 真未知事件：既不在状态机事件族，也不属于其他重放遍已收口的
@@ -384,6 +457,64 @@ const NON_STATE_MACHINE_REPLAYED_EVENT_NAMES: ReadonlySet<string> = new Set([
   "IdentityBindingRegistered",
   "IdentityBindingRevoked"
 ]);
+
+/** 治理桶键：chainId:contractAddress（OwnershipTransferred 跨合约族同键）。 */
+function contractGovernanceKey(chainId: number, contractAddress: Address): string {
+  return `${chainId}:${contractAddress.toLowerCase()}`;
+}
+
+function applyOwnershipTransferred(
+  governance: Map<string, MutableContractGovernanceProjection>,
+  event: ChainEvent
+): void {
+  const newOwner = requiredAddressArg(event, "newOwner");
+  const key = contractGovernanceKey(event.chainId, event.contractAddress);
+  const existing = governance.get(key);
+  const proof = proofOf(event);
+  if (existing) {
+    existing.owner = newOwner;
+    existing.ownerUpdatedAt = provenanceOf(event);
+    existing.ownerProof = proof;
+    return;
+  }
+  governance.set(key, {
+    chainId: event.chainId,
+    contractAddress: event.contractAddress,
+    owner: newOwner,
+    ownerUpdatedAt: provenanceOf(event),
+    ownerProof: proof
+  });
+}
+
+function applyStateMachineModulesFrozen(
+  governance: Map<string, MutableContractGovernanceProjection>,
+  event: ChainEvent
+): void {
+  const moduleSetHash = requiredBytes32Arg(event, "moduleSetHash");
+  const key = contractGovernanceKey(event.chainId, event.contractAddress);
+  const existing = governance.get(key);
+  const proof = proofOf(event);
+  if (existing) {
+    existing.modulesFrozen = true;
+    existing.moduleSetHash = moduleSetHash;
+    existing.frozenAt = provenanceOf(event);
+    existing.frozenProof = proof;
+    return;
+  }
+  // freezeModules 只能由 owner 发起：冻结事件先于任何 OwnershipTransferred
+  // 入流的畸形序列下，owner 面留空（null address），不伪造占位 owner。
+  governance.set(key, {
+    chainId: event.chainId,
+    contractAddress: event.contractAddress,
+    owner: "0x0000000000000000000000000000000000000000" as Address,
+    ownerUpdatedAt: provenanceOf(event),
+    ownerProof: proof,
+    modulesFrozen: true,
+    moduleSetHash,
+    frozenAt: provenanceOf(event),
+    frozenProof: proof
+  });
+}
 
 function applyDeploymentRegistryEvent(
   deployments: Map<string, MutableStateMachineDeploymentProjection>,

@@ -75,6 +75,13 @@ export interface StateMachineDockProjection {
   readonly interfaceNameId: Hex;
   readonly targetPlanId: Hex;
   readonly linkedOrderId: Hex;
+  /**
+   * B-02 边数账本口径：出生事件携带的 depth word = 该边写入目标单
+   * dockEdgeCountOfOrder 账本的值（父单边数 + 1），不是路径深度——
+   * N:1 拼批中未抬升账本的边也按父边数 + 1 发声。订单级「最长 dock
+   * 链路」由索引器派生（快照 stateMachineOrderDockChainDepth），链上
+   * 不再维护该语义。
+   */
   readonly depth: number;
   /** DockOpened 的发起者（mode=new 时必填）。 */
   readonly opener?: Address;

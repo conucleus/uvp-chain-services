@@ -638,6 +638,10 @@ export class IndexerService implements LifecycleService {
         }
       });
       rebuildCommitted = true;
+      // 全量重建（深 reorg 兜底）与回滚路径同口径：重建覆盖区间之上的
+      // sent/failed 通知指向已从 canonical 链消失的区块，必须失效——
+      // 只清 pending 步骤留不下已投递通知的失效标记。
+      await this.#invalidateNotificationsAfterReorg(finalizedBlock);
       await this.#dropGhostPendingNotificationStepsAfterRebuild(events, finalizedBlock);
       const notificationStatus = await this.#processSignalNotifications(activeEvents);
       if (rebuildNotificationStepId !== undefined && notificationStatus === "delivered") {
@@ -865,6 +869,11 @@ export class IndexerService implements LifecycleService {
       return result;
     }
 
+    // 游标哈希必须在读事件前捕获：事务与通知之后再读，confirmations 锚下
+    // 可能把旧分叉事件钉到新 canonical 哈希（TOCTOU，下轮连续性校验恒过）。
+    // 先取哈希时若读事件期间链换轨，存下的是旧哈希，下轮校验会触发回滚
+    // ——fail-safe 方向。
+    const nextCursorBlockHash = await this.#cursorBlockHash(finalizedBlock);
     const events = await this.#eventSource.readEvents(
       {
         chainId: this.#config.network.chainId,
@@ -889,7 +898,7 @@ export class IndexerService implements LifecycleService {
         deploymentBlock,
         nextBlock: finalizedBlock + 1n,
         finalizedBlock: reportedFinalizedBlock,
-        ...(await this.#cursorBlockHash(finalizedBlock))
+        ...(nextCursorBlockHash ?? {})
       };
       let earlyExitAccepted = false;
       try {
@@ -1028,7 +1037,7 @@ export class IndexerService implements LifecycleService {
       deploymentBlock,
       nextBlock: finalizedBlock + 1n,
       finalizedBlock: reportedFinalizedBlock,
-      ...(await this.#cursorBlockHash(finalizedBlock))
+      ...(nextCursorBlockHash ?? {})
     };
     // 游标推进带 CAS 前置条件（基于本轮 fromBlock）：事务提交与游标落库
     // 之间若另一个写者（如另一进程的 full rebuild）移动了持久游标，本

@@ -46,6 +46,11 @@ export interface ReconcileWorkerConfig {
 /** 对账扫描缺省页大小：单轮内存占用有界，历史规模只影响轮时长。 */
 export const DEFAULT_RECONCILE_SCAN_PAGE_SIZE = 200;
 
+/** failed+txHash 行有界复核的退避下限/上限与复核视界（不永久重探）。 */
+const FAILED_TX_RECHECK_BASE_INTERVAL_MS = 5 * 60 * 1000;
+const FAILED_TX_RECHECK_MAX_INTERVAL_MS = 60 * 60 * 1000;
+const FAILED_TX_RECHECK_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
+
 export interface ReconcileReceipt {
   readonly status?: "success" | "reverted" | "failed" | string;
   readonly blockNumber?: bigint | number | string;
@@ -121,6 +126,8 @@ export class TxReconcileWorker implements LifecycleService {
   #lastError: string | undefined;
   /** 已告警过的孤儿 review（每进程至多一条，防每轮重复刷审计台账）。 */
   readonly #orphanRevokedAlerted = new Set<string>();
+  /** 复核视界耗尽已告警的 failed+txHash 行（每进程一次，防每轮刷屏）。 */
+  readonly #failedRecheckExhaustedAlerted = new Set<string>();
 
   constructor(options: TxReconcileWorkerOptions) {
     this.#config = options.config;
@@ -233,6 +240,9 @@ export class TxReconcileWorker implements LifecycleService {
 
     if (this.#productStore) {
       for (const registration of (await this.#productStore.listRegistrations()).filter(isReconcileableRegistration)) {
+        if (registration.status === "failed" && !this.#failedTxRecheckDue(`registration:${registration.triggerId}`, registration)) {
+          continue;
+        }
         summary.registrationsChecked += 1;
         try {
           const updated = await this.#reconcileRegistration(registration);
@@ -263,6 +273,9 @@ export class TxReconcileWorker implements LifecycleService {
         this.#config.scanPageSize ?? DEFAULT_RECONCILE_SCAN_PAGE_SIZE
       )) {
         if (!isReconcileableSubmission(submission)) {
+          continue;
+        }
+        if (submission.status === "failed" && !this.#failedTxRecheckDue(`submission:${submission.submissionId}`, submission)) {
           continue;
         }
         summary.submissionsChecked += 1;
@@ -298,6 +311,9 @@ export class TxReconcileWorker implements LifecycleService {
         }
         if (isSimulatedGovernanceLog(log)) {
           skippedSimulatedCount += 1;
+          continue;
+        }
+        if (log.status === "failed" && !this.#failedTxRecheckDue(`governance-log:${log.logId}`, log)) {
           continue;
         }
         summary.governanceLogsChecked += 1;
@@ -530,6 +546,9 @@ export class TxReconcileWorker implements LifecycleService {
       { listOpenSubmissionsPage: listOpen },
       this.#config.scanPageSize ?? DEFAULT_RECONCILE_SCAN_PAGE_SIZE
     )) {
+      if (submission.status === "failed" && !this.#failedTxRecheckDue(`stage-patch:${submission.submissionId}`, submission)) {
+        continue;
+      }
       summary.stagePatchesChecked += 1;
       try {
         const outcome = await this.#resolveOutcome(
@@ -707,6 +726,50 @@ export class TxReconcileWorker implements LifecycleService {
       });
     }
     return updated;
+  }
+
+  /**
+   * failed+txHash 行的有界复核闸（A-11）：迟到成功自愈车道不得退化为每轮
+   * 永久重探。按行龄指数退避（无计数器：间隔 = 行龄/16，夹在
+   * [BASE, MAX]），行龄越过复核视界后不再重探（车道终态，每进程告警一
+   * 次留痕人工裁决）。updatedAt 缺失/时钟回拨时照常复核（fail-safe）。
+   */
+  #failedTxRecheckDue(
+    key: string,
+    record: {
+      readonly createdAt: string;
+      readonly preparedAt?: string;
+      readonly updatedAt?: string;
+    }
+  ): boolean {
+    const nowMs = this.#now().getTime();
+    const anchorMs = Date.parse(record.preparedAt ?? record.createdAt);
+    if (Number.isNaN(anchorMs)) {
+      return true;
+    }
+    const ageMs = nowMs - anchorMs;
+    if (ageMs > FAILED_TX_RECHECK_HORIZON_MS) {
+      if (!this.#failedRecheckExhaustedAlerted.has(key)) {
+        this.#failedRecheckExhaustedAlerted.add(key);
+        this.#logger.warn(
+          "reconcile worker exhausted the bounded re-check horizon for a failed record with a transaction hash; it stays failed and requires manual adjudication",
+          { record: key }
+        );
+      }
+      return false;
+    }
+    if (record.updatedAt === undefined) {
+      return true;
+    }
+    const sinceCheckMs = nowMs - Date.parse(record.updatedAt);
+    if (Number.isNaN(sinceCheckMs) || sinceCheckMs <= 0) {
+      return true;
+    }
+    const intervalMs = Math.min(
+      Math.max(Math.floor(ageMs / 16), FAILED_TX_RECHECK_BASE_INTERVAL_MS),
+      FAILED_TX_RECHECK_MAX_INTERVAL_MS
+    );
+    return sinceCheckMs >= intervalMs;
   }
 
   async #resolveOutcome(

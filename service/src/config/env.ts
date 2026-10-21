@@ -370,7 +370,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         120_000,
       ),
     },
-    timerKeeper: {
+    timerKeeper: validateTimerKeeperConfig({
       enabled: parseBoolean(env, "UVP_TIMER_KEEPER_ENABLED", false),
       pollIntervalMs: parseInteger(env, "UVP_TIMER_KEEPER_POLL_INTERVAL_MS", 5_000),
       maxCandidatesPerRun: parseInteger(
@@ -388,7 +388,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         optionalEnv(env, "UVP_TIMER_KEEPER_PRIVATE_KEY_ENV") ??
         "UVP_TIMER_KEEPER_PRIVATE_KEY",
       ...(timerKeeperAddress ? { expectedAddress: timerKeeperAddress } : {}),
-    },
+    }),
     evidenceStorage: parseEvidenceStorageConfig(env),
     notifications: parseNotificationsConfig(env),
     storeAuth: parseStoreAuthConfig(env, environment),
@@ -432,6 +432,28 @@ interface ParsedAddressManifest {
   readonly contracts: Readonly<Record<string, Address>>;
   readonly stateMachineDeployments: readonly StateMachineDeploymentConfig[];
   readonly activeDeploymentId?: Hex;
+}
+
+/**
+ * timer keeper 的零预算/零去重窗是配置错误（A-13）：enabled 时
+ * maxCandidatesPerRun=0 让每轮在首个候选前 break（永久静默失效），
+ * redeliveryWindowMs=0 关闭去重逐轮重发。preflight 响亮拒绝。
+ */
+function validateTimerKeeperConfig(config: TimerKeeperConfig): TimerKeeperConfig {
+  if (!config.enabled) {
+    return config;
+  }
+  if (config.maxCandidatesPerRun <= 0) {
+    throw new ConfigError(
+      "UVP_TIMER_KEEPER_MAX_CANDIDATES_PER_RUN must be positive when UVP_TIMER_KEEPER_ENABLED=true (0 silently disables every run)"
+    );
+  }
+  if (config.redeliveryWindowMs <= 0) {
+    throw new ConfigError(
+      "UVP_TIMER_KEEPER_REDELIVERY_WINDOW_MS must be positive when UVP_TIMER_KEEPER_ENABLED=true (0 disables deduplication and re-broadcasts every run)"
+    );
+  }
+  return config;
 }
 
 function optionalEnv(env: Env, name: string): string | undefined {

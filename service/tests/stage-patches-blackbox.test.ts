@@ -73,6 +73,7 @@ const previousExecutorWallet = normalizeAddress(
 const outsiderWallet = "0x9999999999999999999999999999999999999999" as Address;
 const executorWallet = "0x3333333333333333333333333333333333333333" as Address;
 const baseNow = new Date("2026-04-30T00:00:00Z");
+const baseChainClock = { latestBlockTimestampSeconds: async () => Math.floor(baseNow.getTime() / 1000) } as const;
 
 describe("stage-patches black-box adversarial", () => {
   // ------------------------------------------------------------------
@@ -942,6 +943,7 @@ async function routerFixture(
     stagePatchModuleAddress: contractAddress,
     dockingModuleAddress: contractAddress,
     now: () => baseNow,
+    chainClock: baseChainClock,
     prepareIdFactory: () => `prep_${++prepareCount}`,
     submissionIdFactory: () => `sub_${++submissionCount}`,
   };

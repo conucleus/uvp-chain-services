@@ -1095,6 +1095,77 @@ it("revoking an anchored address immediately invalidates sessions for it", async
     expect(publish.body).toMatchObject({ error: "anchor_verification_failed" });
   });
 
+  it("join gate fails closed on listing read failure and chain read failure", async () => {
+    const { createStoreJoinService, StoreJoinServiceError } = await import("../src/store/join/index.js");
+    const joinService = (listingGate: NonNullable<Parameters<typeof createStoreJoinService>[0]["listingGate"]>) =>
+      createStoreJoinService({
+        projectionStore: { listIdentityBindings: async () => [] } as unknown as Parameters<typeof createStoreJoinService>[0]["projectionStore"],
+        productService: {
+          listZhixu: async () => [{ zhixuId: "zx-join-gate", planPublication: { planId } }],
+          getZhixu: async () => ({ roleSlots: [{ slotId: roleSlotId }], stages: [] })
+        } as unknown as Parameters<typeof createStoreJoinService>[0]["productService"],
+        supplierService: {} as Parameters<typeof createStoreJoinService>[0]["supplierService"],
+        publisherAccess: { hasPublisherWriteAccess: async () => false },
+        listingGate
+      });
+    const actor = { anchoredAddress: supplierWallet, authMode: "dev_store_headers", accessLevel: "store_read" };
+    const application = { planId, roleSlotId, authorizationKind: "signal_submitter" as const };
+
+    // listing 读取异常（存储瞬断/脏枚举抛错）不得被吞掉放行——fail-closed 503。
+    await expect(joinService({
+      getListingForPlan: async () => {
+        throw new Error("listing store unavailable");
+      }
+    }).submitApplication(application, actor)).rejects.toMatchObject({
+      status: 503,
+      code: "listing_gate_unavailable"
+    } satisfies Partial<InstanceType<typeof StoreJoinServiceError>>);
+
+    // 配置了链直读但读失败（chainReadFailed）与上架公开门同口径：不放行。
+    await expect(joinService({
+      getListingForPlan: async () => ({
+        status: "public",
+        anchorVerification: { status: "consistent", chainReadFailed: true }
+      })
+    }).submitApplication(application, actor)).rejects.toMatchObject({
+      status: 409,
+      code: "join_entry_suppressed"
+    } satisfies Partial<InstanceType<typeof StoreJoinServiceError>>);
+
+    // 控制组：public + consistent + 链读健康 → 提交正常落档。
+    await expect(joinService({
+      getListingForPlan: async () => ({
+        status: "public",
+        anchorVerification: { status: "consistent" }
+      })
+    }).submitApplication(application, actor)).resolves.toMatchObject({
+      application: { status: "applied" }
+    });
+  });
+
+  it("join rejects a planId that matches multiple catalog deployments (fail-closed)", async () => {
+    const { createStoreJoinService, StoreJoinServiceError } = await import("../src/store/join/index.js");
+    const joinService = createStoreJoinService({
+      projectionStore: { listIdentityBindings: async () => [] } as unknown as Parameters<typeof createStoreJoinService>[0]["projectionStore"],
+      productService: {
+        listZhixu: async () => [
+          { zhixuId: "zx-join-dup-a", planPublication: { planId } },
+          { zhixuId: "zx-join-dup-b", planPublication: { planId } }
+        ],
+        getZhixu: async () => ({ roleSlots: [{ slotId: roleSlotId }], stages: [] })
+      } as unknown as Parameters<typeof createStoreJoinService>[0]["productService"],
+      supplierService: {} as Parameters<typeof createStoreJoinService>[0]["supplierService"],
+      publisherAccess: { hasPublisherWriteAccess: async () => false }
+    });
+    await expect(joinService.submitApplication(
+      { planId, roleSlotId, authorizationKind: "signal_submitter" },
+      { anchoredAddress: supplierWallet, authMode: "dev_store_headers", accessLevel: "store_read" }
+    )).rejects.toMatchObject({
+      status: 409,
+      code: "plan_projection_ambiguous"
+    } satisfies Partial<InstanceType<typeof StoreJoinServiceError>>);
+  });
+
   it("reviewer without planId scope only sees their own applications", async () => {
     const store = new MemoryProjectionStore();
     await seedPlanProjection(store, { withSupplierBinding: true });

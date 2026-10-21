@@ -1,4 +1,5 @@
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
+import { ONCHAIN_HOOK_PLAN_SCHEMA_VERSION } from "@uvp-eth/compiler";
 import {
   CROSS_BORDER_ZHIXU_ID,
   crossBorderPlanIds,
@@ -68,10 +69,12 @@ export const dockTargetPlanIds = {
 
 /**
  * 试拼沙箱以目标发布的具名接口为前提（dock v2）：dock target 的 schema
- * 携带 v2 制品的 dockInterface 承诺，产品详情据此镜像 dockableModules。
+ * 携带制品的 dockInterface 承诺，产品详情据此镜像 dockableModules。
+ * schemaVersion 钉在编译器单源常量上——消费线（product service）按该
+ * 版本断言，旧版本制品会被 fail-closed 拒绝。
  */
 const dockTargetOnchainHookPlanArtifact = {
-  schemaVersion: "uvp.onchainHookPlan.v2",
+  schemaVersion: ONCHAIN_HOOK_PLAN_SCHEMA_VERSION,
   planId: dockTargetPlanIds.planId,
   zhixuId: DOCK_TARGET_ZHIXU_ID,
   zhixuName: "dock_target_staged_payment",

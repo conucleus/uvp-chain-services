@@ -243,6 +243,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     // 持久驱动（sqlite/postgres）注入持久化 stage-patch store；未注入
     // （memory）时服务内部回落内存 store。
     ...(options.stageExecutorPatchStore ? { stageExecutorPatchStore: options.stageExecutorPatchStore } : {}),
+    ...(options.productChainClock ? { chainClock: options.productChainClock } : {}),
     ...(options.now ? { now: options.now } : {})
   });
   const stageResourcePatchChainId = options.stageResourcePatchChainId ?? options.submissionChainId;
@@ -255,6 +256,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(stageResourcePatchVerifyingContract ? { stagePatchModuleAddress: stageResourcePatchVerifyingContract } : {}),
     ...(options.stageResourcePatchBroadcastAdapter ? { broadcastAdapter: options.stageResourcePatchBroadcastAdapter } : {}),
     ...(options.stageResourcePatchStore ? { stageResourcePatchStore: options.stageResourcePatchStore } : {}),
+    ...(options.productChainClock ? { chainClock: options.productChainClock } : {}),
     ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
     ...(options.now ? { now: options.now } : {})
   });
@@ -321,7 +323,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     productService,
     supplierService: storeSupplierService,
     publisherAccess: storeDecorationService,
-    // 红线：加入入口被下架/锚冲突 listing 抑制（服务端强制）。
+    // 红线：加入入口被下架/锚冲突 listing 抑制（服务端强制）。链直读
+    // 失败（chainReadFailed）与锚状态一并传进门，按 fail-closed 处理。
     listingGate: {
       getListingForPlan: async (planId) => {
         const detail = await listingService.findListingByPlanId(planId);
@@ -330,7 +333,10 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
         }
         return {
           status: detail.listing.status,
-          anchorVerification: { status: detail.anchorVerification.status }
+          anchorVerification: {
+            status: detail.anchorVerification.status,
+            ...(detail.anchorVerification.chainReadFailed === true ? { chainReadFailed: true } : {})
+          }
         };
       }
     },

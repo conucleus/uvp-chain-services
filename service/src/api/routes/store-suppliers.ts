@@ -9,7 +9,7 @@ import {
 } from "../../store/suppliers/service.js";
 import type { StoreAccessState, StoreCapability } from "../../store/console/access.js";
 import { isStoreAccessAuthenticated } from "../../store/console/access.js";
-import { cleanQuery, decodePathParameter, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { cleanQuery, decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {
   authorizeStoreCapability,
@@ -245,6 +245,9 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           }
         }
       } catch (error) {
+        if (error instanceof InvalidPathParameterError) {
+          return invalidPathParameterResponse();
+        }
         if (error instanceof StoreSupplierServiceError) {
           return {
             status: error.status,

@@ -36,7 +36,7 @@ import {
  */
 
 const TAXONOMY_VERSION = 'uvp.error-taxonomy.v1';
-const TAXONOMY_SHA256 = '27bc628bd350c6cf63742710a075f94edaad3abb61b0c40c2a41b4f1e4047174';
+const TAXONOMY_SHA256 = 'edd7a1ee1e1a1e6899c008f00aeb57da0918cb98bd8982d7469c855610e7ae84';
 
 interface TaxonomyErrorEntry {
   readonly code: string;
@@ -402,14 +402,17 @@ describe('chain-services classification consistency against the taxonomy', () =>
     expect(entry.producer_overrides?.['executor-kit']?.['dead_letter']).toBe(false);
   });
 
-  it('keeps the nonce_conflict divergence recorded (needs-ruling): submissions non-retryable base, table base matches', () => {
+  it('keeps nonce_conflict ruled single-value across producers (A-30): retryable, never dead-lettered', () => {
     const entry = entryByCode('nonce_conflict');
     const verdict = classifyStateMachineBroadcastError(new Error('replacement transaction underpriced')) as ClassifierVerdict & { errorCode: string };
     expect(verdict.errorCode).toBe('duplicate_transaction');
     expect(verdict.retryable).toBe(entry.retryable);
-    expect(verdict.retryable).toBe(false);
-    // executor-kit override records the diverging retryable=true disposition.
-    expect(entry.producer_overrides?.['executor-kit']?.['retryable']).toBe(true);
+    expect(verdict.retryable).toBe(true);
+    expect(verdict.deadLetter).toBe(entry.dead_letter);
+    expect(entry.dead_letter).toBe(false);
+    // The unification removed the executor-kit override: no producer lane may
+    // reintroduce the old non-retryable/dead-letter disposition.
+    expect(entry.producer_overrides).toBeUndefined();
   });
 });
 
@@ -584,10 +587,10 @@ describe('stage-patch contract revert names against the authoritative ABI (third
     expect(verdict.retryable).toBe(false);
   });
 
-  it('keeps the shared duplicate-transaction lanes terminal-by-default on both patch label sets', () => {
-    // 基础判定对齐 taxonomy nonce_conflict（retryable=false/dead_letter=true）；
-    // broadcast() 捕获口的回执探针改判（receipt_unknown 可重试等）由
-    // broadcast-duplicate-transaction.test.ts 单独钉。
+  it('keeps the shared duplicate-transaction lanes retryable on both patch label sets (nonce_conflict single value)', () => {
+    // 基础判定对齐 taxonomy nonce_conflict 单值裁决（A-30：retryable=true/
+    // dead_letter=false）；broadcast() 捕获口的回执探针改判（receipt_failed
+    // 终态等）由 broadcast-duplicate-transaction.test.ts 单独钉。
     for (const labels of [STAGE_EXECUTOR_PATCH_BROADCAST_LABELS, STAGE_RESOURCE_PATCH_BROADCAST_LABELS] as const) {
       for (const text of ['nonce too low', 'already known', 'replacement transaction underpriced']) {
         const verdict = classifyStagePatchBroadcastError(
@@ -599,7 +602,8 @@ describe('stage-patch contract revert names against the authoritative ABI (third
         expect(verdict.errorCode, `${text} on ${labels.label}`).toBe('duplicate_transaction');
         const entry = entryForInternalName('duplicate_transaction');
         expect(verdict.retryable).toBe(entry.retryable);
-        expect(entry.dead_letter).toBe(true);
+        expect(entry.retryable).toBe(true);
+        expect(entry.dead_letter).toBe(false);
       }
     }
   });
@@ -621,7 +625,6 @@ function branchDeadLetterFallback(errorCode: string, retryable: boolean): boolea
   }
   const deadLetterCodes = new Set([
     'chain_id_mismatch',
-    'duplicate_transaction',
     'expired_signal_signature',
     'invalid_signal_signature',
     'order_plan_unresolved',

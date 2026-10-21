@@ -93,9 +93,29 @@ export interface StateMachineHookProjection {
   readonly stageIdentifier?: Hex;
   readonly hookName?: Hex;
   readonly status: StateMachineHookStatus;
+  /**
+   * 最近一次状态迁移的前态（B-03，HookStatusChanged.previousStatus）：事件
+   * 本就携带该字段，此前投影丢弃——状态迁移链现在可从事件流全量重建。
+   */
+  readonly previousStatus?: StateMachineHookStatus;
   readonly dueAt?: string;
   readonly updatedAt: ProjectionProvenance;
   readonly readyAt?: ProjectionProvenance;
+  readonly proof: StateMachineProofProjection;
+}
+
+/**
+ * 阶段物化出生触发（B-03，StageMaterialized 触发字段）：事件本就携带
+ * triggerHookId/sourceId/signalId，此前投影丢弃——每阶段的出生触发事实
+ * 现在可从事件流重建。键 = stageId。
+ */
+export interface StateMachineStageMaterializationProjection {
+  readonly orderId: Hex;
+  readonly stageId: Hex;
+  readonly triggerHookId?: Hex;
+  readonly sourceId?: Hex;
+  readonly signalId?: Hex;
+  readonly materializedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
 }
 
@@ -117,8 +137,21 @@ export function applyStageMaterialized(
   const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const stageId = requiredBytes32Arg(event, "stageId");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash });
+  // B-03 出生触发字段（事件本就携带；旧事件面缺省按可选读取）。
+  const triggerHookId = optionalBytes32Arg(event, "triggerHookId");
+  const triggerSourceId = optionalBytes32Arg(event, "sourceId");
+  const triggerSignalId = optionalBytes32Arg(event, "signalId");
   order.currentStage = stageId;
   order.status = "registered";
+  order.stageMaterializations[stageId] = {
+    orderId,
+    stageId,
+    ...(triggerHookId ? { triggerHookId } : {}),
+    ...(triggerSourceId ? { sourceId: triggerSourceId } : {}),
+    ...(triggerSignalId ? { signalId: triggerSignalId } : {}),
+    materializedAt: provenanceOf(event),
+    proof
+  };
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "环节已启动", proof, { orderId, planId: order.planId }));
@@ -284,10 +317,15 @@ export function applyHookStatusChanged(
   const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const hookId = requiredBytes32Arg(event, "hookId");
   const hookStatus = hookStatusFromArg(event.args["newStatus"]);
+  // B-03 状态迁移前态（事件本就携带；此前投影丢弃）。
+  const previousStatus = hookStatusFromArg(event.args["previousStatus"]);
   const dueAt = optionalUintArgAsString(event, "dueAt");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash });
   const hook = ensureStateMachineHook(order, event, hookId, proof);
   hook.status = hookStatus;
+  if (previousStatus !== "unknown") {
+    hook.previousStatus = previousStatus;
+  }
   if (dueAt && dueAt !== "0") {
     hook.dueAt = dueAt;
   } else {

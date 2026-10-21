@@ -250,10 +250,17 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
         return { request, broadcast: broadcastFromLog(duplicate), log: duplicate };
       }
       const broadcast = await safeBroadcast(() => broadcastIdentityRevocation(adapter, request));
-      // revoke 前置状态回退——review 在广播前已翻成
-      // revoked，广播确定性失败时恢复原状态，避免"库 revoked、链上 binding
-      // 仍 active"的分叉。
-      if (broadcast.status === "failed" && review && review.status !== "revoked") {
+      // revoke 前置状态回退——review 在广播前已翻成 revoked，仅"无 txHash
+      // 的确定失败"恢复原状态：交易从未上链，回滚无分叉风险。failed+txHash
+      // 按未决处理不回滚（链上交易可能已占用 revoke——reorg/迟到回执由
+      // reconcile 的 revoke-reverted 告警车道覆盖）；可重试失败交重试收敛。
+      if (
+        broadcast.status === "failed" &&
+        !broadcast.txHash &&
+        broadcast.retryable === false &&
+        review &&
+        review.status !== "revoked"
+      ) {
         await store.putReview(review);
       }
       const timestamp = now().toISOString();

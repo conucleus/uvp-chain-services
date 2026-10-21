@@ -1,0 +1,9 @@
+# 本仓 PR/push CI 的源依赖钉（自治组合声明）；按需自行 bump。
+# uvp-protocol：service 的 @uvp-eth/compiler / product-dto / protocol-bindings
+# workspace 依赖与 forge 合约产物的姊妹检出锚点。
+# uvp-core：compiler → hook-core → @conucleus/uvp-core-node 的原生模块与
+# 契约表检出锚点。
+# 两个检出都必须带 pin，防同一 uvp-chain-services SHA 的结论随姊妹仓默认
+# 分支漂移（审计 A-24）。
+uvp-protocol: dd05b88275beef0a2d192e61ec0d5f5b10ca013f
+uvp-core: 2f96d4a484013f8c3fb2e582e05dbcac0b496cda

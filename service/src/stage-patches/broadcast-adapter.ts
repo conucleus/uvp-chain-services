@@ -516,13 +516,13 @@ export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatch
     };
   }
   // duplicate-transaction 车道（broadcaster 的 nonce 冲突三形态）：基础判定
-  // 对齐 taxonomy nonce_conflict（不可重试、死信），但 broadcast() 捕获口会
-  // 先走回执探针裁决改判——直接死信会把已上链交易永久标记 failed。
+  // 对齐 taxonomy nonce_conflict 单值裁决（A-30：可重试、不死信——换新 gas
+  // nonce 重组装即自愈），broadcast() 捕获口仍先走回执探针裁决改判。
   if (/nonce too low|replacement transaction underpriced|already known/i.test(haystack)) {
     return {
       errorCode: "duplicate_transaction",
       message: `broadcaster reported a duplicate or already-used transaction nonce for the ${labels.label}`,
-      retryable: false
+      retryable: true
     };
   }
   if (/timeout|timed out|ETIMEDOUT|AbortError|ECONNRESET/i.test(haystack)) {

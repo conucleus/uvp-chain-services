@@ -5,6 +5,7 @@ import {
   compileZhixuOnchainHookPlan,
   displayIdentity,
   hashCanonical,
+  ONCHAIN_HOOK_PLAN_SCHEMA_VERSION,
   parseZhixuDefinition,
   toSolidityRegisterPlanArgs,
   type OnchainHookPlanArtifact,
@@ -133,7 +134,11 @@ export interface StoreZhixuDraftStore {
  * findProductSchemaByPlan（store 侧锚 schema.planHash，同版本激活的
  * join 口径——最新 product schema 的
  * onchainHookPlanArtifact），经 capabilityTablesOf 换装为链上词序。
- * 无产物/形状不符 → undefined（该 plan 两表留空，fail-closed）。
+ *
+ * 两态必须区分（A-17）：无 schema 行 → undefined（外部发布 plan 的合法
+ * 空词表，投影标 empty）；schema 行存在但产物缺失/形状不符 → 抛错走
+ * resolutionFailures（投影标 failed + mismatch 计数）——产物校验失败
+ * 不得伪装成空词表。
  *
  * 执行者候选集（UB-36②③）同数据流：产物侧 executorCandidates 字段
  *（commitPlan 的候选集清单，编译器产出该字段后即生效）存在且形状合法
@@ -144,7 +149,10 @@ export function createPlanCapabilityTablesResolver(
 ): (planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput | undefined> {
   return async (planId, planHash) => {
     const schema = await draftStore.findProductSchemaByPlan(planId, planHash);
-    const artifact = schema?.onchainHookPlanArtifact as
+    if (!schema) {
+      return undefined;
+    }
+    const artifact = schema.onchainHookPlanArtifact as
       | Parameters<typeof capabilityTablesOf>[0]
       | undefined;
     if (
@@ -152,7 +160,9 @@ export function createPlanCapabilityTablesResolver(
       !Array.isArray(artifact.selectorBindings) ||
       !Array.isArray(artifact.signalCapabilities)
     ) {
-      return undefined;
+      throw new Error(
+        `product schema for plan ${planId} carries no usable onchainHookPlanArtifact; a missing or malformed artifact is a validation failure, not an empty vocabulary (fail-closed)`
+      );
     }
     return {
       planId,
@@ -195,18 +205,28 @@ function executorCandidatesFromArtifact(
  * 语义 oracle 产物源：与词表富集同 join 口径（findProductSchemaByPlan 取
  * 最新 product schema 的 onchainHookPlanArtifact），但携带完整产物
  * （compiledHooks/dependencyIndex/admissions）——回放语义校验的单一入口。
- * 形状不可用 → undefined（该 plan 不可校验，不猜值）。
+ * 同 A-17 两态口径：无 schema 行 → undefined（外部 plan，不可校验）；
+ * schema 行存在但产物不可用 → 抛错（warn 留痕），不静默排除。
  */
 export function createSemanticOraclePlanResolver(
   draftStore: StoreZhixuDraftStore
 ): (planId: Hex, planHash: Hex) => Promise<SemanticOraclePlan | undefined> {
   return async (planId, planHash) => {
     const schema = await draftStore.findProductSchemaByPlan(planId, planHash);
-    return semanticOraclePlanFromArtifact(
+    if (!schema) {
+      return undefined;
+    }
+    const plan = semanticOraclePlanFromArtifact(
       planId,
-      schema?.zhixuId,
-      schema?.onchainHookPlanArtifact
+      schema.zhixuId,
+      schema.onchainHookPlanArtifact
     );
+    if (!plan) {
+      throw new Error(
+        `product schema for plan ${planId} carries an unusable onchainHookPlanArtifact for semantic verification; the plan is not silently excluded (fail-closed)`
+      );
+    }
+    return plan;
   };
 }
 
@@ -219,6 +239,13 @@ function semanticOraclePlanFromArtifact(
     return undefined;
   }
   const record = artifact as Record<string, unknown>;
+  // 消费处 schemaVersion 断言（A-39，单源常量）：schema 升级后的产物不得
+  // 被语义 oracle 按旧口径解释——错版本响亮抛错（warn 留痕），不静默排除。
+  if (record.schemaVersion !== ONCHAIN_HOOK_PLAN_SCHEMA_VERSION) {
+    throw new Error(
+      `onchainHookPlanArtifact for plan ${planId} carries schemaVersion ${String(record.schemaVersion)}; the semantic oracle consumer only interprets ${ONCHAIN_HOOK_PLAN_SCHEMA_VERSION}`
+    );
+  }
   const rawHooks = record.compiledHooks;
   const rawDependencyIndex = record.dependencyIndex;
   if (!Array.isArray(rawHooks) || rawHooks.length === 0) {
@@ -1220,6 +1247,33 @@ function validateProductSchemaBundle(
       message: "schemaVersion must be store-product-schema.v1",
       path: "schemaVersion"
     });
+  }
+  // 产物主体按 artifactHash 复算校验（含 compiledHooks/dependencyIndex 全
+  // canonical payload）：只比 planId/planHash/artifactHash 摘要字段拦不住
+  // "摘要不动、产物被改写"的静默退化（A-17）。编译器断言重算 planHash，
+  // 不匹配即响亮拒绝（error 级 issue 阻断审核提交门；词表闭集复用
+  // plan_identity_mismatch 码，path/message 指明产物主体失配）。
+  if (schema.onchainHookPlanArtifact != null) {
+    try {
+      assertOnchainHookPlanArtifact(schema.onchainHookPlanArtifact);
+      if (
+        schema.onchainHookPlanArtifact.planHash.toLowerCase() !== schema.artifactHash.toLowerCase()
+      ) {
+        issues.push({
+          code: "plan_identity_mismatch",
+          severity: "error",
+          message: "onchainHookPlanArtifact payload does not hash to the schema artifactHash (recomputed over compiledHooks and the full canonical payload)",
+          path: "onchainHookPlanArtifact"
+        });
+      }
+    } catch {
+      issues.push({
+        code: "plan_identity_mismatch",
+        severity: "error",
+        message: "onchainHookPlanArtifact failed canonical artifact validation (shape invalid or the recomputed planHash does not match the artifact's own planHash field)",
+        path: "onchainHookPlanArtifact"
+      });
+    }
   }
   if (expected) {
     for (const [field, actual, wanted] of [

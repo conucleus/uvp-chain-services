@@ -6,6 +6,7 @@ import { ProjectionError, type Address, type Hex } from "../../shared/types.js";
 import {
   ZERO_BYTES32,
   optionalBytes32Arg,
+  optionalBytes32ArrayArg,
   proofOf,
   provenanceOf,
   requiredAddressArg,
@@ -24,6 +25,7 @@ import {
 } from "./snapshot.js";
 import type { MutableStateMachinePlanProjection } from "./plan.js";
 import type {
+  StateMachineDerivedSignalProjection,
   StateMachineSignalAuthorizationProjection,
   StateMachineSignalProjection
 } from "./signal.js";
@@ -31,6 +33,7 @@ import type {
   MutableStateMachineHookProjection,
   StateMachineHookProjection,
   StateMachineStageExecutorOverlayProjection,
+  StateMachineStageMaterializationProjection,
   StateMachineStageResourceOverlayProjection
 } from "./stage.js";
 import type { MutableStateMachineTaskProjection, StateMachineTaskProjection } from "./task.js";
@@ -59,6 +62,10 @@ export interface StateMachineOrderTriggerLinkProjection {
  * 裁决信号 (approvalSourceId, approvalSignalId) 必须存在于父单；血缘只读
  * 本事件（fork 单的注册/事实流沿用 OrderRegistered/SignalSubmitted 事件
  * 口径，索引器把 fork 单当普通单重建）。
+ * B-03 事件自包含扩展：forkPayloadHash（fork 单号派生载荷）与
+ * replayedFactKeys（重放事实键清单，keccak256(abi.encode(sourceId,
+ * signalId))，与合约 _signalKey 同式）随事件广播——重放事实与新生事实凭
+ * 清单区分（projections/signal.ts 标记 signal.replayedFromFork）。
  */
 export interface StateMachineOrderForkProjection {
   readonly orderId: Hex;
@@ -66,6 +73,8 @@ export interface StateMachineOrderForkProjection {
   readonly approvalSourceId: Hex;
   readonly approvalSignalId: Hex;
   readonly initiator: Address;
+  readonly forkPayloadHash?: Hex;
+  readonly replayedFactKeys?: readonly Hex[];
   readonly forkedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
 }
@@ -84,6 +93,17 @@ export interface StateMachineOrderProjection {
   readonly creator?: Address;
   readonly authorizations: Readonly<Record<string, StateMachineSignalAuthorizationProjection>>;
   readonly signals: Readonly<Record<string, StateMachineSignalProjection>>;
+  /**
+   * 派生信号血缘（B-03，DerivedSignalSubmitted 全参数）：from 侧复合身份、
+   * relation 与载荷承诺按事实键落桶——此前投影丢弃多数参数，派生通道
+   * 授权面无法从事件流重建。
+   */
+  readonly derivedSignals: Readonly<Record<string, StateMachineDerivedSignalProjection>>;
+  /**
+   * 阶段物化出生触发（B-03，StageMaterialized 触发字段）：事件本就携带
+   * triggerHookId/sourceId/signalId，此前投影丢弃。
+   */
+  readonly stageMaterializations: Readonly<Record<string, StateMachineStageMaterializationProjection>>;
   readonly stageExecutorOverlays: Readonly<Record<string, StateMachineStageExecutorOverlayProjection>>;
   readonly stageResourceOverlays: Readonly<Record<string, StateMachineStageResourceOverlayProjection>>;
   readonly triggerLink?: StateMachineOrderTriggerLinkProjection;
@@ -114,6 +134,8 @@ export type MutableStateMachineOrderProjection = Writable<
     StateMachineOrderProjection,
     | "authorizations"
     | "signals"
+    | "derivedSignals"
+    | "stageMaterializations"
     | "stageExecutorOverlays"
     | "stageResourceOverlays"
     | "triggerLink"
@@ -126,6 +148,8 @@ export type MutableStateMachineOrderProjection = Writable<
 > & {
   authorizations: Record<string, StateMachineSignalAuthorizationProjection>;
   signals: Record<string, StateMachineSignalProjection>;
+  derivedSignals: Record<string, StateMachineDerivedSignalProjection>;
+  stageMaterializations: Record<string, StateMachineStageMaterializationProjection>;
   stageExecutorOverlays: Record<string, StateMachineStageExecutorOverlayProjection>;
   stageResourceOverlays: Record<string, StateMachineStageResourceOverlayProjection>;
   triggerLink?: StateMachineOrderTriggerLinkProjection;
@@ -436,6 +460,10 @@ export function applyOrderForked(
   const approvalSourceId = requiredBytes32Arg(event, "approvalSourceId");
   const approvalSignalId = requiredBytes32Arg(event, "approvalSignalId");
   const initiator = requiredAddressArg(event, "initiator");
+  // B-03 事件自包含字段（旧事件面缺省）：fork 单号派生载荷与重放事实键
+  // 清单——前者支撑血缘链重算，后者区分重放/新生事实。
+  const forkPayloadHash = optionalBytes32Arg(event, "forkPayloadHash");
+  const replayedFactKeys = optionalBytes32ArrayArg(event, "replayedFactKeys");
   const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
   const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
   const order = ensureStateMachineOrder(
@@ -458,6 +486,8 @@ export function applyOrderForked(
     approvalSourceId,
     approvalSignalId,
     initiator,
+    ...(forkPayloadHash !== undefined ? { forkPayloadHash } : {}),
+    ...(replayedFactKeys !== undefined ? { replayedFactKeys } : {}),
     forkedAt: provenanceOf(event),
     proof,
   };
@@ -551,6 +581,8 @@ export function ensureStateMachineOrder(
     status: planId ? "registered" : "unknown",
     authorizations: {},
     signals: {},
+    derivedSignals: {},
+    stageMaterializations: {},
     stageExecutorOverlays: {},
     stageResourceOverlays: {},
     hooks: {},

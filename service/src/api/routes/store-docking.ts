@@ -1,4 +1,4 @@
-import { decodePathParameter, type ApiResponse } from "../route-context.js";
+import { decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {
   canAccessDockingSession,
@@ -164,6 +164,9 @@ export function createStoreDockingRouteModule(): RouteModule {
           }
         }
       } catch (error) {
+        if (error instanceof InvalidPathParameterError) {
+          return invalidPathParameterResponse();
+        }
         if (error instanceof StoreDockingServiceError) {
           return {
             status: error.status,

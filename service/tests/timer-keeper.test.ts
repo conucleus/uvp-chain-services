@@ -31,7 +31,8 @@ describe("timer keeper", () => {
       stateMachineAddress: contractAddress,
       chainId,
       submitter: recordingSubmitter(poked),
-      now: () => new Date(1_699_999_500_000)
+      now: () => new Date(1_699_999_500_000),
+      chainClock: chainClockAt(() => 1_699_999_500)
     });
     expect(await future.runOnce()).toMatchObject({ pokeCandidates: 0, submitted: 0 });
     expect(poked).toEqual([]);
@@ -44,7 +45,8 @@ describe("timer keeper", () => {
       stateMachineAddress: contractAddress,
       chainId,
       submitter: recordingSubmitter(poked),
-      now: () => new Date(1_700_001_000_000)
+      now: () => new Date(1_700_001_000_000),
+      chainClock: chainClockAt(() => 1_700_001_000)
     });
     expect(await due.runOnce()).toMatchObject({ pokeCandidates: 1, submitted: 1 });
     expect(poked).toEqual([
@@ -58,7 +60,8 @@ describe("timer keeper", () => {
       stateMachineAddress: contractAddress,
       chainId,
       submitter: recordingSubmitter(poked),
-      now: () => new Date(1_700_001_000_000)
+      now: () => new Date(1_700_001_000_000),
+      chainClock: chainClockAt(() => 1_700_001_000)
     });
     expect(await unfinalized.runOnce()).toMatchObject({ pokeCandidates: 0, submitted: 0 });
   });
@@ -75,7 +78,8 @@ describe("timer keeper", () => {
       stateMachineAddress: contractAddress,
       chainId,
       submitter: recordingSubmitter(poked),
-      now: () => new Date(nowMs)
+      now: () => new Date(nowMs),
+      chainClock: chainClockAt(() => Math.floor(nowMs / 1000))
     });
 
     expect(await worker.runOnce()).toMatchObject({ pokeCandidates: 1, submitted: 1 });
@@ -124,7 +128,8 @@ describe("timer keeper", () => {
         }
       },
       logger,
-      now: () => new Date(nowMs)
+      now: () => new Date(nowMs),
+      chainClock: chainClockAt(() => Math.floor(nowMs / 1000))
     });
 
     const first = await worker.runOnce();
@@ -159,7 +164,8 @@ describe("timer keeper", () => {
         }
       },
       logger,
-      now: () => new Date(1_700_001_000_000)
+      now: () => new Date(1_700_001_000_000),
+      chainClock: chainClockAt(() => 1_700_001_000)
     });
 
     const first = await worker.runOnce();
@@ -191,7 +197,8 @@ describe("timer keeper", () => {
         }
       },
       logger,
-      now: () => new Date(nowMs)
+      now: () => new Date(nowMs),
+      chainClock: chainClockAt(() => Math.floor(nowMs / 1000))
     });
 
     // 前两个窗口：只有 skipped 留痕，无 error。
@@ -258,7 +265,8 @@ describe("timer keeper", () => {
           throw new Error("broadcast failed: keeper gas role unavailable");
         }
       },
-      now: () => new Date(1_700_001_000_000)
+      now: () => new Date(1_700_001_000_000),
+      chainClock: chainClockAt(() => 1_700_001_000)
     });
 
     const summary = await worker.runOnce();
@@ -279,7 +287,8 @@ describe("timer keeper", () => {
       stateMachineAddress: contractAddress,
       chainId,
       submitter: recordingSubmitter(poked),
-      now: () => new Date(1_700_001_000_000)
+      now: () => new Date(1_700_001_000_000),
+      chainClock: chainClockAt(() => 1_700_001_000)
     });
 
     const summary = await worker.runOnce();
@@ -468,7 +477,8 @@ describe("timer keeper", () => {
         }
       },
       logger,
-      now: () => new Date(nowMs)
+      now: () => new Date(nowMs),
+      chainClock: chainClockAt(() => Math.floor(nowMs / 1000))
     });
     const first = await revertedWorker.runOnce();
     expect(first).toMatchObject({ attempted: 1, submitted: 0, receiptReverted: 1, receiptUnknown: 0 });
@@ -491,7 +501,8 @@ describe("timer keeper", () => {
         pokeTimer: async () => ({ txHash: "0x" + "ab".repeat(32) as Hex, receipt: "unknown" })
       },
       logger,
-      now: () => new Date(nowMs)
+      now: () => new Date(nowMs),
+      chainClock: chainClockAt(() => Math.floor(nowMs / 1000))
     });
     const unknown = await unknownWorker.runOnce();
     expect(unknown).toMatchObject({ attempted: 1, submitted: 1, receiptUnknown: 1, receiptReverted: 0 });
@@ -521,6 +532,11 @@ function keeperConfig() {
     redeliveryWindowMs: 120_000,
     privateKeyEnv: "UVP_TIMER_KEEPER_PRIVATE_KEY"
   };
+}
+
+/** 链时钟桩：到期判定已改为链时钟（latest block timestamp）。 */
+function chainClockAt(seconds: () => number) {
+  return { latestBlockTimestampSeconds: async (): Promise<number> => seconds() };
 }
 
 function recordingSubmitter(poked: TimerPokeTarget[]): TimerKeeperSubmitter {

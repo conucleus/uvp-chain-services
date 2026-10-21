@@ -9,6 +9,7 @@ import { executorCandidatesRootOf } from "../../submissions/capability-proofs.js
 import type { ChainEvent } from "../events.js";
 import { ProjectionError, type Address, type Hex } from "../../shared/types.js";
 import {
+  optionalAddressArg,
   optionalBytes32Arg,
   proofOf,
   provenanceOf,
@@ -58,6 +59,12 @@ export interface StateMachinePlanProjection {
    * 重放方从编译产物富集（同两表模式：事件只带 root）。
    */
   readonly executorCandidatesRoot?: Hex;
+  /**
+   * 出生授权人（B-03，PlanCommitted 尾参）：outside 出生闸的授权地址随
+   * commit 事件广播，授权面重建不依赖 planBirthAuthorizer view。
+   * 旧事件面（无该字段的历史流）缺省。
+   */
+  readonly birthAuthorizer?: Address;
   readonly committedAt?: ProjectionProvenance;
   readonly finalizedAt?: ProjectionProvenance;
   readonly selectorBindings: readonly StateMachineStageSelectorBindingProjection[];
@@ -186,6 +193,14 @@ export function applyPlanCommitted(
     ...(optionalBytes32Arg(event, "executorCandidatesRoot")
       ? { executorCandidatesRoot: optionalBytes32Arg(event, "executorCandidatesRoot")! }
       : {}),
+    // B-03：出生授权人随 commit 事件广播（尾参）；旧事件面按可选读取。
+    // 零字地址 = 计划未声明出生授权面，归一为缺省。
+    ...((() => {
+      const birthAuthorizer = optionalAddressArg(event, "birthAuthorizer");
+      return birthAuthorizer && birthAuthorizer !== "0x0000000000000000000000000000000000000000"
+        ? { birthAuthorizer }
+        : {};
+    })()),
     committedAt: provenanceOf(event),
     selectorBindings: [],
     signalCapabilities: [],
@@ -374,13 +389,13 @@ export function findPlanForOrder(
  *   任何 plan 的词表，但逐条注册的 gas/事件成本正是链上只存 root 所规避
  *   的对象。链上闸（词表内事实携证验证）不受影响，只是服务端预检/造证
  *   退化为全零结构。
- * - 本轮 resolver 故障，或产物表重算 root ≠ 链上 root（或产物 planHash
- *   不匹配）→ 两表留空、富集态置 failed（后者另计
- *   capabilityEnrichmentMismatchCount，索引器消费为告警日志），不 crash
- *   indexer。三态标记是"解析故障 ≠ 无词表"的快照载体：failed 态下词表
- *   状态未知，提交/触发车道拒绝造证（capability_tables_unavailable），
- *   不得混入 empty 的全零降级路径——把不一致/未知的词表当"确认无词表"
- *   会让下游造出链上必拒的证明。
+ * - 本轮 resolver 故障（含 schema 行存在但产物缺失/校验失败，A-17），或
+ *   产物表重算 root ≠ 链上 root（或产物 planHash 不匹配）→ 两表留空、
+ *   富集态置 failed（两类同计 capabilityEnrichmentMismatchCount，索引器
+ *   消费为告警日志），不 crash indexer。三态标记是"解析故障 ≠ 无词表"的
+ *   快照载体：failed 态下词表状态未知，提交/触发车道拒绝造证
+ *   （capability_tables_unavailable），不得混入 empty 的全零降级路径——
+ *   把不一致/未知的词表当"确认无词表"会让下游造出链上必拒的证明。
  *
  * 幂等：已富集的计划直接跳过（finalize 与 register 各跑一次）。
  */
@@ -396,20 +411,25 @@ function enrichPlanCapabilityTables(
 ): void {
   const source = state.capabilityTables?.get(plan.planId.toLowerCase());
   enrichExecutorCandidates(plan, source, state, options);
-  if (plan.selectorBindings.length > 0 || plan.signalCapabilities.length > 0) {
-    return;
-  }
-  if (!source) {
-    plan.capabilityEnrichment = state.capabilityResolutionFailures?.has(plan.planId.toLowerCase())
-      ? "failed"
-      : "empty";
-    return;
-  }
   const countMismatch = (): void => {
     if (options.countMismatch) {
       state.diagnostics && (state.diagnostics.capabilityEnrichmentMismatchCount += 1);
     }
   };
+  if (plan.selectorBindings.length > 0 || plan.signalCapabilities.length > 0) {
+    return;
+  }
+  if (!source) {
+    if (state.capabilityResolutionFailures?.has(plan.planId.toLowerCase())) {
+      // 解析故障（含 schema 行存在但产物缺失/校验失败，A-17）：failed 态
+      // + mismatch 计数——产物缺失/不可用不得伪装成合法空词表（empty）。
+      countMismatch();
+      plan.capabilityEnrichment = "failed";
+      return;
+    }
+    plan.capabilityEnrichment = "empty";
+    return;
+  }
   if (source.planHash && source.planHash.toLowerCase() !== plan.planHash.toLowerCase()) {
     // 产物锚定的 planHash 与链上 plan 不一致：同 planId 不同版本草稿，
     // 富集错表会造出对不上 root 的证明。

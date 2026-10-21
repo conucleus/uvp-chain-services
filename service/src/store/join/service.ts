@@ -27,7 +27,11 @@ export interface StoreJoinServiceOptions {
   readonly listingGate?: {
     readonly getListingForPlan: (planId: Hex) => Promise<{
       readonly status: "imported" | "public" | "rejected" | "delisted";
-      readonly anchorVerification: { readonly status: "consistent" | "conflict" | "pending_indexing" };
+      readonly anchorVerification: {
+        readonly status: "consistent" | "conflict" | "pending_indexing";
+        /** 配置了链直读但读取失败：与上架公开门同口径 fail-closed。 */
+        readonly chainReadFailed?: boolean;
+      };
     } | undefined>;
   };
   /** publisher/委托核验（由装修域提供同一张权限根表）。 */
@@ -773,15 +777,37 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
    * imported(待审)/rejected/delisted 一律拦截，否则前端被抑制的
    * 入口可直调 API 绕过。无 listing（未走上架流）时按链投影可查
    * 即放行——上架是 Store 经营动作，不是链上事实的前置。
+   * listing 读取失败（存储瞬断/脏枚举抛错）与配置了链直读但读失败
+   * 均不放行（fail-closed）：catch 吞错放行会把上架门变成摆设。
    */
   async function assertJoinEntryAllowedNow(planId: Hex): Promise<void> {
     const gate = options.listingGate;
     if (!gate) {
       return;
     }
-    const listing = await gate.getListingForPlan(planId).catch(() => undefined);
+    let listing: Awaited<ReturnType<typeof gate.getListingForPlan>> | undefined;
+    try {
+      listing = await gate.getListingForPlan(planId);
+    } catch {
+      // cause 不回显进响应 details（存储内部消息不出 API 面），503 +
+      // listing_gate_unavailable 已足够定位。
+      throw new StoreJoinServiceError(
+        503,
+        "listing_gate_unavailable",
+        "the join listing gate could not read the listing state; the join entry stays closed until the listing read recovers",
+        { planId }
+      );
+    }
     if (!listing) {
       return;
+    }
+    if (listing.anchorVerification.chainReadFailed === true) {
+      throw new StoreJoinServiceError(
+        409,
+        "join_entry_suppressed",
+        "listing chain read is configured but failing; the join entry is suppressed until the chain read recovers",
+        { planId, listingStatus: listing.status }
+      );
     }
     if (listing.status !== "public" || listing.anchorVerification.status === "conflict") {
       throw new StoreJoinServiceError(
@@ -799,17 +825,27 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
 
   async function resolveZhixuForPlan(planId: Hex): Promise<{ readonly zhixuId: string; readonly detail: Awaited<ReturnType<ProductService["getZhixu"]>> }> {
     const summaries = await options.productService.listZhixu();
-    const summary = summaries.find((candidate) =>
+    const matches = summaries.filter((candidate) =>
       candidate.planPublication.planId.toLowerCase() === planId.toLowerCase()
     );
-    if (!summary) {
+    if (matches.length === 0) {
       throw new StoreJoinServiceError(409, "zhixu_not_found", "no catalog zhixu matches this planId");
     }
-    const detail = await options.productService.getZhixu(summary.zhixuId);
+    // 同 planId 多命中（跨部署）时槽位/身份解释无法唯一归位——与 listings
+    // 的 plan_projection_ambiguous 同口径 fail-closed，不取首个匹配。
+    if (matches.length > 1) {
+      throw new StoreJoinServiceError(
+        409,
+        "plan_projection_ambiguous",
+        "planId matches multiple zhixu catalog entries; the join target cannot be attributed uniquely",
+        { planId, matches: matches.length }
+      );
+    }
+    const detail = await options.productService.getZhixu(matches[0]!.zhixuId);
     if (!detail) {
       throw new StoreJoinServiceError(409, "zhixu_not_found", "zhixu detail is not resolvable for this planId");
     }
-    return { zhixuId: summary.zhixuId, detail: detail as NonNullable<typeof detail> };
+    return { zhixuId: matches[0]!.zhixuId, detail: detail as NonNullable<typeof detail> };
   }
 
   async function appendEvent(

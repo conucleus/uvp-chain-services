@@ -27,8 +27,10 @@ export function createProductBffRouteModule(options: {
   return {
     async handle(request, context) {
       if (request.method === "POST" && request.pathname === "/product/order-drafts") {
-        const input = parseCreateDraftBody(request.body);
+        // body 解析在 handler 内执行：ProductBffError（如 immutable_field）
+        // 必须落进 handleProductBffRequest 的 400 映射，而不是外抛成 500。
         return handleProductBffRequest(async () => {
+          const input = parseCreateDraftBody(request.body);
           // createdBy 不取自 body 自报（可冒充他人建单）——有会话锚定
           // 钱包时记录锚定地址，无身份时保留匿名建单兼容路径；但匿名
           // 草稿的修改/邀请/参与者读取全部 fail-closed（见下）。

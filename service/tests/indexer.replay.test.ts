@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { encodeAbiParameters, keccak256 } from "viem";
 import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import { createApiRouter } from "../src/api/routes.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
@@ -81,6 +82,17 @@ describe("indexer projection replay", () => {
     expect(order?.planHash).toBe(planHash);
     expect(order?.currentStage).toBe(stageId);
     expect(order?.signals[`${sourceId}:${signalId}`]?.payloadHash).toBe(payloadHash);
+    // B-03：per-stage 归属随 SignalSubmitted 事件重建。
+    expect(order?.signals[`${sourceId}:${signalId}`]?.factStageId).toBe(stageId);
+    // B-03：状态迁移前态随 HookStatusChanged 事件重建。
+    expect(order?.hooks[hookId]?.previousStatus).toBe("waiting");
+    // B-03：阶段物化出生触发随 StageMaterialized 事件重建。
+    expect(order?.stageMaterializations[stageId]).toMatchObject({
+      stageId,
+      triggerHookId: hookId,
+      sourceId,
+      signalId
+    });
     expect(order?.hooks[hookId]?.status).toBe("ready");
     expect(order?.tasks[taskId]?.status).toBe("ready");
     expect(order?.timeline.map((event) => event.eventName)).toContain("SignalSubmitted");
@@ -93,6 +105,123 @@ describe("indexer projection replay", () => {
       "StageMaterialized"
     ]));
     expect(order?.proof.some((proof) => proof.eventName === "HookReady" && proof.transactionHash)).toBe(true);
+  });
+
+  it("rebuilds B-03 self-contained fields: fork lineage, derived params, and governance", () => {
+    const forkedOrderId = "0x0000000000000000000000000000000000000000000000000000000000000f0f";
+    const newSourceId = "0x0000000000000000000000000000000000000000000000000000000000000606";
+    const newSignalId = "0x0000000000000000000000000000000000000000000000000000000000000707";
+    const forkPayloadHash = "0x2222222222222222222222222222222222222222222222222222222222222222";
+    // 与合约 _signalKey 同式：keccak256(abi.encode(sourceId, signalId))。
+    const replayedFactKey = keccak256(
+      encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }], [sourceId, signalId])
+    );
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanCommitted", {
+        planId,
+        planHash,
+        publisher: signer,
+        hooksHash: bytes32Hex("9001"),
+        capabilitiesRoot: emptyHash,
+        hookCount: 1n,
+        dockRoutesRoot: bytes32Hex("9003"),
+        dockInterfaceRoot: bytes32Hex("9004"),
+        birthAuthorizer: signer
+      }),
+      // 父单与裁决事实。
+      chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
+      chainEvent(3n, 0, "SignalSubmitted", {
+        orderId: stateMachineOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signer,
+        factStageId: stageId
+      }),
+      // fork 出生：OrderForked 携带派生载荷与重放事实键清单。
+      chainEvent(4n, 0, "OrderRegistered", { orderId: forkedOrderId, planId }),
+      chainEvent(4n, 1, "OrderForked", {
+        planId,
+        orderId: forkedOrderId,
+        parentOrderId: stateMachineOrderId,
+        approvalSourceId: sourceId,
+        approvalSignalId: signalId,
+        initiator: signer,
+        forkPayloadHash,
+        replayedFactKeys: [replayedFactKey]
+      }),
+      // 重放事实（键在清单内）与新生事实（键在清单外）。
+      chainEvent(4n, 2, "SignalSubmitted", {
+        orderId: forkedOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signer,
+        factStageId: stageId
+      }),
+      chainEvent(4n, 3, "SignalSubmitted", {
+        orderId: forkedOrderId,
+        sourceId: newSourceId,
+        signalId: newSignalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: buyer,
+        factStageId: emptyHash
+      }),
+      // 派生信号全参数。
+      chainEvent(5n, 0, "DerivedSignalSubmitted", {
+        targetOrderId: forkedOrderId,
+        targetPlanId: planId,
+        fromPlanId: planId,
+        fromOrderId: stateMachineOrderId,
+        fromStageId: stageId,
+        targetSourceId: sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey,
+        submitter: signer,
+        relation: 1n
+      }),
+      // 治理面：owner 轮换与模块集冻结。
+      chainEvent(6n, 0, "OwnershipTransferred", { previousOwner: signer, newOwner: buyer }),
+      chainEvent(7n, 0, "StateMachineModulesFrozen", {
+        moduleSetHash: "0x3333333333333333333333333333333333333333333333333333333333333333"
+      })
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+    const forkKey = stateMachineScopedKey(31337, contractAddress, planId, forkedOrderId);
+    const forkOrder = snapshot.stateMachineOrders[forkKey];
+    const governanceKey = `31337:${contractAddress}`;
+
+    // fork 血缘：派生载荷与重放清单随事件重建。
+    expect(forkOrder?.forkLineage).toMatchObject({
+      parentOrderId: stateMachineOrderId,
+      forkPayloadHash,
+      replayedFactKeys: [replayedFactKey]
+    });
+    // 重放/新生可区分：清单内事实标记 replayedFromFork，清单外不标记。
+    expect(forkOrder?.signals[`${sourceId}:${signalId}`]?.replayedFromFork).toBe(true);
+    expect(forkOrder?.signals[`${newSourceId}:${newSignalId}`]?.replayedFromFork).toBeUndefined();
+    // 派生信号全参数（from 复合身份 + relation）按事实键落桶。
+    expect(forkOrder?.derivedSignals[`${sourceId}:${signalId}`]).toMatchObject({
+      fromPlanId: planId,
+      fromOrderId: stateMachineOrderId,
+      fromStageId: stageId,
+      targetSourceId: sourceId,
+      payloadHash,
+      relation: "1"
+    });
+    // 治理状态：owner 轮换与冻结面可从事件流重建。
+    expect(snapshot.contractGovernance[governanceKey]).toMatchObject({
+      owner: buyer,
+      modulesFrozen: true
+    });
+    // 出生授权人随 PlanCommitted 事件重建（不依赖 planBirthAuthorizer view）。
+    expect(snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)]?.birthAuthorizer)
+      .toBe(signer);
   });
 
   it("replays order-level signal submitter authorizations and assigns matching HookReady tasks", async () => {
@@ -449,13 +578,15 @@ describe("indexer projection replay", () => {
       }),
       chainEvent(3n, 0, "DerivedSignalSubmitted", {
         fromOrderId: bytes32Hex("7101"),
+        fromPlanId: planId,
         fromStageId: selectorStageId,
         targetOrderId: stateMachineOrderId,
         targetSourceId: sourceId,
         signalId,
         payloadHash,
         idempotencyKey,
-        submitter: signer
+        submitter: signer,
+        relation: 0n
       })
     ];
 
@@ -734,13 +865,16 @@ describe("indexer projection replay", () => {
       }, moduleAddress),
       chainEvent(7n, 0, "DerivedSignalSubmitted", {
         fromOrderId: stateMachineOrderId,
+        fromPlanId: planId,
         targetOrderId: stateMachineOrderId,
+        targetPlanId: planId,
         signalId,
         fromStageId: stageId,
         targetSourceId: sourceId,
         payloadHash,
         idempotencyKey,
-        submitter: signer
+        submitter: signer,
+        relation: 0n
       }, moduleAddress)
     ];
 
@@ -909,6 +1043,90 @@ describe("indexer projection replay", () => {
     const dockKey = stateMachineScopedKey(31337, contractAddress, dockInstanceId);
     expect(snapshot.stateMachineDocks[dockKey]).toMatchObject({ mode: "new", opener: signer });
     expect(snapshot.stateMachineDocksByTargetOrder[childOrderKey]).toEqual([dockKey]);
+  });
+
+  it("derives per-order longest dock chain depth from the dock event graph (B-02 edge ledger)", () => {
+    // 4.7 起链上不再维护路径深度（dockEdgeCountOfOrder 是每单总挂接边数）；
+    // 订单级「最长 dock 链路」由索引器从事件图派生：P0.o → P1.t1（深度 1），
+    // P1.t1 → P2.t2（深度 2）；N:1 兄弟边（P0.o' → P2.t2）不抬最长路径。
+    const moduleAddress = "0x6666666666666666666666666666666666666666";
+    const planB = bytes32Hex("941");
+    const planC = bytes32Hex("942");
+    const orderRoot = bytes32Hex("943");
+    const orderSibling = bytes32Hex("944");
+    const orderMid = bytes32Hex("945");
+    const orderLeaf = bytes32Hex("946");
+    const dockInstanceRoot = bytes32Hex("947");
+    const dockInstanceChain = bytes32Hex("948");
+    const dockInstanceSibling = bytes32Hex("949");
+    const moduleSet = chainEvent(1n, 0, "StateMachineModuleSet", {
+      moduleId: bytes32Text("uvp.module.docking.v1"),
+      previousModule: "0x0000000000000000000000000000000000000000",
+      newModule: moduleAddress
+    });
+    const events: readonly ChainEvent[] = [
+      moduleSet,
+      chainEvent(2n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
+      chainEvent(3n, 0, "PlanRegistered", { planId: planB, planHash: bytes32Hex("94a"), hookCount: 1n }),
+      chainEvent(4n, 0, "PlanRegistered", { planId: planC, planHash: bytes32Hex("94b"), hookCount: 1n }),
+      chainEvent(5n, 0, "OrderRegistered", { orderId: orderRoot, planId }),
+      chainEvent(6n, 0, "OrderRegistered", { orderId: orderSibling, planId }),
+      chainEvent(7n, 0, "DockOpened", {
+        dockInstanceId: dockInstanceRoot,
+        localOrderId: orderRoot,
+        linkedOrderId: orderMid,
+        interfaceNameId: bytes32Text("production_service"),
+        localPlanId: planId,
+        targetPlanId: planB,
+        routeId: bytes32Hex("94c"),
+        routeHash: planHash,
+        depth: 1n,
+        opener: signer
+      }, moduleAddress),
+      chainEvent(8n, 0, "DockAttached", {
+        dockInstanceId: dockInstanceChain,
+        localOrderId: orderMid,
+        linkedOrderId: orderLeaf,
+        interfaceNameId: bytes32Text("production_service"),
+        localPlanId: planB,
+        targetPlanId: planC,
+        routeId: bytes32Hex("94d"),
+        routeHash: planHash,
+        depth: 2n,
+        attacher: signer
+      }, moduleAddress),
+      // N:1 兄弟边：从零入边的根单直挂叶子——事件 depth word 是父边数+1，
+      // 但不抬升叶子的最长路径（已为 2）。
+      chainEvent(9n, 0, "DockAttached", {
+        dockInstanceId: dockInstanceSibling,
+        localOrderId: orderSibling,
+        linkedOrderId: orderLeaf,
+        interfaceNameId: bytes32Text("production_service"),
+        localPlanId: planId,
+        targetPlanId: planC,
+        routeId: bytes32Hex("94e"),
+        routeHash: planHash,
+        depth: 1n,
+        attacher: signer
+      }, moduleAddress)
+    ];
+
+    const snapshot = rebuildOrderProjections(events);
+
+    const midKey = stateMachineScopedKey(31337, contractAddress, planB, orderMid);
+    const leafKey = stateMachineScopedKey(31337, contractAddress, planC, orderLeaf);
+    expect(snapshot.stateMachineOrderDockChainDepth[midKey]).toBe(1);
+    expect(snapshot.stateMachineOrderDockChainDepth[leafKey]).toBe(2);
+    // 无入边订单不进派生索引；reorg 逐出边后派生值随快照重算消失。
+    expect(snapshot.stateMachineOrderDockChainDepth[
+      stateMachineScopedKey(31337, contractAddress, planId, orderRoot)
+    ]).toBeUndefined();
+    const rolled = rebuildOrderProjections([
+      ...events,
+      { ...events[6]!, removed: true }
+    ]);
+    expect(rolled.stateMachineOrderDockChainDepth[midKey]).toBeUndefined();
+    expect(rolled.stateMachineOrderDockChainDepth[leafKey]).toBe(1);
   });
 
   it("drops an attached dock and its target-order index entry when the birth log is reorged away", () => {
@@ -2928,8 +3146,9 @@ describe("indexer projection replay", () => {
 
     expect(plan?.signalCapabilities).toHaveLength(0);
     expect(plan?.selectorBindings).toHaveLength(0);
-    // 故障不是 mismatch（产物没读到，无从断言），也不得混入 empty。
-    expect(snapshot.capabilityEnrichmentMismatchCount).toBe(0);
+    // 解析故障（含产物缺失/校验失败，A-17）同计 mismatch 使其在诊断面
+    // 可观测，也不得混入 empty。
+    expect(snapshot.capabilityEnrichmentMismatchCount).toBe(1);
     expect(plan?.capabilityEnrichment).toBe("failed");
   });
 
@@ -3841,7 +4060,8 @@ function stateMachineEvents(
       signalId,
       payloadHash,
       idempotencyKey,
-      submitter: signer
+      submitter: signer,
+      factStageId: stageId
     }, stateMachineAddress),
     chainEvent(blockOffset + 3n, 1, "OrderMaterialized", {
       orderId,

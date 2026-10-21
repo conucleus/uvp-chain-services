@@ -9,7 +9,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import type { ChainServicesConfig } from "../config/index.js";
 import { hashGovernanceCanonicalJson } from "./hashing.js";
-import { ConfigError, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
+import { ConfigError, consoleLogger, normalizeAddress, normalizeBytes32, type Address, type Hex, type Logger } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import {
   isDuplicateTransactionReport,
@@ -51,6 +51,8 @@ export interface GovernancePublicClient {
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
   } | undefined | null>;
+  /** 确认深度核验（viem publicClient 自带同签名）。 */
+  getBlockNumber?(parameters?: undefined): Promise<bigint>;
 }
 
 export interface GovernanceWalletClient {
@@ -73,6 +75,8 @@ export interface GovernanceBroadcasterAdapterOptions {
   readonly allowedOperators?: readonly Address[];
   readonly publicClient?: GovernancePublicClient;
   readonly walletClient?: GovernanceWalletClient;
+  /** duplicate 探针异常的响亮上报出口；缺省静默（裁决仍按 receipt_unknown）。 */
+  readonly logger?: Logger;
 }
 
 export interface GovernanceChainAdapter {
@@ -104,7 +108,10 @@ function simulatedBroadcast(request: unknown): GovernanceBroadcastResultDTO {
   };
 }
 
-export function createConfiguredGovernanceChainAdapter(config: ChainServicesConfig): GovernanceChainAdapter {
+export function createConfiguredGovernanceChainAdapter(
+  config: ChainServicesConfig,
+  options: { readonly logger?: Logger } = {}
+): GovernanceChainAdapter {
   if (!config.governance.broadcastEnabled) {
     // simulated 适配器只允许 local：任何非 local 环境回落 simulated 意味着
     // 治理写操作"成功"返回却永不上链（静默假广播）。
@@ -142,7 +149,8 @@ export function createConfiguredGovernanceChainAdapter(config: ChainServicesConf
     contractAddress,
     privateKey: config.governance.signerPrivateKey,
     txConfirmations: config.governance.txConfirmations,
-    allowedOperators: config.governance.allowedOperators
+    allowedOperators: config.governance.allowedOperators,
+    ...(options.logger ? { logger: options.logger } : {})
   });
 }
 
@@ -194,6 +202,7 @@ export function createGovernanceBroadcasterAdapter(
     chain,
     transport: http(options.rpcUrl)
   }) as GovernanceWalletClient;
+  const logger = options.logger ?? consoleLogger;
 
   async function broadcast(
     request: IdentityRegistrationRequestDTO | IdentityRevocationRequestDTO,
@@ -270,7 +279,7 @@ export function createGovernanceBroadcasterAdapter(
       // 走回执探针四态裁决（机制单源 shared/broadcast，与 submissions/
       // stage-patches 的捕获口同口径），不得按默认 retryable 落台账。
       if (isDuplicateTransactionReport(governanceErrorHaystack(error))) {
-        return adjudicatedDuplicateGovernanceBroadcast(error, publicClient, signer);
+        return adjudicatedDuplicateGovernanceBroadcast(error, publicClient, signer, options.txConfirmations, logger);
       }
       return {
         ...failedBroadcast({
@@ -381,19 +390,22 @@ function failedBroadcast(input: {
 }
 
 /**
- * duplicate-transaction 车道的回执探针裁决映射：探到 success 回执按
- * confirmed 落账（交易已上链，不重复登记）；reverted 终态
- * （transaction_reverted，nonce 已被该失败交易消费）；回执未知可重试并
- * 保留候选哈希（transaction_receipt_unknown）；无可探哈希的 nonce 竞争
- * 可重组装重发（duplicate_transaction）。错误码沿用词表已有车道码。
+ * duplicate-transaction 车道的回执探针裁决映射：探到 success 回执且已达
+ * txConfirmations 确认深度才按 confirmed 落账（0-conf 记 confirmed 后
+ * reorg 不复检）；reverted 终态（transaction_reverted，nonce 已被该失败
+ * 交易消费）；回执未知/未达深度可重试并保留候选哈希
+ * （transaction_receipt_unknown）；无可探哈希的 nonce 竞争可重组装重发
+ * （duplicate_transaction）。错误码沿用词表已有车道码。
  */
 async function adjudicatedDuplicateGovernanceBroadcast(
   error: unknown,
   publicClient: GovernancePublicClient,
-  signer: Address
+  signer: Address,
+  txConfirmations: number,
+  logger: Logger
 ): Promise<GovernanceBroadcastResultDTO> {
   const getReceipt = publicClient.getTransactionReceipt
-    ? (txHash: Hex) => publicClient.getTransactionReceipt!({ hash: txHash })
+    ? (txHash: Hex) => probeDuplicateReceiptAtDepth(publicClient, txHash, txConfirmations)
     : undefined;
   return resolveDuplicateTransactionOutcome(
     error,
@@ -428,8 +440,40 @@ async function adjudicatedDuplicateGovernanceBroadcast(
         retryable: true,
         signer
       })
+    },
+    (txHash, probeError) => {
+      // 探针异常不得被吞成无声的 receipt_unknown：响亮留痕（裁决仍按
+      // 可重试未裁决处理）。
+      logger.warn(
+        "governance duplicate-transaction receipt probe failed; the candidate hash stays retryable",
+        { txHash, message: redactErrorMessage(probeError) }
+      );
     }
   );
+}
+
+/**
+ * 达确认深度的 success 回执才放行：未达 txConfirmations 深度（或深度
+ * 不可核验——缺 getBlockNumber/块号）按未裁决返回 undefined，交
+ * receipt_unknown 车道下轮重探，不得 0-conf 记 confirmed。
+ */
+async function probeDuplicateReceiptAtDepth(
+  publicClient: GovernancePublicClient,
+  txHash: Hex,
+  txConfirmations: number
+): Promise<{ readonly status?: "success" | "reverted" | string; readonly blockNumber?: bigint } | undefined | null> {
+  const receipt = await publicClient.getTransactionReceipt!({ hash: txHash });
+  if (!receipt || receipt.status !== "success" || !publicClient.getBlockNumber) {
+    return receipt;
+  }
+  if (receipt.blockNumber === undefined) {
+    return undefined;
+  }
+  const latest = await publicClient.getBlockNumber();
+  if (latest - receipt.blockNumber + 1n < BigInt(Math.max(txConfirmations, 1))) {
+    return undefined;
+  }
+  return receipt;
 }
 
 function identityRegistryAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {

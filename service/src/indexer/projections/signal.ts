@@ -4,10 +4,13 @@
 // 授权（本文件投影的 SignalSubmitterAuthorized 事件流即其完整重建源）。
 import type { ChainEvent } from "../events.js";
 import type { Address, Hex } from "../../shared/types.js";
+import { encodeAbiParameters, keccak256 } from "viem";
 import {
   compareProofEvents,
   optionalAddressArg,
   optionalBytes32Arg,
+  optionalNonZeroBytes32Arg,
+  optionalUintArgAsString,
   proofOf,
   provenanceOf,
   requiredAddressArg,
@@ -41,6 +44,40 @@ export interface StateMachineSignalProjection {
   readonly payloadHash: Hex;
   readonly idempotencyKey: Hex;
   readonly submitter: Address;
+  /**
+   * 事实归属阶段（B-03，SignalSubmitted.factStageId）：0/缺省 = 词表外
+   * 事实——per-stage 归属与计数从事件流重建，不依赖 stageSignalState view。
+   * 旧事件面（无该字段的历史流）缺省。
+   */
+  readonly factStageId?: Hex;
+  /**
+   * fork 重放标记（B-03）：signal 键命中 OrderForked.replayedFactKeys
+   * （keccak256(abi.encode(sourceId, signalId))）时为 true——该事实是
+   * 父单事实在 fork 出生事务内的重放，不是 fork 单新生。
+   */
+  readonly replayedFromFork?: boolean;
+  readonly submittedAt: ProjectionProvenance;
+  readonly proof: StateMachineProofProjection;
+}
+
+/**
+ * 派生信号血缘（B-03，DerivedSignalSubmitted 全参数投影）：此前投影只读
+ * targetOrderId/planId/submitter，丢弃 from 复合身份、relation 与载荷
+ * 承诺——派生通道授权面（relation=0 本单生产 / 1 triggerOrigin 回写）
+ * 现在可从事件流全量重建。
+ */
+export interface StateMachineDerivedSignalProjection {
+  readonly targetOrderId: Hex;
+  readonly fromPlanId: Hex;
+  readonly fromOrderId: Hex;
+  readonly fromStageId: Hex;
+  readonly targetSourceId: Hex;
+  readonly signalId: Hex;
+  readonly payloadHash: Hex;
+  readonly idempotencyKey: Hex;
+  readonly submitter?: Address;
+  /** 目标单关系（事件词序）：0 = 本单生产，1 = triggerOrigin。 */
+  readonly relation?: string;
   readonly submittedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
 }
@@ -99,6 +136,8 @@ export function applySignalSubmitted(
   const sourceId = requiredBytes32Arg(event, "sourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
   const submitter = requiredAddressArg(event, "submitter");
+  // B-03 事实归属阶段（旧事件面缺省；零字 = 词表外事实，归一为缺省）。
+  const factStageId = optionalNonZeroBytes32Arg(event, "factStageId");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash, submitter });
   const signal: StateMachineSignalProjection = {
     orderId,
@@ -107,6 +146,8 @@ export function applySignalSubmitted(
     payloadHash: requiredBytes32Arg(event, "payloadHash"),
     idempotencyKey: requiredBytes32Arg(event, "idempotencyKey"),
     submitter,
+    ...(factStageId ? { factStageId } : {}),
+    ...(isForkReplayedFact(order, sourceId, signalId) ? { replayedFromFork: true } : {}),
     submittedAt: provenanceOf(event),
     proof
   };
@@ -116,6 +157,27 @@ export function applySignalSubmitted(
   markMatchingTasksSubmitted(order, sourceId, signalId, proof);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "确认动作已写入链上", proof, { orderId, planId: order.planId }));
+}
+
+/**
+ * fork 重放判据（B-03）：OrderForked.replayedFactKeys 携带
+ * keccak256(abi.encode(sourceId, signalId))（合约 _signalKey 同式）；
+ * 事实键命中清单即父单事实重放。OrderForked 在重放 SignalSubmitted 之前
+ * 落日志（forkOrderGate 先于 forkOrderReplay），血缘在信号到达时已在桶上。
+ */
+function isForkReplayedFact(
+  order: MutableStateMachineOrderProjection,
+  sourceId: Hex,
+  signalId: Hex
+): boolean {
+  const replayedFactKeys = order.forkLineage?.replayedFactKeys;
+  if (!replayedFactKeys || replayedFactKeys.length === 0) {
+    return false;
+  }
+  const factKey = keccak256(
+    encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }], [sourceId, signalId])
+  );
+  return replayedFactKeys.some((key) => key.toLowerCase() === factKey.toLowerCase());
 }
 
 export function applyDerivedSignalSubmitted(
@@ -130,12 +192,33 @@ export function applyDerivedSignalSubmitted(
   const planId = optionalBytes32Arg(event, "targetPlanId") ?? optionalBytes32Arg(event, "planId");
   // 幻影订单：DerivedSignalSubmitted 由 UVPDerivedSignalModule 发出。
   const order = ensureStateMachineOrderFromModuleEvent(state, event, targetOrderId, planId);
+  const targetSourceId = requiredBytes32Arg(event, "targetSourceId");
+  const signalId = requiredBytes32Arg(event, "signalId");
   const proof = proofOf(event, {
     orderId: targetOrderId,
     planId: order.planId,
     planHash: order.planHash,
     submitter: optionalAddressArg(event, "submitter")
   });
+  // B-03 全参数投影：from 复合身份、relation 与载荷承诺按事实键落桶
+  //（旧事件面的缺失字段按可选读取）。
+  const derivedSubmitter = optionalAddressArg(event, "submitter");
+  const derivedRelation = optionalUintArgAsString(event, "relation");
+  const derived: StateMachineDerivedSignalProjection = {
+    targetOrderId,
+    fromPlanId: requiredBytes32Arg(event, "fromPlanId"),
+    fromOrderId: requiredBytes32Arg(event, "fromOrderId"),
+    fromStageId: requiredBytes32Arg(event, "fromStageId"),
+    targetSourceId,
+    signalId,
+    payloadHash: requiredBytes32Arg(event, "payloadHash"),
+    idempotencyKey: requiredBytes32Arg(event, "idempotencyKey"),
+    ...(derivedSubmitter ? { submitter: derivedSubmitter } : {}),
+    ...(derivedRelation !== undefined ? { relation: derivedRelation } : {}),
+    submittedAt: provenanceOf(event),
+    proof
+  };
+  order.derivedSignals[signalProjectionKey(targetSourceId, signalId)] = derived;
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "派生信号已提交", proof, { orderId: targetOrderId, planId: order.planId }));

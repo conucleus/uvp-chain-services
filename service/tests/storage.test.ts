@@ -121,6 +121,7 @@ const expectedMigrationVersions = [
   "0024_drop_join_application_open_plan_applicant_uk",
   "0025_product_trigger_prepared_at",
   "0026_projection_sync_diagnostics",
+  "0027_store_listing_status_check",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0

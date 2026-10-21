@@ -9,7 +9,7 @@ import {
   recordStoreCapabilitySuccess,
   requireAnchoredStoreAddress
 } from "../store-authz.js";
-import { cleanQuery, decodePathParameter, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { cleanQuery, decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
 /**
@@ -146,6 +146,9 @@ export function createStoreListingsRouteModule(options: {
           }
         }
       } catch (error) {
+        if (error instanceof InvalidPathParameterError) {
+          return invalidPathParameterResponse();
+        }
         if (error instanceof StoreListingServiceError) {
           return {
             status: error.status,

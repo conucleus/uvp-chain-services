@@ -1,6 +1,7 @@
 import type { ProjectionStore } from "../storage/projection-store.js";
-import { noopLogger, type Hex, type LifecycleService, type Logger } from "../shared/types.js";
+import { ConfigError, noopLogger, type Hex, type LifecycleService, type Logger } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
+import type { ChainClock } from "../shared/chain-clock.js";
 import { findErrorName } from "../shared/broadcast/kit.js";
 import {
   TimerPokeReceiptRevertedError,
@@ -41,6 +42,7 @@ export class TimerKeeperWorker implements LifecycleService {
   readonly #submitter: TimerKeeperSubmitter | undefined;
   readonly #logger: Logger;
   readonly #now: () => Date;
+  readonly #chainClock: ChainClock | undefined;
   #timer: NodeJS.Timeout | undefined;
   #running = false;
   #checking = false;
@@ -59,6 +61,8 @@ export class TimerKeeperWorker implements LifecycleService {
     readonly submitter?: TimerKeeperSubmitter;
     readonly logger?: Logger;
     readonly now?: () => Date;
+    /** 到期判定的链时钟源（latest block timestamp）；缺失时 runOnce 响亮拒绝。 */
+    readonly chainClock?: ChainClock;
   }) {
     this.#config = options.config;
     this.#projectionStore = options.projectionStore;
@@ -67,6 +71,7 @@ export class TimerKeeperWorker implements LifecycleService {
     this.#submitter = options.submitter;
     this.#logger = options.logger ?? noopLogger;
     this.#now = options.now ?? (() => new Date());
+    this.#chainClock = options.chainClock;
   }
 
   async start(): Promise<void> {
@@ -80,6 +85,19 @@ export class TimerKeeperWorker implements LifecycleService {
         "timer keeper is enabled but no submitter is wired; the keeper stays idle until the assembly provides one"
       );
       return;
+    }
+    // 零预算/零去重窗是配置错误而非合法档位：maxCandidatesPerRun=0 会让
+    // 每轮在首个候选前 break（keeper 永久静默失效），redeliveryWindowMs=0
+    // 关闭去重逐轮重发（纯 gas 浪费）。启动响亮拒绝。
+    if (this.#config.maxCandidatesPerRun <= 0) {
+      throw new ConfigError(
+        "UVP_TIMER_KEEPER_MAX_CANDIDATES_PER_RUN must be positive when the timer keeper is enabled (0 would silently disable every run)"
+      );
+    }
+    if (this.#config.redeliveryWindowMs <= 0) {
+      throw new ConfigError(
+        "UVP_TIMER_KEEPER_REDELIVERY_WINDOW_MS must be positive when the timer keeper is enabled (0 disables deduplication and re-broadcasts every run)"
+      );
     }
     this.#running = true;
     if (this.#config.pollIntervalMs <= 0) {
@@ -124,7 +142,6 @@ export class TimerKeeperWorker implements LifecycleService {
       const snapshot = await this.#projectionStore.getOrderSnapshot();
       const syncState = await this.#projectionStore.getSyncState();
       const finalizedBlock = syncState?.finalizedBlock;
-      const nowSeconds = BigInt(Math.floor(this.#now().getTime() / 1000));
       const summary: TimerKeeperRunSummary = {
         scannedOrders: 0,
         waitingHooks: 0,
@@ -151,6 +168,14 @@ export class TimerKeeperWorker implements LifecycleService {
         this.#lastSummary = summary;
         return summary;
       }
+      // 到期判定用链时钟（latest block timestamp）：dueAt 是链上秒，宿主
+      // 墙钟偏移会造成早拨/晚拨；链钟缺失响亮拒绝，不回落宿主钟。
+      if (!this.#chainClock) {
+        throw new ConfigError(
+          "timer keeper requires a chain clock (latest block timestamp) to judge hook dueAt; wire the chainClock option"
+        );
+      }
+      const nowSeconds = BigInt(await this.#chainClock.latestBlockTimestampSeconds());
       const candidates: {
         readonly key: string;
         readonly planId: Hex;

@@ -21,6 +21,7 @@ import {
   type ProductOrderTriggerBroadcastAdapter
 } from "../product/query/bff/trigger.js";
 import { createViemReconcileReceiptClient, TxReconcileWorker } from "../reconcile/index.js";
+import { createViemChainClock } from "../shared/chain-clock.js";
 import { DockAutomationWorker } from "../dock-automation/index.js";
 import {
   TimerKeeperWorker,
@@ -166,7 +167,7 @@ export async function startApiServer(
   const evidenceStorage = createConfiguredEvidenceStorage(config);
   const governanceService = createGovernanceService({
     store: governanceStore,
-    adapter: createConfiguredGovernanceChainAdapter(config),
+    adapter: createConfiguredGovernanceChainAdapter(config, { logger }),
     audit,
     // descriptor 托管：注册时快照被哈希原文，descriptorURI 指向公开端点。
     descriptorSnapshotStore: stores.identityDescriptorSnapshots,
@@ -220,6 +221,8 @@ export async function startApiServer(
     projectionStore: store,
     stateMachineAddress: submissionVerifyingContract ?? "0x0000000000000000000000000000000000000000",
     chainId: config.network.chainId,
+    // 到期判定用链时钟（latest block timestamp），宿主墙钟偏移不参与。
+    chainClock: createViemChainClock(config.network.rpcUrl),
     ...(timerKeeperSubmitter ? { submitter: timerKeeperSubmitter } : {}),
     logger
   });
@@ -318,6 +321,8 @@ export async function startApiServer(
         })
       }
       : {}),
+    // stage-patch 签名 deadline 的链时钟（latest block timestamp）。
+    productChainClock: createViemChainClock(config.network.rpcUrl),
     notificationService,
     submissionChainId: config.network.chainId,
     ...(submissionVerifyingContract ? { submissionVerifyingContract } : {}),

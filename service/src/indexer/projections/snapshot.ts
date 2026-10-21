@@ -33,12 +33,37 @@ export interface StateMachineDeploymentProjection {
   readonly proof: StateMachineProofProjection;
 }
 
+/**
+ * 合约治理面投影（B-03）：OwnershipTransferred（owner 轮换）与
+ * StateMachineModulesFrozen（模块集冻结）此前是显式零投影分支，治理状态
+ * 无法从事件流重建。键 = `chainId:contractAddress`——OwnershipTransferred
+ * 也由 identity/deployment registry 发出（同名事件族），按发出合约分桶，
+ * modulesFrozen 仅对状态机合约有意义。
+ */
+export interface ContractGovernanceProjection {
+  readonly chainId: number;
+  readonly contractAddress: Address;
+  /** 最近一次 OwnershipTransferred 的 newOwner（首见事件即建行）。 */
+  readonly owner: Address;
+  readonly ownerUpdatedAt: ProjectionProvenance;
+  readonly ownerProof: StateMachineProofProjection;
+  /** StateMachineModulesFrozen（一次性）：true 后模块集不可再改。 */
+  readonly modulesFrozen?: boolean;
+  readonly moduleSetHash?: Hex;
+  readonly frozenAt?: ProjectionProvenance;
+  readonly frozenProof?: StateMachineProofProjection;
+}
+
+export type MutableContractGovernanceProjection = Writable<ContractGovernanceProjection>;
+
 export interface ProjectionSnapshot {
   readonly rebuildable: true;
   readonly eventCount: number;
   readonly activeStateMachineDeploymentId?: Hex;
   readonly stateMachineDeployments: Readonly<Record<string, StateMachineDeploymentProjection>>;
   readonly stateMachineModules: Readonly<Record<string, StateMachineModuleProjection>>;
+  /** 治理面（OwnershipTransferred/StateMachineModulesFrozen）按合约分桶。 */
+  readonly contractGovernance: Readonly<Record<string, ContractGovernanceProjection>>;
   readonly stateMachinePlans: Readonly<Record<string, StateMachinePlanProjection>>;
   readonly stateMachineOrders: Readonly<Record<string, StateMachineOrderProjection>>;
   readonly stateMachineDocks: Readonly<Record<string, StateMachineDockProjection>>;
@@ -50,6 +75,16 @@ export interface ProjectionSnapshot {
    * 是 new 模式子单出生键（单值、existing 不写），投影不镜像其单值语义。
    */
   readonly stateMachineDocksByTargetOrder: Readonly<Record<string, readonly string[]>>;
+  /**
+   * B-02 边数账本口径下的「最长 dock 链路」派生投影：键 = 订单的 plan
+   * 作用域复合键 (chainId, stateMachineAddress, planId, orderId)，值为以
+   * 该订单为终点的 dock 边链最长路径（无入边订单缺省 0，不出现在索引里）。
+   * 4.7 起链上不再维护路径深度（dockEdgeCountOfOrder 是每单总挂接边数的
+   * 父链账本，上界 MAX_DOCK_EDGES）——最长路径语义由索引器从
+   * DockOpened/DockAttached 事件图（父单 → 目标单边）派生，快照每次重建
+   * 整体重算，天然幂等。
+   */
+  readonly stateMachineOrderDockChainDepth: Readonly<Record<string, number>>;
   readonly stateMachineTasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly lastEvent?: ProjectionProvenance;
   /**
@@ -114,10 +149,12 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     eventCount: 0,
     stateMachineDeployments: {},
     stateMachineModules: {},
+    contractGovernance: {},
     stateMachinePlans: {},
     stateMachineOrders: {},
     stateMachineDocks: {},
     stateMachineDocksByTargetOrder: {},
+    stateMachineOrderDockChainDepth: {},
     stateMachineTasks: {},
     unresolvedModuleOrderEventCount: 0,
     unresolvedDockEventCount: 0,

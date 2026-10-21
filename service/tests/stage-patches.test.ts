@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
   capabilitiesRootOf,
+  ONCHAIN_HOOK_PLAN_SCHEMA_VERSION,
   onchainSignalId,
   onchainSourceId,
   onchainStageId,
@@ -111,6 +112,7 @@ const previousExecutorWallet = normalizeAddress(
 const wrongWallet = "0x2222222222222222222222222222222222222222" as Address;
 const executorWallet = "0x3333333333333333333333333333333333333333" as Address;
 const baseNow = new Date("2026-04-30T00:00:00Z");
+const baseChainClock = { latestBlockTimestampSeconds: async () => Math.floor(baseNow.getTime() / 1000) } as const;
 
 describe("stage executor/resource patch Product API", () => {
   it("hashes resource manifests deterministically with the protocol canonical hash", () => {
@@ -328,6 +330,8 @@ describe("stage executor/resource patch Product API", () => {
     const birthStageSchema = (triggerKind: string): StoreProductSchemaDTO => ({
       ...productSchemaFixture(),
       onchainHookPlanArtifact: {
+        // 消费处按单源常量断言 schemaVersion（A-39）：桩产物同样携带。
+        schemaVersion: ONCHAIN_HOOK_PLAN_SCHEMA_VERSION,
         compiledHooks: [
           // 产物键位：stageId 是标识符 keccak、stageIdentifier 是原文——
           // 补丁目标以标识符右补齐 bytes32 形态进来，两种形态都可命中。
@@ -667,6 +671,7 @@ describe("stage executor/resource patch Product API", () => {
       chainId,
       stagePatchModuleAddress: contractAddress,
       now: () => baseNow,
+      chainClock: baseChainClock,
       prepareIdFactory: () => "prep_1",
       submissionIdFactory: () => "sub_1",
       stageResourcePatchStore: flakyStore,
@@ -1551,6 +1556,7 @@ describe("stage executor/resource patch Product API", () => {
       chainId,
       stagePatchModuleAddress: contractAddress,
       now: () => baseNow,
+      chainClock: baseChainClock,
       prepareIdFactory: () => "prep_1",
       submissionIdFactory: () => "sub_1",
       stageExecutorPatchStore: flakyStore,
@@ -1632,6 +1638,7 @@ describe("stage executor/resource patch Product API", () => {
       chainId,
       stagePatchModuleAddress: contractAddress,
       now: () => baseNow,
+      chainClock: baseChainClock,
       prepareIdFactory: () => "prep_1",
       submissionIdFactory: () => "sub_1",
       stageExecutorPatchStore: new InMemoryProductStagePatchStore<
@@ -1739,6 +1746,7 @@ async function routerFixture(
         }
       : {}),
     now: () => baseNow,
+    chainClock: baseChainClock,
     prepareIdFactory: () => `prep_${++prepareCount}`,
     submissionIdFactory: () => `sub_${++submissionCount}`,
   };

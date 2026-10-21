@@ -33,17 +33,17 @@ describe("duplicate-transaction lane matcher (shared)", () => {
   });
 
   it("both in-service classifiers route the lanes to duplicate_transaction with the taxonomy base verdict", () => {
-    // 基础判定对齐 taxonomy nonce_conflict（不可重试、死信）；broadcast()
-    // 捕获口再走回执探针改判——基础判定本身不能放宽。
+    // 基础判定对齐 taxonomy nonce_conflict 单值裁决（A-30：可重试、不死信）；
+    // broadcast() 捕获口再走回执探针改判——基础判定本身不得回退死信。
     for (const text of ["nonce too low", "already known", "replacement transaction underpriced"]) {
       const submissionVerdict = classifyStateMachineBroadcastError(new Error(text)) as { errorCode: string; retryable: boolean; deadLetter: boolean };
       expect(submissionVerdict.errorCode, `submissions: "${text}"`).toBe("duplicate_transaction");
-      expect(submissionVerdict.retryable).toBe(false);
-      expect(submissionVerdict.deadLetter).toBe(true);
+      expect(submissionVerdict.retryable).toBe(true);
+      expect(submissionVerdict.deadLetter).toBe(false);
 
       const patchVerdict = classifyStagePatchBroadcastError(new Error(text), STAGE_EXECUTOR_PATCH_BROADCAST_LABELS) as { errorCode: string; retryable: boolean };
       expect(patchVerdict.errorCode, `stage-patches: "${text}"`).toBe("duplicate_transaction");
-      expect(patchVerdict.retryable).toBe(false);
+      expect(patchVerdict.retryable).toBe(true);
     }
   });
 
@@ -186,18 +186,20 @@ describe("governance identity broadcast duplicate-transaction lane", () => {
 
   function adapterWith(
     walletClient: { writeContract: () => Promise<never> },
-    receipt?: () => Promise<{ status: string; blockNumber?: bigint } | undefined | null>
+    receipt?: () => Promise<{ status: string; blockNumber?: bigint } | undefined | null>,
+    overrides: { txConfirmations?: number; latestBlock?: bigint } = {}
   ) {
     return createGovernanceBroadcasterAdapter({
       rpcUrl: "http://127.0.0.1:8545",
       chainId: 31337,
       contractAddress: registryAddress,
       privateKey: signerPrivateKey,
-      txConfirmations: 1,
+      txConfirmations: overrides.txConfirmations ?? 1,
       publicClient: {
         async getChainId() { return 31337; },
         async readContract() { return signer; },
         async waitForTransactionReceipt() { return { status: "success" as const }; },
+        async getBlockNumber() { return overrides.latestBlock ?? 42n; },
         ...(receipt ? { getTransactionReceipt: receipt } : {})
       },
       walletClient
@@ -220,6 +222,22 @@ describe("governance identity broadcast duplicate-transaction lane", () => {
       txHash: candidateTx,
       blockNumber: "42",
       retryable: false
+    });
+  });
+
+  it("keeps a success receipt below the confirmation depth as retryable transaction_receipt_unknown", async () => {
+    // 0-conf/浅确认的 success 回执不得记 confirmed（A-14）：未达
+    // txConfirmations 深度按未裁决保留候选哈希，下轮重探。
+    const adapter = adapterWith(
+      { writeContract: async () => { throw nonceRaceError(); } },
+      async () => ({ status: "success", blockNumber: 42n }),
+      { txConfirmations: 2, latestBlock: 42n }
+    );
+    await expect(adapter.registerIdentity(request)).resolves.toMatchObject({
+      status: "failed",
+      errorCode: "transaction_receipt_unknown",
+      txHash: candidateTx,
+      retryable: true
     });
   });
 

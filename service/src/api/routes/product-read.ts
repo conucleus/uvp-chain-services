@@ -430,32 +430,27 @@ async function parseParticipantViewQuery(
     return { ok: false, response: wallet.response };
   }
   const walletAddress = wallet.identity.walletAddress;
-  try {
-    const acceptedParticipants = (await context.productBffService.listParticipantAssignments(walletAddress))
-      .map(productParticipantIdentityFromAssignment);
-    return {
-      ok: true,
-      query: {
-        walletAddress,
-        ...(acceptedParticipants.length > 0 ? { acceptedParticipants } : {})
-      }
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      response: {
-        status: 400,
-        body: {
-          error: "invalid_wallet",
-          message: error instanceof Error ? error.message : "wallet must be a valid EVM address"
-        }
-      }
-    };
-  }
+  // 钱包参数错误已由 resolveParticipantWalletIdentity 以 400 收口；此处
+  // listParticipantAssignments 的异常是存储/内部错误，不得吞成 400
+  // invalid_wallet 并回显 error.message——上抛交由 withStorageGuard
+  //（StorageUnavailableError → 503）与兜底 500 处理。
+  const acceptedParticipants = (await context.productBffService.listParticipantAssignments(walletAddress))
+    .map(productParticipantIdentityFromAssignment);
+  return {
+    ok: true,
+    query: {
+      walletAddress,
+      ...(acceptedParticipants.length > 0 ? { acceptedParticipants } : {})
+    }
+  };
 }
 
 function productParticipantIdentityFromAssignment(assignment: ProductParticipantAssignmentDTO): ProductParticipantIdentityDTO {
   const orderId = assignment.trigger?.orderId ?? assignment.draft.triggeredOrderId;
+  // 身份抽取带 planId（与 acceptedParticipantOrderKeys 同口径）：订单归属
+  // 按 (planId, orderId) 复合键命中，裸 orderId 在跨 plan 同号订单时会
+  // 命中另一 plan 名下的订单。
+  const planId = assignment.trigger?.planId ?? assignment.draft.planId;
   return {
     participantId: assignment.participant.participantId,
     displayName: assignment.participant.displayName,
@@ -464,7 +459,8 @@ function productParticipantIdentityFromAssignment(assignment: ProductParticipant
     roleSlotId: assignment.participant.roleSlotId,
     draftId: assignment.draft.draftId,
     draftTitle: assignment.draft.title,
-    ...(orderId ? { orderId } : {})
+    ...(orderId ? { orderId } : {}),
+    ...(planId ? { planId } : {})
   };
 }
 

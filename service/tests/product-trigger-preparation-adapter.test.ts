@@ -22,10 +22,10 @@ const triggerHookId = productSignalId("v0.9.create-order.trigger");
 const triggerStageId = productSignalSourceId("v0.9.create-order.stage");
 const sourceId = productSignalSourceId("order");
 const signalId = productSignalId("registered");
-const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,address)")) as Hex;
+const signalSubmittedTopic = keccak256(stringToBytes("SignalSubmitted(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,address,bytes32)")) as Hex;
 const signalSubmittedData = encodeAbiParameters(
-  [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }, { type: "address" }],
-  [signalId, payloadHash, idempotencyKey, registrarAddress]
+  [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }, { type: "address" }, { type: "bytes32" }],
+  [signalId, payloadHash, idempotencyKey, registrarAddress, bytes32("0")]
 );
 
 describe("Product BFF trigger broadcast adapter", () => {

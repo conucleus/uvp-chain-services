@@ -178,6 +178,18 @@ export function optionalNonZeroBytes32Arg(event: ChainEvent, name: string): Hex 
   return value && value !== ZERO_BYTES32 ? value : undefined;
 }
 
+/** bytes32[] 事件参数（B-03 OrderForked.replayedFactKeys）：缺失/空数组
+ * 按缺省处理，成员逐个归一为 bytes32 hex。 */
+export function optionalBytes32ArrayArg(event: ChainEvent, name: string): Hex[] | undefined {
+  const value = event.args[name];
+  if (!Array.isArray(value) || value.length === 0) {
+    return undefined;
+  }
+  return value.map((item, index) =>
+    typeof item === "string" ? normalizeBytes32(item, `${event.eventName}.${name}[${index}]`) : undefined
+  ).filter((item): item is Hex => item !== undefined);
+}
+
 export function uintArgAsString(event: ChainEvent, name: string): string {
   const value = optionalUintArgAsString(event, name);
   if (!value) {
