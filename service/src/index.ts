@@ -23,4 +23,5 @@ export * from "./stage-patches/index.js";
 export * from "./store/console/service.js";
 export * from "./store/console/zhixu-drafts.js";
 export * from "./store/suppliers/index.js";
+export * from "./store/registration/index.js";
 export * from "./shared/types.js";

@@ -40,6 +40,10 @@ import { createStoreIdentityProvider } from "../store/console/access.js";
 import { createStoreDockingService, MemoryStoreDockingSessionStore } from "../store/console/docking.js";
 import { createStoreSupplierService, InMemoryStoreSupplierMetadataStore } from "../store/suppliers/service.js";
 import {
+  createStoreEntityRegistrationService,
+  InMemoryStoreEntityRegistrationStore
+} from "../store/registration/index.js";
+import {
   createStoreSessionService,
   createWalletSessionStoreIdentityProvider,
   InMemoryStoreWalletSessionStore
@@ -73,6 +77,7 @@ import { createGovernanceRouteModule } from "./routes/governance.js";
 import { createNotificationsRouteModule } from "./routes/notifications.js";
 import { createProductBffRouteModule } from "./routes/product-bff.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
+import { createProductRegistrationRouteModule } from "./routes/product-registration.js";
 import { createStoreConsoleRouteModule } from "./routes/store-console.js";
 import { createStoreDockingRouteModule } from "./routes/store-docking.js";
 import { createStoreSuppliersRouteModule } from "./routes/store-suppliers.js";
@@ -108,6 +113,11 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const storeZhixuDraftStore = options.storeZhixuDraftStore ?? new MemoryStoreZhixuDraftStore();
   const storeZhixuVersionMetadataStore = options.storeZhixuVersionMetadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
   const storeSupplierMetadataStore = options.storeSupplierMetadataStore ?? new InMemoryStoreSupplierMetadataStore();
+  const storeEntityRegistrationService = options.storeEntityRegistrationService ??
+    createStoreEntityRegistrationService({
+      store: options.storeEntityRegistrationStore ?? new InMemoryStoreEntityRegistrationStore(),
+      ...(options.now ? { now: options.now } : {})
+    });
   const storeDockingSessionStore = options.storeDockingSessionStore ?? new MemoryStoreDockingSessionStore();
   const storeAuditStore = options.storeAuditStore ?? new MemoryStoreAuditStore();
   const productSchemaResolver = options.productSchemaResolver ?? {
@@ -355,6 +365,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     storeZhixuVersionService,
     storeZhixuDraftWorkflowService,
     storeSupplierService,
+    storeEntityRegistrationService,
     storeAuditStore,
     storeIdentityProvider,
     sessionService,
@@ -396,6 +407,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createStagePatchRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createSubmissionsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductBffRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
+    createProductRegistrationRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductReadRouteModule({ runtimeEnvironment: productRuntimeEnvironment })
   ];
 

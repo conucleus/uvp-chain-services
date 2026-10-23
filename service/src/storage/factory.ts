@@ -42,6 +42,12 @@ import {
   type StoreSupplierMetadataStore
 } from "../store/suppliers/index.js";
 import {
+  InMemoryStoreEntityRegistrationStore,
+  PostgresStoreEntityRegistrationStore,
+  SqliteStoreEntityRegistrationStore,
+  type StoreEntityRegistrationStore
+} from "../store/registration/index.js";
+import {
   MemoryStoreDockingSessionStore,
   type StoreDockingSessionStore
 } from "../store/console/docking.js";
@@ -122,6 +128,8 @@ export interface ChainServicesStores {
   readonly storeZhixuDraftStore: StoreZhixuDraftStore;
   readonly storeZhixuVersionMetadataStore: StoreZhixuVersionMetadataStore;
   readonly storeSupplierMetadataStore: StoreSupplierMetadataStore;
+  /** 参与者实体自助登记（链下档案，未核验）。 */
+  readonly storeEntityRegistrationStore: StoreEntityRegistrationStore;
   readonly storeDockingSessionStore: StoreDockingSessionStore;
   readonly storeAuditStore: StoreAuditStore;
   /** 钱包会话 / descriptor 快照 / 装修与委托 / 上架 / 加入申请的持久化 store。 */
@@ -186,6 +194,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         storeZhixuDraftStore: new MemoryStoreZhixuDraftStore(),
         storeZhixuVersionMetadataStore: new MemoryStoreZhixuVersionMetadataStore(),
         storeSupplierMetadataStore: new InMemoryStoreSupplierMetadataStore(),
+        storeEntityRegistrationStore: new InMemoryStoreEntityRegistrationStore(),
         storeDockingSessionStore: new MemoryStoreDockingSessionStore(),
         storeAuditStore: new MemoryStoreAuditStore(),
         storeWalletSessionStore: new InMemoryStoreWalletSessionStore(),
@@ -238,6 +247,10 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
           migrations
         }),
         storeSupplierMetadataStore: new SqliteStoreSupplierMetadataStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        storeEntityRegistrationStore: new SqliteStoreEntityRegistrationStore({
           databaseUrl: options.database.url,
           migrations
         }),
@@ -305,6 +318,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
             stores.storeZhixuDraftStore,
             stores.storeZhixuVersionMetadataStore,
             stores.storeSupplierMetadataStore,
+            stores.storeEntityRegistrationStore,
             stores.storeDockingSessionStore,
             stores.storeAuditStore,
             stores.storeWalletSessionStore,
@@ -346,6 +360,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         storeZhixuDraftStore: new PostgresStoreZhixuDraftStore({ database }),
         storeZhixuVersionMetadataStore: new PostgresStoreZhixuVersionMetadataStore({ database }),
         storeSupplierMetadataStore: new PostgresStoreSupplierMetadataStore({ database }),
+        storeEntityRegistrationStore: new PostgresStoreEntityRegistrationStore({ database }),
         storeDockingSessionStore: new PostgresStoreDockingSessionStore({ database }),
         storeAuditStore: new PostgresStoreAuditStore({ database }),
         storeWalletSessionStore: new PostgresStoreWalletSessionStore({ database }),

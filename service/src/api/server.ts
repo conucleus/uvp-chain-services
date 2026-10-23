@@ -301,6 +301,7 @@ export async function startApiServer(
     storeZhixuDraftStore: stores.storeZhixuDraftStore,
     storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
     storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
     storeDockingSessionStore: stores.storeDockingSessionStore,
     storeAuditStore: stores.storeAuditStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,

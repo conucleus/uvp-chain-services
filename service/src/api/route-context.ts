@@ -56,10 +56,11 @@ import type {
   StoreZhixuVersionMetadataStore,
   StoreZhixuVersionService
 } from "../store/console/version.js";
+import type { StoreSupplierMetadataStore, StoreSupplierService } from "../store/suppliers/service.js";
 import type {
-  StoreSupplierMetadataStore,
-  StoreSupplierService
-} from "../store/suppliers/service.js";
+  StoreEntityRegistrationService,
+  StoreEntityRegistrationStore
+} from "../store/registration/index.js";
 import type { StoreSessionService, StoreWalletSessionStore } from "../store/sessions/index.js";
 import type { StoreDecorationService, StoreZhixuDecorationStore, StorePublisherDelegationStore } from "../store/decoration/index.js";
 import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
@@ -133,6 +134,10 @@ export interface CreateApiRouterOptions {
   readonly storeZhixuVersionMetadataStore?: StoreZhixuVersionMetadataStore;
   readonly storeDockingSessionStore?: StoreDockingSessionStore;
   readonly storeSupplierMetadataStore?: StoreSupplierMetadataStore;
+  /** 参与者实体自助登记（链下档案，未核验）的持久化 store。 */
+  readonly storeEntityRegistrationStore?: StoreEntityRegistrationStore;
+  /** 参与者实体自助登记服务（缺省由 store 构造；测试可整体注入）。 */
+  readonly storeEntityRegistrationService?: StoreEntityRegistrationService;
   readonly storeAuditStore?: StoreAuditStore;
   readonly storeIdentityProvider?: StoreIdentityProvider;
   readonly storeAuthConfig?: StoreAuthConfig;
@@ -202,6 +207,7 @@ export interface ApiRouteContext {
   readonly storeZhixuVersionService: StoreZhixuVersionService;
   readonly storeZhixuDraftWorkflowService: StoreZhixuDraftWorkflowService;
   readonly storeSupplierService: StoreSupplierService;
+  readonly storeEntityRegistrationService: StoreEntityRegistrationService;
   readonly storeAuditStore: StoreAuditStore;
   readonly storeIdentityProvider: StoreIdentityProvider;
   readonly sessionService?: StoreSessionService;

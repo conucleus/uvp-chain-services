@@ -122,6 +122,7 @@ const expectedMigrationVersions = [
   "0025_product_trigger_prepared_at",
   "0026_projection_sync_diagnostics",
   "0027_store_listing_status_check",
+  "0028_store_entity_registration",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -314,7 +315,7 @@ describe("durable storage", () => {
     const legacyDirectory = mkdtempSync(join(tmpdir(), "uvp-migrations-legacy-"));
     tempDirs.push(legacyDirectory);
     for (const entry of readdirSync(migrationsDirectory(), { withFileTypes: true })) {
-      if (entry.isFile() && !entry.name.startsWith("0024_") && !entry.name.startsWith("0025_")) {
+      if (entry.isFile() && !entry.name.startsWith("0024_") && !entry.name.startsWith("0025_") && !entry.name.startsWith("0028_")) {
         copyFileSync(join(migrationsDirectory(), entry.name), join(legacyDirectory, entry.name));
       }
     }
@@ -341,6 +342,7 @@ describe("durable storage", () => {
     expect(upgraded.applied.map((migration) => migration.version)).toEqual([
       "0024_drop_join_application_open_plan_applicant_uk",
       "0025_product_trigger_prepared_at",
+      "0028_store_entity_registration",
     ]);
     expect(uniquePartialIndexNames(legacyDatabase)).toEqual([
       "store_join_application_open_unique",
