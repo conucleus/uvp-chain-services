@@ -115,8 +115,8 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
          draft_id, source_kind, content, status, zhixu_id, title, maintainer,
          public_summary, tags_json, compile_preview_json, product_schema_json, review_id,
          errors_json, review_status,
-         created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13::jsonb, $14, $15, $16)`,
+         created_at, updated_at, publisher_address
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13::jsonb, $14, $15, $16, $17)`,
       draftValues(draft)
     );
   }
@@ -176,6 +176,7 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
          review_id = excluded.review_id,
          errors_json = excluded.errors_json,
          review_status = excluded.review_status,
+         publisher_address = excluded.publisher_address,
          created_at = excluded.created_at,
          updated_at = excluded.updated_at`,
       draftValues(draft)
@@ -396,7 +397,8 @@ function draftValues(draft: StoreZhixuDraftRecord): readonly unknown[] {
     stringifyStorageJson(draft.errors),
     draft.reviewStatus ?? null,
     draft.createdAt,
-    draft.updatedAt
+    draft.updatedAt,
+    draft.publisherAddress
   ];
 }
 
@@ -424,7 +426,8 @@ function draftRow(row: unknown): StoreZhixuDraftRecord {
     errors: parseStorageJson<readonly StoreDraftErrorDTO[]>(stringColumn(record, "errors_json")),
     ...(reviewStatus !== undefined ? { reviewStatus } : {}),
     createdAt: stringColumn(record, "created_at"),
-    updatedAt: stringColumn(record, "updated_at")
+    updatedAt: stringColumn(record, "updated_at"),
+    publisherAddress: stringColumn(record, "publisher_address") as `0x${string}`
   };
 }
 

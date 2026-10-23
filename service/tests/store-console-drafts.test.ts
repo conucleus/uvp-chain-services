@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   compileZhixuOnchainHookPlan,
-  parseZhixuDefinition
+  parseZhixuDefinition,
+  planIdForPublisher
 } from "@uvp-eth/compiler";
 import {
   type StoreProductSchemaDTO
@@ -282,7 +283,15 @@ describe("Store Zhixu draft workflow", () => {
     });
     const manifestCompiled = await compileDraft(router, manifestDraft.draftId);
 
-    expect(manifestCompiled.compilePreview).toEqual(first.compilePreview);
+    const yamlPreview = first.compilePreview!;
+    const manifestPreview = manifestCompiled.compilePreview!;
+    const { planId: yamlPlanId, ...yamlRest } = yamlPreview;
+    const { planId: manifestPlanId, ...manifestRest } = manifestPreview;
+    expect(yamlRest).toEqual(manifestRest);
+    expect(yamlPlanId).toBe(
+      planIdForPublisher("0x1234567890123456789012345678901234567890" as `0x${string}`, yamlPreview.planHash as `0x${string}`)
+    );
+    expect(manifestPlanId).toBe(manifest.planId);
   });
 
   it("generates durable Product Schema Bundle and blocks inferred plugins before review", async () => {

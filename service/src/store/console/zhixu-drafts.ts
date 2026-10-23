@@ -7,6 +7,7 @@ import {
   hashCanonical,
   ONCHAIN_HOOK_PLAN_SCHEMA_VERSION,
   parseZhixuDefinition,
+  planIdForPublisher,
   toSolidityRegisterPlanArgs,
   type OnchainHookPlanArtifact,
   type OnchainSignalInstruction
@@ -96,6 +97,7 @@ export interface StoreZhixuDraftDTO {
 export interface StoreZhixuDraftRecord extends StoreZhixuDraftDTO {
   readonly sourceKind: StoreZhixuDraftSourceKind;
   readonly content: string;
+  readonly publisherAddress: `0x${string}`;
   readonly publicSummary?: string;
   readonly tags: readonly string[];
   readonly reviewStatus?: GovernanceReviewStatus;
@@ -366,7 +368,7 @@ export class StoreZhixuDraftWorkflowError extends Error {
 }
 
 export interface StoreZhixuDraftWorkflowService {
-  importDraft(input: unknown): Promise<StoreZhixuDraftDTO>;
+  importDraft(input: unknown, publisherAddress: `0x${string}`): Promise<StoreZhixuDraftDTO>;
   getDraft(draftId: string): Promise<StoreZhixuDraftDTO | undefined>;
   compilePreview(draftId: string): Promise<StoreZhixuDraftDTO>;
   getProductSchema(draftId: string): Promise<StoreProductSchemaDTO | undefined>;
@@ -408,7 +410,7 @@ export function createStoreZhixuDraftWorkflowService(options: {
   const draftIdFactory = options.draftIdFactory ?? (() => `zhixu_draft_${randomUUID()}`);
 
   return {
-    async importDraft(input) {
+    async importDraft(input, publisherAddress) {
       const request = parseImportRequest(input);
       // manifest 导入的在役门：清单锚定的 (planId, 链侧 planHash) 已注册在役时，
       // 该 plan 的产品 schema 已随发布冻结——放行导入会在首编译生成一份
@@ -421,11 +423,15 @@ export function createStoreZhixuDraftWorkflowService(options: {
           await assertPlanAnchorNotInService(serviceAnchor.planId, serviceAnchor.planHash, options.projectionStore);
         }
       }
+      if (request.sourceKind === "zhixu_yaml" && !publisherAddress) {
+        throw new StoreZhixuDraftWorkflowError(400, "publisher_required", "zhixu_yaml import requires an anchored publisher address");
+      }
       const timestamp = now().toISOString();
       const draft: StoreZhixuDraftRecord = {
         draftId: draftIdFactory(),
         sourceKind: request.sourceKind,
         content: request.content,
+        publisherAddress,
         status: "imported",
         title: request.title ?? "未命名秩序草稿",
         maintainer: request.maintainer ?? "未指定维护方",
@@ -735,7 +741,10 @@ function compileDraftContent(
       zhixuId: onchain.zhixuId,
       zhixuDisplay: displayIdentity(onchain.zhixuName, onchain.zhixuId),
       title: onchain.zhixuName,
-      preview: previewFromOnchainArtifact(onchain),
+      preview: previewFromOnchainArtifact(
+        onchain,
+        draft.sourceKind === "zhixu_yaml" ? draft.publisherAddress : undefined
+      ),
       artifact: onchain
     };
   } catch (error) {
@@ -758,7 +767,10 @@ function compileManifest(raw: string): OnchainHookPlanArtifact {
   return parsed as OnchainHookPlanArtifact;
 }
 
-function previewFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreCompilePreviewDTO {
+function previewFromOnchainArtifact(
+  artifact: OnchainHookPlanArtifact,
+  publisherAddress?: `0x${string}`
+): StoreCompilePreviewDTO {
   // planHash 是 artifact 的链上身份（uvp.plan.runtime.v3 注册哈希，与链上
   // planHash(planId) getter 同名同值）。产物体只携带 canonical payload
   // 哈希（制品 planHash 字段，进 preview.artifactHash），不携带运行时
@@ -788,7 +800,7 @@ function previewFromOnchainArtifact(artifact: OnchainHookPlanArtifact): StoreCom
   }
 
   return {
-    planId: artifact.planId,
+    planId: publisherAddress ? planIdForPublisher(publisherAddress, planHash) : artifact.planId,
     planHash,
     artifactHash: artifact.planHash,
     stageCount: stages.size,
@@ -803,7 +815,10 @@ function buildSuggestedProductSchema(
   artifact: OnchainHookPlanArtifact,
   timestamp: string
 ): StoreProductSchemaDTO {
-  const preview = previewFromOnchainArtifact(artifact);
+  const preview = previewFromOnchainArtifact(
+    artifact,
+    draft.sourceKind === "zhixu_yaml" ? draft.publisherAddress : undefined
+  );
   // evidenceSpec 保留：schema 是发布者拥有的不透明 JSON，重建（从编译产物
   // 重新推断 stage/plugin）不得丢掉上一版 schema 携带的结构化证据要求。
   const evidenceSpecByStage = previousEvidenceSpecByStageId(draft.productSchema);
@@ -854,7 +869,7 @@ function buildSuggestedProductSchema(
     zhixuId: artifact.zhixuId,
     title: draft.title === "未命名秩序草稿" ? artifact.zhixuName : draft.title,
     maintainer: draft.maintainer,
-    planId: artifact.planId,
+    planId: preview.planId,
     planHash: preview.planHash,
     artifactHash: preview.artifactHash,
     onchainHookPlanArtifact: artifact,

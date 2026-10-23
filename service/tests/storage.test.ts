@@ -123,6 +123,7 @@ const expectedMigrationVersions = [
   "0026_projection_sync_diagnostics",
   "0027_store_listing_status_check",
   "0028_store_entity_registration",
+  "0029_store_zhixu_draft_publisher",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -2552,6 +2553,7 @@ function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
     sourceKind: "zhixu_yaml",
     content:
       "apiVersion: uvp/v0\nkind: Zhixu\nmetadata:\n  name: durable-store\n",
+    publisherAddress: "0x1234567890123456789012345678901234567890",
     status: "compiled",
     zhixuId: "zhixu-store-durable",
     title: "Durable Store Zhixu",

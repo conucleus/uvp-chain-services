@@ -641,7 +641,7 @@ async function productOrderFromStateMachine(
   const timeline = productTimelineFromStateMachine(order);
   const proof = productProofFromStateMachine(order);
   const activeTask = tasks.find((task) => task.status === "open") ?? tasks[0];
-  const stages = productStagesFromStateMachine(order);
+  const stages = await productStagesFromStateMachine(order, productSchemaResolver);
   const executorOverlays = productExecutorOverlaysByStage(order);
   const resourceRequirements = productResourceRequirementsByStage(order);
   const currentStageId = displayStageId(
@@ -757,7 +757,9 @@ async function productTaskFromStateMachineTask(
   productSchemaResolver?: ProductSchemaResolver,
 ): Promise<ProductTaskApiDTO> {
   const decodedStageId = displayStageId(task.stageIdentifier);
-  const stageName = displayBytes32(task.stageIdentifier, "阶段");
+  const stageName =
+    (await resolveProductStageForTask(task, order, productSchemaResolver))?.name ??
+    displayBytes32(task.stageIdentifier, "阶段");
   const hookLabel = displayBytes32(task.hookName, "链上待办");
   const orderTitle = order
     ? `链上订单 ${shortId(order.orderId)}`
@@ -1939,9 +1941,11 @@ function productConditionFromStateMachineHook(
   };
 }
 
-function productStagesFromStateMachine(
+async function productStagesFromStateMachine(
   order: StateMachineOrderProjection,
-): readonly ZhixuStageDTO[] {
+  productSchemaResolver?: ProductSchemaResolver,
+): Promise<readonly ZhixuStageDTO[]> {
+  const zhixu = await zhixuDetailForOrder(order, productSchemaResolver);
   const hooks = Object.values(order.hooks).sort(compareHooksByUpdate);
   if (hooks.length === 0) {
     const resourceRequirements = productResourceRequirementsForStage(
@@ -1970,12 +1974,15 @@ function productStagesFromStateMachine(
       order,
       stageIdentifier,
     );
+    const productStage = zhixu?.stages.find((stage) =>
+      taskStageMatches(stage.stageId, new Set([stageIdentifier.toLowerCase()]))
+    );
     return {
       stageId: displayStageId(stageIdentifier),
       index: index + 1,
-      name: displayBytes32(stageIdentifier, "阶段"),
-      evidence: ["凭证指纹或链上确认"],
-      ownerRole: "待分配角色",
+      name: productStage?.name ?? displayBytes32(stageIdentifier, "阶段"),
+      evidence: productStage?.evidence ?? ["凭证指纹或链上确认"],
+      ownerRole: productStage?.ownerRole ?? "待分配角色",
       status: mapHookStatusToStageStatus(hook.status),
       updatedAt: `区块 ${hook.updatedAt.blockNumber.toString()}`,
       ...(executorOverlay

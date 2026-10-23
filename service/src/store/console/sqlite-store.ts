@@ -130,8 +130,8 @@ export class SqliteStoreZhixuDraftStore implements StoreZhixuDraftStore {
            draft_id, source_kind, content, status, zhixu_id, title, maintainer,
            public_summary, tags_json, compile_preview_json, product_schema_json, review_id,
            errors_json, review_status,
-           created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           created_at, updated_at, publisher_address
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(...draftValues(draft));
     });
   }
@@ -169,8 +169,8 @@ export class SqliteStoreZhixuDraftStore implements StoreZhixuDraftStore {
            draft_id, source_kind, content, status, zhixu_id, title, maintainer,
            public_summary, tags_json, compile_preview_json, product_schema_json, review_id,
            errors_json, review_status,
-           created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           created_at, updated_at, publisher_address
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(draft_id)
          DO UPDATE SET
            source_kind = excluded.source_kind,
@@ -186,6 +186,7 @@ export class SqliteStoreZhixuDraftStore implements StoreZhixuDraftStore {
            review_id = excluded.review_id,
            errors_json = excluded.errors_json,
            review_status = excluded.review_status,
+           publisher_address = excluded.publisher_address,
            created_at = excluded.created_at,
            updated_at = excluded.updated_at`
       ).run(...draftValues(draft));
@@ -394,7 +395,8 @@ function draftValues(draft: StoreZhixuDraftRecord): readonly SqliteValue[] {
     stringifyStorageJson(draft.errors),
     draft.reviewStatus ?? null,
     draft.createdAt,
-    draft.updatedAt
+    draft.updatedAt,
+    draft.publisherAddress
   ];
 }
 
@@ -422,7 +424,8 @@ function draftRow(row: unknown): StoreZhixuDraftRecord {
     errors: parseStorageJson<readonly StoreDraftErrorDTO[]>(stringColumn(record, "errors_json")),
     ...(reviewStatus !== undefined ? { reviewStatus } : {}),
     createdAt: stringColumn(record, "created_at"),
-    updatedAt: stringColumn(record, "updated_at")
+    updatedAt: stringColumn(record, "updated_at"),
+    publisherAddress: stringColumn(record, "publisher_address") as `0x${string}`
   };
 }
 

@@ -564,7 +564,10 @@ async function handleStoreZhixuDraftRequest(
         return anchored;
       }
       try {
-        const draft = await context.storeZhixuDraftWorkflowService.importDraft(request.body);
+        const draft = await context.storeZhixuDraftWorkflowService.importDraft(
+          request.body,
+          anchored.anchoredAddress
+        );
         await recordStoreCapabilitySuccess(context, request, authorization.access, "store.draft.import", {
           type: "store_zhixu_draft",
           id: draft.draftId

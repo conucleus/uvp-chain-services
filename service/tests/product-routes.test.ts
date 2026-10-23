@@ -1584,7 +1584,7 @@ describe("product API routes", () => {
     expect(taskResponse.status).toBe(200);
     expect((taskResponse.body as { task: Record<string, unknown> }).task)
       .toMatchObject({
-        stageName: "shipping",
+        stageName: "装船/物流",
         hookName: "generic-review",
         performanceSlotId: "delivery",
         participantRoleLabel: "物流/报关",
@@ -1723,6 +1723,7 @@ describe("product API routes", () => {
       draftId: "store_schema_plan_draft",
       sourceKind: "zhixu_yaml",
       content: "apiVersion: uvp/v0\nkind: Zhixu\n",
+      publisherAddress: "0x1234567890123456789012345678901234567890",
       status: "compiled",
       zhixuId: "store-schema-plan",
       title: "Store schema plan",

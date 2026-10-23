@@ -327,7 +327,7 @@ async function checkDraftImportCompileReview(
         content: CLOSURE_DRY_RUN_ZHIXU_YAML,
         title: "Store closure dry-run draft",
         maintainer: "Store Console dry-run",
-      });
+      }, "0x0000000000000000000000000000000000000001");
       const compiled = await draftWorkflow.compilePreview(imported.draftId);
       if (!compiled.compilePreview) {
         return check({
