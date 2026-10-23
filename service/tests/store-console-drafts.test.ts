@@ -319,6 +319,13 @@ describe("Store Zhixu draft workflow", () => {
     expect(schema.roleSlots[0]?.capabilityPlugins?.[0]).toMatchObject({
       source: "inferred"
     });
+    expect(schema.orderPermissionTable.length).toBeGreaterThan(0);
+    expect(
+      schema.orderPermissionTable.every((entry) => entry.signalName.includes("."))
+    ).toBe(true);
+    expect(
+      schema.orderPermissionTable.some((entry) => entry.signalName === "gate.ready")
+    ).toBe(true);
 
     await expect(router.handle({
       method: "POST",

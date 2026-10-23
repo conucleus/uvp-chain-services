@@ -915,16 +915,16 @@ function permissionTableFromOnchainArtifact(
   artifact: OnchainHookPlanArtifact,
   stageIds: ReadonlySet<string>
 ): readonly OrderPermissionTableEntryDTO[] {
-  return artifact.compiledHooks
-    .filter((hook) => stageIds.has(hook.stageIdentifier))
-    .map((hook): OrderPermissionTableEntryDTO => ({
-      permissionId: `${hook.stageIdentifier}#${hook.hookName}`,
-      roleSlotId: hook.stageIdentifier,
-      stageId: hook.stageIdentifier,
-      source: hook.dependencies[0]?.source ?? hook.kind,
-      signalName: hook.hookName,
+  return artifact.signalCapabilities
+    .filter((capability) => stageIds.has(capability.stageIdentifier))
+    .map((capability): OrderPermissionTableEntryDTO => ({
+      permissionId: `${capability.stageIdentifier}#${capability.targetSignalName}`,
+      roleSlotId: capability.stageIdentifier,
+      stageId: capability.stageIdentifier,
+      source: capability.targetSource,
+      signalName: capability.targetSignalName,
       payloadPolicy: "required",
-      requiredEvidence: [defaultEvidenceLabel(hook.stageIdentifier)]
+      requiredEvidence: [defaultEvidenceLabel(capability.stageIdentifier)]
     }));
 }
 
