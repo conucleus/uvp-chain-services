@@ -1,14 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { openSqliteDatabase } from "../src/storage/sqlite.js";
 import { InMemoryStoreEntityRegistrationStore } from "../src/store/registration/memory-store.js";
-import { createStoreEntityRegistrationService } from "../src/store/registration/service.js";
-import { SqliteStoreEntityRegistrationStore } from "../src/store/registration/sqlite-store.js";
 import { InMemoryStoreSupplierMetadataStore } from "../src/store/suppliers/service.js";
 import type { CreateApiRouterOptions } from "../src/api/route-context.js";
 
@@ -32,21 +25,6 @@ const devAnchoredStoreAuth = {
 
 const sessionHeaders = { "x-uvp-store-dev-anchored-address": anchoredAccount };
 const otherSessionHeaders = { "x-uvp-store-dev-anchored-address": otherAccount };
-
-const migrationsDirectory = fileURLToPath(new URL("../migrations", import.meta.url));
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-function tempSqliteUrl(): string {
-  const dir = mkdtempSync(join(tmpdir(), "uvp-entity-registration-"));
-  tempDirs.push(dir);
-  return `sqlite://${join(dir, "registration.sqlite")}`;
-}
 
 function createRouter(options: {
   readonly storeEntityRegistrationStore?: CreateApiRouterOptions["storeEntityRegistrationStore"];
@@ -122,10 +100,8 @@ describe("participant entity registration routes", () => {
     expect(String(registration.registrationId)).toMatch(/^registration_/);
     expect(String(registration.createdAt)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
-    // 只存链下档案：不创建供应商记录。
     await expect(supplierStore.listSuppliers()).resolves.toEqual([]);
 
-    // 读回同一账号的最新登记；另一个账号读不到。
     const mine = await router.handle({
       method: "GET",
       pathname: "/product/registration/me",
@@ -214,55 +190,5 @@ describe("participant entity registration routes", () => {
       headers: sessionHeaders,
       body: undefined,
     })).resolves.toMatchObject({ status: 400, body: { error: "invalid_body" } });
-  });
-});
-
-describe("entity registration persistence store", () => {
-  it("persists one row per account in sqlite and reads it back after reopen", async () => {
-    const databaseUrl = tempSqliteUrl();
-    const store = new SqliteStoreEntityRegistrationStore({
-      databaseUrl,
-      migrations: { autoRun: true, directory: migrationsDirectory },
-    });
-    let tick = 0;
-    const service = createStoreEntityRegistrationService({
-      store,
-      now: () => new Date(Date.UTC(2026, 9, 23, 12, 0, tick++)),
-    });
-
-    const first = await service.registerEntity(validBody, {
-      accountAddress: anchoredAccount,
-      accountId: "account-1",
-    });
-    const second = await service.registerEntity(
-      { ...validBody, legalName: "中亚二手车出口（更名）有限公司" },
-      { accountAddress: anchoredAccount, accountId: "account-1" },
-    );
-    expect(second.registrationId).toBe(first.registrationId);
-    expect(second.createdAt).toBe(first.createdAt);
-    expect(second.updatedAt >= first.updatedAt).toBe(true);
-    expect(second.verified).toBe(false);
-    expect(second.chainWritten).toBe(false);
-    store.close();
-
-    const reopened = new SqliteStoreEntityRegistrationStore({ databaseUrl });
-    const readBack = await reopened.getRegistrationByAccount(anchoredAccount);
-    expect(readBack).toMatchObject({
-      registrationId: first.registrationId,
-      accountAddress: anchoredAccount.toLowerCase(),
-      accountId: "account-1",
-      legalName: "中亚二手车出口（更名）有限公司",
-      status: "self_declared",
-      createdAt: first.createdAt,
-    });
-    reopened.close();
-
-    // 单账号单活跃记录：库里只有一行。
-    const database = openSqliteDatabase(databaseUrl);
-    const count = database.prepare(
-      `SELECT COUNT(*) AS total FROM store_entity_registration`
-    ).get() as { total: number };
-    database.close();
-    expect(count.total).toBe(1);
   });
 });

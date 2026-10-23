@@ -20,11 +20,6 @@ export interface PostgresStoreEntityRegistrationStoreOptions {
   };
 }
 
-/**
- * postgres 驱动的实体登记 store。schema 见 migrations/postgres/0028；
- * account_address 唯一索引保证单账号单活跃记录。upsert 用 RETURNING 读回
- * 落库行（冲突时保留首次 registration_id/created_at）。
- */
 export class PostgresStoreEntityRegistrationStore implements StoreEntityRegistrationStore {
   readonly driver = "postgres" as const;
 

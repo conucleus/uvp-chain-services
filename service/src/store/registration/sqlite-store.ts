@@ -26,10 +26,6 @@ export interface SqliteStoreEntityRegistrationStoreOptions {
   };
 }
 
-/**
- * sqlite 驱动的实体登记 store。schema 见 migrations/0028；account_address
- * 唯一索引保证单账号单活跃记录。
- */
 export class SqliteStoreEntityRegistrationStore implements StoreEntityRegistrationStore {
   readonly #database: SqliteDatabase;
   readonly #ownsDatabase: boolean;
@@ -72,8 +68,6 @@ export class SqliteStoreEntityRegistrationStore implements StoreEntityRegistrati
            updated_at = excluded.updated_at`
       ).run(...registrationValues(record));
     });
-    // 冲突分支不覆盖 registration_id/created_at：读回的是首次登记身份与
-    // 最新申报字段（并发双提交的败者同样读回赢家行）。
     const persisted = await this.getRegistrationByAccount(record.accountAddress);
     if (!persisted) {
       throw new Error("store_entity_registration upsert returned no row");
