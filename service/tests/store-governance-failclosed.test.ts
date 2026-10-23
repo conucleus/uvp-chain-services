@@ -767,7 +767,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
           registerIdentity: async () => ({ status: "simulated_tx", retryable: false, simulated: true }),
           revokeIdentity: async () => {
             if (failRevoke) {
-              return { status: "failed", errorCode: "adapter_down", retryable: true, simulated: false };
+              // 确定失败（非可重试、无 txHash）才允许回滚 review；可重试失败
+              // 走重试收敛，不能把可能已上链的 revoke 回滚成前置状态。
+              return { status: "failed", errorCode: "adapter_down", retryable: false, simulated: false };
             }
             return { status: "simulated_tx", retryable: false, simulated: true };
           }
@@ -786,6 +788,25 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       expect(retried.broadcast.status).toBe("simulated_tx");
       const finalReviews = await service.listReviews({ subjectType: "supplier", subjectId });
       expect(finalReviews[0]?.status).toBe("revoked");
+    });
+
+    it("keeps the review revoked for a retryable revocation failure (ambiguous outcome)", async () => {
+      const subjectId = "0x" + "55".repeat(32) as Hex;
+      const account = "0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD" as Address;
+      const bindingId = "0x" + "66".repeat(32) as Hex;
+      const admin = { adminId: "gov-reviewer-1", role: "governance_admin" as const };
+      const service = createGovernanceService({
+        adapter: {
+          registerIdentity: async () => ({ status: "simulated_tx", retryable: false, simulated: true }),
+          // 可重试失败可能已上链：不回滚前置状态，交重试/对账收敛。
+          revokeIdentity: async () => ({ status: "failed", errorCode: "adapter_down", retryable: true, simulated: false })
+        }
+      });
+      await service.reviewSupplier({ subjectId, status: "approved_for_broadcast" }, admin);
+      const revoked = await service.revokeIdentity({ subjectId, bindingId }, admin);
+      expect(revoked.broadcast.status).toBe("failed");
+      const reviews = await service.listReviews({ subjectType: "supplier", subjectId });
+      expect(reviews[0]?.status).toBe("revoked");
     });
 
     it("descriptor hash covers profile/capability/reputation", () => {
