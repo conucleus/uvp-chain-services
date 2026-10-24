@@ -8,6 +8,10 @@ import {
 } from "../product/query/bff/service.js";
 import { MemoryProductBffStore, type ProductBffStore } from "../product/query/bff/store.js";
 import { createOrderRequirementsService } from "../product/requirements/index.js";
+import {
+  createEscrowQueryService,
+  MemoryEscrowStore
+} from "../escrow/index.js";
 import { createEvidenceService, LocalEvidenceStorage } from "../evidence/index.js";
 import { createGovernanceService } from "../governance/index.js";
 import {
@@ -77,6 +81,7 @@ import { createEvidenceRouteModule } from "./routes/evidence.js";
 import { createGovernanceRouteModule } from "./routes/governance.js";
 import { createNotificationsRouteModule } from "./routes/notifications.js";
 import { createProductBffRouteModule } from "./routes/product-bff.js";
+import { createProductEscrowRouteModule } from "./routes/product-escrow.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
 import { createProductRegistrationRouteModule } from "./routes/product-registration.js";
 import { createProductRequirementsRouteModule } from "./routes/product-requirements.js";
@@ -171,6 +176,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     bffStore: productBffStore,
     ...(options.orderRequirementsStore ? { store: options.orderRequirementsStore } : {}),
     ...(options.now ? { now: options.now } : {})
+  });
+  const escrowService = options.escrowService ?? createEscrowQueryService({
+    store: new MemoryEscrowStore()
   });
   const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
   if (productTriggerChainId === undefined) {
@@ -370,6 +378,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     productService,
     productBffService,
     orderRequirementsService,
+    escrowService,
     storeConsoleService,
     storeDockingService,
     storeRuntimeService,
@@ -419,6 +428,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createSubmissionsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductBffRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductRequirementsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
+    createProductEscrowRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductRegistrationRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductReadRouteModule({ runtimeEnvironment: productRuntimeEnvironment })
   ];

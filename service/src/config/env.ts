@@ -220,6 +220,16 @@ export interface NotificationsConfig {
   readonly webhookSecretConfigured: boolean;
 }
 
+/**
+ * StageEscrow V2 projection input: one escrow contract on the configured RPC
+ * chain. Absent = escrow reads are disabled (404) and no log poller runs.
+ */
+export interface EscrowIndexerConfig {
+  readonly address: Address;
+  readonly chainId: number;
+  readonly startBlock: bigint;
+}
+
 export interface ChainServicesConfig {
   readonly network: NetworkConfig;
   readonly database: DatabaseConfig;
@@ -233,6 +243,7 @@ export interface ChainServicesConfig {
   readonly timerKeeper: TimerKeeperConfig;
   readonly evidenceStorage: EvidenceStorageConfig;
   readonly notifications?: NotificationsConfig;
+  readonly escrow?: EscrowIndexerConfig;
   readonly storeAuth?: StoreAuthConfig;
   readonly security: SecurityConfig;
 }
@@ -267,6 +278,11 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     ...parseContracts(env),
   };
   const chainId = parseInteger(env, "UVP_CHAIN_ID", manifest.chainId ?? 31337);
+  const escrow = parseEscrowIndexerConfig(
+    env,
+    chainId,
+    manifest.deploymentBlock ?? 0n,
+  );
   const environment = parseRuntimeEnv(env);
   const rpcUrl = resolveRpcUrl(env, manifest.rpcUrlEnv, environment);
   const databaseDriver = parseStorageDriver(
@@ -391,6 +407,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     }),
     evidenceStorage: parseEvidenceStorageConfig(env),
     notifications: parseNotificationsConfig(env),
+    ...(escrow ? { escrow } : {}),
     storeAuth: parseStoreAuthConfig(env, environment),
     security: {
       environment,
@@ -603,6 +620,32 @@ function parseEvidenceStorageConfig(env: Env): EvidenceStorageConfig {
     ...(s3SessionTokenEnv ? { s3SessionTokenEnv } : {}),
     ...(s3ObjectNamespace ? { s3ObjectNamespace } : {}),
     ...(s3BackupBucket ? { s3BackupBucket } : {}),
+  };
+}
+
+function parseEscrowIndexerConfig(
+  env: Env,
+  chainId: number,
+  defaultStartBlock: bigint,
+): EscrowIndexerConfig | undefined {
+  const address = optionalAddressEnv(env, "UVP_ESCROW_ADDRESS");
+  if (!address) {
+    return undefined;
+  }
+  const escrowChainId = parseInteger(env, "UVP_ESCROW_CHAIN_ID", chainId);
+  if (escrowChainId !== chainId) {
+    throw new ConfigError(
+      "UVP_ESCROW_CHAIN_ID must match UVP_CHAIN_ID: the escrow projection reads logs from the configured RPC chain",
+    );
+  }
+  return {
+    address,
+    chainId: escrowChainId,
+    startBlock: parseBigIntValue(
+      env,
+      "UVP_ESCROW_DEPLOYMENT_BLOCK",
+      defaultStartBlock,
+    ),
   };
 }
 

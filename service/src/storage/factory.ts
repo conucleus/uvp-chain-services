@@ -1,5 +1,11 @@
 import { basename, join } from "node:path";
 import type { DatabaseConfig } from "../config/index.js";
+import {
+  MemoryEscrowStore,
+  PostgresEscrowStore,
+  SqliteEscrowStore,
+  type EscrowProjectionStore
+} from "../escrow/index.js";
 import { InMemoryEvidenceMetadataStore, type EvidenceMetadataStore } from "../evidence/store.js";
 import { PostgresEvidenceStore } from "../evidence/postgres-store.js";
 import { InMemoryGovernanceStore, type GovernanceStore } from "../governance/store.js";
@@ -130,6 +136,8 @@ export interface ChainServicesStores {
   readonly productBffStore: ProductBffStore;
   /** V1 订单要求包（声明/合意）持久化 store。 */
   readonly orderRequirementsStore: OrderRequirementsStore;
+  /** StageEscrow V2 tranche 投影（链事件重放可重建）。 */
+  readonly escrowStore: EscrowProjectionStore;
   readonly evidenceMetadataStore: EvidenceMetadataStore;
   readonly submissionStore: ProductSubmissionStore;
   readonly governanceStore: GovernanceStore;
@@ -197,6 +205,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         projectionStore: new MemoryProjectionStore(),
         productBffStore: new MemoryProductBffStore(),
         orderRequirementsStore: new MemoryOrderRequirementsStore(),
+        escrowStore: new MemoryEscrowStore(),
         evidenceMetadataStore: new InMemoryEvidenceMetadataStore(),
         submissionStore: new InMemoryProductSubmissionStore(),
         governanceStore: new InMemoryGovernanceStore(),
@@ -236,6 +245,10 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
           migrations
         }),
         orderRequirementsStore: new SqliteOrderRequirementsStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        escrowStore: new SqliteEscrowStore({
           databaseUrl: options.database.url,
           migrations
         }),
@@ -326,6 +339,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
             stores.projectionStore,
             stores.productBffStore,
             stores.orderRequirementsStore,
+            stores.escrowStore,
             stores.evidenceMetadataStore,
             stores.submissionStore,
             stores.governanceStore,
@@ -369,6 +383,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         }),
         productBffStore: new PostgresProductBffStore({ database }),
         orderRequirementsStore: new PostgresOrderRequirementsStore({ database }),
+        escrowStore: new PostgresEscrowStore({ database }),
         evidenceMetadataStore: new PostgresEvidenceStore({ database }),
         submissionStore: new PostgresSubmissionStore({ database }),
         governanceStore: new PostgresGovernanceStore({ database }),

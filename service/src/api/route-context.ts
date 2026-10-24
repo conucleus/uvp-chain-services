@@ -5,6 +5,7 @@ import type {
   EvidenceStorage
 } from "../evidence/index.js";
 import type { GovernanceAdminAuthPolicy, GovernanceService, GovernanceStore } from "../governance/index.js";
+import type { EscrowQueryService } from "../escrow/index.js";
 import type { ProductBffService } from "../product/query/bff/service.js";
 import type {
   OrderRequirementsService,
@@ -121,6 +122,8 @@ export interface CreateApiRouterOptions {
   readonly orderRequirementsService?: OrderRequirementsService;
   /** 订单要求包持久化 store（sqlite/postgres 驱动注入；缺省内存）。 */
   readonly orderRequirementsStore?: OrderRequirementsStore;
+  /** StageEscrow V2 tranche 读服务（未配置 escrow 时 configured=false）。 */
+  readonly escrowService?: EscrowQueryService;
   readonly productRegistrationAdapter?: ProductOrderTriggerBroadcastAdapter;
   readonly productTriggerAdapter?: ProductOrderTriggerBroadcastAdapter;
   readonly productTriggerChainId?: number;
@@ -210,6 +213,7 @@ export interface ApiRouteContext {
   readonly productService: ProductService;
   readonly productBffService: ProductBffService;
   readonly orderRequirementsService: OrderRequirementsService;
+  readonly escrowService: EscrowQueryService;
   readonly storeConsoleService: StoreConsoleService;
   readonly storeDockingService: StoreDockingService;
   readonly storeRuntimeService: StoreRuntimeService;

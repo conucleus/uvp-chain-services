@@ -12,6 +12,11 @@ import {
   type EvidenceStorage
 } from "../evidence/index.js";
 import { createConfiguredGovernanceChainAdapter, createGovernanceService } from "../governance/index.js";
+import {
+  createEscrowQueryService,
+  createViemEscrowLogSource,
+  EscrowIndexerService
+} from "../escrow/index.js";
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import { createNotificationService, WebhookNotificationDispatcher } from "../notifications/index.js";
@@ -71,6 +76,18 @@ export async function startApiServer(
   const store = options.store ?? stores.projectionStore;
   const logger = createRedactingLogger(options.logger ?? consoleLogger, config.security.logRedactionEnabled);
   const audit = createLoggerAuditSink(logger);
+  const escrowService = createEscrowQueryService({
+    store: stores.escrowStore,
+    ...(config.escrow ? { config: config.escrow } : {})
+  });
+  const escrowIndexer = config.escrow
+    ? EscrowIndexerService.fromConfig({
+      config: config.escrow,
+      store: stores.escrowStore,
+      source: createViemEscrowLogSource(config),
+      logger
+    })
+    : undefined;
   const configDiagnostics = await runConfigPreflight(config);
   const eventSource = options.eventSource === undefined
     ? createChainEventSourceForTarget(config, { logger })
@@ -282,6 +299,7 @@ export async function startApiServer(
   const router = createApiRouter(store, {
     productBffStore,
     orderRequirementsStore: stores.orderRequirementsStore,
+    escrowService,
     ...(config.operatorRoles.adminReviewers.length > 0
       ? { governanceAdminIds: config.operatorRoles.adminReviewers }
       : {}),
@@ -353,7 +371,14 @@ export async function startApiServer(
     timerKeeperDiagnostics: () => timerKeeperWorker.getLastSummary(),
     audit,
     configDiagnostics,
-    ...(indexer ? { onTxMined: () => indexer.refreshIfIdle() } : {})
+    ...(indexer || escrowIndexer
+      ? {
+        onTxMined: () => {
+          indexer?.refreshIfIdle();
+          escrowIndexer?.refreshIfIdle();
+        }
+      }
+      : {})
   });
   const server = createServer((request, response) => {
     const requestId = requestIdFromHeaders(request);
@@ -467,6 +492,7 @@ export async function startApiServer(
   // 重建 settle 后的启动序列不得复活已 stop 的 worker/轮询。
   let closed = false;
   void (async () => {
+    escrowIndexer?.start(config.api.indexerPollIntervalMs);
     await initialProjectionRebuild;
     if (closed) {
       return;
@@ -482,6 +508,7 @@ export async function startApiServer(
   server.on("close", () => {
     closed = true;
     void (async () => {
+      escrowIndexer?.stop();
       await timerKeeperWorker.stop();
       await dockAutomationWorker.stop();
       await reconcileWorker.stop();

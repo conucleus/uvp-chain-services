@@ -6,6 +6,12 @@ import {
   type ProductParticipantIdentityDTO,
   type ProductParticipantViewQuery
 } from "../../product/application/service.js";
+import {
+  acceptedParticipantOrderKeys,
+  orderTaskVisibilityKey,
+  orderVisibleToParticipant,
+  resolveOrderVisibility
+} from "../product-order-visibility.js";
 import { buildProductApiStagingReadiness } from "../../product/query/staging-readiness.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import type { ProjectionSyncState } from "../../storage/projection-store.js";
@@ -462,123 +468,6 @@ function productParticipantIdentityFromAssignment(assignment: ProductParticipant
     ...(orderId ? { orderId } : {}),
     ...(planId ? { planId } : {})
   };
-}
-
-/**
- * 订单/任务可见性复合键 (planId, orderId)：两侧都归一到小写；任一侧缺
- * planId 即不成键（undefined）——订单与任务只有 plan 维度一致才命中。同号
- * 订单跨 plan 复用时，裸 orderId 命中会被本键拒绝（另一 plan 的同号订单
- * 不因 orderId 相同而可见）；双侧都缺 planId 时 ":orderId" 裸段键会把纯
- * orderId 碰撞伪装成复合键命中，同样拒绝。
- */
-function orderTaskVisibilityKey(planId: string | undefined, orderId: string | undefined): string | undefined {
-  if (!orderId || !planId) {
-    return undefined;
-  }
-  return `${planId.toLowerCase()}:${orderId.toLowerCase()}`;
-}
-
-/**
- * 已接受参与（草稿 accept 带来的订单归属）——/product/me/orders 与
- * /product/orders(:id) 共用同一判据：受邀并 accept 的钱包在链上指派
- * 落定前就该看到订单，列表与详情不得一边可见一边 404。键与
- * orderTaskVisibilityKey 同为 (planId, orderId) 复合键：同号订单跨 plan
- * 复用时，另一 plan 的同号订单不因 orderId 相同而命中。
- */
-async function acceptedParticipantOrderKeys(
-  context: Parameters<RouteModule["handle"]>[1],
-  walletAddress: string
-): Promise<Set<string>> {
-  const assignments = await context.productBffService.listParticipantAssignments(walletAddress);
-  return new Set(assignments.flatMap((assignment) => {
-    const orderId = assignment.trigger?.orderId ?? assignment.draft.triggeredOrderId;
-    const planId = assignment.trigger?.planId ?? assignment.draft.planId;
-    const key = orderTaskVisibilityKey(planId, orderId);
-    return key ? [key] : [];
-  }));
-}
-
-/**
- * 订单读取的参与者门（订单详情与 timeline/proof 共用）：订单身份无法
- * 唯一定位时透传 409（歧义是调用方可修正的请求错误）；不可见与
- * "不存在"同响应（404），不泄露存在性。
- */
-async function resolveOrderVisibility(
-  context: Parameters<RouteModule["handle"]>[1],
-  orderId: string,
-  walletAddress: string
-): Promise<
-  | { readonly order: ProductOrderApiDTO }
-  | { readonly response: ApiResponse }
-> {
-  let order: ProductOrderApiDTO | undefined;
-  try {
-    order = await context.productService.getOrder(orderId);
-  } catch (error) {
-    if (error instanceof ProductOrderLookupError) {
-      return {
-        response: {
-          status: 409,
-          body: { error: error.code, details: error.details }
-        }
-      };
-    }
-    throw error;
-  }
-  if (!order || !orderVisibleToParticipant(
-    order,
-    walletAddress.toLowerCase(),
-    await acceptedParticipantOrderKeys(context, walletAddress)
-  )) {
-    return {
-      response: {
-        status: 404,
-        body: { error: "product_order_not_found" }
-      }
-    };
-  }
-  return { order };
-}
-
-/**
- * 订单读可见性（与任务读同口径）：订单 DTO 内嵌全部任务，任务的
- * assigneeWallet/执行者 overlay 是参与者数据。无任何指派钱包的订单
- * 是纯链上事实（同"未指派任务"），对已认证参与者开放；有指派钱包
- * 的订单只有参与者本人（链上指派、订单创建者或已接受参与的订单归属）
- * 可见——创建者无任务指派时同样是订单参与者，读不到自己建的单与
- * 上述口径相悖。已接受参与的订单归属按 (planId, orderId) 复合键命中
- * （orderTaskVisibilityKey 同口径）。
- */
-function orderVisibleToParticipant(
-  order: ProductOrderApiDTO,
-  walletAddress: string,
-  acceptedOrderKeys: ReadonlySet<string>
-): boolean {
-  const participants = new Set<string>();
-  for (const task of order.tasks ?? []) {
-    if (task.assigneeWallet) {
-      participants.add(task.assigneeWallet.toLowerCase());
-    }
-    const overlayWallet = task.stageExecutorOverlay?.activeExecutorWallet;
-    if (overlayWallet) {
-      participants.add(overlayWallet.toLowerCase());
-    }
-  }
-  for (const overlay of Object.values(order.stageExecutorOverlays ?? {})) {
-    participants.add(overlay.activeExecutorWallet.toLowerCase());
-  }
-  for (const overlay of Object.values(order.executorOverlays ?? {})) {
-    if (overlay.activeExecutorWallet) {
-      participants.add(overlay.activeExecutorWallet.toLowerCase());
-    }
-  }
-  if (order.creatorWallet) {
-    participants.add(order.creatorWallet.toLowerCase());
-  }
-  const acceptedKey = orderTaskVisibilityKey(order.planId, order.orderId);
-  return participants.size === 0 ||
-    participants.has(walletAddress) ||
-    (acceptedKey !== undefined && acceptedOrderKeys.has(acceptedKey));
 }
 
 function taskNotFound(): ApiResponse {
