@@ -58,6 +58,15 @@ export function applyEscrowEvent(
     logIndex: event.logIndex
   };
   switch (event.eventName) {
+    case "TrancheStarted":
+      return {
+        applied: true,
+        record: {
+          ...current,
+          ...point,
+          state: "started"
+        }
+      };
     case "TrancheApproved":
       return {
         applied: true,

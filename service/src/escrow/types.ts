@@ -1,11 +1,18 @@
 // StageEscrow V2 projection surface: tranche records, decoded chain events,
 // query DTOs, and the persistence port. The event ABIs are the single source in
 // events.ts; this module only carries the projection shapes.
+//
+// "started" is the payee's markStarted state. Persisted state is plain TEXT in
+// both drivers with no CHECK constraint, so adding it needs no migration: rows
+// projected before this event surface keep their existing states, a rebuild
+// replays TrancheStarted, and an unknown state from storage fails closed in the
+// sqlite/postgres adapters instead of being coerced.
 
 import type { Address, Hex } from "../shared/types.js";
 
 export const ESCROW_TRANCHE_STATES = [
   "frozen",
+  "started",
   "approved",
   "rejected",
   "suspended",
@@ -104,6 +111,10 @@ export type EscrowEvent =
     };
   })
   | (EscrowEventBase & {
+    readonly eventName: "TrancheStarted";
+    readonly args: { readonly payee: Address };
+  })
+  | (EscrowEventBase & {
     readonly eventName: "TrancheApproved";
     readonly args: { readonly verifier: Address; readonly releaseTime: bigint };
   })
@@ -154,6 +165,7 @@ export type EscrowEventName = EscrowEvent["eventName"];
 
 export const ESCROW_EVENT_NAMES: ReadonlySet<string> = new Set([
   "TrancheDeposited",
+  "TrancheStarted",
   "TrancheApproved",
   "TrancheRejected",
   "TrancheSuspended",

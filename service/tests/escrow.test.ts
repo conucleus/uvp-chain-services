@@ -2,6 +2,7 @@
 // unknown-tranche handling, and the session-anchored product read surface.
 
 import { describe, expect, it } from "vitest";
+import { keccak256, toHex } from "viem";
 import { createApiRouter } from "../src/api/routes.js";
 import { loadConfigFromEnv } from "../src/config/index.js";
 import {
@@ -66,8 +67,9 @@ function expectedRecord(
 }
 
 describe("StageEscrow projection replay", () => {
-  it("projects deposit → approve → paid with the fee annotation and replays idempotently", async () => {
+  it("projects deposit → started → approve → paid with the fee annotation and replays idempotently", async () => {
     const depositAt = 1_700_000_000n;
+    const startedAt = 1_700_000_050n;
     const approveAt = 1_700_000_100n;
     const paidAt = 1_700_000_200n;
     const events: readonly EscrowEvent[] = [
@@ -76,6 +78,14 @@ describe("StageEscrow projection replay", () => {
         ...base,
         blockNumber: 11n,
         logIndex: 1,
+        blockTimestamp: startedAt,
+        eventName: "TrancheStarted",
+        args: { payee }
+      },
+      {
+        ...base,
+        blockNumber: 12n,
+        logIndex: 2,
         blockTimestamp: approveAt,
         eventName: "TrancheApproved",
         args: {
@@ -85,8 +95,8 @@ describe("StageEscrow projection replay", () => {
       },
       {
         ...base,
-        blockNumber: 12n,
-        logIndex: 2,
+        blockNumber: 13n,
+        logIndex: 3,
         blockTimestamp: paidAt,
         eventName: "TranchePaid",
         args: {
@@ -99,8 +109,8 @@ describe("StageEscrow projection replay", () => {
       },
       {
         ...base,
-        blockNumber: 12n,
-        logIndex: 3,
+        blockNumber: 13n,
+        logIndex: 4,
         blockTimestamp: paidAt,
         eventName: "FeePaid",
         args: { feeRecipient, fee: 10_000n }
@@ -108,7 +118,7 @@ describe("StageEscrow projection replay", () => {
     ];
     const store = new MemoryEscrowStore();
     const first = await replayEscrowEvents(store, events);
-    expect(first).toMatchObject({ eventCount: 4, appliedCount: 4 });
+    expect(first).toMatchObject({ eventCount: 5, appliedCount: 5 });
 
     const paid = expectedRecord(
       (await store.listTranches(escrowAddress, orderId))[0]
@@ -138,10 +148,87 @@ describe("StageEscrow projection replay", () => {
       escrowAddress,
       events
     });
-    expect(rebuilt.appliedCount).toBe(4);
+    expect(rebuilt.appliedCount).toBe(5);
     expect(
       (await store.getTranche(escrowAddress, orderId, stageId))
     ).toEqual(paid);
+  });
+
+  it("projects markStarted to the started state and rebuilds it from the same events", async () => {
+    const startedAt = 1_700_000_500n;
+    const events: readonly EscrowEvent[] = [
+      deposited(15n, 1_700_000_400n, 1_000n),
+      {
+        ...base,
+        blockNumber: 16n,
+        logIndex: 0,
+        blockTimestamp: startedAt,
+        eventName: "TrancheStarted",
+        args: { payee }
+      }
+    ];
+    const store = new MemoryEscrowStore();
+    const summary = await replayEscrowEvents(store, events);
+    expect(summary).toMatchObject({ eventCount: 2, appliedCount: 2 });
+
+    const record = expectedRecord(
+      (await store.getTranche(escrowAddress, orderId, stageId))
+    );
+    expect(trancheDTO(record)).toMatchObject({
+      state: "started",
+      updatedAt: new Date(Number(startedAt) * 1000).toISOString(),
+      approvedAt: null,
+      rejectedAt: null,
+      releaseAt: null,
+      refundAt: null
+    });
+
+    const replayed = await replayEscrowEvents(store, events);
+    expect(replayed).toMatchObject({
+      appliedCount: 0,
+      staleEventCount: 1,
+      duplicateEventCount: 1
+    });
+
+    const rebuilt = await rebuildEscrowProjection({
+      store,
+      escrowAddress,
+      events
+    });
+    expect(rebuilt.appliedCount).toBe(2);
+    expect(trancheDTO(expectedRecord(
+      (await store.getTranche(escrowAddress, orderId, stageId))
+    )).state).toBe("started");
+  });
+
+  it("decodes TrancheStarted from the contract topic layout", () => {
+    const topic2 = `0x${"0".repeat(24)}${payee.slice(2)}` as Hex;
+    const decoded = decodeEscrowLogs({
+      chainId,
+      escrowAddress,
+      logs: [{
+        address: escrowAddress,
+        blockNumber: 70n,
+        logIndex: 1,
+        data: "0x",
+        topics: [
+          keccak256(toHex("TrancheStarted(bytes32,address)")),
+          trancheId,
+          topic2
+        ]
+      }],
+      blockTimestampOf: () => 1_700_000_600n
+    });
+
+    expect(decoded.unknownLogCount).toBe(0);
+    expect(decoded.events).toEqual([{
+      ...base,
+      blockNumber: 70n,
+      logIndex: 1,
+      blockTimestamp: 1_700_000_600n,
+      eventName: "TrancheStarted",
+      args: { payee }
+    }]);
   });
 
   it("projects reject → refund as a full payer refund with no fee", async () => {
@@ -325,7 +412,15 @@ describe("StageEscrow product API", () => {
     const projection = await projectionWithOrder();
     const escrowStore = new MemoryEscrowStore();
     await replayEscrowEvents(escrowStore, [
-      deposited(10n, 1_700_000_000n, 1_000n)
+      deposited(10n, 1_700_000_000n, 1_000n),
+      {
+        ...base,
+        blockNumber: 11n,
+        logIndex: 0,
+        blockTimestamp: 1_700_000_100n,
+        eventName: "TrancheStarted",
+        args: { payee }
+      }
     ]);
     const router = escrowRouter(projection, escrowStore, true);
 
@@ -341,7 +436,7 @@ describe("StageEscrow product API", () => {
         orderId,
         stageId,
         trancheId,
-        state: "frozen",
+        state: "started",
         amount: "1000",
         observationDays: 14,
         feeBps: 100,
@@ -359,7 +454,7 @@ describe("StageEscrow product API", () => {
     expect(stage.body).toMatchObject({
       orderId,
       stageId,
-      state: "frozen",
+      state: "started",
       payerAmount: null,
       feeAmount: null
     });

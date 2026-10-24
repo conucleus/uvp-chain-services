@@ -12,6 +12,7 @@ import {
 
 export const ESCROW_EVENT_ABI = parseAbi([
   "event TrancheDeposited(bytes32 indexed trancheId, bytes32 indexed orderId, bytes32 indexed stageId, address payer, address payee, address verifier, address feeRecipient, uint256 amount, uint32 observationDays, uint16 feeBps)",
+  "event TrancheStarted(bytes32 indexed trancheId, address indexed payee)",
   "event TrancheApproved(bytes32 indexed trancheId, address indexed verifier, uint64 releaseTime)",
   "event TrancheRejected(bytes32 indexed trancheId, address indexed verifier, uint64 refundTime)",
   "event TrancheSuspended(bytes32 indexed trancheId, address indexed party)",
@@ -90,6 +91,11 @@ type DecodedEscrowEvent =
     readonly args: Extract<EscrowEvent, { eventName: "TrancheDeposited" }>["args"];
   }
   | {
+    readonly eventName: "TrancheStarted";
+    readonly trancheId: Hex;
+    readonly args: Extract<EscrowEvent, { eventName: "TrancheStarted" }>["args"];
+  }
+  | {
     readonly eventName: "TrancheApproved";
     readonly trancheId: Hex;
     readonly args: Extract<EscrowEvent, { eventName: "TrancheApproved" }>["args"];
@@ -160,6 +166,12 @@ function decodeEscrowEventLog(log: RawEscrowLog): DecodedEscrowEvent | undefined
             observationDays: requiredNumber(args, "observationDays"),
             feeBps: requiredNumber(args, "feeBps")
           }
+        };
+      case "TrancheStarted":
+        return {
+          eventName,
+          trancheId,
+          args: { payee: requiredAddress(args, "payee") }
         };
       case "TrancheApproved":
         return {
