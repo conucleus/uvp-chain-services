@@ -8,6 +8,12 @@ import { SqliteGovernanceStore } from "../governance/sqlite-store.js";
 import { PostgresProductBffStore } from "../product/query/bff/postgres-store.js";
 import { SqliteProductBffStore } from "../product/query/bff/sqlite-store.js";
 import { MemoryProductBffStore, type ProductBffStore } from "../product/query/bff/store.js";
+import {
+  MemoryOrderRequirementsStore,
+  PostgresOrderRequirementsStore,
+  SqliteOrderRequirementsStore,
+  type OrderRequirementsStore
+} from "../product/requirements/index.js";
 import type { Address } from "../shared/types.js";
 import { InMemoryProductSubmissionStore } from "../submissions/store.js";
 import { PostgresSubmissionStore } from "../submissions/postgres-store.js";
@@ -122,6 +128,8 @@ export interface CreateProjectionStoreOptions {
 export interface ChainServicesStores {
   readonly projectionStore: ProjectionStore;
   readonly productBffStore: ProductBffStore;
+  /** V1 订单要求包（声明/合意）持久化 store。 */
+  readonly orderRequirementsStore: OrderRequirementsStore;
   readonly evidenceMetadataStore: EvidenceMetadataStore;
   readonly submissionStore: ProductSubmissionStore;
   readonly governanceStore: GovernanceStore;
@@ -188,6 +196,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
       return {
         projectionStore: new MemoryProjectionStore(),
         productBffStore: new MemoryProductBffStore(),
+        orderRequirementsStore: new MemoryOrderRequirementsStore(),
         evidenceMetadataStore: new InMemoryEvidenceMetadataStore(),
         submissionStore: new InMemoryProductSubmissionStore(),
         governanceStore: new InMemoryGovernanceStore(),
@@ -223,6 +232,10 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
           migrations
         }),
         productBffStore: new SqliteProductBffStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        orderRequirementsStore: new SqliteOrderRequirementsStore({
           databaseUrl: options.database.url,
           migrations
         }),
@@ -312,6 +325,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
           await closeStores([
             stores.projectionStore,
             stores.productBffStore,
+            stores.orderRequirementsStore,
             stores.evidenceMetadataStore,
             stores.submissionStore,
             stores.governanceStore,
@@ -354,6 +368,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
             : {})
         }),
         productBffStore: new PostgresProductBffStore({ database }),
+        orderRequirementsStore: new PostgresOrderRequirementsStore({ database }),
         evidenceMetadataStore: new PostgresEvidenceStore({ database }),
         submissionStore: new PostgresSubmissionStore({ database }),
         governanceStore: new PostgresGovernanceStore({ database }),

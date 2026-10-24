@@ -42,6 +42,11 @@ export interface ProductOrderDraftDTO {
   readonly updatedAt: string;
   readonly triggeredOrderId?: string;
   readonly triggerTxHash?: Hex;
+  /**
+   * V1 订单要求包锚（服务端 canonical JSON 算出的 hash）：草稿进入触发生命
+   * 周期前声明，随单冻结；v0 路径不读写该字段，由要求包端点填充。
+   */
+  readonly requirementsHash?: Hex;
 }
 
 export interface DraftParticipantDTO {

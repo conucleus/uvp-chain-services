@@ -281,6 +281,7 @@ export async function startApiServer(
   const opsConsoleAdminIds = config.operatorRoles.opsConsoleAdmins ?? [];
   const router = createApiRouter(store, {
     productBffStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
     ...(config.operatorRoles.adminReviewers.length > 0
       ? { governanceAdminIds: config.operatorRoles.adminReviewers }
       : {}),

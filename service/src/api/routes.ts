@@ -6,7 +6,8 @@ import { createProductService, ProductOrderLookupError } from "../product/applic
 import {
   createProductBffService,
 } from "../product/query/bff/service.js";
-import type { ProductBffStore } from "../product/query/bff/store.js";
+import { MemoryProductBffStore, type ProductBffStore } from "../product/query/bff/store.js";
+import { createOrderRequirementsService } from "../product/requirements/index.js";
 import { createEvidenceService, LocalEvidenceStorage } from "../evidence/index.js";
 import { createGovernanceService } from "../governance/index.js";
 import {
@@ -78,6 +79,7 @@ import { createNotificationsRouteModule } from "./routes/notifications.js";
 import { createProductBffRouteModule } from "./routes/product-bff.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
 import { createProductRegistrationRouteModule } from "./routes/product-registration.js";
+import { createProductRequirementsRouteModule } from "./routes/product-requirements.js";
 import { createStoreConsoleRouteModule } from "./routes/store-console.js";
 import { createStoreDockingRouteModule } from "./routes/store-docking.js";
 import { createStoreSuppliersRouteModule } from "./routes/store-suppliers.js";
@@ -162,13 +164,21 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const resolveDraftOrder = options.productBffStore
     ? productBffStoreDraftOrderResolver(options.productBffStore)
     : undefined;
+  // BFF 台账与 V1 要求包服务共用同一实例：路由层不注入时必须共享同一份
+  // 内存台账，否则 draft 声明与要求包读取会看到两套草稿。
+  const productBffStore = options.productBffStore ?? new MemoryProductBffStore();
+  const orderRequirementsService = options.orderRequirementsService ?? createOrderRequirementsService({
+    bffStore: productBffStore,
+    ...(options.orderRequirementsStore ? { store: options.orderRequirementsStore } : {}),
+    ...(options.now ? { now: options.now } : {})
+  });
   const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
   if (productTriggerChainId === undefined) {
     throw new Error("productTriggerChainId or submissionChainId is required to create the Product BFF service");
   }
   const productBffService = createProductBffService({
     productService,
-    ...(options.productBffStore ? { store: options.productBffStore } : {}),
+    store: productBffStore,
     ...(options.productRegistrationAdapter ? { registrationAdapter: options.productRegistrationAdapter } : {}),
     ...(options.productTriggerAdapter ? { triggerAdapter: options.productTriggerAdapter } : {}),
     ...(options.productRegistrationCreatorAddress ? { productRegistrationCreatorAddress: options.productRegistrationCreatorAddress } : {}),
@@ -359,6 +369,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     store,
     productService,
     productBffService,
+    orderRequirementsService,
     storeConsoleService,
     storeDockingService,
     storeRuntimeService,
@@ -407,6 +418,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createStagePatchRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createSubmissionsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductBffRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
+    createProductRequirementsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductRegistrationRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductReadRouteModule({ runtimeEnvironment: productRuntimeEnvironment })
   ];

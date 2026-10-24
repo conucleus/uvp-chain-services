@@ -124,6 +124,7 @@ const expectedMigrationVersions = [
   "0027_store_listing_status_check",
   "0028_store_entity_registration",
   "0029_store_zhixu_draft_publisher",
+  "0030_order_requirements",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0

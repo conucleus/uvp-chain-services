@@ -6,6 +6,10 @@ import type {
 } from "../evidence/index.js";
 import type { GovernanceAdminAuthPolicy, GovernanceService, GovernanceStore } from "../governance/index.js";
 import type { ProductBffService } from "../product/query/bff/service.js";
+import type {
+  OrderRequirementsService,
+  OrderRequirementsStore
+} from "../product/requirements/index.js";
 import type { ProductOrderTriggerBroadcastAdapter } from "../product/query/bff/trigger.js";
 import type { ProductBffStore } from "../product/query/bff/store.js";
 import type { ProductSchemaResolver, ProductService } from "../product/application/service.js";
@@ -113,6 +117,10 @@ export interface CreateApiRouterOptions {
   readonly stageResourcePatchVerifyingContract?: Address;
   readonly stageResourcePatchStore?: ProductStageResourcePatchStore;
   readonly productBffStore?: ProductBffStore;
+  /** V1 订单要求包服务（缺省由 routes 从 productBffStore 构造）。 */
+  readonly orderRequirementsService?: OrderRequirementsService;
+  /** 订单要求包持久化 store（sqlite/postgres 驱动注入；缺省内存）。 */
+  readonly orderRequirementsStore?: OrderRequirementsStore;
   readonly productRegistrationAdapter?: ProductOrderTriggerBroadcastAdapter;
   readonly productTriggerAdapter?: ProductOrderTriggerBroadcastAdapter;
   readonly productTriggerChainId?: number;
@@ -201,6 +209,7 @@ export interface ApiRouteContext {
   readonly store: ProjectionStore;
   readonly productService: ProductService;
   readonly productBffService: ProductBffService;
+  readonly orderRequirementsService: OrderRequirementsService;
   readonly storeConsoleService: StoreConsoleService;
   readonly storeDockingService: StoreDockingService;
   readonly storeRuntimeService: StoreRuntimeService;
