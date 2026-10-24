@@ -1,14 +1,16 @@
 // 订单要求包服务：声明（PUT）、读取（GET）、相对方合意（POST）。草稿状态与
 // 参与者名单只读 v0 BFF 台账，要求包本身落独立 store；requirementsHash 只
-// 由本服务对 canonical JSON 计算，客户端自报的派生字段一律拒绝。V1 不复用
+// 由本服务对 canonical JSON 计算，客户端自报的派生字段一律拒绝。合意消息
+// 格式单源在 @uvp-eth/product-dto（order-requirements.ts）。V1 不复用
 // capability/permission/createOrderTrigger/evidenceSpec 语义。
 
 import { randomUUID } from "node:crypto";
 import { verifyMessage } from "viem";
-import type {
-  OrderRequirementsBundleDTO,
-  OrderRequirementsConsentDTO,
-  OrderRequirementsTriggerAnchorDTO,
+import {
+  orderRequirementsConsentMessage,
+  type OrderRequirementsBundleDTO,
+  type OrderRequirementsConsentDTO,
+  type OrderRequirementsTriggerAnchorDTO,
 } from "@uvp-eth/product-dto";
 import { normalizeAddress, type Address, type Hex } from "../../shared/types.js";
 import { MemoryProductBffStore, type ProductBffStore } from "../query/bff/store.js";
@@ -41,22 +43,6 @@ const EDITABLE_DRAFT_STATUSES: ReadonlySet<ProductOrderDraftStatus> = new Set([
 ]);
 
 const BYTES32_PATTERN = /^0x[0-9a-fA-F]{64}$/;
-
-export interface OrderRequirementsConsentMessageInput {
-  readonly draftId: string;
-  readonly requirementsHash: string;
-}
-
-/** 相对方签名消息（单源）：签名覆盖 draftId + requirementsHash。 */
-export function orderRequirementsConsentMessage(
-  input: OrderRequirementsConsentMessageInput,
-): string {
-  return [
-    "UVP order requirements consent v1",
-    `Draft: ${input.draftId}`,
-    `Requirements Hash: ${input.requirementsHash}`,
-  ].join("\n");
-}
 
 export interface CreateOrderRequirementsServiceOptions {
   /** 草稿/参与者名单读取口（与 productBffService 共用同一台账实例）。 */
@@ -223,10 +209,10 @@ export function createOrderRequirementsService(
           { draftId },
         );
       }
-      const message = orderRequirementsConsentMessage({
+      const message = orderRequirementsConsentMessage(
         draftId,
-        requirementsHash: record.requirementsHash,
-      });
+        record.requirementsHash,
+      );
       const signatureValid = await verifySignature({
         address: actor,
         message,
@@ -270,6 +256,11 @@ function declarationResult(
     // Hex 字段前在这里收口。
     draft: { ...draft, requirementsHash: bundle.requirementsHash as Hex },
     bundle,
+    // 读面下发同一消息，客户端不必自拼格式即可签名合意。
+    consentMessage: orderRequirementsConsentMessage(
+      draft.draftId,
+      bundle.requirementsHash,
+    ),
     triggerAnchor: anchorOf(draft.draftId, bundle),
     editable: isEditable(draft),
   };

@@ -1,3 +1,4 @@
+import { orderRequirementsConsentMessage } from "@uvp-eth/product-dto";
 import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
@@ -6,7 +7,6 @@ import type {
   DraftParticipantDTO,
   ProductOrderDraftDTO,
 } from "../src/product/query/bff/types.js";
-import { orderRequirementsConsentMessage } from "../src/product/requirements/index.js";
 import type { Hex } from "../src/shared/types.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 
@@ -37,6 +37,7 @@ interface DeclarationResultBody {
     readonly declaredBy: string;
     readonly consents?: readonly { readonly walletAddress: string }[];
   };
+  readonly consentMessage: string;
   readonly triggerAnchor: {
     readonly requirementsHash: string;
     readonly consentedWallets: readonly string[];
@@ -77,6 +78,9 @@ describe("V1 order requirement bundle", () => {
     expect((read.body as DeclarationResultBody).bundle).toEqual(
       declaredBody.bundle,
     );
+    expect((read.body as DeclarationResultBody).consentMessage).toBe(
+      declaredBody.consentMessage,
+    );
   });
 
   it("binds counterparty consent to the declared hash and rejects another signature", async () => {
@@ -84,10 +88,8 @@ describe("V1 order requirement bundle", () => {
     const declaredBody = (await putRequirements(router, requirementsDeclaration()))
       .body as DeclarationResultBody;
     const requirementsHash = declaredBody.bundle.requirementsHash;
-    const message = orderRequirementsConsentMessage({
-      draftId,
-      requirementsHash,
-    });
+    // 读面下发的消息即签名消息：客户端不自拼格式，服务端按同一单源校验。
+    const message = declaredBody.consentMessage;
 
     const signed = await postConsent(router, {
       requirementsHash,
@@ -113,10 +115,7 @@ describe("V1 order requirement bundle", () => {
 
     // 签名覆盖的 hash 不是当前包：合意不成立，精确到 requirements_hash_mismatch。
     const otherHash = `0x${"c".repeat(64)}` as `0x${string}`;
-    const otherMessage = orderRequirementsConsentMessage({
-      draftId,
-      requirementsHash: otherHash,
-    });
+    const otherMessage = orderRequirementsConsentMessage(draftId, otherHash);
     const mismatched = await postConsent(router, {
       requirementsHash: otherHash,
       signature: await counterpartyAccount.signMessage({

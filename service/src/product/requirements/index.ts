@@ -11,7 +11,5 @@ export {
 } from "./validate.js";
 export {
   createOrderRequirementsService,
-  orderRequirementsConsentMessage,
-  type CreateOrderRequirementsServiceOptions,
-  type OrderRequirementsConsentMessageInput
+  type CreateOrderRequirementsServiceOptions
 } from "./service.js";

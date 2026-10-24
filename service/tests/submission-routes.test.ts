@@ -546,6 +546,56 @@ describe("submission API routes", () => {
     });
     expect(aligned.status).toBe(201);
   });
+  it("prepares a V1 acceptance submit without evidenceIds or intent from the explicit signal", async () => {
+    const acceptedSignalId = bytes32("61");
+    const v1Task = {
+      ...routeTask,
+      taskId: "task-route-v1",
+      submitSignals: [
+        { signalName: "accepted", sourceId: routeSourceId, signalId: acceptedSignalId },
+        { signalName: "rejected", sourceId: routeSourceId, signalId: bytes32("62") }
+      ]
+    } as unknown as ProductTaskDTO;
+    const evidenceService = createEvidenceService({
+      runtimeEnvironment: "local",
+      storage: new InMemoryEvidenceStorage(),
+      now: () => new Date("2026-04-28T00:00:00Z")
+    });
+    const submissionService = createProductSubmissionService({
+      productTasks: { getTask: async (taskId) => taskId === v1Task.taskId ? v1Task : undefined },
+      evidenceReader: evidenceService,
+      chainId: 31337,
+      verifyingContract,
+      resolveOrderPlanId: async () => routePlanId,
+      authorization: allowListedSubmissionAuthorization([{
+        orderId: v1Task.orderId,
+        stageIdentifier: v1Task.stageId,
+        signalName: "accepted",
+        submitter
+      }]),
+      now: () => new Date("2026-04-28T00:00:00Z"),
+      prepareIdFactory: () => "prep_v1_accept",
+      nonceFactory: () => "12"
+    });
+    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
+
+    // V1 验收者读要求包句柄后只带显式 signalName：无 evidenceSpec 槽位，
+    // evidenceIds 与 intent 都缺省，服务端按显式信号与兼容缺省意图准备。
+    const prepareResponse = await router.handle({
+      method: "POST",
+      pathname: `/product/tasks/${v1Task.taskId}/prepare-submit`,
+      headers: { "x-uvp-principal-id": submitter.toLowerCase() },
+      body: { walletAddress: submitter, signalName: "accepted" }
+    });
+    expect(prepareResponse.status, JSON.stringify(prepareResponse.body)).toBe(201);
+    expect(prepareResponse.body).toMatchObject({
+      signalName: "accepted",
+      signalId: acceptedSignalId,
+      sourceId: routeSourceId,
+      intent: "confirm_stage",
+      evidence: []
+    });
+  });
 });
 
 function txHash(value: string): Hex {

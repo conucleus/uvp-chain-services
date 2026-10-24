@@ -140,9 +140,11 @@ async function handleSubmissionRequest(action: () => Promise<ApiResponse>): Prom
 function parsePrepareSubmitBody(body: unknown): PrepareProductTaskSubmitInput {
   const record = requireSubmissionBodyRecord(body);
   return {
-    evidenceIds: requiredSubmissionStringArray(record, "evidenceIds"),
+    // V1 验收提交读要求包句柄后只带 signalName：evidenceIds 可缺省为空，
+    // 是否有必填证据槽位由服务端按任务声明裁决；intent 同理保持兼容缺省。
+    evidenceIds: optionalSubmissionStringArray(record, "evidenceIds") ?? [],
     walletAddress: requiredSubmissionString(record, "walletAddress"),
-    intent: requiredSubmitIntent(record, "intent"),
+    intent: optionalSubmitIntent(record, "intent") ?? "confirm_stage",
     ...(typeof record.signalName === "string" && record.signalName.trim().length > 0
       ? { signalName: record.signalName.trim() }
       : {})
@@ -173,6 +175,13 @@ function requiredSubmissionString(record: Record<string, unknown>, field: string
   return value.trim();
 }
 
+function optionalSubmissionStringArray(record: Record<string, unknown>, field: string): readonly string[] | undefined {
+  if (!Object.hasOwn(record, field)) {
+    return undefined;
+  }
+  return requiredSubmissionStringArray(record, field);
+}
+
 function requiredSubmissionStringArray(record: Record<string, unknown>, field: string): readonly string[] {
   const value = record[field];
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim().length > 0)) {
@@ -189,6 +198,13 @@ const SUBMIT_INTENTS: Readonly<Record<ProductSubmitIntent, true>> = {
   raise_dispute: true,
   resolve_dispute: true
 };
+
+function optionalSubmitIntent(record: Record<string, unknown>, field: string): ProductSubmitIntent | undefined {
+  if (!Object.hasOwn(record, field)) {
+    return undefined;
+  }
+  return requiredSubmitIntent(record, field);
+}
 
 function requiredSubmitIntent(record: Record<string, unknown>, field: string): ProductSubmitIntent {
   const value = requiredSubmissionString(record, field);

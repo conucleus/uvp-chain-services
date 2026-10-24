@@ -76,6 +76,8 @@ export interface OrderRequirementsDraftPort {
 export interface OrderRequirementsDeclarationResult {
   readonly draft: ProductOrderDraftDTO;
   readonly bundle: OrderRequirementsBundleDTO;
+  /** 相对方合意签名消息（格式单源在 @uvp-eth/product-dto）。 */
+  readonly consentMessage?: string;
   readonly triggerAnchor: OrderRequirementsTriggerAnchorDTO;
   /** 当前草稿是否仍允许改要求包（读面展示旗标）。 */
   readonly editable: boolean;

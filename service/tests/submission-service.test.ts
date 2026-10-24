@@ -2145,6 +2145,25 @@ describe("product task submissions", () => {
       intent: "confirm_stage"
     }, owner)).resolves.toMatchObject({ orderId: slotTask.orderId });
   });
+
+  it("keeps evidence_required when a v0 task declares a required evidenceSpec slot and no evidence is supplied", async () => {
+    const slotTask = {
+      ...task,
+      evidenceSpec: [
+        { key: "invoice", label: "商业发票", inputKind: "file" as const, required: true }
+      ]
+    } as unknown as ProductTaskDTO;
+    const fixture = await submissionFixture({ task: slotTask });
+
+    await expect(fixture.service.prepareSubmit(slotTask.taskId, {
+      evidenceIds: [],
+      walletAddress: submitter,
+      intent: "confirm_stage"
+    }, owner)).rejects.toMatchObject({
+      code: "evidence_required",
+      status: 400
+    });
+  });
 });
 
 async function submissionFixture(options: {

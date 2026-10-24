@@ -202,9 +202,11 @@ export function createProductSubmissionService(options: ProductSubmissionService
       }
       const signalName = selectedSignal?.signalName ?? signalNameForIntent(input.intent);
       const chainSignal = chainSignalForTask(task, signalName, selectedSignal);
+      const requiredSlots = requiredEvidenceSlotsForTask(task);
       const evidence = await resolveEvidence({
         evidenceReader: options.evidenceReader,
         evidenceIds: input.evidenceIds,
+        requiredSlots,
         principal,
         orderId: task.orderId,
         taskId,
@@ -213,7 +215,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
       });
       // 《证据与存证规则》二.1/二.2：必填凭证槽位的最终门在服务端——
       // 前端渲染只是提示，提交入口按任务的证据槽位声明校验必填凭证在场。
-      validateEvidenceSlots(task, evidence);
+      validateEvidenceSlots(requiredSlots, evidence);
       const payload = payloadForEvidence(evidence);
       const authRequest: SubmissionAuthorizationRequest = {
         task,
@@ -985,6 +987,7 @@ function dtoFromPreparedRecord(record: PreparedSubmissionRecord): PreparedSubmis
 async function resolveEvidence(input: {
   readonly evidenceReader: ProductSubmissionEvidenceReader;
   readonly evidenceIds: readonly string[];
+  readonly requiredSlots: readonly RequiredEvidenceSlot[];
   readonly principal: EvidencePrincipal;
   readonly orderId: string;
   readonly taskId: string;
@@ -992,6 +995,12 @@ async function resolveEvidence(input: {
   readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
 }): Promise<readonly EvidenceRecordDTO[]> {
   if (input.evidenceIds.length === 0) {
+    // V1 任务可以不带 evidenceSpec 槽位：验收者读要求包句柄后显式发信号，
+    // 没有必填槽位就允许空证据并跳过解析；v0 有必填槽位时保持证据必需的
+    // 入口错误，槽位缺具体项仍由 validateEvidenceSlots 精确到因。
+    if (input.requiredSlots.length === 0) {
+      return [];
+    }
     throw new ProductSubmissionError(400, "evidence_required", "at least one evidenceId is required");
   }
 
@@ -1115,8 +1124,10 @@ function requiredEvidenceSlotsForTask(task: ProductTaskDTO): readonly RequiredEv
   return slots;
 }
 
-function validateEvidenceSlots(task: ProductTaskDTO, records: readonly EvidenceRecordDTO[]): void {
-  const slots = requiredEvidenceSlotsForTask(task);
+function validateEvidenceSlots(
+  slots: readonly RequiredEvidenceSlot[],
+  records: readonly EvidenceRecordDTO[]
+): void {
   if (slots.length === 0) {
     return;
   }
