@@ -162,8 +162,46 @@ export function createProductSubmissionService(options: ProductSubmissionService
       const verifyingContract = task.stateMachineAddress
         ? normalizeAddress(task.stateMachineAddress, "task.stateMachineAddress")
         : defaultVerifyingContract;
-      const signalName = signalNameForIntent(input.intent);
-      const chainSignal = chainSignalForTask(task, signalName);
+      const candidates = task.submitSignals ?? [];
+      const requestedSignalName = input.signalName?.trim();
+      let selectedSignal: { readonly signalName: string; readonly sourceId: Hex; readonly signalId: Hex } | undefined;
+      if (requestedSignalName) {
+        const matched = candidates.find(
+          (candidate) =>
+            candidate.signalName.toLowerCase() === requestedSignalName.toLowerCase() ||
+            candidate.signalId.toLowerCase() === requestedSignalName.toLowerCase(),
+        );
+        selectedSignal = matched
+          ? {
+              signalName: matched.signalName,
+              sourceId: normalizeBytes32(matched.sourceId, "submitSignal.sourceId"),
+              signalId: normalizeBytes32(matched.signalId, "submitSignal.signalId"),
+            }
+          : undefined;
+        if (!selectedSignal) {
+          throw new ProductSubmissionError(
+            400,
+            "signal_not_available",
+            "requested signal is not available on this task",
+            { requestedSignalName, candidates: candidates.map((candidate) => candidate.signalName) },
+          );
+        }
+      } else if (candidates.length === 1) {
+        selectedSignal = {
+          signalName: candidates[0]!.signalName,
+          sourceId: normalizeBytes32(candidates[0]!.sourceId, "submitSignal.sourceId"),
+          signalId: normalizeBytes32(candidates[0]!.signalId, "submitSignal.signalId"),
+        };
+      } else if (candidates.length > 1) {
+        throw new ProductSubmissionError(
+          409,
+          "signal_selection_required",
+          "this task can submit more than one signal; choose signalName explicitly",
+          { candidates: candidates.map((candidate) => candidate.signalName) },
+        );
+      }
+      const signalName = selectedSignal?.signalName ?? signalNameForIntent(input.intent);
+      const chainSignal = chainSignalForTask(task, signalName, selectedSignal);
       const evidence = await resolveEvidence({
         evidenceReader: options.evidenceReader,
         evidenceIds: input.evidenceIds,
@@ -775,11 +813,22 @@ type ProductTaskChainFields = ProductTaskDTO & {
   };
 };
 
-function chainSignalForTask(task: ProductTaskDTO, signalName: string): {
+function chainSignalForTask(
+  task: ProductTaskDTO,
+  signalName: string,
+  selected?: { readonly sourceId: Hex; readonly signalId: Hex },
+): {
   readonly orderId: Hex;
   readonly sourceId: Hex;
   readonly signalId: Hex;
 } {
+  if (selected) {
+    return {
+      orderId: normalizeBytes32(task.orderId, "orderId"),
+      sourceId: selected.sourceId,
+      signalId: selected.signalId,
+    };
+  }
   const chainTask = task as ProductTaskChainFields;
   // 与 planId"绝不捏造"同纪律：sourceId/signalId/orderId 三层链上
   // 身份必须来自投影——本地按常量/命名约定推导出的 id 在链上不存在，

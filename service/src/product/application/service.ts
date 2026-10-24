@@ -777,6 +777,11 @@ async function productTaskFromStateMachineTask(
     baseProof,
     capabilityResolution,
   );
+  const submitSignals = await submitSignalsForTask(
+    task,
+    order,
+    productSchemaResolver,
+  );
   const productStage = await resolveProductStageForTask(
     task,
     order,
@@ -948,6 +953,7 @@ async function productTaskFromStateMachineTask(
     hookName: hookLabel,
     stageIdentifier: stageId,
     chainStatus: task.status,
+    ...(submitSignals.length > 0 ? { submitSignals } : {}),
     readyTxHash: task.createdAt.transactionHash,
     ...(task.status === "submitted" &&
     task.proof.eventName === "SignalSubmitted"
@@ -1091,6 +1097,46 @@ function submitterForCapability(
     }
   }
   return undefined;
+}
+
+async function submitSignalsForTask(
+  task: StateMachineTaskProjection,
+  order: StateMachineOrderProjection | undefined,
+  productSchemaResolver: ProductSchemaResolver | undefined,
+): Promise<readonly { readonly signalName: string; readonly sourceId: Hex; readonly signalId: Hex }[]> {
+  if (!order) {
+    return [];
+  }
+  const zhixu = await zhixuDetailForOrder(order, productSchemaResolver);
+  if (!zhixu) {
+    return [];
+  }
+  const decodedStageId = displayStageId(task.stageIdentifier);
+  const stageIds = new Set([decodedStageId, task.stageIdentifier.toLowerCase()]);
+  const allowed = new Set(
+    (task.submitSignals ?? []).map(
+      (signal) => `${signal.sourceId.toLowerCase()}:${signal.signalId.toLowerCase()}`,
+    ),
+  );
+  const seen = new Set<string>();
+  const candidates: { signalName: string; sourceId: Hex; signalId: Hex }[] = [];
+  for (const entry of zhixu.orderPermissionTable) {
+    if (!entry.source || !entry.signalName || !taskStageMatches(entry.stageId, stageIds)) {
+      continue;
+    }
+    const sourceId = keccak256(stringToBytes(entry.source)).toLowerCase() as Hex;
+    const signalId = keccak256(stringToBytes(entry.signalName)).toLowerCase() as Hex;
+    const key = `${sourceId}:${signalId}`;
+    if (allowed.size > 0 && !allowed.has(key)) {
+      continue;
+    }
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    candidates.push({ signalName: entry.signalName, sourceId, signalId });
+  }
+  return candidates;
 }
 
 function proofWithCapabilitySubmitSignal(

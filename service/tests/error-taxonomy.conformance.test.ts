@@ -261,6 +261,10 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'governance_signer_not_authorized',
   'trigger_order_broadcast_failed',
   'trigger_order_reverted',
+  // Product 任务多发射信号的显式选择错误（发布者/验收者按 fileResources 选信号）；
+  // 词表本体（uvp-core）尚未登记，按既有 OUT_OF_TAXONOMY_SCOPE 口径先显式登记。
+  'signal_selection_required',
+  'signal_not_available',
 ]);
 
 function serviceRoot(): string {

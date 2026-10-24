@@ -142,7 +142,10 @@ function parsePrepareSubmitBody(body: unknown): PrepareProductTaskSubmitInput {
   return {
     evidenceIds: requiredSubmissionStringArray(record, "evidenceIds"),
     walletAddress: requiredSubmissionString(record, "walletAddress"),
-    intent: requiredSubmitIntent(record, "intent")
+    intent: requiredSubmitIntent(record, "intent"),
+    ...(typeof record.signalName === "string" && record.signalName.trim().length > 0
+      ? { signalName: record.signalName.trim() }
+      : {})
   };
 }
 
