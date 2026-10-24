@@ -376,7 +376,14 @@ describe("submission API routes", () => {
     const projectionStore = new MemoryProjectionStore();
     const baseEvents = [
       chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
-      chainEvent(2n, 0, "OrderRegistered", { orderId, planId })
+      chainEvent(2n, 0, "OrderRegistered", { orderId, planId }),
+      // 注册交易内的创建者事实：proof 读取会话钱包即订单创建者。
+      chainEvent(2n, 1, "OrderRelayerRecorded", {
+        orderId,
+        planId,
+        relayer: submitter,
+        creator: submitter
+      })
     ];
     await projectionStore.resetFromEvents({ deploymentBlock: 0n, events: baseEvents });
     let preparedForRefresh: PreparedSubmissionDTO | undefined;

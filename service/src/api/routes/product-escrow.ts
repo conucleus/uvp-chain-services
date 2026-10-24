@@ -1,6 +1,8 @@
 // Session-anchored product reads for the StageEscrow V2 projection. Order
 // visibility reuses the product order gate (same 404 for missing/invisible);
 // unconfigured escrow is an explicit 404, never a 500 or an empty fake order.
+// A tranche is served only when its payer belongs to the order's participant
+// set; payee/verifier may be third parties and are not gated by participation.
 
 import { StorageUnavailableError } from "../../storage/errors.js";
 import {
@@ -10,7 +12,10 @@ import {
   type ApiResponse
 } from "../route-context.js";
 import { resolveParticipantWalletIdentity } from "../participant-identity.js";
-import { resolveOrderVisibility } from "../product-order-visibility.js";
+import {
+  orderParticipantWallets,
+  resolveOrderVisibility
+} from "../product-order-visibility.js";
 import type { RouteModule } from "../route-module.js";
 
 const ESCROW_PATH = /^\/product\/orders\/([^/]+)\/escrow(?:\/([^/]+))?$/;
@@ -55,12 +60,13 @@ export function createProductEscrowRouteModule(options: {
           return visibility.response;
         }
         const normalizedOrderId = visibility.order.orderId;
+        const participants = orderParticipantWallets(visibility.order);
         if (stageId !== undefined) {
           const tranche = await context.escrowService.getTranche(
             normalizedOrderId,
             stageId
           );
-          if (!tranche) {
+          if (!tranche || !participants.has(tranche.payer.toLowerCase())) {
             return {
               status: 404,
               body: { error: "escrow_tranche_not_found" }
@@ -68,8 +74,10 @@ export function createProductEscrowRouteModule(options: {
           }
           return { status: 200, body: tranche };
         }
-        const tranches = await context.escrowService.listTranches(
+        const tranches = (await context.escrowService.listTranches(
           normalizedOrderId
+        )).filter((tranche) =>
+          participants.has(tranche.payer.toLowerCase())
         );
         return {
           status: 200,

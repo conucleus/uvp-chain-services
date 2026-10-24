@@ -1,6 +1,8 @@
 // Shared product order visibility: list/detail/task reads and the escrow
 // routes must agree on which wallet can see an order. Keys are (planId,
-// orderId) so a reused bare order id cannot leak another plan's order.
+// orderId) so a reused bare order id cannot leak another plan's order. An
+// order with no judgeable participant (no assignee, overlay executor, or
+// creator) is not visible to anyone: an empty participant set is not public.
 
 import {
   ProductOrderLookupError,
@@ -70,11 +72,9 @@ export async function resolveOrderVisibility(
   return { order };
 }
 
-export function orderVisibleToParticipant(
-  order: ProductOrderApiDTO,
-  walletAddress: string,
-  acceptedOrderKeys: ReadonlySet<string>
-): boolean {
+export function orderParticipantWallets(
+  order: ProductOrderApiDTO
+): ReadonlySet<string> {
   const participants = new Set<string>();
   for (const task of order.tasks ?? []) {
     if (task.assigneeWallet) {
@@ -96,8 +96,21 @@ export function orderVisibleToParticipant(
   if (order.creatorWallet) {
     participants.add(order.creatorWallet.toLowerCase());
   }
+  return participants;
+}
+
+export function orderVisibleToParticipant(
+  order: ProductOrderApiDTO,
+  walletAddress: string,
+  acceptedOrderKeys: ReadonlySet<string>
+): boolean {
+  const participants = orderParticipantWallets(order);
+  if (participants.size === 0) {
+    return false;
+  }
+  if (participants.has(walletAddress)) {
+    return true;
+  }
   const acceptedKey = orderTaskVisibilityKey(order.planId, order.orderId);
-  return participants.size === 0 ||
-    participants.has(walletAddress) ||
-    (acceptedKey !== undefined && acceptedOrderKeys.has(acceptedKey));
+  return acceptedKey !== undefined && acceptedOrderKeys.has(acceptedKey);
 }

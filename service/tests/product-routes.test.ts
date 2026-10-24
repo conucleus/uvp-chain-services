@@ -949,9 +949,8 @@ describe("product API routes", () => {
 
     const orderResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}`, headers: assigneeHeaders });
     // timeline/proof 披露参与者钱包与签名细节：与订单详情同口径参与者门
-    //（匿名 401），带会话断言 200。非参与者 404 的断言在下方"参与者集合
-    // 非空"的用例覆盖——本 fixture 的订单无任何指派参与者（纯链上事实，
-    // 对已认证钱包开放），不构成 404 判据。
+    //（匿名 401），带会话断言 200。fixture 的订单创建者即该会话钱包；
+    // 非参与者 404 的断言在下方"参与者集合非空"的用例覆盖。
     const timelineResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline`, headers: assigneeHeaders });
     const proofResponse = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/proof`, headers: assigneeHeaders });
     const anonymousTimeline = await router.handle({ method: "GET", pathname: `/product/orders/${stateMachineOrderId}/timeline` });
@@ -1075,7 +1074,9 @@ describe("product API routes", () => {
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [
-        ...stateMachineProductEvents(),
+        // 订单创建者是第三方钱包：本用例只让"生效指派"决定订单可见性，
+        // 被接管者不能靠创建者身份继续看到订单。
+        ...stateMachineProductEvents({ orderCreator: routeTestWallet(9) }),
         chainEvent(8n, "SignalSubmitterAuthorized", {
           orderId: stateMachineOrderId,
           sourceId: hookId,
@@ -2476,6 +2477,7 @@ function stateMachineProductEvents(options: {
   readonly taskHookName?: string;
   readonly planId?: string;
   readonly planHash?: string;
+  readonly orderCreator?: string;
 } = {}): readonly ChainEvent[] {
   const eventPlanId = options.planId ?? crossBorderPlanIds.planId;
   const eventPlanHash = options.planHash ?? crossBorderPlanIds.planHash;
@@ -2494,6 +2496,14 @@ function stateMachineProductEvents(options: {
     chainEvent(3n, "OrderRegistered", {
       orderId: stateMachineOrderId,
       planId: eventPlanId
+    }),
+    // _createOrder 同一交易内 OrderRegistered(log 0) 后紧跟
+    // OrderRelayerRecorded(log 1)：订单参与者（创建者）是可见性判据的一部分。
+    chainEventAt(3n, 1, "OrderRelayerRecorded", {
+      orderId: stateMachineOrderId,
+      planId: eventPlanId,
+      relayer: options.orderCreator ?? submitter,
+      creator: options.orderCreator ?? submitter
     }),
     chainEvent(4n, "SignalSubmitted", {
       orderId: stateMachineOrderId,

@@ -2642,7 +2642,20 @@ describe("indexer projection replay", () => {
 
   it("serves state-machine projection through Product API endpoints", async () => {
     const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineEvents() });
+    // _createOrder 同交易内 OrderRegistered 后紧跟 OrderRelayerRecorded：
+    // 创建者参与可见性判定，读取钱包取 fixture 的 seller。
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        ...stateMachineEvents(),
+        chainEvent(2n, 1, "OrderRelayerRecorded", {
+          orderId: stateMachineOrderId,
+          planId,
+          relayer: seller,
+          creator: seller
+        })
+      ]
+    });
     const router = createApiRouter(store, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
     const taskId = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
 
@@ -2659,8 +2672,8 @@ describe("indexer projection replay", () => {
       pathname: `/product/orders/${stateMachineOrderId}/proof`,
       headers: orderHeaders
     });
-    // 任务读取收口：已认证参与者（锚定钱包）读取任务；该任务未指派
-    // 受理人，纯链上事实对已认证参与者开放。
+    // 任务读取收口：已认证参与者（锚定钱包）读取任务；任务未指派受理人，
+    // 订单可见性由创建者（同钱包）判定。
     const tasksResponse = await router.handle({
       method: "GET",
       pathname: "/product/tasks",
@@ -2679,7 +2692,7 @@ describe("indexer projection replay", () => {
         chainStatus: "registered",
         projection: expect.objectContaining({
           syncStatus: "indexed",
-          eventCount: 9,
+          eventCount: 10,
           lastEventName: "HookReady"
         })
       });
@@ -2847,7 +2860,15 @@ describe("indexer projection replay", () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: [] });
 
-    const baseEvents = stateMachineEvents();
+    const baseEvents = [
+      ...stateMachineEvents(),
+      chainEvent(2n, 1, "OrderRelayerRecorded", {
+        orderId: stateMachineOrderId,
+        planId,
+        relayer: seller,
+        creator: seller
+      })
+    ];
     const finalSubmit = chainEvent(8n, 0, "SignalSubmitted", {
       orderId: stateMachineOrderId,
       sourceId: bytes32Text("final-submit-source"),
@@ -2948,6 +2969,16 @@ describe("indexer projection replay", () => {
       }),
       transactionHash: registerTxHash
     };
+    // 同一注册交易的第二条日志：创建者即读取钱包，订单因此可判定参与者。
+    const relayerRecorded = {
+      ...chainEvent(2n, 1, "OrderRelayerRecorded", {
+        orderId: queuedOrderId,
+        planId,
+        relayer: seller,
+        creator: seller
+      }),
+      transactionHash: registerTxHash
+    };
     let readCount = 0;
     let unblock: (() => void) | undefined;
     const blocker = new Promise<void>((resolve) => { unblock = resolve; });
@@ -2961,7 +2992,7 @@ describe("indexer projection replay", () => {
           await blocker;
           return baseEvents;
         }
-        return [...baseEvents, registered];
+        return [...baseEvents, registered, relayerRecorded];
       }
     };
 

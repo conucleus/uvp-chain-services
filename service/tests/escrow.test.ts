@@ -21,12 +21,14 @@ import type { Address, Hex } from "../src/shared/types.js";
 const chainId = 31337;
 const escrowAddress = "0x1111111111111111111111111111111111111111" as Address;
 const orderId = `0x${"aa".repeat(32)}` as Hex;
+const planId = `0x${"22".repeat(32)}` as Hex;
 const stageId = `0x${"bb".repeat(32)}` as Hex;
 const trancheId = `0x${"cc".repeat(32)}` as Hex;
 const payer = "0x2222222222222222222222222222222222222222" as Address;
 const payee = "0x3333333333333333333333333333333333333333" as Address;
 const verifier = "0x4444444444444444444444444444444444444444" as Address;
 const feeRecipient = "0x5555555555555555555555555555555555555555" as Address;
+const thirdParty = "0x6666666666666666666666666666666666666666" as Address;
 const walletHeaders = { "x-uvp-wallet-address": payer };
 const base = { chainId, escrowAddress, trancheId } as const;
 
@@ -34,25 +36,29 @@ function deposited(
   blockNumber: bigint,
   blockTimestamp: bigint,
   amount: bigint,
-  observationDays = 14,
-  feeBps = 100
+  overrides: {
+    readonly payer?: Address;
+    readonly stageId?: Hex;
+    readonly trancheId?: Hex;
+  } = {}
 ): EscrowEvent {
   return {
     ...base,
+    ...(overrides.trancheId ? { trancheId: overrides.trancheId } : {}),
     blockNumber,
     logIndex: 0,
     blockTimestamp,
     eventName: "TrancheDeposited",
     args: {
       orderId,
-      stageId,
-      payer,
+      stageId: overrides.stageId ?? stageId,
+      payer: overrides.payer ?? payer,
       payee,
       verifier,
       feeRecipient,
       amount,
-      observationDays,
-      feeBps
+      observationDays: 14,
+      feeBps: 100
     }
   };
 }
@@ -445,6 +451,23 @@ describe("StageEscrow product API", () => {
       }]
     });
 
+    const detail = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}`,
+      headers: walletHeaders
+    });
+    expect(detail.status).toBe(200);
+
+    const outsider = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}`,
+      headers: { "x-uvp-wallet-address": thirdParty }
+    });
+    expect(outsider).toMatchObject({
+      status: 404,
+      body: { error: "product_order_not_found" }
+    });
+
     const stage = await router.handle({
       method: "GET",
       pathname: `/product/orders/${orderId}/escrow/${stageId}`,
@@ -510,6 +533,95 @@ describe("StageEscrow product API", () => {
       body: { error: "escrow_not_configured" }
     });
   });
+
+  it("fails closed for an order with no judgeable participants", async () => {
+    // OrderRegistered-only 投影：creator/指派/委任尚未到达，参与者集合为空
+    // 不等于公开——任何钱包（含该订单 escrow 的 payer）都按不存在收口。
+    const projection = await projectionWithOrder({ withCreator: false });
+    const escrowStore = new MemoryEscrowStore();
+    await replayEscrowEvents(escrowStore, [
+      deposited(10n, 1_700_000_000n, 1_000n)
+    ]);
+    const router = escrowRouter(projection, escrowStore, true);
+
+    for (const wallet of [payer, thirdParty]) {
+      const list = await router.handle({
+        method: "GET",
+        pathname: `/product/orders/${orderId}/escrow`,
+        headers: { "x-uvp-wallet-address": wallet }
+      });
+      expect(list).toMatchObject({
+        status: 404,
+        body: { error: "product_order_not_found" }
+      });
+    }
+  });
+
+  it("filters tranches whose payer is not an order participant", async () => {
+    const foreignStageId = `0x${"ee".repeat(32)}` as Hex;
+    const foreignTrancheId = `0x${"ff".repeat(32)}` as Hex;
+    const projection = await projectionWithOrder();
+    const escrowStore = new MemoryEscrowStore();
+    await replayEscrowEvents(escrowStore, [
+      deposited(10n, 1_700_000_000n, 1_000n),
+      deposited(11n, 1_700_000_100n, 2_000n, {
+        payer: thirdParty,
+        stageId: foreignStageId,
+        trancheId: foreignTrancheId
+      })
+    ]);
+    const router = escrowRouter(projection, escrowStore, true);
+    expect((await escrowStore.listTranches(escrowAddress, orderId)).map((record) => record.trancheId))
+      .toEqual([trancheId, foreignTrancheId]);
+
+    // 真实 tranche 的 payer 是参与者；payee/verifier 是第三方也不误杀。
+    const list = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow`,
+      headers: walletHeaders
+    });
+    expect(list.body).toMatchObject({
+      orderId,
+      tranches: [{
+        trancheId,
+        payer,
+        payee,
+        verifier,
+        amount: "1000"
+      }]
+    });
+    expect((list.body as { tranches: { trancheId: string }[] }).tranches
+      .map((tranche) => tranche.trancheId)).toEqual([trancheId]);
+
+    const foreignStage = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow/${foreignStageId}`,
+      headers: walletHeaders
+    });
+    expect(foreignStage).toMatchObject({
+      status: 404,
+      body: { error: "escrow_tranche_not_found" }
+    });
+
+    // 全部 tranche 都被过滤时仍是可读订单的空列表，而不是 404。
+    const filteredStore = new MemoryEscrowStore();
+    await replayEscrowEvents(filteredStore, [
+      deposited(10n, 1_700_000_000n, 2_000n, {
+        payer: thirdParty,
+        stageId: foreignStageId,
+        trancheId: foreignTrancheId
+      })
+    ]);
+    const filtered = await escrowRouter(projection, filteredStore, true).handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow`,
+      headers: walletHeaders
+    });
+    expect(filtered).toMatchObject({
+      status: 200,
+      body: { orderId, tranches: [] }
+    });
+  });
 });
 
 describe("StageEscrow config", () => {
@@ -535,23 +647,41 @@ describe("StageEscrow config", () => {
   });
 });
 
-async function projectionWithOrder(): Promise<MemoryProjectionStore> {
+async function projectionWithOrder(
+  options: { readonly withCreator?: boolean } = {}
+): Promise<MemoryProjectionStore> {
   const store = new MemoryProjectionStore();
   await store.resetFromEvents({
     deploymentBlock: 0n,
-    events: [{
-      chainId,
-      contractAddress: escrowAddress,
-      blockNumber: 3n,
-      transactionIndex: 0,
-      transactionHash: `0x${"44".repeat(32)}` as Hex,
-      logIndex: 0,
-      eventName: "OrderRegistered",
-      args: {
-        orderId,
-        planId: `0x${"22".repeat(32)}`
-      }
-    }]
+    events: [
+      {
+        chainId,
+        contractAddress: escrowAddress,
+        blockNumber: 3n,
+        transactionIndex: 0,
+        transactionHash: `0x${"44".repeat(32)}` as Hex,
+        logIndex: 0,
+        eventName: "OrderRegistered",
+        args: { orderId, planId }
+      },
+      ...(options.withCreator === false
+        ? []
+        : [{
+            chainId,
+            contractAddress: escrowAddress,
+            blockNumber: 4n,
+            transactionIndex: 0,
+            transactionHash: `0x${"45".repeat(32)}` as Hex,
+            logIndex: 0,
+            eventName: "OrderRelayerRecorded",
+            args: {
+              orderId,
+              planId,
+              relayer: payer,
+              creator: payer
+            }
+          }])
+    ]
   });
   return store;
 }
