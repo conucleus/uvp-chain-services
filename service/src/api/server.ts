@@ -492,6 +492,9 @@ export async function startApiServer(
   // 重建 settle 后的启动序列不得复活已 stop 的 worker/轮询。
   let closed = false;
   void (async () => {
+    if (closed) {
+      return;
+    }
     escrowIndexer?.start(config.api.indexerPollIntervalMs);
     await initialProjectionRebuild;
     if (closed) {
@@ -508,7 +511,7 @@ export async function startApiServer(
   server.on("close", () => {
     closed = true;
     void (async () => {
-      escrowIndexer?.stop();
+      await escrowIndexer?.stop();
       await timerKeeperWorker.stop();
       await dockAutomationWorker.stop();
       await reconcileWorker.stop();

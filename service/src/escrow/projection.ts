@@ -1,7 +1,6 @@
 // Pure StageEscrow projection: one event -> one tranche row, ordered by
-// (blockNumber, logIndex) and idempotent under replay. Timestamps derive from
-// the canonical block timestamp except approve/reject, whose absolute
-// release/refund deadlines let us recover the exact on-chain action time.
+// (blockNumber, logIndex) and idempotent under replay. Every timestamp is the
+// canonical block timestamp of the event that caused it.
 
 import type { Address, Hex } from "../shared/types.js";
 import {
@@ -13,9 +12,6 @@ import {
   type EscrowTrancheDTO,
   type EscrowTrancheRecord
 } from "./types.js";
-
-const SECONDS_PER_DAY = 86_400n;
-const REJECTION_WINDOW_SECONDS = 48n * 60n * 60n;
 
 export function applyEscrowEvent(
   current: EscrowTrancheRecord | undefined,
@@ -69,10 +65,7 @@ export function applyEscrowEvent(
           ...current,
           ...point,
           state: "approved",
-          approvedAt: isoTimestamp(
-            event.args.releaseTime -
-              BigInt(current.observationDays) * SECONDS_PER_DAY
-          )
+          approvedAt: timestamp
         }
       };
     case "TrancheRejected":
@@ -82,9 +75,7 @@ export function applyEscrowEvent(
           ...current,
           ...point,
           state: "rejected",
-          rejectedAt: isoTimestamp(
-            event.args.refundTime - REJECTION_WINDOW_SECONDS
-          )
+          rejectedAt: timestamp
         }
       };
     case "TrancheSuspended":

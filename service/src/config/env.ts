@@ -630,6 +630,14 @@ function parseEscrowIndexerConfig(
 ): EscrowIndexerConfig | undefined {
   const address = optionalAddressEnv(env, "UVP_ESCROW_ADDRESS");
   if (!address) {
+    if (
+      optionalEnv(env, "UVP_ESCROW_CHAIN_ID") !== undefined ||
+      optionalEnv(env, "UVP_ESCROW_DEPLOYMENT_BLOCK") !== undefined
+    ) {
+      throw new ConfigError(
+        "UVP_ESCROW_ADDRESS is required when UVP_ESCROW_CHAIN_ID or UVP_ESCROW_DEPLOYMENT_BLOCK is set",
+      );
+    }
     return undefined;
   }
   const escrowChainId = parseInteger(env, "UVP_ESCROW_CHAIN_ID", chainId);

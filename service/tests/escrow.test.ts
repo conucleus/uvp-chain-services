@@ -6,6 +6,7 @@ import { createApiRouter } from "../src/api/routes.js";
 import { loadConfigFromEnv } from "../src/config/index.js";
 import {
   createEscrowQueryService,
+  decodeEscrowLogs,
   MemoryEscrowStore,
   rebuildEscrowProjection,
   replayEscrowEvents,
@@ -257,6 +258,34 @@ describe("StageEscrow projection replay", () => {
       releaseAt: new Date(Number(settledAt) * 1000).toISOString(),
       refundAt: new Date(Number(settledAt) * 1000).toISOString()
     });
+  });
+
+  it("drops logs that are not the configured escrow address or carry an unknown signature", () => {
+    const unknownTopic = `0x${"99".repeat(32)}` as Hex;
+    const decoded = decodeEscrowLogs({
+      chainId,
+      escrowAddress,
+      logs: [
+        {
+          address: "0x9999999999999999999999999999999999999999",
+          blockNumber: 50n,
+          logIndex: 0,
+          data: "0x",
+          topics: [unknownTopic]
+        },
+        {
+          address: escrowAddress,
+          blockNumber: 51n,
+          logIndex: 0,
+          data: "0x",
+          topics: [unknownTopic]
+        }
+      ],
+      blockTimestampOf: () => 1_700_004_000n
+    });
+
+    expect(decoded.events).toEqual([]);
+    expect(decoded.unknownLogCount).toBe(1);
   });
 
   it("skips unknown-tranche, duplicate, and conflicting-deposit events without fabricating rows", async () => {

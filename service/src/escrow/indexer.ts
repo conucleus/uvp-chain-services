@@ -10,7 +10,6 @@ import { noopLogger } from "../shared/types.js";
 import { decodeEscrowLogs, type RawEscrowLog } from "./events.js";
 import { replayEscrowEvents } from "./projection.js";
 import type {
-  EscrowEvent,
   EscrowProjectionStore,
   EscrowReplaySummary
 } from "./types.js";
@@ -132,10 +131,13 @@ export class EscrowIndexerService {
     });
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.#timer) {
       clearInterval(this.#timer);
       this.#timer = undefined;
+    }
+    if (this.#refreshing) {
+      await this.#refreshing.catch(() => undefined);
     }
   }
 
