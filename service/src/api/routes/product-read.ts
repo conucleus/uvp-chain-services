@@ -147,8 +147,8 @@ export function createProductReadRouteModule(options: {
         return withStorageGuard(async () => {
           // 订单 DTO 内嵌全部任务（assigneeWallet/proofRows 等参与者数据），
           // 匿名不可枚举——与任务读同口径身份门：身份取会话锚定钱包；
-          // 已有指派参与者的订单只有参与者本人可见，无指派（纯链上
-          // 事实）订单对已认证参与者开放。
+          // 订单可见性一律 fail-closed：没有可判定的参与者/创建者时
+          // 与不存在同响应（404），不再对“已认证但无指派”的钱包开放。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
