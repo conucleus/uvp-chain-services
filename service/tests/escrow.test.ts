@@ -29,6 +29,7 @@ const payee = "0x3333333333333333333333333333333333333333" as Address;
 const verifier = "0x4444444444444444444444444444444444444444" as Address;
 const feeRecipient = "0x5555555555555555555555555555555555555555" as Address;
 const thirdParty = "0x6666666666666666666666666666666666666666" as Address;
+const otherVerifier = "0x7777777777777777777777777777777777777777" as Address;
 const walletHeaders = { "x-uvp-wallet-address": payer };
 const base = { chainId, escrowAddress, trancheId } as const;
 
@@ -38,6 +39,7 @@ function deposited(
   amount: bigint,
   overrides: {
     readonly payer?: Address;
+    readonly verifier?: Address;
     readonly stageId?: Hex;
     readonly trancheId?: Hex;
   } = {}
@@ -54,7 +56,7 @@ function deposited(
       stageId: overrides.stageId ?? stageId,
       payer: overrides.payer ?? payer,
       payee,
-      verifier,
+      verifier: overrides.verifier ?? verifier,
       feeRecipient,
       amount,
       observationDays: 14,
@@ -620,6 +622,122 @@ describe("StageEscrow product API", () => {
     expect(filtered).toMatchObject({
       status: 200,
       body: { orderId, tranches: [] }
+    });
+  });
+
+  it("serves a third-party verifier only its own tranche and stage", async () => {
+    const otherStageId = `0x${"dd".repeat(32)}` as Hex;
+    const otherTrancheId = `0x${"ee".repeat(32)}` as Hex;
+    const projection = await projectionWithOrder();
+    const escrowStore = new MemoryEscrowStore();
+    await replayEscrowEvents(escrowStore, [
+      deposited(10n, 1_700_000_000n, 1_000n),
+      deposited(11n, 1_700_000_100n, 2_000n, {
+        verifier: otherVerifier,
+        stageId: otherStageId,
+        trancheId: otherTrancheId
+      })
+    ]);
+    const router = escrowRouter(projection, escrowStore, true);
+
+    const verifierList = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow`,
+      headers: { "x-uvp-wallet-address": verifier }
+    });
+    expect(verifierList.status).toBe(200);
+    expect((verifierList.body as { tranches: { trancheId: string }[] }).tranches
+      .map((tranche) => tranche.trancheId)).toEqual([trancheId]);
+
+    const ownStage = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow/${stageId}`,
+      headers: { "x-uvp-wallet-address": verifier }
+    });
+    expect(ownStage).toMatchObject({ status: 200, body: { stageId, verifier } });
+
+    const otherStage = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow/${otherStageId}`,
+      headers: { "x-uvp-wallet-address": verifier }
+    });
+    expect(otherStage).toMatchObject({
+      status: 404,
+      body: { error: "escrow_tranche_not_found" }
+    });
+
+    // payee 同为第三方，也按 "自己那段" 读，而不是按订单可见性。
+    const payeeStage = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow/${stageId}`,
+      headers: { "x-uvp-wallet-address": payee }
+    });
+    expect(payeeStage).toMatchObject({ status: 200, body: { stageId, payee } });
+
+    // 参与者仍读全部（含 verifier 是其他第三方的段）。
+    const payerList = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow`,
+      headers: walletHeaders
+    });
+    expect((payerList.body as { tranches: { trancheId: string }[] }).tranches
+      .map((tranche) => tranche.trancheId)).toEqual([trancheId, otherTrancheId]);
+
+    const outsiderList = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow`,
+      headers: { "x-uvp-wallet-address": thirdParty }
+    });
+    expect(outsiderList).toMatchObject({
+      status: 404,
+      body: { error: "product_order_not_found" }
+    });
+
+    const outsiderStage = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow/${stageId}`,
+      headers: { "x-uvp-wallet-address": thirdParty }
+    });
+    expect(outsiderStage).toMatchObject({
+      status: 404,
+      body: { error: "escrow_tranche_not_found" }
+    });
+  });
+
+  it("does not let a forged payer tranche promote a third party", async () => {
+    const forgedStageId = `0x${"dd".repeat(32)}` as Hex;
+    const forgedTrancheId = `0x${"ee".repeat(32)}` as Hex;
+    const projection = await projectionWithOrder();
+    const escrowStore = new MemoryEscrowStore();
+    await replayEscrowEvents(escrowStore, [
+      deposited(10n, 1_700_000_000n, 2_000n, {
+        payer: thirdParty,
+        stageId: forgedStageId,
+        trancheId: forgedTrancheId
+      })
+    ]);
+    const router = escrowRouter(projection, escrowStore, true);
+
+    // verifier 是伪 tranche 的参与方，但 payer 不是订单参与者；空结果收口为
+    // 404，而不是 200 空列表（不泄露该 order 下存在 tranche）。
+    const list = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow`,
+      headers: { "x-uvp-wallet-address": verifier }
+    });
+    expect(list).toMatchObject({
+      status: 404,
+      body: { error: "product_order_not_found" }
+    });
+
+    const stage = await router.handle({
+      method: "GET",
+      pathname: `/product/orders/${orderId}/escrow/${forgedStageId}`,
+      headers: { "x-uvp-wallet-address": verifier }
+    });
+    expect(stage).toMatchObject({
+      status: 404,
+      body: { error: "escrow_tranche_not_found" }
     });
   });
 });
