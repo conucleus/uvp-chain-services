@@ -1308,7 +1308,10 @@ describe("chain-services config", () => {
       UVP_FINALITY_CONFIRMATIONS: "1"
     });
     await expect(runConfigPreflight(loadConfigFromEnv(floorEnv), {
-      env: floorEnv
+      env: floorEnv,
+      // stub 客户端：RPC 预检不访问假 RPC 域名；静态 finality floor
+      // 仍是启动期拒绝的原因。
+      clients: productionPreflightClients()
     })).rejects.toThrow(/UVP_FINALITY_CONFIRMATIONS must be at least 2 in production when UVP_FINALITY_ANCHOR=confirmations/);
 
     const finalizedEnv = productionEnv({
@@ -2092,6 +2095,17 @@ function stagingManifestPath(tempDirs: string[], filename = "staging.addresses.j
     ]
   }));
   return manifestPath;
+}
+
+function productionPreflightClients() {
+  return {
+    network: {
+      // productionEnv 的 chainId；字节码读取返回非空 stub，使 RPC 预检
+      // 不访问 https://base-mainnet.example/rpc。
+      getChainId: async () => 8453,
+      getBytecode: async () => "0x01" as const
+    }
+  };
 }
 
 function stagingPreflightClients() {
