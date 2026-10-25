@@ -207,9 +207,9 @@ describe("evidence API routes", () => {
       headers: { "x-uvp-principal-id": "seller" },
       body: {
         orderId: "order-1",
-        stageIdentifier: "customs-complete",
-        documentType: "customs-declaration",
-        base64Payload: Buffer.from("customs declaration").toString("base64"),
+        stageIdentifier: "example-complete",
+        documentType: "example-declaration",
+        base64Payload: Buffer.from("example declaration").toString("base64"),
         metadata: {
           fields: { declarationNo: "CD-1" }
         }
@@ -272,9 +272,9 @@ describe("evidence API routes", () => {
       headers: { "x-uvp-principal-id": "seller" },
       body: {
         orderId: "order-1",
-        stageIdentifier: "customs-complete",
-        documentType: "customs-declaration",
-        textPayload: "customs declaration",
+        stageIdentifier: "example-complete",
+        documentType: "example-declaration",
+        textPayload: "example declaration",
         metadata: {
           fields: { declarationNo: "CD-1" }
         }

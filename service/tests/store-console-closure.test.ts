@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { CROSS_BORDER_ZHIXU_ID, crossBorderPlanIds } from "./fixtures/business/index.js";
+import { EXAMPLE_ZHIXU_ID, examplePlanIds } from "./fixtures/business/index.js";
 import { createApiRouter } from "../src/api/routes.js";
-import { crossBorderSchemaResolver, dockTargetPlanIds } from "./cross-border-schema.js";
+import { exampleSchemaResolver, dockTargetPlanIds } from "./example-schema.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { MemoryStoreAuditStore } from "../src/store/console/audit.js";
@@ -23,8 +23,8 @@ const metadataHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 const payloadHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const orderId = bytes32Hex("0202");
 const hookId = bytes32Hex("0303");
-const stageId = bytes32Text("export.customs");
-const hookName = bytes32Text("customs-review");
+const stageId = bytes32Text("stage-a");
+const hookName = bytes32Text("example-review");
 
 describe("Store Console closure dry-run summary", () => {
   it("covers the operator closure slice without creating authoritative state", async () => {
@@ -43,7 +43,7 @@ describe("Store Console closure dry-run summary", () => {
       }
     });
     const storeAuditStore = new MemoryStoreAuditStore();
-    const router = createApiRouter(store, { productRuntimeEnvironment: "local", productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeAuditStore,
       now: () => new Date("2026-05-06T00:00:00.000Z")
     });
@@ -105,7 +105,7 @@ describe("Store Console closure dry-run summary", () => {
       auditSummaryFound: true
     });
     const serialized = JSON.stringify(response.body);
-    expect(serialized).toContain(CROSS_BORDER_ZHIXU_ID);
+    expect(serialized).toContain(EXAMPLE_ZHIXU_ID);
     expect(serialized).not.toContain(payloadHash);
     expect(serialized).not.toContain(orderId);
   });
@@ -113,7 +113,7 @@ describe("Store Console closure dry-run summary", () => {
   it("lets read-only Store principals view the summary while write steps fail closed", async () => {
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineOrderEvents() });
-    const router = createApiRouter(store, { productRuntimeEnvironment: "local", productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       now: () => new Date("2026-05-06T00:00:00.000Z")
     });
 
@@ -157,7 +157,7 @@ describe("Store Console closure dry-run summary", () => {
   });
 
   it("requires an authenticated Store audit reader", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(router.handle({
       method: "GET",
@@ -176,8 +176,8 @@ describe("Store Console closure dry-run summary", () => {
 function stateMachineOrderEvents(): readonly ChainEvent[] {
   return [
     chainEvent(1n, "PlanRegistered", {
-      planId: crossBorderPlanIds.planId,
-      planHash: crossBorderPlanIds.planHash,
+      planId: examplePlanIds.planId,
+      planHash: examplePlanIds.planHash,
       hookCount: 1n
     }),
     // STORE-03：closure dry-run 的 docking 沙箱需要第二个已发布 zhixu 作 target。
@@ -188,14 +188,14 @@ function stateMachineOrderEvents(): readonly ChainEvent[] {
     }),
     chainEvent(3n, "OrderRegistered", {
       orderId,
-      planId: crossBorderPlanIds.planId
+      planId: examplePlanIds.planId
     }),
     chainEvent(4n, "SignalSubmitterAuthorized", {
       orderId,
       sourceId: stageId,
       signalId: hookName,
       submitter,
-      role: bytes32Text("customs-broker"),
+      role: bytes32Text("example-broker"),
       metadataHash
     }),
     chainEvent(5n, "HookReady", {

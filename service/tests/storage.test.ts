@@ -10,15 +10,15 @@ import type {
   StoreSupplierDTO,
 } from "@uvp-eth/product-dto";
 import {
-  CROSS_BORDER_ZHIXU_ID,
-  crossBorderPlanIds,
+  EXAMPLE_ZHIXU_ID,
+  examplePlanIds,
 } from "./fixtures/business/index.js";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
 import {
   DOCK_TARGET_ZHIXU_ID,
-  crossBorderSchemaResolver,
+  exampleSchemaResolver,
   dockTargetPlanIds,
-} from "./cross-border-schema.js";
+} from "./example-schema.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import type { ProjectionSnapshot } from "../src/indexer/projections/index.js";
 import { SqliteEvidenceStore } from "../src/evidence/sqlite-store.js";
@@ -1151,7 +1151,7 @@ describe("durable storage", () => {
     ).resolves.toMatchObject({
       supplierId: supplier.supplierId,
       supplierSubjectId: supplier.supplierSubjectId,
-      capabilityTags: ["customs", "logistics"],
+      capabilityTags: ["example", "logistics"],
     });
     await expect(
       reopened.storeSupplierMetadataStore.listAudits(supplier.supplierId),
@@ -1160,11 +1160,11 @@ describe("durable storage", () => {
         auditId: audit.auditId,
         action: "tags_updated",
         beforeTags: ["logistics"],
-        afterTags: ["customs", "logistics"],
+        afterTags: ["example", "logistics"],
         beforeSupportedRoleSlotIds: ["logistics"],
         afterSupportedRoleSlotIds: ["logistics", "seller"],
         beforeSupportedStageIds: ["shipment"],
-        afterSupportedStageIds: ["customs", "shipment"],
+        afterSupportedStageIds: ["example", "shipment"],
       },
     ]);
     await expect(
@@ -1194,8 +1194,8 @@ describe("durable storage", () => {
       deploymentBlock: 0n,
       events: [
         chainEvent(6n, 0, "PlanRegistered", {
-          planId: crossBorderPlanIds.planId,
-          planHash: crossBorderPlanIds.planHash,
+          planId: examplePlanIds.planId,
+          planHash: examplePlanIds.planHash,
           hookCount: 1n,
         }),
         chainEvent(7n, 0, "PlanRegistered", {
@@ -1226,19 +1226,19 @@ describe("durable storage", () => {
 
     const versionResponse = await firstRouter.handle({
       method: "POST",
-      pathname: `/store/zhixu-series/${CROSS_BORDER_ZHIXU_ID}/versions/v-route/deprecate`,
+      pathname: `/store/zhixu-series/${EXAMPLE_ZHIXU_ID}/versions/v-route/deprecate`,
       headers: adminHeaders,
       body: {
-        zhixuId: CROSS_BORDER_ZHIXU_ID,
+        zhixuId: EXAMPLE_ZHIXU_ID,
         versionLabel: "Route smoke v1",
-        planId: crossBorderPlanIds.planId,
-        planHash: crossBorderPlanIds.planHash,
-        artifactHash: crossBorderPlanIds.artifactHash,
+        planId: examplePlanIds.planId,
+        planHash: examplePlanIds.planHash,
+        artifactHash: examplePlanIds.artifactHash,
         cutoverReason: "Route restart smoke.",
         confirmation: {
           versionId: "v-route",
-          planId: crossBorderPlanIds.planId,
-          planHash: crossBorderPlanIds.planHash,
+          planId: examplePlanIds.planId,
+          planHash: examplePlanIds.planHash,
         },
       },
     });
@@ -1255,8 +1255,8 @@ describe("durable storage", () => {
         displayName: "Route Durable Supplier",
         wallet: seller,
         capabilityTags: ["logistics"],
-        supportedRoleSlotIds: ["customs"],
-        supportedStageIds: ["export.customs"],
+        supportedRoleSlotIds: ["example"],
+        supportedStageIds: ["stage-a"],
         registryAddresses: [registryAddress],
         metadataURI: "https://store.example/suppliers/route-durable",
       },
@@ -1268,7 +1268,7 @@ describe("durable storage", () => {
       pathname: "/store/docking-sessions",
       headers: adminHeaders,
       body: {
-        sourceZhixuId: CROSS_BORDER_ZHIXU_ID,
+        sourceZhixuId: EXAMPLE_ZHIXU_ID,
         targetZhixuId: DOCK_TARGET_ZHIXU_ID,
       },
     });
@@ -1303,7 +1303,7 @@ describe("durable storage", () => {
     await expect(
       reopenedRouter.handle({
         method: "GET",
-        pathname: `/store/zhixu-series/${CROSS_BORDER_ZHIXU_ID}/versions`,
+        pathname: `/store/zhixu-series/${EXAMPLE_ZHIXU_ID}/versions`,
         // 版本清单与运行时观察面同门（store.audit.read），匿名不可枚举。
         headers: adminHeaders,
       }),
@@ -1789,7 +1789,7 @@ describePostgres(
         ),
       ).resolves.toMatchObject({
         supplierId: storeSupplier.supplierId,
-        capabilityTags: ["customs", "logistics"],
+        capabilityTags: ["example", "logistics"],
       });
       await expect(
         reopened.storeSupplierMetadataStore.listAudits(
@@ -1823,8 +1823,8 @@ describePostgres(
         deploymentBlock: 0n,
         events: [
           chainEvent(6n, 0, "PlanRegistered", {
-            planId: crossBorderPlanIds.planId,
-            planHash: crossBorderPlanIds.planHash,
+            planId: examplePlanIds.planId,
+            planHash: examplePlanIds.planHash,
             hookCount: 1n,
           }),
           chainEvent(7n, 0, "PlanRegistered", {
@@ -1847,19 +1847,19 @@ describePostgres(
       );
       const versionResponse = await firstRouter.handle({
         method: "POST",
-        pathname: `/store/zhixu-series/${CROSS_BORDER_ZHIXU_ID}/versions/v-postgres-route/deprecate`,
+        pathname: `/store/zhixu-series/${EXAMPLE_ZHIXU_ID}/versions/v-postgres-route/deprecate`,
         headers: adminHeaders,
         body: {
-          zhixuId: CROSS_BORDER_ZHIXU_ID,
+          zhixuId: EXAMPLE_ZHIXU_ID,
           versionLabel: "Postgres route smoke v1",
-          planId: crossBorderPlanIds.planId,
-          planHash: crossBorderPlanIds.planHash,
-          artifactHash: crossBorderPlanIds.artifactHash,
+          planId: examplePlanIds.planId,
+          planHash: examplePlanIds.planHash,
+          artifactHash: examplePlanIds.artifactHash,
           cutoverReason: "Postgres route restart smoke.",
           confirmation: {
             versionId: "v-postgres-route",
-            planId: crossBorderPlanIds.planId,
-            planHash: crossBorderPlanIds.planHash,
+            planId: examplePlanIds.planId,
+            planHash: examplePlanIds.planHash,
           },
         },
       });
@@ -1890,8 +1890,8 @@ describePostgres(
         body: {
           reviewStatus: "approved_for_broadcast",
           capabilityTags: ["inspection", "logistics"],
-          supportedRoleSlotIds: ["customs-broker"],
-          supportedStageIds: ["export.customs"],
+          supportedRoleSlotIds: ["example-broker"],
+          supportedStageIds: ["stage-a"],
           publicSummary: "Approved for Postgres route durable smoke.",
           confirmation: {
             supplierId: "supplier-postgres-route-durable",
@@ -1909,7 +1909,7 @@ describePostgres(
         pathname: "/store/docking-sessions",
         headers: adminHeaders,
         body: {
-          sourceZhixuId: CROSS_BORDER_ZHIXU_ID,
+          sourceZhixuId: EXAMPLE_ZHIXU_ID,
           targetZhixuId: DOCK_TARGET_ZHIXU_ID,
         },
       });
@@ -1979,7 +1979,7 @@ describePostgres(
       await expect(
         reopenedRouter.handle({
           method: "GET",
-          pathname: `/store/zhixu-series/${CROSS_BORDER_ZHIXU_ID}/versions`,
+          pathname: `/store/zhixu-series/${EXAMPLE_ZHIXU_ID}/versions`,
           headers: adminHeaders,
         }),
       ).resolves.toMatchObject({
@@ -2021,9 +2021,9 @@ describePostgres(
             beforeTags: ["logistics"],
             afterTags: ["inspection", "logistics"],
             beforeSupportedRoleSlotIds: ["delivery"],
-            afterSupportedRoleSlotIds: ["customs-broker"],
+            afterSupportedRoleSlotIds: ["example-broker"],
             beforeSupportedStageIds: ["shipping"],
-            afterSupportedStageIds: ["export.customs"],
+            afterSupportedStageIds: ["stage-a"],
           }),
         ]),
       );
@@ -2078,7 +2078,7 @@ function openGovernanceStore(databaseUrl: string): SqliteGovernanceStore {
 }
 
 function createStoreMetadataRouter(stores: ChainServicesStores): ApiRouter {
-  return createApiRouter(stores.projectionStore, { productRuntimeEnvironment: "local", productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+  return createApiRouter(stores.projectionStore, { productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
     storeAuthConfig: {
       mode: "dev_headers" as const,
       roleClaim: "roles",
@@ -2639,9 +2639,9 @@ function storeSupplierMetadataRecord(): StoreSupplierMetadataRecord {
       "0x0000000000000000000000000000000000000000000000000000000000003301",
     displayName: "Store Durable Supplier",
     wallet: seller as Address,
-    capabilityTags: ["customs", "logistics"],
+    capabilityTags: ["example", "logistics"],
     supportedRoleSlotIds: ["seller", "logistics"],
-    supportedStageIds: ["shipment", "customs"],
+    supportedStageIds: ["shipment", "example"],
     registryAddresses: [registryAddress],
     reviewStatus: "approved_for_broadcast",
     metadataURI: "https://store.example/suppliers/durable",
@@ -2660,11 +2660,11 @@ function storeSupplierAuditRecord(
     action: "tags_updated",
     actor: "operator-1",
     beforeTags: ["logistics"],
-    afterTags: ["customs", "logistics"],
+    afterTags: ["example", "logistics"],
     beforeSupportedRoleSlotIds: ["logistics"],
     afterSupportedRoleSlotIds: ["logistics", "seller"],
     beforeSupportedStageIds: ["shipment"],
-    afterSupportedStageIds: ["customs", "shipment"],
+    afterSupportedStageIds: ["example", "shipment"],
     reviewStatus: "approved_for_broadcast",
     createdAt: "2026-04-28T00:00:05.000Z",
   };
@@ -2816,7 +2816,7 @@ function convergenceSeedSql(requiredFalse: string): string {
       ('p_funds_old', 'draft_race', 'funds', 'funds', 'Funds', '${raceWalletLower}', 'funds@example.com', 'accepted', ${requiredFalse}, '2026-01-01T00:00:00.000Z'),
       ('p_delivery_new', 'draft_race', 'delivery', 'delivery', 'Delivery', '${raceWalletMixed}', 'delivery@example.com', 'accepted', ${requiredFalse}, '2026-02-01T00:00:00.000Z'),
       ('p_supply', 'draft_clean', 'supply', 'supply', 'Supply', '${raceWalletLower}', 'supply@example.com', 'accepted', ${requiredFalse}, '2026-01-01T00:00:00.000Z'),
-      ('p_customs', 'draft_clean', 'customs', 'customs', 'Customs', '${otherWallet}', 'customs@example.com', 'accepted', ${requiredFalse}, '2026-01-01T00:00:00.000Z');
+      ('p_example', 'draft_clean', 'example', 'example', 'Example', '${otherWallet}', 'example@example.com', 'accepted', ${requiredFalse}, '2026-01-01T00:00:00.000Z');
 
     INSERT INTO product_invite
       (invite_id, draft_id, participant_id, role_slot_id, token_hash, status, expires_at, created_at)
@@ -2864,7 +2864,7 @@ async function expectConverged(
     p_funds_old: { status: "replaced", wallet: raceWalletLower },
     p_delivery_new: { status: "accepted", wallet: raceWalletMixed },
     p_supply: { status: "accepted", wallet: raceWalletLower },
-    p_customs: { status: "accepted", wallet: otherWallet },
+    p_example: { status: "accepted", wallet: otherWallet },
   });
 }
 

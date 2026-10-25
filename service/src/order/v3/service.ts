@@ -296,7 +296,7 @@ export class OrderV3Service {
           });
           if (updated.termsHash !== stage.termsHash) {
             const accepted = allSlots.some(
-              (slot) => slot.stageKey === stage.stageKey && slot.status === "accepted" && slot.slotKey !== "buyer",
+              (slot) => slot.stageKey === stage.stageKey && slot.status === "accepted",
             );
             if (accepted) {
               throw new OrderV3Error(
@@ -367,7 +367,7 @@ export class OrderV3Service {
       throw new OrderV3Error(404, "stage_not_found", "stage was not found on this draft");
     }
     if (stage.status === "skipped" || stage.amount === "0") {
-      throw new OrderV3Error(409, "stage_skipped", "zero-amount stages are skipped: no invite and no escrow intent");
+      throw new OrderV3Error(409, "stage_skipped", "zero-amount stages are skipped: no invite and no amount intent");
     }
     const slot = await this.#store.getSlot(draft.draftId, input.stageKey, input.slotKey);
     if (!slot) {

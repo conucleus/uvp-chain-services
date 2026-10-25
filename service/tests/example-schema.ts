@@ -1,27 +1,27 @@
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import { ONCHAIN_HOOK_PLAN_SCHEMA_VERSION } from "@uvp-eth/compiler";
 import {
-  CROSS_BORDER_ZHIXU_ID,
-  crossBorderPlanIds,
+  EXAMPLE_ZHIXU_ID,
+  examplePlanIds,
   demoZhixuDetail
 } from "./fixtures/business/index.js";
 import type { ProductSchemaResolver } from "../src/product/application/service.js";
 
 /**
- * Test-side explicit Store schema for the frozen cross-border fixture plan.
+ * Test-side explicit Store schema for the frozen example fixture plan.
  * The runtime carries no built-in catalog fallback, so tests that
  * exercise schema-backed behavior must register this schema themselves and
  * pass it via createApiRouter's productSchemaResolver option.
  */
-export const crossBorderStoreProductSchema: StoreProductSchemaDTO = {
+export const exampleStoreProductSchema: StoreProductSchemaDTO = {
   schemaVersion: "store-product-schema.v1",
   version: 1,
-  zhixuId: CROSS_BORDER_ZHIXU_ID,
+  zhixuId: EXAMPLE_ZHIXU_ID,
   title: demoZhixuDetail.title,
   maintainer: demoZhixuDetail.maintainer,
-  planId: crossBorderPlanIds.planId,
-  planHash: crossBorderPlanIds.planHash,
-  artifactHash: crossBorderPlanIds.artifactHash,
+  planId: examplePlanIds.planId,
+  planHash: examplePlanIds.planHash,
+  artifactHash: examplePlanIds.artifactHash,
   roleSlots: demoZhixuDetail.roleSlots,
   businessPersonaLabels: demoZhixuDetail.applicableBusiness,
   stages: demoZhixuDetail.stages,
@@ -33,11 +33,11 @@ export const crossBorderStoreProductSchema: StoreProductSchemaDTO = {
   updatedAt: "2026-04-28T00:00:00.000Z"
 };
 
-export function crossBorderSchemaResolver(): ProductSchemaResolver {
+export function exampleSchemaResolver(): ProductSchemaResolver {
   return {
     async getProductSchemaByPlan(planId) {
-      if (planId === crossBorderPlanIds.planId) {
-        return crossBorderStoreProductSchema;
+      if (planId === examplePlanIds.planId) {
+        return exampleStoreProductSchema;
       }
       if (planId === dockTargetPlanIds.planId) {
         return dockTargetStoreProductSchema;
@@ -48,8 +48,8 @@ export function crossBorderSchemaResolver(): ProductSchemaResolver {
 }
 
 /**
- * docking 禁止 self-docking：docking 测试需要一个与 cross-border
- * 不同的第二个 zhixu 作为 target，形状与 cross-border schema 一致以便
+ * docking 禁止 self-docking：docking 测试需要一个与 example
+ * 不同的第二个 zhixu 作为 target，形状与 example schema 一致以便
  * 产生候选信号映射。
  */
 export const DOCK_TARGET_ZHIXU_ID = "zx-e0ea55b33cc412d7c6b82d68df182c1a";
@@ -126,7 +126,7 @@ const dockTargetOnchainHookPlanArtifact = {
 } as const;
 
 export const dockTargetStoreProductSchema: StoreProductSchemaDTO = {
-  ...crossBorderStoreProductSchema,
+  ...exampleStoreProductSchema,
   zhixuId: DOCK_TARGET_ZHIXU_ID,
   title: "Dock target staged payment",
   planId: dockTargetPlanIds.planId,

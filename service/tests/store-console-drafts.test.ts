@@ -7,7 +7,7 @@ import {
 import {
   type StoreProductSchemaDTO
 } from "@uvp-eth/product-dto";
-import { crossBorderPlanIds } from "./fixtures/business/index.js";
+import { examplePlanIds } from "./fixtures/business/index.js";
 import { createApiRouter } from "../src/api/routes.js";
 import {
   createGovernanceService,
@@ -164,7 +164,7 @@ describe("Store Zhixu draft workflow", () => {
         transactionHash: ("0x" + "ab".repeat(32)) as import("../src/shared/types.js").Hex,
         logIndex: 0,
         eventName: "PlanRegistered",
-        args: { planId: crossBorderPlanIds.planId, planHash: crossBorderPlanIds.planHash, hookCount: 1n }
+        args: { planId: examplePlanIds.planId, planHash: examplePlanIds.planHash, hookCount: 1n }
       }]
     });
     const router = createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
@@ -191,9 +191,9 @@ describe("Store Zhixu draft workflow", () => {
       pathname: `/store/zhixu-series/series-x/versions/v-ok/activate`,
       headers: adminHeaders,
       body: {
-        planId: crossBorderPlanIds.planId,
-        planHash: crossBorderPlanIds.planHash,
-        confirmation: { versionId: "v-ok", planId: crossBorderPlanIds.planId, planHash: crossBorderPlanIds.planHash }
+        planId: examplePlanIds.planId,
+        planHash: examplePlanIds.planHash,
+        confirmation: { versionId: "v-ok", planId: examplePlanIds.planId, planHash: examplePlanIds.planHash }
       }
     });
     expect(activated.status, JSON.stringify(activated.body)).toBe(200);

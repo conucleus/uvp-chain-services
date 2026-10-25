@@ -323,7 +323,7 @@ function requirementsDeclaration(): RequirementsDeclarationFixture {
             },
             contentHash,
             visibility: "protected",
-            cipher: { alg: "aes256-gcm", keyRef: "keyring/used-car/evidence" },
+            cipher: { alg: "aes256-gcm", keyRef: "keyring/example/evidence" },
             metadata: { note: "buyer-designated inspector" },
           },
           {
@@ -331,7 +331,7 @@ function requirementsDeclaration(): RequirementsDeclarationFixture {
             fileType: "txcloud",
             locator: {
               txCloudFile: {
-                bucket: "used-car-evidence",
+                bucket: "example-evidence",
                 region: "ap-guangzhou",
                 objectKey: "criteria/v1.json",
               },
@@ -339,14 +339,14 @@ function requirementsDeclaration(): RequirementsDeclarationFixture {
           },
         ],
         presetRef: {
-          name: "used-car-inspection",
+          name: "example-inspection",
           version: "1.0.0",
           hash: presetHash,
         },
       },
     ],
     presets: [
-      { name: "used-car-inspection", version: "1.0.0", hash: presetHash },
+      { name: "example-inspection", version: "1.0.0", hash: presetHash },
     ],
   };
 }

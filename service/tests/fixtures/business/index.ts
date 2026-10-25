@@ -1,4 +1,4 @@
-// 业务场景 fixture（customs/cross-border）：仅测试本地使用，不进 public product-dto。
+// 示例场景 fixture：仅测试本地使用，不进 public product-dto。
 
-export * from "./demo-catalog.js";
-export * from "./customs.js";
+export * from "./example-catalog.js";
+export * from "./example-schema.js";

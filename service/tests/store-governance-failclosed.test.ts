@@ -6,10 +6,10 @@ import { keccak256, stringToBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
-  CROSS_BORDER_ZHIXU_ID,
-  customsOnchainHookPlanArtifact,
-  customsPlanIds,
-  crossBorderPlanIds,
+  EXAMPLE_ZHIXU_ID,
+  exampleOnchainHookPlanArtifact,
+  stagePlanIds,
+  examplePlanIds,
   demoZhixuDetail
 } from "./fixtures/business/index.js";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
@@ -38,7 +38,7 @@ import type { StoreJoinApplicationStore } from "../src/store/join/types.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import { openSqliteDatabase } from "../src/storage/sqlite.js";
 import { runSqliteMigrations } from "../src/storage/migrations.js";
-import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import { exampleSchemaResolver } from "./example-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const contractAddress = "0x1111111111111111111111111111111111111111" as Address;
@@ -47,9 +47,9 @@ const supplierWalletKey = "0x111111111111111111111111111111111111111111111111111
 const supplierAccount = privateKeyToAccount(supplierWalletKey);
 const supplierWallet = supplierAccount.address as Address;
 const rivalWallet = "0xcccc000000000000000000000000000000000003" as Address;
-const planId = crossBorderPlanIds.planId as Hex;
-const planHashFixture = crossBorderPlanIds.planHash as Hex;
-const planHash = crossBorderPlanIds.planHash as Hex;
+const planId = examplePlanIds.planId as Hex;
+const planHashFixture = examplePlanIds.planHash as Hex;
+const planHash = examplePlanIds.planHash as Hex;
 const roleSlotId = demoZhixuDetail.roleSlots[0]?.slotId ?? "supplier";
 const adminHeaders = { "x-uvp-admin-id": "governance-admin-1", "x-uvp-admin-role": "governance_admin" };
 const storeAdminHeaders = { "x-uvp-store-user-id": "store-admin-1", "x-uvp-store-role": "admin", "x-uvp-store-dev-anchored-address": publisherAddress };
@@ -289,7 +289,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
       const router = createApiRouter(store, {
-        productSchemaResolver: crossBorderSchemaResolver(),
+        productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
         productRuntimeEnvironment: "testnet",
@@ -336,7 +336,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
       const router = createApiRouter(store, {
-        productSchemaResolver: crossBorderSchemaResolver(),
+        productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
         productRuntimeEnvironment: "local"
@@ -597,26 +597,26 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("rejects re-anchoring an existing version and unprojected new anchors", async () => {
       const store = new MemoryProjectionStore();
       await seedPlan(store);
-      const productService = createProductService(store, { productSchemaResolver: crossBorderSchemaResolver() });
+      const productService = createProductService(store, { productSchemaResolver: exampleSchemaResolver() });
       const metadataStore = new MemoryStoreZhixuVersionMetadataStore();
       const versionService = createStoreZhixuVersionService({
         productService,
         projectionStore: store,
         metadataStore
       });
-      const versions = await versionService.listVersions(CROSS_BORDER_ZHIXU_ID);
+      const versions = await versionService.listVersions(EXAMPLE_ZHIXU_ID);
       const versionId = versions.versions[0]?.versionId;
       expect(versionId).toBeDefined();
-      const activated = await versionService.activate(CROSS_BORDER_ZHIXU_ID, versionId!, {});
+      const activated = await versionService.activate(EXAMPLE_ZHIXU_ID, versionId!, {});
       expect(activated.version.status).toBe("active");
 
       // 改锚（planId 换成另一个 plan）→ 409。
-      await expect(versionService.activate(CROSS_BORDER_ZHIXU_ID, versionId!, {
+      await expect(versionService.activate(EXAMPLE_ZHIXU_ID, versionId!, {
         planId: "0x0000000000000000000000000000000000000000000000000000000000000fff"
       })).rejects.toMatchObject({ code: "version_anchor_immutable" });
 
       // 凭空登记未投影 plan 的新版本 → 409。
-      await expect(versionService.activate(CROSS_BORDER_ZHIXU_ID, "version-fresh", {
+      await expect(versionService.activate(EXAMPLE_ZHIXU_ID, "version-fresh", {
         planId: "0x0000000000000000000000000000000000000000000000000000000000000abc",
         planHash: "0x0000000000000000000000000000000000000000000000000000000000000def"
       })).rejects.toMatchObject({ code: "plan_not_projected" });
@@ -629,8 +629,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const timestamp = new Date("2026-04-28T00:00:00Z").toISOString();
       const versionRecord = (versionId: string, planId: Hex) => ({
         versionId,
-        zhixuId: CROSS_BORDER_ZHIXU_ID,
-        seriesId: CROSS_BORDER_ZHIXU_ID,
+        zhixuId: EXAMPLE_ZHIXU_ID,
+        seriesId: EXAMPLE_ZHIXU_ID,
         versionLabel: versionId,
         status: "deprecated" as const,
         planId,
@@ -643,7 +643,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       await metadataStore.upsertVersion({ ...versionRecord("version-a", planId), status: "active" });
       await metadataStore.upsertVersion({ ...versionRecord("version-b", "0x0000000000000000000000000000000000000000000000000000000000000bbb"), status: "active" });
 
-      const versions = await metadataStore.listVersions(CROSS_BORDER_ZHIXU_ID);
+      const versions = await metadataStore.listVersions(EXAMPLE_ZHIXU_ID);
       const active = versions.filter((version) => version.status === "active");
       expect(active).toHaveLength(1);
       expect(active[0]?.versionId).toBe("version-b");
@@ -934,7 +934,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const primary = new InMemoryEvidenceStorage();
       const backup = new InMemoryEvidenceStorage();
       const router = createApiRouter(store, {
-        productSchemaResolver: crossBorderSchemaResolver(),
+        productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
         productRuntimeEnvironment: "local",
@@ -1011,7 +1011,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       await seedPlan(store);
       const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
 
-        productSchemaResolver: crossBorderSchemaResolver(),
+        productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress
       });
@@ -1030,7 +1030,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       await seedPlan(store);
       const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
 
-        productSchemaResolver: crossBorderSchemaResolver(),
+        productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
         storeAuthConfig: devAnchoredStoreAuth
@@ -1059,7 +1059,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       });
       expect(delisted.status).toBe(200);
 
-      const zhixuIdQuery = CROSS_BORDER_ZHIXU_ID;
+      const zhixuIdQuery = EXAMPLE_ZHIXU_ID;
       const anonymousSearch = await router.handle({
         method: "GET",
         pathname: "/store/search",
@@ -1083,7 +1083,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       await seedPlan(store);
       const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
 
-        productSchemaResolver: crossBorderSchemaResolver(),
+        productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
         storeAuthConfig: {
@@ -1107,13 +1107,13 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       // 不静默空集。
       const anonymous = await router.handle({
         method: "GET",
-        pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+        pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}/orders`,
         query: { status: "registered" }
       });
       expect(anonymous).toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
       const anchoredPlainWallet = await router.handle({
         method: "GET",
-        pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+        pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}/orders`,
         query: { status: "registered" },
         headers: { "x-uvp-store-dev-anchored-address": publisherAddress }
       });
@@ -1125,14 +1125,14 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       };
       const disputed = await router.handle({
         method: "GET",
-        pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+        pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}/orders`,
         query: { status: "disputed" },
         headers: capabilityHeaders
       });
       expect(disputed).toMatchObject({ status: 400, body: { error: "invalid_query" } });
       const registered = await router.handle({
         method: "GET",
-        pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+        pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}/orders`,
         query: { status: "registered" },
         headers: capabilityHeaders
       });
@@ -1146,7 +1146,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       await seedPlan(store);
       const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
 
-        productSchemaResolver: crossBorderSchemaResolver(),
+        productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress
       });
@@ -1164,7 +1164,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 function joinRouterOptions() {
   return {
     productRuntimeEnvironment: "local" as const,
-    productSchemaResolver: crossBorderSchemaResolver(),
+    productSchemaResolver: exampleSchemaResolver(),
     submissionChainId: 31337,
     submissionVerifyingContract: contractAddress,
     storeAuthConfig: {
@@ -1211,7 +1211,7 @@ async function createDraft(router: ApiRouter): Promise<{ readonly draftId: strin
     pathname: "/product/order-drafts",
     headers: bffCreatorHeaders,
     body: {
-      zhixuId: CROSS_BORDER_ZHIXU_ID,
+      zhixuId: EXAMPLE_ZHIXU_ID,
       title: "audit3 draft",
       businessType: "parallel-export",
       totalAmount: "100",

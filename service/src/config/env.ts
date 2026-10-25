@@ -220,16 +220,6 @@ export interface NotificationsConfig {
   readonly webhookSecretConfigured: boolean;
 }
 
-/**
- * StageEscrow V2 projection input: one escrow contract on the configured RPC
- * chain. Absent = escrow reads are disabled (404) and no log poller runs.
- */
-export interface EscrowIndexerConfig {
-  readonly address: Address;
-  readonly chainId: number;
-  readonly startBlock: bigint;
-}
-
 export interface OrderV3BirthConfig {
   /** birthAuthorizer key; local anvil only, never logged. */
   readonly signerPrivateKey: Hex;

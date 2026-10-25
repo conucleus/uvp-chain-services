@@ -5,13 +5,13 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
-import { crossBorderPlanIds } from "./fixtures/business/index.js";
+import { examplePlanIds } from "./fixtures/business/index.js";
 import { buildConfigDiagnostics, loadConfigFromEnv, type ConfigDiagnostics } from "../src/config/index.js";
 import { createApiRouter } from "../src/api/routes.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import { exampleSchemaResolver } from "./example-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const chainId = 84532;
@@ -21,9 +21,9 @@ const deploymentRegistryAddress = "0x8888888888888888888888888888888888888888" a
 const activeDeploymentId = bytes32Hex("d02");
 const stateMachineOrderId = bytes32Hex("202");
 const hookId = bytes32Hex("303");
-const stageId = bytes32Text("export.customs");
-const hookName = bytes32Text("customs-review");
-const sourceId = bytes32Text("customs-source");
+const stageId = bytes32Text("stage-a");
+const hookName = bytes32Text("example-review");
+const sourceId = bytes32Text("example-source");
 const signalId = bytes32Text("cmp");
 const metadataHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const payloadHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -69,7 +69,7 @@ describe("Product API staging readiness", () => {
 
   it("rejects anonymous staging readiness probes with 403", async () => {
     const store = new MemoryProjectionStore();
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
       evidenceStorage: productionSafeEvidenceStorage(),
@@ -105,7 +105,7 @@ describe("Product API staging readiness", () => {
         mismatchCount: 0
       }
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: stagingDiagnostics(tempDirs),
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
@@ -235,7 +235,7 @@ describe("Product API staging readiness", () => {
         permissiveAuthorizationRequested: true
       }
     };
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
@@ -274,7 +274,7 @@ describe("Product API staging readiness", () => {
         }]
       }
     };
-    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: failedDiagnostics,
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
@@ -315,7 +315,7 @@ describe("Product API staging readiness", () => {
     };
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents(), planCapabilityTables: [readinessVocabulary()] });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
@@ -344,7 +344,7 @@ describe("Product API staging readiness", () => {
     // （或私钥角色未装配）即 timer_keeper_not_assembled，ready=false。
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents(), planCapabilityTables: [readinessVocabulary()] });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: stagingDiagnostics(tempDirs, { UVP_TIMER_KEEPER_ENABLED: undefined }),
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
@@ -499,8 +499,8 @@ function readinessVocabulary(): PlanCapabilityTablesInput & { readonly capabilit
     },
   ];
   return {
-    planId: crossBorderPlanIds.planId as Hex,
-    planHash: crossBorderPlanIds.planHash as Hex,
+    planId: examplePlanIds.planId as Hex,
+    planHash: examplePlanIds.planHash as Hex,
     selectorBindings: [],
     signalCapabilities,
     capabilitiesRoot: capabilitiesRootOf([], signalCapabilities),
@@ -510,8 +510,8 @@ function readinessVocabulary(): PlanCapabilityTablesInput & { readonly capabilit
 function planPublishEvents(vocabulary: { readonly capabilitiesRoot: Hex }): readonly ChainEvent[] {
   return [
     chainEvent(4n, 0, "PlanCommitted", {
-      planId: crossBorderPlanIds.planId,
-      planHash: crossBorderPlanIds.planHash,
+      planId: examplePlanIds.planId,
+      planHash: examplePlanIds.planHash,
       publisher: submitter,
       hooksHash: bytes32Text("hooks"),
       capabilitiesRoot: vocabulary.capabilitiesRoot,
@@ -520,17 +520,17 @@ function planPublishEvents(vocabulary: { readonly capabilitiesRoot: Hex }): read
       dockInterfaceRoot: bytes32Text("iface")
     }),
     chainEvent(4n, 1, "PlanPublisherRecorded", {
-      planId: crossBorderPlanIds.planId,
+      planId: examplePlanIds.planId,
       publisher: submitter
     }),
     chainEvent(4n, 2, "PlanFinalized", {
-      planId: crossBorderPlanIds.planId,
-      planHash: crossBorderPlanIds.planHash,
+      planId: examplePlanIds.planId,
+      planHash: examplePlanIds.planHash,
       capabilitiesRoot: vocabulary.capabilitiesRoot
     }),
     chainEvent(4n, 3, "PlanRegistered", {
-      planId: crossBorderPlanIds.planId,
-      planHash: crossBorderPlanIds.planHash,
+      planId: examplePlanIds.planId,
+      planHash: examplePlanIds.planHash,
       hookCount: 1n
     })
   ];
@@ -544,7 +544,7 @@ function readinessEvents(options: {
     ...planPublishEvents(readinessVocabulary()),
     chainEvent(6n, 0, "OrderRegistered", {
       orderId: stateMachineOrderId,
-      planId: crossBorderPlanIds.planId
+      planId: examplePlanIds.planId
     }),
     chainEvent(6n, 1, "SignalSubmitted", {
       orderId: stateMachineOrderId,
@@ -565,7 +565,7 @@ function readinessEvents(options: {
       sourceId: stageId,
       signalId: hookName,
       submitter,
-      role: bytes32Text("customs-broker"),
+      role: bytes32Text("example-broker"),
       metadataHash
     })
   ];
@@ -576,7 +576,7 @@ function activeDeploymentEvents(): readonly ChainEvent[] {
     chainEvent(1n, 0, "DeploymentRegistered", {
       deploymentId: activeDeploymentId,
       stateMachine: stateMachineAddress,
-      artifactHash: crossBorderPlanIds.artifactHash,
+      artifactHash: examplePlanIds.artifactHash,
       abiHash,
       deploymentBlock: 4n,
       metadataURI: "uvp-eth://deployments/staging"

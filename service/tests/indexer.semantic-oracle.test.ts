@@ -30,8 +30,8 @@ function oraclePlan(instructions: readonly Record<string, unknown>[] = [
       {
         hookId,
         stageId,
-        stageIdentifier: "stage-customs",
-        hookName: "customs-review",
+        stageIdentifier: "stage-example",
+        hookName: "example-review",
         orderTriggerKind: "none",
         emitReady: true,
         instructions

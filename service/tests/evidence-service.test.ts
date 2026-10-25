@@ -126,7 +126,7 @@ describe("evidence service", () => {
   it("rejects bindEvidence from a principal that does not own the evidence", async () => {
     const service = testEvidenceService();
     const uploaded = await uploadJsonEvidence(service, {
-      fileName: "customs.txt",
+      fileName: "example.txt",
       content: { note: "declaration" },
       metadataFields: { invoice: "INV-2" }
     });
@@ -255,7 +255,7 @@ describe("evidence service", () => {
     const differentStage = await service.uploadEvidence({
       orderId: "order-1",
       taskId: "task-1",
-      stageIdentifier: "customs-complete",
+      stageIdentifier: "example-complete",
       documentType: "invoice",
       fileName: "invoice.txt",
       textPayload: "invoice payload",
@@ -331,7 +331,7 @@ describe("evidence service", () => {
     expect(first.evidence.payloadHash).not.toBe(second.evidence.payloadHash);
   });
 
-  it("enforces owner, participant, adjudicator, admin, and outsider read rules", async () => {
+  it("enforces owner, participant, operator, admin, and outsider read rules", async () => {
     const metadataStore = new InMemoryEvidenceMetadataStore();
     const service = createEvidenceService({
     runtimeEnvironment: "local",
@@ -1113,7 +1113,7 @@ describe("evidence PDF magic validation (STORE-02)", () => {
     await expect(service.uploadEvidence({
       orderId: "order-1",
       stageIdentifier: "export-documents",
-      documentType: "customs-declaration",
+      documentType: "example-declaration",
       fileName: "fake.pdf",
       mimeType: "application/pdf",
       content: { encoding: "base64", value: Buffer.from("this is not a pdf document").toString("base64") }
@@ -1125,7 +1125,7 @@ describe("evidence PDF magic validation (STORE-02)", () => {
     await expect(service.uploadEvidence({
       orderId: "order-1",
       stageIdentifier: "export-documents",
-      documentType: "customs-declaration",
+      documentType: "example-declaration",
       fileName: "truncated.pdf",
       mimeType: "application/pdf",
       content: { encoding: "base64", value: Buffer.from("%PD").toString("base64") }
@@ -1138,7 +1138,7 @@ describe("evidence PDF magic validation (STORE-02)", () => {
     const accepted = await service.uploadEvidence({
       orderId: "order-1",
       stageIdentifier: "export-documents",
-      documentType: "customs-declaration",
+      documentType: "example-declaration",
       fileName: "real.pdf",
       mimeType: "application/pdf",
       content: { encoding: "base64", value: Buffer.from("%PDF-1.7 real payload").toString("base64") }
@@ -1151,7 +1151,7 @@ describe("evidence PDF magic validation (STORE-02)", () => {
     const uploaded = await service.uploadEvidence({
       orderId: "order-1",
       stageIdentifier: "export-documents",
-      documentType: "customs-declaration",
+      documentType: "example-declaration",
       fileName: "notes.txt",
       mimeType: "text/plain",
       content: { encoding: "text", value: "%PDF- is not required here" }

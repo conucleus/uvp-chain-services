@@ -3,11 +3,11 @@ import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import type { StoreSupplierDTO } from "@uvp-eth/product-dto";
 import {
-  crossBorderPlanIds,
-  CROSS_BORDER_ZHIXU_ID,
+  examplePlanIds,
+  EXAMPLE_ZHIXU_ID,
 } from "./fixtures/business/index.js";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
-import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import { exampleSchemaResolver } from "./example-schema.js";
 import {
   createGovernanceService,
   type GovernanceChainAdapter,
@@ -83,8 +83,8 @@ const hookId =
   "0x0000000000000000000000000000000000000000000000000000000000000303" as Hex;
 const metadataOnlyHookId =
   "0x0000000000000000000000000000000000000000000000000000000000000304" as Hex;
-const stageId = bytes32Text("export.customs") as Hex;
-const hookName = bytes32Text("customs-review") as Hex;
+const stageId = bytes32Text("stage-a") as Hex;
+const hookName = bytes32Text("example-review") as Hex;
 const profileHash =
   "0x9999999999999999999999999999999999999999999999999999999999999999";
 const capabilityHash =
@@ -97,7 +97,7 @@ const policyHash =
   "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const reasonHash =
   "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-const artifactHash = crossBorderPlanIds.artifactHash;
+const artifactHash = examplePlanIds.artifactHash;
 const simulatedTx =
   "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" as Hex;
 const bindingId =
@@ -146,7 +146,7 @@ describe("Store supplier directory API", () => {
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
     const buildRouter = () => createApiRouter(new MemoryProjectionStore(), {  productRuntimeEnvironment: "local",
 
-      productSchemaResolver: crossBorderSchemaResolver(),
+      productSchemaResolver: exampleSchemaResolver(),
       submissionChainId: 84532,
       submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeAuthConfig: devAnchoredStoreAuth,
@@ -165,7 +165,7 @@ describe("Store supplier directory API", () => {
 
     const created = await createSupplier(router);
     expect(created.identityStatus).toBe("active");
-    expect(created.capabilityTags).toEqual(["customs", "logistics"]);
+    expect(created.capabilityTags).toEqual(["example", "logistics"]);
     expect(created.wallet).toBe(supplierWallet.toLowerCase());
     expect(created.proofRows).toContainEqual(
       expect.objectContaining({ value: "IdentityBindingRegistered" }),
@@ -194,7 +194,7 @@ describe("Store supplier directory API", () => {
   it("projects identity status across registration and revocation replay", async () => {
     const store = new MemoryProjectionStore();
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
-    let router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    let router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
     await createSupplier(router);
@@ -213,7 +213,7 @@ describe("Store supplier directory API", () => {
       deploymentBlock: 0n,
       events: [identityRegisteredEvent(2n), identityRevokedEvent(3n)],
     });
-    router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
     const revoked = await getSupplier(router, "supplier-shenzhen-logistics");
@@ -281,7 +281,7 @@ describe("Store supplier directory API", () => {
     };
     const projectionStore = new MemoryProjectionStore();
     const router = createApiRouter(projectionStore, {
-      productSchemaResolver: crossBorderSchemaResolver(),
+      productSchemaResolver: exampleSchemaResolver(),
       submissionChainId: 84532,
       submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeAuthConfig: devAnchoredStoreAuth,
@@ -350,7 +350,7 @@ describe("Store supplier directory API", () => {
     };
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
     const projectionStore = new MemoryProjectionStore();
-    const router = createApiRouter(projectionStore, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    const router = createApiRouter(projectionStore, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
       governanceService: createGovernanceService({ adapter }),
     });
@@ -363,8 +363,8 @@ describe("Store supplier directory API", () => {
       body: {
         reviewStatus: "approved_for_broadcast",
         capabilityTags: ["inspection", "logistics"],
-        supportedRoleSlotIds: ["customs-broker", "logistics-operator"],
-        supportedStageIds: ["export.customs"],
+        supportedRoleSlotIds: ["example-broker", "logistics-operator"],
+        supportedStageIds: ["stage-a"],
         publicSummary: "Approved for Store broadcast.",
         confirmation: {
           supplierId: "supplier-shenzhen-logistics",
@@ -376,8 +376,8 @@ describe("Store supplier directory API", () => {
       (review.body as { supplier: StoreSupplierDTO }).supplier,
     ).toMatchObject({
       capabilityTags: ["inspection", "logistics"],
-      supportedRoleSlotIds: ["customs-broker", "logistics-operator"],
-      supportedStageIds: ["export.customs"],
+      supportedRoleSlotIds: ["example-broker", "logistics-operator"],
+      supportedStageIds: ["stage-a"],
     });
 
     const registration = await router.handle({
@@ -435,12 +435,12 @@ describe("Store supplier directory API", () => {
         audit.action === "tags_updated",
     );
     expect(tagAudit).toMatchObject({
-      beforeTags: ["customs", "logistics"],
+      beforeTags: ["example", "logistics"],
       afterTags: ["inspection", "logistics"],
       beforeSupportedRoleSlotIds: ["delivery"],
-      afterSupportedRoleSlotIds: ["customs-broker", "logistics-operator"],
-      beforeSupportedStageIds: ["customs-complete", "shipping"],
-      afterSupportedStageIds: ["export.customs"],
+      afterSupportedRoleSlotIds: ["example-broker", "logistics-operator"],
+      beforeSupportedStageIds: ["example-complete", "shipping"],
+      afterSupportedStageIds: ["stage-a"],
     });
 
     const auditReadback = await router.handle({
@@ -457,12 +457,12 @@ describe("Store supplier directory API", () => {
         expect.objectContaining({
           action: "tags_updated",
           actor: "store-operator-1",
-          beforeTags: ["customs", "logistics"],
+          beforeTags: ["example", "logistics"],
           afterTags: ["inspection", "logistics"],
           beforeSupportedRoleSlotIds: ["delivery"],
-          afterSupportedRoleSlotIds: ["customs-broker", "logistics-operator"],
-          beforeSupportedStageIds: ["customs-complete", "shipping"],
-          afterSupportedStageIds: ["export.customs"],
+          afterSupportedRoleSlotIds: ["example-broker", "logistics-operator"],
+          beforeSupportedStageIds: ["example-complete", "shipping"],
+          afterSupportedStageIds: ["stage-a"],
         }),
       ]),
     });
@@ -493,7 +493,7 @@ describe("Store supplier directory API", () => {
         }),
       ],
     });
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
 
@@ -505,7 +505,7 @@ describe("Store supplier directory API", () => {
       wallet: metadataOnlyWallet,
       capabilityTags: ["inspection"],
       supportedRoleSlotIds: ["inspection"],
-      supportedStageIds: ["export.customs"],
+      supportedStageIds: ["stage-a"],
     });
 
     await expect(
@@ -558,12 +558,12 @@ describe("Store supplier directory API", () => {
   it("requires store.supplier.tags.update for role-slot and stage support edits", async () => {
     const metadataStore = new InMemoryStoreSupplierMetadataStore();
     const store = new MemoryProjectionStore();
-    const router = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
     await createSupplier(router);
 
-    const reviewOnlyRouter = createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    const reviewOnlyRouter = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
       storeIdentityProvider: reviewOnlyStoreIdentityProvider(),
     });
@@ -574,8 +574,8 @@ describe("Store supplier directory API", () => {
         pathname: "/store/suppliers/supplier-shenzhen-logistics/review",
         body: {
           reviewStatus: "submitted",
-          supportedRoleSlotIds: ["customs-broker"],
-          supportedStageIds: ["export.customs"],
+          supportedRoleSlotIds: ["example-broker"],
+          supportedStageIds: ["stage-a"],
         },
       }),
     ).resolves.toMatchObject({
@@ -595,7 +595,7 @@ async function createRouter(events: readonly ChainEvent[]): Promise<{
   const store = new MemoryProjectionStore();
   await store.resetFromEvents({ deploymentBlock: 0n, events });
   return {
-    router: createApiRouter(store, { productSchemaResolver: crossBorderSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const }),
+    router: createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const }),
     store,
   };
 }
@@ -608,9 +608,9 @@ function supplierBody(
     supplierSubjectId,
     displayName: "Shenzhen Logistics Partner",
     wallet: supplierWallet,
-    capabilityTags: ["logistics", "customs"],
+    capabilityTags: ["logistics", "example"],
     supportedRoleSlotIds: ["delivery"],
-    supportedStageIds: ["customs-complete", "shipping"],
+    supportedStageIds: ["example-complete", "shipping"],
     registryAddresses: [registryAddress],
     ...overrides,
   };
@@ -676,7 +676,7 @@ function productTaskRecord(input: {
     taskId: input.taskId,
     orderId: input.orderId,
     orderTitle: "Chain order",
-    zhixuId: CROSS_BORDER_ZHIXU_ID,
+    zhixuId: EXAMPLE_ZHIXU_ID,
     title: "Supplier task",
     subtitle: "Supplier task",
     assigneeRole: "链上授权执行方",
@@ -684,8 +684,8 @@ function productTaskRecord(input: {
     ...(input.supplierSubjectId
       ? { supplierSubjectId: input.supplierSubjectId }
       : {}),
-    stageId: "export.customs",
-    stageName: "export.customs",
+    stageId: "stage-a",
+    stageName: "stage-a",
     deadline: "以业务约定为准",
     fundingImpact: "条件满足后进入下一步",
     status: "open",
@@ -741,7 +741,7 @@ async function createDraft(router: ApiRouter): Promise<ProductOrderDraftDTO> {
     pathname: "/product/order-drafts",
     headers: creatorHeaders,
     body: {
-      zhixuId: CROSS_BORDER_ZHIXU_ID,
+      zhixuId: EXAMPLE_ZHIXU_ID,
       title: "A company purchase",
       businessType: "parallel-export",
       totalAmount: "10000",
@@ -812,8 +812,8 @@ async function createReadyDraft(
 
 function planRegisteredEvent(blockNumber: bigint): ChainEvent {
   return chainEvent(blockNumber, 0, "PlanRegistered", {
-    planId: crossBorderPlanIds.planId,
-    planHash: crossBorderPlanIds.planHash,
+    planId: examplePlanIds.planId,
+    planHash: examplePlanIds.planHash,
     hookCount: 1n,
   });
 }
@@ -839,8 +839,8 @@ function planPublishWithVocabulary(): {
   return {
     events: [
       chainEvent(1n, 0, "PlanCommitted", {
-        planId: crossBorderPlanIds.planId,
-        planHash: crossBorderPlanIds.planHash,
+        planId: examplePlanIds.planId,
+        planHash: examplePlanIds.planHash,
         publisher: supplierWallet,
         hooksHash: bytes32Text("hooks"),
         capabilitiesRoot,
@@ -849,24 +849,24 @@ function planPublishWithVocabulary(): {
         dockInterfaceRoot: bytes32Text("iface"),
       }),
       chainEvent(1n, 1, "PlanPublisherRecorded", {
-        planId: crossBorderPlanIds.planId,
+        planId: examplePlanIds.planId,
         publisher: supplierWallet,
       }),
       chainEvent(2n, 0, "PlanFinalized", {
-        planId: crossBorderPlanIds.planId,
-        planHash: crossBorderPlanIds.planHash,
+        planId: examplePlanIds.planId,
+        planHash: examplePlanIds.planHash,
         capabilitiesRoot,
       }),
       chainEvent(2n, 1, "PlanRegistered", {
-        planId: crossBorderPlanIds.planId,
-        planHash: crossBorderPlanIds.planHash,
+        planId: examplePlanIds.planId,
+        planHash: examplePlanIds.planHash,
         hookCount: 1n,
       }),
     ],
     tables: [
       {
-        planId: crossBorderPlanIds.planId as Hex,
-        planHash: crossBorderPlanIds.planHash as Hex,
+        planId: examplePlanIds.planId as Hex,
+        planHash: examplePlanIds.planHash as Hex,
         selectorBindings,
         signalCapabilities,
       },
@@ -926,14 +926,14 @@ function stateMachineTaskEvents(input: {
   return [
     chainEvent(input.blockNumber + 1n, 0, "OrderRegistered", {
       orderId: input.orderId,
-      planId: crossBorderPlanIds.planId,
+      planId: examplePlanIds.planId,
     }),
     chainEvent(input.blockNumber + 2n, 0, "SignalSubmitterAuthorized", {
       orderId: input.orderId,
       sourceId: stageId,
       signalId: hookName,
       submitter: input.wallet,
-      role: bytes32Text("customs-broker"),
+      role: bytes32Text("example-broker"),
       metadataHash,
     }),
     chainEvent(input.blockNumber + 3n, 0, "HookReady", {

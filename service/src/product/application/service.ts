@@ -9,7 +9,6 @@ import {
   type ProductResourceRequirementDTO,
   type ProductTaskDTO,
   type ProductTimelineEventDTO,
-  type SettlementPreviewDTO,
   type StoreProductSchemaDTO,
   type ZhixuDetailDTO,
   type ZhixuStageDTO,
@@ -1213,15 +1212,6 @@ function requiredInputsForFulfillment(
   }
 }
 
-function paymentPlaceholderSettlementPreview(): SettlementPreviewDTO {
-  return {
-    label: "稳定币模块占位",
-    statusLabel: "等待后续 funding adapter 接入",
-    adapterStatus: "placeholder",
-    disclaimer:
-      "当前不托管、不划转、不释放、不退款任何资金，只记录付款条件和证明。",
-  };
-}
 
 function productTimelineFromStateMachine(
   order: StateMachineOrderProjection,

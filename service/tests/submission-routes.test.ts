@@ -33,9 +33,9 @@ const routeTask = {
   zhixuId: "zhixu-route",
   title: "Route submit",
   subtitle: "Route submit",
-  assigneeRole: "customs",
-  stageId: "customs-complete",
-  stageName: "Customs complete",
+  assigneeRole: "example",
+  stageId: "example-complete",
+  stageName: "Example complete",
   deadline: "2026-05-01",
   fundingImpact: "advance workflow",
   status: "open",
@@ -91,8 +91,8 @@ describe("submission API routes", () => {
         orderId: routeTask.orderId,
         taskId: routeTask.taskId,
         stageIdentifier: routeTask.stageId,
-        documentType: "customs-declaration",
-        textPayload: "customs declaration",
+        documentType: "example-declaration",
+        textPayload: "example declaration",
         metadata: { fields: { declarationNo: "CD-1" } }
       }
     });
@@ -184,8 +184,8 @@ describe("submission API routes", () => {
         orderId: routeTask.orderId,
         taskId: routeTask.taskId,
         stageIdentifier: routeTask.stageId,
-        documentType: "customs-declaration",
-        textPayload: "customs declaration",
+        documentType: "example-declaration",
+        textPayload: "example declaration",
         metadata: { fields: { declarationNo: "CD-IDOR" } }
       }
     });
@@ -272,8 +272,8 @@ describe("submission API routes", () => {
         orderId: routeTask.orderId,
         taskId: routeTask.taskId,
         stageIdentifier: routeTask.stageId,
-        documentType: "customs-declaration",
-        textPayload: "customs declaration",
+        documentType: "example-declaration",
+        textPayload: "example declaration",
         metadata: { fields: { declarationNo: "CD-2" } }
       }
     });
@@ -420,8 +420,8 @@ describe("submission API routes", () => {
         orderId: projectedTask.orderId,
         taskId: projectedTask.taskId,
         stageIdentifier: projectedTask.stageId,
-        documentType: "customs-declaration",
-        textPayload: "customs declaration",
+        documentType: "example-declaration",
+        textPayload: "example declaration",
         metadata: { fields: { declarationNo: "CD-3" } }
       }
     });
@@ -518,8 +518,8 @@ describe("submission API routes", () => {
         orderId: routeTask.orderId,
         taskId: routeTask.taskId,
         stageIdentifier: routeTask.stageId,
-        documentType: "customs-declaration",
-        textPayload: "customs declaration",
+        documentType: "example-declaration",
+        textPayload: "example declaration",
         metadata: { fields: { declarationNo: "CD-3" } }
       }
     });

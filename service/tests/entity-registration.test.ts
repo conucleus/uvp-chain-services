@@ -45,7 +45,7 @@ function createRouter(options: {
 }
 
 const validBody = {
-  legalName: "中亚二手车出口有限公司",
+  legalName: "示例示例示例流程有限公司",
   registrationNumber: "91310000MA1K000000",
   contactName: "张经理",
 };
@@ -135,7 +135,7 @@ describe("participant entity registration routes", () => {
       method: "POST",
       pathname: "/product/registration",
       headers: sessionHeaders,
-      body: { ...validBody, legalName: "中亚二手车出口（更名）有限公司", contactName: "李经理" },
+      body: { ...validBody, legalName: "示例示例示例流程（更名）有限公司", contactName: "李经理" },
     });
 
     const firstRegistration = (first.body as { registration: { registrationId: string; createdAt: string } }).registration;
@@ -144,7 +144,7 @@ describe("participant entity registration routes", () => {
     }).registration;
     expect(secondRegistration.registrationId).toBe(firstRegistration.registrationId);
     expect(secondRegistration.createdAt).toBe(firstRegistration.createdAt);
-    expect(secondRegistration.legalName).toBe("中亚二手车出口（更名）有限公司");
+    expect(secondRegistration.legalName).toBe("示例示例示例流程（更名）有限公司");
     expect(secondRegistration.updatedAt >= firstRegistration.createdAt).toBe(true);
 
     const stored = await registrationStore.getRegistrationByAccount(
@@ -152,7 +152,7 @@ describe("participant entity registration routes", () => {
     );
     expect(stored).toMatchObject({
       registrationId: firstRegistration.registrationId,
-      legalName: "中亚二手车出口（更名）有限公司",
+      legalName: "示例示例示例流程（更名）有限公司",
       contactName: "李经理",
     });
   });

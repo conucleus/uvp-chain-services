@@ -30,9 +30,9 @@ describe("bytes32 展示解码单源（shared/display）", () => {
   });
 
   it("可打印 ASCII 标识显示文本", () => {
-    expect(decodeBytes32Text(bytes32Text("export.customs"))).toBe("export.customs");
-    expect(displayBytes32(bytes32Text("customs-review"), "阶段")).toBe("customs-review");
-    expect(displayBytes32(bytes32Text("export.customs"))).toBe("export.customs");
+    expect(decodeBytes32Text(bytes32Text("stage-a"))).toBe("stage-a");
+    expect(displayBytes32(bytes32Text("example-review"), "阶段")).toBe("example-review");
+    expect(displayBytes32(bytes32Text("stage-a"))).toBe("stage-a");
   });
 
   it("ASCII 符号类（$=^|~）按并集语义显示文本", () => {
@@ -58,7 +58,7 @@ describe("bytes32 展示解码单源（shared/display）", () => {
   });
 
   it("非 bytes32 输入原样透传，空值回落 fallback", () => {
-    expect(displayBytes32("export.customs", "阶段")).toBe("export.customs");
+    expect(displayBytes32("stage-a", "阶段")).toBe("stage-a");
     expect(displayBytes32("已解码的普通标识", "阶段")).toBe("已解码的普通标识");
     expect(displayBytes32(undefined, "阶段")).toBe("阶段");
     expect(displayBytes32("", "阶段")).toBe("阶段");
@@ -76,7 +76,7 @@ describe("bytes32 展示解码单源（shared/display）", () => {
 describe("bytes32 展示跨视图一致（活动流 vs 阶段视图）", () => {
   it("同一中文标识在订单阶段视图与参与方活动流显示同一文本", async () => {
     const zhStageId = bytes32Text("预交付");
-    const zhHookName = bytes32Text("报关复核");
+    const zhHookName = bytes32Text("示例单据复核");
     const store = new MemoryProjectionStore();
     await store.resetFromEvents({
       deploymentBlock: 0n,
@@ -128,7 +128,7 @@ describe("bytes32 展示跨视图一致（活动流 vs 阶段视图）", () => {
       expect.objectContaining({ stageId: "预交付", name: "预交付" })
     );
     expect(order.tasks[0]).toMatchObject({
-      hookName: "报关复核",
+      hookName: "示例单据复核",
       stageIdentifier: "预交付"
     });
 
@@ -142,7 +142,7 @@ describe("bytes32 展示跨视图一致（活动流 vs 阶段视图）", () => {
     // 核心钉子：同一 bytes32 标识，两个视图同一显示。
     expect(taskNotification?.stageLabel).toBe(order.currentStageId);
     expect(taskNotification?.stageId).toBe(order.currentStageId);
-    expect(taskNotification?.taskTitle).toBe("处理报关复核");
+    expect(taskNotification?.taskTitle).toBe("处理示例单据复核");
   });
 });
 

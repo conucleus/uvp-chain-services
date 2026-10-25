@@ -781,17 +781,17 @@ describe("tx/indexer reconcile worker", () => {
       orderId,
       taskId: "task_sweep_missing",
       stageIdentifier: "stage",
-      documentType: "customs-declaration",
+      documentType: "example-declaration",
       fileName: "missing.txt",
-      textPayload: "customs declaration missing bind"
+      textPayload: "example declaration missing bind"
     }, owner);
     const alreadyBound = await evidenceService.uploadEvidence({
       orderId,
       taskId: "task_sweep_bound",
       stageIdentifier: "stage",
-      documentType: "customs-declaration",
+      documentType: "example-declaration",
       fileName: "bound.txt",
-      textPayload: "customs declaration already bound"
+      textPayload: "example declaration already bound"
     }, owner);
     await evidenceService.bindEvidence({
       evidenceId: alreadyBound.evidence.evidenceId,
@@ -886,7 +886,7 @@ describe("tx/indexer reconcile worker", () => {
     const draftEvidence = await evidenceService.uploadEvidence({
       draftId: "draft_sweep",
       stageIdentifier: "stage",
-      documentType: "customs-declaration",
+      documentType: "example-declaration",
       fileName: "draft-origin.txt",
       textPayload: "draft origin evidence awaiting the order its draft triggered"
     }, owner);
@@ -930,9 +930,9 @@ describe("tx/indexer reconcile worker", () => {
       orderId,
       taskId: "task_unswept",
       stageIdentifier: "stage",
-      documentType: "customs-declaration",
+      documentType: "example-declaration",
       fileName: "unswept.txt",
-      textPayload: "customs declaration not swept"
+      textPayload: "example declaration not swept"
     }, owner);
 
     const projectionStore = new MemoryProjectionStore();
@@ -1083,7 +1083,7 @@ describe("tx/indexer reconcile worker", () => {
       orderId,
       taskId: "task_prune_inflight",
       stageIdentifier: "stage",
-      documentType: "customs-declaration",
+      documentType: "example-declaration",
       fileName: "inflight.txt",
       textPayload: "in-flight bind repair"
     }, owner);
@@ -1091,7 +1091,7 @@ describe("tx/indexer reconcile worker", () => {
       orderId,
       taskId: "task_prune_terminal",
       stageIdentifier: "stage",
-      documentType: "customs-declaration",
+      documentType: "example-declaration",
       fileName: "terminal.txt",
       textPayload: "already-confirmed bind stays as-is"
     }, owner);

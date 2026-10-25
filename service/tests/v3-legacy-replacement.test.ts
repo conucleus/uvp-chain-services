@@ -40,7 +40,6 @@ const stageConfig: ConfigStageV3 = {
     { name: "approved", by: "verifier" },
     { name: "rejected", by: "verifier" },
   ],
-  acceptance: { mode: "third_party" },
   fileResources: [{ name: "std/alpha", version: "1", hash: `sha256:${"ab".repeat(32)}`, ref: "harness/alpha.md" }],
 };
 

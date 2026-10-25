@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import { keccak256, stringToBytes } from "viem";
-import { CROSS_BORDER_ZHIXU_ID, crossBorderPlanIds, demoZhixuDetail } from "./fixtures/business/index.js";
+import { EXAMPLE_ZHIXU_ID, examplePlanIds, demoZhixuDetail } from "./fixtures/business/index.js";
 import { createApiRouter } from "../src/api/routes.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
 import type { ApiRouter } from "../src/api/route-context.js";
 import type { Address, Hex } from "../src/shared/types.js";
-import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import { exampleSchemaResolver } from "./example-schema.js";
 import type { StoreAuthChallengeRecord } from "../src/store/sessions/index.js";
 
 /**
@@ -33,8 +33,8 @@ const teamAccount = privateKeyToAccount("0x3333333333333333333333333333333333333
 const teamDerivedWallet = teamAccount.address as Address;
 const teamMemberWallet = "0xcccc000000000000000000000000000000000003" as Address;
 const outsiderWallet = "0xdddd000000000000000000000000000000000004" as Address;
-const planId = crossBorderPlanIds.planId as Hex;
-const planHash = crossBorderPlanIds.planHash as Hex;
+const planId = examplePlanIds.planId as Hex;
+const planHash = examplePlanIds.planHash as Hex;
 const governanceAdminHeaders = {
   "x-uvp-admin-id": "governance-admin-1",
   "x-uvp-admin-role": "governance_admin",
@@ -179,7 +179,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
 
     const runtimePaths = [
       "/store/runtime/summary",
-      `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+      `/store/zhixus/${EXAMPLE_ZHIXU_ID}/orders`,
       "/store/orders/0x0000000000000000000000000000000000000000000000000000000000000909/observation",
       "/store/orders/0x0000000000000000000000000000000000000000000000000000000000000909/replay",
       "/store/orders/0x0000000000000000000000000000000000000000000000000000000000000909/audit-summary"
@@ -199,7 +199,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(summary.status).toBe(200);
     const orders = await router.handle({
       method: "GET",
-      pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}/orders`,
+      pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}/orders`,
       headers: { "x-uvp-store-session": operatorToken }
     });
     expect(orders.status).toBe(200);
@@ -468,7 +468,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       method: "PUT",
       pathname: `/store/decoration/${planId}`,
       headers: publisherAnchoredHeaders,
-      body: { schemaVersion: "store-zhixu-decoration.v1", theme: { displayName: "x", customsField: "报关单号" } }
+      body: { schemaVersion: "store-zhixu-decoration.v1", theme: { displayName: "x", exampleField: "示例单据单号" } }
     });
     expect(businessField.status).toBe(400);
     expect(businessField.body).toMatchObject({ error: "invalid_decoration_field" });
@@ -494,7 +494,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       method: "POST",
       pathname: "/store/listings/import",
       headers: storeOperatorHeaders,
-      body: { planId: crossBorderPlanIds.planId, planHash: `0x${"ab".repeat(32)}` }
+      body: { planId: examplePlanIds.planId, planHash: `0x${"ab".repeat(32)}` }
     });
     expect(conflictImport.status).toBe(409);
     expect(conflictImport.body).toMatchObject({ error: "listing_exists" });
@@ -523,7 +523,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     // 详情页叠加锚核验。
     const detail = await router.handle({
       method: "GET",
-      pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}`
+      pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}`
     });
     expect(detail.status).toBe(200);
     const overlay = (detail.body as { storeOverlay?: { listing?: { status: string }; anchorVerification?: { status: string; checks: { id: string; outcome: string }[] } } }).storeOverlay;
@@ -547,13 +547,13 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     // 运营方保留治理可见性（下架状态经 overlay 可见）。
     const detailAfter = await router.handle({
       method: "GET",
-      pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}`
+      pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}`
     });
     expect(detailAfter.status).toBe(404);
     expect(detailAfter.body).toMatchObject({ error: "store_zhixu_not_found" });
     const operatorDetailAfter = await router.handle({
       method: "GET",
-      pathname: `/store/zhixus/${CROSS_BORDER_ZHIXU_ID}`,
+      pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}`,
       headers: storeOperatorHeaders
     });
     expect(operatorDetailAfter.status).toBe(200);
@@ -1301,7 +1301,7 @@ async function buildRouter(options: { readonly operatorWallets?: readonly Addres
 function routerOptions(options: { readonly operatorWallets?: readonly Address[]; readonly adminWallets?: readonly Address[] } = {}) {
   return {
     productRuntimeEnvironment: "local" as const,
-    productSchemaResolver: crossBorderSchemaResolver(),
+    productSchemaResolver: exampleSchemaResolver(),
     submissionChainId: 31337,
     submissionVerifyingContract: contractAddress,
     storeAuthConfig: {

@@ -17,11 +17,11 @@ import {
 
 // Demo-only catalog for explicit fixture and local fallback modes.
 /** 派生身份演示值（zx-+32hex，与编译产物 zhixuId 同形态）。 */
-export const CROSS_BORDER_ZHIXU_ID = "zx-3fa636e0229362fa4f6db3db37737a17";
-export const DEMO_ORDER_ID = "order-cross-border-car-001";
-export const DEMO_TASK_ID = "task-customs-complete-001";
+export const EXAMPLE_ZHIXU_ID = "zx-3fa636e0229362fa4f6db3db37737a17";
+export const DEMO_ORDER_ID = "order-example-car-001";
+export const DEMO_TASK_ID = "task-example-complete-001";
 
-export const crossBorderPlanIds = {
+export const examplePlanIds = {
   planId: "0x0000000000000000000000000000000000000000000000000000000000000101",
   planHash: "0x0000000000000000000000000000000000000000000000000000000000000201",
   artifactHash: "0x0000000000000000000000000000000000000000000000000000000000000301"
@@ -96,9 +96,9 @@ export const demoStages: readonly ZhixuStageDTO[] = [
   { stageId: "order-confirmed", index: 1, name: "订单确认", evidence: ["合同"], ownerRole: "买家", status: "done", updatedAt: "2026-04-18 10:15" },
   { stageId: "funds-protected", index: 2, name: "资金保障", evidence: ["付款凭证"], ownerRole: "资金方", status: "done", updatedAt: "2026-04-18 10:27" },
   { stageId: "stock-ready", index: 3, name: "备货", evidence: ["装箱清单", "备货照片"], ownerRole: "供给方", status: "done", updatedAt: "2026-04-20 14:32" },
-  { stageId: "export-documents", index: 4, name: "出口单证", evidence: ["商业发票", "原产地证", "出口单证"], ownerRole: "供给方", status: "done", updatedAt: "2026-04-22 16:45" },
-  { stageId: "customs-complete", index: 5, name: "报关完成", evidence: ["报关单"], ownerRole: "交付方", status: "active", updatedAt: "2026-04-29 09:12" },
-  { stageId: "shipping", index: 6, name: "装船/物流", evidence: ["提单", "装船通知"], ownerRole: "交付方", status: "pending" },
+  { stageId: "export-documents", index: 4, name: "示例流程单证", evidence: ["商业发票", "原产地证", "示例流程单证"], ownerRole: "供给方", status: "done", updatedAt: "2026-04-22 16:45" },
+  { stageId: "example-complete", index: 5, name: "示例单据完成", evidence: ["示例单据单"], ownerRole: "交付方", status: "active", updatedAt: "2026-04-29 09:12" },
+  { stageId: "shipping", index: 6, name: "装船/示例流转", evidence: ["提单", "装船通知"], ownerRole: "交付方", status: "pending" },
   { stageId: "arrival", index: 7, name: "到港/入仓", evidence: ["到港通知", "入仓单", "仓储凭证"], ownerRole: "交付方", status: "pending" },
   { stageId: "inspection", index: 8, name: "检验验收", evidence: ["检验报告", "验收单", "签收照片"], ownerRole: "验收方", status: "pending" },
   { stageId: "close-or-dispute", index: 9, name: "完成或争议", evidence: ["完成确认书", "争议说明"], ownerRole: "维护方", status: "pending" }
@@ -123,24 +123,24 @@ const demoPaymentRequiredInputs: readonly FulfillmentRequiredInputDTO[] = [
   }
 ];
 
-const demoCustomsRequiredInputs: readonly FulfillmentRequiredInputDTO[] = [
+const demoExampleRequiredInputs: readonly FulfillmentRequiredInputDTO[] = [
   {
-    inputId: "customs-declaration",
-    label: "报关单 PDF",
+    inputId: "example-declaration",
+    label: "示例单据单 PDF",
     inputType: "evidence",
     required: true,
     completed: false
   },
   {
-    inputId: "customs-declaration-no",
-    label: "报关单号",
+    inputId: "example-declaration-no",
+    label: "示例单据单号",
     inputType: "text",
     required: true,
     completed: false
   },
   {
-    inputId: "customs-confirmation",
-    label: "确认报关事实",
+    inputId: "example-confirmation",
+    label: "确认示例单据事实",
     inputType: "confirmation",
     required: true,
     completed: false
@@ -163,21 +163,21 @@ const demoOrderParticipantPolicy: ProductResourceAccessPolicyDTO = {
   policyHash: "0x0000000000000000000000000000000000000000000000000000000000000901"
 };
 
-const demoCustomsResourceRequirements: readonly ProductResourceRequirementDTO[] = [
+const demoExampleResourceRequirements: readonly ProductResourceRequirementDTO[] = [
   {
-    resourceId: "customs-declaration-pdf",
-    resourceKey: "customs_declaration_pdf",
-    label: "报关单 PDF",
+    resourceId: "example-declaration-pdf",
+    resourceKey: "example_declaration_pdf",
+    label: "示例单据单 PDF",
     resourceType: "document",
     required: true,
     source: "plan_default",
     visibility: "protected",
-    sourceStageId: "customs-complete",
+    sourceStageId: "example-complete",
     description: "提交加密内容寻址清单和凭证指纹，业务文件原文不写入链上。",
-    manifestURI: "ipfs://bafyuvp-demo-customs-declaration-manifest",
+    manifestURI: "ipfs://bafyuvp-demo-example-declaration-manifest",
     manifestHash: "0x0000000000000000000000000000000000000000000000000000000000000801",
     ciphertextHash: "0x0000000000000000000000000000000000000000000000000000000000000802",
-    storageCID: "bafyuvp-demo-customs-declaration-ciphertext",
+    storageCID: "bafyuvp-demo-example-declaration-ciphertext",
     accessPolicy: demoOrderParticipantPolicy,
     accessStatus: {
       state: "request_required",
@@ -188,15 +188,15 @@ const demoCustomsResourceRequirements: readonly ProductResourceRequirementDTO[] 
     }
   },
   {
-    resourceId: "customs-declaration-number",
-    resourceKey: "customs_declaration_number",
-    label: "报关单号",
+    resourceId: "example-declaration-number",
+    resourceKey: "example_declaration_number",
+    label: "示例单据单号",
     resourceType: "metadata",
     required: true,
     source: "plan_default",
     visibility: "protected",
-    sourceStageId: "customs-complete",
-    manifestURI: "ipfs://bafyuvp-demo-customs-number-manifest",
+    sourceStageId: "example-complete",
+    manifestURI: "ipfs://bafyuvp-demo-example-number-manifest",
     manifestHash: "0x0000000000000000000000000000000000000000000000000000000000000803",
     accessPolicy: demoOrderParticipantPolicy,
     accessStatus: {
@@ -207,15 +207,15 @@ const demoCustomsResourceRequirements: readonly ProductResourceRequirementDTO[] 
     }
   },
   {
-    resourceId: "customs-completion-time",
-    resourceKey: "customs_completion_time",
+    resourceId: "example-completion-time",
+    resourceKey: "example_completion_time",
     label: "完成时间",
     resourceType: "metadata",
     required: true,
     source: "plan_default",
     visibility: "public",
-    sourceStageId: "customs-complete",
-    manifestURI: "ipfs://bafyuvp-demo-customs-completion-time-manifest",
+    sourceStageId: "example-complete",
+    manifestURI: "ipfs://bafyuvp-demo-example-completion-time-manifest",
     manifestHash: "0x0000000000000000000000000000000000000000000000000000000000000804",
     contentHash: "0x0000000000000000000000000000000000000000000000000000000000000805",
     accessPolicy: {
@@ -259,7 +259,7 @@ const demoHandoffPatchMode: ProductExecutorPatchRequirementDTO = {
   requiresApprovalSignal: false,
   previousExecutor: demoPreviousExecutorWallet,
   previousExecutorWallet: demoPreviousExecutorWallet,
-  previousExecutorLabel: "现任报关履约者",
+  previousExecutorLabel: "现任示例单据履约者",
   priorAuthorityLabel: "已完成部分不变",
   futureAuthorityLabel: "交接确认后，新履约者只接续后续工作",
   guidanceLabel: "需要原履约者签名"
@@ -269,7 +269,7 @@ const demoSelectableTargets: readonly ProductSelectableTargetDTO[] = [
   {
     selectorStageId: "order-confirmed",
     targetStageId: "shipping",
-    targetStageName: "装船/物流",
+    targetStageName: "装船/示例流转",
     allowed: true,
     workStarted: false,
     stageSignalCount: 0,
@@ -281,8 +281,8 @@ const demoSelectableTargets: readonly ProductSelectableTargetDTO[] = [
   },
   {
     selectorStageId: "order-confirmed",
-    targetStageId: "customs-complete",
-    targetStageName: "出口报关",
+    targetStageId: "example-complete",
+    targetStageName: "示例流程示例单据",
     allowed: true,
     workStarted: true,
   }
@@ -373,7 +373,7 @@ const selectorAddOnManifest: ParticipantAddOnManifestDTO = {
   addOnKind: "stage_executor_patch",
   title: "选择履约者",
   summary: "为目标阶段选择、交接或替换后续履约者。",
-  stageBindings: ["customs-complete"],
+  stageBindings: ["example-complete"],
   pages: [
     {
       pageId: "executor-selection",
@@ -424,7 +424,7 @@ const resourcePatchAddOnManifest: ParticipantAddOnManifestDTO = {
   addOnKind: "stage_resource_patch",
   title: "补充凭证要求",
   summary: "为目标阶段发布内容寻址资源清单和访问策略。",
-  stageBindings: ["customs-complete"],
+  stageBindings: ["example-complete"],
   pages: [
     {
       pageId: "resource-requirements",
@@ -479,7 +479,7 @@ const supplyAddOnManifest = submitSignalAddOnManifest({
   roleSlotId: "supply",
   addOnKind: "submit_signal",
   title: "供给侧凭证提交",
-  summary: "提交备货、装箱、商业发票和出口单证等供给侧履约凭证。",
+  summary: "提交备货、装箱、商业发票和示例流程单证等供给侧履约凭证。",
   stageBindings: ["stock-ready", "export-documents"],
   actionLabel: "提交供给凭证",
   evidenceLabel: "供给侧履约凭证"
@@ -489,9 +489,9 @@ const deliveryAddOnManifest = submitSignalAddOnManifest({
   roleSlotId: "delivery",
   addOnKind: "submit_signal",
   title: "交付进度更新",
-  summary: "提交报关、装船、物流和到港凭证，更新交付环节状态。",
-  stageBindings: ["customs-complete", "export.customs", "shipping", "arrival"],
-  actionLabel: "确认报关完成",
+  summary: "提交示例单据、装船、示例流转和到港凭证，更新交付环节状态。",
+  stageBindings: ["example-complete", "stage-a", "shipping", "arrival"],
+  actionLabel: "确认示例单据完成",
   evidenceLabel: "交付凭证引用"
 });
 
@@ -526,13 +526,13 @@ const maintainerAddOnManifest = submitSignalAddOnManifest({
 });
 
 export const demoZhixuDetail: ZhixuDetailDTO = {
-  zhixuId: CROSS_BORDER_ZHIXU_ID,
+  zhixuId: EXAMPLE_ZHIXU_ID,
   title: "跨境高价值货物分阶段付款秩序",
-  subtitle: "适用于平行出口车、工业设备、跨境高价值货物的多角色对接、凭证确认与付款条件管理。",
+  subtitle: "适用于平行示例流程车、工业设备、跨境高价值货物的多角色对接、凭证确认与付款条件管理。",
   reviewStatus: "approved",
   reviewLabel: "已由共同秩序审核",
   riskLevel: "标准",
-  applicableBusiness: ["平行出口车", "工业设备", "跨境高价值货物"],
+  applicableBusiness: ["平行示例流程车", "工业设备", "跨境高价值货物"],
   excludedBusiness: ["违禁品", "规避监管", "无法提供凭证的交易"],
   stageCount: demoStages.length,
   roleSlotCount: 6,
@@ -543,9 +543,9 @@ export const demoZhixuDetail: ZhixuDetailDTO = {
     status: "not_found",
     label: "等待 Plan 发布",
     stateMachineLabel: "UVPStateMachine",
-    planId: crossBorderPlanIds.planId,
-    planHash: crossBorderPlanIds.planHash,
-    artifactHash: crossBorderPlanIds.artifactHash
+    planId: examplePlanIds.planId,
+    planHash: examplePlanIds.planHash,
+    artifactHash: examplePlanIds.artifactHash
   },
   roleSlots: [
     {
@@ -565,8 +565,8 @@ export const demoZhixuDetail: ZhixuDetailDTO = {
       slotId: "supply",
       title: "供给方",
       label: "供给方",
-      duty: "完成备货、出口单证和供给侧声明",
-      evidence: ["合同", "装箱清单", "出口单证"],
+      duty: "完成备货、示例流程单证和供给侧声明",
+      evidence: ["合同", "装箱清单", "示例流程单证"],
       status: "required",
       tone: "warn",
       required: true,
@@ -577,14 +577,14 @@ export const demoZhixuDetail: ZhixuDetailDTO = {
     {
       slotId: "delivery",
       title: "交付方",
-      label: "物流/报关",
-      duty: "提交报关、装船、物流和到港凭证",
-      evidence: ["报关单", "提单", "到港通知"],
+      label: "示例流转/示例单据",
+      duty: "提交示例单据、装船、示例流转和到港凭证",
+      evidence: ["示例单据单", "提单", "到港通知"],
       status: "required",
       tone: "warn",
       required: true,
       performanceSlotLabel: "交付履约者",
-      businessPersonaLabels: ["报关行", "物流/货代"],
+      businessPersonaLabels: ["示例单据行", "示例流转/货代"],
       addOnManifest: deliveryAddOnManifest
     },
     {
@@ -645,10 +645,10 @@ export const demoZhixuDetail: ZhixuDetailDTO = {
     {
       interfaceName: "logistics_delivery",
       orderModes: ["new"],
-      title: "物流交付秩序",
-      desc: "对接报关、装船、到港和入仓节点。",
+      title: "示例流转交付秩序",
+      desc: "对接示例单据、装船、到港和入仓节点。",
       inputs: [
-        { portName: "dispatch", label: "报关完成", hook: "intake#EXECUTE" }
+        { portName: "dispatch", label: "示例单据完成", hook: "intake#EXECUTE" }
       ],
       outputs: [
         { portName: "bill_of_lading", label: "提单", signal: "carrier::transit.bl" },
@@ -684,9 +684,9 @@ export const demoZhixuDetail: ZhixuDetailDTO = {
   ],
   stages: demoStages,
   proofRows: [
-    { label: "秩序编号", value: CROSS_BORDER_ZHIXU_ID },
+    { label: "秩序编号", value: EXAMPLE_ZHIXU_ID },
     { label: "审核域", value: "共同秩序官方审核" },
-    { label: "秩序指纹", value: `${crossBorderPlanIds.planHash.slice(0, 14)}...${crossBorderPlanIds.planHash.slice(-10)}` },
+    { label: "秩序指纹", value: `${examplePlanIds.planHash.slice(0, 14)}...${examplePlanIds.planHash.slice(-10)}` },
     { label: "Plan 发布", value: "等待 StateMachine finalized 投影" }
   ],
   createOrderHint: "创建订单后，可填写参与方与商品信息并发起协作。"
@@ -704,23 +704,23 @@ export const demoParticipants: readonly ParticipantDTO[] = [
   {
     participantId: "seller",
     role: "卖家 / 车商",
-    duty: "负责备货和出口单证",
-    evidence: ["装箱清单", "出口单证"],
+    duty: "负责备货和示例流程单证",
+    evidence: ["装箱清单", "示例流程单证"],
     status: "invited",
     tone: "warn"
   },
   {
-    participantId: "customs",
-    role: "报关行",
-    duty: "负责提交报关完成凭证",
-    evidence: ["报关单", "报关完成凭证"],
+    participantId: "example",
+    role: "示例单据行",
+    duty: "负责提交示例单据完成凭证",
+    evidence: ["示例单据单", "示例单据完成凭证"],
     status: "pending_confirmation",
     tone: "warn"
   },
   {
     participantId: "logistics",
-    role: "物流 / 货代",
-    duty: "负责装船或物流凭证",
+    role: "示例流转 / 货代",
+    duty: "负责装船或示例流转凭证",
     evidence: ["提单", "装船通知"],
     status: "invited",
     tone: "warn"
@@ -745,8 +745,8 @@ export const demoParticipants: readonly ParticipantDTO[] = [
 
 export const demoOrder: ProductOrderDTO = {
   orderId: DEMO_ORDER_ID,
-  zhixuId: CROSS_BORDER_ZHIXU_ID,
-  title: "A 公司采购 10 台车辆",
+  zhixuId: EXAMPLE_ZHIXU_ID,
+  title: "A 公司示例环节 10 台标的",
   status: "registered",
   statusLabel: "进行中",
   totalAmount: {
@@ -755,28 +755,28 @@ export const demoOrder: ProductOrderDTO = {
     display: "10,000 USDC"
   },
   fundingStatus: "已确认资金保障",
-  currentStageId: "customs-complete",
-  currentStageName: "出口报关",
+  currentStageId: "example-complete",
+  currentStageName: "示例流程示例单据",
   currentTaskId: DEMO_TASK_ID,
-  currentTaskTitle: "等待报关行提交报关完成凭证",
+  currentTaskTitle: "等待示例单据行提交示例单据完成凭证",
   currentTaskSummary: "凭证通过后，第 2 阶段付款条件满足",
   stages: demoStages,
   executorOverlays: {},
   resourceOverlays: {},
   resourceRequirements: {
-    "customs-complete": demoCustomsResourceRequirements
+    "example-complete": demoExampleResourceRequirements
   },
   selectableTargets: demoSelectableTargets,
   participants: demoParticipants,
   recentEvents: [
-    { eventId: "evt-customs-received", text: "报关行已接收出口单证", time: "2026-04-29 09:12" },
+    { eventId: "evt-example-received", text: "示例单据行已接收示例流程单证", time: "2026-04-29 09:12" },
     { eventId: "evt-invoice", text: "供应商上传商业发票", time: "2026-04-22 16:45" },
     { eventId: "evt-funds", text: "资金条件信号已确认", time: "2026-04-18 10:27" }
   ],
   proofRows: [
     { label: "交易编号", value: "0x7a3b...9c2f8e1d4a7" },
     { label: "区块高度", value: "18,734,562" },
-    { label: "提交人", value: "张经理（XX 报关行）" },
+    { label: "提交人", value: "张经理（XX 示例单据行）" },
     { label: "凭证指纹", value: "a9f3b2c8d4e7...1f6a9b0c3d5e8" }
   ]
 };
@@ -792,7 +792,7 @@ export const demoPaymentTask: ProductTaskDTO = {
   taskId: "task-funding-placeholder-001",
   orderId: DEMO_ORDER_ID,
   orderTitle: demoOrder.title,
-  zhixuId: CROSS_BORDER_ZHIXU_ID,
+  zhixuId: EXAMPLE_ZHIXU_ID,
   title: "确认资金条件证明",
   subtitle: "你作为资金方，需要确认付款条件和资金凭证；当前仅为资金适配器占位。",
   assigneeRole: "资金方",
@@ -808,12 +808,6 @@ export const demoPaymentTask: ProductTaskDTO = {
   addOnManifest: fundsAddOnManifest,
   primaryActionLabel: "确认付款条件",
   requiredInputs: demoPaymentRequiredInputs,
-  settlementPreview: {
-    label: "资金适配器占位",
-    statusLabel: "等待后续 funding adapter 接入",
-    adapterStatus: "placeholder",
-    disclaimer: "当前不托管、不划转、不释放、不退款任何资金，只记录付款条件和证明。"
-  },
   participantRoleLabel: "资金方",
   canSubmit: false,
   proofSummary: {
@@ -837,7 +831,7 @@ export const demoFundingGuaranteeSignalContainers = [
     schemaVersion: "uvp.signal-container.v1",
     taskId: demoPaymentTask.taskId,
     orderId: DEMO_ORDER_ID,
-    planId: crossBorderPlanIds.planId,
+    planId: examplePlanIds.planId,
     stageId: demoPaymentTask.stageId,
     capabilityKind: "payment_placeholder",
     actionKind: "submit_signal",
@@ -868,7 +862,7 @@ export const demoFundingGuaranteeSignalContainers = [
       submitter: "0x1111111111111111111111111111111111111111",
       payloadHash: "0x0f00000000000000000000000000000000000000000000000000000000000103",
       payloadRef: "uvp-resource://demo/funding/buyer-payment-evidence/v1",
-      idempotencyKey: "funding:buyer-payment-evidence:order-cross-border-car-001",
+      idempotencyKey: "funding:buyer-payment-evidence:order-example-car-001",
       deadline: "2026-04-30T10:00:00.000Z"
     },
     proof: {
@@ -892,7 +886,7 @@ export const demoFundingGuaranteeSignalContainers = [
     schemaVersion: "uvp.signal-container.v1",
     taskId: demoPaymentTask.taskId,
     orderId: DEMO_ORDER_ID,
-    planId: crossBorderPlanIds.planId,
+    planId: examplePlanIds.planId,
     stageId: demoPaymentTask.stageId,
     capabilityKind: "payment_placeholder",
     actionKind: "submit_signal",
@@ -925,7 +919,7 @@ export const demoFundingGuaranteeSignalContainers = [
       submitter: "0x4444444444444444444444444444444444444444",
       payloadHash: "0x0f00000000000000000000000000000000000000000000000000000000000203",
       payloadRef: "uvp-resource://demo/funding/guarantor-backing-proof/v1",
-      idempotencyKey: "funding:guarantor-backing-proof:order-cross-border-car-001",
+      idempotencyKey: "funding:guarantor-backing-proof:order-example-car-001",
       deadline: "2026-04-30T10:00:00.000Z"
     },
     proof: {
@@ -949,7 +943,7 @@ export const demoFundingGuaranteeSignalContainers = [
     schemaVersion: "uvp.signal-container.v1",
     taskId: demoPaymentTask.taskId,
     orderId: DEMO_ORDER_ID,
-    planId: crossBorderPlanIds.planId,
+    planId: examplePlanIds.planId,
     stageId: demoPaymentTask.stageId,
     capabilityKind: "payment_placeholder",
     actionKind: "submit_signal",
@@ -982,7 +976,7 @@ export const demoFundingGuaranteeSignalContainers = [
       submitter: "0x5555555555555555555555555555555555555555",
       payloadHash: "0x0f00000000000000000000000000000000000000000000000000000000000303",
       payloadRef: "uvp-resource://demo/funding/stablecoin-adapter-proof/v1",
-      idempotencyKey: "funding:stablecoin-adapter-proof:order-cross-border-car-001",
+      idempotencyKey: "funding:stablecoin-adapter-proof:order-example-car-001",
       deadline: "2026-04-30T10:00:00.000Z"
     },
     proof: {
@@ -1004,10 +998,10 @@ export const demoFundingGuaranteeSignalContainers = [
 ] satisfies readonly DemoFundingSignalContainerFixture[];
 
 export const demoSelectorTask: ProductTaskDTO = {
-  taskId: "task-selector-customs-001",
+  taskId: "task-selector-example-001",
   orderId: DEMO_ORDER_ID,
   orderTitle: demoOrder.title,
-  zhixuId: CROSS_BORDER_ZHIXU_ID,
+  zhixuId: EXAMPLE_ZHIXU_ID,
   title: "选择或交接履约者",
   subtitle: "未开始阶段可选择履约者；已开始阶段需原履约者共签交接。",
   assigneeRole: "买家",
@@ -1037,7 +1031,7 @@ export const demoSelectorTask: ProductTaskDTO = {
     },
     {
       title: "我理解履约者选择只提交引用和指纹",
-      desc: "合同、发票、物流文件等业务原文不会写入链上。"
+      desc: "合同、发票、示例流转文件等业务原文不会写入链上。"
     }
   ],
   proofRows: [
@@ -1050,8 +1044,8 @@ export const demoResourcePatchTask: ProductTaskDTO = {
   taskId: "task-resource-controller-001",
   orderId: DEMO_ORDER_ID,
   orderTitle: demoOrder.title,
-  zhixuId: CROSS_BORDER_ZHIXU_ID,
-  title: "补充报关凭证要求",
+  zhixuId: EXAMPLE_ZHIXU_ID,
+  title: "补充示例单据凭证要求",
   subtitle: "你可以为目标阶段发布加密内容寻址资源清单和访问策略。",
   assigneeRole: "买家",
   stageId: "order-confirmed",
@@ -1064,14 +1058,14 @@ export const demoResourcePatchTask: ProductTaskDTO = {
   selectableTargets: [
     {
       selectorStageId: "order-confirmed",
-      targetStageId: "customs-complete",
-      targetStageName: "出口报关",
+      targetStageId: "example-complete",
+      targetStageName: "示例流程示例单据",
       allowed: true,
       currentExecutorLabel: "待选择履约者",
-      resourceRequirements: demoCustomsResourceRequirements
+      resourceRequirements: demoExampleResourceRequirements
     }
   ],
-  resourceRequirements: demoCustomsResourceRequirements,
+  resourceRequirements: demoExampleResourceRequirements,
   primaryActionLabel: "补充凭证要求",
   participantRoleLabel: "买家",
   canSubmit: true,
@@ -1094,24 +1088,24 @@ export const demoTask: ProductTaskDTO = {
   taskId: DEMO_TASK_ID,
   orderId: DEMO_ORDER_ID,
   orderTitle: demoOrder.title,
-  zhixuId: CROSS_BORDER_ZHIXU_ID,
-  title: "确认出口报关完成",
-  subtitle: "你代表 XX 报关行，需要提交本阶段凭证。",
-  assigneeRole: "XX 报关行",
-  stageId: "customs-complete",
-  stageName: "出口报关",
+  zhixuId: EXAMPLE_ZHIXU_ID,
+  title: "确认示例流程示例单据完成",
+  subtitle: "你代表 XX 示例单据行，需要提交本阶段凭证。",
+  assigneeRole: "XX 示例单据行",
+  stageId: "example-complete",
+  stageName: "示例流程示例单据",
   deadline: "2026-05-03 18:00",
   fundingImpact: "进入验收；通过后第 2 阶段付款条件满足",
   status: "open",
   addOnKind: "submit_signal",
-  resourceRequirements: demoCustomsResourceRequirements,
+  resourceRequirements: demoExampleResourceRequirements,
   performanceSlotId: "delivery",
   performanceSlotLabel: "交付履约者",
-  businessPersonaLabels: ["报关行", "物流/货代"],
+  businessPersonaLabels: ["示例单据行", "示例流转/货代"],
   addOnManifest: deliveryAddOnManifest,
-  primaryActionLabel: "确认报关完成",
-  requiredInputs: demoCustomsRequiredInputs,
-  participantRoleLabel: "报关行",
+  primaryActionLabel: "确认示例单据完成",
+  requiredInputs: demoExampleRequiredInputs,
+  participantRoleLabel: "示例单据行",
   canSubmit: false,
   proofSummary: {
     label: "等待提交凭证"
@@ -1119,7 +1113,7 @@ export const demoTask: ProductTaskDTO = {
   responsibilityStatements: [
     {
       title: "我确认以上凭证真实、完整",
-      desc: "我已核对上传的报关单真实有效，内容完整无误。"
+      desc: "我已核对上传的示例单据单真实有效，内容完整无误。"
     },
     {
       title: "我理解提交后不可删除，只能追加更正或争议",
@@ -1147,7 +1141,7 @@ function demoRoleSlotIdForStage(stageId: string): string {
     case "stock-ready":
     case "export-documents":
       return "supply";
-    case "customs-complete":
+    case "example-complete":
     case "shipping":
     case "arrival":
       return "delivery";

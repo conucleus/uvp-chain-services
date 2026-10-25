@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { crossBorderPlanIds } from "./fixtures/business/index.js";
+import { examplePlanIds } from "./fixtures/business/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { createProductService } from "../src/product/application/service.js";
 import { createStoreRuntimeService } from "../src/store/console/runtime.js";
@@ -9,14 +9,14 @@ import {
   type StoreZhixuVersionRecord,
 } from "../src/store/console/version.js";
 import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { crossBorderSchemaResolver } from "./cross-border-schema.js";
+import { exampleSchemaResolver } from "./example-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
 const stateMachine = "0x1111111111111111111111111111111111111111" as Address;
 const orderId = bytes32("1001");
 const hookId = bytes32("1002");
-const stageId = bytes32Text("export.customs");
-const hookName = bytes32Text("customs-review");
+const stageId = bytes32Text("stage-a");
+const hookName = bytes32Text("example-review");
 const planIdV2 = bytes32("2001");
 const planHashV2 = bytes32("2002");
 
@@ -27,11 +27,11 @@ describe("Store runtime and version selection", () => {
       deploymentBlock: 0n,
       events: [
         event(1n, "PlanRegistered", {
-          planId: crossBorderPlanIds.planId,
-          planHash: crossBorderPlanIds.planHash,
+          planId: examplePlanIds.planId,
+          planHash: examplePlanIds.planHash,
           hookCount: 1n,
         }),
-        event(2n, "OrderRegistered", { orderId, planId: crossBorderPlanIds.planId }),
+        event(2n, "OrderRegistered", { orderId, planId: examplePlanIds.planId }),
         event(4n, "SignalSubmitterAuthorized", {
           orderId,
           sourceId: stageId,
@@ -55,7 +55,7 @@ describe("Store runtime and version selection", () => {
 
     const summary = await createStoreRuntimeService({
       productService: createProductService(store, {
-        productSchemaResolver: crossBorderSchemaResolver()
+        productSchemaResolver: exampleSchemaResolver()
       }),
       store,
     }).getSummary();
@@ -75,15 +75,15 @@ describe("Store runtime and version selection", () => {
       deploymentBlock: 0n,
       events: [
         event(1n, "PlanRegistered", {
-          planId: crossBorderPlanIds.planId,
-          planHash: crossBorderPlanIds.planHash,
+          planId: examplePlanIds.planId,
+          planHash: examplePlanIds.planHash,
           hookCount: 1n,
         }),
         event(2n, "PlanRegistered", { planId: planIdV2, planHash: planHashV2, hookCount: 1n }),
       ],
     });
     const metadata = new MemoryStoreZhixuVersionMetadataStore();
-    await metadata.upsertVersion(version("v1", "active", crossBorderPlanIds.planId, crossBorderPlanIds.planHash));
+    await metadata.upsertVersion(version("v1", "active", examplePlanIds.planId, examplePlanIds.planHash));
     await metadata.upsertVersion(version("v2", "candidate", planIdV2, planHashV2));
     const service = createStoreZhixuVersionService({
       productService: createProductService(store),

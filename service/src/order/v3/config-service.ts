@@ -4,7 +4,6 @@
 // 定稿，这里只校验订单域需要的结构不变量并保留原始内容参与哈希。
 
 import type {
-  ConfigAcceptanceModeV3,
   ConfigBundleV3,
   ConfigStageV3,
   ConfigVersionV3,
@@ -291,10 +290,6 @@ function parseStages(value: unknown, slotKeys: ReadonlySet<string>): ReadonlySet
         assertDeclaredSlot(slotKey, slotKeys, `stage ${key} sender`);
       }
     }
-    if (stage.acceptance !== undefined) {
-      const acceptance = requireRecord(stage.acceptance, `stages[${index}].acceptance`);
-      requireAcceptanceMode(acceptance.mode, `stage ${key}`);
-    }
     for (const field of ["time", "hooks"] as const) {
       const entries = stage[field];
       if (entries === undefined) {
@@ -352,17 +347,11 @@ function assertDeclaredSlot(
   fieldName: string,
 ): void {
   const slotKey = requireString(value, fieldName);
-  if (slotKey !== "buyer" && !slotKeys.has(slotKey)) {
+  if (!slotKeys.has(slotKey)) {
     throw new OrderV3Error(422, "invalid_request", `${fieldName} references unknown slot ${slotKey}`);
   }
 }
 
-function requireAcceptanceMode(value: unknown, fieldName: string): ConfigAcceptanceModeV3 {
-  if (value === "self" || value === "third_party" || value === "mutual" || value === "none") {
-    return value;
-  }
-  throw new OrderV3Error(422, "invalid_request", `${fieldName} has unsupported acceptance mode`);
-}
 
 function requireRecordStatus(value: unknown): OrderConfigStatusV3 {
   if (value === "draft" || value === "published" || value === "deprecated") {

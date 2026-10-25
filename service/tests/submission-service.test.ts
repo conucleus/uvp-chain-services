@@ -60,11 +60,11 @@ const task = {
   orderId: fixtureOnchainOrderId,
   orderTitle: "Order 1",
   zhixuId: "zhixu-1",
-  title: "Confirm customs",
-  subtitle: "Upload customs evidence",
-  assigneeRole: "customs",
-  stageId: "customs-complete",
-  stageName: "Customs complete",
+  title: "Confirm example",
+  subtitle: "Upload example evidence",
+  assigneeRole: "example",
+  stageId: "example-complete",
+  stageName: "Example complete",
   deadline: "2026-05-01",
   fundingImpact: "advance workflow",
   status: "open",
@@ -82,7 +82,7 @@ const task = {
     args: {},
     sourceId: fixtureSourceId,
     signalId: fixtureSignalId,
-    stageIdentifier: "customs-complete"
+    stageIdentifier: "example-complete"
   }
 } as unknown as ProductTaskDTO;
 
@@ -130,11 +130,11 @@ describe("product task submissions", () => {
       orderId: task.orderId,
       taskId: task.taskId,
       stageIdentifier: task.stageId,
-      documentType: "customs-declaration",
-      fileName: "customs.txt",
-      textPayload: "customs declaration",
+      documentType: "example-declaration",
+      fileName: "example.txt",
+      textPayload: "example declaration",
       metadata: {
-        businessLabel: "Customs declaration",
+        businessLabel: "Example declaration",
         fields: { declarationNo: "CD-NO-AUTH" }
       }
     }, owner);
@@ -870,11 +870,11 @@ describe("product task submissions", () => {
       now: () => baseNow,
       evidenceIdFactory: () => "ev_mismatch"
     });
-    const evidence = await uploadSubmissionEvidence(evidenceService, "customs-declaration", "customs declaration");
+    const evidence = await uploadSubmissionEvidence(evidenceService, "example-declaration", "example declaration");
     await storage.delete(evidence.evidence.storageURI);
     await storage.put({
       evidenceId: evidence.evidence.evidenceId,
-      bytes: new TextEncoder().encode("tampered customs declaration")
+      bytes: new TextEncoder().encode("tampered example declaration")
     });
     const service = submissionServiceForEvidence(evidenceService);
 
@@ -900,7 +900,7 @@ describe("product task submissions", () => {
       evidenceIdFactory: sequentialIds(["ev_b", "ev_a"])
     });
     const firstEvidence = await uploadSubmissionEvidence(evidenceService, "manifest", "manifest payload");
-    const secondEvidence = await uploadSubmissionEvidence(evidenceService, "customs-declaration", "customs payload");
+    const secondEvidence = await uploadSubmissionEvidence(evidenceService, "example-declaration", "example payload");
     const firstService = submissionServiceForEvidence(evidenceService);
     const secondService = submissionServiceForEvidence(evidenceService);
 
@@ -1001,8 +1001,8 @@ describe("product task submissions", () => {
       boundSourceId: prepared.sourceId,
       boundSignalId: prepared.signalId
     });
-    expect(JSON.stringify(submission.proofRows)).not.toContain("customs declaration");
-    expect(JSON.stringify(submission.proofRows)).not.toContain("customs.txt");
+    expect(JSON.stringify(submission.proofRows)).not.toContain("example declaration");
+    expect(JSON.stringify(submission.proofRows)).not.toContain("example.txt");
   });
 
   it("does not mark evidence bound when Product submit broadcast fails", async () => {
@@ -2033,11 +2033,11 @@ describe("product task submissions", () => {
     const uploaded = await evidenceService.uploadEvidence({
       draftId: "draft-1",
       stageIdentifier: task.stageId,
-      documentType: "customs-declaration",
-      fileName: "customs.txt",
-      textPayload: "draft-period customs declaration",
+      documentType: "example-declaration",
+      fileName: "example.txt",
+      textPayload: "draft-period example declaration",
       metadata: {
-        businessLabel: "Customs declaration",
+        businessLabel: "Example declaration",
         fields: { declarationNo: "CD-DRAFT" }
       }
     }, owner);
@@ -2105,11 +2105,11 @@ async function submissionFixture(options: {
     orderId: fixtureTask.orderId,
     taskId: fixtureTask.taskId,
     stageIdentifier: fixtureTask.stageId,
-    documentType: "customs-declaration",
-    fileName: "customs.txt",
-    textPayload: "customs declaration",
+    documentType: "example-declaration",
+    fileName: "example.txt",
+    textPayload: "example declaration",
     metadata: {
-      businessLabel: "Customs declaration",
+      businessLabel: "Example declaration",
       fields: { declarationNo: "CD-1" }
     }
   }, owner);
