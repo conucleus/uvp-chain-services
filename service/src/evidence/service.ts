@@ -635,7 +635,7 @@ function canReadEvidence(principal: EvidencePrincipal, record: EvidenceMetadataR
   if (policy.readers.includes(principalId) || policy.writers.includes(principalId)) {
     return true;
   }
-  return principal.role === "adjudicator" && policy.disputeReaders.includes(principalId);
+  return principal.role === "adjudicator" && policy.adjudicatorReaders.includes(principalId);
 }
 
 function normalizeAccessPolicy(input: {
@@ -647,7 +647,7 @@ function normalizeAccessPolicy(input: {
   const readers = normalizeParticipantList(input.input?.readers, "accessPolicy.readers");
   const writers = normalizeParticipantList(input.input?.writers, "accessPolicy.writers");
   const adminReaders = normalizeParticipantList(input.input?.adminReaders, "accessPolicy.adminReaders");
-  const disputeReaders = normalizeParticipantList(input.input?.disputeReaders, "accessPolicy.disputeReaders");
+  const adjudicatorReaders = normalizeParticipantList(input.input?.adjudicatorReaders, "accessPolicy.adjudicatorReaders");
 
   return {
     evidenceId: input.evidenceId,
@@ -655,7 +655,7 @@ function normalizeAccessPolicy(input: {
     readers: uniqueParticipants([input.ownerParticipantId, ...readers]),
     writers: uniqueParticipants([input.ownerParticipantId, ...writers]),
     adminReaders,
-    disputeReaders
+    adjudicatorReaders
   };
 }
 

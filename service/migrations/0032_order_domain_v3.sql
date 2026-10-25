@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS order_config_v3 (
   plan_id TEXT,
   plan_hash TEXT,
   birth_json TEXT,
+  executor_profile_json TEXT,
   bundle_json TEXT NOT NULL,
   created_by TEXT NOT NULL,
   created_at TEXT NOT NULL,

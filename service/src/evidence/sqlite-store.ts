@@ -102,7 +102,7 @@ export class SqliteEvidenceStore implements EvidenceMetadataStore {
 
         this.#database.prepare(
           `INSERT INTO evidence_access_policy (
-             evidence_id, order_id, readers_json, writers_json, admin_readers_json, dispute_readers_json
+             evidence_id, order_id, readers_json, writers_json, admin_readers_json, adjudicator_readers_json
            ) VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(evidence_id)
            DO UPDATE SET
@@ -110,14 +110,14 @@ export class SqliteEvidenceStore implements EvidenceMetadataStore {
              readers_json = excluded.readers_json,
              writers_json = excluded.writers_json,
              admin_readers_json = excluded.admin_readers_json,
-             dispute_readers_json = excluded.dispute_readers_json`
+             adjudicator_readers_json = excluded.adjudicator_readers_json`
         ).run(
           record.accessPolicy.evidenceId,
           record.accessPolicy.orderId ?? null,
           stringifyStorageJson(record.accessPolicy.readers),
           stringifyStorageJson(record.accessPolicy.writers),
           stringifyStorageJson(record.accessPolicy.adminReaders),
-          stringifyStorageJson(record.accessPolicy.disputeReaders)
+          stringifyStorageJson(record.accessPolicy.adjudicatorReaders)
         );
       });
     });
@@ -145,7 +145,7 @@ export class SqliteEvidenceStore implements EvidenceMetadataStore {
         }
         this.#database.prepare(
           `INSERT INTO evidence_access_policy (
-             evidence_id, order_id, readers_json, writers_json, admin_readers_json, dispute_readers_json
+             evidence_id, order_id, readers_json, writers_json, admin_readers_json, adjudicator_readers_json
            ) VALUES (?, ?, ?, ?, ?, ?)`
         ).run(
           record.accessPolicy.evidenceId,
@@ -153,7 +153,7 @@ export class SqliteEvidenceStore implements EvidenceMetadataStore {
           stringifyStorageJson(record.accessPolicy.readers),
           stringifyStorageJson(record.accessPolicy.writers),
           stringifyStorageJson(record.accessPolicy.adminReaders),
-          stringifyStorageJson(record.accessPolicy.disputeReaders)
+          stringifyStorageJson(record.accessPolicy.adjudicatorReaders)
         );
         return true;
       });
@@ -172,7 +172,7 @@ export class SqliteEvidenceStore implements EvidenceMetadataStore {
          policy.readers_json,
          policy.writers_json,
          policy.admin_readers_json,
-         policy.dispute_readers_json
+         policy.adjudicator_readers_json
        FROM evidence_object object
        JOIN evidence_access_policy policy ON policy.evidence_id = object.evidence_id
        WHERE object.evidence_id = ?`
@@ -188,7 +188,7 @@ export class SqliteEvidenceStore implements EvidenceMetadataStore {
          policy.readers_json,
          policy.writers_json,
          policy.admin_readers_json,
-         policy.dispute_readers_json
+         policy.adjudicator_readers_json
        FROM evidence_object object
        JOIN evidence_access_policy policy ON policy.evidence_id = object.evidence_id
        WHERE object.payload_hash = ? AND object.owner_participant_id = ?
@@ -323,7 +323,7 @@ function evidenceRow(row: unknown): EvidenceMetadataRecord {
     readers: parseStorageJson<readonly string[]>(stringColumn(record, "readers_json")),
     writers: parseStorageJson<readonly string[]>(stringColumn(record, "writers_json")),
     adminReaders: parseStorageJson<readonly string[]>(stringColumn(record, "admin_readers_json")),
-    disputeReaders: parseStorageJson<readonly string[]>(stringColumn(record, "dispute_readers_json"))
+    adjudicatorReaders: parseStorageJson<readonly string[]>(stringColumn(record, "adjudicator_readers_json"))
   };
   return {
     evidence,

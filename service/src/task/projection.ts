@@ -5,14 +5,11 @@ import type { StageTaskKindV3 } from "@uvp-eth/product-dto";
 import type { OrderStageRecord, OrderStageSlotRecord } from "../order/v3/types.js";
 import type { TaskListViewV3, TaskProjectionInput, TaskViewV3 } from "./types.js";
 
-const BUYER_FUND_STATES = new Set(["draft", "inviting", "terms_frozen", "deposit_pending"]);
-const PERFORMER_WAIT_STATES = new Set(["draft", "inviting", "terms_frozen", "deposit_pending"]);
-const PERFORMED_STATES = new Set(["performed", "submitted"]);
-const PERFORMER_OPEN_STATES = new Set(["funded", "deposit_confirmed"]);
-const SETTLE_STATES = new Set(["verified", "accepted", "disputed"]);
+const PRE_WORK_STATES = new Set(["draft", "ready"]);
+const DONE_STATES = new Set(["completed", "skipped"]);
 
 export function projectTasks(input: TaskProjectionInput): TaskListViewV3 {
-  const { decision, snapshot, now } = input;
+  const { decision, snapshot } = input;
   if (decision.scope === "operator") {
     return { dataState: "none", orderId: snapshot.order.orderId, items: [] };
   }
@@ -21,11 +18,11 @@ export function projectTasks(input: TaskProjectionInput): TaskListViewV3 {
   for (const stage of stages) {
     const stageSlots = snapshot.slots.filter((slot) => slot.stageKey === stage.stageKey);
     if (decision.scope === "buyer") {
-      tasks.push(...buyerTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots, now));
+      tasks.push(...buyerTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots));
     } else if (decision.scope === "performer") {
-      tasks.push(...performerTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots, now));
+      tasks.push(...performerTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots));
     } else {
-      tasks.push(...verifierTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots, now));
+      tasks.push(...verifierTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots));
     }
   }
   tasks.sort(compareTasks);
@@ -41,26 +38,15 @@ function buyerTasks(
   wallet: string,
   stage: OrderStageRecord,
   slots: readonly OrderStageSlotRecord[],
-  now: Date,
 ): readonly TaskViewV3[] {
-  if (!BUYER_FUND_STATES.has(stage.status)) {
-    if (SETTLE_STATES.has(stage.status)) {
-      return [task(orderId, wallet, stage, stage.payerSlot, "settle_stage", "open", "处理结算/争议", {
-        actionRef: `settle:${stage.stageKey}`,
-        ...(stage.workDeadline !== undefined ? { dueAt: stage.workDeadline } : {}),
-      })];
-    }
+  const payerSlot = slots.find((slot) => slot.slotKey === stage.payerSlot);
+  if (!payerSlot || payerSlot.status === "accepted" || DONE_STATES.has(stage.status)) {
     return [];
   }
-  const requiredPayees = slots.filter(
-    (slot) => slot.required && slot.slotKey !== stage.payerSlot && slot.status !== "accepted",
-  );
-  const blockedBy = requiredPayees.map((slot) => `accept:${slot.slotKey}`);
   return [
-    task(orderId, wallet, stage, stage.payerSlot, "fund_stage", blockedBy.length > 0 ? "blocked" : "open", "冻款", {
+    task(orderId, wallet, stage, payerSlot.slotKey, "accept_invite", "open", "确认条款", {
+      actionRef: `accept:${payerSlot.slotKey}`,
       ...(stage.inviteDeadline !== undefined ? { dueAt: stage.inviteDeadline } : {}),
-      actionRef: `fund:${stage.stageKey}`,
-      ...(blockedBy.length > 0 ? { blockedBy } : {}),
     }),
   ];
 }
@@ -70,31 +56,28 @@ function performerTasks(
   wallet: string,
   stage: OrderStageRecord,
   slots: readonly OrderStageSlotRecord[],
-  _now: Date,
 ): readonly TaskViewV3[] {
   const payeeSlot = slots.find(
     (slot) => slot.slotKey === stage.payeeSlot && slot.status === "accepted" && slot.wallet?.toLowerCase() === wallet,
   );
-  if (!payeeSlot) {
-    return [];
-  }
-  if (SETTLE_STATES.has(stage.status)) {
-    return [task(orderId, wallet, stage, payeeSlot.slotKey, "settle_stage", "open", "处理结算/争议", {
-      actionRef: `settle:${stage.stageKey}`,
-    })];
-  }
-  if (PERFORMED_STATES.has(stage.status)) {
-    return [];
-  }
-  if (!PERFORMER_WAIT_STATES.has(stage.status) && !PERFORMER_OPEN_STATES.has(stage.status)) {
+  if (!payeeSlot || DONE_STATES.has(stage.status)) {
     return [];
   }
   return [
-    task(orderId, wallet, stage, payeeSlot.slotKey, "perform_stage", PERFORMER_WAIT_STATES.has(stage.status) ? "blocked" : "open", "履约/提交", {
-      ...(stage.workDeadline !== undefined ? { dueAt: stage.workDeadline } : {}),
-      actionRef: `perform:${stage.stageKey}`,
-      ...(PERFORMER_WAIT_STATES.has(stage.status) ? { blockedBy: [`fund:${stage.stageKey}`] } : {}),
-    }),
+    task(
+      orderId,
+      wallet,
+      stage,
+      payeeSlot.slotKey,
+      "perform_stage",
+      PRE_WORK_STATES.has(stage.status) ? "blocked" : "open",
+      "履约/提交",
+      {
+        ...(stage.workDeadline !== undefined ? { dueAt: stage.workDeadline } : {}),
+        actionRef: `perform:${stage.stageKey}`,
+        ...(PRE_WORK_STATES.has(stage.status) ? { blockedBy: [`stage:${stage.status}`] } : {}),
+      },
+    ),
   ];
 }
 
@@ -103,30 +86,20 @@ function verifierTasks(
   wallet: string,
   stage: OrderStageRecord,
   slots: readonly OrderStageSlotRecord[],
-  _now: Date,
 ): readonly TaskViewV3[] {
   const verifierSlot = slots.find(
     (slot) => slot.slotKey === stage.verifierSlot && slot.status === "accepted" && slot.wallet?.toLowerCase() === wallet,
   );
-  if (!verifierSlot) {
+  if (!verifierSlot || DONE_STATES.has(stage.status)) {
     return [];
   }
-  if (SETTLE_STATES.has(stage.status)) {
-    return [task(orderId, wallet, stage, verifierSlot.slotKey, "settle_stage", "open", "处理结算/争议", {
-      actionRef: `settle:${stage.stageKey}`,
-    })];
-  }
-  if (PERFORMED_STATES.has(stage.status)) {
-    return [task(orderId, wallet, stage, verifierSlot.slotKey, "verify_stage", "open", "验收", {
+  return [
+    task(orderId, wallet, stage, verifierSlot.slotKey, "verify_stage", "blocked", "验收", {
       ...(stage.workDeadline !== undefined ? { dueAt: stage.workDeadline } : {}),
       actionRef: `verify:${stage.stageKey}`,
-    })];
-  }
-  return [task(orderId, wallet, stage, verifierSlot.slotKey, "verify_stage", "blocked", "验收", {
-    ...(stage.workDeadline !== undefined ? { dueAt: stage.workDeadline } : {}),
-    actionRef: `verify:${stage.stageKey}`,
-    blockedBy: [`perform:${stage.stageKey}`],
-  })];
+      blockedBy: [`perform:${stage.stageKey}`],
+    }),
+  ];
 }
 
 function task(

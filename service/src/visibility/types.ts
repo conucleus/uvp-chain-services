@@ -18,9 +18,6 @@ export interface VisibilityFields {
   readonly walletAddresses: boolean;
   readonly contactRefs: boolean;
   readonly evidenceHandles: boolean;
-  readonly escrowAmounts: boolean;
-  readonly escrowState: boolean;
-  readonly instructions: boolean;
 }
 
 export interface VisibilityDecision {
@@ -86,47 +83,6 @@ export interface HandleViewV3 {
   readonly hash?: string;
 }
 
-export interface EscrowViewV3 {
-  readonly dataState: "ok" | "none" | "pending" | "unknown";
-  readonly stageKey: string;
-  readonly trancheId?: string;
-  readonly state?: string;
-  readonly amount?: string;
-  readonly feeBps?: number;
-  readonly payer?: string;
-  readonly payee?: string;
-  readonly verifier?: string;
-  readonly feeRecipient?: string;
-  readonly observationDays?: number;
-  readonly updatedAt?: string;
-  readonly funded?: boolean;
-  readonly reason?: string;
-}
-
-export interface InstructionViewV3 {
-  readonly instructionId: string;
-  readonly kind: string;
-  readonly status: string;
-  readonly trancheId: string;
-  readonly instructionRef: string;
-  readonly payerAmount?: string;
-  readonly payeeAmount?: string;
-  readonly requiredSigners?: readonly string[];
-  readonly signedRoles?: readonly string[];
-  readonly executeEligibleAt?: string;
-  readonly blockedByDispute?: boolean;
-  readonly txHash?: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-export interface InstructionListViewV3 {
-  readonly dataState: "ok" | "none" | "pending" | "unknown";
-  readonly stageKey: string;
-  readonly items: readonly InstructionViewV3[];
-  readonly reason?: string;
-}
-
 export interface ResourceListViewV3 {
   readonly dataState: "ok" | "none" | "pending" | "unknown";
   readonly stageKey: string;
@@ -150,7 +106,6 @@ export interface StageViewV3 {
   readonly standard?: StandardViewV3;
   readonly slots?: readonly SlotViewV3[];
   readonly fileResources?: readonly HandleViewV3[];
-  readonly escrow?: EscrowViewV3;
 }
 
 export interface OrderViewV3 {
@@ -167,21 +122,6 @@ export interface OrderViewV3 {
   readonly draftId?: string;
   readonly dataState: "ok" | "none" | "pending" | "unknown";
   readonly stages: readonly StageViewV3[];
-}
-
-export interface BindingViewV3 {
-  readonly dataState: "ok" | "none" | "pending" | "unknown";
-  readonly stageKey: string;
-  readonly stageId: string;
-  readonly status: string;
-  readonly payerSlot?: string;
-  readonly payeeSlot?: string;
-  readonly verifierSlot?: string;
-  readonly termsHash?: string;
-  readonly amount?: string;
-  readonly acceptanceMode?: string;
-  readonly verifierMode?: string;
-  readonly slots?: readonly SlotViewV3[];
 }
 
 export interface StageViewResponseV3 {

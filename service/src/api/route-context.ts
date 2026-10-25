@@ -4,9 +4,6 @@ import type {
   EscrowV3Config,
   StoreAuthConfig,
 } from "../config/index.js";
-import type { BindingStore } from "../binding/index.js";
-import type { SettlementStore } from "../settlement/index.js";
-import type { RuntimeStore } from "../runtime/index.js";
 import type {
   EvidenceMetadataStore,
   EvidenceService,
@@ -146,18 +143,13 @@ export interface CreateApiRouterOptions {
   readonly orderV3ResourceResolver?: import("../visibility/types.js").ResourceResolverPort;
   readonly orderV3RuntimeIntervalMs?: number;
   readonly orderV3TimerPoker?: () => Promise<unknown>;
-  readonly settlementRelayer?: import("../settlement/executor.js").SettlementRelayer;
   /** 已发布 plan 查询源；缺省读配置版本登记的 planId/planHash。 */
   readonly orderV3PublishedPlanProvider?: PublishedPlanProvider;
   /** outside-trigger 出生适配器（ProtocolOrderBirthAdapter 或部署侧实现）。 */
   readonly orderV3BirthPort?: OrderBirthPort;
   readonly orderV3TriggerPort?: OrderTriggerPort;
-  /** V3 tranche binding / escrow intents 持久化 store（缺省内存）。 */
-  readonly bindingStore?: BindingStore;
-  /** V3 settlement instruction ledger 持久化 store（缺省内存）。 */
-  readonly settlementStore?: SettlementStore;
-  /** V3 time/hook runtime 持久化 store（缺省内存）。 */
-  readonly runtimeStore?: RuntimeStore;
+  /** Generic executor instruction store (profile-driven, no business actions). */
+  readonly executorInstructionStore?: import("../executor/instruction.js").ExecutorInstructionStore;
   /** V3 哑托管实例配置（地址/链/起点/fact source）。 */
   readonly escrowV3?: EscrowV3Config;
   /** V1 订单要求包服务（缺省由 routes 从 productBffStore 构造）。 */
@@ -251,9 +243,7 @@ export interface ApiRouteContext {
   readonly productService: ProductService;
   readonly productBffService: ProductBffService;
   readonly orderV3Service: OrderV3Service;
-  readonly bindingStore?: BindingStore;
-  readonly settlementStore?: SettlementStore;
-  readonly runtimeStore?: RuntimeStore;
+  readonly executorInstructionStore?: import("../executor/instruction.js").ExecutorInstructionStore;
   readonly orderRequirementsService: OrderRequirementsService;
   readonly escrowService: EscrowQueryService;
   readonly storeConsoleService: StoreConsoleService;

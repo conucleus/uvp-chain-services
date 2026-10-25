@@ -59,32 +59,6 @@ function router() {
 const unknownOrder = `0x${"ab".repeat(32)}`;
 
 describe("V3 integration wiring", () => {
-  it("registers product-binding routes and enforces the session gate", async () => {
-    const app = router();
-    const anonymous = await app.handle({
-      method: "GET",
-      pathname: `/product/orders/${unknownOrder}/bindings`,
-      headers: {},
-    });
-    expect(anonymous.status).toBe(401);
-
-    const bound = await app.handle({
-      method: "GET",
-      pathname: `/product/orders/${unknownOrder}/bindings`,
-      headers: { "x-test-wallet": wallet },
-    });
-    expect(bound.status).toBe(404);
-    expect((bound.body as { error: string }).error).toBe("order_not_found");
-
-    const deposit = await app.handle({
-      method: "POST",
-      pathname: `/product/orders/${unknownOrder}/stages/alpha/deposit-intent`,
-      headers: { "x-test-wallet": wallet },
-      body: {},
-    });
-    expect([404, 409, 503]).toContain(deposit.status);
-    expect((deposit.body as { error: string }).error).not.toBe("not_found");
-  });
 
   it("registers product-v3-signals and tasks routes", async () => {
     const app = router();
@@ -137,7 +111,7 @@ describe("V3 integration wiring", () => {
     expect(v3).toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
   });
 
-  it("assembles binding/settlement/runtime stores for sqlite and applies 0032/0033", async () => {
+  it("applies V3 sqlite migrations through the store factory", async () => {
     const dir = mkdtempSync(join(tmpdir(), "uvp-v3-wiring-"));
     const stores = createChainServicesStores({
       database: {
@@ -147,22 +121,7 @@ describe("V3 integration wiring", () => {
       },
     });
     try {
-      const now = "2026-10-25T00:00:00.000Z";
-      await stores.bindingStore.saveEscrowInstance({
-        chainId: 31337,
-        escrowAddress: "0x2222222222222222222222222222222222222222",
-        contractVersion: "v3",
-        startBlock: "0",
-        status: "active",
-        createdAt: now,
-        updatedAt: now,
-      });
-      const instances = await stores.bindingStore.listEscrowInstances();
-      expect(instances).toHaveLength(1);
-      expect(instances[0]!.contractVersion).toBe("v3");
-      // settlement/runtime stores are queryable (empty ledger is "none", not error).
-      expect(await stores.settlementStore.listByOrder(unknownOrder, 10)).toEqual([]);
-      expect(await stores.runtimeStore.listDueFacts(unknownOrder)).toEqual([]);
+      expect(await stores.orderV3Store.getConfig("missing", "1.0.0")).toBeUndefined();
     } finally {
       await stores.close();
       rmSync(dir, { recursive: true, force: true });

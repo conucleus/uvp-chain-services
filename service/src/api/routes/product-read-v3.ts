@@ -1,20 +1,16 @@
-// V3 订单读路由（可见性裁剪）：order/stage、stage escrow/binding、
-// settlement instructions、fileResources 句柄、operator 最小视图。身份只认
+// V3 订单读路由（可见性裁剪）：order/stage、fileResources 句柄、operator
+// 最小视图。身份只认
 // 会话锚定钱包；所有读先过 `src/visibility` 唯一 resolver，路由不做局部放行。
 
 import type { Address } from "../../shared/types.js";
 import type { ResourceResolverPort } from "../../visibility/types.js";
 import {
   createVisibilityResolver,
-  projectBinding,
-  projectEscrowBinding,
-  projectInstructions,
   projectOperatorOrder,
   projectOrder,
   projectResources,
   projectStage,
 } from "../../visibility/index.js";
-import type { BindingDataState } from "../../binding/types.js";
 import { OrderV3Error } from "../../order/v3/index.js";
 import {
   decodePathParameter,
@@ -28,26 +24,13 @@ import type { RouteModule } from "../route-module.js";
 
 const ORDER_PATH = /^\/product\/v3\/orders\/([^/]+)$/;
 const STAGE_PATH = /^\/product\/v3\/orders\/([^/]+)\/stages\/([^/]+)$/;
-const STAGE_ESCROW_PATH = /^\/product\/v3\/orders\/([^/]+)\/stages\/([^/]+)\/escrow$/;
-const STAGE_INSTRUCTIONS_PATH = /^\/product\/v3\/orders\/([^/]+)\/stages\/([^/]+)\/instructions$/;
-const STAGE_BINDING_PATH = /^\/product\/v3\/orders\/([^/]+)\/stages\/([^/]+)\/binding$/;
 const STAGE_RESOURCES_PATH = /^\/product\/v3\/orders\/([^/]+)\/stages\/([^/]+)\/resources$/;
 const STAGE_RESOURCE_PATH = /^\/product\/v3\/orders\/([^/]+)\/stages\/([^/]+)\/resources\/(.+)$/;
 const OPS_ORDER_PATH = /^\/product\/v3\/ops\/orders\/([^/]+)$/;
 
-export interface RuntimeWorkerPort {
-  runOnce(): Promise<unknown>;
-}
-
-export interface RuntimeSeederPort {
-  seed(orderId: string): Promise<number>;
-}
-
 export interface ProductReadV3RouteOptions {
   readonly operatorWallets?: readonly Address[];
   readonly resourceResolver?: ResourceResolverPort;
-  readonly runtimeWorker?: RuntimeWorkerPort;
-  readonly runtimeSeeder?: RuntimeSeederPort;
 }
 
 export function createProductReadV3RouteModule(
@@ -56,27 +39,6 @@ export function createProductReadV3RouteModule(
   return {
     async handle(request, context) {
       if (!request.pathname.startsWith("/product/v3/")) {
-        return undefined;
-      }
-      if (request.method === "POST") {
-        const seeded = /^\/product\/v3\/ops\/runtime\/seed\/([^/]+)$/.exec(request.pathname);
-        if (seeded) {
-          const wallet = await requireWallet(request, context);
-          void wallet;
-          if (!options.runtimeSeeder) {
-            return { status: 503, body: { error: "runtime_seeder_unavailable", retryable: false } };
-          }
-          const orderId = decodePathParameter(seeded[1] ?? "");
-          return { status: 200, body: { seeded: await options.runtimeSeeder.seed(orderId) } };
-        }
-        if (request.pathname === "/product/v3/ops/runtime/tick") {
-          const wallet = await requireWallet(request, context);
-          void wallet;
-          if (!options.runtimeWorker) {
-            return { status: 503, body: { error: "runtime_worker_unavailable", retryable: false } };
-          }
-          return { status: 200, body: await options.runtimeWorker.runOnce() };
-        }
         return undefined;
       }
       if (request.method !== "GET") {
@@ -113,73 +75,6 @@ async function handleRead(
     }
     const snapshot = await loadSnapshot(context, orderId);
     return { status: 200, body: projectOperatorOrder(decision, snapshot) };
-  }
-
-  const escrow = STAGE_ESCROW_PATH.exec(request.pathname);
-  if (escrow) {
-    const wallet = await requireWallet(request, context);
-    const orderId = decodePathParameter(escrow[1] ?? "");
-    const stageKey = decodePathParameter(escrow[2] ?? "");
-    const decision = await resolverFor(context, options).resolveVisibility(orderId, stageKey, wallet);
-    const snapshot = await loadSnapshot(context, orderId);
-    const stage = stageOf(snapshot, stageKey);
-    const projection = await loadBindingProjection(context, orderId, stage.stageId);
-    return {
-      status: 200,
-      body: projectEscrowBinding(
-        decision,
-        stageKey,
-        projection.binding,
-        projection.dataState,
-        ...(projection.reason !== undefined ? [projection.reason] : []),
-      ),
-    };
-  }
-
-  const binding = STAGE_BINDING_PATH.exec(request.pathname);
-  if (binding) {
-    const wallet = await requireWallet(request, context);
-    const orderId = decodePathParameter(binding[1] ?? "");
-    const stageKey = decodePathParameter(binding[2] ?? "");
-    const decision = await resolverFor(context, options).resolveVisibility(orderId, stageKey, wallet);
-    const snapshot = await loadSnapshot(context, orderId);
-    return { status: 200, body: projectBinding(decision, snapshot, stageOf(snapshot, stageKey)) };
-  }
-
-  const instructions = STAGE_INSTRUCTIONS_PATH.exec(request.pathname);
-  if (instructions) {
-    const wallet = await requireWallet(request, context);
-    const orderId = decodePathParameter(instructions[1] ?? "");
-    const stageKey = decodePathParameter(instructions[2] ?? "");
-    const decision = await resolverFor(context, options).resolveVisibility(orderId, stageKey, wallet);
-    if (!context.settlementStore) {
-      return {
-        status: 200,
-        body: projectInstructions(decision, stageKey, [], "unknown", "settlement_store_unavailable"),
-      };
-    }
-    const snapshot = await loadSnapshot(context, orderId);
-    const stage = stageOf(snapshot, stageKey);
-    const projection = await loadBindingProjection(context, orderId, stage.stageId);
-    const rows = (await context.settlementStore.listByOrder(orderId, 200))
-      .filter((row) => row.stageKey === stageKey || row.stageId === stage.stageId);
-    const dataState = rows.length > 0
-      ? "ok"
-      : projection.dataState === "pending"
-        ? "pending"
-        : projection.dataState === "unknown"
-          ? "unknown"
-          : "none";
-    return {
-      status: 200,
-      body: projectInstructions(
-        decision,
-        stageKey,
-        rows,
-        dataState,
-        ...(dataState === "unknown" && projection.reason !== undefined ? [projection.reason] : []),
-      ),
-    };
   }
 
   const resource = STAGE_RESOURCE_PATH.exec(request.pathname);
@@ -267,49 +162,6 @@ async function handleRead(
     return { status: 200, body: projectOrder(decision, snapshot) };
   }
   return undefined;
-}
-
-async function loadBindingProjection(
-  context: ApiRouteContext,
-  orderId: string,
-  stageId: string,
-): Promise<{
-  readonly dataState: BindingDataState;
-  readonly binding?: Awaited<ReturnType<NonNullable<ApiRouteContext["bindingStore"]>["findCanonicalBindingByStage"]>>;
-  readonly reason?: string;
-}> {
-  const store = context.bindingStore;
-  if (!store) {
-    throw new OrderV3Error(503, "escrow_unavailable", "V3 binding store is not configured", {
-      retryable: false,
-    });
-  }
-  const instances = (await store.listEscrowInstances()).filter(
-    (instance) => instance.status === "active" && instance.contractVersion === "v3",
-  );
-  if (instances.length === 0) {
-    return { dataState: "unknown", reason: "escrow_instance_unregistered" };
-  }
-  let pending = false;
-  for (const instance of instances) {
-    const cursor = await store.getCursor(instance.chainId, instance.escrowAddress);
-    if (!cursor) {
-      pending = true;
-      continue;
-    }
-    const binding = await store.findCanonicalBindingByStage(
-      instance.chainId,
-      instance.escrowAddress,
-      orderId,
-      stageId,
-    );
-    if (binding) {
-      return { dataState: "ok", binding };
-    }
-  }
-  return pending
-    ? { dataState: "pending", reason: "projection_not_ready" }
-    : { dataState: "none" };
 }
 
 function resolverFor(context: ApiRouteContext, options: ProductReadV3RouteOptions) {

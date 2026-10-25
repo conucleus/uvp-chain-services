@@ -348,7 +348,7 @@ describe("evidence service", () => {
       accessPolicy: {
         readers: ["buyer", "reviewer-1"],
         adminReaders: ["ops"],
-        disputeReaders: ["arbiter-1"]
+        adjudicatorReaders: ["arbiter-1"]
       }
     }, owner);
 

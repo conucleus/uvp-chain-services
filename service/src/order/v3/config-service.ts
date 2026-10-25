@@ -11,6 +11,7 @@ import type {
   OrderConfigStatusV3,
 } from "@uvp-eth/product-dto";
 import { planIdForPublisher } from "@uvp-eth/compiler";
+import { parseExecutorProfile } from "../../executor/profile.js";
 import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../../shared/types.js";
 import {
   configContentHash,
@@ -63,6 +64,9 @@ export class OrderConfigService {
     const planInput = input.plan !== undefined ? requireRecord(input.plan, "plan") : input;
     const plan = parsePublishedPlan(planInput);
     const birth = parseBirthRoute(input.birth ?? planInput.birth);
+    const executorProfile = input.executorProfile === undefined
+      ? undefined
+      : parseExecutorProfile(input.executorProfile);
     const providedHash = input.configHash ?? (rawBundle as Record<string, unknown>).configHash;
     const computed = configContentHash(bundle);
     if (providedHash !== undefined) {
@@ -95,6 +99,7 @@ export class OrderConfigService {
       configHash: computed,
       ...(plan ? { planId: plan.planId, planHash: plan.planHash } : {}),
       ...(birth ? { birth } : {}),
+      ...(executorProfile ? { executorProfile } : {}),
       bundle: withStatus(bundle, requestedStatus),
       createdBy: wallet,
       createdAt: now,
@@ -164,6 +169,14 @@ export class OrderConfigService {
     }
     verifyConfigContentHash({ configHash: record.configHash, bundle: record.bundle });
     return toConfigVersionDto(record);
+  }
+
+  async getExecutorProfile(configId: string, version: string): Promise<import("../../executor/profile.js").ExecutorProfileV1> {
+    const record = await this.#store.getConfig(requireString(configId, "configId"), requireString(version, "version"));
+    if (!record?.executorProfile) {
+      throw new OrderV3Error(503, "executor_profile_missing", "the bound config version has no executor profile");
+    }
+    return record.executorProfile;
   }
 
   /** 订单只绑定已发布版本；读取时重算内容哈希，漂移即 503。 */

@@ -788,16 +788,7 @@ function isEvidenceBindingSubmission(submission: ProductSubmissionDTO): boolean 
 }
 
 export function signalNameForIntent(intent: ProductSubmitIntent): string {
-  switch (intent) {
-    case "confirm_stage":
-      return "confirm_stage";
-    case "reject_stage":
-      return "reject_stage";
-    case "raise_dispute":
-      return "raise_dispute";
-    case "resolve_dispute":
-      return "resolve_dispute";
-  }
+  return intent;
 }
 
 type ProductTaskChainFields = ProductTaskDTO & {
@@ -1177,18 +1168,7 @@ function humanSummaryForPrepared(input: {
 }
 
 function actionLabel(intent: ProductSubmitIntent, signalName: string): string {
-  switch (intent) {
-    case "confirm_stage":
-      return "confirm stage";
-    case "reject_stage":
-      return "reject stage";
-    case "raise_dispute":
-      return "raise dispute";
-    case "resolve_dispute":
-      return "resolve dispute";
-    default:
-      return signalName;
-  }
+  return signalName;
 }
 
 async function recoverSignature(prepared: PreparedSubmissionRecord, signature: Hex): Promise<Address> {

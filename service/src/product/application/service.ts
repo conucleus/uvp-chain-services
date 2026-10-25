@@ -1122,10 +1122,10 @@ function primaryActionForFulfillment(kind: FulfillmentPluginKind): string {
       return "提交交付进度";
     case "validation_confirm":
       return "确认验收结果";
-    case "dispute_material":
-      return "提交争议材料";
     case "evidence_submission":
       return "提交阶段凭证";
+    default:
+      return "按配置执行";
   }
 }
 
@@ -1146,6 +1146,8 @@ function fundingImpactForAddOn(
       return "资源要求补充会覆盖订单阶段配置，不直接托管或划转资金";
     case "submit_signal":
       return "执行者提交会形成链上确认；凭证正文仍保留在链下";
+    default:
+      return "按配置执行";
   }
 }
 
@@ -1188,23 +1190,6 @@ function requiredInputsForFulfillment(
           completed,
         },
       ];
-    case "dispute_material":
-      return [
-        {
-          inputId: "dispute-statement",
-          label: "争议说明",
-          inputType: "text",
-          required: true,
-          completed,
-        },
-        {
-          inputId: "dispute-evidence",
-          label: "补充凭证",
-          inputType: "evidence",
-          required: false,
-          completed,
-        },
-      ];
     case "delivery_update":
     case "evidence_submission":
       return [
@@ -1223,6 +1208,8 @@ function requiredInputsForFulfillment(
           completed,
         },
       ];
+    default:
+      return [];
   }
 }
 

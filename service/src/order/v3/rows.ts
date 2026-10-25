@@ -36,6 +36,9 @@ export function configRecord(row: unknown): ConfigVersionRecord {
     ...(optionalStringColumn(record, "birth_json") !== undefined
       ? { birth: parseStorageJson<NonNullable<ConfigVersionRecord["birth"]>>(optionalStringColumn(record, "birth_json")!) }
       : {}),
+    ...(optionalStringColumn(record, "executor_profile_json") !== undefined
+      ? { executorProfile: parseStorageJson<NonNullable<ConfigVersionRecord["executorProfile"]>>(optionalStringColumn(record, "executor_profile_json")!) }
+      : {}),
     bundle: parseStorageJson<ConfigBundleV3>(stringColumn(record, "bundle_json")),
     createdBy: stringColumn(record, "created_by") as Address,
     createdAt: stringColumn(record, "created_at"),

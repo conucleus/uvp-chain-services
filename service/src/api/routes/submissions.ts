@@ -192,11 +192,9 @@ function requiredSubmissionStringArray(record: Record<string, unknown>, field: s
 
 // 运行时受理集以 Record<ProductSubmitIntent, true> 锚定单源词表：
 // 联合增删成员时编译器在此处强制同步，字面量不再裸奔。
-const SUBMIT_INTENTS: Readonly<Record<ProductSubmitIntent, true>> = {
+const SUBMIT_INTENTS: Readonly<Partial<Record<ProductSubmitIntent, true>>> = {
   confirm_stage: true,
-  reject_stage: true,
-  raise_dispute: true,
-  resolve_dispute: true
+  reject_stage: true
 };
 
 function optionalSubmitIntent(record: Record<string, unknown>, field: string): ProductSubmitIntent | undefined {

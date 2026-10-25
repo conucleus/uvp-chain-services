@@ -127,7 +127,7 @@ const expectedMigrationVersions = [
   "0030_order_requirements",
   "0031_escrow_tranches",
   "0032_order_domain_v3",
-  "0033_binding_settlement_runtime",
+  "0035_rename_evidence_adjudicator_readers",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -2318,7 +2318,7 @@ function evidenceRecord(): EvidenceMetadataRecord {
       readers: ["seller", "buyer"],
       writers: ["seller"],
       adminReaders: ["ops"],
-      disputeReaders: [],
+      adjudicatorReaders: [],
     },
     canonicalMetadata: {
       businessLabel: "Invoice",

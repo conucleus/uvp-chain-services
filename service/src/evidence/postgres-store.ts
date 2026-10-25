@@ -96,7 +96,7 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
 
       await this.#database.query(
         `INSERT INTO evidence_access_policy (
-           evidence_id, order_id, readers_json, writers_json, admin_readers_json, dispute_readers_json
+           evidence_id, order_id, readers_json, writers_json, admin_readers_json, adjudicator_readers_json
          ) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb)
          ON CONFLICT(evidence_id)
          DO UPDATE SET
@@ -104,14 +104,14 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
            readers_json = excluded.readers_json,
            writers_json = excluded.writers_json,
            admin_readers_json = excluded.admin_readers_json,
-           dispute_readers_json = excluded.dispute_readers_json`,
+           adjudicator_readers_json = excluded.adjudicator_readers_json`,
         [
           record.accessPolicy.evidenceId,
           record.accessPolicy.orderId ?? null,
           stringifyStorageJson(record.accessPolicy.readers),
           stringifyStorageJson(record.accessPolicy.writers),
           stringifyStorageJson(record.accessPolicy.adminReaders),
-          stringifyStorageJson(record.accessPolicy.disputeReaders)
+          stringifyStorageJson(record.accessPolicy.adjudicatorReaders)
         ]
       );
     });
@@ -153,7 +153,7 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
       if (inserted) {
         await this.#database.query(
           `INSERT INTO evidence_access_policy (
-             evidence_id, order_id, readers_json, writers_json, admin_readers_json, dispute_readers_json
+             evidence_id, order_id, readers_json, writers_json, admin_readers_json, adjudicator_readers_json
            ) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb)`,
           [
             record.accessPolicy.evidenceId,
@@ -161,7 +161,7 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
             stringifyStorageJson(record.accessPolicy.readers),
             stringifyStorageJson(record.accessPolicy.writers),
             stringifyStorageJson(record.accessPolicy.adminReaders),
-            stringifyStorageJson(record.accessPolicy.disputeReaders)
+            stringifyStorageJson(record.accessPolicy.adjudicatorReaders)
           ]
         );
       }
@@ -203,7 +203,7 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
          policy.readers_json::text AS readers_json,
          policy.writers_json::text AS writers_json,
          policy.admin_readers_json::text AS admin_readers_json,
-         policy.dispute_readers_json::text AS dispute_readers_json
+         policy.adjudicator_readers_json::text AS adjudicator_readers_json
        FROM evidence_object obj
        JOIN evidence_access_policy policy ON policy.evidence_id = obj.evidence_id
        WHERE obj.evidence_id = $1`,
@@ -243,7 +243,7 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
          policy.readers_json::text AS readers_json,
          policy.writers_json::text AS writers_json,
          policy.admin_readers_json::text AS admin_readers_json,
-         policy.dispute_readers_json::text AS dispute_readers_json
+         policy.adjudicator_readers_json::text AS adjudicator_readers_json
        FROM evidence_object obj
        JOIN evidence_access_policy policy ON policy.evidence_id = obj.evidence_id
        WHERE obj.payload_hash = $1 AND obj.owner_participant_id = $2
@@ -383,7 +383,7 @@ function evidenceRow(row: unknown): EvidenceMetadataRecord {
     readers: parseStorageJson<readonly string[]>(stringColumn(record, "readers_json")),
     writers: parseStorageJson<readonly string[]>(stringColumn(record, "writers_json")),
     adminReaders: parseStorageJson<readonly string[]>(stringColumn(record, "admin_readers_json")),
-    disputeReaders: parseStorageJson<readonly string[]>(stringColumn(record, "dispute_readers_json"))
+    adjudicatorReaders: parseStorageJson<readonly string[]>(stringColumn(record, "adjudicator_readers_json"))
   };
   return {
     evidence,

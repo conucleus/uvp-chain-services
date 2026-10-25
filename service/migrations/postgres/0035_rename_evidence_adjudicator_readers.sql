@@ -1,0 +1,1 @@
+ALTER TABLE evidence_access_policy RENAME COLUMN dispute_readers_json TO adjudicator_readers_json;

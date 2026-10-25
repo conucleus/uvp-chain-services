@@ -12,6 +12,7 @@ import type {
   StageStandardRefV3,
 } from "@uvp-eth/product-dto";
 import type { Address, Hex } from "../../shared/types.js";
+import type { ExecutorProfileV1 } from "../../executor/profile.js";
 
 export type OrderV3ErrorCode =
   | "invalid_request"
@@ -33,6 +34,7 @@ export type OrderV3ErrorCode =
   | "config_not_found"
   | "config_not_published"
   | "config_publish_forbidden"
+  | "executor_profile_missing"
   | "config_hash_mismatch"
   | "config_version_exists"
   | "config_version_not_draft"
@@ -139,6 +141,8 @@ export interface ConfigVersionRecord {
   readonly planId?: Hex;
   readonly planHash?: Hex;
   readonly birth?: ConfigBirthRecord;
+  /** Business-owned executor profile (uvp.executor-profile/v1). */
+  readonly executorProfile?: ExecutorProfileV1;
   readonly bundle: ConfigBundleV3;
   readonly createdBy: Address;
   readonly createdAt: string;

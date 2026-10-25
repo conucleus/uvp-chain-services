@@ -115,9 +115,6 @@ function buyerFields(): VisibilityFields {
     walletAddresses: true,
     contactRefs: true,
     evidenceHandles: true,
-    escrowAmounts: true,
-    escrowState: true,
-    instructions: true,
   };
 }
 
@@ -130,9 +127,6 @@ function participantFields(scope: VisibilityScope, disclosure?: ConfigSlotVisibi
     walletAddresses: false,
     contactRefs: false,
     evidenceHandles: true,
-    escrowAmounts: scope === "performer" && disclosure?.escrow?.includes("amount") !== false,
-    escrowState: true,
-    instructions: true,
   };
 }
 
@@ -145,9 +139,6 @@ function operatorFields(): VisibilityFields {
     walletAddresses: false,
     contactRefs: false,
     evidenceHandles: false,
-    escrowAmounts: false,
-    escrowState: true,
-    instructions: false,
   };
 }
 

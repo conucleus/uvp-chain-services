@@ -29,15 +29,6 @@ import { createViemReconcileReceiptClient, TxReconcileWorker } from "../reconcil
 import { createViemChainClock } from "../shared/chain-clock.js";
 import { createPublicClient, createWalletClient, defineChain, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { BindingIndexerService, createViemBindingLogSource } from "../binding/index.js";
-import {
-  createEscrowExecuteAdapter,
-  createOnchainSettlementFactSource,
-} from "../settlement/chain-adapter.js";
-import { createSettlementRelayer } from "../settlement/executor.js";
-import { createSettlementFactSourceTrigger } from "../settlement/execute-trigger.js";
-import type { SettlementRelayer } from "../settlement/executor.js";
-import type { BoundTrancheReader } from "../settlement/types.js";
 import { ProtocolOrderBirthAdapter, type OrderBirthPort } from "../order/v3/index.js";
 import { DockAutomationWorker } from "../dock-automation/index.js";
 import {
@@ -101,37 +92,6 @@ export async function startApiServer(
       logger
     })
     : undefined;
-  if (config.escrowV3 && config.database.driver === "postgres") {
-    throw new ConfigError(
-      "V3 escrow binding/settlement stores have no postgres adapters yet; use sqlite or memory for UVP_ESCROW_V3_*",
-    );
-  }
-  if (config.escrowV3) {
-    const now = new Date().toISOString();
-    await stores.bindingStore.saveEscrowInstance({
-      chainId: config.escrowV3.chainId,
-      escrowAddress: config.escrowV3.address,
-      ...(config.escrowV3.tokenAddress ? { tokenAddress: config.escrowV3.tokenAddress } : {}),
-      contractVersion: "v3",
-      deploymentBlock: String(config.escrowV3.deploymentBlock),
-      startBlock: String(config.escrowV3.startBlock),
-      status: "active",
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
-  const bindingIndexer = config.escrowV3
-    ? new BindingIndexerService({
-      chainId: config.escrowV3.chainId,
-      escrowAddress: config.escrowV3.address,
-      startBlock: config.escrowV3.startBlock,
-      deploymentBlock: config.escrowV3.deploymentBlock,
-      store: stores.bindingStore,
-      source: createViemBindingLogSource(config),
-      logger,
-    })
-    : undefined;
-  const settlementRelayer = createConfiguredSettlementRelayer(config, stores, logger);
   const orderV3BirthPort = createConfiguredOrderV3BirthPort(config, logger);
   const configDiagnostics = await runConfigPreflight(config);
   const eventSource = options.eventSource === undefined
@@ -353,17 +313,6 @@ export async function startApiServer(
       ...(config.storeAuth?.walletSession?.operatorWallets ?? []),
       ...(config.storeAuth?.walletSession?.adminWallets ?? [])
     ],
-    bindingStore: stores.bindingStore,
-    settlementStore: stores.settlementStore,
-    runtimeStore: stores.runtimeStore,
-    ...(settlementRelayer ? { settlementRelayer } : {}),
-    ...(Number(process.env.UVP_RUNTIME_POLL_INTERVAL_MS ?? "0") > 0
-      ? { orderV3RuntimeIntervalMs: Number(process.env.UVP_RUNTIME_POLL_INTERVAL_MS) }
-      : {}),
-    ...(config.timerKeeper.enabled
-      ? { orderV3TimerPoker: () => timerKeeperWorker.runOnce() }
-      : {}),
-    ...(config.escrowV3 ? { escrowV3: config.escrowV3 } : {}),
     ...(orderV3BirthPort ? { orderV3BirthPort } : {}),
     orderRequirementsStore: stores.orderRequirementsStore,
     escrowService,
@@ -559,9 +508,6 @@ export async function startApiServer(
       return;
     }
     escrowIndexer?.start(config.api.indexerPollIntervalMs);
-    if (bindingIndexer && config.escrowV3) {
-      bindingIndexer.start(config.escrowV3.indexPollIntervalMs);
-    }
     await initialProjectionRebuild;
     if (closed) {
       return;
@@ -578,7 +524,6 @@ export async function startApiServer(
     closed = true;
     void (async () => {
       await escrowIndexer?.stop();
-      await bindingIndexer?.stop();
       await timerKeeperWorker.stop();
       await dockAutomationWorker.stop();
       await reconcileWorker.stop();
@@ -601,61 +546,6 @@ export async function startApiServer(
  * V3 订单出生广播：birthAuthorizer key 只允许 local anvil（config.env 已
  * fail-closed 拒绝非 local）；私钥/派生账户不写日志，只记录 tx hash 与回执状态。
  */
-export function createConfiguredSettlementRelayer(
-  config: ChainServicesConfig,
-  stores: ReturnType<typeof createChainServicesStores>,
-  logger: Logger,
-): SettlementRelayer | undefined {
-  if (!config.escrowV3?.factSourceAddress) {
-    logger.warn("settlement relayer disabled: UVP_ESCROW_V3_FACT_SOURCE_ADDRESS is not configured");
-    return undefined;
-  }
-  const privateKey = process.env[config.relayer.stateMachinePrivateKeyEnv]?.trim();
-  if (!privateKey || !/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
-    logger.warn("settlement relayer disabled: relayer private key env is missing for local e2e");
-    return undefined;
-  }
-  const tranches: BoundTrancheReader = {
-    async getBoundTranche(input) {
-      const record = await stores.bindingStore.getTrancheBinding(
-        input.chainId,
-        input.escrowAddress,
-        input.trancheId,
-      );
-      if (!record) {
-        return undefined;
-      }
-      return {
-        state: record.state,
-        amount: record.amount,
-        orderId: record.orderId,
-        stageId: record.stageId,
-        payer: record.payer,
-        payee: record.payee,
-        ...(record.verifier !== undefined ? { verifier: record.verifier } : {}),
-      };
-    },
-  };
-  const adapter = createEscrowExecuteAdapter({
-    rpcUrl: config.network.rpcUrl,
-    privateKey: privateKey as Hex,
-    escrowAddress: config.escrowV3.address,
-    chainId: config.escrowV3.chainId,
-  });
-  return createSettlementRelayer({
-    store: stores.settlementStore,
-    adapter,
-    bindings: tranches,
-    executeTrigger: createSettlementFactSourceTrigger(
-      createOnchainSettlementFactSource({
-        rpcUrl: config.network.rpcUrl,
-        factSourceAddress: config.escrowV3.factSourceAddress,
-      }),
-    ),
-    logger,
-  });
-}
-
 function createConfiguredOrderV3BirthPort(
   config: ChainServicesConfig,
   logger: Logger,

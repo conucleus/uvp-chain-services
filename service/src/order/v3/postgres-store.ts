@@ -70,14 +70,15 @@ export class PostgresOrderV3Store implements OrderV3Store {
     await this.#database.query(
       `INSERT INTO order_config_v3 (
          config_id, version, status, config_hash, plan_id, plan_hash,
-         birth_json, bundle_json, created_by, created_at, published_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         birth_json, executor_profile_json, bundle_json, created_by, created_at, published_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT(config_id, version) DO UPDATE SET
          status = excluded.status,
          config_hash = excluded.config_hash,
          plan_id = excluded.plan_id,
          plan_hash = excluded.plan_hash,
          birth_json = excluded.birth_json,
+         executor_profile_json = excluded.executor_profile_json,
          bundle_json = excluded.bundle_json,
          published_at = excluded.published_at,
          updated_at = excluded.updated_at`,
@@ -89,6 +90,7 @@ export class PostgresOrderV3Store implements OrderV3Store {
         record.planId ?? null,
         record.planHash ?? null,
         record.birth ? stringifyStorageJson(record.birth) : null,
+        record.executorProfile ? stringifyStorageJson(record.executorProfile) : null,
         stringifyStorageJson(record.bundle),
         record.createdBy,
         record.createdAt,

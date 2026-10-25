@@ -65,7 +65,7 @@ export interface EvidenceAccessPolicyDTO {
   readonly readers: readonly string[];
   readonly writers: readonly string[];
   readonly adminReaders: readonly string[];
-  readonly disputeReaders: readonly string[];
+  readonly adjudicatorReaders: readonly string[];
 }
 
 // EvidenceProofDTO 单源在 @uvp-eth/product-dto（write-side.ts，字段集以
@@ -96,7 +96,7 @@ export interface EvidenceAccessPolicyInputDTO {
   readonly readers?: readonly string[];
   readonly writers?: readonly string[];
   readonly adminReaders?: readonly string[];
-  readonly disputeReaders?: readonly string[];
+  readonly adjudicatorReaders?: readonly string[];
 }
 
 export interface CreateEvidenceRequestDTO {
