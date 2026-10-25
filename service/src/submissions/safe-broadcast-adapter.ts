@@ -5,7 +5,7 @@ import type {
   SubmissionBroadcastRequest,
   SubmissionBroadcastResult
 } from "./types.js";
-import type { BroadcastDedupeStore } from "./broadcast-dedupe-sqlite-store.js";
+import type { BroadcastDedupeStore } from "./broadcast-dedupe-postgres-store.js";
 
 type FailedSubmissionBroadcastResult = Extract<SubmissionBroadcastResult, { readonly status: "failed" }>;
 
@@ -19,10 +19,6 @@ export interface SecureSubmissionBroadcastAdapterOptions {
   readonly retryMaxMs?: number;
   readonly now?: () => Date;
   readonly audit?: AuditSink;
-  /**
-   * 可选持久化去重存储。进程内 Map 仍是主缓存（语义不变），
-   * 持久层保证重启后同一 idempotencyKey / txHash 依旧被去重。
-   */
   readonly dedupeStore?: BroadcastDedupeStore;
 }
 
@@ -79,9 +75,6 @@ export function createSecureSubmissionBroadcastAdapter(
         return duplicate;
       }
 
-      // TOCTOU 防护：在任何 await 之前同步占位（先占后查），并发进入的
-      // 同单/同人广播各自拿到递增的占位数，超额者立即释放并限流返回，
-      // 避免"双方都读到 0、双双放行"的穿透窗口。
       const acquiredOrderInFlight = (inFlightByOrder.get(orderKey) ?? 0) + 1;
       inFlightByOrder.set(orderKey, acquiredOrderInFlight);
       const acquiredSubmitterInFlight = (inFlightBySubmitter.get(submitterKey) ?? 0) + 1;
@@ -147,12 +140,6 @@ export function createSecureSubmissionBroadcastAdapter(
           retryBaseMs,
           retryMaxMs
         });
-        // 去重台账（claimTxHash/save）故障不得吞掉已上链交易的 txHash：
-        // 内层适配器已经真实广播，异常逃逸会让调用方 catch 口按"无 txHash
-        // 的失败"释放 nonce——重启后同一签名会被二次真实广播烧 gas。带
-        // txHash 的结果原样返回（调用方保持 nonce 占用、落档后交 reconcile
-        // 复核），并留审计事件；无 txHash 的结果（从未上链）才允许异常
-        // 继续上抛。
         let result: SubmissionBroadcastResult;
         try {
           const duplicateTxHash = await duplicateTxHashResult(idempotencyKey, broadcast, txHashOwners, attemptNumber, dedupeStore);
@@ -162,8 +149,6 @@ export function createSecureSubmissionBroadcastAdapter(
             lastResult: result
           };
           states.set(idempotencyKey, newState);
-          // 写穿持久层；失败不吞——与内存路径同等严格（带 txHash 的
-          // 失败在下方 catch 转为结果返回，不留静默缺口）。
           await dedupeStore?.save(idempotencyKey, newState);
         } catch (error) {
           const broadcastTxHash = broadcastResultTxHash(broadcast);
@@ -229,10 +214,6 @@ function duplicateResult(
   const lastResult = state.lastResult;
   if (lastResult.status === "failed") {
     if (!lastResult.retryable) {
-      // 去重重放必须保留原始失败结果：泛化成 broadcast_retry_blocked 会
-      // 抹掉真实错误码（invalid_signal_signature/transaction_reverted 等），
-      // 调用方与排障拿到的是被改写的响应契约。原结果自带不可重试语义
-      // （retryable=false/deadLetter），重放即最终事实。
       return lastResult;
     }
     if (state.attempts > maxRetry) {
@@ -261,7 +242,6 @@ async function duplicateTxHashResult(
   const normalizedTxHash = txHash.toLowerCase();
   let owner = txHashOwners.get(normalizedTxHash);
   if (!owner && dedupeStore) {
-    // 内存未命中时问持久层；无归属则登记归属。
     owner = await dedupeStore.claimTxHash(normalizedTxHash, idempotencyKey);
   }
   if (!owner) {
@@ -276,7 +256,6 @@ async function duplicateTxHashResult(
   });
 }
 
-/** 广播结果携带的链上 txHash（顶层或 attempt），无论成功失败形态。 */
 function broadcastResultTxHash(result: SubmissionBroadcastResult): string | undefined {
   return result.status === "submitted" || result.status === "confirmed" || result.status === "broadcasting"
     ? result.txHash

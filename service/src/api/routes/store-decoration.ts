@@ -8,7 +8,6 @@ import {
 import { decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-/** 装修路由：publisher（或受托成员）才可写，服务端强制。 */
 export function createStoreDecorationRouteModule(options: {
   readonly decorationService: StoreDecorationService;
 }): RouteModule {

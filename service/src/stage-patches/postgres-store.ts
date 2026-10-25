@@ -17,12 +17,6 @@ export interface PostgresProductStagePatchStoreOptions {
   };
 }
 
-/**
- * stage-patch 状态的 postgres 持久化（表结构见
- * migrations/postgres/0019_stage_patch_state.sql）：nonce 预留靠
- * stage_patch_nonce 主键的 ON CONFLICT DO NOTHING 提供跨实例 CAS，
- * 多实例共享库不双播同一 patchNonce。
- */
 export class PostgresProductStagePatchStore<
     TPrepared extends PreparedPatchRecordBase & { readonly deadline: string },
     TSubmission extends StagePatchSubmissionBase
@@ -66,9 +60,6 @@ export class PostgresProductStagePatchStore<
   }
 
   async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
-    // deadline 列随行写入（putPrepared），清扫不解析 record_json——每行
-    // 数 KB 的 typedData 只在命中点查时读取。持久表本身只进不出，
-    // prepare 入口无配额会让表无界堆叠，由过期清扫约束。
     const result = await this.#database.query(
       `DELETE FROM stage_patch_prepared
        WHERE deadline_seconds < $1::bigint`,
@@ -117,8 +108,6 @@ export class PostgresProductStagePatchStore<
         throw error;
       }
     }
-    // 条件 UPDATE 原子接管（对齐 submissions/postgres-store 手法）：年龄
-    // 判定在 WHERE 内完成，并发重试同 key 只有一个赢家。
     const staleBefore = options?.staleBefore;
     if (!staleBefore) {
       return false;
@@ -165,8 +154,6 @@ export class PostgresProductStagePatchStore<
     after: StagePatchSubmissionScanCursor | undefined,
     limit: number
   ): Promise<readonly TSubmission[]> {
-    // 未闭环剪除在 SQL 内完成（status/txHash 都在 record_json 里），
-    // 键序翻页与 submissions 台账同口径。
     const result = await this.#database.query(
       `SELECT record_json::text AS "recordJson" FROM stage_patch_submission
        WHERE (record_json::jsonb->>'status' IN ('broadcasting', 'submitted')
@@ -185,7 +172,6 @@ export class PostgresProductStagePatchStore<
   }
 }
 
-/** prepare 截止（unix 秒字符串）→ 数值列；非数值 deadline 是数据损坏，响亮失败。 */
 function deadlineSecondsOf(deadline: string): number {
   const parsed = Number(deadline);
   if (!Number.isFinite(parsed) || parsed < 0) {

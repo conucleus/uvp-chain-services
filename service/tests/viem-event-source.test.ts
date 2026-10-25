@@ -8,8 +8,6 @@ import { UnsupportedChainTargetError } from "../src/shared/types.js";
 
 describe("ViemChainEventSource", () => {
   it("binds every indexed event topic to the frozen protocol ABI fixtures", () => {
-    // UVPPlanMetadataModule v0.6 不发事件（合约只保留 view 验证例程），
-    // 索引器不 watch 该合约，fixture 对照表相应收窄。
     const fixtures: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
       UVPStateMachine: "uvp-state-machine.v0.17.json",
       UVPIdentityRegistry: "uvp-identity-registry.v0.1.json",
@@ -47,10 +45,6 @@ describe("ViemChainEventSource", () => {
       );
       expect(actualTopics, contractName).toEqual(expectedTopics);
 
-      // A topic alone cannot reveal an indexed/non-indexed layout drift. Read
-      // the compiled Solidity artifact as a second protocol source, so the
-      // decoder cannot pass when its hand-written ABI and log encoder share a
-      // mistaken indexed layout.
       const artifact = JSON.parse(readFileSync(
         new URL(
           `../../../uvp-protocol/contracts/uvp-contracts/out/${artifacts[contractName as keyof typeof INDEXER_EVENT_ABIS]}`,
@@ -84,8 +78,6 @@ describe("ViemChainEventSource", () => {
   });
 
   it("indexes module contracts configured through flat contract keys", async () => {
-    // 写路径（server.ts moduleAddress）对模块地址扁平键优先：索引器也必须
-    // watch 扁平模块键，否则只配扁平键时 patch/dock 写入有事件无投影。
     const dockingModuleAddress = "0x6666666666666666666666666666666666666666";
     const dockInstanceId = "0x0000000000000000000000000000000000000000000000000000000000000901";
     const localOrderId = "0x0000000000000000000000000000000000000000000000000000000000000902";
@@ -183,9 +175,6 @@ describe("ViemChainEventSource", () => {
       chainServicesConfig()
     );
 
-    // 每片闭区间恰 9999 个块（与 executor-kit watcher 同源口径）：
-    // [100, 10098]、[10099, 20097]、[20098, 20150]。10000 块跨会撞
-    // provider 对 eth_getLogs 的 10K 块硬限制。
     expect(calls).toEqual([
       {
         address: "0x1111111111111111111111111111111111111111",
@@ -268,8 +257,6 @@ describe("ViemChainEventSource", () => {
   });
 
   it("anchors the finalized bound on the finalized tag by default and on confirmations when overridden", async () => {
-    // 默认锚定 finalized 标签：finalityConfirmations=1 这类浅确认缓冲会被
-    // 2 块深 reorg 越过，旧分叉事件从此成为游标之下的永久幽灵。
     const blockCalls: unknown[] = [];
     const finalizedSource = new ViemChainEventSource({
       publicClient: {
@@ -324,8 +311,6 @@ describe("ViemChainEventSource", () => {
   });
 
   it("fails closed when the finalized block carries no number instead of silently anchoring at 0", async () => {
-    // 无块号的 finalized 块属 RPC 层异常；静默按 0 会让索引器把链当作
-    // 未达部署高度，游标与最终性上界被无声压回 0。
     const source = new ViemChainEventSource({
       publicClient: {
         async getBlockNumber() {
@@ -344,8 +329,6 @@ describe("ViemChainEventSource", () => {
   });
 
   it("skips an undecodable log with an explicit count instead of failing the index range", async () => {
-    // 单条不可解码日志不得让索引器永久 degraded——跳过留痕
-    // （计数 + warn），游标照常前进。
     const invalidLog = {
       ...planRegisteredLog(),
       data: "0x01" as Hex
@@ -380,8 +363,6 @@ describe("ViemChainEventSource", () => {
   });
 
   it("fails loudly on a malformed log address instead of swallowing it as undecodable", async () => {
-    // 日志地址畸形是 RPC 层故障（与块号/交易哈希缺失同口径），必须抛错
-    // ——被解码 catch 吞成"单条不可解码日志"会把节点故障静默成投影缺行。
     const malformedAddressLog = {
       ...planRegisteredLog(),
       address: "0xnot-an-address"
@@ -411,8 +392,6 @@ describe("ViemChainEventSource", () => {
   });
 
   it("keeps 0x-prefixed string event args verbatim while lowercasing bytes args", async () => {
-    // 0x 小写化只允许作用于 bytes/address 类型；string 参数
-    //（URI 等）大小写敏感，必须保持链上原文。
     const eventSource = new ViemChainEventSource({
       publicClient: {
         async getBlockNumber() {

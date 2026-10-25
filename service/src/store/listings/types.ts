@@ -1,21 +1,14 @@
 import type { Address, Hex } from "../../shared/types.js";
 
-/**
- * 秩序上架与锚核验。
- *
- * - 上架 = 把已注册的链上秩序变成可发现、可核验的商品：导入编译产物锚
- *   （planId / planHash / deploymentId），配装修，最小审核后公开。
- * - 锚核验：listing 声称的锚与链上注册事实（投影 + 可选的直读链）比对；
- *   不一致必须显式冲突并抑制加入入口，不得静默展示旧数据。
- * - 下架/隐藏只改 Store 可见性，链上事实不受影响。
- */
+// 秩序上架与锚核验：上架把已注册的链上秩序变成可发现商品；锚核验把
+// listing 声称的锚与链上注册事实比对，不一致显式冲突；下架只改 Store
+// 可见性，链上事实不受影响。
 
 export type StoreListingStatus = "imported" | "public" | "rejected" | "delisted";
 
 export interface StoreListingRecord {
   readonly listingId: string;
   readonly planId: Hex;
-  /** 导入时声称的 planHash（可选；缺省时以投影 planHash 为基准记录）。 */
   readonly planHashClaimed?: Hex;
   readonly deploymentIdClaimed?: Hex;
   readonly stateMachineAddressClaimed?: Address;
@@ -30,28 +23,16 @@ export interface StoreListingRecord {
   readonly updatedAt: string;
 }
 
-/**
- * 状态迁移的写入前提：服务层"读检查后写入"的窗口是 TOCTOU——并发互斥
- * 迁移（review/delist/relist）双成功会让台账出现两条互斥成功。带前提的
- * 写入只在该前态仍然成立时生效。
- */
 export interface StoreListingPrecondition {
   readonly status: StoreListingStatus;
 }
 
-/** 条件写入结果：applied=false 表示行已被并发写抢先或已存在，record 为读回的现行值。 */
 export interface StoreListingSave {
   readonly applied: boolean;
   readonly record: StoreListingRecord;
 }
 
 export interface StoreListingStore {
-  /**
-   * 条件写入：省略 expect 时为纯插入（一 plan 一 listing，行已存在或
-   * UNIQUE(plan_id) 命中即不覆盖，读回现行值）；带 expect 时仅当现行行
-   * status 与之一致才更新。受影响行数为 0 时读回现行值并以 applied=false
-   * 返回，服务层把冲突映射为 409。
-   */
   putListing(record: StoreListingRecord, expect?: StoreListingPrecondition): Promise<StoreListingSave>;
   getListing(listingId: string): Promise<StoreListingRecord | undefined>;
   findListingByPlanId(planId: Hex): Promise<StoreListingRecord | undefined>;
@@ -93,13 +74,11 @@ export interface StoreAnchorVerificationDTO {
     readonly planFinalized?: boolean;
     readonly planPublisher?: Address;
   };
-  /** 配置了链直读但读取失败（fail-closed：公开被阻断直至恢复）。 */
   readonly chainReadFailed?: boolean;
   readonly verifiedAt: string;
 }
 
 export interface ListingAnchorChainView {
-  /** stateMachineAddress 缺省时用装配地址；多部署投影下按 plan 自己的地址直读。 */
   readPlanAnchors(planId: Hex, stateMachineAddress?: Address): Promise<{
     readonly chainId?: number;
     readonly stateMachineAddress?: Address;

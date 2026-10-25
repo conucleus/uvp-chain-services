@@ -6,8 +6,6 @@ import type {
 } from "./types.js";
 import { StoreDecorationServiceError } from "./types.js";
 
-
-
 const MAX_THEME_STRING_LENGTH = 2000;
 const MAX_TAGS = 24;
 const MAX_TAG_LENGTH = 64;

@@ -41,9 +41,6 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           if (!parsedQuery.ok) {
             return parsedQuery.response;
           }
-          // 读面鉴权——供应商目录/详情包含钱包、
-          // 主体、任务统计等经营数据，不匿名可读；要求已认证的 Store
-          // 读身份（store.read 能力 + 非 anonymous）。
           const capability = "store.read";
           const resource = { type: "store_supplier" };
           const authorization = await authorizeStoreCapability(context, request, capability, resource);
@@ -66,7 +63,6 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
-          // 红线：供应商写操作要求会话已锚定地址。
           const anchored = await requireAnchoredStoreAddress(context, request, resource);
           if (!isAnchoredStoreAuthorizationResult(anchored)) {
             return anchored;
@@ -114,9 +110,6 @@ export function createStoreSuppliersRouteModule(): RouteModule {
         if (request.method === "POST" && notificationProfileMatch) {
           const supplierId = decodePathParameter(notificationProfileMatch[1] ?? "");
           const action = notificationProfileMatch[2];
-          // 与同模块其余写路由同口径：通知配置可改写供应商钱包与 webhook，
-          // 必须走 store capability 鉴权——裸 wallet 证明只证明"签名者控制
-          // 请求体里的新 wallet"，与供应商既有身份无关。
           const profileCapability: StoreCapability = "store.supplier.notification_profile.update";
           const profileResource = { type: "store_supplier", id: supplierId };
           const profileAuthorization = await authorizeStoreCapability(context, request, profileCapability, profileResource);
@@ -129,7 +122,6 @@ export function createStoreSuppliersRouteModule(): RouteModule {
               body: await context.storeSupplierService.prepareNotificationProfile(supplierId, request.body)
             };
           }
-          // 红线：通知配置落库（可改写供应商钱包/webhook）要求锚定地址。
           const profileAnchored = await requireAnchoredStoreAddress(context, request, profileResource);
           if (!isAnchoredStoreAuthorizationResult(profileAnchored)) {
             return profileAnchored;
@@ -152,7 +144,6 @@ export function createStoreSuppliersRouteModule(): RouteModule {
         const action = supplierMatch[2];
 
         if (request.method === "GET" && !action) {
-          // 读面鉴权（同列表口径：已认证 Store 读身份）。
           const readAuthorization = await authorizeStoreCapability(context, request, "store.read", { type: "store_supplier", id: supplierId });
           if (!isStoreAuthorizationResult(readAuthorization)) {
             return readAuthorization;
@@ -180,7 +171,6 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
-          // 红线：供应商审核/身份登记/撤销（敏感写）要求会话已锚定地址。
           const anchored = await requireAnchoredStoreAddress(context, request, resource);
           if (!isAnchoredStoreAuthorizationResult(anchored)) {
             return anchored;
@@ -366,8 +356,6 @@ function isSensitiveReviewStatus(status: string | undefined): boolean {
 }
 
 function storeOperatorPrincipalFromAccess(access: StoreAccessState): StoreOperatorPrincipal {
-  // operatorId 只取真实身份（principalId 或锚定钱包），不再兜底
-  // "unknown-store-principal"——审计行的 actor 必须可归属。
   return {
     operatorId: access.principalId ?? (access.anchoredAddress ? `wallet:${access.anchoredAddress}` : "unauthenticated"),
     role: access.roles.includes("governance_admin") ? "governance_admin" : access.level

@@ -1,15 +1,29 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { createApiRouter } from "../src/api/routes.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import type { StoreAuthConfig } from "../src/config/index.js";
 import { createStoreIdentityProvider, type StoreSessionDTO } from "../src/store/console/access.js";
 
 const issuer = "https://identity.example/";
 const audience = "uvp-store";
 const kid = "store-auth-test-key";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
 
 describe("Store JWT/JWKS operator identity", () => {
   const servers: Server[] = [];
@@ -76,12 +90,8 @@ describe("Store JWT/JWKS operator identity", () => {
   });
 
   it("does not grant canWrite to read-level Store JWT identities", async () => {
-    // store.docking.read 是读级能力：纯读会话（store_reader）不得因
-    // 漏排该能力被判定 canWrite（JWT 访问态谓词）。
     const fixture = await createJwksFixture(servers);
     const provider = createStoreIdentityProvider({
-      // 本地 JWKS fixture 是 http/127.0.0.1——strict runtime 会按 SSRF
-      // 防线拒绝；canWrite 谓词与运行档位无关，用 local 装配即可。
       runtimeEnvironment: "local",
       authConfig: {
         mode: "jwt",
@@ -109,8 +119,6 @@ describe("Store JWT/JWKS operator identity", () => {
 
   it("requires JWT governance_admin principals to pass the governance whitelist", async () => {
     const fixture = await createJwksFixture(servers);
-    // 白名单注入后，IdP 声明的 governance_admin 角色不再直接映射治理权威：
-    // 未命中 GOVERNANCE_ADMIN_REVIEWER_IDS 的 principal 只保留公共读。
     const router = createJwtRouter(fixture, { governanceAdminIds: ["gov-reviewer-1"] });
     const unlisted = await storeSession(router, await signStoreToken(fixture, {
       sub: "idp-claims-admin",
@@ -229,9 +237,6 @@ describe("Store JWT/JWKS operator identity", () => {
   });
 
   it("rejects a discovery-advertised jwks_uri that is not HTTPS or points at a private host in strict runtimes", async () => {
-    // discovery 响应是外部输入，其 jwks_uri 可把密钥拉取指向内网
-    // 端点/明文信道（受限 SSRF 纵深）。非 local 复用配置层同款校验；
-    // local 开发允许本地 IdP。
     const originalFetch = globalThis.fetch;
     const discoveryCalls: string[] = [];
     globalThis.fetch = (async (input: string | URL | Request) => {
@@ -346,7 +351,36 @@ function createJwtRouter(
   fixture: JwksFixture,
   overrides: JwtRouterOverrides = {}
 ): ReturnType<typeof createApiRouter> {
-  return createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+  return createApiRouter(stores.projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    }),
     productRuntimeEnvironment: overrides.runtimeEnvironment ?? "local",
     ...(overrides.governanceAdminIds ? { governanceAdminIds: overrides.governanceAdminIds } : {}),
     evidenceRuntimeEnvironment: "local",

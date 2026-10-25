@@ -1,14 +1,33 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
 import { STATE_MACHINE_ABI } from "@uvp-eth/protocol-bindings";
 import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import { privateKeyToAccount } from "viem/accounts";
 import { resolvePlanCapabilityTablesFromStore } from "../src/submissions/capability-proofs.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+let submissionDatabaseUrl: string;
+
+beforeAll(async () => {
+  submissionDatabaseUrl = await createPostgresTestDatabase();
+  stores = createChainServicesStores({
+    database: { url: submissionDatabaseUrl, migrationsAutoRun: true },
+    chainId: 31337
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function evidenceStorageFixture(): LocalEvidenceStorage {
+  return new LocalEvidenceStorage({ rootDir: mkdtempSync(join(tmpdir(), "uvp-submission-evidence-")) });
+}
 import type { ChainEvent } from "../src/indexer/events.js";
 import {
   allowListedSubmissionAuthorization,
@@ -17,8 +36,7 @@ import {
   createProductSubmissionService,
   InMemoryProductSubmissionStore,
   permissiveProductProjectionAuthorization,
-  SqliteBroadcastDedupeStore,
-  SqliteSubmissionStore,
+  PostgresBroadcastDedupeStore,
   type PreparedSubmissionDTO,
   type ProductSubmissionService,
   type ProductSubmissionStore,
@@ -27,9 +45,11 @@ import {
   type SubmissionBroadcastRequest,
   type SubmissionBroadcastResult
 } from "../src/submissions/index.js";
+import { PostgresSubmissionStore } from "../src/submissions/postgres-store.js";
 import {
   createEvidenceService,
-  InMemoryEvidenceStorage,
+  InMemoryEvidenceMetadataStore,
+  LocalEvidenceStorage,
   type EvidencePrincipal,
   type EvidenceService,
   type EvidenceUploadResponseDTO
@@ -44,13 +64,9 @@ const verifyingContract = "0x1111111111111111111111111111111111111111" as Addres
 const planId = "0x7777777777777777777777777777777777777777777777777777777777777777" as Hex;
 const zeroPlanId = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
 const chainId = 31337;
-// 证据归属=业务签名者本人（会话锚定上传者 principal id 即小写钱包地址，
-// prepare-submit 的签名者同锚定地址）——bind 归属校验按此判定。
 const owner: EvidencePrincipal = { id: submitter.toLowerCase(), role: "participant" };
 const baseNow = new Date("2026-04-28T00:00:00Z");
 
-// 链上身份常量：orderId/sourceId/signalId 必须是真实的 bytes32 链上身份
-// （prepare 绝不本地捏造回退）。
 const fixtureOnchainOrderId = "0x0000000000000000000000000000000000000000000000000000000000000301" as Hex;
 const fixtureSourceId = "0x0000000000000000000000000000000000000000000000000000000000000401" as Hex;
 const fixtureSignalId = "0x0000000000000000000000000000000000000000000000000000000000000501" as Hex;
@@ -88,9 +104,6 @@ const task = {
 
 describe("product task submissions", () => {
   it("refuses to prepare when the projection supplies no chain signal identity instead of fabricating one", async () => {
-    // （对齐 planId"绝不捏造"纪律）：sourceId/signalId/orderId 缺失时
-    // 不得按命名约定本地推导——推导出的链上身份不存在，签出的 typedData
-    // 只会被链上拒绝。
     const strippedTask = { ...task, proof: undefined, orderId: "business-order-1" } as unknown as ProductTaskDTO;
     const fixture = await submissionFixture({ task: strippedTask });
 
@@ -103,7 +116,6 @@ describe("product task submissions", () => {
       status: 409
     });
 
-    // sourceId 可由 overlay 解析，但 signalId 缺失同样拒签。
     const overlayOnlyTask = {
       ...task,
       proof: { stageIdentifier: txHash("516") }
@@ -122,7 +134,8 @@ describe("product task submissions", () => {
   it("does not authorize permissively when no authorization adapter is configured", async () => {
     const evidenceService = createEvidenceService({
     runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      metadataStore: new InMemoryEvidenceMetadataStore(),
+      storage: evidenceStorageFixture(),
       now: () => baseNow,
       evidenceIdFactory: () => "ev_no_auth"
     });
@@ -139,6 +152,7 @@ describe("product task submissions", () => {
       }
     }, owner);
     const service = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: {
         getTask: async (taskId) => taskId === task.taskId ? task : undefined
       },
@@ -222,7 +236,6 @@ describe("product task submissions", () => {
         }
       }
     });
-    // UVPStateMachineSignal 签名域并入 planId，且首字段为 planId。
     expect(prepared.typedData.types.UVPStateMachineSignal.map((field) => field.name)).toEqual([
       "planId",
       "orderId",
@@ -237,11 +250,11 @@ describe("product task submissions", () => {
   });
 
   it("refuses to prepare when the projection cannot supply the order planId", async () => {
-    // 负例：投影无 planId（或为零占位）时不构造签名，prepare 直接失败。
     const fixture = await submissionFixture({
       authorization: permissiveProductProjectionAuthorization()
     });
     const service = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: {
         getTask: async (taskId) => taskId === task.taskId ? task : undefined
       },
@@ -263,6 +276,7 @@ describe("product task submissions", () => {
     });
 
     const zeroService = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: {
         getTask: async (taskId) => taskId === task.taskId ? task : undefined
       },
@@ -284,14 +298,12 @@ describe("product task submissions", () => {
   });
 
   it("fails prepare loudly when the plan capability-table resolver throws instead of minting zero proofs", async () => {
-    // 解析器故障 ≠ 无词表：读失败时无法判断事实是否在词表内，全零造证
-    // 会把本可预判的 InvalidSignalCapability 留到链上 revert 才暴露
-    //（白烧代付 gas）——prepare 时点响亮失败，不得用降级值造证。
     const base = await submissionFixture({
       authorization: permissiveProductProjectionAuthorization()
     });
     const resolverFailure = new Error("projection snapshot unreadable");
     const failing = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: {
         getTask: async (taskId) => taskId === task.taskId ? task : undefined
       },
@@ -315,9 +327,8 @@ describe("product task submissions", () => {
       status: 409
     });
 
-    // 对照：解析不到词表（外部发布 plan → undefined）是合法全零路径，
-    // 不得因响亮失败而误伤。
     const externalPlan = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: {
         getTask: async (taskId) => taskId === task.taskId ? task : undefined
       },
@@ -337,11 +348,6 @@ describe("product task submissions", () => {
   });
 
   it("refuses zero-proof minting when the persisted plan snapshot carries the failed enrichment marker", async () => {
-    // 解析故障 ≠ 无词表（indexer 侧贯穿）：resolver 故障轮的快照带 failed
-    // 富集态，路由装配的词表解析器（resolvePlanCapabilityTablesFromStore）
-    // 对它抛错——提交车道按既有 catch 口径归一为 409
-    // capability_tables_unavailable，不得把未知词表当"确认无词表"降级
-    // 全零造证。empty（外部发布 plan）与恢复后的 enriched 不受影响。
     const fixture = await submissionFixture({
       authorization: permissiveProductProjectionAuthorization()
     });
@@ -363,8 +369,9 @@ describe("product task submissions", () => {
       chainPlanEvent(2n, 0, "PlanFinalized", { planId, planHash, capabilitiesRoot }),
       chainPlanEvent(2n, 1, "PlanRegistered", { planId, planHash, hookCount: 1n })
     ];
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     const serviceForStore = () => createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: {
         getTask: async (taskId) => taskId === task.taskId ? task : undefined
       },
@@ -377,7 +384,6 @@ describe("product task submissions", () => {
       now: () => baseNow
     });
 
-    // 故障轮快照（failed 标记 + 空两表）：拒识，与解析器直接抛错同口径。
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: planEvents,
@@ -392,7 +398,6 @@ describe("product task submissions", () => {
       status: 409
     });
 
-    // 外部发布 plan（empty）：合法全零路径，不得因三态引入而误伤。
     await store.resetFromEvents({ deploymentBlock: 0n, events: planEvents });
     await expect(serviceForStore().prepareSubmit(task.taskId, {
       evidenceIds: [fixture.evidence.evidence.evidenceId],
@@ -400,7 +405,6 @@ describe("product task submissions", () => {
       intent: "confirm_stage"
     }, owner)).resolves.toMatchObject({ status: "prepared" });
 
-    // 恢复轮（enriched）：回到可用态，词表内事实携带非零造证。
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: planEvents,
@@ -485,8 +489,6 @@ describe("product task submissions", () => {
 
     expect(submission).toMatchObject({
       status: "expired",
-      // 过期检查发生在验签之后：签名是验证过的，失败的是时限——
-      // 台账不得谎报 not_verified。
       signatureStatus: "signature_verified",
       recoveredSubmitter: submitter,
       broadcastStatus: "not_attempted",
@@ -497,10 +499,6 @@ describe("product task submissions", () => {
   });
 
   it("probes the chain before expiring a TTL-dead retry and recovers the on-chain submission", async () => {
-    // UB-4：TTL 到期重试先探链。崩溃孤儿（广播已发出、落档前进程
-    // 死亡，或 rpc 超时不携哈希）可能已把这笔业务提交送上网——deadline
-    // 检查先于探链会让这类重试永不探链、误落 expired 终态。六元业务
-    // 身份在链上已呈现时按链重算收口（confirmed + prepare 消费）。
     let current = new Date("2026-04-28T00:00:00Z");
     const broadcast: SubmissionBroadcastAdapter = {
       broadcast: vi.fn(async (): Promise<SubmissionBroadcastResult> => ({ status: "submitted" as const, txHash: txHash("1") }))
@@ -532,7 +530,6 @@ describe("product task submissions", () => {
       signatureStatus: "signature_verified"
     });
     expect(broadcast.broadcast).not.toHaveBeenCalled();
-    // 链上已收口：prepare 被消费，同 prepareId 的再重放不再出广播。
     await expect(fixture.service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
@@ -541,8 +538,6 @@ describe("product task submissions", () => {
   });
 
   it("keeps expiring a TTL-dead retry when the chain probe finds no business submission", async () => {
-    // 探链 absent（六元业务身份未在链上呈现）：expired 如旧——探链只是
-    // 收回"可能已上链"的孤儿，不是无限延长授权窗口。
     let current = new Date("2026-04-28T00:00:00Z");
     const broadcast: SubmissionBroadcastAdapter = {
       broadcast: vi.fn(async (): Promise<SubmissionBroadcastResult> => ({ status: "submitted" as const, txHash: txHash("1") }))
@@ -571,9 +566,6 @@ describe("product task submissions", () => {
   });
 
   it("treats a failing chain probe on a TTL-dead retry as retryable instead of expiring", async () => {
-    // 探链本身失败（transport/投影读故障）≠ 链上没有：按可重试失败落档
-    //（transaction_receipt_unknown），prepare 不消费——同一 prepareId 的
-    // 下一次重试再探；探链恢复后按链收口。
     let current = new Date("2026-04-28T00:00:00Z");
     const broadcast: SubmissionBroadcastAdapter = {
       broadcast: vi.fn(async (): Promise<SubmissionBroadcastResult> => ({ status: "submitted" as const, txHash: txHash("1") }))
@@ -615,7 +607,6 @@ describe("product task submissions", () => {
       broadcastStatus: "failed"
     });
 
-    // prepare 未消费：同一 prepareId 重试再探，探链恢复即按链收口。
     const recovered = await fixture.service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
@@ -653,8 +644,6 @@ describe("product task submissions", () => {
       broadcastStatus: "not_attempted"
     });
 
-    // Nothing was broadcast, so the prepared signal is deliberately not
-    // consumed: the submitter can retry it later against a configured relayer.
     await expect(fixture.service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
@@ -664,7 +653,6 @@ describe("product task submissions", () => {
       broadcastStatus: "not_attempted"
     });
 
-    // With a real broadcasting adapter the same reuse is rejected instead.
     const broadcastingFixture = await submissionFixture({
       broadcastAdapter: {
         async broadcast() {
@@ -689,16 +677,9 @@ describe("product task submissions", () => {
     });
   });
 
-  it("keeps the prepared signal reusable on the durable sqlite store when broadcasting is disabled", async () => {
-    // 与上一条用例同语义，落到持久驱动：非广播路径不消费 prepare，
-    // 广播路径标记 used 后拒绝复用。
-    const tempDir = mkdtempSync(join(tmpdir(), "uvp-submission-sqlite-"));
-    const store = new SqliteSubmissionStore({
-      databaseUrl: `sqlite://${join(tempDir, "submissions.sqlite")}`,
-      migrations: {
-        autoRun: true,
-        directory: fileURLToPath(new URL("../migrations", import.meta.url))
-      }
+  it("keeps the prepared signal reusable on the durable postgres store when broadcasting is disabled", async () => {
+    const store = new PostgresSubmissionStore({
+      databaseUrl: submissionDatabaseUrl
     });
     try {
       const fixture = await submissionFixture({ store });
@@ -749,7 +730,6 @@ describe("product task submissions", () => {
       });
     } finally {
       await store.close();
-      rmSync(tempDir, { recursive: true, force: true });
     }
   });
 
@@ -769,10 +749,6 @@ describe("product task submissions", () => {
   });
 
   it("lets an explicitly authorized submitter pass even when an overlay names another active executor", async () => {
-    // 《授权与签名规则》§五：先看显式订单级授权、再看阶段委任的在任
-    // 执行者——显式授权者在任执行者变更后不失去提交权（合约按同一
-    // 口径接受）；service 层若以 submitter_wallet_not_active_executor
-    // 前置拦截，即与合约相反。
     const targetStageId = txHash("515");
     const overlayTask = {
       ...task,
@@ -782,14 +758,11 @@ describe("product task submissions", () => {
       },
       proof: {
         stageIdentifier: targetStageId,
-        // prepare 绝不捏造 signalId——overlay 场景的链上信号身份
-        // 仍须由投影 proof 提供（sourceId 由 overlay 目标阶段解析）。
         signalId: fixtureSignalId
       }
     } as ProductTaskDTO;
     const fixture = await submissionFixture({ task: overlayTask });
 
-    // submitter 在显式授权清单内（allow list），overlay 指向别人 → 放行。
     await expect(fixture.service.prepareSubmit(overlayTask.taskId, {
       evidenceIds: [fixture.evidence.evidence.evidenceId],
       walletAddress: submitter,
@@ -799,7 +772,6 @@ describe("product task submissions", () => {
       sourceId: targetStageId
     });
 
-    // 在任执行者提交：既被显式授权（fixture 允许）也是 active executor。
     const activeExecutor = "0x2222222222222222222222222222222222222222" as Address;
     const activeFixture = await submissionFixture({
       task: overlayTask,
@@ -814,7 +786,6 @@ describe("product task submissions", () => {
       sourceId: targetStageId
     });
 
-    // 既无显式授权、也不是在任执行者 → 拒绝（由授权适配器裁决）。
     const unauthorized = "0x3333333333333333333333333333333333333333" as Address;
     const unauthorizedFixture = await submissionFixture({
       task: overlayTask,
@@ -833,10 +804,12 @@ describe("product task submissions", () => {
   it("rejects missing evidence before preparing a signed payload", async () => {
     const evidenceService = createEvidenceService({
     runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      metadataStore: new InMemoryEvidenceMetadataStore(),
+      storage: evidenceStorageFixture(),
       now: () => baseNow
     });
     const service = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: {
         getTask: async (taskId) => taskId === task.taskId ? task : undefined
       },
@@ -863,9 +836,10 @@ describe("product task submissions", () => {
   });
 
   it("rejects hash-mismatched evidence before preparing a signed payload", async () => {
-    const storage = new InMemoryEvidenceStorage();
+    const storage = evidenceStorageFixture();
     const evidenceService = createEvidenceService({
     runtimeEnvironment: "local",
+      metadataStore: new InMemoryEvidenceMetadataStore(),
       storage,
       now: () => baseNow,
       evidenceIdFactory: () => "ev_mismatch"
@@ -895,7 +869,8 @@ describe("product task submissions", () => {
   it("builds deterministic payload bundle hashes regardless of evidence id order", async () => {
     const evidenceService = createEvidenceService({
     runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      metadataStore: new InMemoryEvidenceMetadataStore(),
+      storage: evidenceStorageFixture(),
       now: () => baseNow,
       evidenceIdFactory: sequentialIds(["ev_b", "ev_a"])
     });
@@ -979,8 +954,6 @@ describe("product task submissions", () => {
       status: "submitted",
       txHash: txHash("21")
     });
-    // 绑定载荷随提交落库：reconcile 清扫对绑定缺失的提交重试绑定时
-    // 以此为唯一持久化依据。
     expect(submission.evidenceIds).toEqual([fixture.evidence.evidence.evidenceId]);
     await expect(fixture.service.getSubmission("sub_1", submitter)).resolves.toMatchObject({
       evidenceIds: [fixture.evidence.evidence.evidenceId]
@@ -1098,18 +1071,12 @@ describe("product task submissions", () => {
     const prepared = await prepare(fixture);
     const signature = await signPrepared(prepared);
 
-    // First attempt throws after the nonce was reserved: nothing was
-    // broadcast and no submission exists, so the error must propagate.
     await expect(fixture.service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
       signature
     })).rejects.toThrow("rpc connection reset before writeContract");
 
-    // 逃逸异常必须留下一致的持久状态——失败档案（按适配器同款
-    // 分类器归档）与 nonce 释放在同一落档事务内，档案保留证据、释放保证
-    // 同一 prepareId 可重试。（fixture 的 submissionId 工厂是常量，重试
-    // 档案覆盖失败档案；断言在抛错后立即执行。）
     const failedAttempt = await fixture.service.getSubmission("sub_1", submitter);
     expect(failedAttempt).toMatchObject({
       status: "failed",
@@ -1117,8 +1084,6 @@ describe("product task submissions", () => {
     });
     expect(typeof failedAttempt?.errorCode).toBe("string");
 
-    // The nonce was released, so retrying the same prepareId succeeds instead
-    // of reporting a false duplicate_submit.
     const retried = await fixture.service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
@@ -1142,9 +1107,6 @@ describe("product task submissions", () => {
   });
 
   it("records persist_failed with txHash and keeps the nonce when the store write fails after a successful broadcast", async () => {
-    // 广播已成功（拿到 txHash）但持久化失败：必须尽力落一条 failed
-    // （persist_failed，回执未知）档案，且不释放 nonce（链上可能已占用）；
-    // 只有广播本身抛错（未拿到 txHash）才释放 nonce。
     const inner = new InMemoryProductSubmissionStore();
     const releasedKeys: string[] = [];
     let putSubmissionCalls = 0;
@@ -1203,7 +1165,6 @@ describe("product task submissions", () => {
       signature
     })).rejects.toThrow("simulated durable store outage");
 
-    // 第一次 putSubmission 抛错；第二次是 catch 中的尽力落档。
     expect(putSubmissionCalls).toBe(2);
     await expect(inner.getSubmission("sub_1")).resolves.toMatchObject({
       status: "failed",
@@ -1212,10 +1173,8 @@ describe("product task submissions", () => {
       deadLetter: true,
       receiptStatus: "not_checked"
     });
-    // nonce 不释放。
     expect(releasedKeys).toHaveLength(0);
 
-    // nonce 仍被占用：重试同一 prepare 被 duplicate_submit 拒绝而不是双花。
     await expect(service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
@@ -1227,11 +1186,6 @@ describe("product task submissions", () => {
   });
 
   it("takes over a stale nonce reservation after a hard crash and still 409s an unexpired one", async () => {
-    // 崩溃窗口模拟：预留 nonce 后、广播前进程硬崩溃——落档事务（失败
-    // 档案 + releaseNonce）从未提交，泄漏的预留行在持久 store 里留存的
-    // 状态由本测试的 store 对象扮演（进程重启后仍在）。授权有效期内的
-    // 重试仍 409；超过授权有效期后重新 prepare（同 nonce 工厂、同 key）
-    // 由陈旧预留接管恢复，同 prepareId 的签名作废走新 prepare。
     let clock = baseNow.getTime();
     const now = () => new Date(clock);
     const fixture = await submissionFixture({ now });
@@ -1256,8 +1210,6 @@ describe("product task submissions", () => {
       markPreparedUsed: (prepareId, submissionId, usedAt) => inner.markPreparedUsed(prepareId, submissionId, usedAt),
       reserveNonce: (key, options) => inner.reserveNonce(key, options),
       releaseNonce: (key) => inner.releaseNonce(key),
-      // 硬崩溃：首次落档写丢失（catch 内失败档案写同败，releaseNonce
-      // 随之未执行）；重启后的进程落档恢复正常。
       putSubmission: async (submission) => {
         putSubmissionCalls += 1;
         if (putSubmissionCalls === 1) {
@@ -1290,7 +1242,6 @@ describe("product task submissions", () => {
     const prepared = await prepare({ service, evidence: fixture.evidence, task });
     const signature = await signPrepared(prepared);
 
-    // 首次提交：预留后崩溃，泄漏预留行且无档案、prepare 未消费。
     await expect(service.submit(task.taskId, {
       prepareId: prepared.prepareId,
       walletAddress: submitter,
@@ -1298,7 +1249,6 @@ describe("product task submissions", () => {
     })).rejects.toThrow("process died before the submission was persisted");
     expect(broadcastCalls).toBe(1);
 
-    // 授权有效期内重试同 prepareId：预留未过期，仍 409 duplicate_submit。
     clock = baseNow.getTime() + 5 * 60_000;
     await expect(service.submit(task.taskId, {
       prepareId: prepared.prepareId,
@@ -1306,8 +1256,6 @@ describe("product task submissions", () => {
       signature
     })).rejects.toMatchObject({ code: "duplicate_submit", status: 409 });
 
-    // 超过授权有效期后重新 prepare（同 nonce → 同 key）：陈旧预留被
-    // 条件更新接管，提交成功，无需人工清表。
     clock = baseNow.getTime() + 11 * 60_000;
     const reprepared = await prepare({ service, evidence: fixture.evidence, task });
     const resigned = await signPrepared(reprepared);
@@ -1418,8 +1366,6 @@ describe("product task submissions", () => {
       prepared.submitter,
       BigInt(prepared.deadline),
       signature,
-      // 词表 Merkle 造证参数：本夹具无 plan 词表（外部 plan 口径）→
-      // 全零 attribution（prepare 时构造并随档案下发）。
       prepared.attribution ?? {
         sourceId: prepared.sourceId,
         signalId: prepared.signalId,
@@ -1450,8 +1396,6 @@ describe("product task submissions", () => {
   });
 
   it("refuses to broadcast a prepared submission whose planId is missing or zero", async () => {
-    // 负例：零占位 planId 无法通过链上 (planId, orderId) 存在性校验，
-    // broadcast 适配器必须拒绝构造调用而不是发一笔注定 revert 的交易。
     const walletClient = {
       account: { address: "0x9999999999999999999999999999999999999999" as Address },
       writeContract: vi.fn(async () => txHash("79"))
@@ -1685,8 +1629,6 @@ describe("product task submissions", () => {
       status: "failed",
       errorCode: "relayer_insufficient_funds",
       errorLabel: "Relayer gas payer needs funds",
-      // 与 relayer 口径统一——充值是运营可修复条件，同签名
-      // 载荷可重试（submitter 未产生 txHash，nonce 未消费），不烧死信。
       retryable: true,
       retryState: "retryable",
       deadLetter: false,
@@ -1736,7 +1678,6 @@ describe("product task submissions", () => {
       retryable: true,
       retryState: "retryable",
       deadLetter: false,
-      // 回执未知（等待回执抛错）：不得虚报 failed，如实报 not_checked。
       receiptStatus: "not_checked"
     });
     expect(submission.attempts[0]).toMatchObject({
@@ -1783,7 +1724,6 @@ describe("product task submissions", () => {
       retryable: false,
       retryState: "dead_letter",
       deadLetter: true,
-      // 回执确实为 reverted：如实报 failed。
       receiptStatus: "failed"
     });
     expect(submission.attempts[0]).toMatchObject({
@@ -1867,9 +1807,6 @@ describe("product task submissions", () => {
   });
 
   it("returns the txHash-bearing broadcast result when the dedupe ledger write fails after a real broadcast", async () => {
-    // 内层适配器已真实广播（拿到 txHash）后，去重台账（claimTxHash/
-    // save）抛错不得让异常带着哈希一起逃逸——调用方 catch 口无哈希可救，
-    // 会释放 nonce，重启后同一签名被二次真实广播烧 gas。
     const audit = new InMemoryAuditSink();
     const inner: SubmissionBroadcastAdapter = {
       broadcast: vi.fn(async (): Promise<SubmissionBroadcastResult> => ({
@@ -1929,8 +1866,6 @@ describe("product task submissions", () => {
     };
 
     await secure.broadcast(request);
-    // 去重重放保留原始错误码（不再泛化成 broadcast_retry_blocked）：
-    // 响应契约对调用方诚实，重复提交被去重层拦截（inner 只调用一次）。
     await expect(secure.broadcast(request)).resolves.toMatchObject({
       status: "failed",
       errorCode: "invalid_signal_signature",
@@ -2026,7 +1961,8 @@ describe("product task submissions", () => {
   it("rejects draft-origin evidence replayed into a submission it is not bound to (U4)", async () => {
     const evidenceService = createEvidenceService({
       runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      metadataStore: new InMemoryEvidenceMetadataStore(),
+      storage: evidenceStorageFixture(),
       now: () => baseNow,
       evidenceIdFactory: () => "ev_draft_replay"
     });
@@ -2043,6 +1979,7 @@ describe("product task submissions", () => {
     }, owner);
     const serviceFor = (resolveDraftOrder?: (draftId: string) => Promise<string | undefined>) =>
       createProductSubmissionService({
+        store: new InMemoryProductSubmissionStore(),
         productTasks: {
           getTask: async (taskId) => taskId === task.taskId ? task : undefined
         },
@@ -2061,16 +1998,12 @@ describe("product task submissions", () => {
         intent: "confirm_stage"
       }, owner);
 
-    // 草稿触发了另一个订单：凭证不得进入本订单的提交。
     await expect(prepareDraftSubmit(serviceFor(async () => "0x0000000000000000000000000000000000000000000000000000000000009999")))
       .rejects.toMatchObject({ code: "evidence_order_mismatch", status: 409 });
-    // 草稿尚未触发成订单：无归属可证，拒绝。
     await expect(prepareDraftSubmit(serviceFor(async () => undefined)))
       .rejects.toMatchObject({ code: "evidence_order_mismatch", status: 409 });
-    // 无解析器装配：空 orderId 不再放行（fail-closed）。
     await expect(prepareDraftSubmit(serviceFor()))
       .rejects.toMatchObject({ code: "evidence_order_mismatch", status: 409 });
-    // 草稿触发的正是目标订单：提交准备成功。
     await expect(prepareDraftSubmit(serviceFor(async (draftId) =>
       draftId === "draft-1" ? task.orderId : undefined)))
       .resolves.toMatchObject({ orderId: task.orderId });
@@ -2097,7 +2030,8 @@ async function submissionFixture(options: {
   const fixtureTask = options.task ?? task;
   const evidenceService = createEvidenceService({
     runtimeEnvironment: "local",
-    storage: new InMemoryEvidenceStorage(),
+    metadataStore: new InMemoryEvidenceMetadataStore(),
+    storage: evidenceStorageFixture(),
     now,
     evidenceIdFactory: () => "ev_1"
   });
@@ -2125,12 +2059,12 @@ async function submissionFixture(options: {
       getTask: async (taskId) => taskId === fixtureTask.taskId ? fixtureTask : undefined
     },
     evidenceReader: evidenceService,
+    store: options.store ?? new InMemoryProductSubmissionStore(),
     chainId,
     verifyingContract,
     resolveOrderPlanId: async () => planId,
     authorization,
     ...(options.broadcastAdapter ? { broadcastAdapter: options.broadcastAdapter } : {}),
-    ...(options.store ? { store: options.store } : {}),
     ...(options.probePriorSubmissionOnChain
       ? { probePriorSubmissionOnChain: options.probePriorSubmissionOnChain }
       : {}),
@@ -2144,6 +2078,7 @@ async function submissionFixture(options: {
 
 function submissionServiceForEvidence(evidenceService: EvidenceService): ProductSubmissionService {
   return createProductSubmissionService({
+    store: new InMemoryProductSubmissionStore(),
     productTasks: {
       getTask: async (taskId) => taskId === task.taskId ? task : undefined
     },
@@ -2214,7 +2149,6 @@ function zeroBytes32(): Hex {
   return `0x${"0".repeat(64)}` as Hex;
 }
 
-/** 两步发布的计划族事件（词表 root 锚定 capabilitiesRoot，见 plan.ts）。 */
 function chainPlanEvent(
   blockNumber: bigint,
   logIndex: number,
@@ -2232,7 +2166,6 @@ function chainPlanEvent(
   };
 }
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
 const signatureHex = ("0x" + "cd".repeat(65)) as Hex;
 const onchainOrderId = txHash("order-dedupe") as Address;
 
@@ -2242,9 +2175,13 @@ function idempotencyKeyHex(value: string): Hex {
 
 describe("secure broadcast durable dedupe", () => {
   it("dedupes the same submission through a rebuilt adapter backed by the durable store", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "uvp-broadcast-dedupe-"));
-    const databaseUrl = `sqlite://${join(tempDir, "dedupe.sqlite3")}`;
-    const migrations = { autoRun: true, directory: resolve(__dirname, "../migrations") };
+    const databaseUrl = submissionDatabaseUrl;
+    const dedupeStores: PostgresBroadcastDedupeStore[] = [];
+    const openDedupeStore = () => {
+      const store = new PostgresBroadcastDedupeStore({ databaseUrl });
+      dedupeStores.push(store);
+      return store;
+    };
     try {
       let broadcastCalls = 0;
       const inner: SubmissionBroadcastAdapter = {
@@ -2275,15 +2212,14 @@ describe("secure broadcast durable dedupe", () => {
 
       const first = createSecureSubmissionBroadcastAdapter({
         adapter: inner,
-        dedupeStore: new SqliteBroadcastDedupeStore({ databaseUrl, migrations })
+        dedupeStore: openDedupeStore()
       });
       await expect(first.broadcast(request)).resolves.toMatchObject({ status: "submitted" });
       expect(broadcastCalls).toBe(1);
 
-      // 进程重启：重建 adapter 实例，同一 idempotencyKey 仍被去重。
       const second = createSecureSubmissionBroadcastAdapter({
         adapter: inner,
-        dedupeStore: new SqliteBroadcastDedupeStore({ databaseUrl, migrations })
+        dedupeStore: openDedupeStore()
       });
       await expect(second.broadcast(request)).resolves.toMatchObject({
         status: "submitted",
@@ -2291,10 +2227,9 @@ describe("secure broadcast durable dedupe", () => {
       });
       expect(broadcastCalls).toBe(1);
 
-      // txHash 归属持久化：另一个 idempotencyKey 复用同一 txHash 会被拒绝。
       const third = createSecureSubmissionBroadcastAdapter({
         adapter: inner,
-        dedupeStore: new SqliteBroadcastDedupeStore({ databaseUrl, migrations })
+        dedupeStore: openDedupeStore()
       });
       await expect(third.broadcast({
         ...request,
@@ -2309,14 +2244,14 @@ describe("secure broadcast durable dedupe", () => {
       });
       expect(broadcastCalls).toBe(2);
     } finally {
-      rmSync(tempDir, { recursive: true, force: true });
+      for (const store of dedupeStores.splice(0)) {
+        await store.close();
+      }
     }
   });
 });
 
 describe("state-machine broadcast duplicate-transaction lanes", () => {
-  // 三车道（nonce too low / already known / replacement underpriced）从
-  // relayer 下沉后的在役消费测试：基础分类 + 回执探针四态裁决。
   const duplicateTx = txHash("aa");
 
   function duplicateLaneFixture(receipts: Map<string, { status?: "success" | "reverted" | string; blockNumber?: bigint }>) {
@@ -2430,6 +2365,5 @@ describe("state-machine broadcast duplicate-transaction lanes", () => {
       retryState: "retryable",
       deadLetter: false
     });
-    // 无 txHash 的可重试失败：submit 落档事务会释放 nonce、prepare 可重用。
   });
 });

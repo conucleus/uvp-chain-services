@@ -140,8 +140,6 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
     planId: string,
     planHash: string
   ): Promise<StoreProductSchemaDTO | undefined> {
-    // planId 前置下推到 SQL，只反序列化同 plan 候选行；精确匹配
-    // （planHash=runtime 域，锚 schema.planHash）仍由 JS 侧统一判定。
     const result = await this.#database.query(
       `SELECT product_schema_json::text AS product_schema_json
        FROM store_zhixu_draft
@@ -159,8 +157,8 @@ export class PostgresStoreZhixuDraftStore implements StoreZhixuDraftStore {
          draft_id, source_kind, content, status, zhixu_id, title, maintainer,
          public_summary, tags_json, compile_preview_json, product_schema_json, review_id,
          errors_json, review_status,
-         created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13::jsonb, $14, $15, $16)
+         created_at, updated_at, publisher_address
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13::jsonb, $14, $15, $16, $17)
        ON CONFLICT(draft_id)
        DO UPDATE SET
          source_kind = excluded.source_kind,
@@ -503,9 +501,6 @@ function productSchemaRowsByPlan(
   planId: string,
   planHash: string
 ): readonly StoreProductSchemaDTO[] {
-  // planHash 是链侧身份（runtime 域），schema.planHash 与链上值同域
-  // 同值——join 锚 schema.planHash；schema.artifactHash 是 canonical
-  // 载荷哈希，与链上值永不相等。
   return rows
     .map((row) => optionalJson<StoreProductSchemaDTO>(
       rowObject(row, "store_zhixu_draft product schema query"),

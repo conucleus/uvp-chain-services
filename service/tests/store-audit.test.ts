@@ -1,18 +1,66 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
+import { InMemoryGovernanceStore } from "../src/governance/index.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import {
   createGovernanceService,
   type GovernanceChainAdapter,
   type GovernanceChainRequestDTO
 } from "../src/governance/index.js";
 import { InMemoryAuditSink } from "../src/security/index.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import type { Address, Hex } from "../src/shared/types.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 const operatorHeaders = {
   "x-uvp-store-operator-id": "operator-1",
   "x-uvp-store-operator-role": "store_operator",
-  // 红线：草稿/供应商写路由要求会话已锚定地址（本地联调 dev 锚定头）。
   "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
 };
 
@@ -46,7 +94,7 @@ const signer = "0x3333333333333333333333333333333333333333" as Address;
 describe("Store operator audit events", () => {
   it("audits blocked Store writes with actor, capability, resource, and request id", async () => {
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, audit });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, audit });
 
     const response = await router.handle({
       method: "POST",
@@ -78,7 +126,7 @@ describe("Store operator audit events", () => {
 
   it("audits successful Store metadata mutations", async () => {
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, audit });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, audit });
 
     const response = await router.handle({
       method: "POST",
@@ -123,9 +171,10 @@ describe("Store operator audit events", () => {
       }
     };
     const audit = new InMemoryAuditSink();
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       audit,
-      governanceService: createGovernanceService({ adapter })
+      governanceService: createGovernanceService({
+    store: new InMemoryGovernanceStore(), adapter })
     });
 
     await expect(router.handle({
@@ -141,7 +190,7 @@ describe("Store operator audit events", () => {
       headers: operatorHeaders,
       body: {
         reviewStatus: "approved_for_broadcast",
-        capabilityTags: ["inspection"],
+        capabilityTags: ["tag-2"],
         confirmation: {
           supplierId: "supplier-audit"
         }
@@ -186,9 +235,9 @@ function supplierBody(): Record<string, unknown> {
     supplierSubjectId,
     displayName: "Audit Supplier",
     wallet: supplierWallet,
-    capabilityTags: ["logistics"],
-    supportedRoleSlotIds: ["delivery"],
-    supportedStageIds: ["shipping"],
+    capabilityTags: ["tag-1"],
+    supportedRoleSlotIds: ["slot-a"],
+    supportedStageIds: ["stage-1"],
     registryAddresses: [registryAddress]
   };
 }

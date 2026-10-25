@@ -1,20 +1,23 @@
 import type { Server } from "node:http";
-import { describe, expect, it } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startApiServer } from "../src/api/server.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import type { ChainEventSource } from "../src/indexer/service.js";
 import { buildConfigDiagnostics, loadConfigFromEnv } from "../src/config/index.js";
 import {
-  InMemoryEvidenceStorage,
+  LocalEvidenceStorage,
   type EvidencePrincipal,
   type EvidenceService
 } from "../src/evidence/index.js";
 import { InMemoryGovernanceStore, type IdentityTxLogDTO } from "../src/governance/index.js";
 import { createApiRouter } from "../src/api/routes.js";
-import {
-  MemoryProjectionStore,
-  projectionScopeContractAddress
-} from "../src/storage/projection-store.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { projectionScopeContractAddress } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import { redactSecrets } from "../src/security/index.js";
 import {
   InMemoryProductSubmissionStore,
@@ -22,6 +25,66 @@ import {
   type ProductSubmissionDTO
 } from "../src/submissions/index.js";
 import type { Address, Hex } from "../src/shared/types.js";
+
+let stores: ChainServicesStores;
+let databaseUrl: string;
+
+beforeAll(async () => {
+  databaseUrl = await createPostgresTestDatabase();
+  stores = createChainServicesStores({
+    database: { url: databaseUrl, migrationsAutoRun: true },
+    chainId: 31337
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
+
+function localEvidenceStorage(): LocalEvidenceStorage {
+  return new LocalEvidenceStorage({ rootDir: evidenceTempRoot() });
+}
+
+let evidenceRoot: string | undefined;
+
+function evidenceTempRoot(): string {
+  evidenceRoot ??= mkdtempSync(join(tmpdir(), "uvp-health-diagnostics-"));
+  return evidenceRoot;
+}
 
 const stateMachine = "0x1111111111111111111111111111111111111111" as Address;
 const identityRegistry = "0x2222222222222222222222222222222222222222" as Address;
@@ -45,7 +108,7 @@ const adminHeaders = {
 
 describe("ops health diagnostics", () => {
   it("exposes safe runtime, indexer, submission, governance, evidence, and preflight summaries", async () => {
-    const projectionStore = new MemoryProjectionStore();
+    const projectionStore = stores.projectionStore;
     await projectionStore.saveSyncState({
       chainId: 31337,
       contractAddress: projectionScopeContractAddress,
@@ -71,11 +134,11 @@ describe("ops health diagnostics", () => {
     const governanceStore = new InMemoryGovernanceStore();
     await governanceStore.appendIdentityTxLog(pendingGovernanceLog());
 
-    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: buildConfigDiagnostics(testConfig()),
       submissionStore,
       governanceStore,
-      evidenceStorage: new InMemoryEvidenceStorage(),
+      evidenceStorage: localEvidenceStorage(),
       indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 },
       timerKeeperDiagnostics: {
         scannedOrders: 1,
@@ -111,8 +174,6 @@ describe("ops health diagnostics", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/healthz" });
 
-    // healthz 收口——只回聚合健康位；诊断明细走
-    // /admin/diagnostics（治理白名单 admin）。
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       sourceOfTruth: "contracts-and-chain-events",
@@ -151,9 +212,6 @@ describe("ops health diagnostics", () => {
           running: true,
           lastSummary: { submissionsChecked: 1, governanceLogsChecked: 1 }
         },
-        // timer keeper 的末轮 summary 以 timerKeeperRuntime 并入 admin
-        // diagnostics（receiptReverted/receiptUnknown/deduplicated 暴露），
-        // 不进 /healthz 聚合健康位。
         timerKeeperRuntime: {
           lastSummary: { receiptReverted: 1, receiptUnknown: 0, deduplicated: 0 }
         },
@@ -178,7 +236,7 @@ describe("ops health diagnostics", () => {
           })]
         },
         evidenceStorage: {
-          adapterKind: "memory",
+          adapterKind: "local",
           readiness: "ready"
         }
       }
@@ -187,7 +245,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("requires admin headers for operator console routes", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     for (const request of [
       { method: "GET", pathname: "/admin/ops/status" },
@@ -203,11 +261,10 @@ describe("ops health diagnostics", () => {
   });
 
   it("enforces the OPS_CONSOLE_ADMIN_IDS allowlist when configured", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       opsConsoleAdminIds: ["ops-admin-1", "ops-admin-2"]
     });
 
-    // 白名单内：放行（governance admin 检查之后命中 ops 白名单）。
     const allowed = await router.handle({
       method: "GET",
       pathname: "/admin/ops/status",
@@ -215,7 +272,6 @@ describe("ops health diagnostics", () => {
     });
     expect(allowed.status).toBe(200);
 
-    // governance admin 身份合法但不在 ops 白名单内：403。
     const outsideGovernanceAdmin = await router.handle({
       method: "GET",
       pathname: "/admin/ops/status",
@@ -229,7 +285,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("falls back to the governance admin check when no ops allowlist is configured", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const response = await router.handle({
       method: "GET",
@@ -252,7 +308,6 @@ describe("ops health diagnostics", () => {
       };
       server = await startApiServer({
         config: serverTestConfig(),
-        store: new MemoryProjectionStore(),
         eventSource
       });
       const address = server.address();
@@ -295,7 +350,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("exposes admin operator status and redacted downloadable summary fields", async () => {
-    const projectionStore = new MemoryProjectionStore();
+    const projectionStore = stores.projectionStore;
     await projectionStore.saveSyncState({
       chainId: 31337,
       contractAddress: projectionScopeContractAddress,
@@ -306,9 +361,9 @@ describe("ops health diagnostics", () => {
       eventCount: 4,
       rebuild: { status: "completed", toBlock: 12n, eventCount: 4 }
     });
-    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: buildConfigDiagnostics(testConfig()),
-      evidenceStorage: new InMemoryEvidenceStorage(),
+      evidenceStorage: localEvidenceStorage(),
       now: () => new Date(now)
     });
 
@@ -347,12 +402,12 @@ describe("ops health diagnostics", () => {
       storeMetadata: {
         readiness: "ready",
         stores: {
-          draft: { kind: "memory", readiness: "ready" },
-          productSchema: { kind: "memory", readiness: "ready", representedBy: "draft" },
-          version: { kind: "memory", readiness: "ready" },
-          supplier: { kind: "memory", readiness: "ready" },
-          supplierAudit: { kind: "memory", readiness: "ready", representedBy: "supplier" },
-          docking: { kind: "memory", readiness: "ready" }
+          draft: { kind: "postgres", readiness: "ready" },
+          productSchema: { kind: "postgres", readiness: "ready", representedBy: "draft" },
+          version: { kind: "postgres", readiness: "ready" },
+          supplier: { kind: "postgres", readiness: "ready" },
+          supplierAudit: { kind: "postgres", readiness: "ready", representedBy: "supplier" },
+          docking: { kind: "postgres", readiness: "ready" }
         }
       },
       recoveryPolicy: {
@@ -375,9 +430,9 @@ describe("ops health diagnostics", () => {
         storeMetadata: {
           readiness: "ready",
           stores: {
-            productSchema: { representedBy: "draft", kind: "memory", readiness: "ready" },
-            supplierAudit: { representedBy: "supplier", kind: "memory", readiness: "ready" },
-            docking: { kind: "memory", readiness: "ready" }
+            productSchema: { representedBy: "draft", kind: "postgres", readiness: "ready" },
+            supplierAudit: { representedBy: "supplier", kind: "postgres", readiness: "ready" },
+            docking: { kind: "postgres", readiness: "ready" }
           }
         }
       }
@@ -387,11 +442,11 @@ describe("ops health diagnostics", () => {
   });
 
   it("returns stable safe action records for recovery hooks", async () => {
-    const projectionStore = new MemoryProjectionStore();
+    const projectionStore = stores.projectionStore;
     const submissionStore = new InMemoryProductSubmissionStore();
     await submissionStore.putSubmission(retryableSubmission());
     const seenRetries: string[] = [];
-    const router = createApiRouter(projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       submissionStore,
       now: () => new Date(now),
       opsRecoveryActions: {
@@ -486,7 +541,7 @@ describe("ops health diagnostics", () => {
         }]
       }
     };
-    const preflightFailedRouter = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const preflightFailedRouter = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: failedDiagnostics,
       opsRecoveryActions: {
         async runReconcile() {
@@ -495,7 +550,7 @@ describe("ops health diagnostics", () => {
         }
       }
     });
-    const missingDependencyRouter = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const missingDependencyRouter = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const failedResponse = await preflightFailedRouter.handle({
       method: "POST",
@@ -529,7 +584,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("returns not ready when critical diagnostics are degraded", async () => {
-    const projectionStore = new MemoryProjectionStore();
+    const projectionStore = stores.projectionStore;
     await projectionStore.saveSyncState({
       chainId: 31337,
       contractAddress: projectionScopeContractAddress,
@@ -541,9 +596,9 @@ describe("ops health diagnostics", () => {
       degradedReason: "RPC timeout token=secret"
     });
 
-    const router = createApiRouter(projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceService: noopEvidenceService(),
-      evidenceStorage: new InMemoryEvidenceStorage(),
+      evidenceStorage: localEvidenceStorage(),
       evidenceRuntimeEnvironment: "production",
       reconcileDiagnostics: {
         enabled: true,
@@ -557,8 +612,6 @@ describe("ops health diagnostics", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/readyz" });
 
-    // readyz 收口——只回 ready 位与 reasons；脱敏
-    // 后的诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
       ready: false,
@@ -586,9 +639,6 @@ describe("ops health diagnostics", () => {
   });
 
   it("reports storage failures as 503-with-reason on /readyz instead of letting the probe die with 500", async () => {
-    // 探针/恢复入口在存储故障时恰须可用：submission/governance 台账读
-    // 失败不得把 /healthz /readyz /admin/ops 打成 HTTP 包装层的 500——
-    // 按服务不可用（503）+ 原因呈现，/admin/ops/status 仍可访问。
     const failingSubmissionStore = new InMemoryProductSubmissionStore();
     (failingSubmissionStore as unknown as { listSubmissions(): Promise<readonly ProductSubmissionDTO[]> }).listSubmissions =
       async () => {
@@ -600,7 +650,7 @@ describe("ops health diagnostics", () => {
         throw new Error("governance ledger unreachable");
       };
 
-    const router = createApiRouter(new MemoryProjectionStore(), {
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
       productRuntimeEnvironment: "local",
       submissionChainId: 84532,
       submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
@@ -616,12 +666,10 @@ describe("ops health diagnostics", () => {
       reasons: expect.arrayContaining(["submission_store_unavailable", "governance_store_unavailable"])
     });
 
-    // healthz 聚合健康位如实 degraded（不是 500）。
     const healthResponse = await router.handle({ method: "GET", pathname: "/healthz" });
     expect(healthResponse.status).toBe(200);
     expect(healthResponse.body).toMatchObject({ status: "degraded" });
 
-    // 恢复入口保持可用，且呈现脱敏后的存储故障事实。
     const opsResponse = await router.handle({
       method: "GET",
       pathname: "/admin/ops/status",
@@ -641,7 +689,7 @@ describe("ops health diagnostics", () => {
       signature: `0x${"aa".repeat(65)}`,
       rpcUrl: "https://rpc.example/base?api_key=rpc-secret&chain=base-sepolia",
       presignedUrl: "https://objects.example/evidence.bin?X-Amz-Signature=aws-secret&X-Amz-Credential=cred",
-      textPayload: "invoice plaintext must not appear",
+      textPayload: "doc-1 plaintext must not appear",
       content: "raw evidence body"
     });
     const serialized = JSON.stringify(redacted);
@@ -650,7 +698,7 @@ describe("ops health diagnostics", () => {
     expect(serialized).not.toContain("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     expect(serialized).not.toContain("rpc-secret");
     expect(serialized).not.toContain("aws-secret");
-    expect(serialized).not.toContain("invoice plaintext");
+    expect(serialized).not.toContain("doc-1 plaintext");
     expect(serialized).not.toContain("raw evidence body");
     expect(serialized).toContain("[redacted:presigned-url]");
     expect(serialized).toContain("[redacted:evidence]");
@@ -661,8 +709,7 @@ describe("ops health diagnostics", () => {
 function testConfig() {
   return loadConfigFromEnv({
     CHAIN_SERVICES_RUNTIME_ENV: "local",
-    CHAIN_SERVICES_DATABASE_DRIVER: "memory",
-    CHAIN_SERVICES_DATABASE_URL: "memory://projection-store",
+    CHAIN_SERVICES_DATABASE_URL: databaseUrl,
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger",
     UVP_CHAIN_ID: "31337",
     UVP_CONTRACTS_JSON: JSON.stringify({
@@ -824,9 +871,8 @@ function serverTestConfig(): ChainServicesConfig {
       }
     },
     database: {
-      driver: "memory",
-      url: "memory://projection-store",
-      migrationsAutoRun: false
+      url: databaseUrl,
+      migrationsAutoRun: true
     },
     api: {
       host: "127.0.0.1",

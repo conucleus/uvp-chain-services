@@ -1,12 +1,7 @@
-import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import { StorageMigrationError } from "./errors.js";
-import {
-  assertNoRetiredMigrations,
-  loadSqlMigrations,
-  type AppliedMigrationRecord,
-  type MigrationDefinition,
-  type MigrationRunResult
-} from "./migrations.js";
 import type { PostgresDatabase } from "./postgres-client.js";
 import { numberColumn, rowObject, stringColumn } from "./postgres-rows.js";
 
@@ -43,12 +38,6 @@ export async function runPostgresMigrations(options: RunPostgresMigrationsOption
     return { applied: [], pending };
   }
 
-  // 多实例并发启动会各自跑迁移：查询-应用-记账的序列没有库级互斥时，
-  // 两个实例可以同时把同一批 pending 各自应用一遍（DDL 竞态 + 台账
-  // 重复插入）。事务级 advisory lock 把整轮序列化——后来者在锁上等待，
-  // 拿锁后重读台账（上一轮已应用的版本直接跳过），同一迁移只会被应用
-  // 一次。批次整体一个事务：任一步失败全批回滚，库留在上一完整基线，
-  // 下次启动整批重放。
   return options.database.withTransactionRaw(async () => {
     await options.database.queryRaw("SELECT pg_advisory_xact_lock(hashtext('chain_services_migrations'))");
     assertNoRetiredMigrations(await listAppliedVersionsPostgres(options.database), migrations);
@@ -137,4 +126,69 @@ function migrationRow(row: unknown): AppliedMigrationRecord {
 
 function defaultPostgresMigrationsDirectory(): string {
   return resolve(process.cwd(), "migrations", "postgres");
+}
+
+// SQL 迁移文件装载与账本校验，只服务于本模块的 postgres 迁移 runner。
+
+export interface MigrationDefinition {
+  readonly version: string;
+  readonly checksum: string;
+  readonly sql: string;
+}
+
+export interface AppliedMigrationRecord {
+  readonly version: string;
+  readonly checksum: string;
+  readonly appliedAt: string;
+  readonly durationMs: number;
+}
+
+export interface MigrationRunResult {
+  readonly applied: readonly AppliedMigrationRecord[];
+  readonly pending: readonly MigrationDefinition[];
+}
+
+const MIGRATION_FILENAME_PATTERN = /^(\d{4})_[a-z0-9_]+\.sql$/;
+
+export function loadSqlMigrations(migrationsDirectory: string): readonly MigrationDefinition[] {
+  const files = readdirSync(migrationsDirectory)
+    .filter((file) => file.endsWith(".sql"))
+    .sort((left, right) => left.localeCompare(right));
+
+  const seenNumbers = new Set<string>();
+  return files.map((file) => {
+    const match = MIGRATION_FILENAME_PATTERN.exec(file);
+    if (!match) {
+      throw new StorageMigrationError(
+        `migration file ${file} must match NNNN_name.sql (4-digit sequence prefix, lowercase snake name)`
+      );
+    }
+    const sequence = match[1]!;
+    if (seenNumbers.has(sequence)) {
+      throw new StorageMigrationError(
+        `migration sequence ${sequence} is defined by more than one file in ${migrationsDirectory}`
+      );
+    }
+    seenNumbers.add(sequence);
+    const sql = readFileSync(resolve(migrationsDirectory, file), "utf8");
+    return {
+      version: basename(file, ".sql"),
+      checksum: createHash("sha256").update(sql).digest("hex"),
+      sql
+    };
+  });
+}
+
+export function assertNoRetiredMigrations(
+  appliedVersions: readonly string[],
+  migrations: readonly MigrationDefinition[]
+): void {
+  const known = new Set(migrations.map((migration) => migration.version));
+  const retired = appliedVersions.filter((version) => !known.has(version));
+  if (retired.length > 0) {
+    throw new StorageMigrationError(
+      `applied migrations missing from the migrations directory: ${retired.join(", ")}; ` +
+      "restore the files or reconcile the ledger before running further migrations"
+    );
+  }
 }

@@ -1,20 +1,3 @@
-/**
- * 链轨 chaos Stage 3：reorg 合成车道（消费者侧）。
- *
- * 不依赖 anvil 原生 reorg RPC——直接构造含 `removed:true`、乱序、重复的
- * 日志流喂索引器的墓碑/复活过滤与投影重建，断言：
- * - 墓碑把同位事件移出活跃集；复活（removed 后同位事件再现）抵消墓碑；
- * - `removedLogsFiltered` 只在终态真丢失事件时为 true（诚实口径）；
- * - sortChainEvents 规范序：乱序流排出链序、等位事件保输入相对序；
- * - 活跃集重放投影幂等：重复事件行进事件面后投影不变（timeline 长度在
- *   比较面内，去重失效即翻红）且重复行计数入异常面；
- * - 「好流」与「坏流 + 墓碑」终态一致（reorg 语义等价性）；
- * - 游标单调性（sortChainEvents 规范序不回退）。
- *
- * 合成事件形状对齐 viem-event-source 解码面：indexed 首参 planId 进
- * StageMaterialized/HookStatusChanged/HookReady 的 args；PlanCommitted
- * 携 executorCandidatesRoot（第六承诺域）。
- */
 import { describe, expect, it } from "vitest";
 import {
   buildActiveChainEventReplaySummary,
@@ -60,7 +43,6 @@ function chainEvent(
   };
 }
 
-/** 与 indexer.replay.test.ts 的 stateMachineEvents 同口径（含 plan 两步发布前奏）。 */
 function goodStream(): ChainEvent[] {
   return [
     chainEvent(1n, 0, "PlanCommitted", {
@@ -151,7 +133,6 @@ describe("reorg synthetic lane: canonical ordering", () => {
     for (let i = 1; i < sorted.length; i += 1) {
       expect(compareChainPointers(sorted[i - 1]!, sorted[i]!)).toBeLessThanOrEqual(0);
     }
-    // 规范序是幂等的固定点：排序后的流再排不变（游标不回退）。
     expect(sortChainEvents(sorted).map(eventKey)).toEqual(sorted.map(eventKey));
   });
 
@@ -216,9 +197,6 @@ describe("reorg synthetic lane: tombstone/revive filter", () => {
   it("tombstoning the reorged suffix then replaying the good suffix equals the good stream", () => {
     const stream = goodStream();
     const reorgedSuffix = stream.slice(3) as ChainEvent[];
-    // reorg 后 canonical 链重放出同位事件：交易哈希换了（新块新序），
-    // 但事件语义内容（eventName + blockNumber:logIndex + args）不变——
-    // 等价性按内容判，不按 txHash 键判。
     const reorgStream: ChainEvent[] = [
       ...(stream.slice(0, 3) as ChainEvent[]),
       ...reorgedSuffix.map((event) => ({ ...event, removed: true })),
@@ -237,11 +215,9 @@ describe("reorg synthetic lane: projection idempotence", () => {
   it("duplicate rows marching through the event list leave projections unchanged and are counted", () => {
     const stream = goodStream();
     const duplicated = [...stream, ...stream];
-    // 重复行进事件面：每一行重复都是一次可观测异常（事件去重计数）。
     expect(countDuplicateActiveEventAnomalies(duplicated)).toBe(stream.length);
     const snapshot = rebuildOrderProjections(duplicated);
     expect(snapshot.eventCount).toBe(stream.length);
-    // 比较面含 timeline 长度：去重失效会让时间线翻倍翻红，不是恒真断言。
     expect(orderSnapshots(snapshot)).toEqual(orderSnapshots(rebuildOrderProjections(stream)));
   });
 
@@ -250,8 +226,6 @@ describe("reorg synthetic lane: projection idempotence", () => {
     const victim = stream[8] as ChainEvent;
     const withTombstone = [...stream, { ...victim, removed: true }];
     const withoutVictim = stream.filter((event) => event !== victim);
-    // 损伤金丝雀：比较面能看到该事件的投影足迹（dueAt/timeline 长度），
-    // 去掉 victim 的投影必须先与好流可区分，等价断言才有红绿含义。
     expect(orderSnapshots(rebuildOrderProjections(filterActiveChainEvents(withoutVictim)))).not.toEqual(
       orderSnapshots(rebuildOrderProjections(filterActiveChainEvents(stream)))
     );
@@ -265,7 +239,6 @@ describe("reorg synthetic lane: projection idempotence", () => {
     const victim = stream[9] as ChainEvent;
     const withTombstone = [...stream, { ...victim, removed: true }];
     const withoutVictim = stream.filter((event) => event !== victim);
-    // 损伤金丝雀：HookReady 缺席时钩子状态停在 waiting 而非 ready。
     expect(orderSnapshots(rebuildOrderProjections(filterActiveChainEvents(withoutVictim)))).not.toEqual(
       orderSnapshots(rebuildOrderProjections(filterActiveChainEvents(stream)))
     );

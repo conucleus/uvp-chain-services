@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../../shared/types.js";
 import type { ProjectionStore } from "../../storage/projection-store.js";
 import type { StateMachinePlanProjection } from "../../indexer/projections/index.js";
-import { InMemoryStoreListingStore } from "./memory-store.js";
 import {
   ListingAnchorChainView,
   StoreAnchorVerificationDTO,
@@ -16,7 +15,7 @@ import { anchorVerificationAllowsPublish, verifyListingAnchors } from "./verify.
 
 export interface StoreListingServiceOptions {
   readonly projectionStore: ProjectionStore;
-  readonly listingStore?: StoreListingStore;
+  readonly listingStore: StoreListingStore;
   readonly chainView?: ListingAnchorChainView;
   readonly now?: () => Date;
   readonly audit?: (event: StoreListingAuditEvent) => Promise<void> | void;
@@ -53,7 +52,7 @@ const OPERATOR_LEVELS = new Set(["store_operator", "store_admin"]);
 
 export function createStoreListingService(options: StoreListingServiceOptions): StoreListingService {
   const projectionStore = options.projectionStore;
-  const listingStore = options.listingStore ?? new InMemoryStoreListingStore();
+  const listingStore = options.listingStore;
   const now = options.now ?? (() => new Date());
 
   return {
@@ -83,7 +82,6 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
 
       const actorIsOperator = OPERATOR_LEVELS.has(actor.accessLevel);
       if (!actorIsOperator) {
-        // 非运营方导入：只允许该 plan 的 publisher 自导入（导入自己的秩序）。
         const publisher = plan?.publisher;
         if (!actor.anchoredAddress || !publisher || actor.anchoredAddress.toLowerCase() !== publisher.toLowerCase()) {
           throw new StoreListingServiceError(
@@ -109,8 +107,6 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
       };
       const save = await listingStore.putListing(listing);
       if (!save.applied) {
-        // 并发导入的败者：前置查重窗口被穿透时由存储层一 plan 一 listing
-        // 约束裁决——与前置查重同响应 409。
         const winner = save.record.listingId !== listing.listingId
           ? save.record
           : await listingStore.findListingByPlanId(planId);
@@ -178,7 +174,6 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
         throw new StoreListingServiceError(409, "invalid_listing_transition", `${listing.status} listing cannot be reviewed`);
       }
       if (decision === "approve") {
-        // 上架审核（章程 §3 目标 D）：版本、锚核验通过才可公开。
         const verification = await verifyListingAnchors({
           listing,
           projectionStore,
@@ -309,11 +304,6 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
     }
   };
 
-  /**
-   * 状态迁移的条件写入：期望前态即本次判定所依据的读快照。前提失配
-   * （0 行受影响）说明并发迁移已抢先——按 409 收敛且不落审计成功，
-   * 台账不出现两条互斥成功；调用方重读后重试。
-   */
   async function transitionListing(updated: StoreListingRecord, expectedStatus: StoreListingStatus): Promise<void> {
     const save = await listingStore.putListing(updated, { status: expectedStatus });
     if (!save.applied) {
@@ -327,12 +317,9 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
   }
 
   async function findPlanByPlanId(planId: Hex): Promise<StateMachinePlanProjection | undefined> {
-    // 投影以 chainId:contract:planId 为键；按 planId 值匹配（大小写不敏感）。
     const snapshot = await projectionStore.getOrderSnapshot();
     const matches = Object.values(snapshot.stateMachinePlans)
       .filter((candidate) => candidate.planId.toLowerCase() === planId.toLowerCase());
-    // 同 planId 跨部署多命中时锚无法唯一归位，静默取首个会把别的部署
-    // 的 planHash/publisher 当成本部署事实。
     if (matches.length > 1) {
       throw new StoreListingServiceError(
         409,

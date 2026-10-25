@@ -15,11 +15,8 @@ type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions
 
 interface AdminOpsRequestContext {
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
-  /** 审计通道（装配层注入）：每个 ops 动作留一条操作留痕。 */
   readonly audit?: AuditSink;
-  /** 治理 admin 鉴权策略（环境档位 + 白名单，装配层注入）。 */
   readonly governanceAdminPolicy: Parameters<RouteModule["handle"]>[1]["governanceAdminPolicy"];
-  /** OPS_CONSOLE_ADMIN_IDS 白名单；非空时只放行集合内 admin id。 */
   readonly opsConsoleAdminIds?: readonly string[];
   readonly actions?: {
     runReconcile?(): Promise<AdminOpsActionEffect | void>;
@@ -68,9 +65,6 @@ async function handleAdminOpsRequest(
       body: { error: "forbidden" }
     };
   }
-  // OPS_CONSOLE_ADMIN_IDS 只在配置了白名单时生效——配置为非空
-  // 集合后，governance reviewer 即使通过通用 admin 鉴权也不在 ops 白名单
-  // 内，必须 403；未配置（本地开发）回退既有 governance admin 检查。
   if (context.opsConsoleAdminIds && context.opsConsoleAdminIds.length > 0) {
     const allowList = new Set(context.opsConsoleAdminIds.map((id) => id.trim()).filter(Boolean));
     if (!allowList.has(principal.adminId)) {
@@ -122,8 +116,6 @@ async function handleAdminOpsRequest(
     });
   }
 
-  // post-commit 失败批次（信号通知/投影自动化）的持久 pending
-  // 队列——列表供研判，重试触发一轮 sweep 直至成功或人工干预。
   if (request.method === "GET" && request.pathname === "/admin/ops/indexer/pending-steps") {
     if (!context.actions?.listPendingPostCommitSteps) {
       return {
@@ -201,7 +193,6 @@ async function runAdminOpsAction(
   context: AdminOpsRequestContext,
   input: {
     readonly action: AdminOpsActionName;
-    /** 操作者（通过 admin 鉴权的 principal id）。 */
     readonly actor: string;
     readonly targetId?: string;
     readonly run: (() => Promise<AdminOpsActionEffect | void>) | undefined;
@@ -211,10 +202,6 @@ async function runAdminOpsAction(
   const actionId = actionIdFor(input.action, requestId, input.targetId);
   const diagnostics = await context.buildDiagnostics();
 
-  // ops 动作（重试/重建/补投）直接改变系统行为，必须留审计痕：
-  // 操作者 + 动作 + 目标 + 结果（accepted/rejected/failed）一条不少。
-  // 审计通道不可用不得改变动作本身的响应语义（对齐 submissions 的
-  // evidence bind 审计口径）。
   const recordAudit = async (outcome: "accepted" | "rejected" | "failed", errorCode?: string, message?: string): Promise<void> => {
     if (!context.audit) {
       return;
@@ -234,7 +221,6 @@ async function runAdminOpsAction(
         ...(message !== undefined ? { metadata: { message } } : {})
       });
     } catch {
-      // 审计失败不改变动作响应。
     }
   };
 

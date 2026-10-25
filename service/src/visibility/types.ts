@@ -1,10 +1,10 @@
-// V3 可见性类型：唯一 resolver 的输出（scope + allowed fields）与字段级
+// 可见性类型：唯一 resolver 的输出（scope + allowed fields）与字段级
 // 读投影形状。配置/阶段/slot 绑定在服务端解析；响应里不出现 locator/URI。
 // 该模块不做状态机，只描述“谁能看到哪些字段”。
 
-import type { ConfigSlotVisibilityV3 } from "@uvp-eth/product-dto";
+import type { ConfigSlotVisibility } from "@uvp-eth/product-dto";
 import type { Address } from "../shared/types.js";
-import type { OrderV3VisibilitySnapshot } from "../order/v3/service.js";
+import type { OrderVisibilitySnapshot } from "../order/service.js";
 
 export type VisibilityScope = "buyer" | "stage-executor" | "operator";
 
@@ -23,9 +23,7 @@ export interface VisibilityDecision {
   readonly wallet: string;
   readonly scope: VisibilityScope;
   readonly allowed: VisibilityFields;
-  /** 允许读取的 stageKey；buyer/operator 为全部 stage。 */
   readonly stageKeys: ReadonlySet<string>;
-  /** 本单 stageKey → 当前钱包已接受的 slotKey（buyer/operator 为空）。 */
   readonly slotKeysByStage: ReadonlyMap<string, string>;
 }
 
@@ -47,7 +45,7 @@ export interface ResourceResolverPort {
 }
 
 export interface VisibilityResolverOptions {
-  readonly loadOrder: (orderId: string) => Promise<OrderV3VisibilitySnapshot | undefined>;
+  readonly loadOrder: (orderId: string) => Promise<OrderVisibilitySnapshot | undefined>;
   readonly operatorWallets?: readonly Address[];
 }
 
@@ -57,16 +55,16 @@ export interface VisibilityResolver {
 
 export interface ConfigSlotVisibilitySource {
   readonly slotKey: string;
-  readonly visibility?: ConfigSlotVisibilityV3;
+  readonly visibility?: ConfigSlotVisibility;
 }
 
-export interface StandardViewV3 {
+export interface StandardView {
   readonly name: string;
   readonly version?: string;
   readonly hash?: string;
 }
 
-export interface SlotViewV3 {
+export interface SlotView {
   readonly slotKey: string;
   readonly required: boolean;
   readonly subjectLabel?: string;
@@ -75,20 +73,20 @@ export interface SlotViewV3 {
   readonly contactRef?: string;
 }
 
-export interface HandleViewV3 {
+export interface HandleView {
   readonly handleKey: string;
   readonly version?: string;
   readonly hash?: string;
 }
 
-export interface ResourceListViewV3 {
+export interface ResourceListView {
   readonly dataState: "ok" | "none" | "pending" | "unknown";
   readonly stageKey: string;
-  readonly items: readonly HandleViewV3[];
+  readonly items: readonly HandleView[];
   readonly reason?: string;
 }
 
-export interface StageViewV3 {
+export interface StageView {
   readonly stageKey: string;
   readonly stageId: string;
   readonly index: number;
@@ -98,12 +96,12 @@ export interface StageViewV3 {
   readonly inviteDeadline?: string;
   readonly workDeadline?: string;
   readonly windowValues?: Readonly<Record<string, number>>;
-  readonly standard?: StandardViewV3;
-  readonly slots?: readonly SlotViewV3[];
-  readonly fileResources?: readonly HandleViewV3[];
+  readonly standard?: StandardView;
+  readonly slots?: readonly SlotView[];
+  readonly fileResources?: readonly HandleView[];
 }
 
-export interface OrderViewV3 {
+export interface OrderView {
   readonly orderId: string;
   readonly planId?: string;
   readonly chainId?: number;
@@ -116,27 +114,27 @@ export interface OrderViewV3 {
   readonly txHash?: string;
   readonly draftId?: string;
   readonly dataState: "ok" | "none" | "pending" | "unknown";
-  readonly stages: readonly StageViewV3[];
+  readonly stages: readonly StageView[];
 }
 
-export interface StageViewResponseV3 {
-  readonly order: OrderViewV3;
-  readonly stage: StageViewV3;
+export interface StageViewResponse {
+  readonly order: OrderView;
+  readonly stage: StageView;
   readonly dataState: "ok" | "none" | "pending" | "unknown";
 }
 
-export interface OperatorStageViewV3 {
+export interface OperatorStageView {
   readonly stageKey: string;
   readonly index: number;
   readonly status: string;
 }
 
-export interface OperatorOrderViewV3 {
+export interface OperatorOrderView {
   readonly orderId: string;
   readonly planId?: string;
   readonly status?: string;
   readonly dataState: "ok" | "none" | "pending" | "unknown";
-  readonly stages: readonly OperatorStageViewV3[];
+  readonly stages: readonly OperatorStageView[];
   readonly exceptions: readonly {
     readonly code: string;
     readonly stageKey?: string;

@@ -7,7 +7,6 @@ import type {
   StoreWalletSessionStore
 } from "./types.js";
 
-/** 钱包会话的 postgres 持久化（生产拓扑）。 */
 export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore {
   readonly #database: PostgresDatabase;
 
@@ -19,11 +18,6 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
     record: StoreAuthChallengeRecord,
     options: { readonly maxLivePerAddress: number; readonly maxLivePerRequester: number; readonly now: string }
   ): Promise<boolean> {
-    // 配额判定与写入必须在同一事务内，且按地址+请求方两个咨询锁串行化：
-    // READ COMMITTED 下无锁的"数了再插"两条并发语句可同时看到未满的
-    // 计数，双双写入穿透配额。pg_advisory_xact_lock 随事务结束自动释放，
-    // 无关的地址/请求方组合互不阻塞；两把锁按字典序固定顺序获取，避免
-    // "地址 A+请求方 R1"与"地址 B+请求方 R2"交叉持锁时互等死锁。
     const addressKey = record.address.toLowerCase();
     const requesterKey = record.requesterKey;
     return this.#database.withTransaction(async () => {
@@ -75,7 +69,6 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
   }
 
   async deleteExpiredChallenges(expiresBefore: string): Promise<number> {
-    // 过期行无论是否消费都不再参与判定——未鉴权入口的写入时清扫。
     const result = await this.#database.query(
       `DELETE FROM store_auth_challenge WHERE expires_at < $1`,
       [expiresBefore]
@@ -84,8 +77,6 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
   }
 
   async deleteExpiredSessions(expiresBefore: string): Promise<number> {
-    // 过期会话（含已撤销）对 resolve 一律拒绝、无判定价值——与挑战
-    // 清扫同批约束会话表只增不删的无界放大。
     const result = await this.#database.query(
       `DELETE FROM store_wallet_session WHERE expires_at < $1`,
       [expiresBefore]
@@ -94,8 +85,6 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
   }
 
   async consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined> {
-    // 条件 UPDATE 原子占位——
-    // WHERE consumed_at IS NULL 保证并发重放同一 nonce 只有一个赢家。
     const result = await this.#database.query(
       `UPDATE store_auth_challenge SET consumed_at = $1 WHERE nonce = $2 AND consumed_at IS NULL`,
       [consumedAt, nonce]
@@ -121,8 +110,6 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
   }
 
   async touchSession(sessionId: string, lastSeenAt: string): Promise<boolean> {
-    // 条件 UPDATE（touch）：仅存活行可推进 last_seen_at，0 行受影响即
-    // 行已被并发撤销——不回写整行快照。
     const updated = await this.#database.query(
       `UPDATE store_wallet_session
        SET last_seen_at = $1
@@ -133,7 +120,6 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
   }
 
   async revokeSession(sessionId: string, revokedAt: string, revokedReason: string): Promise<boolean> {
-    // 条件 UPDATE：撤销不可逆，仅首撤销落笔。
     const updated = await this.#database.query(
       `UPDATE store_wallet_session
        SET revoked_at = $1, revoked_reason = $2
@@ -167,9 +153,6 @@ export class PostgresStoreWalletSessionStore implements StoreWalletSessionStore 
   }
 
   async claimActiveAccountAddress(record: StoreAccountAddressRecord): Promise<StoreAccountAddressRecord | undefined> {
-    // 单语句原子 CAS：已有 active 行时 SELECT 产出 0 行（不插入），
-    // 已撤销行经 conflict 分支条件重锚（两个并发重锚只有一个胜者）；
-    // 占位失败后回读既有 active 行交给服务层按 409 收敛。
     const claimed = await this.#database.query(
       `INSERT INTO store_account_address (address, account_id, status, anchored_at, anchor_session_id)
        SELECT $1, $2, 'active', $3, $4

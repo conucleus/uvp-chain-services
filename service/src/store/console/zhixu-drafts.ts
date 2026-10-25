@@ -27,7 +27,7 @@ import type {
 } from "../../governance/index.js";
 import type { ProjectionStore } from "../../storage/projection-store.js";
 import type { Address, Hex } from "../../shared/types.js";
-import { buildV3PublishMetadata, type V3PublishMetadata } from "../../v3/store-publishing.js";
+import { buildPublishMetadata, type PublishMetadata } from "../store-publishing.js";
 import type { PlanCapabilityTablesInput } from "../../indexer/projections/plan.js";
 import type { SemanticOraclePlan } from "../../indexer/semantic-oracle.js";
 import { isPlanRegisteredProjection } from "./version.js";
@@ -329,7 +329,7 @@ export interface StoreZhixuDraftWorkflowService {
   importDraft(input: unknown, publisherAddress: `0x${string}`): Promise<StoreZhixuDraftDTO>;
   getDraft(draftId: string): Promise<StoreZhixuDraftDTO | undefined>;
   compilePreview(draftId: string): Promise<StoreZhixuDraftDTO>;
-  getPublishMetadata(draftId: string): Promise<V3PublishMetadata | undefined>;
+  getPublishMetadata(draftId: string): Promise<PublishMetadata | undefined>;
   submitReview(
     draftId: string,
     input: unknown,
@@ -341,13 +341,13 @@ export interface StoreZhixuDraftWorkflowService {
 }
 
 export function createStoreZhixuDraftWorkflowService(options: {
-  readonly draftStore?: StoreZhixuDraftStore;
+  readonly draftStore: StoreZhixuDraftStore;
   readonly governanceService: GovernanceService;
   readonly projectionStore: ProjectionStore;
   readonly now?: () => Date;
   readonly draftIdFactory?: () => string;
 }): StoreZhixuDraftWorkflowService {
-  const draftStore = options.draftStore ?? new MemoryStoreZhixuDraftStore();
+  const draftStore = options.draftStore;
   const now = options.now ?? (() => new Date());
   const draftIdFactory = options.draftIdFactory ?? (() => `zhixu_draft_${randomUUID()}`);
 
@@ -425,7 +425,7 @@ export function createStoreZhixuDraftWorkflowService(options: {
       if (!preview) {
         return undefined;
       }
-      return buildV3PublishMetadata({
+      return buildPublishMetadata({
         config: {
           configId: draft.zhixuId ?? preview.planId,
           version: String(draft.productSchema?.version ?? 1),

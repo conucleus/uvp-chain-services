@@ -28,7 +28,7 @@ import { StorageConstraintError } from "./storage/errors.js";
 
 /**
  * Store 域的 postgres 持久化。
- * 集中一个模块以共享 row 装配助手；schema 见 migrations/postgres/0014、0015。
+ * 集中一个模块以共享 row 装配助手；schema 见 migrations/postgres/0001_schema.sql。
  */
 
 type Row = Record<string, unknown>;
@@ -224,8 +224,6 @@ export class PostgresStoreListingStore implements StoreListingStore {
     record: StoreListingRecord,
     expect?: StoreListingPrecondition
   ): Promise<{ applied: boolean; record: StoreListingRecord }> {
-    // 条件写入（CAS on status）：DO UPDATE 带 WHERE 前提，前提不成立的
-    // 并发抢先落为 0 行受影响；无前提时只插入不覆盖。
     const insert = `INSERT INTO store_zhixu_listing
            (listing_id, plan_id, plan_hash_claimed, deployment_id_claimed, state_machine_address_claimed,
             status, imported_by_address, imported_by_account_id, imported_at,
@@ -248,8 +246,6 @@ export class PostgresStoreListingStore implements StoreListingStore {
     try {
       result = await this.#database.query(sql, values);
     } catch (error) {
-      // listing_id 冲突已被 ON CONFLICT 吸收；约束命中只能是
-      // UNIQUE(plan_id)——并发导入同 plan 第二条 listing 的败者（与 sqlite 实现同口径）。
       if (error instanceof StorageConstraintError) {
         return { applied: false, record: await this.findListingByPlanId(record.planId) ?? record };
       }
@@ -352,9 +348,6 @@ export class PostgresStoreJoinApplicationStore implements StoreJoinApplicationSt
         applicationValues(record)
       );
     } catch (error) {
-      // application_id 冲突已被 ON CONFLICT 吸收；约束命中只能是
-      // 在途唯一索引 (plan_id, applicant_address)——并发双提交的败者
-      //（与 sqlite 实现同口径）。
       if (error instanceof StorageConstraintError) {
         throw new StoreJoinOpenApplicationExistsError();
       }
@@ -371,8 +364,6 @@ export class PostgresStoreJoinApplicationStore implements StoreJoinApplicationSt
     record: StoreJoinApplicationRecord,
     expected: StoreJoinApplicationStatus
   ): Promise<boolean> {
-    // 条件 UPDATE（CAS）：WHERE status = expected 保证并发终态迁移的
-    // 败者（rowCount 0）不得整行覆盖赢家的决策。
     const updated = await this.#database.query(
       `UPDATE store_join_application
        SET status = $1, supplier_id = $2, tx_evidence_json = $3::jsonb, rejection_reason = $4,

@@ -1,4 +1,4 @@
-export type StorageDriver = "memory" | "sqlite" | "postgres";
+export type StorageDriver = "postgres";
 
 export interface StorageAdapterLifecycle {
   readonly driver: StorageDriver;

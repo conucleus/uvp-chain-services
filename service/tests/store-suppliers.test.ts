@@ -1,12 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
+import { InMemoryGovernanceStore } from "../src/governance/index.js";
 import type { StoreSupplierDTO } from "@uvp-eth/product-dto";
 import {
   examplePlanIds,
   EXAMPLE_ZHIXU_ID,
 } from "./fixtures/business/index.js";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { exampleSchemaResolver } from "./example-schema.js";
 import {
   createGovernanceService,
@@ -14,10 +16,11 @@ import {
   type GovernanceChainRequestDTO,
 } from "../src/governance/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { PostgresDatabase } from "../src/storage/postgres-client.js";
+import type { ProjectionStore } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import {
-  createStoreSupplierService,
-  InMemoryStoreSupplierMetadataStore,
   type StoreSupplierAuditRecord,
   type StoreSupplierMetadataRecord,
 } from "../src/store/suppliers/index.js";
@@ -29,12 +32,73 @@ import type {
 import type { Address, Hex } from "../src/shared/types.js";
 import type { ProductOrderDraftDTO } from "../src/product/query/bff/types.js";
 
+let stores: ChainServicesStores;
+let cleanupDatabase: PostgresDatabase;
+
+beforeAll(async () => {
+  const databaseUrl = await createPostgresTestDatabase();
+  stores = createChainServicesStores({
+    database: { url: databaseUrl, migrationsAutoRun: true },
+    chainId: 31337
+  });
+  cleanupDatabase = new PostgresDatabase({ databaseUrl });
+});
+
+beforeEach(async () => {
+  // 各用例都用固定的 supplier-main/subjectId 断言 201 创建语义：清空供应商
+  // 元数据与审计表，保持用例间互不可见（同一克隆库内）。
+  await cleanupDatabase.query("DELETE FROM store_supplier_audit");
+  await cleanupDatabase.query("DELETE FROM store_supplier_metadata");
+  // identityStatus 来自 projectionStore 的 identity 投影（chain_event_log +
+  // chain_projection_snapshot），不清会把上一用例的绑定泄漏进本用例：
+  // 等价于原先每用例独立的 Memory projection store。
+  await stores.projectionStore.resetFromEvents({ deploymentBlock: 0n, events: [] });
+});
+
+afterAll(async () => {
+  await cleanupDatabase.close();
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
+
 const operatorWallet = "0x1234567890123456789012345678901234567890" as Address;
 
 const storeHeaders = {
   "x-uvp-store-operator-id": "store-operator-1",
   "x-uvp-store-operator-role": "store_operator",
-  // 红线：供应商写路由要求会话已锚定地址（本地联调走 dev 锚定头）。
   "x-uvp-store-dev-anchored-address": operatorWallet,
 };
 
@@ -44,7 +108,6 @@ const adminHeaders = {
   "x-uvp-store-dev-anchored-address": operatorWallet,
 };
 
-/** 本地联调的 dev 锚定头开关（仅非严格环境生效）。 */
 const devAnchoredStoreAuth = {
   mode: "dev_headers" as const,
   roleClaim: "roles",
@@ -105,8 +168,6 @@ const bindingId =
 
 describe("Store supplier directory API", () => {
   it("/store/search supplier facet requires authenticated store readers", async () => {
-    // 供应商命中暴露钱包精确匹配与审核状态：type=supplier 未认证即 401；
-    // all 查询对匿名静默剔除供应商命中；已认证 store 读身份可查。
     const { router } = await createRouter([]);
     await createSupplier(router, { reviewStatus: "approved_for_broadcast" });
 
@@ -141,10 +202,8 @@ describe("Store supplier directory API", () => {
   });
 
   it("supplier audit ids are store-generated and unique across service instances", async () => {
-    // 审计 ID 由存储端生成（audit_<uuid>），两个服务实例（模拟重启/
-    // 多实例）写入不冲突，不再依赖进程内 audit_000001 序号。
-    const metadataStore = new InMemoryStoreSupplierMetadataStore();
-    const buildRouter = () => createApiRouter(new MemoryProjectionStore(), {  productRuntimeEnvironment: "local",
+    const metadataStore = stores.storeSupplierMetadataStore;
+    const buildRouter = () => createApiRouter(stores.projectionStore, { ...requiredRouterStores(),  productRuntimeEnvironment: "local",
 
       productSchemaResolver: exampleSchemaResolver(),
       submissionChainId: 84532,
@@ -165,7 +224,7 @@ describe("Store supplier directory API", () => {
 
     const created = await createSupplier(router);
     expect(created.identityStatus).toBe("active");
-    expect(created.capabilityTags).toEqual(["example", "logistics"]);
+    expect(created.capabilityTags).toEqual(["example", "tag-1"]);
     expect(created.wallet).toBe(supplierWallet.toLowerCase());
     expect(created.proofRows).toContainEqual(
       expect.objectContaining({ value: "IdentityBindingRegistered" }),
@@ -175,7 +234,7 @@ describe("Store supplier directory API", () => {
       method: "GET",
       pathname: "/store/suppliers",
       headers: storeHeaders,
-      query: { identity: "active", tag: "logistics", query: "Shenzhen" },
+      query: { identity: "active", tag: "tag-1", query: "Main" },
     });
 
     expect(listResponse.status).toBe(200);
@@ -183,7 +242,7 @@ describe("Store supplier directory API", () => {
       .suppliers;
     expect(suppliers).toHaveLength(1);
     expect(suppliers[0]).toMatchObject({
-      supplierId: "supplier-shenzhen-logistics",
+      supplierId: "supplier-main",
       supplierSubjectId,
       identityStatus: "active",
       identityLabel: "身份映射有效",
@@ -192,31 +251,31 @@ describe("Store supplier directory API", () => {
   });
 
   it("projects identity status across registration and revocation replay", async () => {
-    const store = new MemoryProjectionStore();
-    const metadataStore = new InMemoryStoreSupplierMetadataStore();
-    let router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    const store = stores.projectionStore;
+    const metadataStore = stores.storeSupplierMetadataStore;
+    let router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
     await createSupplier(router);
 
-    const missing = await getSupplier(router, "supplier-shenzhen-logistics");
+    const missing = await getSupplier(router, "supplier-main");
     expect(missing.identityStatus).toBe("not_found");
 
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [identityRegisteredEvent(2n)],
     });
-    const registered = await getSupplier(router, "supplier-shenzhen-logistics");
+    const registered = await getSupplier(router, "supplier-main");
     expect(registered.identityStatus).toBe("active");
 
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [identityRegisteredEvent(2n), identityRevokedEvent(3n)],
     });
-    router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
-    const revoked = await getSupplier(router, "supplier-shenzhen-logistics");
+    const revoked = await getSupplier(router, "supplier-main");
     expect(revoked.identityStatus).toBe("revoked");
     expect(revoked.proofRows).toContainEqual(
       expect.objectContaining({ value: "IdentityBindingRevoked" }),
@@ -232,16 +291,13 @@ describe("Store supplier directory API", () => {
       (listResponse.body as { suppliers: StoreSupplierDTO[] }).suppliers,
     ).toContainEqual(
       expect.objectContaining({
-        supplierId: "supplier-shenzhen-logistics",
+        supplierId: "supplier-main",
         identityStatus: "revoked",
       }),
     );
   });
 
   it("preserves a concurrent review reversal when identity registration lands after it", async () => {
-    // 登记链读到 approved_for_broadcast 后广播期间，运营并发把审核翻成
-    // revoked：广播后的供应商整行写不得以过期快照复活被翻案的审核态；
-    // 登记事实由治理台账承载，审计行照常补记。
     const adapter: GovernanceChainAdapter = {
       async registerIdentity() {
         return {
@@ -262,15 +318,14 @@ describe("Store supplier directory API", () => {
         };
       },
     };
-    const backing = new InMemoryStoreSupplierMetadataStore();
+    const backing = stores.storeSupplierMetadataStore;
     let flipDuringBroadcast = false;
     const adapterWithFlip: GovernanceChainAdapter = {
       ...adapter,
       async registerIdentity(request) {
         if (flipDuringBroadcast) {
           flipDuringBroadcast = false;
-          // 广播期间运营翻案：审核态 revoked、钱包摘除。
-          const latest = await backing.getSupplier("supplier-shenzhen-logistics");
+          const latest = await backing.getSupplier("supplier-main");
           if (latest) {
             const { wallet: _wallet, ...rest } = latest;
             await backing.putSupplier({ ...rest, reviewStatus: "revoked" });
@@ -279,26 +334,27 @@ describe("Store supplier directory API", () => {
         return adapter.registerIdentity(request);
       },
     };
-    const projectionStore = new MemoryProjectionStore();
+    const projectionStore = stores.projectionStore;
     const router = createApiRouter(projectionStore, {
+      ...requiredRouterStores(),
       productSchemaResolver: exampleSchemaResolver(),
       submissionChainId: 84532,
       submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeAuthConfig: devAnchoredStoreAuth,
       productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: backing,
-      governanceService: createGovernanceService({ adapter: adapterWithFlip }),
+      governanceService: createGovernanceService({
+    store: new InMemoryGovernanceStore(), adapter: adapterWithFlip }),
     });
     await createSupplier(router, { reviewStatus: "approved_for_broadcast" });
-    // 登记前置：供应商先过运营审核（治理侧落 supplier review）。
     const review = await router.handle({
       method: "POST",
-      pathname: "/store/suppliers/supplier-shenzhen-logistics/review",
+      pathname: "/store/suppliers/supplier-main/review",
       headers: storeHeaders,
       body: {
         reviewStatus: "approved_for_broadcast",
         publicSummary: "Approved for Store broadcast.",
-        confirmation: { supplierId: "supplier-shenzhen-logistics" },
+        confirmation: { supplierId: "supplier-main" },
       },
     });
     expect(review.status).toBe(200);
@@ -306,19 +362,19 @@ describe("Store supplier directory API", () => {
     flipDuringBroadcast = true;
     const registration = await router.handle({
       method: "POST",
-      pathname: "/store/suppliers/supplier-shenzhen-logistics/request-identity-registration",
+      pathname: "/store/suppliers/supplier-main/request-identity-registration",
       headers: adminHeaders,
-      body: { confirmation: { supplierId: "supplier-shenzhen-logistics" } },
+      body: { confirmation: { supplierId: "supplier-main" } },
     });
     expect(registration.status).toBe(202);
     expect(
       (registration.body as { supplier: StoreSupplierDTO }).supplier,
     ).toMatchObject({ reviewStatus: "revoked" });
     await expect(
-      backing.getSupplier("supplier-shenzhen-logistics"),
+      backing.getSupplier("supplier-main"),
     ).resolves.toMatchObject({ reviewStatus: "revoked" });
     expect(
-      (await backing.listAudits("supplier-shenzhen-logistics")).some(
+      (await backing.listAudits("supplier-main")).some(
         (audit) => audit.action === "request_identity_registration",
       ),
     ).toBe(true);
@@ -348,46 +404,49 @@ describe("Store supplier directory API", () => {
         };
       },
     };
-    const metadataStore = new InMemoryStoreSupplierMetadataStore();
-    const projectionStore = new MemoryProjectionStore();
-    const router = createApiRouter(projectionStore, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    const metadataStore = stores.storeSupplierMetadataStore;
+    const projectionStore = stores.projectionStore;
+    const router = createApiRouter(projectionStore, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
-      governanceService: createGovernanceService({ adapter }),
+      governanceService: createGovernanceService({
+    store: new InMemoryGovernanceStore(), adapter }),
     });
     await createSupplier(router);
 
     const review = await router.handle({
       method: "POST",
-      pathname: "/store/suppliers/supplier-shenzhen-logistics/review",
+      pathname: "/store/suppliers/supplier-main/review",
       headers: storeHeaders,
       body: {
         reviewStatus: "approved_for_broadcast",
-        capabilityTags: ["inspection", "logistics"],
-        supportedRoleSlotIds: ["example-broker", "logistics-operator"],
+        capabilityTags: ["tag-2", "tag-1"],
+        supportedRoleSlotIds: ["slot-b", "slot-c"],
         supportedStageIds: ["stage-a"],
         publicSummary: "Approved for Store broadcast.",
         confirmation: {
-          supplierId: "supplier-shenzhen-logistics",
+          supplierId: "supplier-main",
         },
       },
     });
     expect(review.status).toBe(200);
+    // 服务端 normalizeCapabilityTags 会把标签规范化为去重+排序形态：
+    // 请求里故意乱序传 ["tag-2", "tag-1"]，回读必须是排序后的规范序。
     expect(
       (review.body as { supplier: StoreSupplierDTO }).supplier,
     ).toMatchObject({
-      capabilityTags: ["inspection", "logistics"],
-      supportedRoleSlotIds: ["example-broker", "logistics-operator"],
+      capabilityTags: ["tag-1", "tag-2"],
+      supportedRoleSlotIds: ["slot-b", "slot-c"],
       supportedStageIds: ["stage-a"],
     });
 
     const registration = await router.handle({
       method: "POST",
       pathname:
-        "/store/suppliers/supplier-shenzhen-logistics/request-identity-registration",
+        "/store/suppliers/supplier-main/request-identity-registration",
       headers: adminHeaders,
       body: {
         confirmation: {
-          supplierId: "supplier-shenzhen-logistics",
+          supplierId: "supplier-main",
         },
       },
     });
@@ -413,12 +472,12 @@ describe("Store supplier directory API", () => {
     const revoke = await router.handle({
       method: "POST",
       pathname:
-        "/store/suppliers/supplier-shenzhen-logistics/request-identity-revocation",
+        "/store/suppliers/supplier-main/request-identity-revocation",
       headers: adminHeaders,
       body: {
         reason: "Operator review requested revocation.",
         confirmation: {
-          supplierId: "supplier-shenzhen-logistics",
+          supplierId: "supplier-main",
         },
       },
     });
@@ -429,23 +488,23 @@ describe("Store supplier directory API", () => {
     ]);
 
     const tagAudit = (
-      await metadataStore.listAudits("supplier-shenzhen-logistics")
+      await metadataStore.listAudits("supplier-main")
     ).find(
       (audit): audit is StoreSupplierAuditRecord =>
         audit.action === "tags_updated",
     );
     expect(tagAudit).toMatchObject({
-      beforeTags: ["example", "logistics"],
-      afterTags: ["inspection", "logistics"],
-      beforeSupportedRoleSlotIds: ["delivery"],
-      afterSupportedRoleSlotIds: ["example-broker", "logistics-operator"],
-      beforeSupportedStageIds: ["example-complete", "shipping"],
+      beforeTags: ["example", "tag-1"],
+      afterTags: ["tag-1", "tag-2"],
+      beforeSupportedRoleSlotIds: ["slot-a"],
+      afterSupportedRoleSlotIds: ["slot-b", "slot-c"],
+      beforeSupportedStageIds: ["example-complete", "stage-1"],
       afterSupportedStageIds: ["stage-a"],
     });
 
     const auditReadback = await router.handle({
       method: "GET",
-      pathname: "/store/suppliers/supplier-shenzhen-logistics/audits",
+      pathname: "/store/suppliers/supplier-main/audits",
       headers: storeHeaders,
     });
     expect(auditReadback.status).toBe(200);
@@ -457,11 +516,11 @@ describe("Store supplier directory API", () => {
         expect.objectContaining({
           action: "tags_updated",
           actor: "store-operator-1",
-          beforeTags: ["example", "logistics"],
-          afterTags: ["inspection", "logistics"],
-          beforeSupportedRoleSlotIds: ["delivery"],
-          afterSupportedRoleSlotIds: ["example-broker", "logistics-operator"],
-          beforeSupportedStageIds: ["example-complete", "shipping"],
+          beforeTags: ["example", "tag-1"],
+          afterTags: ["tag-1", "tag-2"],
+          beforeSupportedRoleSlotIds: ["slot-a"],
+          afterSupportedRoleSlotIds: ["slot-b", "slot-c"],
+          beforeSupportedStageIds: ["example-complete", "stage-1"],
           afterSupportedStageIds: ["stage-a"],
         }),
       ]),
@@ -470,8 +529,8 @@ describe("Store supplier directory API", () => {
 
 
   it("counts open tasks by the supplier wallet stored in Store metadata", async () => {
-    const store = new MemoryProjectionStore();
-    const metadataStore = new InMemoryStoreSupplierMetadataStore();
+    const store = stores.projectionStore;
+    const metadataStore = stores.storeSupplierMetadataStore;
     const published = planPublishWithVocabulary();
     await store.resetFromEvents({
       deploymentBlock: 0n,
@@ -493,7 +552,7 @@ describe("Store supplier directory API", () => {
         }),
       ],
     });
-    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
 
@@ -503,13 +562,13 @@ describe("Store supplier directory API", () => {
       supplierSubjectId: metadataOnlySupplierSubjectId,
       displayName: "Wallet Only Supplier",
       wallet: metadataOnlyWallet,
-      capabilityTags: ["inspection"],
-      supportedRoleSlotIds: ["inspection"],
+      capabilityTags: ["tag-2"],
+      supportedRoleSlotIds: ["slot-e2"],
       supportedStageIds: ["stage-a"],
     });
 
     await expect(
-      getSupplier(router, "supplier-shenzhen-logistics"),
+      getSupplier(router, "supplier-main"),
     ).resolves.toMatchObject({
       supplierSubjectId,
       identityStatus: "active",
@@ -543,27 +602,27 @@ describe("Store supplier directory API", () => {
     await expect(
       router.handle({
         method: "POST",
-        pathname: "/store/suppliers/supplier-shenzhen-logistics/review",
+        pathname: "/store/suppliers/supplier-main/review",
         body: { reviewStatus: "submitted" },
       }),
     ).resolves.toMatchObject({ status: 401 });
     await expect(
       router.handle({
         method: "GET",
-        pathname: "/store/suppliers/supplier-shenzhen-logistics/audits",
+        pathname: "/store/suppliers/supplier-main/audits",
       }),
     ).resolves.toMatchObject({ status: 401 });
   });
 
   it("requires store.supplier.tags.update for role-slot and stage support edits", async () => {
-    const metadataStore = new InMemoryStoreSupplierMetadataStore();
-    const store = new MemoryProjectionStore();
-    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    const metadataStore = stores.storeSupplierMetadataStore;
+    const store = stores.projectionStore;
+    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
     });
     await createSupplier(router);
 
-    const reviewOnlyRouter = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
+    const reviewOnlyRouter = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
       storeSupplierMetadataStore: metadataStore,
       storeIdentityProvider: reviewOnlyStoreIdentityProvider(),
     });
@@ -571,10 +630,10 @@ describe("Store supplier directory API", () => {
     await expect(
       reviewOnlyRouter.handle({
         method: "POST",
-        pathname: "/store/suppliers/supplier-shenzhen-logistics/review",
+        pathname: "/store/suppliers/supplier-main/review",
         body: {
           reviewStatus: "submitted",
-          supportedRoleSlotIds: ["example-broker"],
+          supportedRoleSlotIds: ["slot-b"],
           supportedStageIds: ["stage-a"],
         },
       }),
@@ -590,12 +649,12 @@ describe("Store supplier directory API", () => {
 
 async function createRouter(events: readonly ChainEvent[]): Promise<{
   readonly router: ApiRouter;
-  readonly store: MemoryProjectionStore;
+  readonly store: ProjectionStore;
 }> {
-  const store = new MemoryProjectionStore();
+  const store = stores.projectionStore;
   await store.resetFromEvents({ deploymentBlock: 0n, events });
   return {
-    router: createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const }),
+    router: createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const }),
     store,
   };
 }
@@ -604,13 +663,13 @@ function supplierBody(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
-    supplierId: "supplier-shenzhen-logistics",
+    supplierId: "supplier-main",
     supplierSubjectId,
-    displayName: "Shenzhen Logistics Partner",
+    displayName: "Main Partner",
     wallet: supplierWallet,
-    capabilityTags: ["logistics", "example"],
-    supportedRoleSlotIds: ["delivery"],
-    supportedStageIds: ["example-complete", "shipping"],
+    capabilityTags: ["tag-1", "example"],
+    supportedRoleSlotIds: ["slot-a"],
+    supportedStageIds: ["example-complete", "stage-1"],
     registryAddresses: [registryAddress],
     ...overrides,
   };
@@ -629,7 +688,6 @@ function reviewOnlyStoreIdentityProvider(): StoreIdentityProvider {
           "store.supplier.review",
         ],
         authMode: "jwt",
-        // 锚定地址已具备（红线门槛通过），本测试断言的是能力差集。
         anchoredAddress: operatorWallet,
         canWrite: true,
         canAdmin: false,
@@ -722,7 +780,6 @@ async function getSupplier(
   router: ApiRouter,
   supplierId: string,
 ): Promise<StoreSupplierDTO> {
-  // 读面鉴权——测试请求带上已认证的 store 头。
   const response = await router.handle({
     method: "GET",
     pathname: `/store/suppliers/${supplierId}`,
@@ -732,7 +789,6 @@ async function getSupplier(
   return (response.body as { supplier: StoreSupplierDTO }).supplier;
 }
 
-/** 建单者会话头：createdBy 服务端派生（会话锚定），不再自报 body。 */
 const creatorHeaders = { "x-uvp-wallet-address": operatorWallet };
 
 async function createDraft(router: ApiRouter): Promise<ProductOrderDraftDTO> {
@@ -743,9 +799,9 @@ async function createDraft(router: ApiRouter): Promise<ProductOrderDraftDTO> {
     body: {
       zhixuId: EXAMPLE_ZHIXU_ID,
       title: "A company purchase",
-      businessType: "parallel-export",
+      businessType: "type-1",
       totalAmount: "10000",
-      currency: "USDC",
+      currency: "tok-1",
     },
   });
   expect(response.status).toBe(201);
@@ -818,10 +874,6 @@ function planRegisteredEvent(blockNumber: bigint): ChainEvent {
   });
 }
 
-/**
- * 词表产物富集夹具：两步发布事件对（PlanCommitted/PlanFinalized 携带
- * capabilitiesRoot）+ 配对的富集源，供 openTaskCount 等词表驱动断言。
- */
 function planPublishWithVocabulary(): {
   readonly events: readonly ChainEvent[];
   readonly tables: readonly PlanCapabilityTablesInput[];
@@ -933,7 +985,7 @@ function stateMachineTaskEvents(input: {
       sourceId: stageId,
       signalId: hookName,
       submitter: input.wallet,
-      role: bytes32Text("example-broker"),
+      role: bytes32Text("slot-b"),
       metadataHash,
     }),
     chainEvent(input.blockNumber + 3n, 0, "HookReady", {

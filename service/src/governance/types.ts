@@ -38,11 +38,6 @@ export interface GovernanceReviewDTO {
   readonly reviewer: string;
   readonly createdAt: string;
   readonly updatedAt: string;
-  /**
-   * 哈希材料原文（metadata/policy）随 review 记录
-   * 持久化：registerIdentity 重建 descriptor 哈希时必须有原文可用，
-   * 缺失会按 null 参与哈希，造成同一 review 两处哈希口径分叉。
-   */
   readonly metadataDocument?: unknown;
   readonly policyDocument?: unknown;
 }
@@ -112,7 +107,6 @@ export interface IdentityTxLogDTO extends TxReconcileFields {
   readonly requester: string;
   readonly status: GovernanceTxLogStatus;
   readonly broadcastStatus: GovernanceBroadcastStatus;
-  /** Explicit marker for how the entry was produced; "simulated" entries never hit chain and are skipped by reconciliation. */
   readonly executionMode?: "simulated" | "on_chain";
   readonly errorCode?: string;
   readonly errorMessage?: string;

@@ -152,9 +152,6 @@ function readinessReasons(input: {
   if (input.proof.orderProofEventCount === 0 || input.proof.taskProofRowCount === 0) {
     reasons.push("no_chain_proof");
   }
-  // B5 裁决：staging 的链上时钟拨表面必须在场——timer keeper 未启用或
-  // 私钥角色未装配（enabled+key 一致）即红。dock keeper 的 no-op 是链轨
-  // 无 route 投影源的既定形态（reason 见 automation 摘要），不计红。
   if (input.profile.environment === "staging" && input.automation.timerKeeperReady !== true) {
     reasons.push("timer_keeper_not_assembled");
   }
@@ -222,8 +219,6 @@ function indexerSummary(diagnostics: JsonRecord): JsonRecord {
     eventCount: numberOf(indexer?.eventCount),
     lastEventName: stringOrNull(indexer?.lastEventName),
     rebuildStatus,
-    // staging readiness 的 rebuild "unknown" 不视为就绪——重建状态未知的
-    // 部署不得宣告 ready，只有 completed/idle 算就绪。
     rebuildReady: rebuildStatus === "completed" || rebuildStatus === "idle",
     rebuild: {
       status: rebuildStatus,

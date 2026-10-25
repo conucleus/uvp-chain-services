@@ -1,32 +1,15 @@
 import type { Address, Hex } from "../../shared/types.js";
 
-/**
- * Store 身份与会话。
- *
- * 会话配对：Store 登录会话 ↔ 责任主体钱包地址。签名证明（SIWE 式
- * personal_sign challenge）建立"该会话控制该地址"的事实；服务端只保存
- * token 哈希与挑战记录，不接触私钥。
- *
- * 一个账号（account）可关联多个地址（凝结核团队成员）；敏感操作要求
- * 会话已锚定地址（见 route 层 requireAnchoredStoreAddress）。
- */
+// Store 身份与会话：SIWE 式 personal_sign challenge 建立"登录会话控制
+// 该钱包地址"的事实，服务端只保存 token 哈希与挑战记录，不接触私钥。
 
 export type StoreAccountAddressStatus = "active" | "revoked";
 
 export interface StoreAuthChallengeRecord {
-  /** 单次使用的随机 nonce（32 字符 hex）。 */
   readonly nonce: string;
   readonly address: Address;
-  /**
-   * 签发请求方标识（连接对端地址；取不到时为共享兜底桶）。
-   * challenge 入口匿名且 address 由调用方自报——若只按目标地址配额，
-   * 任何人连发满额即可锁死任意受害地址的 Store 登录；请求方维度配额
-   * 把囤积成本留在攻击者自己的请求方桶里。
-   */
   readonly requesterKey: string;
-  /** 会话意图：登录或为既有账号锚定新地址。 */
   readonly intent: "login" | "anchor_address";
-  /** anchor_address 意图下的目标账号。 */
   readonly accountId?: string;
   readonly message: string;
   readonly issuedAt: string;
@@ -36,7 +19,6 @@ export interface StoreAuthChallengeRecord {
 
 export interface StoreWalletSessionRecord {
   readonly sessionId: string;
-  /** token 的 SHA-256；原始 token 只下发一次，不落库。 */
   readonly tokenHash: string;
   readonly accountId: string;
   readonly anchoredAddress: Address;
@@ -58,16 +40,6 @@ export interface StoreAccountAddressRecord {
 }
 
 export interface StoreWalletSessionStore {
-  /**
-   * 原子签发：同一地址的存活挑战（未消费且未过期）达到
-   * maxLivePerAddress，或同一请求方（requesterKey）跨全部地址的存活
-   * 挑战达到 maxLivePerRequester 时拒绝写入并返回 false。双键都防的是
-   * 匿名入口的定向锁死：仅按地址配额时任一请求方可替受害者把配额
-   * 占满，仅按请求方配额时协同多方仍可围攻单地址。配额判定与写入
-   * 必须处于存储层同一原子边界（内存驱动同步完成 / sqlite 单写连接 /
-   * postgres 事务内按地址+请求方咨询锁）——服务层"先数后写"的窗口会被
-   * 并发请求整体穿透（配额形同虚设）。返回 true 表示挑战已落库。
-   */
   putChallengeWithinAddressQuota(
     record: StoreAuthChallengeRecord,
     options: {
@@ -79,59 +51,17 @@ export interface StoreWalletSessionStore {
   getChallenge(nonce: string): Promise<StoreAuthChallengeRecord | undefined>;
   listChallengesForAddress(address: Address): Promise<readonly StoreAuthChallengeRecord[]>;
   updateChallenge(record: StoreAuthChallengeRecord): Promise<void>;
-  /**
-   * 挑战一次性占位的条件 UPDATE——
-   * `UPDATE ... SET consumed_at = ? WHERE nonce = ? AND consumed_at IS NULL`，
-   * 仅当确实占位成功（行数=1）才返回占位后的记录；并发重放同一 nonce
-   * 只有一个请求能通过（burn-on-attempt 原子化）。
-   */
   consumeChallenge(nonce: string, consumedAt: string): Promise<StoreAuthChallengeRecord | undefined>;
-  /**
-   * 过期挑战清扫：删除 expires_at < expiresBefore 的行（含已消费的），
-   * 返回删除行数。challenge 入口未鉴权且只插不删会把表/内存无界放大
-   * （DoS）；由服务层在写入时顺带触发，三种驱动同口径。过期行无论
-   * 是否消费都不再参与任何判定（verify 对过期/未知一律拒绝）。
-   */
   deleteExpiredChallenges(expiresBefore: string): Promise<number>;
-  /**
-   * 过期会话清扫：删除 expires_at < expiresBefore 的行（含已撤销的），
-   * 返回删除行数。过期会话对 resolve 一律拒绝、无判定价值，会话行随
-   * 登录只增不删同样无界放大；与挑战清扫同批触发、同口径。
-   */
   deleteExpiredSessions(expiresBefore: string): Promise<number>;
 
-  /**
-   * 纯插入：会话行只由 verify 铸造（sessionId/tokenHash 全新），行已存在
-   * 即视为被抢先，不覆盖。可覆盖既有行的 upsert 会把并发撤销落下的
-   * revoked_at 写回 NULL——已登出会话在 TTL 内复活。
-   */
   putSession(record: StoreWalletSessionRecord): Promise<void>;
   findSessionByTokenHash(tokenHash: string): Promise<StoreWalletSessionRecord | undefined>;
-  /**
-   * lastSeen 刷新（touch 语义）：仅当行未撤销（revoked_at IS NULL）时推进
-   * last_seen_at 的条件更新，不携带其他列。返回 false 表示行已被并发撤销
-   * 或已过期清扫——调用方按已撤销处理，不得回写先前读到的整行快照。
-   */
   touchSession(sessionId: string, lastSeenAt: string): Promise<boolean>;
-  /**
-   * 撤销的条件更新：仅当行未撤销时落下撤销事实（撤销不可逆，无取消
-   * 路径）。返回 false 表示并发撤销已先行，现行撤销事实保持不变。
-   */
   revokeSession(sessionId: string, revokedAt: string, revokedReason: string): Promise<boolean>;
 
   putAccountAddress(record: StoreAccountAddressRecord): Promise<void>;
-  /**
-   * 锚定 CAS：原子地为一地址落 active 锚定行。已存在 active 行时返回
-   * 该行且不写入（并发双 verify 的败者据此按 409 收敛，不会落第二条
-   * active）；行已撤销时按 UPDATE ... WHERE status='revoked' 重锚，与
-   * 并发重锚互斥（仅一个胜者）。写入成功返回 undefined。
-   */
   claimActiveAccountAddress(record: StoreAccountAddressRecord): Promise<StoreAccountAddressRecord | undefined>;
-  /**
-   * 撤销 CAS：仅当地址行仍属该账号且 active 时翻 revoked
-   * （UPDATE ... WHERE address=? AND account_id=? AND status='active'）。
-   * 返回 false 表示并发方已先完成撤销/重锚，调用方回读最新状态收口。
-   */
   revokeActiveAccountAddress(input: {
     readonly address: Address;
     readonly accountId: string;

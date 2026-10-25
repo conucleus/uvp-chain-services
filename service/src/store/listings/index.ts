@@ -11,8 +11,6 @@ export {
   verifyListingAnchors,
   anchorVerificationAllowsPublish
 } from "./verify.js";
-export { InMemoryStoreListingStore } from "./memory-store.js";
-export { SqliteStoreListingStore } from "./sqlite-store.js";
 export {
   StoreListingServiceError,
   type ListingAnchorChainView,

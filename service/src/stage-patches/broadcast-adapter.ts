@@ -29,10 +29,6 @@ import type {
   StageResourcePatchBroadcastAdapter
 } from "./types.js";
 
-// applyStageExecutorPatchFor/applyStageResourcePatchFor 的 ABI 以
-// @uvp-eth/protocol-bindings 导出的
-// STAGE_PATCH_MODULE_ABI（fixtures 同源）与调用构造器为准，杜绝本地漂移
-//（本地副本缺 planId 首参时广播必然在链上 revert）。
 export type StateMachineStagePatchCall =
   | ApplyStageExecutorPatchForCall
   | ApplyStageResourcePatchForCall;
@@ -43,7 +39,6 @@ export interface StateMachineStagePatchPublicClient {
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
   } | undefined>;
-  /** duplicate-transaction 车道的回执探针（viem publicClient 自带同签名）。 */
   getTransactionReceipt?(args: { readonly hash: Hex }): Promise<{
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
@@ -76,7 +71,6 @@ const BROADCAST_LABEL = "stage patch broadcast";
 export type StateMachineStageExecutorPatchBroadcastAdapterOptions = StateMachineStagePatchBroadcastAdapterOptions;
 export type StateMachineStageResourcePatchBroadcastAdapterOptions = StateMachineStagePatchBroadcastAdapterOptions;
 
-/** 分类标签随工厂导出：conformance 测试复用同一份标签做"revert 名→检测模式"锁定。 */
 export const STAGE_EXECUTOR_PATCH_BROADCAST_LABELS: StagePatchBroadcastAdapterLabels<
   PreparedStageExecutorPatchDTO,
   import("./types.js").StageExecutorPatchBroadcastRequest
@@ -177,11 +171,8 @@ type StagePatchBroadcastRequestBase<TPrepared extends PreparedPatchForBroadcast>
   readonly signature: Hex;
   readonly recoveredSelector: Address;
   readonly previousExecutorSignature?: Hex;
-  /** 词表 Merkle 造证（submit 时从 plan 投影构造，fail-closed）。 */
   readonly bindingProof: SelectorBindingPayload;
-  /** 候选集成员证明（UB-36②③，仅 executor 档消费）。 */
   readonly candidateProof?: readonly Hex[];
-  /** patch 生效授权集（UB-36①，仅 executor 档消费）。 */
   readonly executorAuthorizations?: readonly SignalAuthorizationPayload[];
 };
 
@@ -257,9 +248,6 @@ function createStagePatchBroadcastAdapter<
         );
       }
 
-      // 与 submissions 同构：chain-id 预检是一次普通 RPC 往返，传输故障必须
-      // 分类为 failed 广播结果，绝不允许抛穿调用方（抛穿会在未记录任何提交
-      // 的情况下消耗预留 nonce）。
       let rpcChainId: number | undefined;
       try {
         rpcChainId = await publicClient.getChainId?.();
@@ -288,10 +276,6 @@ function createStagePatchBroadcastAdapter<
         }, request.prepared, request));
       } catch (error) {
         const classified = classifyStagePatchBroadcastError(error, labels);
-        // duplicate-transaction 三车道（nonce too low / already known /
-        // replacement underpriced）不是终态失败：交易可能已上链或仍在池中，
-        // 先按候选 txHash 探回执裁决（成功按 submitted 落账、revert 终态、
-        // 未知可重试并保留候选哈希），机制单源在 shared/broadcast。
         if (classified.errorCode === "duplicate_transaction") {
           const getReceipt = publicClient.getTransactionReceipt
             ? (txHash: Hex) => publicClient.getTransactionReceipt!({ hash: txHash })
@@ -366,9 +350,6 @@ function createStagePatchBroadcastAdapter<
         if (receipt?.status === "reverted" || receipt?.status === "failed") {
           return failedResult("transaction_reverted", "transaction reverted", false, gasPayer, txHash, receipt.blockNumber?.toString());
         }
-        // Do not treat an absent receipt or an extension/unknown status as a
-        // successful submission. The transaction hash is retained so an
-        // operator/reconcile path can inspect it without broadcasting again.
         if (receipt?.status !== "success") {
           return failedResult(
             "transaction_receipt_unknown",
@@ -430,18 +411,6 @@ interface ClassifiedBroadcastError {
   readonly retryable: boolean;
 }
 
-/**
- * stage patch 广播错误的分类（viem 抛穿 writeContract/getChainId 的错误）。
- * 导出供 error-taxonomy conformance 测试做"合约 revert 名→检测模式"锁定；
- * 合约错误名以权威 ABI 为准——UVPStateMachine 的错误名可从
- * @uvp-eth/protocol-bindings 的 UVP_STATE_MACHINE_ARTIFACT_ABI 交叉验证
- * （error-taxonomy conformance 测试锁定），UVPStagePatchModule 自身的错误
- * 名以合约源为准。检测串必须是真实合约错误名：近似名（如历史上的
- * "StaleStagePatchNonce"/"UnauthorizedStageSelector"）与真实名
- * （StageExecutorPatchNonceNotIncreasing/UnauthorizedStageExecutorPatchSelector）
- * 互不为子串，失配会让一切持久性 revert 落进泛 retryable 分支，同一
- * prepare 被无限重试链上必拒的变更。
- */
 export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatchForBroadcast>(
   error: unknown,
   labels: StagePatchBroadcastAdapterLabels<
@@ -494,10 +463,6 @@ export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatch
       retryable: false
     };
   }
-  // 候选集闸（UB-36②③）：无候选集（EMPTY_ROOT）或 (targetStageId,
-  // executor) 不在集内同报 StageExecutorNotCandidate——持久 revert，重试
-  // 同一签名载荷无意义（候选集随 plan commit 冻结，只能换执行者重新
-  // prepare）。
   if (haystack.includes("StageExecutorNotCandidate")) {
     return {
       errorCode: "executor_not_in_candidate_set",
@@ -505,9 +470,6 @@ export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatch
       retryable: false
     };
   }
-  // UnknownOrder 先于泛 reverted 判定：viem 的合约执行错误文本同时含
-  // "reverted." 与 "Error: UnknownOrder()"，泛规则在前会把"订单尚未注册/
-  // 索引未跟上"的典型瞬态永久死信（对齐 submissions 广播分类器的既有规则）。
   if (haystack.includes("UnknownOrder")) {
     return {
       errorCode: "unknown_order",
@@ -515,9 +477,6 @@ export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatch
       retryable: true
     };
   }
-  // duplicate-transaction 车道（broadcaster 的 nonce 冲突三形态）：基础判定
-  // 对齐 taxonomy nonce_conflict 单值裁决（A-30：可重试、不死信——换新 gas
-  // nonce 重组装即自愈），broadcast() 捕获口仍先走回执探针裁决改判。
   if (/nonce too low|replacement transaction underpriced|already known/i.test(haystack)) {
     return {
       errorCode: "duplicate_transaction",
@@ -532,10 +491,6 @@ export function classifyStagePatchBroadcastError<TPrepared extends PreparedPatch
       retryable: true
     };
   }
-  // 泛 revert 兜底（对齐 submissions/broadcast-adapter 既有规则）：发送前
-  // viem 的 gas 预估（estimateGas）对必拒交易抛泛 revert——真实执行失败按
-  // 永久失败处理，继续按可重试无限重放同一签名载荷只会重复烧 gas。位置
-  // 必须在 UnknownOrder/timeout 等瞬态判定之后，否则复合文本的瞬态被误判。
   if (/execution reverted|transaction reverted|reverted/i.test(haystack)) {
     return {
       errorCode: "transaction_reverted",

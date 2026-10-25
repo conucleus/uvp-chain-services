@@ -1,27 +1,27 @@
-// V3 字段级读投影：按 VisibilityDecision 裁剪 order/stage/slot/标准/句柄。所有裁剪在服务端完成；DTO 允许字段由 scope 决定，调用方不得
+// 字段级读投影：按 VisibilityDecision 裁剪 order/stage/slot/标准/句柄。所有裁剪在服务端完成；DTO 允许字段由 scope 决定，调用方不得
 // 把未授权字段“删掉后当 empty”返回。locator/URI 永不出现在句柄列表。
 
-import type { ConfigFileResourceRefV3, ConfigStageV3 } from "@uvp-eth/product-dto";
-import type { OrderV3VisibilitySnapshot } from "../order/v3/service.js";
-import type { OrderStageRecord, OrderStageSlotRecord } from "../order/v3/types.js";
-import { OrderV3Error } from "../order/v3/types.js";
+import type { ConfigFileResourceRef, ConfigStage } from "@uvp-eth/product-dto";
+import type { OrderVisibilitySnapshot } from "../order/service.js";
+import type { OrderStageRecord, OrderStageSlotRecord } from "../order/types.js";
+import { OrderError } from "../order/types.js";
 import type {
-  HandleViewV3,
-  OperatorOrderViewV3,
-  OrderViewV3,
-  ResourceListViewV3,
-  SlotViewV3,
-  StageViewResponseV3,
-  StageViewV3,
-  StandardViewV3,
+  HandleView,
+  OperatorOrderView,
+  OrderView,
+  ResourceListView,
+  SlotView,
+  StageViewResponse,
+  StageView,
+  StandardView,
   VisibilityDecision,
 } from "./types.js";
 
-export function projectOrder(decision: VisibilityDecision, snapshot: OrderV3VisibilitySnapshot): OrderViewV3 {
+export function projectOrder(decision: VisibilityDecision, snapshot: OrderVisibilitySnapshot): OrderView {
   const stages = snapshot.stages
     .filter((stage) => decision.stageKeys.has(stage.stageKey))
     .map((stage) => projectStageView(decision, snapshot, stage));
-  const base: OrderViewV3 = {
+  const base: OrderView = {
     orderId: snapshot.order.orderId,
     dataState: "ok",
     stages,
@@ -56,9 +56,9 @@ export function projectOrder(decision: VisibilityDecision, snapshot: OrderV3Visi
 
 export function projectStage(
   decision: VisibilityDecision,
-  snapshot: OrderV3VisibilitySnapshot,
+  snapshot: OrderVisibilitySnapshot,
   stage: OrderStageRecord,
-): StageViewResponseV3 {
+): StageViewResponse {
   return {
     order: projectOrder(decision, snapshot),
     stage: projectStageView(decision, snapshot, stage),
@@ -69,10 +69,10 @@ export function projectStage(
 export function projectResources(
   decision: VisibilityDecision,
   stageKey: string,
-  stageConfig: ConfigStageV3 | undefined,
-): ResourceListViewV3 {
+  stageConfig: ConfigStage | undefined,
+): ResourceListView {
   if (!decision.allowed.evidenceHandles || decision.scope === "operator") {
-    throw new OrderV3Error(403, "visibility_denied", "the current scope cannot read stage file handles", {
+    throw new OrderError(403, "visibility_denied", "the current scope cannot read stage file handles", {
       resource: "file_resources",
       stageKey,
     });
@@ -85,10 +85,10 @@ export function projectResources(
 
 export function projectOperatorOrder(
   decision: VisibilityDecision,
-  snapshot: OrderV3VisibilitySnapshot,
-): OperatorOrderViewV3 {
+  snapshot: OrderVisibilitySnapshot,
+): OperatorOrderView {
   if (decision.scope !== "operator") {
-    throw new OrderV3Error(404, "order_not_found", "order was not found");
+    throw new OrderError(404, "order_not_found", "order was not found");
   }
   return {
     orderId: snapshot.order.orderId,
@@ -106,9 +106,9 @@ export function projectOperatorOrder(
 
 function projectStageView(
   decision: VisibilityDecision,
-  snapshot: OrderV3VisibilitySnapshot,
+  snapshot: OrderVisibilitySnapshot,
   stage: OrderStageRecord,
-): StageViewV3 {
+): StageView {
   if (decision.scope === "operator") {
     return {
       stageKey: stage.stageKey,
@@ -148,7 +148,7 @@ function projectStageView(
   };
 }
 
-function slotView(slot: OrderStageSlotRecord, full: boolean): SlotViewV3 {
+function slotView(slot: OrderStageSlotRecord, full: boolean): SlotView {
   return {
     slotKey: slot.slotKey,
     required: slot.required,
@@ -159,7 +159,7 @@ function slotView(slot: OrderStageSlotRecord, full: boolean): SlotViewV3 {
   };
 }
 
-function standardView(standard: NonNullable<OrderStageRecord["standard"]>): StandardViewV3 {
+function standardView(standard: NonNullable<OrderStageRecord["standard"]>): StandardView {
   return {
     name: standard.name,
     ...(standard.version !== undefined ? { version: standard.version } : {}),
@@ -167,7 +167,7 @@ function standardView(standard: NonNullable<OrderStageRecord["standard"]>): Stan
   };
 }
 
-function handleView(resource: ConfigFileResourceRefV3 | string): HandleViewV3 {
+function handleView(resource: ConfigFileResourceRef | string): HandleView {
   if (typeof resource === "string") {
     return { handleKey: resource };
   }

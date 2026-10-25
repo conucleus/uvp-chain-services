@@ -1,11 +1,59 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { EXAMPLE_ZHIXU_ID, examplePlanIds } from "./fixtures/business/index.js";
 import { createApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { exampleSchemaResolver, dockTargetPlanIds } from "./example-schema.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import { MemoryStoreAuditStore } from "../src/store/console/audit.js";
 import type { Address, Hex } from "../src/shared/types.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 const operatorHeaders = {
   "x-uvp-store-user-id": "closure-operator",
@@ -28,7 +76,7 @@ const hookName = bytes32Text("example-review");
 
 describe("Store Console closure dry-run summary", () => {
   it("covers the operator closure slice without creating authoritative state", async () => {
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: stateMachineOrderEvents(),
@@ -43,7 +91,7 @@ describe("Store Console closure dry-run summary", () => {
       }
     });
     const storeAuditStore = new MemoryStoreAuditStore();
-    const router = createApiRouter(store, { productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { ...requiredRouterStores(), productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       storeAuditStore,
       now: () => new Date("2026-05-06T00:00:00.000Z")
     });
@@ -83,8 +131,7 @@ describe("Store Console closure dry-run summary", () => {
         ]),
         prototypeReasons: expect.arrayContaining([
           "dry_run_no_broadcast",
-          "store_identity_not_external_oidc",
-          "store_metadata_memory_only"
+          "store_identity_not_external_oidc"
         ])
       }
     });
@@ -111,9 +158,9 @@ describe("Store Console closure dry-run summary", () => {
   });
 
   it("lets read-only Store principals view the summary while write steps fail closed", async () => {
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({ deploymentBlock: 0n, events: stateMachineOrderEvents() });
-    const router = createApiRouter(store, { productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { ...requiredRouterStores(), productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       now: () => new Date("2026-05-06T00:00:00.000Z")
     });
 
@@ -157,7 +204,7 @@ describe("Store Console closure dry-run summary", () => {
   });
 
   it("requires an authenticated Store audit reader", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(router.handle({
       method: "GET",

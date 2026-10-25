@@ -2,17 +2,67 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import { examplePlanIds } from "./fixtures/business/index.js";
 import { buildConfigDiagnostics, loadConfigFromEnv, type ConfigDiagnostics } from "../src/config/index.js";
 import { createApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { PostgresProjectionStore } from "../src/storage/postgres.js";
+import { projectionScopeContractAddress } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import { exampleSchemaResolver } from "./example-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 const chainId = 84532;
 const stateMachineAddress = "0x1111111111111111111111111111111111111111" as Address;
@@ -41,10 +91,6 @@ const stagingGovernanceAddress = "0x7564105e977516c53be337314c7e53838967bdac";
 const stagingTimerKeeperPrivateKey = "0x5555555555555555555555555555555555555555555555555555555555555555";
 const stagingTimerKeeperAddress = "0xe1fae9b4fab2f5726677ecfa912d96b0b683e6a9";
 const generatedAt = "2026-05-01T00:00:00.000Z";
-/**
- * 就绪探针是治理 admin 门：运营细节匿名不可读。staging 档的
- * admin 凭据叠加口令因子（sha256 哈希比对）。
- */
 const stagingOpsAdminToken = "staging-ops-readiness-token";
 const stagingOpsAdminHeaders = {
   "x-uvp-admin-id": "staging-ops-1",
@@ -60,16 +106,28 @@ const stagingOpsAdminRouterOptions = {
 
 describe("Product API staging readiness", () => {
   const tempDirs: string[] = [];
+  const projectionStores: PostgresProjectionStore[] = [];
 
-  afterEach(() => {
+  afterEach(async () => {
+    for (const store of projectionStores.splice(0)) {
+      await store.close();
+    }
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
+  async function openProjectionStore(): Promise<PostgresProjectionStore> {
+    const store = new PostgresProjectionStore({
+      databaseUrl: await createPostgresTestDatabase()
+    });
+    projectionStores.push(store);
+    return store;
+  }
+
   it("rejects anonymous staging readiness probes with 403", async () => {
-    const store = new MemoryProjectionStore();
-    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const store = await openProjectionStore();
+    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
       evidenceStorage: productionSafeEvidenceStorage(),
@@ -81,11 +139,13 @@ describe("Product API staging readiness", () => {
   });
 
   it("serves a no-secret ready summary from non-demo chain projections", async () => {
-    const store = new MemoryProjectionStore();
+    const store = await openProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents(), planCapabilityTables: [readinessVocabulary()] });
     await store.saveSyncState({
       chainId,
-      contractAddress: stateMachineAddress,
+      // PG 投影 sync_state 按 (chainId, contractAddress) 作用域：readiness 路由
+      // 经默认 projection scope（0x0000…0000）读取，写入必须用同一 scope 键。
+      contractAddress: projectionScopeContractAddress,
       syncStatus: "indexed",
       latestIndexedBlock: 9n,
       finalizedBlock: 9n,
@@ -105,7 +165,7 @@ describe("Product API staging readiness", () => {
         mismatchCount: 0
       }
     });
-    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: stagingDiagnostics(tempDirs),
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
@@ -225,7 +285,7 @@ describe("Product API staging readiness", () => {
   });
 
   it("fails closed when permissive authorization is presented as staging evidence", async () => {
-    const store = new MemoryProjectionStore();
+    const store = await openProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents({ includeActiveDeployment: false }), planCapabilityTables: [readinessVocabulary()] });
     const baseDiagnostics = stagingDiagnostics(tempDirs);
     const unsafeDiagnostics: ConfigDiagnostics = {
@@ -235,7 +295,7 @@ describe("Product API staging readiness", () => {
         permissiveAuthorizationRequested: true
       }
     };
-    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
@@ -274,7 +334,7 @@ describe("Product API staging readiness", () => {
         }]
       }
     };
-    const router = createApiRouter(new MemoryProjectionStore(), { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(await openProjectionStore(), { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: failedDiagnostics,
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
@@ -313,9 +373,9 @@ describe("Product API staging readiness", () => {
         keySource: "jwks_url"
       }
     };
-    const store = new MemoryProjectionStore();
+    const store = await openProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents(), planCapabilityTables: [readinessVocabulary()] });
-    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: unsafeDiagnostics,
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
@@ -340,11 +400,9 @@ describe("Product API staging readiness", () => {
   });
 
   it("fails closed on staging when the timer keeper role is not assembled", async () => {
-    // B5 红路径：staging 的链上时钟拨表面必须在场——timer keeper 未启用
-    // （或私钥角色未装配）即 timer_keeper_not_assembled，ready=false。
-    const store = new MemoryProjectionStore();
+    const store = await openProjectionStore();
     await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents(), planCapabilityTables: [readinessVocabulary()] });
-    const router = createApiRouter(store, { productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: stagingDiagnostics(tempDirs, { UVP_TIMER_KEEPER_ENABLED: undefined }),
       productRuntimeEnvironment: "staging",
       ...stagingOpsAdminRouterOptions,
@@ -393,7 +451,6 @@ function stagingEnv(tempDirs: string[]): Record<string, string | undefined> {
     CHAIN_SERVICES_RUNTIME_ENV: "staging",
     SECURITY_PREFLIGHT_STRICT: "true",
     LOG_REDACTION_ENABLED: "true",
-    CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:db-secret@staging-db.internal:5432/uvp",
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
     UVP_INDEXER_POLL_INTERVAL_MS: "5000",
@@ -484,11 +541,6 @@ function stagingManifestPath(tempDirs: string[]): string {
   return manifestPath;
 }
 
-/**
- * 词表产物富集夹具：两步发布事件（PlanCommitted/PlanFinalized 携带
- * capabilitiesRoot）+ 配对富集源——链上不发布词表注册事件，任务的
- * submittable 判定依赖富集后的 submitSignals。
- */
 function readinessVocabulary(): PlanCapabilityTablesInput & { readonly capabilitiesRoot: Hex } {
   const signalCapabilities = [
     {

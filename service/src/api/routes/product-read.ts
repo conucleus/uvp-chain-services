@@ -30,9 +30,6 @@ export function createProductReadRouteModule(options: {
   const routeModule: RouteModule = {
     async handle(request, context) {
       if (request.method === "GET" && request.pathname === "/product/staging/readiness") {
-        // 部署就绪探针倾倒运营细节（部署清单、角色输入姿态、样本任务
-        // 的 assigneeWallet）——与 /admin/diagnostics 同门：治理 admin
-        // 凭据才可读；公共聚合健康位走 /healthz、/readyz。
         const principal = adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
         if (!principal) {
           return {
@@ -124,8 +121,6 @@ export function createProductReadRouteModule(options: {
                 orderCount: view.orders.length,
                 openTaskCount: view.tasks.filter((task) => task.status === "open").length,
                 blockedTaskCount: view.tasks.filter((task) => task.status === "blocked").length,
-                // 任务词表只有 open/submitted/blocked：submitted 即工作已提交、
-                // 链上确认中，按已完成口径计入。
                 completedTaskCount: view.tasks.filter((task) => task.status === "submitted").length
               }
             }
@@ -145,10 +140,6 @@ export function createProductReadRouteModule(options: {
 
       if (request.method === "GET" && request.pathname === "/product/orders") {
         return withStorageGuard(async () => {
-          // 订单 DTO 内嵌全部任务（assigneeWallet/proofRows 等参与者数据），
-          // 匿名不可枚举——与任务读同口径身份门：身份取会话锚定钱包；
-          // 订单可见性一律 fail-closed：没有可判定的参与者/创建者时
-          // 与不存在同响应（404），不再对“已认证但无指派”的钱包开放。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -185,9 +176,6 @@ export function createProductReadRouteModule(options: {
       const productOrderTimelineMatch = /^\/product\/orders\/([^/]+)\/timeline$/.exec(request.pathname);
       if (request.method === "GET" && productOrderTimelineMatch) {
         return withStorageGuard(async () => {
-          // 时间线与订单详情同口径参与者门：事件载荷携带信号提交者等
-          // 参与者数据，匿名/非参与者不可读；不可见与"不存在"同响应
-          //（404），不泄露存在性。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -225,8 +213,6 @@ export function createProductReadRouteModule(options: {
       const productOrderProofMatch = /^\/product\/orders\/([^/]+)\/proof$/.exec(request.pathname);
       if (request.method === "GET" && productOrderProofMatch) {
         return withStorageGuard(async () => {
-          // 证明行与订单详情同口径参与者门：proof 披露每步链上事件的
-          // 参与者钱包与签名细节，匿名/非参与者不可读（404 不泄露存在性）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -264,8 +250,6 @@ export function createProductReadRouteModule(options: {
       const productOrderMatch = /^\/product\/orders\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productOrderMatch) {
         return withStorageGuard(async () => {
-          // 订单详情与列表同口径：内嵌任务携带 assigneeWallet/proofRows，
-          // 已指派给他人的订单对非参与者不得区分"不存在"（404）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -284,10 +268,6 @@ export function createProductReadRouteModule(options: {
 
       if (request.method === "GET" && request.pathname === "/product/tasks") {
         return withStorageGuard(async () => {
-          // 任务 DTO 携带 assigneeWallet/proofRows 等参与者数据，匿名不可
-          // 枚举：身份取会话锚定钱包；已指派任务只有受理人本人可见，
-          // 未指派任务随其订单走参与者判定（与订单读同口径），无关钱包
-          // 不可见。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -301,9 +281,6 @@ export function createProductReadRouteModule(options: {
           }
           const acceptedOrderKeys = await acceptedParticipantOrderKeys(context, wallet.identity.walletAddress);
           const orders = await context.productService.listOrders();
-          // 可见集按 (planId, orderId) 复合键合并（与 reconcile/dock-automation
-          // 的订单定位口径一致）：裸 orderId 集合在两个 plan 复用同一订单号时，
-          // 会把另一 plan 名下同号订单的未指派任务一并放行（跨 plan 越权读）。
           const visibleOrderKeys = new Set(
             orders
               .filter((order) => orderVisibleToParticipant(order, walletAddress.toLowerCase(), acceptedOrderKeys))
@@ -328,9 +305,6 @@ export function createProductReadRouteModule(options: {
       const productTaskMatch = /^\/product\/tasks\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productTaskMatch) {
         return withStorageGuard(async () => {
-          // 任务详情（assigneeWallet/proofRows）要求已认证参与者：已指派
-          // 任务仅受理人本人可读；未指派任务随订单走参与者判定，不可见
-          // 与"不存在"同响应（404），不泄露存在性。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -355,7 +329,6 @@ export function createProductReadRouteModule(options: {
             order = await context.productService.getOrder(task.orderId);
           } catch (error) {
             if (error instanceof ProductOrderLookupError) {
-              // 订单身份无法唯一定位时参与者判定无从建立，按不可见收口。
               return taskNotFound();
             }
             throw error;
@@ -380,12 +353,6 @@ export function createProductReadRouteModule(options: {
   return withProjectionDegradationMeta(routeModule);
 }
 
-/**
- * Product reads are projections of chain events. When the indexer marked the
- * projection degraded (background refresh failed), every successful read
- * response carries a meta.projectionSync marker so callers can see the
- * projection may lag or be incomplete instead of silently trusting it.
- */
 function withProjectionDegradationMeta(module: RouteModule): RouteModule {
   return {
     async handle(request, context) {
@@ -427,19 +394,11 @@ async function parseParticipantViewQuery(
   context: ApiRouteContext,
   runtimeEnvironment?: Parameters<typeof resolveParticipantWalletIdentity>[2]
 ): Promise<ParsedParticipantViewQuery> {
-  // /product/me* 的身份 = 会话锚定地址（钱包会话
-  // 签名证明或 local dev 锚定头）。自报 query/header 钱包只做一致性核验
-  //（不一致即 403），不是身份来源——否则 ?wallet= 可读任意人任务与
-  // 订单视图。local 之外无会话即 401。
   const wallet = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment);
   if (!wallet.ok) {
     return { ok: false, response: wallet.response };
   }
   const walletAddress = wallet.identity.walletAddress;
-  // 钱包参数错误已由 resolveParticipantWalletIdentity 以 400 收口；此处
-  // listParticipantAssignments 的异常是存储/内部错误，不得吞成 400
-  // invalid_wallet 并回显 error.message——上抛交由 withStorageGuard
-  //（StorageUnavailableError → 503）与兜底 500 处理。
   const acceptedParticipants = (await context.productBffService.listParticipantAssignments(walletAddress))
     .map(productParticipantIdentityFromAssignment);
   return {
@@ -453,9 +412,6 @@ async function parseParticipantViewQuery(
 
 function productParticipantIdentityFromAssignment(assignment: ProductParticipantAssignmentDTO): ProductParticipantIdentityDTO {
   const orderId = assignment.trigger?.orderId ?? assignment.draft.triggeredOrderId;
-  // 身份抽取带 planId（与 acceptedParticipantOrderKeys 同口径）：订单归属
-  // 按 (planId, orderId) 复合键命中，裸 orderId 在跨 plan 同号订单时会
-  // 命中另一 plan 名下的订单。
   const planId = assignment.trigger?.planId ?? assignment.draft.planId;
   return {
     participantId: assignment.participant.participantId,

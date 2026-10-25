@@ -1,23 +1,23 @@
-// V3 任务投影：只根据配置 stage/slot、已接受的 slot 绑定、stage 状态与
+// 任务投影：只根据配置 stage/slot、已接受的 slot 绑定、stage 状态与
 // 窗口期限派生待办；不写回订单，不引入第二套状态词表。未知状态不产生动作。
 
-import type { StageTaskKindV3 } from "@uvp-eth/product-dto";
-import type { OrderStageRecord, OrderStageSlotRecord } from "../order/v3/types.js";
-import type { TaskListViewV3, TaskProjectionInput, TaskViewV3 } from "./types.js";
+import type { StageTaskKind } from "@uvp-eth/product-dto";
+import type { OrderStageRecord, OrderStageSlotRecord } from "../order/types.js";
+import type { TaskListView, TaskProjectionInput, TaskView } from "./types.js";
 
 const DONE_STATES = new Set(["completed", "skipped"]);
 
-export function projectTasks(input: TaskProjectionInput): TaskListViewV3 {
+export function projectTasks(input: TaskProjectionInput): TaskListView {
   const { decision, snapshot } = input;
   if (decision.scope === "operator") {
     return { dataState: "none", orderId: snapshot.order.orderId, items: [] };
   }
   const stages = snapshot.stages.filter((stage) => decision.stageKeys.has(stage.stageKey));
-  const tasks: TaskViewV3[] = [];
+  const tasks: TaskView[] = [];
   for (const stage of stages) {
     const stageSlots = snapshot.slots.filter((slot) => slot.stageKey === stage.stageKey);
     if (decision.scope === "buyer") {
-      tasks.push(...buyerTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots));
+      tasks.push(...ownerTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots));
     } else {
       tasks.push(...executorTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots));
     }
@@ -30,12 +30,12 @@ export function projectTasks(input: TaskProjectionInput): TaskListViewV3 {
   };
 }
 
-function buyerTasks(
+function ownerTasks(
   orderId: string,
   wallet: string,
   stage: OrderStageRecord,
   slots: readonly OrderStageSlotRecord[],
-): readonly TaskViewV3[] {
+): readonly TaskView[] {
   if (DONE_STATES.has(stage.status)) {
     return [];
   }
@@ -52,7 +52,7 @@ function executorTasks(
   wallet: string,
   stage: OrderStageRecord,
   slots: readonly OrderStageSlotRecord[],
-): readonly TaskViewV3[] {
+): readonly TaskView[] {
   const invited = slots.find(
     (slot) => slot.status === "invited" && slot.wallet?.toLowerCase() === wallet,
   );
@@ -84,11 +84,11 @@ function task(
   wallet: string,
   stage: OrderStageRecord,
   slotKey: string,
-  kind: StageTaskKindV3,
-  status: TaskViewV3["status"],
+  kind: StageTaskKind,
+  status: TaskView["status"],
   nextAction: string,
-  extra: Pick<TaskViewV3, "dueAt" | "actionRef" | "blockedBy">,
-): TaskViewV3 {
+  extra: Pick<TaskView, "dueAt" | "actionRef" | "blockedBy">,
+): TaskView {
   return {
     taskId: `task:${orderId}:${stage.stageKey}:${slotKey}:${kind}`,
     orderId,
@@ -104,7 +104,7 @@ function task(
   };
 }
 
-function compareTasks(left: TaskViewV3, right: TaskViewV3): number {
+function compareTasks(left: TaskView, right: TaskView): number {
   const leftDue = left.dueAt ?? "";
   const rightDue = right.dueAt ?? "";
   return leftDue.localeCompare(rightDue) || left.stageKey.localeCompare(right.stageKey) || left.kind.localeCompare(right.kind);

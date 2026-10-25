@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { examplePlanIds } from "./fixtures/business/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { createProductService } from "../src/product/application/service.js";
@@ -8,7 +8,8 @@ import {
   MemoryStoreZhixuVersionMetadataStore,
   type StoreZhixuVersionRecord,
 } from "../src/store/console/version.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import { exampleSchemaResolver } from "./example-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
@@ -20,9 +21,26 @@ const hookName = bytes32Text("example-review");
 const planIdV2 = bytes32("2001");
 const planHashV2 = bytes32("2002");
 
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true },
+    chainId: 31337
+  });
+});
+
+beforeEach(async () => {
+  await stores.projectionStore.resetFromEvents({ deploymentBlock: 0n, events: [] });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
 describe("Store runtime and version selection", () => {
   it("summarizes StateMachine orders and projection health", async () => {
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [
@@ -70,7 +88,7 @@ describe("Store runtime and version selection", () => {
   });
 
   it("activates a published version and deprecates the previous active version", async () => {
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [
@@ -106,7 +124,7 @@ describe("Store runtime and version selection", () => {
   });
 
   it("requires StateMachine publication before activation", async () => {
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     const metadata = new MemoryStoreZhixuVersionMetadataStore();
     await metadata.upsertVersion(version("v2", "candidate", planIdV2, planHashV2));
     const service = createStoreZhixuVersionService({
@@ -122,9 +140,7 @@ describe("Store runtime and version selection", () => {
   });
 
   it("a committed-but-not-registered plan bucket is not activatable", async () => {
-    // 投影桶在 commitPlan 第一步即建、PlanRegistered 到 finalize 才发：
-    // 只有 PlanCommitted 的"待定计划"不得激活建单。
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [
@@ -152,7 +168,6 @@ describe("Store runtime and version selection", () => {
       code: "plan_not_published",
       status: 409,
     });
-    // 新建版本记录同样要求已注册锚：committed-only 计划不可登记版本。
     await expect(service.activate("series-1", "v3", {
       planId: planIdV2,
       planHash: planHashV2,

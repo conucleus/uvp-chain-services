@@ -54,7 +54,6 @@ const LOCATOR_FIELD_BY_TYPE: Readonly<
   plain_text: "plainText",
 };
 
-/** 各 fileType 定位对象的必填字段（顺序即读取顺序）。 */
 const LOCATOR_REQUIRED_FIELDS: Readonly<
   Record<FileResourceType, readonly string[]>
 > = {
@@ -64,15 +63,9 @@ const LOCATOR_REQUIRED_FIELDS: Readonly<
   plain_text: ["ref"],
 };
 
-/** 句柄名：订单内引用用的短名，不接受空白与凭据式长串。 */
 const HANDLE_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-/** 引用（keyRef/policyRef/plainText.ref/预设 ref）：名字或 URI，不是密钥或正文。 */
 const REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/#@+=-]{0,255}$/;
 
-/**
- * 密钥/凭据字段名词表（比较前去掉大小写与分隔符）：句柄任何层级命中即拒，
- * metadata 的值仍不解释、只拒绝字段名——凭据不得藏在“不透明”字段里。
- */
 const SECRET_FIELD_NAMES = new Set([
   "key",
   "apikey",
@@ -112,14 +105,12 @@ const SECRET_FIELD_NAMES = new Set([
   "ststoken",
 ]);
 
-/** 对 declaration 的 canonical JSON 算 requirementsHash（服务端唯一算法）。 */
 export function requirementsHashOf(
   declaration: OrderRequirementsDeclarationDTO,
 ): Hex {
   return hashCanonicalJson(declaration, "requirementsHash");
 }
 
-/** 解析并规范化客户端声明体；shape/闭集/句柄校验全在这里收口。 */
 export function parseOrderRequirementsDeclaration(
   body: unknown,
 ): OrderRequirementsDeclarationDTO {
@@ -420,8 +411,6 @@ function parseHandle(
     metadata = value.metadata;
     if (metadata !== undefined) {
       rejectSecretFieldsIn(metadata, "metadata", `${path}.metadata`);
-      // metadata 不解释语义，但必须进得了 canonical JSON：浮点/大整数会让
-      // hash 预像不可重建，在这里拒绝而不是让哈希计算抛 500。
       try {
         canonicalJson(metadata);
       } catch {
@@ -504,7 +493,6 @@ function parseLocator(
       return { localFile: { path: readField("path") } };
     case "plain_text": {
       const ref = readField("ref");
-      // plain_text 只允许内容引用：正文（含任何长串/空白文本）不得进句柄。
       assertReference(ref, path, "handle_locator_invalid", "ref");
       return { plainText: { ref } };
     }
@@ -623,10 +611,6 @@ function requireName(value: unknown, path: string, code: string): string {
   return value.trim();
 }
 
-/**
- * 引用值校验：必须是名字/URI 形态，且不得是密钥材料（0x 长十六进制、
- * 长 base64/hex 串）——“只允许引用”不是提示语，是校验。
- */
 function assertReference(
   value: unknown,
   path: string,

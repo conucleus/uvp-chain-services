@@ -9,11 +9,6 @@ import { readApiHeader, type ApiRequest, type ApiResponse } from "../route-conte
 import type { RouteModule } from "../route-module.js";
 import type { ResolveWalletSessionResult } from "../../store/sessions/index.js";
 
-/**
- * 会话路由：challenge → 钱包签名 → verify（发 token）→ session 读取。
- * token 以 x-uvp-store-session 头回传；敏感操作经 requireAnchoredStoreAddress
- * 强制"会话已锚定地址"。
- */
 export function createStoreAuthRouteModule(options: {
   readonly sessionService: StoreSessionService;
 }): RouteModule {
@@ -26,10 +21,6 @@ export function createStoreAuthRouteModule(options: {
         const requesterSession = await resolveRequesterSession(request, options.sessionService);
 
         if (request.method === "POST" && request.pathname === "/store/auth/challenge") {
-          // 请求方维度（对端地址）随服务端观测值传入：挑战配额需要
-          // "请求方 + 目标地址"双键才能防住匿名定向锁死（见 service 注释）。
-          // domain 同为服务端观测值（Host 头）：挑战按签发域绑定，verify
-          // 时点复核，跨域重放被拒。
           return {
             status: 201,
             body: {
@@ -124,7 +115,6 @@ export function sessionTokenFromRequest(request: ApiRequest): string | undefined
   return readApiHeader(request.headers, STORE_SESSION_HEADER)?.trim() || undefined;
 }
 
-/** 挑战的域绑定观测值：请求 Host 头（HTTP/1.1 必带；进程内直调可缺省）。 */
 function challengeDomainFromRequest(request: ApiRequest): string | undefined {
   return readApiHeader(request.headers, "host")?.trim() || undefined;
 }

@@ -2,13 +2,6 @@ import type { Address } from "../shared/types.js";
 
 type Hex = `0x${string}`;
 
-/**
- * Anvil/Hardhat 默认开发账户（mnemonic "test test ... junk"，路径
- * m/44'/60'/0'/0/i）的权威单一来源。私钥与地址成对维护：黑名单校验
- * （production/staging/testnet 禁用开发密钥）从同一张表派生两个集合，
- * 杜绝"键表缺一条、地址表多一条"的漂移——曾出现派生地址不属于任何
- * Anvil 账户的误报键，以及地址表含 #10 而键表缺 #10 的漏报。
- */
 export interface AnvilDefaultAccount {
   readonly privateKey: Hex;
   readonly address: Address;

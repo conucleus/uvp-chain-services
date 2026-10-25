@@ -5,7 +5,6 @@ import type {
   ProductSubmissionStore
 } from "./types.js";
 
-/** 台账扫描的"未闭环"状态集（与 reconcile worker 的行级口径同源）。 */
 const OPEN_SUBMISSION_STATUSES = new Set(["broadcasting", "submitted", "indexing", "failed"]);
 
 export class InMemoryProductSubmissionStore implements ProductSubmissionStore {
@@ -15,9 +14,6 @@ export class InMemoryProductSubmissionStore implements ProductSubmissionStore {
   readonly #now: () => Date;
 
   constructor(options: { readonly now?: () => Date } = {}) {
-    // 预留年龄判定要求写入时间与调用方时钟同源（持久 store 用系统时钟，
-    // 内存 store 在服务时钟可注入的语境下必须可对齐），否则陈旧预留
-    // 接管在注入时钟下永不触发。
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -42,7 +38,6 @@ export class InMemoryProductSubmissionStore implements ProductSubmissionStore {
   }
 
   async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
-    // 过期行（deadline 为 unix 秒字符串）无论是否已消费都不再参与判定。
     const boundary = Number(deadlineBeforeSeconds);
     let deleted = 0;
     for (const [prepareId, record] of this.#prepared) {
@@ -58,8 +53,6 @@ export class InMemoryProductSubmissionStore implements ProductSubmissionStore {
     const reservedAt = this.#now().toISOString();
     const existing = this.#reservedNonceKeys.get(key);
     if (existing !== undefined) {
-      // 与持久实现同判据：只接管早于 staleBefore 的陈旧预留，未过期的
-      // 预留可能属于存活中的提交，仍按重复拒绝。
       if (!options?.staleBefore || existing >= options.staleBefore) {
         return false;
       }

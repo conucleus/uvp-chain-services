@@ -1,10 +1,30 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { decodeFunctionData, type Abi } from "viem";
 import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import { DOCKING_MODULE_ABI } from "@uvp-eth/protocol-bindings";
 import { DockAutomationWorker } from "../src/dock-automation/service.js";
 import type { DockRouteRecord } from "../src/dock-automation/types.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { projectionScopeContractAddress } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true },
+    chainId: 31337
+  });
+});
+
+beforeEach(async () => {
+  // 原先每用例各建一个 Memory projection store：重置为空投影面等价替换。
+  await stores.projectionStore.resetFromEvents({ deploymentBlock: 0n, events: [] });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
 import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import type { Hex } from "../src/shared/types.js";
@@ -35,8 +55,6 @@ const zeroBytes32 = ("0x" + "00".repeat(32)) as Hex;
 describe("dock liveness keeper", () => {
 
   it("stays idle with a loud warning when enabled but no route source/submitter is wired", async () => {
-    // 交付形态未装配 routeSource/submitter——enabled 时不得空转
-    // 轮询并宣称 started。
     const warnings: string[] = [];
     const infos: string[] = [];
     const logger = {
@@ -47,7 +65,7 @@ describe("dock liveness keeper", () => {
     };
     const worker = new DockAutomationWorker({
       config: { enabled: true, pollIntervalMs: 5, redeliveryWindowMs: 60_000, maxCandidatesPerRun: 5 },
-      projectionStore: new MemoryProjectionStore(),
+      projectionStore: stores.projectionStore,
       dockingAddress: "0x6666666666666666666666666666666666666666",
       chainId: 31337,
       logger
@@ -56,18 +74,12 @@ describe("dock liveness keeper", () => {
     await worker.start();
     expect(warnings.some((message) => message.includes("no route source/submitter"))).toBe(true);
     expect(infos).toEqual([]);
-    // 未启动轮询：等待一个以上轮询周期后仍是 idle。
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(worker.getLastSummary()).toBeUndefined();
   });
 
   it("fails closed on route records with missing or malformed identity fields", async () => {
-    // route 数据来自链下来源：keeper 只提交可由链上 committed 投影推导的
-    // 就绪性——记录身份字段缺失/零值/跨链/new 模式缺 openCalldata（该
-    // 模式唯一交易载荷）即整轮响亮报错，不静默跳过、不带可疑数据继续
-    // 提交。existing 模式的 attachCalldata 缺失不在此列（permissionless
-    // attach 的合法形态，见下方专测）。
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({ deploymentBlock: 0n, events: dockEvents() });
     const submitted: string[] = [];
     const build = (routes: readonly DockRouteRecord[]) =>
@@ -100,18 +112,13 @@ describe("dock liveness keeper", () => {
       inputs: [...dockRoute().inputs.slice(1), { ...dockRoute().inputs[1]!, bindingHash: "0x1234" as Hex }]
     }]).runOnce())
       .rejects.toThrow(/routes\[0\]\.inputs\[1\]\.bindingHash must be a non-zero bytes32/);
-    // 无提交发生：校验在任何广播之前完成。
     expect(submitted).toEqual([]);
   });
 
   it("relays the pre-assembled attach calldata once both endpoint orders are born, and stops once attached", async () => {
-    // attach 同意门三腿（目标单 creator / 在任执行者 / publisher attach
-    // 预授权）都不含中继 keeper——keeper 只广播 route 来源预组装的
-    // attachCalldata 原文，不组装、不补签；挂接前提（父单与目标单出生）
-    // 以投影为准，未出生前不广播（否则必 revert 白烧 gas）。
     const buildWorker = async (events: readonly ChainEvent[]) => {
-      const store = new MemoryProjectionStore();
-      await store.resetFromEvents({ deploymentBlock: 0n, events });
+      const store = stores.projectionStore;
+      await resetProjection(events);
       const submitted: string[] = [];
       const worker = new DockAutomationWorker({
         config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
@@ -129,7 +136,6 @@ describe("dock liveness keeper", () => {
       return { worker, submitted };
     };
 
-    // 目标单未出生（且未挂接）：attach 不成候选，也不发任何交付交易。
     const withoutTarget = await buildWorker(
       attachedEvents().filter(
         (event) =>
@@ -140,14 +146,11 @@ describe("dock liveness keeper", () => {
     expect(await withoutTarget.worker.runOnce()).toMatchObject({ attachCandidates: 0, submitted: 0 });
     expect(withoutTarget.submitted).toEqual([]);
 
-    // 两端出生且尚未挂接：广播预组装 calldata 原文。
     const pending = await buildWorker(attachedEvents().filter((event) => event.eventName !== "DockAttached"));
     const summary = await pending.worker.runOnce();
     expect(summary).toMatchObject({ attachCandidates: 1, submitted: 1 });
     expect(pending.submitted).toEqual([existingDockRoute().attachCalldata]);
 
-    // 已挂接（投影含 dock 实例）：进入交付车道（input 活交付候选成立），
-    // 不再发 attach。
     const attached = await buildWorker(attachedEvents());
     const attachedSummary = await attached.worker.runOnce();
     expect(attachedSummary).toMatchObject({ attachCandidates: 0, inputCandidates: 1, submitted: 1 });
@@ -155,11 +158,6 @@ describe("dock liveness keeper", () => {
   });
 
   it("skips only the attach lane with a skipped trace when a pending existing route carries no attachCalldata", async () => {
-    // attach 是 permissionless 面：目标单 creator/在任执行者可自行上链挂接，
-    // 这类 route 在 route source 里合法地没有 attachCalldata。留痕只发生在
-    // 挂接仍未发生（无 dock 实例）且缺 calldata 的可行动场景——dock 已出生
-    // 的 route attach 车道已无关，留痕会是每轮重复的永久噪声；两条路径都
-    // 不阻断其他 route 的 attach/input/output 交付车道。
     const pendingRouteId = bytes32Hex("2525");
     const pendingOrderId = bytes32Hex("2626");
     const attachedRouteId = bytes32Hex("2727");
@@ -170,27 +168,21 @@ describe("dock liveness keeper", () => {
       localOrderId: pendingOrderId,
       attachCalldata: "0xabef9999" as Hex
     };
-    // 待挂接且无 calldata：唯一应留痕的形态。
     const { attachCalldata: _omitted, ...pendingPermissionless } = {
       ...existingDockRoute(),
       routeId: attachedRouteId,
       localOrderId: attachedOrderId
     };
     void _omitted;
-    // 已挂接且无 calldata：attach 车道无关，不留痕、input 交付照常。
     const { attachCalldata: _omittedAttached, ...attachedPermissionless } = existingDockRoute();
     void _omittedAttached;
 
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        ...attachedEvents(),
-        // 两条新 route 的父单出生（目标单已在基座事件中出生）。
-        chainEvent(8n, 0, "OrderRegistered", { orderId: pendingOrderId, planId }),
-        chainEvent(9n, 0, "OrderRegistered", { orderId: attachedOrderId, planId })
-      ]
-    });
+    const store = stores.projectionStore;
+    await resetProjection([
+      ...attachedEvents(),
+      chainEvent(8n, 0, "OrderRegistered", { orderId: pendingOrderId, planId }),
+      chainEvent(9n, 0, "OrderRegistered", { orderId: attachedOrderId, planId })
+    ]);
     const submitted: string[] = [];
     const worker = new DockAutomationWorker({
       config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
@@ -207,40 +199,29 @@ describe("dock liveness keeper", () => {
     });
 
     const summary = await worker.runOnce();
-    // 已挂接 route：input 交付照常；待挂接且有 calldata 的 route：attach
-    // 照常广播；待挂接且无 calldata 的 route：只跳过 attach 车道并留痕。
     expect(summary).toMatchObject({ inputCandidates: 1, attachCandidates: 1, submitted: 2 });
     expect(summary.skipped).toContainEqual(
       expect.stringContaining(`attach:route ${attachedRouteId} carries no pre-assembled attachCalldata`)
     );
-    // 已挂接 route 的 routeId 不得出现在任何留痕里（attach 车道无关）。
     expect(summary.skipped.join("\n")).not.toContain(existingDockRoute().routeId);
     expect(submitted).toContain(withAttachRoute.attachCalldata);
-    // 已挂接 route 的 input 交付（submitDockedInput）照常广播。
     const decoded = decodeFunctionData({ abi: DOCKING_MODULE_ABI as Abi, data: submitted[0] as Hex });
     expect(decoded.functionName).toBe("submitDockedInput");
   });
 
   it("does not broadcast submitDockedInput when the target fact slot is already occupied", async () => {
-    // 投影侧预检（对称于 output 车道 targetFactExists 正向门）：目标单
-    // mailbox 槽 (targetSourceId, targetSignalId) 已被不同 provenance 的
-    // 事实占用时，submitDockedInput 链上永久 revert DockInputConflict——
-    // 不广播、留痕交人工裁决，不再每窗口烧一次 gas 撞同一堵墙。
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        ...attachedEvents(),
-        chainEvent(8n, 0, "SignalSubmitted", {
-          orderId: linkedOrderId,
-          sourceId,
-          signalId,
-          payloadHash,
-          idempotencyKey: bytes32Hex("0aaa"),
-          submitter: signer
-        })
-      ]
-    });
+    const store = stores.projectionStore;
+    await resetProjection([
+      ...attachedEvents(),
+      chainEvent(8n, 0, "SignalSubmitted", {
+        orderId: linkedOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey: bytes32Hex("0aaa"),
+        submitter: signer
+      })
+    ]);
     const submitted: string[] = [];
     const worker = new DockAutomationWorker({
       config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
@@ -263,11 +244,8 @@ describe("dock liveness keeper", () => {
   });
 
   it("escalates a persistent DockInputConflict to an error-level alarm after consecutive windows", async () => {
-    // keeper 无死信机制：无收敛 revert（事实槽冲突）每窗口照常重播、仅
-    // skipped 留痕——连续 3 个窗口撞同一绑定同一原因即升级 error 级告警
-    // （带 dockInstanceId/bindingHash 与处置指引）；广播成功清零计数。
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: attachedEvents() });
+    const store = stores.projectionStore;
+    await resetProjection(attachedEvents());
     let nowMs = 1_000_000;
     let fail = true;
     const logger = new RecordingLogger();
@@ -289,13 +267,11 @@ describe("dock liveness keeper", () => {
       now: () => new Date(nowMs)
     });
 
-    // 前两个窗口：只有 skipped 留痕，无 error。
     await worker.runOnce();
     nowMs += 70_000;
     await worker.runOnce();
     expect(logger.errors).toEqual([]);
 
-    // 第三个连续窗口：升级 error，带绑定身份与原因。
     nowMs += 70_000;
     const third = await worker.runOnce();
     expect(third.skipped.length).toBe(1);
@@ -308,7 +284,6 @@ describe("dock liveness keeper", () => {
       windows: 3
     });
 
-    // 广播成功：计数清零，后续连续失败从头数起。
     fail = false;
     nowMs += 70_000;
     await worker.runOnce();
@@ -325,24 +300,18 @@ describe("dock liveness keeper", () => {
   });
 
   it("escalates a persistent InvalidSignalCapability on the output lane to an error-level alarm", async () => {
-    // 全零造证撞链上词表闸同样是合约永久 revert：投影侧无法预判（词表
-    // 在链上），只能靠连续窗口的失败升级告警把"route source 词表/造证
-    // 需修正"抬出来。
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        ...attachedEvents(),
-        chainEvent(8n, 0, "SignalSubmitted", {
-          orderId: linkedOrderId,
-          sourceId,
-          signalId,
-          payloadHash,
-          idempotencyKey: bytes32Hex("0aaa"),
-          submitter: signer
-        })
-      ]
-    });
+    const store = stores.projectionStore;
+    await resetProjection([
+      ...attachedEvents(),
+      chainEvent(8n, 0, "SignalSubmitted", {
+        orderId: linkedOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey: bytes32Hex("0aaa"),
+        submitter: signer
+      })
+    ]);
     const route: DockRouteRecord = { ...existingDockRoute(), inputs: [], outputs: [{
       bindingHash: outputBindingHash,
       localSourceId: sourceId,
@@ -381,11 +350,8 @@ describe("dock liveness keeper", () => {
   });
 
   it("does not re-broadcast the same binding inside the finality window and retries after it", async () => {
-    // 最终性窗口内同一 binding 每轮（默认 5s）重复广播 no-op
-    // 交易是纯 gas 浪费。窗口内去重跳过（计数 deduplicated）；窗口过后
-    // 投影仍未呈现 delivery 才重试（覆盖交易丢失）。
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: attachedEvents() });
+    const store = stores.projectionStore;
+    await resetProjection(attachedEvents());
 
     let nowMs = 1_000_000;
     const submitted: string[] = [];
@@ -409,13 +375,9 @@ describe("dock liveness keeper", () => {
       now: () => new Date(nowMs)
     });
 
-    // 第一轮：候选成立，广播一次；existing 无出生锚，inputs[0] 也是活交付面。
     const first = await worker.runOnce();
     expect(first).toMatchObject({ inputCandidates: 1, submitted: 1, deduplicated: 0 });
     expect(submitted.length).toBe(1);
-    // 4.5 写面形状：submitDockedInput 四参数（dockInstanceId/localHookId/
-    // inputBindingHash/attribution），selector 由 bindings 单源切片决定；
-    // 词表外/无词表的目标事实按全零 attribution 提交，由链上词表闸裁决。
     const decoded = decodeFunctionData({
       abi: DOCKING_MODULE_ABI as Abi,
       data: submitted[0] as Hex
@@ -428,13 +390,11 @@ describe("dock liveness keeper", () => {
       signalId: expect.any(String)
     });
 
-    // 第二轮（10s 后，仍在 60s 窗口内）：投影未呈现 delivery，去重跳过。
     nowMs += 10_000;
     const second = await worker.runOnce();
     expect(second).toMatchObject({ inputCandidates: 1, submitted: 0, deduplicated: 1 });
     expect(submitted.length).toBe(1);
 
-    // 第三轮（窗口过后仍未投递）：重试一次。
     nowMs += 60_000;
     const third = await worker.runOnce();
     expect(third).toMatchObject({ inputCandidates: 1, submitted: 1, deduplicated: 0 });
@@ -442,10 +402,8 @@ describe("dock liveness keeper", () => {
   });
 
   it("rate-bounds failed broadcasts with the same finality window", async () => {
-    // 持续失败的绑定若不占窗会每轮重发，gas 燃烧无速率上限；成败同占
-    // 窗口后，每绑定每窗口至多一次尝试，失败仍在 summary.skipped 可见。
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: attachedEvents() });
+    const store = stores.projectionStore;
+    await resetProjection(attachedEvents());
 
     let nowMs = 1_000_000;
     let submitCalls = 0;
@@ -474,14 +432,12 @@ describe("dock liveness keeper", () => {
     expect(first.skipped.length).toBe(1);
     expect(submitCalls).toBe(1);
 
-    // 窗口内的后续轮次不再重发失败的绑定。
     nowMs += 10_000;
     const second = await worker.runOnce();
     expect(second).toMatchObject({ inputCandidates: 1, submitted: 0, deduplicated: 1 });
     expect(second.skipped.length).toBe(0);
     expect(submitCalls).toBe(1);
 
-    // 窗口过后允许重试一次（投影仍未呈现 delivery）。
     nowMs += 60_000;
     const third = await worker.runOnce();
     expect(third).toMatchObject({ inputCandidates: 1, submitted: 0, deduplicated: 0 });
@@ -504,8 +460,8 @@ describe("dock liveness keeper", () => {
         submitter: signer
       }, dockingModuleAddress)
     ];
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events });
+    const store = stores.projectionStore;
+    await resetProjection(events);
 
     const submitted: string[] = [];
     const worker = new DockAutomationWorker({
@@ -533,11 +489,8 @@ describe("dock liveness keeper", () => {
   });
 
   it("has no live input lane for new-mode docks because the entrance is delivered atomically at open", async () => {
-    // 4.4 链上 new 模式只登记出生锚绑定（open 原子投递）：非 entrance 的
-    // input 绑定没有链上活面，keeper 对 new 模式提交它们只会收获
-    // DockInputNotFound revert。活交付面只在 existing（attached）一侧。
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: dockEvents() });
+    const store = stores.projectionStore;
+    await resetProjection(dockEvents());
 
     const submitted: string[] = [];
     const worker = new DockAutomationWorker({
@@ -565,9 +518,6 @@ describe("dock liveness keeper", () => {
   });
 
   it("backfills attached-dock outputs with submitDockedSignal and converges on the delivery event", async () => {
-    // attach 不内联已成立输出清单：回填 = 按路由产物枚举 output 绑定逐条
-    // 重放 submitDockedSignal（payload 读 StateMachine 存储）。该调用携
-    // attribution 造证——无词表 plan 造全零结构，由链上词表闸裁决。
     const baseEvents: readonly ChainEvent[] = [
       ...attachedEvents(),
       chainEvent(8n, 0, "SignalSubmitted", {
@@ -588,8 +538,8 @@ describe("dock liveness keeper", () => {
     }] };
 
     let nowMs = 1_000_000;
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: baseEvents });
+    const store = stores.projectionStore;
+    await resetProjection(baseEvents);
     const submitted: string[] = [];
     const worker = new DockAutomationWorker({
       config: {
@@ -611,7 +561,6 @@ describe("dock liveness keeper", () => {
       now: () => new Date(nowMs)
     });
 
-    // 第一轮：目标事实已在投影（attach 前成立），回填候选成立并广播。
     const first = await worker.runOnce();
     expect(first).toMatchObject({ outputCandidates: 1, submitted: 1, deduplicated: 0 });
     expect(submitted.length).toBe(1);
@@ -626,17 +575,14 @@ describe("dock liveness keeper", () => {
       { sourceId, signalId, stageId: zeroBytes32, capabilityProof: [] }
     ]);
 
-    // 窗口内：投影尚未呈现 delivery，去重跳过（交易可能仍在途）。
     nowMs += 10_000;
     expect(await worker.runOnce()).toMatchObject({ outputCandidates: 1, submitted: 0, deduplicated: 1 });
 
-    // 窗口过后：仍未呈现 delivery，重试一次（覆盖交易丢失）。
     nowMs += 60_000;
     expect(await worker.runOnce()).toMatchObject({ outputCandidates: 1, submitted: 1, deduplicated: 0 });
     expect(submitted.length).toBe(2);
 
-    // 投影呈现 DockOutputSubmitted：候选归零，收敛。
-    await store.resetFromEvents({ deploymentBlock: 0n, events: [
+    await resetProjection([
       ...baseEvents,
       chainEvent(9n, 0, "DockOutputSubmitted", {
         dockInstanceId,
@@ -650,15 +596,12 @@ describe("dock liveness keeper", () => {
         payloadHash,
         submitter: signer
       }, dockingModuleAddress)
-    ] });
+    ]);
     const converged = await worker.runOnce();
     expect(converged).toMatchObject({ outputCandidates: 0, submitted: 0, deduplicated: 0 });
   });
 
   it("holds output backfill while the target fact sits in an unfinalized block", async () => {
-    // 最终性门：目标事实所在区块未 finalize 时不抢跑回填——未最终事实
-    // 可能被 reorg 掉，抢跑即广播必 revert 的 submitDockedSignal；
-    // finality 追上后候选照常成立。
     const events: readonly ChainEvent[] = [
       ...attachedEvents(),
       chainEvent(8n, 0, "SignalSubmitted", {
@@ -677,7 +620,7 @@ describe("dock liveness keeper", () => {
       targetSourceId: sourceId,
       targetSignalId: signalId
     }] };
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({ deploymentBlock: 0n, events });
     const submitted: string[] = [];
     const worker = new DockAutomationWorker({
@@ -694,13 +637,11 @@ describe("dock liveness keeper", () => {
       }
     });
 
-    // 事实在区块 8、finalizedBlock=7：不触发回填。
     await store.saveSyncState(dockSyncState(7n));
     const held = await worker.runOnce();
     expect(held).toMatchObject({ outputCandidates: 0, attempted: 0, submitted: 0 });
     expect(submitted).toEqual([]);
 
-    // finality 追上（区块 8 已最终）：候选成立并广播。
     await store.saveSyncState(dockSyncState(8n));
     const released = await worker.runOnce();
     expect(released).toMatchObject({ outputCandidates: 1, attempted: 1, submitted: 1 });
@@ -708,10 +649,7 @@ describe("dock liveness keeper", () => {
   });
 
   it("fails the whole round closed while finality is unknown or a rebuild is in progress", async () => {
-    // 镜像 timer keeper 的最终性门：sync state 无 finalizedBlock（最终性
-    // 上界未知）或人工 rebuild 进行中（投影是半重建中间态）时整轮不放行
-    // 任何候选并留痕，不放行 = fail-closed。
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({ deploymentBlock: 0n, events: attachedEvents() });
     const submitted: string[] = [];
     const worker = new DockAutomationWorker({
@@ -728,7 +666,6 @@ describe("dock liveness keeper", () => {
       }
     });
 
-    // 无 finalizedBlock：整轮不放行并留痕。
     const { finalizedBlock: _unfinal, ...withoutFinality } = dockSyncState(7n);
     void _unfinal;
     await store.saveSyncState(withoutFinality);
@@ -736,7 +673,6 @@ describe("dock liveness keeper", () => {
     expect(unfinal).toMatchObject({ inputCandidates: 0, attempted: 0, submitted: 0 });
     expect(unfinal.skipped[0]).toMatch(/finality: projection sync state carries no finalizedBlock/);
 
-    // 人工 rebuild 进行中：同样整轮不放行。
     await store.saveSyncState({ ...dockSyncState(7n), syncStatus: "rebuilding" });
     const rebuilding = await worker.runOnce();
     expect(rebuilding).toMatchObject({ inputCandidates: 0, attempted: 0, submitted: 0 });
@@ -745,24 +681,18 @@ describe("dock liveness keeper", () => {
   });
 
   it("retries a DockOutputNotReady revert only once per finality window", async () => {
-    // 未成立的目标输出链上 revert DockOutputNotReady：与广播失败同占窗口
-    //（否则持续 NotReady 的绑定每轮重发，gas 无速率上限），失败进
-    // skipped 可见；窗口过后投影仍未呈现事实才再试。
-    const store = new MemoryProjectionStore();
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        ...attachedEvents(),
-        chainEvent(8n, 0, "SignalSubmitted", {
-          orderId: linkedOrderId,
-          sourceId,
-          signalId,
-          payloadHash,
-          idempotencyKey: bytes32Hex("0aaa"),
-          submitter: signer
-        })
-      ]
-    });
+    const store = stores.projectionStore;
+    await resetProjection([
+      ...attachedEvents(),
+      chainEvent(8n, 0, "SignalSubmitted", {
+        orderId: linkedOrderId,
+        sourceId,
+        signalId,
+        payloadHash,
+        idempotencyKey: bytes32Hex("0aaa"),
+        submitter: signer
+      })
+    ]);
     const route: DockRouteRecord = { ...existingDockRoute(), inputs: [], outputs: [{
       bindingHash: outputBindingHash,
       localSourceId: sourceId,
@@ -808,9 +738,6 @@ describe("dock liveness keeper", () => {
   });
 
   it("mints vocabulary-backed attribution for the mirrored parent fact and skips while enrichment state is unknown", async () => {
-    // 词表内事实必须携证（全零必被 InvalidSignalCapability 拒绝）：镜像事实
-    // 落父单，attribution 按父 plan 词表铸造；富集 failed（解析故障轮）时
-    // 词表状态未知——跳过留痕而不是全零造证，白烧 gas 等 revert 才暴露。
     const signalCapabilities = [
       { stageId: hookId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 as const },
       { stageId: hookId, targetSourceId: sourceId, signalId: bytes32Hex("0f0f"), targetOrderRelation: 0 as const }
@@ -844,13 +771,14 @@ describe("dock liveness keeper", () => {
       planCapabilityTables: readonly PlanCapabilityTablesInput[],
       resolutionFailures?: readonly Hex[]
     ) => {
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await store.resetFromEvents({
         deploymentBlock: 0n,
         events: planPublishEvents(capabilitiesRootOf([], signalCapabilities)).concat(events),
         ...(planCapabilityTables.length > 0 ? { planCapabilityTables } : {}),
         ...(resolutionFailures ? { planCapabilityResolutionFailures: resolutionFailures } : {})
       });
+      await store.saveSyncState(dockSyncState(10n));
       const submitted: string[] = [];
       const worker = new DockAutomationWorker({
         config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
@@ -868,7 +796,6 @@ describe("dock liveness keeper", () => {
       return { worker, submitted };
     };
 
-    // 词表命中：attribution 携属主阶段与能力叶 proof。
     const enriched = await buildWorker([vocabulary]);
     const enrichedSummary = await enriched.worker.runOnce();
     expect(enrichedSummary).toMatchObject({ outputCandidates: 1, submitted: 1, skipped: [] });
@@ -882,8 +809,6 @@ describe("dock liveness keeper", () => {
       { sourceId, signalId, stageId: hookId, capabilityProof: [expect.any(String)] }
     ]);
 
-    // 富集 failed（resolver 故障轮，无产物两表可富集）：词表状态未知，绑定
-    // 跳过进 skipped，不广播。
     const failed = await buildWorker([], [planId]);
     const failedSummary = await failed.worker.runOnce();
     expect(failedSummary).toMatchObject({ outputCandidates: 1, submitted: 0 });
@@ -892,10 +817,6 @@ describe("dock liveness keeper", () => {
   });
 
   it("treats a sibling-satisfied output binding as delivered instead of re-broadcasting forever", async () => {
-    // 同一本地事实键的两条 output 绑定：首条真实交付（Submitted），兄弟绑定
-    // 在链上被等价交付吸收（Satisfied）。Satisfied 事件必须把投影台账收敛为
-    // 已交付——否则 keeper 每个重发窗口都会把兄弟绑定再广播一次（永不收敛
-    // 的 gas 循环）。
     const doneBindingHash = bytes32Hex("0d0d");
     const progressBindingHash = bytes32Hex("0e0e");
     const outputs = [
@@ -914,7 +835,6 @@ describe("dock liveness keeper", () => {
         targetSignalId: signalId
       }
     ];
-    // entrance-only inputs：跳过 input 候选路径，聚焦 output 车道。
     const route: DockRouteRecord = { ...dockRoute(), inputs: [dockRoute().inputs[0]!], outputs };
     const baseEvents: readonly ChainEvent[] = [
       ...dockEvents(),
@@ -953,8 +873,8 @@ describe("dock liveness keeper", () => {
     }, dockingModuleAddress);
 
     const buildWorker = async (events: readonly ChainEvent[]) => {
-      const store = new MemoryProjectionStore();
-      await store.resetFromEvents({ deploymentBlock: 0n, events });
+      const store = stores.projectionStore;
+      await resetProjection(events);
       const submitted: string[] = [];
       const worker = new DockAutomationWorker({
         config: {
@@ -977,13 +897,11 @@ describe("dock liveness keeper", () => {
       return { worker, submitted };
     };
 
-    // 反例（无 Satisfied 事件）：兄弟绑定仍被视为未交付，候选成立。
     const without = await buildWorker(baseEvents);
     const withoutSummary = await without.worker.runOnce();
     expect(withoutSummary).toMatchObject({ outputCandidates: 1, submitted: 1 });
     expect(without.submitted.length).toBe(1);
 
-    // 正例（含 Satisfied 事件）：两条绑定台账齐备，候选归零、不再广播。
     const withSatisfied = await buildWorker([...baseEvents, satisfiedEvent]);
     const summary = await withSatisfied.worker.runOnce();
     expect(summary).toMatchObject({ outputCandidates: 0, submitted: 0, deduplicated: 0 });
@@ -1005,7 +923,6 @@ function dockRoute(): DockRouteRecord {
     openCalldata: "0xabcd1234" as Hex,
     inputs: [
       {
-        // entrance（new 模式唯一 input 绑定，open 原子投递）。
         bindingHash: entranceBindingHash,
         localHookId: hookId,
         targetSourceId: sourceId,
@@ -1036,7 +953,6 @@ function existingDockRoute(): DockRouteRecord {
     attachCalldata: "0xabef5678" as Hex,
     inputs: [
       {
-        // existing 无出生锚：全部 input 绑定（含首条）都是活交付面。
         bindingHash: amendBindingHash,
         localHookId: amendHookId,
         targetSourceId: sourceId,
@@ -1086,8 +1002,6 @@ function dockEvents(): readonly ChainEvent[] {
   ];
 }
 
-/** existing 模式事件基座：父单/目标单/两 plan 出生 + docking 模块登记 +
- * amend hook Ready + DockAttached。 */
 function attachedEvents(): readonly ChainEvent[] {
   return [
     chainEvent(1n, 0, "PlanRegistered", {
@@ -1136,7 +1050,6 @@ function attachedEvents(): readonly ChainEvent[] {
   ];
 }
 
-/** 父 plan 两步发布事件（词表富集的链上 root 载体）。 */
 function planPublishEvents(capabilitiesRoot: Hex): readonly ChainEvent[] {
   return [
     chainEvent(0n, 0, "PlanCommitted", {
@@ -1184,11 +1097,12 @@ function chainEvent(
   };
 }
 
-/** keeper 最终性门测试用的 sync state（finalizedBlock 可调）。 */
 function dockSyncState(finalizedBlock: bigint) {
   return {
     chainId,
-    contractAddress,
+    // PG 投影 sync_state 按 (chainId, contractAddress) 作用域：worker 经
+    // defaultProjectionScope 读 0x0000…0000，夹具写入必须用同一 scope 键。
+    contractAddress: projectionScopeContractAddress,
     syncStatus: "indexed" as const,
     latestIndexedBlock: finalizedBlock,
     finalizedBlock,
@@ -1198,11 +1112,18 @@ function dockSyncState(finalizedBlock: bigint) {
   };
 }
 
+// 与 timer-keeper.test.ts 的 freshStore 同型：resetFromEvents 只持久化派生
+// 同步态（不含 finalizedBlock），这里显式补写已定稿高度，keeper 才会放行候选。
+async function resetProjection(events: readonly ChainEvent[], finalizedBlock = 10n): Promise<void> {
+  const store = stores.projectionStore;
+  await store.resetFromEvents({ deploymentBlock: 0n, events });
+  await store.saveSyncState(dockSyncState(finalizedBlock));
+}
+
 function bytes32Hex(value: string): Hex {
   return `0x${value.padStart(64, "0")}` as Hex;
 }
 
-/** 捕获 error 级告警（消息 + 结构化上下文）供升级断言。 */
 class RecordingLogger {
   readonly errors: Array<{ readonly message: string; readonly context?: Record<string, unknown> }> = [];
 

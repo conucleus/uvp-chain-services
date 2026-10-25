@@ -2,8 +2,6 @@
 // @uvp-eth/product-dto，服务端算 requirementsHash 并落 store。
 
 export * from "./types.js";
-export * from "./store.js";
-export * from "./sqlite-store.js";
 export * from "./postgres-store.js";
 export {
   parseOrderRequirementsDeclaration,

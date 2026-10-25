@@ -1,8 +1,56 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import { createApiRouter } from "../src/api/routes.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import type { StoreSessionDTO } from "../src/store/console/access.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 const readHeaders = {
   "x-uvp-store-user-id": "reader-1",
@@ -26,7 +74,7 @@ const governanceAdminHeaders = {
 
 describe("Store operator identity and capability auth", () => {
   it("resolves Store sessions through the identity provider capability matrix", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(session(router, undefined)).resolves.toMatchObject({
       authenticated: false,
@@ -75,7 +123,7 @@ describe("Store operator identity and capability auth", () => {
   });
 
   it("fails Store writes closed when a principal lacks the named capability", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(router.handle({
       method: "POST",
@@ -108,7 +156,7 @@ describe("Store operator identity and capability auth", () => {
   });
 
   it("disables development header auth in staging and production runtime", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "staging",
       evidenceRuntimeEnvironment: "local"
     });
@@ -137,10 +185,7 @@ describe("Store operator identity and capability auth", () => {
   });
 
   it("binds wallet challenges to the issuing domain and rejects cross-domain replay", async () => {
-    // 同一部署被多个域名触达时，A 域签下的登录证明不得在 B 域换会话：
-    // 挑战按签发时的请求 Host 绑定（写入签名 message），verify 时点按
-    // 当前请求 Host 复核；跨域重放被拒且不烧挑战。
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     const account = privateKeyToAccount("0x2222222222222222222222222222222222222222222222222222222222222222");
 
     const challengeResponse = await router.handle({
@@ -164,7 +209,6 @@ describe("Store operator identity and capability auth", () => {
     expect(replay.status).toBe(401);
     expect(replay.body).toMatchObject({ error: "store_challenge_domain_mismatch" });
 
-    // 被重放方不承担烧挑战的代价：签发域内核验仍成功。
     const verified = await router.handle({
       method: "POST",
       pathname: "/store/auth/verify",
@@ -175,10 +219,7 @@ describe("Store operator identity and capability auth", () => {
   });
 
   it("rejects a malformed Host header with a header-scoped error code, not invalid_body", async () => {
-    // 异常 Host 的缺陷在请求头不在 JSON body：错误码按 store_challenge_*
-    // 族命名（store_challenge_domain_invalid），不冒充 invalid_body——
-    // 客户端按码定位问题时不会被指向 body。
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const hostileCharacters = await router.handle({
       method: "POST",

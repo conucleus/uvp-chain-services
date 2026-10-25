@@ -1,15 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import type { ProjectionStore } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import type { Address, Hex } from "../src/shared/types.js";
 import type { StoreListingRecord } from "../src/store/listings/types.js";
 import { verifyListingAnchors } from "../src/store/listings/verify.js";
 
-/**
- * 锚核验三态：已投影且匹配（consistent）/ 已投影且失配（conflict）/
- * 未投影（pending_indexing——投影滞后窗口等索引器，不是冲突）；
- * 以及同 planId 跨部署多命中的显式冲突（不静默取首个命中）。
- */
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
 
 const contractAddress = "0x1111111111111111111111111111111111111111" as Address;
 const secondDeploymentAddress = "0x2222222222222222222222222222222222222222" as Address;
@@ -36,8 +44,8 @@ function chainEvent(
   };
 }
 
-async function seededStore(events: readonly ChainEvent[]): Promise<MemoryProjectionStore> {
-  const store = new MemoryProjectionStore();
+async function seededStore(events: readonly ChainEvent[]): Promise<ProjectionStore> {
+  const store = stores.projectionStore;
   await store.resetFromEvents({ deploymentBlock: 0n, events });
   return store;
 }
@@ -93,7 +101,6 @@ describe("listing anchor verification states", () => {
     });
     expect(verification.status).toBe("pending_indexing");
     expect(verification.projection.planProjected).toBe(false);
-    // 未投影是等待不是冲突：plan_projected 不得计入 mismatch。
     expect(verification.checks.find((check) => check.id === "plan_projected")?.outcome).toBe("unavailable");
     expect(verification.checks.some((check) => check.outcome === "mismatch")).toBe(false);
   });
@@ -110,7 +117,6 @@ describe("listing anchor verification states", () => {
     });
     expect(verification.status).toBe("conflict");
     expect(verification.checks.some((check) => check.id === "plan_projection_ambiguous" && check.outcome === "mismatch")).toBe(true);
-    // 锚无法唯一归位时不得取首个命中当投影事实。
     expect(verification.projection.planProjected).toBe(false);
   });
 });

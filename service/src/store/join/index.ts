@@ -5,8 +5,6 @@ export {
   type StoreJoinAuditEvent,
   type StoreJoinListQuery
 } from "./service.js";
-export { InMemoryStoreJoinApplicationStore } from "./memory-store.js";
-export { SqliteStoreJoinApplicationStore } from "./sqlite-store.js";
 export {
   StoreJoinServiceError,
   StoreJoinOpenApplicationExistsError,

@@ -6,23 +6,14 @@ import { createProductService, ProductOrderLookupError } from "../product/applic
 import {
   createProductBffService,
 } from "../product/query/bff/service.js";
-import {
-  createOrderV3Service,
-  MemoryOrderV3Store,
-} from "../order/v3/index.js";
-import { MemoryProductBffStore, type ProductBffStore } from "../product/query/bff/store.js";
+import { createOrderService } from "../order/index.js";
+import type { ProductBffStore } from "../product/query/bff/store.js";
 import { createOrderRequirementsService } from "../product/requirements/index.js";
 import { createEvidenceService, LocalEvidenceStorage } from "../evidence/index.js";
 import { createGovernanceService } from "../governance/index.js";
-import {
-  createStoreZhixuDraftWorkflowService,
-  MemoryStoreZhixuDraftStore
-} from "../store/console/zhixu-drafts.js";
+import { createStoreZhixuDraftWorkflowService } from "../store/console/zhixu-drafts.js";
 import { createStoreRuntimeService } from "../store/console/runtime.js";
-import {
-  createStoreZhixuVersionService,
-  MemoryStoreZhixuVersionMetadataStore
-} from "../store/console/version.js";
+import { createStoreZhixuVersionService } from "../store/console/version.js";
 import {
   createProductSubmissionService,
   type SubmissionAuthorizationAdapter,
@@ -35,40 +26,18 @@ import {
 } from "../stage-patches/index.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { buildOperationalDiagnostics } from "./diagnostics.js";
-import {
-  createNotificationService,
-  createSupplierNotificationProfileConfigService
-} from "../notifications/index.js";
 import { createStoreConsoleService } from "../store/console/service.js";
-import { MemoryStoreAuditStore } from "../store/console/audit.js";
 import { createStoreIdentityProvider } from "../store/console/access.js";
-import { createStoreDockingService, MemoryStoreDockingSessionStore } from "../store/console/docking.js";
-import { createStoreSupplierService, InMemoryStoreSupplierMetadataStore } from "../store/suppliers/service.js";
-import {
-  createStoreEntityRegistrationService,
-  InMemoryStoreEntityRegistrationStore
-} from "../store/registration/index.js";
+import { createStoreDockingService } from "../store/console/docking.js";
+import { createStoreSupplierService } from "../store/suppliers/service.js";
+import { createStoreEntityRegistrationService } from "../store/registration/index.js";
 import {
   createStoreSessionService,
-  createWalletSessionStoreIdentityProvider,
-  InMemoryStoreWalletSessionStore
+  createWalletSessionStoreIdentityProvider
 } from "../store/sessions/index.js";
-import {
-  createStoreDecorationService,
-  InMemoryStorePublisherDelegationStore,
-  InMemoryStoreZhixuDecorationStore
-} from "../store/decoration/index.js";
-import {
-  InMemoryStoreIdentityDescriptorSnapshotStore
-} from "../governance/descriptors.js";
-import {
-  createStoreListingService,
-  InMemoryStoreListingStore
-} from "../store/listings/index.js";
-import {
-  createStoreJoinService,
-  InMemoryStoreJoinApplicationStore
-} from "../store/join/index.js";
+import { createStoreDecorationService } from "../store/decoration/index.js";
+import { createStoreListingService } from "../store/listings/index.js";
+import { createStoreJoinService } from "../store/join/index.js";
 import { createStoreAuthRouteModule } from "./routes/store-auth.js";
 import { createStoreDecorationRouteModule } from "./routes/store-decoration.js";
 import { createStoreJoinRouteModule } from "./routes/store-join.js";
@@ -81,11 +50,11 @@ import { createEvidenceRouteModule } from "./routes/evidence.js";
 import { createGovernanceRouteModule } from "./routes/governance.js";
 import { createNotificationsRouteModule } from "./routes/notifications.js";
 import { createProductBffRouteModule } from "./routes/product-bff.js";
-import { createProductOrderV3RouteModule } from "./routes/product-order-v3.js";
-import { createProductV3SignalsRouteModule } from "./routes/product-v3-signals.js";
-import { createProductReadV3RouteModule } from "./routes/product-read-v3.js";
-import { createV3ResourceResolver } from "../resources/resolver.js";
-import { createProductTasksV3RouteModule } from "./routes/product-tasks-v3.js";
+import { createProductOrderRouteModule } from "./routes/product-order.js";
+import { createProductSignalsRouteModule } from "./routes/product-signals.js";
+import { createProductReadKernelRouteModule } from "./routes/product-read-kernel.js";
+import { createResourceResolver } from "../resources/resolver.js";
+import { createProductTasksRouteModule } from "./routes/product-tasks.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
 import { createProductRegistrationRouteModule } from "./routes/product-registration.js";
 import { createProductRequirementsRouteModule } from "./routes/product-requirements.js";
@@ -105,11 +74,8 @@ export type {
   CreateApiRouterOptions
 } from "./route-context.js";
 
-export function createApiRouter(store: ProjectionStore, options: CreateApiRouterOptions = {}): ApiRouter {
+export function createApiRouter(store: ProjectionStore, options: CreateApiRouterOptions): ApiRouter {
   const audit = options.audit ?? noopAuditSink;
-  // 运行环境只接受显式注入（config.security.environment 或等价的
-  // configDiagnostics.environment），绝不缺省 local——身份门/证据边界/
-  // 诊断全部以该档位定宽严，漏传即 fail-closed 拒绝装配。
   const productRuntimeEnvironment = options.productRuntimeEnvironment ?? options.configDiagnostics?.environment;
   if (!productRuntimeEnvironment) {
     throw new Error("productRuntimeEnvironment (or configDiagnostics.environment) is required to create the API router");
@@ -121,16 +87,16 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       ? { adminTokenHashes: options.governanceAdminTokenHashes }
       : {})
   };
-  const storeZhixuDraftStore = options.storeZhixuDraftStore ?? new MemoryStoreZhixuDraftStore();
-  const storeZhixuVersionMetadataStore = options.storeZhixuVersionMetadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
-  const storeSupplierMetadataStore = options.storeSupplierMetadataStore ?? new InMemoryStoreSupplierMetadataStore();
+  const storeZhixuDraftStore = options.storeZhixuDraftStore;
+  const storeZhixuVersionMetadataStore = options.storeZhixuVersionMetadataStore;
+  const storeSupplierMetadataStore = options.storeSupplierMetadataStore;
   const storeEntityRegistrationService = options.storeEntityRegistrationService ??
     createStoreEntityRegistrationService({
-      store: options.storeEntityRegistrationStore ?? new InMemoryStoreEntityRegistrationStore(),
+      store: options.storeEntityRegistrationStore,
       ...(options.now ? { now: options.now } : {})
     });
-  const storeDockingSessionStore = options.storeDockingSessionStore ?? new MemoryStoreDockingSessionStore();
-  const storeAuditStore = options.storeAuditStore ?? new MemoryStoreAuditStore();
+  const storeDockingSessionStore = options.storeDockingSessionStore;
+  const storeAuditStore = options.storeAuditStore;
   const productSchemaResolver = options.productSchemaResolver ?? {
     getProductSchemaByPlan: (planId: string, planHash: string) =>
       storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash)
@@ -146,10 +112,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     sessionStore: storeDockingSessionStore,
     ...(options.now ? { now: options.now } : {})
   });
-  const identityDescriptorSnapshots = options.identityDescriptorSnapshots
-    ?? new InMemoryStoreIdentityDescriptorSnapshotStore();
+  const identityDescriptorSnapshots = options.identityDescriptorSnapshots;
   const governanceService = options.governanceService ?? createGovernanceService({
-    ...(options.governanceStore ? { store: options.governanceStore } : {}),
+    store: options.governanceStore,
     audit,
     descriptorSnapshotStore: identityDescriptorSnapshots,
     ...(options.descriptorPublicBaseUrl ? { descriptorPublicBaseUrl: options.descriptorPublicBaseUrl } : {})
@@ -165,20 +130,12 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     metadataStore: storeZhixuVersionMetadataStore,
     ...(options.now ? { now: options.now } : {})
   });
-  const submissionAuthorization = options.productBffStore
-    ? productBffStoreSubmissionAuthorization(options.productBffStore, store)
-    : undefined;
-  // 草稿期证据归属核验：draftId → 该草稿已触发的订单 id。装配在
-  // BFF 台账上——trigger 记录是草稿与订单对应关系的服务端事实源。
-  const resolveDraftOrder = options.productBffStore
-    ? productBffStoreDraftOrderResolver(options.productBffStore)
-    : undefined;
-  // BFF 台账与 V1 要求包服务共用同一实例：路由层不注入时必须共享同一份
-  // 内存台账，否则 draft 声明与要求包读取会看到两套草稿。
-  const productBffStore = options.productBffStore ?? new MemoryProductBffStore();
+  const submissionAuthorization = productBffStoreSubmissionAuthorization(options.productBffStore, store);
+  const resolveDraftOrder = productBffStoreDraftOrderResolver(options.productBffStore);
+  const productBffStore = options.productBffStore;
   const orderRequirementsService = options.orderRequirementsService ?? createOrderRequirementsService({
     bffStore: productBffStore,
-    ...(options.orderRequirementsStore ? { store: options.orderRequirementsStore } : {}),
+    store: options.orderRequirementsStore,
     ...(options.now ? { now: options.now } : {})
   });
   const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
@@ -191,11 +148,10 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const defaultEvidenceStorage = options.evidenceStorage ?? (options.evidenceService ? undefined : new LocalEvidenceStorage());
   const evidenceService = options.evidenceService ?? (
     createEvidenceService({
-      ...(options.evidenceMetadataStore ? { metadataStore: options.evidenceMetadataStore } : {}),
+      metadataStore: options.evidenceMetadataStore,
       storage: defaultEvidenceStorage ?? new LocalEvidenceStorage(),
       runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment,
-      ...(resolveDraftOrder ? { resolveDraftOrder } : {}),
-      // backup verify/restore 的 admin 存储探测/写回动作留审计。
+      resolveDraftOrder,
       audit
     })
   );
@@ -212,13 +168,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     governanceService,
     metadataStore: storeSupplierMetadataStore
   });
-  const notificationService = options.notificationService ?? createNotificationService({
-    store,
-    supplierMetadataStore: storeSupplierMetadataStore,
-    productSchemaResolver
-  });
-  const supplierNotificationConfigService = options.supplierNotificationConfigService ??
-    createSupplierNotificationProfileConfigService();
+  const notificationService = options.notificationService;
+  const supplierNotificationConfigService = options.supplierNotificationConfigService;
   const submissionChainId = options.submissionChainId;
   if (submissionChainId === undefined) {
     throw new Error("submissionChainId is required to create the product submission service");
@@ -230,27 +181,18 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const submissionService = options.submissionService ?? createProductSubmissionService({
     productTasks: productService,
     evidenceReader: evidenceService,
-    ...(options.submissionStore ? { store: options.submissionStore } : {}),
+    store: options.submissionStore,
     chainId: submissionChainId,
     verifyingContract: submissionVerifyingContract,
-    // plan 作用域 submitSignal 的 planId 取自索引器投影
-    // （OrderRegistered/OrderMaterialized 的 indexed planId）。
     resolveOrderPlanId: resolveOrderPlanIdFromStore(store),
-    // 词表 Merkle 造证（attribution/selectorBinding）从 plan 投影两表构造。
     resolvePlanCapabilityTables: resolvePlanCapabilityTablesFromStore(store),
-    // draftId 来源凭证的提交归属核验：无解析器时提交侧 fail-closed。
-    ...(resolveDraftOrder ? { resolveDraftOrder } : {}),
-    // TTL 到期重试的先探链车道（UB-4）：六元业务身份查投影单源复用
-    // reconcile 的 submissionProjectionConfirmation，两侧不得各自口径。
+    resolveDraftOrder,
     probePriorSubmissionOnChain: priorSubmissionChainProbeFromStore(store),
     ...(options.submissionBroadcastAdapter ? { broadcastAdapter: options.submissionBroadcastAdapter } : {}),
     ...(submissionAuthorization ? { authorization: submissionAuthorization } : {}),
     audit
   });
   const stageExecutorPatchChainId = options.stageExecutorPatchChainId ?? options.submissionChainId;
-  // patch/docking 模块地址必须显式提供（地址清单），
-  // 不默认到 submissionVerifyingContract（状态机地址）；缺省时服务不持有
-  // 模块地址，patch/docking prepare 按模块地址缺失 fail-closed。
   const stageExecutorPatchVerifyingContract = options.stageExecutorPatchVerifyingContract;
   const productStageExecutorPatchService = options.productStageExecutorPatchService ?? createProductStageExecutorPatchService({
     store,
@@ -259,9 +201,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(stageExecutorPatchChainId !== undefined ? { chainId: stageExecutorPatchChainId } : {}),
     ...(stageExecutorPatchVerifyingContract ? { stagePatchModuleAddress: stageExecutorPatchVerifyingContract } : {}),
     ...(options.stageExecutorPatchBroadcastAdapter ? { broadcastAdapter: options.stageExecutorPatchBroadcastAdapter } : {}),
-    // 持久驱动（sqlite/postgres）注入持久化 stage-patch store；未注入
-    // （memory）时服务内部回落内存 store。
-    ...(options.stageExecutorPatchStore ? { stageExecutorPatchStore: options.stageExecutorPatchStore } : {}),
+    stageExecutorPatchStore: options.stageExecutorPatchStore,
     ...(options.productChainClock ? { chainClock: options.productChainClock } : {}),
     ...(options.now ? { now: options.now } : {})
   });
@@ -274,7 +214,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(stageResourcePatchChainId !== undefined ? { chainId: stageResourcePatchChainId } : {}),
     ...(stageResourcePatchVerifyingContract ? { stagePatchModuleAddress: stageResourcePatchVerifyingContract } : {}),
     ...(options.stageResourcePatchBroadcastAdapter ? { broadcastAdapter: options.stageResourcePatchBroadcastAdapter } : {}),
-    ...(options.stageResourcePatchStore ? { stageResourcePatchStore: options.stageResourcePatchStore } : {}),
+    stageResourcePatchStore: options.stageResourcePatchStore,
     ...(options.productChainClock ? { chainClock: options.productChainClock } : {}),
     ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
     ...(options.now ? { now: options.now } : {})
@@ -286,8 +226,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.indexerDiagnostics ? { indexer: options.indexerDiagnostics } : {}),
     ...(options.reconcileDiagnostics ? { reconcile: options.reconcileDiagnostics } : {}),
     ...(options.timerKeeperDiagnostics ? { timerKeeper: options.timerKeeperDiagnostics } : {}),
-    ...(options.submissionStore ? { submissionStore: options.submissionStore } : {}),
-    ...(options.governanceStore ? { governanceStore: options.governanceStore } : {}),
+    submissionStore: options.submissionStore,
+    governanceStore: options.governanceStore,
     storeMetadataStores: {
       draft: storeZhixuDraftStore,
       version: storeZhixuVersionMetadataStore,
@@ -298,7 +238,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     evidenceRuntimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
   });
   const now = options.now ?? (() => new Date());
-  const storeWalletSessionStore = options.storeWalletSessionStore ?? new InMemoryStoreWalletSessionStore();
+  const storeWalletSessionStore = options.storeWalletSessionStore;
   const storeAuthConfig = options.storeAuthConfig;
   const sessionService = options.storeSessionService ?? createStoreSessionService({
     store: storeWalletSessionStore,
@@ -313,7 +253,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       ? { governanceAdminTokenHashes: options.governanceAdminTokenHashes }
       : {})
   });
-  // 钱包会话叠加层（未启用时原样透传，fail-closed）。
   const storeIdentityProvider = createWalletSessionStoreIdentityProvider({
     base: baseStoreIdentityProvider,
     sessionService,
@@ -322,19 +261,16 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   });
   const storeDecorationService = options.storeDecorationService ?? createStoreDecorationService({
     projectionStore: store,
-    decorationStore: options.storeDecorationStore ?? new InMemoryStoreZhixuDecorationStore(),
-    delegationStore: options.storePublisherDelegationStore ?? new InMemoryStorePublisherDelegationStore(),
+    decorationStore: options.storeDecorationStore,
+    delegationStore: options.storePublisherDelegationStore,
     ...(options.now ? { now: options.now } : {}),
-    // 装修域审计事件接 AuditSink：emitAudit 只有接到回调才留痕，未接线
-    // 时 saved/restored/委托变更全部零审计。
     audit: (event) => recordStoreDomainAuditEvent(audit, "store.decoration", event.action, event)
   });
   const listingService = options.storeListingService ?? createStoreListingService({
     projectionStore: store,
-    listingStore: options.storeListingStore ?? new InMemoryStoreListingStore(),
+    listingStore: options.storeListingStore,
     ...(options.listingAnchorChainView ? { chainView: options.listingAnchorChainView } : {}),
     ...(options.now ? { now: options.now } : {}),
-    // 同装修域：上架/审核/下架/恢复事件接 AuditSink。
     audit: (event) => recordStoreDomainAuditEvent(audit, "store.listing", event.action, event)
   });
   const joinService = options.storeJoinService ?? createStoreJoinService({
@@ -342,8 +278,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     productService,
     supplierService: storeSupplierService,
     publisherAccess: storeDecorationService,
-    // 红线：加入入口被下架/锚冲突 listing 抑制（服务端强制）。链直读
-    // 失败（chainReadFailed）与锚状态一并传进门，按 fail-closed 处理。
     listingGate: {
       getListingForPlan: async (planId) => {
         const detail = await listingService.findListingByPlanId(planId);
@@ -359,35 +293,34 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
         };
       }
     },
-    joinStore: options.storeJoinApplicationStore ?? new InMemoryStoreJoinApplicationStore(),
+    joinStore: options.storeJoinApplicationStore,
     ...(options.now ? { now: options.now } : {}),
-    // 同装修/上架域：提交/评审/决策/联动事件接 AuditSink。
     audit: (event) => recordStoreDomainAuditEvent(audit, "store.join", event.action, event)
   });
-  const orderV3Store = options.orderV3Store ?? new MemoryOrderV3Store();
-  const orderV3Service = options.orderV3Service ?? createOrderV3Service({
-    store: orderV3Store,
-    chainId: options.orderV3ChainId ?? options.productTriggerChainId ?? options.submissionChainId ?? 0,
-    ...(options.orderV3StateMachineAddress ?? options.submissionVerifyingContract
-      ? { stateMachine: options.orderV3StateMachineAddress ?? options.submissionVerifyingContract! }
+  const orderStore = options.orderStore;
+  const orderService = options.orderService ?? createOrderService({
+    store: orderStore,
+    chainId: options.orderChainId ?? options.productTriggerChainId ?? options.submissionChainId ?? 0,
+    ...(options.orderStateMachineAddress ?? options.submissionVerifyingContract
+      ? { stateMachine: options.orderStateMachineAddress ?? options.submissionVerifyingContract! }
       : {}),
-    publisherWallets: options.orderV3ConfigPublisherWallets ?? [],
-    ...(options.orderV3PublishedPlanProvider ? { publishedPlanProvider: options.orderV3PublishedPlanProvider } : {}),
-    ...(options.orderV3BirthPort ? { birthPort: options.orderV3BirthPort } : {}),
-    ...(options.orderV3TriggerPort ? { triggerPort: options.orderV3TriggerPort } : {}),
+    publisherWallets: options.orderConfigPublisherWallets ?? [],
+    ...(options.orderPublishedPlanProvider ? { publishedPlanProvider: options.orderPublishedPlanProvider } : {}),
+    ...(options.orderBirthPort ? { birthPort: options.orderBirthPort } : {}),
+    ...(options.orderTriggerPort ? { triggerPort: options.orderTriggerPort } : {}),
     ...(options.now ? { now: options.now } : {})
   });
-  const orderV3ResourceResolver = options.orderV3ResourceResolver ?? createV3ResourceResolver({
-    loadOrder: (orderId) => orderV3Service.loadOrderSnapshotForVisibility(orderId),
-    ...(options.orderV3OperatorWallets !== undefined
-      ? { operatorWallets: options.orderV3OperatorWallets }
+  const orderResourceResolver = options.orderResourceResolver ?? createResourceResolver({
+    loadOrder: (orderId) => orderService.loadOrderSnapshotForVisibility(orderId),
+    ...(options.orderOperatorWallets !== undefined
+      ? { operatorWallets: options.orderOperatorWallets }
       : {}),
   });
   const context: ApiRouteContext = {
     store,
     productService,
     productBffService,
-    orderV3Service,
+    orderService,
     orderRequirementsService,
     storeConsoleService,
     storeDockingService,
@@ -410,7 +343,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     submissionService,
     productStageExecutorPatchService,
     productStageResourcePatchService,
-    ...(options.submissionStore ? { submissionStore: options.submissionStore } : {}),
+    submissionStore: options.submissionStore,
     ...(options.opsRecoveryActions ? { opsRecoveryActions: options.opsRecoveryActions } : {}),
     ...(options.opsConsoleAdminIds ? { opsConsoleAdminIds: options.opsConsoleAdminIds } : {}),
     audit,
@@ -437,19 +370,19 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createStagePatchRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createSubmissionsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductBffRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
-    createProductV3SignalsRouteModule({
-      ...(options.orderV3OperatorWallets !== undefined ? { operatorWallets: options.orderV3OperatorWallets } : {}),
-      resourceResolver: orderV3ResourceResolver,
+    createProductSignalsRouteModule({
+      ...(options.orderOperatorWallets !== undefined ? { operatorWallets: options.orderOperatorWallets } : {}),
+      resourceResolver: orderResourceResolver,
       planCapabilities: resolvePlanCapabilityTablesFromStore(store)
     }),
-    createProductReadV3RouteModule({
-      ...(options.orderV3OperatorWallets !== undefined ? { operatorWallets: options.orderV3OperatorWallets } : {}),
-      resourceResolver: orderV3ResourceResolver,
+    createProductReadKernelRouteModule({
+      ...(options.orderOperatorWallets !== undefined ? { operatorWallets: options.orderOperatorWallets } : {}),
+      resourceResolver: orderResourceResolver,
     }),
-    createProductTasksV3RouteModule({
-      ...(options.orderV3OperatorWallets !== undefined ? { operatorWallets: options.orderV3OperatorWallets } : {}),
+    createProductTasksRouteModule({
+      ...(options.orderOperatorWallets !== undefined ? { operatorWallets: options.orderOperatorWallets } : {}),
     }),
-    createProductOrderV3RouteModule(),
+    createProductOrderRouteModule(),
     createProductRequirementsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductRegistrationRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductReadRouteModule({ runtimeEnvironment: productRuntimeEnvironment })
@@ -471,10 +404,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   };
 }
 
-/**
- * draftId → 已触发订单 id 的解析器（草稿期证据归属核验的事实源）：
- * trigger 记录优先（订单确认即落 orderId），draft.triggeredOrderId 兜底。
- */
 export function productBffStoreDraftOrderResolver(
   store: ProductBffStore
 ): (draftId: string) => Promise<string | undefined> {
@@ -492,16 +421,10 @@ export function productBffStoreSubmissionAuthorization(
   projectionStore?: ProjectionStore
 ): SubmissionAuthorizationAdapter {  return {
     async authorize(request) {
-      // 《授权与签名规则》§五：执行者变更/委任不抹除既有的显式订单级
-      // 授权——先看显式 trigger 授权，命中即放行；未命中再看阶段委任的
-      // 在任执行者（overlay）。overlay 优先会一票否决显式授权者，
-      // 与合约口径（显式优先）相反。
       const registrations = await store.listRegistrations();
       const matches = registrations.filter((item) =>
         equalHex(item.orderId, request.onchainOrderId) || item.orderId.toLowerCase() === request.orderId.toLowerCase()
       );
-      // 同号订单跨 plan 复用时歧义即拒（ambiguous_order_id），不取第一条，
-      // 防止用别的 plan 的 trigger 授权通过本单的提交鉴权。
       const distinctPlanIds = new Set(matches.map((item) => item.planId.toLowerCase()));
       if (distinctPlanIds.size > 1) {
         return {
@@ -521,11 +444,6 @@ export function productBffStoreSubmissionAuthorization(
           return { authorized: true, source: "product_bff_trigger" };
         }
       }
-      // 《授权与签名规则》§四/§五 + 合约 _isSignalSubmitterAuthorized：
-      // 显式授权未命中不是终局否决。链上腿（显式授权投影）与任务
-      // overlay 兜底依序合并裁决，任一命中即放行；全部未命中才拒绝，
-      // 并以最具信息量的腿作为拒绝理由。显式命中即短路是安全的；显式
-      // 未命中短路才是缺陷（会把事后获授权者系统性 403）。
       const chainAuthorization = await chainSignalSubmitterAuthorization(projectionStore, request);
       if (chainAuthorization?.verdict) {
         return chainAuthorization.verdict;
@@ -545,21 +463,6 @@ export function productBffStoreSubmissionAuthorization(
   };
 }
 
-/**
- * 链上事后授权（SignalSubmitterAuthorized 事件投影）：参与方在订单
- * 创建后才拿到 (sourceId, signalId, submitter) 授权时，BFF trigger
- * 台账里没有对应记录——不读投影会让合法参与方的 prepare-submit 403。
- * 同号订单跨 plan 复用与 BFF 路径同口径歧义即拒。
- *
- * 显式腿：order.authorizations，键 `${sourceId}:${signalId}:${submitter}`。
- * patch 生效授权由合约 authorizeSignalSubmittersFromModule 写入显式
- * 订单级授权，经同一 SignalSubmitterAuthorized 事件流投影，显式腿即其
- * 完整重建源。
- *
- * verdict 是立即裁决（命中/歧义拒绝）；miss 只在显式腿评估过且未命中时
- * 出现——未命中不是终局否决，调用方继续评估任务 overlay 兜底，仍未决
- * 时才以 miss 作为最终拒绝理由。
- */
 async function chainSignalSubmitterAuthorization(
   projectionStore: ProjectionStore | undefined,
   request: SubmissionAuthorizationRequest
@@ -584,8 +487,6 @@ async function chainSignalSubmitterAuthorization(
       }
     };
   }
-  // 投影键与 indexer signalAuthorizationProjectionKey 同构：
-  // `${sourceId}:${signalId}:${submitter 小写}`。
   const authorizationKey = `${request.sourceId}:${request.signalId}:${request.submitter.toLowerCase()}`;
   if (orders.some((order) => order.authorizations[authorizationKey] !== undefined)) {
     return {
@@ -614,18 +515,9 @@ type ProductTaskExecutorOverlay = {
   readonly activeExecutorWallet?: string;
 };
 
-/**
- * 任务 overlay 兜底（无链上投影裁决时的近似授权）：投影在场时事后
- * 授权已由 chainSignalSubmitterAuthorization 的显式腿按键精确裁决；
- * 本腿只覆盖任务自带 overlay 而投影未裁决的场景。targetStageId ==
- * request.sourceId 是保守的阶段绑定——放宽为"在任执行者可提交任意
- * 记录信号"会授权链上必 revert 的签名（active patch 单独不构成提交
- * 权，见 _isSignalSubmitterAuthorized），保持 fail-closed。
- */
 function productBffActiveStageExecutorAuthorization(
   request: SubmissionAuthorizationRequest
 ): SubmissionAuthorizationResult | undefined {
-  // 无任务上下文（链上腿评估过的请求可以不带 task）即无 overlay 可言。
   if (!request.task) {
     return undefined;
   }
@@ -643,10 +535,6 @@ function productBffActiveStageExecutorAuthorization(
     };
   }
 
-  // overlay 委任只覆盖目标阶段已记录的真实提交信号（proof.signalId 来自
-  // 投影 submitSignals）。signalId 是推导值（proof 缺signalId 时按
-  // stageId+intent 拼出）意味着无法证明链上存在该信号——为必 revert 的
-  // 签名完成授权并广播，必须在授权层拒绝。
   const recordedSignalId = task.proof?.signalId;
   if (!recordedSignalId || !equalHex(recordedSignalId, request.signalId)) {
     return {
@@ -670,14 +558,6 @@ function equalHex(left: string, right: string): boolean {
 
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
-/**
- * plan 作用域 submitSignal 的 planId 从索引器投影读取
- * （OrderRegistered/OrderMaterialized 均带 indexed planId，投影行已存）。
- * 找不到非零 planId 时返回 undefined，由 submission service 拒绝 prepare；
- * 同号订单跨 plan 复用（多命中非零 planId）时歧义即拒
- * （ambiguous_order_id，对齐 product/service.ts resolveProductOrder 先例），
- * 绝不取第一个。
- */
 function resolveOrderPlanIdFromStore(
   store: ProjectionStore
 ): (onchainOrderId: Hex) => Promise<Hex | undefined> {
@@ -702,12 +582,6 @@ function resolveOrderPlanIdFromStore(
   };
 }
 
-/**
- * TTL 到期重试的先探链适配（UB-4）：按六元业务身份查索引器投影——
- * 匹配单源复用 reconcile 的 submissionProjectionConfirmation（worker 与
- * 提交重试侧同一口径）。confirmed = 链上已呈现（带投影出处哈希）；
- * absent = 未见；探链本身抛错按 unknown（可重试）收敛，不放大成 500。
- */
 function priorSubmissionChainProbeFromStore(
   store: ProjectionStore
 ): (prepared: import("../submissions/types.js").PreparedSubmissionRecord) => Promise<import("../submissions/service.js").PriorSubmissionChainProbe> {
@@ -727,12 +601,6 @@ function priorSubmissionChainProbeFromStore(
   };
 }
 
-/**
- * store 域服务级审计事件（join/listing/装修）接入 AuditSink：这些域的
- * 服务自带 outcome/errorCode/元数据丰富的审计回调，路由层不接线时
- * 决策与联动事件零留痕。事件体（含 planId/applicationId 等定位字段）
- * 作为 subject 整体入账。
- */
 async function recordStoreDomainAuditEvent(
   audit: AuditSink,
   type: "store.join" | "store.listing" | "store.decoration",

@@ -71,20 +71,6 @@ import {
   type StateMachineDeploymentStatus
 } from "./projections/snapshot.js";
 
-/**
- * rebuild summary 的 mismatchCount 必须反映真实 replay 异常，而不是
- * 硬编码 0。这里统计两类可观测异常：
- * 1. 重复/矛盾投递 —— 同一事件键（chain/contract/block/tx/log）作为活跃
- *    事件出现多次（replay 会静默去重，但这是真实异常，必须计数）；
- * 2. 投影 apply 失败 —— 事件流引用未知 plan 等导致 rebuildOrderProjections
- *    抛错（调用方随后按 degraded 处理，异常本身计为 1）。
- *
- * 已调查 uvp-protocol 的 @uvp-eth/statemachine 语义 replay oracle
- * （replayChainEvents）：它要求带 compiledHooks/dependencyIndex 的完整
- * plan 编译产物与 zhixuId 富化事件，索引器投影的事件流不携带这些数据，
- * 且依赖 @uvp-eth/hook-core 的原生 uvp-core 运行时；在索引器内接通属于
- * 独立集成任务，此处先用真实可观测异常计数。
- */
 export function countReplayAnomalies(events: readonly ChainEvent[]): number {
   let anomalies = countDuplicateActiveEventAnomalies(events);
   try {
@@ -95,12 +81,6 @@ export function countReplayAnomalies(events: readonly ChainEvent[]): number {
   return anomalies;
 }
 
-/**
- * 重复/矛盾投递计数（countReplayAnomalies 的第一类异常）。调用方在同一
- * 路径里已自行执行 rebuildOrderProjections（apply 失败会直接抛出走向
- * degraded，无需在此再全量重放一遍）时使用本函数，避免每轮增量触发
- * 一次冗余的 O(全历史) 投影重放。
- */
 export function countDuplicateActiveEventAnomalies(events: readonly ChainEvent[]): number {
   let anomalies = 0;
   const seenActive = new Set<string>();
@@ -135,14 +115,10 @@ export function rebuildOrderProjections(
     capabilityEnrichmentMismatchCount: 0,
     unknownEventCount: 0
   };
-  // 词表产物富集索引：planId(lower) → 编译产物两表（applyPlanFinalized/
-  // applyPlanRegistered 时填进投影并断言 capabilitiesRoot，见 plan.ts）。
   const capabilityTables = new Map<string, PlanCapabilityTablesInput>();
   for (const source of options.planCapabilityTables ?? []) {
     capabilityTables.set(source.planId.toLowerCase(), source);
   }
-  // 本轮 resolver 故障的 planId(lower)：这些 plan 的空两表是"未知词表"
-  // 而非"无词表"，富集态标 failed 供提交/触发车道拒识（见 plan.ts）。
   const capabilityResolutionFailures = new Set<string>(
     (options.planCapabilityResolutionFailures ?? []).map((planId) => planId.toLowerCase())
   );
@@ -170,11 +146,6 @@ export function rebuildOrderProjections(
   const stateMachineOrderRecord: Record<string, StateMachineOrderProjection> = {};
   const stateMachineTaskRecord: Record<string, StateMachineTaskProjection> = {};
   const stateMachineDockRecord: Record<string, StateMachineDockProjection> = {};
-  // 目标侧"谁挂了我"索引：预留索引——从已出生的 dock 集合收口派生
-  // （而非逐事件记账），快照每次重建整体重算，天然幂等；existing 的 N:1
-  // 由集合值承载，键与目标单订单桶同形。当前没有读取方消费它，消费方
-  // （目标单视角的反查/展示面）接入前该索引不承载任何读取语义，只随
-  // 快照持久化保持形状稳定。
   const stateMachineDocksByTargetOrder: Record<string, string[]> = {};
   for (const [dockKey, dock] of stateMachineDocks) {
     stateMachineDockRecord[dockKey] = {
@@ -223,8 +194,6 @@ export function rebuildOrderProjections(
       timeline: [...order.timeline].sort(compareTimelineEvents),
       proof: [...order.proof].sort(compareProofEvents)
     };
-    // 快照只暴露 plan 作用域的复合键：每条订单/任务恰好一个键，
-    // 裸 orderId 必须走 fail-closed 扫描（uniqueOrderByBareId），绝不静默命中。
     stateMachineOrderRecord[orderId] = readonlyOrder;
   }
 
@@ -251,26 +220,11 @@ export function rebuildOrderProjections(
   };
 }
 
-/**
- * 重放选项。planCapabilityTables：planId 锚定的编译产物两表（词表富集源，
- * 见 projections/plan.ts 的 fail-closed 口径）；缺省时所有 plan 两表为空
- * ——与链上无注册事件面的事实一致，只是词表相关推导不可用。
- * planCapabilityResolutionFailures：本轮 resolver 故障的 planId 集合——
- * 这些 plan 的空两表按 failed 富集态进快照（解析故障 ≠ 无词表）。
- */
 export interface ProjectionReplayOptions {
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
   readonly planCapabilityResolutionFailures?: readonly Hex[];
 }
 
-/**
- * B-02 派生投影：每单「最长 dock 链路」从 dock 事件图（父单 → 目标单边）
- * 计算——4.7 起链上不再维护路径深度（dockEdgeCountOfOrder 是每单总挂接
- * 边数的父链账本），路径语义归索引器。有 memo 的 DFS：无入边订单 = 0
- * （不出现在结果里），有入边订单 = max(入边父链 + 1)。链上有界祖先检查
- * 保证跨单无环；防御性 visiting 集合对异常事件流（理论上的环）截断，
- * 不抛错不静默丢边。
- */
 function deriveOrderDockChainDepth(
   docks: Map<string, MutableStateMachineDockProjection>
 ): Record<string, number> {
@@ -298,8 +252,6 @@ function deriveOrderDockChainDepth(
     if (cached !== undefined) {
       return cached;
     }
-    // 防御性环截断：理论不可达（链上 DockAncestorCycle 拒绝跨单环），
-    // 异常事件流按当前展开值收敛而不是死循环。
     if (visiting.has(orderKey)) {
       return 0;
     }
@@ -377,9 +329,6 @@ function applyStateMachineEvent(
       applyOrderLinked(state, event);
       return;
     case "OrderForked":
-      // fork 出生血缘（UB-39）：血缘进 fork 单投影（order.forkLineage）；
-      // fork 单的注册与事实流沿用既有事件族（OrderRegistered/
-      // SignalSubmitted），本分支只收血缘，不落未知事件桶。
       applyOrderForked(state, event);
       return;
     case "StageExecutorPatchApplied":
@@ -418,12 +367,6 @@ function applyStateMachineEvent(
     case "TimerPoked":
       applyTimerPoked(state, event);
       return;
-    // 治理面投影（B-03）：此前 OwnershipTransferred（owner 轮换）与
-    // StateMachineModulesFrozen（模块集冻结）是显式零投影分支，治理状态
-    // 无法从事件流重建。两族按发出合约分桶写入 contractGovernance——
-    // OwnershipTransferred 同名事件族也由 identity/deployment registry 发出，
-    // 一并入桶（治理状态可全量重建）。它们不产生订单/plan/模块投影，
-    // 也不落入未知计数。
     case "OwnershipTransferred":
       applyOwnershipTransferred(state.governance, event);
       return;
@@ -431,10 +374,6 @@ function applyStateMachineEvent(
       applyStateMachineModulesFrozen(state.governance, event);
       return;
     default:
-      // 真未知事件：既不在状态机事件族，也不属于其他重放遍已收口的
-      // 家族（部署注册表族由 applyDeploymentRegistryEvent 处理、身份族
-      // 由 rebuildIdentityProjections 处理）。新合约事件上线而投影未跟
-      // 进时必须显式计数（不静默），快照与索引器日志都会携带该计数。
       if (!NON_STATE_MACHINE_REPLAYED_EVENT_NAMES.has(event.eventName)) {
         state.diagnostics.unknownEventCount += 1;
       }
@@ -442,12 +381,6 @@ function applyStateMachineEvent(
   }
 }
 
-/**
- * 其他重放遍已收口、允许穿过 applyStateMachineEvent default 分支且不计入
- * 未知计数的事件名：部署注册表族（applyDeploymentRegistryEvent）与身份
- * 注册表族（rebuildIdentityProjections）。rebuildOrderProjections 的输入是
- * 全量事件流，这两族事件到达这里属正常编排，不是漏跟。
- */
 const NON_STATE_MACHINE_REPLAYED_EVENT_NAMES: ReadonlySet<string> = new Set([
   "DeploymentRegistered",
   "DeploymentCanaryMarked",
@@ -458,7 +391,6 @@ const NON_STATE_MACHINE_REPLAYED_EVENT_NAMES: ReadonlySet<string> = new Set([
   "IdentityBindingRevoked"
 ]);
 
-/** 治理桶键：chainId:contractAddress（OwnershipTransferred 跨合约族同键）。 */
 function contractGovernanceKey(chainId: number, contractAddress: Address): string {
   return `${chainId}:${contractAddress.toLowerCase()}`;
 }
@@ -501,8 +433,6 @@ function applyStateMachineModulesFrozen(
     existing.frozenProof = proof;
     return;
   }
-  // freezeModules 只能由 owner 发起：冻结事件先于任何 OwnershipTransferred
-  // 入流的畸形序列下，owner 面留空（null address），不伪造占位 owner。
   governance.set(key, {
     chainId: event.chainId,
     contractAddress: event.contractAddress,

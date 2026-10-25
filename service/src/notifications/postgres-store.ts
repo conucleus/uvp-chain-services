@@ -27,11 +27,6 @@ export interface PostgresNotificationStateStoreOptions {
   };
 }
 
-/**
- * 通知 delivery / participant read 状态落 postgres（表结构见
- * migrations/postgres/0013_notification_broadcast_state.sql）。
- * postgres 驱动的生产拓扑要求通知状态持久化，不静默退化为无存储。
- */
 export class PostgresNotificationStateStore implements NotificationDeliveryStore, ParticipantNotificationReadStateStore {
   readonly #database: PostgresDatabase;
   readonly #ownsDatabase: boolean;
@@ -65,9 +60,6 @@ export class PostgresNotificationStateStore implements NotificationDeliveryStore
     record: NotificationDeliveryRecord,
     expect?: NotificationDeliveryPrecondition
   ): Promise<NotificationDeliverySave> {
-    // 条件写入（CAS on status/attempts），与 sqlite 驱动同语义：DO UPDATE
-    // 带前提 WHERE，前提不成立的并发抢先 rowCount 为 0；无前提时只插
-    // 入不覆盖。
     const insert = `INSERT INTO notification_delivery (
         delivery_id, kind, status, task_id, order_id, receiver_hook_id, receiver_stage_id,
         source_id, signal_id, payload_hash, idempotency_key, chain_id, state_machine_address,

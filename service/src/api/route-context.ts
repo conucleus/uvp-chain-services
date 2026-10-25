@@ -76,10 +76,10 @@ import type { StoreJoinService, StoreJoinApplicationStore } from "../store/join/
 import type {
   OrderBirthPort,
   OrderTriggerPort,
-  OrderV3Service,
-  OrderV3Store,
+  OrderService,
+  OrderStore,
   PublishedPlanProvider,
-} from "../order/v3/index.js";
+} from "../order/index.js";
 import type { TimerKeeperRunSummary } from "../timer-keeper/types.js";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
@@ -89,11 +89,6 @@ export interface ApiRequest {
   readonly query?: Readonly<Record<string, string>>;
   readonly headers?: Readonly<Record<string, string | undefined>>;
   readonly body?: unknown;
-  /**
-   * 连接对端地址（服务端观测值，调用方不可自报）。匿名入口的请求方
-   * 维度限流/配额键；直连部署取 socket 对端，经反代部署由装配层按其
-   * 转发头策略填充。
-   */
   readonly clientAddress?: string | undefined;
 }
 
@@ -108,11 +103,11 @@ export interface ApiRouter {
 
 export interface CreateApiRouterOptions {
   readonly evidenceService?: EvidenceService;
-  readonly evidenceMetadataStore?: EvidenceMetadataStore;
+  readonly evidenceMetadataStore: EvidenceMetadataStore;
   readonly governanceService?: GovernanceService;
-  readonly governanceStore?: GovernanceStore;
+  readonly governanceStore: GovernanceStore;
   readonly submissionService?: ProductSubmissionService;
-  readonly submissionStore?: ProductSubmissionStore;
+  readonly submissionStore: ProductSubmissionStore;
   readonly submissionChainId?: number;
   readonly submissionVerifyingContract?: Address;
   readonly submissionBroadcastAdapter?: SubmissionBroadcastAdapter;
@@ -120,37 +115,27 @@ export interface CreateApiRouterOptions {
   readonly stageExecutorPatchBroadcastAdapter?: StageExecutorPatchBroadcastAdapter;
   readonly stageExecutorPatchChainId?: number;
   readonly stageExecutorPatchVerifyingContract?: Address;
-  readonly stageExecutorPatchStore?: ProductStageExecutorPatchStore;
+  readonly stageExecutorPatchStore: ProductStageExecutorPatchStore;
   readonly productStageResourcePatchService?: ProductStageResourcePatchService;
   readonly stageResourcePatchBroadcastAdapter?: StageResourcePatchBroadcastAdapter;
   readonly stageResourcePatchChainId?: number;
   readonly stageResourcePatchVerifyingContract?: Address;
-  readonly stageResourcePatchStore?: ProductStageResourcePatchStore;
-  readonly productBffStore?: ProductBffStore;
-  /** V3 订单域持久化 store（sqlite/postgres 驱动注入；缺省内存）。 */
-  readonly orderV3Store?: OrderV3Store;
-  /** V3 订单域服务（测试可整体注入；缺省由 store/options 构造）。 */
-  readonly orderV3Service?: OrderV3Service;
-  readonly orderV3ChainId?: number;
-  readonly orderV3StateMachineAddress?: Address;
-  /** 允许发布 V3 配置版本的钱包（凝结核/运营），空名单 fail-closed。 */
-  readonly orderV3ConfigPublisherWallets?: readonly Address[];
-  /** V3 运营/凝结核最小视图钱包白名单；空名单 fail-closed（operator 端点 404）。 */
-  readonly orderV3OperatorWallets?: readonly Address[];
-  /** V3 fileResources 解析器（授权后才调用）；缺省 503，不伪造空文件。 */
-  readonly orderV3ResourceResolver?: import("../visibility/types.js").ResourceResolverPort;
-  readonly orderV3RuntimeIntervalMs?: number;
-  readonly orderV3TimerPoker?: () => Promise<unknown>;
-  /** 已发布 plan 查询源；缺省读配置版本登记的 planId/planHash。 */
-  readonly orderV3PublishedPlanProvider?: PublishedPlanProvider;
-  /** outside-trigger 出生适配器（ProtocolOrderBirthAdapter 或部署侧实现）。 */
-  readonly orderV3BirthPort?: OrderBirthPort;
-  readonly orderV3TriggerPort?: OrderTriggerPort;
-  /** Generic executor instruction store (profile-driven, no business actions). */
-  /** V1 订单要求包服务（缺省由 routes 从 productBffStore 构造）。 */
+  readonly stageResourcePatchStore: ProductStageResourcePatchStore;
+  readonly productBffStore: ProductBffStore;
+  readonly orderStore: OrderStore;
+  readonly orderService?: OrderService;
+  readonly orderChainId?: number;
+  readonly orderStateMachineAddress?: Address;
+  readonly orderConfigPublisherWallets?: readonly Address[];
+  readonly orderOperatorWallets?: readonly Address[];
+  readonly orderResourceResolver?: import("../visibility/types.js").ResourceResolverPort;
+  readonly orderRuntimeIntervalMs?: number;
+  readonly orderTimerPoker?: () => Promise<unknown>;
+  readonly orderPublishedPlanProvider?: PublishedPlanProvider;
+  readonly orderBirthPort?: OrderBirthPort;
+  readonly orderTriggerPort?: OrderTriggerPort;
   readonly orderRequirementsService?: OrderRequirementsService;
-  /** 订单要求包持久化 store（sqlite/postgres 驱动注入；缺省内存）。 */
-  readonly orderRequirementsStore?: OrderRequirementsStore;
+  readonly orderRequirementsStore: OrderRequirementsStore;
   readonly productTriggerChainId?: number;
   readonly productRuntimeEnvironment?: ChainServicesRuntimeEnv;
   readonly audit?: AuditSink;
@@ -160,53 +145,37 @@ export interface CreateApiRouterOptions {
   readonly timerKeeperDiagnostics?: TimerKeeperRunSummary | (() => TimerKeeperRunSummary | undefined);
   readonly evidenceStorage?: EvidenceStorage;
   readonly evidenceRuntimeEnvironment?: ChainServicesRuntimeEnv;
-  readonly notificationService?: NotificationService;
-  readonly supplierNotificationConfigService?: SupplierNotificationProfileConfigService;
-  readonly storeZhixuDraftStore?: StoreZhixuDraftStore;
+  readonly notificationService: NotificationService;
+  readonly supplierNotificationConfigService: SupplierNotificationProfileConfigService;
+  readonly storeZhixuDraftStore: StoreZhixuDraftStore;
   readonly storeZhixuDraftWorkflowService?: StoreZhixuDraftWorkflowService;
   readonly productSchemaResolver?: ProductSchemaResolver;
-  readonly storeZhixuVersionMetadataStore?: StoreZhixuVersionMetadataStore;
-  readonly storeDockingSessionStore?: StoreDockingSessionStore;
-  readonly storeSupplierMetadataStore?: StoreSupplierMetadataStore;
-  /** 参与者实体自助登记（链下档案，未核验）的持久化 store。 */
-  readonly storeEntityRegistrationStore?: StoreEntityRegistrationStore;
-  /** 参与者实体自助登记服务（缺省由 store 构造；测试可整体注入）。 */
+  readonly storeZhixuVersionMetadataStore: StoreZhixuVersionMetadataStore;
+  readonly storeDockingSessionStore: StoreDockingSessionStore;
+  readonly storeSupplierMetadataStore: StoreSupplierMetadataStore;
+  readonly storeEntityRegistrationStore: StoreEntityRegistrationStore;
   readonly storeEntityRegistrationService?: StoreEntityRegistrationService;
-  readonly storeAuditStore?: StoreAuditStore;
+  readonly storeAuditStore: StoreAuditStore;
   readonly storeIdentityProvider?: StoreIdentityProvider;
   readonly storeAuthConfig?: StoreAuthConfig;
-  readonly storeWalletSessionStore?: StoreWalletSessionStore;
+  readonly storeWalletSessionStore: StoreWalletSessionStore;
   readonly storeSessionService?: StoreSessionService;
-  readonly storeDecorationStore?: StoreZhixuDecorationStore;
-  readonly storePublisherDelegationStore?: StorePublisherDelegationStore;
+  readonly storeDecorationStore: StoreZhixuDecorationStore;
+  readonly storePublisherDelegationStore: StorePublisherDelegationStore;
   readonly storeDecorationService?: StoreDecorationService;
-  readonly identityDescriptorSnapshots?: StoreIdentityDescriptorSnapshotStore;
+  readonly identityDescriptorSnapshots: StoreIdentityDescriptorSnapshotStore;
   readonly descriptorPublicBaseUrl?: string;
-  readonly storeListingStore?: StoreListingStore;
+  readonly storeListingStore: StoreListingStore;
   readonly storeListingService?: StoreListingService;
   readonly listingAnchorChainView?: ListingAnchorChainView;
   readonly storeJoinService?: StoreJoinService;
-  readonly storeJoinApplicationStore?: StoreJoinApplicationStore;
+  readonly storeJoinApplicationStore: StoreJoinApplicationStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
-  /**
-   * OPS_CONSOLE_ADMIN_IDS 白名单（去空格后的 id 列表）。非空时
-   * /admin/ops 只放行集合内的 admin id；未配置时回退到既有 governance
-   * admin 鉴权（adminPrincipalFromHeaders），保持本地开发兼容。
-   */
   readonly opsConsoleAdminIds?: readonly string[];
-  /**
-   * GOVERNANCE_ADMIN_REVIEWER_IDS 白名单（config.operatorRoles.adminReviewers）。
-   * admin 鉴权的唯一注入通道——路由不再读 process.env。
-   */
   readonly governanceAdminIds?: readonly string[];
-  /**
-   * GOVERNANCE_ADMIN_TOKEN_HASHES（sha256 hex）：非 local 管理面口令
-   * 因子（管理面生产基线：明文白名单自报头仅限 local 档）。
-   */
   readonly governanceAdminTokenHashes?: readonly string[];
   readonly onTxMined?: () => void;
   readonly now?: () => Date;
-  /** stage-patch 签名 deadline 的链时钟源（默认服务构造用）。 */
   readonly productChainClock?: ChainClock;
 }
 
@@ -225,9 +194,7 @@ export interface AdminOpsRecoveryActions {
   runReconcile?(): Promise<AdminOpsActionEffect | void>;
   rebuildProjections?(): Promise<AdminOpsActionEffect | void>;
   retrySubmission?(input: AdminOpsRetrySubmissionInput): Promise<AdminOpsActionEffect | void>;
-  /** 补投 post-commit 失败批次（游标已前进的持久 pending 队列）。 */
   sweepPendingPostCommitSteps?(): Promise<AdminOpsActionEffect | void>;
-  /** 列出 pending 队列（人工研判）。 */
   listPendingPostCommitSteps?(): Promise<unknown>;
 }
 
@@ -235,7 +202,7 @@ export interface ApiRouteContext {
   readonly store: ProjectionStore;
   readonly productService: ProductService;
   readonly productBffService: ProductBffService;
-  readonly orderV3Service: OrderV3Service;
+  readonly orderService: OrderService;
   readonly orderRequirementsService: OrderRequirementsService;
   readonly storeConsoleService: StoreConsoleService;
   readonly storeDockingService: StoreDockingService;
@@ -250,7 +217,7 @@ export interface ApiRouteContext {
   readonly decorationService?: StoreDecorationService;
   readonly listingService?: StoreListingService;
   readonly joinService?: StoreJoinService;
-  readonly identityDescriptorSnapshots?: StoreIdentityDescriptorSnapshotStore;
+  readonly identityDescriptorSnapshots: StoreIdentityDescriptorSnapshotStore;
   readonly governanceService: GovernanceService;
   readonly notificationService: NotificationService;
   readonly supplierNotificationConfigService: SupplierNotificationProfileConfigService;
@@ -260,9 +227,7 @@ export interface ApiRouteContext {
   readonly productStageResourcePatchService: ProductStageResourcePatchService;
   readonly submissionStore?: ProductSubmissionStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
-  /** 见 CreateApiRouterOptions.opsConsoleAdminIds。 */
   readonly opsConsoleAdminIds?: readonly string[];
-  /** 治理 admin 鉴权策略（环境档位 + 白名单，装配层注入）。 */
   readonly governanceAdminPolicy: GovernanceAdminAuthPolicy;
   readonly audit: AuditSink;
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
@@ -276,10 +241,6 @@ export function cleanQuery<TQuery extends Readonly<Record<string, string | undef
   );
 }
 
-/**
- * 路径参数解码：畸形百分号编码是调用方可修正的请求错误（400），
- * 裸 decodeURIComponent 抛 URIError 会落进兜底 catch 变 500。
- */
 export class InvalidPathParameterError extends Error {
   override readonly name = "InvalidPathParameterError";
   readonly status = 400;
@@ -315,12 +276,6 @@ export function readApiHeader(headers: ApiRequest["headers"], name: string): str
     .find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
 }
 
-/**
- * 客户端自报请求标识的清洗口径（x-request-id / x-uvp-request-id 等共用）：
- * trim 后非空、≤128 字符、可打印 ASCII 白名单（字母/数字/`._:-`）才采信；
- * 非法值返回 undefined 由调用方丢弃重建。请求 id 会原样回写响应头并落
- * 日志——不清洗的采信等于把客户端任意字节放进日志与响应头（注入面）。
- */
 export function normalizeRequestId(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed || !/^[A-Za-z0-9._:-]{1,128}$/.test(trimmed)) {

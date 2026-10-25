@@ -118,7 +118,6 @@ async function handleIdentityProjectionRequest(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1]
 ): Promise<ApiResponse | undefined> {
-  // descriptor 托管：公开、免鉴权的档案快照取回端点（按 descriptorHash 锁内容）。
   const descriptorMatch = /^\/identity\/descriptors\/([^/]+)(?:\/([^/]+))?$/.exec(request.pathname);
   if (request.method === "GET" && descriptorMatch && context.identityDescriptorSnapshots) {
     try {
@@ -190,8 +189,6 @@ function parseIdentityBindingQuery(query: ApiRequest["query"]): ParsedIdentityQu
   if (!parsed.ok || !activeOnly) {
     return parsed;
   }
-  // 路由层收敛为 boolean：字符串 "false" 若原样透传，投影侧按
-  // truthy 处理会把 false 当 true（撤销记录被错误过滤）。
   return { ok: true, query: { ...parsed.query, activeOnly: activeOnly === "true" } };
 }
 

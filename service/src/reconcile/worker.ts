@@ -35,18 +35,11 @@ export interface ReconcileWorkerConfig {
   readonly enabled: boolean;
   readonly pollIntervalMs: number;
   readonly txTimeoutMs: number;
-  /**
-   * 台账扫描页大小（可选能力）：submission/governance 车道按
-   * (createdAt, id) 键序分页加载，避免每轮把全历史拉进内存。缺省用
-   * DEFAULT_RECONCILE_SCAN_PAGE_SIZE。
-   */
   readonly scanPageSize?: number;
 }
 
-/** 对账扫描缺省页大小：单轮内存占用有界，历史规模只影响轮时长。 */
 export const DEFAULT_RECONCILE_SCAN_PAGE_SIZE = 200;
 
-/** failed+txHash 行有界复核的退避下限/上限与复核视界（不永久重探）。 */
 const FAILED_TX_RECHECK_BASE_INTERVAL_MS = 5 * 60 * 1000;
 const FAILED_TX_RECHECK_MAX_INTERVAL_MS = 60 * 60 * 1000;
 const FAILED_TX_RECHECK_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
@@ -65,10 +58,6 @@ export interface ViemReconcileReceiptClientOptions {
   readonly chainId: number;
 }
 
-/**
- * 证据绑定清扫依赖的最小读场面：与 EvidenceService 结构子集对齐，
- * worker 不依赖完整证据服务面。
- */
 export interface EvidenceBindingSweeper {
   getProof(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceProofDTO | undefined>;
   bindEvidence(input: BindEvidenceRequestDTO, principal: EvidencePrincipal): Promise<EvidenceRecordDTO | undefined>;
@@ -81,7 +70,6 @@ export interface TxReconcileWorkerOptions {
   readonly productStore?: ProductBffStore;
   readonly submissionStore?: ProductSubmissionStore;
   readonly governanceStore?: GovernanceStore;
-  /** stage-patch 台账对账（可选装配）：广播后回执未知/迟到的补丁行收敛。 */
   readonly stageExecutorPatchStore?: ProductStageExecutorPatchStore;
   readonly stageResourcePatchStore?: ProductStageResourcePatchStore;
   readonly evidenceBinder?: EvidenceBindingSweeper;
@@ -93,12 +81,6 @@ export interface TxReconcileWorkerOptions {
 type ReconcileableTxRecord = {
   readonly txHash?: Hex;
   readonly createdAt: string;
-  /**
-   * 最近一次身份生效（BFF prepare/同身份重开）的时间：优先于 createdAt
-   * 作为超时判定时钟——重开的行继承旧 createdAt 仅作审计，不得毒化
-   * 重试后的超时判定。缺省（submissions/governance 等无重开语义的
-   * 台账）回退 createdAt。
-   */
   readonly preparedAt?: string;
   readonly status: string;
 };
@@ -124,9 +106,7 @@ export class TxReconcileWorker implements LifecycleService {
   #lastRunAt: string | undefined;
   #lastSummary: ReconcileRunSummary | undefined;
   #lastError: string | undefined;
-  /** 已告警过的孤儿 review（每进程至多一条，防每轮重复刷审计台账）。 */
   readonly #orphanRevokedAlerted = new Set<string>();
-  /** 复核视界耗尽已告警的 failed+txHash 行（每进程一次，防每轮刷屏）。 */
   readonly #failedRecheckExhaustedAlerted = new Set<string>();
 
   constructor(options: TxReconcileWorkerOptions) {
@@ -194,10 +174,6 @@ export class TxReconcileWorker implements LifecycleService {
   }
 
   async runOnce(): Promise<ReconcileRunSummary> {
-    // 防重入守卫必须在 runOnce 本体：定时轮询（#runOnceSafely）、admin
-    // 手动 runReconcile、retrySubmission 都会并发触达本方法，只在
-    // #runOnceSafely 里挡 #checking 挡不住手动入口（对齐 dock-automation
-    // 的守卫位置）。已在跑的一轮进行中时，后到触发直接返回空汇总。
     if (this.#checking) {
       return {
         registrationsChecked: 0,
@@ -230,12 +206,6 @@ export class TxReconcileWorker implements LifecycleService {
       failed: 0
     };
 
-    // 每条记录独立 try/catch：单条坏记录（缺字段/投影查询异常）只计失败
-    // 并继续，不把整轮（以及 /admin/ops/reconcile/run、retrySubmission）
-    // 一起拖成 500。
-
-    // 证据清扫先行：清扫对象是"在途未终"的提交，先跑可确保本轮即将被
-    // reconcile 确认（终态剪除后不再进入清扫）的记录仍获得一次补绑机会。
     await this.#sweepEvidenceBinds(summary);
 
     if (this.#productStore) {
@@ -264,10 +234,6 @@ export class TxReconcileWorker implements LifecycleService {
     }
 
     if (this.#submissionStore) {
-      // 分页/终态剪除扫描：持久驱动按 (createdAt, submissionId) 键序 +
-      // status 过滤只取未闭环行（见 listOpenSubmissionsPage）；能力缺失
-      // （测试内存桩等）回退全量。行级 isReconcileableSubmission 仍兜底
-      // 过滤（failed 还需 txHash 才可复核）。
       for await (const submission of iterateOpenSubmissions(
         this.#submissionStore,
         this.#config.scanPageSize ?? DEFAULT_RECONCILE_SCAN_PAGE_SIZE
@@ -299,8 +265,6 @@ export class TxReconcileWorker implements LifecycleService {
     }
 
     if (this.#governanceStore) {
-      // 同 submission 车道：分页 + status 剪除，simulated 档（从未上链）
-      // 逐条跳过并计数告警。
       let skippedSimulatedCount = 0;
       for await (const log of iterateOpenGovernanceLogs(
         this.#governanceStore,
@@ -349,16 +313,6 @@ export class TxReconcileWorker implements LifecycleService {
     return summary;
   }
 
-  /**
-   * 证据绑定清扫：链上提交已成功但证据绑定缺失的记录，用随提交落库的
-   * 证据引用重试绑定（relayer.submit.evidence_bind_failed 的补账车道）。
-   * 与回执复核相互独立：绑定缺失不是链上事实缺口，不写提交记录。
-   * 终态 confirmed 不进清扫（对齐回执对账侧 isReconcileableSubmission 的
-   * 终态剪除口径）：确认档随历史单调增长，纳入清扫会让每轮
-   * O(全历史) 逐条 getProof。补绑车道因此以"本轮清扫先于 reconcile
-   * 确认"收口——确认后仍缺失的绑定由 evidence_bind_failed 审计事件留痕
-   * 供人工处置。
-   */
   async #sweepEvidenceBinds(summary: ReconcileRunSummaryDraft): Promise<void> {
     if (!this.#submissionStore || !this.#evidenceBinder) {
       return;
@@ -389,8 +343,6 @@ export class TxReconcileWorker implements LifecycleService {
       return 0;
     }
     const evidenceIds = submission.evidenceIds ?? [];
-    // 绑定主体与提交通路一致（业务签名者，prepare 时已过授权与签名核验），
-    // 清扫不获得超出原绑定尝试的权限。
     const binderPrincipal: EvidencePrincipal = {
       id: submission.submitter.toLowerCase(),
       role: "participant"
@@ -398,8 +350,6 @@ export class TxReconcileWorker implements LifecycleService {
     const repaired: string[] = [];
     for (const evidenceId of evidenceIds) {
       const proof = await this.#evidenceBinder.getProof(evidenceId, binderPrincipal);
-      // 只补可验证为未绑定的证据：读不到（无权/不存在）与哈希失配不是
-      // 绑定缺口，清扫不得越权，也不得把其它故障类别混进补账。
       if (proof?.verificationStatus !== "unbound") {
         continue;
       }
@@ -416,8 +366,6 @@ export class TxReconcileWorker implements LifecycleService {
       repaired.push(evidenceId);
     }
     if (repaired.length > 0) {
-      // 审计闭合：relayer.submit.evidence_bind_failed（failed）由本事件
-      // （succeeded）收口。
       await this.#audit?.record({
         type: "reconcile.evidence_bind.succeeded",
         action: submission.signalName,
@@ -441,14 +389,6 @@ export class TxReconcileWorker implements LifecycleService {
     return repaired.length;
   }
 
-  /**
-   * revoke 预翻转崩溃窗的补偿复核：review 已翻 revoked、同主体在链上
-   * 投影仍有 active binding、且台账里没有任何该主体的 tx log——即"翻转
-   * 落库成功、台账写入前进程死亡"的孤儿形态（有 log 的分叉由既有
-   * failed+txHash 复核车道与 revoke-reverted 告警覆盖）。此时零告警会
-   * 让"库 revoked、链上 active"静默漂移；补一条审计告警，运营重发
-   * revoke-identity 即可重建台账并消除孤儿。
-   */
   async #sweepOrphanRevokedReviews(summary: ReconcileRunSummaryDraft): Promise<void> {
     if (!this.#governanceStore || !this.#projectionStore) {
       return;
@@ -475,9 +415,6 @@ export class TxReconcileWorker implements LifecycleService {
       if (activeBindings.length === 0) {
         continue;
       }
-      // 孤儿条件没有状态转变可依附（补台账前它会一直成立），按 reviewId
-      // 每进程只告警一次：运营重发 revoke-identity 落下新台账后，主体键
-      // 进入 loggedSubjectIds，该行自然退出孤儿集；重启后至多再告一次。
       if (this.#orphanRevokedAlerted.has(review.reviewId)) {
         continue;
       }
@@ -500,13 +437,6 @@ export class TxReconcileWorker implements LifecycleService {
     }
   }
 
-  /**
-   * stage-patch 台账对账：执行者/资源补丁广播后的行没有收敛车道时，
-   * receipt_unknown（failed+txHash、retryable）与 submitted 行永滞在途。
-   * 口径与 registration/submission 车道同源：投影 overlay 按 patchHash
-   * （补丁内容身份）确认——overlay 呈现即补丁已上链生效；无投影再探
-   * 回执；超时无哈希的行先查投影（哈希可能在落档窗口丢失）再判失败。
-   */
   async #reconcileStagePatches(summary: ReconcileRunSummaryDraft): Promise<void> {
     if (this.#stageExecutorPatchStore?.listOpenSubmissionsPage) {
       await this.#reconcileStagePatchLane<
@@ -577,7 +507,6 @@ export class TxReconcileWorker implements LifecycleService {
   }
 
   async #runOnceSafely(): Promise<void> {
-    // 防重入由 runOnce 本体的 #checking 承担（定时/手动/重试入口共用）。
     try {
       const summary = await this.runOnce();
       this.#logger.info("reconcile worker run completed", { ...summary });
@@ -691,14 +620,6 @@ export class TxReconcileWorker implements LifecycleService {
       updatedAt: outcome.checkedAt
     };
     await this.#governanceStore?.updateTxLog(updated);
-    // 撤销异步失败分叉的显式告警：revoke 广播 submitted/confirmed 后
-    // reorg/revert，回执复核把 tx log 翻 failed，但 review 已在广播前翻成
-    // revoked 且不可回退（revoked 是 review 状态机的终态，预撤销的哈希
-    // 材料也无法从日志无损重建）——"库 revoked、链上 binding 仍 active"
-    // 没有自动闭合路径。最小闭合是留痕告警：治理侧失败台账不再被
-    // duplicate 复用短路（isReusableDuplicateLog 只认成功终态），运营
-    // 重发 revoke-identity 即可携带原请求重新广播。仅在翻入 failed 的
-    // 转变时告警一次，持续 failed 的复核轮不重复刷屏。
     if (
       log.action === "revoke_identity" &&
       outcome.kind === "failed" &&
@@ -728,12 +649,6 @@ export class TxReconcileWorker implements LifecycleService {
     return updated;
   }
 
-  /**
-   * failed+txHash 行的有界复核闸（A-11）：迟到成功自愈车道不得退化为每轮
-   * 永久重探。按行龄指数退避（无计数器：间隔 = 行龄/16，夹在
-   * [BASE, MAX]），行龄越过复核视界后不再重探（车道终态，每进程告警一
-   * 次留痕人工裁决）。updatedAt 缺失/时钟回拨时照常复核（fail-safe）。
-   */
   #failedTxRecheckDue(
     key: string,
     record: {
@@ -790,17 +705,9 @@ export class TxReconcileWorker implements LifecycleService {
             receiptStatus: "not_checked",
             projectionStatus: "not_checked"
           },
-          // No transaction hash means no chain fact has been observed yet;
-          // this is a pending/reconcile condition regardless of the adapter's
-          // original retry flag. It must not be dead-lettered as a permanent
-          // broadcast failure.
           retryable: true
         };
       }
-      // 超时但无 txHash ≠ 链上无订单：哈希可能在落档窗口丢失（persist
-      // 失败/崩溃）。先查投影——订单已呈现即按已确认收口，不得仅凭
-      // "无哈希可探回执"就把行钉成 failed（failed 且无 txHash 的行不再
-      // 进复核，迟到投影永远无人认领）。
       const projectedWithoutHash = await projectionConfirmation();
       if (projectedWithoutHash) {
         return this.#confirmedFromProjection(checkedAt, projectedWithoutHash);
@@ -829,8 +736,6 @@ export class TxReconcileWorker implements LifecycleService {
           receiptStatus: "missing",
           projectionStatus: "not_checked"
         },
-        // A missing receipt is a temporary observation gap, not a reverted
-        // transaction. Keep probing until the timeout lane takes over.
         retryable: true
       };
     }
@@ -854,10 +759,6 @@ export class TxReconcileWorker implements LifecycleService {
       };
     }
     if (receipt.status !== "success") {
-      // Receipt status is an open input at the RPC boundary. Unknown,
-      // pending, or omitted values must remain pending/retryable; treating
-      // them as a revert can isolate a transaction which is actually still
-      // mining (or already successful on the canonical chain).
       return {
         kind: "pending",
         registrationStatus: record.status as ProductOrderTriggerStatus,
@@ -894,13 +795,6 @@ export class TxReconcileWorker implements LifecycleService {
     return this.#confirmedFromProjection(checkedAt, projected, blockNumber);
   }
 
-  /**
-   * 业务身份匹配后的按链重算出口（「链为真相、台账是缓存」UB-4）：
-   * 投影按业务身份（六元组/复合键）命中即视为同笔业务提交在链上生效，
-   * 确认结论取投影出处；台账 txHash 与链上不一致（替换回执/分叉重放）
-   * 不再一票否决——行内 txHash 改写为链上胜出哈希，并落诊断日志
-   * （可观测，防静默吞真分叉）。
-   */
   #confirmedFromProjection(
     checkedAt: string,
     projection: ProjectionConfirmation,
@@ -920,9 +814,6 @@ export class TxReconcileWorker implements LifecycleService {
     if (!projection.hashMismatch) {
       return;
     }
-    // 业务身份已匹配、仅回执哈希不一致：不是否决理由（链为真相），但
-    // 必须留痕——哈希漂移可能是替换回执（正常收敛），也可能是真分叉
-    // （同身份被两笔不同内容上链），静默确认会吞掉后者的可观测性。
     this.#logger.warn(
       "reconcile confirmed a business-identity projection match whose transaction hash differs from the ledger record; state recalculated from chain and the ledger hash follows the chain",
       {
@@ -954,10 +845,6 @@ function confirmedOutcome(checkedAt: string, blockNumber?: string): ResolvedReco
 interface ProjectionConfirmation {
   readonly transactionHash: Hex;
   readonly blockNumber: string;
-  /**
-   * 业务身份匹配但链上回执哈希与台账记录不一致（替换回执/分叉重放）：
-   * 按链重算仍确认（台账跟随链），调用方负责落诊断日志与 txHash 改写。
-   */
   readonly hashMismatch?: boolean;
 }
 
@@ -981,9 +868,6 @@ function projectionConfirmationFromProvenance(
     expectedTxHash &&
     provenance.transactionHash.toLowerCase() !== expectedTxHash.toLowerCase()
   ) {
-    // 哈希逐字相等不再一票否决（UB-4）：业务身份（六元组/复合键）已在
-    // 调用方匹配命中，替换回执（重广播/分叉后链上胜出的那笔）不得让行
-    // 永久滞留 stale_pending。标记不一致交由调用方按链重算并留诊断。
     return { ...confirmation, hashMismatch: true };
   }
   return confirmation;
@@ -1023,14 +907,12 @@ interface ResolvedReconcileOutcome {
   readonly checkedAt: string;
   readonly fields: Required<Pick<TxReconcileFields, "reconcileStatus" | "lastCheckedAt" | "receiptStatus" | "projectionStatus">>;
   readonly blockNumber?: string;
-  /** 按链重算胜出的链上哈希（业务身份匹配但台账哈希不一致时改写行内 txHash）。 */
   readonly txHash?: Hex;
   readonly errorCode?: string;
   readonly errorMessage?: string;
   readonly retryable: boolean;
 }
 
-/** 本轮内累加的进行中汇总（DTO 面只读，累加发生在 pass 内部）。 */
 type ReconcileRunSummaryDraft = {
   -readonly [K in keyof ReconcileRunSummary]: ReconcileRunSummary[K];
 };
@@ -1053,13 +935,6 @@ function staleOutcome(checkedAt: string): ResolvedReconcileOutcome {
 }
 
 function isReconcileableRegistration(registration: ProductOrderTriggerRecord): boolean {
-  // 与 submissions/governance 口径对齐：failed + txHash 必须继续复核——
-  // 链上真相可能推翻本地失败标记（迟到成功自愈为 confirmed）。归属与
-  // BFF 同身份重开闸（isReopenableFailedTriggerRecord）同源裁决：
-  // 无 txHash 的可重试失败归 BFF 同身份重开放行（无回执可查，不进本
-  // 车道）；带 txHash 的失败行不满足重开闸（永不重开），回执/投影复核
-  // 是其唯一收敛车道——两侧共用同一判定，不留第二身份再生入口
-  //（UA-2/UB-3）。无 txHash 且不可重试的失败同样无回执可查。
   if (registration.status === "failed") {
     return !isReopenableFailedTriggerRecord(registration)
       && Boolean(registration.txHash);
@@ -1068,9 +943,6 @@ function isReconcileableRegistration(registration: ProductOrderTriggerRecord): b
 }
 
 function isReconcileableSubmission(submission: ProductSubmissionDTO): boolean {
-  // 带 txHash 的 failed 必须复核回执：链上真相可能推翻本地失败标记
-  // （回执成功且投影已呈现 → 自愈为 confirmed）。无 txHash 的 failed
-  // 从未上链，没有回执可查。
   if (submission.status === "failed") {
     return Boolean(submission.txHash);
   }
@@ -1078,11 +950,6 @@ function isReconcileableSubmission(submission: ProductSubmissionDTO): boolean {
 }
 
 function isEvidenceBindSweepable(submission: ProductSubmissionDTO): boolean {
-  // 清扫对象：链上提交已成功（持 txHash 的在途档）且随提交落库了证据
-  // 引用。failed 即便带 txHash 也是回执失败/未知，不存在"提交已成功"的
-  // 事实基础；expired/signature_received 从未上链；无证据引用的记录
-  // 没有可重试的绑定载荷。终态 confirmed 不进清扫（对齐回执对账侧的
-  // 终态剪除口径，见 #sweepEvidenceBinds 注释）。
   if (!submission.txHash || !submission.evidenceIds?.length) {
     return false;
   }
@@ -1092,7 +959,6 @@ function isEvidenceBindSweepable(submission: ProductSubmissionDTO): boolean {
 }
 
 function isReconcileableGovernanceLog(log: GovernanceTxLogDTO): boolean {
-  // 同 registration 口径：failed + txHash 继续复核，迟到成功自愈。
   if (log.status === "failed") {
     return Boolean(log.txHash);
   }
@@ -1103,7 +969,6 @@ function isSimulatedGovernanceLog(log: GovernanceTxLogDTO): boolean {
   return log.executionMode === "simulated" || log.broadcastStatus === "simulated_tx";
 }
 
-/** stage-patch 台账的同款有界扫描（(createdAt, submissionId) 键序）。 */
 async function* iterateOpenStagePatches<TSubmission extends {
   readonly submissionId: string;
   readonly createdAt: string;
@@ -1130,7 +995,6 @@ async function* iterateOpenStagePatches<TSubmission extends {
   }
 }
 
-/** 执行者补丁的投影确认：订单按复合键 (planId, orderId) 定位，overlay 按 patchHash（内容身份）匹配。 */
 async function confirmExecutorPatchProjection(
   projectionStore: ProjectionStore,
   submission: StageExecutorPatchSubmissionDTO
@@ -1146,7 +1010,6 @@ async function confirmExecutorPatchProjection(
   };
 }
 
-/** 资源补丁的投影确认：overlay 键是 (targetStageId, resourceKey)。 */
 async function confirmResourcePatchProjection(
   projectionStore: ProjectionStore,
   submission: StageResourcePatchSubmissionDTO
@@ -1162,12 +1025,6 @@ async function confirmResourcePatchProjection(
   };
 }
 
-/**
- * 订单身份是 (planId, orderId) 复合键，与 registration/submission 车道同
- * 纪律走复合键查询：裸 (orderId, 合约地址) 查找在同号订单跨 plan 复用时
- * 会把别的 plan 的投影行当成本补丁的确认依据。合约地址是部署侧的一致性
- * 复核，失配即不确认。
- */
 async function findStagePatchOrder(
   projectionStore: ProjectionStore,
   submission: { readonly onchainOrderId: Hex; readonly planId: Hex; readonly stateMachineAddress: Address }
@@ -1182,7 +1039,6 @@ async function findStagePatchOrder(
   return order;
 }
 
-/** 对账结论映射回补丁台账行（confirmed/failed 终态，pending 档如实保留在途）。 */
 function stagePatchSubmissionFromOutcome<TSubmission extends StageExecutorPatchSubmissionDTO | StageResourcePatchSubmissionDTO>(
   submission: TSubmission,
   outcome: ResolvedReconcileOutcome
@@ -1200,7 +1056,6 @@ function stagePatchSubmissionFromOutcome<TSubmission extends StageExecutorPatchS
       broadcastStatus = "failed";
       break;
     case "indexing":
-      // 回执成功、投影未呈现：如实标 submitted（等待索引），不虚构 confirmed。
       status = "submitted";
       broadcastStatus = "submitted";
       break;
@@ -1222,12 +1077,6 @@ function stagePatchSubmissionFromOutcome<TSubmission extends StageExecutorPatchS
   };
 }
 
-/**
- * 未闭环提交的有界扫描：持久驱动提供 listOpenSubmissionsPage 时按
- * (createdAt, submissionId) 键序分页（服务端 status 剪除，终态不再返回），
- * 能力缺失时回退 listSubmissions() 全量（调用方行级过滤兜底）。键序基于
- * created_at（不可变），轮中对页内记录的状态更新不影响游标稳定性。
- */
 async function* iterateOpenSubmissions(
   store: ProductSubmissionStore,
   pageSize: number
@@ -1255,7 +1104,6 @@ async function* iterateOpenSubmissions(
   }
 }
 
-/** 同 iterateOpenSubmissions 的 governance 台账版本（(createdAt, logId) 键序）。 */
 async function* iterateOpenGovernanceLogs(
   store: GovernanceStore,
   pageSize: number
@@ -1287,9 +1135,6 @@ async function registrationProjectionConfirmation(
   projectionStore: ProjectionStore,
   registration: ProductOrderTriggerRecord
 ): Promise<ProjectionConfirmation | undefined> {
-  // 订单身份是 (planId, orderId)：registration.planId 必填（schema NOT
-  // NULL），必须走复合键查询——裸 orderId 在同号订单跨 plan
-  // 复用时永远查不中，registration 会永卡 indexing。
   const order = await projectionStore.getStateMachineOrder(
     registration.orderId,
     registration.planId
@@ -1306,13 +1151,6 @@ async function registrationProjectionConfirmation(
   return projectionConfirmationFromProvenance(order.registeredAt, registration.txHash);
 }
 
-/**
- * 提交车道的业务身份投影确认（六元组）：订单按复合键 (planId, orderId)
- * 定位，信号按 sourceId:signalId 定位后核对 orderId/sourceId/signalId/
- * submitter/payloadHash/idempotencyKey 六元全等——命中即视为同笔业务
- * 提交在链上生效。导出供 submissions TTL 到期先探链车道复用同一匹配
- * 单源（「重试=同身份重放」两侧不得各自口径）。
- */
 export async function submissionProjectionConfirmation(
   projectionStore: ProjectionStore,
   submission: {
@@ -1323,13 +1161,9 @@ export async function submissionProjectionConfirmation(
     readonly submitter: Address;
     readonly payloadHash: Hex;
     readonly idempotencyKey: Hex;
-    /** 台账已知的回执哈希（缺省 = 未观察到链上事实，不做一致性标记）。 */
     readonly txHash?: Hex;
   }
 ): Promise<ProjectionConfirmation | undefined> {
-  // The state-machine identity is (planId, orderId), not bare orderId. The
-  // composite lookup never returns another plan's projection for this signed
-  // submission.
   const order = await projectionStore.getStateMachineOrder(submission.onchainOrderId, submission.planId);
   if (!order) {
     return undefined;
@@ -1412,9 +1246,6 @@ function submissionStatusFromOutcome(
     case "indexing":
       return "indexing";
     case "pending":
-      // pending + 无 txHash = 仍在广播、回执未知：不得虚标 submitted
-      // （投影不得替链说话），保持原状态（broadcasting）。有 txHash 的
-      // pending 表示已广播、回执未落地，标 submitted 是如实的。
       return submission.txHash ? "submitted" : submission.status;
   }
 }
@@ -1525,8 +1356,6 @@ function timedOut(record: ReconcileableTxRecord, timeoutMs: number, now: Date): 
   if (timeoutMs <= 0) {
     return false;
   }
-  // 超时时钟优先读 preparedAt：同身份重开的行继承旧 createdAt 仅作审计
-  //（首次建档时间），按旧时钟判超时会让重放后的行立即"已被超时"。
   const clockMs = Date.parse(record.preparedAt ?? record.createdAt);
   return Number.isFinite(clockMs) && now.getTime() - clockMs >= timeoutMs;
 }
@@ -1546,12 +1375,5 @@ function isReceiptMissingError(error: unknown): boolean {
   if (/ReceiptNotFound|TransactionReceiptNotFound/i.test(name)) {
     return true;
   }
-  // 泛 "not found" 会把网关类传输错误（"upstream/resource not found"）吞成
-  // "回执缺失"→pending：真回执被误判缺失，超时车道随后把它标成
-  // tx_reconcile_timeout 失败。viem 的错误文本必然包含方法名
-  // eth_getTransactionReceipt，不能拿方法名当语境——not found 必须紧跟
-  // transaction/receipt 词（geth "transaction not found"、viem "Transaction
-  // receipt with hash … could not be found"）。其余传输错误原样上抛，
-  // 由逐记录 catch 计失败并响亮记录。
   return /\b(?:transaction|receipt)\s+(?:with\s+hash\s+\S+\s+)?(?:could\s+not\s+be\s+found|not\s+found)/i.test(error.message);
 }

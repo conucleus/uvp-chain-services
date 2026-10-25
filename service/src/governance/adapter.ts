@@ -44,14 +44,12 @@ export interface GovernancePublicClient {
     readonly status: "success" | "reverted";
     readonly blockNumber?: bigint;
   }>;
-  /** duplicate-transaction 车道的回执探针（viem publicClient 自带同签名）。 */
   getTransactionReceipt?(parameters: {
     readonly hash: Hex;
   }): Promise<{
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
   } | undefined | null>;
-  /** 确认深度核验（viem publicClient 自带同签名）。 */
   getBlockNumber?(parameters?: undefined): Promise<bigint>;
 }
 
@@ -75,7 +73,6 @@ export interface GovernanceBroadcasterAdapterOptions {
   readonly allowedOperators?: readonly Address[];
   readonly publicClient?: GovernancePublicClient;
   readonly walletClient?: GovernanceWalletClient;
-  /** duplicate 探针异常的响亮上报出口；缺省静默（裁决仍按 receipt_unknown）。 */
   readonly logger?: Logger;
 }
 
@@ -113,18 +110,9 @@ export function createConfiguredGovernanceChainAdapter(
   options: { readonly logger?: Logger } = {}
 ): GovernanceChainAdapter {
   if (!config.governance.broadcastEnabled) {
-    // simulated 适配器只允许 local：任何非 local 环境回落 simulated 意味着
-    // 治理写操作"成功"返回却永不上链（静默假广播）。
     if (config.security.environment === "local") {
       return createSimulatedGovernanceChainAdapter();
     }
-    // production 禁用 env 私钥治理（validateProductionSafety），两条
-    // "要么开广播、要么拒启动"的路都死会让合法组合无法启动。装配一个
-    // fail-closed 拒绝适配器：服务可启动（读面/其余域不受影响），
-    // registerIdentity/revokeIdentity 一律按 failed 广播结果拒绝——
-    // 不假成功、留台账与审计，治理广播通道等专门的 production 治理
-    // 接入方接上后再启用。testnet/staging 是 rehearsal 档，仍要求显式
-    // 配置 GOVERNANCE_BROADCAST_ENABLED=true（启动即失败提醒配置缺失）。
     if (config.security.environment === "production") {
       return createRefusingGovernanceChainAdapter(
         "governance broadcast is disabled: production forbids env private-key governance (GOVERNANCE_BROADCAST_ENABLED) and no production governance signer is assembled; identity registration/revocation is refused until a production governance integration is wired"
@@ -154,11 +142,6 @@ export function createConfiguredGovernanceChainAdapter(
   });
 }
 
-/**
- * fail-closed 拒绝适配器：不广播、不假成功。每次调用按 failed 广播结果
- * 拒绝（retryable=true——接上正式治理 signer 后同一请求可直接重发），
- * 服务层会把它当一次失败尝试落台账并留审计。
- */
 export function createRefusingGovernanceChainAdapter(reason: string): GovernanceChainAdapter {
   return {
     async registerIdentity() {
@@ -221,10 +204,6 @@ export function createGovernanceBroadcasterAdapter(
       return preflight;
     }
 
-    // 已广播的 txHash 必须穿越 catch：writeContract 成功后等待回执抛错
-    // 时链上交易已经存在，failed 结果丢失 txHash 会造成幽灵交易与重复
-    // 登记（对齐 product/query/bff/trigger、submissions/broadcast-adapter、
-    // relayer 的同款防线）。
     let broadcastTxHash: ReturnType<typeof normalizeTxHash> | undefined;
     try {
       const txHash = normalizeTxHash(await walletClient.writeContract({
@@ -274,10 +253,6 @@ export function createGovernanceBroadcasterAdapter(
         simulated: false
       };
     } catch (error) {
-      // duplicate-transaction 车道（nonce too low / already known /
-      // replacement underpriced）不是终态失败：交易可能已上链或仍在池中，
-      // 走回执探针四态裁决（机制单源 shared/broadcast，与 submissions/
-      // stage-patches 的捕获口同口径），不得按默认 retryable 落台账。
       if (isDuplicateTransactionReport(governanceErrorHaystack(error))) {
         return adjudicatedDuplicateGovernanceBroadcast(error, publicClient, signer, options.txConfirmations, logger);
       }
@@ -288,8 +263,6 @@ export function createGovernanceBroadcasterAdapter(
           retryable: isRetryableBroadcastError(error),
           signer
         }),
-        // 交易已在链上（或仍在池中）：回执等待失败不抹掉 txHash，人工/
-        // 对账路径可凭哈希追踪，不再重复登记。
         ...(broadcastTxHash ? { txHash: broadcastTxHash } : {})
       };
     }
@@ -389,14 +362,6 @@ function failedBroadcast(input: {
   };
 }
 
-/**
- * duplicate-transaction 车道的回执探针裁决映射：探到 success 回执且已达
- * txConfirmations 确认深度才按 confirmed 落账（0-conf 记 confirmed 后
- * reorg 不复检）；reverted 终态（transaction_reverted，nonce 已被该失败
- * 交易消费）；回执未知/未达深度可重试并保留候选哈希
- * （transaction_receipt_unknown）；无可探哈希的 nonce 竞争可重组装重发
- * （duplicate_transaction）。错误码沿用词表已有车道码。
- */
 async function adjudicatedDuplicateGovernanceBroadcast(
   error: unknown,
   publicClient: GovernancePublicClient,
@@ -442,8 +407,6 @@ async function adjudicatedDuplicateGovernanceBroadcast(
       })
     },
     (txHash, probeError) => {
-      // 探针异常不得被吞成无声的 receipt_unknown：响亮留痕（裁决仍按
-      // 可重试未裁决处理）。
       logger.warn(
         "governance duplicate-transaction receipt probe failed; the candidate hash stays retryable",
         { txHash, message: redactErrorMessage(probeError) }
@@ -452,11 +415,6 @@ async function adjudicatedDuplicateGovernanceBroadcast(
   );
 }
 
-/**
- * 达确认深度的 success 回执才放行：未达 txConfirmations 深度（或深度
- * 不可核验——缺 getBlockNumber/块号）按未裁决返回 undefined，交
- * receipt_unknown 车道下轮重探，不得 0-conf 记 confirmed。
- */
 async function probeDuplicateReceiptAtDepth(
   publicClient: GovernancePublicClient,
   txHash: Hex,
@@ -505,20 +463,12 @@ function sanitizedErrorMessage(error: unknown, privateKey: Hex): string {
 
 function isRetryableBroadcastError(error: unknown): boolean {
   const haystack = governanceErrorHaystack(error);
-  // 传输层信封是瞬态故障，必须先于 revert 判定短路为可重试：viem 对
-  // 非标准节点错误的通用信封 UnknownRpcError（"An unknown RPC error
-  // occurred."）与 HTTP/超时类错误不代表交易被链上裁决，钉成
-  // retryable:false 落库后，同请求会被失败台账复用短路（对照
-  // relayer/submissions 的同类处理：只有链上裁决的确定性 revert 才永久）。
   if (
     /unknownrpcerror|rpcerror|httprequesterror|websocketerror|timeouterror|resourceunavailable/i.test(haystack) ||
     /timeout|timed out|etimedout|econnreset|econnrefused|aborterror|fetch failed|network error|rpc unavailable/i.test(haystack)
   ) {
     return true;
   }
-  // 合约确定性 revert（含 NotOwner 权限拒绝）才是永久失败：继续重试同一
-  // 交易只会重复烧 gas。viem 的复合错误文本同时含 "reverted" 与错误名，
-  // 因此 revert 判定必须放在传输信封/瞬态判定之后。
   if (haystack.includes("revert") || haystack.includes("notowner") || haystack.includes("not owner")) {
     return false;
   }

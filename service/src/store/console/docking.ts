@@ -9,17 +9,13 @@ import {
 import type { ProductService } from "../../product/application/service.js";
 import type { Address } from "../../shared/types.js";
 
-/** dock 下单模式（{new, existing}）。 */
 export type StoreDockOrderMode = "new" | "existing";
-/** 草稿映射行方向：input=本地通道→接口输入端口，output=本地信号→接口输出端口。 */
 export type StoreDockBindingKind = "input" | "output";
 
 export interface StoreDockingSessionCreateDTO {
   readonly sourceZhixuId: string;
   readonly targetZhixuId: string;
-  /** 目标具名接口；缺省取目标首个接口。 */
   readonly targetInterfaceName?: string;
-  /** 下单模式；缺省取所选接口的首个开放模式。 */
   readonly orderMode?: StoreDockOrderMode;
 }
 
@@ -37,13 +33,10 @@ export interface StoreDockingZhixuRefDTO {
 export interface StoreDockingInterfacePortDTO {
   readonly portName: string;
   readonly label: string;
-  /** input 端口的目标侧 hook 引用（<task>.<stage>#<channel>）。 */
   readonly hook?: string;
-  /** output 端口的目标侧 canonical signal。 */
   readonly signal?: string;
 }
 
-/** 目标定义发布的具名 dock 接口（试拼沙箱消费的 v2 接口形状）。 */
 export interface StoreDockingInterfaceDTO {
   readonly interfaceName: string;
   readonly orderModes: readonly StoreDockOrderMode[];
@@ -109,11 +102,9 @@ export interface StoreDockingValidationDTO {
 export interface StoreDockingSessionDTO {
   readonly sessionId: string;
   readonly status: StoreDockingSessionStatus;
-  /** 创建会话的锚定地址（资源租户）：读写归属断言的比对基准。 */
   readonly createdBy: Address;
   readonly source: StoreDockingZhixuRefDTO;
   readonly target: StoreDockingZhixuRefDTO;
-  /** 目标定义当前发布的具名接口全集（供操作员切换试拼对象）。 */
   readonly interfaces: readonly StoreDockingInterfaceDTO[];
   readonly selectedInterfaceName: string;
   readonly orderMode: StoreDockOrderMode;
@@ -125,7 +116,6 @@ export interface StoreDockingSessionDTO {
 }
 
 export interface StoreDockingService {
-  /** creator 必须是路由层锚定校验拿到的服务端地址，不从请求体取。 */
   createSession(
     input: StoreDockingSessionCreateDTO,
     creator: { readonly anchoredAddress: Address }
@@ -135,11 +125,6 @@ export interface StoreDockingService {
   saveDraftMap(sessionId: string, draftSignalMap: readonly StoreDraftSignalMapEntryDTO[]): Promise<StoreDockingSessionDTO>;
 }
 
-/**
- * 试拼会话的租户归属断言：会话是创建者的谈判桌（含草稿信号
- * 映射），非创建者不得读写；管理员（canAdmin）保留跨租户治理可见性。
- * 历史会话无 createdBy（无法证明归属）时对非管理员一律不可见。
- */
 export function canAccessDockingSession(
   session: StoreDockingSessionDTO,
   viewer: { readonly anchoredAddress?: Address; readonly canAdmin: boolean }
@@ -201,16 +186,14 @@ interface DockingSessionContext {
 
 export function createStoreDockingService(options: {
   readonly productService: ProductService;
-  readonly sessionStore?: StoreDockingSessionStore;
+  readonly sessionStore: StoreDockingSessionStore;
   readonly now?: () => Date;
 }): StoreDockingService {
-  const sessionStore = options.sessionStore ?? new MemoryStoreDockingSessionStore();
+  const sessionStore = options.sessionStore;
   const now = options.now ?? (() => new Date());
 
   return {
     async createSession(input, creator) {
-      // STORE-03：self-docking 无业务意义且会绕过信号映射校验的 source/target
-      // 前提；服务层为权威校验，路由层另做同规则快速拦截。
       if (input.sourceZhixuId.trim() === input.targetZhixuId.trim()) {
         throw new StoreDockingServiceError(
           422,
@@ -385,8 +368,6 @@ async function currentSessionContext(
     source: zhixuRef(sourceDetail),
     target: zhixuRef(targetDetail),
     interfaces,
-    // 会话锚定的接口在当前目标定义上已消失时保留接口名并让校验层以
-    // target_interface_not_found 阻断（会话是草稿，不静默改选接口）。
     selectedInterface: selectedInterface ?? {
       interfaceName: session.selectedInterfaceName,
       orderModes: [],
@@ -447,7 +428,6 @@ function validateSignalMap(input: {
       ));
       continue;
     }
-    // 同一目标端口在一条 route 内至多绑定一次。
     const targetPortKey = `${entry.bindingKind}:${entry.targetSignalId}`;
     if (boundTargetPorts.has(targetPortKey)) {
       errors.push(validationError(
@@ -474,10 +454,6 @@ function publicationErrors(
   const errors: StoreDockingValidationErrorDTO[] = [];
   const prefix = side === "source" ? "source" : "target";
 
-  // A docking session is review material only, but it must never claim that
-  // an unpublished or revoked plan can participate in a valid composition.
-  // Keep both checks explicit: a revoked definition is terminal even if a
-  // stale projection still reports its old publication marker.
   if (ref.publicationStatus !== "published") {
     errors.push(validationError(
       `${prefix}_zhixu_not_published` as const,
@@ -538,7 +514,6 @@ function interfacesFromDetail(zhixu: ZhixuDetailDTO): readonly StoreDockingInter
   }));
 }
 
-/** 源侧端口按绑定方向分组：input 行用本地通道（receiveSignals 词表），output 行用本地完成信号。 */
 function sourcePortsForKind(
   zhixu: ZhixuDetailDTO
 ): ReadonlyMap<StoreDockBindingKind, ReadonlyMap<string, StoreDockingSignalPortDTO>> {
@@ -564,7 +539,6 @@ function sourcePortsForKind(
   ]);
 }
 
-/** 目标侧端口按绑定方向分组：接口输入端口 / 接口输出端口。 */
 function targetPortsForKind(
   selectedInterface: StoreDockingInterfaceDTO
 ): ReadonlyMap<StoreDockBindingKind, ReadonlyMap<string, StoreDockingSignalPortDTO>> {
@@ -653,11 +627,6 @@ function signalPort(input: {
   };
 }
 
-/**
- * 候选只做方向对齐与启发式排序，不做兼容性裁决：接口端口的 payload
- * hint 是协议引用（hook/signal 原文），与源侧证据清单不可比，兼容性
- * 由操作员在草稿中确认。
- */
 function candidateConfidence(
   source: StoreDockingSignalPortDTO,
   target: StoreDockingSignalPortDTO

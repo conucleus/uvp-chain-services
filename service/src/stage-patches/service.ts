@@ -37,7 +37,6 @@ import {
   selectorBindingProofForPatch,
   type PlanCapabilityTables
 } from "../submissions/capability-proofs.js";
-import { InMemoryProductStagePatchStore } from "./store.js";
 import {
   buildStageExecutorPatchTypedData,
   buildStageResourcePatchTypedData,
@@ -79,7 +78,6 @@ import type {
 
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
 
-/** deadline 的链时钟源：缺失即响亮拒绝，不回落宿主墙钟。 */
 function requireChainClockNowSeconds(
   options: ProductStagePatchServiceOptions,
 ): Promise<number> {
@@ -123,11 +121,6 @@ export interface ProductStagePatchServiceOptions {
   readonly stagePatchModuleAddress?: Address;
   readonly dockingModuleAddress?: Address;
   readonly now?: () => Date;
-  /**
-   * 签名 deadline 的链时钟源（latest block timestamp，秒）。deadline 由
-   * 合约按 block.timestamp 校验，宿主墙钟偏移会让签名早/晚过期——缺省
-   * 时 prepare 响亮拒绝，不回落宿主钟。
-   */
   readonly chainClock?: ChainClock;
   readonly prepareTtlSeconds?: number;
   readonly prepareIdFactory?: () => string;
@@ -137,13 +130,13 @@ export interface ProductStagePatchServiceOptions {
 
 export interface ProductStageExecutorPatchServiceOptions
   extends ProductStagePatchServiceOptions {
-  readonly stageExecutorPatchStore?: ProductStageExecutorPatchStore;
+  readonly stageExecutorPatchStore: ProductStageExecutorPatchStore;
   readonly broadcastAdapter?: StageExecutorPatchBroadcastAdapter;
 }
 
 export interface ProductStageResourcePatchServiceOptions
   extends ProductStagePatchServiceOptions {
-  readonly stageResourcePatchStore?: ProductStageResourcePatchStore;
+  readonly stageResourcePatchStore: ProductStageResourcePatchStore;
   readonly broadcastAdapter?: StageResourcePatchBroadcastAdapter;
 }
 
@@ -198,12 +191,7 @@ export interface ProductStageResourcePatchService {
 export function createProductStageExecutorPatchService(
   options: ProductStageExecutorPatchServiceOptions,
 ): ProductStageExecutorPatchService {
-  const stageExecutorPatchStore =
-    options.stageExecutorPatchStore ??
-    new InMemoryProductStagePatchStore<
-      PreparedStageExecutorPatchRecord,
-      StageExecutorPatchSubmissionDTO
-    >();
+  const stageExecutorPatchStore = options.stageExecutorPatchStore;
   const now = options.now ?? (() => new Date());
   const ttlSeconds = options.prepareTtlSeconds ?? DEFAULT_PREPARE_TTL_SECONDS;
   const prepareIdFactory =
@@ -241,15 +229,11 @@ export function createProductStageExecutorPatchService(
         input.executorWallet,
         "executorWallet",
       );
-      // 候选集闸（UB-36②③）：(targetStageId, executor) 必须命中 plan 承诺的
-      // 执行者候选集——无候选集（EMPTY_ROOT）或不在集内的链上恒拒
-      // StageExecutorNotCandidate。prepare 时点 fail-closed，不发必 revert
-      // 的签名载荷。
       assertExecutorInCandidateSet(
         plan,
         context.targetStageId,
         executorWallet,
-        /* failOnMissingList */ true,
+        true,
       );
       const executorMetadataHash = normalizeNonZeroBytes32(
         input.executorMetadataHash ?? input.supplierReferenceHash,
@@ -258,9 +242,6 @@ export function createProductStageExecutorPatchService(
       const roleHash = input.roleHash
         ? normalizeNonZeroBytes32(input.roleHash, "roleHash")
         : context.targetStageId;
-      // 授权集（UB-36①）：patch 生效时对新城执行者写入的显式订单级授权
-      //——目标阶段 relation=0 事实全表映射为 executorWallet 的授权，
-      // prepare 时点冻结进档案，selector 签名覆盖的就是这份集。
       const executorAuthorizations = executorAuthorizationsForTargetStage(
         plan,
         context.targetStageId,
@@ -288,8 +269,6 @@ export function createProductStageExecutorPatchService(
         metadataURI,
       });
       const createdAt = now();
-      // deadline 属协议面：链时钟（latest block timestamp）起算，宿主墙钟
-      // 偏移不影响签名有效期。
       const deadlineSeconds =
         (await requireChainClockNowSeconds(options)) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
@@ -376,8 +355,6 @@ export function createProductStageExecutorPatchService(
           patchNonce,
         }),
       };
-      // 写入时顺带清扫过期 prepare（同 store-sessions 挑战表口径）：
-      // prepare 入口无配额，只插不删会让表无界堆叠。
       await stageExecutorPatchStore.deleteExpiredPrepared?.(
         String(Math.floor(now().getTime() / 1000)),
       );
@@ -423,9 +400,6 @@ export function createProductStageExecutorPatchService(
         );
       }
 
-      // 过期检查必须在签名恢复之后：消费 prepare（落 expired 档案 +
-      // markPreparedUsed）是写操作，任何持有 prepareId 的人都能触发——
-      // 未验签就烧毁他人的已过期 prepare 等于让无关方替持有人做决定。
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(prepared.deadline) < currentSeconds) {
         const submission = expiredExecutorSubmission(
@@ -433,9 +407,6 @@ export function createProductStageExecutorPatchService(
           submissionIdFactory(),
           now().toISOString(),
         );
-        // 落档与 markPreparedUsed 同事务（对齐主路径与 submissions 口径）：
-        // 分开提交时两写之间崩溃会留下"expired 档案已落、prepare 未标
-        // used"的组合，重放同 prepareId 会再次消费而非复用档案结果。
         await withStagePatchStoreTransaction(stageExecutorPatchStore, async () => {
           await stageExecutorPatchStore.putSubmission(submission);
           await stageExecutorPatchStore.markPreparedUsed(
@@ -455,20 +426,11 @@ export function createProductStageExecutorPatchService(
         prepared,
         plan,
       );
-      // 词表 Merkle 造证（bindingProof）：applyStageExecutorPatchFor 的
-      // 必携参数，从 plan 投影 bindings 表构造；投影表空（外部发布 plan）
-      // 无法造证，fail-closed 拒绝提交（广播必被 StageSelectorBindingNotFound
-      // 拒绝，白烧 gas 白占 nonce）。
       const bindingProof = stagePatchBindingProofFromPlan(
         plan,
         prepared.selectorStageId,
         prepared.targetStageId,
       );
-      // 候选集成员证明（UB-36②③）：从 plan 投影候选集清单现场构造。清单
-      // 缺失（产物未携带候选集/外部发布 plan）或执行者已被移出集 →
-      // fail-closed 拒绝：合约 StageExecutorNotCandidate 恒拒，发交易必
-      // revert。授权集取 prepared 档案的冻结集（selector 签名覆盖的集），
-      // 广播原样携带——合约复算 signalAuthorizationsHash 与 digest 承诺比对。
       const candidateProof = candidateProofForPrepared(
         plan,
         prepared.targetStageId,
@@ -493,12 +455,6 @@ export function createProductStageExecutorPatchService(
           { recoveredPreviousExecutor },
         );
       }
-      // 授权有效期（prepare TTL）即陈旧预留阈值：存活中的 submit 要么在
-      // 落档事务内收尾要么显式释放，预留年龄超过一个授权窗口只可能是
-      // 进程在 reserve 与落档之间硬崩溃留下的泄漏行——条件更新接管，
-      // 未过期仍按重复拒绝。patchNonce 虽从链上投影派生
-      // （nextStageExecutorPatchNonce），键本身不变，接管只复用崩溃泄漏
-      // 的预留、不影响派生。
       const reserved = await stageExecutorPatchStore.reserveNonce(
         prepared.nonceKey,
         { staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString() },
@@ -511,11 +467,6 @@ export function createProductStageExecutorPatchService(
         );
       }
 
-      // nonce 已被占用。若 broadcast 或存储写入在落库前抛错且
-      // 尚未拿到 txHash，先释放 nonce 再 rethrow：同一 prepareId 在瞬时
-      // RPC/存储失败后仍可重试。广播已返回 txHash 后的落库失败不释放——
-      // 链上交易可能已占用 nonce（对齐 submissions 主路径：只有确认失败
-      // 才释放）。broadcast 返回失败结果视为已消费。
       let broadcastTxHash: Hex | undefined;
       let notAttempted = false;
       let submission: StageExecutorPatchSubmissionDTO;
@@ -555,14 +506,6 @@ export function createProductStageExecutorPatchService(
           broadcast,
           timestamp,
         });
-        // 落档与 nonce 收尾同事务：分开提交时两次写之间崩溃会留下
-        // "nonce 行已插、prepare 未标 used"的组合，同 prepareId 的合法
-        // 重试将永久 409（全库无其他释放口，只剩 staleBefore 接管兜底）。
-        // 任何未拿到 txHash 的失败（含确定失败）都意味着链上不存在占用
-        // nonce 的交易：同事务释放预留并保留 prepare 可复用。若确定失败
-        // 不释放，markPreparedUsed 已消费 prepare 而 nonce 行残留，同
-        // nonceKey 的 reserveNonce 永久 409（车道楔死）。带 txHash 的失败
-        // 不同：链上可能已占用 nonce，保持消费、交复核车道处置。
         const reopenForRetry =
           broadcast.status === "failed" && !submission.txHash;
         await withStagePatchStoreTransaction(stageExecutorPatchStore, async () => {
@@ -582,11 +525,6 @@ export function createProductStageExecutorPatchService(
           await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
           throw error;
         }
-        // 广播已成功（拿到 txHash）但持久化失败：链上交易可能已占用
-        // nonce，不得释放。先尽力落一条 failed（persist_failed、带 txHash、
-        // 回执未知如实报 not_checked）的档案保证链上哈希零留痕可追——
-        // 对齐 submissions 主路径的同款兜底；落档本身失败也不能掩盖
-        // 原始错误。
         try {
           await stageExecutorPatchStore.putSubmission(executorSubmissionFromBroadcast(prepared, {
             submissionId: broadcastSubmissionId,
@@ -606,15 +544,9 @@ export function createProductStageExecutorPatchService(
             timestamp: now().toISOString()
           }));
         } catch {
-          // 尽力而为：落档失败时保持原始错误继续上抛。
         }
         throw error;
       }
-      // cannot broadcast 的适配器不得消费 prepare/nonce（与 submissions
-      // 主路径 submissions/service.ts 的 attemptsBroadcast 契约一致）：
-      // 记录尝试后响亮失败（503 可重试），nonce 已在落档事务内释放、
-      // prepare 保持可复用——200 假成功会把这个补丁通道永久楔死在
-      // duplicate nonce 上。
       if (notAttempted) {
         throw new ProductStagePatchError(
           503,
@@ -635,12 +567,7 @@ export function createProductStageExecutorPatchService(
 export function createProductStageResourcePatchService(
   options: ProductStageResourcePatchServiceOptions,
 ): ProductStageResourcePatchService {
-  const stageResourcePatchStore =
-    options.stageResourcePatchStore ??
-    new InMemoryProductStagePatchStore<
-      PreparedStageResourcePatchRecord,
-      StageResourcePatchSubmissionDTO
-    >();
+  const stageResourcePatchStore = options.stageResourcePatchStore;
   const now = options.now ?? (() => new Date());
   const ttlSeconds = options.prepareTtlSeconds ?? DEFAULT_PREPARE_TTL_SECONDS;
   const prepareIdFactory =
@@ -691,7 +618,6 @@ export function createProductStageResourcePatchService(
         manifestURI,
       });
       const createdAt = now();
-      // 同 executor patch 路径：deadline 以链时钟起算。
       const deadlineSeconds =
         (await requireChainClockNowSeconds(options)) + ttlSeconds;
       const deadline = deadlineSeconds.toString();
@@ -762,7 +688,6 @@ export function createProductStageResourcePatchService(
           patchNonce,
         }),
       };
-      // 同 executor patch 路径：写入时顺带清扫过期 prepare。
       await stageResourcePatchStore.deleteExpiredPrepared?.(
         String(Math.floor(now().getTime() / 1000)),
       );
@@ -808,9 +733,6 @@ export function createProductStageResourcePatchService(
         );
       }
 
-      // 过期检查必须在签名恢复之后：消费 prepare（落 expired 档案 +
-      // markPreparedUsed）是写操作，任何持有 prepareId 的人都能触发——
-      // 未验签就烧毁他人的已过期 prepare 等于让无关方替持有人做决定。
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(prepared.deadline) < currentSeconds) {
         const submission = expiredResourceSubmission(
@@ -818,7 +740,6 @@ export function createProductStageResourcePatchService(
           submissionIdFactory(),
           now().toISOString(),
         );
-        // 同 executor patch 路径：落档与 markPreparedUsed 同事务。
         await withStagePatchStoreTransaction(stageResourcePatchStore, async () => {
           await stageResourcePatchStore.putSubmission(submission);
           await stageResourcePatchStore.markPreparedUsed(
@@ -837,16 +758,11 @@ export function createProductStageResourcePatchService(
         prepared,
         plan?.signalCapabilities ?? [],
       );
-      // 词表 Merkle 造证：同 executor patch 路径（bindingProof 为
-      // applyStageResourcePatchFor 必携参数，投影表空 fail-closed）。
       const bindingProof = stagePatchBindingProofFromPlan(
         plan,
         prepared.selectorStageId,
         prepared.targetStageId,
       );
-      // 同 executor patch 路径：prepare TTL 即陈旧预留阈值，崩溃泄漏的
-      // 预留由新请求条件接管（nextStageResourcePatchNonce 的链上派生不受
-      // 影响），未过期仍按重复拒绝。
       const reserved = await stageResourcePatchStore.reserveNonce(
         prepared.nonceKey,
         { staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString() },
@@ -859,9 +775,6 @@ export function createProductStageResourcePatchService(
         );
       }
 
-      // 同 executor patch 路径——尚未拿到 txHash 的失败先释放
-      // nonce；广播已返回 txHash 后的落库失败不释放（链上可能已占用
-      // nonce，对齐 submissions 主路径语义）。
       let broadcastTxHash: Hex | undefined;
       let notAttempted = false;
       let submission: StageResourcePatchSubmissionDTO;
@@ -888,8 +801,6 @@ export function createProductStageResourcePatchService(
           broadcast,
           timestamp,
         });
-        // 同 executor patch 路径：落档与 nonce 收尾同事务（见该路径注释）。
-        // 未拿到 txHash 的失败（含确定失败）同释放 nonce，防车道楔死。
         const reopenForRetry =
           broadcast.status === "failed" && !submission.txHash;
         await withStagePatchStoreTransaction(stageResourcePatchStore, async () => {
@@ -909,8 +820,6 @@ export function createProductStageResourcePatchService(
           await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
           throw error;
         }
-        // 同 executor patch 路径：广播拿到 txHash 后的落库失败尽力补
-        // persist_failed 档案（带 txHash），链上哈希不得零留痕。
         try {
           await stageResourcePatchStore.putSubmission(resourceSubmissionFromBroadcast(prepared, {
             submissionId: broadcastSubmissionId,
@@ -926,13 +835,9 @@ export function createProductStageResourcePatchService(
             timestamp: now().toISOString()
           }));
         } catch {
-          // 尽力而为：落档失败时保持原始错误继续上抛。
         }
         throw error;
       }
-      // 同 executor patch 路径：cannot broadcast 不得消费 prepare/nonce
-      // （submissions/service.ts 的 attemptsBroadcast 契约）——记录尝试后
-      // 响亮失败，nonce 已在落档事务内释放，prepare 保持可复用。
       if (notAttempted) {
         throw new ProductStagePatchError(
           503,
@@ -959,10 +864,6 @@ interface SelectorTaskContext {
 interface SelectorPatchContext extends SelectorTaskContext {
   readonly selectorWallet: Address;
   readonly targetStageId: Hex;
-  /**
-   * 编译 plan 的信号能力表事实键（投影形态）：执行者/资源补丁的进度
-   * 闸与合约 _stageSignalState 同构——能力表键 ∪ source==stageId 回退键。
-   */
   readonly planSignalCapabilities: readonly StateMachineSignalCapabilityProjection[];
 }
 
@@ -1200,15 +1101,6 @@ async function findProjectedPlan(
   );
 }
 
-/**
- * stage patch 的词表 Merkle 造证（bindingProof）。
- *
- * 投影表空（外部发布 plan，产物富集不可用）或绑定叶不在表内 →
- * fail-closed 抛错：合约入口对 bindingProof 强制验证
- * （StageSelectorBindingNotFound），发不携证/携伪证的交易只会白烧 gas、
- * 白占 patch nonce。外部发布 plan 的绑定表本就不在链上（也无法通过
- * findAllowedSelectorBinding 的授权预检），两条路径同口径拒绝。
- */
 function stagePatchBindingProofFromPlan(
   plan: StateMachinePlanProjection | undefined,
   selectorStageId: Hex,
@@ -1234,13 +1126,6 @@ function stagePatchBindingProofFromPlan(
   return bindingProof;
 }
 
-/**
- * 候选集成员证明（UB-36②③，applyStageExecutorPatch 族 candidateProof
- * 参数）：从 plan 投影的候选集清单构造。清单为空（产物未携带候选集/
- * 外部发布 plan/富集 root 断言不过）或叶不在集内 → fail-closed 抛错：
- * 两类失败在合约侧同报 StageExecutorNotCandidate 恒拒，服务端不发必
- * revert 的交易，仅以错误码区分"候选面未知"与"不在集内"。
- */
 function candidateProofForPrepared(
   plan: StateMachinePlanProjection | undefined,
   targetStageId: Hex,
@@ -1263,11 +1148,6 @@ function candidateProofForPrepared(
   return proof;
 }
 
-/**
- * 候选集闸的 prepare/submit 双口径：清单为空按 failOnMissingList 决定
- * （prepare 时点即拒；submit 由 candidateProofForPrepared 的证明构造
- * 兜底）——无候选集（EMPTY_ROOT）的计划没有逐单换人面。
- */
 function assertExecutorInCandidateSet(
   plan: StateMachinePlanProjection | undefined,
   targetStageId: Hex,
@@ -1301,14 +1181,6 @@ function assertExecutorInCandidateSet(
   }
 }
 
-/**
- * patch 生效授权集推导（UB-36①，委托通道的替代）：目标阶段 relation=0
- *（current）事实全表 → executorWallet 的显式订单级授权。role/metadataHash
- * 承载 patch 的执行者角色与元数据承诺——授权来源 = selector 的 patch
- * 签名（签名覆盖本集），provenance 可审计。词表为空的 plan（回退
- * source==stage 形态）推导为空集：合约接受空集（patch 合法、不授予任何
- * 提交权），链上按需另行显式授权。
- */
 function executorAuthorizationsForTargetStage(
   plan: StateMachinePlanProjection | undefined,
   targetStageId: Hex,
@@ -1574,18 +1446,6 @@ interface ExecutorPatchGovernance {
   readonly previousExecutorForPatch: Address;
 }
 
-/**
- * 执行者补丁治理预检（合约 UVPStagePatchModule._validateStageExecutorPatchMode
- * 的服务层镜像；合约为权威，此处只做广播前快速失败）。patch 词表封闭为
- * assign/handoff，非协作换人走 forkOrder 车道。
- * 事实键与定序与合约 _stageSignalState 同构：
- * - 事实键 = 编译 plan 能力表键（relation=0/current 的 (targetSourceId,
- *   signalId)，即 keccak256(source)×keccak256(signalName) 事实键）∪
- *   source==targetStageId 回退键——两流并集，只统计"有没有"；
- * - "上一执行者" = 在任 overlay executor（activePatch.exists 时权威）；
- *   否则取末位提交者，末位不可唯一判定（同块并列不同提交者/两流末位
- *   不一致）时 fail-closed（镜像 StagePreviousExecutorAmbiguous）。
- */
 function resolveExecutorPatchGovernance(
   order: StateMachineOrderProjection,
   targetStageId: Hex,
@@ -1660,7 +1520,6 @@ function resolveExecutorPatchGovernance(
     );
   }
 
-  // handoff：上一执行者对同一 digest 的会签是唯一授权材料。
   return {
     mode,
     modeHash,
@@ -1725,35 +1584,10 @@ function hasSubmittedTargetSignal(
 interface TargetStageProgress {
   readonly signalCount: number;
   readonly lastSignalSubmitter?: Address;
-  /**
-   * 末位提交者不可唯一判定（镜像合约 StagePreviousExecutorAmbiguous 的
-   * fail-closed 形态）。仅在无在任 overlay 时被消费。
-   */
   readonly lastSignalAmbiguous?: boolean;
-  /** 歧义证据：并列最高块（⟹合约同秒）。 */
   readonly lastSignalTieBlockNumber?: bigint;
 }
 
-/**
- * 目标阶段进度镜像（合约 _stageSignalState 的服务层形态）。
- *
- * 事实键两流并集（与 _recordSignal 的两条归属路径同构，缺一会让另一流
- * 绕过 assign 闸）：
- * 1. 编译 plan 能力表：plan 投影 signalCapabilities 中 stageId==目标、
- *    relation=current（合约 relation=0）的 (targetSourceId, signalId)——
- *    即 keccak256(source)×keccak256(signalName) 事实键，与 stageId 无
- *    必然相等关系（回退形态 source==stageId 只是 targetSource 恰为阶段
- *    自身标识符时的特例）；
- * 2. source==targetStageId 回退键。
- *
- * 末位提交者：合约取最高 submittedAt（block.timestamp 秒）的提交者，同秒
- * 并列不同提交者 fail-closed。SignalSubmitted 事件不携带秒级时间戳，投影
- * 只保有链序 provenance（blockNumber/txIndex/logIndex）——本镜像以链序为
- * submittedAt 的全序代理：同块必同秒（可判定歧义，保守 fail-closed），
- * 跨块同秒不可判定（合约仍会拒绝，服务层放行只是预检漏报，广播后合约
- * revert 兜底）。纯回退流合约无歧义判定（lastSignalSubmitter 即写入序
- * 末位），镜像保持同口径。
- */
 function targetStageProgress(
   order: StateMachineOrderProjection,
   targetStageId: Hex,
@@ -1805,8 +1639,6 @@ function targetStageProgress(
       : {}),
   });
   if (capabilitySignals.length > 0 && fallbackSignals.length > 0) {
-    // 两流并存：回退流逐键时序无法跨流定序（合约同款 fail-closed）——
-    // 两流末位提交者不一致即歧义；一致则无歧义。
     const crossFlowAmbiguous =
       capabilityLatest.submitter !== undefined &&
       fallbackLatest.submitter !== undefined &&
@@ -1829,7 +1661,6 @@ function targetStageProgress(
   return mergeLatest(false, fallbackLatest.submitter, fallbackLatest.tieBlockNumber);
 }
 
-/** 单流末位提交者：链序最大者；同块（⟹同秒）并列不同提交者标记歧义。 */
 function latestSubmitterByChainOrder(
   signals: readonly {
     readonly submitter: Address;
@@ -1867,8 +1698,6 @@ function expectedPreviousExecutorForPatch(
   targetStageId: Hex,
   progress: TargetStageProgress,
 ): ExpectedPreviousExecutor {
-  // 在任 overlay executor 即合约 activePatch.executor：存在时权威，
-  // 不回退、无歧义（镜像合约 activePatch.exists 分支）。
   const overlay =
     order.stageExecutorOverlays[targetStageId.toLowerCase()];
   if (overlay) {
@@ -1948,9 +1777,6 @@ async function ensureExecutorPreparedStillCurrent(
       : {}),
   }, planSignalCapabilities);
   await assertTargetStageNotBirthStage(options, order, prepared.targetStageId, plan);
-  // 候选集闸随投影刷新复核（prepare 与 submit 之间清单可能被重新富集/
-  // 修正）；授权集不复核——selector 签名覆盖的是 prepare 时点冻结的集，
-  // 中途换集等于伪造授权来源。
   assertExecutorInCandidateSet(
     plan,
     prepared.targetStageId,
@@ -1973,13 +1799,6 @@ async function ensureExecutorPreparedStillCurrent(
   }
 }
 
-/**
- * 出生阶段守卫的服务端镜像：目标阶段挂有 mint/dock 开单 trigger hook 时，
- * 合约对逐单 executor patch 必 revert（出生阶段执行者终生不可变）。
- * 不镜像则签名验证通过后广播必失败，gas 白烧、nonce 白占。判定读产品
- * schema 的编译产物（compiledHooks.orderTriggerKind）；无 schema 可镜像时
- * 不拦截——合约仍是最终守门人，广播 revert 由失败车道如实落账。
- */
 async function assertTargetStageNotBirthStage(
   options: ProductStagePatchServiceOptions,
   order: StateMachineOrderProjection,
@@ -2003,8 +1822,6 @@ async function assertTargetStageNotBirthStage(
         }[];
       }
     | undefined;
-  // 消费处 schemaVersion 断言（A-39，单源常量）：schema 升级后的产物不得
-  // 被本消费线按旧口径解释——缺产物不拦截（合约守门），错版本响亮拒绝。
   if (
     artifact &&
     artifact.schemaVersion !== ONCHAIN_HOOK_PLAN_SCHEMA_VERSION
@@ -2026,11 +1843,6 @@ async function assertTargetStageNotBirthStage(
   }
 }
 
-/**
- * 编译产物的 hook 阶段键对齐补丁目标：产物侧 stageId 是标识符的 keccak，
- * 而补丁目标允许两种合法形态——keccak id 或标识符右补齐的 bytes32。
- * 两种形态都比对，漏一种会让补丁目标与产物键错位、守卫形同虚设。
- */
 function hookStageMatchesTarget(
   hook: { readonly stageId?: unknown; readonly stageIdentifier?: unknown },
   targetStageId: Hex
@@ -2129,10 +1941,6 @@ function moduleAddressFor(
   configured: Address | undefined,
   label: string
 ): Address {
-  // 模块地址必须显式存在于选项/地址清单中，
-  // 不静默回退到状态机地址（options.verifyingContract /
-  // stateMachineAddressFor 派生）——用错误 verifyingContract 域签出的
-  // typed data 无法通过链上域校验，等于把签名发给错误合约。缺失即 fail-closed。
   if (!configured) {
     throw new ProductStagePatchError(
       409,
@@ -2144,8 +1952,6 @@ function moduleAddressFor(
 }
 
 function requiredChainId(configured: number | undefined): number {
-  // typed data 域的 chainId 同属"签错即废"的域参数：静默缺省会签向错误
-  // 链，与模块地址缺失同一口径 fail-closed。
   if (configured === undefined) {
     throw new ProductStagePatchError(
       409,
@@ -2301,9 +2107,6 @@ function signatureForPreviousExecutor(
 ): Hex | undefined {
   if (prepared.mode !== "handoff") {
     if (signatureInput) {
-      // 与合约同口径：前任签名只在 handoff 是授权材料，其他模式附带
-      // 即拒绝——静默丢弃会让调用方误以为签名参与了授权，签名通过后
-      // 广播也必在链上被拒（白烧 gas）。
       throw new ProductStagePatchError(
         400,
         "previous_executor_signature_not_allowed",
@@ -2391,9 +2194,6 @@ function expiredExecutorSubmission(
       createdAt: timestamp,
     }),
     status: "expired",
-    // 过期档案在 selector 签名恢复之后才落：失败的是时限，不是签名
-    //（对齐 submissions 口径）；previousExecutor 签名在过期分支之后才
-    // 校验，保持未核验。
     signatureStatus: "signature_verified",
     selectorSignatureStatus: "signature_verified",
     previousExecutorSignatureStatus: previousExecutorSignatureStatus(
@@ -2436,7 +2236,6 @@ function expiredResourceSubmission(
       createdAt: timestamp,
     }),
     status: "expired",
-    // 同 executor patch：selector 签名已核验，失败的是时限。
     signatureStatus: "signature_verified",
     broadcastStatus: "not_attempted",
     errorCode: "stage_resource_patch_expired",
@@ -2792,12 +2591,6 @@ function stringField(
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-/**
- * 未分类异常的兜底 500 分类器：`stage_patch_failed` 在跨仓错误词表
- * （自宿主于 uvp-core 仓 protocol/uvp-error-taxonomy.v1.json）
- * 注册，本函数是该 internal name 在服务端的唯一出处——词表登记与代码
- * 出处由 error-taxonomy.conformance 测试双向锁定，删改需与词表仓同步。
- */
 export function normalizeStagePatchServiceError(
   error: unknown,
 ): ProductStagePatchError {

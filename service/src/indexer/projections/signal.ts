@@ -44,28 +44,12 @@ export interface StateMachineSignalProjection {
   readonly payloadHash: Hex;
   readonly idempotencyKey: Hex;
   readonly submitter: Address;
-  /**
-   * 事实归属阶段（B-03，SignalSubmitted.factStageId）：0/缺省 = 词表外
-   * 事实——per-stage 归属与计数从事件流重建，不依赖 stageSignalState view。
-   * 旧事件面（无该字段的历史流）缺省。
-   */
   readonly factStageId?: Hex;
-  /**
-   * fork 重放标记（B-03）：signal 键命中 OrderForked.replayedFactKeys
-   * （keccak256(abi.encode(sourceId, signalId))）时为 true——该事实是
-   * 父单事实在 fork 出生事务内的重放，不是 fork 单新生。
-   */
   readonly replayedFromFork?: boolean;
   readonly submittedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
 }
 
-/**
- * 派生信号血缘（B-03，DerivedSignalSubmitted 全参数投影）：此前投影只读
- * targetOrderId/planId/submitter，丢弃 from 复合身份、relation 与载荷
- * 承诺——派生通道授权面（relation=0 本单生产 / 1 triggerOrigin 回写）
- * 现在可从事件流全量重建。
- */
 export interface StateMachineDerivedSignalProjection {
   readonly targetOrderId: Hex;
   readonly fromPlanId: Hex;
@@ -76,7 +60,6 @@ export interface StateMachineDerivedSignalProjection {
   readonly payloadHash: Hex;
   readonly idempotencyKey: Hex;
   readonly submitter?: Address;
-  /** 目标单关系（事件词序）：0 = 本单生产，1 = triggerOrigin。 */
   readonly relation?: string;
   readonly submittedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
@@ -136,7 +119,6 @@ export function applySignalSubmitted(
   const sourceId = requiredBytes32Arg(event, "sourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
   const submitter = requiredAddressArg(event, "submitter");
-  // B-03 事实归属阶段（旧事件面缺省；零字 = 词表外事实，归一为缺省）。
   const factStageId = optionalNonZeroBytes32Arg(event, "factStageId");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash, submitter });
   const signal: StateMachineSignalProjection = {
@@ -159,12 +141,6 @@ export function applySignalSubmitted(
   appendOrderTimeline(order, timelineOf(event, "确认动作已写入链上", proof, { orderId, planId: order.planId }));
 }
 
-/**
- * fork 重放判据（B-03）：OrderForked.replayedFactKeys 携带
- * keccak256(abi.encode(sourceId, signalId))（合约 _signalKey 同式）；
- * 事实键命中清单即父单事实重放。OrderForked 在重放 SignalSubmitted 之前
- * 落日志（forkOrderGate 先于 forkOrderReplay），血缘在信号到达时已在桶上。
- */
 function isForkReplayedFact(
   order: MutableStateMachineOrderProjection,
   sourceId: Hex,
@@ -190,7 +166,6 @@ export function applyDerivedSignalSubmitted(
 ): void {
   const targetOrderId = requiredBytes32Arg(event, "targetOrderId");
   const planId = optionalBytes32Arg(event, "targetPlanId") ?? optionalBytes32Arg(event, "planId");
-  // 幻影订单：DerivedSignalSubmitted 由 UVPDerivedSignalModule 发出。
   const order = ensureStateMachineOrderFromModuleEvent(state, event, targetOrderId, planId);
   const targetSourceId = requiredBytes32Arg(event, "targetSourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
@@ -200,8 +175,6 @@ export function applyDerivedSignalSubmitted(
     planHash: order.planHash,
     submitter: optionalAddressArg(event, "submitter")
   });
-  // B-03 全参数投影：from 复合身份、relation 与载荷承诺按事实键落桶
-  //（旧事件面的缺失字段按可选读取）。
   const derivedSubmitter = optionalAddressArg(event, "submitter");
   const derivedRelation = optionalUintArgAsString(event, "relation");
   const derived: StateMachineDerivedSignalProjection = {
@@ -279,8 +252,6 @@ export function signalAuthorizationMatchesHook(
   authorization: StateMachineSignalAuthorizationProjection,
   hook: SignalAuthorizationHookMatchInput
 ): boolean {
-  // 除 plan 词表外，sourceId/signalId 即 hookId 是链上授权与任务的
-  // 另一个事实绑定键（taskMatchesSubmittedSignal 的既有回退口径一致）。
   if (hook.hookId === authorization.sourceId || hook.hookId === authorization.signalId) {
     return true;
   }

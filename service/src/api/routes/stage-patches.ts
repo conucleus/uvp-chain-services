@@ -15,7 +15,6 @@ import { resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { RouteModule } from "../route-module.js";
 
 export function createStagePatchRouteModule(options: {
-  /** 仅显式 local 允许自报 selector 头/体；缺省/非 local 无会话身份即 401。 */
   readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
 } = {}): RouteModule {
   return {
@@ -101,13 +100,6 @@ export function createStagePatchRouteModule(options: {
   };
 }
 
-/**
- * selector 身份收口（对照 submissions 路由的 resolveParticipantWalletIdentity
- * 做法）：会话锚定地址为真源，body 自报 selectorWallet 只做一致性核验——
- * 不一致即 403，否则可用任意（任务,钱包）组合探测授权结果（201/403
- * oracle）。仅显式 local 允许 body 自报 selector 作为身份；非 local 无
- * 锚定即 401 fail-closed。
- */
 async function resolveSelectorWalletIdentity(
   request: ApiRequest,
   context: ApiRouteContext,
@@ -180,8 +172,6 @@ async function handleStagePatchRequest(action: () => Promise<ApiResponse>): Prom
 function parsePrepareExecutorBody(body: unknown): PrepareProductStageExecutorPatchInput {
   const record = requireBodyRecord(body);
   assertKnownFields(record, PREPARE_EXECUTOR_FIELDS, "prepare executor patch body");
-  // mode 显式提供但类型非法/空白 = 词表外取值：类型化拒绝，不走
-  // "非字符串静默丢弃 → 缺省 assign"的宽松归一（调用方无从感知归一）。
   if (
     record.mode !== undefined &&
     (typeof record.mode !== "string" || record.mode.trim().length === 0)
@@ -247,10 +237,6 @@ function parseSubmitResourceBody(body: unknown): SubmitProductStageResourcePatch
   };
 }
 
-
-// 请求体封闭字段集：未知字段一律 400 而非静默忽略——静默忽略会把
-// "调用方以为表达了别的语义"变成一次普通补丁（误导性接受面），digest
-// 不含杂音不等于语义没有杂音。
 const PREPARE_EXECUTOR_FIELDS: readonly string[] = [
   "selectorWallet",
   "targetStageId",

@@ -15,7 +15,6 @@ import { decodePathParameter, InvalidPathParameterError, invalidPathParameterRes
 import type { RouteModule } from "../route-module.js";
 
 export function createSubmissionsRouteModule(options: {
-  /** 仅显式 local 允许自报 principal 头；缺省/非 local 无会话身份即 401。 */
   readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
 } = {}): RouteModule {
   return {
@@ -24,13 +23,7 @@ export function createSubmissionsRouteModule(options: {
       if (request.method === "POST" && productTaskPrepareSubmitMatch) {
         return handleSubmissionRequest(async () => {
           const taskId = decodePathParameter(productTaskPrepareSubmitMatch[1] ?? "");
-          // prepare-submit 的证据读取主体不取自 x-uvp-principal-* 自报头
-          // （否则可冒充任意参与者读取他人证据）；与 /product/evidence
-          // 同口径：治理 admin 或钱包会话锚定地址，非 local 无身份即 401。
           const principal = await resolveEvidencePrincipal(request, context, options.runtimeEnvironment);
-          // 业务签名者身份以会话锚定地址为真源，body 自报钱包只做一致性
-          // 核验（不一致即 403）——否则可用任意（任务,钱包）组合探测
-          // 授权结果（201/403 oracle）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -67,10 +60,6 @@ export function createSubmissionsRouteModule(options: {
       const productSubmissionMatch = /^\/product\/submissions\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productSubmissionMatch) {
         return handleSubmissionRequest(async () => {
-          // 提交档案携带签名者/证据/广播细节，匿名不可按 id 枚举——
-          // 与 product-read 订单/任务读同款会话身份门；会话钱包还须与
-          // 档案属主（业务签名者）比对，否则"id 一旦泄露即任一会话可读"
-          // （IDOR，与 GET /product/order-drafts/:id 的归属断言同口径）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -140,8 +129,6 @@ async function handleSubmissionRequest(action: () => Promise<ApiResponse>): Prom
 function parsePrepareSubmitBody(body: unknown): PrepareProductTaskSubmitInput {
   const record = requireSubmissionBodyRecord(body);
   return {
-    // V1 验收提交读要求包句柄后只带 signalName：evidenceIds 可缺省为空，
-    // 是否有必填证据槽位由服务端按任务声明裁决；intent 同理保持兼容缺省。
     evidenceIds: optionalSubmissionStringArray(record, "evidenceIds") ?? [],
     walletAddress: requiredSubmissionString(record, "walletAddress"),
     intent: optionalSubmitIntent(record, "intent") ?? "confirm_stage",
@@ -190,8 +177,6 @@ function requiredSubmissionStringArray(record: Record<string, unknown>, field: s
   return value.map((item) => item.trim());
 }
 
-// 运行时受理集以 Record<ProductSubmitIntent, true> 锚定单源词表：
-// 联合增删成员时编译器在此处强制同步，字面量不再裸奔。
 const SUBMIT_INTENTS: Readonly<Partial<Record<ProductSubmitIntent, true>>> = {
   confirm_stage: true,
   reject_stage: true

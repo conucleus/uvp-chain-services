@@ -3,12 +3,11 @@ import { canonicalize } from "@uvp-eth/compiler";
 import { hashCanonicalJson, hashEvidenceBytes, hashEvidencePayload } from "./hashing.js";
 import { normalizeBytes32 } from "../shared/types.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
-import { InMemoryEvidenceMetadataStore, type EvidenceMetadataRecord, type EvidenceMetadataStore } from "./store.js";
+import { type EvidenceMetadataRecord, type EvidenceMetadataStore } from "./store.js";
 import {
   assertEvidenceStorageProductionBoundary,
   assertProductionStorageURI,
   BackupEvidenceStorage,
-  InMemoryEvidenceStorage,
   type EvidenceStorage,
   type EvidenceStorageRuntimeEnvironment
 } from "./storage.js";
@@ -63,23 +62,13 @@ export class EvidenceServiceError extends Error {
 }
 
 export interface EvidenceServiceOptions {
-  readonly metadataStore?: EvidenceMetadataStore;
-  readonly storage?: EvidenceStorage;
+  readonly metadataStore: EvidenceMetadataStore;
+  readonly storage: EvidenceStorage;
   readonly now?: () => Date;
   readonly evidenceIdFactory?: () => string;
   readonly maxPayloadBytes?: number;
-  /** 必填：生产存储边界断言按环境档位定宽严，缺省 local 是 fail-open。 */
   readonly runtimeEnvironment: EvidenceStorageRuntimeEnvironment;
-  /**
-   * 草稿期证据（draftId 来源）绑定订单前的事实源：把 draftId 解析成该
-   * 草稿已触发的订单 id。缺省时草稿来源凭证不可绑定（fail-closed）——
-   * "先存后绑"要求订单与草稿的对应关系可证明，不允许凭空绑定。
-   */
   readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
-  /**
-   * 运维面审计（backup verify/restore 是对存储布局的 admin 探测/写回
-   * 动作，零审计即盲区）。缺省 no-op，路由装配时注入。
-   */
   readonly audit?: AuditSink;
 }
 
@@ -87,13 +76,8 @@ export interface EvidenceService {
   uploadEvidence(input: CreateEvidenceRequestDTO, principal: EvidencePrincipal): Promise<EvidenceUploadResponseDTO>;
   getEvidence(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceRecordDTO | undefined>;
   getProof(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceProofDTO | undefined>;
-  /** 调用方主体必须显式传入（业务签名者/admin），匿名绑定被拒。 */
   bindEvidence(input: BindEvidenceRequestDTO, principal: EvidencePrincipal): Promise<EvidenceRecordDTO | undefined>;
-  /**
-   * 第二副本 verify 的服务端接线（admin 专用）。
-   */
   verifyEvidenceBackup(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceBackupStatusDTO | undefined>;
-  /** 主对象损坏/缺失时从第二副本恢复（admin 专用）。 */
   restoreEvidenceBackup(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceBackupStatusDTO | undefined>;
 }
 
@@ -106,8 +90,8 @@ export interface EvidenceBackupStatusDTO {
 }
 
 export function createEvidenceService(options: EvidenceServiceOptions): EvidenceService {
-  const metadataStore = options.metadataStore ?? new InMemoryEvidenceMetadataStore();
-  const storage = options.storage ?? new InMemoryEvidenceStorage();
+  const metadataStore = options.metadataStore;
+  const storage = options.storage;
   const now = options.now ?? (() => new Date());
   const evidenceIdFactory = options.evidenceIdFactory ?? (() => `ev_${randomUUID()}`);
   const maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
@@ -125,9 +109,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
       if (!orderId && !draftId) {
         throw invalidRequest("either orderId or draftId is required");
       }
-      // 《证据与存证规则》二.4：草稿期以 draftId 替代订单成分参与指纹——
-      // 是替代不是叠加，两者并提会让 draftId 悄悄退出指纹，同一哈希对应
-      // 两个不同的绑定元组。
       if (orderId && draftId) {
         throw invalidRequest("orderId and draftId are mutually exclusive; draft-period evidence substitutes draftId for the order component");
       }
@@ -135,11 +116,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
       const taskId = optionalNonEmptyString(input.taskId, "taskId");
       const stageIdentifier = requiredNonEmptyString(input.stageIdentifier, "stageIdentifier");
       const documentType = requiredNonEmptyString(input.documentType, "documentType");
-      // Evidence ownership is a server-side derivation. The request
-      // body cannot attribute a record to another participant: canWriteEvidence
-      // only accepts the authenticated principal itself (or an admin acting on
-      // behalf), and a request-supplied access policy can never vouch for the
-      // requester because it comes from the same untrusted body.
       const ownerParticipantId = normalizeParticipantId(
         optionalNonEmptyString(input.ownerParticipantId, "ownerParticipantId") ?? normalizedPrincipal.id
       );
@@ -150,8 +126,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
       if (!SUPPORTED_MIME_TYPES.has(mimeType)) {
         throw new EvidenceServiceError("unsupported_mime_type", `${mimeType} is not supported by Evidence Service v1`, 415);
       }
-      // STORE-02：声明为 PDF 的证据必须以 %PDF- 魔数开头；服务端是权威校验，
-      // 客户端拦截只是快速提示。非 PDF accept 不受影响。
       if (mimeType === "application/pdf" && !isPdfBytes(content.bytes)) {
         throw new EvidenceServiceError("pdf_magic_mismatch", "declared application/pdf payload does not start with the %PDF- magic header", 400);
       }
@@ -159,8 +133,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
         throw new EvidenceServiceError("payload_too_large", "evidence payload exceeds the configured size limit", 413);
       }
 
-      // The provisional policy is not built here anymore: write authorization
-      // is derived from the principal and the derived owner only.
       if (!canWriteEvidence(normalizedPrincipal, ownerParticipantId)) {
         throw new EvidenceServiceError("forbidden", "principal cannot upload evidence for this owner", 403);
       }
@@ -179,10 +151,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
         ...(taskId ? { taskId } : {}),
         stageIdentifier
       });
-      // 重复上传幂等：同一 owner 再次提交完全相同
-      // 的证据载荷（content+metadata+order/draft+task+stage 全等，
-      // draftId/taskId 参与指纹）时返回既有记录，不追加内容完全相同的
-      // 副本，也不会把另一草稿/任务的同内容凭证错记到本名下。
       const existing = await metadataStore.findOwnedByPayloadHash?.(payloadHash, ownerParticipantId);
       if (existing) {
         assertIdempotentBindingTuple(existing, {
@@ -234,9 +202,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
         accessPolicy,
         canonicalMetadata
       };
-      // 条件插入收口并发同 payload 竞态：前置 find 各自未命中时，
-      // UNIQUE (owner, payload_hash) 由单语句 NOT EXISTS 判定，败者拿
-      // 既有记录幂等返回，不再以存储错误 500 泄露。
       const raceExisting = await metadataStore.insertIfPayloadHashAbsent(record);
       if (raceExisting) {
         assertIdempotentBindingTuple(raceExisting, {
@@ -262,8 +227,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
     },
 
     async getEvidence(evidenceId, principal) {
-      // 先鉴权后读取：未认证在读库前即 401；已认证但无权读时与
-      // "不存在"同响应（404），不留下 404/403 存在性 oracle。
       const normalizedPrincipal = normalizePrincipal(principal);
       requireAuthenticated(normalizedPrincipal);
       const record = await metadataStore.get(evidenceId);
@@ -282,7 +245,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
     },
 
     async getProof(evidenceId, principal) {
-      // 同 getEvidence：先鉴权后读取，无权读与不存在不可区分。
       const normalizedPrincipal = normalizePrincipal(principal);
       requireAuthenticated(normalizedPrincipal);
       const record = await metadataStore.get(evidenceId);
@@ -316,10 +278,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
     },
 
     async bindEvidence(input, principal) {
-      // 调用方主体显式传入并校验：bind 是状态迁移写（uploaded→bound +
-      // 链上定位落档），不允许匿名触发；内部调用方（submission 广播后的
-      // 绑定）传业务签名者。归属校验与 upload 同判据（owner 本人或
-      // admin）——防线不依赖"该入口暂无 HTTP 暴露"的约定。
       const bindingPrincipal = normalizePrincipal(principal);
       requireAuthenticated(bindingPrincipal);
       const binding = normalizeBinding(input, now);
@@ -345,9 +303,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
       if (!updated) {
         return undefined;
       }
-      // 绑定落库后的归属复核：并发双绑的败者会拿到赢家的绑定档——同链上
-      // 订单按幂等收敛，跨订单是归属冲突，与前置检查同响应 409，不得把
-      // 别人的绑定当成本次成功返回。
       if (
         updated.evidence.status === "bound" &&
         updated.evidence.boundOnchainOrderId?.toLowerCase() !== binding.onchainOrderId.toLowerCase()
@@ -358,9 +313,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
     },
 
     async verifyEvidenceBackup(evidenceId, principal) {
-      // admin 专用（接口注释即契约）：verify 虽是读，但暴露副本布局与
-      // 存储定位——与 restore 同门，不给读级主体探测面。角色先于存在性
-      // 判定，非 admin 一律 403，不泄露 evidence 存在与否。
       const normalizedPrincipal = normalizePrincipal(principal);
       requireAuthenticated(normalizedPrincipal);
       requireAdminPrincipal(normalizedPrincipal);
@@ -376,9 +328,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
         record.evidence.storageURI,
         record.evidence.contentHash
       );
-      // 存储布局探测面（admin 专用）留审计：谁在何时核验了哪份副本、
-      // 结果如何——verify 结果异常（副本缺失/哈希失配）是数据事故的
-      // 第一信号，零审计即盲区。
       await audit.record({
         type: "evidence.backup.verify",
         action: "verifyEvidenceBackup",
@@ -398,8 +347,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
     },
 
     async restoreEvidenceBackup(evidenceId, principal) {
-      // admin 专用：restore 会向主存储写回对象——读级主体（owner/策略
-      // reader/ adjudicator）一律 403，角色先于存在性判定。
       const normalizedPrincipal = normalizePrincipal(principal);
       requireAuthenticated(normalizedPrincipal);
       requireAdminPrincipal(normalizedPrincipal);
@@ -420,7 +367,6 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
         record.evidence.storageURI,
         record.evidence.contentHash
       );
-      // restore 是对主存储的写回动作，必须留审计（成功与失败同录）。
       await audit.record({
         type: "evidence.backup.restore",
         action: "restoreEvidenceBackup",
@@ -535,9 +481,6 @@ function assertBindable(record: EvidenceMetadataRecord, binding: BindEvidenceReq
     throw new EvidenceServiceError("invalid_request", "evidence belongs to a different order", 409);
   }
   if (record.evidence.status === "bound") {
-    // 已绑定记录的幂等重放只对同一链上订单成立：换订单重放（尤其
-    // draftId 来源、库里无 orderId 可比对的历史记录）必须 409，不能
-    // 静默返回首单的旧档案让调用方误以为绑定成功。
     if (record.evidence.boundOnchainOrderId?.toLowerCase() !== binding.onchainOrderId.toLowerCase()) {
       throw new EvidenceServiceError("invalid_request", "evidence is already bound to a different order", 409);
     }
@@ -548,12 +491,6 @@ function assertBindable(record: EvidenceMetadataRecord, binding: BindEvidenceReq
   }
 }
 
-/**
- * 草稿期上传的凭证（draftId 来源，无 orderId）绑定订单前必须能证明
- * "该草稿触发的就是这个订单"：解析器缺省或解析不到订单即拒绝——
- * 《证据与存证规则》二.4 的"先存后绑"要求绑定有事实依据，不允许
- * 草稿凭证漂移到任意订单名下。
- */
 async function assertDraftOriginBoundToOrder(
   record: EvidenceMetadataRecord,
   binding: BindEvidenceRequestDTO,
@@ -572,11 +509,6 @@ async function assertDraftOriginBoundToOrder(
   }
 }
 
-/**
- * 重复上传幂等返回前校验绑定元组一致：payloadHash 相同但已存记录的
- * （orderId, draftId）与本次请求不一致时按 409 拒绝，不把另一订单/
- * 草稿名下的既有记录当成本次上传的结果返回。
- */
 function assertIdempotentBindingTuple(
   existing: EvidenceMetadataRecord,
   requested: { readonly orderId?: string; readonly draftId?: string }
@@ -605,11 +537,6 @@ function canWriteEvidence(
   principal: EvidencePrincipal,
   ownerParticipantId: string
 ): boolean {
-  // Membership in a request-supplied `writers` list must never
-  // authorize an upload — the list arrives in the same request body that is
-  // trying to claim ownership, so it cannot vouch for the requester. Write
-  // authority over a new record is derived from the authenticated principal
-  // alone (owner = self, or admin on behalf).
   if (principal.role === "admin") {
     return true;
   }

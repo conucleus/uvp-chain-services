@@ -1,10 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decodeFunctionData } from "viem";
 import { STATE_MACHINE_ABI } from "@uvp-eth/protocol-bindings";
 import { TimerKeeperWorker } from "../src/timer-keeper/service.js";
 import { createTimerKeeperWalletSubmitter } from "../src/timer-keeper/index.js";
 import { TimerPokeReceiptRevertedError, type TimerKeeperSubmitter, type TimerPokeOutcome, type TimerPokeTarget } from "../src/timer-keeper/types.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { projectionScopeContractAddress, type ProjectionStore } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true },
+    chainId: 31337
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
 import type { ChainEvent } from "../src/indexer/events.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
@@ -19,12 +34,8 @@ const payloadHash = bytes32Hex("0b0b");
 describe("timer keeper", () => {
 
   it("selects only finalized waiting hooks whose dueAt has passed", async () => {
-    // 候选筛选语义：status!=waiting 不选、dueAt 未到不选、最近状态变更
-    // 未最终（hook.updatedAt.blockNumber > finalizedBlock）不选——不对
-    // 未最终区块抢跑。
     const poked: TimerPokeTarget[] = [];
 
-    // dueAt 在未来（now=1_699_999_500s < dueAt=1_700_000_000s）：不选。
     const future = new TimerKeeperWorker({
       config: keeperConfig(),
       projectionStore: await freshStore(baseEvents(), 4n),
@@ -37,8 +48,6 @@ describe("timer keeper", () => {
     expect(await future.runOnce()).toMatchObject({ pokeCandidates: 0, submitted: 0 });
     expect(poked).toEqual([]);
 
-    // 到期（now=1_700_001_000s）：唯一 waiting+due 且已最终的 hook 成
-    // 候选；ready 态对照 hook 不选。
     const due = new TimerKeeperWorker({
       config: keeperConfig(),
       projectionStore: await freshStore(baseEvents(), 4n),
@@ -53,7 +62,6 @@ describe("timer keeper", () => {
       { planId, orderId, hookId: timerHookId, gas: 500_000n }
     ]);
 
-    // 状态变更未最终（blockNumber=3 > finalizedBlock=2）：不抢跑。
     const unfinalized = new TimerKeeperWorker({
       config: keeperConfig(),
       projectionStore: await freshStore(baseEvents(), 2n),
@@ -67,8 +75,6 @@ describe("timer keeper", () => {
   });
 
   it("converges once the projection reflects the poke outcome", async () => {
-    // poke 成功后移除候选：窗口内去重，投影呈现新状态（不再 waiting）
-    // 后候选归零——不是每轮重发。
     let nowMs = 1_700_001_000_000;
     const store = await freshStore(baseEvents(), 4n);
     const poked: TimerPokeTarget[] = [];
@@ -84,11 +90,9 @@ describe("timer keeper", () => {
 
     expect(await worker.runOnce()).toMatchObject({ pokeCandidates: 1, submitted: 1 });
 
-    // 窗口内：投影仍 waiting+due，去重跳过。
     nowMs += 10_000;
     expect(await worker.runOnce()).toMatchObject({ pokeCandidates: 1, submitted: 0, deduplicated: 1 });
 
-    // 投影呈现 poke 后状态（HookStatusChanged → ready）：候选归零。
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [
@@ -110,9 +114,6 @@ describe("timer keeper", () => {
   });
 
   it("treats TimerNotDue as convergence, not failure", async () => {
-    // 到期秒边界：链上守门仍判未到期（pokedAt < dueAt）revert
-    // TimerNotDue——按收敛处理：移出本轮候选、不计失败、不升级告警；
-    // 窗口照常占窗限速（投影 lag 期内逐轮重发是纯 gas 浪费）。
     let nowMs = 1_700_001_000_000;
     const logger = new RecordingLogger();
     let attempts = 0;
@@ -137,7 +138,6 @@ describe("timer keeper", () => {
     expect(first.converged[0]).toMatch(/TimerNotDue/);
     expect(first.skipped).toEqual([]);
 
-    // 窗口内不再重试（收敛同样占窗）；连续窗口也不升级 error。
     nowMs += 10_000;
     expect(await worker.runOnce()).toMatchObject({ submitted: 0, deduplicated: 1 });
     expect(attempts).toBe(1);
@@ -145,9 +145,6 @@ describe("timer keeper", () => {
   });
 
   it("treats a simulate-time TimerNotWaiting revert as convergence, not failure", async () => {
-    // 写面先经 simulateContract 预演：链上必拒的 poke 以携 errorName 的
-    // 合约执行错误抛回（已知自定义错误自动解码）——errorName 判定收敛，
-    // 不计失败、不升级告警。
     const logger = new RecordingLogger();
     let attempts = 0;
     const worker = new TimerKeeperWorker({
@@ -177,9 +174,6 @@ describe("timer keeper", () => {
   });
 
   it("escalates a hook that keeps failing after consecutive redelivery windows", async () => {
-    // 预演让链上会 revert 的 poke 在广播前失败：非收敛失败记逐 hook 连续
-    // 失败窗口，连续 3 个窗口仍失败即升级 error 级告警（带 hook 身份与
-    // 窗口数）；广播成功清零后从头数起。
     let nowMs = 1_700_001_000_000;
     const logger = new RecordingLogger();
     let fail = true;
@@ -201,13 +195,11 @@ describe("timer keeper", () => {
       chainClock: chainClockAt(() => Math.floor(nowMs / 1000))
     });
 
-    // 前两个窗口：只有 skipped 留痕，无 error。
     await worker.runOnce();
     nowMs += 130_000;
     await worker.runOnce();
     expect(logger.errors).toEqual([]);
 
-    // 第三个连续窗口：升级 error，带 hook 身份与窗口数。
     nowMs += 130_000;
     const third = await worker.runOnce();
     expect(third.skipped.length).toBe(1);
@@ -220,7 +212,6 @@ describe("timer keeper", () => {
       windows: 3
     });
 
-    // 广播成功：计数清零，后续连续失败从头数起。
     fail = false;
     nowMs += 130_000;
     await worker.runOnce();
@@ -237,8 +228,6 @@ describe("timer keeper", () => {
   });
 
   it("bounds attempts, not successes, when every poke fails", async () => {
-    // maxCandidatesPerRun 对 attempted（去重窗口放行后的实际尝试数）封顶：
-    // 全失败轮不会扫穿全部候选——第二个 hook 留待下一轮。
     const secondOrderId = bytes32Hex("0203");
     const secondHookId = bytes32Hex("0304");
     const store = await freshStore([
@@ -276,8 +265,6 @@ describe("timer keeper", () => {
   });
 
   it("releases no candidate while a manual projection rebuild is in progress", async () => {
-    // syncStatus=rebuilding：投影是半重建的中间态，整轮 fail-closed 不放行
-    // 任何候选（finalizedBlock 存在也不放行）。
     const store = await freshStore(baseEvents(), 4n);
     await store.saveSyncState({ ...syncState(4n), syncStatus: "rebuilding" });
     const poked: TimerPokeTarget[] = [];
@@ -298,8 +285,6 @@ describe("timer keeper", () => {
   });
 
   it("stays idle when disabled or unwired", async () => {
-    // 禁用即不启动：无轮询、无 summary；enabled 但无 submitter 同为
-    // idle 并响亮告警。
     const infos: string[] = [];
     const warnings: string[] = [];
     const logger = {
@@ -334,10 +319,6 @@ describe("timer keeper", () => {
   });
 
   it("pins pokeTimer calldata, simulation args, and the gas cap on the wallet submitter", async () => {
-    // 写面形状：广播前先 simulateContract 预演（同一 address/abi/args/
-    // account），estimateGas 取模拟 gas 与上限比较，通过后以模拟 gas 加
-    // 20% 缓冲为 limit 广播预演产出的 to/data；selector 与参数布局由
-    // STATE_MACHINE_ABI 单源钉死。
     const keeperAddress = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
     const sent: Array<{ readonly to: Address; readonly data: Hex; readonly gas?: bigint }> = [];
     const simulations: Array<Record<string, unknown>> = [];
@@ -391,8 +372,6 @@ describe("timer keeper", () => {
     expect(sent[0]!.to).toBe(contractAddress);
     expect(sent[0]!.gas).toBe(144_000n);
 
-    // 广播 limit（模拟 gas 120k + 20% 缓冲 = 144k）超过 keeper 上限：拒发
-    // （不进入广播面，硬顶按 limit 比较）。
     await expect(
       submitter.pokeTimer({ planId, orderId, hookId: timerHookId, gas: 100_000n })
     ).rejects.toThrow(/broadcast gas limit 144000 exceeds the timer keeper gas cap 100000/);
@@ -400,8 +379,6 @@ describe("timer keeper", () => {
   });
 
   it("classifies a reverted receipt as a keeper failure and an unreadable receipt as unknown", async () => {
-    // 广播后的有界回执等待：reverted 抛 TimerPokeReceiptRevertedError（交
-    // worker 失败窗口升级）；等待超时/回执不可判读按 unknown 返回，不 throw。
     const keeperAddress = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
     const baseClient = {
       account: { address: keeperAddress },
@@ -459,9 +436,6 @@ describe("timer keeper", () => {
   });
 
   it("counts receipt-reverted pokes into the failure escalation lane and receipt-unknown pokes as submitted", async () => {
-    // 回执 reverted：计 receiptReverted，进 failureWindows（连续窗口升级），
-    // 不落入收敛车道；回执 unknown：已广播不判失败，submitted 与
-    // receiptUnknown 同计。
     let nowMs = 1_700_001_000_000;
     const logger = new RecordingLogger();
     const revertedWorker = new TimerKeeperWorker({
@@ -509,9 +483,6 @@ describe("timer keeper", () => {
     expect(unknown.skipped).toEqual([]);
     expect(unknown.converged).toEqual([]);
 
-    // 持续 unknown 不清窗：连续 3 个去重窗口仍不可判读即升级 error 级
-    // 告警（已广播但结果不可判读不是成功事实；既有 reverted 车道告警
-    // 保留，unknown 车道单独计数升级）。
     nowMs += 130_000;
     await unknownWorker.runOnce();
     expect(logger.errors).toHaveLength(1);
@@ -534,7 +505,6 @@ function keeperConfig() {
   };
 }
 
-/** 链时钟桩：到期判定已改为链时钟（latest block timestamp）。 */
 function chainClockAt(seconds: () => number) {
   return { latestBlockTimestampSeconds: async (): Promise<number> => seconds() };
 }
@@ -552,8 +522,8 @@ function confirmedOutcome(): TimerPokeOutcome {
   return { txHash: "0x" + "ab".repeat(32) as Hex, receipt: "confirmed" };
 }
 
-async function freshStore(events: readonly ChainEvent[], finalizedBlock: bigint): Promise<MemoryProjectionStore> {
-  const store = new MemoryProjectionStore();
+async function freshStore(events: readonly ChainEvent[], finalizedBlock: bigint): Promise<ProjectionStore> {
+  const store = stores.projectionStore;
   await store.resetFromEvents({ deploymentBlock: 0n, events });
   await store.saveSyncState(syncState(finalizedBlock));
   return store;
@@ -562,7 +532,7 @@ async function freshStore(events: readonly ChainEvent[], finalizedBlock: bigint)
 function syncState(finalizedBlock: bigint) {
   return {
     chainId,
-    contractAddress: contractAddress,
+    contractAddress: projectionScopeContractAddress,
     syncStatus: "indexed" as const,
     latestIndexedBlock: finalizedBlock,
     finalizedBlock,
@@ -572,8 +542,6 @@ function syncState(finalizedBlock: bigint) {
   };
 }
 
-/** 基座事件：order 出生 + timer hook →waiting（dueAt=1_700_000_000s，
- * blockNumber=3）+ ready 态对照 hook。 */
 function baseEvents(): readonly ChainEvent[] {
   return [
     chainEvent(1n, 0, "PlanRegistered", { planId, planHash: payloadHash, hookCount: 2n }),

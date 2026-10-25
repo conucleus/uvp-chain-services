@@ -9,7 +9,6 @@ import {
 import { decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-/** 加入闭环路由。提交/读取要求锚定会话；审核要求 publisher/委托。 */
 export function createStoreJoinRouteModule(options: {
   readonly joinService: StoreJoinService;
 }): RouteModule {
@@ -102,8 +101,6 @@ export function createStoreJoinRouteModule(options: {
         if (error instanceof InvalidPathParameterError) {
           return invalidPathParameterResponse();
         }
-        // 非法 query（planId/applicantAddress 形制错误）是可修正的 4xx，
-        // 不得漏进 503 污染可用性监控。
         if (error instanceof ConfigError) {
           return {
             status: 400,
@@ -135,7 +132,6 @@ function joinActor(
     authMode: access.authMode,
     accessLevel: access.level,
     ...(access.principalId ? { principalId: access.principalId } : {}),
-    // 审批触发链上身份登记时按 governance_admin 权威门禁。
     ...(access.roles?.includes("governance_admin") ? { governanceAdmin: true } : {})
   };
 }

@@ -49,10 +49,6 @@ export interface StoreSupplierAuditRecord {
   readonly createdAt: string;
 }
 
-/**
- * 审计写入入参：auditId 由存储端生成（库端唯一），调用方不得自带
- * 进程内序号——重启/多实例下 audit_000001 会反复撞唯一索引。
- */
 export type StoreSupplierAuditInput = Omit<StoreSupplierAuditRecord, "auditId"> & {
   readonly auditId?: string;
 };
@@ -62,16 +58,8 @@ export interface StoreSupplierMetadataStore {
   findSupplierBySubjectId(supplierSubjectId: Hex): Promise<StoreSupplierMetadataRecord | undefined>;
   listSuppliers(): Promise<readonly StoreSupplierMetadataRecord[]>;
   putSupplier(record: StoreSupplierMetadataRecord): Promise<void>;
-  /**
-   * 条件覆盖（CAS）：仅当现行 review_status 仍是 expected 时整行落档
-   * （UPDATE ... WHERE review_status=?）。返回 false 表示并发方已先改
-   * 审核态——身份登记链读到 approved_for_broadcast 后广播期间，运营
-   * 并发翻案（如 revoked）不得被过期快照的整行写复活。
-   */
   putSupplierIfReviewStatus(record: StoreSupplierMetadataRecord, expected: StoreSupplierMetadataRecord["reviewStatus"]): Promise<boolean>;
-  /** 审计行与业务写同事务（提供 withTransaction 的后端）；auditId 库端生成。 */
   appendAudit(record: StoreSupplierAuditInput): Promise<void>;
   listAudits(supplierId?: string): Promise<readonly StoreSupplierAuditRecord[]>;
-  /** 持久后端提供：把 putSupplier+appendAudit 包进单事务，防半提交。 */
   withTransaction?<T>(operation: () => Promise<T>): Promise<T>;
 }

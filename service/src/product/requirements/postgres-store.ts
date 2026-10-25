@@ -1,5 +1,5 @@
-// 订单要求包 postgres 持久化（迁移 postgres/0030_order_requirements.sql）：
-// 与 sqlite 同语义，声明 upsert 与旧合意清理在同一事务内完成。
+// 订单要求包 postgres 持久化（schema 见 migrations/postgres/0001_schema.sql）：
+// 与内存实现同语义，声明 upsert 与旧合意清理在同一事务内完成。
 
 import type { OrderRequirementsDeclarationDTO } from "@uvp-eth/product-dto";
 import { parseStorageJson, stringifyStorageJson } from "../../storage/json.js";
@@ -86,7 +86,6 @@ export class PostgresOrderRequirementsStore
           record.updatedAt,
         ],
       );
-      // 合意只对签名时的 hash 有效：包内容变了旧合意即作废。
       await this.#database.query(
         `DELETE FROM order_requirement_consent
          WHERE draft_id = $1 AND requirements_hash <> $2`,

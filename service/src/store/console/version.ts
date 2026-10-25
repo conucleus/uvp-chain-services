@@ -65,11 +65,6 @@ export interface StoreZhixuVersionMetadataStore {
     versionId: string,
   ): Promise<StoreZhixuVersionRecord | undefined>;
   upsertVersion(record: StoreZhixuVersionRecord): Promise<void>;
-  /**
-   * activate 的"旧 active 批量 deprecated + 新
-   * active 落库"必须事务化，中途失败不得留下无 active 或双 active 的
-   * 中间态。持久后端提供；内存后端顺序执行即可。
-   */
   withTransaction?<T>(operation: () => Promise<T>): Promise<T>;
 }
 
@@ -94,9 +89,6 @@ export class MemoryStoreZhixuVersionMetadataStore
   }
 
   async upsertVersion(record: StoreZhixuVersionRecord): Promise<void> {
-    // 单活不变量的内存侧执行（对齐 0021 迁移的部分唯一索引）：写入
-    // active 时同步撤销同 series 的其他 active 行——Map 写入与遍历同处
-    // 一个同步临界区，相对事件循环原子，并发 activate 不会留下双 active。
     if (record.status === "active") {
       for (const [key, item] of this.#records) {
         if (item.seriesId === record.seriesId && item.status === "active" && item.versionId !== record.versionId) {
@@ -125,10 +117,6 @@ export class StoreZhixuVersionError extends Error {
   }
 }
 
-/**
- * 并发激活撞上单活部分唯一索引：败者的 cutover 事务整体回滚，按 409
- * 报告冲突；其余错误原样上抛。
- */
 function mapActivationConflict(error: unknown): unknown {
   if (error instanceof StorageConstraintError) {
     return new StoreZhixuVersionError(
@@ -144,11 +132,10 @@ function mapActivationConflict(error: unknown): unknown {
 export function createStoreZhixuVersionService(options: {
   readonly productService: ProductService;
   readonly projectionStore: ProjectionStore;
-  readonly metadataStore?: StoreZhixuVersionMetadataStore;
+  readonly metadataStore: StoreZhixuVersionMetadataStore;
   readonly now?: () => Date;
 }): StoreZhixuVersionService {
-  const metadataStore: StoreZhixuVersionMetadataStore =
-    options.metadataStore ?? new MemoryStoreZhixuVersionMetadataStore();
+  const metadataStore: StoreZhixuVersionMetadataStore = options.metadataStore;
   const now = options.now ?? (() => new Date());
 
   return {
@@ -181,9 +168,6 @@ export function createStoreZhixuVersionService(options: {
         options.projectionStore,
       );
       const summary = summarizeRecord(record, view);
-      // 激活确认取服务端记录——publicationStatus 由
-      // 链投影（stateMachinePlans）判定，调用方自报的 planId/planHash 不是
-      // 激活的依据；记录锚不可改（patchVersionRecord 拒绝）。
       assertActivatable(summary);
       const cutoverAt = now().toISOString();
       const existing = await effectiveVersionRecords({
@@ -193,8 +177,6 @@ export function createStoreZhixuVersionService(options: {
         projectionStore: options.projectionStore,
         now,
       });
-      // cutover（旧 active 批量 deprecated + 新 active 落库）
-      // 事务化；持久后端中途失败整体回滚，不留双 active/无 active 中间态。
       const applyCutover = async (): Promise<StoreZhixuVersionRecord> => {
         for (const item of existing) {
           if (item.versionId === record.versionId) {
@@ -222,11 +204,6 @@ export function createStoreZhixuVersionService(options: {
         await metadataStore.upsertVersion(active);
         return active;
       };
-      // cutover（旧 active 批量 deprecated + 新 active 落库）
-      // 事务化；持久后端中途失败整体回滚，不留双 active/无 active 中间态。
-      // 并发 activate 的败者由 (series_id) WHERE status='active' 部分唯一
-      // 索引裁决（0021 迁移）：两事务各自基于 cutover 前旧状态写入时，
-      // 后提交者在索引上撞车，按激活冲突 409 收敛而非留下双 active。
       const active = metadataStore.withTransaction
         ? await metadataStore.withTransaction(applyCutover).catch((error: unknown) => {
           throw mapActivationConflict(error);
@@ -307,8 +284,6 @@ async function mutationResult(
   projectionStore: ProjectionStore,
   now: () => Date,
 ): Promise<StoreZhixuVersionMutationDTO> {
-  // 快照与订单计数视图单次加载、系列内共享：逐版本各自拉全量订单是
-  // O(版本×全量订单) 放大，列表端点的代价随版本数线性叠加。
   const [view, versions] = await Promise.all([
     loadVersionSummaryView(productService, projectionStore),
     summarizeSeries({
@@ -367,8 +342,6 @@ async function ensureVersionRecord(input: {
       },
     );
   }
-  // 新建版本记录的锚（planId/planHash）必须在
-  // 链投影中真实存在——否则可凭空登记任意 plan 的"版本"再激活。
   const planId = normalizeBytes32(input.input.planId, "planId");
   const planHash = normalizeBytes32(input.input.planHash, "planHash");
   const snapshot = await input.projectionStore.getOrderSnapshot();
@@ -408,9 +381,6 @@ function patchVersionRecord(
   record: StoreZhixuVersionRecord,
   input: StoreZhixuVersionMutationInput,
 ): StoreZhixuVersionRecord {
-  // 版本记录的链锚不可改——planId/planHash/
-  // artifactHash 只能在创建时给定；调用方在其后携带不同锚即 409，
-  // 防止"改锚任意 plan"把既有版本偷换到另一个 plan 上。
   for (const [field, rawValue] of [
     ["planId", input.planId],
     ["planHash", input.planHash],
@@ -494,9 +464,6 @@ async function synthesizeDefaultVersion(
   if (!zhixu) {
     return undefined;
   }
-  // 投影桶在 commitPlan 第一步即建、PlanRegistered 到 finalize 才发：
-  // 默认版本只对"已 finalize"的 plan 合成 active，否则待定计划可被
-  // 直接激活建单。
   const snapshot = await projectionStore.getOrderSnapshot();
   const planId = normalizeBytes32(zhixu.planPublication.planId, "planId");
   const planHash = normalizeBytes32(zhixu.planPublication.planHash, "planHash");
@@ -523,10 +490,6 @@ async function synthesizeDefaultVersion(
   };
 }
 
-/**
- * 版本摘要的共享读视图：订单快照一次、订单计数按 (planId, planHash)
- * 预先索引——系列内每个版本只做一次查表，不再逐版本扫全量订单。
- */
 interface VersionSummaryView {
   readonly snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>;
   readonly orderCountByPlanAndHash: ReadonlyMap<string, number>;
@@ -548,7 +511,6 @@ async function loadVersionSummaryView(
       continue;
     }
     if (!order.planHash) {
-      // 无 planHash 的订单按原口径计入同 planId 的任意版本。
       orderCountByPlanWithoutHash.set(order.planId, (orderCountByPlanWithoutHash.get(order.planId) ?? 0) + 1);
       continue;
     }
@@ -571,9 +533,6 @@ function summarizeRecord(
   record: StoreZhixuVersionRecord,
   view: VersionSummaryView,
 ): StoreZhixuVersionSummaryDTO {
-  // "published" 要求链上已 finalize（PlanFinalized/PlanRegistered 均在
-  // finalize 交易内发出）：投影桶在 commitPlan 即建，仅凭桶存在会把
-  // 待定计划当成已发布。
   const plan = findFinalizedPlan(view.snapshot, record.planId, record.planHash);
   const publicationStatus: PlanPublicationStatus = plan ? "published" : "not_found";
   const artifactHash = record.artifactHash;
@@ -608,12 +567,6 @@ function assertActivatable(version: StoreZhixuVersionSummaryDTO): void {
   }
 }
 
-/**
- * 已注册（PlanRegistered）的 plan 查找：投影桶在 commitPlan 即建，
- * registeredAt 初始携带 commit 溯源、PlanRegistered 到达后被 finalize
- * 交易溯源覆写——以"registeredAt 晚于 committedAt（或无 commit 溯源）
- * / finalizedAt 已落"作为已注册判据，待定（仅 commit）计划不算。
- */
 function findFinalizedPlan(
   snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
   planId: Hex,
@@ -634,7 +587,6 @@ function isPlanRegistered(
     return true;
   }
   if (plan.committedAt === undefined) {
-    // 只见过 PlanRegistered（截断流建桶）——注册事实已存在。
     return true;
   }
   const committed = plan.committedAt;
@@ -645,7 +597,6 @@ function isPlanRegistered(
   );
 }
 
-/** 供 listing 锚核验等域复用的"PlanRegistered 已被索引"判据。 */
 export function isPlanRegisteredProjection(
   plan: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>["stateMachinePlans"][string],
 ): boolean {

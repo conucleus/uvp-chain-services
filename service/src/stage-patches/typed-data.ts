@@ -32,9 +32,6 @@ export {
   EXECUTOR_PATCH_MODE_HANDOFF
 } from "../shared/protocol-constants.js";
 
-// patch 模块的 EIP-712 结构以 planId 开头
-// （UVPStagePatchModuleStageExecutorPatch(bytes32 planId,bytes32 orderId,...)）。
-// 字段表从 protocol-bindings 导入，禁止本地漂移。
 export const STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS =
   PROTOCOL_STAGE_EXECUTOR_PATCH_TYPED_DATA_FIELDS;
 
@@ -51,19 +48,12 @@ export interface StageExecutorPatchPayload {
   readonly executorMetadataHash: Hex;
   readonly mode: Hex;
   readonly previousExecutor: Address;
-  /**
-   * patch 生效时对新城执行者写入的显式订单级授权集哈希（UB-36①）：
-   * = stateMachine.signalAuthorizationsHash(executorAuthorizations)，进
-   * patchHash preimage 与 EIP-712 摘要——selector 签名覆盖授权集，
-   * 授权来源可审计。
-   */
   readonly authorizationsHash: Hex;
   readonly patchNonce: string;
   readonly metadataURI: string;
 }
 
 export interface BuildStageExecutorPatchTypedDataInput extends StageExecutorPatchPayload {
-  /** 订单所属 plan，签名首字段。 */
   readonly planId: Hex;
   readonly chainId: number;
   readonly verifyingContract: Address | string;
@@ -84,7 +74,6 @@ export interface StageResourcePatchPayload {
 }
 
 export interface BuildStageResourcePatchTypedDataInput extends StageResourcePatchPayload {
-  /** 订单所属 plan，签名首字段。 */
   readonly planId: Hex;
   readonly chainId: number;
   readonly verifyingContract: Address | string;
@@ -98,10 +87,6 @@ export interface BuildStageResourcePatchTypedDataInput extends StageResourcePatc
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
 
 export function hashStageExecutorPatchPayload(payload: StageExecutorPatchPayload): Hex {
-  // patchHash 口径唯一：preimage 的域常量首槽、字段规范化与 ABI 编码全部以
-  // protocol-bindings 为准；本地复制 preimage 会在两栈间产出不同的链上
-  // patchHash（签名可恢复但合约校验失败）。这里只做错误面（ConfigError）
-  // 与非零守卫。
   try {
     return nonZeroHash(
       hashProtocolStageExecutorPatchPayload(payload),
@@ -116,8 +101,6 @@ export function hashStageExecutorPatchPayload(payload: StageExecutorPatchPayload
 }
 
 export function hashStageResourcePatchPayload(payload: StageResourcePatchPayload): Hex {
-  // 同上：resource patch 与 executor patch 共用 protocol-bindings 的
-  // 域分离 preimage，链上服务不得持有第二种哈希变体。
   try {
     return nonZeroHash(
       hashProtocolStageResourcePatchPayload(payload),
@@ -232,9 +215,6 @@ export async function recoverStageResourcePatchSigner(
 
 
 export function hashResourceManifest(manifest: ResourceManifestV1): Hex {
-  // manifest hash 必须与 protocol-bindings 的 canonical 实现
-  // （带 domain 与 normalization）一致——两栈只维护一种哈希口径，
-  // 不做本地变体。
   try {
     return nonZeroHash(
       hashProtocolResourceManifest(manifest),
@@ -260,7 +240,6 @@ export function signatureHashFor(signature: Hex): Hex {
 }
 
 export function executorPatchModeHash(mode: StageExecutorPatchMode): Hex {
-  // patch 词表封闭为 assign/handoff（非协作换人走 forkOrder 车道）。
   switch (mode) {
     case "assign":
       return EXECUTOR_PATCH_MODE_ASSIGN;

@@ -20,20 +20,9 @@ import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 
-// 事件面按合约族划分：订单维度事件全部 plan-scoped；patch/metadata/
-// derived/link/dock 事件由各模块合约发出，按 deployment.modules 分地址挂
-// ABI。
-// 词表 Merkle 化形态：PlanCommitted/PlanFinalized 携带 capabilitiesRoot
-// 字段；链上不发布词表注册事件——两表由重放方从编译产物富集
-// （projections/plan.ts）。
-//
-// 事件面单源化（对齐 docking 的 DOCKING_MODULE_ABI 先例）：状态机与
-// stage-patch/derived-signal/order-link 模块的事件条目直接从
-// @uvp-eth/protocol-bindings 的整表 ABI 滤出，手抄事件副本会随协议演进
-// 漂移成错 topic。滤出面（topic 与 indexed 布局）由 viem-event-source
-// 测试按 forge fixture + 编译 artifact 双源钉住。与写面同取舍：先放宽为
-// 泛型 Abi 再滤，直接在整表字面量类型上做 filter 会让 viem 的巨型条件
-// 类型爆栈（TS2589）。
+// 事件面按合约族划分：订单维度事件 plan-scoped，模块事件按 deployment.modules
+// 分地址挂 ABI；状态机与模块事件条目均从 @uvp-eth/protocol-bindings 整表 ABI
+// 滤出（单源，先放宽为泛型 Abi 再滤以避开 viem 条件类型爆栈）。
 const stateMachineAbi: Abi = (STATE_MACHINE_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
@@ -41,9 +30,6 @@ const stateMachineAbi: Abi = (STATE_MACHINE_ABI as Abi).filter(
 const stagePatchModuleAbi: Abi = (STAGE_PATCH_MODULE_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
-
-// UVPPlanMetadataModule v0.6 不发出任何事件（合约只保留 view 验证
-// 例程），索引器不 watch 该地址。
 
 const derivedSignalModuleAbi: Abi = (DERIVED_SIGNAL_MODULE_ABI as Abi).filter(
   (entry) => entry.type === "event"
@@ -53,17 +39,6 @@ const orderLinkModuleAbi: Abi = (ORDER_LINK_MODULE_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
 
-// UVPDockingModule v4.4（具名接口 dock v2）事件面：从 protocol-bindings
-// 单源（DOCKING_MODULE_ABI）滤出 event 条目，对齐写面已做的单源化
-// （dock-automation/service.ts 的 dockingWriteAbi）——手抄事件副本会随
-// 协议演进漂移成错 topic。终态不由链上事件驱动；事件面为 open/attach/
-// input/output/outputSatisfied 五类——DockAttached 是 existing 模式出生
-// 事件（形状与 DockOpened 同构，对等挂接既有目标单，不铸子单）；
-// DockOutputSatisfied 记录兄弟 output 绑定等价交付下的满足（无新镜像
-// 写入）。与写面同取舍：先放宽为泛型 Abi 再滤，直接在整表字面量类型上
-// 做 filter 会让 viem 的巨型条件类型爆栈（TS2589）；滤出面的 topic 与
-// indexed 布局由 viem-event-source 测试按 v4.4 fixture 钉住（守护单源
-// 滤出本身不漂移）。
 const dockingModuleAbi: Abi = (DOCKING_MODULE_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
@@ -83,12 +58,6 @@ const deploymentRegistryAbi = parseAbi([
   "event DeploymentRetired(bytes32 indexed deploymentId,bytes32 reasonHash,string reasonURI)",
 ]);
 
-/**
- * Event-only ABI surface consumed by the indexer. Keep this exported so the
- * decoder can be regression-tested against the frozen protocol ABI fixtures;
- * a fixture topic mismatch is a build failure instead of a silent empty
- * projection.
- */
 export const INDEXER_EVENT_ABIS = {
   UVPStateMachine: stateMachineAbi,
   UVPIdentityRegistry: identityRegistryAbi,
@@ -100,9 +69,6 @@ export const INDEXER_EVENT_ABIS = {
 } as const;
 
 const maxGetLogsBlockSpan = 9_999n;
-// chunk 级并发上限与重试：全部 chunk×contract 一次性 Promise.all 会同时
-// 打满公网 RPC 限流（失败即整轮重来）；按 chunk 限流并做短退避重试，
-// 重试耗尽才让本轮失败。
 const maxConcurrentLogReads = 4;
 const logReadAttemptLimit = 3;
 const logReadRetryBaseDelayMs = 250;
@@ -132,7 +98,6 @@ interface ViemLogReader {
   getBlock?(input:
     | { readonly blockNumber: bigint; readonly blockTag?: undefined }
     | { readonly blockNumber?: undefined; readonly blockTag: "finalized" }): Promise<{
-    /** null 仅见于 pending 区块；按高度/标签取块时恒非空。 */
     readonly hash: Hex | null;
     readonly number?: bigint | null;
   }>;
@@ -140,7 +105,6 @@ interface ViemLogReader {
 
 export interface ViemChainEventSourceOptions {
   readonly publicClient?: ViemLogReader;
-  /** 不可解码日志的留痕出口；缺省为静默（计数仍可经实例读取）。 */
   readonly logger?: Logger;
 }
 
@@ -154,16 +118,10 @@ export class ViemChainEventSource implements ChainEventSource {
     this.#logger = options.logger ?? noopLogger;
   }
 
-  /**
-   * 单条不可解码日志的累计计数（跳过留痕）。游标照常前进：不可解码的
-   * 日志无法投影，阻塞整轮只会让索引器永久 degraded 并反复重撞同一批
-   * 日志；计数由索引器服务在每轮刷新时取走并入日志/指标。
-   */
   get unresolvedLogCount(): number {
     return this.#unresolvedLogCount;
   }
 
-  /** 取走自上次调用以来的累计计数并清零（索引器服务每轮刷新消费）。 */
   consumeUnresolvedLogCount(): number {
     const count = this.#unresolvedLogCount;
     this.#unresolvedLogCount = 0;
@@ -173,11 +131,6 @@ export class ViemChainEventSource implements ChainEventSource {
   async getFinalizedBlock(config: ChainServicesConfig): Promise<bigint> {
     const client = this.#client(config);
     if (config.network.finalityAnchor === "confirmations") {
-      // 显式覆盖锚（anvil 等不支持 finalized 标签的本地/测试链）：
-      // reorg 安全 = finalityConfirmations 缓冲 + indexer/service.ts
-      // 的追加前哈希连续性校验与有界共同祖先回滚。超过回滚窗口的深
-      // reorg 仍需 full rebuild；`removed` log 的墓碑/复活过滤在 replay
-      // 层完成。
       const latestBlock = await client.getBlockNumber();
       const confirmations = BigInt(config.network.finalityConfirmations);
       if (latestBlock <= confirmations) {
@@ -185,8 +138,6 @@ export class ViemChainEventSource implements ChainEventSource {
       }
       return latestBlock - confirmations;
     }
-    // 默认锚：finalized 标签。最终性边界内的 reorg 被根除，游标不会
-    // 锚到可回滚的高度。
     const finalizedBlock = await client.getBlock?.({ blockTag: "finalized" });
     if (!finalizedBlock) {
       throw new ConfigError(
@@ -194,18 +145,11 @@ export class ViemChainEventSource implements ChainEventSource {
       );
     }
     if (finalizedBlock.number === null || finalizedBlock.number === undefined) {
-      // finalized 标签取块却拿到无块号属 RPC 层异常（块号仅 pending 块可
-      // 缺）；静默按 0 会让索引器把链当作未达部署高度，游标与最终性上界
-      // 被无声压回 0。
       throw new ConfigError("finalized block returned by the RPC node carries no number");
     }
     return finalizedBlock.number;
   }
 
-  /**
-   * 返回当前 canonical 链上指定高度的区块哈希，供 indexer 在
-   * 追加事件前校验 cursor 连续性、reorg 时定位共同祖先。
-   */
   async getBlockHash(
     blockNumber: bigint,
     config: ChainServicesConfig,
@@ -216,8 +160,6 @@ export class ViemChainEventSource implements ChainEventSource {
     }
     const block = await client.getBlock({ blockNumber });
     if (block.hash === null || block.hash === undefined) {
-      // 按高度取 canonical 区块却拿到无哈希块属 RPC 层异常（仅 pending
-      // 块无哈希）；返回空值会让游标带着假锚点放行 reorg 校验。
       throw new ConfigError(`block ${blockNumber} returned by the RPC node carries no hash`);
     }
     return block.hash.toLowerCase() as Hex;
@@ -233,9 +175,6 @@ export class ViemChainEventSource implements ChainEventSource {
     }
 
     const client = this.#client(config);
-    // 有界并发读：以 (contract, chunk) 为任务粒度跑工作池，避免全量任务
-    // 一次性 Promise.all 打爆公网 RPC；单任务失败带重试（见
-    // #getLogsWithRetry），重试耗尽才向上抛错让本轮重来。
     const readTasks = contracts.flatMap((contract) =>
       blockRanges(range.fromBlock, range.toBlock, maxGetLogsBlockSpan).map(
         (blockRange) => ({ contract, blockRange })
@@ -267,7 +206,6 @@ export class ViemChainEventSource implements ChainEventSource {
         continue;
       }
       for (const log of taskLogs) {
-        // 不可解码日志跳过留痕（计数 + warn），游标前进；不阻塞整轮。
         const event = decodeChainEventLog(log, range.chainId, contract);
         if (event) {
           decoded.push(event);
@@ -354,9 +292,6 @@ function indexedContracts(
       config.network.contracts,
       deploymentRegistryAbi,
     ),
-    // 扁平模块键与写路径（server.ts moduleAddress）同源：patch/dock 服务
-    // 只配扁平键时写入的模块事件也必须入投影，否则有写入无投影。双轨
-    // 同配且一致时按 name:address 去重；漂移由 preflight fail-closed。
     indexedContract(
       "UVPStagePatchModule",
       config.network.contracts,
@@ -443,9 +378,6 @@ function blockRanges(
   maxSpan: bigint,
 ): readonly { readonly fromBlock: bigint; readonly toBlock: bigint }[] {
   const ranges: { fromBlock: bigint; toBlock: bigint }[] = [];
-  // maxSpan 语义与 executor-kit watcher 同源：闭区间每片恰 maxSpan 个块
-  // （[start, start + maxSpan - 1]），不是 toBlock - fromBlock = maxSpan 的
-  // 10000 块跨——那会超出 provider 对 eth_getLogs 的 10K 块硬限制。
   for (let start = fromBlock; start <= toBlock; start = start + maxSpan) {
     const end = start + maxSpan - 1n < toBlock ? start + maxSpan - 1n : toBlock;
     ranges.push({ fromBlock: start, toBlock: end });
@@ -457,11 +389,6 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * 解码单条日志。解码失败（ABI 不匹配 / 未知事件 / 畸形 data）返回
- * undefined 由调用方跳过并计数；日志元数据不完整仍抛错——那是 RPC 层
- * 故障，不是单条日志问题。
- */
 function decodeChainEventLog(
   log: Log,
   chainId: number,
@@ -477,8 +404,6 @@ function decodeChainEventLog(
       `incomplete ${contract.name} log metadata from ${contract.address}`,
     );
   }
-  // 日志地址畸形与块号/交易哈希缺失同属 RPC 层故障：必须在 try 外校验，
-  // 否则 normalizeLogAddress 的抛错被解码 catch 吞成"单条不可解码日志"。
   const normalizedAddress = normalizeLogAddress(log.address);
 
   let event: ChainEvent | undefined;
@@ -513,10 +438,6 @@ function decodeChainEventLog(
   return event;
 }
 
-/**
- * string 参数（URI 等）保持原文：整体小写化只允许用于 bytes/address 类型，
- * 否则 0x 开头的 URI/标识串会被破坏。
- */
 function normalizeEventArgs(args: unknown, inputTypes: ReadonlyMap<string, string>): EventArgs {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     return {};
@@ -555,7 +476,6 @@ function arrayItemType(abiType: string | undefined): string | undefined {
   return abiType.slice(0, -2);
 }
 
-/** 事件名 → 参数名 → ABI 类型（bytes/address/string/uint…）。 */
 function eventInputTypes(abi: Abi, eventName: string): ReadonlyMap<string, string> {
   const types = new Map<string, string>();
   for (const entry of abi) {
@@ -572,8 +492,6 @@ function eventInputTypes(abi: Abi, eventName: string): ReadonlyMap<string, strin
 }
 
 function normalizeLogAddress(address: string): Address {
-  // 与 shared normalizeAddress 同语义（畸形 RPC 日志地址→ConfigError，
-  // 调用点在解码 catch 之外抛出）；委托单源实现，仅保留错误文案锚点。
   try {
     return normalizeAddress(address, "log address");
   } catch {

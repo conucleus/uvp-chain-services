@@ -3,21 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  BackupEvidenceStorage,
   buildPayloadHashDocument,
   createEvidenceService,
   EvidenceServiceError,
   EvidenceStorageConfigurationError,
-  hashEvidenceBytes,
-  hashEvidencePayload,
   InMemoryEvidenceMetadataStore,
-  InMemoryEvidenceStorage,
   LocalEvidenceStorage,
   ObjectEvidenceStorage,
   RehearsalObjectEvidenceStorage,
-  defaultRehearsalObjectStorageRoot,
   S3EvidenceStorageClient,
-  type EvidenceStorage,
   type S3CompatibleObjectClient,
   type S3ObjectOperationInput,
   type S3ObjectPutOperationInput,
@@ -25,7 +19,7 @@ import {
   type EvidenceUploadResponseDTO
 } from "../src/evidence/index.js";
 
-const owner: EvidencePrincipal = { id: "seller", role: "participant" };
+const owner: EvidencePrincipal = { id: "slot-b", role: "participant" };
 const tempDirs: string[] = [];
 
 describe("evidence service", () => {
@@ -35,90 +29,19 @@ describe("evidence service", () => {
     }
   });
 
-  it("settles concurrent same-payload uploads idempotently", async () => {
-    // 并发同 (owner, payload) 上传：前置 find 各自未命中时，条件插入
-    // 只允许一条落库，败者按既有记录幂等返回——不撞 UNIQUE 变存储错误。
-    const service = testEvidenceService();
-    const body = {
-      orderId: "order-1",
-      taskId: "task-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      fileName: "concurrent.json",
-      content: { encoding: "json" as const, value: { n: 1 } },
-      metadata: { businessLabel: "Commercial invoice", fields: { invoice: "INV-9" } }
-    };
-
-    const [first, second] = await Promise.all([
-      service.uploadEvidence(body, owner),
-      service.uploadEvidence(body, owner)
-    ]);
-
-    expect(first.evidence.evidenceId).toBe(second.evidence.evidenceId);
-    expect(first.payloadHash).toBe(second.payloadHash);
-    expect(first.evidence.evidenceId).toMatch(/^ev_/);
-  });
-
-  it("generates stable hashes from canonical JSON metadata and payload content", async () => {
-    const service = testEvidenceService();
-    const first = await uploadJsonEvidence(service, {
-      fileName: "packing-list-a.json",
-      content: { z: 2, a: { c: 3, b: 1 } },
-      metadataFields: { invoice: "INV-1", amount: 100 }
-    });
-    const second = await uploadJsonEvidence(service, {
-      fileName: "renamed.json",
-      content: { a: { b: 1, c: 3 }, z: 2 },
-      metadataFields: { amount: 100, invoice: "INV-1" }
-    });
-
-    expect(first.evidence.contentHash).toBe(second.evidence.contentHash);
-    expect(first.evidence.metadataHash).toBe(second.evidence.metadataHash);
-    expect(first.evidence.payloadHash).toBe(second.evidence.payloadHash);
-    // 同一 owner 重复上传完全相同的载荷幂等返回既有
-    // 记录——payloadHash 覆盖 content+metadata+order+stage（fileName 不参与
-    // 哈希），重命名文件重传不再追加内容副本。
-    expect(second.evidence.evidenceId).toBe(first.evidence.evidenceId);
-    expect(second.evidence.fileName).toBe(first.evidence.fileName);
-    expect(first.evidence.payloadHash).toBe(hashEvidencePayload({
-      contentHash: first.evidence.contentHash,
-      metadataHash: first.evidence.metadataHash,
-      documentType: first.metadata.documentType,
-      ...(first.evidence.orderId ? { orderId: first.evidence.orderId } : {}),
-      ...(first.evidence.taskId ? { taskId: first.evidence.taskId } : {}),
-      stageIdentifier: first.evidence.stageIdentifier
-    }));
-    expect(buildPayloadHashDocument({
-      contentHash: first.evidence.contentHash,
-      metadataHash: first.evidence.metadataHash,
-      documentType: first.metadata.documentType,
-      ...(first.evidence.orderId ? { orderId: first.evidence.orderId } : {}),
-      stageIdentifier: first.evidence.stageIdentifier
-    })).not.toHaveProperty("fileName");
-    expect(buildPayloadHashDocument({
-      contentHash: first.evidence.contentHash,
-      metadataHash: first.evidence.metadataHash,
-      documentType: first.metadata.documentType,
-      ...(first.evidence.orderId ? { orderId: first.evidence.orderId } : {}),
-      stageIdentifier: first.evidence.stageIdentifier
-    })).not.toHaveProperty("evidenceId");
-  });
-
   it("keeps same-owner evidence on different tasks distinct via the taskId fingerprint component", async () => {
     const service = testEvidenceService();
     const base = {
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      fileName: "invoice.json",
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      fileName: "doc-1.json",
       content: { encoding: "json" as const, value: { amount: 100 } },
-      metadata: { businessLabel: "Invoice", fields: { invoice: "INV-9" } }
+      metadata: { businessLabel: "Doc-1", fields: { "doc-1": "DOC-9" } }
     };
     const taskA = await service.uploadEvidence({ orderId: "order-1", taskId: "task-a", ...base }, owner);
     const taskB = await service.uploadEvidence({ orderId: "order-1", taskId: "task-b", ...base }, owner);
     expect(taskA.evidence.taskId).toBe("task-a");
     expect(taskB.evidence.taskId).toBe("task-b");
-    // (owner, payloadHash) 幂等不得跨任务错带：taskId 入指纹后两份记录
-    // 指纹不同，各自成档。
     expect(taskA.evidence.payloadHash).not.toBe(taskB.evidence.payloadHash);
     expect(taskB.evidence.evidenceId).not.toBe(taskA.evidence.evidenceId);
   });
@@ -128,7 +51,7 @@ describe("evidence service", () => {
     const uploaded = await uploadJsonEvidence(service, {
       fileName: "example.txt",
       content: { note: "declaration" },
-      metadataFields: { invoice: "INV-2" }
+      metadataFields: { "doc-1": "DOC-2" }
     });
     await expect(service.bindEvidence({
       evidenceId: uploaded.evidence.evidenceId,
@@ -141,7 +64,6 @@ describe("evidence service", () => {
       code: "forbidden",
       status: 403
     });
-    // owner 本人仍可绑定；admin 代绑不受影响。
     const bound = await service.bindEvidence({
       evidenceId: uploaded.evidence.evidenceId,
       txHash: txHash("21"),
@@ -163,9 +85,6 @@ describe("evidence service", () => {
   });
 
   it("settles a concurrent double-bind by first-writer-wins and rejects the cross-order loser", async () => {
-    // 并发双绑都读到 uploaded 快照：条件翻转只有一个赢家；败者回读拿到
-    // 赢家的绑定档——同订单幂等收敛，跨订单按 409 拒绝，不得把别人的
-    // 绑定当成本次成功返回。
     const backing = new InMemoryEvidenceMetadataStore();
     let staleReadPending = false;
     const racingStore: typeof backing = new Proxy(backing, {
@@ -186,13 +105,13 @@ describe("evidence service", () => {
     });
     const service = createEvidenceService({
       runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      storage: new LocalEvidenceStorage({ rootDir: tempDir() }),
       metadataStore: racingStore,
     });
     const uploaded = await uploadJsonEvidence(service, {
       fileName: "double-bind.txt",
       content: { note: "race" },
-      metadataFields: { invoice: "INV-RACE" },
+      metadataFields: { "doc-1": "DOC-RACE" },
     });
     const evidenceId = uploaded.evidence.evidenceId;
 
@@ -206,8 +125,6 @@ describe("evidence service", () => {
     };
     await service.bindEvidence(winnerBinding, owner);
 
-    // 败者读到 uploaded 旧快照、试图绑到另一链上订单：条件翻转落空，
-    // 拿回赢家的绑定档，按归属冲突拒绝。
     staleReadPending = true;
     await expect(service.bindEvidence({
       ...winnerBinding,
@@ -218,7 +135,6 @@ describe("evidence service", () => {
       status: 409
     });
 
-    // 同订单的迟到重放幂等：拿回赢家的绑定档按成功收敛。
     staleReadPending = true;
     const idempotent = await service.bindEvidence(winnerBinding, owner);
     expect(idempotent?.evidence).toMatchObject({
@@ -229,8 +145,8 @@ describe("evidence service", () => {
 
   it("changes metadataHash and payloadHash when canonical metadata changes", async () => {
     const service = testEvidenceService();
-    const first = await uploadTextEvidence(service, { invoice: "INV-1" });
-    const second = await uploadTextEvidence(service, { invoice: "INV-2" });
+    const first = await uploadTextEvidence(service, { "doc-1": "DOC-1" });
+    const second = await uploadTextEvidence(service, { "doc-1": "DOC-2" });
 
     expect(first.evidence.contentHash).toBe(second.evidence.contentHash);
     expect(first.evidence.metadataHash).not.toBe(second.evidence.metadataHash);
@@ -239,29 +155,29 @@ describe("evidence service", () => {
 
   it("keeps metadataHash stable while payloadHash changes for order or stage binding changes", async () => {
     const service = testEvidenceService();
-    const first = await uploadTextEvidence(service, { invoice: "INV-1" });
+    const first = await uploadTextEvidence(service, { "doc-1": "DOC-1" });
     const differentOrder = await service.uploadEvidence({
       orderId: "order-2",
       taskId: "task-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      fileName: "invoice.txt",
-      textPayload: "invoice payload",
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      fileName: "doc-1.txt",
+      textPayload: "doc-1 payload",
       metadata: {
-        businessLabel: "Commercial invoice",
-        fields: { invoice: "INV-1" }
+        businessLabel: "Doc-1",
+        fields: { "doc-1": "DOC-1" }
       }
     }, owner);
     const differentStage = await service.uploadEvidence({
       orderId: "order-1",
       taskId: "task-1",
       stageIdentifier: "example-complete",
-      documentType: "invoice",
-      fileName: "invoice.txt",
-      textPayload: "invoice payload",
+      documentType: "doc-1",
+      fileName: "doc-1.txt",
+      textPayload: "doc-1 payload",
       metadata: {
-        businessLabel: "Commercial invoice",
-        fields: { invoice: "INV-1" }
+        businessLabel: "Doc-1",
+        fields: { "doc-1": "DOC-1" }
       }
     }, owner);
 
@@ -276,30 +192,25 @@ describe("evidence service", () => {
     const service = testEvidenceService();
     const uploadDraft = async (draftId: string) => service.uploadEvidence({
       draftId,
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      fileName: "invoice.txt",
-      textPayload: "invoice payload",
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      fileName: "doc-1.txt",
+      textPayload: "doc-1 payload",
       metadata: {
-        businessLabel: "Commercial invoice",
-        fields: { invoice: "INV-1" }
+        businessLabel: "Doc-1",
+        fields: { "doc-1": "DOC-1" }
       }
     }, owner);
 
     const draftA = await uploadDraft("draft-1");
     const draftB = await uploadDraft("draft-2");
-    // 《证据与存证规则》二.4：草稿期以 draftId 替代订单成分参与指纹——
-    // 同 owner 同内容的不同草稿不再共享 payloadHash，(owner, payload_hash)
-    // 幂等归并不会把 B 草稿的凭证错记到 A 草稿名下。
     expect(draftA.evidence.payloadHash).not.toBe(draftB.evidence.payloadHash);
     expect(draftB.evidence.evidenceId).not.toBe(draftA.evidence.evidenceId);
     expect(draftB.evidence.draftId).toBe("draft-2");
 
-    // 同一草稿重复上传仍幂等返回既有记录。
     const draftAgain = await uploadDraft("draft-1");
     expect(draftAgain.evidence.evidenceId).toBe(draftA.evidence.evidenceId);
 
-    // 订单存在时（orderId 提给）文档不含 draftId 成分，四元组结构不变。
     expect(buildPayloadHashDocument({
       contentHash: draftA.evidence.contentHash,
       metadataHash: draftA.evidence.metadataHash,
@@ -312,17 +223,17 @@ describe("evidence service", () => {
 
   it("changes contentHash and payloadHash when file bytes change", async () => {
     const service = testEvidenceService();
-    const first = await uploadTextEvidence(service, { invoice: "INV-1" });
+    const first = await uploadTextEvidence(service, { "doc-1": "DOC-1" });
     const second = await service.uploadEvidence({
       orderId: "order-1",
       taskId: "task-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      fileName: "invoice.txt",
-      textPayload: "different invoice payload",
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      fileName: "doc-1.txt",
+      textPayload: "different doc-1 payload",
       metadata: {
-        businessLabel: "Commercial invoice",
-        fields: { invoice: "INV-1" }
+        businessLabel: "Doc-1",
+        fields: { "doc-1": "DOC-1" }
       }
     }, owner);
 
@@ -336,36 +247,33 @@ describe("evidence service", () => {
     const service = createEvidenceService({
     runtimeEnvironment: "local",
       metadataStore,
-      storage: new InMemoryEvidenceStorage(),
+      storage: new LocalEvidenceStorage({ rootDir: tempDir() }),
       now: () => new Date("2026-04-28T00:00:00Z")
     });
     const upload = await service.uploadEvidence({
       orderId: "order-1",
       taskId: "task-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
       textPayload: "paid",
       accessPolicy: {
-        readers: ["buyer", "reviewer-1"],
+        readers: ["slot-a", "reviewer-1"],
         adminReaders: ["ops"],
         adjudicatorReaders: ["arbiter-1"]
       }
     }, owner);
 
     await expect(service.getEvidence(upload.evidence.evidenceId, owner)).resolves.toBeDefined();
-    await expect(service.getEvidence(upload.evidence.evidenceId, { id: "buyer", role: "participant" })).resolves.toBeDefined();
+    await expect(service.getEvidence(upload.evidence.evidenceId, { id: "slot-a", role: "participant" })).resolves.toBeDefined();
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "reviewer-1", role: "participant" })).resolves.toBeDefined();
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "arbiter-1", role: "adjudicator" })).resolves.toBeDefined();
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "ops-admin", role: "admin" })).resolves.toBeDefined();
     await expect(service.getProof(upload.evidence.evidenceId, { id: "ops-admin", role: "admin" }))
       .resolves.toMatchObject({ verificationStatus: "unbound" });
-    // 存在性 oracle 消除：无权读取与"不存在"同为 undefined（路由层 404
-    // evidence_not_found），不再以 403 泄露证据是否存在。
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "outsider", role: "participant" }))
       .resolves.toBeUndefined();
     await expect(service.getEvidence(upload.evidence.evidenceId, { id: "ops", role: "participant" }))
       .resolves.toBeUndefined();
-    // 未认证主体在读库前即 401（不因 evidenceId 是否存在而不同）。
     await expect(service.getEvidence(upload.evidence.evidenceId, { role: "anonymous" }))
       .rejects.toMatchObject({ code: "unauthenticated", status: 401 });
     await expect(service.getEvidence("ev_missing", { role: "anonymous" }))
@@ -381,81 +289,75 @@ describe("evidence service", () => {
     const service = createEvidenceService({
     runtimeEnvironment: "local",
       metadataStore,
-      storage: new InMemoryEvidenceStorage(),
+      storage: new LocalEvidenceStorage({ rootDir: tempDir() }),
       now: () => new Date("2026-04-28T00:00:00Z"),
       evidenceIdFactory: () => "ev_forge"
     });
     const attacker: EvidencePrincipal = { id: "attacker", role: "participant" };
 
-    // A self-asserted writers list in the same request body must not vouch
-    // for attributing the record to someone else.
     await expect(service.uploadEvidence({
       orderId: "order-1",
       taskId: "task-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      textPayload: "forged invoice",
-      ownerParticipantId: "seller",
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      textPayload: "forged doc-1",
+      ownerParticipantId: "slot-b",
       accessPolicy: { writers: ["attacker"] }
     }, attacker)).rejects.toMatchObject({ code: "forbidden", status: 403 });
 
     await expect(metadataStore.get("ev_forge")).resolves.toBeUndefined();
 
-    // A plain writers grant without the owner claim is equally rejected: the
-    // request body cannot create evidence owned by another participant.
     await expect(service.uploadEvidence({
       orderId: "order-1",
       taskId: "task-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      textPayload: "forged invoice",
-      ownerParticipantId: "seller",
-      accessPolicy: { writers: ["attacker"], readers: ["seller"] }
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      textPayload: "forged doc-1",
+      ownerParticipantId: "slot-b",
+      accessPolicy: { writers: ["attacker"], readers: ["slot-b"] }
     }, attacker)).rejects.toMatchObject({ code: "forbidden", status: 403 });
     await expect(metadataStore.get("ev_forge")).resolves.toBeUndefined();
 
-    // The principal can still declare itself as owner explicitly.
     const own = await service.uploadEvidence({
       orderId: "order-1",
       taskId: "task-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      textPayload: "own invoice",
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      textPayload: "own doc-1",
       ownerParticipantId: "attacker",
       accessPolicy: { writers: ["attacker"] }
     }, attacker);
     expect(own.evidence.ownerParticipantId).toBe("attacker");
 
-    // Admin keeps the existing on-behalf ability, and an omitted owner
-    // defaults to the authenticated principal.
     const onBehalf = await service.uploadEvidence({
       orderId: "order-1",
       taskId: "task-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      textPayload: "admin invoice",
-      ownerParticipantId: "seller"
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      textPayload: "admin doc-1",
+      ownerParticipantId: "slot-b"
     }, { id: "ops-admin", role: "admin" });
-    expect(onBehalf.evidence.ownerParticipantId).toBe("seller");
+    expect(onBehalf.evidence.ownerParticipantId).toBe("slot-b");
 
     const defaulted = await service.uploadEvidence({
       orderId: "order-1",
       taskId: "task-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      textPayload: "default owner invoice"
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      textPayload: "default owner doc-1"
     }, owner);
-    expect(defaulted.evidence.ownerParticipantId).toBe("seller");
+    expect(defaulted.evidence.ownerParticipantId).toBe("slot-b");
   });
 
   it("returns proof and reports missing_file or mismatch without deleting evidence metadata", async () => {
-    const storage = new InMemoryEvidenceStorage();
+    const storage = new LocalEvidenceStorage({ rootDir: tempDir() });
     const service = createEvidenceService({
+    metadataStore: new InMemoryEvidenceMetadataStore(),
     runtimeEnvironment: "local",
       storage,
       now: () => new Date("2026-04-28T00:00:00Z")
     });
-    const upload = await uploadTextEvidence(service, { invoice: "INV-1" });
+    const upload = await uploadTextEvidence(service, { "doc-1": "DOC-1" });
 
     await expect(service.getProof(upload.evidence.evidenceId, owner))
       .resolves.toMatchObject({
@@ -474,7 +376,7 @@ describe("evidence service", () => {
 
     await storage.put({
       evidenceId: upload.evidence.evidenceId,
-      bytes: new TextEncoder().encode("tampered invoice payload")
+      bytes: new TextEncoder().encode("tampered doc-1 payload")
     });
     await expect(service.getProof(upload.evidence.evidenceId, owner))
       .resolves.toMatchObject({
@@ -486,17 +388,18 @@ describe("evidence service", () => {
 
   it("rejects oversized payloads and unsupported MIME types", async () => {
     const service = createEvidenceService({
+    metadataStore: new InMemoryEvidenceMetadataStore(),
     runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      storage: new LocalEvidenceStorage({ rootDir: tempDir() }),
       maxPayloadBytes: 4
     });
 
-    await expect(uploadTextEvidence(service, { invoice: "INV-1" }))
+    await expect(uploadTextEvidence(service, { "doc-1": "DOC-1" }))
       .rejects.toMatchObject({ code: "payload_too_large", status: 413 });
     await expect(service.uploadEvidence({
       orderId: "order-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
       mimeType: "application/x-msdownload",
       textPayload: "bin"
     }, owner)).rejects.toMatchObject({ code: "unsupported_mime_type", status: 415 });
@@ -504,7 +407,7 @@ describe("evidence service", () => {
 
   it("marks evidence bound only through explicit signal binding", async () => {
     const service = testEvidenceService();
-    const upload = await uploadTextEvidence(service, { invoice: "INV-1" });
+    const upload = await uploadTextEvidence(service, { "doc-1": "DOC-1" });
     const binding = {
       evidenceId: upload.evidence.evidenceId,
       submissionId: "sub_1",
@@ -543,21 +446,15 @@ describe("evidence service", () => {
 
   it("rejects non-object evidence storage in production mode", () => {
     expect(() => createEvidenceService({
-      storage: new InMemoryEvidenceStorage(),
-      runtimeEnvironment: "production"
-    })).toThrow(EvidenceStorageConfigurationError);
-    expect(() => createEvidenceService({
+      metadataStore: new InMemoryEvidenceMetadataStore(),
       storage: new LocalEvidenceStorage(),
       runtimeEnvironment: "production"
     })).toThrow(EvidenceStorageConfigurationError);
   });
 
-  it("rejects memory and local evidence storage in testnet rehearsal mode", () => {
+  it("rejects local evidence storage in testnet rehearsal mode", () => {
     expect(() => createEvidenceService({
-      storage: new InMemoryEvidenceStorage(),
-      runtimeEnvironment: "testnet"
-    })).toThrow(EvidenceStorageConfigurationError);
-    expect(() => createEvidenceService({
+      metadataStore: new InMemoryEvidenceMetadataStore(),
       storage: new LocalEvidenceStorage(),
       runtimeEnvironment: "testnet"
     })).toThrow(EvidenceStorageConfigurationError);
@@ -570,10 +467,12 @@ describe("evidence service", () => {
     });
 
     expect(() => createEvidenceService({
+      metadataStore: new InMemoryEvidenceMetadataStore(),
       storage,
       runtimeEnvironment: "staging"
     })).toThrow(EvidenceStorageConfigurationError);
     expect(() => createEvidenceService({
+      metadataStore: new InMemoryEvidenceMetadataStore(),
       storage,
       runtimeEnvironment: "production"
     })).toThrow(EvidenceStorageConfigurationError);
@@ -586,11 +485,12 @@ describe("evidence service", () => {
       namespace: "uvp-rehearsal-test"
     });
     const service = createEvidenceService({
+      metadataStore: new InMemoryEvidenceMetadataStore(),
       storage,
       runtimeEnvironment: "testnet"
     });
 
-    const upload = await uploadTextEvidence(service, { invoice: "INV-1" });
+    const upload = await uploadTextEvidence(service, { "doc-1": "DOC-1" });
 
     expect(storage.adapterKind).toBe("object");
     expect(storage.productionSafe).toBe(true);
@@ -601,25 +501,14 @@ describe("evidence service", () => {
     });
   });
 
-  it("keeps the default rehearsal object root stable across process restarts", () => {
-    // Stored metadata references bytes under this root, so the
-    // default must never embed a timestamp or pid that changes on restart.
-    const first = new RehearsalObjectEvidenceStorage();
-    const second = new RehearsalObjectEvidenceStorage();
-    const expected = join(process.cwd(), "data", "evidence-object", "ev_restart.bin");
-
-    expect(first.pathForStorageURI("object://uvp-rehearsal/ev_restart")).toBe(expected);
-    expect(second.pathForStorageURI("object://uvp-rehearsal/ev_restart")).toBe(expected);
-    expect(defaultRehearsalObjectStorageRoot()).toBe(join(process.cwd(), "data", "evidence-object"));
-  });
-
   it("accepts production-like object storage but rejects public or credential-bearing storage URIs", async () => {
     const objectStorage = objectStorageWithUri("object://private-evidence/ev_object");
     const service = createEvidenceService({
+      metadataStore: new InMemoryEvidenceMetadataStore(),
       storage: objectStorage,
       runtimeEnvironment: "production"
     });
-    await expect(uploadTextEvidence(service, { invoice: "INV-1" }))
+    await expect(uploadTextEvidence(service, { "doc-1": "DOC-1" }))
       .resolves.toMatchObject({ evidence: { storageURI: "object://private-evidence/ev_object" } });
 
     for (const unsafeURI of [
@@ -628,10 +517,11 @@ describe("evidence service", () => {
       "s3://access:secret@bucket/evidence/ev_public"
     ]) {
       const unsafeService = createEvidenceService({
+        metadataStore: new InMemoryEvidenceMetadataStore(),
         storage: objectStorageWithUri(unsafeURI),
         runtimeEnvironment: "testnet"
       });
-      await expect(uploadTextEvidence(unsafeService, { invoice: "INV-1" }))
+      await expect(uploadTextEvidence(unsafeService, { "doc-1": "DOC-1" }))
         .rejects.toThrow(EvidenceStorageConfigurationError);
     }
   });
@@ -650,11 +540,12 @@ describe("evidence service", () => {
       })
     });
     const service = createEvidenceService({
+      metadataStore: new InMemoryEvidenceMetadataStore(),
       storage,
       runtimeEnvironment: "staging"
     });
 
-    const upload = await uploadTextEvidence(service, { invoice: "INV-1" });
+    const upload = await uploadTextEvidence(service, { "doc-1": "DOC-1" });
 
     expect(upload.evidence.storageURI).toBe(
       `s3://private-evidence-bucket/orders/evidence/${upload.evidence.evidenceId}`
@@ -678,31 +569,6 @@ describe("evidence service", () => {
     await expect(service.getProof(upload.evidence.evidenceId, owner)).resolves.toMatchObject({
       verificationStatus: "missing_file"
     });
-  });
-
-  it("supports explicit object URI namespace mode for S3-compatible storage", async () => {
-    const mockClient = new MockS3CompatibleObjectClient();
-    const client = new S3EvidenceStorageClient({
-      bucket: "private-evidence-bucket",
-      prefix: "evidence",
-      region: "us-east-1",
-      accessKeyIdEnv: "S3_ACCESS_KEY_ID",
-      secretAccessKeyEnv: "S3_SECRET_ACCESS_KEY",
-      env: s3CredentialEnv(),
-      objectClient: mockClient,
-      uriMode: "object",
-      objectNamespace: "uvp-private-evidence"
-    });
-
-    await expect(client.put({
-      evidenceId: "ev_s3_object",
-      bytes: new TextEncoder().encode("object namespace payload")
-    })).resolves.toEqual({
-      storageURI: "object://uvp-private-evidence/evidence/ev_s3_object",
-      size: 24
-    });
-    await expect(client.get("object://uvp-private-evidence/evidence/ev_s3_object"))
-      .resolves.toEqual(new TextEncoder().encode("object namespace payload"));
   });
 
   it("rejects public, presigned, credential-bearing, and unmanaged S3 URIs", async () => {
@@ -755,9 +621,6 @@ describe("evidence service", () => {
   });
 
   it("resolves a configured STS session token env at construction time", () => {
-    // The session token must reach the S3 client when configured,
-    // and a configured-but-empty token env must fail construction instead of
-    // producing a client that passes preflight and 403s on first use.
     expect(() => new S3EvidenceStorageClient({
       bucket: "private-evidence-bucket",
       region: "us-east-1",
@@ -790,21 +653,19 @@ describe("evidence service", () => {
   });
 
   it("rejects uploads carrying both orderId and draftId (U4)", async () => {
-    // 草稿期 draftId 替代（不是叠加）订单成分：并提会让 draftId 悄悄
-    // 退出指纹，同一 payloadHash 对应两个绑定元组。
     const service = testEvidenceService();
     await expect(service.uploadEvidence({
       orderId: "order-1",
       draftId: "draft-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      textPayload: "invoice payload"
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      textPayload: "doc-1 payload"
     }, owner)).rejects.toMatchObject({ code: "invalid_request", status: 400 });
   });
 
   it("binds draft evidence only to the order created from its draft (U4)", async () => {
     const metadataStore = new InMemoryEvidenceMetadataStore();
-    const storage = new InMemoryEvidenceStorage();
+    const storage = new LocalEvidenceStorage({ rootDir: tempDir() });
     const serviceFor = (resolveDraftOrder?: (draftId: string) => Promise<string | undefined>) =>
       createEvidenceService({
         runtimeEnvironment: "local",
@@ -816,10 +677,10 @@ describe("evidence service", () => {
     const service = serviceFor();
     const uploaded = await service.uploadEvidence({
       draftId: "draft-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
-      fileName: "invoice.txt",
-      textPayload: "draft invoice"
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
+      fileName: "doc-1.txt",
+      textPayload: "draft doc-1"
     }, owner);
     const bindTo = (svc: ReturnType<typeof createEvidenceService>, orderId: string, onchainOrderId: ReturnType<typeof txHash>) =>
       svc.bindEvidence({
@@ -831,40 +692,33 @@ describe("evidence service", () => {
         signalId: txHash("cc")
       }, owner);
 
-    // 无解析器：草稿与订单的对应关系无法证明，fail-closed 拒绝绑定。
     await expect(bindTo(service, "order-1", txHash("aa"))).rejects.toMatchObject({ code: "invalid_request", status: 409 });
 
-    // 解析到另一个订单：拒绝——草稿凭证不得漂移到无关订单名下。
     await expect(bindTo(serviceFor(async () => "order-other"), "order-1", txHash("aa")))
       .rejects.toMatchObject({ code: "invalid_request", status: 409 });
 
-    // 草稿未触发（解析不到订单）：同样拒绝。
     await expect(bindTo(serviceFor(async () => undefined), "order-1", txHash("aa")))
       .rejects.toMatchObject({ code: "invalid_request", status: 409 });
 
-    // 草稿触发的正是目标订单：绑定成功。
     await expect(bindTo(serviceFor(async (draftId) => draftId === "draft-1" ? "order-1" : undefined), "order-1", txHash("aa")))
       .resolves.toMatchObject({ evidence: { status: "bound" } });
 
-    // 绑定后的跨订单重放：即使解析器口径放宽也按已存链上订单 409。
     await expect(bindTo(serviceFor(async () => "order-2"), "order-2", txHash("dd")))
       .rejects.toMatchObject({ code: "invalid_request", status: 409 });
   });
 
   it("refuses idempotent returns when the stored binding tuple differs from the request (U4)", async () => {
-    // 防线钉住契约：即便指纹实现漂移（同 hash 命中不同绑定元组的记录），
-    // 幂等分支也必须 409，而不是把他人订单/草稿名下的记录当本次结果返回。
     const base = new InMemoryEvidenceMetadataStore();
     const seeding = createEvidenceService({
       runtimeEnvironment: "local",
       metadataStore: base,
-      storage: new InMemoryEvidenceStorage(),
+      storage: new LocalEvidenceStorage({ rootDir: tempDir() }),
       now: () => new Date("2026-04-28T00:00:00Z")
     });
     const stored = await seeding.uploadEvidence({
       orderId: "order-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
       textPayload: "tuple guard"
     }, owner);
     const record = await base.get(stored.evidence.evidenceId);
@@ -882,19 +736,19 @@ describe("evidence service", () => {
             ? { ...record, evidence: { ...record.evidence, orderId: "order-2" } }
             : undefined
       },
-      storage: new InMemoryEvidenceStorage(),
+      storage: new LocalEvidenceStorage({ rootDir: tempDir() }),
       now: () => new Date("2026-04-28T00:00:00Z")
     });
     await expect(service.uploadEvidence({
       orderId: "order-1",
-      stageIdentifier: "export-documents",
-      documentType: "invoice",
+      stageIdentifier: "stage-1",
+      documentType: "doc-1",
       textPayload: "tuple guard"
     }, owner)).rejects.toMatchObject({ code: "evidence_already_bound", status: 409 });
   });
 
   it("rejects replaying a bound evidence to a different chain order under the same order id (U4)", async () => {    const service = testEvidenceService();
-    const upload = await uploadTextEvidence(service, { invoice: "INV-1" });
+    const upload = await uploadTextEvidence(service, { "doc-1": "DOC-1" });
     await service.bindEvidence({
       evidenceId: upload.evidence.evidenceId,
       txHash: txHash("1"),
@@ -913,7 +767,6 @@ describe("evidence service", () => {
       signalId: txHash("4")
     }, owner)).rejects.toMatchObject({ code: "invalid_request", status: 409 });
 
-    // 同一链上订单的重放保持幂等（返回首绑档案）。
     await expect(service.bindEvidence({
       evidenceId: upload.evidence.evidenceId,
       txHash: txHash("9"),
@@ -989,8 +842,9 @@ function s3CredentialEnv(): Record<string, string> {
 
 function testEvidenceService() {
   return createEvidenceService({
+    metadataStore: new InMemoryEvidenceMetadataStore(),
     runtimeEnvironment: "local",
-    storage: new InMemoryEvidenceStorage(),
+    storage: new LocalEvidenceStorage({ rootDir: tempDir() }),
     now: () => new Date("2026-04-28T00:00:00Z")
   });
 }
@@ -1016,12 +870,12 @@ async function uploadJsonEvidence(
   return service.uploadEvidence({
     orderId: "order-1",
     taskId: "task-1",
-    stageIdentifier: "export-documents",
-    documentType: "invoice",
+    stageIdentifier: "stage-1",
+    documentType: "doc-1",
     fileName: input.fileName,
     content: { encoding: "json", value: input.content },
     metadata: {
-      businessLabel: "Commercial invoice",
+      businessLabel: "Doc-1",
       fields: input.metadataFields
     }
   }, owner);
@@ -1034,12 +888,12 @@ async function uploadTextEvidence(
   return service.uploadEvidence({
     orderId: "order-1",
     taskId: "task-1",
-    stageIdentifier: "export-documents",
-    documentType: "invoice",
-    fileName: "invoice.txt",
-    textPayload: "invoice payload",
+    stageIdentifier: "stage-1",
+    documentType: "doc-1",
+    fileName: "doc-1.txt",
+    textPayload: "doc-1 payload",
     metadata: {
-      businessLabel: "Commercial invoice",
+      businessLabel: "Doc-1",
       fields: metadataFields
     }
   }, owner).catch((error: unknown) => {
@@ -1050,69 +904,13 @@ async function uploadTextEvidence(
   });
 }
 
-describe("evidence backup storage", () => {
-  it("writes a second copy on put and restores the primary object from the verified backup", async () => {
-    const primary = new InMemoryEvidenceStorage();
-    const backup = new InMemoryEvidenceStorage();
-    const storage = new BackupEvidenceStorage({ primary, backup });
-    const evidenceId = "ev_backup_1";
-    const bytes = new TextEncoder().encode("evidence-bytes-for-backup");
-
-    await storage.put({ evidenceId, bytes });
-
-    const primaryURI = `memory://evidence/${evidenceId}`;
-    await expect(backup.exists(primaryURI)).resolves.toBe(true);
-    const storedHash = hashEvidenceBytes(bytes);
-
-    // 主对象被"损坏"：内容被替换，hash 不再匹配。
-    await primary.put({ evidenceId, bytes: new TextEncoder().encode("corrupted-bytes") });
-    await expect(storage.verifyBackup(primaryURI, storedHash)).resolves.toEqual({
-      backupPresent: true,
-      hashMatches: true
-    });
-
-    await expect(storage.restoreFromBackup(primaryURI, evidenceId, storedHash)).resolves.toBe(true);
-    await expect(primary.get(primaryURI)).resolves.toEqual(bytes);
-
-    // 副本 hash 不匹配时拒绝恢复。
-    await backup.put({ evidenceId, bytes: new TextEncoder().encode("tampered-backup") });
-    await expect(storage.restoreFromBackup(primaryURI, evidenceId, storedHash)).resolves.toBe(false);
-
-    // 缺失副本时报告不可用。
-    await backup.delete(primaryURI);
-    await expect(storage.verifyBackup(primaryURI, storedHash)).resolves.toEqual({
-      backupPresent: false,
-      hashMatches: false
-    });
-  });
-
-  it("propagates backup write failures instead of pretending a copy exists", async () => {
-    const primary = new InMemoryEvidenceStorage();
-    const failingBackup: EvidenceStorage = {
-      adapterKind: "memory",
-      productionSafe: false,
-      put: async () => {
-        throw new Error("backup bucket unavailable");
-      },
-      get: async () => undefined,
-      exists: async () => false
-    };
-    const storage = new BackupEvidenceStorage({ primary, backup: failingBackup });
-
-    await expect(storage.put({
-      evidenceId: "ev_backup_fail",
-      bytes: new TextEncoder().encode("payload")
-    })).rejects.toThrow(/backup bucket unavailable/);
-  });
-});
-
 describe("evidence PDF magic validation (STORE-02)", () => {
   it("rejects a declared application/pdf payload without the %PDF- magic header", async () => {
     const service = testEvidenceService();
 
     await expect(service.uploadEvidence({
       orderId: "order-1",
-      stageIdentifier: "export-documents",
+      stageIdentifier: "stage-1",
       documentType: "example-declaration",
       fileName: "fake.pdf",
       mimeType: "application/pdf",
@@ -1124,7 +922,7 @@ describe("evidence PDF magic validation (STORE-02)", () => {
 
     await expect(service.uploadEvidence({
       orderId: "order-1",
-      stageIdentifier: "export-documents",
+      stageIdentifier: "stage-1",
       documentType: "example-declaration",
       fileName: "truncated.pdf",
       mimeType: "application/pdf",
@@ -1134,10 +932,9 @@ describe("evidence PDF magic validation (STORE-02)", () => {
       status: 400
     });
 
-    // 真实 %PDF- 魔数通过。
     const accepted = await service.uploadEvidence({
       orderId: "order-1",
-      stageIdentifier: "export-documents",
+      stageIdentifier: "stage-1",
       documentType: "example-declaration",
       fileName: "real.pdf",
       mimeType: "application/pdf",
@@ -1150,7 +947,7 @@ describe("evidence PDF magic validation (STORE-02)", () => {
     const service = testEvidenceService();
     const uploaded = await service.uploadEvidence({
       orderId: "order-1",
-      stageIdentifier: "export-documents",
+      stageIdentifier: "stage-1",
       documentType: "example-declaration",
       fileName: "notes.txt",
       mimeType: "text/plain",

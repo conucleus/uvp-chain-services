@@ -134,8 +134,6 @@ export class PostgresGovernanceStore implements GovernanceStore {
   }
 
   async putReviewIfStatus(review: GovernanceReviewDTO, expected: GovernanceReviewDTO["status"]): Promise<boolean> {
-    // 条件 upsert（CAS）：行不存在按新档插入；存在时 DO UPDATE 附
-    // WHERE status=? ——行已迁移则 rowCount 0，过期校验结果不得覆盖。
     const updated = await this.#database.query(
       `INSERT INTO governance_review (
          review_id, subject_type, subject_id, status, risk_level, risk_tags_json,
@@ -202,8 +200,6 @@ export class PostgresGovernanceStore implements GovernanceStore {
     after: GovernanceTxLogScanCursor | undefined,
     limit: number
   ): Promise<readonly IdentityTxLogDTO[]> {
-    // 终态剪除在服务端完成（confirmed 等不返回），键序 (created_at,
-    // log_id) 与游标推进一致；failed/simulated 的行级口径由调用方过滤。
     const result = await this.#database.query(
       `SELECT log_json::text AS log_json
        FROM governance_tx_log

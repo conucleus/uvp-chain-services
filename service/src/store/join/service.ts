@@ -6,7 +6,6 @@ import type { IdentityBindingProjection } from "../../indexer/identity-projectio
 import type { ProductService } from "../../product/application/service.js";
 import { productSignalId, productSignalSourceId } from "../../product/query/bff/trigger.js";
 import type { StoreSupplierService, StoreOperatorPrincipal } from "../suppliers/service.js";
-import { InMemoryStoreJoinApplicationStore } from "./memory-store.js";
 import type {
   StoreJoinActor,
   StoreJoinApplicationDetailDTO,
@@ -23,22 +22,19 @@ export interface StoreJoinServiceOptions {
   readonly projectionStore: ProjectionStore;
   readonly productService: ProductService;
   readonly supplierService: StoreSupplierService;
-  /** 红线：加入入口必须被 listing 状态与锚核验抑制（与详情页同口径）。 */
   readonly listingGate?: {
     readonly getListingForPlan: (planId: Hex) => Promise<{
       readonly status: "imported" | "public" | "rejected" | "delisted";
       readonly anchorVerification: {
         readonly status: "consistent" | "conflict" | "pending_indexing";
-        /** 配置了链直读但读取失败：与上架公开门同口径 fail-closed。 */
         readonly chainReadFailed?: boolean;
       };
     } | undefined>;
   };
-  /** publisher/委托核验（由装修域提供同一张权限根表）。 */
   readonly publisherAccess: {
     hasPublisherWriteAccess(planId: Hex, address: Address): Promise<boolean>;
   };
-  readonly joinStore?: StoreJoinApplicationStore;
+  readonly joinStore: StoreJoinApplicationStore;
   readonly now?: () => Date;
   readonly audit?: (event: StoreJoinAuditEvent) => Promise<void> | void;
 }
@@ -80,7 +76,7 @@ const OPERATOR_LEVELS = new Set(["store_operator", "store_admin"]);
 
 export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJoinService {
   const projectionStore = options.projectionStore;
-  const joinStore = options.joinStore ?? new InMemoryStoreJoinApplicationStore();
+  const joinStore = options.joinStore;
   const now = options.now ?? (() => new Date());
 
   return {
@@ -132,8 +128,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
       try {
         await joinStore.putApplication(application);
       } catch (error) {
-        // 并发双提交的败者：前置查重窗口被穿透时，由存储层在途唯一
-        // 约束裁决——与前置查重同响应 409，不落第二条在途申请。
         if (!(error instanceof StoreJoinOpenApplicationExistsError)) {
           throw error;
         }
@@ -202,8 +196,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
       assertTransition(application.status, "under_review");
       const timestamp = now().toISOString();
       const updated: StoreJoinApplicationRecord = { ...application, status: "under_review", updatedAt: timestamp };
-      // 条件迁移：并发 startReview/决策只有一个赢家；幂等命中（已是
-      // under_review）按成功收敛。
       if (!(await joinStore.updateApplicationIfStatus(updated, application.status))) {
         const latest = await requireApplication(applicationId);
         if (latest.status !== "under_review") {
@@ -258,10 +250,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         decidedAt: timestamp,
         updatedAt: timestamp
       };
-      // 终态翻转用条件 UPDATE：身份登记（链上副作用）已发生，CAS 败者
-      // 不得整行覆盖赢家的终态——"链上身份已登记而终态已拒绝"的半提交
-      // 由冲突显式暴露，运营复核（重跑审批会复用 active binding 证据，
-      // 不二次广播）后收敛。
       if (!(await joinStore.updateApplicationIfStatus(updated, "under_review"))) {
         const latest = await requireApplication(applicationId);
         await emitAudit({
@@ -316,7 +304,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         decidedAt: timestamp,
         updatedAt: timestamp
       };
-      // 同 approve：终态翻转走条件 UPDATE，并发决策的败者按冲突收敛。
       if (!(await joinStore.updateApplicationIfStatus(updated, application.status))) {
         const latest = await requireApplication(applicationId);
         throw new StoreJoinServiceError(
@@ -363,7 +350,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         decidedAt: timestamp,
         updatedAt: timestamp
       };
-      // 同 approve/reject：终态翻转走条件 UPDATE，败者按冲突收敛。
       if (!(await joinStore.updateApplicationIfStatus(updated, application.status))) {
         const latest = await requireApplication(applicationId);
         if (latest.status !== "revoked") {
@@ -388,20 +374,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     }
   };
 
-  /**
-   * 审批通过后的身份配对链（配对红线）：
-   * 1. 双向占用核验（account→subject 与 subject→account，冲突即 409）；
-   * 2. 门禁前置：无既有 active binding 时，链上登记要求 governance_admin
-   *    权威——在建供应商/翻 approved_for_broadcast 等任何副作用之前
-   *    拒绝，绝不留下"供应商已建、审批却失败"的半提交；
-   * 3. 无供应商元数据则以申请信息创建（以元数据存在性判断，DTO 行对
-   *    只有 revoked binding 的 subject 也生成一行，不能当存在性）；
-   * 4. 运营审核翻案仅限持有 operator 级能力的审批者（与
-   *    /store/suppliers/{id}/review 的能力门禁同口径）；
-   * 5. 链上身份绑定：地址已有同主体 active binding → 复用其交易证据；
-   *    无绑定 → registerIdentity。
-   * 任何一步失败，申请留在 under_review，不落后续状态。
-   */
   async function ensureIdentityPairing(
     application: StoreJoinApplicationRecord,
     actor: StoreJoinActor
@@ -411,7 +383,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     readonly txLogId?: string;
     readonly executionMode?: "simulated" | "on_chain";
   }> {
-    // 先做双向占用核验，再创建任何经营数据：409 时不留下孤儿供应商记录。
     const activeBinding = selectActiveBinding(
       await projectionStore.listIdentityBindings({ account: application.applicantAddress, activeOnly: true })
     );
@@ -423,8 +394,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         { boundSubjectId: activeBinding.subjectId }
       );
     }
-    // subjectId→account 方向同样核验：缺了这一向，审批会静默覆写
-    // 既有供应商钱包 / 为其广播新绑定。
     const subjectBinding = selectActiveBinding(
       await projectionStore.listIdentityBindings({ subjectId: application.applicantSubjectId, activeOnly: true })
     );
@@ -436,8 +405,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         { boundAccount: subjectBinding.account }
       );
     }
-    // 自报 subjectId 防误伤：既有供应商元数据登记了别人的钱包时，
-    // 该申请不得挂到别人名下（binding 方向核验只覆盖 active 绑定）。
     const existingMetadata = await options.supplierService.findSupplierMetadataBySubjectId(application.applicantSubjectId);
     if (existingMetadata?.wallet && existingMetadata.wallet.toLowerCase() !== application.applicantAddress.toLowerCase()) {
       throw new StoreJoinServiceError(
@@ -447,10 +414,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         { supplierId: existingMetadata.supplierId }
       );
     }
-    // 门禁前置：需要链上登记（无 active binding）时先核验 governance
-    // _admin 权威——门禁必须先于任何写库动作（创建供应商、翻转
-    // approved_for_broadcast、落治理 review）执行，事后才拒会留下
-    // 无法回滚的半提交状态。
     if (!activeBinding && !actor.governanceAdmin) {
       await emitAudit({
         action: "join.approved",
@@ -468,10 +431,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         { applicationId: application.applicationId }
       );
     }
-    // 运营审核翻案门：供应商未过 approved_for_broadcast 时，只有持有
-    // operator 级能力（store.supplier.review）的审批者才能经本链路补审核；
-    // 纯 publisher 审批不得直接翻案运营审核状态。判断先于任何写——
-    // 拒绝时不留孤儿供应商记录。
     const needsOperationalReview = !existingMetadata || existingMetadata.reviewStatus !== "approved_for_broadcast";
     const actorHoldsOperatorCapability = OPERATOR_LEVELS.has(actor.accessLevel);
     if (!activeBinding && needsOperationalReview && !actorHoldsOperatorCapability) {
@@ -482,9 +441,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         { supplierId: existingMetadata?.supplierId, applicationId: application.applicationId }
       );
     }
-    // principal 只承载真实身份：operatorId 取审批者锚定地址（本函数
-    // 调用前 requireAnchored 已保证存在），role 如实记录审批者权威
-    // （治理/运营级别/plan publisher）——不把 plan publisher 包装成运营方。
     const principal: StoreOperatorPrincipal = {
       operatorId: actor.anchoredAddress ?? actor.principalId ?? "join-reviewer",
       role: actor.governanceAdmin
@@ -504,9 +460,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
           wallet: application.applicantAddress,
           supportedRoleSlotIds: [application.roleSlotId],
           ...(application.stageId ? { supportedStageIds: [application.stageId] } : {}),
-          // active binding 意味着该主体此前已通过登记门（登记前置
-          // approved_for_broadcast）；镜像该事实，避免把目录显示状态
-          // 从 approved_for_broadcast 无端降级成 submitted。
           reviewStatus: activeBinding ? "approved_for_broadcast" : "submitted"
         },
         principal
@@ -536,15 +489,11 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
         principal
       );
     }
-    // governance_admin 门禁已前置（副作用之前），此处可直接登记。
     const registration = await options.supplierService.requestIdentityRegistration(
       supplierId!,
       { wallet: application.applicantAddress },
       principal
     );
-    // 广播失败不得吞：申请保持 under_review（可重试审批恢复），不落
-    // authorized、不把 tx 证据标成 on_chain 已记录——那会把未上链的
-    // 身份登记伪装成既成事实。
     const registrationBroadcast = (registration.governance as { readonly broadcast?: { readonly status?: string; readonly errorCode?: string } }).broadcast;
     if (registrationBroadcast?.status === "failed") {
       throw new StoreJoinServiceError(
@@ -566,13 +515,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     };
   }
 
-  /**
-   * 惰性收敛（读取时）：
-   * - binding 撤销 → 申请进入 revoked（联动红线）。
-   * - authorized 的申请在投影观察到被授权地址的链上授权事件
-   *   （SignalSubmitterAuthorized / stageExecutorOverlay.activeExecutorWallet）
-   *   → 落为 active 并补记 tx 证据。
-   */
   async function resolveApplicationDetail(
     application: StoreJoinApplicationRecord
   ): Promise<StoreJoinApplicationDetailDTO> {
@@ -621,8 +563,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
             }
           ];
           const refreshed = { ...current, status: "active" as StoreJoinApplicationStatus, txEvidence: evidence, updatedAt: timestamp };
-          // 惰性收敛也是状态迁移：条件 UPDATE 兜并发（与决策路径互斥），
-          // 败者说明另一条车道已收敛，沿用库内最新状态。
           if (await joinStore.updateApplicationIfStatus(refreshed, current.status)) {
             await appendEvent(refreshed.applicationId, "activated", undefined, undefined, materialized.txHash, timestamp);
             await emitAudit({
@@ -668,8 +608,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
       revocationReason: application.revocationReason ?? reason,
       updatedAt: timestamp
     };
-    // 联动收敛也走条件 UPDATE：与决策路径并发时只有一方落档；败者
-    // 回读库内最新状态（可能已被决策翻成 authorized 等非撤销态）。
     if (await joinStore.updateApplicationIfStatus(updated, application.status)) {
       if (!hasEvent) {
         await appendEvent(application.applicationId, eventType, undefined, reason, undefined, timestamp);
@@ -679,12 +617,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     return requireApplication(application.applicationId);
   }
 
-  /**
-   * 激活判定不是"任一订单存在 submitter==申请人"
-   * 即通过——链上授权信号必须与申请的槽位对应：
-   * - signal_submitter：authorization 必须由申请人提交；
-   * - stage_executor：overlay 的 targetStageId 必须是申请的 stageId。
-   */
   async function findOnChainAuthorizationEvidence(
     application: StoreJoinApplicationRecord
   ): Promise<{ readonly txHash?: Hex } | undefined> {
@@ -759,15 +691,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     return application;
   }
 
-  /**
-   * 红线（服务端强制，与前端抑制同口径）：
-   * listing 存在时，只有 public 且锚核验不冲突才开放加入——
-   * imported(待审)/rejected/delisted 一律拦截，否则前端被抑制的
-   * 入口可直调 API 绕过。无 listing（未走上架流）时按链投影可查
-   * 即放行——上架是 Store 经营动作，不是链上事实的前置。
-   * listing 读取失败（存储瞬断/脏枚举抛错）与配置了链直读但读失败
-   * 均不放行（fail-closed）：catch 吞错放行会把上架门变成摆设。
-   */
   async function assertJoinEntryAllowedNow(planId: Hex): Promise<void> {
     const gate = options.listingGate;
     if (!gate) {
@@ -777,8 +700,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     try {
       listing = await gate.getListingForPlan(planId);
     } catch {
-      // cause 不回显进响应 details（存储内部消息不出 API 面），503 +
-      // listing_gate_unavailable 已足够定位。
       throw new StoreJoinServiceError(
         503,
         "listing_gate_unavailable",
@@ -819,8 +740,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
     if (matches.length === 0) {
       throw new StoreJoinServiceError(409, "zhixu_not_found", "no catalog zhixu matches this planId");
     }
-    // 同 planId 多命中（跨部署）时槽位/身份解释无法唯一归位——与 listings
-    // 的 plan_projection_ambiguous 同口径 fail-closed，不取首个匹配。
     if (matches.length > 1) {
       throw new StoreJoinServiceError(
         409,

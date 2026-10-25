@@ -21,12 +21,6 @@ import type { ProductOrderTriggerStatus, SignalAuthorizationDTO } from "./types.
 
 export const DEFAULT_PRODUCT_REGISTRAR_ADDRESS = "0x000000000000000000000000000000000000bff1" as const;
 
-/**
- * SignalSubmitted 的 topic 从权威 ABI 推导（手写事件签名串在 ABI 重命名
- * 时会静默失配，导致回执探针漏判）。
- * planId/orderId/sourceId indexed；signalId 是 data 载荷首参（非第四个
- * topic）。
- */
 const signalSubmittedTopic = eventTopicFromAbi("SignalSubmitted");
 
 function eventTopicFromAbi(eventName: string): Hex {
@@ -44,7 +38,6 @@ function eventTopicFromAbi(eventName: string): Hex {
   return getEventSelector(event);
 }
 
-/** 链上事实键单源：与 @uvp-eth/compiler 的 onchainSourceId/onchainSignalId 同派生。 */
 export function productSignalSourceId(source: string): Hex {
   return onchainSourceId(source);
 }
@@ -71,12 +64,6 @@ export interface ProductBroadcastOutsideTriggerInput {
   readonly stateMachineAddress?: Address;
   readonly deploymentId?: Hex;
   readonly authorizations: readonly SignalAuthorizationDTO[];
-  /**
-   * 出生事实的属主自证（词表 Merkle 化形态的必携参数）：从 plan 投影词表
-   * 造（relation=0 能力叶 proof）；无词表/词表外 → 全零结构——出生事实
-   * 必须有词表内属主证，否则链上 InvalidSignalCapability（链上是最终
-   * 守门人，服务端造不出证明时不伪造）。
-   */
   readonly birthFactAttribution?: SignalAttributionPayload;
 }
 
@@ -98,12 +85,6 @@ export interface MemoryProductTriggerBroadcastAdapterOptions {
   readonly registrarAddress?: Address;
 }
 
-/**
- * memory-trigger adapter: records the trigger attempt in process memory only.
- * It never broadcasts and never claims an on-chain outcome, so it always
- * reports status "pending" with no transaction hash. Drafts stay out of the
- * "triggered" state until a real chain adapter confirms the order.
- */
 export class MemoryProductOrderTriggerBroadcastAdapter implements ProductOrderTriggerBroadcastAdapter {
   readonly registrarAddress: Address;
   readonly #attempts: ProductBroadcastOutsideTriggerInput[] = [];
@@ -138,7 +119,6 @@ export interface AnvilProductTriggerBroadcastAdapterOptions {
   readonly privateKey?: Hex | string;
   readonly registrarAddress?: Address;
   readonly waitForReceipt?: boolean;
-  /** 非 local 默认开：代付 gas 的注册器不得同时是业务签名者（同族 submissions/stage-patch 防线）。 */
   readonly rejectGasPayerAsSubmitter?: boolean;
   readonly publicClient?: ProductTriggerBroadcastPublicClient;
   readonly walletClient?: ProductTriggerBroadcastWalletClient;
@@ -196,9 +176,6 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
   }
 
   async broadcastOutsideTrigger(input: ProductBroadcastOutsideTriggerInput): Promise<ProductOrderTriggerBroadcastResult> {
-    // 与 submissions/stage-patch 广播同防线：registrar（gas 付费方）
-    // 不得同时是业务签名者——代付通道自己签名自己提交会让"服务不生成
-    // 业务签名"的边界名存实亡。确定性拒绝，不产生任何链上交易。
     if (this.#options.rejectGasPayerAsSubmitter &&
         this.registrarAddress.toLowerCase() === input.submitter.toLowerCase()) {
       return {
@@ -208,15 +185,10 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
         retryable: false
       };
     }
-    // 已广播的 txHash 必须穿越 catch：writeContract 成功后等待回执/解析回执
-    // 抛错时，链上交易已经存在，failed 结果不得丢失 txHash（对齐
-    // submissions/broadcast-adapter 的 failedResult 携带方式）。
     let txHash: Hex | undefined;
     try {
       const { publicClient, wallet } = this.#clients();
       const stateMachineAddress = input.stateMachineAddress ?? this.#options.stateMachineAddress;
-      // 出生事实属主自证缺省按全零结构广播（词表外/无词表 plan 的既有
-      // 语义）：链上词表闸对词表内事实回 InvalidSignalCapability。
       const call = buildTriggerOrderFromOutsideForCall({
         stateMachineAddress,
         chainId: this.#options.chainId
@@ -250,8 +222,6 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
         };
       }
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-      // 一事一单：链上订单 id 由合约从事实派生——本地镜像同一公式做回执
-      // 事件匹配（input.orderId 是产品侧关联 id，不进链上请求）。
       const chainOrderId = deriveTriggerOrderId(input.planId, input.sourceId, input.signalId, input.payloadHash);
       if (receipt?.status === "success" && hasSignalSubmittedEvent(receipt.logs, input.planId, chainOrderId, input.sourceId, input.signalId)) {
         return {
@@ -279,9 +249,6 @@ export class AnvilProductOrderTriggerBroadcastAdapter implements ProductOrderTri
           retryable: false
         };
       }
-      // A missing receipt or an RPC/client-specific status is neither a
-      // success nor a deterministic revert. Keep the known tx in indexing so
-      // reconcile can probe it later; callers must not rebroadcast it.
       return {
         status: "indexing",
         txHash,
@@ -384,24 +351,13 @@ interface ClassifiedProductTriggerBroadcastError {
   readonly retryable: boolean;
 }
 
-/**
- * 传输层错误信封（JSON-RPC / HTTP / 网络）。这些错误与链上业务状态
- * 无关，一律可重试——裸 /invalid/ 正则会把 "Invalid JSON RPC
- * response" 误判为确定性拒绝（retryable:false），草稿被永久卡死。
- */
 function isTransportEnvelopeError(haystack: string): boolean {
-  // "context deadline exceeded" 是传输层超时信封（代理/网关侧截止），
-  // 不入传输正则会被确定性分支的 /deadline/ 吞掉：判成
-  // trigger_order_reverted retryable:false（无 txHash 无从复核），
-  // 单草稿触发死锁（重触发只接受 failed&&retryable）。
   return /json.?rpc|http request|fetch failed|network|socket|connection|ECONN|ETIMEDOUT|timeout|timed out|deadline exceeded|AbortError|transport|too many|rate.?limit/i.test(haystack);
 }
 
 function classifyProductTriggerBroadcastError(error: unknown): ClassifiedProductTriggerBroadcastError {
   const message = error instanceof Error ? error.message : "triggerOrderFromOutsideFor broadcast failed";
   const haystack = `${error instanceof Error ? error.name : ""} ${message}`;
-  // 只有确定性业务拒绝（合约 revert/签名/授权/期限类拒绝）才不可重试；
-  // 传输层信封先短路为可重试，其余未知错误也按可重试处理（对账可探测）。
   if (!isTransportEnvelopeError(haystack) &&
       /\brevert|unauthori[sz]ed|expired|deadline|unknown.?order|already.?(?:registered|exists|triggered)|signature/i.test(haystack)) {
     return {
@@ -410,9 +366,6 @@ function classifyProductTriggerBroadcastError(error: unknown): ClassifiedProduct
       retryable: false
     };
   }
-  // 可重试分支的 message 会落 errorMessage 并回显给调用方：裸 error.message
-  // 可能携带 RPC URL/内网主机等基础设施细节，先脱敏再出镜（对齐
-  // submissions/broadcast-adapter 的 errorText 口径）。
   return {
     errorCode: "trigger_order_broadcast_failed",
     message: redactErrorMessage(message),

@@ -28,7 +28,6 @@ export interface StateMachineSubmissionPublicClient {
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
   } | undefined>;
-  /** duplicate-transaction 车道的回执探针（viem publicClient 自带同签名）。 */
   getTransactionReceipt?(args: { readonly hash: Hex }): Promise<{
     readonly status?: "success" | "reverted" | string;
     readonly blockNumber?: bigint;
@@ -112,10 +111,6 @@ export function createStateMachineSubmissionBroadcastAdapter(
 
   return {
     async broadcast(request): Promise<SubmissionBroadcastResult> {
-      // submitSignalFor is plan-scoped. A prepared submission
-      // without a non-zero planId can only produce a transaction that fails the
-      // on-chain (planId, orderId) existence check — refuse to construct the
-      // call instead of broadcasting a doomed tx.
       const planId = normalizePlanId(request.prepared.planId);
       if (!planId) {
         return failedResult(
@@ -148,10 +143,6 @@ export function createStateMachineSubmissionBroadcastAdapter(
         );
       }
 
-      // The chain-id preflight is an RPC round trip like any other: a
-      // transport failure must be classified into a failed broadcast result,
-      // never thrown past the caller (an escaping throw would consume the
-      // reserved nonce without recording any submission).
       let rpcChainId: number | undefined;
       try {
         rpcChainId = await publicClient.getChainId?.();
@@ -176,8 +167,6 @@ export function createStateMachineSubmissionBroadcastAdapter(
 
       let txHash: Hex;
       try {
-        // 词表造证参数：prepare 时从 plan 投影两表构造；缺省（旧档案/
-        // 外部 plan）按全零结构兜底（词表外不声明，合约按词表闸裁决）。
         const attribution: SignalAttributionPayload = request.prepared.attribution ??
           zeroFactAttribution(request.prepared.sourceId, request.prepared.signalId);
         const call = buildSubmitSignalForCall({
@@ -198,10 +187,6 @@ export function createStateMachineSubmissionBroadcastAdapter(
         txHash = await walletClient.writeContract(call);
       } catch (error) {
         const classified = classifyStateMachineBroadcastError(error);
-        // duplicate-transaction 三车道（nonce too low / already known /
-        // replacement underpriced）不是终态失败：交易可能已上链或仍在池中，
-        // 先按候选 txHash 探回执裁决（成功按 submitted 落账、revert 终态、
-        // 未知可重试并保留候选哈希），机制单源在 shared/broadcast。
         if (classified.errorCode === "duplicate_transaction") {
           const getReceipt = publicClient.getTransactionReceipt
             ? (txHash: Hex) => publicClient.getTransactionReceipt!({ hash: txHash })
@@ -296,11 +281,6 @@ export function createStateMachineSubmissionBroadcastAdapter(
             receipt.blockNumber?.toString()
           );
         }
-        // A receipt is only authoritative when its status is one of the
-        // protocol's closed-set values.  A missing receipt (for example when
-        // an injected client has no wait method) or an RPC/client extension
-        // status is an unknown outcome: preserve the tx hash and keep it in
-        // the reconcile lane instead of claiming submitted/confirmed.
         if (receipt?.status !== "success") {
           return failedResult(
             "transaction_receipt_unknown",
@@ -392,10 +372,6 @@ export function classifyStateMachineBroadcastError(error: unknown): ClassifiedSt
       name?.includes("InvalidSignalSignature") ? name : "InvalidSignalSignature"
     );
   }
-  // duplicate-transaction 车道（broadcaster 的 nonce 冲突三形态）：基础判定
-  // 对齐 taxonomy nonce_conflict 单值裁决（A-30：可重试、不死信——换新 gas
-  // nonce 重组装即自愈），broadcast() 捕获口仍先走回执探针裁决改判
-  //（submitted / receipt_failed / receipt_unknown）。
   if (/nonce too low|replacement transaction underpriced|already known/i.test(haystack)) {
     return classifiedBroadcastError(
       "duplicate_transaction",
@@ -404,10 +380,6 @@ export function classifyStateMachineBroadcastError(error: unknown): ClassifiedSt
       text
     );
   }
-  // 未登记 revert 的泛规则（对齐 taxonomy transaction_reverted 基础判定）：真实执行
-  // 失败按永久失败处理——继续按可重试无限重放同一签名载荷只会重复烧
-  // gas。位置在 UnknownOrder 等瞬态判定之后：viem 复合错误文本同时含
-  // "reverted." 与具体错误名，泛规则在前会把瞬态永久死信。
   if (/execution reverted|transaction reverted|reverted/i.test(haystack)) {
     return classifiedBroadcastError(
       "transaction_reverted",
@@ -420,8 +392,6 @@ export function classifyStateMachineBroadcastError(error: unknown): ClassifiedSt
     return classifiedBroadcastError(
       "relayer_insufficient_funds",
       "relayer gas payer has insufficient funds",
-      // 对齐 taxonomy insufficient_funds（充值是运营可修复条件，同签名
-      // 载荷可重试；不消费 prepare/nonce（submitter 未产生 txHash）。
       true,
       text
     );

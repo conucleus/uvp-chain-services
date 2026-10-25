@@ -31,7 +31,6 @@ import type {
   StoreSupplierMetadataRecord,
   StoreSupplierMetadataStore,
 } from "./types.js";
-import { randomUUID } from "node:crypto";
 
 export type {
   StoreOperatorPrincipal,
@@ -52,65 +51,6 @@ export class StoreSupplierServiceError extends Error {
     readonly details?: unknown,
   ) {
     super(message);
-  }
-}
-
-export class InMemoryStoreSupplierMetadataStore
-  implements StoreSupplierMetadataStore
-{
-  readonly #suppliers = new Map<string, StoreSupplierMetadataRecord>();
-  readonly #audits: StoreSupplierAuditRecord[] = [];
-
-  async getSupplier(
-    supplierId: string,
-  ): Promise<StoreSupplierMetadataRecord | undefined> {
-    return this.#suppliers.get(supplierId);
-  }
-
-  async findSupplierBySubjectId(
-    supplierSubjectId: Hex,
-  ): Promise<StoreSupplierMetadataRecord | undefined> {
-    return [...this.#suppliers.values()].find(
-      (supplier) => supplier.supplierSubjectId === supplierSubjectId,
-    );
-  }
-
-  async listSuppliers(): Promise<readonly StoreSupplierMetadataRecord[]> {
-    return [...this.#suppliers.values()].sort(compareMetadataUpdatedDesc);
-  }
-
-  async putSupplier(record: StoreSupplierMetadataRecord): Promise<void> {
-    this.#suppliers.set(record.supplierId, record);
-  }
-
-  async putSupplierIfReviewStatus(
-    record: StoreSupplierMetadataRecord,
-    expected: StoreSupplierMetadataRecord["reviewStatus"],
-  ): Promise<boolean> {
-    // 判定与写入同处一个同步临界区：并发审核态迁移只有一个赢家。
-    const current = this.#suppliers.get(record.supplierId);
-    if (current && current.reviewStatus !== expected) {
-      return false;
-    }
-    this.#suppliers.set(record.supplierId, record);
-    return true;
-  }
-
-  async appendAudit(record: StoreSupplierAuditInput): Promise<void> {
-    // auditId 由存储端生成（单实例内存后端用 UUID），不接进程内序号。
-    this.#audits.push({ ...record, auditId: record.auditId ?? `audit_${randomUUID()}` });
-  }
-
-  async listAudits(
-    supplierId?: string,
-  ): Promise<readonly StoreSupplierAuditRecord[]> {
-    return this.#audits
-      .filter((audit) => !supplierId || audit.supplierId === supplierId)
-      .sort(
-        (left, right) =>
-          right.createdAt.localeCompare(left.createdAt) ||
-          right.auditId.localeCompare(left.auditId),
-      );
   }
 }
 
@@ -152,11 +92,6 @@ export interface StoreSupplierNotificationProfileResult
 export interface StoreSupplierService {
   listSuppliers(query?: StoreSupplierListQuery): Promise<StoreSupplierListDTO>;
   getSupplier(supplierId: string): Promise<StoreSupplierDTO | undefined>;
-  /**
-   * 以 Store 元数据（非 DTO 行）判断 subject 是否已有供应商记录。
-   * DTO 行对只有 revoked binding 的 subject 也生成一行，把"存在性"
-   * 建在其上会让 join 配对的创建分支永不可达（reviewSupplier 404）。
-   */
   findSupplierMetadataBySubjectId(
     supplierSubjectId: Hex,
   ): Promise<StoreSupplierMetadataRecord | undefined>;
@@ -194,15 +129,14 @@ export interface StoreSupplierServiceOptions {
   readonly store: ProjectionStore;
   readonly productService: ProductService;
   readonly governanceService: GovernanceService;
-  readonly metadataStore?: StoreSupplierMetadataStore;
+  readonly metadataStore: StoreSupplierMetadataStore;
   readonly now?: () => Date;
 }
 
 export function createStoreSupplierService(
   options: StoreSupplierServiceOptions,
 ): StoreSupplierService {
-  const metadataStore =
-    options.metadataStore ?? new InMemoryStoreSupplierMetadataStore();
+  const metadataStore = options.metadataStore;
   const now = options.now ?? (() => new Date());
 
   return {
@@ -295,9 +229,6 @@ export function createStoreSupplierService(
     async reviewSupplier(supplierId, input, principal) {
       const current = await requireMetadata(metadataStore, supplierId);
       const record = mergeReviewMetadata(current, input, now().toISOString());
-      // "先过治理、后改库"：治理 review 落库成功
-      // 之后才写 Store 元数据，治理失败时两边不分叉
-      //（库显示新状态、治理记录不存在）。
       const governance = await options.governanceService.reviewSupplier(
         governanceReviewInput(record, input),
         governancePrincipal(principal),
@@ -350,9 +281,6 @@ export function createStoreSupplierService(
         governancePrincipal(principal),
       );
       await withSupplierStoreTransaction(metadataStore, async () => {
-        // 广播期间运营可能并发翻案审核态（如 revoked）：过期快照的整行写
-        // 不得复活被翻案的 review 状态。登记事实由治理台账与身份绑定投影
-        // 承载；CAS 败者保留库内最新审核态，只补登记审计行。
         const persisted = await metadataStore.putSupplierIfReviewStatus(
           record,
           "approved_for_broadcast",
@@ -446,9 +374,6 @@ export function createStoreSupplierService(
           "an active identity binding is required before requesting revocation",
         );
       }
-      // "先过治理、后改库"：撤销广播失败时 Store
-      // 元数据不预先翻成 revoked（否则分叉：库 revoked、链上
-      // binding 仍 active）。广播结果非 failed 才落库。
       const governance = await options.governanceService.revokeIdentity(
         supplierRevocationInput(current, input, activeBinding.bindingId),
         governancePrincipal(principal),
@@ -877,8 +802,6 @@ function auditRecord(
   now: () => Date,
   extra: Partial<StoreSupplierAuditRecord> = {},
 ): StoreSupplierAuditInput {
-  // auditId 不在此生成——存储端负责（库端唯一），进程内序号会在
-  // 重启/多实例下反复撞 audit_id 唯一索引。
   return {
     supplierId: supplier.supplierId,
     supplierSubjectId: supplier.supplierSubjectId,
@@ -889,10 +812,6 @@ function auditRecord(
   };
 }
 
-/**
- * 业务写 + 审计行同事务：持久后端提供 withTransaction 时整体提交/回滚，
- * 审计不再落在业务写入之后的裸 append（半提交窗口）。
- */
 async function withSupplierStoreTransaction<T>(
   metadataStore: StoreSupplierMetadataStore,
   operation: () => Promise<T>,
@@ -1291,16 +1210,6 @@ function compareIdentityUpdatedDesc(
     return position;
   }
   return left.registryAddress.localeCompare(right.registryAddress);
-}
-
-function compareMetadataUpdatedDesc(
-  left: StoreSupplierMetadataRecord,
-  right: StoreSupplierMetadataRecord,
-): number {
-  return (
-    right.updatedAt.localeCompare(left.updatedAt) ||
-    left.supplierId.localeCompare(right.supplierId)
-  );
 }
 
 function shortHex(value: string): string {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createProductService } from "../src/product/application/service.js";
 import { rebuildOrderProjections } from "../src/indexer/replay.js";
 import {
@@ -6,8 +6,21 @@ import {
   stateMachineTaskProjectionKey,
 } from "../src/indexer/projections/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import type { Address, Hex } from "../src/shared/types.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
 
 const stateMachineAddress = "0x1111111111111111111111111111111111111111" as Address;
 const walletA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as Address;
@@ -36,7 +49,7 @@ describe("plan-scoped state-machine identities", () => {
     expect(snapshot.stateMachineTasks[taskKeyA]?.planId).toBe(planA);
     expect(snapshot.stateMachineTasks[taskKeyB]?.planId).toBe(planB);
 
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({ deploymentBlock: 0n, events });
     await expect(store.getStateMachineOrder(orderId)).resolves.toBeUndefined();
     await expect(store.getStateMachineOrder(orderKeyA)).resolves.toMatchObject({ planId: planA });
@@ -48,12 +61,10 @@ describe("plan-scoped state-machine identities", () => {
 
   it("does not leak a plan when participant visibility starts with a bare accepted order id", async () => {
     const events = collisionEvents();
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({ deploymentBlock: 0n, events });
     const product = createProductService(store);
 
-    // 任务指派通道不因身份抽取口径变化：walletA 仍能看到自己被指派
-    // 任务所在的 planA 订单（裸 orderId 不再参与命中也不影响该通道）。
     const ambiguous = await product.getParticipantView({
       walletAddress: walletA,
       acceptedParticipants: [{
@@ -72,8 +83,6 @@ describe("plan-scoped state-machine identities", () => {
     expect(ambiguous.tasks).toHaveLength(1);
     expect(ambiguous.tasks[0]?.assigneeWallet).toBe(walletA);
 
-    // 裸 orderId（缺 planId）不成复合键：已接受参与通道 fail-closed，
-    // 不回退裸 orderId 相等——无指派的参与方一个订单都看不到。
     const walletC = "0xcccccccccccccccccccccccccccccccccccccccccc";
     const bare = await product.getParticipantView({
       walletAddress: walletC,
@@ -91,8 +100,6 @@ describe("plan-scoped state-machine identities", () => {
     expect(bare.orders).toHaveLength(0);
     expect(bare.tasks).toHaveLength(0);
 
-    // (planId, orderId) 复合键命中对应 plan 的订单，不串到同号的另一
-    // plan 名下。
     const canonical = await product.getParticipantView({
       walletAddress: walletC,
       acceptedParticipants: [{

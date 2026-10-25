@@ -1,27 +1,8 @@
 import type { Hex } from "../types.js";
 
-/**
- * duplicate-transaction 广播失败车道的共享机制（单源）。
- *
- * broadcaster 报 "nonce too low" / "already known" / "replacement transaction
- * underpriced" 不等于失败：同一签名载荷（或同 nonce 交易）可能已经上链或
- * 仍在池中。直接钉终态死信会把已上链交易永久标记 failed、误导参与方对已
- * 消费 nonce 重签。本模块提供在役广播链路（submissions signal 面、
- * stage-patches patch 面）共用的判定机制：
- *
- * 1. 车道识别（isDuplicateTransactionReport）：文本匹配三报错形态；
- * 2. 候选 txHash 提取（duplicateTransactionTxHashCandidates）：错误对象
- *    携带的哈希 + 此前记录的哈希，去重保序；
- * 3. 回执探针裁决（adjudicateDuplicateTransaction）：探针成功→按已提交
- *    落账（submitted）；reverted→链上已裁决失败（receipt_failed 终态）；
- *    探针失败/无回执/状态未知→transaction_receipt_unknown 可重试并保留
- *    候选 txHash；无可探对象→nonce 竞争可重组装（reassemblable）。
- *
- * 错误码词表本身不入本模块：signal 面与 patch 面的 errorCode 集各自保持
- * （分类表有 taxonomy conformance 钉），这里只共享机制不硬统一错误码。
- */
+// duplicate-transaction 广播失败车道的共享机制（单源）：submissions 与
+// stage-patches 共用的三报错形态识别、候选 txHash 提取与回执探针四态裁决。
 
-/** 回执探针的最小事实面：状态与块高即可裁决 duplicate 车道。 */
 export interface DuplicateTransactionReceiptProbe {
   readonly status?: "success" | "reverted" | string;
   readonly blockNumber?: bigint | number | string;
@@ -36,7 +17,6 @@ export type DuplicateTransactionAdjudication =
 export type DuplicateTransactionReceiptGetter =
   (txHash: Hex) => Promise<DuplicateTransactionReceiptProbe | undefined | null>;
 
-/** 各广播面只提供结果构造器：错误码/标签/DTO 形状留在各自分类表一侧。 */
 export interface DuplicateTransactionOutcomeBuilders<TResult> {
   readonly onSubmitted: (outcome: { readonly txHash: Hex; readonly blockNumber?: string }) => TResult;
   readonly onReceiptFailed: (outcome: { readonly txHash: Hex; readonly blockNumber?: string }) => TResult;
@@ -44,10 +24,6 @@ export interface DuplicateTransactionOutcomeBuilders<TResult> {
   readonly onReassemblableNonceRace: () => TResult;
 }
 
-/**
- * 广播面 catch 口的消费入口：一次探针裁决 + 四态结果映射。判定与映射
- * 在此单源；结果构造（错误码、标签、attempt 形状）由各面注入，不硬统一。
- */
 export async function resolveDuplicateTransactionOutcome<TResult>(
   error: unknown,
   getReceipt: DuplicateTransactionReceiptGetter | undefined,
@@ -67,18 +43,12 @@ export async function resolveDuplicateTransactionOutcome<TResult>(
   }
 }
 
-/** broadcaster 的 duplicate-transaction 三报错形态（nonce 冲突车道）。 */
 export function isDuplicateTransactionReport(haystack: string): boolean {
   return /nonce too low|replacement transaction underpriced|already known/i.test(haystack);
 }
 
 const TX_HASH_LIKE = /^0x[0-9a-fA-F]{64}$/;
 
-/**
- * duplicate_transaction 的候选 txHash（去重保序）：错误对象上携带的
- * txHash/transactionHash/hash 字段（viem/节点错误常见），加上该提交此前
- * 记录的 txHash——"already known" 通常是同一签名载荷先前已广播。
- */
 export function duplicateTransactionTxHashCandidates(
   error: unknown,
   priorTxHash?: Hex
@@ -130,7 +100,6 @@ function collectTxHashLikeFields(
   }
 }
 
-/** 单笔回执的三态裁决：success / failed（含 reverted）/ unknown。 */
 export function duplicateTransactionReceiptVerdict(
   receipt: DuplicateTransactionReceiptProbe | undefined | null
 ): "success" | "failed" | "unknown" {
@@ -146,20 +115,6 @@ export function duplicateTransactionReceiptVerdict(
   return "unknown";
 }
 
-/**
- * duplicate-transaction 的回执探针裁决（四态）：
- * - 探到 success 回执 → submitted：交易已上链成功，按已提交落账；
- * - 探到 reverted/failed 回执 → receipt_failed：链上已裁决失败（nonce 已
- *   被该失败交易消费），调用方落终态；
- * - 有候选哈希但回执未产出/探针抛错/状态未知 → receipt_unknown：不是
- *   失败裁决，调用方按 transaction_receipt_unknown 可重试落账并保留候选
- *   哈希，下轮重探；
- * - 无候选哈希（gas nonce 冲突通常不携带 txHash）→ reassemblable_nonce_
- *   race：业务结果未在链上落定，换 gas nonce 重组装即可自愈。
- *
- * 探针不可用（getReceipt 未实现）同样未裁决：有候选哈希按 receipt_unknown
- * 保留，无候选按 reassemblable。
- */
 export async function adjudicateDuplicateTransaction(
   error: unknown,
   priorTxHash: Hex | undefined,

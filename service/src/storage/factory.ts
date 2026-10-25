@@ -1,41 +1,31 @@
 import { basename, join } from "node:path";
 import type { DatabaseConfig } from "../config/index.js";
-import { InMemoryEvidenceMetadataStore, type EvidenceMetadataStore } from "../evidence/store.js";
+import type { EvidenceMetadataStore } from "../evidence/store.js";
 import { PostgresEvidenceStore } from "../evidence/postgres-store.js";
-import { InMemoryGovernanceStore, type GovernanceStore } from "../governance/store.js";
+import type { GovernanceStore } from "../governance/store.js";
 import { PostgresGovernanceStore } from "../governance/postgres-store.js";
-import { SqliteGovernanceStore } from "../governance/sqlite-store.js";
 import {
-  MemoryOrderV3Store,
-  PostgresOrderV3Store,
-  SqliteOrderV3Store,
-  type OrderV3Store
-} from "../order/v3/index.js";
+  PostgresOrderStore,
+  type OrderStore
+} from "../order/index.js";
 import { PostgresProductBffStore } from "../product/query/bff/postgres-store.js";
-import { SqliteProductBffStore } from "../product/query/bff/sqlite-store.js";
-import { MemoryProductBffStore, type ProductBffStore } from "../product/query/bff/store.js";
+import type { ProductBffStore } from "../product/query/bff/store.js";
 import {
-  MemoryOrderRequirementsStore,
   PostgresOrderRequirementsStore,
-  SqliteOrderRequirementsStore,
   type OrderRequirementsStore
 } from "../product/requirements/index.js";
 import type { Address } from "../shared/types.js";
-import { InMemoryProductSubmissionStore } from "../submissions/store.js";
 import { PostgresSubmissionStore } from "../submissions/postgres-store.js";
-import { SqliteSubmissionStore } from "../submissions/sqlite-store.js";
-import { SqliteBroadcastDedupeStore, type BroadcastDedupeStore } from "../submissions/broadcast-dedupe-sqlite-store.js";
-import { PostgresBroadcastDedupeStore } from "../submissions/broadcast-dedupe-postgres-store.js";
+import {
+  PostgresBroadcastDedupeStore,
+  type BroadcastDedupeStore
+} from "../submissions/broadcast-dedupe-postgres-store.js";
 import type { ProductSubmissionStore } from "../submissions/types.js";
-import { SqliteNotificationStateStore } from "../notifications/sqlite-store.js";
 import { PostgresNotificationStateStore } from "../notifications/postgres-store.js";
 import type {
   NotificationDeliveryStore,
   ParticipantNotificationReadStateStore
 } from "../notifications/service.js";
-import {
-  SqliteProductStagePatchStore
-} from "../stage-patches/sqlite-store.js";
 import {
   PostgresProductStagePatchStore
 } from "../stage-patches/postgres-store.js";
@@ -48,24 +38,18 @@ import type {
   StageResourcePatchSubmissionDTO
 } from "../stage-patches/types.js";
 import {
-  InMemoryStoreSupplierMetadataStore,
   PostgresStoreSupplierMetadataStore,
-  SqliteStoreSupplierMetadataStore,
   type StoreSupplierMetadataStore
 } from "../store/suppliers/index.js";
 import {
-  InMemoryStoreEntityRegistrationStore,
   PostgresStoreEntityRegistrationStore,
-  SqliteStoreEntityRegistrationStore,
   type StoreEntityRegistrationStore
 } from "../store/registration/index.js";
-import {
-  MemoryStoreDockingSessionStore,
-  type StoreDockingSessionStore
+import type {
+  StoreDockingSessionStore
 } from "../store/console/docking.js";
-import {
-  MemoryStoreAuditStore,
-  type StoreAuditStore
+import type {
+  StoreAuditStore
 } from "../store/console/audit.js";
 import {
   PostgresStoreAuditStore,
@@ -73,42 +57,19 @@ import {
   PostgresStoreZhixuDraftStore,
   PostgresStoreZhixuVersionMetadataStore
 } from "../store/console/postgres-store.js";
+import type { StoreZhixuDraftStore } from "../store/console/zhixu-drafts.js";
+import type { StoreZhixuVersionMetadataStore } from "../store/console/version.js";
 import {
-  SqliteStoreAuditStore,
-  SqliteStoreDockingSessionStore,
-  SqliteStoreZhixuDraftStore,
-  SqliteStoreZhixuVersionMetadataStore
-} from "../store/console/sqlite-store.js";
-import { MemoryStoreZhixuDraftStore, type StoreZhixuDraftStore } from "../store/console/zhixu-drafts.js";
-import { MemoryStoreZhixuVersionMetadataStore, type StoreZhixuVersionMetadataStore } from "../store/console/version.js";
-import { SqliteEvidenceStore } from "../evidence/sqlite-store.js";
-import {
-  InMemoryStoreWalletSessionStore,
-  SqliteStoreWalletSessionStore,
+  PostgresStoreWalletSessionStore,
   type StoreWalletSessionStore
 } from "../store/sessions/index.js";
-import {
-  InMemoryStorePublisherDelegationStore,
-  InMemoryStoreZhixuDecorationStore,
-  SqliteStorePublisherDelegationStore,
-  SqliteStoreZhixuDecorationStore,
-  type StorePublisherDelegationStore,
-  type StoreZhixuDecorationStore
+import type {
+  StoreZhixuDecorationStore,
+  StorePublisherDelegationStore
 } from "../store/decoration/index.js";
-import {
-  InMemoryStoreIdentityDescriptorSnapshotStore,
-  SqliteStoreIdentityDescriptorSnapshotStore
+import type {
+  StoreIdentityDescriptorSnapshotStore
 } from "../governance/descriptors.js";
-import {
-  InMemoryStoreListingStore,
-  SqliteStoreListingStore,
-  type StoreListingStore
-} from "../store/listings/index.js";
-import {
-  InMemoryStoreJoinApplicationStore,
-  SqliteStoreJoinApplicationStore,
-  type StoreJoinApplicationStore
-} from "../store/join/index.js";
 import {
   PostgresStoreIdentityDescriptorSnapshotStore,
   PostgresStoreJoinApplicationStore,
@@ -116,13 +77,11 @@ import {
   PostgresStorePublisherDelegationStore,
   PostgresStoreZhixuDecorationStore
 } from "../store-access-postgres-stores.js";
-import { PostgresStoreWalletSessionStore } from "../store/sessions/index.js";
-import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
+import type { StoreListingStore } from "../store/listings/index.js";
+import type { StoreJoinApplicationStore } from "../store/join/index.js";
 import { PostgresDatabase } from "./postgres-client.js";
 import { PostgresProjectionStore } from "./postgres.js";
-import { MemoryProjectionStore, type ProjectionStore } from "./projection-store.js";
-import { SqliteProjectionStore } from "./sqlite-projection-store.js";
-import type { StorageAdapterLifecycle } from "./types.js";
+import type { ProjectionStore } from "./projection-store.js";
 
 export interface CreateProjectionStoreOptions {
   readonly database: DatabaseConfig;
@@ -134,11 +93,11 @@ export interface CreateProjectionStoreOptions {
 export interface ChainServicesStores {
   readonly projectionStore: ProjectionStore;
   readonly productBffStore: ProductBffStore;
-  /** V3 订单域（配置注册/草稿/阶段/slot/邀请/订单）持久化 store。 */
-  readonly orderV3Store: OrderV3Store;
+  /** 订单域（配置注册/草稿/阶段/slot/邀请/订单）持久化 store。 */
+  readonly orderStore: OrderStore;
   /** V1 订单要求包（声明/合意）持久化 store。 */
   readonly orderRequirementsStore: OrderRequirementsStore;
-  /** StageEscrow V2 tranche 投影（链事件重放可重建）。 */
+  /** 证据元数据持久化（链事件重放可重建）。 */
   readonly evidenceMetadataStore: EvidenceMetadataStore;
   readonly submissionStore: ProductSubmissionStore;
   readonly governanceStore: GovernanceStore;
@@ -156,292 +115,84 @@ export interface ChainServicesStores {
   readonly storePublisherDelegationStore: StorePublisherDelegationStore;
   readonly storeListingStore: StoreListingStore;
   readonly storeJoinApplicationStore: StoreJoinApplicationStore;
-  /** sqlite/postgres 驱动下提供持久化通知状态；其余驱动为 undefined（内存）。 */
-  readonly notificationStateStore?: NotificationDeliveryStore & ParticipantNotificationReadStateStore;
-  /** sqlite/postgres 驱动下提供持久化 broadcast 去重状态；其余驱动为 undefined。 */
-  readonly broadcastDedupeStore?: BroadcastDedupeStore;
-  /** sqlite/postgres 驱动下提供持久化 stage-patch 状态；其余驱动为 undefined（内存）。 */
-  readonly stageExecutorPatchStore?: ProductStageExecutorPatchStore;
-  readonly stageResourcePatchStore?: ProductStageResourcePatchStore;
+  /** postgres 驱动下提供持久化通知状态。 */
+  readonly notificationStateStore: NotificationDeliveryStore & ParticipantNotificationReadStateStore;
+  /** postgres 驱动下提供持久化 broadcast 去重状态。 */
+  readonly broadcastDedupeStore: BroadcastDedupeStore;
+  /** postgres 驱动下提供持久化 stage-patch 状态。 */
+  readonly stageExecutorPatchStore: ProductStageExecutorPatchStore;
+  readonly stageResourcePatchStore: ProductStageResourcePatchStore;
   close(): Promise<void>;
 }
 
 export function createProjectionStore(options: CreateProjectionStoreOptions): ProjectionStore {
-  switch (options.database.driver) {
-    case "memory":
-      return new MemoryProjectionStore();
-    case "sqlite":
-      return new SqliteProjectionStore({
-        databaseUrl: options.database.url,
-        ...(options.chainId !== undefined ? { chainId: options.chainId } : {}),
-        ...(options.projectionScopeContractAddress
-          ? { projectionScopeContractAddress: options.projectionScopeContractAddress }
-          : {}),
-        migrations: {
-          autoRun: options.database.migrationsAutoRun,
-          ...(options.migrationsDirectory ? { directory: options.migrationsDirectory } : {})
-        }
-      });
-    case "postgres": {
-      const postgresDirectory = postgresMigrationsDirectory(options.migrationsDirectory);
-      return new PostgresProjectionStore({
-        databaseUrl: options.database.url,
-        ...(options.chainId !== undefined ? { chainId: options.chainId } : {}),
-        ...(options.projectionScopeContractAddress
-          ? { projectionScopeContractAddress: options.projectionScopeContractAddress }
-          : {}),
-        migrations: {
-          autoRun: options.database.migrationsAutoRun,
-          ...(postgresDirectory ? { directory: postgresDirectory } : {})
-        }
-      });
+  const postgresDirectory = postgresMigrationsDirectory(options.migrationsDirectory);
+  return new PostgresProjectionStore({
+    databaseUrl: options.database.url,
+    ...(options.chainId !== undefined ? { chainId: options.chainId } : {}),
+    ...(options.projectionScopeContractAddress
+      ? { projectionScopeContractAddress: options.projectionScopeContractAddress }
+      : {}),
+    migrations: {
+      autoRun: options.database.migrationsAutoRun,
+      ...(postgresDirectory ? { directory: postgresDirectory } : {})
     }
-  }
+  });
 }
 
 export function createChainServicesStores(options: CreateProjectionStoreOptions): ChainServicesStores {
-  switch (options.database.driver) {
-    case "memory": {
-      return {
-        projectionStore: new MemoryProjectionStore(),
-        productBffStore: new MemoryProductBffStore(),
-        orderV3Store: new MemoryOrderV3Store(),
-        orderRequirementsStore: new MemoryOrderRequirementsStore(),
-        evidenceMetadataStore: new InMemoryEvidenceMetadataStore(),
-        submissionStore: new InMemoryProductSubmissionStore(),
-        governanceStore: new InMemoryGovernanceStore(),
-        storeZhixuDraftStore: new MemoryStoreZhixuDraftStore(),
-        storeZhixuVersionMetadataStore: new MemoryStoreZhixuVersionMetadataStore(),
-        storeSupplierMetadataStore: new InMemoryStoreSupplierMetadataStore(),
-        storeEntityRegistrationStore: new InMemoryStoreEntityRegistrationStore(),
-        storeDockingSessionStore: new MemoryStoreDockingSessionStore(),
-        storeAuditStore: new MemoryStoreAuditStore(),
-        storeWalletSessionStore: new InMemoryStoreWalletSessionStore(),
-        identityDescriptorSnapshots: new InMemoryStoreIdentityDescriptorSnapshotStore(),
-        storeDecorationStore: new InMemoryStoreZhixuDecorationStore(),
-        storePublisherDelegationStore: new InMemoryStorePublisherDelegationStore(),
-        storeListingStore: new InMemoryStoreListingStore(),
-        storeJoinApplicationStore: new InMemoryStoreJoinApplicationStore(),
-        async close() {
-          return undefined;
-        }
-      };
+  const postgresDirectory = postgresMigrationsDirectory(options.migrationsDirectory);
+  const migrations = {
+    autoRun: options.database.migrationsAutoRun,
+    ...(postgresDirectory ? { directory: postgresDirectory } : {})
+  };
+  const database = new PostgresDatabase({
+    databaseUrl: options.database.url,
+    migrations
+  });
+  const stores = {
+    projectionStore: new PostgresProjectionStore({
+      database,
+      ...(options.chainId !== undefined ? { chainId: options.chainId } : {}),
+      ...(options.projectionScopeContractAddress
+        ? { projectionScopeContractAddress: options.projectionScopeContractAddress }
+        : {})
+    }),
+    productBffStore: new PostgresProductBffStore({ database }),
+    orderStore: new PostgresOrderStore({ database }),
+    orderRequirementsStore: new PostgresOrderRequirementsStore({ database }),
+    evidenceMetadataStore: new PostgresEvidenceStore({ database }),
+    submissionStore: new PostgresSubmissionStore({ database }),
+    governanceStore: new PostgresGovernanceStore({ database }),
+    storeZhixuDraftStore: new PostgresStoreZhixuDraftStore({ database }),
+    storeZhixuVersionMetadataStore: new PostgresStoreZhixuVersionMetadataStore({ database }),
+    storeSupplierMetadataStore: new PostgresStoreSupplierMetadataStore({ database }),
+    storeEntityRegistrationStore: new PostgresStoreEntityRegistrationStore({ database }),
+    storeDockingSessionStore: new PostgresStoreDockingSessionStore({ database }),
+    storeAuditStore: new PostgresStoreAuditStore({ database }),
+    storeWalletSessionStore: new PostgresStoreWalletSessionStore({ database }),
+    identityDescriptorSnapshots: new PostgresStoreIdentityDescriptorSnapshotStore({ database }),
+    storeDecorationStore: new PostgresStoreZhixuDecorationStore({ database }),
+    storePublisherDelegationStore: new PostgresStorePublisherDelegationStore({ database }),
+    storeListingStore: new PostgresStoreListingStore({ database }),
+    storeJoinApplicationStore: new PostgresStoreJoinApplicationStore({ database }),
+    notificationStateStore: new PostgresNotificationStateStore({ database }),
+    broadcastDedupeStore: new PostgresBroadcastDedupeStore({ database }),
+    stageExecutorPatchStore: new PostgresProductStagePatchStore<
+      PreparedStageExecutorPatchRecord,
+      StageExecutorPatchSubmissionDTO
+    >({ database, patchKind: "executor" }),
+    stageResourcePatchStore: new PostgresProductStagePatchStore<
+      PreparedStageResourcePatchRecord,
+      StageResourcePatchSubmissionDTO
+    >({ database, patchKind: "resource" })
+  };
+  return {
+    ...stores,
+    async close() {
+      await database.close();
     }
-    case "sqlite": {
-      const migrations = {
-        autoRun: options.database.migrationsAutoRun,
-        ...(options.migrationsDirectory ? { directory: options.migrationsDirectory } : {})
-      };
-      const stores = {
-        projectionStore: new SqliteProjectionStore({
-          databaseUrl: options.database.url,
-          ...(options.chainId !== undefined ? { chainId: options.chainId } : {}),
-          ...(options.projectionScopeContractAddress
-            ? { projectionScopeContractAddress: options.projectionScopeContractAddress }
-            : {}),
-          migrations
-        }),
-        productBffStore: new SqliteProductBffStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        orderV3Store: new SqliteOrderV3Store({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        orderRequirementsStore: new SqliteOrderRequirementsStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        evidenceMetadataStore: new SqliteEvidenceStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        submissionStore: new SqliteSubmissionStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        governanceStore: new SqliteGovernanceStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storeZhixuDraftStore: new SqliteStoreZhixuDraftStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storeZhixuVersionMetadataStore: new SqliteStoreZhixuVersionMetadataStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storeSupplierMetadataStore: new SqliteStoreSupplierMetadataStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storeEntityRegistrationStore: new SqliteStoreEntityRegistrationStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storeDockingSessionStore: new SqliteStoreDockingSessionStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storeAuditStore: new SqliteStoreAuditStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storeWalletSessionStore: new SqliteStoreWalletSessionStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        identityDescriptorSnapshots: new SqliteStoreIdentityDescriptorSnapshotStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storeDecorationStore: new SqliteStoreZhixuDecorationStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storePublisherDelegationStore: new SqliteStorePublisherDelegationStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storeListingStore: new SqliteStoreListingStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        storeJoinApplicationStore: new SqliteStoreJoinApplicationStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        // 通知状态与 broadcast 去重状态落 sqlite。
-        notificationStateStore: new SqliteNotificationStateStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        broadcastDedupeStore: new SqliteBroadcastDedupeStore({
-          databaseUrl: options.database.url,
-          migrations
-        }),
-        // stage-patch prepared/submission/nonce 状态落 sqlite：
-        // 重启不丢已签名 prepare，nonce 预留跨实例由唯一键承担。
-        stageExecutorPatchStore: new SqliteProductStagePatchStore<
-          PreparedStageExecutorPatchRecord,
-          StageExecutorPatchSubmissionDTO
-        >({ databaseUrl: options.database.url, migrations, patchKind: "executor" }),
-        stageResourcePatchStore: new SqliteProductStagePatchStore<
-          PreparedStageResourcePatchRecord,
-          StageResourcePatchSubmissionDTO
-        >({ databaseUrl: options.database.url, migrations, patchKind: "resource" })
-      };
-      return {
-        ...stores,
-        async close() {
-          await closeStores([
-            stores.projectionStore,
-            stores.productBffStore,
-            stores.orderV3Store,
-            stores.orderRequirementsStore,
-            stores.evidenceMetadataStore,
-            stores.submissionStore,
-            stores.governanceStore,
-            stores.storeZhixuDraftStore,
-            stores.storeZhixuVersionMetadataStore,
-            stores.storeSupplierMetadataStore,
-            stores.storeEntityRegistrationStore,
-            stores.storeDockingSessionStore,
-            stores.storeAuditStore,
-            stores.storeWalletSessionStore,
-            stores.identityDescriptorSnapshots,
-            stores.storeDecorationStore,
-            stores.storePublisherDelegationStore,
-            stores.storeListingStore,
-            stores.storeJoinApplicationStore,
-            stores.notificationStateStore,
-            stores.broadcastDedupeStore,
-            stores.stageExecutorPatchStore,
-            stores.stageResourcePatchStore
-          ]);
-        }
-      };
-    }
-    case "postgres": {
-      const postgresDirectory = postgresMigrationsDirectory(options.migrationsDirectory);
-      const migrations = {
-        autoRun: options.database.migrationsAutoRun,
-        ...(postgresDirectory ? { directory: postgresDirectory } : {})
-      };
-      const database = new PostgresDatabase({
-        databaseUrl: options.database.url,
-        migrations
-      });
-      const stores = {
-        projectionStore: new PostgresProjectionStore({
-          database,
-          ...(options.chainId !== undefined ? { chainId: options.chainId } : {}),
-          ...(options.projectionScopeContractAddress
-            ? { projectionScopeContractAddress: options.projectionScopeContractAddress }
-            : {})
-        }),
-        productBffStore: new PostgresProductBffStore({ database }),
-        orderV3Store: new PostgresOrderV3Store({ database }),
-        // V3 binding/settlement/runtime have no postgres adapters yet. Server
-        // refuses to start V3 escrow projection on postgres; without escrow
-        // these memory stores only back read surfaces (reported as a gap).
-        orderRequirementsStore: new PostgresOrderRequirementsStore({ database }),
-        evidenceMetadataStore: new PostgresEvidenceStore({ database }),
-        submissionStore: new PostgresSubmissionStore({ database }),
-        governanceStore: new PostgresGovernanceStore({ database }),
-        storeZhixuDraftStore: new PostgresStoreZhixuDraftStore({ database }),
-        storeZhixuVersionMetadataStore: new PostgresStoreZhixuVersionMetadataStore({ database }),
-        storeSupplierMetadataStore: new PostgresStoreSupplierMetadataStore({ database }),
-        storeEntityRegistrationStore: new PostgresStoreEntityRegistrationStore({ database }),
-        storeDockingSessionStore: new PostgresStoreDockingSessionStore({ database }),
-        storeAuditStore: new PostgresStoreAuditStore({ database }),
-        storeWalletSessionStore: new PostgresStoreWalletSessionStore({ database }),
-        identityDescriptorSnapshots: new PostgresStoreIdentityDescriptorSnapshotStore({ database }),
-        storeDecorationStore: new PostgresStoreZhixuDecorationStore({ database }),
-        storePublisherDelegationStore: new PostgresStorePublisherDelegationStore({ database }),
-        storeListingStore: new PostgresStoreListingStore({ database }),
-        storeJoinApplicationStore: new PostgresStoreJoinApplicationStore({ database }),
-        // 通知状态与 broadcast 去重状态在生产拓扑（postgres）
-        // 同样持久化；表迁移见 migrations/postgres/0013。共享 database 连接，
-        // close 由 database.close() 统一负责。
-        notificationStateStore: new PostgresNotificationStateStore({ database }),
-        broadcastDedupeStore: new PostgresBroadcastDedupeStore({ database }),
-        // stage-patch 状态在生产拓扑同样持久化（migrations/postgres/0019），
-        // 共享 database 连接。
-        stageExecutorPatchStore: new PostgresProductStagePatchStore<
-          PreparedStageExecutorPatchRecord,
-          StageExecutorPatchSubmissionDTO
-        >({ database, patchKind: "executor" }),
-        stageResourcePatchStore: new PostgresProductStagePatchStore<
-          PreparedStageResourcePatchRecord,
-          StageResourcePatchSubmissionDTO
-        >({ database, patchKind: "resource" })
-      };
-      return {
-        ...stores,
-        async close() {
-          await database.close();
-        }
-      };
-    }
-  }
-}
-
-async function closeStores(stores: readonly unknown[]): Promise<void> {
-  for (const store of stores) {
-    if (isClosableStore(store)) {
-      await store.close();
-    }
-  }
-}
-
-function isClosableStore(store: unknown): store is StorageAdapterLifecycle {
-  if (!store || typeof store !== "object") {
-    return false;
-  }
-  return "close" in store && typeof (store as { readonly close?: unknown }).close === "function";
+  };
 }
 
 function postgresMigrationsDirectory(directory: string | undefined): string | undefined {

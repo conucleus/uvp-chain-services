@@ -7,14 +7,6 @@ export {
   type StoreDecorationPermissionView,
   type StoreDecorationAuditEvent
 } from "./service.js";
-export {
-  InMemoryStoreZhixuDecorationStore,
-  InMemoryStorePublisherDelegationStore
-} from "./memory-store.js";
-export {
-  SqliteStoreZhixuDecorationStore,
-  SqliteStorePublisherDelegationStore
-} from "./sqlite-store.js";
 export { validateStoreDecorationData } from "./validate.js";
 export {
   StoreDecorationServiceError,

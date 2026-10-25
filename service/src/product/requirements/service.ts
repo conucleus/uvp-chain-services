@@ -1,8 +1,6 @@
 // 订单要求包服务：声明（PUT）、读取（GET）、相对方合意（POST）。草稿状态与
-// 参与者名单只读 v0 BFF 台账，要求包本身落独立 store；requirementsHash 只
-// 由本服务对 canonical JSON 计算，客户端自报的派生字段一律拒绝。合意消息
-// 格式单源在 @uvp-eth/product-dto（order-requirements.ts）。V1 不复用
-// 能力/权限/开单触发语义由 V3 order/config 路径承载。
+// 参与者名单只读 v0 BFF 台账；requirementsHash 只由本服务对 canonical JSON
+// 计算，合意消息格式单源在 @uvp-eth/product-dto。
 
 import { randomUUID } from "node:crypto";
 import { verifyMessage } from "viem";
@@ -13,12 +11,11 @@ import {
   type OrderRequirementsTriggerAnchorDTO,
 } from "@uvp-eth/product-dto";
 import { normalizeAddress, type Address, type Hex } from "../../shared/types.js";
-import { MemoryProductBffStore, type ProductBffStore } from "../query/bff/store.js";
+import type { ProductBffStore } from "../query/bff/store.js";
 import type {
   ProductOrderDraftDTO,
   ProductOrderDraftStatus,
 } from "../query/bff/types.js";
-import { MemoryOrderRequirementsStore } from "./store.js";
 import {
   OrderRequirementsError,
   type OrderRequirementBundleRecord,
@@ -34,7 +31,6 @@ import {
   requirementsHashOf,
 } from "./validate.js";
 
-/** 要求包可编辑的草稿状态：进入触发生命周期后要求包随单冻结。 */
 const EDITABLE_DRAFT_STATUSES: ReadonlySet<ProductOrderDraftStatus> = new Set([
   "draft",
   "awaiting_participants",
@@ -45,9 +41,8 @@ const EDITABLE_DRAFT_STATUSES: ReadonlySet<ProductOrderDraftStatus> = new Set([
 const BYTES32_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
 export interface CreateOrderRequirementsServiceOptions {
-  /** 草稿/参与者名单读取口（与 productBffService 共用同一台账实例）。 */
-  readonly bffStore?: ProductBffStore;
-  readonly store?: OrderRequirementsStore;
+  readonly bffStore: ProductBffStore;
+  readonly store: OrderRequirementsStore;
   readonly now?: () => Date;
   readonly verifyConsentSignature?: (input: {
     readonly address: Address;
@@ -57,10 +52,10 @@ export interface CreateOrderRequirementsServiceOptions {
 }
 
 export function createOrderRequirementsService(
-  options: CreateOrderRequirementsServiceOptions = {},
+  options: CreateOrderRequirementsServiceOptions,
 ): OrderRequirementsService {
-  const drafts = options.bffStore ?? new MemoryProductBffStore();
-  const store = options.store ?? new MemoryOrderRequirementsStore();
+  const drafts = options.bffStore;
+  const store = options.store;
   const now = options.now ?? (() => new Date());
   const verifySignature =
     options.verifyConsentSignature ?? defaultVerifyConsentSignature;
@@ -105,7 +100,6 @@ export function createOrderRequirementsService(
     async declare(draftId, actorWallet, body) {
       const draft = await requireDraft(draftId);
       const actor = normalizeAddress(actorWallet, "wallet");
-      // 要求包只能由开单人（草稿创建者）声明：无创建者锚点的草稿不接受声明。
       if (!draft.createdBy || draft.createdBy.toLowerCase() !== actor) {
         throw new OrderRequirementsError(
           403,
@@ -252,11 +246,8 @@ function declarationResult(
   bundle: OrderRequirementsBundleDTO,
 ): OrderRequirementsDeclarationResult {
   return {
-    // 服务端算出的 hash 已是 0x32 字节；DTO 面按 string 声明，落草稿 DTO 的
-    // Hex 字段前在这里收口。
     draft: { ...draft, requirementsHash: bundle.requirementsHash as Hex },
     bundle,
-    // 读面下发同一消息，客户端不必自拼格式即可签名合意。
     consentMessage: orderRequirementsConsentMessage(
       draft.draftId,
       bundle.requirementsHash,

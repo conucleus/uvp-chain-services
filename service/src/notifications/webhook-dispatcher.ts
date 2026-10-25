@@ -10,29 +10,19 @@ export const NOTIFICATION_WEBHOOK_SIGNATURE_HEADER = "x-uvp-webhook-signature";
 export const NOTIFICATION_WEBHOOK_TIMESTAMP_HEADER = "x-uvp-webhook-timestamp";
 export const NOTIFICATION_WEBHOOK_NONCE_HEADER = "x-uvp-webhook-nonce";
 
-/** 与 executor-kit 的 DEFAULT_WEBHOOK_TIMESTAMP_TOLERANCE_MS 一致：±5 分钟。 */
 export const NOTIFICATION_WEBHOOK_TIMESTAMP_TOLERANCE_MS = 5 * 60_000;
 const NOTIFICATION_WEBHOOK_REPLAY_MAX_NONCES = 10_000;
 
 export interface WebhookNotificationDispatcherOptions {
   readonly url: string;
-  /** 可选：配置后以 timestamp.nonce.body 计算 HMAC-SHA256 并附带三个签名头。 */
   readonly secret?: string;
   readonly timeoutMs?: number;
   readonly fetchImpl?: typeof fetch;
   readonly now?: () => Date;
 }
 
-/**
- * 时间戳+nonce 的 HMAC 签名字段。裸 body HMAC 可被永久重放：截获
- * (body, signature) 即可在任意时刻重投。签名覆盖 timestamp.nonce.body，
- * 时间戳超出容窗即拒绝，nonce 经 replay guard 在窗口内单次消费——
- * 截获的请求随窗口一起失效。
- */
 export interface WebhookSignatureFields {
-  /** Unix 秒，随时间戳头发送。 */
   readonly timestamp: string;
-  /** 随机 hex nonce，随 nonce 头发送。 */
   readonly nonce: string;
 }
 
@@ -58,23 +48,12 @@ function webhookSignedPayload(body: string | Uint8Array, fields: WebhookSignatur
 }
 
 export interface VerifyWebhookSignatureOptions {
-  /** x-uvp-webhook-timestamp 头的值（unix 秒）。 */
   readonly timestamp?: string;
-  /** x-uvp-webhook-nonce 头的值。 */
   readonly nonce?: string;
   readonly nowMs?: () => number;
   readonly toleranceMs?: number;
 }
 
-/**
- * 校验 x-uvp-webhook-signature 对原始请求 body 及其时间戳/nonce 头的
- * 覆盖。接收方应在解析 JSON 之前调用，并对缺失、畸形、过期签名一律
- * 拒绝。常量时间比较防时序泄露。
- *
- * 时间戳/nonce 缺失时 fail-closed：不带这两个头的旧 body-only 形态
- * 正是本方案要消灭的永久可重放形态。±5 分钟容窗由
- * NOTIFICATION_WEBHOOK_TIMESTAMP_TOLERANCE_MS 缺省强制。
- */
 export function verifyWebhookSignature(
   body: string | Uint8Array,
   signature: string | undefined,
@@ -102,11 +81,6 @@ export function verifyWebhookSignature(
 }
 
 export interface WebhookReplayGuard {
-  /**
-   * 记录一次 nonce 出现。同一 nonce 在容窗内再次出现时返回 false——
-   * 该请求是重放。应在 MAC 校验通过后再调用，避免攻击者用垃圾 nonce
-   * 挤占追踪容量。
-   */
   observe(nonce: string, timestampMs: number, nowMs?: number): boolean;
 }
 
@@ -126,10 +100,6 @@ export function createWebhookReplayGuard(options: {
       seen.delete(nonce);
       seen.set(nonce, timestampMs);
       if (seen.size > maxTrackedNonces) {
-        // nonce 随验收窗（与 verifyWebhookSignature 同一 tolerance）一起失效：
-        // 窗口外签名本身已验不过，条目不可能再命中。容量溢出先逐出过期条目，
-        // 不让死条目占住追踪容量、把窗口内未消费的签名回调挤出 guard；仍超
-        // 上限才按插入序兜底驱逐。
         for (const [trackedNonce, observedMs] of seen) {
           if (seen.size <= maxTrackedNonces) {
             break;
@@ -151,11 +121,6 @@ export function createWebhookReplayGuard(options: {
   };
 }
 
-/**
- * 通用 webhook 通知 transport。产品渠道决策仍未做，默认关闭：
- * 只在显式配置 UVP_NOTIFY_WEBHOOK_URL 时由 server 装配；secret 可选。
- * body 为投递记录的脱敏摘要，不包含通知 payload 明文与外部端点。
- */
 export class WebhookNotificationDispatcher implements NotificationDispatcher {
   readonly #url: string;
   readonly #secret: string | undefined;
@@ -201,8 +166,6 @@ export class WebhookNotificationDispatcher implements NotificationDispatcher {
     } catch (error) {
       return {
         ok: false,
-        // 错误消息先脱敏再回写——fetch 异常文本可能携带完整端点
-        // URL（含凭据查询参数），不得原样进入投递台账。
         error: redactErrorMessage(
           error instanceof Error ? error.message : "webhook dispatch failed"
         )

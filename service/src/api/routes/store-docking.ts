@@ -31,13 +31,11 @@ export function createStoreDockingRouteModule(): RouteModule {
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
-          // 红线：对接草案写操作要求会话已锚定地址。
           const anchored = await requireAnchoredStoreAddress(context, request, { type: "store_docking_session" });
           if (!isAnchoredStoreAuthorizationResult(anchored)) {
             return anchored;
           }
           try {
-            // 归属由服务端锚定地址派生：创建者即会话租户，不从请求体取。
             const session = await context.storeDockingService.createSession(
               parseStoreDockingCreateBody(request.body),
               { anchoredAddress: anchored.anchoredAddress }
@@ -61,8 +59,6 @@ export function createStoreDockingRouteModule(): RouteModule {
         const sessionMatch = /^\/store\/docking-sessions\/([^/]+)$/.exec(request.pathname);
         if (request.method === "GET" && sessionMatch) {
           const sessionId = decodePathParameter(sessionMatch[1] ?? "");
-          // 会话档案含草稿信号映射，与 create/validate/save 同门：按 id 读
-          // 也要求已认证的 Store 身份（store.docking.read），匿名不可枚举。
           const resource = { type: "store_docking_session" as const, id: sessionId };
           const authorization = await authorizeStoreCapability(context, request, "store.docking.read", resource);
           if (!isStoreAuthorizationResult(authorization)) {
@@ -70,8 +66,6 @@ export function createStoreDockingRouteModule(): RouteModule {
           }
           try {
             const session = await context.storeDockingService.getSession(sessionId);
-            // 归属断言：非本租户会话与不存在同响应（404），不向他人
-            // reader 泄露会话存在性；管理员保留跨租户治理可见性。
             if (!session || !canAccessDockingSession(session, authorization.access)) {
               const denied = new StoreDockingServiceError(
                 404,
@@ -194,11 +188,6 @@ export function createStoreDockingRouteModule(): RouteModule {
   };
 }
 
-/**
- * 写路径（validate/save-draft-map）的租户归属断言：写者已过能力门与
- * 锚定门，403 明示"不是你的会话"（与装修面 not_plan_publisher 同口径），
- * 不与 404 混淆——写者身份已知，掩盖存在性没有意义。
- */
 async function dockingSessionOwnership(
   context: Parameters<RouteModule["handle"]>[1],
   sessionId: string,
@@ -225,7 +214,6 @@ function parseStoreDockingCreateBody(body: unknown): StoreDockingSessionCreateDT
   const record = requireStoreDockingBodyRecord(body);
   const sourceZhixuId = requiredStoreDockingString(record, "sourceZhixuId");
   const targetZhixuId = requiredStoreDockingString(record, "targetZhixuId");
-  // STORE-03：路由层快速拦截 self-docking（服务层为权威校验）。
   if (sourceZhixuId === targetZhixuId) {
     throw new StoreDockingServiceError(
       422,

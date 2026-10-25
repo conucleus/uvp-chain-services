@@ -11,9 +11,6 @@ import type {
   StoreRole,
   StoreSessionDTO
 } from "../console/access.js";
-import {
-  InMemoryStoreWalletSessionStore
-} from "./memory-store.js";
 import type {
   StoreAccountAddressView,
   StoreAuthChallengeRecord,
@@ -25,19 +22,8 @@ import type {
 } from "./types.js";
 import { StoreSessionServiceError } from "./types.js";
 
-/**
- * 会话配对：登录会话 ↔ 钱包地址（SIWE 式 personal_sign 证明）。
- *
- * - 挑战一次性、带 TTL；签名用 viem verifyMessage 校验（服务端不接触私钥）。
- * - 挑战绑定签发域（服务端观测的请求 Host，写入签名 message 并在
- *   verify 时点复核）：跨域重放的签名证明被拒，不换发会话。
- * - 会话 token 只下发一次，库中仅存 SHA-256 哈希。
- * - 会话能力继承所锚地址的 Store 运营方角色（MVP 单运营方地址清单）；
- *   plan 级权限（publisher/委托）在装修与加入路由内按 plan 核验。
- */
-
 export interface StoreSessionServiceOptions {
-  readonly store?: StoreWalletSessionStore;
+  readonly store: StoreWalletSessionStore;
   readonly config?: StoreWalletSessionConfig;
   readonly now?: () => Date;
   readonly verifyWalletMessage?: (input: {
@@ -49,17 +35,11 @@ export interface StoreSessionServiceOptions {
 
 export interface ResolveWalletSessionResult {
   readonly session: StoreWalletSessionView;
-  /** 请求头里出现的原始 token 对应的会话记录（已通过有效期与撤销检查）。 */
   readonly record: StoreWalletSessionRecord;
 }
 
-/**
- * 挑战签发的请求方上下文：只取服务端可见的连接信息（对端地址、Host 头），
- * 不接受任何自报字段——配额键自报等于没有配额。
- */
 export interface StoreChallengeRequesterContext {
   readonly clientAddress?: string | undefined;
-  /** 服务端观测到的请求 Host（含端口，如 console.example.com:8443）。 */
   readonly domain?: string | undefined;
 }
 
@@ -85,8 +65,8 @@ export const STORE_SESSION_TOKEN_PREFIX = "uvs_";
 export const STORE_SESSION_HEADER = "x-uvp-store-session";
 export const STORE_DEV_ANCHORED_ADDRESS_HEADER = "x-uvp-store-dev-anchored-address";
 
-export function createStoreSessionService(options: StoreSessionServiceOptions = {}): StoreSessionService {
-  const store = options.store ?? new InMemoryStoreWalletSessionStore();
+export function createStoreSessionService(options: StoreSessionServiceOptions): StoreSessionService {
+  const store = options.store;
   const config = options.config ?? defaultWalletSessionConfig();
   const now = options.now ?? (() => new Date());
   const verifyWalletMessage = options.verifyWalletMessage ?? defaultVerifyWalletMessage;
@@ -98,8 +78,6 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       }
       const record = requireBodyRecord(input);
       const address = normalizeAddress(requiredString(record, "address"), "address");
-      // 请求方配额键：连接对端地址；取不到时归入共享兜底桶（fail-closed，
-      // 宁可错杀匿名签发量也不放开定向锁死面）。
       const requesterKey = requester?.clientAddress?.trim() || FALLBACK_CHALLENGE_REQUESTER_KEY;
       const intentValue = optionalString(record, "intent") ?? "login";
       if (intentValue !== "login" && intentValue !== "anchor_address") {
@@ -111,26 +89,12 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       }
       const accountId = requesterSession?.session.accountId;
       const timestamp = now();
-      // 未鉴权入口的资源上界：先顺带清扫过期挑战（只插不删会把表/内存
-      // 无界放大），再按"请求方 + 目标地址"双键配额拒绝囤积——正常登录
-      // 一个地址同时存活的挑战只有个位数，10/30 都是宽松上界。单按地址
-      // 配额防不住定向锁死：入口匿名且 address 自报，任何人连发满额即可
-      // 顶掉任意受害地址的登录；请求方桶把囤积成本留在攻击者一侧。配额
-      // 判定在存储层原子完成：服务层先数后写的窗口会被并发请求整体穿透。
-      // 过期会话同批清扫：resolve 对过期一律拒绝，行只增不删同样无界。
       await store.deleteExpiredChallenges(timestamp.toISOString());
       await store.deleteExpiredSessions(timestamp.toISOString());
       const nonce = randomBytes(16).toString("hex");
       const issuedAt = timestamp.toISOString();
       const expiresAt = new Date(timestamp.getTime() + config.challengeTtlSeconds * 1000).toISOString();
-      // challenge 入口完全未鉴权且 message 会被整段落库：chainId 是唯一
-      // 由调用方提供并拼进 message 的自由文本字段，必须限长+字符集白名单，
-      // 否则任意长度写入直接放大成存储/内存 DoS（memory 驱动是无界 Map）。
       const chainId = boundedOptionalString(record, "chainId", CHALLENGE_CHAIN_ID_PATTERN, CHALLENGE_INPUT_MAX_LENGTH);
-      // 挑战按签发时的请求 Host 绑定（写入签名 message 并在 verify 时点
-      // 复核）：同一部署被多个域名触达时，A 域签下的登录证明不得在 B 域
-      // 换会话。取不到 Host（HTTP/1.1 必带，仅进程内直调缺省）时按空域
-      // 处理——签发与核验同口径，不因缺观测而放开跨域。
       const domain = challengeDomainFromRequester(requester);
       const message = buildStoreLoginMessage({
         address,
@@ -183,9 +147,6 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
         throw new StoreSessionServiceError(403, "store_wallet_session_disabled", "wallet sessions are not enabled for this deployment");
       }
       const record = requireBodyRecord(input);
-      // 入口字段全部限长：nonce 由本服务铸造（32 位小写 hex），签名是
-      // 0x 前缀 hex——超长值在触达存储/验签前按 400 拒绝，不给未鉴权
-      // 调用方任何放大面。
       const nonce = boundedRequiredString(record, "nonce", /^[0-9a-f]+$/, CHALLENGE_INPUT_MAX_LENGTH);
       const signature = boundedRequiredString(record, "signature", /^0x[0-9a-fA-F]+$/, 132) as Hex;
       const challenge = await store.getChallenge(nonce);
@@ -195,8 +156,6 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       if (challenge.expiresAt < now().toISOString()) {
         throw new StoreSessionServiceError(401, "store_challenge_expired", "challenge has expired");
       }
-      // 域绑定复核在烧挑战之前：跨域重放被拒后合法持有人仍可在签发域
-      // 完成 verify（烧挑战的代价不该由被重放方承担）。
       const verifyDomain = challengeDomainFromRequester(requester);
       const challengeDomain = challengeDomainFromMessage(challenge.message);
       if (challengeDomain !== verifyDomain) {
@@ -208,9 +167,6 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
         );
       }
       const address = challenge.address;
-      // 挑战单次使用：条件 UPDATE 原子占位
-      //（burn-on-attempt）：并发重放同一 nonce 只有一个请求能通过；
-      // 签名失败可重新取挑战，代价可接受。
       const consumed = await store.consumeChallenge(nonce, now().toISOString());
       if (!consumed) {
         throw new StoreSessionServiceError(401, "store_challenge_invalid", "challenge is unknown or already used");
@@ -240,10 +196,6 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       const timestamp = now().toISOString();
       const token = `${STORE_SESSION_TOKEN_PREFIX}${randomBytes(32).toString("hex")}`;
       const sessionId = `sess_${randomUUID()}`;
-      // 锚定 CAS：并发双 verify（同地址不同挑战）的败者在此收敛——
-      // 已有 active 行时不得覆盖；claim 撞上胜者行的跨账号败者按
-      // store_address_already_anchored 409 出局，不依赖
-      // findActiveAccountAddress 的先查后写窗口。
       const claimed = existing
         ? undefined
         : await store.claimActiveAccountAddress({
@@ -264,9 +216,6 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       const session: StoreWalletSessionRecord = {
         sessionId,
         tokenHash: sha256Hex(token),
-        // 走到这里 claim 必属于本次 accountId（跨账号败者已在上方 409
-        // 出局，不存在"复用胜者归属"的分支）；跨账号的收敛靠败者 409
-        // 后重试——重试读到胜者已落库的 active 行，按其归属建会话。
         accountId: claimed?.accountId ?? accountId,
         anchoredAddress: address,
         createdAt: timestamp,
@@ -282,8 +231,6 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
     },
 
     async resolveSessionFromToken(token) {
-      // 停用开关半关收敛：challenge/verify 都按 disabled 拒绝，存量
-      // token 不能在 TTL 内继续生效。
       if (!config.enabled) {
         return undefined;
       }
@@ -297,16 +244,11 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       if (record.expiresAt < now().toISOString()) {
         return undefined;
       }
-      // 地址撤销即时收敛：锚定地址不再是账号的 active 地址时会话立即失效
-      //（含运营方/管理员地址清单带来的能力）。
       const activeAnchor = await store.findActiveAccountAddress(record.anchoredAddress);
       if (!activeAnchor || activeAnchor.accountId !== record.accountId) {
         await store.revokeSession(record.sessionId, now().toISOString(), "anchor_address_revoked");
         return undefined;
       }
-      // lastSeen 刷新是 touch 而非整行回写：读到本快照后行可能已被并发
-      // logout/撤销翻成 revoked，整行回写会把 revoked_at 写回 NULL（已登出
-      // 会话在 TTL 内复活）。0 行受影响即按已撤销处理。
       const lastSeenAt = now().toISOString();
       if (!(await store.touchSession(record.sessionId, lastSeenAt))) {
         return undefined;
@@ -323,8 +265,6 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
       if (!record || record.revokedAt) {
         return false;
       }
-      // 撤销条件化：读到快照后行已被并发撤销翻终态时（0 行受影响）按已
-      // 登出收敛，不回写陈旧快照。
       return store.revokeSession(record.sessionId, now().toISOString(), "logout");
     },
 
@@ -348,8 +288,6 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
         );
       }
       const timestamp = now().toISOString();
-      // 撤销 CAS：并发撤销/重锚只有一个赢家——条件 UPDATE 失败即回读
-      // 最新状态（行已被他人撤销或重锚），不回写陈旧快照。
       const revoked = await store.revokeActiveAccountAddress({
         address,
         accountId: requesterSession.session.accountId,
@@ -384,18 +322,10 @@ export function createStoreSessionService(options: StoreSessionServiceOptions = 
   };
 }
 
-/**
- * 把钱包会话叠加到既有 StoreAccessState 上：
- * - 未配置/未启用时原样返回（fail-closed，不放大权限）。
- * - 钱包地址命中运营方/管理员清单时提升 level；否则至少 store_read。
- * - dev 锚定地址头仅 local 生效（testnet 是公开测试网，与 staging/prod
- *   同按 strict runtime 硬拒自报地址锚定）。
- */
 export function createWalletSessionStoreIdentityProvider(options: {
   readonly base: StoreIdentityProvider;
   readonly sessionService: StoreSessionService;
   readonly config?: StoreWalletSessionConfig;
-  /** 必填：环境档位由装配层注入，漏传即构造失败，不回退 local。 */
   readonly runtimeEnvironment: ChainServicesRuntimeEnv;
 }): StoreIdentityProvider {
   const config = options.config ?? defaultWalletSessionConfig();
@@ -511,16 +441,10 @@ function capabilitiesForAccessLevel(level: StoreAccessLevel): readonly StoreCapa
         "store.listing.manage"
       ];
     case "store_read":
-      // 钱包会话对未命中运营方/管理员清单的地址只授公共读——
-      // store.audit.read 是运营审计面，任意钱包登录即可读全量运营
-      // 审计等于把运营数据开放给所有人。
       return ["store.read"];
     case "anonymous_read":
       return ["store.read"];
   }
-  // store.draft.review 不下放：zhixu 草稿审核是治理动作（governance
-  // review 落库），提交者与审核者职责分离，专属 governance_admin
-  // （store/console/access.ts 口径；JWT 侧同样刻意不映射给运营级）。
 }
 
 function storeReadCapabilities(): readonly StoreCapability[] {
@@ -557,7 +481,6 @@ export function buildStoreLoginMessage(input: {
   readonly intent: "login" | "anchor_address";
   readonly accountId?: string;
   readonly chainId?: string;
-  /** 签发域（服务端观测的请求 Host）：钱包展示层可见的绑定目标。 */
   readonly domain?: string;
   readonly nonce?: string;
   readonly issuedAt: string;
@@ -590,7 +513,6 @@ export function defaultWalletSessionConfig(): StoreWalletSessionConfig {
     adminWallets: [],
     sessionTtlSeconds: 43200,
     challengeTtlSeconds: 300,
-    // 程序化默认关闭 dev 锚定头；env 解析在 local 环境默认开启。
     devAnchoredAddressHeaderEnabled: false
   };
 }
@@ -653,34 +575,15 @@ function optionalString(record: Record<string, unknown>, field: string): string 
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-/** 未鉴权入口的字符串上限（防存储/内存放大，128 字符足够任何标识符）。 */
 const CHALLENGE_INPUT_MAX_LENGTH = 128;
-/** chainId 在签名 message 中只是展示性标识，收窄到安全子集即可。 */
 const CHALLENGE_CHAIN_ID_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._:-]*$/;
-/** 单地址同时存活的未消费挑战配额（未鉴权入口的囤积上界）。 */
 const MAX_LIVE_CHALLENGES_PER_ADDRESS = 10;
-/**
- * 单请求方跨全部地址的存活挑战配额：防定向锁死——challenge 入口匿名
- * 且 address 自报，只按地址配额时任一请求方可替受害者占满配额，使其
- * 在 TTL 内无法登录且可续期。30 覆盖一个团队/出口 IP 的正常多地址登录。
- */
 const MAX_LIVE_CHALLENGES_PER_REQUESTER = 30;
-/** 取不到对端地址时的共享请求方桶（fail-closed：不因缺追踪而放开）。 */
 const FALLBACK_CHALLENGE_REQUESTER_KEY = "";
-/** 签名 message 中的域绑定行前缀（verify 时点按此复核签发域）。 */
 const CHALLENGE_MESSAGE_DOMAIN_PREFIX = "Domain: ";
-/** Host 头归一后的安全子集：DNS 名/IPv4/IPv6 字面量 + 端口。 */
 const CHALLENGE_DOMAIN_PATTERN = /^[a-z0-9.\-:\[\]]+$/;
 const CHALLENGE_DOMAIN_MAX_LENGTH = 255;
 
-/**
- * 请求方观测域（Host 头）归一：小写、限长、字符集白名单——拼进签名
- * message 的自由文本面必须收窄。缺失归空串：签发与核验同口径比较，
- * "无观测域签发的挑战"只能同样无域地核验，不构成跨域放行。异常 Host
- * 的错误码是 store_challenge_domain_invalid（问题在头不在 body，且与
- * verify 时点的 store_challenge_domain_mismatch 同族）——HTTP 请求校验
- * 码不入链上重试 taxonomy（与 invalid_body 同属词表外描述码）。
- */
 function challengeDomainFromRequester(requester: StoreChallengeRequesterContext | undefined): string {
   const domain = requester?.domain?.trim().toLowerCase() ?? "";
   if (domain.length > CHALLENGE_DOMAIN_MAX_LENGTH) {
@@ -692,7 +595,6 @@ function challengeDomainFromRequester(requester: StoreChallengeRequesterContext 
   return domain;
 }
 
-/** 从已落库的挑战 message 里取回签发域（服务端铸造的文本，非调用方输入）。 */
 function challengeDomainFromMessage(message: string): string {
   const line = message
     .split("\n")

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { keccak256, stringToBytes } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
@@ -13,33 +13,107 @@ import {
   demoZhixuDetail
 } from "./fixtures/business/index.js";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { loadConfigFromEnv } from "../src/config/env.js";
-import { adminPrincipalFromHeaders, createGovernanceService } from "../src/governance/index.js";
-import { SqliteGovernanceStore } from "../src/governance/sqlite-store.js";
+import { adminPrincipalFromHeaders, createGovernanceService, InMemoryGovernanceStore } from "../src/governance/index.js";
+import { PostgresGovernanceStore } from "../src/governance/postgres-store.js";
 import { hashIdentityDescriptor } from "../src/governance/hashing.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import {
   BackupEvidenceStorage,
-  InMemoryEvidenceStorage,
+  LocalEvidenceStorage,
   ObjectEvidenceStorage
 } from "../src/evidence/index.js";
 import { verifyProofBundle } from "../src/proof-verifier/service.js";
 import { createProductService } from "../src/product/application/service.js";
-import {
-  InMemoryStoreZhixuDecorationStore,
-  InMemoryStorePublisherDelegationStore
-} from "../src/store/decoration/memory-store.js";
+
 import {
   MemoryStoreZhixuVersionMetadataStore,
   createStoreZhixuVersionService
 } from "../src/store/console/version.js";
-import { InMemoryStoreWalletSessionStore, createStoreSessionService } from "../src/store/sessions/index.js";
+import { PostgresStoreWalletSessionStore, createStoreSessionService } from "../src/store/sessions/index.js";
 import type { StoreJoinApplicationStore } from "../src/store/join/types.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { openSqliteDatabase } from "../src/storage/sqlite.js";
-import { runSqliteMigrations } from "../src/storage/migrations.js";
+import {
+  PostgresStorePublisherDelegationStore,
+  PostgresStoreZhixuDecorationStore
+} from "../src/store-access-postgres-stores.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { PostgresDatabase } from "../src/storage/postgres-client.js";
+import type { ProjectionStore } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import { exampleSchemaResolver } from "./example-schema.js";
 import type { Address, Hex } from "../src/shared/types.js";
+
+let stores: ChainServicesStores;
+let failClosedDatabase: PostgresDatabase;
+
+beforeAll(async () => {
+  const databaseUrl = await createPostgresTestDatabase();
+  stores = createChainServicesStores({
+    database: { url: databaseUrl, migrationsAutoRun: true },
+    chainId: 31337
+  });
+  failClosedDatabase = new PostgresDatabase({ databaseUrl });
+});
+
+beforeEach(async () => {
+  // 原先每用例各建一个 Memory projection store + 各域内存件：同一克隆库内
+  // 清空本文件会写入的表，保持用例间互不可见。
+  await failClosedDatabase.query("DELETE FROM chain_event_log WHERE chain_id = 31337");
+  await failClosedDatabase.query("DELETE FROM chain_projection_snapshot WHERE chain_id = 31337");
+  await failClosedDatabase.query("DELETE FROM chain_index_cursor WHERE chain_id = 31337");
+  await failClosedDatabase.query("DELETE FROM chain_projection_sync_state WHERE chain_id = 31337");
+  await failClosedDatabase.query("DELETE FROM store_auth_challenge");
+  await failClosedDatabase.query("DELETE FROM store_wallet_session");
+  await failClosedDatabase.query("DELETE FROM store_account_address");
+  await failClosedDatabase.query("DELETE FROM store_identity_descriptor_snapshot");
+  await failClosedDatabase.query("DELETE FROM store_zhixu_decoration");
+  await failClosedDatabase.query("DELETE FROM store_publisher_delegation");
+  await failClosedDatabase.query("DELETE FROM store_zhixu_listing");
+  await failClosedDatabase.query("DELETE FROM store_join_application_event");
+  await failClosedDatabase.query("DELETE FROM store_join_application");
+  await failClosedDatabase.query("DELETE FROM product_order_draft");
+  await failClosedDatabase.query("DELETE FROM product_invite");
+});
+
+afterAll(async () => {
+  await failClosedDatabase.close();
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 const contractAddress = "0x1111111111111111111111111111111111111111" as Address;
 const publisherAddress = "0xaaaa000000000000000000000000000000000001" as Address;
@@ -53,11 +127,9 @@ const planHash = examplePlanIds.planHash as Hex;
 const roleSlotId = demoZhixuDetail.roleSlots[0]?.slotId ?? "supplier";
 const adminHeaders = { "x-uvp-admin-id": "governance-admin-1", "x-uvp-admin-role": "governance_admin" };
 const storeAdminHeaders = { "x-uvp-store-user-id": "store-admin-1", "x-uvp-store-role": "admin", "x-uvp-store-dev-anchored-address": publisherAddress };
-/** 管理面口令因子测试材料：sha256(adminTokenPlaintext) = adminTokenHash。 */
 const adminTokenPlaintext = "test-admin-password";
 const adminTokenHash = "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d";
 
-/** 本地联调的 dev 锚定头开关（仅非严格环境生效）。 */
 const devAnchoredStoreAuth = {
   mode: "dev_headers" as const,
   roleClaim: "roles",
@@ -77,9 +149,9 @@ const publisherAnchoredHeaders = {
   "x-uvp-store-dev-anchored-address": publisherAddress
 };
 
-describe("store, governance, and evidence fail-closed behaviors", () => {
-  const tempDirs: string[] = [];
+const tempDirs: string[] = [];
 
+describe("store, governance, and evidence fail-closed behaviors", () => {
   afterEach(() => {
     for (const dir of tempDirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
@@ -90,9 +162,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     const originalEnv = { ...process.env };
 
     afterEach(() => {
-      // 恢复要区分"未设置"与"空串"：直接赋 undefined 会留下字符串
-      // "undefined"，让后续测试的运行时判定变成 non-local（自报 admin
-      // 头被误关）。未设置的键必须删除。
       for (const key of ["CHAIN_SERVICES_RUNTIME_ENV", "GOVERNANCE_ADMIN_REVIEWER_IDS"] as const) {
         const value = originalEnv[key];
         if (value === undefined) {
@@ -104,14 +173,10 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("rejects self-reported governance admin headers outside local when the whitelist is empty", () => {
-      // 鉴权策略由装配层显式注入（governance/auth.ts 不读 process.env）。
-      // 空白名单 + 非 local：自报 admin 头 fail-closed。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "attacker",
         "x-uvp-admin-role": "governance_admin"
       }, { runtimeEnvironment: "testnet", allowedAdminIds: [] })).toBeUndefined();
-      // 白名单非空但未配置口令因子（明文白名单自报头
-      // 仅限 local 档）——非 local 命中白名单也不放行。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "gov-reviewer-1",
         "x-uvp-admin-role": "governance_admin"
@@ -121,8 +186,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         "x-uvp-admin-role": "governance_admin"
       }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
         .toBeUndefined();
-      // 白名单 + 口令因子（x-uvp-admin-token 哈希命中）才是非 local 的
-      // 完整凭据；口令错误/缺失都拒绝。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "gov-reviewer-1",
         "x-uvp-admin-role": "governance_admin",
@@ -135,15 +198,12 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         "x-uvp-admin-token": adminTokenPlaintext
       }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
         .toMatchObject({ adminId: "gov-reviewer-1" });
-      // 白名单外 admin id 即使口令正确也拒绝（白名单仍是身份允许清单）。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "attacker",
         "x-uvp-admin-role": "governance_admin",
         "x-uvp-admin-token": adminTokenPlaintext
       }, { runtimeEnvironment: "testnet", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
         .toBeUndefined();
-      // staging/production 与 testnet 同口径：白名单命中而无口令因子
-      // 一律拒绝（明文自报头仅限 local）。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "gov-reviewer-1",
         "x-uvp-admin-role": "governance_admin"
@@ -154,7 +214,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         "x-uvp-admin-role": "governance_admin"
       }, { runtimeEnvironment: "production", allowedAdminIds: ["gov-reviewer-1"], adminTokenHashes: [adminTokenHash] }))
         .toBeUndefined();
-      // local 保持自报（dev 便利），口令因子不强制。
       expect(adminPrincipalFromHeaders({
         "x-uvp-admin-id": "dev-admin",
         "x-uvp-admin-role": "governance_admin"
@@ -165,11 +224,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const databaseUrl = "postgres://uvp:secret@testnet-db.internal:5432/uvp";
       const base = {
         CHAIN_SERVICES_RUNTIME_ENV: "testnet",
-        CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
         CHAIN_SERVICES_DATABASE_URL: databaseUrl,
         CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "true",
-        // testnet 自动迁移知情门：本用例聚焦鉴权/白名单失败面，基线先过
-        // 迁移门（对照 production/staging 档口径）。
         UVP_TESTNET_ALLOW_AUTO_MIGRATIONS: "1",
         UVP_INDEXER_POLL_INTERVAL_MS: "5000",
         UVP_CHAIN_ID: "84532",
@@ -183,18 +239,13 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222",
         UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
         UVP_FINALITY_CONFIRMATIONS: "12",
-        // testnet 档位不对称收口：等回执注册与对账 worker 同 production/
-        // staging 强制（受管 PG 上对账轮询同样走 ≥30s 的成本门）。
         UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: "true",
         RECONCILE_WORKER_ENABLED: "true",
         RECONCILE_POLL_INTERVAL_MS: "30000"
       };
-      // STORE_AUTH_MODE 缺省无回落 → 启动失败。
       expect(() => loadConfigFromEnv(base)).toThrow(/STORE_AUTH_MODE/);
-      // 显式 dev_headers 在 testnet 同样拒绝。
       expect(() => loadConfigFromEnv({ ...base, STORE_AUTH_MODE: "dev_headers" }))
         .toThrow(/dev_headers is only allowed in local/);
-      // dev 锚定地址头在 testnet 缺省关闭。
       const withJwt = {
         ...base,
         STORE_AUTH_MODE: "jwt",
@@ -208,7 +259,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1"
       };
       expect(() => loadConfigFromEnv(withWhitelists)).toThrow(/OPS_CONSOLE_ADMIN_IDS is required in testnet/);
-      // 管理面生产基线：testnet 同样要求口令因子配置。
       expect(() => loadConfigFromEnv({
         ...withWhitelists,
         OPS_CONSOLE_ADMIN_IDS: "ops-admin-1"
@@ -228,7 +278,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     it("requires an explicit non-local RPC in production", () => {
       const base = {
         CHAIN_SERVICES_RUNTIME_ENV: "production",
-        CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
         CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:secret@prod-db.internal:5432/uvp",
         CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
         STORE_AUTH_MODE: "jwt",
@@ -253,29 +302,22 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
         OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
         GOVERNANCE_ADMIN_TOKEN_HASHES: adminTokenHash,
-        // production 档位倒挂收口：等回执注册与对账 worker 是生产基线
-        //（对照 staging 口径），本用例聚焦 RPC/白名单失败面，基线先过档。
         UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: "true",
         RECONCILE_WORKER_ENABLED: "true",
         RECONCILE_POLL_INTERVAL_MS: "30000",
-        // production 受管 PG 的显式轮询基线（受管库成本安全门三档同口径）。
         UVP_INDEXER_POLL_INTERVAL_MS: "5000",
-        // production 要求 chainId 显式（env 或地址清单），基线一并带上。
         UVP_CHAIN_ID: "8453"
       };
-      // 无 UVP_RPC_URL：不再静默回落 127.0.0.1:8545。
       expect(() => loadConfigFromEnv(base)).toThrow(/UVP_RPC_URL is required in production/);
       expect(() => loadConfigFromEnv({ ...base, UVP_RPC_URL: "http://127.0.0.1:8545" }))
         .toThrow(/non-local RPC/);
       expect(() => loadConfigFromEnv({ ...base, UVP_RPC_URL: "https://base-mainnet.example/rpc" }))
         .not.toThrow();
-      // 空白名单在 production 同样拦截。
       expect(() => loadConfigFromEnv({
         ...base,
         UVP_RPC_URL: "https://base-mainnet.example/rpc",
         GOVERNANCE_ADMIN_REVIEWER_IDS: ""
       })).toThrow(/GOVERNANCE_ADMIN_REVIEWER_IDS is required in production/);
-      // 缺口令因子（明文白名单自报头仅限 local 档）在 production 拦截。
       const productionReady = { ...base, UVP_RPC_URL: "https://base-mainnet.example/rpc" };
       const { GOVERNANCE_ADMIN_TOKEN_HASHES: _tokenHashes, ...withoutAdminToken } = productionReady;
       expect(() => loadConfigFromEnv(withoutAdminToken)).toThrow(/GOVERNANCE_ADMIN_TOKEN_HASHES is required in production/);
@@ -286,9 +328,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
   describe("activity-feed identity", () => {
     it("requires a wallet session outside local and enforces the claimed wallet", async () => {
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await seedPlan(store);
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, { ...requiredRouterStores(),
         productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
@@ -304,7 +346,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
           clockToleranceSeconds: 60
         }
       });
-      // 无会话（自报 query/header 钱包不再是身份）→ 401。
       const anonymous = await router.handle({
         method: "GET",
         pathname: "/product/me/activity-feed",
@@ -312,7 +353,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       });
       expect(anonymous).toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
 
-      // 会话锚定后可读；声称他人钱包 → 403。
       const session = await login(router, supplierAccount);
       const own = await router.handle({
         method: "GET",
@@ -333,9 +373,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
   describe("invite token", () => {
     it("rejects invite accept/reject without the one-time token", async () => {
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await seedPlan(store);
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, { ...requiredRouterStores(),
         productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
@@ -351,7 +391,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       expect(invite.status).toBe(201);
       const inviteId = (invite.body as { invite: { inviteId: string } }).invite.inviteId;
       const inviteToken = (invite.body as { inviteToken?: string }).inviteToken;
-      // token 存在且未泄露 tokenHash。
       expect(typeof inviteToken).toBe("string");
       expect(invite.body).not.toHaveProperty(["invite", "tokenHash"]);
 
@@ -393,7 +432,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       });
       expect(accepted.status).toBe(200);
 
-      // 已接受的 invite 再拒绝也要求 token（哈希比对）。
       const rejectWithoutToken = await router.handle({
         method: "POST",
         pathname: `/product/invites/${inviteId}/reject`,
@@ -405,8 +443,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
   describe("join loop", () => {
     it("blocks approval when the subject is actively bound to another account (409)", async () => {
-      const store = new MemoryProjectionStore();
-      // rival 账号占用同一 subject（subjectId→account 方向冲突）。
+      const store = stores.projectionStore;
       await seedPlan(store, {
         foreignBinding: {
           subjectId: derivedJoinSubject(supplierWallet),
@@ -439,8 +476,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("requires governance-admin authority to broadcast identity registration during approval", async () => {
-      const store = new MemoryProjectionStore();
-      // 无 active binding：审批需要触发 registerIdentity。
+      const store = stores.projectionStore;
       await seedPlan(store);
       const router = createApiRouter(store, joinRouterOptions());
       const session = await login(router, supplierAccount);
@@ -457,7 +493,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         headers: publisherAnchoredHeaders,
         body: {}
       });
-      // publisher 审批（无 governance_admin 角色）→ 登记 403，申请留审。
       const approved = await router.handle({
         method: "POST",
         pathname: `/store/join-applications/${applicationId}/approve`,
@@ -468,9 +503,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("keeps the application under review and refuses on_chain evidence when the identity registration broadcast fails", async () => {
-      // approve 不得吞身份登记广播失败——申请留 under_review（可重试
-      // 审批恢复），不落 authorized、tx 证据不冒充 on_chain 已记录。
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await seedPlan(store);
       const failingGovernance = createGovernanceService({
         store: new (await import("../src/governance/index.js")).InMemoryGovernanceStore(),
@@ -483,12 +516,11 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
           }
         }
       });
-      // 审批链路要求既有 supplier review（registerIdentity 的前置）。
       await failingGovernance.reviewSupplier(
         { subjectId: derivedJoinSubject(supplierWallet), status: "approved_for_broadcast" },
         { adminId: "governance-admin-1", role: "governance_admin" }
       );
-      const router = createApiRouter(store, {
+      const router = createApiRouter(store, { ...requiredRouterStores(),
         ...joinRouterOptions(),
         governanceService: failingGovernance
       });
@@ -506,7 +538,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         headers: publisherAnchoredHeaders,
         body: {}
       });
-      // 运营（governance_admin + operator 能力）审批：登记广播失败。
       const approved = await router.handle({
         method: "POST",
         pathname: `/store/join-applications/${applicationId}/approve`,
@@ -525,14 +556,10 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("does not let a concurrent decision overwrite the terminal state after identity pairing", async () => {
-      // approve 的终态翻转走条件 UPDATE——身份已登记但 CAS 败者
-      // 不得把 rejected（或其他赢家终态）整行覆盖成 authorized。
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await seedPlan(store, { withSupplierBinding: true });
-      // 代理 join store：可指定下一次读取返回过期快照（under_review），
-      // 精确模拟"approve 读快照后、终态翻转前"的并发决策窗口。
-      const { InMemoryStoreJoinApplicationStore } = await import("../src/store/join/index.js");
-      const realJoinStore = new InMemoryStoreJoinApplicationStore();
+      const { PostgresStoreJoinApplicationStore } = await import("../src/store-access-postgres-stores.js");
+      const realJoinStore = new PostgresStoreJoinApplicationStore({ database: failClosedDatabase });
       let doctorNextRead = false;
       const staleSnapshotStore: StoreJoinApplicationStore = {
         putApplication: (record) => realJoinStore.putApplication(record),
@@ -549,7 +576,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         appendEvent: (record) => realJoinStore.appendEvent(record),
         listEvents: (applicationId) => realJoinStore.listEvents(applicationId)
       };
-      const router = createApiRouter(store, { ...joinRouterOptions(), storeJoinApplicationStore: staleSnapshotStore });
+      const router = createApiRouter(store, { ...requiredRouterStores(), ...joinRouterOptions(), storeJoinApplicationStore: staleSnapshotStore });
       const session = await login(router, supplierAccount);
       const submitted = await router.handle({
         method: "POST",
@@ -564,7 +591,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         headers: publisherAnchoredHeaders,
         body: {}
       });
-      // 并发决策赢家先落终态 rejected。
       const rejected = await router.handle({
         method: "POST",
         pathname: `/store/join-applications/${applicationId}/reject`,
@@ -573,8 +599,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       });
       expect(rejected.status).toBe(200);
 
-      // approve 读取的快照是过期的 under_review，但行已是 rejected——
-      // CAS 失败，不得覆盖（active binding 场景下身份证据已在链上）。
       doctorNextRead = true;
       const approved = await router.handle({
         method: "POST",
@@ -595,7 +619,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
   describe("version activate", () => {
     it("rejects re-anchoring an existing version and unprojected new anchors", async () => {
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await seedPlan(store);
       const productService = createProductService(store, { productSchemaResolver: exampleSchemaResolver() });
       const metadataStore = new MemoryStoreZhixuVersionMetadataStore();
@@ -610,12 +634,10 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const activated = await versionService.activate(EXAMPLE_ZHIXU_ID, versionId!, {});
       expect(activated.version.status).toBe("active");
 
-      // 改锚（planId 换成另一个 plan）→ 409。
       await expect(versionService.activate(EXAMPLE_ZHIXU_ID, versionId!, {
         planId: "0x0000000000000000000000000000000000000000000000000000000000000fff"
       })).rejects.toMatchObject({ code: "version_anchor_immutable" });
 
-      // 凭空登记未投影 plan 的新版本 → 409。
       await expect(versionService.activate(EXAMPLE_ZHIXU_ID, "version-fresh", {
         planId: "0x0000000000000000000000000000000000000000000000000000000000000abc",
         planHash: "0x0000000000000000000000000000000000000000000000000000000000000def"
@@ -623,8 +645,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("keeps at most one active version per series (single-active invariant)", async () => {
-      // 并发/连续激活不得留下双 active——内存后端在写入 active 时
-      // 同步撤销同 series 其他 active（持久后端由 0021 部分唯一索引裁决）。
       const metadataStore = new MemoryStoreZhixuVersionMetadataStore();
       const timestamp = new Date("2026-04-28T00:00:00Z").toISOString();
       const versionRecord = (versionId: string, planId: Hex) => ({
@@ -651,12 +671,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
   });
 
   describe("governance stores and hashing", () => {
-    it("putReview does not overwrite created_at on conflict (sqlite)", async () => {
-      const dir = mkdtempSync(join(tmpdir(), "uvp-audit3-governance-"));
-      tempDirs.push(dir);
-      const database = openSqliteDatabase(join(dir, "governance.db"));
-      runSqliteMigrations({ database, migrationsDirectory: migrationsDirectory() });
-      const governanceStore = new SqliteGovernanceStore({ database });
+    it("putReview does not overwrite created_at on conflict (postgres)", async () => {
+      const governanceStore = new PostgresGovernanceStore({ database: failClosedDatabase });
       const review = {
         reviewId: "review_created_at",
         subjectType: "supplier" as const,
@@ -674,7 +690,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         updatedAt: "2026-01-01T00:00:00.000Z"
       };
       await governanceStore.putReview(review);
-      // 调用方误传新 createdAt：库内 created_at 必须保持初值。
       await governanceStore.putReview({
         ...review,
         status: "approved_for_broadcast",
@@ -694,13 +709,12 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const account = "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" as Address;
       const admin = { adminId: "gov-reviewer-1", role: "governance_admin" as const };
       const service = createGovernanceService({
+        store: new InMemoryGovernanceStore(),
         adapter: {
           registerIdentity: async () => ({ status: "simulated_tx", retryable: false, simulated: true }),
           revokeIdentity: async () => ({ status: "simulated_tx", retryable: false, simulated: true })
         }
       });
-      // 带 metadata/policy 的 review：registerIdentity 的 descriptor 哈希材料
-      // 必须包含原文（两侧口径一致，不按 null 重建）。
       await service.reviewSupplier({
         subjectId,
         status: "approved_for_broadcast",
@@ -710,8 +724,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const registered = await service.registerIdentity({ subjectId, account }, admin);
       const descriptorHashWithDocuments = registered.request.descriptorHash;
       expect(descriptorHashWithDocuments).toMatch(/^0x[0-9a-f]{64}$/);
-      // 对照：无 metadata/policy 的 subject 得到不同 descriptor 哈希——
-      // 材料原文确实参与哈希。
       const bareSubjectId = "0x" + "32".repeat(32) as Hex;
       await service.reviewSupplier({ subjectId: bareSubjectId, status: "approved_for_broadcast" }, admin);
       const bareRegistered = await service.registerIdentity({ subjectId: bareSubjectId, account }, admin);
@@ -725,12 +737,11 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const admin = { adminId: "gov-reviewer-1", role: "governance_admin" as const };
       let failRevoke = false;
       const service = createGovernanceService({
+        store: new InMemoryGovernanceStore(),
         adapter: {
           registerIdentity: async () => ({ status: "simulated_tx", retryable: false, simulated: true }),
           revokeIdentity: async () => {
             if (failRevoke) {
-              // 确定失败（非可重试、无 txHash）才允许回滚 review；可重试失败
-              // 走重试收敛，不能把可能已上链的 revoke 回滚成前置状态。
               return { status: "failed", errorCode: "adapter_down", retryable: false, simulated: false };
             }
             return { status: "simulated_tx", retryable: false, simulated: true };
@@ -741,10 +752,8 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       failRevoke = true;
       const revoked = await service.revokeIdentity({ subjectId, bindingId }, admin);
       expect(revoked.broadcast.status).toBe("failed");
-      // 广播失败：review 不得停留在 revoked（前置状态回退）。
       const reviews = await service.listReviews({ subjectType: "supplier", subjectId });
       expect(reviews[0]?.status).toBe("approved_for_broadcast");
-      // 广播恢复成功后：review 落 revoked。
       failRevoke = false;
       const retried = await service.revokeIdentity({ subjectId, bindingId }, admin);
       expect(retried.broadcast.status).toBe("simulated_tx");
@@ -758,9 +767,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const bindingId = "0x" + "66".repeat(32) as Hex;
       const admin = { adminId: "gov-reviewer-1", role: "governance_admin" as const };
       const service = createGovernanceService({
+        store: new InMemoryGovernanceStore(),
         adapter: {
           registerIdentity: async () => ({ status: "simulated_tx", retryable: false, simulated: true }),
-          // 可重试失败可能已上链：不回滚前置状态，交重试/对账收敛。
           revokeIdentity: async () => ({ status: "failed", errorCode: "adapter_down", retryable: true, simulated: false })
         }
       });
@@ -778,19 +787,17 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         metadata: { supplierId: "s1" }
       };
       const first = hashIdentityDescriptor(base);
-      // 替换 profile/capability/reputation 任一主体 → descriptorHash 变化。
       expect(hashIdentityDescriptor({ ...base, profile: { displayName: "A" } })).not.toBe(first);
       expect(hashIdentityDescriptor({ ...base, capability: { tags: ["t"] } })).not.toBe(first);
       expect(hashIdentityDescriptor({ ...base, reputation: { score: 5 } })).not.toBe(first);
-      // 相同材料 → 稳定哈希。
       expect(hashIdentityDescriptor({ ...base, profile: { displayName: "A" } }))
         .toBe(hashIdentityDescriptor({ ...base, profile: { displayName: "A" } }));
     });
   });
 
-  describe("decoration memory store alignment", () => {
-    it("rejects duplicate (planId, version) appends like the sqlite unique constraint", async () => {
-      const decorationStore = new InMemoryStoreZhixuDecorationStore();
+  describe("decoration durable store alignment", () => {
+    it("rejects duplicate (planId, version) appends like the unique constraint", async () => {
+      const decorationStore = new PostgresStoreZhixuDecorationStore({ database: failClosedDatabase });
       const record = {
         decorationId: "deco_1",
         planId: "0x" + "21".repeat(32) as Hex,
@@ -805,7 +812,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("keeps delegation grants append-only and only updates revocation fields", async () => {
-      const delegationStore = new InMemoryStorePublisherDelegationStore();
+      const delegationStore = new PostgresStorePublisherDelegationStore({ database: failClosedDatabase });
       await delegationStore.appendDelegation({
         delegationId: "dlg_1",
         publisherAddress: publisherAddress,
@@ -813,7 +820,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         grantedByAddress: publisherAddress,
         grantedAt: "2026-01-01T00:00:00.000Z"
       });
-      // 同 delegationId 再写：只更新撤销字段，publisher/member 不可被改写。
       await delegationStore.appendDelegation({
         delegationId: "dlg_1",
         publisherAddress: rivalWallet,
@@ -835,7 +841,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
   describe("sessions challenge consume", () => {
     it("consumes a challenge exactly once (conditional update)", async () => {
-      const store = new InMemoryStoreWalletSessionStore();
+      const store = new PostgresStoreWalletSessionStore({ database: failClosedDatabase });
       const service = createStoreSessionService({
         store,
         verifyWalletMessage: async () => true
@@ -843,7 +849,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const challenge = await service.createChallenge({ address: supplierWallet });
       const first = await service.verify({ nonce: challenge.nonce, signature: "0x" + "ab".repeat(32) });
       expect(first.token).toMatch(/^uvs_/);
-      // 重放同一 nonce：条件占位失败（读-判-写竞态不得双通过）。
       await expect(service.verify({ nonce: challenge.nonce, signature: "0x" + "ab".repeat(32) }))
         .rejects.toMatchObject({ code: "store_challenge_invalid" });
     });
@@ -861,7 +866,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       expect(verifyProofBundle({
         zhixuHash: { actual: matched, expected: matched }
       }).valid).toBe(false);
-      // 单侧缺失按 mismatch 记。
       const oneSided = verifyProofBundle({ metadataHash: { expected: matched } });
       expect(oneSided.valid).toBe(false);
       expect(oneSided.checks.find((check) => check.name === "metadataHash")?.status).toBe("mismatch");
@@ -870,8 +874,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
   describe("evidence backup wiring", () => {
     it("translates URIs between primary and backup spaces for verify/restore", async () => {
-      // 主存储 s3://primary-bucket/prefix/...，备份 s3://backup-bucket/...——
-      // 两边 URI 字符串不同，直传主 URI 会抛 "not managed by"。
       const objects = new Map<string, Uint8Array>();
       const primary = new ObjectEvidenceStorage({
         client: {
@@ -921,7 +923,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const put = await storage.put({ evidenceId: "ev_audit3", bytes: new TextEncoder().encode("payload") });
       expect(put.storageURI).toBe("s3://primary-bucket/prefix/ev_audit3");
 
-      // 主副本损坏后：verify 定位到备份对象、restore 写回主存储。
       objects.delete(put.storageURI);
       const verified = await storage.verifyBackup(put.storageURI, "0x" + "aa".repeat(32));
       expect(verified).toEqual({ backupPresent: true, hashMatches: false });
@@ -929,11 +930,11 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("exposes admin-gated backup verify/restore endpoints", async () => {
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await seedPlan(store);
-      const primary = new InMemoryEvidenceStorage();
-      const backup = new InMemoryEvidenceStorage();
-      const router = createApiRouter(store, {
+      const primary = new LocalEvidenceStorage({ rootDir: tempDir() });
+      const backup = new LocalEvidenceStorage({ rootDir: tempDir() });
+      const router = createApiRouter(store, { ...requiredRouterStores(),
         productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
@@ -943,11 +944,11 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const upload = await router.handle({
         method: "POST",
         pathname: "/product/evidence",
-        headers: { "x-uvp-principal-id": "seller" },
+        headers: { "x-uvp-principal-id": "slot-b" },
         body: {
           orderId: "order-1",
-          stageIdentifier: "export-documents",
-          documentType: "invoice",
+          stageIdentifier: "stage-1",
+          documentType: "doc-1",
           textPayload: "audit3 backup payload"
         }
       });
@@ -955,12 +956,10 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const evidenceId = (upload.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
       const contentHash = (upload.body as { evidence: { contentHash: string } }).evidence.contentHash;
 
-      // owner（非 admin）不得触发 verify/restore：restore 向主存储写回，
-      // verify 暴露副本布局——读级主体一律 403（角色先于存在性判定）。
       const ownerVerify = await router.handle({
         method: "POST",
         pathname: `/product/evidence/${evidenceId}/backup-verify`,
-        headers: { "x-uvp-principal-id": "seller" }
+        headers: { "x-uvp-principal-id": "slot-b" }
       });
       expect(ownerVerify.status).toBe(403);
       expect(ownerVerify.body).toMatchObject({ error: "forbidden" });
@@ -968,12 +967,11 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const ownerRestore = await router.handle({
         method: "POST",
         pathname: `/product/evidence/${evidenceId}/backup-restore`,
-        headers: { "x-uvp-principal-id": "seller" }
+        headers: { "x-uvp-principal-id": "slot-b" }
       });
       expect(ownerRestore.status).toBe(403);
       expect(ownerRestore.body).toMatchObject({ error: "forbidden" });
 
-      // admin 会话：verify/restore 正常（接口注释即契约：admin 专用）。
       const adminHeaders = { "x-uvp-admin-id": "audit-admin", "x-uvp-admin-role": "admin" };
       const adminVerify = await router.handle({
         method: "POST",
@@ -995,7 +993,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
         backup: { restored: true, hashMatches: true }
       });
 
-      // 无身份 → 401。
       const anonymous = await router.handle({
         method: "POST",
         pathname: `/product/evidence/${evidenceId}/backup-verify`
@@ -1007,9 +1004,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
   describe("store read surfaces", () => {
     it("requires store.read for /store/suppliers reads", async () => {
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await seedPlan(store);
-      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+      const router = createApiRouter(store, { ...requiredRouterStores(),  productRuntimeEnvironment: "local",
 
         productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
@@ -1026,16 +1023,15 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("filters delisted zhixus from store search for non-operators", async () => {
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await seedPlan(store);
-      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+      const router = createApiRouter(store, { ...requiredRouterStores(),  productRuntimeEnvironment: "local",
 
         productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
         submissionVerifyingContract: contractAddress,
         storeAuthConfig: devAnchoredStoreAuth
       });
-      // 上架后下架同一 plan。
       const imported = await router.handle({
         method: "POST",
         pathname: "/store/listings/import",
@@ -1079,9 +1075,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
 
     it("rejects unsupported store order filter status values", async () => {
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await seedPlan(store);
-      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+      const router = createApiRouter(store, { ...requiredRouterStores(),  productRuntimeEnvironment: "local",
 
         productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
@@ -1101,10 +1097,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
           }
         }
       });
-      // 运行时订单读是运营观察面：与 /store/audit 同能力门
-      //（store.audit.read）——匿名与纯锚定钱包（仅证明钱包控制权）都
-      // 不可读；持有该能力的会话锚定后死词 "disputed" 仍按 400 拒绝，
-      // 不静默空集。
       const anonymous = await router.handle({
         method: "GET",
         pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}/orders`,
@@ -1142,9 +1134,9 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
   describe("staging readiness", () => {
     it("does not treat an unknown rebuild status as ready", async () => {
-      const store = new MemoryProjectionStore();
+      const store = stores.projectionStore;
       await seedPlan(store);
-      const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+      const router = createApiRouter(store, { ...requiredRouterStores(),  productRuntimeEnvironment: "local",
 
         productSchemaResolver: exampleSchemaResolver(),
         submissionChainId: 31337,
@@ -1153,7 +1145,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
       const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness", headers: adminHeaders });
       expect(response.status).toBe(503);
       const body = response.body as { reasons: string[]; indexer: { rebuildReady: boolean; rebuildStatus: string } };
-      // 重建状态未知（无 rebuild 记录）→ rebuildReady=false + 明确 reason。
       expect(body.indexer.rebuildStatus).toBe("unknown");
       expect(body.indexer.rebuildReady).toBe(false);
       expect(body.reasons).toContain("projection_rebuild_not_complete");
@@ -1163,6 +1154,7 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
 
 function joinRouterOptions() {
   return {
+    ...requiredRouterStores(),
     productRuntimeEnvironment: "local" as const,
     productSchemaResolver: exampleSchemaResolver(),
     submissionChainId: 31337,
@@ -1202,7 +1194,6 @@ async function login(router: ApiRouter, account: ReturnType<typeof privateKeyToA
   return (verify.body as { token: string }).token;
 }
 
-/** 建单者（运营方）本地 dev 会话头：createdBy 由服务端据此锚定。 */
 const bffCreatorHeaders = { "x-uvp-wallet-address": "0x7777777777777777777777777777777777777777" };
 
 async function createDraft(router: ApiRouter): Promise<{ readonly draftId: string }> {
@@ -1213,9 +1204,9 @@ async function createDraft(router: ApiRouter): Promise<{ readonly draftId: strin
     body: {
       zhixuId: EXAMPLE_ZHIXU_ID,
       title: "audit3 draft",
-      businessType: "parallel-export",
+      businessType: "type-1",
       totalAmount: "100",
-      currency: "USDC"
+      currency: "tok-1"
     }
   });
   expect(response.status, JSON.stringify(response.body)).toBe(201);
@@ -1223,7 +1214,7 @@ async function createDraft(router: ApiRouter): Promise<{ readonly draftId: strin
 }
 
 async function seedPlan(
-  store: MemoryProjectionStore,
+  store: ProjectionStore,
   options: {
     readonly withSupplierBinding?: boolean;
     readonly foreignBinding?: { readonly subjectId: Hex; readonly account: Address };
@@ -1259,7 +1250,7 @@ async function seedPlan(
 }
 
 async function seedOrderWithAuthorization(
-  store: MemoryProjectionStore,
+  store: ProjectionStore,
   submitter: Address,
   signal: { readonly sourceId: Hex; readonly signalId: Hex }
 ): Promise<void> {
@@ -1290,6 +1281,12 @@ async function seedOrderWithAuthorization(
   });
 }
 
+function tempDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "uvp-failclosed-"));
+  tempDirs.push(dir);
+  return dir;
+}
+
 function derivedJoinSubject(address: Address): Hex {
   return keccak256(stringToBytes(`uvp:store:join:subject:v1:${address.toLowerCase()}`)) as Hex;
 }
@@ -1306,11 +1303,6 @@ function chainEvent(blockNumber: bigint, logIndex: number, eventName: string, ar
   };
 }
 
-function migrationsDirectory(): string {
-  return join(process.cwd(), "migrations");
-}
-
-/** testnet/production 边界可接受的内存对象存储客户端。 */
 function memoryObjectClient() {
   const objects = new Map<string, Uint8Array>();
   return {

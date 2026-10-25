@@ -1,14 +1,19 @@
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
+import { randomUUID } from "node:crypto";
 import {
   createGovernanceService,
+  InMemoryGovernanceStore,
   type GovernancePrincipal,
 } from "../../governance/index.js";
 import type { ProductOrderApiDTO, ProductService } from "../../product/application/service.js";
 import type { ProjectionStore } from "../../storage/projection-store.js";
-import {
-  createStoreSupplierService,
-  InMemoryStoreSupplierMetadataStore,
-} from "../suppliers/service.js";
+import { createStoreSupplierService } from "../suppliers/service.js";
+import type {
+  StoreSupplierAuditInput,
+  StoreSupplierAuditRecord,
+  StoreSupplierMetadataRecord,
+  StoreSupplierMetadataStore
+} from "../suppliers/types.js";
 import type { Address, Hex } from "../../shared/types.js";
 import {
   hasStoreCapability,
@@ -312,6 +317,7 @@ async function checkDraftImportCompileReview(
       const draftWorkflow = createStoreZhixuDraftWorkflowService({
         draftStore: new MemoryStoreZhixuDraftStore(),
         governanceService: createGovernanceService({
+          store: new InMemoryGovernanceStore(),
           ...(options.now ? { now: options.now } : {}),
         }),
         projectionStore: options.projectionStore,
@@ -374,6 +380,63 @@ async function checkDraftImportCompileReview(
   );
 }
 
+// 闭环 dry-run 的供应商档案 scratch store：检查在请求内创建并读回一次性
+// 草稿数据，不落任何持久化引擎（与 docking/draft dry-run 的内存 fixture
+// 同口径）。命名刻意避开引擎前缀：它不是存储引擎选型，而是 closure
+// dry-run 的内置夹具。
+class ClosureDryRunSupplierMetadataStore implements StoreSupplierMetadataStore {
+  readonly #suppliers = new Map<string, StoreSupplierMetadataRecord>();
+  readonly #audits: StoreSupplierAuditRecord[] = [];
+
+  async getSupplier(supplierId: string): Promise<StoreSupplierMetadataRecord | undefined> {
+    return this.#suppliers.get(supplierId);
+  }
+
+  async findSupplierBySubjectId(supplierSubjectId: Hex): Promise<StoreSupplierMetadataRecord | undefined> {
+    return [...this.#suppliers.values()].find(
+      (supplier) => supplier.supplierSubjectId === supplierSubjectId,
+    );
+  }
+
+  async listSuppliers(): Promise<readonly StoreSupplierMetadataRecord[]> {
+    return [...this.#suppliers.values()].sort(
+      (left, right) =>
+        right.updatedAt.localeCompare(left.updatedAt) ||
+        left.supplierId.localeCompare(right.supplierId),
+    );
+  }
+
+  async putSupplier(record: StoreSupplierMetadataRecord): Promise<void> {
+    this.#suppliers.set(record.supplierId, record);
+  }
+
+  async putSupplierIfReviewStatus(
+    record: StoreSupplierMetadataRecord,
+    expected: StoreSupplierMetadataRecord["reviewStatus"],
+  ): Promise<boolean> {
+    const current = this.#suppliers.get(record.supplierId);
+    if (current && current.reviewStatus !== expected) {
+      return false;
+    }
+    this.#suppliers.set(record.supplierId, record);
+    return true;
+  }
+
+  async appendAudit(record: StoreSupplierAuditInput): Promise<void> {
+    this.#audits.push({ ...record, auditId: record.auditId ?? `audit_${randomUUID()}` });
+  }
+
+  async listAudits(supplierId?: string): Promise<readonly StoreSupplierAuditRecord[]> {
+    return this.#audits
+      .filter((audit) => !supplierId || audit.supplierId === supplierId)
+      .sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) ||
+          right.auditId.localeCompare(left.auditId),
+      );
+  }
+}
+
 async function checkSupplierTagAuditReadback(
   options: StoreClosureDryRunOptions,
 ): Promise<StoreClosureCheckDTO> {
@@ -402,11 +465,12 @@ async function checkSupplierTagAuditReadback(
       requiredCapabilities: required,
     },
     async () => {
-      const metadataStore = new InMemoryStoreSupplierMetadataStore();
+      const metadataStore = new ClosureDryRunSupplierMetadataStore();
       const supplierService = createStoreSupplierService({
         productService: options.productService,
         store: options.projectionStore,
         governanceService: createGovernanceService({
+          store: new InMemoryGovernanceStore(),
           ...(options.now ? { now: options.now } : {}),
         }),
         metadataStore,

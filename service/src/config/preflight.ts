@@ -69,7 +69,6 @@ export interface ConfigDiagnostics {
     readonly governanceSigner: PrivateKeyRoleDiagnostics;
     readonly governanceAdminReviewer: {
       readonly configuredCount: number;
-      /** GOVERNANCE_ADMIN_TOKEN_HASHES 是否配置（非 local 口令因子）。 */
       readonly adminTokenConfigured: boolean;
       readonly publicTrustAuthority: false;
     };
@@ -77,17 +76,7 @@ export interface ConfigDiagnostics {
       readonly configuredCount: number;
     };
   };
-  /**
-   * 链上时钟拨表 keeper：enabled 来自配置段，私钥角色姿态与
-   * relayerGasPayer 同口径（privateKeyConfigured/addressMatches）。
-   * staging-readiness 以此为装配判据（缺即红）。
-   */
   readonly timerKeeper: PrivateKeyRoleDiagnostics & { readonly enabled: boolean };
-  /**
-   * dock keeper 装配事实：route 明细（binding 全集 + 预组装
-   * open/attach calldata）只存在于云编译产物，链轨无投影源可重建
-   * route 清单——routeSourceAssembled 如实反映当前装配（false）。
-   */
   readonly dockAutomation: { readonly enabled: boolean; readonly routeSourceAssembled: false };
   readonly storage: {
     readonly driver: string;
@@ -240,15 +229,13 @@ export function buildConfigDiagnostics(
   const storeAuth = effectiveStoreAuthConfig(config);
   const storeAuthEvidence = assessStoreAuthEvidence(storeAuth, config.security.environment);
   const preflight = options.preflight ?? {
-    // 未传入执行结果 = 预检尚未运行，无论 strict 与否都如实记 skipped
-    //（strict 部署正常都会经 runConfigPreflight 传入真实结果）。
     status: "skipped" as const,
     checks: []
   };
 
   return {
     environment: config.security.environment,
-    storageDriver: config.database.driver,
+    storageDriver: "postgres",
     relayerConfigured,
     network: {
       chainId: config.network.chainId,
@@ -264,9 +251,6 @@ export function buildConfigDiagnostics(
         relayerPrivateKeyConfigured,
         permissiveAuthorizationRequested
       }),
-      // UVP_CONTRACTS_JSON 以 env 内联 JSON 优先的合并顺序静默覆盖地址
-      // 清单同名合约：清单与 JSON 分头维护时实际生效地址无从核对，至少
-      // 在诊断面留痕（告警不拦截——热改地址是合法运维手段）。
       ...safeListContractJsonOverrides(env).map((name) =>
         `UVP_CONTRACTS_JSON overrides the UVP_ADDRESS_MANIFEST entry for ${name}; the inline JSON address silently wins`
       )
@@ -307,8 +291,8 @@ export function buildConfigDiagnostics(
       routeSourceAssembled: false
     },
     storage: {
-      driver: config.database.driver,
-      durable: config.database.driver !== "memory",
+      driver: "postgres",
+      durable: true,
       migrationsAutoRun: config.database.migrationsAutoRun
     },
     evidenceStorage: {
@@ -443,10 +427,7 @@ function runStoreAuthPreflight(
   const envMode = env.STORE_AUTH_MODE?.trim();
   const storeAuth = effectiveStoreAuthConfig(config);
   const mode = envMode === "dev_headers" || envMode === "jwt" ? envMode : storeAuth.mode;
-  // testnet 是公开测试网，与 staging/production 同按 strict runtime 收口。
   const strictRuntime = config.security.environment !== "local";
-  // testnet 不允许 dev_headers——自报 store 头不是 testnet 的身份证明；
-  // STORE_AUTH_MODE 必须显式配置。
   const devHeadersAllowed = config.security.environment === "local";
   const evidence = assessStoreAuthEvidence(storeAuth, config.security.environment);
 
@@ -460,8 +441,6 @@ function runStoreAuthPreflight(
     pass(checks, "store_auth.dev_headers");
   }
 
-  // dev 锚定地址头 local-only：非 local 自报地址锚定等于伪造身份
-  //（env 解析层已拒绝，这里是纵深防御）。
   if (strictRuntime && enabledEnv(env, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")) {
     fail(checks, errors, "store_auth.dev_anchored_header", "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER is only allowed in local development");
   } else {
@@ -533,28 +512,22 @@ function runProductionSafetyPreflight(
     fail(checks, errors, "security.log_redaction", "LOG_REDACTION_ENABLED=false is forbidden in production");
   }
 
-  if (config.database.driver === "postgres") {
+  if (/^postgres(?:ql)?:\/\//.test(config.database.url)) {
     pass(checks, "storage.driver");
   } else {
-    fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production");
+    fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_URL must be a postgres:// DSN in production");
   }
-  // production 的 RPC 必须显式且非本地——env 缺省会静默回落
-  // 127.0.0.1:8545。与 staging/testnet 同口径。
   if (isNonLocalRpcUrl(config.network.rpcUrl)) {
     pass(checks, "network.rpc_url_configured");
   } else {
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must be explicitly configured to a non-local RPC endpoint in production");
   }
   checkEndpointScheme(config, checks, errors);
-  // env 层禁令镜像：chainId 必须显式来自 env 或地址清单（缺省回落 31337
-  // 会把生产链身份锚到 Anvil 语义）。
   if (isChainIdExplicitlyConfigured(env)) {
     pass(checks, "network.chain_id_explicit");
   } else {
     fail(checks, errors, "network.chain_id_explicit", "UVP_CHAIN_ID must be explicitly configured in production (env var or address manifest network.chainId); refusing the 31337 fallback");
   }
-  // production 强制 admin 白名单非空（空=任意自报
-  // admin 通过的 fail-open 已在 governance/auth.ts 收口，这里拦配置）。
   if (config.operatorRoles.adminReviewers.length > 0) {
     pass(checks, "operator.governance_admin_reviewer");
   } else {
@@ -565,9 +538,6 @@ function runProductionSafetyPreflight(
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in production");
   }
-  // 管理面生产基线：非 local 要求口令/签名因子——
-  // 明文白名单自报头不是完整凭据（governance/auth.ts 同口径拒
-  // 绝），缺口令哈希直接拦截启动。
   if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
     pass(checks, "operator.governance_admin_token");
   } else {
@@ -580,8 +550,6 @@ function runProductionSafetyPreflight(
     pass(checks, "storage.migrations_auto_run");
   }
 
-  // confirmations 锚是显式的浅缓冲覆盖：production 不允许静默落到 env
-  // 默认值 1。默认 finalized 锚以最终性标签为上界，不消费确认数。
   if (config.network.finalityAnchor === "confirmations") {
     if (env.UVP_FINALITY_CONFIRMATIONS?.trim() && config.network.finalityConfirmations > 0) {
       pass(checks, "network.finality_confirmations_explicit");
@@ -589,9 +557,6 @@ function runProductionSafetyPreflight(
       fail(checks, errors, "network.finality_confirmations_explicit", "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production when UVP_FINALITY_ANCHOR=confirmations");
     }
 
-    // 生产最终性下限。确认数是 reorg 缓冲——配 1 时边界块自身的
-    // 单块重组即可穿透缓冲（哈希连续性校验只能事后补救），形同虚设；
-    // 生产至少 2 个确认。
     if (config.network.finalityConfirmations >= 2) {
       pass(checks, "network.finality_confirmations_floor");
     } else {
@@ -613,16 +578,12 @@ function runProductionSafetyPreflight(
     pass(checks, "product.registration_adapter");
   }
 
-  // 档位倒挂收口（与 staging 同口径）：fire-and-forget 注册会让 BFF 在
-  // 交易未上链时就回报成功——生产必须等回执。
   if (config.productBff.waitForReceipt) {
     pass(checks, "product.registration_receipt");
   } else {
     fail(checks, errors, "product.registration_receipt", "UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in production");
   }
 
-  // 档位倒挂收口（与 staging 同口径）：对账 worker 缺席时链上回执与
-  // 投影的漂移只能靠人工发现。
   if (config.reconcile.enabled) {
     pass(checks, "reconcile.worker_enabled");
   } else {
@@ -654,16 +615,12 @@ function runProductionSafetyPreflight(
     fail(checks, errors, "contracts.identity_registry", "UVPIdentityRegistry contract address is required in production");
   }
 
-  // env 层禁令镜像（validateProductionSafety）：env 私钥治理广播在
-  // production 被禁——静默放行会让治理写面回落 env-key 签名者。
   if (config.governance.broadcastEnabled) {
     fail(checks, errors, "governance.broadcast_enabled", "GOVERNANCE_BROADCAST_ENABLED=true uses env private-key governance and is forbidden in production");
   } else {
     pass(checks, "governance.broadcast_enabled");
   }
 
-  // env 层禁令镜像（validateProductionSafety 的证据 s3 基线，对齐 staging
-  // 段同名检查项）：非 durable/无凭据的证据面不得进生产。
   if (config.evidenceStorage.adapter === "s3") {
     pass(checks, "evidence.storage_adapter");
   } else {
@@ -692,7 +649,7 @@ function requireDurableStoreMetadata(
   errors: string[],
   environment: "production" | "testnet" | "staging"
 ): void {
-  if (config.database.driver === "postgres") {
+  if (/^postgres(?:ql)?:\/\//.test(config.database.url)) {
     pass(checks, "store_metadata.durable");
     return;
   }
@@ -729,14 +686,12 @@ function runTestnetSafetyPreflight(
     fail(checks, errors, "security.log_redaction", "LOG_REDACTION_ENABLED=false is forbidden in testnet");
   }
 
-  if (config.database.driver === "postgres") {
+  if (/^postgres(?:ql)?:\/\//.test(config.database.url)) {
     pass(checks, "storage.driver");
   } else {
-    fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in testnet");
+    fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_URL must be a postgres:// DSN in testnet");
   }
   requireDurableStoreMetadata(config, checks, errors, "testnet");
-  // 自动迁移知情门（对照 production/staging 档）：testnet 的受管 PG 同样
-  // 会在启动期自动执行 DDL，必须显式确认知情，避免部署管道无意间改库。
   if (config.database.migrationsAutoRun && env.UVP_TESTNET_ALLOW_AUTO_MIGRATIONS?.trim() !== "1") {
     fail(checks, errors, "storage.migrations_auto_run", "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN=true is forbidden in testnet without UVP_TESTNET_ALLOW_AUTO_MIGRATIONS=1");
   } else {
@@ -756,8 +711,6 @@ function runTestnetSafetyPreflight(
   }
   checkEndpointScheme(config, checks, errors);
 
-  // testnet 强制 admin 白名单非空 + STORE_AUTH_MODE
-  // 显式配置（dev_headers 仅限 local）。
   if (config.operatorRoles.adminReviewers.length > 0) {
     pass(checks, "operator.governance_admin_reviewer");
   } else {
@@ -768,8 +721,6 @@ function runTestnetSafetyPreflight(
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in testnet");
   }
-  // 管理面生产基线：testnet 同按非 local 口径要求
-  // 管理面口令因子。
   if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
     pass(checks, "operator.governance_admin_token");
   } else {
@@ -794,8 +745,6 @@ function runTestnetSafetyPreflight(
     pass(checks, "product.registration_adapter");
   }
 
-  // 档位不对称收口（镜像 production/staging 段）：等回执与对账 worker
-  // 缺席的漂移只能靠人工发现，公开测试网同样强制。
   if (config.productBff.waitForReceipt) {
     pass(checks, "product.registration_receipt");
   } else {
@@ -863,10 +812,10 @@ function runStagingSafetyPreflight(
     fail(checks, errors, "security.log_redaction", "LOG_REDACTION_ENABLED=false is forbidden in staging");
   }
 
-  if (config.database.driver === "postgres") {
+  if (/^postgres(?:ql)?:\/\//.test(config.database.url)) {
     pass(checks, "storage.driver");
   } else {
-    fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in staging");
+    fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_URL must be a postgres:// DSN in staging");
   }
   requireDurableStoreMetadata(config, checks, errors, "staging");
   if (config.database.migrationsAutoRun && env.UVP_STAGING_ALLOW_AUTO_MIGRATIONS?.trim() !== "1") {
@@ -886,10 +835,6 @@ function runStagingSafetyPreflight(
     fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia or staging RPC in staging");
   }
   checkEndpointScheme(config, checks, errors);
-  // finalityConfirmations controls the normal indexing buffer. The indexer
-  // additionally verifies block-hash continuity and performs a bounded
-  // common-ancestor rollback when a reorg is observed. The former
-  // UVP_REORG_BUFFER_BLOCKS check was a ghost config nothing consumed.
   if (config.network.finalityConfirmations > 0) {
     pass(checks, "network.finality_confirmations");
   } else {
@@ -965,14 +910,6 @@ const REQUIRED_STATE_MACHINE_MODULE_KEYS = [
   "lens"
 ] as const;
 
-/**
- * 模块清单 fail-closed：索引器只从 deployment.modules（嵌套写法）取模块
- * 地址，扁平写法会静默丢失全部 patch/dock 投影，常规配置校验发现不了。
- * strict 环境
- * （production/testnet/staging）必须有 stateMachineDeployments，且 active
- * deployment 的 modules 含全部必填模块；缺失即启动失败。local 保持豁免
- * （skip），因为本地开发可以只配状态机地址跑最小路径。
- */
 function runStateMachineModulesManifestPreflight(
   config: ChainServicesConfig,
   checks: ConfigDiagnosticCheck[],
@@ -998,9 +935,6 @@ function runStateMachineModulesManifestPreflight(
     return;
   }
 
-  // activeDeploymentId 与清单不匹配时 selectActiveStateMachineDeployment
-  // 会静默回退（status=active / 首项），拼错的部署 id 因此永远不会暴露——
-  // 运行时用的是另一个部署。不匹配即显式失败。
   if (
     config.network.activeDeploymentId &&
     !deployments.some((deployment) => deployment.deploymentId === config.network.activeDeploymentId)
@@ -1014,9 +948,6 @@ function runStateMachineModulesManifestPreflight(
     return;
   }
 
-  // 首项静默回退在 strict 环境同样必须消除：无 activeDeploymentId 且
-  // status=active 的部署不唯一（零个或多个）时，运行时用的是"碰巧排在
-  // 清单第一"的部署——canary/candidate 排前面就会整环境跑错部署。
   if (!config.network.activeDeploymentId) {
     const activeCount = deployments.filter((deployment) => deployment.status === "active").length;
     if (activeCount !== 1) {
@@ -1075,12 +1006,6 @@ const FLAT_CONTRACT_BY_MODULE_KEY = {
 
 type ModuleManifestKey = keyof typeof FLAT_CONTRACT_BY_MODULE_KEY;
 
-/**
- * 模块地址双轨一致性：扁平 contracts 键（server.ts moduleAddress 写路径
- * 优先取、索引器也 watch）与 deployment.modules（预检对链核验）同时配置
- * 且地址不一致时，写入与投影会指向不同合约——有写入无投影。任何环境都
- * 不允许静默漂移；只配单轨（或两轨一致）不受影响。
- */
 function runModuleAddressDriftPreflight(
   config: ChainServicesConfig,
   checks: ConfigDiagnosticCheck[],
@@ -1116,13 +1041,6 @@ function runModuleAddressDriftPreflight(
   pass(checks, "contracts.module_address_consistency");
 }
 
-/**
- * 状态机地址双轨一致性：扁平 contracts.UVPStateMachine（字节码预检、BFF
- * 广播与签名域取值）与 active deployment 的 stateMachineAddress（模块
- * 投影、E20 跨部署守卫取值）同时配置且不一致时，预检查看 X、运行时投影
- * 看 Y——部署切换窗口的静默分叉。与模块地址漂移同口径：任何环境不允许
- * 静默漂移；只配单轨（或两轨一致）不受影响。
- */
 function runStateMachineAddressDriftPreflight(
   config: ChainServicesConfig,
   checks: ConfigDiagnosticCheck[],
@@ -1229,8 +1147,6 @@ function runStagingRolePreflight(
   } else {
     fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in staging");
   }
-  // 管理面生产基线：staging gate 前置项——运营面
-  // 访问要求口令或签名因子，明文白名单自报头仅限 local 档。
   if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
     pass(checks, "operator.governance_admin_token");
   } else {
@@ -1310,12 +1226,6 @@ function runProductRegistrationPreflight(
   }
 }
 
-/**
- * timer keeper 私钥角色一致性检查（照 relayerGasPayer 的角色接线模式）：
- * keeper 是可选装配面，未启用即 skip；启用后私钥必须存在、合法、非
- * Anvil 缺省，且派生地址与 UVP_TIMER_KEEPER_ADDRESS（如配置）一致。
- * staging 是否必须启用由 staging-readiness 装配检查裁决，不在启动门。
- */
 function runTimerKeeperPreflight(
   config: ChainServicesConfig,
   env: Env,
@@ -1474,8 +1384,6 @@ async function checkStateMachineModules(input: {
     for (const key of Object.keys(getterByKey) as Array<keyof typeof getterByKey>) {
       const expected = deployment.modules[key];
       if (!expected) {
-        // fail-closed：模块地址必须在配置/地址清单中显式存在，
-        // stage-patch / docking 等模块地址缺失不得跳过。
         fail(
           input.checks,
           input.errors,
@@ -1568,13 +1476,6 @@ function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Addr
     : undefined;
 }
 
-/**
- * 统一的 active deployment 选择口径：精确 activeDeploymentId 优先，其次
- * status=active，最后唯一回退首项。server.ts（模块地址解析）与 preflight
- * （模块校验）共用，避免两处谓词漂移。首项回退仅供 local 最小配置：
- * strict 环境由 runStateMachineModulesManifestPreflight 强制显式选择
- * （activeDeploymentId 或唯一 status=active），回退在那里不可达。
- */
 export function selectActiveStateMachineDeployment(
   config: ChainServicesConfig
 ): NonNullable<ChainServicesConfig["network"]["stateMachineDeployments"]>[number] | undefined {
@@ -1604,9 +1505,6 @@ function diagnosticWarnings(
   }
 ): readonly string[] {
   const warnings: string[] = [];
-  if (config.database.driver === "memory") {
-    warnings.push("memory storage is non-durable");
-  }
   if (config.productBff.registrationAdapter === "memory-trigger") {
     warnings.push("Product BFF registration uses the memory-trigger adapter");
   }
@@ -1625,12 +1523,9 @@ function diagnosticWarnings(
   if (config.governance.broadcastEnabled && config.security.environment !== "testnet" && config.security.environment !== "staging") {
     warnings.push("env-key governance broadcaster is for testnet/staging rehearsal only and is not production governance");
   }
-  // 产品通知渠道决策未做，webhook transport 默认关闭；未配置时
-  // 所有投递按 transport_adapter_missing 记录失败，这里给出可见提醒。
   if (!config.notifications?.webhookUrl) {
     warnings.push("UVP_NOTIFY_WEBHOOK_URL is not configured; notification delivery will be recorded as skipped (transport_adapter_missing)");
   }
-  // 证据只有单副本时提醒配置第二副本 bucket。
   if (config.evidenceStorage.adapter === "s3" && !config.evidenceStorage.s3BackupBucket) {
     warnings.push("UVP_EVIDENCE_BACKUP_BUCKET is not configured; evidence objects have no code-level backup copy");
   }
@@ -1642,8 +1537,6 @@ function enabledEnv(env: Env, name: string): boolean {
   return rawValue === "1" || rawValue === "true" || rawValue === "yes";
 }
 
-/** 诊断侧的覆盖检测兜底：清单文件在配置加载后被移动/删除等情况不重复
- * 抛错（那是 loadConfigFromEnv 的职责），只放弃告警。 */
 function safeListContractJsonOverrides(env: Env): readonly string[] {
   try {
     return listContractJsonOverrides(env);
@@ -1760,11 +1653,6 @@ function isNonLocalRpcUrl(rpcUrl: string): boolean {
     !hostname.endsWith(".local");
 }
 
-/**
- * 非 local 档 RPC/S3 endpoint 的 scheme 门（与 env.ts
- * validateNonLocalHttpsEndpointUrl 同口径）：https 必须；http 仅回环 host
- * 放行。URL 不可解析同样判不过（rpc_url_configured 已覆盖存在性）。
- */
 function isHttpsEndpointUrl(url: string): boolean {
   let parsed: URL;
   try {
@@ -1827,6 +1715,3 @@ function fail(checks: ConfigDiagnosticCheck[], errors: string[], name: string, m
 function skip(checks: ConfigDiagnosticCheck[], name: string, message: string): void {
   checks.push({ name, status: "skipped", message });
 }
-
-// Anvil 开发账户黑名单的单一来源在 anvil-defaults.ts（与 env.ts 共享），
-// 私钥/地址成对维护，避免两份拷贝漂移。

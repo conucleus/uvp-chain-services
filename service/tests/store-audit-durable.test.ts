@@ -1,17 +1,15 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { InMemoryAuditSink } from "../src/security/index.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import { recordStoreAudit } from "../src/store/console/audit.js";
 
 const operatorHeaders = {
   "x-uvp-store-operator-id": "audit-operator",
   "x-uvp-store-operator-role": "store_operator",
-  // 红线：草稿/供应商写路由要求会话已锚定地址（本地联调 dev 锚定头）。
   "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
 };
 
@@ -45,23 +43,19 @@ const supplierSubjectId = "0x000000000000000000000000000000000000000000000000000
 const supplierWallet = "0x4444444444444444444444444444444444444444";
 
 describe("durable Store operator audit", () => {
-  const tempDirs: string[] = [];
   const openedStores: ChainServicesStores[] = [];
 
   afterEach(async () => {
     for (const store of openedStores.splice(0)) {
       await store.close();
     }
-    for (const dir of tempDirs.splice(0)) {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 
   it("persists Store audit rows and exposes filtered GET /store/audit", async () => {
     const audit = new InMemoryAuditSink();
-    const databaseUrl = sqliteUrl(tempDirs);
+    const databaseUrl = await createPostgresTestDatabase();
     const first = openStores(databaseUrl, openedStores);
-    const router = createApiRouter(first.projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
+    const router = createApiRouter(first.projectionStore, { ...requiredRouterStores(first), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       audit,
       storeAuditStore: first.storeAuditStore,
       storeZhixuDraftStore: first.storeZhixuDraftStore
@@ -85,10 +79,9 @@ describe("durable Store operator audit", () => {
     openedStores.splice(openedStores.indexOf(first), 1);
 
     const reopened = openStores(databaseUrl, openedStores);
-    const reopenedRouter = createApiRouter(reopened.projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
+    const reopenedRouter = createApiRouter(reopened.projectionStore, { ...requiredRouterStores(reopened), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       storeAuditStore: reopened.storeAuditStore
     });
-    // 审计流按租户隔离（U5）：跨 actor 的过滤读属于管理员视角。
     const auditResponse = await reopenedRouter.handle({
       method: "GET",
       pathname: "/store/audit",
@@ -123,13 +116,12 @@ describe("durable Store operator audit", () => {
 
   it("isolates the audit stream per acting tenant (U5)", async () => {
     const audit = new InMemoryAuditSink();
-    const stores = openStores(sqliteUrl(tempDirs), openedStores);
-    const router = createApiRouter(stores.projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
+    const stores = openStores(await createPostgresTestDatabase(), openedStores);
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(stores), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       audit,
       storeAuditStore: stores.storeAuditStore
     });
 
-    // operator-1 落下一条成功审计；reader 是另一个主体（不同 principal）。
     const importResponse = await router.handle({
       method: "POST",
       pathname: "/store/zhixu-drafts/import",
@@ -142,8 +134,6 @@ describe("durable Store operator audit", () => {
     });
     expect(importResponse.status).toBe(201);
 
-    // 非管理员只读到自己 actor 名下的流：reader 名下无记录 → 空集，
-    // 不能再枚举运营方 colleague 的审计轨迹。
     const readerStream = await router.handle({
       method: "GET",
       pathname: "/store/audit",
@@ -154,7 +144,6 @@ describe("durable Store operator audit", () => {
       .every((record) => record.actor === "audit-reader")).toBe(true);
     expect((readerStream.body as { records: unknown[] }).records).toHaveLength(0);
 
-    // 显式点名他人 actor：直接 403，不静默降级成空集。
     await expect(router.handle({
       method: "GET",
       pathname: "/store/audit",
@@ -162,7 +151,6 @@ describe("durable Store operator audit", () => {
       headers: readerHeaders
     })).resolves.toMatchObject({ status: 403, body: { error: "store_audit_actor_forbidden" } });
 
-    // 操作者本人能读自己的轨迹；管理员保留全量视角。
     const operatorStream = await router.handle({
       method: "GET",
       pathname: "/store/audit",
@@ -185,7 +173,7 @@ describe("durable Store operator audit", () => {
   });
 
   it("redacts sensitive audit metadata before durable storage", async () => {
-    const stores = openStores(sqliteUrl(tempDirs), openedStores);
+    const stores = openStores(await createPostgresTestDatabase(), openedStores);
 
     await recordStoreAudit(new InMemoryAuditSink(), {
       action: "store.draft.import",
@@ -204,7 +192,7 @@ describe("durable Store operator audit", () => {
         privateKey: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         jwt: "ey.secret",
         rawSignature: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        evidencePlaintext: "invoice plaintext",
+        evidencePlaintext: "doc-1 plaintext",
         safeCount: 1
       }
     }, { store: stores.storeAuditStore, now: () => new Date("2026-04-30T00:00:00.000Z") });
@@ -213,7 +201,7 @@ describe("durable Store operator audit", () => {
     const serialized = JSON.stringify(records);
     expect(serialized).not.toContain("aaaaaaaaaaaaaaaa");
     expect(serialized).not.toContain("ey.secret");
-    expect(serialized).not.toContain("invoice plaintext");
+    expect(serialized).not.toContain("doc-1 plaintext");
     expect(records[0]?.metadata).toMatchObject({
       privateKey: "[redacted]",
       jwt: "[redacted]",
@@ -224,8 +212,8 @@ describe("durable Store operator audit", () => {
   });
 
   it("classifies duplicate and rejected Store outcomes in durable audit", async () => {
-    const stores = openStores(sqliteUrl(tempDirs), openedStores);
-    const router = createApiRouter(stores.projectionStore, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
+    const stores = openStores(await createPostgresTestDatabase(), openedStores);
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(stores), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       storeAuditStore: stores.storeAuditStore,
       storeSupplierMetadataStore: stores.storeSupplierMetadataStore
     });
@@ -271,10 +259,43 @@ describe("durable Store operator audit", () => {
   });
 });
 
+function requiredRouterStores(stores: ChainServicesStores) {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
+
 function openStores(databaseUrl: string, openedStores: ChainServicesStores[]): ChainServicesStores {
   const stores = createChainServicesStores({
     database: {
-      driver: "sqlite",
       url: databaseUrl,
       migrationsAutoRun: true
     },
@@ -283,12 +304,6 @@ function openStores(databaseUrl: string, openedStores: ChainServicesStores[]): C
   });
   openedStores.push(stores);
   return stores;
-}
-
-function sqliteUrl(tempDirs: string[]): string {
-  const dir = mkdtempSync(join(tmpdir(), "uvp-store-audit-"));
-  tempDirs.push(dir);
-  return `sqlite://${join(dir, "audit.sqlite")}`;
 }
 
 function migrationsDirectory(): string {
@@ -301,9 +316,9 @@ function supplierBody(): Record<string, unknown> {
     supplierSubjectId,
     displayName: "Durable Audit Supplier",
     wallet: supplierWallet,
-    capabilityTags: ["logistics"],
-    supportedRoleSlotIds: ["delivery"],
-    supportedStageIds: ["shipping"],
+    capabilityTags: ["tag-1"],
+    supportedRoleSlotIds: ["slot-a"],
+    supportedStageIds: ["stage-1"],
     registryAddresses: [registryAddress]
   };
 }

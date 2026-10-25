@@ -1,20 +1,15 @@
 import type { ChainEvent } from "../indexer/events.js";
 import { filterActiveChainEvents, sortChainEvents } from "../indexer/events.js";
 import type { PlanCapabilityTablesInput } from "../indexer/projections/plan.js";
-import {
-  createEmptyProjectionSnapshot,
-  type ProjectionSnapshot,
-  type StateMachineOrderProjection,
-  type StateMachineTaskProjection,
+import type {
+  ProjectionSnapshot,
+  StateMachineOrderProjection,
+  StateMachineTaskProjection,
 } from "../indexer/projections/index.js";
-import { rebuildOrderProjections } from "../indexer/replay.js";
-import {
-  createEmptyIdentityProjectionSnapshot,
-  filterIdentityBindings,
-  rebuildIdentityProjections,
-  type IdentityBindingProjection,
-  type IdentityBindingQuery,
-  type IdentityProjectionSnapshot,
+import type {
+  IdentityBindingProjection,
+  IdentityBindingQuery,
+  IdentityProjectionSnapshot,
 } from "../indexer/identity-projections.js";
 import type { Address, Hex } from "../shared/types.js";
 import type { StorageAdapterLifecycle, TransactionalStorage } from "./types.js";
@@ -49,13 +44,6 @@ export interface ProjectionRebuildMetadata {
   readonly mismatchCount?: number;
 }
 
-/**
- * 随重放快照产生的显式诊断计数（unknown/unresolved 族、词表富集
- * mismatch 与语义 oracle 分叉）。快照本身随事件表重建即可复原，但这些
- * 计数必须随 sync state 持久化：/healthz 与 /admin/diagnostics 只读
- * sync state，不重放全历史——计数只留在快照/日志里时，投影悄然不完整
- * 仍报 ok/ready。
- */
 export interface ProjectionSyncDiagnosticsCounts {
   readonly unresolvedModuleOrderEventCount: number;
   readonly unresolvedDockEventCount: number;
@@ -64,19 +52,9 @@ export interface ProjectionSyncDiagnosticsCounts {
   readonly unresolvedIdentityRevokeEventCount: number;
   readonly capabilityEnrichmentMismatchCount: number;
   readonly unknownEventCount: number;
-  /**
-   * 语义 oracle（replayChainEvents）对可校验 plan 子集的分叉计数：非零 =
-   * 链上 hook 观测与产物语义期望不一致（只报告不覆盖投影，投影以链为真）。
-   */
   readonly semanticOracleMismatchCount: number;
-  /** 诚实覆盖面：本轮实际喂给 oracle 的 plan 数（缺产物/DELAY plan 不计）。 */
   readonly semanticOracleCheckedPlanCount: number;
-  /**
-   * oracle 回放的非分叉抛错计数（结构性毒流/native 运行时不可用）：非零
-   * = oracle 无法为投影作证，算异常（与 mismatch 不同车道，不混同）。
-   */
   readonly semanticOracleErrorCount: number;
-  /** DELAY 语义排除的 plan 数（不算异常，但随诊断暴露覆盖面分母）。 */
   readonly semanticOracleExcludedPlanCount: number;
 }
 
@@ -138,25 +116,10 @@ export interface ProjectionSyncState extends ProjectionScope {
 export interface ProjectionRebuildInput {
   readonly deploymentBlock: bigint;
   readonly events: readonly ChainEvent[];
-  /**
-   * 词表产物富集源（planId → 编译产物两表）：链上不发布词表注册事件，
-   * plan 投影的两表由重放方按产物富集并断言 capabilitiesRoot（见
-   * indexer/projections/plan.ts）。缺省时所有 plan 两表为空（外部发布
-   * plan 的既定口径）。
-   */
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
-  /**
-   * 本轮 resolver 故障的 planId 集合：这些 plan 的空两表按 failed 富集态
-   * 进快照（解析故障 ≠ 无词表），提交/触发车道拒识。
-   */
   readonly planCapabilityResolutionFailures?: readonly Hex[];
   readonly scope?: ProjectionScope;
   readonly syncState?: Omit<ProjectionSyncState, "updatedAt">;
-  /**
-   * 重建完成后的游标。durable 存储必须把它与"整库事件替换"写进同一
-   * 个事务：重建事务提交后、游标单独落库前崩溃会留下越过重建覆盖区间
-   * 的旧游标，产生静默丢事件的缺口。非持久存储忽略该字段。
-   */
   readonly cursor?: Omit<StoredProjectionCursor, "updatedAt">;
 }
 
@@ -169,25 +132,18 @@ export interface StoredProjectionCursor extends ProjectionScope {
   readonly deploymentBlock: bigint;
   readonly nextBlock: bigint;
   readonly finalizedBlock?: bigint;
-  /** nextBlock - 1 高度区块哈希，用于追加前的哈希连续性校验。 */
   readonly blockHash?: Hex;
   readonly updatedAt: string;
 }
 
 export type ProjectionSnapshotKind = "order" | "identity";
 
-/**
- * Post-commit steps（信号通知 / 投影自动化）在投影与 cursor 落库之后执行；
- * 处理失败且进程内重试耗尽时必须持久化，否则 cursor 已前进、增量永不再
- * 处理，通知永久丢失。后台 sweep 持续补投直至成功或人工干预。
- */
 export type PendingPostCommitKind = "signal_notification" | "projection_automation";
 
 export interface PendingPostCommitStep {
   readonly stepId: string;
   readonly chainId: number;
   readonly kind: PendingPostCommitKind;
-  /** signal_notification：处理失败的那批链上事件（回放补投的载荷）。 */
   readonly events?: readonly ChainEvent[];
   readonly attempts: number;
   readonly lastError?: string;
@@ -219,11 +175,6 @@ export interface ProjectionStore {
     scope?: Partial<ProjectionScope>,
   ): Promise<ProjectionSyncState | undefined>;
   listStateMachineOrders(): Promise<readonly StateMachineOrderProjection[]>;
-  /**
-   * 订单身份是 (planId, orderId) 复合键。调用方持有 planId 时必须传入：
-   * 同号订单跨 plan 复用时裸 orderId 查询按"唯一才返回"处理，多命中即
-   * undefined（fail-closed），绝不猜第一个。
-   */
   getStateMachineOrder(
     orderId: string,
     planId?: string,
@@ -245,13 +196,6 @@ export interface DurableProjectionStore
   extends ProjectionStore,
     StorageAdapterLifecycle,
     TransactionalStorage {
-  /**
-   * 持久化索引游标。options.expectNextBlock 提供时为条件写（CAS）：
-   * 持久游标的 next_block 与期望值一致才写入，返回 undefined 表示游标
-   * 已被其他写者移动（如另一进程的 full rebuild），调用方不得推进；
-   * 行不存在时视为可写（首条游标）。未提供 expectNextBlock 时为无条件
-   * upsert，恒返回写入结果。
-   */
   saveCursor(
     cursor: Omit<StoredProjectionCursor, "updatedAt">,
     options?: { readonly expectNextBlock?: bigint }
@@ -261,11 +205,6 @@ export interface DurableProjectionStore
   ): Promise<StoredProjectionCursor | undefined>;
   appendEvent(event: ChainEvent): Promise<void>;
   listEvents(scope: Partial<ProjectionScope>): Promise<readonly ChainEvent[]>;
-  /**
-   * 删除 blockNumber > block 的已投影事件（reorg 回滚），
-   * 返回删除行数。调用方随后必须从剩余事件重建快照并回退 cursor。
-   * chainId 必填：无链范围的整库删除会跨链误删。
-   */
   deleteEventsAfterBlock(
     scope: { readonly chainId: number; readonly contractAddress?: Address },
     blockNumber: bigint,
@@ -280,129 +219,10 @@ export interface DurableProjectionStore
     scope: ProjectionScope,
     kind: ProjectionSnapshotKind,
   ): Promise<StoredProjectionSnapshot<TSnapshot> | undefined>;
-  /**
-   * post-commit 步骤失败后的持久补投队列。游标在通知处理前已
-   * 保存，失败批次必须落表由后台 sweep 补投，而不是静默丢弃。
-   */
   savePendingPostCommitStep(input: SavePendingPostCommitStepInput): Promise<PendingPostCommitStep>;
   listPendingPostCommitSteps(scope: { readonly chainId: number }): Promise<readonly PendingPostCommitStep[]>;
   recordPendingPostCommitAttempt(stepId: string, error: string): Promise<void>;
   deletePendingPostCommitStep(stepId: string): Promise<void>;
-}
-
-export class MemoryProjectionStore implements ProjectionStore {
-  #snapshot: ProjectionSnapshot = createEmptyProjectionSnapshot();
-  #identitySnapshot: IdentityProjectionSnapshot =
-    createEmptyIdentityProjectionSnapshot();
-  #syncState: ProjectionSyncState | undefined;
-
-  async resetFromEvents(
-    input: ProjectionRebuildInput,
-  ): Promise<ProjectionSnapshot> {
-    const events = input.events.filter(
-      (event) => event.blockNumber >= input.deploymentBlock,
-    );
-    this.#snapshot = rebuildOrderProjections(events, {
-      ...(input.planCapabilityTables ? { planCapabilityTables: input.planCapabilityTables } : {}),
-      ...(input.planCapabilityResolutionFailures
-        ? { planCapabilityResolutionFailures: input.planCapabilityResolutionFailures }
-        : {})
-    });
-    this.#identitySnapshot = rebuildIdentityProjections(events);
-    const derived = syncStateFromRebuildInput(input, events);
-    // 内存重放存储无链侧确认深度视图：所给事件即已提交历史，显式
-    // syncState.finalizedBlock 缺席时以最新已索引块为最终性上界（keeper
-    // 的最终性门在测试装配下仍可放行；durable 存储不走该缺省）。
-    const withFinality: ProjectionSyncState =
-      derived.finalizedBlock === undefined && derived.latestIndexedBlock !== undefined
-        ? { ...derived, finalizedBlock: derived.latestIndexedBlock }
-        : derived;
-    this.#syncState = withFinality.projectionDiagnostics
-      ? withFinality
-      : {
-        ...withFinality,
-        projectionDiagnostics: projectionDiagnosticsFromSnapshots(this.#snapshot, this.#identitySnapshot)
-      };
-    return this.#snapshot;
-  }
-
-  async getOrderSnapshot(): Promise<ProjectionSnapshot> {
-    return this.#snapshot;
-  }
-
-  async saveSyncState(
-    state: Omit<ProjectionSyncState, "updatedAt">,
-  ): Promise<ProjectionSyncState> {
-    this.#syncState = {
-      ...state,
-      updatedAt: new Date().toISOString(),
-    };
-    return this.#syncState;
-  }
-
-  async getSyncState(
-    _scope: Partial<ProjectionScope> = {},
-  ): Promise<ProjectionSyncState | undefined> {
-    return this.#syncState;
-  }
-
-  async listStateMachineOrders(): Promise<
-    readonly StateMachineOrderProjection[]
-  > {
-    return uniqueProjectionValues(this.#snapshot.stateMachineOrders);
-  }
-
-  async getStateMachineOrder(
-    orderId: string,
-    planId?: string,
-  ): Promise<StateMachineOrderProjection | undefined> {
-    const orders = uniqueProjectionValues(this.#snapshot.stateMachineOrders);
-    if (planId) {
-      // 订单身份是 (planId, orderId)：带 planId 的查询只匹配同 plan 投影，
-      // 不做裸键回退，跨 plan 复用同号订单时绝不串单。
-      return uniqueOrderByBareId(orders, orderId, planId);
-    }
-    return (
-      this.#snapshot.stateMachineOrders[orderId.toLowerCase()] ??
-      this.#snapshot.stateMachineOrders[orderId] ??
-      uniqueOrderByBareId(orders, orderId)
-    );
-  }
-
-  async findStateMachineOrdersByOrderId(
-    orderId: string,
-  ): Promise<readonly StateMachineOrderProjection[]> {
-    return uniqueProjectionValues(this.#snapshot.stateMachineOrders).filter(
-      (order) => order.orderId.toLowerCase() === orderId.toLowerCase(),
-    );
-  }
-
-  async listStateMachineTasks(): Promise<
-    readonly StateMachineTaskProjection[]
-  > {
-    return uniqueProjectionValues(this.#snapshot.stateMachineTasks);
-  }
-
-  async getStateMachineTask(
-    taskId: string,
-  ): Promise<StateMachineTaskProjection | undefined> {
-    const normalizedTaskId = taskId.toLowerCase();
-    return (
-      this.#snapshot.stateMachineTasks[normalizedTaskId] ??
-      this.#snapshot.stateMachineTasks[taskId] ??
-      uniqueTaskByBareId(uniqueProjectionValues(this.#snapshot.stateMachineTasks), taskId)
-    );
-  }
-
-  async listIdentityBindings(
-    query: IdentityBindingQuery,
-  ): Promise<readonly IdentityBindingProjection[]> {
-    return filterIdentityBindings(this.#identitySnapshot, query);
-  }
-
-  async getIdentitySnapshot(): Promise<IdentityProjectionSnapshot> {
-    return this.#identitySnapshot;
-  }
 }
 
 export function defaultProjectionScope(chainId: number): ProjectionScope {
@@ -459,28 +279,3 @@ function latestBlockNumber(events: readonly ChainEvent[]): bigint | undefined {
   );
 }
 
-function uniqueOrderByBareId(
-  orders: readonly StateMachineOrderProjection[],
-  orderId: string,
-  planId?: string,
-): StateMachineOrderProjection | undefined {
-  const matches = orders.filter(
-    (order) =>
-      order.orderId.toLowerCase() === orderId.toLowerCase() &&
-      (!planId || order.planId.toLowerCase() === planId.toLowerCase()),
-  );
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
-function uniqueTaskByBareId(
-  tasks: readonly StateMachineTaskProjection[],
-  taskId: string,
-): StateMachineTaskProjection | undefined {
-  const normalizedTaskId = taskId.toLowerCase();
-  const matches = tasks.filter((task) => task.taskId.toLowerCase() === normalizedTaskId);
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
-function uniqueProjectionValues<TValue>(record: Readonly<Record<string, TValue>>): TValue[] {
-  return [...new Set(Object.values(record))];
-}

@@ -1,12 +1,60 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 describe("API router composition", () => {
   it("returns not_found for unknown routes", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(router.handle({ method: "GET", pathname: "/unknown-route" }))
       .resolves.toEqual({
@@ -16,7 +64,7 @@ describe("API router composition", () => {
   });
 
   it("serves production reads without demo fallback data", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "production",
       evidenceStorage: productionSafeEvidenceStorage()
     });
@@ -32,10 +80,8 @@ describe("API router composition", () => {
   });
 
   it("rejects malformed percent-encoded path parameters with 400 instead of 500", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
 
-    // "%ZZ" 不是合法的百分号编码：decodeURIComponent 抛 URIError，
-    // 必须落 400 而不是兜底 500。
     const productOrder = await router.handle({
       method: "GET",
       pathname: "/product/orders/%ZZ",
@@ -48,10 +94,7 @@ describe("API router composition", () => {
       pathname: "/store/zhixus/%E0%A4%A/orders",
       headers: { "x-uvp-wallet-address": "0x9999999999999999999999999999999999999999" }
     });
-    // /store 运行时读先过能力门（store.audit.read）：自报钱包头不构成
-    // 该能力，按 401 拒绝，不做路径解码。
     expect(storeOrder).toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
-    // 持有该能力的会话走到路径解码：非法百分号编码仍 400，不 500。
     const storeOrderOperator = await router.handle({
       method: "GET",
       pathname: "/store/zhixus/%E0%A4%A/orders",
@@ -61,10 +104,8 @@ describe("API router composition", () => {
   });
 
   it("store runtime reads and submission reads require session identity", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
 
-    // /store 运行时读是运营观察面（无参与者过滤）：与 /store/audit 同
-    // 能力门——匿名按 store_identity_missing 拒绝（store.audit.read）。
     for (const pathname of [
       "/store/runtime/summary",
       "/store/zhixus/zhixu-1/orders"
@@ -72,7 +113,6 @@ describe("API router composition", () => {
       const anonymous = await router.handle({ method: "GET", pathname });
       expect(anonymous).toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
     }
-    // 参与者面（候选清单/提交档案）仍按会话锚定钱包门。
     for (const pathname of [
       "/store/orders/0xabc/candidates",
       "/product/submissions/sub_1"
@@ -102,15 +142,12 @@ describe("API router composition", () => {
       submitter: executor as `0x${string}`
     };
 
-    // signalId 与任务记录的提交信号不一致（推导值）：overlay 不得授权——
-    // 链上必 revert 的信号不应被完成授权并签名广播。
     const derived = await authorization.authorize({
       ...baseRequest,
       signalId: derivedSignalId as `0x${string}`,
       task: {
         taskId: "task-1",
         stageExecutorOverlay: { targetStageId, activeExecutorWallet: executor }
-        // proof.signalId 缺失：chainSignal 推导 signalId。
       } as never
     });
     expect(derived).toMatchObject({
@@ -118,7 +155,6 @@ describe("API router composition", () => {
       source: "active_stage_executor_overlay"
     });
 
-    // proof 记录的信号与请求一致：按在任执行者授权。
     const recorded = await authorization.authorize({
       ...baseRequest,
       signalId: recordedSignalId as `0x${string}`,
@@ -134,16 +170,13 @@ describe("API router composition", () => {
   it("submission authorization honors on-chain SignalSubmitterAuthorized projections", async () => {
     const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
     const { MemoryProductBffStore } = await import("../src/product/query/bff/store.js");
-    const { MemoryProjectionStore } = await import("../src/storage/projection-store.js");
 
-    // 投影携带链上事后授权（SignalSubmitterAuthorized），BFF trigger
-    // 台账为空——不读投影的适配器会把合法参与方 403。
     const submitter = "0x7777777777777777777777777777777777777777";
     const onchainOrderId = "0x" + "9".repeat(64);
     const sourceId = "0x" + "a".repeat(64);
     const signalId = "0x" + "b".repeat(64);
     const planId = "0x" + "c".repeat(64);
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [
@@ -175,7 +208,6 @@ describe("API router composition", () => {
     } as never);
     expect(authorized).toMatchObject({ authorized: true, source: "chain_signal_authorization" });
 
-    // 未获链上授权的钱包仍被拒。
     const stranger = "0x6666666666666666666666666666666666666666";
     const denied = await authorization.authorize({
       orderId: "order-1",

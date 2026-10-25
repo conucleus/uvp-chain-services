@@ -23,14 +23,6 @@ import {
 import type { MutableStateMachinePlanProjection } from "./plan.js";
 import type { ProjectionReplayDiagnostics, Writable } from "./snapshot.js";
 
-/**
- * uvp.dock.v2 具名接口委托协议投影。dock 实例身份由
- * dockInstanceId 唯一确定（哈希 preimage 覆盖双方 plan/order/route +
- * 接口/mode），投影键为 (chainId, stateMachineAddress, dockInstanceId)；
- * binding 细节（portKey/localHookId）来自 DockingModule 事件可见字段，
- * 事件不携带的补全由 keeper 通过 lens 视图按需读取。终态不由链上事件
- * 驱动：投影只记录开启/挂接与投递事实。
- */
 export interface StateMachineDockInputDeliveryProjection {
   readonly inputBindingHash: Hex;
   readonly localPlanId: Hex;
@@ -62,30 +54,16 @@ export interface StateMachineDockProjection {
   readonly dockInstanceId: Hex;
   readonly chainId: number;
   readonly stateMachineAddress: Address;
-  /**
-   * 出生事件族：DockOpened（new 模式，出生锚在 open 原子消费）/
-   * DockAttached（existing 模式，对等挂接既有目标单，无出生锚）。
-   */
   readonly mode: StateMachineDockMode;
   readonly localPlanId: Hex;
   readonly localOrderId: Hex;
   readonly routeId: Hex;
   readonly routeHash: Hex;
-  /** keccak(interfaceName)：具名接口的链上 word 形态。 */
   readonly interfaceNameId: Hex;
   readonly targetPlanId: Hex;
   readonly linkedOrderId: Hex;
-  /**
-   * B-02 边数账本口径：出生事件携带的 depth word = 该边写入目标单
-   * dockEdgeCountOfOrder 账本的值（父单边数 + 1），不是路径深度——
-   * N:1 拼批中未抬升账本的边也按父边数 + 1 发声。订单级「最长 dock
-   * 链路」由索引器派生（快照 stateMachineOrderDockChainDepth），链上
-   * 不再维护该语义。
-   */
   readonly depth: number;
-  /** DockOpened 的发起者（mode=new 时必填）。 */
   readonly opener?: Address;
-  /** DockAttached 的发起者（mode=existing 时必填）。 */
   readonly attacher?: Address;
   readonly inputDeliveries: Readonly<Record<string, StateMachineDockInputDeliveryProjection>>;
   readonly outputDeliveries: Readonly<Record<string, StateMachineDockOutputDeliveryProjection>>;
@@ -117,7 +95,6 @@ export function applyDockOpened(
   event: ChainEvent
 ): void {
   const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
-  // DockOpened 由 UVPDockingModule 发出：先归一化到所属状态机地址。
   const stateMachineAddress = stateMachineAddressForOrderEvent(state, event);
   const localPlanId = requiredBytes32Arg(event, "localPlanId");
   const localOrderId = requiredBytes32Arg(event, "localOrderId");
@@ -131,15 +108,10 @@ export function applyDockOpened(
     submitter: opener
   });
 
-  // 跨部署子订单归桶诊断：linkedOrderId 的子订单按 local 状态机地址建桶
-  //（现状行为），但 targetPlan 无法在 local 状态机下定位已登记 plan 时，
-  // 归属未经证实（跨部署 dock / plan 未登记 / 回放顺序缺口）——显式计数，
-  // 不允许静默（对照 unresolvedModuleOrderEventCount 纪律）。
   if (!state.plans.has(stateMachineScopedKey(event.chainId, stateMachineAddress, targetPlanId))) {
     state.diagnostics.unresolvedDockTargetDeploymentCount += 1;
   }
 
-  // 父订单与子订单各自补事件轨迹（订单本体由 OrderRegistered 等建桶）。
   const localOrder = ensureStateMachineOrder(state.orders, event, localOrderId, localPlanId, undefined, stateMachineAddress);
   localOrder.updatedAt = provenanceOf(event);
   appendOrderProof(localOrder, proof);
@@ -186,14 +158,6 @@ export function applyDockOpened(
   state.docks.set(dockProjectionKey(event.chainId, stateMachineAddress, dockInstanceId), dock);
 }
 
-/**
- * existing 模式出生事件：对等挂接既有目标单（不铸子单）。linkedOrderId
- * 是既有目标单——桶通常已由其自身的订单事件建立，回放顺序缺口时按同键
- * 补建（与 DockOpened 同口径）。N:1 由事件天然承载：目标侧"谁挂了我"
- * 索引在 replay 快照收口处按 (targetPlanId, linkedOrderId) 复合键聚合
- *（dockByTargetOrder 是链上 new 模式子单出生键，existing 不写它，投影
- * 不得镜像其单值语义）。
- */
 export function applyDockAttached(
   state: {
     modules: StateMachineModuleIndex;
@@ -205,7 +169,6 @@ export function applyDockAttached(
   event: ChainEvent
 ): void {
   const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
-  // DockAttached 由 UVPDockingModule 发出：先归一化到所属状态机地址。
   const stateMachineAddress = stateMachineAddressForOrderEvent(state, event);
   const localPlanId = requiredBytes32Arg(event, "localPlanId");
   const localOrderId = requiredBytes32Arg(event, "localOrderId");
@@ -219,8 +182,6 @@ export function applyDockAttached(
     submitter: attacher
   });
 
-  // 与 DockOpened 同款跨部署诊断：挂接对象是既有目标单，targetPlan 在
-  // local 状态机下无法定位已登记 plan 时归属未经证实，显式计数不静默。
   if (!state.plans.has(stateMachineScopedKey(event.chainId, stateMachineAddress, targetPlanId))) {
     state.diagnostics.unresolvedDockTargetDeploymentCount += 1;
   }
@@ -283,7 +244,6 @@ export function applyDockInputSubmitted(
   const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
   const dock = findDockForEvent(state, event, dockInstanceId);
   if (!dock) {
-    // dock 未开启（或模块归属无法解析）：显式计数，不允许静默丢弃。
     state.diagnostics.unresolvedDockEventCount += 1;
     return;
   }
@@ -308,7 +268,6 @@ export function applyDockInputSubmitted(
   };
   dock.updatedAt = provenanceOf(event);
 
-  // 跨订单事件：父侧记录投递轨迹，子订单侧记录输入事实写入。
   const localOrder = ensureStateMachineOrder(
     state.orders,
     event,
@@ -351,7 +310,6 @@ export function applyDockOutputSubmitted(
   const dockInstanceId = requiredBytes32Arg(event, "dockInstanceId");
   const dock = findDockForEvent(state, event, dockInstanceId);
   if (!dock) {
-    // dock 未开启（或模块归属无法解析）：显式计数，不允许静默丢弃。
     state.diagnostics.unresolvedDockEventCount += 1;
     return;
   }
@@ -377,7 +335,6 @@ export function applyDockOutputSubmitted(
   };
   dock.updatedAt = provenanceOf(event);
 
-  // 跨订单事件：子侧记录输出已回写，父侧记录映射事实落账。
   const linkedOrder = ensureStateMachineOrder(
     state.orders,
     event,
@@ -408,10 +365,6 @@ export function applyDockOutputSubmitted(
   }));
 }
 
-/** 兄弟 output 绑定的等价交付满足：没有发生新的镜像写入，只把该绑定收敛为
- * 已交付——不落子侧"已回写"与父侧"映射事实落账"时间线（那两条属于真正
- * 执行过写入的 Submitted 事件），父侧只留一条说明性时间线供审计解释该绑定
- * 为何没有 Submitted 事件。 */
 export function applyDockOutputSatisfied(
   state: {
     modules: StateMachineModuleIndex;
@@ -465,8 +418,6 @@ export function applyDockOutputSatisfied(
   }));
 }
 
-/** dock 事件桶定位：模块地址归一化 + dockInstanceId 键；未出生（未开启/
- * 未挂接）的 dock 事件无法定位桶，由调用方显式计数，不静默。 */
 function findDockForEvent(
   state: {
     modules: StateMachineModuleIndex;

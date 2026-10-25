@@ -32,10 +32,6 @@ async function handleParticipantNotificationRequest(
     return undefined;
   }
 
-  // activity-feed 的身份 = 会话锚定地址（钱包会话
-  // 的签名证明，或 local 显式开启的 dev 锚定头）。query/body/header 自报
-  // 钱包只用于与锚定地址一致性核验，不是身份来源——否则 ?wallet= 即
-  // 可读任意人活动流、代标已读。local 之外无会话即 401。
   const wallet = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment);
   if (!wallet.ok) {
     return wallet.response;
@@ -146,8 +142,6 @@ async function handleNotificationRequest(
         body: { error: "notification_delivery_not_found" }
       };
     }
-    // 终态行 retry 是无操作，不得返回 200 假成功。sent/invalidated
-    // 不可重开；dead_letter 需经显式 reopen 端点。
     if (outcome.outcome === "terminal") {
       return {
         status: 409,
@@ -160,8 +154,6 @@ async function handleNotificationRequest(
         }
       };
     }
-    // 写入栅栏拦下的并发抢先：行已被并发方推进，按现行状态重试而不是
-    // 假成功。
     if (outcome.outcome === "conflict") {
       return {
         status: 409,
@@ -230,8 +222,6 @@ async function handleNotificationRequest(
         body: { error: "notification_delivery_not_found" }
       };
     }
-    // sent/invalidated 是不可追改的终态：回写 dead_letter 会伪造投递
-    // 台账（reopen 重发即双发），按 409 拒绝而非假成功。
     if (outcome.outcome === "terminal") {
       return {
         status: 409,

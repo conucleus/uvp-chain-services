@@ -44,12 +44,19 @@ node --env-file=.env.local --import tsx src/api/server.ts
 - `CHAIN_SERVICES_RUNTIME_ENV`: `local`、`testnet`、`staging` 或 `production`
 - `UVP_ADDRESS_MANIFEST`: 当前网络地址清单
 - `UVP_RPC_URL`, `UVP_CHAIN_ID`: RPC 与链 ID
-- `CHAIN_SERVICES_DATABASE_DRIVER`, `CHAIN_SERVICES_DATABASE_URL`: 投影和业务存储
+- `CHAIN_SERVICES_DATABASE_URL`: 投影和业务存储（唯一存储 env，PG-only，必须是 `postgres://` DSN；未设置时启动直接报错并提示用 docker 起库）
 - `UVP_EVIDENCE_STORAGE_ADAPTER`: 证据存储适配器
 - `UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED`: State Machine 广播开关
 - `RECONCILE_WORKER_ENABLED`: 交易回执对账
 
-非本地环境应使用持久数据库和对象存储，并通过安全预检。demo/fixture/mock 运行路径仅存在于 local 档（simulated 治理链适配器、内存广播/存储等开发适配器），非 local 环境不含。
+非本地环境应使用持久数据库和对象存储，并通过安全预检。demo/fixture/mock 运行路径仅存在于 local 档（simulated 治理链适配器、内存广播等开发适配器），非 local 环境不含。
+
+## 存储与测试（PG-only）
+
+存储引擎只保留 Postgres：部署跑什么，本地与测试就跑什么。
+
+- 本地起库用 `./scripts/with-postgres.sh`（内部复用 `uvp-deploy/deploy/scripts/lib/with-postgres.sh`，一次性 docker postgres，随机端口），把打印出的 DSN 填进 `CHAIN_SERVICES_DATABASE_URL`。
+- `pnpm test` 会自动套一层 `./scripts/with-postgres.sh` 起 docker 库再跑 vitest；直接运行 `vitest`（绕过该脚本）时必须自带 `CHAIN_SERVICES_POSTGRES_TEST_URL` 指向一个可达的 Postgres。
 
 ## 迁移口径
 
@@ -118,4 +125,4 @@ Store：
 
 ## 验证原则
 
-测试覆盖现行协议不变量、权限边界、签名域、索引重放、重组恢复、持久化和公开接口；不再表达现行行为或风险的测试会被移除。
+测试覆盖现行协议不变量、权限边界、签名域、索引重放、重组恢复、持久化和公开接口；不再表达现行行为或风险的测试会被移除。持久化测试统一走 Postgres（见上文「存储与测试（PG-only）」）。

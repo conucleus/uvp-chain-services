@@ -79,8 +79,6 @@ export class PostgresProductBffStore implements ProductBffStore {
   }
 
   async updateDraftIfStatus(draft: ProductOrderDraftDTO, expected: ProductOrderDraftDTO["status"]): Promise<boolean> {
-    // 条件 UPDATE（CAS）：WHERE status 保证读到旧快照的整行覆盖在行已
-    // 迁移时不得落库（rowCount 0 即败者）。
     const updated = await this.#database.query(
       `UPDATE product_order_draft
        SET zhixu_id = $2, plan_id = $3, plan_hash = $4, title = $5, business_type = $6, goods_json = $7::jsonb,
@@ -131,10 +129,6 @@ export class PostgresProductBffStore implements ProductBffStore {
   }
 
   async createInviteIfNoneActive(invite: ProductInviteDTO, nowIso: string): Promise<boolean> {
-    // 单语句条件插入：expires_at::timestamptz 归一化解析（含时区偏移）。
-    // 单活不变量由 (participant_id) WHERE status='active' 部分唯一索引承担：
-    // READ COMMITTED 下语句快照读不到并发方未提交的 active 行，NOT EXISTS
-    // 会双双通过，败者由索引兜底——命中约束按 false 交服务层 409 收敛。
     try {
       const result = await this.#database.query(
         `INSERT INTO product_invite (

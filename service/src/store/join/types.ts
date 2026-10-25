@@ -1,19 +1,7 @@
 import type { Address, Hex } from "../../shared/types.js";
 
-/**
- * 供应商自助加入闭环。
- *
- * 状态机：applied → under_review → authorized（记录链上交易证据）→ active；
- * 任何时点可进入 rejected / revoked（含 binding 撤销联动）。
- *
- * 配对红线：
- * - 每条进入 authorized 的申请必须记录链上交易证据（tx hash、类型、
- *   planId、slot、被授权地址）。
- * - 冻结合约下加入时（订单尚未产生）唯一可写的链上授权事实是
- *   UVPIdentityRegistry.registerIdentityBinding（身份配对）；
- *   signal submitter / stage executor 授权在订单触发/执行者补丁时落地，
- *   本域记录授权意向（grant）并在投影观察到授权事件时落为 active。
- */
+// 供应商自助加入闭环：applied → under_review → authorized（记录链上
+// 交易证据）→ active；任何时点可进入 rejected / revoked（含 binding 撤销联动）。
 
 export type StoreJoinApplicationStatus =
   | "applied"
@@ -85,13 +73,6 @@ export interface StoreJoinApplicationEventRecord {
 
 export interface StoreJoinApplicationStore {
   putApplication(record: StoreJoinApplicationRecord): Promise<void>;
-  /**
-   * 条件状态迁移（CAS）：仅当现行状态仍是 expected 时落档（持久层
-   * UPDATE ... WHERE status = ?，内存层同步临界区）。返回 false 表示
-   * 并发方已先完成迁移——approve/reject/revoke 的终态翻转以条件更新
-   * 收口，败者不得整行覆盖赢家的终态（链上身份可能已登记，覆盖会留下
-   * "链上已登记而终态已拒绝"的半提交假象）。
-   */
   updateApplicationIfStatus(
     record: StoreJoinApplicationRecord,
     expected: StoreJoinApplicationStatus
@@ -112,11 +93,6 @@ export interface StoreJoinActor {
   readonly authMode: string;
   readonly accessLevel: string;
   readonly principalId?: string;
-  /**
-   * 审批触发链上身份登记（registerIdentity）时
-   * 必须持有 governance_admin 权威——与 /store/suppliers/:id/request-
-   * identity-registration 路由的能力门禁同口径，publisher 审批不绕过。
-   */
   readonly governanceAdmin?: boolean;
 }
 
@@ -143,10 +119,6 @@ export class StoreJoinServiceError extends Error {
   }
 }
 
-/**
- * 存储层在途申请唯一约束命中（同 plan + 同申请人的并发双提交败者）：
- * 服务层统一映射为 409 application_exists，不泄露为存储故障。
- */
 export class StoreJoinOpenApplicationExistsError extends Error {
   override readonly name = "StoreJoinOpenApplicationExistsError";
 }

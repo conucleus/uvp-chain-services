@@ -38,7 +38,6 @@ import type {
 } from "../../storage/projection-store.js";
 import { compareChainPointers, type Address } from "../../shared/types.js";
 import { decodeBytes32Text, displayBytes32 } from "../../shared/display.js";
-// PlanRegistered(finalize) 才是发布权威时点：桶存在只代表 commitPlan 已执行。
 import { isPlanRegisteredProjection } from "../../store/console/version.js";
 
 export interface ProductChainProofDTO {
@@ -113,7 +112,6 @@ export interface ProductStageExecutorOverlayApiDTO {
   readonly mode: string;
   readonly modeHash?: string;
   readonly previousExecutor?: string;
-  /** patch 生效授权集哈希（UB-36①，随 StageExecutorPatchApplied 广播）。 */
   readonly authorizationsHash?: string;
   readonly roleHash: string;
   readonly executorMetadataHash: string;
@@ -155,14 +153,6 @@ export interface ProductProjectionMetadataDTO {
   readonly degradedReason?: string;
 }
 
-/**
- * 订单读面的投影完整性。协议包 OrderStatus 是冻结的单值类型（忠实于合约
- * 词表），"store 行已建但 OrderRegistered 事件尚未投影"的中间态由本字段
- * 诚实表达，避免读面看起来"一切正常已注册"：
- * - "projected"：OrderRegistered 事件已投影（registeredAt 在场）；
- * - "pending"：订单行已被其他事件建出，但注册投影尚未到达（最终一致
- *   窗口，不是错误——因此用字段而不是 404/错误码表达）。
- */
 export type ProductOrderProjectionStatus = "projected" | "pending";
 
 export type ProductOrderApiDTO = ProductOrderDTO & {
@@ -171,7 +161,6 @@ export type ProductOrderApiDTO = ProductOrderDTO & {
   readonly chainStatus?: StateMachineOrderStatus;
   readonly projectionStatus?: ProductOrderProjectionStatus;
   readonly paymentConditionSummary?: string;
-  /** OrderRelayerRecorded 事实：订单创建者钱包（可见性判定的参与者之一）。 */
   readonly creatorWallet?: Address;
   readonly tasks?: readonly ProductTaskApiDTO[];
   readonly stageExecutorOverlays?: Readonly<
@@ -188,11 +177,6 @@ export type ProductOrderApiDTO = ProductOrderDTO & {
 };
 
 export type ProductTaskApiDTO = ProductTaskDTO & {
-  /**
-   * 任务行是 plan 作用域投影的展平行：携带 planId 让消费方在两个 plan
-   * 复用同一 orderId 时仍能把任务 join 回正确的订单（复合键
-   * (planId, orderId)，与 reconcile/dock-automation 的订单定位口径一致）。
-   */
   readonly planId?: string;
   readonly hookId?: string;
   readonly hookName?: string;
@@ -225,7 +209,6 @@ export interface ProductParticipantIdentityDTO {
   readonly roleSlotId: string;
   readonly draftId: string;
   readonly draftTitle: string;
-  /** 订单归属按 (planId, orderId) 复合键命中（与 /product/orders 通道同口径）。 */
   readonly planId?: string;
   readonly orderId?: string;
 }
@@ -236,11 +219,6 @@ export interface ProductParticipantView {
     readonly displayName: string;
     readonly walletAddress?: string;
     readonly roleLabels: readonly string[];
-    // 词表对齐冻结 DTO ProductParticipantProfileDTO.source
-    // （"wallet" | "mock" | "anonymous"）：参与事实由 participantId/
-    // roleLabels 表达，source 只回答身份锚定形态（钱包 / 匿名）。
-    // 自造 "accepted_participant" 会被前端严格校验置为 undefined，
-    // 已接受参与者恒显示"身份未确认"。
     readonly source: "wallet" | "anonymous";
   };
   readonly orders: readonly ProductOrderApiDTO[];
@@ -270,12 +248,6 @@ export interface ProductService {
 }
 
 export interface ProductSchemaResolver {
-  /**
-   * planHash 是链侧身份（订单/计划投影的 planHash，runtime 域）——
-   * schema.planHash 同域同值（链 getter 命名权威），实现锚
-   * schema.planHash join；schema.artifactHash 是 canonical 载荷哈希，
-   * 与链上值永不相等。
-   */
   getProductSchemaByPlan(
     planId: string,
     planHash: string,
@@ -298,11 +270,6 @@ export class ProductOrderLookupError extends Error {
   }
 }
 
-/**
- * Resolves a Product order through the same deployment-aware boundary for
- * detail, timeline, and proof reads. A bare order id is not an identity when
- * several state-machine deployments contain it.
- */
 async function resolveProductOrder(
   store: ProjectionStore,
   orderId: string,
@@ -470,10 +437,6 @@ export function createProductService(
             .map(({ dto }) => dto)
         : [];
       const visibleOrderKeys = new Set<string>();
-      // 订单可见性与任务列表同一口径：任务归属按 DTO 的生效指派
-      // （执行者 overlay/能力提交者优先，回退链上指派）。两个列表口径
-      // 不一致会让 overlay 接管执行者后，接手者看得到任务却看不到订单、
-      // 被接管者反之，me 视图两栏互相矛盾。
       for (const { order, dto } of visibleTaskRows) {
         if (walletAddress && dto.assigneeWallet?.toLowerCase() === walletAddress && order) {
           visibleOrderKeys.add(stateMachineOrderProjectionKey(
@@ -484,8 +447,6 @@ export function createProductService(
           ));
         }
       }
-      // 创建者本人：OrderRelayerRecorded 的 creator 是订单参与者——
-      // 无任务指派时创建者也读得到自己建的单（与列表/详情读同口径）。
       if (walletAddress) {
         for (const order of orders) {
           if (order.creator?.toLowerCase() === walletAddress) {
@@ -667,9 +628,9 @@ async function productOrderFromStateMachine(
     totalAmount: {
       amount: "0",
       currency: "N/A",
-      display: "未接入资金托管",
+      display: "未接入资金模块",
     },
-    fundingStatus: "资金托管未接入本接口",
+    fundingStatus: "资金模块未接入本接口",
     currentStageId,
     currentStageName,
     ...(activeTask ? { currentTaskId: activeTask.taskId } : {}),
@@ -732,12 +693,6 @@ function findStateMachineOrderForTask(
   return matches.length === 1 ? matches[0] : undefined;
 }
 
-/**
- * 已接受参与者的订单命中只认 (planId, orderId) 复合键（与
- * /product/orders 通道的 orderTaskVisibilityKey 同口径）：裸 orderId 在
- * 跨 plan 同号订单时会命中另一 plan 名下的订单。缺 planId 即不成键，
- * 不回退裸 orderId 相等。
- */
 function orderIdentifierMatches(
   order: StateMachineOrderProjection,
   planId: string,
@@ -814,7 +769,7 @@ async function productTaskFromStateMachineTask(
     deadline: "以业务约定为准",
     fundingImpact: productAddOnKind
       ? fundingImpactForAddOn(productAddOnKind)
-      : "链上证明可查看；业务动作以 V3 config/order 任务投影为准",
+      : "链上证明可查看；业务动作以 config/order 任务投影为准",
     status: productStatus,
     ...(productAddOnKind ? { addOnKind: productAddOnKind } : {}),
     ...(productStage?.selectableTargets
@@ -932,7 +887,6 @@ async function zhixuDetailForOrder(
     return zhixuDetailFromProductSchema(storeSchema);
   }
 
-  // Schema 未登记时不回退到任何内置目录；调用方按显式缺失处理。
   return undefined;
 }
 
@@ -1009,11 +963,6 @@ function zhixuIdFromPlanId(planId: string): string {
   return `plan-${shortId(planId)}`;
 }
 
-/**
- * 具名 dock 接口的展示面唯一来源是编译制品的 dockInterface 承诺
- * （uvp.dockInterfaceArtifact.v2）——Store 不发明接口，只镜像发布者
- * 已承诺的接口形状。schema 携带的制品是不透明 JSON，这里做结构化读取。
- */
 function dockableModulesFromArtifact(
   artifact: unknown
 ): readonly DockableZhixuModuleDTO[] {
@@ -1074,11 +1023,6 @@ function recordField(value: unknown, key: string): Record<string, unknown> | und
     : undefined;
 }
 
-/**
- * 消费线 schemaVersion 钉扎（单源常量 ONCHAIN_HOOK_PLAN_SCHEMA_VERSION，
- * 与编译器 artifact 校验同口径）：版本不符的制品按旧口径解释会静默
- * 错读结构，响亮拒绝。缺制品（undefined/null）维持无 dock 模块的现状。
- */
 function assertOnchainArtifactSchemaVersion(artifact: unknown): void {
   if (artifact === undefined || artifact === null) {
     return;
@@ -1118,7 +1062,7 @@ function primaryActionForFulfillment(kind: FulfillmentPluginKind): string {
     case "payment_placeholder":
       return "确认付款条件";
     case "delivery_update":
-      return "提交交付进度";
+      return "提交履约进度";
     case "validation_confirm":
       return "确认验收结果";
     case "evidence_submission":
@@ -1130,9 +1074,9 @@ function primaryActionForFulfillment(kind: FulfillmentPluginKind): string {
 
 function fundingImpactForFulfillment(kind: FulfillmentPluginKind): string {
   if (kind === "payment_placeholder") {
-    return "稳定币模块占位：仅记录付款条件和凭证，不托管或划转资金";
+    return "资金模块占位：仅记录付款条件和凭证，不划转资金";
   }
-  return "条件满足后进入下一步；资金托管不在本接口处理";
+  return "条件满足后进入下一步；资金动向不在本接口处理";
 }
 
 function fundingImpactForAddOn(
@@ -1142,7 +1086,7 @@ function fundingImpactForAddOn(
     case "stage_executor_patch":
       return "执行者调整会作为阶段补充写入链上，后续履约只认当前激活执行者";
     case "stage_resource_patch":
-      return "资源要求补充会覆盖订单阶段配置，不直接托管或划转资金";
+      return "资源要求补充会覆盖订单阶段配置，不直接划转资金";
     case "submit_signal":
       return "执行者提交会形成链上确认；凭证正文仍保留在链下";
     default:
@@ -1194,7 +1138,7 @@ function requiredInputsForFulfillment(
       return [
         {
           inputId: "stage-evidence",
-          label: kind === "delivery_update" ? "阶段交付凭证" : "阶段凭证",
+          label: kind === "delivery_update" ? "阶段履约凭证" : "阶段凭证",
           inputType: "evidence",
           required: true,
           completed,
@@ -1655,8 +1599,6 @@ function displayAssigneeRole(role: string): string {
 function executorPatchModeLabel(
   mode: StateMachineStageExecutorOverlayProjection["mode"],
 ): string {
-  // patch 词表封闭为 assign/handoff（非协作换人走 fork 车道）。
-  // default 分支兜底未知词，不裸出内部枚举。
   switch (mode) {
     case "assign":
       return "指派执行方";
@@ -1685,11 +1627,6 @@ function zhixuIdForPlan(order: StateMachineOrderProjection): string {
   return zhixuIdFromPlanId(order.planId);
 }
 
-/**
- * The zhixu id of an order/task follows the Store-registered schema for its
- * plan when one exists; otherwise it falls back to the plan-derived id so the
- * id always points at a real catalog entry built from the same projection.
- */
 async function zhixuIdForOrderProjection(
   order: StateMachineOrderProjection,
   productSchemaResolver?: ProductSchemaResolver,
@@ -1698,11 +1635,6 @@ async function zhixuIdForOrderProjection(
   return schema?.zhixuId ?? zhixuIdForPlan(order);
 }
 
-/**
- * Catalog entries describe the same plan the chain published. When the plan
- * projection exists, its publication evidence overrides the schema bundle's
- * "not yet synced" placeholder.
- */
 function overlayPlanPublication(
   detail: ZhixuDetailDTO,
   plan: ProjectionSnapshot["stateMachinePlans"][string] | undefined,
@@ -1710,8 +1642,6 @@ function overlayPlanPublication(
   if (!plan) {
     return detail;
   }
-  // 只有用 PlanRegistered(finalize) 覆写占位状态；commit-only 桶保留
-  // "not_found/等待发布同步" 占位——发布权威在 finalize，不在桶存在。
   if (!isPlanRegisteredProjection(plan)) {
     return detail;
   }
@@ -1785,12 +1715,6 @@ function taskStatusMatchesQuery(
   );
 }
 
-/**
- * 协议包 OrderStatus 是冻结的单值类型（合约词表只有 registered），投影侧的
- * "unknown"/乐观提升在这里被归一为 "registered"。诚实性由 projectionStatus
- * （机器可读）与 statusLabel（pending 时"同步中"）承担，二者都以
- * registeredAt 为判据，见 orderProjectionComplete。
- */
 function mapStateMachineOrderStatus(
   status: StateMachineOrderStatus,
 ): ProductOrderDTO["status"] {
@@ -1798,22 +1722,12 @@ function mapStateMachineOrderStatus(
   return "registered";
 }
 
-/**
- * 投影完整性判据：订单行存在 ≠ 注册事件已投影。行可被任意引用该 orderId
- * 的事件先建出（SignalSubmitted/HookStatusChanged 等还会把 status 乐观提升
- * 为 "registered"），而 registeredAt 只由 OrderRegistered 事件写入——与
- * reconcile worker 判定注册投影在场的判据一致。
- */
 function orderProjectionComplete(
   order: StateMachineOrderProjection,
 ): boolean {
   return Boolean(order.registeredAt);
 }
 
-/**
- * statusLabel 跟投影完整性走：行已建但注册投影未到时显示"同步中"，即使
- * status 字段已被乐观提升为 registered——避免读面渲染成"已注册"。
- */
 function orderProjectionStatusLabel(
   status: StateMachineOrderStatus,
   projected: boolean,
@@ -2008,13 +1922,6 @@ function compareProvenance(
   return compareChainPointers(left, right);
 }
 
-// bytes32 展示解码/回落单源在 shared/display.ts：displayBytes32 的标签
-// 回落 `${fallback} ${短哈希}` 与本视图形态一致，直接消费单源。
-// displayStageId 是"解码失败原样透传"的
-// 恒等组合：它的输出参与 currentStageId 匹配、executorOverlays/
-// resourceRequirements 记录键与 schema 阶段比对，回落必须是原始值而非
-// 短哈希（前端与链上原始值关联依赖它），故仅委托单源解码、不套标签
-// 回落。
 function displayStageId(value: string): string {
   return decodeBytes32Text(value) ?? value;
 }

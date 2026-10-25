@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { createNotificationService } from "../src/notifications/service.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createNotificationService, MemoryNotificationDeliveryStore, MemoryParticipantNotificationReadStateStore } from "../src/notifications/service.js";
+import { createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/config.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import {
   decodeBytes32Text,
   displayBytes32,
@@ -10,9 +12,52 @@ import {
 } from "../src/shared/display.js";
 import type { Address, Hex } from "../src/shared/types.js";
 
-// bytes32 展示解码单源（shared/display.ts）的钉子：并集语义 = 可打印
-// ASCII 或 Unicode Letter/Number/Punctuation/Separator → 显示文本，
-// 否则短哈希回落——同一标识在阶段视图与活动流两个视图同一显示。
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
+
 const contractAddress = "0x1111111111111111111111111111111111111111" as Address;
 const participantWallet = "0x4444444444444444444444444444444444444444" as Address;
 const planId = "0x0000000000000000000000000000000000000000000000000000000000000aaa" as Hex;
@@ -24,9 +69,9 @@ const zeroBytes32 = "0x000000000000000000000000000000000000000000000000000000000
 
 describe("bytes32 展示解码单源（shared/display）", () => {
   it("中文标识按 Unicode 字符集显示文本", () => {
-    expect(decodeBytes32Text(bytes32Text("预交付"))).toBe("预交付");
-    expect(displayBytes32(bytes32Text("预交付"), "阶段")).toBe("预交付");
-    expect(displayBytes32(bytes32Text("预交付"))).toBe("预交付");
+    expect(decodeBytes32Text(bytes32Text("示例阶段"))).toBe("示例阶段");
+    expect(displayBytes32(bytes32Text("示例阶段"), "阶段")).toBe("示例阶段");
+    expect(displayBytes32(bytes32Text("示例阶段"))).toBe("示例阶段");
   });
 
   it("可打印 ASCII 标识显示文本", () => {
@@ -36,14 +81,11 @@ describe("bytes32 展示解码单源（shared/display）", () => {
   });
 
   it("ASCII 符号类（$=^|~）按并集语义显示文本", () => {
-    // "$ + = < > ^ ` | ~" 是 ASCII 可打印符号，但不在 Unicode
-    // Letter/Number/Punctuation/Separator 内：按并集语义统一显示文本。
     expect(displayBytes32(bytes32Text("v2=beta$ok"), "阶段")).toBe("v2=beta$ok");
     expect(displayBytes32(bytes32Text("v2=beta$ok"))).toBe("v2=beta$ok");
   });
 
   it("混合控制字符不可展示：带标签回落 `${fallback} ${短哈希}`，无标签回落裸短哈希", () => {
-    // "ab\x01cd"：\x01 两边字符集都不收 → 判不可展示。
     const mixedControl = bytes32FromBytes(0x61, 0x62, 0x01, 0x63, 0x64);
     expect(decodeBytes32Text(mixedControl)).toBeUndefined();
     expect(displayBytes32(mixedControl, "阶段")).toBe(`阶段 ${shortBytes32(mixedControl)}`);
@@ -68,23 +110,20 @@ describe("bytes32 展示解码单源（shared/display）", () => {
   it("按首个 NUL 截断并去首尾空白（Solidity 字符串填充惯例）", () => {
     expect(decodeBytes32Text(bytes32FromBytes(0x61, 0x62, 0x00, 0x63, 0x64))).toBe("ab");
     expect(decodeBytes32Text(bytes32Text("ab "))).toBe("ab");
-    // 乱码字节序列（非法 utf8 / 控制字节）整体判不可展示。
     expect(decodeBytes32Text(bytes32FromBytes(0xff, 0xfe, 0xfd, 0xfc))).toBeUndefined();
   });
 });
 
 describe("bytes32 展示跨视图一致（活动流 vs 阶段视图）", () => {
   it("同一中文标识在订单阶段视图与参与方活动流显示同一文本", async () => {
-    const zhStageId = bytes32Text("预交付");
-    const zhHookName = bytes32Text("示例单据复核");
-    const store = new MemoryProjectionStore();
+    const zhStageId = bytes32Text("示例阶段");
+    const zhHookName = bytes32Text("示例复核");
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [
         chainEvent(1n, "PlanRegistered", { planId, planHash, hookCount: 1n }),
         chainEvent(2n, "OrderRegistered", { orderId, planId }),
-        // 授权提交方 = 参与钱包（sourceId/signalId 即 hookId 的链上事实
-        // 绑定键）：HookReady 生成的任务指派给该钱包，两侧视图同可见。
         chainEvent(3n, "SignalSubmitterAuthorized", {
           orderId,
           sourceId: hookId,
@@ -102,8 +141,8 @@ describe("bytes32 展示跨视图一致（活动流 vs 阶段视图）", () => {
       ]
     });
 
-    // 阶段视图（product 读面：订单详情的阶段/任务展示）。
     const router = createApiRouter(store, {
+      ...requiredRouterStores(),
       submissionChainId: 84532,
       submissionVerifyingContract: contractAddress,
       productRuntimeEnvironment: "local" as const
@@ -122,27 +161,29 @@ describe("bytes32 展示跨视图一致（活动流 vs 阶段视图）", () => {
         readonly tasks: ReadonlyArray<{ readonly hookName: string; readonly stageIdentifier: string }>;
       };
     }).order;
-    expect(order.currentStageId).toBe("预交付");
-    expect(order.currentStageName).toBe("预交付");
+    expect(order.currentStageId).toBe("示例阶段");
+    expect(order.currentStageName).toBe("示例阶段");
     expect(order.stages).toContainEqual(
-      expect.objectContaining({ stageId: "预交付", name: "预交付" })
+      expect.objectContaining({ stageId: "示例阶段", name: "示例阶段" })
     );
     expect(order.tasks[0]).toMatchObject({
-      hookName: "示例单据复核",
-      stageIdentifier: "预交付"
+      hookName: "示例复核",
+      stageIdentifier: "示例阶段"
     });
 
-    // 活动流（notifications 参与方面：task_ready 通知的阶段展示）。
-    const feed = await createNotificationService({ store })
+    const feed = await createNotificationService({
+      store,
+      deliveryStore: new MemoryNotificationDeliveryStore(),
+      participantReadStateStore: new MemoryParticipantNotificationReadStateStore(),
+    })
       .listParticipantNotifications({ walletAddress: participantWallet });
     const taskNotification = feed.notifications.find(
       (notification) => notification.kind === "task_ready"
     );
     expect(taskNotification).toBeDefined();
-    // 核心钉子：同一 bytes32 标识，两个视图同一显示。
     expect(taskNotification?.stageLabel).toBe(order.currentStageId);
     expect(taskNotification?.stageId).toBe(order.currentStageId);
-    expect(taskNotification?.taskTitle).toBe("处理示例单据复核");
+    expect(taskNotification?.taskTitle).toBe("处理示例复核");
   });
 });
 

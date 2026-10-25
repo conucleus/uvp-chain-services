@@ -17,9 +17,6 @@ import type { Address, Hex } from "../shared/types.js";
 
 export type { ProductSubmitTypedData, ProductSubmitTypedDataField };
 
-// 写侧契约单源在 @uvp-eth/product-dto（write-side.ts，形状以本服务端真身
-// 为权威）；此处仅再导出供仓内消费。statusLabel 必填的成立前提是
-// withSubmissionReconcileDefaults（service.ts）对每次读取恒兜底产出。
 export type {
   PrepareProductTaskSubmitInput,
   ProductSubmissionAttemptDTO,
@@ -45,10 +42,6 @@ export interface PreparedSubmissionDTO {
   readonly taskId: string;
   readonly orderId: string;
   readonly onchainOrderId: Hex;
-  /**
-   * the state machine ABI is plan-scoped. The prepared signature
-   * commits to (planId, orderId); the zero placeholder is never stored here.
-   */
   readonly planId: Hex;
   readonly stageIdentifier: string;
   readonly signalName: string;
@@ -65,13 +58,7 @@ export interface PreparedSubmissionDTO {
   readonly status: "prepared";
   readonly humanSummary: ProductSubmitHumanSummaryDTO;
   readonly typedData: ProductSubmitTypedData;
-  /**
-   * 事实属主自证（词表 Merkle 化形态的 submitSignalFor 参数）：prepare 时从
-   * plan 投影两表构造（词表内 relation=0 能力叶 proof；全零 = 词表外/
-   * 投影表空的外部 plan，不声明属主）。缺省视为全零——广播适配器兜底。
-   */
   readonly attribution?: SignalAttributionPayload;
-  /** selector 绑定证明（按属主阶段找绑定叶；全零 = 不携证）。 */
   readonly selectorBinding?: SelectorBindingPayload;
   readonly evidence: readonly PreparedSubmissionEvidenceDTO[];
   readonly authorization: {
@@ -184,17 +171,10 @@ export type SubmissionBroadcastResult =
     };
 
 export interface SubmissionBroadcastAdapter {
-  /**
-   * Capability flag: does this adapter actually broadcast to chain?
-   * Adapters that cannot broadcast must declare `attemptsBroadcast: false`
-   * so callers never reserve nonces or consume prepared submissions for
-   * transactions that will never be sent.
-   */
   readonly attemptsBroadcast?: boolean;
   broadcast(request: SubmissionBroadcastRequest): Promise<SubmissionBroadcastResult>;
 }
 
-/** 台账键序扫描游标：(createdAt, submissionId) 双键，created_at 不可变保证轮中更新不影响游标稳定性。 */
 export interface ProductSubmissionScanCursor {
   readonly createdAt: string;
   readonly submissionId: string;
@@ -205,41 +185,12 @@ export interface ProductSubmissionStore {
   putPrepared(record: PreparedSubmissionRecord): Promise<void>;
   getPrepared(prepareId: string): Promise<PreparedSubmissionRecord | undefined>;
   markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void>;
-  /**
-   * 过期 prepare 清扫（可选能力，与 stage-patches deleteExpiredPrepared
-   * 同形态）：删除 deadline（unix 秒）早于 deadlineBeforeSeconds 的行，
-   * 无论是否已消费——过期行只剩档案价值，真正的过期档案在 submission
-   * 台账里。prepare 入口无配额，由服务层写入时顺带触发约束表无界堆叠。
-   */
   deleteExpiredPrepared?(deadlineBeforeSeconds: string): Promise<number>;
-  /**
-   * staleBefore：命中既有预留时，预留时间早于该阈值的行视为陈旧预留
-   * （进程在 reserve 与落档之间硬崩溃的唯一泄漏形态——存活中的 submit
-   * 要么在同一落档事务内收尾，要么显式释放，预留年龄不可能超过一个
-   * 授权有效期）。陈旧行走条件更新接管并返回 true；未过期仍返回 false
-   * 由调用方 409。阈值缺省时退化为纯 insert 语义。
-   */
   reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean>;
-  /**
-   * Release a previously reserved nonce so the same prepared submission can be
-   * retried after a failure that consumed the reservation without ever
-   * recording a submission (transient RPC or store failure). Optional store
-   * capability: submission-service treats a missing releaseNonce as
-   * best-effort.
-   */
   releaseNonce?(key: string): Promise<void>;
   putSubmission(submission: ProductSubmissionDTO): Promise<void>;
   getSubmission(submissionId: string): Promise<ProductSubmissionDTO | undefined>;
   listSubmissions(): Promise<readonly ProductSubmissionDTO[]>;
-  /**
-   * 对账/清扫车道的有界扫描（可选能力）：按 (createdAt, submissionId)
-   * 键序返回"未闭环"的一页——status ∈ {broadcasting, submitted,
-   * indexing, failed}。终态（confirmed/expired/signature_received/
-   * replaced）随历史单调增长且每轮重扫是 O(全历史) 的根因，服务端直接
-   * 剪除不返回。failed 是否可复核（需带 txHash）由调用方行级过滤。after
-   * 为上一页末尾游标，缺省从头开始；实现缺失时调用方回退
-   * listSubmissions() 全量。
-   */
   listOpenSubmissionsPage?(
     after: ProductSubmissionScanCursor | undefined,
     limit: number

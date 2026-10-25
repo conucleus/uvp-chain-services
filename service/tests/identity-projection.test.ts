@@ -1,8 +1,56 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { rebuildIdentityProjections } from "../src/indexer/identity-projections.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 const registryAddress = "0x1111111111111111111111111111111111111111";
 const registrar = "0x2222222222222222222222222222222222222222";
@@ -40,14 +88,10 @@ describe("identity registry projection", () => {
         revokeReasonHash: reasonHash,
       }),
     ]);
-    // 已注册 binding 的撤销正常落地，不产生未知计数。
     expect(snapshot.unresolvedRevokeEventCount).toBe(0);
   });
 
   it("counts revocations that point at an unknown binding instead of silently dropping them", () => {
-    // 撤销指向未知 binding（未注册/回放顺序缺口/键不一致）：撤销被跳过，
-    // 但必须显式计数留痕——静默 return 会让"链上已撤销、投影仍 active"
-    // 的缺口不可观测。
     const snapshot = rebuildIdentityProjections([
       event(2n, 0, "IdentityBindingRegistered", {
         bindingId,
@@ -58,7 +102,6 @@ describe("identity registry projection", () => {
         registrar,
       }),
       event(3n, 0, "IdentityBindingRevoked", {
-        // 该 bindingId 从未注册。
         bindingId: "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
         reasonHash,
         reasonURI: "https://store/identity-revocations/2",
@@ -67,16 +110,14 @@ describe("identity registry projection", () => {
     ]);
 
     expect(snapshot.unresolvedRevokeEventCount).toBe(1);
-    // 已注册 binding 不受未知撤销影响。
     expect(Object.values(snapshot.bindings)).toEqual([
       expect.objectContaining({ bindingId, status: "active" }),
     ]);
-    // 未知撤销仍是已处理事件（eventCount 覆盖全部身份事件）。
     expect(snapshot.eventCount).toBe(2);
   });
 
   it("exposes bindings through the projection store and public API", async () => {
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [event(2n, 0, "IdentityBindingRegistered", {
@@ -90,7 +131,7 @@ describe("identity registry projection", () => {
     });
 
     expect(await store.listIdentityBindings({ account })).toHaveLength(1);
-    const response = await createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({
+    const response = await createApiRouter(store, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({
       method: "GET",
       pathname: "/identity/bindings",
       query: { registryAddress, account },
@@ -100,9 +141,7 @@ describe("identity registry projection", () => {
   });
 
   it("parses activeOnly=false as boolean false so revoked records stay visible", async () => {
-    // activeOnly 的字符串 "false" 若原样透传给投影（truthy），撤销记录
-    // 会被错误过滤——路由层必须收敛为 boolean。
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [
@@ -122,7 +161,7 @@ describe("identity registry projection", () => {
         }),
       ],
     });
-    const router = createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const all = await router.handle({
       method: "GET",

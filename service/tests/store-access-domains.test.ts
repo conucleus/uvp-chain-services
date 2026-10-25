@@ -1,26 +1,92 @@
-import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import { keccak256, stringToBytes } from "viem";
 import { EXAMPLE_ZHIXU_ID, examplePlanIds, demoZhixuDetail } from "./fixtures/business/index.js";
 import { createApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { PostgresDatabase } from "../src/storage/postgres-client.js";
+import type { ProjectionStore } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import type { ApiRouter } from "../src/api/route-context.js";
 import type { Address, Hex } from "../src/shared/types.js";
 import { exampleSchemaResolver } from "./example-schema.js";
-import type { StoreAuthChallengeRecord } from "../src/store/sessions/index.js";
+import { PostgresStoreWalletSessionStore } from "../src/store/sessions/index.js";
+import { PostgresStoreListingStore } from "../src/store-access-postgres-stores.js";
 
-/**
- * Store 身份与会话、加入闭环、装修权限、上架与锚核验的后端验收。
- *
- * 链侧事实全部经投影播种（PlanRegistered/PlanPublisherRecorded/
- * IdentityBindingRegistered/SignalSubmitterAuthorized …），服务端广播走
- * 模拟治理适配器（simulated_tx 带 txHash）。
- */
+let stores: ChainServicesStores;
+let accessDatabase: PostgresDatabase;
+
+beforeAll(async () => {
+  const databaseUrl = await createPostgresTestDatabase();
+  stores = createChainServicesStores({
+    database: { url: databaseUrl, migrationsAutoRun: true },
+    chainId: 31337
+  });
+  accessDatabase = new PostgresDatabase({ databaseUrl });
+});
+
+beforeEach(async () => {
+  // 原先每用例各建一个 Memory projection store + 路由内新建各域内存件：
+  // 同一克隆库内清空本文件会写入的 store-access 域表，保持用例间互不可见。
+  await accessDatabase.query("DELETE FROM chain_event_log WHERE chain_id = 31337");
+  await accessDatabase.query("DELETE FROM chain_projection_snapshot WHERE chain_id = 31337");
+  await accessDatabase.query("DELETE FROM chain_index_cursor WHERE chain_id = 31337");
+  await accessDatabase.query("DELETE FROM chain_projection_sync_state WHERE chain_id = 31337");
+  await accessDatabase.query("DELETE FROM store_auth_challenge");
+  await accessDatabase.query("DELETE FROM store_wallet_session");
+  await accessDatabase.query("DELETE FROM store_account_address");
+  await accessDatabase.query("DELETE FROM store_identity_descriptor_snapshot");
+  await accessDatabase.query("DELETE FROM store_zhixu_decoration");
+  await accessDatabase.query("DELETE FROM store_publisher_delegation");
+  await accessDatabase.query("DELETE FROM store_zhixu_listing");
+  await accessDatabase.query("DELETE FROM store_join_application_event");
+  await accessDatabase.query("DELETE FROM store_join_application");
+  // join 审批通过会经 supplier service 落 store_supplier_metadata/audit：
+  // 不清会把上一用例创建的供应商带进本用例的 /store/suppliers 读回。
+  await accessDatabase.query("DELETE FROM store_supplier_audit");
+  await accessDatabase.query("DELETE FROM store_supplier_metadata");
+});
+
+afterAll(async () => {
+  await accessDatabase.close();
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 const contractAddress: Address = "0x1111111111111111111111111111111111111111";
 const publisherAddress = "0xaaaa000000000000000000000000000000000001" as Address;
@@ -38,13 +104,11 @@ const planHash = examplePlanIds.planHash as Hex;
 const governanceAdminHeaders = {
   "x-uvp-admin-id": "governance-admin-1",
   "x-uvp-admin-role": "governance_admin",
-  // 红线：供应商写路由要求会话已锚定地址（本地联调 dev 锚定头）。
   "x-uvp-store-dev-anchored-address": publisherAddress
 };
 const storeOperatorHeaders = {
   "x-uvp-store-user-id": "store-operator-1",
   "x-uvp-store-role": "operator",
-  // 红线：listing/供应商写路由要求会话已锚定地址（本地联调 dev 锚定头）。
   "x-uvp-store-dev-anchored-address": publisherAddress
 };
 const publisherAnchoredHeaders = {
@@ -80,7 +144,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(verified.session.anchoredAddress.toLowerCase()).toBe(supplierWallet.toLowerCase());
     expect(verified.session.addresses).toHaveLength(1);
 
-    // 挑战一次性：重放被拒绝。
     const replay = await router.handle({
       method: "POST",
       pathname: "/store/auth/verify",
@@ -89,7 +152,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(replay.status).toBe(401);
     expect(replay.body).toMatchObject({ error: "store_challenge_invalid" });
 
-    // 会话叠加到 /store/session（含锚定地址）。
     const sessionResponse = await router.handle({
       method: "GET",
       pathname: "/store/session",
@@ -100,7 +162,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(session.anchoredAddress?.toLowerCase()).toBe(supplierWallet.toLowerCase());
     expect(session.accessLevel).toBe("store_read");
 
-    // 错误签名被拒绝：挑战发给 outsider，却由 supplier 的钥匙签名。
     const forgedChallenge = await router.handle({
       method: "POST",
       pathname: "/store/auth/challenge",
@@ -115,7 +176,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(forgedVerify.status).toBe(401);
     expect(forgedVerify.body).toMatchObject({ error: "store_challenge_signature_invalid" });
 
-    // 登出后会话失效。
     const logout = await router.handle({
       method: "POST",
       pathname: "/store/auth/logout",
@@ -145,8 +205,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("plain wallet sessions only get the public read capability, not store.audit.read", async () => {
-    // 未命中运营方/管理员清单的钱包登录只证明钱包控制权——运营审计
-    // （store.audit.read）是运营数据面，不得随登录默认授予。
     const router = await buildRouter({ operatorWallets: [operatorWallet] });
     const plainToken = await login(router, supplierWallet);
     const operatorToken = await login(router, operatorWallet);
@@ -169,10 +227,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("store runtime observation reads require the store.audit.read capability", async () => {
-    // 运行时观察面（summary/订单观察/回放/审计汇总）无参与者过滤，暴露
-    // 全量订单的 authorizations/signals submitter、tasks assigneeWallet
-    // 与参与者钱包映射：任意第三方钱包 SIWE 登录不得因"有锚定会话"即得
-    // 运营数据——与 /store/audit 同能力门（store.audit.read）。
     const router = await buildRouter({ operatorWallets: [operatorWallet] });
     const plainToken = await login(router, supplierWallet);
     const operatorToken = await login(router, operatorWallet);
@@ -185,12 +239,9 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       "/store/orders/0x0000000000000000000000000000000000000000000000000000000000000909/audit-summary"
     ];
     for (const pathname of runtimePaths) {
-      // 纯钱包会话只证明钱包控制权（store.read）：403，不因锚定而放行。
       const plain = await router.handle({ method: "GET", pathname, headers: { "x-uvp-store-session": plainToken } });
       expect(plain).toMatchObject({ status: 403, body: { error: "forbidden" } });
     }
-    // 运营方钱包会话持有 store.audit.read：summary/订单列表 200；具体
-    // 订单缺投影时 404（不泄露存在），不再是身份层拒绝。
     const summary = await router.handle({
       method: "GET",
       pathname: "/store/runtime/summary",
@@ -214,7 +265,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   it("ignores the dev anchored address header outside local runtime", async () => {
     const { createWalletSessionStoreIdentityProvider } = await import("../src/store/sessions/index.js");
     const { createStoreSessionService } = await import("../src/store/sessions/index.js");
-    const sessionService = createStoreSessionService();
+    const sessionService = createStoreSessionService({ store: stores.storeWalletSessionStore });
     const base = {
       async resolve() {
         return {
@@ -256,14 +307,10 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       },
       runtimeEnvironment: "testnet"
     });
-    // testnet 是公开测试网：自报地址头不构成身份锚定。
     expect((await testnetProvider.resolve(headers)).anchoredAddress).toBeUndefined();
   });
 
   it("wallet sessions never receive store.draft.review (governance-only capability)", async () => {
-    // 职责分离（store/console/access.ts 口径）：zhixu 草稿审核是治理动作，
-    // 专属 governance_admin——钱包会话的 operator/store_admin 能力表都
-    // 不得下放（JWT 侧同样刻意不映射）。
     const router = await buildRouter({ operatorWallets: [operatorWallet], adminWallets: [teamDerivedWallet] });
     const operatorToken = await login(router, operatorWallet);
     const adminToken = await login(router, teamDerivedWallet);
@@ -292,7 +339,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     });
     expect(challenge.status).toBe(201);
     const anchorChallenge = (challenge.body as { challenge: { nonce: string; message: string } }).challenge;
-    // 挑战发给 teamMemberWallet，但由另一个真实密钥签名 → 地址不符被拒。
     const wrongKeyVerify = await router.handle({
       method: "POST",
       pathname: "/store/auth/verify",
@@ -301,7 +347,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     });
     expect(wrongKeyVerify.status).toBe(401);
 
-    // 正确流程：为派生地址签挑战。
     const properAddress = teamDerivedWallet;
     const properChallenge = await router.handle({
       method: "POST",
@@ -343,7 +388,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const router = await buildRouter();
     const subjectId = "0x0000000000000000000000000000000000000000000000000000000000007777" as Hex;
 
-    // 准备审核记录 → 身份注册（模拟广播）。
     await router.handle({
       method: "POST",
       pathname: "/store/suppliers",
@@ -353,7 +397,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const suppliers = await router.handle({
       method: "GET",
       pathname: "/store/suppliers",
-      // 读面鉴权——用已认证 store 头读取。
       headers: governanceAdminHeaders
     });
     const supplierId = (suppliers.body as { suppliers: { supplierId: string }[] }).suppliers[0]!.supplierId;
@@ -390,7 +433,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(dto.verification.recomputedDescriptorHash).toBe(descriptorHash);
     expect(dto.descriptor.account.toLowerCase()).toBe(supplierWallet.toLowerCase());
 
-    // 篡改检测：错误的 hash 查不到快照。
     const missing = await router.handle({
       method: "GET",
       pathname: `/identity/descriptors/${subjectId}/0x${"f".repeat(64)}`
@@ -420,7 +462,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const view = (saved.body as { current?: { version: number }; versions: { version: number }[] });
     expect(view.current?.version).toBe(1);
 
-    // 委托：publisher 授予团队成员 → 成员可写；撤销后立即失去写权限。
     const delegation = await router.handle({
       method: "POST",
       pathname: "/store/publishers/delegations",
@@ -453,7 +494,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     });
     expect(memberBlocked.status).toBe(403);
 
-    // 版本回滚 = 新版本复制旧版本。
     const restored = await router.handle({
       method: "POST",
       pathname: `/store/decoration/${planId}/versions/1/restore`,
@@ -463,12 +503,11 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(restored.status).toBe(201);
     expect((restored.body as { current?: { version: number } }).current?.version).toBe(3);
 
-    // 结构校验拒绝业务性/未知字段与非法 evidenceSpec。
     const businessField = await router.handle({
       method: "PUT",
       pathname: `/store/decoration/${planId}`,
       headers: publisherAnchoredHeaders,
-      body: { schemaVersion: "store-zhixu-decoration.v1", theme: { displayName: "x", exampleField: "示例单据单号" } }
+      body: { schemaVersion: "store-zhixu-decoration.v1", theme: { displayName: "x", exampleField: "示例单号" } }
     });
     expect(businessField.status).toBe(400);
     expect(businessField.body).toMatchObject({ error: "invalid_decoration_field" });
@@ -489,7 +528,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(listing.listing.status).toBe("imported");
     expect(listing.anchorVerification.status).toBe("consistent");
 
-    // 冲突：声称一个错误的 planHash → 锚核验 conflict，公开被阻断。
     const conflictImport = await router.handle({
       method: "POST",
       pathname: "/store/listings/import",
@@ -515,12 +553,10 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(publicAnchorVerification.status).toBe(200);
     expect((publicAnchorVerification.body as { anchorVerification: { status: string } }).anchorVerification.status).toBe("consistent");
 
-    // 目录可见（含该 zhixu）。
     const catalogBefore = await router.handle({ method: "GET", pathname: "/store/zhixus" });
     const zhixusBefore = (catalogBefore.body as { zhixus: { planId: string }[] }).zhixus;
     expect(zhixusBefore.some((row) => row.planId.toLowerCase() === planId.toLowerCase())).toBe(true);
 
-    // 详情页叠加锚核验。
     const detail = await router.handle({
       method: "GET",
       pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}`
@@ -531,7 +567,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(overlay?.anchorVerification?.status).toBe("consistent");
     expect(overlay?.anchorVerification?.checks.some((check) => check.id === "plan_hash" && check.outcome === "match")).toBe(true);
 
-    // 下架：目录与匿名读取不可见，直链显示已下架；链上事实（detail 链数据）仍在。
     const delisted = await router.handle({
       method: "POST",
       pathname: `/store/listings/${listing.listing.listingId}/delist`,
@@ -543,8 +578,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const zhixusAfter = (catalogAfter.body as { zhixus: { planId: string }[] }).zhixus;
     expect(zhixusAfter.some((row) => row.planId.toLowerCase() === planId.toLowerCase())).toBe(false);
 
-    // 详情与列表/search 同口径：delisted 对非运营方 404（不泄露存在），
-    // 运营方保留治理可见性（下架状态经 overlay 可见）。
     const detailAfter = await router.handle({
       method: "GET",
       pathname: `/store/zhixus/${EXAMPLE_ZHIXU_ID}`
@@ -566,7 +599,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(hiddenAnchorVerification.status).toBe(404);
     expect(hiddenAnchorVerification.body).toMatchObject({ error: "listing_not_found" });
 
-    // 运营方仍能在目录里看到（治理观察）。
     const operatorCatalog = await router.handle({
       method: "GET",
       pathname: "/store/zhixus",
@@ -575,7 +607,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const operatorZhixus = (operatorCatalog.body as { zhixus: { planId: string }[] }).zhixus;
     expect(operatorZhixus.some((row) => row.planId.toLowerCase() === planId.toLowerCase())).toBe(true);
 
-    // 重新上架：锚核验一致才允许。
     const relisted = await router.handle({
       method: "POST",
       pathname: `/store/listings/${listing.listing.listingId}/relist`,
@@ -587,11 +618,9 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("conflicted anchors block publication (mismatched planHash claim)", async () => {
-    // 该 plan 必须真的在投影里注册：未投影只能判 pending_indexing（等
-    // 索引器），planHash 失配的 conflict 要在已投影的对照下才成立。
     const dockPlanId = "0x0000000000000000000000000000000000000000000000000000000000000102";
     const dockPlanHash = `0x${"ab".repeat(32)}` as Hex;
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [
@@ -599,7 +628,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       ]
     });
     const router = createApiRouter(store, routerOptions());
-    // 为第二个 plan 建 listing，声称错误 planHash。
     const imported = await router.handle({
       method: "POST",
       pathname: "/store/listings/import",
@@ -621,12 +649,9 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("a listing transition racing a concurrent decision converges on one winner", async () => {
-    const { createStoreListingService, InMemoryStoreListingStore } = await import("../src/store/listings/index.js");
-    // 竞态形态：review(approve) 的读检查与写入之间，并发 review(reject)
-    // 已把行翻成 rejected——approve 的期望前态失配，按 409 收敛，不得
-    // 覆盖赢家，也不得再落一条 succeeded 审计。
+    const { createStoreListingService } = await import("../src/store/listings/index.js");
     let armed = false;
-    class RacingRejectStore extends InMemoryStoreListingStore {
+    class RacingRejectStore extends PostgresStoreListingStore {
       override async getListing(listingId: string) {
         const listing = await super.getListing(listingId);
         if (armed && listing?.status === "imported") {
@@ -640,8 +665,8 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
         return listing;
       }
     }
-    const listingStore = new RacingRejectStore();
-    const projectionStore = new MemoryProjectionStore();
+    const listingStore = new RacingRejectStore({ database: accessDatabase });
+    const projectionStore = stores.projectionStore;
     await seedPlanProjection(projectionStore);
     const audits: { action: string; outcome: string }[] = [];
     const service = createStoreListingService({
@@ -658,12 +683,11 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       .rejects.toMatchObject({ status: 409, code: "listing_transition_conflict" });
 
     expect((await service.getListing(imported.listing.listingId)).listing.status).toBe("rejected");
-    // 败者不落第二条互斥成功的审核审计。
     expect(audits.filter((event) => event.outcome === "succeeded" && event.action === "listing.reviewed")).toHaveLength(0);
   });
 
   it("join loop applied → under_review → authorized (identity pairing tx evidence)", async () => {
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await seedPlanProjection(store, { withSupplierBinding: true });
     const router = createApiRouter(store, routerOptions());
     const applicantToken = await login(router, supplierWallet);
@@ -678,7 +702,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const application = (submitted.body as { application: { applicationId: string; status: string; applicantAddress: string } });
     expect(application.application.status).toBe("applied");
 
-    // 无锚定会话不能提交敏感操作。
     const anonymousSubmit = await router.handle({
       method: "POST",
       pathname: "/store/join-applications",
@@ -686,7 +709,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     });
     expect(anonymousSubmit.status).toBe(401);
 
-    // 非 publisher 不能审核。
     const outsiderReview = await router.handle({
       method: "POST",
       pathname: `/store/join-applications/${application.application.applicationId}/review-start`,
@@ -719,14 +741,11 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(approvedBody.application.status).toBe("authorized");
     expect(approvedBody.application.txEvidence.some((entry) => entry.kind === "identity_binding" && entry.txHash && entry.txHash.startsWith("0x"))).toBe(true);
     expect(approvedBody.events.map((event) => event.type)).toContain("authorized");
-    // 授权意向已记录（订单触发时落地链上）。
     expect(approvedBody.identityPairing.bindingStatus).toBe("active");
 
-    // 供应商与治理审核记录成对出现（审计配对）。
     const suppliers = await router.handle({
       method: "GET",
       pathname: "/store/suppliers",
-      // 读面鉴权——用已认证 store 头读取。
       headers: governanceAdminHeaders
     });
     const createdSupplier = (suppliers.body as { suppliers: { wallet?: string; reviewStatus: string; identityStatus: string }[] }).suppliers
@@ -735,10 +754,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("publisher approval without governance admin is rejected before any side effects", async () => {
-    // 无既有 active binding 时，链上身份登记需要 governance_admin 权威：
-    // 门禁前置于建供应商/翻 approved_for_broadcast/落治理 review——
-    // 拒绝后不留半提交（供应商未创建、申请留在 under_review）。
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await seedPlanProjection(store);
     const router = createApiRouter(store, routerOptions());
     const applicantToken = await login(router, supplierWallet);
@@ -768,7 +784,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       body: { error: "governance_admin_required" }
     });
 
-    // 无半提交：供应商目录里没有该申请人的记录。
     const suppliers = await router.handle({
       method: "GET",
       pathname: "/store/suppliers",
@@ -777,7 +792,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const rows = (suppliers.body as { suppliers: { wallet?: string }[] }).suppliers;
     expect(rows.some((row) => row.wallet?.toLowerCase() === supplierWallet.toLowerCase())).toBe(false);
 
-    // 申请仍在 under_review（未被翻成 authorized/失败终态）。
     const detail = await router.handle({
       method: "GET",
       pathname: `/store/join-applications/${applicationId}`,
@@ -787,7 +801,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("publisher (non-operator) can self-import their own plan; join entry is suppressed while delisted", async () => {
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await seedPlanProjection(store);
     const router = createApiRouter(store, routerOptions());
     const publisherReadHeaders = {
@@ -796,7 +810,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       "x-uvp-store-dev-anchored-address": publisherAddress
     };
 
-    // publisher 自导入（非运营方、无显式 planHash）：投影可查即放行。
     const imported = await router.handle({
       method: "POST",
       pathname: "/store/listings/import",
@@ -807,7 +820,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const listing = (imported.body as { listing: { listingId: string; status: string; planHashClaimed?: string } });
     expect(listing.listing.planHashClaimed?.toLowerCase()).toBe(planHash.toLowerCase());
 
-    // 非运营方不能审核公开。
     const publishDenied = await router.handle({
       method: "POST",
       pathname: `/store/listings/${listing.listing.listingId}/review`,
@@ -816,8 +828,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     });
     expect(publishDenied.status).toBe(403);
 
-    // 未公开 listing（imported，上架审核未完成）服务端一律拦截加入——
-    // 前端被抑制的入口不得可直调 API 绕过。
     const applicantTokenEarly = await login(router, supplierWallet);
     const joinWhileImported = await router.handle({
       method: "POST",
@@ -828,7 +838,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(joinWhileImported.status).toBe(409);
     expect(joinWhileImported.body).toMatchObject({ error: "join_entry_suppressed" });
 
-    // 公开 → 下架后加入入口被服务端抑制（红线）。
     await router.handle({
       method: "POST",
       pathname: `/store/listings/${listing.listing.listingId}/review`,
@@ -852,7 +861,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(joinDenied.status).toBe(409);
     expect(joinDenied.body).toMatchObject({ error: "join_entry_suppressed" });
 
-    // 重新上架后恢复可申请。
     await router.handle({
       method: "POST",
       pathname: `/store/listings/${listing.listing.listingId}/relist`,
@@ -869,7 +877,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("configured chain read failure blocks publication (fail-closed)", async () => {
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await seedPlanProjection(store);
     const router = createApiRouter(store, {
       ...routerOptions(),
@@ -923,12 +931,12 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
         } as unknown as Parameters<typeof createStoreJoinService>[0]["productService"],
         supplierService: {} as Parameters<typeof createStoreJoinService>[0]["supplierService"],
         publisherAccess: { hasPublisherWriteAccess: async () => false },
+        joinStore: stores.storeJoinApplicationStore,
         listingGate
       });
     const actor = { anchoredAddress: supplierWallet, authMode: "dev_store_headers", accessLevel: "store_read" };
     const application = { planId, roleSlotId, authorizationKind: "signal_submitter" as const };
 
-    // listing 读取异常（存储瞬断/脏枚举抛错）不得被吞掉放行——fail-closed 503。
     await expect(joinService({
       getListingForPlan: async () => {
         throw new Error("listing store unavailable");
@@ -938,7 +946,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       code: "listing_gate_unavailable"
     } satisfies Partial<InstanceType<typeof StoreJoinServiceError>>);
 
-    // 配置了链直读但读失败（chainReadFailed）与上架公开门同口径：不放行。
     await expect(joinService({
       getListingForPlan: async () => ({
         status: "public",
@@ -949,7 +956,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       code: "join_entry_suppressed"
     } satisfies Partial<InstanceType<typeof StoreJoinServiceError>>);
 
-    // 控制组：public + consistent + 链读健康 → 提交正常落档。
     await expect(joinService({
       getListingForPlan: async () => ({
         status: "public",
@@ -972,7 +978,8 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
         getZhixu: async () => ({ roleSlots: [{ slotId: roleSlotId }], stages: [] })
       } as unknown as Parameters<typeof createStoreJoinService>[0]["productService"],
       supplierService: {} as Parameters<typeof createStoreJoinService>[0]["supplierService"],
-      publisherAccess: { hasPublisherWriteAccess: async () => false }
+      publisherAccess: { hasPublisherWriteAccess: async () => false },
+      joinStore: stores.storeJoinApplicationStore
     });
     await expect(joinService.submitApplication(
       { planId, roleSlotId, authorizationKind: "signal_submitter" },
@@ -984,7 +991,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("reviewer without planId scope only sees their own applications", async () => {
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await seedPlanProjection(store, { withSupplierBinding: true });
     const router = createApiRouter(store, routerOptions());
     const applicantToken = await login(router, supplierWallet);
@@ -995,7 +1002,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       body: { planId, roleSlotId, authorizationKind: "signal_submitter" }
     });
 
-    // publisher（非运营方、无 planId 过滤）只能看到自己的申请（应为空）。
     const publisherReadHeaders = {
       "x-uvp-store-user-id": "publisher-only",
       "x-uvp-store-role": "read",
@@ -1009,7 +1015,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(publisherList.status).toBe(200);
     expect((publisherList.body as { applications: unknown[] }).applications).toHaveLength(0);
 
-    // 申请人（非 reviewer）即便带 planId 也只看到自己的申请。
     const applicantScoped = await router.handle({
       method: "GET",
       pathname: "/store/join-applications",
@@ -1020,34 +1025,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const scoped = (applicantScoped.body as { applications: { application: { applicantAddress: string } }[] }).applications;
     expect(scoped.every((entry) => entry.application.applicantAddress.toLowerCase() === supplierWallet.toLowerCase())).toBe(true);
     expect(scoped).toHaveLength(1);
-  });
-
-  it("sqlite decoration store round-trips versions (driver-level)", async () => {
-    const { mkdtempSync, rmSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
-    const dir = mkdtempSync(join(tmpdir(), "store-decoration-sqlite-"));
-    try {
-      const { SqliteStoreZhixuDecorationStore } = await import("../src/store/decoration/sqlite-store.js");
-      const decorations = new SqliteStoreZhixuDecorationStore({
-        databaseUrl: `file:${join(dir, "decoration.db")}`,
-        migrations: { autoRun: true }
-      });
-      await decorations.appendVersion({
-        decorationId: "decor_sqlite_1",
-        planId,
-        version: 1,
-        data: { schemaVersion: "store-zhixu-decoration.v1", theme: { displayName: "sqlite 版本" } },
-        authorAddress: publisherAddress,
-        createdAt: "2026-09-03T00:00:00.000Z"
-      });
-      const versions = await decorations.listVersions(planId);
-      expect(versions).toHaveLength(1);
-      expect(versions[0]?.version).toBe(1);
-      expect(versions[0]?.data.theme?.displayName).toBe("sqlite 版本");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 
   it("reject leaves an audited trail with reason and reviewer session", async () => {
@@ -1079,7 +1056,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     const rejectEvent = rejectedBody.events.find((event) => event.type === "rejected");
     expect(rejectEvent?.actorAddress?.toLowerCase()).toBe(publisherAddress.toLowerCase());
 
-    // 申请人能看到自己的申请；列表范围收窄到自己。
     const myList = await router.handle({
       method: "GET",
       pathname: "/store/join-applications",
@@ -1091,10 +1067,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("concurrent join submissions leave exactly one open application", async () => {
-    // 在途查重是"先查后写"：并发双提交会同时通过前置检查。裁决必须
-    // 落在存储层（内存驱动同步查判+写入原子；持久驱动在途唯一索引）
-    // ——败者 409 application_exists，只留一条在途申请。
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await seedPlanProjection(store, { withSupplierBinding: true });
     const router = createApiRouter(store, routerOptions());
     const applicantToken = await login(router, supplierWallet);
@@ -1122,9 +1095,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 
   it("concurrent listing imports for one plan leave exactly one listing (409 for the loser)", async () => {
-    // "一 plan 一 listing"不能只靠先查后写：并发双导入若都落库，旧条
-    // delist 后加入门与详情抑制会按新条放行。存储层唯一裁决 + 败者
-    // 409 listing_exists（不是 503 存储故障失真）。
     const router = await buildRouter();
 
     const results = await Promise.allSettled(
@@ -1151,155 +1121,25 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
   });
 });
 
-describe("store listing/join uniqueness and session CAS (sqlite driver)", () => {
-  const tempDirs: string[] = [];
-
-  afterEach(() => {
-    for (const dir of tempDirs.splice(0)) {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("enforces the one-open-application invariant via the partial unique index", async () => {
-    const { SqliteStoreJoinApplicationStore, StoreJoinOpenApplicationExistsError } = await import("../src/store/join/index.js");
-    const store = new SqliteStoreJoinApplicationStore({
-      databaseUrl: sqliteUrl(),
-      migrations: { autoRun: true }
-    });
-    const base = {
-      planId,
-      roleSlotId,
-      authorizationKind: "signal_submitter" as const,
-      applicantAddress: supplierWallet,
-      applicantSubjectId: `0x${"12".repeat(32)}` as Hex,
-      txEvidence: [],
-      submittedAt: "2026-09-01T00:00:00.000Z",
-      updatedAt: "2026-09-01T00:00:00.000Z"
-    };
-
-    await store.putApplication({ ...base, applicationId: "join_a", status: "applied" });
-    // 并发双提交的败者：同 (plan, applicant) 第二条在途申请被唯一索引拒绝。
-    await expect(store.putApplication({ ...base, applicationId: "join_b", status: "applied" }))
-      .rejects.toBeInstanceOf(StoreJoinOpenApplicationExistsError);
-    // 同一条申请的状态推进不受影响（同 applicationId 的 upsert）。
-    await store.putApplication({ ...base, applicationId: "join_a", status: "under_review" });
-    await store.putApplication({ ...base, applicationId: "join_a", status: "authorized" });
-    // 终态后同一申请人可再次提交新申请（部分索引只约束在途状态）。
-    await store.putApplication({ ...base, applicationId: "join_c", status: "applied" });
-    store.close();
-  });
-
-  it("keeps one listing per plan: the concurrent import loser reads back the winner", async () => {
-    const { SqliteStoreListingStore } = await import("../src/store/listings/index.js");
-    const store = new SqliteStoreListingStore({
-      databaseUrl: sqliteUrl(),
-      migrations: { autoRun: true }
-    });
-    const base = {
-      planId,
-      status: "imported" as const,
-      importedAt: "2026-09-01T00:00:00.000Z",
-      updatedAt: "2026-09-01T00:00:00.000Z"
-    };
-
-    const first = await store.putListing({ ...base, listingId: "listing_a" });
-    expect(first.applied).toBe(true);
-    // 并发双导入的败者：同 plan 第二条不落库（条件写入 0 行受影响），
-    // 读回赢家交给服务层按 409 收敛。
-    const loser = await store.putListing({ ...base, listingId: "listing_b" });
-    expect(loser.applied).toBe(false);
-    expect(loser.record.listingId).toBe("listing_a");
-    // 无前提重插同 listingId：纯插入不覆盖。
-    const reinsert = await store.putListing({ ...base, listingId: "listing_a", status: "delisted" });
-    expect(reinsert.applied).toBe(false);
-    expect(reinsert.record.status).toBe("imported");
-    expect((await store.findListingByPlanId(planId))?.status).toBe("imported");
-    store.close();
-  });
-
-  it("applies listing transitions only from the expected prior status", async () => {
-    const { SqliteStoreListingStore } = await import("../src/store/listings/index.js");
-    const store = new SqliteStoreListingStore({
-      databaseUrl: sqliteUrl(),
-      migrations: { autoRun: true }
-    });
-    const base = {
-      planId,
-      status: "imported" as const,
-      importedAt: "2026-09-01T00:00:00.000Z",
-      updatedAt: "2026-09-01T00:00:00.000Z"
-    };
-    await store.putListing({ ...base, listingId: "listing_a" });
-
-    // 前提命中：imported → public。
-    await expect(
-      store.putListing({ ...base, listingId: "listing_a", status: "public", updatedAt: "2026-09-01T00:00:01.000Z" }, { status: "imported" })
-    ).resolves.toMatchObject({ applied: true });
-    // 前提失配：期望 imported、现行 public——0 行受影响并读回现行行，
-    // 并发互斥迁移只有一个赢家。
-    await expect(
-      store.putListing({ ...base, listingId: "listing_a", status: "rejected", updatedAt: "2026-09-01T00:00:02.000Z" }, { status: "imported" })
-    ).resolves.toMatchObject({ applied: false, record: { status: "public" } });
-    expect((await store.getListing("listing_a"))?.status).toBe("public");
-    store.close();
-  });
-
-  it("session touch/revoke are conditional on the live row and inserts never overwrite", async () => {
-    const { SqliteStoreWalletSessionStore } = await import("../src/store/sessions/index.js");
-    const store = new SqliteStoreWalletSessionStore({
-      databaseUrl: sqliteUrl(),
-      migrations: { autoRun: true }
-    });
-    const record = {
-      sessionId: "sess_sql_cas",
-      tokenHash: "hash_sql_cas",
-      accountId: "acct_1",
-      anchoredAddress: supplierWallet,
-      createdAt: "2026-09-01T00:00:00.000Z",
-      expiresAt: "2026-09-02T00:00:00.000Z"
-    };
-    await store.putSession(record);
-    // touch 命中：存活行推进 last_seen_at。
-    await expect(store.touchSession("sess_sql_cas", "2026-09-01T00:01:00.000Z")).resolves.toBe(true);
-    await expect(store.revokeSession("sess_sql_cas", "2026-09-01T00:02:00.000Z", "logout")).resolves.toBe(true);
-    // touch 前提失配（已撤销）：不推进、不复活。
-    await expect(store.touchSession("sess_sql_cas", "2026-09-01T00:03:00.000Z")).resolves.toBe(false);
-    // 二次撤销失配：首撤销事实保持（撤销不可逆）。
-    await expect(store.revokeSession("sess_sql_cas", "2026-09-01T00:04:00.000Z", "anchor_address_revoked")).resolves.toBe(false);
-    // 复活向量：用撤销前的整行快照重插，不得覆盖撤销事实。
-    await store.putSession({ ...record, lastSeenAt: "2026-09-01T00:03:00.000Z" });
-    expect(await store.findSessionByTokenHash("hash_sql_cas")).toMatchObject({
-      lastSeenAt: "2026-09-01T00:01:00.000Z",
-      revokedAt: "2026-09-01T00:02:00.000Z",
-      revokedReason: "logout"
-    });
-    store.close();
-  });
-
-  function sqliteUrl(): string {
-    const dir = mkdtempSync(join(tmpdir(), "uvp-store-uniqueness-"));
-    tempDirs.push(dir);
-    return `sqlite://${join(dir, "store.sqlite")}`;
-  }
-});
 
 function decorationBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schemaVersion: "store-zhixu-decoration.v1",
-    theme: { displayName: "跨境结算秩序", description: "展示描述", tags: ["logistics"] },
+    theme: { displayName: "示例展示主题", description: "展示描述", tags: ["tag-1"] },
     taskDeclarations: [{ stageId: stageIdOfFirstStage }],
     ...overrides
   };
 }
 
 async function buildRouter(options: { readonly operatorWallets?: readonly Address[]; readonly adminWallets?: readonly Address[] } = {}): Promise<ApiRouter> {
-  const store = new MemoryProjectionStore();
+  const store = stores.projectionStore;
   await seedPlanProjection(store);
   return createApiRouter(store, routerOptions(options));
 }
 
 function routerOptions(options: { readonly operatorWallets?: readonly Address[]; readonly adminWallets?: readonly Address[] } = {}) {
   return {
+    ...requiredRouterStores(),
     productRuntimeEnvironment: "local" as const,
     productSchemaResolver: exampleSchemaResolver(),
     submissionChainId: 31337,
@@ -1321,7 +1161,7 @@ function routerOptions(options: { readonly operatorWallets?: readonly Address[];
   };
 }
 
-async function seedPlanProjection(store: MemoryProjectionStore, options: { readonly withSupplierBinding?: boolean } = {}): Promise<void> {
+async function seedPlanProjection(store: ProjectionStore, options: { readonly withSupplierBinding?: boolean } = {}): Promise<void> {
   await store.resetFromEvents({
     deploymentBlock: 0n,
     events: [
@@ -1341,12 +1181,10 @@ async function seedPlanProjection(store: MemoryProjectionStore, options: { reado
   });
 }
 
-/** 与服务端 deriveSubjectForAddress 同式：keccak256("uvp:store:join:subject:v1:" + address)。 */
 function derivedJoinSubject(address: Address): Hex {
   return keccak256(stringToBytes(`uvp:store:join:subject:v1:${address.toLowerCase()}`)) as Hex;
 }
 
-/** 槽位能力键：roleSlot 的首条 permission (source, signalName) 的链上 id。 */
 function bytes32Text(value: string): Hex {
   return `0x${Buffer.from(value, "utf8").toString("hex").padEnd(64, "0")}` as Hex;
 }
@@ -1380,10 +1218,10 @@ const addressKeyMap = new Map<string, `0x${string}`>([
 
 describe("store auth challenge resource bounds", () => {
   it("rate-limits live challenges per address and sweeps expired ones on write", async () => {
-    const { createStoreSessionService, InMemoryStoreWalletSessionStore, StoreSessionServiceError } =
+    const { createStoreSessionService, StoreSessionServiceError } =
       await import("../src/store/sessions/index.js");
     let current = new Date("2026-04-28T00:00:00Z");
-    const store = new InMemoryStoreWalletSessionStore();
+    const store = new PostgresStoreWalletSessionStore({ database: accessDatabase });
     const service = createStoreSessionService({
       store,
       config: {
@@ -1397,7 +1235,6 @@ describe("store auth challenge resource bounds", () => {
       now: () => current
     });
 
-    // 单地址同时存活的挑战有上界：第 11 个 429。
     for (let index = 0; index < 10; index += 1) {
       await expect(service.createChallenge({ address: supplierWallet })).resolves.toBeDefined();
     }
@@ -1408,22 +1245,18 @@ describe("store auth challenge resource bounds", () => {
     });
     await expect(limited).rejects.toBeInstanceOf(StoreSessionServiceError);
 
-    // 配额按地址计：别的地址不受该地址囤积影响。
     await expect(service.createChallenge({ address: outsiderWallet })).resolves.toBeDefined();
 
-    // 过期挑战在写入时被清扫：TTL 过后配额自动释放。
     current = new Date(current.getTime() + 301_000);
     await expect(service.createChallenge({ address: supplierWallet })).resolves.toBeDefined();
   });
 
   it("caps a single requester across all addresses (anonymous targeted lockout bound)", async () => {
-    // challenge 入口匿名且 address 自报：若无请求方维度配额，一个请求方
-    // 连发 10 次即可锁死任意受害地址并按 TTL 续期。请求方桶把单个
-    // 请求方可占用的总囤积量压到 30——换地址绕过地址配额不再可行。
     const { createStoreSessionService, StoreSessionServiceError } =
       await import("../src/store/sessions/index.js");
     const current = new Date(Date.UTC(2026, 8, 10, 0, 0, 0));
     const service = createStoreSessionService({
+      store: new PostgresStoreWalletSessionStore({ database: accessDatabase }),
       config: {
         enabled: true,
         operatorWallets: [],
@@ -1439,62 +1272,21 @@ describe("store auth challenge resource bounds", () => {
       const address = `0x${(0x1000 + index).toString(16).padStart(40, "0")}` as Address;
       await expect(service.createChallenge({ address }, undefined, requester)).resolves.toBeDefined();
     }
-    // 每个地址只被签发过 1 次（远未触地址配额），但请求方桶已满：429。
     await expect(
       service.createChallenge({ address: `0x${"7".repeat(40)}` as Address }, undefined, requester)
     ).rejects.toMatchObject({ status: 429, code: "store_challenge_rate_limited" });
     await expect(
       service.createChallenge({ address: `0x${"8".repeat(40)}` as Address }, undefined, requester)
     ).rejects.toBeInstanceOf(StoreSessionServiceError);
-    // 别的请求方不受该请求方囤积影响。
     await expect(
       service.createChallenge({ address: `0x${"7".repeat(40)}` as Address }, undefined, { clientAddress: "198.51.100.9" })
     ).resolves.toBeDefined();
   });
 
-  it("keeps a hard cap on the in-memory challenge table", async () => {
-    const { InMemoryStoreWalletSessionStore, MEMORY_CHALLENGE_HARD_LIMIT } =
-      await import("../src/store/sessions/index.js");
-    const store = new InMemoryStoreWalletSessionStore();
-    const challengeAt = (index: number, expiresAt: string): StoreAuthChallengeRecord => ({
-      nonce: `nonce${index.toString().padStart(6, "0")}`,
-      address: `0x${(index % 100).toString(16).padStart(40, "0")}` as Address,
-      requesterKey: "test-requester",
-      intent: "login",
-      message: "m",
-      issuedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 0) + index * 1000).toISOString(),
-      expiresAt
-    });
-
-    // 到达硬上限时先清过期行：最早过期的挑战被清扫而不是顶掉最新行。
-    // 配额给到不可达值——本用例专测硬上限淘汰，不与每地址/每请求方配额
-    // 耦合（记录按 index%100 轮换地址，同请求方多条会先撞请求方配额）。
-    const put = (record: StoreAuthChallengeRecord): Promise<boolean> =>
-      store.putChallengeWithinAddressQuota(record, {
-        maxLivePerAddress: Number.MAX_SAFE_INTEGER,
-        maxLivePerRequester: Number.MAX_SAFE_INTEGER,
-        now: "2101-01-01T00:00:00Z"
-      });
-    await put(challengeAt(0, "2026-01-01T00:00:00Z"));
-    for (let index = 1; index < MEMORY_CHALLENGE_HARD_LIMIT; index += 1) {
-      await put(challengeAt(index, "2100-01-01T00:00:00Z"));
-    }
-    await put(challengeAt(MEMORY_CHALLENGE_HARD_LIMIT, "2100-01-01T00:00:00Z"));
-    await expect(store.getChallenge("nonce000000")).resolves.toBeUndefined();
-    await expect(store.getChallenge(`nonce${MEMORY_CHALLENGE_HARD_LIMIT.toString().padStart(6, "0")}`)).resolves.toBeDefined();
-
-    // 全部存活仍超上限：按签发序淘汰最旧行——内存不随未鉴权写入无界增长。
-    await put(challengeAt(MEMORY_CHALLENGE_HARD_LIMIT + 1, "2100-01-01T00:00:00Z"));
-    await expect(store.getChallenge("nonce000001")).resolves.toBeUndefined();
-    await expect(store.getChallenge(`nonce${(MEMORY_CHALLENGE_HARD_LIMIT + 1).toString().padStart(6, "0")}`)).resolves.toBeDefined();
-  });
-
   it("holds the per-address challenge quota under concurrent creation", async () => {
-    // 配额判定与写入必须原子：同地址并发签发风暴不允许整体穿透
-    //（32 个并发请求在"先数后写"实现下会全部读到同一旧计数）。
-    const { InMemoryStoreWalletSessionStore, StoreSessionServiceError, createStoreSessionService } =
+    const { StoreSessionServiceError, createStoreSessionService } =
       await import("../src/store/sessions/index.js");
-    const store = new InMemoryStoreWalletSessionStore();
+    const store = new PostgresStoreWalletSessionStore({ database: accessDatabase });
     const current = new Date(Date.UTC(2026, 8, 10, 0, 0, 0));
     const service = createStoreSessionService({
       store,
@@ -1516,80 +1308,6 @@ describe("store auth challenge resource bounds", () => {
     expect(accepted).toBe(10);
     const rejected = results.filter((result) => result.status === "rejected");
     expect(rejected.every((result) => result.reason instanceof StoreSessionServiceError && result.reason.status === 429)).toBe(true);
-  });
-});
-
-describe("store wallet session concurrency semantics (memory driver)", () => {
-  it("touch/revoke are conditional on the live row and inserts never overwrite", async () => {
-    const { InMemoryStoreWalletSessionStore } = await import("../src/store/sessions/index.js");
-    const store = new InMemoryStoreWalletSessionStore();
-    const record = {
-      sessionId: "sess_mem_cas",
-      tokenHash: "hash_mem_cas",
-      accountId: "acct_1",
-      anchoredAddress: supplierWallet,
-      createdAt: "2026-09-01T00:00:00.000Z",
-      expiresAt: "2026-09-02T00:00:00.000Z"
-    };
-    await store.putSession(record);
-    // touch 命中：存活行推进 last_seen_at。
-    await expect(store.touchSession("sess_mem_cas", "2026-09-01T00:01:00.000Z")).resolves.toBe(true);
-    await expect(store.revokeSession("sess_mem_cas", "2026-09-01T00:02:00.000Z", "logout")).resolves.toBe(true);
-    // touch 前提失配（已撤销）：不推进、不复活。
-    await expect(store.touchSession("sess_mem_cas", "2026-09-01T00:03:00.000Z")).resolves.toBe(false);
-    // 二次撤销失配：首撤销事实保持（撤销不可逆）。
-    await expect(store.revokeSession("sess_mem_cas", "2026-09-01T00:04:00.000Z", "anchor_address_revoked")).resolves.toBe(false);
-    // 复活向量：用撤销前的整行快照重插，不得覆盖撤销事实。
-    await store.putSession({ ...record, lastSeenAt: "2026-09-01T00:03:00.000Z" });
-    await expect(store.findSessionByTokenHash("hash_mem_cas")).resolves.toMatchObject({
-      lastSeenAt: "2026-09-01T00:01:00.000Z",
-      revokedAt: "2026-09-01T00:02:00.000Z",
-      revokedReason: "logout"
-    });
-  });
-
-  it("a logout racing session refresh cannot revive the session", async () => {
-    const { createStoreSessionService, InMemoryStoreWalletSessionStore } = await import("../src/store/sessions/index.js");
-    // 竞态形态：resolve 读到存活快照后、touch 落笔前，并发 logout 已把
-    // 行翻成 revoked——resolve 按 touch 失配收口，不得复活会话。
-    class RacingLogoutStore extends InMemoryStoreWalletSessionStore {
-      #read = false;
-      override async findSessionByTokenHash(tokenHash: string) {
-        const record = await super.findSessionByTokenHash(tokenHash);
-        if (record && !this.#read) {
-          this.#read = true;
-          await super.revokeSession(record.sessionId, "2026-09-01T00:00:01.000Z", "logout");
-        }
-        return record;
-      }
-    }
-    const token = `uvs_${"a".repeat(64)}`;
-    const store = new RacingLogoutStore();
-    await store.putSession({
-      sessionId: "sess_race",
-      tokenHash: createHash("sha256").update(token, "utf8").digest("hex"),
-      accountId: "acct_1",
-      anchoredAddress: supplierWallet,
-      createdAt: "2026-09-01T00:00:00.000Z",
-      expiresAt: "2026-09-02T00:00:00.000Z",
-      lastSeenAt: "2026-09-01T00:00:00.000Z"
-    });
-    await store.putAccountAddress({
-      accountId: "acct_1",
-      address: supplierWallet,
-      status: "active",
-      anchoredAt: "2026-09-01T00:00:00.000Z"
-    });
-    const service = createStoreSessionService({ store, now: () => new Date("2026-09-01T00:00:00Z") });
-
-    await expect(service.resolveSessionFromToken(token)).resolves.toBeUndefined();
-
-    const after = await store.findSessionByTokenHash(createHash("sha256").update(token, "utf8").digest("hex"));
-    expect(after).toMatchObject({
-      revokedAt: "2026-09-01T00:00:01.000Z",
-      revokedReason: "logout",
-      lastSeenAt: "2026-09-01T00:00:00.000Z"
-    });
   });
 });
 

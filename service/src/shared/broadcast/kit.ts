@@ -2,18 +2,8 @@ import type { Chain } from "viem";
 import { ConfigError, assertHex, normalizeAddress, type Address, type Hex } from "../types.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 
-/**
- * 状态机广播装配套件（单源）：submissions 与 stage-patches 共用的装配
- * 骨架（chainFor / findErrorName / errorText / normalizeGasPayer /
- * requiredRpcUrl / loadRelayerPrivateKey / failedResult 核心字段拼装）。
- * 行为口径：
- * - findErrorName：errorName 优先，其次自有（own）且非默认的 name——
- *   不被 Error 原型链上的 "Error" 短路，也不忽略显式赋名的自定义错误；
- * - errorText：保留普通对象分支（拼接字符串字段值），非 Error 对象的
- *   错误面不被静默丢弃。
- * 结果 DTO 面（errorLabel/retryState/deadLetter/revertReason）为
- * submissions 面专属字段，由各 adapter 自行附加，不在本套件统一。
- */
+// 状态机广播装配套件（单源）：submissions 与 stage-patches 共用的装配
+// 骨架（chainFor/findErrorName/errorText/normalizeGasPayer 等）。
 
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 export const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -44,8 +34,6 @@ export function findErrorName(error: unknown): string | undefined {
   if (typeof record.errorName === "string" && record.errorName) {
     return record.errorName;
   }
-  // 只认自有且非默认的 name：Error 原型链上的 "Error" 对任何错误恒真，
-  // 会短路 cause 递归（viem 的 errorName 与自定义错误类名才是有效信号）。
   if (
     Object.prototype.hasOwnProperty.call(record, "name") &&
     typeof record.name === "string" &&
@@ -91,8 +79,6 @@ export function normalizeGasPayer(value: string | undefined): Address {
 }
 
 export function requiredRpcUrl(rpcUrl: string | undefined, label: string): string {
-  // fail-closed：无显式 RPC 配置即抛错，不回落 127.0.0.1:8545（本地环境
-  // 也必须显式传 UVP_RPC_URL）。
   if (!rpcUrl) {
     throw new ConfigError(`UVP_RPC_URL is required for ${label}; refusing to fall back to a default RPC endpoint`);
   }
@@ -128,7 +114,6 @@ export interface BroadcastFailureCoreInput {
   readonly blockNumber?: string;
 }
 
-/** failedResult 的公共骨架：顶层与 attempt 的同名字段同值拼装。 */
 export interface BroadcastFailureCore {
   readonly status: "failed";
   readonly txHash?: Hex;

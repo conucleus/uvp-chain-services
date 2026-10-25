@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
-import { InMemoryStoreEntityRegistrationStore } from "../src/store/registration/memory-store.js";
-import { InMemoryStoreSupplierMetadataStore } from "../src/store/suppliers/service.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import type { CreateApiRouterOptions } from "../src/api/route-context.js";
 
 const anchoredAccount = "0x1234567890123456789012345678901234567890";
@@ -26,21 +26,58 @@ const devAnchoredStoreAuth = {
 const sessionHeaders = { "x-uvp-store-dev-anchored-address": anchoredAccount };
 const otherSessionHeaders = { "x-uvp-store-dev-anchored-address": otherAccount };
 
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
 function createRouter(options: {
   readonly storeEntityRegistrationStore?: CreateApiRouterOptions["storeEntityRegistrationStore"];
   readonly storeSupplierMetadataStore?: CreateApiRouterOptions["storeSupplierMetadataStore"];
 } = {}) {
-  return createApiRouter(new MemoryProjectionStore(), {
+  return createApiRouter(stores.projectionStore, {
     productRuntimeEnvironment: "local",
     submissionChainId: 84532,
     submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
     storeAuthConfig: devAnchoredStoreAuth,
-    ...(options.storeEntityRegistrationStore
-      ? { storeEntityRegistrationStore: options.storeEntityRegistrationStore }
-      : {}),
-    ...(options.storeSupplierMetadataStore
-      ? { storeSupplierMetadataStore: options.storeSupplierMetadataStore }
-      : {}),
+    storeEntityRegistrationStore:
+      options.storeEntityRegistrationStore ?? stores.storeEntityRegistrationStore,
+    storeSupplierMetadataStore:
+      options.storeSupplierMetadataStore ?? stores.storeSupplierMetadataStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    }),
   });
 }
 
@@ -73,8 +110,8 @@ describe("participant entity registration routes", () => {
   });
 
   it("anchors the account address from the session and stores an unverified off-chain declaration", async () => {
-    const registrationStore = new InMemoryStoreEntityRegistrationStore();
-    const supplierStore = new InMemoryStoreSupplierMetadataStore();
+    const registrationStore = stores.storeEntityRegistrationStore;
+    const supplierStore = stores.storeSupplierMetadataStore;
     const router = createRouter({
       storeEntityRegistrationStore: registrationStore,
       storeSupplierMetadataStore: supplierStore,
@@ -122,7 +159,7 @@ describe("participant entity registration routes", () => {
   });
 
   it("updates the single active record on resubmission instead of appending history", async () => {
-    const registrationStore = new InMemoryStoreEntityRegistrationStore();
+    const registrationStore = stores.storeEntityRegistrationStore;
     const router = createRouter({ storeEntityRegistrationStore: registrationStore });
 
     const first = await router.handle({

@@ -1,6 +1,4 @@
-// 原 indexer/projections.ts 的对外导出面（纯搬迁拆分后保持不变）。
-// 重放编排入口（rebuildOrderProjections / countReplayAnomalies /
-// countDuplicateActiveEventAnomalies）见 ../replay.ts。
+// projections 族的对外导出面；重放编排入口见 ../replay.ts。
 export type {
   ProjectionProvenance,
   StateMachineProofProjection,

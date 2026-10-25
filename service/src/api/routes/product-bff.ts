@@ -25,13 +25,8 @@ export function createProductBffRouteModule(options: {
   return {
     async handle(request, context) {
       if (request.method === "POST" && request.pathname === "/product/order-drafts") {
-        // body 解析在 handler 内执行：ProductBffError（如 immutable_field）
-        // 必须落进 handleProductBffRequest 的 400 映射，而不是外抛成 500。
         return handleProductBffRequest(async () => {
           const input = parseCreateDraftBody(request.body);
-          // createdBy 不取自 body 自报（可冒充他人建单）——有会话锚定
-          // 钱包时记录锚定地址，无身份时保留匿名建单兼容路径；但匿名
-          // 草稿的修改/邀请/参与者读取全部 fail-closed（见下）。
           const wallet = await resolveParticipantWalletIdentity(
             request,
             context,
@@ -54,8 +49,6 @@ export function createProductBffRouteModule(options: {
         const draftId = decodePathParameter(productOrderDraftMatch[1] ?? "");
         if (request.method === "GET") {
           return handleProductBffRequest(async () => {
-            // 草稿读取返回完整参与者名单（含联系方式），与 listParticipants
-            // 同门槛：会话锚定钱包（创建者/已接受参与者由服务端核验）。
             const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
             if (!wallet.ok) {
               return wallet.response;
@@ -68,7 +61,6 @@ export function createProductBffRouteModule(options: {
         }
         if (request.method === "PATCH") {
           return handleProductBffRequest(async () => {
-            // 修改限创建者：会话锚定钱包必须等于建单时记录的 createdBy。
             const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
             if (!wallet.ok) {
               return wallet.response;
@@ -85,8 +77,6 @@ export function createProductBffRouteModule(options: {
       if (request.method === "POST" && productOrderInviteMatch) {
         return handleProductBffRequest(async () => {
           const draftId = decodePathParameter(productOrderInviteMatch[1] ?? "");
-          // 邀请由创建者签发（token 只回到创建响应），任何会话钱包
-          // 不得替他人草稿发邀请。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -103,11 +93,6 @@ export function createProductBffRouteModule(options: {
       if (request.method === "POST" && productInvitePreviewMatch) {
         return handleProductBffRequest(async () => {
           const inviteId = decodePathParameter(productInvitePreviewMatch[1] ?? "");
-          // 预览同样强制 invite token（哈希比对）：inviteId 是弱凭据，
-          // 仅凭 id 即可读受邀人联系方式与草稿金额等于邀请面全员可枚举。
-          // token 与 accept/reject 同走 body——同权凭据不得落 URL query
-          //（URL/Referer/代理日志留痕等于一次性凭据泄漏）。会话钱包仍
-          // 可选（用于金额可见范围判定）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           const walletAddress = wallet.ok ? wallet.identity.walletAddress : undefined;
           const result = await context.productBffService.getInvite(inviteId, {
@@ -125,10 +110,6 @@ export function createProductBffRouteModule(options: {
       if (request.method === "POST" && productInviteAcceptMatch) {
         return handleProductBffRequest(async () => {
           const inviteId = decodePathParameter(productInviteAcceptMatch[1] ?? "");
-          // accept 必须是已证明钱包控制的会话（钱包会话签名
-          // 或 local dev 锚定头），自报钱包头不算数；且必须携带 invite
-          // token（哈希比对）——inviteId 是弱凭据，不足以占角色槽。钱包声明
-          // 不读 body（body.walletAddress 是被核验对象，不是证明）。
           const wallet = await resolveParticipantWalletIdentity(
             request,
             context,
@@ -163,8 +144,6 @@ export function createProductBffRouteModule(options: {
       if (request.method === "GET" && productOrderParticipantsMatch) {
         return handleProductBffRequest(async () => {
           const draftId = decodePathParameter(productOrderParticipantsMatch[1] ?? "");
-          // 参与者名单含联系方式，读门槛与 accept 同级证明（会话锚定
-          // 钱包），且仅限创建者或该草稿的已接受参与者（服务端核验）。
           const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
@@ -249,7 +228,6 @@ function parseCreateDraftBody(body: unknown): CreateProductOrderDraftInput {
   const destinationRegion = optionalString(record, "destinationRegion");
   const expectedCompletionDate = optionalString(record, "expectedCompletionDate");
   const notes = optionalString(record, "notes");
-  // createdBy 由服务端从会话锚定地址派生，不读 body 自报值。
   for (const field of ["createdBy"]) {
     if (Object.hasOwn(record, field)) {
       throw new ProductBffError(400, "immutable_field", `${field} cannot be set by clients`);
@@ -322,7 +300,6 @@ function parseAcceptInviteBody(
     displayName: requiredString(record, "displayName"),
     walletAddress: requiredString(record, "walletAddress"),
     contact: requiredString(record, "contact"),
-    // accept/reject 强制携带 invite token（服务端哈希比对）。
     token: requiredString(record, "token"),
     sessionWalletAddress
   };

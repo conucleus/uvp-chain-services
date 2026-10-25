@@ -6,7 +6,6 @@ import type { TxReconcileFields } from "../reconcile/status.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { assertHex, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
-import { InMemoryProductSubmissionStore } from "./store.js";
 import type {
   PreparedSubmissionDTO,
   PreparedSubmissionEvidenceDTO,
@@ -55,12 +54,6 @@ export class ProductSubmissionError extends Error {
   }
 }
 
-/**
- * TTL 到期重试的探链结论：confirmed = 六元业务身份已在链上呈现
- *（按链重算收口，txHash 取投影出处）；absent = 链上未见（expired 如旧）；
- * unknown = 探链本身失败（transport/存储故障）——按可重试处理，不得
- * 落 expired 终态。
- */
 export type PriorSubmissionChainProbe =
   | { readonly outcome: "confirmed"; readonly txHash: Hex; readonly blockNumber?: string }
   | { readonly outcome: "absent" }
@@ -73,38 +66,12 @@ export interface ProductSubmissionServiceOptions {
   readonly verifyingContract: Address;
   readonly authorization?: SubmissionAuthorizationAdapter;
   readonly broadcastAdapter?: SubmissionBroadcastAdapter;
-  readonly store?: ProductSubmissionStore;
-  /**
-   * TTL 到期重试的先探链车道（「重试=同身份重放」UB-4）：deadline 已过
-   * 的同 prepareId 重试不再直接落 expired——崩溃孤儿（reserve 与落档
-   * 之间进程死亡、广播超时不携哈希）可能已把这笔业务提交送上网。按
-   * 六元业务身份查索引器投影：链上已呈现 → 按链重算收口；未呈现 →
-   * expired 如旧；探链本身失败 → 可重试失败（prepare 不消费，稍后
-   * 重试再探）。缺省不装配（保持纯 expired 语义，测试/嵌入场景）。
-   */
+  readonly store: ProductSubmissionStore;
   readonly probePriorSubmissionOnChain?: (
     prepared: PreparedSubmissionRecord
   ) => Promise<PriorSubmissionChainProbe>;
-  /**
-   * resolves the order planId for the on-chain order id from the
-   * indexer projection (OrderRegistered/OrderMaterialized carry the indexed
-   * planId). prepareSubmit refuses to build the plan-scoped signature when the
-   * projection cannot supply a non-zero planId.
-   */
   readonly resolveOrderPlanId?: (onchainOrderId: Hex) => Promise<Hex | undefined>;
-  /**
-   * 词表产物富集源（plan 投影两表）：prepare 时构造 submitSignalFor 的
-   * attribution/selectorBinding（Merkle 造证单源在
-   * ./capability-proofs.ts）。缺省或投影表空（外部发布 plan）→ 全零结构
-   * ——链上按词表闸自行裁决（词表内事实会被 InvalidSignalCapability
-   * 拒绝，服务端无法为没有词表的 plan 造证）。
-   */
   readonly resolvePlanCapabilityTables?: (planId: Hex) => Promise<PlanCapabilityTables | undefined>;
-  /**
-   * 草稿期上传的凭证（draftId 来源）进入提交前的归属核验：把 draftId
-   * 解析成该草稿已触发的订单 id，与目标订单比对。缺省或解析不到时
-   * draftId 来源凭证一律拒绝（fail-closed）——空 orderId 不是通行证。
-   */
   readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
   readonly now?: () => Date;
   readonly prepareTtlSeconds?: number;
@@ -128,7 +95,7 @@ export interface ProductSubmissionService {
 }
 
 export function createProductSubmissionService(options: ProductSubmissionServiceOptions): ProductSubmissionService {
-  const store = options.store ?? new InMemoryProductSubmissionStore();
+  const store = options.store;
   const now = options.now ?? (() => new Date());
   const ttlSeconds = options.prepareTtlSeconds ?? DEFAULT_PREPARE_TTL_SECONDS;
   const prepareIdFactory = options.prepareIdFactory ?? (() => `prep_${randomUUID()}`);
@@ -213,8 +180,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
         stageIdentifier: task.stageId,
         ...(options.resolveDraftOrder ? { resolveDraftOrder: options.resolveDraftOrder } : {})
       });
-      // 《证据与存证规则》二.1/二.2：必填凭证槽位的最终门在服务端——
-      // 前端渲染只是提示，提交入口按任务的证据槽位声明校验必填凭证在场。
       validateEvidenceSlots(requiredSlots, evidence);
       const payload = payloadForEvidence(evidence);
       const authRequest: SubmissionAuthorizationRequest = {
@@ -236,12 +201,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
         });
       }
 
-      // submitSignal is plan-scoped and the signature commits to
-      // (planId, orderId). The planId comes from the indexer projection, never
-      // from local fabrication; a missing planId must fail the prepare instead
-      // of producing a signature that can only be rejected on chain. An
-      // ambiguous bare order id (same orderId reused across plans) is rejected
-      // as ambiguous_order_id instead of silently picking one plan.
       let resolvedPlanId: Hex | undefined;
       try {
         resolvedPlanId = options.resolveOrderPlanId
@@ -271,9 +230,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
       const createdAt = now();
       const deadlineSeconds = Math.floor(createdAt.getTime() / 1000) + ttlSeconds;
       const nonce = normalizeNonce(nonceFactory());
-      // 词表 Merkle 造证：attribution（事实属主自证）+ selectorBinding（属主
-      // 阶段的 selector 绑定证明）。词表外/投影表空 → 全零结构（链上按词表
-      // 闸裁决）；typedData 不承诺这两个参数，零结构只是广播参数降级。
       const { attribution, selectorBinding } = await resolveSubmissionCapabilityProofs(
         options.resolvePlanCapabilityTables,
         planId,
@@ -343,8 +299,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
         },
         evidenceRecords: evidence
       };
-      // 写入时顺带清扫过期 prepare（同 stage-patches/sessions 清扫口径）：
-      // prepare 入口无配额，只插不删会让表无界堆叠。
       await store.deleteExpiredPrepared?.(
         String(Math.floor(createdAt.getTime() / 1000))
       );
@@ -379,16 +333,8 @@ export function createProductSubmissionService(options: ProductSubmissionService
         });
       }
 
-      // 过期检查必须在签名恢复之后：消费 prepare（落 expired 档案 +
-      // markPreparedUsed）是写操作，任何持有 prepareId 的人都能触发——
-      // 未验签就烧毁他人的已过期 prepare 等于让无关方替持有人做决定。
       const currentSeconds = BigInt(Math.floor(now().getTime() / 1000));
       if (BigInt(prepared.deadline) < currentSeconds) {
-        // TTL 到期重试先探链（UB-4）：deadline 检查先于探链会让崩溃孤儿
-        //（广播已发出、落档前进程死亡，或 rpc 超时不携哈希）在 TTL 到期
-        // 后的重试永不探链——链上可能已有这笔业务提交，直接 expired 会
-        // 把"回执存在性"问题误报成"时限"问题。按六元业务身份探链后再
-        // 决定失败语义；探链失败按可重试处理。
         if (options.probePriorSubmissionOnChain) {
           let probe: PriorSubmissionChainProbe;
           try {
@@ -397,8 +343,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
             probe = { outcome: "unknown" };
           }
           if (probe.outcome === "confirmed") {
-            // 链为真相：六元业务身份已呈现即同笔业务提交已生效，按链
-            // 重算收口（confirmed 档 + prepare 消费），台账跟随链。
             const submissionId = submissionIdFactory();
             const timestamp = now().toISOString();
             const submission = withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
@@ -434,8 +378,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
             return submission;
           }
           if (probe.outcome === "unknown") {
-            // 探链失败 ≠ 链上没有：按可重试失败落档（不消费 prepare，
-            // 同一 prepareId 的下一次重试再探），不得误落 expired 终态。
             const submissionId = submissionIdFactory();
             const timestamp = now().toISOString();
             const probeUnknown = withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
@@ -464,7 +406,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
             });
             return probeUnknown;
           }
-          // absent：链上未见此业务提交——expired 如旧（下方原路径）。
         }
         const expired = withSubmissionReconcileDefaults(
           buildExpiredSubmission(prepared, submissionIdFactory(), now().toISOString(), {
@@ -479,9 +420,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
         return expired;
       }
 
-      // Adapters that cannot broadcast must not consume the prepared
-      // submission or its nonce: the signature is received and reported,
-      // but no chain transaction was attempted and nothing is marked used.
       if (broadcastAdapter.attemptsBroadcast === false) {
         const submissionId = submissionIdFactory();
         const createdAt = now().toISOString();
@@ -515,10 +453,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
       }
 
       const nonceKey = submissionNonceKey(prepared);
-      // 授权有效期（prepare TTL）即陈旧预留阈值：存活中的 submit 要么在
-      // 落档事务内收尾要么显式释放，预留年龄超过一个授权窗口只可能是
-      // 进程在 reserve 与落档之间硬崩溃留下的泄漏行——条件更新接管，
-      // 未过期仍按重复拒绝。
       const reserved = await store.reserveNonce(nonceKey, {
         staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString()
       });
@@ -534,15 +468,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
         throw new ProductSubmissionError(409, "duplicate_submit", "submission nonce has already been used");
       }
 
-      // From here the nonce reservation is held. If the broadcast or durable
-      // store write throws before a submission record exists, release it and
-      // rethrow. A returned retryable failure without a txHash is likewise a
-      // pre-broadcast observation: record the attempt, release the nonce, and
-      // leave the prepare reusable. Any result carrying a txHash keeps the
-      // reservation because the chain may already own that nonce.
-      // 契约：可重试失败的 nonce 释放必须发生在落档事务内部——事务提交后
-      // 崩溃不得留下"nonce 行已插、prepare 未标 used"的组合，否则同
-      // prepareId 的合法重试会永久 409 duplicate_submit（全库无其他释放口）。
       let submission: ProductSubmissionDTO;
       let broadcastSubmissionId: string | undefined;
       let broadcastTxHash: Hex | undefined;
@@ -575,10 +500,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
         });
       } catch (error) {
         if (broadcastSubmissionId && broadcastTxHash) {
-          // 广播已成功（拿到 txHash）但持久化失败：链上交易可能已占用
-          // nonce，不得释放。先尽力落一条 failed（persist_failed，带 txHash、
-          // 回执未知如实报 not_checked）的提交档案保证台账可追溯，再上抛
-          // 原始错误；落档本身失败也不能掩盖原始错误。
           try {
             await store.putSubmission(withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
               submissionId: broadcastSubmissionId,
@@ -595,17 +516,9 @@ export function createProductSubmissionService(options: ProductSubmissionService
               }
             })));
           } catch {
-            // 尽力而为：落档失败时保持原始错误继续上抛。
           }
           throw error;
         }
-        // 广播本身抛错（未拿到 txHash）：未上链。逃逸异常违反适配器
-        // "分类为 failed 结果、绝不抛穿"的契约，但仍必须留下一致的持久
-        // 状态——失败档案（按适配器同款分类器归档，错误码走已登记词表）
-        // 与 nonce 释放写进同一个落档事务：事务提交后崩溃不得留下
-        // "nonce 行已插、无档案、prepare 未标 used"的组合，否则同
-        // prepareId 的合法重试会永久 409 duplicate_submit（全库无其他
-        // 释放口）。
         const classifiedThrow = classifyStateMachineBroadcastError(error);
         await withSubmissionStoreTransaction(store, async () => {
           await store.putSubmission(withSubmissionReconcileDefaults(submissionFromBroadcast(prepared, {
@@ -637,9 +550,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
         retryable: submission.retryable
       });
       if (isEvidenceBindingSubmission(submission)) {
-        // 链上广播已成功——绑定失败是服务端补账缺口，不得把已成功
-        // 的提交以异常报成 500（违反信封契约）。返回成功提交结果，同时落
-        // 审计事件供对账；证据引用随提交落库，绑定补账走 reconcile 清扫。
         try {
           await bindSubmittedEvidence(options.evidenceReader, prepared, submission);
         } catch (error) {
@@ -653,9 +563,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
                 submissionId: submission.submissionId,
                 ...(submission.txHash ? { txHash: submission.txHash } : {})
               },
-              // taxonomy 已登记 errorCode 载体（retryable=true，
-              // backoff=reconcile_poll）：重试由 reconcile worker 的绑定
-              // 清扫承担，本路径只留痕不重试。
               errorCode: "evidence_bind_failed",
               retryable: true,
               metadata: {
@@ -663,7 +570,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
               }
             });
           } catch {
-            // 审计通道不可用不得改变提交响应语义。
           }
         }
       }
@@ -675,9 +581,6 @@ export function createProductSubmissionService(options: ProductSubmissionService
       if (!submission) {
         return undefined;
       }
-      // 归属校验（IDOR）：档案携带签名者/证据/广播细节——会话身份门只挡
-      // 匿名，不比对属主时任一会话可按 id 读取。读取者必须是该次提交的
-      // 业务签名者本人（与 getDraft 的 assertDraftAffiliate 同款双门）。
       if (submission.submitter.toLowerCase() !== readerWallet.toLowerCase()) {
         throw new ProductSubmissionError(
           403,
@@ -703,20 +606,6 @@ const EMPTY_PLAN_CAPABILITY_TABLES: PlanCapabilityTables = {
   signalCapabilities: []
 };
 
-/**
- * submitSignalFor 的词表造证（prepare 时点）：plan 词表在 finalize 后
- * 不可变，prepare 与 broadcast 之间证明不会过期。
- *
- * - 投影表命中 relation=0 能力 → 属主阶段 + 能力叶 proof，并按属主阶段
- *   找 selector 绑定叶 proof（找不到 → 全零，合约按"未声明"放行）；
- * - 词表外事实 / 投影表空（外部发布 plan）→ 全零 attribution + 全零
- *   selectorBinding：携词表的 plan 一律被链上词表闸拒绝
- *   （InvalidSignalCapability——合约无证时无法区分词表内外），零词表
- *   plan 才按 source==stage 回退解析；
- * - 词表解析器故障 → 响亮失败：读失败时无法区分事实是否在词表内，
- *   全零造证会把本可预判的 InvalidSignalCapability 留到链上 revert
- *   才暴露（白烧代付 gas）；prepare 时点失败不产生签名、不消耗 nonce。
- */
 async function resolveSubmissionCapabilityProofs(
   resolvePlanCapabilityTables:
     | ((planId: Hex) => Promise<PlanCapabilityTables | undefined>)
@@ -744,9 +633,6 @@ async function resolveSubmissionCapabilityProofs(
   const effectiveTables = tables ?? EMPTY_PLAN_CAPABILITY_TABLES;
   const attribution = factAttributionPayload(effectiveTables, sourceId, signalId);
   if (attribution.stageId === ZERO_BYTES32) {
-    // 投影词表未命中：不猜测属主（全零），也不携 selector 证明——携词表
-    // plan 上链即被 InvalidSignalCapability 拒绝，零词表 plan 才由合约按
-    // source==stage 回退解析；服务端无 plan 阶段全集可镜像。
     return { attribution, selectorBinding: zeroSelectorBinding() };
   }
   return {
@@ -763,8 +649,6 @@ async function bindSubmittedEvidence(
   if (!evidenceReader.bindEvidence || !submission.txHash) {
     return;
   }
-  // 绑定主体显式传入：绑定是 uploaded→bound 的状态迁移写，主体取该次
-  // 提交的业务签名者（prepare 时已过授权与签名核验）。
   const binderPrincipal: EvidencePrincipal = {
     id: prepared.submitter.toLowerCase(),
     role: "participant"
@@ -823,9 +707,6 @@ function chainSignalForTask(
     };
   }
   const chainTask = task as ProductTaskChainFields;
-  // 与 planId"绝不捏造"同纪律：sourceId/signalId/orderId 三层链上
-  // 身份必须来自投影——本地按常量/命名约定推导出的 id 在链上不存在，
-  // 签出的 typedData 只会被链上拒绝。缺失即拒签并显式报错。
   const sourceId = firstBytes32(chainTask.proof?.sourceId) ??
     activeStageExecutorSourceIdForTask(chainTask);
   if (!sourceId) {
@@ -860,12 +741,6 @@ function chainSignalForTask(
   };
 }
 
-// 《授权与签名规则》§五：授权检查先看显式订单级授权、再看阶段委任的
-// 在任执行者——service 层不得用 submitter_wallet_not_active_executor
-// 前置一票否决（显式授权者会因此失去合约口径内的提交权）；
-// overlay 委任判定由 SubmissionAuthorizationAdapter（默认
-// productBffStoreSubmissionAuthorization）按同一顺序执行。
-
 function activeStageExecutorSourceIdForTask(task: ProductTaskChainFields): Hex | undefined {
   if (!activeStageExecutorWalletForTask(task)) {
     return undefined;
@@ -893,11 +768,6 @@ function firstBytes32(...values: readonly (string | undefined)[]): Hex | undefin
 
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
-/**
- * the projection must supply a real, non-zero planId. Anything else
- * (undefined, malformed, or the zero placeholder) is treated as "unresolved" so
- * the zero placeholder can never be signed or broadcast.
- */
 function normalizeResolvedPlanId(value: Hex | string | undefined): Hex | undefined {
   if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
     return undefined;
@@ -986,9 +856,6 @@ async function resolveEvidence(input: {
   readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
 }): Promise<readonly EvidenceRecordDTO[]> {
   if (input.evidenceIds.length === 0) {
-    // 验收者读要求包句柄后显式发信号，
-    // 没有必填槽位就允许空证据并跳过解析；v0 有必填槽位时保持证据必需的
-    // 入口错误，槽位缺具体项仍由 validateEvidenceSlots 精确到因。
     if (input.requiredSlots.length === 0) {
       return [];
     }
@@ -1040,9 +907,6 @@ async function validateEvidenceRecord(
       });
     }
   } else {
-    // 空 orderId 只允许一种形态：草稿期上传（draftId 来源）且该草稿
-    // 触发的正是目标订单。草稿未触发、触发成他单或无法解析归属时
-    // 一律拒绝——草稿凭证不得漂移进无关订单的提交。
     const draftOrder = evidence.draftId && expected.resolveDraftOrder
       ? await expected.resolveDraftOrder(evidence.draftId)
       : undefined;
@@ -1066,12 +930,10 @@ async function validateEvidenceRecord(
 }
 
 interface RequiredEvidenceSlot {
-  /** 资源要求槽位对应的 documentType（resourceType，缺省 resourceId）。 */
   readonly documentType: string;
   readonly label: string;
 }
 
-/** 任务的必填凭证槽位只来自通用 resourceRequirements；声明缺失即无槽位。 */
 function requiredEvidenceSlotsForTask(task: ProductTaskDTO): readonly RequiredEvidenceSlot[] {
   const slots: RequiredEvidenceSlot[] = [];
   const documentTypes = new Set<string>();
@@ -1324,10 +1186,6 @@ function submissionFromBroadcast(
   };
 }
 
-/**
- * 过期档案在签名恢复之后才落（见 submit 的时序注释）——signatureStatus
- * 必须如实记 signature_verified：失败的是时限，不是签名。
- */
 function buildExpiredSubmission(
   prepared: PreparedSubmissionRecord,
   submissionId: string,
@@ -1359,10 +1217,6 @@ function buildExpiredSubmission(
   };
 }
 
-/**
- * statusLabel 的唯一产出点（DTO 已定必填）：withSubmissionReconcileDefaults
- * 兜底与各状态落档共用。导出供测试夹具按状态取真值，不在测试侧镜像词表。
- */
 export function submissionStatusLabel(status: ProductSubmissionStatus): string {
   switch (status) {
     case "prepared":
@@ -1417,10 +1271,6 @@ function defaultSubmissionReconcileFields(submission: ProductSubmissionDTO): TxR
     };
   }
   if (submission.status === "failed") {
-    // failed + txHash ≠ 回执失败：只有广播适配器确认回执 reverted
-    // （errorCode = transaction_reverted）才如实报 failed；其余带 txHash 的
-    // 失败（回执未复核/回执等待抛错）回执未知，如实报 not_checked，
-    // 交给 reconcile worker 复核。
     const receiptVerifiedFailed = submission.txHash !== undefined
       && submission.errorCode === "transaction_reverted";
     return {

@@ -120,14 +120,9 @@ export class PostgresSubmissionStore implements ProductSubmissionStore {
     const prepared = parseStorageJson<PreparedSubmissionRecord>(stringColumn(record, "prepared_json"));
     const usedAt = optionalStringColumn(record, "used_at");
     const submissionId = optionalStringColumn(record, "submission_id");
-    // planId 必填（schema NOT NULL）：缺 planId 的行不允许被静默兼容读出。
     if (!prepared.planId) {
       throw new Error(`stored submission prepare ${prepareId} is missing planId`);
     }
-    // used 语义与内存 store 对齐：只有 markPreparedUsed 写入的 used_at 才
-    // 表示 prepare 已消费。非广播路径（广播未配置）落档的提交不写 used_at，
-    // prepare 保持可复用；此时行上的 submission_id 只是落档提交的检索键，
-    // 不得当作消费标记。
     if (usedAt === undefined) {
       return prepared;
     }
@@ -148,8 +143,6 @@ export class PostgresSubmissionStore implements ProductSubmissionStore {
   }
 
   async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
-    // deadline 列为 unix 秒文本，按 bigint 比较；过期行无论是否已消费都
-    // 不再参与判定（prepare 入口无配额，写入时顺带清扫约束无界堆叠）。
     const result = await this.#database.query(
       `DELETE FROM submission_prepare
        WHERE deadline::bigint < $1::bigint`,
@@ -173,9 +166,6 @@ export class PostgresSubmissionStore implements ProductSubmissionStore {
         throw error;
       }
     }
-    // 条件 UPDATE 原子接管（对齐 store-sessions consumeChallenge 手法）：
-    // 年龄判定在 WHERE 内完成，并发重试同 key 只有一个赢家。reserved_at
-    // 统一 toISOString 落库，字典序即时间序。
     if (!options?.staleBefore) {
       return false;
     }
@@ -198,8 +188,6 @@ export class PostgresSubmissionStore implements ProductSubmissionStore {
 
   async putSubmission(submission: ProductSubmissionDTO): Promise<void> {
     await this.withTransaction(async () => {
-      // submission 以 submission_id 为主键追加:同一 prepare 的重试历史
-      // 各自留档,不按 prepare_id 收敛覆盖(与内存 store 语义一致)。
       await this.#database.query(
         `INSERT INTO submission (
            submission_id, prepare_id, task_id, order_id, onchain_order_id, plan_id, stage_identifier,
@@ -348,9 +336,6 @@ export class PostgresSubmissionStore implements ProductSubmissionStore {
     after: ProductSubmissionScanCursor | undefined,
     limit: number
   ): Promise<readonly ProductSubmissionDTO[]> {
-    // 终态剪除在服务端完成（confirmed/expired/signature_received/replaced
-    // 不返回），键序 (created_at, submission_id) 与游标推进一致；行值比较
-    // 保证双键翻页不重不漏。failed 是否可复核由调用方按 txHash 行级过滤。
     const result = await this.#database.query(
       `SELECT submission_id, submission_json::text AS submission_json, plan_id
        FROM submission

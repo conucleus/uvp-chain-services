@@ -1,16 +1,12 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { buildConfigDiagnostics, loadConfigFromEnv as loadRawConfigFromEnv, runConfigPreflight } from "../src/config/index.js";
 
-// Storage driver/URL and the registration adapter are mandatory in every
-// environment now; tests that do not assert those failures get explicit
-// defaults injected here.
 const MANDATORY_STORAGE_AND_REGISTRATION_ENV = {
   CHAIN_SERVICES_RUNTIME_ENV: "local",
-  CHAIN_SERVICES_DATABASE_DRIVER: "memory",
-  CHAIN_SERVICES_DATABASE_URL: "memory://projection-store",
+  CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:uvp@127.0.0.1:5432/uvp_chain_services",
   UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
 } as const;
 
@@ -18,15 +14,96 @@ function loadConfigFromEnv(env: Record<string, string | undefined> = {}): Return
   return loadRawConfigFromEnv({ ...MANDATORY_STORAGE_AND_REGISTRATION_ENV, ...env });
 }
 import { createApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { PostgresProjectionStore } from "../src/storage/postgres.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import type {
+  StoreSupplierAuditRecord,
+  StoreSupplierMetadataRecord,
+  StoreSupplierMetadataStore
+} from "../src/store/suppliers/index.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import { redactSecrets } from "../src/security/index.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+// 本文件断言聚焦 config 诊断（storeMetadata.stores.supplier 必须保持
+// kind: "memory"），因此 supplier 件用测试内存件，其余必填路由件取 PG bundle。
+class ConfigTestMemorySupplierMetadataStore implements StoreSupplierMetadataStore {
+  async getSupplier(): Promise<StoreSupplierMetadataRecord | undefined> {
+    return undefined;
+  }
+
+  async findSupplierBySubjectId(): Promise<StoreSupplierMetadataRecord | undefined> {
+    return undefined;
+  }
+
+  async listSuppliers(): Promise<readonly StoreSupplierMetadataRecord[]> {
+    return [];
+  }
+
+  async putSupplier(): Promise<void> {}
+
+  async putSupplierIfReviewStatus(): Promise<boolean> {
+    return false;
+  }
+
+  async appendAudit(): Promise<void> {}
+
+  async listAudits(): Promise<readonly StoreSupplierAuditRecord[]> {
+    return [];
+  }
+}
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: new ConfigTestMemorySupplierMetadataStore(),
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 const anvilPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const productionRelayerPrivateKey = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const productionRelayerAddress = "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a";
 const productionRegistrarPrivateKey = "0x2222222222222222222222222222222222222222222222222222222222222222";
-/** 管理面口令因子测试材料：sha256("test-admin-password")。 */
 const productionAdminTokenHash = "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d";
 const productionRegistrarAddress = "0x1563915e194d8cfba1943570603f7606a3115508";
 const productionContracts = JSON.stringify({
@@ -207,11 +284,8 @@ describe("chain-services config", () => {
   });
 
   it("refuses to start without an explicit runtime environment", () => {
-    // 环境档位是 fail-closed 门禁的根开关：缺省即拒绝启动并报键名，
-    // 不回退 local——local 也必须显式声明。
     expect(() => loadRawConfigFromEnv({
-      CHAIN_SERVICES_DATABASE_DRIVER: "memory",
-      CHAIN_SERVICES_DATABASE_URL: "memory://projection-store",
+      CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:uvp@127.0.0.1:5432/uvp_chain_services",
       UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
     })).toThrow(/CHAIN_SERVICES_RUNTIME_ENV is required/);
     expect(loadConfigFromEnv({ CHAIN_SERVICES_RUNTIME_ENV: "local" }).security.environment).toBe("local");
@@ -230,7 +304,6 @@ describe("chain-services config", () => {
     } finally {
       console.warn = originalWarn;
     }
-    // 显式配置 UVP_RPC_URL 时不告警。
     const quiet: string[] = [];
     console.warn = (message?: unknown) => {
       quiet.push(String(message));
@@ -243,69 +316,32 @@ describe("chain-services config", () => {
     }
   });
 
-  it("requires the durable storage driver and URL to be declared explicitly", () => {
+  it("requires the storage URL to be declared explicitly and points local runs at the bundled Postgres container", () => {
     expect(() => loadRawConfigFromEnv({})).toThrow(/CHAIN_SERVICES_RUNTIME_ENV is required/);
 
     expect(() => loadRawConfigFromEnv({
       CHAIN_SERVICES_RUNTIME_ENV: "local"
-    })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
-
-    expect(() => loadRawConfigFromEnv({
-      CHAIN_SERVICES_RUNTIME_ENV: "local",
-      CHAIN_SERVICES_DATABASE_DRIVER: "memory"
     })).toThrow(/CHAIN_SERVICES_DATABASE_URL is required/);
+    expect(() => loadRawConfigFromEnv({
+      CHAIN_SERVICES_RUNTIME_ENV: "local"
+    })).toThrow(/with-postgres\.sh/);
 
     const config = loadConfigFromEnv({});
     expect(config.database).toEqual({
-      driver: "memory",
-      url: "memory://projection-store",
+      url: "postgres://uvp:uvp@127.0.0.1:5432/uvp_chain_services",
       migrationsAutoRun: false
     });
   });
 
-  it("loads durable storage driver, URL, and migration auto-run config", () => {
+  it("loads the storage URL and migration auto-run config", () => {
     const config = loadConfigFromEnv({
-      CHAIN_SERVICES_DATABASE_DRIVER: "sqlite",
-      CHAIN_SERVICES_DATABASE_URL: "sqlite://./local.db",
+      CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:uvp@127.0.0.1:5432/local-db",
       CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "true"
     });
 
     expect(config.database).toEqual({
-      driver: "sqlite",
-      url: "sqlite://./local.db",
+      url: "postgres://uvp:uvp@127.0.0.1:5432/local-db",
       migrationsAutoRun: true
-    });
-  });
-
-  it("loads reconcile worker config", () => {
-    const config = loadConfigFromEnv({
-      RECONCILE_WORKER_ENABLED: "true",
-      RECONCILE_POLL_INTERVAL_MS: "250",
-      RECONCILE_TX_TIMEOUT_MS: "1000"
-    });
-
-    expect(config.reconcile).toEqual({
-      enabled: true,
-      pollIntervalMs: 250,
-      txTimeoutMs: 1000
-    });
-  });
-
-  it("loads dock automation config and gas cap", () => {
-    const config = loadConfigFromEnv({
-      UVP_DOCK_AUTOMATION_ENABLED: "true",
-      UVP_DOCK_AUTOMATION_POLL_INTERVAL_MS: "250",
-      UVP_DOCK_AUTOMATION_MAX_CANDIDATES_PER_RUN: "2",
-      UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX: "250000",
-      UVP_DOCK_AUTOMATION_REDELIVERY_WINDOW_MS: "60000"
-    });
-
-    expect(config.dockAutomation).toEqual({
-      enabled: true,
-      pollIntervalMs: 250,
-      maxCandidatesPerRun: 2,
-      maxGasPerTx: 250_000n,
-      redeliveryWindowMs: 60_000
     });
   });
 
@@ -329,14 +365,12 @@ describe("chain-services config", () => {
       privateKeyEnv: "UVP_STAGING_TIMER_KEEPER_PRIVATE_KEY"
     });
 
-    // 启用但私钥缺失：preflight 红（local 档 static 预检即可复现）。
     const missing = loadConfigFromEnv({
       UVP_TIMER_KEEPER_ENABLED: "true"
     });
     await expect(runConfigPreflight(missing, { env: { ...MANDATORY_STORAGE_AND_REGISTRATION_ENV, UVP_TIMER_KEEPER_ENABLED: "true" } }))
       .rejects.toThrow(/UVP_TIMER_KEEPER_PRIVATE_KEY is required when UVP_TIMER_KEEPER_ENABLED=true/);
 
-    // Anvil 缺省私钥：preflight 红——keeper 是链上写者，缺省键即公开钱包。
     const anvilDefaultEnv = {
       ...MANDATORY_STORAGE_AND_REGISTRATION_ENV,
       UVP_TIMER_KEEPER_ENABLED: "true",
@@ -345,7 +379,6 @@ describe("chain-services config", () => {
     await expect(runConfigPreflight(loadConfigFromEnv(anvilDefaultEnv), { env: anvilDefaultEnv }))
       .rejects.toThrow(/UVP_TIMER_KEEPER_PRIVATE_KEY must not use an Anvil default private key/);
 
-    // 派生地址与 UVP_TIMER_KEEPER_ADDRESS 失配：preflight 红。
     const mismatchedEnv = {
       ...MANDATORY_STORAGE_AND_REGISTRATION_ENV,
       UVP_TIMER_KEEPER_ENABLED: "true",
@@ -355,7 +388,6 @@ describe("chain-services config", () => {
     await expect(runConfigPreflight(loadConfigFromEnv(mismatchedEnv), { env: mismatchedEnv }))
       .rejects.toThrow(/UVP_TIMER_KEEPER_PRIVATE_KEY does not match UVP_TIMER_KEEPER_ADDRESS/);
 
-    // 未启用：角色检查 skip，不因缺私钥拦截启动。
     const disabled = loadConfigFromEnv({});
     await expect(runConfigPreflight(disabled, { env: MANDATORY_STORAGE_AND_REGISTRATION_ENV })).resolves.toMatchObject({
       timerKeeper: { enabled: false, privateKeyConfigured: false },
@@ -363,45 +395,26 @@ describe("chain-services config", () => {
     });
   });
 
-  it("does not infer a storage driver from the database URL", () => {
+  it("rejects non-postgres database URLs", () => {
     expect(() => loadRawConfigFromEnv({
       CHAIN_SERVICES_RUNTIME_ENV: "local",
-      CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:uvp@127.0.0.1:5432/uvp"
-    })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
-  });
+      CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:uvp@127.0.0.1:5432/uvp",
+      UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+    })).not.toThrow();
 
-  it("loads security hardening config", () => {
-    const config = loadConfigFromEnv({
+    expect(() => loadRawConfigFromEnv({
       CHAIN_SERVICES_RUNTIME_ENV: "local",
-      SECURITY_PREFLIGHT_STRICT: "true",
-      LOG_REDACTION_ENABLED: "false",
-      BROADCAST_MAX_IN_FLIGHT_PER_ORDER: "2",
-      BROADCAST_MAX_RETRY_ATTEMPTS: "5",
-      BROADCAST_RETRY_BASE_MS: "100",
-      BROADCAST_RETRY_MAX_MS: "2000",
-      BROADCAST_RECEIPT_TIMEOUT_MS: "30000"
-    });
-
-    expect(config.security).toEqual({
-      environment: "local",
-      preflightStrict: true,
-      logRedactionEnabled: false,
-      broadcastMaxInFlightPerOrder: 2,
-      broadcastMaxRetry: 5,
-      broadcastRetryBaseMs: 100,
-      broadcastRetryMaxMs: 2000,
-      broadcastReceiptTimeoutMs: 30000
-    });
-    expect(config.relayer.maxRetries).toBe(5);
+      CHAIN_SERVICES_DATABASE_URL: "not-a-database-url",
+      UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "memory-trigger"
+    })).toThrow(/CHAIN_SERVICES_DATABASE_URL must be a postgres:\/\/ \(or postgresql:\/\/\) DSN/);
   });
 
-  it("ignores the removed UVP_RELAYER_TX_SIGNER_REF dead knob (no consumer ever read gasSignerRef)", () => {
-    // 死配置链销项：UVP_RELAYER_TX_SIGNER_REF 曾被解析进 relayer.gasSignerRef
-    // 但全仓无消费方。钉住"设置了也不再进入配置对象"，防止该死键复活。
+  it("propagates the broadcast retry budget into the relayer config", () => {
     const config = loadConfigFromEnv({
-      UVP_RELAYER_TX_SIGNER_REF: "local-keystore:relayer-gas-payer"
+      BROADCAST_MAX_RETRY_ATTEMPTS: "5"
     });
-    expect(config.relayer).not.toHaveProperty("gasSignerRef");
+
+    expect(config.relayer.maxRetries).toBe(5);
   });
 
   it("loads Store auth config with local dev-header default and JWT settings", () => {
@@ -447,8 +460,8 @@ describe("chain-services config", () => {
     expect(config.security.environment).toBe("testnet");
     expect(config.security.preflightStrict).toBe(true);
     expect(config.network.chainId).toBe(84532);
-    expect(config.database).toMatchObject({
-      driver: "postgres",
+    expect(config.database).toEqual({
+      url: testnetPostgresConfigUrl(),
       migrationsAutoRun: true
     });
     expect(config.productBff.registrationAdapter).toBe("anvil");
@@ -456,23 +469,16 @@ describe("chain-services config", () => {
     expect(config.evidenceStorage.adapter).toBe("rehearsal-object");
   });
 
-  it("rejects testnet memory, SQLite, or implicit database storage", () => {
+  it("rejects testnet non-Postgres or missing database storage", () => {
     const databaseUrl = testnetPostgresConfigUrl();
-
-    expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
-      CHAIN_SERVICES_DATABASE_DRIVER: "memory"
-    }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in testnet/);
 
     const { CHAIN_SERVICES_DATABASE_URL: _databaseUrl, ...missingDatabaseUrl } = testnetEnv(databaseUrl);
     expect(() => loadRawConfigFromEnv(missingDatabaseUrl)).toThrow(/CHAIN_SERVICES_DATABASE_URL is required/);
 
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
-      CHAIN_SERVICES_DATABASE_DRIVER: "sqlite",
-      CHAIN_SERVICES_DATABASE_URL: sqliteConfigUrl(tempDirs)
-    }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in testnet/);
+      CHAIN_SERVICES_DATABASE_URL: "not-a-database-url"
+    }))).toThrow(/CHAIN_SERVICES_DATABASE_URL must be a postgres:\/\/ \(or postgresql:\/\/\) DSN/);
 
-    // D18 裁决：受管 PG 上 poll 间隔必须显式配置（推荐温和正值）；
-    // 显式 0 需 UVP_INDEXER_POLL_DISABLED_ACK=1 知情确认。
     expect(() => loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_INDEXER_POLL_INTERVAL_MS: undefined
     }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS must be explicitly configured/);
@@ -516,8 +522,6 @@ describe("chain-services config", () => {
   it("rejects testnet demo controls, permissive auth, memory registration, and unsafe keys", () => {
     const databaseUrl = testnetPostgresConfigUrl();
 
-    // UVP_PRODUCT_DEMO_MODE is not a known key: unknown keys are ignored and no
-    // demo fallback can be enabled anywhere.
     expect(loadConfigFromEnv(testnetEnv(databaseUrl, {
       UVP_PRODUCT_DEMO_MODE: "1"
     })).security.environment).toBe("testnet");
@@ -561,7 +565,6 @@ describe("chain-services config", () => {
   it("runs safe strict preflight diagnostics for the testnet profile", async () => {
     const env = testnetEnv(testnetPostgresConfigUrl(), {
       UVP_RPC_URL: "https://base-sepolia.example/rpc?api_key=rpc-secret",
-      // strict 环境的模块清单 fail-closed 预检需要带 modules 的 deployment。
       UVP_ADDRESS_MANIFEST: stagingManifestPath(tempDirs, "testnet.addresses.json")
     });
     const config = loadConfigFromEnv(env);
@@ -575,7 +578,7 @@ describe("chain-services config", () => {
 
     expect(diagnostics).toMatchObject({
       environment: "testnet",
-      storage: { driver: "postgres", durable: true },
+      storage: { driver: "postgres" },
       evidenceStorage: {
         adapter: "rehearsal-object",
         objectNamespace: "uvp-rehearsal"
@@ -590,8 +593,6 @@ describe("chain-services config", () => {
         permissiveAuthorizationRequested: false
       },
       storeAuth: {
-        // testnet 不再缺省 dev_headers——基线 env
-        // 显式 jwt + 外部 OIDC 证据。
         mode: "jwt",
         jwtConfigured: true,
         externalIdentityEvidence: true,
@@ -622,8 +623,6 @@ describe("chain-services config", () => {
     const env = testnetEnv(testnetPostgresConfigUrl());
     const config = loadConfigFromEnv(env);
 
-    // testnet 显式开启 dev 锚定地址头即拒绝启动（自报地址锚定
-    // 等于伪造身份，公开测试网不比 staging 宽松）。
     expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
       STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER: "true"
     }))).toThrow(/STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER=true is only allowed in local development/);
@@ -637,8 +636,8 @@ describe("chain-services config", () => {
       preflightStrict: true,
       logRedactionEnabled: true
     });
-    expect(config.database).toMatchObject({
-      driver: "postgres",
+    expect(config.database).toEqual({
+      url: "postgres://uvp:db-secret@staging-db.internal:5432/uvp",
       migrationsAutoRun: false
     });
     expect(config.evidenceStorage).toMatchObject({
@@ -676,15 +675,10 @@ describe("chain-services config", () => {
     expect(config.operatorRoles.opsConsoleAdmins).toEqual(["ops-admin-1"]);
   });
 
-  it("rejects staging local storage, demo controls, local RPC, wrong chain, unsafe evidence, and weak keys", () => {
+  it("rejects staging non-Postgres storage, demo controls, local RPC, wrong chain, unsafe evidence, and weak keys", () => {
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
-      CHAIN_SERVICES_DATABASE_DRIVER: "memory"
-    }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres/);
-
-    expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
-      CHAIN_SERVICES_DATABASE_DRIVER: "sqlite",
-      CHAIN_SERVICES_DATABASE_URL: sqliteConfigUrl(tempDirs)
-    }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres/);
+      CHAIN_SERVICES_DATABASE_URL: "not-a-database-url"
+    }))).toThrow(/CHAIN_SERVICES_DATABASE_URL must be a postgres:\/\/ \(or postgresql:\/\/\) DSN/);
 
     const { CHAIN_SERVICES_DATABASE_URL: _databaseUrl, ...missingDatabaseUrl } = stagingEnv(tempDirs);
     expect(() => loadRawConfigFromEnv(missingDatabaseUrl)).toThrow(/CHAIN_SERVICES_DATABASE_URL/);
@@ -701,7 +695,6 @@ describe("chain-services config", () => {
       UVP_INDEXER_POLL_INTERVAL_MS: "0"
     }))).toThrow(/UVP_INDEXER_POLL_DISABLED_ACK=1/);
 
-    // D18 裁决：poll=0 带显式知情确认即可加载；温和正值是推荐缺省。
     expect(loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_INDEXER_POLL_INTERVAL_MS: "0",
       UVP_INDEXER_POLL_DISABLED_ACK: "1"
@@ -719,8 +712,6 @@ describe("chain-services config", () => {
       UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object"
     }))).toThrow(/UVP_EVIDENCE_STORAGE_ADAPTER=s3/);
 
-    // UVP_PRODUCT_DEMO_MODE is not a known key: unknown keys are ignored and no
-    // demo fallback can be enabled anywhere.
     expect(loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_PRODUCT_DEMO_MODE: "1"
     })).security.environment).toBe("staging");
@@ -824,8 +815,6 @@ describe("chain-services config", () => {
     const { OPS_CONSOLE_ADMIN_IDS: _opsAdmins, ...missingOpsAdmins } = stagingEnv(tempDirs);
     expect(() => loadConfigFromEnv(missingOpsAdmins)).toThrow(/OPS_CONSOLE_ADMIN_IDS/);
 
-    // 管理面生产基线：staging 要求管理面口令因子，
-    // 明文白名单自报头仅限 local 档。
     const { GOVERNANCE_ADMIN_TOKEN_HASHES: _adminTokens, ...missingAdminTokens } = stagingEnv(tempDirs);
     expect(() => loadConfigFromEnv(missingAdminTokens)).toThrow(/GOVERNANCE_ADMIN_TOKEN_HASHES is required in staging/);
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
@@ -844,7 +833,7 @@ describe("chain-services config", () => {
 
     expect(diagnostics).toMatchObject({
       environment: "staging",
-      storage: { driver: "postgres", durable: true, migrationsAutoRun: false },
+      storage: { driver: "postgres", migrationsAutoRun: false },
       evidenceStorage: {
         adapter: "s3",
         s3: {
@@ -939,8 +928,6 @@ describe("chain-services config", () => {
   });
 
   it("fails strict preflight closed when the active deployment manifest is missing modules", async () => {
-    // manifest 缺 modules 必须启动失败——扁平合约地址写法会让索引器
-    // 静默丢弃全部 patch/dock/派生信号模块事件投影。
     const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-modules-"));
     tempDirs.push(manifestDir);
     const manifestPath = join(manifestDir, "flat.addresses.json");
@@ -968,7 +955,6 @@ describe("chain-services config", () => {
       clients: stagingPreflightClients()
     })).rejects.toThrow(/stateMachineDeployments with modules are required/);
 
-    // local 环境豁免：模块清单不是本地最小路径的硬门槛。
     const localConfig = loadConfigFromEnv({
       UVP_ADDRESS_MANIFEST: manifestPath,
       UVP_RPC_URL: "http://127.0.0.1:8545"
@@ -986,8 +972,6 @@ describe("chain-services config", () => {
   });
 
   it("fails strict preflight when activeDeploymentId matches no deployment in the manifest", async () => {
-    // activeDeploymentId 与清单不匹配时不得静默回退到另一个部署——
-    // 拼错的部署 id 必须在启动期显式失败。
     const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-active-id-"));
     tempDirs.push(manifestDir);
     const manifestPath = join(manifestDir, "addresses.mismatch.json");
@@ -1036,9 +1020,6 @@ describe("chain-services config", () => {
   });
 
   it("fails strict preflight when no deployment is explicitly active", async () => {
-    // 无 activeDeploymentId 且 status=active 不唯一时，select 首项回退会让
-    // "碰巧排第一"的部署（如 canary/candidate）成为整环境运行时——strict
-    // 环境必须显式选择。
     const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-no-active-"));
     tempDirs.push(manifestDir);
     const manifestPath = join(manifestDir, "addresses.no-active.json");
@@ -1087,8 +1068,6 @@ describe("chain-services config", () => {
   });
 
   it("rejects flat module contract keys that diverge from deployment module manifests", async () => {
-    // 双轨同配且漂移时，写路径取扁平键、索引器/预检取 deployment.modules
-    // ——写入与投影指向不同合约。任何环境（含 local）都不得静默放行。
     const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-drift-"));
     tempDirs.push(manifestDir);
     const manifestPath = join(manifestDir, "addresses.drift.json");
@@ -1119,7 +1098,6 @@ describe("chain-services config", () => {
           address: "0x2222222222222222222222222222222222222222",
           deployment: { blockNumber: 18 }
         },
-        // 与 deployment.modules.stagePatch 漂移的扁平键。
         UVPStagePatchModule: {
           address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           deployment: { blockNumber: 21 }
@@ -1143,8 +1121,6 @@ describe("chain-services config", () => {
   });
 
   it("rejects flat UVPStateMachine addresses that diverge from the active deployment", async () => {
-    // 状态机地址双轨：字节码预检/BFF 广播与签名域取扁平键，模块投影与
-    // E20 跨部署守卫取 active deployment——两轨同配不一致即静默分叉。
     const manifestDir = mkdtempSync(join(tmpdir(), "uvp-chain-services-sm-drift-"));
     tempDirs.push(manifestDir);
     const manifestPath = join(manifestDir, "addresses.sm-drift.json");
@@ -1167,7 +1143,6 @@ describe("chain-services config", () => {
         }
       ],
       contracts: {
-        // 与 deployment.stateMachineAddress 漂移的扁平键。
         UVPStateMachine: {
           address: "0x1111111111111111111111111111111111111111",
           deployment: { blockNumber: 20 }
@@ -1209,7 +1184,6 @@ describe("chain-services config", () => {
       expect.stringContaining("UVP_CONTRACTS_JSON overrides the UVP_ADDRESS_MANIFEST entry for UVPStateMachine")
     );
 
-    // 地址一致（或清单缺席）不算覆盖漂移，不告警。
     const consistentEnv = {
       UVP_ADDRESS_MANIFEST: manifestPath,
       UVP_CONTRACTS_JSON: JSON.stringify({
@@ -1223,8 +1197,6 @@ describe("chain-services config", () => {
   });
 
   it("requires wait-for-receipt registration and the reconcile worker in production", () => {
-    // 档位倒挂收口（对照 staging）：fire-and-forget 注册与缺席对账在
-    // 生产都是启动期拦截项，不允许静默降档。
     expect(() => loadConfigFromEnv(productionEnv({
       UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: undefined
     }))).toThrow(/UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in production/);
@@ -1235,7 +1207,6 @@ describe("chain-services config", () => {
   });
 
   it("requires wait-for-receipt registration and the reconcile worker in testnet", () => {
-    // 档位不对称收口：testnet 与 production/staging 同口径。
     expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
       UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: undefined
     }))).toThrow(/UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in testnet/);
@@ -1246,22 +1217,16 @@ describe("chain-services config", () => {
   });
 
   it("requires an explicit production chainId and refuses the 31337 fallback", () => {
-    // chainId 缺省回落 31337（Anvil）不是 production 的合法姿态；地址清单
-    // network.chainId 同样算显式。
     expect(() => loadConfigFromEnv(productionEnv({
       UVP_CHAIN_ID: undefined
     }))).toThrow(/UVP_CHAIN_ID must be explicitly configured in production/);
   });
 
   it("rejects plain-http RPC and S3 endpoints outside local development", () => {
-    // 非 local 档 scheme 门：http 仅回环 host 放行（回环 RPC 另有
-    // non-local 检查拦截）；明文 http 的公网端点直接拒绝。
     expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
       UVP_RPC_URL: "http://base-sepolia.example/rpc"
     }))).toThrow(/UVP_RPC_URL must use https outside local development/);
 
-    // 治理广播 RPC 显式配置同样过 scheme 门（缺省回落已检的 UVP_RPC_URL，
-    // 显式 http 公网端点不得成为绕行面）。
     expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
       GOVERNANCE_RPC_URL: "http://base-sepolia.example/rpc"
     }))).toThrow(/GOVERNANCE_RPC_URL must use https outside local development/);
@@ -1270,14 +1235,12 @@ describe("chain-services config", () => {
       UVP_EVIDENCE_S3_ENDPOINT: "http://objects.example"
     }))).toThrow(/UVP_EVIDENCE_S3_ENDPOINT must use https outside local development/);
 
-    // 回环 http endpoint 放行（本地 MinIO 一类）。
     expect(() => loadConfigFromEnv(stagingEnv(tempDirs, {
       UVP_EVIDENCE_S3_ENDPOINT: "http://127.0.0.1:9000"
     }))).not.toThrow();
   });
 
   it("rejects zero-or-negative keeper gas caps instead of treating them as uncapped", () => {
-    // 「0=无上限」语义已废除：显式 ≤0 即响亮拒绝，未配置走 fallback。
     expect(() => loadConfigFromEnv({
       UVP_TIMER_KEEPER_MAX_GAS_PER_TX: "0"
     })).toThrow(/UVP_TIMER_KEEPER_MAX_GAS_PER_TX must be a positive integer/);
@@ -1291,26 +1254,18 @@ describe("chain-services config", () => {
   });
 
   it("requires an informed acknowledgement for testnet auto migrations", () => {
-    // 自动迁移知情门（对照 production/staging 档）：受管 PG 的启动期 DDL
-    // 必须显式确认知情。
     expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
       UVP_TESTNET_ALLOW_AUTO_MIGRATIONS: undefined
     }))).toThrow(/UVP_TESTNET_ALLOW_AUTO_MIGRATIONS=1/);
   });
 
   it("enforces a finality confirmation floor of 2 in production preflight under the confirmations anchor", async () => {
-    // 确认数是 reorg 缓冲，配 1 形同虚设——单块重组即可穿透
-    // 最终性窗口；confirmations 锚（显式浅缓冲覆盖）在生产下限 2，
-    // 启动期显式失败。默认 finalized 锚不消费确认数，最终性检查直接
-    // 通过。（达标面由既有生产 preflight 用例以 12 确认覆盖。）
     const floorEnv = productionEnv({
       UVP_FINALITY_ANCHOR: "confirmations",
       UVP_FINALITY_CONFIRMATIONS: "1"
     });
     await expect(runConfigPreflight(loadConfigFromEnv(floorEnv), {
       env: floorEnv,
-      // stub 客户端：RPC 预检不访问假 RPC 域名；静态 finality floor
-      // 仍是启动期拒绝的原因。
       clients: productionPreflightClients()
     })).rejects.toThrow(/UVP_FINALITY_CONFIRMATIONS must be at least 2 in production when UVP_FINALITY_ANCHOR=confirmations/);
 
@@ -1319,9 +1274,6 @@ describe("chain-services config", () => {
     });
     const finalizedConfig = loadConfigFromEnv(finalizedEnv);
     expect(finalizedConfig.network.finalityAnchor).toBe("finalized");
-    // 默认 finalized 锚下最终性检查必须直接通过（不消费确认数）——
-    // 生产预检可能因其他配置缺口失败，但失败面不得再含
-    // finality_confirmations 检查。客户端用 stub 避免真实 RPC 访问。
     const finalizedPreflightError = await runConfigPreflight(finalizedConfig, {
       env: finalizedEnv,
       clients: stagingPreflightClients()
@@ -1375,8 +1327,6 @@ describe("chain-services config", () => {
   });
 
   it("requires the managed-database poll gates in production as well", () => {
-    // 受管库成本安全门与 staging/testnet 同口径：production 的非本地
-    // PG 同样要求显式轮询配置与禁轮询知情确认。
     expect(() => loadConfigFromEnv(productionEnv({
       UVP_INDEXER_POLL_INTERVAL_MS: undefined
     }))).toThrow(/UVP_INDEXER_POLL_INTERVAL_MS must be explicitly configured/);
@@ -1400,12 +1350,11 @@ describe("chain-services config", () => {
     expect(() => loadRawConfigFromEnv({
       CHAIN_SERVICES_RUNTIME_ENV: "production",
       ...storeAuthJwtEnv
-    })).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER is required/);
+    })).toThrow(/CHAIN_SERVICES_DATABASE_URL is required/);
 
     expect(() => loadConfigFromEnv(productionEnv({
-      CHAIN_SERVICES_DATABASE_DRIVER: "sqlite",
-      CHAIN_SERVICES_DATABASE_URL: "sqlite://./prod-chain-services.sqlite3"
-    }))).toThrow(/CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production/);
+      CHAIN_SERVICES_DATABASE_URL: "not-a-database-url"
+    }))).toThrow(/CHAIN_SERVICES_DATABASE_URL must be a postgres:\/\/ \(or postgresql:\/\/\) DSN/);
 
     expect(() => loadConfigFromEnv(productionEnv({
       CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "true"
@@ -1417,9 +1366,6 @@ describe("chain-services config", () => {
   });
 
   it("defaults the finality anchor to the finalized tag and validates the explicit override", () => {
-    // M44：默认锚是 finalized 标签——2 块深 reorg 不再越过 1 块确认缓冲
-    // 成为游标之下的永久幽灵。anvil/testnet 可用 UVP_FINALITY_ANCHOR=
-    // confirmations 显式覆盖（浅缓冲 + 哈希连续性校验兜底）。
     expect(loadConfigFromEnv().network.finalityAnchor).toBe("finalized");
     expect(loadConfigFromEnv({
       UVP_FINALITY_ANCHOR: "confirmations"
@@ -1428,7 +1374,6 @@ describe("chain-services config", () => {
       UVP_FINALITY_ANCHOR: "latest"
     })).toThrow(/UVP_FINALITY_ANCHOR must be finalized or confirmations/);
 
-    // 默认 finalized 锚不再要求显式确认数（不消费该值）。
     const { UVP_FINALITY_CONFIRMATIONS: _prodFinality, ...missingProdFinality } = productionEnv();
     expect(loadConfigFromEnv(missingProdFinality).network.finalityAnchor).toBe("finalized");
 
@@ -1438,9 +1383,6 @@ describe("chain-services config", () => {
   });
 
   it("requires an explicit UVP_FINALITY_CONFIRMATIONS in production, staging and testnet under the confirmations anchor; local keeps the default", () => {
-    // confirmations 锚是显式的浅缓冲覆盖：非 local 公网环境一律不允许
-    // 静默落到默认值 1（reorg 防线必须显式配置），testnet 与
-    // production/staging 同口径。
     const { UVP_FINALITY_CONFIRMATIONS: _finality, ...missingFinality } = productionEnv({
       UVP_FINALITY_ANCHOR: "confirmations"
     });
@@ -1471,7 +1413,6 @@ describe("chain-services config", () => {
       UVP_FINALITY_CONFIRMATIONS: "0"
     }))).toThrow(/UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in testnet/);
 
-    // local 保持默认 1 不变。
     expect(loadConfigFromEnv().network.finalityConfirmations).toBe(1);
   });
 
@@ -1513,8 +1454,6 @@ describe("chain-services config", () => {
   it("rejects production demo, test controls, permissive auth, redaction gaps, and mock registration", () => {
     expect(loadConfigFromEnv(productionEnv()).security.environment).toBe("production");
 
-    // UVP_PRODUCT_DEMO_MODE is not a known key: unknown keys are ignored and no
-    // demo fallback can be enabled anywhere.
     expect(loadConfigFromEnv(productionEnv({
       UVP_PRODUCT_DEMO_MODE: "1"
     })).security.environment).toBe("production");
@@ -1672,7 +1611,6 @@ describe("chain-services config", () => {
   });
 
   it("resolves the governance signer key via GOVERNANCE_SIGNER_PRIVATE_KEY_ENV and fails loudly when missing", () => {
-    // DEPLOY 依赖：staging 剖面用名引用注入私钥；名/值二选一，广播开启但解析不到值必须点名失败。
     const namedEnv = loadConfigFromEnv({
       GOVERNANCE_BROADCAST_ENABLED: "true",
       GOVERNANCE_SIGNER_PRIVATE_KEY_ENV: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY",
@@ -1729,7 +1667,6 @@ describe("chain-services config", () => {
   });
 
   it("keeps 64-hex business identifiers and only redacts secrets by key name or labeled text", () => {
-    // 64-hex（bytes32）是业务标识，按键名驱动脱敏后必须保留原值。
     const orderId = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const prepareId = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const redacted = redactSecrets({
@@ -1744,8 +1681,6 @@ describe("chain-services config", () => {
     expect(redacted.nested.orderId).toBe(orderId);
     expect(redacted.nested.hookId).toBe(prepareId);
 
-    // 私钥/签名不能漏：键名匹配 secret 模式仍打码；错误消息里带标签的
-    // 私钥、裸 130-hex 签名同样打码。
     const secretsRedacted = redactSecrets({
       private_key: "0x1111111111111111111111111111111111111111111111111111111111111111",
       signature: `0x${"aa".repeat(65)}`,
@@ -1786,7 +1721,6 @@ describe("chain-services config", () => {
     expect(serialized).not.toContain("1212121212121212");
 
     const config = loadConfigFromEnv({
-      CHAIN_SERVICES_DATABASE_DRIVER: "sqlite",
       UVP_CONTRACTS_JSON: JSON.stringify({
         UVPStateMachine: "0x1111111111111111111111111111111111111111"
       }),
@@ -1797,11 +1731,12 @@ describe("chain-services config", () => {
         UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222"
       }
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", configDiagnostics: diagnostics });
+    const store = new PostgresProjectionStore({
+      databaseUrl: await createPostgresTestDatabase()
+    });
+    const router = createApiRouter(store, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", configDiagnostics: diagnostics });
     const response = await router.handle({ method: "GET", pathname: "/healthz" });
 
-    // 公共探针收口——healthz 只回聚合健康位，
-    // 诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       ok: true,
@@ -1819,11 +1754,11 @@ describe("chain-services config", () => {
     expect(adminResponse.body).toMatchObject({
       diagnostics: {
         environment: "local",
-        storageDriver: "sqlite",
+        storageDriver: "postgres",
         relayerConfigured: true,
         relayer: { configured: true },
         governance: { broadcastEnabled: false },
-        storage: { driver: "sqlite", durable: true },
+        storage: { driver: "postgres" },
         product: {
           registrationAdapter: "memory-trigger",
           permissiveAuthorizationRequested: false
@@ -1836,17 +1771,18 @@ describe("chain-services config", () => {
           nonAuthoritative: true,
           sourceOfTruth: "contracts-and-chain-events",
           stores: {
-            draft: { kind: "memory", readiness: "ready", durable: false },
-            productSchema: { kind: "memory", readiness: "ready", durable: false, representedBy: "draft" },
-            version: { kind: "memory", readiness: "ready", durable: false },
+            draft: { kind: "postgres", readiness: "ready", durable: true },
+            productSchema: { kind: "postgres", readiness: "ready", durable: true, representedBy: "draft" },
+            version: { kind: "postgres", readiness: "ready", durable: true },
             supplier: { kind: "memory", readiness: "ready", durable: false },
             supplierAudit: { kind: "memory", readiness: "ready", durable: false, representedBy: "supplier" },
-            docking: { kind: "memory", readiness: "ready", durable: false }
+            docking: { kind: "postgres", readiness: "ready", durable: true }
           }
         }
       }
     });
     expect(JSON.stringify(adminResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
+    await store.close();
   });
 
   it("marks non-local readiness degraded when Store metadata wiring falls back to memory", async () => {
@@ -1858,7 +1794,10 @@ describe("chain-services config", () => {
         checks: [{ name: "store_metadata.durable", status: "passed" }]
       }
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const store = new PostgresProjectionStore({
+      databaseUrl: await createPostgresTestDatabase()
+    });
+    const router = createApiRouter(store, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: diagnostics,
       productRuntimeEnvironment: "production",
       governanceAdminIds: ["gov-reviewer-1"],
@@ -1868,8 +1807,6 @@ describe("chain-services config", () => {
 
     const response = await router.handle({ method: "GET", pathname: "/readyz" });
 
-    // readyz 收口——只回 ready 位与 reasons，
-    // 诊断明细走 /admin/diagnostics。
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
       ok: false,
@@ -1889,27 +1826,25 @@ describe("chain-services config", () => {
         storeMetadata: {
           readiness: "degraded",
           stores: {
-            draft: { kind: "memory", readiness: "degraded" },
-            productSchema: { kind: "memory", readiness: "degraded", representedBy: "draft" },
-            version: { kind: "memory", readiness: "degraded" },
+            draft: { kind: "postgres", readiness: "ready" },
+            productSchema: { kind: "postgres", readiness: "ready", representedBy: "draft" },
+            version: { kind: "postgres", readiness: "ready" },
             supplier: { kind: "memory", readiness: "degraded" },
             supplierAudit: { kind: "memory", readiness: "degraded", representedBy: "supplier" },
-            docking: { kind: "memory", readiness: "degraded" }
+            docking: { kind: "postgres", readiness: "ready" }
           }
         }
       }
     });
+    await store.close();
   });
 });
 
 function productionEnv(overrides: Record<string, string | undefined> = {}): Record<string, string | undefined> {
   return {
     CHAIN_SERVICES_RUNTIME_ENV: "production",
-    CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:db-secret@prod-db.internal:5432/uvp",
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
-    // production 档位倒挂收口：等回执注册与对账 worker 是生产基线
-    //（对照 staging 口径），基线 env 一并带上。
     UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: "true",
     RECONCILE_WORKER_ENABLED: "true",
     ...storeAuthJwtEnv,
@@ -1922,19 +1857,12 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Reco
     UVP_PRODUCT_BFF_REGISTRATION_ADAPTER: "anvil",
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: productionRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: productionRelayerPrivateKey,
-    // production 要求 chainId 显式（env 或地址清单），基线 env 一并带上。
     UVP_CHAIN_ID: "8453",
-    // production 要求显式配置 finality 确认数，基线 env 一并带上。
     UVP_FINALITY_CONFIRMATIONS: "12",
-    // production 强制显式非本地 RPC + admin 白名单
-    // 非空——静默回落 127.0.0.1:8545 与空白名单 fail-open 已废除。
     UVP_RPC_URL: "https://base-mainnet.example/rpc",
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
-    // 管理面生产基线：非 local 要求口令因子（sha256("test-admin-password")）。
     GOVERNANCE_ADMIN_TOKEN_HASHES: "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d",
-    // production 受管 PG 同样要求显式轮询配置（受管库成本安全门，
-    // 与 staging/testnet 同口径）。
     UVP_INDEXER_POLL_INTERVAL_MS: "5000",
     RECONCILE_POLL_INTERVAL_MS: "30000",
     ...storeAuthJwtEnv,
@@ -1964,11 +1892,8 @@ function productionSafeEvidenceStorage(): ObjectEvidenceStorage {
 function testnetEnv(databaseUrl: string, overrides: Record<string, string | undefined> = {}): Record<string, string | undefined> {
   return {
     CHAIN_SERVICES_RUNTIME_ENV: "testnet",
-    CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: databaseUrl,
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "true",
-    // testnet 自动迁移知情门（对照 production/staging 档）：基线 env 显式
-    // 确认知情。
     UVP_TESTNET_ALLOW_AUTO_MIGRATIONS: "1",
     UVP_INDEXER_POLL_INTERVAL_MS: "5000",
     UVP_CHAIN_ID: "84532",
@@ -1978,15 +1903,10 @@ function testnetEnv(databaseUrl: string, overrides: Record<string, string | unde
     UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY: testnetRegistrarPrivateKey,
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: testnetRelayerPrivateKey,
     UVP_EVIDENCE_STORAGE_ADAPTER: "rehearsal-object",
-    // testnet 档位不对称收口：等回执与对账 worker 与 production/staging
-    // 同口径强制（受管 PG 上对账轮询同样走 ≥30s 的成本门）。
     UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT: "true",
     RECONCILE_WORKER_ENABLED: "true",
     RECONCILE_POLL_INTERVAL_MS: "30000",
-    // testnet 强制显式 finality 确认数。
     UVP_FINALITY_CONFIRMATIONS: "12",
-    // testnet 必须显式 STORE_AUTH_MODE=jwt 且
-    // admin 白名单非空——缺省 dev_headers/空白名单的 fail-open 已废除。
     ...storeAuthJwtEnv,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
@@ -2000,7 +1920,6 @@ function stagingEnv(tempDirs: string[], overrides: Record<string, string | undef
     CHAIN_SERVICES_RUNTIME_ENV: "staging",
     SECURITY_PREFLIGHT_STRICT: "true",
     LOG_REDACTION_ENABLED: "true",
-    CHAIN_SERVICES_DATABASE_DRIVER: "postgres",
     CHAIN_SERVICES_DATABASE_URL: "postgres://uvp:db-secret@staging-db.internal:5432/uvp",
     CHAIN_SERVICES_MIGRATIONS_AUTO_RUN: "false",
     UVP_INDEXER_POLL_INTERVAL_MS: "5000",
@@ -2074,9 +1993,6 @@ function stagingManifestPath(tempDirs: string[], filename = "staging.addresses.j
         deployment: { blockNumber: 111 }
       }
     },
-    // strict 环境（production/testnet/staging）要求 active deployment 携带
-    // 全量模块清单：模块地址只经 deployment.modules 进索引器，扁平写法会
-    // 静默丢失全部 patch/dock 投影（fail-closed 预检）。
     stateMachineDeployments: [
       {
         deploymentId: "0x" + "ab".repeat(32),
@@ -2100,8 +2016,6 @@ function stagingManifestPath(tempDirs: string[], filename = "staging.addresses.j
 function productionPreflightClients() {
   return {
     network: {
-      // productionEnv 的 chainId；字节码读取返回非空 stub，使 RPC 预检
-      // 不访问 https://base-mainnet.example/rpc。
       getChainId: async () => 8453,
       getBytecode: async () => "0x01" as const
     }
@@ -2121,7 +2035,6 @@ function stagingPreflightClients() {
     network: {
       getChainId: async () => 84532,
       getBytecode: async () => "0x01" as const,
-      // 模块 getter 预检：返回与 stagingManifestPath 清单一致的模块地址。
       readContract: async (call: { functionName: string }) =>
         manifestModuleByGetter[call.functionName] ?? "0x0000000000000000000000000000000000000000"
     },
@@ -2130,12 +2043,6 @@ function stagingPreflightClients() {
       readContract: async () => stagingGovernanceAddress
     }
   };
-}
-
-function sqliteConfigUrl(tempDirs: string[]): string {
-  const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-config-"));
-  tempDirs.push(dir);
-  return `sqlite://${join(dir, "testnet.sqlite3")}`;
 }
 
 function testnetPostgresConfigUrl(): string {

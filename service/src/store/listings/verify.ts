@@ -9,14 +9,9 @@ import type {
 } from "./types.js";
 import type { ProjectionStore } from "../../storage/projection-store.js";
 
-/**
- * 锚核验红线：listing 声称的锚 vs 投影 vs（可选）链上直读。
- *
- * - 投影是 indexer 从链事件重建的事实；链直读是独立的第二证据源。
- * - 没有配置 RPC/状态机地址时链直读标记 unavailable（不伪造），
- *   核验退化为投影比对（projection-only），状态相应保守。
- * - 任何 mismatch 都必须显式 conflict，由上层抑制加入入口。
- */
+// 锚核验：listing 声称的锚 vs 投影 vs（可选）链上直读；投影是 indexer
+// 从链事件重建的事实，链直读是独立的第二证据源。未配置 RPC 时直读标记
+// unavailable（不伪造）；任何 mismatch 都显式 conflict，由上层抑制加入入口。
 
 const LISTING_ANCHOR_ABI = [
   { inputs: [{ name: "planId", type: "bytes32" }], name: "planCommitted", outputs: [{ type: "bool" }], stateMutability: "view" },
@@ -74,15 +69,10 @@ export async function verifyListingAnchors(options: {
 }): Promise<StoreAnchorVerificationDTO> {
   const { listing } = options;
   const snapshot = await options.projectionStore.getOrderSnapshot();
-  // 投影以 chainId:contract:planId 为键；按 planId 值匹配（大小写不敏感）。
-  // 已注册判据：桶存在只代表 commitPlan 已执行——须见到
-  // PlanRegistered（registeredAt 被 finalize 交易覆写）或 PlanFinalized。
   const planMatches = Object.values(snapshot.stateMachinePlans)
     .filter((candidate) =>
       candidate.planId.toLowerCase() === listing.planId.toLowerCase() &&
       isPlanRegisteredProjection(candidate));
-  // 同 planId 跨部署多命中时锚无法唯一归位：显式 conflict，不静默
-  // 取首个命中比对。
   const planAmbiguous = planMatches.length > 1;
   const plan = planMatches.length === 1 ? planMatches[0] : undefined;
   const checks: StoreAnchorCheck[] = [];
@@ -99,8 +89,6 @@ export async function verifyListingAnchors(options: {
     label: "秩序已在链上注册并被索引（PlanRegistered 投影）",
     expected: "registered",
     actual: plan ? "registered" : "pending",
-    // 投影滞后是等待不是冲突：未命中不计入 mismatch，交给
-    // pending_indexing 状态阻断公开，等索引器追上。
     outcome: plan ? "match" : "unavailable"
   });
 
@@ -120,7 +108,6 @@ export async function verifyListingAnchors(options: {
   }
 
   if (plan && listing.deploymentIdClaimed) {
-    // 关联性核验：deploymentId 必须属于该 plan（plan 自带 deploymentId 时直接比对）。
     const planDeployment = plan.deploymentId ?? Object.values(snapshot.stateMachinePlans)
       .find((candidate) =>
         candidate.deploymentId?.toLowerCase() === listing.deploymentIdClaimed!.toLowerCase() &&
@@ -205,8 +192,6 @@ export async function verifyListingAnchors(options: {
   }
 
   const hasMismatch = checks.some((check) => check.outcome === "mismatch");
-  // 未注册（含"桶已建但 finalize 未索引"）统一 pending_indexing：
-  // 公开被阻断，等索引器追上而不是误报冲突。
   const status = hasMismatch ? "conflict" : plan ? "consistent" : "pending_indexing";
 
   return {
@@ -231,6 +216,5 @@ export async function verifyListingAnchors(options: {
 }
 
 export function anchorVerificationAllowsPublish(verification: StoreAnchorVerificationDTO): boolean {
-  // 链直读是第二证据源：配置了但读失败时不得公开（fail-closed）。
   return verification.status === "consistent" && verification.chainReadFailed !== true;
 }

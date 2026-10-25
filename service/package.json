@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "./scripts/with-postgres.sh --env CHAIN_SERVICES_POSTGRES_TEST_URL -- vitest run",
     "check": "pnpm run typecheck && pnpm run test",
     "dev:api": "tsx src/api/server.ts",
     "dev:indexer": "tsx src/indexer/service.ts",

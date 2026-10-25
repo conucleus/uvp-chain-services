@@ -1,8 +1,6 @@
-// Shared product order visibility: list/detail/task reads and the escrow
-// routes must agree on which wallet can see an order. Keys are (planId,
-// orderId) so a reused bare order id cannot leak another plan's order. An
-// order with no judgeable participant (no assignee, overlay executor, or
-// creator) is not visible to anyone: an empty participant set is not public.
+// 共享的产品订单可见性判定：list/detail/task 各读路径对「哪个钱包能
+// 看到订单」必须一致。键是 (planId, orderId)，裸 orderId 复用不能泄漏
+// 别的 plan 的订单；无可判定参与者的订单对任何人不可见。
 
 import {
   ProductOrderLookupError,

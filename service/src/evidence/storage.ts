@@ -2,7 +2,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { hashEvidenceBytes } from "./hashing.js";
 
-export type EvidenceStorageAdapterKind = "memory" | "local" | "object";
+export type EvidenceStorageAdapterKind = "local" | "object";
 export type EvidenceStorageRuntimeEnvironment = "local" | "testnet" | "staging" | "production";
 
 export interface EvidenceStoragePutInput {
@@ -23,12 +23,6 @@ export interface EvidenceStorage {
   get(storageURI: string): Promise<Uint8Array | undefined>;
   exists(storageURI: string): Promise<boolean>;
   delete?(storageURI: string): Promise<void>;
-  /**
-   * 主/备副本 URI 空间可能不同（不同 bucket、prefix 或 uriMode）。
-   * 提供 evidenceId↔storageURI 的双向翻译，让
-   * BackupEvidenceStorage 能用主存储的 URI 定位备份对象，而不是假设
-   * 两边 URI 字符串相等。返回 undefined 表示该适配器不支持翻译。
-   */
   storageURIForEvidenceId?(evidenceId: string): string | undefined;
   evidenceIdForStorageURI?(storageURI: string): string | undefined;
 }
@@ -36,48 +30,6 @@ export interface EvidenceStorage {
 export class EvidenceStorageConfigurationError extends Error {
   override readonly name = "EvidenceStorageConfigurationError";
   readonly code = "evidence_storage_not_production_ready";
-}
-
-export class InMemoryEvidenceStorage implements EvidenceStorage {
-  readonly adapterKind = "memory";
-  readonly productionSafe = false;
-
-  readonly #objects = new Map<string, Uint8Array>();
-
-  async put(input: EvidenceStoragePutInput): Promise<EvidenceStoragePutResult> {
-    const storageURI = `memory://evidence/${encodeURIComponent(input.evidenceId)}`;
-    const bytes = copyBytes(input.bytes);
-    this.#objects.set(storageURI, bytes);
-    return {
-      storageURI,
-      size: bytes.byteLength
-    };
-  }
-
-  async get(storageURI: string): Promise<Uint8Array | undefined> {
-    const bytes = this.#objects.get(storageURI);
-    return bytes ? copyBytes(bytes) : undefined;
-  }
-
-  async exists(storageURI: string): Promise<boolean> {
-    return this.#objects.has(storageURI);
-  }
-
-  async delete(storageURI: string): Promise<void> {
-    this.#objects.delete(storageURI);
-  }
-
-  storageURIForEvidenceId(evidenceId: string): string {
-    return `memory://evidence/${encodeURIComponent(evidenceId)}`;
-  }
-
-  evidenceIdForStorageURI(storageURI: string): string {
-    const prefix = "memory://evidence/";
-    if (!storageURI.startsWith(prefix)) {
-      throw new Error("storageURI is not managed by InMemoryEvidenceStorage");
-    }
-    return decodeURIComponent(storageURI.slice(prefix.length));
-  }
 }
 
 export interface LocalEvidenceStorageOptions {
@@ -164,7 +116,6 @@ export interface ObjectEvidenceStorageClient {
   get(storageURI: string): Promise<Uint8Array | undefined>;
   exists(storageURI: string): Promise<boolean>;
   delete?(storageURI: string): Promise<void>;
-  /** 主/备 URI 空间翻译（bucket/prefix/uriMode 不同时定位对象）。 */
   storageURIForEvidenceId?(evidenceId: string): string;
   evidenceIdForStorageURI?(storageURI: string): string;
 }
@@ -225,7 +176,6 @@ export class ObjectEvidenceStorage implements EvidenceStorage {
 
 export interface BackupEvidenceStorageOptions {
   readonly primary: EvidenceStorage;
-  /** 第二副本存储：UVP_EVIDENCE_BACKUP_BUCKET 指定的第二 bucket（或同 bucket 备份前缀）。 */
   readonly backup: EvidenceStorage;
 }
 
@@ -234,11 +184,6 @@ export interface EvidenceBackupVerifyResult {
   readonly hashMatches: boolean;
 }
 
-/**
- * 证据第二副本。put 成功后立即写第二副本；备份写入失败按整体
- * 失败处理（上抛），不允许"主存成功、副本静默丢失"。提供按 hash 校验与
- * 从副本恢复主对象的能力。
- */
 export class BackupEvidenceStorage implements EvidenceStorage {
   readonly adapterKind: EvidenceStorageAdapterKind;
   readonly productionSafe: boolean;
@@ -259,8 +204,6 @@ export class BackupEvidenceStorage implements EvidenceStorage {
 
   async put(input: EvidenceStoragePutInput): Promise<EvidenceStoragePutResult> {
     const result = await this.#primary.put(input);
-    // 副本写入失败必须上抛：调用方（evidence service）尚未落 metadata，
-    // 重试/告警仍能补救；静默吞掉会制造"看起来有副本"的假象。
     await this.#backup.put({ evidenceId: input.evidenceId, bytes: copyBytes(input.bytes) });
     return result;
   }
@@ -284,14 +227,6 @@ export class BackupEvidenceStorage implements EvidenceStorage {
     }
   }
 
-  /**
-   * 主存储 URI → 备份存储 URI 的翻译。主/备
-   * bucket、prefix 或 uriMode 不同时，两边 URI 字符串不相等——直接把
-   * 主 URI 喂给备份适配器会抛 "storageURI is not managed by ..."。
-   * 翻译链：primary.evidenceIdForStorageURI →
-   * backup.storageURIForEvidenceId；适配器不支持翻译时退回原 URI（同
-   * URI 空间的内存/本地存储场景）。
-   */
   backupURIFor(storageURI: string, evidenceId?: string): string {
     const primaryTranslate = this.#primary.evidenceIdForStorageURI;
     const backupTranslate = this.#backup.storageURIForEvidenceId;
@@ -305,7 +240,6 @@ export class BackupEvidenceStorage implements EvidenceStorage {
     return backupTranslate.call(this.#backup, id) ?? storageURI;
   }
 
-  /** 读取第二副本并按期望 hash 校验（链上/库内 contentHash，keccak256）。 */
   async verifyBackup(storageURI: string, expectedContentHash: string): Promise<EvidenceBackupVerifyResult> {
     const bytes = await this.#backup.get(this.backupURIFor(storageURI));
     if (!bytes) {
@@ -317,10 +251,6 @@ export class BackupEvidenceStorage implements EvidenceStorage {
     };
   }
 
-  /**
-   * 主对象损坏/缺失时从第二副本恢复：副本字节摘要必须与期望 hash 一致
-   * 才允许写回主存储；成功返回 true。
-   */
   async restoreFromBackup(storageURI: string, evidenceId: string, expectedContentHash: string): Promise<boolean> {
     const bytes = await this.#backup.get(this.backupURIFor(storageURI, evidenceId));
     if (!bytes) {

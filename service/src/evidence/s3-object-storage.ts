@@ -24,7 +24,6 @@ export interface S3EvidenceStorageClientOptions {
   readonly forcePathStyle?: boolean;
   readonly accessKeyIdEnv: string;
   readonly secretAccessKeyEnv: string;
-  /** Optional name of the env variable holding an STS session token; required to be populated when set. */
   readonly sessionTokenEnv?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly objectClient?: S3CompatibleObjectClient;
@@ -71,9 +70,6 @@ export class S3EvidenceStorageClient implements ObjectEvidenceStorageClient {
     const env = options.env ?? process.env;
     const accessKeyId = readCredentialValue(env, accessKeyIdEnv, "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV");
     const secretAccessKey = readCredentialValue(env, secretAccessKeyEnv, "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV");
-    // A configured STS session-token env must resolve here, at construction
-    // time: a credential that only fails at first upload/read surfaces as a
-    // 403 far from the misconfiguration that caused it.
     const sessionToken = options.sessionTokenEnv
       ? readCredentialValue(
           env,
@@ -142,7 +138,6 @@ export class S3EvidenceStorageClient implements ObjectEvidenceStorageClient {
     return this.#prefix ? `${this.#prefix}/${evidenceId}` : evidenceId;
   }
 
-  /** evidenceId↔storageURI 双向翻译（BackupEvidenceStorage 用）。 */
   storageURIForEvidenceId(evidenceId: string): string {
     return this.storageURIForKey(this.objectKeyForEvidenceId(evidenceId));
   }

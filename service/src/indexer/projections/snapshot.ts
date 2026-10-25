@@ -33,21 +33,12 @@ export interface StateMachineDeploymentProjection {
   readonly proof: StateMachineProofProjection;
 }
 
-/**
- * 合约治理面投影（B-03）：OwnershipTransferred（owner 轮换）与
- * StateMachineModulesFrozen（模块集冻结）此前是显式零投影分支，治理状态
- * 无法从事件流重建。键 = `chainId:contractAddress`——OwnershipTransferred
- * 也由 identity/deployment registry 发出（同名事件族），按发出合约分桶，
- * modulesFrozen 仅对状态机合约有意义。
- */
 export interface ContractGovernanceProjection {
   readonly chainId: number;
   readonly contractAddress: Address;
-  /** 最近一次 OwnershipTransferred 的 newOwner（首见事件即建行）。 */
   readonly owner: Address;
   readonly ownerUpdatedAt: ProjectionProvenance;
   readonly ownerProof: StateMachineProofProjection;
-  /** StateMachineModulesFrozen（一次性）：true 后模块集不可再改。 */
   readonly modulesFrozen?: boolean;
   readonly moduleSetHash?: Hex;
   readonly frozenAt?: ProjectionProvenance;
@@ -62,68 +53,19 @@ export interface ProjectionSnapshot {
   readonly activeStateMachineDeploymentId?: Hex;
   readonly stateMachineDeployments: Readonly<Record<string, StateMachineDeploymentProjection>>;
   readonly stateMachineModules: Readonly<Record<string, StateMachineModuleProjection>>;
-  /** 治理面（OwnershipTransferred/StateMachineModulesFrozen）按合约分桶。 */
   readonly contractGovernance: Readonly<Record<string, ContractGovernanceProjection>>;
   readonly stateMachinePlans: Readonly<Record<string, StateMachinePlanProjection>>;
   readonly stateMachineOrders: Readonly<Record<string, StateMachineOrderProjection>>;
   readonly stateMachineDocks: Readonly<Record<string, StateMachineDockProjection>>;
-  /**
-   * 目标侧"谁挂了我"索引：键 = 目标单的 plan 作用域复合键
-   * (chainId, stateMachineAddress, targetPlanId, linkedOrderId)，值为该
-   * 目标单名下 dock 实例键的集合。existing 模式（DockAttached）天然
-   * N:1——多个父单可挂同一目标单，索引必须是集合；链上 dockByTargetOrder
-   * 是 new 模式子单出生键（单值、existing 不写），投影不镜像其单值语义。
-   */
   readonly stateMachineDocksByTargetOrder: Readonly<Record<string, readonly string[]>>;
-  /**
-   * B-02 边数账本口径下的「最长 dock 链路」派生投影：键 = 订单的 plan
-   * 作用域复合键 (chainId, stateMachineAddress, planId, orderId)，值为以
-   * 该订单为终点的 dock 边链最长路径（无入边订单缺省 0，不出现在索引里）。
-   * 4.7 起链上不再维护路径深度（dockEdgeCountOfOrder 是每单总挂接边数的
-   * 父链账本，上界 MAX_DOCK_EDGES）——最长路径语义由索引器从
-   * DockOpened/DockAttached 事件图（父单 → 目标单边）派生，快照每次重建
-   * 整体重算，天然幂等。
-   */
   readonly stateMachineOrderDockChainDepth: Readonly<Record<string, number>>;
   readonly stateMachineTasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly lastEvent?: ProjectionProvenance;
-  /**
-   * 幻影订单诊断计数：订单维度事件（patch/dock/link/derived）本应由已
-   * 登记的模块合约发出，但 replay 时其 emitting 地址无法通过
-   * stateMachineModules 唯一归因到所属状态机（模块未登记/replay 顺序中
-   * StateMachineModuleSet 尚未出现/一址多机）。这类事件保持事件自带地址
-   * 建桶（现状），但必须在此显式计数，不允许静默。
-   */
   readonly unresolvedModuleOrderEventCount?: number;
-  /**
-   * Dock 事件（input/output）无法定位已出生 dock 桶的显式计数
-   * （dock 未开启/未挂接 / 模块未登记 / 回放顺序中出生事件缺失）。
-   * 不允许静默。
-   */
   readonly unresolvedDockEventCount?: number;
-  /**
-   * StageExecutorActivated 到达时目标 stage 没有既有 overlay 的显式计数
-   * （激活前补丁事件缺失）。不允许静默。
-   */
   readonly unresolvedStageActivationEventCount?: number;
-  /**
-   * DockOpened 的跨部署子订单归桶诊断计数：linkedOrderId/targetPlanId 的
-   * 子订单按 local 状态机地址建桶（现状行为），但 targetPlan 无法在 local
-   * 状态机下定位已登记 plan（跨部署 dock / plan 未登记 / 回放顺序缺口）
-   * 时，子订单归属未经证实——显式计数，不允许静默。
-   */
   readonly unresolvedDockTargetDeploymentCount?: number;
-  /**
-   * 词表产物富集的 fail-closed 计数：store 域产物两表按 planId 命中，但
-   * planHash/capabilitiesRoot 断言不过（产物过期/被改写/锚错版本），
-   * 该 plan 两表保持为空（词表相关推导退化为不可用）。不允许静默。
-   */
   readonly capabilityEnrichmentMismatchCount?: number;
-  /**
-   * 真未知事件计数：事件流的 eventName 不属于任何已收口的重放族
-   * （状态机/模块/部署注册表/身份注册表），也没有显式零投影分支。
-   * 新合约事件上线而投影未跟进时在此显式计数，不静默。
-   */
   readonly unknownEventCount?: number;
 }
 
@@ -133,7 +75,6 @@ export type Writable<TValue> = {
 
 export type MutableStateMachineDeploymentProjection = Writable<StateMachineDeploymentProjection>;
 
-/** 单次 replay 内累计的显式诊断计数（幻影订单等回放异常）。 */
 export interface ProjectionReplayDiagnostics {
   unresolvedModuleOrderEventCount: number;
   unresolvedDockEventCount: number;

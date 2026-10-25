@@ -14,10 +14,6 @@ import type {
   ProductOrderDraftDTO,
 } from "../query/bff/types.js";
 
-/**
- * 要求包服务的失败态：status 定 HTTP，code 精确到因（未登录/无权限由路由的
- * 身份门给 401，这里给 403/404/409/400 的具名分支）。
- */
 export class OrderRequirementsError extends Error {
   override readonly name = "OrderRequirementsError";
 
@@ -31,7 +27,6 @@ export class OrderRequirementsError extends Error {
   }
 }
 
-/** 草稿持久化记录：declaration 是客户端原文（服务端已结构校验/规范化）。 */
 export interface OrderRequirementBundleRecord {
   readonly draftId: string;
   readonly declaration: OrderRequirementsDeclarationDTO;
@@ -41,7 +36,6 @@ export interface OrderRequirementBundleRecord {
   readonly updatedAt: string;
 }
 
-/** 相对方合意记录：签名覆盖 (draftId, requirementsHash)。 */
 export interface OrderRequirementConsentRecord {
   readonly consentId: string;
   readonly draftId: string;
@@ -56,16 +50,13 @@ export interface OrderRequirementsStore {
   getBundle(
     draftId: string,
   ): Promise<OrderRequirementBundleRecord | undefined>;
-  /** 声明 upsert；同事务删掉 hash 已不匹配的旧合意（合意只对当前包有效）。 */
   saveBundle(record: OrderRequirementBundleRecord): Promise<void>;
   listConsents(
     draftId: string,
   ): Promise<readonly OrderRequirementConsentRecord[]>;
-  /** 同一钱包重新合意时覆盖旧记录（一个钱包对本包只有一个立场）。 */
   saveConsent(record: OrderRequirementConsentRecord): Promise<void>;
 }
 
-/** 要求包服务对草稿/参与者名单的最小读取口（ProductBffStore 直接满足）。 */
 export interface OrderRequirementsDraftPort {
   getDraft(draftId: string): Promise<ProductOrderDraftDTO | undefined>;
   listParticipants(
@@ -76,10 +67,8 @@ export interface OrderRequirementsDraftPort {
 export interface OrderRequirementsDeclarationResult {
   readonly draft: ProductOrderDraftDTO;
   readonly bundle: OrderRequirementsBundleDTO;
-  /** 相对方合意签名消息（格式单源在 @uvp-eth/product-dto）。 */
   readonly consentMessage?: string;
   readonly triggerAnchor: OrderRequirementsTriggerAnchorDTO;
-  /** 当前草稿是否仍允许改要求包（读面展示旗标）。 */
   readonly editable: boolean;
 }
 

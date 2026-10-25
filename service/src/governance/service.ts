@@ -15,7 +15,7 @@ import {
 } from "./hashing.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { redactErrorMessage } from "../security/redaction.js";
-import { InMemoryGovernanceStore, type GovernanceReviewQuery, type GovernanceStore } from "./store.js";
+import { type GovernanceReviewQuery, type GovernanceStore } from "./store.js";
 import {
   buildDescriptorPublicUri,
   persistIdentityDescriptorSnapshot,
@@ -52,18 +52,9 @@ export class GovernanceServiceError extends Error {
   }
 }
 
-// 与 governance/auth.ts 的 ADMIN_ROLES 同口径：治理权威角色集合。
 const GOVERNANCE_ADMIN_ROLES = new Set(["admin", "governance_admin", "governance"]);
-// Store 运营侧角色可以落 supplier review 记录（/store/suppliers 的
-// operator 级审核流），但拿不到 zhixu 审核与链上身份登记/撤销。
 const STORE_OPERATOR_ROLES = new Set(["store_operator", "store_admin"]);
 
-/**
- * 服务端角色核验（纵深防御）：治理服务不再接受任意 role 的 principal。
- * zhixu 审核 / 链上身份登记与撤销要求治理管理员角色；supplier review
- * 记录接受治理或 Store 运营角色（路由层能力门禁为权威，服务端拒绝
- * 未知/匿名角色，防伪造）。
- */
 function assertPrincipalRole(
   principal: GovernancePrincipal,
   allowed: ReadonlySet<string>
@@ -79,13 +70,11 @@ function assertPrincipalRole(
 }
 
 export interface GovernanceServiceOptions {
-  readonly store?: GovernanceStore;
+  readonly store: GovernanceStore;
   readonly adapter?: GovernanceChainAdapter;
   readonly now?: () => Date;
   readonly audit?: AuditSink;
-  /** descriptor 托管：登记身份时把被哈希的档案原文追加为 append-only 快照。 */
   readonly descriptorSnapshotStore?: StoreIdentityDescriptorSnapshotStore;
-  /** 配置后 descriptorURI 指向 Store 公开端点（GET /identity/descriptors/...）。 */
   readonly descriptorPublicBaseUrl?: string;
 }
 
@@ -98,8 +87,8 @@ export interface GovernanceService {
   revokeIdentity(input: unknown, principal: GovernancePrincipal): Promise<GovernanceIdentityRevocationResultDTO>;
 }
 
-export function createGovernanceService(options: GovernanceServiceOptions = {}): GovernanceService {
-  const store = options.store ?? new InMemoryGovernanceStore();
+export function createGovernanceService(options: GovernanceServiceOptions): GovernanceService {
+  const store = options.store;
   const adapter = options.adapter ?? createSimulatedGovernanceChainAdapter();
   const now = options.now ?? (() => new Date());
   const audit = options.audit ?? noopAuditSink;
@@ -144,17 +133,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
       const account = requiredAddress(record, "account");
       const review = await resolveReview(store, record, "supplier", subjectId);
       if (!review) {
-        // never fabricate an on-chain review hash from request-body
-        // fields: hashing the caller's own fields with a default
-        // "approved_for_broadcast" status would put a descriptorHash
-        // on chain whose review material does not exist anywhere in the
-        // store. Identity registration therefore requires an existing
-        // review record (created via review-zhixu / review-supplier /
-        // store supplier review) — the same bar as
-        // assertReviewAllowsIdentityRegistration, except there is
-        // nothing to assert when no review exists, so the request is
-        // refused instead of being broadcast with a forged
-        // "approved" hash.
         throw new GovernanceServiceError(
           409,
           "review_not_approved",
@@ -250,10 +228,6 @@ export function createGovernanceService(options: GovernanceServiceOptions = {}):
         return { request, broadcast: broadcastFromLog(duplicate), log: duplicate };
       }
       const broadcast = await safeBroadcast(() => broadcastIdentityRevocation(adapter, request));
-      // revoke 前置状态回退——review 在广播前已翻成 revoked，仅"无 txHash
-      // 的确定失败"恢复原状态：交易从未上链，回滚无分叉风险。failed+txHash
-      // 按未决处理不回滚（链上交易可能已占用 revoke——reorg/迟到回执由
-      // reconcile 的 revoke-reverted 告警车道覆盖）；可重试失败交重试收敛。
       if (
         broadcast.status === "failed" &&
         !broadcast.txHash &&
@@ -390,13 +364,9 @@ async function saveReviewFromRecord(options: {
     reviewer: options.principal.adminId,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
-    // 哈希材料原文随记录持久化，registerIdentity 重建
-    // descriptor 哈希时 metadata/policy 不丢。
     ...(metadataDocument !== undefined ? { metadataDocument } : {}),
     ...(policyDocument !== undefined ? { policyDocument } : {})
   };
-  // 状态迁移以条件更新收口：校验（canTransition）与写入之间行可能已被
-  // 并发迁移，过期校验结果不得覆盖赢家。同目标状态的并发更新幂等重放。
   if (!(await options.store.putReviewIfStatus(review, existing?.status ?? review.status))) {
     const latest = await requireReviewForConflict(options.store, review.reviewId);
     if (latest.status !== status) {
@@ -504,8 +474,6 @@ async function markReviewRevoked(
     reviewer: principal.adminId,
     updatedAt: now().toISOString()
   };
-  // 预翻转必须条件落库：撤销是 revoke 广播的前置，并发方先改了 review
-  // 状态时，过期快照的翻转不得覆盖（已 revoked 的档幂等返回）。
   if (!(await store.putReviewIfStatus(updated, review.status))) {
     const latest = await requireReviewForConflict(store, review.reviewId);
     if (latest.status !== "revoked") {
@@ -530,7 +498,6 @@ function reviewHashInput(review: GovernanceReviewDTO): GovernanceReviewHashInput
     riskLevel: review.riskLevel,
     riskTags: review.riskTags,
     publicSummary: review.publicSummary,
-    // 用持久化的哈希材料原文重建，metadata/policy 不丢。
     ...(review.metadataDocument !== undefined ? { metadata: review.metadataDocument } : {}),
     ...(review.policyDocument !== undefined ? { policy: review.policyDocument } : {})
   });
@@ -603,9 +570,6 @@ async function reusableDuplicateIdentityLog(
   request: IdentityRegistrationRequestDTO | IdentityRevocationRequestDTO
 ): Promise<IdentityTxLogDTO | undefined> {
   const key = governanceRequestKey(action, request);
-  // 同请求键的历史档案可能既有失败档也有成功档（失败后重播）：必须选中
-  // 第一条"可复用"的成功档，而不是第一条键匹配档——后者若是失败档就
-  // 直接放弃复用会引发不必要的重播（时间戳并列时档案顺序还不稳定）。
   return (await store.listIdentityTxLogs())
     .find((log) => log.action === action
       && governanceRequestKey(log.action, log.request) === key
@@ -613,12 +577,6 @@ async function reusableDuplicateIdentityLog(
 }
 
 function isReusableDuplicateLog(log: GovernanceTxLogDTO): boolean {
-  // 复用只认"已成功在途/终态"的广播（simulated_tx/submitted/confirmed）：
-  // 这些档案代表一次真实（或 local 档模拟）广播已发生，同请求重放幂等
-  // 返回已记录结果即可。failed 档案不得当最终答复复用——即便
-  // retryable:false，失败也只是当时的一次尝试结果（历史上还存在把瞬态
-  // 传输错误误钉成不可重试的分类），把它当复用终态会让陈年失败台账永久
-  // 堵死 registerIdentity/revokeIdentity 通道；重放应重新广播并落新档案。
   return log.broadcastStatus === "simulated_tx"
     || log.broadcastStatus === "submitted"
     || log.broadcastStatus === "confirmed";
@@ -690,13 +648,6 @@ async function safeBroadcast(action: () => Promise<GovernanceBroadcastResultDTO>
   }
 }
 
-/**
- * 台账写入的 persist_failed 兜底：广播已完成（拿到 txHash）后写台账
- * 抛错会制造幽灵交易——链上事实存在、库内零留痕，重启重放同请求还会
- * 二次广播。先尽力补一条带 txHash 的 failed 档（reconcile 凭哈希复核
- * 回执/投影，迟到成功自愈 confirmed），再上抛原始错误；补档失败也不
- * 掩盖原始错误。广播未拿到 txHash 时无需兜底，直接上抛。
- */
 async function appendIdentityTxLogWithPersistFallback(input: {
   readonly store: GovernanceStore;
   readonly audit: AuditSink;
@@ -706,8 +657,6 @@ async function appendIdentityTxLogWithPersistFallback(input: {
   try {
     await input.store.appendIdentityTxLog(input.log);
   } catch (error) {
-    // simulated 档从未上链（executionMode=simulated），补档无哈希可复核，
-    // 重放同请求也安全——直接上抛即可。
     if (!input.log.txHash || input.log.executionMode === "simulated") {
       throw error;
     }
@@ -716,7 +665,6 @@ async function appendIdentityTxLogWithPersistFallback(input: {
       await input.store.appendIdentityTxLog(fallbackLog);
       await auditGovernanceLog(input.audit, fallbackLog, "failed");
     } catch {
-      // 尽力而为：补档失败时保持原始错误继续上抛。
     }
     throw error;
   }

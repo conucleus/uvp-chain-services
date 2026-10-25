@@ -15,13 +15,6 @@ export {
   type StoreChallengeRequesterContext
 } from "./service.js";
 export {
-  InMemoryStoreWalletSessionStore,
-  MEMORY_CHALLENGE_HARD_LIMIT
-} from "./memory-store.js";
-export {
-  SqliteStoreWalletSessionStore
-} from "./sqlite-store.js";
-export {
   PostgresStoreWalletSessionStore
 } from "./postgres-store.js";
 export {

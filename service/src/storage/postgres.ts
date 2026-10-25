@@ -123,8 +123,6 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       }
       await this.saveSnapshot(scope, "order", orderSnapshot);
       await this.saveSnapshot(scope, "identity", identitySnapshot);
-      // 游标与"整库事件替换"同事务收敛：重建覆盖区间 [deploymentBlock,
-      // finalizedBlock] 之外的旧游标不允许在崩溃窗口内越过事件表。
       if (input.cursor) {
         await this.saveCursor({
           ...input.cursor,
@@ -261,8 +259,6 @@ export class PostgresProjectionStore implements DurableProjectionStore {
     );
 
     if (options?.expectNextBlock !== undefined) {
-      // CAS：本轮回读基于 expectNextBlock，持久游标已被其他写者移动时
-      // 拒绝推进（返回 undefined），防止把游标写到事件表覆盖区间之外。
       const updated = await this.#database.query(
         `UPDATE chain_index_cursor
          SET deployment_block = $3, next_block = $4, finalized_block = $5, block_hash = $6, updated_at = $7
@@ -288,7 +284,6 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       if (existing.rows.length > 0) {
         return undefined;
       }
-      // 行不存在：首条游标，直接插入。
     }
 
     await this.#database.query(
@@ -342,7 +337,6 @@ export class PostgresProjectionStore implements DurableProjectionStore {
     scope: { readonly chainId: number; readonly contractAddress?: Address },
     blockNumber: bigint,
   ): Promise<number> {
-    // chainId 必填：无链范围的删除会跨链误删其他链的已投影事件。
     const clauses: string[] = ["block_number > $1", "chain_id = $2"];
     const values: unknown[] = [blockNumber.toString(), scope.chainId];
     if (scope.contractAddress) {
@@ -434,11 +428,6 @@ export class PostgresProjectionStore implements DurableProjectionStore {
         return;
       }
     } else {
-      // 复活：同主键（chain/contract/block/txHash/logIndex）的事件此前因
-      // reorg 被打上 removed 墓碑，canonical 链重新出现同一位日志时必须
-      // 解除墓碑；ON CONFLICT DO NOTHING 只会忽略主键冲突、保留 removed=TRUE，
-      // 导致复活事件被永久跳过。transaction_index 随复活回填（墓碑行可能
-      // 缺该列，排序键缺失会让复活事件在 listEvents 的全序里错位）。
       const revival = await this.#database.query(
         `UPDATE chain_event_log
          SET removed = FALSE, event_name = $1, args_json = $2::jsonb, block_hash = COALESCE($3, block_hash),
@@ -601,8 +590,6 @@ export class PostgresProjectionStore implements DurableProjectionStore {
     const snapshot = await this.#currentOrderSnapshot();
     const orders = uniqueProjectionValues(snapshot.stateMachineOrders);
     if (planId) {
-      // 订单身份是 (planId, orderId)：带 planId 的查询只匹配同 plan 投影，
-      // 不做裸键回退，跨 plan 复用同号订单时绝不串单。
       return uniqueOrderByBareId(orders, orderId, planId);
     }
     return (

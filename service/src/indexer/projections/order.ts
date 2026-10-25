@@ -44,11 +44,6 @@ export interface StateMachineOrderTriggerLinkProjection {
   readonly triggeredOrderId: Hex;
   readonly triggerOriginOrderId: Hex;
   readonly triggerStageId: Hex;
-  /**
-   * 触发源单所属 plan（OrderLinked.originPlanId）：跨 plan 链接触发时
-   * 定位源单投影的唯一 plan 维度——裸 triggerOriginOrderId 在同号订单
-   * 跨 plan 复用时定位不了源单。旧事件面（无该字段）缺省。
-   */
   readonly originPlanId?: Hex;
   readonly originSourceId: Hex;
   readonly originSignalId: Hex;
@@ -56,17 +51,6 @@ export interface StateMachineOrderTriggerLinkProjection {
   readonly proof: StateMachineProofProjection;
 }
 
-/**
- * fork 出生血缘（UB-39，OrderForked 事件）：fork 单号由合约
- * forkOrderIdFor(planId, parentOrderId, forkPayloadHash) 纯函数派生，
- * 裁决信号 (approvalSourceId, approvalSignalId) 必须存在于父单；血缘只读
- * 本事件（fork 单的注册/事实流沿用 OrderRegistered/SignalSubmitted 事件
- * 口径，索引器把 fork 单当普通单重建）。
- * B-03 事件自包含扩展：forkPayloadHash（fork 单号派生载荷）与
- * replayedFactKeys（重放事实键清单，keccak256(abi.encode(sourceId,
- * signalId))，与合约 _signalKey 同式）随事件广播——重放事实与新生事实凭
- * 清单区分（projections/signal.ts 标记 signal.replayedFromFork）。
- */
 export interface StateMachineOrderForkProjection {
   readonly orderId: Hex;
   readonly parentOrderId: Hex;
@@ -88,26 +72,15 @@ export interface StateMachineOrderProjection {
   readonly planHash?: Hex;
   readonly status: StateMachineOrderStatus;
   readonly currentStage?: Hex;
-  /** OrderRelayerRecorded 事实：订单中继方与创建者。 */
   readonly relayer?: Address;
   readonly creator?: Address;
   readonly authorizations: Readonly<Record<string, StateMachineSignalAuthorizationProjection>>;
   readonly signals: Readonly<Record<string, StateMachineSignalProjection>>;
-  /**
-   * 派生信号血缘（B-03，DerivedSignalSubmitted 全参数）：from 侧复合身份、
-   * relation 与载荷承诺按事实键落桶——此前投影丢弃多数参数，派生通道
-   * 授权面无法从事件流重建。
-   */
   readonly derivedSignals: Readonly<Record<string, StateMachineDerivedSignalProjection>>;
-  /**
-   * 阶段物化出生触发（B-03，StageMaterialized 触发字段）：事件本就携带
-   * triggerHookId/sourceId/signalId，此前投影丢弃。
-   */
   readonly stageMaterializations: Readonly<Record<string, StateMachineStageMaterializationProjection>>;
   readonly stageExecutorOverlays: Readonly<Record<string, StateMachineStageExecutorOverlayProjection>>;
   readonly stageResourceOverlays: Readonly<Record<string, StateMachineStageResourceOverlayProjection>>;
   readonly triggerLink?: StateMachineOrderTriggerLinkProjection;
-  /** fork 出生血缘（OrderForked）：非 fork 单缺省。 */
   readonly forkLineage?: StateMachineOrderForkProjection;
   readonly hooks: Readonly<Record<string, StateMachineHookProjection>>;
   readonly tasks: Readonly<Record<string, StateMachineTaskProjection>>;
@@ -180,18 +153,6 @@ export function applyStateMachineModuleSet(
   });
 }
 
-/**
- * 幻影订单：订单/计划维度事件可能由模块合约发出（UVPStagePatchModule、
- * UVPDockingModule、UVPOrderLinkModule、UVPDerivedSignalModule、
- * UVPPlanMetadataModule），此时 event.contractAddress 是模块地址。订单必须
- * 按所属状态机地址分桶，否则同一订单会在模块地址下分裂出 planId=0 的
- * unknown 幻影桶。这里用 StateMachineModuleSet 建立的 stateMachineModules
- * 投影做 module → state machine 反向归一化：
- * - 唯一命中 → 返回所属状态机地址（resolved）；
- * - 无法唯一归因（模块未登记 / replay 顺序中 StateMachineModuleSet 尚未
- *   出现 / 同一模块地址被多个状态机登记）→ 返回事件自带地址（resolved:
- *   false），调用方保持现状建桶并计入显式诊断计数，不允许静默。
- */
 export function resolveStateMachineAddressForModuleEvent(
   modules: StateMachineModuleIndex,
   event: ChainEvent
@@ -209,10 +170,6 @@ export function resolveStateMachineAddressForModuleEvent(
   return { stateMachineAddress: event.contractAddress, resolved: false };
 }
 
-/**
- * 幻影订单：订单维度事件（7 类）建桶前的统一归一化入口——解析失败的
- * 事件保持事件地址建桶（现状）并累计 unresolvedModuleOrderEventCount。
- */
 export function stateMachineAddressForOrderEvent(
   state: {
     modules: StateMachineModuleIndex;
@@ -227,7 +184,6 @@ export function stateMachineAddressForOrderEvent(
   return resolution.stateMachineAddress;
 }
 
-/** 订单维度事件专用：先归一化到状态机地址，再建/取订单桶。 */
 export function ensureStateMachineOrderFromModuleEvent(
   state: {
     modules: StateMachineModuleIndex;
@@ -263,9 +219,6 @@ export function applyOrderRegistered(
   const proof = proofOf(event, { orderId, planId, planHash: plan?.planHash });
   const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
   const order = ensureStateMachineOrder(state.orders, event, orderId, planId, deploymentId);
-  // 合约侧注册幂等、同单恒同 id：账本已立过该订单（registeredAt 已存在）
-  // 时，重复的 OrderRegistered（重放/跨块重注册）只作幂等吸收——不重置
-  // 状态与注册事实，也不向 timeline/proof 追加第二个"订单已创建"。
   if (order.registeredAt) {
     return;
   }
@@ -328,8 +281,6 @@ export function applyOrderRelayerRecorded(
   const creator = requiredAddressArg(event, "creator");
   const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
   const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
-  // _createOrder 同一交易内先发 OrderRegistered 再发 OrderRelayerRecorded：
-  // 桶通常已存在，缺失时按复合键补建（链上事实：订单已注册）。
   const order = ensureStateMachineOrder(state.orders, event, orderId, planId, deploymentId);
   const proof = proofOf(event, { orderId, planId, planHash: order.planHash, submitter: relayer });
   order.relayer = relayer;
@@ -350,7 +301,6 @@ export function applyOrderTriggered(
   const orderId = requiredBytes32Arg(event, "orderId");
   const planId = requiredBytes32Arg(event, "planId");
   const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
-  // v0.10 起携带 triggerHookId（出生 hook 定位）；旧事件无此字段按可选处理。
   const triggerHookId = optionalBytes32Arg(event, "triggerHookId");
   const sourceId = requiredBytes32Arg(event, "sourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
@@ -395,12 +345,8 @@ export function applyOrderLinked(
   const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
   const originSourceId = requiredBytes32Arg(event, "originSourceId");
   const originSignalId = requiredBytes32Arg(event, "originSignalId");
-  // originPlanId：触发源单的 plan 维度（跨 plan 链接触发的源单定位键），
-  // 旧事件面缺省——投影字段补齐，不再丢弃。
   const originPlanId = optionalBytes32Arg(event, "originPlanId");
   const planId = optionalBytes32Arg(event, "planId");
-  // 幻影订单：OrderLinked 由 UVPOrderLinkModule 发出，先归一化到所属
-  // 状态机地址再做部署归属与建桶。
   const stateMachineAddress = stateMachineAddressForOrderEvent(state, event);
   const childOrder = ensureStateMachineOrder(
     state.orders,
@@ -437,15 +383,6 @@ export function applyOrderLinked(
   }));
 }
 
-/**
- * OrderForked 投影（UB-39）：fork 单血缘进 fork 单自己的行——
- * forkOrderGate 同一交易先 L_createOrder（OrderRegistered +
- * OrderRelayerRecorded）再发本事件，桶通常已存在，缺失时按链上事实补建
- * （订单已注册）。父单行不回写：血缘是 fork 单的出生属性，父单视角的
- * 反查由快照按 forkLineage 派生。fork 裁决材料 (approvalSourceId,
- * approvalSignalId) 只做血缘留痕，不在投影侧复刻授权判定——链上
- * forkOrderGate 已 fail-closed。
- */
 export function applyOrderForked(
   state: {
     deployments: Map<string, MutableStateMachineDeploymentProjection>;
@@ -460,8 +397,6 @@ export function applyOrderForked(
   const approvalSourceId = requiredBytes32Arg(event, "approvalSourceId");
   const approvalSignalId = requiredBytes32Arg(event, "approvalSignalId");
   const initiator = requiredAddressArg(event, "initiator");
-  // B-03 事件自包含字段（旧事件面缺省）：fork 单号派生载荷与重放事实键
-  // 清单——前者支撑血缘链重算，后者区分重放/新生事实。
   const forkPayloadHash = optionalBytes32Arg(event, "forkPayloadHash");
   const replayedFactKeys = optionalBytes32ArrayArg(event, "replayedFactKeys");
   const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
@@ -506,10 +441,6 @@ export function ensureStateMachineOrder(
   orderId: Hex,
   planId?: Hex,
   deploymentId?: Hex,
-  /**
-   * 幻影订单：订单维度事件由模块合约发出时，桶与订单本体必须归一到
-   * 所属状态机地址；缺省保持事件自带地址（状态机直发事件的现状）。
-   */
   bucketStateMachineAddress?: Address
 ): MutableStateMachineOrderProjection {
   const contractAddress = bucketStateMachineAddress ?? event.contractAddress;
@@ -612,11 +543,6 @@ export function appendOrderTimeline(
   order.timeline.push(timelineEvent);
 }
 
-/**
- * Canonical identity for an order projection.  `orderId` is only unique inside
- * a plan, so every storage/read path must use this four-part key when it has
- * plan context available.
- */
 export function stateMachineOrderProjectionKey(
   chainId: number,
   stateMachineAddress: Address,
@@ -626,7 +552,6 @@ export function stateMachineOrderProjectionKey(
   return `${chainId}:${stateMachineAddress.toLowerCase()}:${planId.toLowerCase()}:${orderId.toLowerCase()}`;
 }
 
-/** Canonical identity for a task projection under a plan-scoped order. */
 export function stateMachineTaskProjectionKey(
   chainId: number,
   stateMachineAddress: Address,
@@ -637,11 +562,6 @@ export function stateMachineTaskProjectionKey(
   return `${stateMachineOrderProjectionKey(chainId, stateMachineAddress, planId, orderId)}:${hookId.toLowerCase()}`;
 }
 
-/**
- * Plan/module/dock scope key: `chainId:stateMachineAddress:id`.  The
- * four-argument overload resolves to the plan-scoped order projection key so
- * order callers share one helper without changing plan/module key shapes.
- */
 export function stateMachineScopedKey(chainId: number, stateMachineAddress: Address, id: Hex): string;
 export function stateMachineScopedKey(
   chainId: number,

@@ -32,8 +32,6 @@ export type NotificationDeliveryStatus =
   | "failed"
   | "skipped"
   | "dead_letter"
-  // reorg 回滚联动失效：载荷指向的链上定位已被回滚删除，记录保留为
-  // 排障证据，不再是可重试/可重开的投递。
   | "invalidated";
 export type NotificationActivationStatus = "accepted" | "started" | "rejected";
 
@@ -49,14 +47,8 @@ export type NotificationSkippedReason =
   | "transport_not_supported"
   | "executor_watch_self_managed"
   | "transport_adapter_missing"
-  // SignalSubmitted 事件缺可解码的 planId/orderId：无法定位订单桶，
-  // 派生被隔离，但丢弃必须落账可数（否则丢事件在台账不可见）。
   | "event_scope_ids_missing"
-  // dead_letter 终态的原因码（自动补投预算耗尽）：与 skipped 原因共用
-  // reason 词表，不入枚举会在 evidence 视图被统一掩成
-  // redacted_operator_reason，自动耗尽终态不可归因。
   | "delivery_attempts_exhausted"
-  // reorg 回滚联动的失效原因码（status=invalidated 行）。
   | "reorg_rolled_back";
 
 export interface SignalNotificationPayload {
@@ -133,7 +125,6 @@ export type ParticipantNotificationKind =
   | "submission_confirmed"
   | "submission_failed"
   | "task_revoked"
-  // 载荷指向的链上定位已被 reorg 回滚：通知内容不可信，需引导查证最新链上状态。
   | "notification_invalidated";
 
 export type ParticipantNotificationSeverity = "info" | "action" | "warning" | "critical" | "success";
@@ -166,7 +157,6 @@ export interface ParticipantNotificationRecord {
   readonly actionHref: string;
   readonly proofHref?: string;
   readonly proof?: ParticipantNotificationProof;
-  /** kind=notification_invalidated 时的结构化失效状态：前端按状态呈现操作指引，不解析文案。 */
   readonly invalidation?: {
     readonly status: "invalidated";
     readonly reason?: string;
@@ -250,19 +240,11 @@ export interface ParticipantNotificationReadStateStore {
   markRead(state: ParticipantNotificationReadState): Promise<ParticipantNotificationReadState>;
 }
 
-/**
- * saveDelivery 的写入前提：调用方做出判定（终态检查、预算扣减、状态
- * 迁移）所依据的现行行 (status, attempts)。保存与判定之间的窗口是
- * TOCTOU——无条件 upsert 会让显式 retry/reopen 把并发已 sent 的行回退
- * 成 pending、让两次外发共写同一个 attempts。带 expect 的写入只在该前提
- * 仍然成立时生效。
- */
 export interface NotificationDeliveryPrecondition {
   readonly status: NotificationDeliveryStatus;
   readonly attempts: number;
 }
 
-/** 条件写入结果：applied=false 表示行已被并发写抢先，record 为读回的现行值。 */
 export interface NotificationDeliverySave {
   readonly applied: boolean;
   readonly record: NotificationDeliveryRecord;
@@ -270,11 +252,6 @@ export interface NotificationDeliverySave {
 
 export interface NotificationDeliveryStore {
   getDelivery(deliveryId: Hex): Promise<NotificationDeliveryRecord | undefined>;
-  /**
-   * 条件写入：省略 expect 时为纯插入（行已存在即被抢先，不覆盖）；带
-   * expect 时仅当现行行的 (status, attempts) 与之一致才更新，行不存在
-   * 则插入。受影响行数为 0 时读回现行值并以 applied=false 返回。
-   */
   saveDelivery(
     record: NotificationDeliveryRecord,
     expect?: NotificationDeliveryPrecondition
@@ -314,34 +291,23 @@ export interface NotificationRunSummary {
   readonly failed: number;
   readonly skipped: number;
   readonly existing: number;
-  /**
-   * reorg 失效桶：本轮命中了 status=invalidated 的既有投递（终态守卫原样
-   * 返回）。不设此桶时 deliveryIntents 与各桶之和会出现不可解释差额。
-   */
   readonly invalidated: number;
 }
 
 export type NotificationProcessSummary = NotificationRunSummary;
 
-/** dead_letter 显式重开：只允许 dead_letter 行，其余终态/非终态均拒绝。 */
 export type NotificationDeliveryReopenOutcome =
   | { readonly outcome: "not_found" }
   | { readonly outcome: "not_dead_letter"; readonly delivery: NotificationDeliveryRecord }
   | { readonly outcome: "conflict"; readonly delivery: NotificationDeliveryRecord }
   | { readonly outcome: "reopened"; readonly delivery: NotificationDeliveryRecord };
 
-/** retry 结果：终态行是 no-op，路由层据此返回非 200 而非假成功。 */
 export type NotificationDeliveryRetryOutcome =
   | { readonly outcome: "not_found" }
   | { readonly outcome: "terminal"; readonly delivery: NotificationDeliveryRecord }
   | { readonly outcome: "conflict"; readonly delivery: NotificationDeliveryRecord }
   | { readonly outcome: "retried"; readonly delivery: NotificationDeliveryRecord };
 
-/**
- * dead-letter 结果：sent/invalidated 是不可追改的终态——把已投递/已失效
- * 的行回写成 dead_letter 会伪造投递台账，且经 reopen 重发即双发；
- * dead_letter 行幂等返回 dead_lettered。
- */
 export type NotificationDeliveryDeadLetterOutcome =
   | { readonly outcome: "not_found" }
   | { readonly outcome: "terminal"; readonly delivery: NotificationDeliveryRecord }
@@ -355,11 +321,6 @@ export interface NotificationService {
   retryDelivery(deliveryId: Hex): Promise<NotificationDeliveryRetryOutcome>;
   deadLetterDelivery(deliveryId: Hex, reason?: string): Promise<NotificationDeliveryDeadLetterOutcome>;
   reopenDelivery(deliveryId: Hex): Promise<NotificationDeliveryReopenOutcome>;
-  /**
-   * reorg 回滚联动：把 proof 定位高于 blockNumber 的投递标记为
-   * invalidated——回滚删除了这些事件，已生成的投递（含 sent）从此指向
-   * 已消失的链上定位，必须失效留痕而不是继续呈现为有效通知。
-   */
   invalidateDeliveriesAboveBlock(input: { readonly chainId: number; readonly blockNumber: bigint }): Promise<number>;
   listParticipantNotifications(query?: ParticipantNotificationQuery): Promise<ParticipantNotificationList>;
   markParticipantNotificationRead(input: ParticipantNotificationReadInput): Promise<ParticipantNotificationRecord | undefined>;
@@ -371,8 +332,8 @@ export interface CreateNotificationServiceOptions {
   readonly supplierMetadataStore?: StoreSupplierMetadataStore;
   readonly productSchemaResolver?: ProductSchemaResolver;
   readonly planArtifactResolver?: (order: StateMachineOrderProjection) => Promise<OnchainHookPlanArtifact | undefined>;
-  readonly deliveryStore?: NotificationDeliveryStore;
-  readonly participantReadStateStore?: ParticipantNotificationReadStateStore;
+  readonly deliveryStore: NotificationDeliveryStore;
+  readonly participantReadStateStore: ParticipantNotificationReadStateStore;
   readonly dispatcher?: NotificationDispatcher;
   readonly productTaskBaseUrl?: string;
   readonly now?: () => Date;
@@ -391,8 +352,6 @@ export class MemoryNotificationDeliveryStore implements NotificationDeliveryStor
   ): Promise<NotificationDeliverySave> {
     const current = this.#deliveries.get(record.deliveryId);
     if (current !== undefined) {
-      // 写入栅栏与持久驱动同语义：现行行必须仍处于调用方判定的
-      // (status, attempts)，否则读回现行值、不覆盖并发写。
       const fenced = expect !== undefined &&
         current.status === expect.status &&
         current.attempts === expect.attempts;
@@ -433,8 +392,8 @@ export class MemoryParticipantNotificationReadStateStore implements ParticipantN
 }
 
 export function createNotificationService(options: CreateNotificationServiceOptions): NotificationService {
-  const deliveryStore = options.deliveryStore ?? new MemoryNotificationDeliveryStore();
-  const participantReadStateStore = options.participantReadStateStore ?? new MemoryParticipantNotificationReadStateStore();
+  const deliveryStore = options.deliveryStore;
+  const participantReadStateStore = options.participantReadStateStore;
   const now = () => (options.now ?? (() => new Date()))().toISOString();
 
   return {
@@ -458,11 +417,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         const planId = bytes32Arg(event, "planId");
         const sourceId = bytes32Arg(event, "sourceId");
         const signalId = bytes32Arg(event, "signalId");
-        // SignalSubmitted is plan-scoped on the frozen state-machine ABI.
-        // An event without a decodable planId cannot resolve its order bucket
-        // and is isolated (no notification derivation), but the drop must be
-        // countable: a silent continue leaves lost events invisible in the
-        // run summary and delivery ledger.
         if (!planId || !orderId) {
           updateIntentSummary(summary, await saveSkippedSignalDelivery({
             deliveryStore,
@@ -641,10 +595,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
 
     async retryDelivery(deliveryId) {
       const existing = await deliveryStore.getDelivery(deliveryId);
-      // Sent, dead-lettered and invalidated rows are terminal: sent 永不重投，
-      // dead_letter 只能经显式重开（reopenDelivery），invalidated 的载荷
-      // 定位已被 reorg 回滚删除、重投必是伪造通知。非终态（failed/skipped/
-      // pending）照常重试。
       if (!existing) {
         return { outcome: "not_found" };
       }
@@ -661,9 +611,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         { status: existing.status, attempts: existing.attempts }
       );
       if (!save.applied) {
-        // 终态判定与保存之间被并发写抢先：以读回的现行值重新裁决——
-        // 已终态即 terminal（sent 不回退），仍非终态说明并发方在推进，
-        // 由调用方对最新状态重试。
         if (save.record.status === "sent" || save.record.status === "dead_letter" || save.record.status === "invalidated") {
           return { outcome: "terminal", delivery: save.record };
         }
@@ -711,19 +658,12 @@ export function createNotificationService(options: CreateNotificationServiceOpti
         {
           ...rest,
           status: "pending",
-          // 重开即重置自动补投预算：死信是"上一轮预算耗尽"的结论，带着
-          // 已耗尽的 attempts 重开会在下一次失败后立即再次转死信——
-          // 重开→失败→dead-letter 循环里一次外部投递都不会发生；显式
-          // 重开就是运营授权的一轮全新预算。
           attempts: 0,
           updatedAt: now()
         },
         { status: existing.status, attempts: existing.attempts }
       );
       if (!save.applied) {
-        // 并发抢先后的现行值不再是 dead_letter（如并发重开已投递成功）
-        // 按现行状态裁决；仍停留 dead_letter 说明并发方在推进，交由
-        // 调用方对最新状态重开。
         if (save.record.status !== "dead_letter") {
           return { outcome: "not_dead_letter", delivery: save.record };
         }
@@ -778,8 +718,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
           },
           { status: delivery.status, attempts: delivery.attempts }
         );
-        // 被并发写抢先的行跳过不计数：并发方正基于更新的状态推进，
-        // 本轮快照已过期；失效判定由后续轮次对现行值重做。
         invalidated += save.applied ? 1 : 0;
       }
       return invalidated;
@@ -790,9 +728,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       if (!existing) {
         return { outcome: "not_found" };
       }
-      // 终态守卫：sent 是"外部已确认收到"的事实，invalidated 的载荷定位
-      // 已被 reorg 删除——把这两种行回写成 dead_letter 是伪造台账，且
-      // reopen 后重发即对已送达/已失效内容双发。dead_letter 幂等返回。
       if (existing.status === "sent" || existing.status === "invalidated") {
         return { outcome: "terminal", delivery: existing };
       }
@@ -835,9 +770,6 @@ export function createNotificationService(options: CreateNotificationServiceOpti
       if (!participantKey) {
         return undefined;
       }
-      // 先判存在/可见再写：已读状态是持久写入，对不存在（或对该参与者
-      // 不可见）的通知先落已读、再由路由 404，会把一次无效请求固化成
-      // 持久状态。列表即该参与者的可见集合判据。
       const visible = await buildParticipantNotificationList({
         store: options.store,
         deliveryStore,
@@ -1385,9 +1317,6 @@ function signalPayloadNotificationProof(proof: SignalNotificationProof): Partici
 }
 
 function participantCanSeeOrderSignals(order: StateMachineOrderProjection, participantKey: string): boolean {
-  // creator 与 product 读面 orderVisibleToParticipant 同口径：订单创建者
-  // 无任务指派/信号时同样是订单参与者，读不到自己创建的订单信号与该
-  // 口径相悖。
   return order.creator?.toLowerCase() === participantKey ||
     Object.values(order.authorizations).some((authorization) =>
       authorization.submitter.toLowerCase() === participantKey
@@ -1420,12 +1349,6 @@ function displayParticipantRole(role: string): string {
   }
 }
 
-// bytes32 展示单源在 shared/display.ts：
-// 中文等 Unicode 标识与 "$=|~" 类 ASCII 符号标识按并集语义显示文本；
-// 非 bytes32 原样透传、不可解码回落短哈希。
-// stageId 技术字段用无标签形态（解码文本或裸短哈希），stageLabel/
-// message 用标签形态（"当前阶段 0x…"）——与阶段视图同标识同显示。
-
 function shortId(value: string): string {
   return value.length > 18 ? `${value.slice(0, 10)}...${value.slice(-6)}` : value;
 }
@@ -1454,11 +1377,6 @@ function compareParticipantNotifications(
   if (severity !== 0) {
     return severity;
   }
-  // 排序键按类分流：链上事件类（任务/信号）的 createdAt 是 "block N"
-  // 字符串、投递类是 ISO 时间——两类互排是 localeCompare 字典序乱序。
-  // 链上事件按 (blockNumber, logIndex) 数值序，投递类按时间戳；混排时
-  // 链上事件类稳定在前：链是真相，投递反馈只是链上事实的派生回执，
-  // 两者没有可互排的全序。
   if (left.source !== right.source) {
     return left.source === "chain_projection" ? -1 : 1;
   }
@@ -1471,8 +1389,6 @@ function compareParticipantNotifications(
   return left.notificationId.localeCompare(right.notificationId);
 }
 
-/** 链上事件类通知按 (blockNumber, logIndex) 数值倒序；行序缺失时以
- * notificationId 兜底保证稳定全序。 */
 function compareChainProvenanceDesc(
   left: ParticipantNotificationRecord,
   right: ParticipantNotificationRecord
@@ -1495,7 +1411,6 @@ function chainProvenanceBlock(record: ParticipantNotificationRecord): bigint {
     try {
       return BigInt(record.proof.blockNumber);
     } catch {
-      // fall through to createdAt parsing
     }
   }
   const match = /^block (\d+)$/u.exec(record.createdAt);
@@ -1522,7 +1437,6 @@ type MutableNotificationRunSummary = {
   -readonly [TKey in keyof NotificationRunSummary]: NotificationRunSummary[TKey];
 };
 
-/** failed 投递的自动重投上限；超过即转 dead_letter（人工可重开）。 */
 const MAX_AUTOMATIC_DELIVERY_ATTEMPTS = 5;
 
 type ReceiverResolution =
@@ -1558,10 +1472,6 @@ function finalizedSignalSubmittedEvents(
     if (signalEvents.length === 0) {
       return [];
     }
-    // fail-closed：sync state（最终性上界）缺失时不得把事件当作已最终。
-    // 放行 = 未确认事件凭空进入通知最终性判定；此处抛错让调用方
-    // （索引器 post-commit 重试 / pending sweep）整批保序等待，最终性
-    // 上界恢复后补投，而不是留下不可补投的 skipped 台账。
     throw new Error(
       "notification finality gate is missing the projection sync state (finalizedBlock); refusing to judge event finality - the batch is held for retry instead of being treated as finalized"
     );
@@ -1650,7 +1560,6 @@ function supplierMetadataByWallet(
     return { status: "skipped", reason: "store_supplier_not_found" };
   }
   if (matches.length > 1) {
-    // 歧义不带主体：带第一个命中会把别人的通知记到/投给任意首位供应商。
     return { status: "skipped", reason: "store_supplier_ambiguous" };
   }
   const first = matches[0];
@@ -1673,7 +1582,6 @@ function supplierMetadataByStage(
     return { status: "skipped", reason: "receiver_not_found" };
   }
   if (matches.length > 1) {
-    // 同上：歧义不带第一个命中。
     return { status: "skipped", reason: "receiver_ambiguous" };
   }
   const first = matches[0];
@@ -1727,12 +1635,6 @@ async function dispatchSignalTransportDelivery(input: {
   if (existing && existing.status !== "pending" && existing.status !== "failed") {
     return existing;
   }
-  // 自动补投预算。重建/重放会对 failed 行自动重投；无上限的重启
-  // 重投会无界重复外部投递（每次 webhook 最多一个超时周期）。预算闸同时
-  // 覆盖 pending 行：外发记账先行后，"外发已发生、结果落账前崩溃"的行
-  // 停在 pending 且预算已扣——重放必须尊重已扣预算，否则崩溃循环里
-  // pending 永远不过闸。超过预算转 dead_letter 终态，人工 retryDelivery
-  // 仍可显式重开。
   if (
     existing &&
     (existing.status === "failed" || existing.status === "pending") &&
@@ -1766,7 +1668,6 @@ async function dispatchSignalTransportDelivery(input: {
     existing ? { status: existing.status, attempts: existing.attempts } : undefined
   );
   if (!save.applied) {
-    // 并发写已推进该行（在途/终态）：以现行台账为准，本路径不再外发。
     return save.record;
   }
   const pending = save.record;
@@ -1793,9 +1694,6 @@ async function dispatchPreparedDelivery(input: {
     return (await input.deliveryStore.saveDelivery(
       {
         ...input.pending,
-        // No delivery attempt was made. Keep this distinct from a transport
-        // failure so retry budgets and operator evidence do not count a missing
-        // adapter as an exhausted send attempt.
         status: "skipped",
         reason: "transport_adapter_missing",
         updatedAt: input.now()
@@ -1804,10 +1702,6 @@ async function dispatchPreparedDelivery(input: {
     )).record;
   }
 
-  // 外发前先记账（attempts 预增持久落库）：webhook 已送达而进程在外发与
-  // 落账之间死亡时，预算已被扣减——重启重投由 attempts 上限收敛，不会
-  // 以"零尝试"的姿态无限重发。这与广播车道的"nonce 先占位后外发"同构：
-  // 不可撤销的外部副作用之前，账必须先落。
   const inFlightSave = await input.deliveryStore.saveDelivery(
     {
       ...input.pending,
@@ -1817,9 +1711,6 @@ async function dispatchPreparedDelivery(input: {
     { status: input.pending.status, attempts: input.pending.attempts }
   );
   if (!inFlightSave.applied) {
-    // 预算占位被并发写抢先：本方未取得外发权（attempts 已被并发方按
-    // 同一预算推进），不得发送——否则两个分发方各自发送一次而台账只
-    // 记一次扣减。以现行台账返回。
     return inFlightSave.record;
   }
   const inFlight = inFlightSave.record;
@@ -1842,18 +1733,12 @@ async function dispatchPreparedDelivery(input: {
       { status: inFlight.status, attempts: inFlight.attempts }
     )).record;
   }
-  // 外发已发生（成功或渠道自报失败）：此处落账抛错不得回退成 failed——
-  // 外部已收到的投递被记成失败会驱动一次必然双发的重试。让错误上抛，
-  // 行保持 pending+已扣预算，由重建/重放的预算闸与运营台账收敛。
-  // 落账被并发写抢先时同理以现行台账返回：并发方持有该行的更新视图。
   return (await input.deliveryStore.saveDelivery(
     {
       ...inFlight,
       status: result.ok ? "sent" : "failed",
       ...activationStatusForResult(input.transport, result),
       ...(result.externalReceiptRef ? { externalReceiptRef: result.externalReceiptRef } : {}),
-      // 错误消息先脱敏再持久化（对齐兄弟路径），防 transport 异常
-      // 文本把端点/凭证带进投递台账。
       ...(result.error ? { lastError: redactErrorMessage(result.error) } : {}),
       updatedAt: input.now()
     },
@@ -1876,9 +1761,6 @@ async function resolveRetryTransport(
   options: CreateNotificationServiceOptions,
   delivery: NotificationDeliveryRecord
 ): Promise<RetryTransportResolution> {
-  // 无 supplier 定位字段的记录（投影缺失类 skip、歧义未携带主体）不得
-  // 投给任何供应商——空字段过滤对全部供应商恒真，会把含
-  // orderId/payloadHash 的通知投给无关方并标 sent。
   if (!delivery.supplierSubjectId && !delivery.supplierWallet) {
     return { status: "skipped", reason: "store_supplier_not_found" };
   }
@@ -2056,11 +1938,6 @@ function chooseTransportForRetry(
 }
 
 function isPushTransport(transport: SupplierNotificationTransport): boolean {
-  // 只有 webhook 是已产品化的推送渠道：当前装配的唯一 dispatcher 是
-  // WebhookNotificationDispatcher（单一 webhook URL）。slack/email/mcp
-  // 的专用渠道产品尚未做——放行会把它们的载荷统一误投到 webhook URL
-  //（错渠道投递+假 sent），因此 fail-closed 拒绝：标记
-  // transport_not_supported 留账，等渠道产品化后再启用。
   return transport.type === "webhook";
 }
 
@@ -2190,8 +2067,6 @@ function updateIntentSummary(
       summary.existing += 1;
       return;
     case "invalidated":
-      // reorg 回滚失效的既有投递（终态守卫原样返回）：单独计数，
-      // 汇总不再出现 deliveryIntents 与各桶之和的不可解释差额。
       summary.invalidated += 1;
       return;
   }

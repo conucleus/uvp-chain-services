@@ -68,10 +68,6 @@ export interface EvidenceAccessPolicyDTO {
   readonly adjudicatorReaders: readonly string[];
 }
 
-// EvidenceProofDTO 单源在 @uvp-eth/product-dto（write-side.ts，字段集以
-// 本服务端 getProof 恒产出真身为权威——evidenceId/payloadRef/storageURI
-// 必填属实：storageURI 源自 EvidenceObjectDTO.storageURI（上传即落，非空）。
-
 export type EvidenceContentDTO =
   | {
       readonly encoding: "text" | "base64";

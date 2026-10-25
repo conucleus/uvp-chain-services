@@ -1,13 +1,4 @@
-// dock 投递与事件投影链的黑盒对抗测试（独立测试工程师视角）：
-// 只依据行为规格构造事件流与 route 记录，不 mock 内部实现，验证
-// - keeper：乱序到达（挂接前已 Ready 的钩子/挂接前已成立的目标事实）、
-//   最终性窗口重播抑制与窗口后重试、DockInputConflict 预检留痕、
-//   attribution 造证三态（词表命中/无词表全零/词表解析 failed）、
-//   去重键组成（dockInstanceId+bindingHash）、预算公平性、并发 runOnce；
-// - 投影：未知事件显式计数、OrderForked 血缘落库与 fork 单上的信号流、
-//   两次重建幂等、fork 出生事件的 reorg 墓碑、未出生 dock 的交付事件
-//   显式计数不静默。
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decodeFunctionData, type Abi } from "viem";
 import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import { DOCKING_MODULE_ABI } from "@uvp-eth/protocol-bindings";
@@ -21,7 +12,22 @@ import type {
 import { rebuildOrderProjections } from "../src/indexer/replay.js";
 import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import { stateMachineScopedKey } from "../src/indexer/projections/index.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { projectionScopeContractAddress } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true },
+    chainId: 31337
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
 import type { ChainEvent } from "../src/indexer/events.js";
 import type { Hex } from "../src/shared/types.js";
 
@@ -56,14 +62,7 @@ const idempotencyKey = bytes32Hex("0602");
 
 describe("dock delivery & projection blackbox", () => {
 
-  // ---------------------------------------------------------------------------
-  // keeper（dock-automation）
-  // ---------------------------------------------------------------------------
-
   it("delivers a hook that was already ready before the dock was attached (out-of-order arrival)", async () => {
-    // 时序红线对抗：B 侧挂接建立之前，父单 hook 已经 Ready（跨源事件乱序
-    // 到达）。keeper 每轮按投影快照扫描，不是只看"挂接后新 Ready"的钩子
-    // ——挂接前已 Ready 的钩子必须同样被扫进来投递，否则该事实永久滞留。
     const events: readonly ChainEvent[] = [
       planRegistered(1n, planId, planHash),
       planRegistered(2n, targetPlanId, targetPlanHash),
@@ -91,9 +90,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("backfills a target fact that was established before the dock was attached", async () => {
-    // 乱序对抗的另一侧：目标事实（SignalSubmitted）先于 DockAttached 上链。
-    // output 车道以投影快照为准做正向回填，attach 前已成立的事实也要重放
-    // submitDockedSignal（attribution 造证形态，无词表 plan 全零造证由链上裁决）。
     const events: readonly ChainEvent[] = [
       planRegistered(1n, planId, planHash),
       planRegistered(2n, targetPlanId, targetPlanHash),
@@ -122,9 +118,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("mints submitDockedInput attribution from the target plan vocabulary when available, zero structure otherwise", async () => {
-    // attribution 造证两态（input 车道）：目标事实键在目标 plan 词表内 →
-    // 属主阶段 + 能力叶 proof；目标 plan 已注册但产物词表不可用（外部发布
-    // plan 的合法空词表）→ 全零结构由链上词表闸裁决，不阻断广播。
     const signalCapabilities = [
       { stageId: targetStageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 as const },
       { stageId: targetStageId, targetSourceId: sourceId, signalId: bytes32Hex("0f0f"), targetOrderRelation: 0 as const }
@@ -148,7 +141,6 @@ describe("dock delivery & projection blackbox", () => {
       inputs: [inputBinding("03", hookId, sourceId, signalId)]
     });
 
-    // 词表命中：attribution 携属主阶段与成员资格证明。
     const enriched = await buildWorker({
       events: planPublishEvents(2n, targetPlanId, targetPlanHash, capabilitiesRootOf([], signalCapabilities))
         .concat(baseEvents),
@@ -165,7 +157,6 @@ describe("dock delivery & projection blackbox", () => {
       capabilityProof: [expect.any(String)]
     });
 
-    // 无词表（目标 plan 只见 PlanRegistered，产物未富集）：全零 attribution。
     const plain = await buildWorker({
       events: [planRegistered(2n, targetPlanId, targetPlanHash)].concat(baseEvents),
       routes: [route]
@@ -182,9 +173,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("keeps the keeper alive when the input-lane vocabulary resolution failed: skip with a trace, never reject the round", async () => {
-    // 目标 plan 词表富集 failed（indexer 按设计持久化该态直到 resolver
-    // 恢复）：input 车道造证跳过留痕，runOnce 正常返回——整轮 reject 会
-    // 冻结同 route 之后所有交付车道，keeper 活性归零。
     const baseEvents: readonly ChainEvent[] = [
       planRegistered(1n, planId, planHash),
       planRegistered(2n, targetPlanId, targetPlanHash),
@@ -209,13 +197,9 @@ describe("dock delivery & projection blackbox", () => {
     expect(summary.skipped).toHaveLength(1);
     expect(summary.skipped[0]).toContain("input:");
     expect(submitted).toHaveLength(0);
-    // 恢复后（词表富集可用）同一 worker 下一轮自然续上。
   });
 
   it("suppresses re-broadcasts inside the finality window, retries after it, and counts deduplicated", async () => {
-    // 去重语义基线：同 (dockInstanceId, bindingHash) 在最终性窗口内已尝试
-    // （成败同占窗）→ deduplicated 计数、不再广播；窗口过后投影仍未呈现
-    // delivery → 恰好重试一次。
     const events = attachedBase([hookId]);
     const route = existingRoute({
       routeId,
@@ -240,9 +224,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("scopes the dedupe key to (dockInstanceId, bindingHash): the same bindingHash under two docks never eats the other's window", async () => {
-    // 去重键对抗：同一 bindingHash 出现在两个不同 dock 实例（不同 route/
-    // 订单）。若去重键只按 bindingHash，第一轮会吃掉第二个实例的广播；
-    // 键必须含 dockInstanceId——两个实例各自独立投递、独立占窗。
     const parentB = bytes32Hex("c3");
     const targetB = bytes32Hex("c4");
     const hookB = bytes32Hex("d9");
@@ -275,7 +256,6 @@ describe("dock delivery & projection blackbox", () => {
     );
     expect(decodedInstances).toEqual([dockInstanceId, dockInstanceB]);
 
-    // 窗口内第二轮：两个实例各自去重，互不吞窗。
     nowMs += 10_000;
     const second = await worker.runOnce();
     expect(second).toMatchObject({ inputCandidates: 2, submitted: 0, deduplicated: 2 });
@@ -283,12 +263,8 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("skips an occupied target fact slot with a per-round trace, never broadcasts it, and does not poison sibling bindings", async () => {
-    // DockInputConflict 预检：目标事实槽已被占用 → 该绑定不广播、每轮
-    // 留痕（skipped 语义可解释：冲突是持续状态，不是一次性事件）；同 dock
-    // 的兄弟绑定不受毒害照常投递；冲突预检不占广播窗口（每轮照常检查）。
     const events: readonly ChainEvent[] = [
       ...attachedBase([hookId, secondHookId]),
-      // 目标事实槽 (sourceId, signalId) 已被其他 provenance 占用。
       signalSubmitted(8n, targetOrderId, targetPlanId, sourceId, signalId)
     ];
     const route = existingRoute({
@@ -309,7 +285,6 @@ describe("dock delivery & projection blackbox", () => {
     const decoded = decodeFunctionData({ abi: DOCKING_MODULE_ABI as Abi, data: submitted[0] as Hex });
     expect((decoded.args as unknown[])[2]).toBe(bindingHash("08"));
 
-    // 第二轮（窗口内）：兄弟绑定去重，冲突绑定照常留痕（预检不占窗）。
     nowMs += 10_000;
     const second = await worker.runOnce();
     expect(second).toMatchObject({ inputCandidates: 1, submitted: 0, deduplicated: 1 });
@@ -319,9 +294,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("keeps the per-run candidate budget fair across rounds for a multi-binding dock", async () => {
-    // 同 dockInstanceId 多 binding + maxCandidatesPerRun 预算：首轮按预算
-    // 截断（先到先得），下一轮窗口去重不占预算、尾部绑定补投——预算在
-    // 轮次间公平轮转，不饿死任何绑定。
     const events = attachedBase([hookId, secondHookId, thirdHookId]);
     const route = existingRoute({
       routeId,
@@ -342,17 +314,14 @@ describe("dock delivery & projection blackbox", () => {
     const first = await worker.runOnce();
     expect(first).toMatchObject({ inputCandidates: 2, submitted: 2, deduplicated: 0 });
 
-    // 窗口内第二轮：前两条去重（去重不占预算），预算落到尾部绑定。
     nowMs += 30_000;
     const second = await worker.runOnce();
     expect(second).toMatchObject({ inputCandidates: 3, submitted: 1, deduplicated: 2 });
 
-    // 窗口外第三轮：前两条窗口过期重试（预算再次截断），尾部绑定窗口未过。
     nowMs += 70_000;
     const third = await worker.runOnce();
     expect(third).toMatchObject({ inputCandidates: 2, submitted: 2, deduplicated: 0 });
 
-    // 三条绑定都至少被广播过一次。
     const broadcastHashes = new Set(submitted.map((data) => {
       const decoded = decodeFunctionData({ abi: DOCKING_MODULE_ABI as Abi, data: data as Hex });
       return decoded.args?.[2];
@@ -361,8 +330,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("makes a concurrent runOnce an explicit no-op summary instead of a second broadcast", async () => {
-    // 并发对抗：上一轮仍在广播中时叠加的 runOnce 必须显式归零（不排队、
-    // 不重入、不二次广播），返回可解释的空 summary。
     const events = attachedBase([hookId]);
     const route = existingRoute({
       routeId,
@@ -409,15 +376,12 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("treats a not-yet-ready hook as a silent waiting state (no candidates, no skip traces)", async () => {
-    // skipped/deduplicated 语义可解释性：hook 未 Ready 是正常等待态——
-    // 不产生候选、不产生 skipped 留痕（留痕只属于冲突/失败/结构性跳过）。
     const events: readonly ChainEvent[] = [
       planRegistered(1n, planId, planHash),
       planRegistered(2n, targetPlanId, targetPlanHash),
       orderRegistered(3n, parentOrderId, planId),
       orderRegistered(4n, targetOrderId, targetPlanId),
       moduleSet(5n),
-      // hook 存在但处于 pending（status 1），未 Ready。
       chainEvent(6n, 0, "HookStatusChanged", {
         orderId: parentOrderId,
         planId,
@@ -444,14 +408,7 @@ describe("dock delivery & projection blackbox", () => {
     expect(submitted).toEqual([]);
   });
 
-  // ---------------------------------------------------------------------------
-  // 投影重建（indexer replay）
-  // ---------------------------------------------------------------------------
-
   it("counts genuinely unknown events explicitly and keeps neighbour projections intact", async () => {
-    // 事件覆盖面对抗：未知事件必须显式计数（两个不同名未知事件 = 2），
-    // 已收口家族（部署注册表族、零投影治理族）不得误计入未知；未知事件
-    // 的存在不得污染相邻事件的投影。
     const events: readonly ChainEvent[] = [
       planRegistered(1n, planId, planHash),
       chainEvent(2n, 0, "OwnershipTransferred", {
@@ -481,9 +438,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("projects OrderForked lineage and keeps the fork order an ordinary order that accepts signals", async () => {
-    // fork 血缘：OrderForked 落 fork 单自己的行（forkLineage 含 parentOrderId
-    // 与裁决信号），父单不回写；fork 单是普通订单——其上的 SignalSubmitted
-    // 照常进 signals/timeline/proof，OrderForked 不落未知事件桶。
     const forkOrderId = bytes32Hex("c5");
     const events: readonly ChainEvent[] = [
       planRegistered(1n, planId, planHash),
@@ -522,8 +476,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("replays the same event stream twice into deeply equal snapshots (idempotent rebuild)", async () => {
-    // 幂等对抗：同一条事件流（含 plan 发布、dock 挂接、投递台账、fork 血缘、
-    // 信号、hook 状态）重建两次必须逐字段一致；store 重建路径与直接重放同构。
     const forkOrderId = bytes32Hex("c6");
     const events: readonly ChainEvent[] = [
       ...planPublishEvents(1n, planId, planHash, capabilitiesRootOf([], [])),
@@ -578,7 +530,7 @@ describe("dock delivery & projection blackbox", () => {
     const second = rebuildOrderProjections(events);
     expect(second).toEqual(first);
 
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     const fromStoreFirst = await store.resetFromEvents({ deploymentBlock: 0n, events });
     const fromStoreSecond = await store.resetFromEvents({ deploymentBlock: 0n, events });
     expect(fromStoreSecond).toEqual(fromStoreFirst);
@@ -586,8 +538,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("drops a fork order that exists only through OrderForked when the birth log is reorged away", async () => {
-    // fork 单出生只由 OrderForked 承载（补建路径）时，reorg 墓碑必须把
-    // 该 fork 单从快照里同时摘除——投影是重放产物，不残留孤儿桶。
     const forkOrderId = bytes32Hex("c7");
     const forkedEvent = chainEvent(3n, 0, "OrderForked", {
       planId,
@@ -615,9 +565,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("keeps the fork lineage when OrderForked arrives before the fork order's own OrderRegistered", async () => {
-    // 乱序对抗：OrderForked 先补建 fork 单桶（血缘已落行），其后的
-    // OrderRegistered（重放/同块排序差异）不得覆盖或清掉血缘——fork 单
-    // 仍是带 forkLineage 的普通订单。
     const forkOrderId = bytes32Hex("c8");
     const events: readonly ChainEvent[] = [
       planRegistered(1n, planId, planHash),
@@ -643,9 +590,6 @@ describe("dock delivery & projection blackbox", () => {
   });
 
   it("counts delivery events for an unborn dock instance instead of silently dropping them", async () => {
-    // 未出生 dock 的投递/满足事件（DockAttached 尚未发生或事件缺口）：
-    // 显式计入 unresolvedDockEventCount，不静默丢弃、不崩溃；DockOpened
-    // 的目标 plan 未登记时同样显式计入 unresolvedDockTargetDeploymentCount。
     const unknownDockInstance = bytes32Hex("e9");
     const childOrderId = bytes32Hex("c9");
     const events: readonly ChainEvent[] = [
@@ -706,8 +650,6 @@ describe("dock delivery & projection blackbox", () => {
     expect(snapshot.unresolvedDockEventCount).toBe(3);
     expect(snapshot.unresolvedDockTargetDeploymentCount).toBe(1);
     expect(snapshot.unresolvedModuleOrderEventCount).toBe(0);
-    // 未出生实例不产生 dock 桶；已开启实例正常出生（目标 plan 未登记仍按
-    // 链上事实补建子单桶）。
     expect(snapshot.stateMachineDocks[stateMachineScopedKey(chainId, stateMachineAddress, unknownDockInstance)])
       .toBeUndefined();
     expect(snapshot.stateMachineDocks[stateMachineScopedKey(chainId, stateMachineAddress, bytes32Hex("e8"))])
@@ -716,10 +658,6 @@ describe("dock delivery & projection blackbox", () => {
       .toBeDefined();
   });
 });
-
-// ---------------------------------------------------------------------------
-// 造桩工具（黑盒：只构造链事件与 route 记录，不触碰内部实现）
-// ---------------------------------------------------------------------------
 
 async function buildWorker(options: {
   readonly events: readonly ChainEvent[];
@@ -731,7 +669,7 @@ async function buildWorker(options: {
   readonly redeliveryWindowMs?: number;
   readonly submit?: (submission: DockAutomationSubmission) => Promise<Hex>;
 }): Promise<{ readonly worker: DockAutomationWorker; readonly submitted: string[] }> {
-  const store = new MemoryProjectionStore();
+  const store = stores.projectionStore;
   await store.resetFromEvents({
     deploymentBlock: 0n,
     events: options.events,
@@ -739,6 +677,19 @@ async function buildWorker(options: {
     ...(options.planCapabilityResolutionFailures
       ? { planCapabilityResolutionFailures: options.planCapabilityResolutionFailures }
       : {})
+  });
+  // PG 化后 resetFromEvents 只持久化派生同步态（不含 finalizedBlock）：
+  // 与 timer-keeper.test.ts 的 freshStore 同型，显式补写已定稿高度，
+  // 且 scope 键与 worker 读取的 defaultProjectionScope 保持一致。
+  await store.saveSyncState({
+    chainId,
+    contractAddress: projectionScopeContractAddress,
+    syncStatus: "indexed" as const,
+    latestIndexedBlock: 12n,
+    finalizedBlock: 12n,
+    confirmationDepth: 1,
+    eventCount: options.events.length,
+    rebuild: { status: "completed" as const }
   });
   const submitted: string[] = [];
   const worker = new DockAutomationWorker({
@@ -763,7 +714,6 @@ async function buildWorker(options: {
   return { worker, submitted };
 }
 
-/** existing 挂接基座：两 plan + 父/目标单出生 + 模块登记 + 指定父单 hooks Ready + DockAttached。 */
 function attachedBase(hooks: readonly Hex[]): readonly ChainEvent[] {
   return [
     planRegistered(1n, planId, planHash),
@@ -818,7 +768,6 @@ function outputBinding(
   return { bindingHash: bindingHash(tag), localSourceId, localSignalId, targetSourceId, targetSignalId };
 }
 
-/** 两步发布的真实链序：PlanCommitted → PlanPublisherRecorded → PlanFinalized → PlanRegistered。 */
 function planPublishEvents(
   startBlock: bigint,
   publishedPlanId: Hex,

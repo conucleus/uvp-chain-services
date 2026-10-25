@@ -1,15 +1,16 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import type { Address } from "viem";
 import { createApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import type { ApiRouter } from "../src/api/routes.js";
 import {
   createEvidenceService,
   InMemoryEvidenceMetadataStore,
-  InMemoryEvidenceStorage,
+  LocalEvidenceStorage,
   ObjectEvidenceStorage,
   RehearsalObjectEvidenceStorage,
   S3EvidenceStorageClient,
@@ -17,7 +18,54 @@ import {
   type S3ObjectOperationInput,
   type S3ObjectPutOperationInput
 } from "../src/evidence/index.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 describe("evidence API routes", () => {
   const tempDirs: string[] = [];
@@ -29,11 +77,12 @@ describe("evidence API routes", () => {
   });
 
   it("uploads text evidence and serves its proof for an authorized participant", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "local",
       evidenceService: createEvidenceService({
+    metadataStore: new InMemoryEvidenceMetadataStore(),
     runtimeEnvironment: "local",
-        storage: new InMemoryEvidenceStorage(),
+        storage: new LocalEvidenceStorage({ rootDir: tempDir(tempDirs) }),
         now: () => new Date("2026-04-28T00:00:00Z")
       })
     });
@@ -41,20 +90,20 @@ describe("evidence API routes", () => {
     const uploadResponse = await router.handle({
       method: "POST",
       pathname: "/product/evidence",
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: {
         orderId: "order-1",
         taskId: "task-1",
-        stageIdentifier: "export-documents",
-        documentType: "invoice",
-        fileName: "invoice.txt",
-        textPayload: "invoice payload",
+        stageIdentifier: "stage-1",
+        documentType: "doc-1",
+        fileName: "doc-1.txt",
+        textPayload: "doc-1 payload",
         metadata: {
-          businessLabel: "Commercial invoice",
-          fields: { invoice: "INV-1" }
+          businessLabel: "Doc-1",
+          fields: { "doc-1": "DOC-1" }
         },
         accessPolicy: {
-          readers: ["buyer"]
+          readers: ["slot-a"]
         }
       }
     });
@@ -64,7 +113,7 @@ describe("evidence API routes", () => {
     const proofResponse = await router.handle({
       method: "GET",
       pathname: `/product/evidence/${upload.evidence.evidenceId}/proof`,
-      headers: { "x-uvp-principal-id": "buyer" }
+      headers: { "x-uvp-principal-id": "slot-a" }
     });
 
     expect(proofResponse.status).toBe(200);
@@ -78,7 +127,7 @@ describe("evidence API routes", () => {
   });
 
   it("uploads through rehearsal object storage in testnet mode", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       evidenceStorage: new RehearsalObjectEvidenceStorage({
         rootDir: tempDir(tempDirs),
         namespace: "uvp-route-rehearsal"
@@ -86,8 +135,6 @@ describe("evidence API routes", () => {
       evidenceRuntimeEnvironment: "testnet"
     });
 
-    // testnet 模式下自报 x-uvp-principal-* 不再是
-    // 身份——钱包会话（签名证明）锚定参与者身份。
     const session = await loginWalletSession(router, "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
     const uploadResponse = await router.handle({
       method: "POST",
@@ -96,11 +143,11 @@ describe("evidence API routes", () => {
       body: {
         orderId: "order-1",
         taskId: "task-1",
-        stageIdentifier: "export-documents",
-        documentType: "invoice",
-        textPayload: "invoice payload",
+        stageIdentifier: "stage-1",
+        documentType: "doc-1",
+        textPayload: "doc-1 payload",
         metadata: {
-          fields: { invoice: "INV-1" }
+          fields: { "doc-1": "DOC-1" }
         }
       }
     });
@@ -115,7 +162,10 @@ describe("evidence API routes", () => {
 
   it("uploads through S3-compatible storage and returns private object proof", async () => {
     const mockClient = new MockS3CompatibleObjectClient();
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      // 隔离元数据：rehearsal 用例已把同 payloadHash/owner 的记录写入共享库，
+      // 复用会命中 findOwnedByPayloadHash 幂等去重而绕过这里的 S3 存储。
+      evidenceMetadataStore: new InMemoryEvidenceMetadataStore(),
       evidenceStorage: new ObjectEvidenceStorage({
         client: new S3EvidenceStorageClient({
           bucket: "private-evidence-bucket",
@@ -130,7 +180,6 @@ describe("evidence API routes", () => {
       evidenceRuntimeEnvironment: "staging"
     });
 
-    // staging 同样要求会话身份（自报头 401）。
     const session = await loginWalletSession(router, "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
     const uploadResponse = await router.handle({
       method: "POST",
@@ -139,14 +188,14 @@ describe("evidence API routes", () => {
       body: {
         orderId: "order-1",
         taskId: "task-1",
-        stageIdentifier: "export-documents",
-        documentType: "invoice",
-        textPayload: "invoice payload",
+        stageIdentifier: "stage-1",
+        documentType: "doc-1",
+        textPayload: "doc-1 payload",
         metadata: {
-          fields: { invoice: "INV-1" }
+          fields: { "doc-1": "DOC-1" }
         },
         accessPolicy: {
-          readers: ["buyer"]
+          readers: ["slot-a"]
         }
       }
     });
@@ -175,7 +224,6 @@ describe("evidence API routes", () => {
     const proofResponse = await router.handle({
       method: "GET",
       pathname: `/product/evidence/${upload.evidence.evidenceId}/proof`,
-      // staging 读取同样需要会话身份——owner 会话读取自己的 proof。
       headers: { "x-uvp-store-session": session.token }
     });
 
@@ -193,18 +241,19 @@ describe("evidence API routes", () => {
   });
 
   it("rejects unauthorized evidence reads and returns 404 for missing evidence", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "local",
       evidenceService: createEvidenceService({
+    metadataStore: new InMemoryEvidenceMetadataStore(),
     runtimeEnvironment: "local",
-        storage: new InMemoryEvidenceStorage(),
+        storage: new LocalEvidenceStorage({ rootDir: tempDir(tempDirs) }),
         now: () => new Date("2026-04-28T00:00:00Z")
       })
     });
     const uploadResponse = await router.handle({
       method: "POST",
       pathname: "/product/evidence",
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: {
         orderId: "order-1",
         stageIdentifier: "example-complete",
@@ -217,8 +266,6 @@ describe("evidence API routes", () => {
     });
     const upload = uploadResponse.body as { evidence: { evidenceId: string } };
 
-    // 存在性 oracle 消除：无权读取与不存在同响应（404），
-    // 未认证在读取前即 401——不再以 403/404 区分泄露证据存在性。
     await expect(router.handle({
       method: "GET",
       pathname: `/product/evidence/${upload.evidence.evidenceId}`,
@@ -239,7 +286,7 @@ describe("evidence API routes", () => {
     await expect(router.handle({
       method: "GET",
       pathname: `/product/evidence/ev_missing`,
-      headers: { "x-uvp-principal-id": "seller" }
+      headers: { "x-uvp-principal-id": "slot-b" }
     })).resolves.toMatchObject({
       status: 404,
       body: { error: "evidence_not_found" }
@@ -248,7 +295,7 @@ describe("evidence API routes", () => {
     await expect(router.handle({
       method: "GET",
       pathname: `/product/evidence/ev_missing/proof`,
-      headers: { "x-uvp-principal-id": "seller" }
+      headers: { "x-uvp-principal-id": "slot-b" }
     })).resolves.toMatchObject({
       status: 404,
       body: { error: "evidence_not_found" }
@@ -257,19 +304,19 @@ describe("evidence API routes", () => {
 
   it("audits admin proof reads through the route boundary", async () => {
     const metadataStore = new InMemoryEvidenceMetadataStore();
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "local",
       evidenceService: createEvidenceService({
     runtimeEnvironment: "local",
         metadataStore,
-        storage: new InMemoryEvidenceStorage(),
+        storage: new LocalEvidenceStorage({ rootDir: tempDir(tempDirs) }),
         now: () => new Date("2026-04-28T00:00:00Z")
       })
     });
     const uploadResponse = await router.handle({
       method: "POST",
       pathname: "/product/evidence",
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: {
         orderId: "order-1",
         stageIdentifier: "example-complete",
@@ -353,8 +400,6 @@ function s3CredentialEnv(): Record<string, string> {
   };
 }
 
-
-/** 非 local 环境 evidence 身份需要钱包会话。 */
 async function loginWalletSession(
   router: ApiRouter,
   privateKey: `0x${string}`

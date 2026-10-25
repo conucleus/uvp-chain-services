@@ -17,12 +17,6 @@ export interface StateMachineTaskProjection {
   readonly taskId: string;
   readonly orderId: Hex;
   readonly stateMachineAddress: Address;
-  /**
-   * Stable API-facing identifier (hook/order), while the projection itself is
-   * plan-scoped.  Keeping the plan id on the flattened row lets consumers join
-   * a task back to the right order when two plans intentionally reuse the same
-   * orderId and hookId.
-   */
   readonly planId?: Hex;
   readonly deploymentId?: Hex;
   readonly hookId: Hex;
@@ -80,12 +74,6 @@ export function refreshTaskSubmitSignals(
       source: "authorization"
     });
   }
-  // 合约 _authorizeSignalSubmitter 不校验 plan 能力词表——授权可以
-  // 落链在词表之外。任务完成判定以链上事实为准：词表外授权通过链上
-  // 绑定键（sourceId/signalId 即任务 hookId）挂到任务，否则
-  // SignalSubmitted 落链后任务永远停在 ready。patch 生效授权走显式
-  // SignalSubmitterAuthorized 事件流，由上方
-  // authorizationMatchesSubmitSignals/词表两径挂接。
   for (const authorization of Object.values(order.authorizations)) {
     if (task.hookId === authorization.sourceId || task.hookId === authorization.signalId) {
       signals.push({
@@ -174,18 +162,11 @@ export function markTaskSubmitted(
   proof: StateMachineProofProjection
 ): boolean {
   if (task.status === "submitted") {
-    // submitted 是已成立的完成事实。后到的匹配信号不得覆盖首个
-    // 完成证明与 updatedAt（与创建路径取最早证明同口径）；仅当链上位置
-    // 更早时才修正为真正最早的事实（容忍乱序回放）。
     if (compareProofEvents(proof, task.proof) >= 0) {
       return false;
     }
   }
   if (task.status === "cancelled") {
-    // HookStatusChanged(cancelled) 是链上终态事实。taskMatchesSubmittedSignal
-    // 的宽松回退键（hookId === sourceId/signalId）可能匹配到无关信号，
-    // 不得借此把已撤销任务复活成 submitted；hook 重开会经 HookReady 重建
-    // ready 任务，合法的再提交走新任务。
     return false;
   }
   task.status = "submitted";

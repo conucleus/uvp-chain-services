@@ -12,10 +12,6 @@ import {
 import { cleanQuery, decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-/**
- * 上架路由。导入可由运营方或 plan publisher 发起；
- * 审核/下架/重新上架是运营方治理动作（store.listing.manage）。
- */
 export function createStoreListingsRouteModule(options: {
   readonly listingService: StoreListingService;
 }): RouteModule {
@@ -29,7 +25,6 @@ export function createStoreListingsRouteModule(options: {
           const capability = "store.listing.manage";
           const authorization = await authorizeStoreCapability(context, request, capability, { type: "store_listing" });
           if (isStoreAuthorizationResult(authorization)) {
-            // 红线：导入是敏感写——运营方路径同样要求会话已锚定地址。
             const anchored = await requireAnchoredStoreAddress(context, request, { type: "store_listing" });
             if (!isAnchoredStoreAuthorizationResult(anchored)) {
               return anchored;
@@ -46,8 +41,6 @@ export function createStoreListingsRouteModule(options: {
               throw error;
             }
           }
-          // 导入也可由该 plan 的 publisher 发起（导入自己的秩序）——
-          // 服务层核验"运营方或 plan publisher"，此处只补锚定会话要求。
           const anchored = await requireAnchoredStoreAddress(context, request, { type: "store_listing" });
           if (!isAnchoredStoreAuthorizationResult(anchored)) {
             return anchored;
@@ -63,8 +56,6 @@ export function createStoreListingsRouteModule(options: {
           const isOperator = access.level === "store_operator" || access.level === "store_admin";
           const status = parseListingStatus(request.query?.status);
           const listings = await options.listingService.listListings(status);
-          // 内部治理状态（imported/rejected 及操作者信息）不对非运营方暴露；
-          // 未指定 status 时匿名只读只看到 public。
           const visible = isOperator
             ? listings
             : listings.filter((listing) => listing.status === "public");
@@ -97,8 +88,6 @@ export function createStoreListingsRouteModule(options: {
         }
 
         if (request.method === "GET" && action === "anchor-verification") {
-          // 公开目录之外的 listing 仅限运营方核验；否则泄露 listingId 后，
-          // 匿名调用者仍可读取 imported/rejected/delisted 的治理与链锚状态。
           const detail = await options.listingService.getListing(listingId);
           const access = await context.storeIdentityProvider.resolve(request.headers);
           const isOperator = access.level === "store_operator" || access.level === "store_admin";
@@ -118,7 +107,6 @@ export function createStoreListingsRouteModule(options: {
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
-          // 红线：上架审核/下架/重新上架是敏感治理写，要求会话已锚定地址。
           const anchored = await requireAnchoredStoreAddress(context, request, resource);
           if (!isAnchoredStoreAuthorizationResult(anchored)) {
             return anchored;

@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
 import { privateKeyToAccount } from "viem/accounts";
 import { createApiRouter } from "../src/api/routes.js";
+import { InMemoryProductSubmissionStore } from "../src/submissions/index.js";
+import { InMemoryEvidenceMetadataStore } from "../src/evidence/store.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import {
   allowListedSubmissionAuthorization,
   createProductSubmissionService,
@@ -9,9 +15,61 @@ import {
   type SubmissionBroadcastResult,
   type PreparedSubmissionDTO
 } from "../src/submissions/index.js";
-import { createEvidenceService, InMemoryEvidenceStorage } from "../src/evidence/index.js";
+import { createEvidenceService, LocalEvidenceStorage } from "../src/evidence/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true },
+    chainId: 31337
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
+
+function evidenceStorageFixture(): LocalEvidenceStorage {
+  return new LocalEvidenceStorage({ rootDir: mkdtempSync(join(tmpdir(), "uvp-submission-routes-")) });
+}
 import { normalizeAddress, type Address, type Hex } from "../src/shared/types.js";
 
 const privateKey = "0x1111111111111111111111111111111111111111111111111111111111111111" as Hex;
@@ -20,8 +78,6 @@ const submitter = normalizeAddress(account.address, "account.address");
 const verifyingContract = "0x1111111111111111111111111111111111111111" as Address;
 const routePlanId = "0x7777777777777777777777777777777777777777777777777777777777777777" as Hex;
 
-// prepare 绝不本地捏造链上身份：orderId/sourceId/signalId 必须
-// 是真实 bytes32 链上身份。
 const routeOnchainOrderId = "0x0000000000000000000000000000000000000000000000000000000000000311" as Hex;
 const routeSourceId = "0x0000000000000000000000000000000000000000000000000000000000000411" as Hex;
 const routeSignalId = "0x0000000000000000000000000000000000000000000000000000000000000511" as Hex;
@@ -59,12 +115,14 @@ const routeTask = {
 describe("submission API routes", () => {
   it("prepares, accepts a wallet signature, and serves submission status", async () => {
     const evidenceService = createEvidenceService({
+    metadataStore: new InMemoryEvidenceMetadataStore(),
     runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      storage: evidenceStorageFixture(),
       now: () => new Date("2026-04-28T00:00:00Z"),
       evidenceIdFactory: () => "ev_route"
     });
     const submissionService = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: { getTask: async (taskId) => taskId === routeTask.taskId ? routeTask : undefined },
       evidenceReader: evidenceService,
       chainId: 31337,
@@ -81,12 +139,12 @@ describe("submission API routes", () => {
       submissionIdFactory: () => "sub_route",
       nonceFactory: () => "7"
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
 
     const uploadResponse = await router.handle({
       method: "POST",
       pathname: "/product/evidence",
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: {
         orderId: routeTask.orderId,
         taskId: routeTask.taskId,
@@ -102,7 +160,7 @@ describe("submission API routes", () => {
     const prepareResponse = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${routeTask.taskId}/prepare-submit`,
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: {
         evidenceIds: [evidenceId],
         walletAddress: submitter,
@@ -149,15 +207,15 @@ describe("submission API routes", () => {
   });
 
   it("rejects submission profile reads from wallets other than the submitter", async () => {
-    // IDOR 归属校验：会话身份门只挡匿名不比对属主——非签名者钱包拿到
-    // id 也不得读取提交档案（签名者/证据/广播细节）。
     const evidenceService = createEvidenceService({
+    metadataStore: new InMemoryEvidenceMetadataStore(),
     runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      storage: evidenceStorageFixture(),
       now: () => new Date("2026-04-28T00:00:00Z"),
       evidenceIdFactory: () => "ev_idor"
     });
     const submissionService = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: { getTask: async (taskId) => taskId === routeTask.taskId ? routeTask : undefined },
       evidenceReader: evidenceService,
       chainId: 31337,
@@ -174,12 +232,12 @@ describe("submission API routes", () => {
       submissionIdFactory: () => "sub_idor",
       nonceFactory: () => "11"
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
 
     const uploadResponse = await router.handle({
       method: "POST",
       pathname: "/product/evidence",
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: {
         orderId: routeTask.orderId,
         taskId: routeTask.taskId,
@@ -193,7 +251,7 @@ describe("submission API routes", () => {
     const prepareResponse = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${routeTask.taskId}/prepare-submit`,
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: { evidenceIds: [evidenceId], walletAddress: submitter, intent: "confirm_stage" }
     });
     const prepared = prepareResponse.body as PreparedSubmissionDTO;
@@ -206,14 +264,12 @@ describe("submission API routes", () => {
       body: { prepareId: prepared.prepareId, walletAddress: submitter, signature }
     });
 
-    // 属主读取 200。
     await expect(router.handle({
       method: "GET",
       pathname: "/product/submissions/sub_idor",
       headers: { "x-uvp-wallet-address": submitter }
     })).resolves.toMatchObject({ status: 200 });
 
-    // 非属主（任一会话）403，不回显档案。
     const stranger = "0x9999999999999999999999999999999999999999";
     await expect(router.handle({
       method: "GET",
@@ -227,8 +283,9 @@ describe("submission API routes", () => {
 
   it("returns txHash when the injected submission broadcaster submits on-chain", async () => {
     const evidenceService = createEvidenceService({
+    metadataStore: new InMemoryEvidenceMetadataStore(),
     runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      storage: evidenceStorageFixture(),
       now: () => new Date("2026-04-28T00:00:00Z"),
       evidenceIdFactory: () => "ev_broadcast"
     });
@@ -245,6 +302,7 @@ describe("submission API routes", () => {
       })
     };
     const submissionService = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: { getTask: async (taskId) => taskId === routeTask.taskId ? routeTask : undefined },
       evidenceReader: evidenceService,
       chainId: 31337,
@@ -262,12 +320,12 @@ describe("submission API routes", () => {
       submissionIdFactory: () => "sub_broadcast",
       nonceFactory: () => "8"
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
 
     const uploadResponse = await router.handle({
       method: "POST",
       pathname: "/product/evidence",
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: {
         orderId: routeTask.orderId,
         taskId: routeTask.taskId,
@@ -281,7 +339,7 @@ describe("submission API routes", () => {
     const prepareResponse = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${routeTask.taskId}/prepare-submit`,
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: {
         evidenceIds: [evidenceId],
         walletAddress: submitter,
@@ -336,8 +394,9 @@ describe("submission API routes", () => {
       stateMachineAddress: verifyingContract
     } as ProductTaskDTO;
     const evidenceService = createEvidenceService({
+    metadataStore: new InMemoryEvidenceMetadataStore(),
     runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      storage: evidenceStorageFixture(),
       now: () => new Date("2026-04-28T00:00:00Z"),
       evidenceIdFactory: () => "ev_projected_submit"
     });
@@ -356,6 +415,7 @@ describe("submission API routes", () => {
       })
     };
     const submissionService = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: { getTask: async (taskId) => taskId === projectedTask.taskId ? projectedTask : undefined },
       evidenceReader: evidenceService,
       chainId: 31337,
@@ -373,11 +433,10 @@ describe("submission API routes", () => {
       submissionIdFactory: () => "sub_projected_submit",
       nonceFactory: () => "9"
     });
-    const projectionStore = new MemoryProjectionStore();
+    const projectionStore = stores.projectionStore;
     const baseEvents = [
       chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
       chainEvent(2n, 0, "OrderRegistered", { orderId, planId }),
-      // 注册交易内的创建者事实：proof 读取会话钱包即订单创建者。
       chainEvent(2n, 1, "OrderRelayerRecorded", {
         orderId,
         planId,
@@ -388,7 +447,7 @@ describe("submission API routes", () => {
     await projectionStore.resetFromEvents({ deploymentBlock: 0n, events: baseEvents });
     let preparedForRefresh: PreparedSubmissionDTO | undefined;
     let refresh: Promise<unknown> | undefined;
-    const router = createApiRouter(projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local",
+    const router = createApiRouter(projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local",
       evidenceService,
       submissionService,
       onTxMined: () => {
@@ -415,7 +474,7 @@ describe("submission API routes", () => {
     const uploadResponse = await router.handle({
       method: "POST",
       pathname: "/product/evidence",
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: {
         orderId: projectedTask.orderId,
         taskId: projectedTask.taskId,
@@ -429,7 +488,7 @@ describe("submission API routes", () => {
     const prepareResponse = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${projectedTask.taskId}/prepare-submit`,
-      headers: { "x-uvp-principal-id": "seller" },
+      headers: { "x-uvp-principal-id": "slot-b" },
       body: {
         evidenceIds: [evidenceId],
         walletAddress: submitter,
@@ -457,7 +516,6 @@ describe("submission API routes", () => {
     const proofResponse = await router.handle({
       method: "GET",
       pathname: `/product/orders/${orderId}/proof`,
-      // 订单 proof 与订单详情同口径参与者门（匿名 401），带提交者会话读取。
       headers: { "x-uvp-wallet-address": submitter }
     });
 
@@ -471,12 +529,14 @@ describe("submission API routes", () => {
 
   it("prepare-submit ties the business signer to the session-anchored wallet", async () => {
     const evidenceService = createEvidenceService({
+    metadataStore: new InMemoryEvidenceMetadataStore(),
     runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      storage: evidenceStorageFixture(),
       now: () => new Date("2026-04-28T00:00:00Z"),
       evidenceIdFactory: () => "ev_oracle"
     });
     const submissionService = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: { getTask: async (taskId) => taskId === routeTask.taskId ? routeTask : undefined },
       evidenceReader: evidenceService,
       chainId: 31337,
@@ -493,7 +553,7 @@ describe("submission API routes", () => {
       submissionIdFactory: () => "sub_oracle",
       nonceFactory: () => "9"
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService,
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService,
       storeAuthConfig: {
         mode: "dev_headers" as const,
         roleClaim: "roles",
@@ -525,8 +585,6 @@ describe("submission API routes", () => {
     });
     const evidenceId = (uploadResponse.body as { evidence: { evidenceId: string } }).evidence.evidenceId;
 
-    // 锚定钱包（local dev 锚定头）与 body 自报签名者不一致：403 一致性
-    // 核验，不落入 201/403 授权探测 oracle。
     const otherWallet = "0x9999999999999999999999999999999999999999";
     const mismatch = await router.handle({
       method: "POST",
@@ -540,7 +598,6 @@ describe("submission API routes", () => {
     });
     expect(mismatch).toMatchObject({ status: 403, body: { error: "wrong_wallet" } });
 
-    // 锚定一致时按锚定钱包求值授权，正常 201。
     const aligned = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${routeTask.taskId}/prepare-submit`,
@@ -564,11 +621,13 @@ describe("submission API routes", () => {
       ]
     } as unknown as ProductTaskDTO;
     const evidenceService = createEvidenceService({
+      metadataStore: new InMemoryEvidenceMetadataStore(),
       runtimeEnvironment: "local",
-      storage: new InMemoryEvidenceStorage(),
+      storage: evidenceStorageFixture(),
       now: () => new Date("2026-04-28T00:00:00Z")
     });
     const submissionService = createProductSubmissionService({
+      store: new InMemoryProductSubmissionStore(),
       productTasks: { getTask: async (taskId) => taskId === v1Task.taskId ? v1Task : undefined },
       evidenceReader: evidenceService,
       chainId: 31337,
@@ -584,10 +643,8 @@ describe("submission API routes", () => {
       prepareIdFactory: () => "prep_v1_accept",
       nonceFactory: () => "12"
     });
-    const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local", evidenceService, submissionService });
 
-    // V1 验收者读要求包句柄后只带显式 signalName：无 evidenceSpec 槽位，
-    // evidenceIds 与 intent 都缺省，服务端按显式信号与兼容缺省意图准备。
     const prepareResponse = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${v1Task.taskId}/prepare-submit`,

@@ -25,7 +25,7 @@ type HealthStatus = "ok" | "degraded";
 type ReadinessStatus = "ready" | "not_ready";
 type EvidenceReadiness = "ready" | "degraded" | "unknown";
 type StoreMetadataReadiness = "ready" | "degraded" | "unknown";
-type StoreMetadataKind = "memory" | "sqlite" | "postgres" | "unknown";
+type StoreMetadataKind = "memory" | "postgres" | "unknown";
 type JsonRecord = Record<string, unknown>;
 type StoreMetadataRepresentation = "draft" | "supplier";
 
@@ -37,13 +37,9 @@ export interface IndexerRuntimeDiagnostics {
 export interface BuildOperationalDiagnosticsOptions {
   readonly store: ProjectionStore;
   readonly configDiagnostics?: ConfigDiagnostics;
-  /** 必填：环境档位由装配层注入，不提供缺省 local 回退。 */
   readonly runtimeEnvironment: ChainServicesRuntimeEnv;
   readonly indexer?: IndexerRuntimeDiagnostics;
   readonly reconcile?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
-  /** timer keeper 的末轮 summary（receiptReverted/receiptUnknown/deduplicated
-   * 等计数面）：以 timerKeeperRuntime 键只读暴露进 diagnostics，不进
-   * /healthz 聚合健康位。 */
   readonly timerKeeper?: TimerKeeperRunSummary | (() => TimerKeeperRunSummary | undefined);
   readonly submissionStore?: ProductSubmissionStore;
   readonly governanceStore?: GovernanceStore;
@@ -295,13 +291,6 @@ function buildReconcileDiagnostics(
   };
 }
 
-/**
- * timer keeper 的运行时诊断面（getLastSummary 的只读暴露）：末轮 summary
- * 携带 receiptReverted/receiptUnknown/deduplicated 等计数，供
- * /admin/diagnostics 人工研判。输出键为 timerKeeperRuntime——
- * configDiagnostics.timerKeeper 是配置形状（enabled/私钥角色装配，staging
- * readiness 消费），不得覆写；运行时 summary 不参与 /healthz 聚合健康位。
- */
 function buildTimerKeeperDiagnostics(
   source: BuildOperationalDiagnosticsOptions["timerKeeper"]
 ): Record<string, unknown> {
@@ -311,11 +300,6 @@ function buildTimerKeeperDiagnostics(
   };
 }
 
-/**
- * 探针/恢复入口（/healthz /readyz /admin/ops）的存储读包装：读失败不抛
- * （抛错会让 HTTP 包装层回 500，故障时恰好丢失恢复入口），而是携带
- * 脱敏原因的 unavailable 事实，由汇总层计入 not-ready 原因。
- */
 async function readDiagnosticsStoreValue<TValue>(
   read: () => Promise<TValue>
 ): Promise<{ readonly ok: true; readonly value: TValue } | { readonly ok: false; readonly degradedReason: string }> {
@@ -391,8 +375,6 @@ async function buildGovernanceTxDiagnostics(
     };
   }
 
-  // 与 submissions 同口径：治理台账读失败按 degraded 事实呈现，
-  // 不让 /healthz /readyz /admin/ops 落进兜底 500。
   const logsResult = await readDiagnosticsStoreValue(() => store.listIdentityTxLogs());
   if (!logsResult.ok) {
     return storeUnavailableDiagnostics(logsResult.degradedReason);
@@ -480,7 +462,7 @@ function storeMetadataStoreStatus(
   readonly representedBy?: StoreMetadataRepresentation;
 } {
   const kind = storeMetadataKind(source);
-  const durable = kind === "sqlite" || kind === "postgres";
+  const durable = kind === "postgres";
   return {
     configured: source !== undefined,
     kind,
@@ -500,7 +482,7 @@ function storeMetadataKind(source: unknown): StoreMetadataKind {
   }
   if (source && typeof source === "object") {
     const driver = (source as { readonly driver?: unknown }).driver;
-    if (driver === "postgres" || driver === "sqlite" || driver === "memory") {
+    if (driver === "postgres" || driver === "memory") {
       return driver;
     }
   }
@@ -509,9 +491,6 @@ function storeMetadataKind(source: unknown): StoreMetadataKind {
     : "";
   if (constructorName.includes("postgres")) {
     return "postgres";
-  }
-  if (constructorName.includes("sqlite")) {
-    return "sqlite";
   }
   if (constructorName.includes("memory")) {
     return "memory";
@@ -535,9 +514,6 @@ function operationalDegradedReasons(diagnostics: Record<string, unknown>): reado
   if ((governanceTxs?.failed?.length ?? 0) > 0) {
     degraded.push("governance_failed_txs");
   }
-  // 重放的显式诊断计数（unknown/unresolved/词表富集 mismatch）非零 =
-  // 投影对已索引事件不完整或未经证实。计数明细在 indexer.projectionDiagnostics
-  // （/admin/diagnostics），/healthz 只携带聚合健康位。
   if (hasProjectionDiagnosticsAnomalies(indexer?.projectionDiagnostics ?? undefined)) {
     degraded.push("projection_unresolved_counts");
   }
@@ -569,8 +545,6 @@ function operationalNotReadyReasons(diagnostics: Record<string, unknown>): reado
   if (storeMetadata.readiness === "degraded") {
     reasons.push("store_metadata_degraded");
   }
-  // 存储故障 = 服务不可用（不是内部错误）：/readyz 503 携带原因，
-  // /admin/ops 恢复入口在故障时仍可访问（呈现 degraded 事实）。
   if (submissions.unavailable === true) {
     reasons.push("submission_store_unavailable");
   }

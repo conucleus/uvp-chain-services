@@ -38,8 +38,6 @@ export function createProductRequirementsRouteModule(options: {
           if (request.method !== "POST") {
             return undefined;
           }
-          // 合意的身份是签名者：会话锚定钱包即被核验对象，body 自报钱包
-          // 只作一致性校验（不一致即 403）。
           const wallet = await resolveParticipantWalletIdentity(
             request,
             context,
@@ -75,7 +73,6 @@ export function createProductRequirementsRouteModule(options: {
           };
         }
         if (request.method === "PUT") {
-          // 声明人由会话锚定：body 自报钱包不构成身份（服务端另核创建者）。
           const wallet = await resolveParticipantWalletIdentity(
             request,
             context,

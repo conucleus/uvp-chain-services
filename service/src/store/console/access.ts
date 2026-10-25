@@ -38,10 +38,6 @@ export type StoreCapability =
   | "store.docking.validate"
   | "store.docking.save";
 
-/**
- * 会话锚定地址。锚定来源只能是钱包会话（签名证明）或
- * local 开发头（devAnchoredAddressHeaderEnabled，staging/prod 拒绝）。
- */
 export type StoreAnchorSource = "wallet_session" | "dev_header";
 
 export interface StoreAccessState {
@@ -55,7 +51,6 @@ export interface StoreAccessState {
   readonly governancePrincipal?: GovernancePrincipal;
   readonly canWrite: boolean;
   readonly canAdmin: boolean;
-  /** 会话已证明控制的钱包地址（会话配对）。 */
   readonly anchoredAddress?: Address;
   readonly anchorSource?: StoreAnchorSource;
   readonly walletAccountId?: string;
@@ -82,16 +77,9 @@ export interface StoreIdentityProvider {
 }
 
 export interface StoreIdentityProviderOptions {
-  /** 必填：环境档位由装配层注入，漏传即构造失败，不回退 local。 */
   readonly runtimeEnvironment: ChainServicesRuntimeEnv;
   readonly authConfig?: StoreAuthConfig;
-  /** GOVERNANCE_ADMIN_REVIEWER_IDS：JWT governance_admin 与 dev admin 头共用同一白名单核验。 */
   readonly governanceAdminIds?: readonly string[];
-  /**
-   * GOVERNANCE_ADMIN_TOKEN_HASHES：dev admin 自报头的口令因子
-   *（非 local 必须；JWT governance_admin 的凭据是外部 IdP 签名，
-   * 不叠加口令因子）。
-   */
   readonly governanceAdminTokenHashes?: readonly string[];
 }
 
@@ -99,8 +87,6 @@ const STORE_PUBLIC_READ_CAPABILITIES = ["store.read"] as const satisfies readonl
 const STORE_READ_CAPABILITIES = [
   ...STORE_PUBLIC_READ_CAPABILITIES,
   "store.audit.read",
-  // docking 会话档案含草稿信号映射，与公共读（store.read）分层：
-  // 已认证 reader 及以上才可按 id 读会话，匿名不可枚举。
   "store.docking.read"
 ] as const satisfies readonly StoreCapability[];
 
@@ -132,9 +118,6 @@ const GOVERNANCE_ADMIN_CAPABILITIES = [
   "store.supplier.identity.revoke"
 ] as const satisfies readonly StoreCapability[];
 
-// JWT governance_admin 不继承 store_admin 全量——治理权威只映射到治理
-// 动作（zhixu 草稿审核 + 链上身份登记/撤销）与读；store.draft.review
-// 在此补齐，否则 JWT 治理管理员无法执行 submit-review。
 const JWT_GOVERNANCE_ADMIN_CAPABILITIES = [
   ...STORE_READ_CAPABILITIES,
   "store.draft.review",
@@ -145,8 +128,6 @@ const JWT_GOVERNANCE_ADMIN_CAPABILITIES = [
 export function createStoreIdentityProvider(options: StoreIdentityProviderOptions): StoreIdentityProvider {
   const runtimeEnvironment = options.runtimeEnvironment;
   const authConfig = options.authConfig ?? defaultStoreAuthConfig();
-  // testnet 是公开测试网（Base Sepolia），与 staging/production 同按
-  // strict runtime 处理：dev 自报身份形态一律硬拒。
   const strictRuntime = runtimeEnvironment !== "local";
   const governanceAdminPolicy: GovernanceAdminAuthPolicy = {
     runtimeEnvironment,
@@ -201,8 +182,6 @@ export function storeAccessRequiredLevel(capability: StoreCapability): StoreAcce
     case "store.supplier.identity.register":
     case "store.supplier.identity.revoke":
     case "store.draft.review":
-      // zhixu 草稿审核是治理动作（governance review 落库），
-      // 不下放给 operator 级——提交者与审核者职责分离。
       return "governance_admin";
     case "store.version.activate":
     case "store.version.deprecate":
@@ -295,10 +274,8 @@ function resolveStoreAccessFromHeaders(
 
 interface JwtVerifier {
   readonly config: RequiredJwtStoreAuthConfig;
-  /** 非 local：discovery 回传的 jwks_uri 必须过 HTTPS/非私网校验（SSRF 纵深）。 */
   readonly strictRuntime: boolean;
   jwks?: ReturnType<typeof createRemoteJWKSet>;
-  // discovery 失败时清空重试，类型显式含 undefined。
   jwksPromise?: Promise<ReturnType<typeof createRemoteJWKSet>> | undefined;
 }
 
@@ -344,8 +321,6 @@ async function resolveStoreAccessFromJwt(
     });
     return storeAccessFromJwtPayload(result.payload, verifier.config, governanceAdminPolicy);
   } catch (error) {
-    // discovery/JWKS 故障不是 token 无效：token 本身可能合法，
-    // 标成 unavailable 才能区分"换 token 也没用"与"身份源瞬断"。
     if (isJwksDiscoveryFailure(error)) {
       return anonymousAccess("jwt", {
         code: "store_identity_unavailable",
@@ -371,9 +346,6 @@ async function jwksForVerifier(verifier: JwtVerifier): Promise<ReturnType<typeof
   try {
     verifier.jwks = await verifier.jwksPromise;
   } catch (error) {
-    // ??= 只在 undefined 时赋值：rejected promise 若留在缓存里，
-    // 一次 discovery 瞬断会让 jwt 模式所有 Bearer 请求 403 到重启。
-    // 失败即清缓存，下次请求重新 discovery。
     verifier.jwksPromise = undefined;
     throw error;
   }
@@ -413,9 +385,6 @@ async function discoverStoreAuthJwks(config: RequiredJwtStoreAuthConfig, strictR
   if (typeof record.jwks_uri !== "string" || record.jwks_uri.trim().length === 0) {
     throw namedDiscoveryError("OIDC discovery response is missing jwks_uri");
   }
-  // discovery 响应是外部输入，其 jwks_uri 可把密钥拉取指向内网端点
-  // 或明文信道（受限 SSRF 纵深）。非 local 环境复用配置层同款
-  // HTTPS/非私网校验；local 开发允许本地 IdP 的 http/localhost。
   if (strictRuntime && storeAuthUrlEvidenceFailure(record.jwks_uri)) {
     throw namedDiscoveryError("OIDC discovery jwks_uri must be HTTPS on a non-private host outside local development");
   }
@@ -447,9 +416,6 @@ function storeAccessFromJwtPayload(
 
   const jwtRoles = normalizeJwtRoles(claimValue(payload, config.roleClaim));
   const roles = canonicalStoreRoles(jwtRoles).filter((role) =>
-    // JWT governance_admin 不是治理权威本身：与自报 admin 头同门，必须
-    // 命中 GOVERNANCE_ADMIN_REVIEWER_IDS 白名单才映射治理主体与治理
-    // 能力，否则 IdP 的角色声明即可绕过白名单冒充治理管理员。
     role !== "governance_admin" || governanceAdminAllowed(principalId, governanceAdminPolicy)
   );
   const capabilities = capabilitiesForStoreRoles(roles);
@@ -467,8 +433,6 @@ function storeAccessFromJwtPayload(
     capabilities,
     authMode: "jwt",
     ...(governancePrincipal ? { governancePrincipal } : {}),
-    // 读级能力不构成写权：store.docking.read 与 store.read/store.audit.read
-    // 同为读面，漏排会把纯读会话判成 canWrite。
     canWrite: capabilities.some((capability) =>
       capability !== "store.read" &&
       capability !== "store.audit.read" &&
@@ -496,9 +460,6 @@ function canonicalStoreRoles(roles: readonly string[]): readonly StoreRole[] {
 }
 
 function capabilitiesForStoreRoles(roles: readonly StoreRole[]): readonly StoreCapability[] {
-  // 零角色 JWT 不并入 store.audit.read——匿名
-  // 语义的 token 只拿到公共读（store.read）；audit.read 随 store_reader
-  // 及以上角色授予。
   const capabilities = new Set<StoreCapability>(STORE_PUBLIC_READ_CAPABILITIES);
   if (roles.includes("store_reader")) {
     addCapabilities(capabilities, STORE_READ_CAPABILITIES);

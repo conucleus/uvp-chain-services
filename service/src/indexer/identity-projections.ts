@@ -37,11 +37,6 @@ export interface IdentityProjectionSnapshot {
   readonly rebuildable: true;
   readonly eventCount: number;
   readonly bindings: Readonly<Record<string, IdentityBindingProjection>>;
-  /**
-   * 撤销事件指向未知 binding 的显式计数（binding 未注册/回放顺序中注册
-   * 事件缺失/键不一致）。撤销被跳过时不得静默——快照与索引器日志携带
-   * 该计数，与订单族回放的诊断计数口径一致。
-   */
   readonly unresolvedRevokeEventCount?: number;
   readonly lastEvent?: IdentityProjectionProvenance;
 }
@@ -80,8 +75,6 @@ export function rebuildIdentityProjections(
       applyIdentityBindingRegistered(bindings, event);
     } else if (event.eventName === "IdentityBindingRevoked") {
       if (!applyIdentityBindingRevoked(bindings, event)) {
-        // 撤销指向未知 binding：跳过但必须计数留痕（不允许静默）——
-        // binding 未注册/回放顺序缺口/键不一致都从这里暴露。
         unresolvedRevokeEventCount += 1;
       }
     } else {

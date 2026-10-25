@@ -43,7 +43,7 @@ export interface StoreConsoleListDTO {
   readonly projectionStatus?: StoreProjectionStatusDTO;
 }
 
-export interface StoreZhixuDetailV3DTO extends StoreZhixuConsoleDTO {
+export interface StoreZhixuDetailKernelDTO extends StoreZhixuConsoleDTO {
   readonly schema: "store-zhixu-detail.v3";
   readonly publishMetadata: {
     readonly configId: string;
@@ -55,7 +55,7 @@ export interface StoreZhixuDetailV3DTO extends StoreZhixuConsoleDTO {
 
 export interface StoreConsoleService {
   listZhixus(query?: StoreConsoleListQuery): Promise<StoreConsoleListDTO>;
-  getZhixu(zhixuId: string): Promise<StoreZhixuDetailV3DTO | undefined>;
+  getZhixu(zhixuId: string): Promise<StoreZhixuDetailKernelDTO | undefined>;
   search(query: StoreSearchQuery, options?: StoreSearchOptions): Promise<StoreSearchResponseDTO>;
   listOrderCandidates(orderId: string): Promise<StoreOrderCandidatesResponseDTO>;
 }

@@ -1,13 +1,4 @@
-// stage-patches 产品流黑盒对抗测试。
-//
-// 视角：BFF 外部攻击者/鲁莽调用方。只按行为规格构造请求，不断言内部
-// 实现，重点挖掘：
-// - 模式词表边界（大小写/词表外/空串/非字符串 mode）；
-// - patchNonce 严格递增与并发/重放/submit 后再 prepare；
-// - 授权集 prepare 时点冻结与 digest 档案一致性（含空授权集语义）；
-// - 候选集 fail-closed 门（无清单/不在集内/大小写地址造证材料）；
-// - 载荷边界（零值哈希、超长 metadataURI、未知字段接受面）。
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
   capabilitiesRootOf,
@@ -23,15 +14,68 @@ import {
 import { getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import {
   createProductStageExecutorPatchService,
+  InMemoryProductStagePatchStore,
   type PreparedStageExecutorPatchDTO,
+  type PreparedStageExecutorPatchRecord,
   type StageExecutorPatchBroadcastAdapter,
   type StageExecutorPatchBroadcastRequest,
+  type StageExecutorPatchSubmissionDTO,
   type StagePatchBroadcastResult,
 } from "../src/stage-patches/index.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import type { ProjectionStore } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true },
+    chainId: 31337
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 import {
   normalizeAddress,
   type Address,
@@ -76,12 +120,7 @@ const baseNow = new Date("2026-04-30T00:00:00Z");
 const baseChainClock = { latestBlockTimestampSeconds: async () => Math.floor(baseNow.getTime() / 1000) } as const;
 
 describe("stage-patches black-box adversarial", () => {
-  // ------------------------------------------------------------------
-  // 模式词表（规格 1：词表外一律 invalid_executor_patch_mode）
-  // ------------------------------------------------------------------
   it("rejects executor patch modes outside the assign/handoff vocabulary verbatim", async () => {
-    // 词表外字符串（含大小写变体词表外的词、非协作换人暗示词）必须 400，
-    // 不得落成任何默认模式。
     const { router } = await routerFixture();
     for (const mode of [
       "REPLACEMENT",
@@ -108,9 +147,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("accepts assign mode case-insensitively (documents lenient normalization)", async () => {
-    // 现状：normalizeExecutorPatchMode trim+lowercase 后比对——"ASSIGN"
-    // 属词表内的大小写变体，按宽松口径接受。规格未声明大小写敏感，
-    // 这里钉住现状（宽松接受、等价语义），不构成越权。
     const { router } = await routerFixture();
     for (const mode of ["ASSIGN", " Assign ", "assign"]) {
       const response = await router.handle({
@@ -124,9 +160,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("rejects an explicitly provided non-string or blank mode as out-of-vocabulary", async () => {
-    // mode 缺省 = assign（可选字段）；但显式提供而类型非法/空白的 mode
-    // 是词表外取值：类型化 400，不走"静默丢弃 → 缺省归一"的宽松路径
-    //（调用方必须能感知自己的取值没有被采纳）。
     const { router } = await routerFixture();
     for (const mode of ["", 5, null, {}, true]) {
       const response = await router.handle({
@@ -140,8 +173,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("rejects a non-zero previousExecutorWallet on assign mode but accepts the zero address", async () => {
-    // assign 模式没有"上一执行者"概念：显式带非零 previousExecutor 必须
-    // 拒绝（与合约同口径），零地址视为占位放行。
     const { router } = await routerFixture();
     await expect(
       router.handle({
@@ -165,7 +196,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("rejects handoff prepare when the claimed previous executor mismatches the last submitter", async () => {
-    // handoff 的会签对象是链上事实推定的上一执行者：谎报他人不得备签。
     const { router } = await routerFixture({
       events: [...baseEvents(), targetSignalSubmittedEvent(5n)],
     });
@@ -184,13 +214,7 @@ describe("stage-patches black-box adversarial", () => {
     });
   });
 
-  // ------------------------------------------------------------------
-  // patchNonce（规格 2：分配严格递增；submit 后广播实参与档案一致）
-  // ------------------------------------------------------------------
   it("gives concurrent prepares the same nonce and lets exactly one submit win", async () => {
-    // 并发 prepare 同单同阶段：链上投影未变 → 两次 prepare 派生同一
-    // nonce（=1）。首写者赢：第一个 submit 成功，第二个 submit（另一个
-    // prepareId、同一 nonce 键）撞 409 duplicate nonce，广播恰好一次。
     let broadcastCalls = 0;
     const { router } = await routerFixture({
       executorBroadcastAdapter: {
@@ -236,8 +260,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("keeps replaying the consumed nonce fail-closed when the chain projection has not caught up", async () => {
-    // submit 成功后链上事件未回放：再 prepare 仍派生旧 nonce（=1），
-    // 其 submit 必须被 store 的 nonce 预留门 409 拒绝，绝不二次广播。
     let broadcastCalls = 0;
     const { router, store } = await routerFixture({
       executorBroadcastAdapter: {
@@ -259,7 +281,6 @@ describe("stage-patches black-box adversarial", () => {
     });
     expect(firstSubmit.status).toBe(200);
 
-    // 投影原样重建（无 StageExecutorPatchApplied 事件）模拟索引滞后。
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: baseEvents(),
@@ -288,8 +309,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("allocates a strictly increasing nonce once the applied patch lands in the projection", async () => {
-    // 链上 StageExecutorPatchApplied(nonce=1) 回放后：下一次 prepare 必须
-    // 分配 nonce=2（严格递增），且 submit 全链路成功。
     let broadcastCalls = 0;
     const events = [
       ...baseEvents(),
@@ -323,13 +342,7 @@ describe("stage-patches black-box adversarial", () => {
     expect(broadcastCalls).toBe(1);
   });
 
-  // ------------------------------------------------------------------
-  // 授权集（规格 2：prepare 时点冻结；digest 与档案一致；空集语义）
-  // ------------------------------------------------------------------
   it("broadcasts the authorization set frozen at prepare even when the plan projection gains facts before submit", async () => {
-    // prepare 后投影重新富集出更多目标阶段事实：授权集不得随投影漂移
-    // ——selector 签名覆盖的是 prepare 时点冻结的集，submit 广播实参
-    // 必须与档案逐字节一致。
     const vocabBefore = registerPlanVocabulary({
       selectorBindings: [{ selectorStageId, targetStageId }],
       signalCapabilities: [
@@ -386,7 +399,6 @@ describe("stage-patches black-box adversarial", () => {
     expect(prepared.executorAuthorizations).toHaveLength(1);
     const frozenAuthorizations = prepared.executorAuthorizations;
 
-    // 投影重放：plan 词表升级为含两条目标阶段事实的版本。
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: baseEvents({ vocabulary: vocabAfter }),
@@ -415,9 +427,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("derives an empty authorization set for plans without target-stage capability facts and still submits", async () => {
-    // 空授权集语义：词表无目标阶段 relation=current 事实 → 授权集为空、
-    // authorizationsHash = hashSignalAuthorizations([])。合约接受空集
-    // （patch 合法、不授予任何提交权），服务面同口径放行。
     const broadcast = vi.fn(
       async (
         _request: StageExecutorPatchBroadcastRequest,
@@ -448,9 +457,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("maps target-stage capability facts to the new executor with the patch role and metadata commitments", async () => {
-    // 非空授权集推导：目标阶段 relation=current 事实全表 → submitter=
-    // 新执行者、role/metadataHash 取 patch 承诺值；哈希与
-    // hashSignalAuthorizations 一致（digest 面可复算）。
     const factA = {
       stageId: targetStageId,
       targetSourceId: onchainSourceId("origin.a"),
@@ -505,8 +511,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("rejects a submitted patch envelope whose authorizationsHash diverges from the archive", async () => {
-    // 提交方篡改回传的 patch 档案（换授权集哈希）：canonical 比对必须
-    // 400 prepared_patch_mismatch，且不广播。
     const broadcast = vi.fn(async (): Promise<StagePatchBroadcastResult> => ({
       status: "submitted",
       txHash,
@@ -538,8 +542,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("rejects a submitted typedData envelope whose digest diverges from the prepared one", async () => {
-    // 回传 typedData 被篡改（digest 面授权集哈希换掉）：
-    // 400 typed_data_mismatch，不广播。
     const broadcast = vi.fn(async (): Promise<StagePatchBroadcastResult> => ({
       status: "submitted",
       txHash,
@@ -574,9 +576,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("rejects a signature produced over a tampered digest even without envelopes", async () => {
-    // 不回传 envelope、只换签：selector 对"另一个 digest"签名，服务端
-    // 按档案 typedData 恢复地址 → 与 selector 不符 → 400 invalid_signature。
-    // 封面校验不是唯一防线，验签本身绑定档案摘要。
     const broadcast = vi.fn(async (): Promise<StagePatchBroadcastResult> => ({
       status: "submitted",
       txHash,
@@ -613,15 +612,7 @@ describe("stage-patches black-box adversarial", () => {
     expect(broadcast).not.toHaveBeenCalled();
   });
 
-  // ------------------------------------------------------------------
-  // 候选集门（规格 3：409 fail-closed，不发必 revert 的交易）
-  // ------------------------------------------------------------------
   it("fails closed at submit when the re-projected plan lost the candidate list", async () => {
-    // prepare 时点候选集在、submit 时投影重放成无候选集清单：
-    // executor_candidate_set_unavailable，不广播。
-    // 注意：词表产物按 planId 单源——重放词表必须换 capabilitiesRoot
-    // （追加一条无关能力事实）才能携带不同的候选集清单，这里在夹具
-    // 创建之后再注册，避免与默认词表同根互相覆盖。
     const broadcast = vi.fn(async (): Promise<StagePatchBroadcastResult> => ({
       status: "submitted",
       txHash,
@@ -676,9 +667,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("fails closed at submit when the executor was removed from the candidate set", async () => {
-    // prepare 后执行者被移出候选集（投影按修正后的产物重放，候选集
-    // 同根约束下换成新词表 root）：executor_not_in_candidate_set，
-    // 不广播（链上 StageExecutorNotCandidate 恒拒）。
     const broadcast = vi.fn(async (): Promise<StagePatchBroadcastResult> => ({
       status: "submitted",
       txHash,
@@ -735,10 +723,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("builds the candidate proof through case-insensitive address normalization", async () => {
-    // 造证材料大小写：候选集清单以 EIP-55 checksummed 地址登记、请求
-    // executorWallet 用大写变体——成员资格必须经小写归一命中，proof
-    // 与小写规范形态逐字节一致（否则合法执行者被误伤 fail-closed）。
-    // 全数字地址无 EIP-55 大写位，选含字母的执行者地址验证大小写归一。
     const letteredExecutor =
       "0xabc000000000000000000000000000000000de01" as Address;
     const checksummedExecutor = getAddress(letteredExecutor);
@@ -796,12 +780,7 @@ describe("stage-patches black-box adversarial", () => {
     );
   });
 
-  // ------------------------------------------------------------------
-  // 载荷边界与接受面
-  // ------------------------------------------------------------------
   it("rejects zero-valued roleHash, executorMetadataHash, and executorWallet", async () => {
-    // 零值承诺=未承诺：role/metadataHash/executor 零值必须 400
-    // invalid_body，不得备签出全零承诺的补丁。
     const { router } = await routerFixture();
     for (const overrides of [
       { roleHash: ZERO_BYTES32 },
@@ -822,10 +801,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("accepts an oversized metadataURI (documents the absent length cap)", async () => {
-    // 现状：metadataURI 只做 trim 非空校验，无长度上限——超长 URI 可
-    // 备签、digest 可计算。链下接受面不设限，把 gas 上限压力留给链上
-    // 合约与 relayer。钉住现状，评估见报告（低危：prepare 表有硬上限
-    // 兜底，非无界堆积）。
     const oversizedURI = `ipfs://stage-executor-patches/${"x".repeat(100_000)}`;
     const { router } = await routerFixture();
     const response = await router.handle({
@@ -841,9 +816,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("rejects unknown prepare fields outright instead of silently ignoring them", async () => {
-    // 请求体封闭字段集：未知字段一律 400 invalid_body——静默忽略会把
-    // "调用方以为表达了别的语义"（例如暗示非协作换人的字段名）变成一次
-    // 普通 assign 补丁且无任何提示（误导性接受面）。
     const { router } = await routerFixture();
     const response = await router.handle({
       method: "POST",
@@ -883,8 +855,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 
   it("keeps stage resource patches blocked once the target stage started (non-executor lane stays closed)", async () => {
-    // 规格 4 侧写：非协作换人不在本服务面（无入口/字段）。资源补丁车道
-    // 在目标阶段开工后同样锁定，防止借资源补丁通道变相换人面扩张。
     const { router } = await routerFixture({
       events: [...baseEvents(), targetSignalSubmittedEvent(5n)],
     });
@@ -901,10 +871,6 @@ describe("stage-patches black-box adversarial", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// 造桩（与 stage-patches.test.ts 同口径的自包含夹具）
-// ---------------------------------------------------------------------------
-
 async function routerFixture(
   options: {
     readonly executorBroadcastAdapter?: StageExecutorPatchBroadcastAdapter;
@@ -913,9 +879,9 @@ async function routerFixture(
   } = {},
 ): Promise<{
   readonly router: ApiRouter;
-  readonly store: MemoryProjectionStore;
+  readonly store: ProjectionStore;
 }> {
-  const store = new MemoryProjectionStore();
+  const store = stores.projectionStore;
   const events = options.events ?? baseEvents();
   await store.resetFromEvents({
     deploymentBlock: 0n,
@@ -942,6 +908,10 @@ async function routerFixture(
     chainId,
     stagePatchModuleAddress: contractAddress,
     dockingModuleAddress: contractAddress,
+    stageExecutorPatchStore: new InMemoryProductStagePatchStore<
+      PreparedStageExecutorPatchRecord,
+      StageExecutorPatchSubmissionDTO
+    >(),
     now: () => baseNow,
     chainClock: baseChainClock,
     prepareIdFactory: () => `prep_${++prepareCount}`,
@@ -955,7 +925,7 @@ async function routerFixture(
   });
   return {
     store,
-    router: createApiRouter(store, {
+    router: createApiRouter(store, { ...requiredRouterStores(),
       productRuntimeEnvironment: "local",
       submissionChainId: 84532,
       submissionVerifyingContract:
@@ -999,10 +969,10 @@ function prepareResourceBody(
   return {
     selectorWallet,
     targetStageId,
-    resourceKey: "invoice-pdf",
+    resourceKey: "doc-1-pdf",
     manifestHash: bytes32Hex("a11"),
     policyHash: bytes32Hex("b22"),
-    manifestURI: "ipfs://resource-manifests/invoice-v1",
+    manifestURI: "ipfs://resource-manifests/doc-1-v1",
     ...overrides,
   };
 }

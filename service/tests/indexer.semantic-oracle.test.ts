@@ -1,12 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { onchainSignalKey } from "@uvp-eth/compiler";
 import { IndexerService, type ChainEventSource } from "../src/indexer/service.js";
 import { runSemanticOracleReplay, type SemanticOraclePlan } from "../src/indexer/semantic-oracle.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { hasProjectionDiagnosticsAnomalies } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import type { Hex } from "../src/shared/types.js";
+
+let stores: ChainServicesStores;
+let databaseUrl: string;
+
+beforeAll(async () => {
+  databaseUrl = await createPostgresTestDatabase();
+  stores = createChainServicesStores({
+    database: { url: databaseUrl, migrationsAutoRun: true },
+    chainId: 31337
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
 
 const contractAddress = "0x1111111111111111111111111111111111111111";
 const planId = "0x0000000000000000000000000000000000000000000000000000000000000101";
@@ -72,8 +88,6 @@ describe("indexer semantic oracle", () => {
   });
 
   it("counts an injected semantic fork without throwing", () => {
-    // 语义分叉：链上观测到 HookReady，但事件流没有任何使该 hook 就绪的
-    // 信号——oracle 的期望面与观测面分叉，计数非零且不 crash。
     const forked = runSemanticOracleReplay(
       [...baseEvents(), hookReadyEvent(4n), hookReadyEvent(5n, "0x0000000000000000000000000000000000000000000000000000000000000313")],
       [oraclePlan()]
@@ -81,7 +95,6 @@ describe("indexer semantic oracle", () => {
     expect(forked.semanticOracleMismatchCount).toBeGreaterThan(0);
     expect(forked.semanticOracleCheckedPlanCount).toBe(1);
 
-    // 信号缺席（观测到 ready 但从未提交信号）同属分叉。
     const missingSignal = runSemanticOracleReplay(
       [baseEvents()[0]!, baseEvents()[1]!, hookReadyEvent(4n)],
       [oraclePlan()]
@@ -90,8 +103,6 @@ describe("indexer semantic oracle", () => {
   });
 
   it("excludes DELAY-carrying plans honestly instead of replaying them on a fabricated clock", () => {
-    // 索引事件流无区块时间戳：DELAY 语义需要 submittedAt/pokedAt 时钟，
-    // 喂假时钟只会制造假分叉——该 plan 整体不进喂给面，覆盖面计数为 0。
     const delayPlan = oraclePlan([
       { op: "SIGNAL", sourceId, signalId, signalKey },
       { op: "DELAY", delaySeconds: 5 }
@@ -101,7 +112,6 @@ describe("indexer semantic oracle", () => {
       semanticOracleCheckedPlanCount: 0,
       semanticOracleMismatchCount: 0,
       semanticOracleErrorCount: 0,
-      // DELAY 排除的 plan 伴随计数（覆盖面分母诚实），不算异常不进 mismatch。
       semanticOracleExcludedPlanCount: 1
     });
   });
@@ -114,16 +124,12 @@ describe("indexer semantic oracle", () => {
       semanticOracleErrorCount: 0,
       semanticOracleExcludedPlanCount: 0
     });
-    // 产物指向别的 plan：本流不可校验。
     const otherPlan = { ...oraclePlan(), planId: `0x${"ee".repeat(32)}` as Hex };
     expect(runSemanticOracleReplay(events, [otherPlan]).semanticOracleCheckedPlanCount).toBe(0);
   });
 
   it("carries the oracle counts through the indexer sync state diagnostics", async () => {
-    // 服务接线：resolveSemanticOraclePlan 产物 + 分叉事件流 → sync state
-    // 诊断携带 semanticOracleMismatchCount（>0 命中 hasProjectionDiagnostics
-    // Anomalies → /healthz operationalDegradedReasons），投影不被覆盖。
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     const events = [...baseEvents(), hookReadyEvent(4n), hookReadyEvent(5n, "0x0000000000000000000000000000000000000000000000000000000000000313")];
     const eventSource: ChainEventSource = {
       async getFinalizedBlock() {
@@ -153,7 +159,6 @@ describe("indexer semantic oracle", () => {
     });
     expect(syncState?.projectionDiagnostics?.semanticOracleMismatchCount).toBeGreaterThan(0);
     expect(hasProjectionDiagnosticsAnomalies(syncState?.projectionDiagnostics)).toBe(true);
-    // 投影以链为真：分叉只报告，链上 HookReady 事件照常投影。
     const orderKey = `31337:${contractAddress}:${planId}:${orderId}`;
     expect(result.snapshot.stateMachineOrders[orderKey]?.hooks["0x0000000000000000000000000000000000000000000000000000000000000313"]?.status).toBe("ready");
   });
@@ -195,7 +200,7 @@ function testConfig(): ChainServicesConfig {
       finalityConfirmations: 2,
       contracts: {}
     },
-    database: { driver: "memory", url: "memory://projection-store", migrationsAutoRun: false },
+    database: { url: databaseUrl, migrationsAutoRun: true },
     api: { host: "127.0.0.1", port: 8787, indexerPollIntervalMs: 5000 },
     relayer: {
       businessSigning: "forbidden",

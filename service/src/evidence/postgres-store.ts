@@ -137,11 +137,6 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
         );
         inserted = (result.rowCount ?? 0) > 0;
       } catch (error) {
-        // READ COMMITTED 下 NOT EXISTS 的检查可双过：同 owner+payload 的
-        // 并发上传败者在本事务内撞 UNIQUE (owner_participant_id,
-        // payload_hash)（23505）。这是重复上传的幂等路径而非存储故障，
-        // 按接口契约以既有记录返回，不得以 500 泄露；evidence_id 主键等
-        // 其他唯一冲突不属于该竞态，照旧上抛。
         if (
           !(error instanceof StorageConstraintError) ||
           !EVIDENCE_PAYLOAD_UNIQUE_CONSTRAINT.test(error.message)
@@ -255,9 +250,6 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
   }
 
   async markBound(input: BindEvidenceRequestDTO): Promise<EvidenceMetadataRecord | undefined> {
-    // 条件 UPDATE（CAS）：仅 uploaded 可翻转 bound——并发双绑只有一个
-    // 赢家，后到者回读既有档（同订单幂等、跨订单由服务层核验拒绝），
-    // 不再以读-改-写整行覆盖赢家的绑定归属。
     const updated = await this.#database.query(
       `UPDATE evidence_object
        SET status = 'bound',
@@ -302,7 +294,6 @@ export class PostgresEvidenceStore implements EvidenceMetadataStore {
   }
 }
 
-/** postgres 对 UNIQUE (owner_participant_id, payload_hash) 的自动命名约束。 */
 const EVIDENCE_PAYLOAD_UNIQUE_CONSTRAINT = /evidence_object_owner_participant_id_payload_hash_key/;
 
 function evidenceValues(record: EvidenceMetadataRecord) {

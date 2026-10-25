@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   compileZhixuOnchainHookPlan,
   parseZhixuDefinition,
@@ -9,12 +9,14 @@ import {
 } from "@uvp-eth/product-dto";
 import { examplePlanIds } from "./fixtures/business/index.js";
 import { createApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import {
   createGovernanceService,
   type GovernanceChainAdapter,
   type GovernanceChainRequestDTO
 } from "../src/governance/index.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import type {
   StoreCompilePreviewDTO,
   StoreZhixuDraftDTO,
@@ -22,10 +24,55 @@ import type {
   StoreZhixuDraftStore
 } from "../src/store/console/zhixu-drafts.js";
 
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
+
 const storeOperatorHeaders = {
   "x-uvp-store-operator-id": "operator-1",
   "x-uvp-store-operator-role": "store_operator",
-  // 红线：草稿流程写操作要求会话已锚定地址（本地联调 dev 锚定头）。
   "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
 };
 
@@ -66,19 +113,17 @@ spec:
     id: store-draft
   stages:
     - name: gate
-      source: buyer
-      # 自发种子入口（uvp-core 物化门：零 hook 阶段永不可物化，其
-      # sendSignals 无钩子可挂，编译器拒绝该形状）。
+      source: slot-a
       receiveSignals:
-        START: "buyer::gate.seed"
+        START: "slot-a::gate.seed"
       sendSignals: [{ name: "ready" }, { name: "seed" }]
       executor:
         supplierType: organization
         supplierID: selector-ops
     - name: intake
-      source: buyer
+      source: slot-a
       receiveSignals:
-        START: "buyer::gate.ready"
+        START: "slot-a::gate.ready"
       sendSignals: [{ name: "cmp" }]
       executor:
         supplierType: organization
@@ -97,14 +142,12 @@ spec:
     id: broken
   stages:
     - name: intake
-      source: buyer
+      source: slot-a
 `;
 
 describe("Store Zhixu draft workflow", () => {
   it("draft/schema reads and writes fail closed without identity or anchor", async () => {
-    // 匿名读取草稿/完整 Product Schema 一律 401（DTO 含 compilePreview 与
-    // 发布者创作资产）；无锚定地址的 operator 写操作 403（红线）。
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
 
     await expect(router.handle({
@@ -112,7 +155,6 @@ describe("Store Zhixu draft workflow", () => {
       pathname: `/store/zhixu-drafts/${draft.draftId}`
     })).resolves.toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
 
-    // 能力通过但会话未锚定地址：写路由 403 store_address_anchor_required。
     const unanchoredOperator = {
       "x-uvp-store-operator-id": "operator-no-anchor",
       "x-uvp-store-operator-role": "store_operator"
@@ -129,10 +171,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("zhixu submit-review is governance-admin gated, not operator level", async () => {
-    // submit-review 要求 governance_admin 能力 + 真实治理身份：
-    // operator 级（即便锚定）被能力门禁拒绝；身份解析不再把
-    // principalId/roles[0] 包装成 GovernancePrincipal。
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
 
@@ -152,9 +191,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("version activation confirmation cannot self-confirm via body claims", async () => {
-    // 期望锚只取服务端可证明的值（版本记录或链投影）；自报 planId 与
-    // confirmation.planId 自我印证、但锚未上链/未注册 → 400 mismatch。
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: [{
@@ -167,7 +204,7 @@ describe("Store Zhixu draft workflow", () => {
         args: { planId: examplePlanIds.planId, planHash: examplePlanIds.planHash, hookCount: 1n }
       }]
     });
-    const router = createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const router = createApiRouter(store, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const unregisteredPlanId = "0x" + "99".repeat(32);
     const unregisteredPlanHash = "0x" + "88".repeat(32);
 
@@ -185,7 +222,6 @@ describe("Store Zhixu draft workflow", () => {
       body: { error: "store_confirmation_mismatch" }
     });
 
-    // 与投影一致的锚 + 正确 confirmation 可通过（期望值经投影证明）。
     const activated = await router.handle({
       method: "POST",
       pathname: `/store/zhixu-series/series-x/versions/v-ok/activate`,
@@ -200,7 +236,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("imports a Zhixu draft without adding it to the public Product catalog", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
 
     expect(draft).toMatchObject({
@@ -217,8 +253,8 @@ describe("Store Zhixu draft workflow", () => {
       .resolves.toMatchObject({ status: 200, body: { draft: { draftId: draft.draftId, status: "imported" } } });
   });
 
-  it("exposes V3 publish metadata for a compiled draft", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+  it("exposes publish metadata for a compiled draft", async () => {
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
     const response = await router.handle({
@@ -237,7 +273,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("fails Store metadata writes closed when the draft store is unavailable", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       storeZhixuDraftStore: new FailingStoreZhixuDraftStore()
     });
 
@@ -263,7 +299,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("produces deterministic compile previews for DSL and manifest imports", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const yamlDraft = await importDraft(router);
     const first = await compileDraft(router, yamlDraft.draftId);
     const second = await compileDraft(router, yamlDraft.draftId);
@@ -303,7 +339,7 @@ describe("Store Zhixu draft workflow", () => {
 
 
   it("records compile failures and blocks review submission", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router, { content: invalidZhixuYaml });
     const compiled = await compileDraft(router, draft.draftId);
 
@@ -322,7 +358,7 @@ describe("Store Zhixu draft workflow", () => {
   });
 
   it("persists an approved Store review", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
 

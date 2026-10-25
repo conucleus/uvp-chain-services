@@ -1,8 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import {
   capabilitiesRootOf,
@@ -26,6 +22,7 @@ import {
 } from "../src/submissions/capability-proofs.js";
 import { privateKeyToAccount } from "viem/accounts";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import type { ChainServicesRuntimeEnv } from "../src/config/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import {
@@ -51,9 +48,60 @@ import {
   type StagePatchBroadcastResult,
   type StageResourcePatchBroadcastAdapter,
   type StageResourcePatchSubmissionDTO,
-  SqliteProductStagePatchStore,
+  PostgresProductStagePatchStore,
 } from "../src/stage-patches/index.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import type { ProjectionStore } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+let stagePatchDatabaseUrl: string;
+
+beforeAll(async () => {
+  stagePatchDatabaseUrl = await createPostgresTestDatabase();
+  stores = createChainServicesStores({
+    database: { url: stagePatchDatabaseUrl, migrationsAutoRun: true },
+    chainId: 31337
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 import {
   normalizeAddress,
   type Address,
@@ -70,8 +118,6 @@ const planHash =
 const linkedPlanId = bytes32Hex("102");
 const linkedPlanHash =
   "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" as Hex;
-// 产物体内部身份（canonical 载荷哈希）——与链事件携带的 runtime 域
-// planHash 异值；schema 的链侧身份在 artifactHash 字段。
 const canonicalPlanHash =
   "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Hex;
 const orderId = bytes32Hex("202");
@@ -84,8 +130,8 @@ const targetStageOnchainId =
   "0x26cc04b18410316cea7364178848d74c4c4cdbec93b7497a57eec8a6f7f49fbc" as Hex;
 const selectorHookId = bytes32Hex("303");
 const selectorHookName = bytes32Text("select-executor");
-const selectorRoleSlotId = "buyer-selector";
-const resourceControllerRoleSlotId = "buyer-resource-controller";
+const selectorRoleSlotId = "slot-a-selector";
+const resourceControllerRoleSlotId = "slot-a-resource-controller";
 const executorPatchSignalId =
   "0xbbb1770c9313f4029a89e03f4719037cdad52864ab4da5f623bc7c8a0c489e97" as Hex;
 const resourcePatchSignalId =
@@ -97,7 +143,7 @@ const resourcePatchHash = bytes32Hex("606");
 const txHash = bytes32Hex("707");
 const manifestHash = bytes32Hex("a11");
 const policyHash = bytes32Hex("b22");
-const resourceKey = "invoice-pdf";
+const resourceKey = "doc-1";
 const selectorAccount = privateKeyToAccount(
   "0x1111111111111111111111111111111111111111111111111111111111111111",
 );
@@ -116,8 +162,6 @@ const baseChainClock = { latestBlockTimestampSeconds: async () => Math.floor(bas
 
 describe("stage executor/resource patch Product API", () => {
   it("hashes resource manifests deterministically with the protocol canonical hash", () => {
-    // 两栈必须对同一 manifest 算出同一 hash——chain-services 的
-    // helper 直接委托 protocol-bindings 的 canonical 实现（domain + normalization）。
     const manifest: ResourceManifestV1 = {
       schemaVersion: "uvp-resource-manifest-v1",
       orderId,
@@ -147,13 +191,10 @@ describe("stage executor/resource patch Product API", () => {
 
     const left = hashResourceManifest(manifest);
     expect(left).toBe(hashResourceManifest(reordered));
-    // parity：与 protocol-bindings 直接导出的实现逐字节一致。
     expect(left).toBe(hashProtocolResourceManifest(manifest));
   });
 
   it("accepts reordered prepared envelopes when comparing canonical typed data", async () => {
-    // 广播装配为 submitted：本测试关注提交前的 canonical typed data
-    // 比较，不把 not_attempted 200 假成功路径当作断言对象。
     const broadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => ({
         status: "submitted",
@@ -189,7 +230,6 @@ describe("stage executor/resource patch Product API", () => {
         expect(request.recoveredSelector).toBe(selectorWallet);
         expect(request.previousExecutorSignature).toBeUndefined();
         expect(JSON.stringify(request.prepared)).not.toContain("fileResources");
-        // UB-36①②③：候选集成员证明 + 冻结授权集随广播携带（合约新尾参）。
         expect(request.candidateProof).toEqual(
           executorCandidateProofFor(
             [{ stageId: targetStageId, executor: executorWallet }],
@@ -247,8 +287,6 @@ describe("stage executor/resource patch Product API", () => {
         primaryType: "UVPStagePatchModuleStageExecutorPatch",
       },
     });
-    // UB-36①：digest 面携带授权集哈希——authorizationsHash 进摘要
-    //（= hashSignalAuthorizations(推导集)，selector 签名覆盖授权集）。
     expect(prepared.typedData.message).toMatchObject({
       mode: prepared.modeHash,
       previousExecutor: "0x0000000000000000000000000000000000000000",
@@ -293,8 +331,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("rejects a previous-executor signature attached to a non-handoff patch before broadcasting", async () => {
-    // 与合约同口径：前任签名只在 handoff 是授权材料，其他模式附带即拒
-    // ——静默放行会让调用方误以为签名参与了授权，广播也在链上必 revert。
     const broadcast = vi.fn(async (): Promise<StagePatchBroadcastResult> => ({
       status: "submitted",
       txHash,
@@ -330,11 +366,8 @@ describe("stage executor/resource patch Product API", () => {
     const birthStageSchema = (triggerKind: string): StoreProductSchemaDTO => ({
       ...productSchemaFixture(),
       onchainHookPlanArtifact: {
-        // 消费处按单源常量断言 schemaVersion（A-39）：桩产物同样携带。
         schemaVersion: ONCHAIN_HOOK_PLAN_SCHEMA_VERSION,
         compiledHooks: [
-          // 产物键位：stageId 是标识符 keccak、stageIdentifier 是原文——
-          // 补丁目标以标识符右补齐 bytes32 形态进来，两种形态都可命中。
           { stageId: targetStageOnchainId, stageIdentifier: "target.stage", orderTriggerKind: triggerKind }
         ]
       } as StoreProductSchemaDTO["onchainHookPlanArtifact"],
@@ -359,7 +392,6 @@ describe("stage executor/resource patch Product API", () => {
       status: 409,
       body: { error: "executor_patch_forbidden_on_birth_stage" },
     });
-    // 同锚的 dock 出生阶段同样拒绝。
     const dockRouter = (await routerFixture({
       executorBroadcastAdapter: broadcastAdapter,
       productSchema: birthStageSchema("dock"),
@@ -380,7 +412,6 @@ describe("stage executor/resource patch Product API", () => {
       status: 409,
       body: { error: "executor_patch_forbidden_on_birth_stage" },
     });
-    // 非出生阶段（orderTriggerKind=none）不误伤：正常提交并广播。
     const plainRouter = (await routerFixture({
       executorBroadcastAdapter: broadcastAdapter,
       productSchema: birthStageSchema("none"),
@@ -500,8 +531,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("rejects executor patch modes outside the assign/handoff vocabulary", async () => {
-    // patch 词表封闭为 assign/handoff：词表外的 mode 一律 400 拒识，
-    // 非协作换人走 fork 车道。
     const { router } = await routerFixture({
       events: [...baseEvents(), targetSignalSubmittedEvent(5n)],
     });
@@ -516,9 +545,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("fails closed on executor patches when the plan candidate list is unavailable", async () => {
-    // UB-36②③：无候选集（EMPTY_ROOT）或清单不可富集（产物未携带候选集）
-    // 的计划没有逐单换人面——合约 StageExecutorNotCandidate 恒拒，服务端
-    // fail-closed 拒绝 prepare/submit，不发必 revert 的交易。
     const emptyCandidates = registerPlanVocabulary({
       selectorBindings: [{ selectorStageId, targetStageId }],
       signalCapabilities: [{
@@ -543,7 +569,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("fails closed when the executor is outside the plan candidate set for the target stage", async () => {
-    // 候选集外没有任何人（包括 creator 指定）可以成为逐单执行者。
     const strangerCandidates = registerPlanVocabulary({
       selectorBindings: [{ selectorStageId, targetStageId }],
       signalCapabilities: [{
@@ -608,7 +633,7 @@ describe("stage executor/resource patch Product API", () => {
       manifestHash,
       policyHash,
       patchNonce: "1",
-      manifestURI: "ipfs://resource-manifests/invoice-v1",
+      manifestURI: "ipfs://resource-manifests/doc-1",
       status: "prepared",
       typedData: {
         primaryType: "UVPStagePatchModuleStageResourcePatch",
@@ -631,8 +656,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("records a persist_failed fallback with the txHash on the resource patch path when the store write fails after broadcast", async () => {
-    // 同 executor patch 路径：广播拿到 txHash 后的落库失败不得释放
-    // nonce，且必须补一条带 txHash 的 persist_failed 档案。
     const innerBroadcast: StageResourcePatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => ({
         status: "submitted",
@@ -660,7 +683,7 @@ describe("stage executor/resource patch Product API", () => {
       },
       getSubmission: (submissionId) => inner.getSubmission(submissionId),
     };
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: baseEvents(),
@@ -677,7 +700,7 @@ describe("stage executor/resource patch Product API", () => {
       stageResourcePatchStore: flakyStore,
       broadcastAdapter: innerBroadcast,
     });
-    const router = createApiRouter(store, {
+    const router = createApiRouter(store, { ...requiredRouterStores(),
       productRuntimeEnvironment: "local",
       submissionChainId: 84532,
       submissionVerifyingContract:
@@ -711,8 +734,6 @@ describe("stage executor/resource patch Product API", () => {
       retryable: false,
     });
 
-    // nonce 不释放：重试撞 duplicate_stage_resource_patch_nonce，不会
-    // 二次广播。
     const retried = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/submit-stage-resource-patch`,
@@ -729,8 +750,8 @@ describe("stage executor/resource patch Product API", () => {
       runtimeEnvironment: "production",
     });
     for (const manifestURI of [
-      "https://files.example/invoice.pdf",
-      "invoice-manifest.json",
+      "https://files.example/doc-1.pdf",
+      "doc-1-manifest.json",
     ]) {
       const response = await router.handle({
         method: "POST",
@@ -878,8 +899,6 @@ describe("stage executor/resource patch Product API", () => {
     });
 
     const duplicate = await routerFixture({
-      // 首次提交必须真实消费 prepare（not_attempted 已改为不消费），
-      // 才能钉住"同一 prepareId 二次提交 409"的重复拒绝。
       executorBroadcastAdapter: {
         broadcast: async (): Promise<StagePatchBroadcastResult> => ({
           status: "submitted",
@@ -916,12 +935,8 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("ties the selector wallet to the session-anchored address and rejects mismatched claims", async () => {
-    // 授权探测 oracle 收口（对照 submissions 路由）：selectorWallet 取自
-    // body 时可用任意（任务,钱包）组合探测 201/403——锚定地址为真源，
-    // 自报不一致即 403，不再进入授权求值。
     const { router } = await routerFixture({ devAnchoredAuth: true });
     const anchoredHeaders = { "x-uvp-store-dev-anchored-address": selectorWallet };
-    // 锚定一致：正常 201。
     const aligned = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
@@ -930,7 +945,6 @@ describe("stage executor/resource patch Product API", () => {
     });
     expect(aligned.status).toBe(201);
 
-    // 锚定不一致：403 wrong_wallet，不落入授权求值。
     await expect(router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
@@ -943,10 +957,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("fails loudly with a reusable prepare when the resource patch relayer is disabled", async () => {
-    // cannot broadcast 不得消费 prepare/nonce（submissions 主路径契约）：
-    // not_attempted 必须响亮失败（503 可重试错误信封），同一 prepareId
-    // 在装配广播后原签名重投成功——旧行为 200 假成功 + 烧毁 prepare +
-    // 楔死 nonce 是本缺陷本身。
     let broadcastCalls = 0;
     const broadcast: StageResourcePatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => {
@@ -996,7 +1006,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("fails loudly with a reusable prepare when the executor patch relayer is disabled", async () => {
-    // executor patch 同口径：not_attempted 释放 nonce、不烧毁 prepare。
     let broadcastCalls = 0;
     const broadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => {
@@ -1046,8 +1055,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("releases the reserved patch nonce when broadcast throws so the same prepareId stays retryable", async () => {
-    // broadcast 在 nonce 已 reserve 后抛错（模拟瞬时 RPC 故障），
-    // nonce 必须被释放，否则同一 prepareId 重试会永久 409 duplicate nonce。
     let broadcastCalls = 0;
     const broadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => {
@@ -1086,8 +1093,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("reopens the same prepare after a retryable broadcast result without txHash", async () => {
-    // failed(retryable=true) 代表尚未拿到链上交易，不能消费
-    // prepareId；第二次提交应复用原签名和 nonce，而不是 409。
     let broadcastCalls = 0;
     const broadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => {
@@ -1139,10 +1144,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("resolves a duplicate-transaction broadcast through the shared receipt probe", async () => {
-    // 三车道从 relayer 下沉后的在役消费：writeContract 报 "already known"
-    // 且携带候选 txHash 时，先探回执——探到成功按 submitted 落账（nonce 已
-    // 被链上消费，不再放行重试）；探不到回执保持 transaction_receipt_unknown
-    // 可重试并保留候选哈希（nonce 不释放、reconcile 通道可查）。
     const duplicateTx = bytes32Hex("e0e");
     const receipts = new Map<string, { status?: "success" | "reverted" | string; blockNumber?: bigint }>();
     const writeContract = vi.fn(async () => {
@@ -1172,8 +1173,6 @@ describe("stage executor/resource patch Product API", () => {
       signature: await signExecutorPrepared(prepared),
     };
 
-    // 回执未产出：可重试的 receipt_unknown，候选哈希随提交落账（prepare
-    // 被消费、nonce 不释放——链上可能已持有，收口交给 reconcile 通道）。
     await expect(router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
@@ -1188,9 +1187,6 @@ describe("stage executor/resource patch Product API", () => {
       }
     });
 
-    // 回执挖出且成功：车道自愈——同 stage 的补丁 nonce 已被 receipt_unknown
-    // 行持有（服务面 409 是正确防御），直接驱动 adapter 验证探针闭环
-    // submitted（带候选哈希与块高）。
     receipts.set(duplicateTx, { status: "success", blockNumber: 61n });
     const healedPrepared = await prepareStageExecutorPatch(router, {
       metadataURI: "ipfs://stage-executor-patches/2"
@@ -1199,7 +1195,6 @@ describe("stage executor/resource patch Product API", () => {
       prepared: healedPrepared,
       signature: await signExecutorPrepared(healedPrepared),
       recoveredSelector: selectorWallet,
-      // 服务 submit 路径同款造证材料（真实流由服务端从投影构造）。
       bindingProof: { selectorStageId: healedPrepared.selectorStageId, proof: [] },
       candidateProof: [],
       executorAuthorizations: healedPrepared.executorAuthorizations
@@ -1211,11 +1206,6 @@ describe("stage executor/resource patch Product API", () => {
     expect(writeContract).toHaveBeenCalledTimes(2);
   });
 
-  // ---- 执行者治理镜像（合约 UVPStagePatchModule._stageSignalState 同构）----
-  // 编译 plan 事实键（keccak 形态）：事实键是
-  // (keccak256(source), keccak256(signalName))，夹具不得把 utf8 stageId
-  // 兼任事实 sourceId——那只建模了 source==stageId 的回退形态，会让
-  // 治理规则漂移绕过夹具的拦截。
   const compiledTargetStageIdentifier = "target.stage";
   const compiledFactSource = "origin.stage";
   const compiledFactSignalName = "origin.handoff-proof";
@@ -1224,8 +1214,6 @@ describe("stage executor/resource patch Product API", () => {
   function compiledPlanEvents(
     extraSignals: readonly ChainEvent[],
   ): readonly ChainEvent[] {
-    // 编译 plan 词表（富集源）：selector→target 绑定 + selector 阶段事实键
-    // + 目标阶段 relation=0 事实键（两键同源，构造同秒平局场景）。
     const vocabulary = registerPlanVocabulary({
       selectorBindings: [{ selectorStageId, targetStageId: targetStageOnchainId }],
       signalCapabilities: [
@@ -1281,9 +1269,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("gates assign on compiled-plan capability fact keys whose source differs from the stage id", async () => {
-    // 回归：事实键 (keccak(source), keccak(signalName)) 命中能力表——
-    // sourceId != targetStageId 仍计入进度。旧服务层只统计回退形态，
-    // assign 预检恒放行、白烧签名（链上 StageAlreadyHasSignal 必拒）。
     const { router } = await routerFixture({
       events: compiledPlanEvents([
         compiledFactSignalEvent(5n, previousExecutorWallet),
@@ -1303,7 +1288,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("lets the first handoff through on compiled-plan fact keys (previously a spurious 409)", async () => {
-    // 回归：真实 plan 第一步 handoff 不再被 target_stage_not_started 拒绝。
     const { router } = await routerFixture({
       events: compiledPlanEvents([
         compiledFactSignalEvent(5n, previousExecutorWallet),
@@ -1344,7 +1328,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("keeps the fallback form working alongside compiled-plan facts with one latest submitter", async () => {
-    // 混排（回退形态 + 编译形态）且末位提交者一致：不歧义，handoff 可备签。
     const { router } = await routerFixture({
       events: compiledPlanEvents([
         compiledFactSignalEvent(5n, previousExecutorWallet),
@@ -1372,8 +1355,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("fails closed when the two fact flows disagree on the latest submitter (previous_executor_ambiguous)", async () => {
-    // 镜像合约 _stageSignalState 的跨流 fail-closed：能力流末位与回退流
-    // 末位不一致 → 无法定序"上一执行者"。
     const { router } = await routerFixture({
       events: compiledPlanEvents([
         compiledFactSignalEvent(5n, previousExecutorWallet),
@@ -1405,8 +1386,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("fails closed on a same-block tie between different submitters within the capability flow", async () => {
-    // 同块 ⟹ 同一 block.timestamp（合约同秒）：并列不同提交者时合约
-    // StagePreviousExecutorAmbiguous 必拒，服务层同口径给可解释错误。
     const { router } = await routerFixture({
       events: compiledPlanEvents([
         compiledFactSignalEvent(5n, previousExecutorWallet, compiledFactSignalName, 0),
@@ -1451,8 +1430,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("keeps the applied overlay executor authoritative over an ambiguous signal history", async () => {
-    // 合约 activePatch.exists 分支：在任 patch executor 是权威"上一执行者"，
-    // 不回退到末位提交者、不受歧义影响。
     const { router } = await routerFixture({
       events: [
         ...compiledPlanEvents([
@@ -1486,10 +1463,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("records a persist_failed fallback with the txHash and keeps the nonce consumed when the store write fails after broadcast", async () => {
-    // 广播已返回 txHash 后的落库失败：不得释放 nonce（链上交易可能已
-    // 占用，重试会二次广播），且必须尽力补一条带 txHash 的
-    // persist_failed 档案——链上哈希零留痕会让已上链交易从台账消失
-    //（对齐 submissions 主路径的同款兜底）。
     const innerBroadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => ({
         status: "submitted",
@@ -1517,7 +1490,7 @@ describe("stage executor/resource patch Product API", () => {
       },
       getSubmission: (submissionId) => inner.getSubmission(submissionId),
     };
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: baseEvents(),
@@ -1534,7 +1507,7 @@ describe("stage executor/resource patch Product API", () => {
       stageExecutorPatchStore: flakyStore,
       broadcastAdapter: innerBroadcast,
     });
-    const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+    const router = createApiRouter(store, { ...requiredRouterStores(),  productRuntimeEnvironment: "local",
 
       submissionChainId: 84532,
       submissionVerifyingContract:
@@ -1561,8 +1534,6 @@ describe("stage executor/resource patch Product API", () => {
       body: submitBody,
     })).rejects.toThrow("simulated durable patch store outage");
 
-    // 第一次 putSubmission 抛错，catch 中的尽力落档补上带 txHash 的
-    // persist_failed 档案——链上哈希不零留痕，对账可凭哈希追。
     expect(putSubmissionCalls).toBe(2);
     await expect(inner.getSubmission("sub_1")).resolves.toMatchObject({
       status: "failed",
@@ -1572,8 +1543,6 @@ describe("stage executor/resource patch Product API", () => {
       retryable: false,
     });
 
-    // nonce 未释放：同一 prepareId 重试撞 duplicate_stage_executor_patch_nonce
-    //（409），不会二次广播；补单交给 reconcile 从链上回执对账。
     const retried = await router.handle({
       method: "POST",
       pathname: `/product/tasks/${selectorTaskId()}/submit-stage-executor-patch`,
@@ -1587,8 +1556,6 @@ describe("stage executor/resource patch Product API", () => {
   });
 
   it("releases the reserved patch nonce when the broadcast throws before producing a txHash so the same prepareId stays retryable", async () => {
-    // 尚未拿到 txHash 的失败（RPC 抛错/存储写入抛错）必须释放
-    // nonce，同一 prepareId 在瞬时故障后仍可重试。
     const broadcastCalls = { count: 0 };
     const innerBroadcast: StageExecutorPatchBroadcastAdapter = {
       broadcast: async (): Promise<StagePatchBroadcastResult> => {
@@ -1599,7 +1566,7 @@ describe("stage executor/resource patch Product API", () => {
         return { status: "submitted", txHash };
       },
     };
-    const store = new MemoryProjectionStore();
+    const store = stores.projectionStore;
     await store.resetFromEvents({
       deploymentBlock: 0n,
       events: baseEvents(),
@@ -1619,7 +1586,7 @@ describe("stage executor/resource patch Product API", () => {
       >(),
       broadcastAdapter: innerBroadcast,
     });
-    const router = createApiRouter(store, {  productRuntimeEnvironment: "local",
+    const router = createApiRouter(store, { ...requiredRouterStores(),  productRuntimeEnvironment: "local",
 
       submissionChainId: 84532,
       submissionVerifyingContract:
@@ -1671,26 +1638,21 @@ async function routerFixture(
     readonly productBffStore?: ProductBffStore;
     readonly productSchema?: StoreProductSchemaDTO;
     readonly explicitModuleAddresses?: boolean;
-    /** 本地联调 dev 锚定头（钱包会话叠加层）开关。 */
     readonly devAnchoredAuth?: boolean;
   } = {},
 ): Promise<{
   readonly router: ApiRouter;
-  readonly store: MemoryProjectionStore;
+  readonly store: ProjectionStore;
 }> {
-  const store = new MemoryProjectionStore();
+  const store = stores.projectionStore;
   const events = options.events ?? baseEvents();
   await store.resetFromEvents({
     deploymentBlock: 0n,
     events,
-    // 词表产物富集：按事件流锚定的 capabilitiesRoot 取注册表夹具。
     planCapabilityTables: planCapabilityTablesFor(events),
   });
   const productSchemaResolver = options.productSchema
     ? {
-        // 生产口径：入参 planHash 是链侧身份（runtime 域），join 锚
-        // schema.artifactHash——schema.planHash 是 canonical 载荷哈希，
-        // 两者异值时 canonical 不得命中。
         getProductSchemaByPlan: async (
           requestedPlanId: string,
           requestedPlanHash: string,
@@ -1717,6 +1679,14 @@ async function routerFixture(
           dockingModuleAddress: contractAddress,
         }
       : {}),
+    stageExecutorPatchStore: new InMemoryProductStagePatchStore<
+      PreparedStageExecutorPatchRecord,
+      StageExecutorPatchSubmissionDTO
+    >(),
+    stageResourcePatchStore: new InMemoryProductStagePatchStore<
+      PreparedStageResourcePatchRecord,
+      StageResourcePatchSubmissionDTO
+    >(),
     now: () => baseNow,
     chainClock: baseChainClock,
     prepareIdFactory: () => `prep_${++prepareCount}`,
@@ -1739,7 +1709,7 @@ async function routerFixture(
   });
   return {
     store,
-    router: createApiRouter(store, { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    router: createApiRouter(store, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productStageExecutorPatchService: executorService,
       productStageResourcePatchService: resourceService,
       ...(options.devAnchoredAuth
@@ -1814,7 +1784,7 @@ function prepareResourceBody(
     resourceKey,
     manifestHash,
     policyHash,
-    manifestURI: "ipfs://resource-manifests/invoice-v1",
+    manifestURI: "ipfs://resource-manifests/doc-1",
     ...overrides,
   };
 }
@@ -1881,7 +1851,7 @@ async function productStoreFixture(
       businessType: "stage-patch",
       goods: [],
       totalAmount: "0",
-      currency: "USDC",
+      currency: "tok-1",
       status: "triggered",
       createdAt: baseNow.toISOString(),
       updatedAt: baseNow.toISOString(),
@@ -1954,8 +1924,8 @@ function productSchemaFixture(): StoreProductSchemaDTO {
     roleSlots: [
       {
         slotId: selectorRoleSlotId,
-        title: "Buyer selector",
-        label: "Buyer selector",
+        title: "Slot-a selector",
+        label: "Slot-a selector",
         duty: "Select executor",
         evidence: [],
         status: "required",
@@ -1964,8 +1934,8 @@ function productSchemaFixture(): StoreProductSchemaDTO {
       },
       {
         slotId: resourceControllerRoleSlotId,
-        title: "Buyer resource controller",
-        label: "Buyer resource controller",
+        title: "Slot-a resource controller",
+        label: "Slot-a resource controller",
         duty: "Control resources",
         evidence: [],
         status: "required",
@@ -1974,14 +1944,14 @@ function productSchemaFixture(): StoreProductSchemaDTO {
       },
     ],
 
-    businessPersonaLabels: ["buyer"],
+    businessPersonaLabels: ["slot-a"],
     stages: [
       {
         stageId: "selector.stage",
         index: 1,
         name: "Selector",
         evidence: [],
-        ownerRole: "buyer",
+        ownerRole: "slot-a",
         status: "done",
         updatedAt: baseNow.toISOString(),
         stageKind: "control",
@@ -2011,11 +1981,6 @@ function productSchemaFixture(): StoreProductSchemaDTO {
   };
 }
 
-/**
- * 词表产物富集夹具（两表的来源）：baseEvents/compiledPlanEvents
- * 构造的两步发布事件携带 capabilitiesRoot，resetFromEvents 按 root 从本
- * 注册表取富集源（与生产路径同口径：applyPlanFinalized 断言后填表）。
- */
 const vocabularyRegistry = new Map<string, PlanCapabilityTablesInput>();
 
 interface VocabularyFixture extends PlanCapabilityTablesInput {
@@ -2031,7 +1996,6 @@ function registerPlanVocabulary(tables: {
     readonly signalId: Hex;
     readonly targetOrderRelation: 0 | 1;
   }[];
-  /** 候选集清单（UB-36②③）；缺省按绑定目标阶段 + 夹具执行者构造。 */
   readonly executorCandidates?: readonly { readonly stageId: Hex; readonly executor: Address }[];
 }): VocabularyFixture {
   const signalCapabilities = tables.signalCapabilities ?? [];
@@ -2058,7 +2022,6 @@ function registerPlanVocabulary(tables: {
   };
 }
 
-/** 事件流内 PlanCommitted/PlanFinalized 锚定的 root → 富集源注册表命中。 */
 function planCapabilityTablesFor(events: readonly ChainEvent[]): readonly PlanCapabilityTablesInput[] {
   const roots = new Set(events
     .filter((event) => event.eventName === "PlanCommitted" || event.eventName === "PlanFinalized")
@@ -2074,7 +2037,6 @@ function baseEvents(
     readonly includeSelectorTaskAuthorization?: boolean;
     readonly selectorStageId?: Hex;
     readonly targetStageId?: Hex;
-    /** 发布事件携带的词表（capabilitiesRoot 与两表配对）；缺省按 selector/target 键构造。 */
     readonly vocabulary?: VocabularyFixture;
   } = {},
 ): readonly ChainEvent[] {
@@ -2093,9 +2055,6 @@ function baseEvents(
     }]
   });
   return [
-    // 两步发布（v0.11 真实链序）：commit 交易 PlanCommitted →
-    // PlanPublisherRecorded，finalize 交易 PlanFinalized → PlanRegistered；
-    // 词表 Merkle 化进 capabilitiesRoot，两表经 resetFromEvents 富集。
     chainEvent(1n, "PlanCommitted", {
       planId,
       planHash,
@@ -2105,7 +2064,6 @@ function baseEvents(
       hookCount: 1n,
       dockRoutesRoot: bytes32Hex("807"),
       dockInterfaceRoot: bytes32Hex("808"),
-      // UB-36②③：候选集 root 随 commit 广播，清单从注册表富集。
       executorCandidatesRoot: vocabulary.executorCandidatesRoot,
     }),
     chainEvent(1n, "PlanPublisherRecorded", {
@@ -2330,15 +2288,12 @@ describe("stage patch prepare table bounds", () => {
       deadline: deadlineSeconds
     }) as unknown as PreparedStageExecutorPatchRecord;
 
-    // 过期清扫：deadline 已过的 prepare 被删除。
     await store.putPrepared(preparedAt(0, "1"));
     await store.putPrepared(preparedAt(1, String(Math.floor(current.getTime() / 1000) + 600)));
     await expect(store.deleteExpiredPrepared(String(Math.floor(current.getTime() / 1000)))).resolves.toBe(1);
     await expect(store.getPrepared("prep_0")).resolves.toBeUndefined();
     await expect(store.getPrepared("prep_1")).resolves.toBeDefined();
 
-    // 硬上限：到顶后先清过期，仍满按最早 deadline 淘汰——表大小不随
-    // 未鉴权写入无界增长。
     for (let index = 2; index < MEMORY_PREPARED_PATCH_HARD_LIMIT + 2; index += 1) {
       await store.putPrepared(preparedAt(index, String(Math.floor(current.getTime() / 1000) + 600)));
     }
@@ -2347,27 +2302,18 @@ describe("stage patch prepare table bounds", () => {
   });
 });
 
-describe("stage patch durable store (sqlite)", () => {
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  const tempDir = mkdtempSync(join(tmpdir(), "uvp-stage-patch-store-"));
-  afterAll(() => {
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-
+describe("stage patch durable store (postgres)", () => {
   function openStore() {
-    return new SqliteProductStagePatchStore<
+    return new PostgresProductStagePatchStore<
       PreparedStageExecutorPatchRecord,
       StageExecutorPatchSubmissionDTO
     >({
-      databaseUrl: `sqlite://${join(tempDir, "stage-patch.sqlite3")}`,
-      patchKind: "executor",
-      migrations: { autoRun: true, directory: resolve(__dirname, "../migrations") }
+      databaseUrl: stagePatchDatabaseUrl,
+      patchKind: "executor"
     });
   }
 
   it("persists prepared/submission/nonce state across restarts and reserves nonces cross-instance", async () => {
-    // prepared 签名载荷与 nonce 预留不得依赖进程内存——重启后已签名
-    // prepare 仍可提交；多实例共享库时 nonce 预留由唯一键承担。
     const first = openStore();
     const prepared: PreparedStageExecutorPatchRecord = {
       prepareId: "prep_restart_1",
@@ -2379,7 +2325,6 @@ describe("stage patch durable store (sqlite)", () => {
     } as unknown as PreparedStageExecutorPatchRecord;
     await first.putPrepared(prepared);
     expect(await first.reserveNonce(prepared.nonceKey)).toBe(true);
-    // 同一 nonce 第二次预留（另一实例视角）必须失败。
     expect(await first.reserveNonce(prepared.nonceKey)).toBe(false);
     await first.putSubmission({
       submissionId: "sub_restart_1",
@@ -2388,7 +2333,6 @@ describe("stage patch durable store (sqlite)", () => {
     await first.markPreparedUsed(prepared.prepareId, "sub_restart_1", "2026-09-08T00:00:00Z");
     await first.close();
 
-    // "重启"：新连接同一库文件，状态必须仍在。
     const second = openStore();
     try {
       const restored = await second.getPrepared("prep_restart_1");
@@ -2400,13 +2344,10 @@ describe("stage patch durable store (sqlite)", () => {
       await expect(second.getSubmission("sub_restart_1")).resolves.toMatchObject({
         submissionId: "sub_restart_1"
       });
-      // nonce 预留跨实例仍生效；释放后可再预留。
       await expect(second.reserveNonce("executor:31337:0xabc:1")).resolves.toBe(false);
       await second.releaseNonce("executor:31337:0xabc:1");
       await expect(second.reserveNonce("executor:31337:0xabc:1")).resolves.toBe(true);
 
-      // 持久表清扫：过期 prepare 按 deadline 列删除，
-      // 存活行不受影响——每行数 KB（含完整 typedData）的表不无界堆叠。
       await second.putPrepared({
         ...prepared,
         prepareId: "prep_restart_expired",

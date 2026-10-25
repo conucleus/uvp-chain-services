@@ -1,10 +1,18 @@
 import { parseStorageJson, stringifyStorageJson } from "../storage/json.js";
 import { PostgresDatabase } from "../storage/postgres-client.js";
 import { rowObject } from "../storage/postgres-rows.js";
-import type { BroadcastDedupeState, BroadcastDedupeStore } from "./broadcast-dedupe-sqlite-store.js";
 import type { SubmissionBroadcastResult } from "./types.js";
 
-export type { BroadcastDedupeState, BroadcastDedupeStore } from "./broadcast-dedupe-sqlite-store.js";
+export interface BroadcastDedupeState {
+  readonly attempts: number;
+  readonly lastResult: SubmissionBroadcastResult;
+}
+
+export interface BroadcastDedupeStore {
+  load(idempotencyKey: string): Promise<BroadcastDedupeState | undefined>;
+  save(idempotencyKey: string, state: BroadcastDedupeState): Promise<void>;
+  claimTxHash(txHash: string, idempotencyKey: string): Promise<string | undefined>;
+}
 
 export interface PostgresBroadcastDedupeStoreOptions {
   readonly databaseUrl?: string;
@@ -74,13 +82,6 @@ export class PostgresBroadcastDedupeStore implements BroadcastDedupeStore {
 
   async claimTxHash(txHash: string, idempotencyKey: string): Promise<string | undefined> {
     const normalizedTxHash = txHash.toLowerCase();
-    // 单事务 INSERT ... ON CONFLICT DO NOTHING + 随后 SELECT：并发双方在
-    // 唯一索引上串行化，后到者必然读到先到者的归属，避免"双方都视为
-    // 无归属"的撞车窗口。
-    //
-    // 契约（与 memory/sqlite 后端一致）：INSERT 抢到归属（rowCount > 0）
-    // 说明此前无既有归属，必须返回 undefined；只有撞上他人归属时才返回
-    // 归属 idempotencyKey。
     return this.#database.withTransaction(async () => {
       const claimed = await this.#database.query(
         `INSERT INTO broadcast_dedupe_tx_owner (tx_hash, idempotency_key, updated_at)

@@ -30,7 +30,7 @@ import {
   type ProductOrderTriggerBroadcastAdapter,
   type ProductOrderTriggerBroadcastResult,
 } from "./trigger.js";
-import { MemoryProductBffStore, type ProductBffStore } from "./store.js";
+import type { ProductBffStore } from "./store.js";
 import {
   factAttributionPayload,
   type PlanCapabilityTables,
@@ -73,14 +73,8 @@ export class ProductBffError extends Error {
 
 export interface ProductBffServiceOptions {
   readonly productService: ProductService;
-  readonly store?: ProductBffStore;
+  readonly store: ProductBffStore;
   readonly versionResolver?: ProductDraftVersionResolver;
-  /**
-   * 词表产物富集源（plan 投影两表）：出生事实的属主自证
-   * （birthFactAttribution）从 plan 词表造（relation=0 能力叶 proof）。
-   * 缺省或投影表空 → 全零结构，链上词表闸裁决（词表内出生事实会被
-   * InvalidSignalCapability 拒绝——出生事实必须有词表内属主证）。
-   */
   readonly resolvePlanCapabilityTables?: (
     planId: Hex
   ) => Promise<PlanCapabilityTables | undefined>;
@@ -146,7 +140,7 @@ export interface InviteWithDraft {
 export function createProductBffService(
   options: ProductBffServiceOptions,
 ): ProductBffService {
-  const store = options.store ?? new MemoryProductBffStore();
+  const store = options.store;
   const now = options.now ?? (() => new Date());
   const idScope = randomUUID().replaceAll("-", "").slice(0, 8);
   let sequence = 1;
@@ -208,14 +202,6 @@ export function createProductBffService(
     async updateDraft(draftId, input, actorWallet) {
       const current = await requireDraft(store, draftId);
       assertDraftCreator(current, actorWallet);
-      // 触发负载（payloadHash/授权）在 prepare 时点由草稿快照定形：稿行
-      // 是"链上订单从何而来"的档案，进入触发生命周期后再改内容会割裂
-      // 档案与已签名/已广播负载的对应关系，确定性拒绝而非只靠 CAS 竞态
-      // 兜底。failed 仍可编辑：重试 prepare 按当前稿重建授权，改稿重试
-      // 是失败恢复路径。ready_to_trigger（prepared）同样保持可编辑：
-      // payloadHash 已在 prepare 时点定形，这里的可编辑字段（标题/品名/
-      // 金额等档案面）不进链上负载，prepared 期编辑不改已签名面——签名
-      // 校验锚 registration 定形的 typedData，而非稿行现状。
       if (
         current.status === "triggering" ||
         current.status === "triggered" ||
@@ -251,8 +237,6 @@ export function createProductBffService(
         ...(input.notes !== undefined ? { notes: input.notes } : {}),
         updatedAt: now().toISOString(),
       };
-      // 编辑是整行覆盖写：并发状态迁移（触发/对账收敛）后，旧快照的
-      // 整行不得落库——CAS 败者按冲突拒绝，调用方回读后重试。
       if (!(await store.updateDraftIfStatus(draft, current.status))) {
         throw new ProductBffError(
           409,
@@ -310,9 +294,6 @@ export function createProductBffService(
         contact: input.contact,
         status: "invited",
       };
-      // tokenHash 为随机 token 的哈希——库中只存哈希，明文只在
-      // createInvite 响应出现一次；accept/reject 强制回呈 token 做哈希比对。
-      // inviteId 追加随机熵，不可枚举。
       const inviteToken = randomBytes(32).toString("hex");
       const invite: ProductInviteDTO = {
         inviteId: `${nextId("invite", idScope, sequence++)}_${randomBytes(8).toString("hex")}`,
@@ -326,16 +307,11 @@ export function createProductBffService(
       };
       return withProductStoreTransaction(store, async () => {
         await store.updateParticipant(invited);
-        // 过期档先翻 expired 再发新邀：单活索引只认 status，时间性过期
-        // 不在索引语义内——不翻档时旧 active 行（已过期）会挡住新邀插入。
         for (const stale of participantInvites) {
           if (stale.status === "active" && isInviteExpired(stale, now())) {
             await store.updateInvite({ ...stale, status: "expired" });
           }
         }
-        // 并发 createInvite 双双通过前置检查时，条件插入保证只有
-        // 一个 active invite 落库；败者（索引命中）由存储层映射为 false，
-        // 与存储错误 500 区分。
         if (!(await store.createInviteIfNoneActive(invite, now().toISOString()))) {
           throw new ProductBffError(
             409,
@@ -351,8 +327,6 @@ export function createProductBffService(
 
     async getInvite(inviteId, input = {}) {
       const invite = await requireInvite(store, inviteId);
-      // 预览读取受邀人联系方式与草稿金额，凭据口径与 accept/reject 一致：
-      // token 哈希比对（inviteId 是弱凭据，不可单独作为预览凭据）。
       assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const draft = await requireDraft(store, invite.draftId);
@@ -369,9 +343,6 @@ export function createProductBffService(
             walletAddress,
           )
         : undefined;
-      // 响应字段最小集：联系方式脱敏、金额按可见范围
-      // 收敛——totalAmount 只对创建者/已接受参与者（会话钱包）可见，
-      // notes/createdBy/planId 等运营字段不进预览。
       const amountVisible = walletAddress
         ? await isDraftAmountVisible(store, draft, walletAddress)
         : false;
@@ -387,15 +358,12 @@ export function createProductBffService(
 
     async acceptInvite(inviteId, input) {
       const invite = await requireAcceptableInvite(store, inviteId, now);
-      // token 哈希比对——inviteId 是弱凭据，不足以占角色槽。
       assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const acceptedWalletAddress = normalizeAddress(
         input.walletAddress,
         "walletAddress",
       );
-      // sessionWalletAddress 由路由层从会话锚定地址解析（钱包
-      // 会话签名证明或 local dev 锚定头），不取自自报头。
       const sessionWalletAddress = normalizeAddress(
         input.sessionWalletAddress,
         "sessionWalletAddress",
@@ -432,24 +400,14 @@ export function createProductBffService(
       };
       try {
         return await withProductStoreTransaction(store, async () => {
-          // 受约束的参与者写在前、invite 条件迁移在后：持久驱动同事务等价；
-          // 无事务的内存实现里，钱包冲突败者不至于先把 invite 消费成
-          // accepted。
           try {
             await store.updateParticipant(accepted);
           } catch (error) {
-            // 前置钱包查重（assertWalletCanAcceptInvite）在事务外，并发
-            // 跨槽 accept 双双通过时由存储层的一钱包一角色约束裁决。
-            // postgres 下 23505 已把当前事务打入 abort（后续语句 25P02），
-            // 事务内任何回读都以 InFailedSqlTransaction 失败——占用详情
-            // 只能等事务回滚后重读（外层 catch），这里仅上抛败者标记。
             if (!(error instanceof StorageConstraintError)) {
               throw error;
             }
             throw new WalletBoundRaceLostError();
           }
-          // 条件状态迁移（WHERE status='active'）：并发双 accept 只有一个
-          // 能落档，败者按现行状态返回冲突，不再相互覆写。
           if (!(await store.updateInviteIfActive(acceptedInvite))) {
             throw inactiveInviteError(await requireInvite(store, inviteId));
           }
@@ -464,9 +422,6 @@ export function createProductBffService(
         if (!(error instanceof WalletBoundRaceLostError)) {
           throw error;
         }
-        // 败者回读占用详情：走到这里时失败事务已被 withTransaction 回滚，
-        // 新开的读可见胜者已提交的钱包归属，与前置查重同响应 409，
-        // 不外泄存储错误。
         const binding = await inviteWalletBinding(
           store,
           invite,
@@ -492,7 +447,6 @@ export function createProductBffService(
 
     async rejectInvite(inviteId, input) {
       const invite = await requireAcceptableInvite(store, inviteId, now);
-      // reject 同样强制携带 token。
       assertInviteToken(invite, input.token);
       const participant = await requireParticipant(store, invite.participantId);
       const rejected: DraftParticipantDTO = {
@@ -507,7 +461,6 @@ export function createProductBffService(
         status: "rejected",
       };
       return withProductStoreTransaction(store, async () => {
-        // 同 accept：条件状态迁移收口并发 accept/reject 竞态。
         if (!(await store.updateInviteIfActive(rejectedInvite))) {
           throw inactiveInviteError(await requireInvite(store, inviteId));
         }
@@ -598,10 +551,6 @@ async function requireDraft(
   return draft;
 }
 
-/**
- * 草稿归属校验。createdBy 只信建单时会话锚定地址——非地址值（匿名
- * 建单兼容路径）或他人的钱包都无权修改/发邀请，fail-closed。
- */
 function assertDraftCreator(
   draft: ProductOrderDraftDTO,
   actorWallet: Address,
@@ -617,7 +566,6 @@ function assertDraftCreator(
   );
 }
 
-/** 参与者名单/草稿读取：创建者或该草稿已接受参与者。 */
 function assertDraftAffiliate(
   draft: ProductOrderDraftDTO,
   participants: readonly DraftParticipantDTO[],
@@ -650,7 +598,6 @@ function isDraftCreator(
       wallet.toLowerCase()
     );
   } catch {
-    // createdBy 不是合法地址（匿名建单）：无可验证创建者。
     return false;
   }
 }
@@ -781,7 +728,6 @@ function isInviteExpired(invite: ProductInviteDTO, now: Date): boolean {
   return Date.parse(invite.expiresAt) <= now.getTime();
 }
 
-/** invite token 的哈希口径（与 createInvite 一致）。 */
 function inviteTokenHash(token: string): `0x${string}` {
   return hashHex(`uvp:product-bff:invite:v2:${token}`);
 }
@@ -860,11 +806,6 @@ function inviteAcceptance(
   return { canAccept: true, status: "can_accept" };
 }
 
-/**
- * 预览金额可见范围：与 getDraft 的草稿归属同口径——
- * 创建者或已接受参与者的会话钱包可见 totalAmount；纯 token 持有者
- *（尚未接受邀请）不在金额可见范围。
- */
 async function isDraftAmountVisible(
   store: ProductBffStore,
   draft: ProductOrderDraftDTO,
@@ -879,7 +820,6 @@ async function isDraftAmountVisible(
   );
 }
 
-/** 预览参与者最小投影：联系方式脱敏，不回传钱包地址。 */
 function invitePreviewParticipant(
   participant: DraftParticipantDTO,
 ): ProductInvitePreviewParticipantDTO {
@@ -895,7 +835,6 @@ function invitePreviewParticipant(
   };
 }
 
-/** 预览草稿最小投影：金额按可见范围收敛，notes/planId 等不进预览。 */
 function invitePreviewDraft(
   draft: ProductOrderDraftDTO,
   amountVisible: boolean,
@@ -913,11 +852,6 @@ function invitePreviewDraft(
   };
 }
 
-/**
- * 联系方式脱敏：邮箱保留本地部分前 2 位 + 域名；
- * 电话/其他文本保留前 3 后 2；过短或空值整段遮蔽。预览只证明
- * "邀请发到了这个联系方式"，不回传原文。
- */
 function maskContact(contact: string): string {
   const trimmed = contact.trim();
   if (!trimmed) {
@@ -942,7 +876,6 @@ function inviteRolePreview(
   const roleSlot = zhixu?.roleSlots.find(
     (slot) => slot.slotId === participant.roleSlotId,
   );
-  // 发布者携带的结构化证据要求（schema roleSlot 不透明 JSON，结构化读取）。
   return {
     roleSlotId: participant.roleSlotId,
     label: roleSlot?.label ?? participant.roleLabel,
@@ -1042,9 +975,6 @@ async function refreshDraftStatus(
         ? "awaiting_participants"
         : "draft";
   const next = { ...draft, status, updatedAt: now().toISOString() };
-  // 派生状态重算是非权威写入：整行覆盖必须以"读到快照后状态未变"为
-  // 条件——否则并发触发车道刚落的 triggering/triggered 会被旧快照盖回
-  // awaiting/ready（草稿"被取消触发"而订单已在链上）。败者回读最新档。
   if (await store.updateDraftIfStatus(next, draft.status)) {
     return next;
   }
@@ -1071,9 +1001,4 @@ async function withProductStoreTransaction<T>(
   return store.withTransaction ? store.withTransaction(operation) : operation();
 }
 
-/**
- * acceptInvite 竞态败者标记：updateParticipant 撞一钱包一角色约束后，
- * postgres 事务已 abort，占用详情只能在事务回滚后重读（见 acceptInvite
- * 外层 catch），用标记把"败者"从存储错误流里区分出来。
- */
 class WalletBoundRaceLostError extends Error {}

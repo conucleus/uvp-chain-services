@@ -121,8 +121,6 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
   }
 
   async putSupplierIfReviewStatus(record: StoreSupplierMetadataRecord, expected: StoreSupplierMetadataRecord["reviewStatus"]): Promise<boolean> {
-    // 条件 upsert（CAS）：行存在且 review_status 已被并发迁移时 rowCount 0，
-    // 过期快照的整行写不得复活被运营翻案的审核态。
     const updated = await this.#database.query(
       `INSERT INTO store_supplier_metadata (
            supplier_id, supplier_subject_id, display_name, wallet,

@@ -1,22 +1,7 @@
-// 语义 oracle 接入（@uvp-eth/statemachine replayChainEvents）：把索引事件
-// 流与 plan 编译产物（compiledHooks/dependencyIndex）合成的 PlanRegistered
-// 事件一起喂给链上语义回放——oracle 对 HookStatusChanged/HookReady 观测面
-// 的期望与链上实际事件分叉即抛 ChainReplayMismatchError。投影以链为真：
-// 校验只验证并报告，不覆盖投影；mismatch 捕获计数进 sync state 诊断
-// （semanticOracleMismatchCount），非分叉抛错单独计
-// semanticOracleErrorCount，DELAY 排除的 plan 计
-// semanticOracleExcludedPlanCount（覆盖面分母诚实），不 crash 索引器。
-//
-// 事件合成手法镜像 uvp-deploy chaos/reconcile.ts 的 chainEventsFromLogs：
-// plan 族事件按产物合成 PlanRegistered，HookStatusChanged 只喂可观测态
-// （wait/cxl；ready/init 由 HookReady 观测），zhixuId 是富化键（产物 schema
-// 缺省时回退 planId 字符串，同一 plan 内一致即可）。
-//
-// 覆盖面的诚实边界：oracle 的 DELAY 语义消费链上时钟（submittedAt/
-// pokedAt），而索引事件流不携带区块时间戳——无法忠实重建时钟的
-// DELAY-carrying plan 不进喂给面（连 TimerPoked 一并跳过），否则时钟错位
-// 会制造假 mismatch。semanticOracleCheckedPlanCount 如实反映实际喂给 oracle
-// 的 plan 子集，缺产物/产物形状不可用的 plan 同样不可校验。
+// 语义 oracle（@uvp-eth/statemachine replayChainEvents）：把索引事件流与
+// plan 编译产物合成的 PlanRegistered 一起喂给链上语义回放做对拍。只验证并
+// 报告，不覆盖投影；mismatch/error/excluded 计数进 sync state 诊断。
+// 事件合成手法镜像 uvp-deploy chaos/reconcile.ts 的 chainEventsFromLogs。
 import {
   ChainReplayMismatchError,
   replayChainEvents,
@@ -31,7 +16,6 @@ import { buildActiveChainEventReplaySummary } from "./events.js";
 import { optionalBytes32Arg, optionalUintArgAsString } from "./projections/proof.js";
 import type { Hex } from "../shared/types.js";
 
-/** 链上 HookStatus 枚举 → oracle 词表（frozen v0.10：init/wait/ready/cxl）。 */
 const ORACLE_STATUS: Record<number, ChainOracleHookStatus> = {
   0: "init",
   1: "wait",
@@ -45,7 +29,6 @@ const PLAN_FAMILY_EVENT_NAMES: ReadonlySet<string> = new Set([
   "PlanRegistered"
 ]);
 
-/** oracle 喂给面的 plan 产物（防御性读取 store 域 onchainHookPlanArtifact）。 */
 export interface SemanticOraclePlan {
   readonly planId: Hex;
   readonly zhixuId: string;
@@ -70,10 +53,7 @@ export interface SemanticOraclePlan {
 export interface SemanticOracleSummary {
   readonly semanticOracleCheckedPlanCount: number;
   readonly semanticOracleMismatchCount: number;
-  /** 非分叉抛错（结构性毒流/native 运行时不可用）的单独计数：
-   * oracle 无法为投影作证 ≠ 语义分叉，不与 mismatch 混同。 */
   readonly semanticOracleErrorCount: number;
-  /** DELAY 语义排除的 plan 数（伴随 checked 计数暴露，覆盖面分母诚实）。 */
   readonly semanticOracleExcludedPlanCount: number;
 }
 
@@ -86,17 +66,6 @@ export function emptySemanticOracleSummary(): SemanticOracleSummary {
   };
 }
 
-/**
- * 语义 oracle 投影校验（纯函数）：事件流 + plan 产物 → 分叉计数。
- * - 产物缺失/形状不可用或携带 DELAY 指令的 plan 不可校验，其事件整体不进
- *   喂给面；
- * - 事件按 (chainId, contractAddress) 作用域分组回放——oracle 的订单注册
- *   键是 planId::orderId，跨部署同键喂给同一场会互相污染；
- * - ChainReplayMismatchError 捕获后按 mismatches.length 计数；其余错误
- *   （结构性毒流/native 运行时不可用）同样不 crash，单独计
- *   semanticOracleErrorCount 并交由调用方日志面携带原因——oracle 无法
- *   为投影作证（error）与语义分叉（mismatch）不同车道，不混同。
- */
 export function runSemanticOracleReplay(
   events: readonly ChainEvent[],
   plans: readonly SemanticOraclePlan[]
@@ -165,8 +134,6 @@ function semanticOracleFeedForScope(
   plans: ReadonlyMap<string, ChainOraclePlan>,
   checkedPlanIds: Set<string>
 ): ChainModeEvent[] {
-  // 订单注册表：orderId(lower) → plan（SignalSubmitted/HookStatusChanged/
-  // HookReady 的事件载荷不总带 planId，与投影同口径从注册面回填）。
   const orderPlans = new Map<string, ChainOraclePlan>();
   const feed: ChainModeEvent[] = [];
   const baseOf = (event: ChainEvent) => ({
@@ -231,7 +198,6 @@ function semanticOracleFeedForScope(
           signalId,
           signalKey: onchainSignalKey(sourceId, signalId),
           senderId: String(event.args["submitter"] ?? ""),
-          // 非 DELAY plan 的求值不消费提交时钟；固定纪元保持喂给面确定性。
           submittedAt: new Date(0).toISOString()
         });
       }
@@ -240,7 +206,6 @@ function semanticOracleFeedForScope(
     if (event.eventName === "HookStatusChanged") {
       const newStatus = statusArgOf(event.args["newStatus"]);
       if (newStatus !== 1 && newStatus !== 3) {
-        // ready/init 不可观测（ready 经 HookReady 观测），与 chaos 同口径过滤。
         continue;
       }
       const orderId = optionalBytes32Arg(event, "orderId");
@@ -285,15 +250,10 @@ function semanticOracleFeedForScope(
       }
       continue;
     }
-    // TimerPoked 只服务 DELAY hook 的链上时钟求值，DELAY plan 已整体排除。
   }
   return feed;
 }
 
-/**
- * 产物 → oracle plan 载荷的防御性换装（chaos/reconcile.ts 的指令映射同
- * 手法）：任一指令形状不可用即整 plan 不可校验（返回 undefined），不猜值。
- */
 function semanticOraclePlanPayload(plan: SemanticOraclePlan): ChainOraclePlan | undefined {
   if (!Array.isArray(plan.compiledHooks) || plan.compiledHooks.length === 0) {
     return undefined;
@@ -333,8 +293,6 @@ function semanticOraclePlanPayload(plan: SemanticOraclePlan): ChainOraclePlan | 
     if (!admission || typeof admission !== "object") {
       return undefined;
     }
-    // admissionId 缺失/非字的条目整体省略：适格面是注册门的可选投影，
-    // 省略只是不校验该门，不改变信号求值语义（链上被拒的信号本就无事件）。
     const admissionId = hexWordOf(admission.admissionId);
     if (!admissionId) {
       continue;
@@ -404,7 +362,6 @@ function hexWordOf(value: unknown): `0x${string}` | undefined {
     : undefined;
 }
 
-/** DELAY 指令消费链上时钟（索引事件流无区块时间戳），携带即不可校验。 */
 function planCarriesDelay(plan: SemanticOraclePlan): boolean {
   const instructions = [
     ...plan.compiledHooks.flatMap((hook) => hook.instructions ?? []),

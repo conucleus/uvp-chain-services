@@ -1,34 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Pool } from "pg";
 import { afterEach, describe, expect, it } from "vitest";
-import type {
-  StoreProductSchemaDTO,
-  StoreSupplierDTO,
-} from "@uvp-eth/product-dto";
-import {
-  EXAMPLE_ZHIXU_ID,
-  examplePlanIds,
-} from "./fixtures/business/index.js";
-import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
-import {
-  DOCK_TARGET_ZHIXU_ID,
-  exampleSchemaResolver,
-  dockTargetPlanIds,
-} from "./example-schema.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import type { ProjectionSnapshot } from "../src/indexer/projections/index.js";
-import { SqliteEvidenceStore } from "../src/evidence/sqlite-store.js";
-import type { EvidenceMetadataRecord } from "../src/evidence/store.js";
-import { SqliteGovernanceStore } from "../src/governance/sqlite-store.js";
-import type {
-  GovernanceReviewDTO,
-  IdentityTxLogDTO,
-} from "../src/governance/types.js";
-import { SqliteProductBffStore } from "../src/product/query/bff/sqlite-store.js";
 import type {
   DraftParticipantDTO,
   ProductInviteDTO,
@@ -37,38 +10,21 @@ import type {
 } from "../src/product/query/bff/types.js";
 import type { Address, Hex } from "../src/shared/types.js";
 import { StorageConstraintError } from "../src/storage/errors.js";
-import {
-  createChainServicesStores,
-  type ChainServicesStores,
-} from "../src/storage/factory.js";
-import {
-  listAppliedSqliteMigrations,
-  loadSqlMigrations,
-  runSqliteMigrations,
-} from "../src/storage/migrations.js";
-import { PostgresDatabase, normalizePostgresError } from "../src/storage/postgres-client.js";
-import {
-  listAppliedPostgresMigrations,
-  runPostgresMigrations,
-} from "../src/storage/postgres-migrations.js";
+import { createChainServicesStores } from "../src/storage/factory.js";
+import { normalizePostgresError } from "../src/storage/postgres-client.js";
 import { PostgresProjectionStore } from "../src/storage/postgres.js";
-import { SqliteProjectionStore } from "../src/storage/sqlite-projection-store.js";
-import {
-  openSqliteDatabase,
-  type SqliteDatabase,
-} from "../src/storage/sqlite.js";
-import type { StoreDockingSessionDTO } from "../src/store/console/docking.js";
+import type { EvidenceMetadataRecord } from "../src/evidence/store.js";
 import type {
-  StoreZhixuDraftDTO,
-  StoreZhixuDraftRecord,
-} from "../src/store/console/zhixu-drafts.js";
+  GovernanceReviewDTO,
+  IdentityTxLogDTO,
+} from "../src/governance/types.js";
+import type { StoreDockingSessionDTO } from "../src/store/console/docking.js";
+import type { StoreZhixuDraftRecord } from "../src/store/console/zhixu-drafts.js";
 import type { StoreZhixuVersionRecord } from "../src/store/console/version.js";
 import type {
   StoreSupplierAuditRecord,
   StoreSupplierMetadataRecord,
 } from "../src/store/suppliers/index.js";
-import { SqliteSubmissionStore } from "../src/submissions/sqlite-store.js";
-import { SqliteBroadcastDedupeStore } from "../src/submissions/broadcast-dedupe-sqlite-store.js";
 import { submissionStatusLabel } from "../src/submissions/service.js";
 import type {
   PreparedSubmissionRecord,
@@ -78,14 +34,8 @@ import type {
 const chainId = 31337;
 const contractAddress = "0x1111111111111111111111111111111111111111";
 const registryAddress = contractAddress as Address;
-const buyer = "0x2222222222222222222222222222222222222222";
-const seller = "0x3333333333333333333333333333333333333333";
-const adminHeaders = {
-  "x-uvp-admin-id": "store-admin",
-  "x-uvp-admin-role": "admin",
-  // 红线：草稿/供应商写路由要求会话已锚定地址（本地联调 dev 锚定头）。
-  "x-uvp-store-dev-anchored-address": "0x1234567890123456789012345678901234567890"
-};
+const slotA = "0x2222222222222222222222222222222222222222";
+const slotB = "0x3333333333333333333333333333333333333333";
 const planId =
   "0x0000000000000000000000000000000000000000000000000000000000000101";
 const planHash =
@@ -95,129 +45,17 @@ const artifactHash =
 const stateMachineOrderId =
   "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const snapshotScopeContract = "0x0000000000000000000000000000000000000000";
-const expectedMigrationVersions = [
-  "0001_projection_storage",
-  "0002_business_storage",
-  "0004_submission_attempt_operations",
-  "0005_projection_sync_state",
-  "0006_store_metadata",
-  "0007_store_product_schema",
-  "0008_store_audit",
-  "0009_product_trigger_prepare",
-  "0010_store_supplier_capability_audit",
-  "0011_canonical_chain_event_order",
-  "0012_cursor_block_hash",
-  "0013_notification_broadcast_state",
-  "0014_store_wallet_session",
-  "0015_store_listing_decoration_join",
-  "0016_submission_plan_id",
-  "0017_indexer_pending_post_commit",
-  "0018_store_governance_audit_constraints",
-  "0019_stage_patch_state",
-  "0020_store_challenge_requester_key",
-  "0021_zhixu_version_single_active",
-  "0022_product_invite_single_active",
-  "0023_participant_wallet_single_role",
-  "0024_drop_join_application_open_plan_applicant_uk",
-  "0025_product_trigger_prepared_at",
-  "0026_projection_sync_diagnostics",
-  "0027_store_listing_status_check",
-  "0028_store_entity_registration",
-  "0029_store_zhixu_draft_publisher",
-  "0030_order_requirements",
-  "0032_order_domain_v3",
-  "0035_rename_evidence_adjudicator_readers",
-];
-const routeSmokeZhixuYaml = `
-apiVersion: uvp/v0
-kind: Zhixu
-metadata:
-  name: route-durable
-  annotations:
-    version: "1"
-spec:
-  platform:
-    type: blockchain
-    provider: eth
-  nucleation:
-    id: route-durable
-  stages:
-    - name: gate
-      source: buyer
-      # BEGIN 自发种子入口（物化门：零 hook 阶段在链上永不可物化）。
-      receiveSignals:
-        BEGIN: "buyer::gate.seed"
-      sendSignals: [{ name: "ready" }, { name: "seed" }]
-      executor:
-        supplierType: organization
-        supplierID: selector-ops
-    - name: intake
-      source: buyer
-      receiveSignals:
-        START: "buyer::gate.ready"
-      sendSignals: [{ name: "cmp" }]
-      executor:
-        supplierType: organization
-        supplierID: intake-ops
-`;
 
-describe("durable storage", () => {
-  const tempDirs: string[] = [];
+describe("postgres durable storage", () => {
   const stores: Array<{ close(): Promise<void> }> = [];
-  const databases: SqliteDatabase[] = [];
 
   afterEach(async () => {
     for (const store of stores.splice(0)) {
       await store.close();
     }
-    for (const database of databases.splice(0)) {
-      database.close();
-    }
-    for (const dir of tempDirs.splice(0)) {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("records SQLite migration version, checksum, and applied timestamp", () => {
-    const database = openSqliteDatabase(sqliteUrl(tempDirs));
-    databases.push(database);
-
-    const dryRun = runSqliteMigrations({
-      database,
-      migrationsDirectory: migrationsDirectory(),
-      dryRun: true,
-    });
-    expect(dryRun.pending.map((migration) => migration.version)).toContain(
-      "0001_projection_storage",
-    );
-    expect(listAppliedSqliteMigrations(database)).toHaveLength(0);
-
-    const result = runSqliteMigrations({
-      database,
-      migrationsDirectory: migrationsDirectory(),
-    });
-
-    expect(result.applied.map((migration) => migration.version)).toEqual(
-      expectedMigrationVersions,
-    );
-    expect(result.applied[0]?.checksum).toMatch(/^[0-9a-f]{64}$/);
-    expect(result.applied[0]?.appliedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(
-      listAppliedSqliteMigrations(database).map((record) => record.version),
-    ).toEqual(expectedMigrationVersions);
-    expect(
-      runSqliteMigrations({
-        database,
-        migrationsDirectory: migrationsDirectory(),
-      }).applied,
-    ).toHaveLength(0);
   });
 
   it("maps only the unique-violation SQLSTATE to StorageConstraintError", () => {
-    // StorageConstraintError 的消费方一律按"并发败者的 409 域冲突"收敛；
-    // 23xxx 里的 FK/NOT NULL/CHECK 是完整性故障，误译会把这些 schema/
-    // 数据问题伪装成可重试的域冲突。只认 23505，与 sqlite 侧只认
-    // UNIQUE 约束的口径对齐。
     const pgError = (code: string) =>
       Object.assign(new Error(`pg failure (${code})`), { code });
     expect(normalizePostgresError(pgError("23505"))).toBeInstanceOf(
@@ -230,177 +68,100 @@ describe("durable storage", () => {
     }
   });
 
-  it("rejects malformed migration filenames and duplicate sequence numbers", () => {
-    const directory = mkdtempSync(join(tmpdir(), "uvp-migrations-probe-"));
-    const write = (name: string) => writeFileSync(join(directory, name), "-- probe\n");
-    write("0100_probe.sql");
-    expect(() => loadSqlMigrations(directory)).not.toThrow();
-
-    write("0100_duplicate.sql");
-    expect(() => loadSqlMigrations(directory)).toThrow(/sequence 0100/);
-    rmSync(directory, { recursive: true, force: true });
-
-    const malformed = mkdtempSync(join(tmpdir(), "uvp-migrations-probe-"));
-    writeFileSync(join(malformed, "0101-No-Go.sql"), "-- probe\n");
-    expect(() => loadSqlMigrations(malformed)).toThrow(/NNNN_name\.sql/);
-    rmSync(malformed, { recursive: true, force: true });
-  });
-
-  it("refuses to run when the ledger holds versions missing from the files", () => {
-    // 迁移文件被删除/改名后，库内已应用版本在文件集里没有对应——
-    // 静默继续会让版本历史叠在洞上，必须响亮失败交人工裁决。
-    const database = openSqliteDatabase(sqliteUrl(tempDirs));
-    databases.push(database);
-    runSqliteMigrations({ database, migrationsDirectory: migrationsDirectory() });
-
-    const directory = mkdtempSync(join(tmpdir(), "uvp-migrations-retired-"));
-    tempDirs.push(directory);
-    // 只保留一个真实迁移文件作为"文件集"，其余已应用版本全部表现为缺失。
-    copyFileSync(
-      join(migrationsDirectory(), "0001_projection_storage.sql"),
-      join(directory, "0001_projection_storage.sql"),
-    );
-    expect(() =>
-      runSqliteMigrations({ database, migrationsDirectory: directory }),
-    ).toThrow(/applied migrations missing/);
-  });
-
-  it("converges duplicate rows before creating the single-active unique indexes", async () => {
-    // 脏库升级：单活/一钱包一角色索引之前的历史竞态已在存量数据里留下
-    // 重复组。直接建部分唯一索引会在重复组上失败、阻断部署——迁移必须
-    // 先确定性收敛（每组保最新行，旧行翻既有失效态）再上索引。
-    const database = openSqliteDatabase(sqliteUrl(tempDirs));
-    databases.push(database);
-    const base = migrationsDirectoryWithoutConvergenceFiles(tempDirs);
-    runSqliteMigrations({ database, migrationsDirectory: base });
-    database.exec(convergenceSeedSql("0"));
-
-    copyFileSync(
-      join(migrationsDirectory(), "0021_zhixu_version_single_active.sql"),
-      join(base, "0021_zhixu_version_single_active.sql"),
-    );
-    copyFileSync(
-      join(migrationsDirectory(), "0022_product_invite_single_active.sql"),
-      join(base, "0022_product_invite_single_active.sql"),
-    );
-    copyFileSync(
-      join(migrationsDirectory(), "0023_participant_wallet_single_role.sql"),
-      join(base, "0023_participant_wallet_single_role.sql"),
-    );
-    const result = runSqliteMigrations({ database, migrationsDirectory: base });
-    expect(result.applied.map((migration) => migration.version)).toEqual([
-      "0021_zhixu_version_single_active",
-      "0022_product_invite_single_active",
-      "0023_participant_wallet_single_role",
-    ]);
-
-    await expectConverged((sql) =>
-      database.prepare(sql).all() as Record<string, unknown>[],
-    );
-    // 收敛后索引真实生效：重复组上的新写入撞索引。
-    expect(() =>
-      database
-        .prepare(
-          `INSERT INTO store_zhixu_version_metadata
-           (series_id, version_id, zhixu_id, version_label, status, plan_id, plan_hash, created_at)
-           VALUES ('series_race', 'v_extra', 'zhixu_race', '3.0', 'active', ?, ?, '2026-04-01T00:00:00.000Z')`,
-        )
-        .run(planId, planHash),
-    ).toThrow();
-  });
-
-  it("upgrades a pre-0024 ledger without checksum drift and drops the duplicate open-application index", () => {
-    // 台账逐字校验已应用迁移的 checksum：库升级只在文件集保持原始字节时
-    // 放行。旧库先按 0024 前的文件集建库（0015/0018 各留一条同型打开态
-    // 唯一部分索引），升级后重复索引被 0024 收口、唯一裁决仍在，且与新库
-    // 一次跑完的最终索引集同形。
-    const legacyDatabase = openSqliteDatabase(sqliteUrl(tempDirs));
-    databases.push(legacyDatabase);
-    const legacyDirectory = mkdtempSync(join(tmpdir(), "uvp-migrations-legacy-"));
-    tempDirs.push(legacyDirectory);
-    for (const entry of readdirSync(migrationsDirectory(), { withFileTypes: true })) {
-      if (entry.isFile() && !entry.name.startsWith("0024_") && !entry.name.startsWith("0025_") && !entry.name.startsWith("0028_")) {
-        copyFileSync(join(migrationsDirectory(), entry.name), join(legacyDirectory, entry.name));
-      }
-    }
-    const legacyApplied = runSqliteMigrations({
-      database: legacyDatabase,
-      migrationsDirectory: legacyDirectory,
+  it("rolls back Postgres projection transactions and persists rebuild snapshots", async () => {
+    const databaseUrl = await createPostgresTestDatabase();
+    const store = new PostgresProjectionStore({
+      databaseUrl,
+      chainId,
+      migrations: { autoRun: true, directory: postgresMigrationsDirectory() },
     });
-    expect(legacyApplied.applied.map((migration) => migration.version)).toContain(
-      "0006_store_metadata",
-    );
-    expect(uniquePartialIndexNames(legacyDatabase)).toEqual([
-      "store_join_application_open_plan_applicant_uk",
-      "store_join_application_open_unique",
-    ]);
-    legacyDatabase.exec(joinApplicationInsert("legacy-application", "applied"));
-
-    // 升级 = 把当前文件集（含 0024/0025）指向旧库：已应用版本 checksum
-    // 全部命中，仅 0024/0025 待应用——任何已应用文件被原地改写都会在
-    // 这里被拒。
-    const upgraded = runSqliteMigrations({
-      database: legacyDatabase,
-      migrationsDirectory: migrationsDirectory(),
-    });
-    expect(upgraded.applied.map((migration) => migration.version)).toEqual([
-      "0024_drop_join_application_open_plan_applicant_uk",
-      "0025_product_trigger_prepared_at",
-      "0028_store_entity_registration",
-    ]);
-    expect(uniquePartialIndexNames(legacyDatabase)).toEqual([
-      "store_join_application_open_unique",
-    ]);
-    // 唯一裁决仍生效：同 plan + 同申请人的第二条打开态申请撞索引。
-    expect(() =>
-      legacyDatabase.exec(joinApplicationInsert("legacy-application-duplicate", "applied")),
-    ).toThrow();
-
-    // 新库路径：全量迁移一次跑完，最终索引集与旧库升级后同形。
-    const freshDatabase = openSqliteDatabase(sqliteUrl(tempDirs));
-    databases.push(freshDatabase);
-    runSqliteMigrations({ database: freshDatabase, migrationsDirectory: migrationsDirectory() });
-    expect(uniquePartialIndexNames(freshDatabase)).toEqual(
-      uniquePartialIndexNames(legacyDatabase),
-    );
-  });
-
-  it("refuses to migrate a ledger whose applied migration file drifted", () => {
-    // 已应用迁移的文件字节一旦漂移（原地改写），checksum 硬失配——迁移
-    // 加载必须响亮拒绝而不是把 schema 叠在改写过的历史上；结构性收口
-    // 只能走全新编号迁移。
-    const database = openSqliteDatabase(sqliteUrl(tempDirs));
-    databases.push(database);
-    runSqliteMigrations({ database, migrationsDirectory: migrationsDirectory() });
-
-    const driftedDirectory = mkdtempSync(join(tmpdir(), "uvp-migrations-drift-"));
-    tempDirs.push(driftedDirectory);
-    for (const entry of readdirSync(migrationsDirectory(), { withFileTypes: true })) {
-      if (!entry.isFile()) {
-        continue;
-      }
-      const content = readFileSync(join(migrationsDirectory(), entry.name), "utf8");
-      writeFileSync(
-        join(driftedDirectory, entry.name),
-        entry.name === "0006_store_metadata.sql" ? `${content}-- drifted bytes\n` : content,
-      );
-    }
-    expect(() =>
-      runSqliteMigrations({ database, migrationsDirectory: driftedDirectory }),
-    ).toThrow(/0006_store_metadata checksum mismatch/);
-  });
-
-  it("deduplicates the same event but retains same-position logs from different transactions", async () => {
-    const store = openStore(tempDirs);
     stores.push(store);
-    const event = chainEvent(10n, 0, "OrderCreated", {
-      orderId: "order-unique",
-      buyer,
-      seller,
-    });
 
-    await store.appendEvent({ ...event, transactionIndex: 0 });
-    await expect(store.appendEvent({ ...event, transactionIndex: 0 })).resolves.toBeUndefined();
+    await expect(
+      store.withTransaction(async () => {
+        await store.appendEvent(
+          chainEvent(1n, 0, "OrderCreated", {
+            orderId: "order-postgres-rollback",
+            slotA,
+            slotB,
+          }),
+        );
+        throw new Error("force postgres rollback");
+      }),
+    ).rejects.toThrow("force postgres rollback");
+    await expect(store.listEvents({ chainId })).resolves.toHaveLength(0);
+
+    await store.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(2n, 0, "PlanRegistered", {
+          planId,
+          planHash,
+          hookCount: 1n,
+        }),
+        chainEvent(3n, 0, "OrderRegistered", {
+          orderId: stateMachineOrderId,
+          planId,
+        }),
+      ],
+      syncState: {
+        chainId,
+        contractAddress: snapshotScopeContract,
+        syncStatus: "indexed",
+        latestIndexedBlock: 3n,
+        finalizedBlock: 3n,
+        confirmationDepth: 1,
+        lastEventName: "PlanRegistered",
+        eventCount: 2,
+      },
+    });
+    await store.close();
+    stores.splice(stores.indexOf(store), 1);
+
+    const reopened = new PostgresProjectionStore({
+      databaseUrl,
+      chainId,
+      migrations: { autoRun: true, directory: postgresMigrationsDirectory() },
+    });
+    stores.push(reopened);
+
+    await expect(
+      reopened.getStateMachineOrder(stateMachineOrderId),
+    ).resolves.toMatchObject({
+      orderId: stateMachineOrderId,
+      planId,
+    });
+    await expect(
+      reopened.listEvents({ chainId, contractAddress }),
+    ).resolves.toHaveLength(2);
+    await expect(
+      reopened.getSyncState({
+        chainId,
+        contractAddress: snapshotScopeContract,
+      }),
+    ).resolves.toMatchObject({
+      syncStatus: "indexed",
+      latestIndexedBlock: 3n,
+      finalizedBlock: 3n,
+    });
+  });
+
+  it("deduplicates the same Postgres event but retains same-position logs from different transactions", async () => {
+    const databaseUrl = await createPostgresTestDatabase();
+    const store = new PostgresProjectionStore({
+      databaseUrl,
+      chainId,
+      migrations: { autoRun: true, directory: postgresMigrationsDirectory() },
+    });
+    stores.push(store);
+
+    const event = chainEvent(10n, 0, "OrderCreated", {
+      orderId: "order-postgres-unique",
+      slotA,
+      slotB,
+    });
+    await store.appendEvent(event);
+    await expect(store.appendEvent(event)).resolves.toBeUndefined();
 
     await expect(
       store.listEvents({ chainId, contractAddress }),
@@ -410,587 +171,66 @@ describe("durable storage", () => {
       ...event,
       transactionHash:
         "0x9999999999999999999999999999999999999999999999999999999999999999" as const,
-      transactionIndex: 1,
     };
-    await expect(store.appendEvent(sameLogIndexDifferentTx)).resolves.toBeUndefined();
+    await expect(
+      store.appendEvent(sameLogIndexDifferentTx),
+    ).resolves.toBeUndefined();
+
     await expect(
       store.listEvents({ chainId, contractAddress }),
     ).resolves.toHaveLength(2);
+  });
+
+  it("assembles and persists notification state and broadcast dedupe stores in the Postgres factory wiring", async () => {
+    const databaseUrl = await createPostgresTestDatabase();
+    const factoryStores = createChainServicesStores({
+      database: {
+        url: databaseUrl,
+        migrationsAutoRun: true,
+      },
+      chainId,
+      migrationsDirectory: migrationsDirectory(),
+    });
+    stores.push(factoryStores);
+
+    expect(factoryStores.notificationStateStore).toBeDefined();
+    expect(factoryStores.broadcastDedupeStore).toBeDefined();
+
+    const notificationState = factoryStores.notificationStateStore!;
+    const marked = await notificationState.markRead({
+      participantKey: "supplier:postgres-1",
+      notificationId: planId as Hex,
+      readAt: "2026-04-28T00:00:00.000Z",
+    });
+    expect(marked.readAt).toBe("2026-04-28T00:00:00.000Z");
     await expect(
-      store.listEvents({ chainId, contractAddress }),
-    ).resolves.toEqual(expect.arrayContaining([
-      expect.objectContaining({ transactionIndex: 1 }),
-    ]));
-  });
-
-  it("revives a stored event when the canonical chain re-emits the same log without removed", async () => {
-    // removed 墓碑后同 (block,txHash,logIndex) 的非 removed 事件必须解除
-    // 墓碑复活；INSERT OR IGNORE 不得让 removed=1 永久留存。
-    const store = openStore(tempDirs);
-    stores.push(store);
-    const event = chainEvent(10n, 0, "OrderCreated", {
-      orderId: "order-revive",
-      buyer,
-      seller,
-    });
-    const tombstoned = { ...event, removed: true as const };
-
-    await store.appendEvent(event);
-    await store.appendEvent(tombstoned);
-    const afterTombstone = await store.listEvents({ chainId, contractAddress });
-    expect(afterTombstone).toHaveLength(1);
-    expect(afterTombstone[0]).toMatchObject({ removed: true });
-
-    // 复活载荷携带 transaction_index：墓碑行缺失该排序键时必须回填，
-    // 否则复活事件在同块事件全序里错位。
-    await store.appendEvent({ ...event, transactionIndex: 4 });
-    const revived = await store.listEvents({ chainId, contractAddress });
-    expect(revived).toHaveLength(1);
-    expect(revived[0]?.removed).toBeUndefined();
-    expect(revived[0]).toMatchObject({ eventName: "OrderCreated", transactionIndex: 4 });
-  });
-
-  it("backfills a missing transaction_index when reviving a tombstoned event", async () => {
-    // 墓碑行不带 transaction_index（初始插入时事件源未提供），
-    // 复活时携带的序号必须写回；已有序号的墓碑行复活时保留原值。
-    const store = openStore(tempDirs);
-    stores.push(store);
-    const base = chainEvent(11n, 1, "SignalSubmitted", {
-      orderId: "order-revive-index",
+      notificationState.getReadState("supplier:postgres-1", planId as Hex),
+    ).resolves.toMatchObject({
+      participantKey: "supplier:postgres-1",
+      notificationId: planId,
+      readAt: "2026-04-28T00:00:00.000Z",
     });
 
-    await store.appendEvent(base);
-    await store.appendEvent({ ...base, removed: true as const });
-    await store.appendEvent({ ...base, transactionIndex: 2 });
-    const revived = await store.listEvents({ chainId, contractAddress });
-    expect(revived).toHaveLength(1);
-    expect(revived[0]?.removed).toBeUndefined();
-    expect(revived[0]).toMatchObject({ transactionIndex: 2 });
-
-    const preserved = chainEvent(12n, 0, "HookReady", { orderId: "order-revive-keep" });
-    await store.appendEvent({ ...preserved, transactionIndex: 7 });
-    await store.appendEvent({ ...preserved, transactionIndex: 7, removed: true as const });
-    await store.appendEvent({ ...preserved });
-    const kept = (await store.listEvents({ chainId, contractAddress }))
-      .find((event) => event.eventName === "HookReady");
-    expect(kept).toMatchObject({ transactionIndex: 7 });
-  });
-
-  it("claims broadcast txHash ownership with the same contract on SQLite as on Postgres", async () => {
-    // 三后端 parity：无既有归属时 claim 必须登记归属并返回 undefined，
-    // 已有归属时返回归属 idempotencyKey——抢到归属时不返回自身 key，
-    // 该契约锁定到两个持久后端。
-    const dedupe = new SqliteBroadcastDedupeStore({
-      databaseUrl: sqliteUrl(tempDirs),
-      migrations: { autoRun: true, directory: migrationsDirectory() },
-    });
-    stores.push(dedupe);
+    const dedupe = factoryStores.broadcastDedupeStore!;
     const dedupeTxHash =
       "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b" as Hex;
-
-    await dedupe.save("idem-sqlite-1", {
+    await dedupe.save("idem-postgres-1", {
       attempts: 1,
       lastResult: { status: "submitted", txHash: dedupeTxHash },
     });
-    await expect(dedupe.load("idem-sqlite-1")).resolves.toMatchObject({
+    await expect(dedupe.load("idem-postgres-1")).resolves.toMatchObject({
       attempts: 1,
       lastResult: { status: "submitted", txHash: dedupeTxHash },
     });
-
-    await expect(
-      dedupe.claimTxHash(dedupeTxHash, "idem-sqlite-1"),
-    ).resolves.toBeUndefined();
-    await expect(
-      dedupe.claimTxHash(dedupeTxHash, "idem-sqlite-2"),
-    ).resolves.toBe("idem-sqlite-1");
-  });
-
-  it("rolls back writes when a transaction fails", async () => {
-    const store = openStore(tempDirs);
-    stores.push(store);
-
-    await expect(
-      store.withTransaction(async () => {
-        await store.appendEvent(
-          chainEvent(1n, 0, "OrderCreated", {
-            orderId: "order-rollback",
-            buyer,
-            seller,
-          }),
-        );
-        throw new Error("force rollback");
-      }),
-    ).rejects.toThrow("force rollback");
-
-    await expect(store.listEvents({ chainId })).resolves.toHaveLength(0);
-  });
-
-  it("upserts and reloads the chain index cursor", async () => {
-    const store = openStore(tempDirs);
-    stores.push(store);
-
-    await store.saveCursor({
-      chainId,
-      contractAddress,
-      deploymentBlock: 5n,
-      nextBlock: 6n,
-      finalizedBlock: 5n,
-    });
-    await store.saveCursor({
-      chainId,
-      contractAddress,
-      deploymentBlock: 5n,
-      nextBlock: 12n,
-      finalizedBlock: 11n,
-    });
-
-    await expect(
-      store.getCursor({ chainId, contractAddress }),
-    ).resolves.toMatchObject({
-      chainId,
-      contractAddress,
-      deploymentBlock: 5n,
-      nextBlock: 12n,
-      finalizedBlock: 11n,
-    });
-  });
-
-  it("serializes and deserializes projection snapshots and event args", async () => {
-    const databaseUrl = sqliteUrl(tempDirs);
-    const store = new SqliteProjectionStore({
-      databaseUrl,
-      chainId,
-      migrations: { autoRun: true, directory: migrationsDirectory() },
-    });
-    stores.push(store);
-
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        chainEvent(1n, 0, "PlanRegistered", {
-          planId,
-          planHash,
-          hookCount: 1n,
-        }),
-        chainEvent(2n, 0, "OrderRegistered", {
-          orderId: stateMachineOrderId,
-          planId,
-        }),
-      ],
-    });
-    await store.close();
-    stores.splice(stores.indexOf(store), 1);
-
-    const reopened = new SqliteProjectionStore({
-      databaseUrl,
-      chainId,
-      migrations: { autoRun: true, directory: migrationsDirectory() },
-    });
-    stores.push(reopened);
-
-    const stored = await reopened.getSnapshot<ProjectionSnapshot>(
-      { chainId, contractAddress: snapshotScopeContract },
-      "order",
+    await expect(dedupe.claimTxHash(dedupeTxHash, "idem-postgres-1")).resolves.toBeUndefined();
+    await expect(dedupe.claimTxHash(dedupeTxHash, "idem-postgres-2")).resolves.toBe(
+      "idem-postgres-1",
     );
-    const events = await reopened.listEvents({ chainId });
-
-    expect(stored?.snapshot.lastEvent?.blockNumber).toBe(2n);
-    expect(
-      (await reopened.getStateMachineOrder(stateMachineOrderId))?.planId,
-    ).toBe(planId);
-    expect(
-      events.find((event) => event.eventName === "PlanRegistered")?.args
-        .hookCount,
-    ).toBe(1n);
   });
 
-  it("rebuilds SQLite projections after derived snapshot rows are deleted", async () => {
-    const databaseUrl = sqliteUrl(tempDirs);
-    const store = new SqliteProjectionStore({
-      databaseUrl,
-      chainId,
-      migrations: { autoRun: true, directory: migrationsDirectory() },
-    });
-    stores.push(store);
-    const event = chainEvent(3n, 0, "OrderRegistered", {
-      orderId: stateMachineOrderId,
-      planId,
-    });
-
-    await store.resetFromEvents({ deploymentBlock: 0n, events: [event] });
-    await expect(
-      store.getStateMachineOrder(stateMachineOrderId),
-    ).resolves.toMatchObject({
-      orderId: stateMachineOrderId,
-    });
-
-    const database = openSqliteDatabase(databaseUrl);
-    databases.push(database);
-    database.prepare("DELETE FROM chain_projection_snapshot").run();
-
-    await expect(
-      store.getStateMachineOrder(stateMachineOrderId),
-    ).resolves.toBeUndefined();
-    const retainedEvents = await store.listEvents({ chainId, contractAddress });
-    expect(retainedEvents).toHaveLength(1);
-
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: retainedEvents,
-    });
-    await expect(
-      store.getStateMachineOrder(stateMachineOrderId),
-    ).resolves.toMatchObject({
-      orderId: stateMachineOrderId,
-      planId,
-    });
-  });
-
-  it("persists projection sync state and marks removed events for rebuild", async () => {
-    const store = openStore(tempDirs);
-    stores.push(store);
-    const event = chainEvent(1n, 0, "OrderCreated", {
-      orderId: "order-removed",
-      buyer,
-      seller,
-    });
-
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [event, { ...event, removed: true }],
-      syncState: {
-        chainId,
-        contractAddress: snapshotScopeContract,
-        syncStatus: "indexed",
-        latestIndexedBlock: 1n,
-        finalizedBlock: 3n,
-        confirmationDepth: 2,
-        lastEventName: "OrderCreated",
-        eventCount: 0,
-        rebuild: {
-          status: "completed",
-          fromBlock: 0n,
-          toBlock: 3n,
-          eventCount: 0,
-          mismatchCount: 0,
-        },
-      },
-    });
-
-    const events = await store.listEvents({ chainId, contractAddress });
-    const syncState = await store.getSyncState({
-      chainId,
-      contractAddress: snapshotScopeContract,
-    });
-
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      eventName: "OrderCreated",
-      removed: true,
-    });
-    expect(syncState).toMatchObject({
-      syncStatus: "indexed",
-      latestIndexedBlock: 1n,
-      finalizedBlock: 3n,
-      confirmationDepth: 2,
-      eventCount: 0,
-      rebuild: expect.objectContaining({ status: "completed" }),
-    });
-  });
-
-  it("persists product drafts, participants, invites, and registrations across SQLite store restarts", async () => {
-    const databaseUrl = sqliteUrl(tempDirs);
-    const store = openProductStore(databaseUrl);
-    stores.push(store);
-    const draft = productDraft();
-    const participant = productParticipant(draft.draftId);
-    const invite = productInvite(draft.draftId, participant.participantId);
-    const registration = productRegistration(draft.draftId);
-
-    await store.createDraft(draft, [participant]);
-    await store.createInviteIfNoneActive(invite, "2026-01-01T00:00:00.000Z");
-    await store.createRegistrationIfNoneForDraft(registration);
-    // 条件状态迁移（CAS）：期望状态命中才整行落库，行已迁移时返回 false
-    // 且不覆盖。
-    await expect(
-      store.updateDraftIfStatus({ ...draft, status: "awaiting_participants" }, draft.status),
-    ).resolves.toBe(true);
-    await expect(
-      store.updateDraftIfStatus({ ...draft, status: "draft" }, "ready_to_trigger"),
-    ).resolves.toBe(false);
-    await expect(store.getDraft(draft.draftId)).resolves.toMatchObject({
-      status: "awaiting_participants",
-    });
-    await store.close();
-    stores.splice(stores.indexOf(store), 1);
-
-    const reopened = openProductStore(databaseUrl);
-    stores.push(reopened);
-
-    await expect(reopened.getDraft(draft.draftId)).resolves.toMatchObject({
-      draftId: draft.draftId,
-    });
-    await expect(
-      reopened.listParticipants(draft.draftId),
-    ).resolves.toMatchObject([participant]);
-    await expect(reopened.getInvite(invite.inviteId)).resolves.toMatchObject(
-      invite,
-    );
-    await expect(
-      reopened.getRegistration(registration.triggerId),
-    ).resolves.toMatchObject(registration);
-    await expect(reopened.listRegistrations()).resolves.toHaveLength(1);
-  });
-
-  it("rolls back SQLite product business writes in a transaction", async () => {
-    const store = openProductStore(sqliteUrl(tempDirs));
-    stores.push(store);
-    const draft = productDraft("draft_rollback");
-
-    await expect(
-      store.withTransaction(async () => {
-        await store.createDraft(draft, [productParticipant(draft.draftId)]);
-        throw new Error("force product rollback");
-      }),
-    ).rejects.toThrow("force product rollback");
-
-    await expect(store.getDraft(draft.draftId)).resolves.toBeUndefined();
-  });
-
-  it("persists evidence metadata, access policy, and admin read audit", async () => {
-    const databaseUrl = sqliteUrl(tempDirs);
-    const store = openEvidenceStore(databaseUrl);
-    stores.push(store);
-    const record = evidenceRecord();
-
-    await store.put(record);
-    await store.recordAdminRead({
-      evidenceId: record.evidence.evidenceId,
-      principalId: "admin-1",
-      accessedAt: "2026-04-28T00:00:01.000Z",
-      route: "proof",
-    });
-    await expect(
-      store.put({
-        ...record,
-        evidence: { ...record.evidence, evidenceId: "ev_duplicate" },
-      }),
-    ).rejects.toBeInstanceOf(StorageConstraintError);
-    // 上传路径的条件插入对同 (owner, payloadHash) 幂等收口：返回既有
-    // 记录而不是撞 UNIQUE（并发重复上传不再以存储错误泄露）。
-    await expect(
-      store.insertIfPayloadHashAbsent({
-        ...record,
-        evidence: { ...record.evidence, evidenceId: "ev_race_loser" },
-      }),
-    ).resolves.toMatchObject({
-      evidence: { evidenceId: record.evidence.evidenceId },
-    });
-    // 不同 owner 同 payloadHash 不受影响：插入成功返回 undefined。
-    await expect(
-      store.insertIfPayloadHashAbsent({
-        ...record,
-        evidence: {
-          ...record.evidence,
-          evidenceId: "ev_other_owner",
-          ownerParticipantId: "buyer",
-        },
-        accessPolicy: {
-          ...record.accessPolicy,
-          evidenceId: "ev_other_owner",
-        },
-      }),
-    ).resolves.toBe(undefined);
-    await store.close();
-    stores.splice(stores.indexOf(store), 1);
-
-    const reopened = openEvidenceStore(databaseUrl);
-    stores.push(reopened);
-
-    await expect(
-      reopened.get(record.evidence.evidenceId),
-    ).resolves.toMatchObject({
-      evidence: { evidenceId: record.evidence.evidenceId },
-      accessPolicy: { readers: ["seller", "buyer"] },
-    });
-    await expect(reopened.listAdminReads()).resolves.toHaveLength(1);
-  });
-
-  it("persists prepared submissions, nonce reservations, submissions, and attempts", async () => {
-    const databaseUrl = sqliteUrl(tempDirs);
-    const store = openSubmissionStore(databaseUrl);
-    stores.push(store);
-    const prepared = preparedSubmission();
-    const submission = productSubmission(prepared);
-
-    await store.putPrepared(prepared);
-    await expect(store.reserveNonce("nonce-key")).resolves.toBe(true);
-    await expect(store.reserveNonce("nonce-key")).resolves.toBe(false);
-    await store.releaseNonce("nonce-key");
-    await expect(store.reserveNonce("nonce-key")).resolves.toBe(true);
-    // 陈旧预留接管（硬崩溃泄漏形态）：命中预留时，仅当行的预留时间早于
-    // staleBefore 才条件更新接管；接管后行时间刷新，早于新时间的阈值
-    // 不再命中（未过期仍拒绝）。
-    await expect(store.reserveNonce("nonce-key", {
-      staleBefore: new Date(Date.now() + 60_000).toISOString(),
-    })).resolves.toBe(true);
-    await expect(store.reserveNonce("nonce-key", {
-      staleBefore: new Date(Date.now() - 60_000).toISOString(),
-    })).resolves.toBe(false);
-    await store.putSubmission(submission);
-    await store.markPreparedUsed(
-      prepared.prepareId,
-      submission.submissionId,
-      submission.updatedAt,
-    );
-    await store.close();
-    stores.splice(stores.indexOf(store), 1);
-
-    const reopened = openSubmissionStore(databaseUrl);
-    stores.push(reopened);
-
-    await expect(
-      reopened.getPrepared(prepared.prepareId),
-    ).resolves.toMatchObject({
-      prepareId: prepared.prepareId,
-      submissionId: submission.submissionId,
-      usedAt: submission.updatedAt,
-    });
-    await expect(
-      reopened.getSubmission(submission.submissionId),
-    ).resolves.toMatchObject({
-      submissionId: submission.submissionId,
-      attemptCount: 1,
-      attempts: [{ txHash: submission.attempts[0]?.txHash }],
-    });
-    await expect(reopened.listSubmissions()).resolves.toHaveLength(1);
-  });
-
-  it("keeps the prepared signal reusable when a non-broadcast submission is recorded", async () => {
-    // 非广播路径（广播未配置）落档的 signature_received 提交不得消费
-    // prepare：used_at 只能由 markPreparedUsed 写入（与内存 store 同语义）。
-    const databaseUrl = sqliteUrl(tempDirs);
-    const store = openSubmissionStore(databaseUrl);
-    stores.push(store);
-    const prepared = preparedSubmission();
-    const { txHash: _omittedTxHash, ...nonBroadcastBase } = productSubmission(prepared);
-    const signatureReceived: ProductSubmissionDTO = {
-      ...nonBroadcastBase,
-      submissionId: "sub_signature_received",
-      status: "signature_received",
-      broadcastStatus: "not_attempted",
-      attempts: [],
-      attemptCount: 0,
-    };
-
-    await store.putPrepared(prepared);
-    await store.putSubmission(signatureReceived);
-
-    const reusable = await store.getPrepared(prepared.prepareId);
-    expect(reusable).toMatchObject({ prepareId: prepared.prepareId });
-    expect(reusable?.usedAt).toBeUndefined();
-    expect(reusable?.submissionId).toBeUndefined();
-    await expect(store.getSubmission("sub_signature_received")).resolves.toMatchObject({
-      submissionId: "sub_signature_received",
-      status: "signature_received",
-    });
-
-    // 广播路径：markPreparedUsed 之后 prepare 才算已消费。
-    await store.putSubmission(productSubmission(prepared));
-    await store.markPreparedUsed(
-      prepared.prepareId,
-      "sub_sqlite",
-      "2026-04-28T00:00:00.000Z",
-    );
-    await expect(store.getPrepared(prepared.prepareId)).resolves.toMatchObject({
-      prepareId: prepared.prepareId,
-      submissionId: "sub_sqlite",
-      usedAt: "2026-04-28T00:00:00.000Z",
-    });
-  });
-
-  it("persists governance reviews and tx logs across SQLite store restarts", async () => {
-    const databaseUrl = sqliteUrl(tempDirs);
-    const store = openGovernanceStore(databaseUrl);
-    stores.push(store);
-    const review = governanceReview();
-    const log = identityTxLog();
-
-    await store.putReview(review);
-    await store.appendIdentityTxLog(log);
-    await store.close();
-    stores.splice(stores.indexOf(store), 1);
-
-    const reopened = openGovernanceStore(databaseUrl);
-    stores.push(reopened);
-
-    await expect(
-      reopened.findLatestReview(review.subjectType, review.subjectId),
-    ).resolves.toMatchObject(review);
-    await expect(reopened.getTxLog(log.txLogId)).resolves.toMatchObject(log);
-
-    const updated = {
-      ...log,
-      status: "confirmed" as const,
-      broadcastStatus: "confirmed" as const,
-    };
-    await reopened.updateTxLog(updated);
-    await expect(reopened.listIdentityTxLogs()).resolves.toMatchObject([
-      updated,
-    ]);
-  });
-
-  it("guards governance review transitions and evidence bindings with conditional writes in SQLite", async () => {
-    const databaseUrl = sqliteUrl(tempDirs);
-    const governanceStore = openGovernanceStore(databaseUrl);
-    stores.push(governanceStore);
-    const evidenceStore = openEvidenceStore(databaseUrl);
-    stores.push(evidenceStore);
-
-    // review：行已迁移时，过期期望的条件写不得覆盖赢家。
-    const review = governanceReview();
-    await governanceStore.putReview(review);
-    await expect(
-      governanceStore.putReviewIfStatus({ ...review, status: "restricted" }, review.status),
-    ).resolves.toBe(true);
-    await expect(
-      governanceStore.putReviewIfStatus({ ...review, status: "revoked" }, review.status),
-    ).resolves.toBe(false);
-    await expect(governanceStore.getReview(review.reviewId)).resolves.toMatchObject({
-      status: "restricted",
-    });
-
-    // evidence：仅 uploaded 可绑定；已绑行的再次 markBound 拿回赢家档。
-    const evidence = evidenceRecord();
-    await evidenceStore.put(evidence);
-    const bindingOrderId = evidence.evidence.orderId ?? "order-1";
-    const bound = await evidenceStore.markBound?.({
-      evidenceId: evidence.evidence.evidenceId,
-      txHash: `0x${"1".repeat(64)}`,
-      orderId: bindingOrderId,
-      onchainOrderId: `0x${"2".repeat(64)}`,
-      sourceId: `0x${"3".repeat(64)}`,
-      signalId: `0x${"4".repeat(64)}`
-    });
-    expect(bound?.evidence.status).toBe("bound");
-    const loser = await evidenceStore.markBound?.({
-      evidenceId: evidence.evidence.evidenceId,
-      txHash: `0x${"5".repeat(64)}`,
-      orderId: bindingOrderId,
-      onchainOrderId: `0x${"6".repeat(64)}`,
-      sourceId: `0x${"7".repeat(64)}`,
-      signalId: `0x${"8".repeat(64)}`
-    });
-    expect(loser?.evidence).toMatchObject({
-      status: "bound",
-      boundOnchainOrderId: `0x${"2".repeat(64)}`,
-    });
-  });
-
-  it("wires all chain-services stores to durable SQLite across service restarts", async () => {
-    const databaseUrl = sqliteUrl(tempDirs);
+  it("wires all chain-services stores to durable Postgres across service restarts", async () => {
+    const databaseUrl = await createPostgresTestDatabase();
     const database = {
-      driver: "sqlite" as const,
       url: databaseUrl,
       migrationsAutoRun: true,
     };
@@ -1000,11 +240,26 @@ describe("durable storage", () => {
       migrationsDirectory: migrationsDirectory(),
     });
     stores.push(first);
-    const draft = productDraft("draft_runtime");
+    const draft = productDraft("draft_postgres");
     const participant = productParticipant(draft.draftId);
+    const registration = {
+      ...productRegistration(draft.draftId),
+      stateMachineAddress: contractAddress as Address,
+      deploymentId: planId as Hex,
+    };
     const evidence = evidenceRecord();
     const prepared = preparedSubmission();
+    const submission = productSubmission(prepared);
     const review = governanceReview();
+    const log = identityTxLog();
+    const storeDraft = storeZhixuDraftRecord();
+    const storeVersion = storeZhixuVersionRecord("v-postgres", "active", {
+      cutoverAt: "2026-04-28T00:00:07.000Z",
+      cutoverReason: "Postgres durable Store metadata test.",
+    });
+    const storeSupplier = storeSupplierMetadataRecord();
+    const storeAudit = storeSupplierAuditRecord(storeSupplier);
+    const storeDocking = storeDockingSession();
 
     await first.projectionStore.resetFromEvents({
       deploymentBlock: 0n,
@@ -1016,9 +271,49 @@ describe("durable storage", () => {
       ],
     });
     await first.productBffStore.createDraft(draft, [participant]);
+    await first.productBffStore.createInviteIfNoneActive(
+      productInvite(draft.draftId, participant.participantId),
+      "2026-01-01T00:00:00.000Z",
+    );
+    await first.productBffStore.createRegistrationIfNoneForDraft(registration);
     await first.evidenceMetadataStore.put(evidence);
+    await first.evidenceMetadataStore.markBound?.({
+      evidenceId: evidence.evidence.evidenceId,
+      txHash:
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      submissionId: "sub_postgres",
+      orderId: evidence.evidence.orderId ?? "order-1",
+      onchainOrderId:
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      sourceId:
+        "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      signalId:
+        "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      boundAt: "2026-04-28T00:00:02.000Z",
+    });
+    await first.evidenceMetadataStore.recordAdminRead({
+      evidenceId: evidence.evidence.evidenceId,
+      principalId: "admin-1",
+      accessedAt: "2026-04-28T00:00:03.000Z",
+      route: "evidence",
+    });
     await first.submissionStore.putPrepared(prepared);
+    await expect(
+      first.submissionStore.reserveNonce("nonce-key-postgres"),
+    ).resolves.toBe(true);
+    await first.submissionStore.putSubmission(submission);
+    await first.submissionStore.markPreparedUsed(
+      prepared.prepareId,
+      submission.submissionId,
+      submission.updatedAt,
+    );
     await first.governanceStore.putReview(review);
+    await first.governanceStore.appendIdentityTxLog(log);
+    await first.storeZhixuDraftStore.createDraft(storeDraft);
+    await first.storeZhixuVersionMetadataStore.upsertVersion(storeVersion);
+    await first.storeSupplierMetadataStore.putSupplier(storeSupplier);
+    await first.storeSupplierMetadataStore.appendAudit(storeAudit);
+    await first.storeDockingSessionStore.createSession(storeDocking);
     await first.close();
     stores.splice(stores.indexOf(first), 1);
 
@@ -1036,19 +331,45 @@ describe("durable storage", () => {
       planId,
     });
     await expect(
-      reopened.productBffStore.getDraft(draft.draftId),
+      reopened.productBffStore.getRegistration(registration.triggerId),
     ).resolves.toMatchObject({
-      draftId: draft.draftId,
+      triggerId: registration.triggerId,
+      stateMachineAddress: contractAddress,
+      deploymentId: planId,
     });
     await expect(
       reopened.evidenceMetadataStore.get(evidence.evidence.evidenceId),
     ).resolves.toMatchObject({
-      evidence: { evidenceId: evidence.evidence.evidenceId },
+      evidence: {
+        evidenceId: evidence.evidence.evidenceId,
+        status: "bound",
+        boundSubmissionId: "sub_postgres",
+      },
     });
+    await expect(
+      reopened.evidenceMetadataStore.listAdminReads?.(),
+    ).resolves.toHaveLength(1);
+    await expect(
+      reopened.submissionStore.reserveNonce("nonce-key-postgres"),
+    ).resolves.toBe(false);
+    await expect(
+      reopened.submissionStore.reserveNonce("nonce-key-postgres", {
+        staleBefore: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ).resolves.toBe(true);
     await expect(
       reopened.submissionStore.getPrepared(prepared.prepareId),
     ).resolves.toMatchObject({
       prepareId: prepared.prepareId,
+      submissionId: submission.submissionId,
+      usedAt: submission.updatedAt,
+    });
+    await expect(
+      reopened.submissionStore.getSubmission(submission.submissionId),
+    ).resolves.toMatchObject({
+      submissionId: submission.submissionId,
+      attemptCount: 1,
+      attempts: [{ txHash: submission.attempts[0]?.txHash }],
     });
     await expect(
       reopened.governanceStore.findLatestReview(
@@ -1058,1117 +379,50 @@ describe("durable storage", () => {
     ).resolves.toMatchObject({
       reviewId: review.reviewId,
     });
-  });
-
-  it("persists Store metadata stores across SQLite service restarts", async () => {
-    const databaseUrl = sqliteUrl(tempDirs);
-    const database = {
-      driver: "sqlite" as const,
-      url: databaseUrl,
-      migrationsAutoRun: true,
-    };
-    const first = createChainServicesStores({
-      database,
-      chainId,
-      migrationsDirectory: migrationsDirectory(),
-    });
-    stores.push(first);
-    const draft = storeZhixuDraftRecord();
-    const deprecatedVersion = storeZhixuVersionRecord("v1", "deprecated", {
-      cutoverAt: "2026-04-28T00:00:02.000Z",
-      cutoverReason: "Superseded during Store cutover.",
-    });
-    const activeVersion = storeZhixuVersionRecord("v2", "active", {
-      planId:
-        "0x0000000000000000000000000000000000000000000000000000000000000202" as Hex,
-      planHash:
-        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as Hex,
-      cutoverAt: "2026-04-28T00:00:03.000Z",
-      cutoverReason: "Operator activated v2.",
-    });
-    const supplier = storeSupplierMetadataRecord();
-    const audit = storeSupplierAuditRecord(supplier);
-    const docking = storeDockingSession();
-
-    await first.storeZhixuDraftStore.createDraft(draft);
-    await first.storeZhixuVersionMetadataStore.upsertVersion(deprecatedVersion);
-    await first.storeZhixuVersionMetadataStore.upsertVersion(activeVersion);
-    await first.storeSupplierMetadataStore.putSupplier(supplier);
-    await first.storeSupplierMetadataStore.appendAudit(audit);
-    await first.storeDockingSessionStore.createSession(docking);
-    await first.close();
-    stores.splice(stores.indexOf(first), 1);
-
-    const reopened = createChainServicesStores({
-      database,
-      chainId,
-      migrationsDirectory: migrationsDirectory(),
-    });
-    stores.push(reopened);
-
     await expect(
-      reopened.storeZhixuDraftStore.getDraft(draft.draftId),
+      reopened.governanceStore.getTxLog(log.txLogId),
+    ).resolves.toMatchObject(log);
+    await expect(
+      reopened.storeZhixuDraftStore.getDraft(storeDraft.draftId),
     ).resolves.toMatchObject({
-      draftId: draft.draftId,
+      draftId: storeDraft.draftId,
       status: "compiled",
-      compilePreview: { planId },
-      productSchema: {
-        planId,
-        planHash,
-        artifactHash,
-        validation: { ok: true },
-      },
     });
-    // findProductSchemaByPlan 的 planHash 是链侧身份（runtime 域）——
-    // 夹具 planHash（runtime）与 artifactHash（canonical）异值，只有
-    // planHash 能命中，canonical 值必须 miss。
     await expect(
-      reopened.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash),
+      reopened.storeZhixuVersionMetadataStore.getVersion(
+        storeVersion.seriesId,
+        storeVersion.versionId,
+      ),
     ).resolves.toMatchObject({
-      planId,
-      planHash,
-      schemaHash: "0xstoreproductschema",
+      versionId: storeVersion.versionId,
+      status: "active",
+      cutoverReason: "Postgres durable Store metadata test.",
     });
     await expect(
-      reopened.storeZhixuDraftStore.findProductSchemaByPlan(planId, artifactHash),
-    ).resolves.toBeUndefined();
+      reopened.storeSupplierMetadataStore.findSupplierBySubjectId(
+        storeSupplier.supplierSubjectId,
+      ),
+    ).resolves.toMatchObject({
+      supplierId: storeSupplier.supplierId,
+      capabilityTags: ["example", "tag-1"],
+    });
     await expect(
-      reopened.storeZhixuVersionMetadataStore.listVersions(draft.zhixuId!),
+      reopened.storeSupplierMetadataStore.listAudits(
+        storeSupplier.supplierId,
+      ),
     ).resolves.toMatchObject([
-      {
-        versionId: "v1",
-        status: "deprecated",
-        cutoverReason: "Superseded during Store cutover.",
-      },
-      {
-        versionId: "v2",
-        status: "active",
-        cutoverReason: "Operator activated v2.",
-      },
+      { auditId: storeAudit.auditId, action: "tags_updated" },
     ]);
     await expect(
-      reopened.storeSupplierMetadataStore.getSupplier(supplier.supplierId),
+      reopened.storeDockingSessionStore.getSession(storeDocking.sessionId),
     ).resolves.toMatchObject({
-      supplierId: supplier.supplierId,
-      supplierSubjectId: supplier.supplierSubjectId,
-      capabilityTags: ["example", "logistics"],
-    });
-    await expect(
-      reopened.storeSupplierMetadataStore.listAudits(supplier.supplierId),
-    ).resolves.toMatchObject([
-      {
-        auditId: audit.auditId,
-        action: "tags_updated",
-        beforeTags: ["logistics"],
-        afterTags: ["example", "logistics"],
-        beforeSupportedRoleSlotIds: ["logistics"],
-        afterSupportedRoleSlotIds: ["logistics", "seller"],
-        beforeSupportedStageIds: ["shipment"],
-        afterSupportedStageIds: ["example", "shipment"],
-      },
-    ]);
-    await expect(
-      reopened.storeDockingSessionStore.getSession(docking.sessionId),
-    ).resolves.toMatchObject({
-      sessionId: docking.sessionId,
-      draftSignalMap: [
-        { sourceSignalId: "source.done", targetSignalId: "target.start" },
-      ],
-    });
-  });
-
-  it("reloads Store metadata through API routes after SQLite service restart", async () => {
-    const databaseUrl = sqliteUrl(tempDirs);
-    const database = {
-      driver: "sqlite" as const,
-      url: databaseUrl,
-      migrationsAutoRun: true,
-    };
-    const first = createChainServicesStores({
-      database,
-      chainId,
-      migrationsDirectory: migrationsDirectory(),
-    });
-    stores.push(first);
-    await first.projectionStore.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        chainEvent(6n, 0, "PlanRegistered", {
-          planId: examplePlanIds.planId,
-          planHash: examplePlanIds.planHash,
-          hookCount: 1n,
-        }),
-        chainEvent(7n, 0, "PlanRegistered", {
-          planId: dockTargetPlanIds.planId,
-          planHash: dockTargetPlanIds.planHash,
-          hookCount: 1n,
-        }),
-      ],
-    });
-    const firstRouter = createStoreMetadataRouter(first);
-
-    const draftResponse = await firstRouter.handle({
-      method: "POST",
-      pathname: "/store/zhixu-drafts/import",
-      headers: adminHeaders,
-      body: {
-        sourceKind: "zhixu_yaml",
-        content:
-          "apiVersion: uvp/v0\nkind: Zhixu\nmetadata:\n  name: route-durable\n",
-        title: "Route durable draft",
-        maintainer: "Store team",
-        tags: ["route-smoke"],
-      },
-    });
-    expect(draftResponse.status).toBe(201);
-    const draftId = (draftResponse.body as { draft: { draftId: string } }).draft
-      .draftId;
-
-    const versionResponse = await firstRouter.handle({
-      method: "POST",
-      pathname: `/store/zhixu-series/${EXAMPLE_ZHIXU_ID}/versions/v-route/deprecate`,
-      headers: adminHeaders,
-      body: {
-        zhixuId: EXAMPLE_ZHIXU_ID,
-        versionLabel: "Route smoke v1",
-        planId: examplePlanIds.planId,
-        planHash: examplePlanIds.planHash,
-        artifactHash: examplePlanIds.artifactHash,
-        cutoverReason: "Route restart smoke.",
-        confirmation: {
-          versionId: "v-route",
-          planId: examplePlanIds.planId,
-          planHash: examplePlanIds.planHash,
-        },
-      },
-    });
-    expect(versionResponse.status).toBe(200);
-
-    const supplierResponse = await firstRouter.handle({
-      method: "POST",
-      pathname: "/store/suppliers",
-      headers: adminHeaders,
-      body: {
-        supplierId: "supplier-route-durable",
-        supplierSubjectId:
-          "0x0000000000000000000000000000000000000000000000000000000000003311",
-        displayName: "Route Durable Supplier",
-        wallet: seller,
-        capabilityTags: ["logistics"],
-        supportedRoleSlotIds: ["example"],
-        supportedStageIds: ["stage-a"],
-        registryAddresses: [registryAddress],
-        metadataURI: "https://store.example/suppliers/route-durable",
-      },
-    });
-    expect(supplierResponse.status).toBe(201);
-
-    const dockingResponse = await firstRouter.handle({
-      method: "POST",
-      pathname: "/store/docking-sessions",
-      headers: adminHeaders,
-      body: {
-        sourceZhixuId: EXAMPLE_ZHIXU_ID,
-        targetZhixuId: DOCK_TARGET_ZHIXU_ID,
-      },
-    });
-    expect(dockingResponse.status).toBe(201);
-    const dockingSessionId = (
-      dockingResponse.body as { session: { sessionId: string } }
-    ).session.sessionId;
-
-    await first.close();
-    stores.splice(stores.indexOf(first), 1);
-
-    const reopened = createChainServicesStores({
-      database,
-      chainId,
-      migrationsDirectory: migrationsDirectory(),
-    });
-    stores.push(reopened);
-    const reopenedRouter = createStoreMetadataRouter(reopened);
-
-    await expect(
-      reopenedRouter.handle({
-        method: "GET",
-        pathname: `/store/zhixu-drafts/${draftId}`,
-        headers: adminHeaders,
-      }),
-    ).resolves.toMatchObject({
-      status: 200,
-      body: {
-        draft: { draftId, title: "Route durable draft", status: "imported" },
-      },
-    });
-    await expect(
-      reopenedRouter.handle({
-        method: "GET",
-        pathname: `/store/zhixu-series/${EXAMPLE_ZHIXU_ID}/versions`,
-        // 版本清单与运行时观察面同门（store.audit.read），匿名不可枚举。
-        headers: adminHeaders,
-      }),
-    ).resolves.toMatchObject({
-      status: 200,
-      body: {
-        versions: expect.arrayContaining([
-          expect.objectContaining({
-            versionId: "v-route",
-            status: "deprecated",
-            cutoverReason: "Route restart smoke.",
-          }),
-        ]),
-      },
-    });
-    await expect(
-      reopenedRouter.handle({
-        method: "GET",
-        pathname: "/store/suppliers/supplier-route-durable",
-        headers: adminHeaders,
-      }),
-    ).resolves.toMatchObject({
-      status: 200,
-      body: {
-        supplier: {
-          supplierId: "supplier-route-durable",
-          displayName: "Route Durable Supplier",
-          capabilityTags: ["logistics"],
-        },
-      },
-    });
-    await expect(
-      reopenedRouter.handle({
-        method: "GET",
-        pathname: `/store/docking-sessions/${dockingSessionId}`,
-        // 会话档案读与写同门：需要已认证的 Store 身份（store.docking.read）。
-        headers: adminHeaders,
-      }),
-    ).resolves.toMatchObject({
-      status: 200,
-      body: { session: { sessionId: dockingSessionId, status: "draft" } },
+      sessionId: storeDocking.sessionId,
+      status: "valid",
     });
   });
 });
 
-const postgresTestUrl = process.env.CHAIN_SERVICES_POSTGRES_TEST_URL;
-const describePostgres = postgresTestUrl ? describe : describe.skip;
-
-describePostgres(
-  `postgres durable storage${postgresTestUrl ? "" : " (skipped: set CHAIN_SERVICES_POSTGRES_TEST_URL)"}`,
-  () => {
-    const stores: Array<{ close(): Promise<void> }> = [];
-    const databases: PostgresDatabase[] = [];
-    const schemas: string[] = [];
-    const tempDirs: string[] = [];
-
-    afterEach(async () => {
-      for (const store of stores.splice(0)) {
-        await store.close();
-      }
-      for (const database of databases.splice(0)) {
-        await database.close();
-      }
-      for (const schema of schemas.splice(0)) {
-        await dropPostgresTestSchema(postgresTestUrl!, schema);
-      }
-      for (const dir of tempDirs.splice(0)) {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    });
-
-    it("runs Postgres migrations explicitly and records checksums", async () => {
-      const databaseUrl = await postgresSchemaUrl(schemas);
-      const database = new PostgresDatabase({ databaseUrl });
-      databases.push(database);
-
-      const dryRun = await runPostgresMigrations({
-        database,
-        migrationsDirectory: postgresMigrationsDirectory(),
-        dryRun: true,
-      });
-      expect(dryRun.pending.map((migration) => migration.version)).toContain(
-        "0001_projection_storage",
-      );
-      expect(await listAppliedPostgresMigrations(database)).toHaveLength(0);
-
-      const result = await runPostgresMigrations({
-        database,
-        migrationsDirectory: postgresMigrationsDirectory(),
-      });
-
-      expect(result.applied.map((migration) => migration.version)).toEqual(
-        expectedMigrationVersions,
-      );
-      expect(result.applied[0]?.checksum).toMatch(/^[0-9a-f]{64}$/);
-      expect(
-        (await listAppliedPostgresMigrations(database)).map(
-          (record) => record.version,
-        ),
-      ).toEqual(expectedMigrationVersions);
-    });
-
-    it("converges duplicate rows before creating the single-active unique indexes (postgres)", async () => {
-      // 与 sqlite 侧同名测试同口径：脏库（重复 active/同钱包双 accepted）
-      // 上直接建部分唯一索引会失败、阻断部署，迁移先收敛再上索引。
-      const databaseUrl = await postgresSchemaUrl(schemas);
-      const database = new PostgresDatabase({ databaseUrl });
-      databases.push(database);
-      const base = migrationsDirectoryWithoutConvergenceFiles(tempDirs, "postgres");
-      await runPostgresMigrations({ database, migrationsDirectory: base });
-      await database.queryRaw(convergenceSeedSql("false"));
-
-      for (const file of [
-        "0021_zhixu_version_single_active.sql",
-        "0022_product_invite_single_active.sql",
-        "0023_participant_wallet_single_role.sql",
-      ]) {
-        copyFileSync(
-          join(postgresMigrationsDirectory(), file),
-          join(base, file),
-        );
-      }
-      const result = await runPostgresMigrations({ database, migrationsDirectory: base });
-      expect(result.applied.map((migration) => migration.version)).toEqual([
-        "0021_zhixu_version_single_active",
-        "0022_product_invite_single_active",
-        "0023_participant_wallet_single_role",
-      ]);
-
-      await expectConverged(async (sql) =>
-        (await database.queryRaw(sql)).rows as Record<string, unknown>[],
-      );
-      // 收敛后索引真实生效：重复组上的新写入撞索引。
-      await expect(
-        database.queryRaw(
-          `INSERT INTO store_zhixu_version_metadata
-           (series_id, version_id, zhixu_id, version_label, status, plan_id, plan_hash, created_at)
-           VALUES ('series_race', 'v_extra', 'zhixu_race', '3.0', 'active', '${planId}', '${planHash}', '2026-04-01T00:00:00.000Z')`,
-        ),
-      ).rejects.toThrow();
-    });
-
-    it("rolls back Postgres projection transactions and persists rebuild snapshots", async () => {
-      const databaseUrl = await postgresSchemaUrl(schemas);
-      const store = new PostgresProjectionStore({
-        databaseUrl,
-        chainId,
-        migrations: { autoRun: true, directory: postgresMigrationsDirectory() },
-      });
-      stores.push(store);
-
-      await expect(
-        store.withTransaction(async () => {
-          await store.appendEvent(
-            chainEvent(1n, 0, "OrderCreated", {
-              orderId: "order-postgres-rollback",
-              buyer,
-              seller,
-            }),
-          );
-          throw new Error("force postgres rollback");
-        }),
-      ).rejects.toThrow("force postgres rollback");
-      await expect(store.listEvents({ chainId })).resolves.toHaveLength(0);
-
-      await store.resetFromEvents({
-        deploymentBlock: 0n,
-        events: [
-          chainEvent(2n, 0, "PlanRegistered", {
-            planId,
-            planHash,
-            hookCount: 1n,
-          }),
-          chainEvent(3n, 0, "OrderRegistered", {
-            orderId: stateMachineOrderId,
-            planId,
-          }),
-        ],
-        syncState: {
-          chainId,
-          contractAddress: snapshotScopeContract,
-          syncStatus: "indexed",
-          latestIndexedBlock: 3n,
-          finalizedBlock: 3n,
-          confirmationDepth: 1,
-          lastEventName: "PlanRegistered",
-          eventCount: 2,
-        },
-      });
-      await store.close();
-      stores.splice(stores.indexOf(store), 1);
-
-      const reopened = new PostgresProjectionStore({
-        databaseUrl,
-        chainId,
-        migrations: { autoRun: true, directory: postgresMigrationsDirectory() },
-      });
-      stores.push(reopened);
-
-      await expect(
-        reopened.getStateMachineOrder(stateMachineOrderId),
-      ).resolves.toMatchObject({
-        orderId: stateMachineOrderId,
-        planId,
-      });
-      await expect(
-        reopened.listEvents({ chainId, contractAddress }),
-      ).resolves.toHaveLength(2);
-      await expect(
-        reopened.getSyncState({
-          chainId,
-          contractAddress: snapshotScopeContract,
-        }),
-      ).resolves.toMatchObject({
-        syncStatus: "indexed",
-        latestIndexedBlock: 3n,
-        finalizedBlock: 3n,
-      });
-    });
-
-    it("deduplicates the same Postgres event but retains same-position logs from different transactions", async () => {
-      const databaseUrl = await postgresSchemaUrl(schemas);
-      const store = new PostgresProjectionStore({
-        databaseUrl,
-        chainId,
-        migrations: { autoRun: true, directory: postgresMigrationsDirectory() },
-      });
-      stores.push(store);
-
-      const event = chainEvent(10n, 0, "OrderCreated", {
-        orderId: "order-postgres-unique",
-        buyer,
-        seller,
-      });
-      await store.appendEvent(event);
-      await expect(store.appendEvent(event)).resolves.toBeUndefined();
-
-      await expect(
-        store.listEvents({ chainId, contractAddress }),
-      ).resolves.toHaveLength(1);
-
-      // 迁移 0011 后 canonical 身份为 (chain, contract, block, txHash, logIndex)，
-      // 同位不同 tx 的日志必须保留，与 memory/sqlite 后端语义一致。
-      const sameLogIndexDifferentTx = {
-        ...event,
-        transactionHash:
-          "0x9999999999999999999999999999999999999999999999999999999999999999" as const,
-      };
-      await expect(
-        store.appendEvent(sameLogIndexDifferentTx),
-      ).resolves.toBeUndefined();
-
-      await expect(
-        store.listEvents({ chainId, contractAddress }),
-      ).resolves.toHaveLength(2);
-    });
-
-    it("assembles and persists notification state and broadcast dedupe stores in the Postgres factory wiring", async () => {
-      // 生产拓扑（postgres）同样装配持久化通知状态与
-      // broadcast 去重状态，而不是静默退化为 undefined。
-      const databaseUrl = await postgresSchemaUrl(schemas);
-      const factoryStores = createChainServicesStores({
-        database: {
-          driver: "postgres" as const,
-          url: databaseUrl,
-          migrationsAutoRun: true,
-        },
-        chainId,
-        migrationsDirectory: migrationsDirectory(),
-      });
-      stores.push(factoryStores);
-
-      expect(factoryStores.notificationStateStore).toBeDefined();
-      expect(factoryStores.broadcastDedupeStore).toBeDefined();
-
-      const notificationState = factoryStores.notificationStateStore!;
-      const marked = await notificationState.markRead({
-        participantKey: "supplier:postgres-1",
-        notificationId: planId as Hex,
-        readAt: "2026-04-28T00:00:00.000Z",
-      });
-      expect(marked.readAt).toBe("2026-04-28T00:00:00.000Z");
-      await expect(
-        notificationState.getReadState("supplier:postgres-1", planId as Hex),
-      ).resolves.toMatchObject({
-        participantKey: "supplier:postgres-1",
-        notificationId: planId,
-        readAt: "2026-04-28T00:00:00.000Z",
-      });
-
-      const dedupe = factoryStores.broadcastDedupeStore!;
-      const dedupeTxHash =
-        "0x7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b" as Hex;
-      await dedupe.save("idem-postgres-1", {
-        attempts: 1,
-        lastResult: { status: "submitted", txHash: dedupeTxHash },
-      });
-      await expect(dedupe.load("idem-postgres-1")).resolves.toMatchObject({
-        attempts: 1,
-        lastResult: { status: "submitted", txHash: dedupeTxHash },
-      });
-      await expect(dedupe.claimTxHash(dedupeTxHash, "idem-postgres-1")).resolves.toBeUndefined();
-      await expect(dedupe.claimTxHash(dedupeTxHash, "idem-postgres-2")).resolves.toBe(
-        "idem-postgres-1",
-      );
-    });
-
-    it("wires all chain-services stores to durable Postgres across service restarts", async () => {
-      const databaseUrl = await postgresSchemaUrl(schemas);
-      const database = {
-        driver: "postgres" as const,
-        url: databaseUrl,
-        migrationsAutoRun: true,
-      };
-      const first = createChainServicesStores({
-        database,
-        chainId,
-        migrationsDirectory: migrationsDirectory(),
-      });
-      stores.push(first);
-      const draft = productDraft("draft_postgres");
-      const participant = productParticipant(draft.draftId);
-      const registration = {
-        ...productRegistration(draft.draftId),
-        stateMachineAddress: contractAddress as Address,
-        deploymentId: planId as Hex,
-      };
-      const evidence = evidenceRecord();
-      const prepared = preparedSubmission();
-      const submission = productSubmission(prepared);
-      const review = governanceReview();
-      const log = identityTxLog();
-      const storeDraft = storeZhixuDraftRecord();
-      const storeVersion = storeZhixuVersionRecord("v-postgres", "active", {
-        cutoverAt: "2026-04-28T00:00:07.000Z",
-        cutoverReason: "Postgres durable Store metadata test.",
-      });
-      const storeSupplier = storeSupplierMetadataRecord();
-      const storeAudit = storeSupplierAuditRecord(storeSupplier);
-      const storeDocking = storeDockingSession();
-
-      await first.projectionStore.resetFromEvents({
-        deploymentBlock: 0n,
-        events: [
-          chainEvent(4n, 0, "OrderRegistered", {
-            orderId: stateMachineOrderId,
-            planId,
-          }),
-        ],
-      });
-      await first.productBffStore.createDraft(draft, [participant]);
-      await first.productBffStore.createInviteIfNoneActive(
-        productInvite(draft.draftId, participant.participantId),
-        "2026-01-01T00:00:00.000Z",
-      );
-      await first.productBffStore.createRegistrationIfNoneForDraft(registration);
-      await first.evidenceMetadataStore.put(evidence);
-      await first.evidenceMetadataStore.markBound?.({
-        evidenceId: evidence.evidence.evidenceId,
-        txHash:
-          "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        submissionId: "sub_postgres",
-        orderId: evidence.evidence.orderId ?? "order-1",
-        onchainOrderId:
-          "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        sourceId:
-          "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        signalId:
-          "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-        boundAt: "2026-04-28T00:00:02.000Z",
-      });
-      await first.evidenceMetadataStore.recordAdminRead({
-        evidenceId: evidence.evidence.evidenceId,
-        principalId: "admin-1",
-        accessedAt: "2026-04-28T00:00:03.000Z",
-        route: "evidence",
-      });
-      await first.submissionStore.putPrepared(prepared);
-      await expect(
-        first.submissionStore.reserveNonce("nonce-key-postgres"),
-      ).resolves.toBe(true);
-      await first.submissionStore.putSubmission(submission);
-      await first.submissionStore.markPreparedUsed(
-        prepared.prepareId,
-        submission.submissionId,
-        submission.updatedAt,
-      );
-      await first.governanceStore.putReview(review);
-      await first.governanceStore.appendIdentityTxLog(log);
-      await first.storeZhixuDraftStore.createDraft(storeDraft);
-      await first.storeZhixuVersionMetadataStore.upsertVersion(storeVersion);
-      await first.storeSupplierMetadataStore.putSupplier(storeSupplier);
-      await first.storeSupplierMetadataStore.appendAudit(storeAudit);
-      await first.storeDockingSessionStore.createSession(storeDocking);
-      await first.close();
-      stores.splice(stores.indexOf(first), 1);
-
-      const reopened = createChainServicesStores({
-        database,
-        chainId,
-        migrationsDirectory: migrationsDirectory(),
-      });
-      stores.push(reopened);
-
-      await expect(
-        reopened.projectionStore.getStateMachineOrder(stateMachineOrderId),
-      ).resolves.toMatchObject({
-        orderId: stateMachineOrderId,
-        planId,
-      });
-      await expect(
-        reopened.productBffStore.getRegistration(registration.triggerId),
-      ).resolves.toMatchObject({
-        triggerId: registration.triggerId,
-        stateMachineAddress: contractAddress,
-        deploymentId: planId,
-      });
-      await expect(
-        reopened.evidenceMetadataStore.get(evidence.evidence.evidenceId),
-      ).resolves.toMatchObject({
-        evidence: {
-          evidenceId: evidence.evidence.evidenceId,
-          status: "bound",
-          boundSubmissionId: "sub_postgres",
-        },
-      });
-      await expect(
-        reopened.evidenceMetadataStore.listAdminReads?.(),
-      ).resolves.toHaveLength(1);
-      await expect(
-        reopened.submissionStore.reserveNonce("nonce-key-postgres"),
-      ).resolves.toBe(false);
-      // 陈旧预留接管与 sqlite 同判据：预留行早于 staleBefore 才接管。
-      await expect(
-        reopened.submissionStore.reserveNonce("nonce-key-postgres", {
-          staleBefore: new Date(Date.now() + 60_000).toISOString(),
-        }),
-      ).resolves.toBe(true);
-      await expect(
-        reopened.submissionStore.getPrepared(prepared.prepareId),
-      ).resolves.toMatchObject({
-        prepareId: prepared.prepareId,
-        submissionId: submission.submissionId,
-        usedAt: submission.updatedAt,
-      });
-      await expect(
-        reopened.submissionStore.getSubmission(submission.submissionId),
-      ).resolves.toMatchObject({
-        submissionId: submission.submissionId,
-        attemptCount: 1,
-        attempts: [{ txHash: submission.attempts[0]?.txHash }],
-      });
-      await expect(
-        reopened.governanceStore.findLatestReview(
-          review.subjectType,
-          review.subjectId,
-        ),
-      ).resolves.toMatchObject({
-        reviewId: review.reviewId,
-      });
-      await expect(
-        reopened.governanceStore.getTxLog(log.txLogId),
-      ).resolves.toMatchObject(log);
-      await expect(
-        reopened.storeZhixuDraftStore.getDraft(storeDraft.draftId),
-      ).resolves.toMatchObject({
-        draftId: storeDraft.draftId,
-        status: "compiled",
-      });
-      await expect(
-        reopened.storeZhixuVersionMetadataStore.getVersion(
-          storeVersion.seriesId,
-          storeVersion.versionId,
-        ),
-      ).resolves.toMatchObject({
-        versionId: storeVersion.versionId,
-        status: "active",
-        cutoverReason: "Postgres durable Store metadata test.",
-      });
-      await expect(
-        reopened.storeSupplierMetadataStore.findSupplierBySubjectId(
-          storeSupplier.supplierSubjectId,
-        ),
-      ).resolves.toMatchObject({
-        supplierId: storeSupplier.supplierId,
-        capabilityTags: ["example", "logistics"],
-      });
-      await expect(
-        reopened.storeSupplierMetadataStore.listAudits(
-          storeSupplier.supplierId,
-        ),
-      ).resolves.toMatchObject([
-        { auditId: storeAudit.auditId, action: "tags_updated" },
-      ]);
-      await expect(
-        reopened.storeDockingSessionStore.getSession(storeDocking.sessionId),
-      ).resolves.toMatchObject({
-        sessionId: storeDocking.sessionId,
-        status: "valid",
-      });
-    });
-
-    it("reloads Store metadata through API routes after Postgres service restart", async () => {
-      const databaseUrl = await postgresSchemaUrl(schemas);
-      const database = {
-        driver: "postgres" as const,
-        url: databaseUrl,
-        migrationsAutoRun: true,
-      };
-      const first = createChainServicesStores({
-        database,
-        chainId,
-        migrationsDirectory: migrationsDirectory(),
-      });
-      stores.push(first);
-      await first.projectionStore.resetFromEvents({
-        deploymentBlock: 0n,
-        events: [
-          chainEvent(6n, 0, "PlanRegistered", {
-            planId: examplePlanIds.planId,
-            planHash: examplePlanIds.planHash,
-            hookCount: 1n,
-          }),
-          chainEvent(7n, 0, "PlanRegistered", {
-            planId: dockTargetPlanIds.planId,
-            planHash: dockTargetPlanIds.planHash,
-            hookCount: 1n,
-          }),
-        ],
-      });
-      const firstRouter = createStoreMetadataRouter(first);
-
-      const imported = await importRouteSmokeDraft(firstRouter);
-      const compiled = await compileRouteSmokeDraft(
-        firstRouter,
-        imported.draftId,
-      );
-      const savedSchema = await saveExplicitRouteSmokeSchema(
-        firstRouter,
-        compiled.draftId,
-      );
-      const versionResponse = await firstRouter.handle({
-        method: "POST",
-        pathname: `/store/zhixu-series/${EXAMPLE_ZHIXU_ID}/versions/v-postgres-route/deprecate`,
-        headers: adminHeaders,
-        body: {
-          zhixuId: EXAMPLE_ZHIXU_ID,
-          versionLabel: "Postgres route smoke v1",
-          planId: examplePlanIds.planId,
-          planHash: examplePlanIds.planHash,
-          artifactHash: examplePlanIds.artifactHash,
-          cutoverReason: "Postgres route restart smoke.",
-          confirmation: {
-            versionId: "v-postgres-route",
-            planId: examplePlanIds.planId,
-            planHash: examplePlanIds.planHash,
-          },
-        },
-      });
-      expect(versionResponse.status).toBe(200);
-
-      const supplierResponse = await firstRouter.handle({
-        method: "POST",
-        pathname: "/store/suppliers",
-        headers: adminHeaders,
-        body: {
-          supplierId: "supplier-postgres-route-durable",
-          supplierSubjectId:
-            "0x0000000000000000000000000000000000000000000000000000000000004411",
-          displayName: "Postgres Route Durable Supplier",
-          wallet: seller,
-          capabilityTags: ["logistics"],
-          supportedRoleSlotIds: ["delivery"],
-          supportedStageIds: ["shipping"],
-          registryAddresses: [registryAddress],
-          metadataURI: "https://store.example/suppliers/postgres-route-durable",
-        },
-      });
-      expect(supplierResponse.status).toBe(201);
-      const reviewedSupplier = await firstRouter.handle({
-        method: "POST",
-        pathname: "/store/suppliers/supplier-postgres-route-durable/review",
-        headers: adminHeaders,
-        body: {
-          reviewStatus: "approved_for_broadcast",
-          capabilityTags: ["inspection", "logistics"],
-          supportedRoleSlotIds: ["example-broker"],
-          supportedStageIds: ["stage-a"],
-          publicSummary: "Approved for Postgres route durable smoke.",
-          confirmation: {
-            supplierId: "supplier-postgres-route-durable",
-          },
-        },
-      });
-      expect(reviewedSupplier.status).toBe(200);
-      expect(
-        (reviewedSupplier.body as { supplier: StoreSupplierDTO }).supplier
-          .capabilityTags,
-      ).toEqual(["inspection", "logistics"]);
-
-      const dockingResponse = await firstRouter.handle({
-        method: "POST",
-        pathname: "/store/docking-sessions",
-        headers: adminHeaders,
-        body: {
-          sourceZhixuId: EXAMPLE_ZHIXU_ID,
-          targetZhixuId: DOCK_TARGET_ZHIXU_ID,
-        },
-      });
-      expect(dockingResponse.status).toBe(201);
-      const dockingSessionId = (
-        dockingResponse.body as { session: { sessionId: string } }
-      ).session.sessionId;
-
-      await first.close();
-      stores.splice(stores.indexOf(first), 1);
-
-      const reopened = createChainServicesStores({
-        database,
-        chainId,
-        migrationsDirectory: migrationsDirectory(),
-      });
-      stores.push(reopened);
-      const reopenedRouter = createStoreMetadataRouter(reopened);
-
-      await expect(
-        reopenedRouter.handle({
-          method: "GET",
-          pathname: `/store/zhixu-drafts/${imported.draftId}`,
-          headers: adminHeaders,
-        }),
-      ).resolves.toMatchObject({
-        status: 200,
-        body: {
-          draft: {
-            draftId: imported.draftId,
-            title: "Route durable draft",
-            productSchema: {
-              schemaHash: savedSchema.schemaHash,
-              validation: { ok: true, status: "explicit" },
-            },
-          },
-        },
-      });
-      await expect(
-        reopenedRouter.handle({
-          method: "GET",
-          pathname: `/store/zhixu-drafts/${imported.draftId}/product-schema`,
-          headers: adminHeaders,
-        }),
-      ).resolves.toMatchObject({
-        status: 200,
-        body: {
-          productSchema: {
-            schemaHash: savedSchema.schemaHash,
-            validation: { ok: true },
-          },
-        },
-      });
-      // 链侧身份（artifactHash，runtime 域）命中；canonical planHash 在
-      // 异值夹具下不得命中。
-      await expect(
-        reopenedRouter.handle({
-          method: "GET",
-          pathname: `/store/product-schemas/${encodeURIComponent(savedSchema.planId)}/${encodeURIComponent(savedSchema.artifactHash)}`,
-          // plan 级完整 schema 同为发布者创作资产，匿名不可读（operator 级）。
-          headers: adminHeaders,
-        }),
-      ).resolves.toMatchObject({
-        status: 200,
-        body: { productSchema: { schemaHash: savedSchema.schemaHash } },
-      });
-      await expect(
-        reopenedRouter.handle({
-          method: "GET",
-          pathname: `/store/zhixu-series/${EXAMPLE_ZHIXU_ID}/versions`,
-          headers: adminHeaders,
-        }),
-      ).resolves.toMatchObject({
-        status: 200,
-        body: {
-          versions: expect.arrayContaining([
-            expect.objectContaining({
-              versionId: "v-postgres-route",
-              status: "deprecated",
-              cutoverReason: "Postgres route restart smoke.",
-            }),
-          ]),
-        },
-      });
-      await expect(
-        reopenedRouter.handle({
-          method: "GET",
-          pathname: "/store/suppliers/supplier-postgres-route-durable",
-          headers: adminHeaders,
-        }),
-      ).resolves.toMatchObject({
-        status: 200,
-        body: {
-          supplier: {
-            supplierId: "supplier-postgres-route-durable",
-            displayName: "Postgres Route Durable Supplier",
-            capabilityTags: ["inspection", "logistics"],
-          },
-        },
-      });
-      await expect(
-        reopened.storeSupplierMetadataStore.listAudits(
-          "supplier-postgres-route-durable",
-        ),
-      ).resolves.toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            action: "tags_updated",
-            beforeTags: ["logistics"],
-            afterTags: ["inspection", "logistics"],
-            beforeSupportedRoleSlotIds: ["delivery"],
-            afterSupportedRoleSlotIds: ["example-broker"],
-            beforeSupportedStageIds: ["shipping"],
-            afterSupportedStageIds: ["stage-a"],
-          }),
-        ]),
-      );
-      await expect(
-        reopenedRouter.handle({
-          method: "GET",
-          pathname: `/store/docking-sessions/${dockingSessionId}`,
-          headers: adminHeaders,
-        }),
-      ).resolves.toMatchObject({
-        status: 200,
-        body: { session: { sessionId: dockingSessionId, status: "draft" } },
-      });
-    });
-  },
-);
-
-function openStore(tempDirs: string[]): SqliteProjectionStore {
-  return new SqliteProjectionStore({
-    databaseUrl: sqliteUrl(tempDirs),
-    chainId,
-    migrations: { autoRun: true, directory: migrationsDirectory() },
-  });
-}
-
-function openProductStore(databaseUrl: string): SqliteProductBffStore {
-  return new SqliteProductBffStore({
-    databaseUrl,
-    migrations: { autoRun: true, directory: migrationsDirectory() },
-  });
-}
-
-function openEvidenceStore(databaseUrl: string): SqliteEvidenceStore {
-  return new SqliteEvidenceStore({
-    databaseUrl,
-    migrations: { autoRun: true, directory: migrationsDirectory() },
-  });
-}
-
-function openSubmissionStore(databaseUrl: string): SqliteSubmissionStore {
-  return new SqliteSubmissionStore({
-    databaseUrl,
-    migrations: { autoRun: true, directory: migrationsDirectory() },
-  });
-}
-
-function openGovernanceStore(databaseUrl: string): SqliteGovernanceStore {
-  return new SqliteGovernanceStore({
-    databaseUrl,
-    migrations: { autoRun: true, directory: migrationsDirectory() },
-  });
-}
-
-function createStoreMetadataRouter(stores: ChainServicesStores): ApiRouter {
-  return createApiRouter(stores.projectionStore, { productRuntimeEnvironment: "local", productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-    storeAuthConfig: {
-      mode: "dev_headers" as const,
-      roleClaim: "roles",
-      principalClaim: "sub",
-      clockToleranceSeconds: 60,
-      walletSession: {
-        enabled: true,
-        operatorWallets: [],
-        adminWallets: [],
-        sessionTtlSeconds: 43200,
-        challengeTtlSeconds: 300,
-        devAnchoredAddressHeaderEnabled: true,
-      },
-    },
-    productBffStore: stores.productBffStore,
-    evidenceMetadataStore: stores.evidenceMetadataStore,
-    submissionStore: stores.submissionStore,
-    governanceStore: stores.governanceStore,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    // 锚定地址的 wallet 会话必须与被测栈同源（postgres 持久化）：不传时
-    // 路由自建内存会话仓，重启后 store_operator 身份蒸发、路由 401。
-    storeWalletSessionStore: stores.storeWalletSessionStore,
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
-    now: () => new Date("2026-04-30T00:00:00.000Z"),
-  });
-}
-
-async function importRouteSmokeDraft(
-  router: ApiRouter,
-): Promise<StoreZhixuDraftDTO> {
-  const response = await router.handle({
-    method: "POST",
-    pathname: "/store/zhixu-drafts/import",
-    headers: adminHeaders,
-    body: {
-      sourceKind: "zhixu_yaml",
-      content: routeSmokeZhixuYaml,
-      title: "Route durable draft",
-      maintainer: "Store team",
-      tags: ["route-smoke"],
-    },
-  });
-  expect(response.status).toBe(201);
-  return (response.body as { draft: StoreZhixuDraftDTO }).draft;
-}
-
-async function compileRouteSmokeDraft(
-  router: ApiRouter,
-  draftId: string,
-): Promise<StoreZhixuDraftDTO> {
-  const response = await router.handle({
-    method: "POST",
-    pathname: `/store/zhixu-drafts/${draftId}/compile-preview`,
-    headers: adminHeaders,
-  });
-  expect(response.status).toBe(200);
-  return (response.body as { draft: StoreZhixuDraftDTO }).draft;
-}
-
-async function saveExplicitRouteSmokeSchema(
-  router: ApiRouter,
-  draftId: string,
-): Promise<StoreProductSchemaDTO> {
-  const schemaResponse = await router.handle({
-    method: "GET",
-    pathname: `/store/zhixu-drafts/${draftId}/product-schema`,
-    // 完整 schema 含 compilePreview 材料，路由对匿名读取强制 401——
-    // smoke 链路与其余写操作一样走 admin 能力头。
-    headers: adminHeaders,
-  });
-  expect(schemaResponse.status).toBe(200);
-  const schema = (
-    schemaResponse.body as { productSchema: StoreProductSchemaDTO }
-  ).productSchema;
-  const explicitSchema = schema;
-  const updateResponse = await router.handle({
-    method: "PUT",
-    pathname: `/store/zhixu-drafts/${draftId}/product-schema`,
-    headers: adminHeaders,
-    body: { productSchema: explicitSchema },
-  });
-  expect(updateResponse.status).toBe(200);
-  return (updateResponse.body as { productSchema: StoreProductSchemaDTO })
-    .productSchema;
-}
-
-function productDraft(draftId = "draft_sqlite"): ProductOrderDraftDTO {
+function productDraft(draftId = "draft_durable"): ProductOrderDraftDTO {
   return {
     draftId,
     zhixuId: "zhixu-1",
@@ -2178,9 +432,9 @@ function productDraft(draftId = "draft_sqlite"): ProductOrderDraftDTO {
     businessType: "export",
     goods: ["widgets"],
     totalAmount: "100",
-    currency: "USDC",
+    currency: "tok-1",
     status: "draft",
-    createdBy: buyer,
+    createdBy: slotA,
     createdAt: "2026-04-28T00:00:00.000Z",
     updatedAt: "2026-04-28T00:00:00.000Z",
   };
@@ -2192,9 +446,9 @@ function productParticipant(draftId: string): DraftParticipantDTO {
     draftId,
     roleSlotId: "funds",
     roleLabel: "Funds",
-    displayName: "Buyer finance",
-    walletAddress: buyer as Address,
-    contact: "buyer@example.com",
+    displayName: "Slot-a finance",
+    walletAddress: slotA as Address,
+    contact: "slot-a@example.com",
     status: "accepted",
     required: true,
     acceptedAt: "2026-04-28T00:00:01.000Z",
@@ -2215,7 +469,7 @@ function productInvite(
     status: "accepted",
     expiresAt: "2026-05-05T00:00:00.000Z",
     createdAt: "2026-04-28T00:00:00.000Z",
-    acceptedWalletAddress: buyer as Address,
+    acceptedWalletAddress: slotA as Address,
   };
 }
 
@@ -2240,7 +494,7 @@ function productRegistration(draftId: string): ProductOrderTriggerRecord {
       "0x5555555555555555555555555555555555555555555555555555555555555555",
     triggerStageId:
       "0x6666666666666666666666666666666666666666666666666666666666666666",
-    submitter: buyer as Address,
+    submitter: slotA as Address,
     payloadHash:
       "0x7777777777777777777777777777777777777777777777777777777777777777",
     idempotencyKey:
@@ -2251,14 +505,14 @@ function productRegistration(draftId: string): ProductOrderTriggerRecord {
     reconcileStatus: "submitted",
     receiptStatus: "not_checked",
     projectionStatus: "not_checked",
-    creator: buyer as Address,
+    creator: slotA as Address,
     authorizations: [
       {
         sourceId:
           "0x1111111111111111111111111111111111111111111111111111111111111111",
         signalId:
           "0x2222222222222222222222222222222222222222222222222222222222222222",
-        submitter: buyer as Address,
+        submitter: slotA as Address,
         role: "0x3333333333333333333333333333333333333333333333333333333333333333",
         metadataHash:
           "0x4444444444444444444444444444444444444444444444444444444444444444",
@@ -2274,7 +528,7 @@ function productRegistration(draftId: string): ProductOrderTriggerRecord {
         stageIdentifier: "stage-1",
         source: "product",
         signalName: "confirm_stage",
-        submitterAddress: buyer,
+        submitterAddress: slotA,
         payloadPolicy: "required",
       },
     ],
@@ -2286,43 +540,43 @@ function productRegistration(draftId: string): ProductOrderTriggerRecord {
 function evidenceRecord(): EvidenceMetadataRecord {
   return {
     evidence: {
-      evidenceId: "ev_sqlite",
+      evidenceId: "ev_durable",
       orderId: "order-1",
       taskId: "task-1",
       stageIdentifier: "stage-1",
-      ownerParticipantId: "seller",
-      fileName: "invoice.txt",
+      ownerParticipantId: "slot-b",
+      fileName: "doc-1.txt",
       mimeType: "text/plain",
       size: 7,
-      storageURI: "local://evidence/ev_sqlite",
+      storageURI: "local://evidence/ev_durable",
       contentHash:
         "0x5555555555555555555555555555555555555555555555555555555555555555",
       metadataHash:
         "0x6666666666666666666666666666666666666666666666666666666666666666",
       payloadHash:
         "0x7777777777777777777777777777777777777777777777777777777777777777",
-      payloadRef: "uvp-evidence://product/ev_sqlite",
+      payloadRef: "uvp-evidence://product/ev_durable",
       status: "uploaded",
       createdAt: "2026-04-28T00:00:00.000Z",
     },
     metadata: {
-      evidenceId: "ev_sqlite",
-      businessLabel: "Invoice",
-      documentType: "invoice",
-      fields: { invoice: "INV-1" },
+      evidenceId: "ev_durable",
+      businessLabel: "Doc-1",
+      documentType: "doc-1",
+      fields: { "doc-1": "DOC-1" },
     },
     accessPolicy: {
-      evidenceId: "ev_sqlite",
+      evidenceId: "ev_durable",
       orderId: "order-1",
-      readers: ["seller", "buyer"],
-      writers: ["seller"],
+      readers: ["slot-b", "slot-a"],
+      writers: ["slot-b"],
       adminReaders: ["ops"],
       adjudicatorReaders: [],
     },
     canonicalMetadata: {
-      businessLabel: "Invoice",
-      documentType: "invoice",
-      fields: { invoice: "INV-1" },
+      businessLabel: "Doc-1",
+      documentType: "doc-1",
+      fields: { "doc-1": "DOC-1" },
     },
   };
 }
@@ -2330,12 +584,12 @@ function evidenceRecord(): EvidenceMetadataRecord {
 function preparedSubmission(): PreparedSubmissionRecord {
   const evidence = evidenceRecord();
   return {
-    prepareId: "prep_sqlite",
+    prepareId: "prep_durable",
     taskId: "task-1",
     orderId: "order-1",
     onchainOrderId:
       "0x8888888888888888888888888888888888888888888888888888888888888888",
-    planId: "0x6666666666666666666666666666666666666666666666666666666666666666",
+    planId: "0x6666666666666666666666666666666666666666666666666666666666666",
     stageIdentifier: "stage-1",
     signalName: "confirm_stage",
     sourceId:
@@ -2347,7 +601,7 @@ function preparedSubmission(): PreparedSubmissionRecord {
     payloadRef: evidence.evidence.payloadRef,
     idempotencyKey:
       "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-    submitter: buyer as Address,
+    submitter: slotA as Address,
     nonce: "1",
     deadline: "1777334400",
     expiresAt: "2026-05-28T00:00:00.000Z",
@@ -2360,7 +614,7 @@ function preparedSubmission(): PreparedSubmissionRecord {
       action: "confirm stage",
       payloadHash: evidence.evidence.payloadHash,
       payloadRef: evidence.evidence.payloadRef,
-      submitter: buyer as Address,
+      submitter: slotA as Address,
       validUntil: "2026-05-28T00:00:00.000Z",
       chainId,
       verifyingContract: contractAddress as Address,
@@ -2397,7 +651,7 @@ function preparedSubmission(): PreparedSubmissionRecord {
         payloadHash: evidence.evidence.payloadHash,
         idempotencyKey:
           "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        submitter: buyer as Address,
+        submitter: slotA as Address,
         deadline: "1777334400",
       },
     },
@@ -2424,7 +678,7 @@ function productSubmission(
   prepared: PreparedSubmissionRecord,
 ): ProductSubmissionDTO {
   return {
-    submissionId: "sub_sqlite",
+    submissionId: "sub_durable",
     prepareId: prepared.prepareId,
     taskId: prepared.taskId,
     orderId: prepared.orderId,
@@ -2458,8 +712,8 @@ function productSubmission(
     projectionStatus: "not_checked",
     attempts: [
       {
-        attemptId: "sub_sqlite:1",
-        submissionId: "sub_sqlite",
+        attemptId: "sub_durable:1",
+        submissionId: "sub_durable",
         orderId: prepared.onchainOrderId,
         sourceId: prepared.sourceId,
         signalId: prepared.signalId,
@@ -2467,7 +721,7 @@ function productSubmission(
         txHash:
           "0x3434343434343434343434343434343434343434343434343434343434343434",
         status: "submitted",
-        gasPayer: seller as Address,
+        gasPayer: slotB as Address,
         attemptNumber: 1,
         retryable: false,
         retryState: "not_applicable",
@@ -2485,7 +739,7 @@ function productSubmission(
 
 function governanceReview(): GovernanceReviewDTO {
   return {
-    reviewId: "review_sqlite",
+    reviewId: "review_durable",
     subjectType: "zhixu",
     subjectId: "zhixu-1",
     status: "approved",
@@ -2497,7 +751,7 @@ function governanceReview(): GovernanceReviewDTO {
       "0x4545454545454545454545454545454545454545454545454545454545454545",
     metadataHash:
       "0x5656565656565656565656565656565656565656565656565656565656565656",
-    metadataURI: "uvp-governance://metadata/review_sqlite",
+    metadataURI: "uvp-governance://metadata/review_durable",
     reviewer: "admin-1",
     createdAt: "2026-04-28T00:00:00.000Z",
     updatedAt: "2026-04-28T00:00:00.000Z",
@@ -2506,17 +760,17 @@ function governanceReview(): GovernanceReviewDTO {
 
 function identityTxLog(): IdentityTxLogDTO {
   return {
-    logId: "identity_log_sqlite",
-    txLogId: "identity_log_sqlite",
+    logId: "identity_log_durable",
+    txLogId: "identity_log_durable",
     action: "register_identity",
     subjectId: planId as Hex,
-    account: buyer as Address,
+    account: slotA as Address,
     descriptorHash:
       "0x9090909090909090909090909090909090909090909090909090909090909090",
     descriptorURI: "uvp-store://identities/acme",
     txHash:
       "0xabababababababababababababababababababababababababababababababab",
-    signer: buyer as Address,
+    signer: slotA as Address,
     requester: "admin-1",
     status: "pending",
     broadcastStatus: "submitted",
@@ -2527,7 +781,7 @@ function identityTxLog(): IdentityTxLogDTO {
     request: {
       kind: "registerIdentity",
       subjectId: planId as Hex,
-      account: buyer as Address,
+      account: slotA as Address,
       descriptorHash:
         "0x9090909090909090909090909090909090909090909090909090909090909090",
       descriptorURI: "uvp-store://identities/acme",
@@ -2539,7 +793,7 @@ function identityTxLog(): IdentityTxLogDTO {
 
 function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
   return {
-    draftId: "store_draft_sqlite",
+    draftId: "store_draft_durable",
     sourceKind: "zhixu_yaml",
     content:
       "apiVersion: uvp/v0\nkind: Zhixu\nmetadata:\n  name: durable-store\n",
@@ -2579,10 +833,10 @@ function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
           tone: "info",
           required: true,
           performanceSlotLabel: "Intake executor",
-          businessPersonaLabels: ["Buyer ops"],
+          businessPersonaLabels: ["Slot-a ops"],
         },
       ],
-      businessPersonaLabels: ["Buyer ops"],
+      businessPersonaLabels: ["Slot-a ops"],
       stages: [
         {
           stageId: "intake",
@@ -2638,9 +892,9 @@ function storeSupplierMetadataRecord(): StoreSupplierMetadataRecord {
     supplierSubjectId:
       "0x0000000000000000000000000000000000000000000000000000000000003301",
     displayName: "Store Durable Supplier",
-    wallet: seller as Address,
-    capabilityTags: ["example", "logistics"],
-    supportedRoleSlotIds: ["seller", "logistics"],
+    wallet: slotB as Address,
+    capabilityTags: ["example", "tag-1"],
+    supportedRoleSlotIds: ["slot-b", "slot-c"],
     supportedStageIds: ["shipment", "example"],
     registryAddresses: [registryAddress],
     reviewStatus: "approved_for_broadcast",
@@ -2659,10 +913,10 @@ function storeSupplierAuditRecord(
     supplierSubjectId: supplier.supplierSubjectId,
     action: "tags_updated",
     actor: "operator-1",
-    beforeTags: ["logistics"],
-    afterTags: ["example", "logistics"],
-    beforeSupportedRoleSlotIds: ["logistics"],
-    afterSupportedRoleSlotIds: ["logistics", "seller"],
+    beforeTags: ["tag-1"],
+    afterTags: ["example", "tag-1"],
+    beforeSupportedRoleSlotIds: ["slot-c"],
+    afterSupportedRoleSlotIds: ["slot-c", "slot-b"],
     beforeSupportedStageIds: ["shipment"],
     afterSupportedStageIds: ["example", "shipment"],
     reviewStatus: "approved_for_broadcast",
@@ -2672,7 +926,7 @@ function storeSupplierAuditRecord(
 
 function storeDockingSession(): StoreDockingSessionDTO {
   return {
-    sessionId: "dock_sqlite",
+    sessionId: "dock_durable",
     status: "valid",
     createdBy: "0x1234567890123456789012345678901234567890",
     source: {
@@ -2724,208 +978,12 @@ function storeDockingSession(): StoreDockingSessionDTO {
   };
 }
 
-function sqliteUrl(tempDirs: string[]): string {
-  const dir = mkdtempSync(join(tmpdir(), "uvp-chain-services-storage-"));
-  tempDirs.push(dir);
-  return `sqlite://${join(dir, "storage.sqlite")}`;
-}
-
 function migrationsDirectory(): string {
   return fileURLToPath(new URL("../migrations", import.meta.url));
 }
 
 function postgresMigrationsDirectory(): string {
   return fileURLToPath(new URL("../migrations/postgres", import.meta.url));
-}
-
-/** 复制迁移目录但去掉 0021-0023：构造"索引尚未上线"的历史基线库。 */
-function migrationsDirectoryWithoutConvergenceFiles(
-  tempDirs: string[],
-  subdir = "",
-): string {
-  const source = subdir
-    ? join(migrationsDirectory(), subdir)
-    : migrationsDirectory();
-  const base = mkdtempSync(join(tmpdir(), "uvp-migrations-converge-"));
-  tempDirs.push(base);
-  for (const entry of readdirSync(source, { withFileTypes: true })) {
-    // sqlite 目录内含 postgres/ 孪生目录，只复制本驱动的 .sql 文件。
-    if (entry.isFile() && !/^002[123]_/.test(entry.name)) {
-      copyFileSync(join(source, entry.name), join(base, entry.name));
-    }
-  }
-  return base;
-}
-
-/** store_join_application 上的唯一部分索引名（升序）：0024 收口后应只剩
- * 0018 的打开态唯一裁决一条。 */
-function uniquePartialIndexNames(database: SqliteDatabase): string[] {
-  return (
-    database.prepare("PRAGMA index_list(store_join_application)").all() as Record<
-      string,
-      unknown
-    >[]
-  )
-    .filter((index) => index.unique === 1 && index.partial === 1)
-    .map((index) => String(index.name))
-    .sort();
-}
-
-/** 同 plan + 同申请人的打开态申请行：application_id/status 可变，便于
- * 制造撞打开态唯一索引的写入对。 */
-function joinApplicationInsert(applicationId: string, status: string): string {
-  return `
-    INSERT INTO store_join_application (
-      application_id, plan_id, role_slot_id, authorization_kind,
-      applicant_address, applicant_subject_id, status, tx_evidence_json,
-      submitted_at, updated_at
-    ) VALUES (
-      '${applicationId}', '${planId}', 'role-slot', 'store_join',
-      '${seller}', 'subject-a', '${status}', '{}',
-      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
-    )`;
-}
-
-const raceWalletLower = "0xaabbccddeeff001122334455667778899aabbccdd";
-const raceWalletMixed = "0xAaBbCcDdEeFf001122334455667778899AaBbCcDd";
-const otherWallet = "0x9999999999999999999999999999999999999999";
-
-/** 索引上线前的脏数据：并发竞态留下的双 active 版本、双 active 邀请、
- * 同钱包（含大小写漂移）双 accepted 角色，以及不受影响的干净对照组。 */
-function convergenceSeedSql(requiredFalse: string): string {
-  return `
-    INSERT INTO product_order_draft
-      (draft_id, zhixu_id, plan_id, plan_hash, title, business_type, goods_json, total_amount, currency, status, created_at, updated_at)
-    VALUES
-      ('draft_race', 'zhixu_race', '${planId}', '${planHash}', 'race', 'parallel-export', '[]', '100', 'USDC', 'draft', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
-      ('draft_clean', 'zhixu_race', '${planId}', '${planHash}', 'clean', 'parallel-export', '[]', '100', 'USDC', 'draft', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
-
-    INSERT INTO store_zhixu_version_metadata
-      (series_id, version_id, zhixu_id, version_label, status, plan_id, plan_hash, created_at)
-    VALUES
-      ('series_race', 'v_old', 'zhixu_race', '1.0', 'active', '${planId}', '${planHash}', '2026-01-01T00:00:00.000Z'),
-      ('series_race', 'v_new', 'zhixu_race', '2.0', 'active', '${planId}', '${planHash}', '2026-02-01T00:00:00.000Z'),
-      ('series_tie_a', 'v_a', 'zhixu_race', '1.0', 'active', '${planId}', '${planHash}', '2026-03-01T00:00:00.000Z'),
-      ('series_tie_a', 'v_b', 'zhixu_race', '2.0', 'active', '${planId}', '${planHash}', '2026-03-01T00:00:00.000Z'),
-      ('series_single', 'v_only', 'zhixu_race', '1.0', 'active', '${planId}', '${planHash}', '2026-01-01T00:00:00.000Z'),
-      ('series_retired', 'v_dep', 'zhixu_race', '0.9', 'deprecated', '${planId}', '${planHash}', '2025-12-01T00:00:00.000Z');
-
-    INSERT INTO product_participant
-      (participant_id, draft_id, role_slot_id, role_label, display_name, wallet_address, contact, status, required, accepted_at)
-    VALUES
-      ('p_funds_old', 'draft_race', 'funds', 'funds', 'Funds', '${raceWalletLower}', 'funds@example.com', 'accepted', ${requiredFalse}, '2026-01-01T00:00:00.000Z'),
-      ('p_delivery_new', 'draft_race', 'delivery', 'delivery', 'Delivery', '${raceWalletMixed}', 'delivery@example.com', 'accepted', ${requiredFalse}, '2026-02-01T00:00:00.000Z'),
-      ('p_supply', 'draft_clean', 'supply', 'supply', 'Supply', '${raceWalletLower}', 'supply@example.com', 'accepted', ${requiredFalse}, '2026-01-01T00:00:00.000Z'),
-      ('p_example', 'draft_clean', 'example', 'example', 'Example', '${otherWallet}', 'example@example.com', 'accepted', ${requiredFalse}, '2026-01-01T00:00:00.000Z');
-
-    INSERT INTO product_invite
-      (invite_id, draft_id, participant_id, role_slot_id, token_hash, status, expires_at, created_at)
-    VALUES
-      ('inv_old', 'draft_race', 'p_funds_old', 'funds', '0x${"a".repeat(64)}', 'active', '2100-01-01T00:00:00.000Z', '2026-01-05T00:00:00.000Z'),
-      ('inv_new', 'draft_race', 'p_funds_old', 'funds', '0x${"b".repeat(64)}', 'active', '2100-01-01T00:00:00.000Z', '2026-02-05T00:00:00.000Z'),
-      ('inv_clean', 'draft_clean', 'p_supply', 'supply', '0x${"c".repeat(64)}', 'active', '2100-01-01T00:00:00.000Z', '2026-01-05T00:00:00.000Z');
-  `;
-}
-
-async function expectConverged(
-  query: (sql: string) => Promise<readonly Record<string, unknown>[]> | readonly Record<string, unknown>[],
-): Promise<void> {
-  const zhixu = Object.fromEntries(
-    (await query("SELECT series_id, version_id, status FROM store_zhixu_version_metadata")).map(
-      (row) => [`${row.series_id}/${row.version_id}`, row.status],
-    ),
-  );
-  expect(zhixu).toMatchObject({
-    "series_race/v_old": "deprecated",
-    "series_race/v_new": "active",
-    "series_tie_a/v_a": "deprecated",
-    "series_tie_a/v_b": "active",
-    "series_single/v_only": "active",
-    "series_retired/v_dep": "deprecated",
-  });
-
-  const invites = Object.fromEntries(
-    (await query("SELECT invite_id, status FROM product_invite")).map(
-      (row) => [row.invite_id, row.status],
-    ),
-  );
-  expect(invites).toMatchObject({
-    inv_old: "revoked",
-    inv_new: "active",
-    inv_clean: "active",
-  });
-
-  const participants = Object.fromEntries(
-    (await query("SELECT participant_id, status, wallet_address FROM product_participant")).map(
-      (row) => [row.participant_id, { status: row.status, wallet: row.wallet_address }],
-    ),
-  );
-  expect(participants).toMatchObject({
-    p_funds_old: { status: "replaced", wallet: raceWalletLower },
-    p_delivery_new: { status: "accepted", wallet: raceWalletMixed },
-    p_supply: { status: "accepted", wallet: raceWalletLower },
-    p_example: { status: "accepted", wallet: otherWallet },
-  });
-}
-
-async function postgresSchemaUrl(schemas: string[]): Promise<string> {
-  const schema = postgresTestSchemaName();
-  await createPostgresTestSchema(postgresTestUrl!, schema);
-  schemas.push(schema);
-  return postgresUrlWithSearchPath(postgresTestUrl!, schema);
-}
-
-async function createPostgresTestSchema(
-  databaseUrl: string,
-  schema: string,
-): Promise<void> {
-  const pool = new Pool({ connectionString: databaseUrl });
-  try {
-    await pool.query(`CREATE SCHEMA ${postgresIdentifier(schema)}`);
-  } finally {
-    await pool.end();
-  }
-}
-
-async function dropPostgresTestSchema(
-  databaseUrl: string,
-  schema: string,
-): Promise<void> {
-  const pool = new Pool({ connectionString: databaseUrl });
-  try {
-    await pool.query(
-      `DROP SCHEMA IF EXISTS ${postgresIdentifier(schema)} CASCADE`,
-    );
-  } finally {
-    await pool.end();
-  }
-}
-
-function postgresUrlWithSearchPath(
-  databaseUrl: string,
-  schema: string,
-): string {
-  const url = new URL(databaseUrl);
-  const existingOptions = url.searchParams.get("options");
-  const searchPathOption = `-c search_path=${postgresIdentifier(schema)}`;
-  url.searchParams.set(
-    "options",
-    existingOptions
-      ? `${existingOptions} ${searchPathOption}`
-      : searchPathOption,
-  );
-  return url.toString();
-}
-
-function postgresTestSchemaName(): string {
-  return `uvp_storage_${randomUUID().replaceAll("-", "_")}`;
-}
-
-function postgresIdentifier(identifier: string): string {
-  if (!/^[a-z_][a-z0-9_]*$/.test(identifier)) {
-    throw new Error(`invalid Postgres test identifier: ${identifier}`);
-  }
-  return identifier;
 }
 
 function chainEvent(

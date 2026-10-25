@@ -47,7 +47,6 @@ import type { ProjectionReplayDiagnostics, Writable } from "./snapshot.js";
 
 export type StateMachineHookStatus = "init" | "waiting" | "ready" | "cancelled" | "unknown";
 
-/** patch 模式词表（合约闭集 assign/handoff）。 */
 export type StateMachineStageExecutorPatchMode = "assign" | "handoff";
 
 export interface StateMachineStageExecutorOverlayProjection {
@@ -59,7 +58,6 @@ export interface StateMachineStageExecutorOverlayProjection {
   readonly mode: StateMachineStageExecutorPatchMode;
   readonly modeHash?: Hex;
   readonly previousExecutor?: Address;
-  /** patch 生效授权集哈希（UB-36①，随 StageExecutorPatchApplied 广播）。 */
   readonly authorizationsHash?: Hex;
   readonly roleHash: Hex;
   readonly executorMetadataHash: Hex;
@@ -93,10 +91,6 @@ export interface StateMachineHookProjection {
   readonly stageIdentifier?: Hex;
   readonly hookName?: Hex;
   readonly status: StateMachineHookStatus;
-  /**
-   * 最近一次状态迁移的前态（B-03，HookStatusChanged.previousStatus）：事件
-   * 本就携带该字段，此前投影丢弃——状态迁移链现在可从事件流全量重建。
-   */
   readonly previousStatus?: StateMachineHookStatus;
   readonly dueAt?: string;
   readonly updatedAt: ProjectionProvenance;
@@ -104,11 +98,6 @@ export interface StateMachineHookProjection {
   readonly proof: StateMachineProofProjection;
 }
 
-/**
- * 阶段物化出生触发（B-03，StageMaterialized 触发字段）：事件本就携带
- * triggerHookId/sourceId/signalId，此前投影丢弃——每阶段的出生触发事实
- * 现在可从事件流重建。键 = stageId。
- */
 export interface StateMachineStageMaterializationProjection {
   readonly orderId: Hex;
   readonly stageId: Hex;
@@ -137,7 +126,6 @@ export function applyStageMaterialized(
   const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const stageId = requiredBytes32Arg(event, "stageId");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash });
-  // B-03 出生触发字段（事件本就携带；旧事件面缺省按可选读取）。
   const triggerHookId = optionalBytes32Arg(event, "triggerHookId");
   const triggerSourceId = optionalBytes32Arg(event, "sourceId");
   const triggerSignalId = optionalBytes32Arg(event, "signalId");
@@ -167,7 +155,6 @@ export function applyStageExecutorPatchApplied(
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
   const planId = optionalBytes32Arg(event, "planId");
-  // 幻影订单：StageExecutorPatchApplied 由 UVPStagePatchModule 发出。
   const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId, planId);
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
@@ -176,8 +163,6 @@ export function applyStageExecutorPatchApplied(
   const modeHash = optionalBytes32Arg(event, "mode");
   const mode = executorPatchModeFromArg(modeHash);
   const previousExecutor = optionalAddressArg(event, "previousExecutor");
-  // UB-36①：授权集哈希随事件广播（授权明细经 SignalSubmitterAuthorized
-  // 事件流可完整重建）。旧事件面（无该字段的历史流）缺省。
   const authorizationsHash = optionalNonZeroBytes32Arg(event, "authorizationsHash");
   const proof = proofOf(event, {
     orderId,
@@ -223,7 +208,6 @@ export function applyStageResourcePatchApplied(
 ): void {
   const orderId = requiredBytes32Arg(event, "orderId");
   const planId = optionalBytes32Arg(event, "planId");
-  // 幻影订单：StageResourcePatchApplied 由 UVPStagePatchModule 发出。
   const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId, planId);
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
@@ -281,8 +265,6 @@ export function applyStageExecutorActivated(
   const key = stageExecutorOverlayProjectionKey(targetStageId);
   const existing = order.stageExecutorOverlays[key];
   if (!existing) {
-    // StageExecutorActivated 之前必须有 StageExecutorPatchApplied 建 overlay；
-    // 缺失说明补丁事件未入流。计数显式暴露，不允许静默丢弃。
     state.diagnostics.unresolvedStageActivationEventCount += 1;
   }
   if (existing && compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
@@ -317,7 +299,6 @@ export function applyHookStatusChanged(
   const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const hookId = requiredBytes32Arg(event, "hookId");
   const hookStatus = hookStatusFromArg(event.args["newStatus"]);
-  // B-03 状态迁移前态（事件本就携带；此前投影丢弃）。
   const previousStatus = hookStatusFromArg(event.args["previousStatus"]);
   const dueAt = optionalUintArgAsString(event, "dueAt");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash });

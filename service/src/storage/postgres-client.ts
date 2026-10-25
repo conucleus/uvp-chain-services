@@ -67,9 +67,6 @@ export class PostgresDatabase {
   }
 
   async withTransactionRaw<T>(operation: () => Promise<T>): Promise<T> {
-    // 不等 ready()：迁移运行器是 #ready 的构造方，等 ready 是循环等待
-    // （迁移→开事务→等迁移完成→死锁）。公开的 withTransaction 仍先过
-    // ready 门，业务查询不会跑到迁移前面。
     const currentClient = this.#transaction.getStore();
     if (currentClient) {
       return operation();
@@ -87,7 +84,6 @@ export class PostgresDatabase {
       try {
         await client.query("ROLLBACK");
       } catch {
-        // Preserve the original failure; rollback failure is secondary.
       }
       throw normalizePostgresError(error);
     } finally {
@@ -129,11 +125,6 @@ function causeMessage(error: unknown): string {
 
 function isPostgresConstraintError(error: unknown): error is Error & { readonly code: string } {
   const postgresError = error as Error & { readonly code?: unknown };
-  // 只认唯一冲突（23505）：StorageConstraintError 的消费方一律按"并发
-  // 败者的 409 域冲突"收敛，23xxx 前缀会把 FK（23503）/NOT NULL
-  //（23502）/CHECK（23514）等完整性故障误译成域冲突——那些是数据或
-  // schema 问题，必须以原始错误上抛。与 sqlite 侧只认 UNIQUE 约束的
-  // 口径对齐。
   return (
     error instanceof Error &&
     typeof postgresError.code === "string" &&

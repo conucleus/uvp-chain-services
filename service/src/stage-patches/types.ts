@@ -9,7 +9,6 @@ export interface StagePatchTypedDataField {
   readonly type: string;
 }
 
-/** patch 模式词表（合约 _isStageExecutorPatchMode 闭集）：assign/handoff。 */
 export type StageExecutorPatchMode = "assign" | "handoff";
 
 export type StageExecutorPatchSignatureStatus = "not_verified" | "signature_verified";
@@ -19,7 +18,6 @@ export type PreviousExecutorSignatureStatus = "not_required" | "not_verified" | 
 export interface StageExecutorPatchTypedData {
   readonly domain: {
     readonly name: "UVPStagePatchModule";
-    /** 域版本随协议包单源（protocol-bindings STAGE_EXECUTOR_PATCH_DOMAIN_VERSION）。 */
     readonly version: "0.2";
     readonly chainId: number;
     readonly verifyingContract: Address;
@@ -38,7 +36,6 @@ export interface StageExecutorPatchTypedData {
     readonly executorMetadataHash: Hex;
     readonly mode: Hex;
     readonly previousExecutor: Address;
-    /** selector 签名覆盖的授权集哈希（UB-36①，进 EIP-712 摘要）。 */
     readonly authorizationsHash: Hex;
     readonly patchHash: Hex;
     readonly patchNonce: string;
@@ -51,7 +48,6 @@ export interface StageExecutorPatchTypedData {
 export interface StageResourcePatchTypedData {
   readonly domain: {
     readonly name: "UVPStagePatchModule";
-    /** 域版本随协议包单源（与 executor 档共用同一 EIP-712 域）。 */
     readonly version: "0.2";
     readonly chainId: number;
     readonly verifyingContract: Address;
@@ -124,7 +120,6 @@ export interface StageExecutorPatchHumanSummaryDTO {
   readonly mode: StageExecutorPatchMode;
   readonly modeHash: Hex;
   readonly previousExecutor?: Address;
-  /** 授权集哈希（selector 签名覆盖的授权面，UB-36①）。 */
   readonly authorizationsHash: Hex;
   readonly patchHash: Hex;
   readonly patchNonce: string;
@@ -161,7 +156,6 @@ export interface PreparedStageExecutorPatchDTO {
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   readonly stateMachineAddress: Address;
-  /** plan-scoped 补丁身份：applyStageExecutorPatchFor 首参，必填。 */
   readonly planId: Hex;
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
@@ -170,14 +164,7 @@ export interface PreparedStageExecutorPatchDTO {
   readonly mode: StageExecutorPatchMode;
   readonly modeHash: Hex;
   readonly previousExecutor?: Address;
-  /**
-   * patch 生效时对新城执行者写入的显式订单级授权集（UB-36①）：prepare
-   * 时点从 plan 投影推导并冻结进档案——selector 签名覆盖的就是这份集，
-   * submit 广播必须原样携带（合约复算 signalAuthorizationsHash 与
-   * digest 承诺比对，中途换集等于伪造授权来源）。
-   */
   readonly executorAuthorizations: readonly SignalAuthorizationPayload[];
-  /** 授权集哈希（= hashSignalAuthorizations(executorAuthorizations)）。 */
   readonly authorizationsHash: Hex;
   readonly roleHash: Hex;
   readonly executorMetadataHash: Hex;
@@ -197,7 +184,6 @@ export interface PreparedStageResourcePatchDTO {
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   readonly stateMachineAddress: Address;
-  /** plan-scoped 补丁身份：applyStageResourcePatchFor 首参，必填。 */
   readonly planId: Hex;
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
@@ -242,7 +228,6 @@ export interface StageExecutorPatchSubmissionDTO {
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   readonly stateMachineAddress: Address;
-  /** 订单身份复合键 (planId, orderId) 的 plan 侧：对账车道按复合键查投影。 */
   readonly planId: Hex;
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
@@ -285,7 +270,6 @@ export interface StageResourcePatchSubmissionDTO {
   readonly orderId: string;
   readonly onchainOrderId: Hex;
   readonly stateMachineAddress: Address;
-  /** 订单身份复合键 (planId, orderId) 的 plan 侧：对账车道按复合键查投影。 */
   readonly planId: Hex;
   readonly selectorStageId: Hex;
   readonly targetStageId: Hex;
@@ -372,24 +356,8 @@ export interface StageExecutorPatchBroadcastRequest {
   readonly previousExecutorSignature?: Hex;
   readonly recoveredSelector: Address;
   readonly recoveredPreviousExecutor?: Address;
-  /**
-   * selector→target 绑定叶 proof（词表 Merkle 化形态的必携参数，合约
-   * StageSelectorBindingNotFound fail-closed）。submit 时从 plan 投影
-   * bindings 表构造；投影表空的外部 plan 无法造证，submit 直接拒绝。
-   */
   readonly bindingProof: SelectorBindingPayload;
-  /**
-   * 候选集成员证明（UB-36②③）：(targetStageId, executor) ∈ plan 承诺的
-   * 执行者候选集——无候选集（EMPTY_ROOT）或证明不过，合约
-   * StageExecutorNotCandidate 恒拒。submit 时从 plan 投影候选集清单构造；
-   * 清单缺失（编译产物尚未携带候选集/外部发布 plan）fail-closed 拒绝，
-   * 不发必 revert 的交易。
-   */
   readonly candidateProof: readonly Hex[];
-  /**
-   * patch 生效时对新城执行者写入的显式订单级授权集（UB-36①）：来自
-   * prepared 档案（selector 签名覆盖的冻结集），广播原样携带。
-   */
   readonly executorAuthorizations: readonly SignalAuthorizationPayload[];
 }
 
@@ -412,7 +380,6 @@ export interface StagePatchSubmissionBase {
   readonly submissionId: string;
 }
 
-/** 未闭环补丁台账的有界扫描游标：(createdAt, submissionId) 双键。 */
 export interface StagePatchSubmissionScanCursor {
   readonly createdAt: string;
   readonly submissionId: string;
@@ -422,47 +389,15 @@ export interface ProductStagePatchStore<
   TPrepared extends PreparedPatchRecordBase,
   TSubmission extends StagePatchSubmissionBase
 > {
-  /**
-   * 可选事务能力（sqlite/postgres 实现）：putSubmission 与 nonce 收尾
-   * （释放或 markPreparedUsed）必须同事务提交——分开提交时事务间崩溃
-   * 会留下"nonce 行已插、prepare 未标 used"的组合，同 prepareId 的合法
-   * 重试将永久 409（全库无其他释放口）。
-   */
   withTransaction?<T>(operation: () => Promise<T>): Promise<T>;
   putPrepared(record: TPrepared): Promise<void>;
   getPrepared(prepareId: string): Promise<TPrepared | undefined>;
   markPreparedUsed(prepareId: string, submissionId: string, usedAt: string): Promise<void>;
-  /**
-   * staleBefore：命中既有预留时，预留时间早于该阈值的行视为陈旧预留
-   * （进程在 reserve 与落档之间硬崩溃的唯一泄漏形态——存活中的 submit
-   * 要么在同一落档事务内收尾，要么显式释放，预留年龄不可能超过一个
-   * 授权有效期）。陈旧行走条件更新接管并返回 true；未过期仍返回 false
-   * 由调用方 409。阈值缺省时退化为纯 insert 语义。
-   */
   reserveNonce(key: string, options?: { readonly staleBefore?: string }): Promise<boolean>;
-  /**
-   * reserve 之后的 broadcast/存储写入抛错时，提交服务会先释放
-   * nonce 再 rethrow，保证同一 prepareId 在瞬时 RPC/存储失败后仍可重试。
-   * 与 ProductSubmissionStore.releaseNonce 相同的可选能力语义：实现缺失时
-   * patch 服务按 nonce 已消费处理（fail-closed，不重试）。
-   */
   releaseNonce?(key: string): Promise<void>;
-  /**
-   * 过期 prepare 清扫：删除 deadline（unix 秒字符串）小于
-   * deadlineBeforeSeconds 的行，返回删除行数。prepare 入口未设配额，
-   * 只插不删会让内存表/持久表无界堆叠；由服务层在写入时顺带触发
-   * （同 store-sessions 挑战表口径）。可选能力：实现缺失时跳过清扫，
-   * memory 驱动自身的硬上限仍然兜底。
-   */
   deleteExpiredPrepared?(deadlineBeforeSeconds: string): Promise<number>;
   putSubmission(submission: TSubmission): Promise<void>;
   getSubmission(submissionId: string): Promise<TSubmission | undefined>;
-  /**
-   * 对账车道的有界扫描（可选能力）：按 (createdAt, submissionId) 键序
-   * 返回"未闭环"的一页——status ∈ {broadcasting, submitted}，或带
-   * txHash 的 failed（迟到成功需自愈复核）。终态（confirmed/expired）
-   * 与从未上链的 signature_received 不返回。实现缺失时对账车道不装配。
-   */
   listOpenSubmissionsPage?(
     after: StagePatchSubmissionScanCursor | undefined,
     limit: number

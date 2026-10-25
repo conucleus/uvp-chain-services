@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createPublicClient,
   createWalletClient,
@@ -19,7 +19,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { startApiServer } from "../src/api/server.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createPostgresTestDatabase } from "./postgres.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, "../../..");
@@ -28,6 +28,12 @@ const registryArtifactPath = resolve(contractsDir, "out/UVPIdentityRegistry.sol/
 const anvilPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const canRunAnvil = commandExists("anvil") && commandExists("forge");
 const maybeIt = canRunAnvil ? it : it.skip;
+
+let databaseUrl: string;
+
+beforeAll(async () => {
+  databaseUrl = await createPostgresTestDatabase();
+});
 
 describe("anvil identity registry indexing", () => {
   let anvil: ChildProcess | undefined;
@@ -102,7 +108,7 @@ describe("anvil identity registry indexing", () => {
       rpcUrl,
       deploymentBlock: deployReceipt.blockNumber,
       registry
-    }), new MemoryProjectionStore());
+    }));
 
     const apiBase = httpServerBaseUrl(apiServer);
     const identity = await waitForIdentityBinding(apiBase, registry, bindingId);
@@ -115,8 +121,6 @@ describe("anvil identity registry indexing", () => {
       method: "OPTIONS"
     });
     expect(optionsResponse.status).toBe(204);
-    // 模-5 裁决：跨源默认关闭。未配置 UVP_API_CORS_ALLOWED_ORIGINS 时不回
-    // allow-origin 头（通配 "*" 已废除）。
     expect(optionsResponse.headers.get("access-control-allow-origin")).toBeNull();
   }, 120_000);
 });
@@ -159,9 +163,8 @@ function testConfig(input: {
       }
     },
     database: {
-      driver: "memory",
-      url: "memory://projection-store",
-      migrationsAutoRun: false
+      url: databaseUrl,
+      migrationsAutoRun: true
     },
     api: {
       host: "127.0.0.1",

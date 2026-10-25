@@ -20,57 +20,24 @@ import type {
   DockRouteSource
 } from "./types.js";
 
-/** submitDockedSignal 的镜像事实造证结果（payload 形状见造证单源）。 */
 interface DockedSignalProofs {
   readonly attribution: BuiltFactAttribution;
 }
 
-/** keeper 写面切片：submitDockedInput/submitDockedSignal 取自
- * protocol-bindings 单源（DOCKING_MODULE_ABI）——submitDockedSignal
- * 携 attribution 造证参数，手抄副本会随协议演进漂移成错
- * selector。先放宽为泛型 Abi 再切片：直接在整表字面量类型上做
- * filter/encodeFunctionData 参数推导会让 viem 的巨型条件类型爆栈
- * （TS2589）；切片的 selector 与参数布局由 dock-automation 测试按
- * v4.4 fixture 钉住。 */
 const dockingWriteAbi: Abi = (DOCKING_MODULE_ABI as Abi).filter(
   (entry) =>
     entry.type === "function" &&
     (entry.name === "submitDockedInput" || entry.name === "submitDockedSignal")
 );
 
-/** 无词表（外部发布 plan / 投影无该 plan）时的空两表：造证归零，由链上
- * 词表闸裁决（与 submissions 车道同取舍）。 */
 const EMPTY_PLAN_CAPABILITY_TABLES: PlanCapabilityTables = {
   selectorBindings: [],
   signalCapabilities: []
 };
 
-/**
- * Dock liveness worker（keeper 只提供活性）。
- *
- * 候选发现完全来自投影 + route 来源，keeper 不发明任何协议 word：
- * - attach（existing）：同意门三腿（目标单 creator / 在任执行者 /
- *   publisher attach 预授权）都不含中继 keeper 钱包——keeper 只广播
- *   route 来源预组装的 attachCalldata（预授权材料在 calldata 内，对齐
- *   openDockedOrder 的 openCalldata 模式）；仅当父单与目标单都已在投影
- *   中出生且该 route 尚无 dock 实例时提交。attachCalldata 缺失的 route
- *   是合法形态：attach 本身是 permissionless 面（目标单 creator / 在任
- *   执行者可自行上链挂接），这类 route 只跳过 attach 车道并留痕，其
- *   dock 经 DockAttached 入投影后 input/output 车道照常交付。
- * - open（new）：对称的预组装 calldata 车道；仅当投影中入口 hook 已
- *   Ready 且该 route 尚无 dock 实例时提交。
- * - input（existing 专属）：new 模式链上只登记出生锚绑定且由 open 原子
- *   投递，无活 input 面；existing 逐端口活交付——父订单 hook Ready 且
- *   binding 未投递 → submitDockedInput，无出生锚可跳过。
- * - output（两模式同构）：目标单事实已在投影中且 binding 未投递 →
- *   submitDockedSignal（attach 前已成立的目标输出由此重放回填；未成立
- *   的绑定链上 revert DockOutputNotReady，由窗口重试）。submitDockedSignal
- *   的镜像事实造证（attribution/selectorBinding）由 capability-proofs
- *   单源按父 plan 词表现场铸造。
- *
- * 未配置 routeSource/submitter 时 runOnce 为显式 no-op（summary 归零），
- * 便于仅索引部署共享同一装配。
- */
+// Dock liveness worker：attach/open/input/output 四车道候选发现完全来自
+// 投影 + route 来源，keeper 不发明任何协议 word；未配置 routeSource/
+// submitter 时 runOnce 为显式 no-op，便于仅索引部署共享同一装配。
 export class DockAutomationWorker implements LifecycleService {
   readonly name = "dock-automation";
 
@@ -86,33 +53,8 @@ export class DockAutomationWorker implements LifecycleService {
   #running = false;
   #checking = false;
   #lastSummary: DockAutomationRunSummary | undefined;
-  /**
-   * 广播 + 最终性窗口去重：同一 key 在 redeliveryWindowMs 内已尝试过
-   * （无论成败）则本轮跳过。成功后窗口防的是 finalize+索引延迟内的
-   * 纯 gas 浪费；失败后同样占窗——否则持续 revert 的绑定每轮重发，
-   * gas 燃烧没有任何速率上限。窗口过后投影仍未呈现 delivery 才重试
-   * （覆盖交易丢失），每次重试的失败照常进 summary.skipped 可见。
-   * 进程内状态即可：keeper 是单实例写者，重启多发的最坏情形是窗口内
-   * 每绑定一条冗余交易（投递事实以投影为准，重启后仍收敛）。
-   */
   readonly #lastBroadcastAt = new Map<string, number>();
-  /**
-   * 无收敛 revert 的逐绑定连续窗口计数（key 同去重键）：DockInputConflict
-   * （目标事实槽已被占）与 InvalidSignalCapability（全零造证撞链上词表
-   * 闸）是合约永久 revert，keeper 没有死信机制——每窗口照常重播留痕，但
-   * 连续 TERMINAL_REVERT_ESCALATION_WINDOWS 个窗口撞同一原因即升级
-   * error 级告警（带 dockInstanceId/bindingHash 与处置指引），把"需要
-   * 人工裁决 route source 或事实槽冲突"从 skipped 噪声里抬出来。广播
-   * 成功即清零；瞬态失败不计入也不清零（既不证明原因仍在，也不证明
-   * 已消除）。
-   */
   readonly #terminalRevertWindows = new Map<string, { readonly reason: string; windows: number }>();
-  /**
-   * 词表两表解析（capability-proofs 单源）。plan 词表 finalize 后不可变，
-   * 但"解析故障轮"的 failed 态会恢复、plan 也可能在 keeper 启动后才进
-   * 投影——缓存只覆盖单轮（runOnce 开头重建），跨轮钉死会把手写词表当
-   * 终态。
-   */
   #runPlanTables = new Map<string, PlanCapabilityTables | undefined>();
   readonly #resolvePlanTables: (planId: Hex) => Promise<PlanCapabilityTables | undefined>;
 
@@ -141,9 +83,6 @@ export class DockAutomationWorker implements LifecycleService {
     if (!this.#config.enabled || this.#running) {
       return;
     }
-    // enabled 但 routeSource/submitter 未装配：runOnce 的候选扫描恒归零，
-    // keeper 永远不会提交任何交易——不启动空转轮询，也不宣称 started，
-    // 响亮声明装配缺口（交付形态当前就是未装配，见 api/server.ts）。
     if (!this.#routeSource || !this.#submitter) {
       this.#logger.warn(
         "dock automation is enabled but no route source/submitter is wired; the keeper stays idle until the assembly provides them"
@@ -152,8 +91,6 @@ export class DockAutomationWorker implements LifecycleService {
     }
     this.#running = true;
     if (this.#config.pollIntervalMs <= 0) {
-      // 轮询间隔非正数会让 setInterval 退化成热循环（对齐 reconcile worker
-      // 与 indexer 轮询的守卫）：响亮告警并保持不轮询。
       this.#logger.warn(
         "dock automation polling is disabled (UVP_DOCK_AUTOMATION_POLL_INTERVAL_MS<=0): no route candidate will ever be delivered until the interval is positive"
       );
@@ -204,13 +141,6 @@ export class DockAutomationWorker implements LifecycleService {
     try {
       this.#runPlanTables = new Map();
       const routes = (await this.#routeSource?.listRoutes()) ?? [];
-      // fail-closed 前置：route 记录来自链下来源（云编译产物），keeper 只
-      // 提交可从链上 committed 状态推导的数据——身份字段（dock 实例三元组
-      // 与 binding 键）缺失/畸形即整轮响亮报错，不静默跳过（坏一条即来源
-      // 可疑，静默会让"没跑"伪装成"没问题"）。attachCalldata 不在此列：
-      // attach 是 permissionless 面，缺失只降级为该 route 跳过 attach
-      // 车道 + skipped 留痕（见挂接车道），不阻断其他 route 的交付车道。
-      // 校验抛错上抛 runOnce（轮询由 interval 捕获记 warn）。
       routes.forEach((route, index) =>
         validateDockRouteRecord(route, this.#chainId, index)
       );
@@ -232,10 +162,6 @@ export class DockAutomationWorker implements LifecycleService {
         deduplicated: 0,
         skipped: []
       };
-      // 最终性门（镜像 timer keeper）：sync state 缺失（最终性上界未知）
-      // 或人工 rebuild 进行中（syncStatus=rebuilding，投影是半重建的
-      // 中间态）时整轮不放行任何候选并留痕——hook ready/target fact 判据
-      // 读的是未最终投影时不抢跑，fail-closed。
       if (finalizedBlock === undefined || syncState?.syncStatus === "rebuilding") {
         summary.skipped.push(
           finalizedBlock === undefined
@@ -245,7 +171,6 @@ export class DockAutomationWorker implements LifecycleService {
         this.#lastSummary = summary;
         return summary;
       }
-      /** 本轮触过的去重键（收尾淘汰用：未触过的键对应候选已消失）。 */
       const touchedDedupeKeys = new Set<string>();
       if (routes.length === 0 || !this.#submitter) {
         this.#evictStaleTracking(touchedDedupeKeys, this.#now().getTime());
@@ -257,11 +182,6 @@ export class DockAutomationWorker implements LifecycleService {
         if (summary.attempted >= this.#config.maxCandidatesPerRun) {
           break;
         }
-        // dock 实例身份是 (routeId, localPlanId, localOrderId) 且模式钉死：
-        // 同 plan 复用同一 routeId 时每个订单各有一个 dock 实例，忽略
-        // localOrderId 会把 binding 提交到别的订单的实例上；routeId 公式
-        // 不分模式，同一三元组在 new/existing 两模式下是两个实例，按
-        // mode 收敛避免串到另一模式的实例。
         const dock = docks.find(
           (candidate) =>
             candidate.mode === route.orderMode &&
@@ -272,7 +192,6 @@ export class DockAutomationWorker implements LifecycleService {
 
         if (!dock) {
           if (route.orderMode === "new") {
-            // open 候选（new）：入口 hook 已 Ready + route 来源携带 calldata。
             if (
               route.openCalldata &&
               this.entranceHookReady(snapshot, route, finalizedBlock)
@@ -282,33 +201,21 @@ export class DockAutomationWorker implements LifecycleService {
                 route.openCalldata,
                 summary,
                 "open",
-                // 去重键与实例身份同构（含 localOrderId）：同 route 不同订单
-                // 的 open 各自独立，不得互相吃掉对方的广播窗口。
                 `open:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}:${route.localOrderId.toLowerCase()}`,
                 undefined,
                 touchedDedupeKeys
               );
             }
           } else if (!route.attachCalldata) {
-            // permissionless attach：目标单 creator/在任执行者可自行上链
-            // 挂接（同意门三腿不含 keeper），这类 route 在 route source 里
-            // 合法地没有 attachCalldata——只跳过本 route 的 attach 车道并
-            // 留痕（对齐既有 skipped 形态），其 dock 经 DockAttached 入
-            // 投影后由下方交付车道接手；同轮其他 route 不受影响。
             summary.skipped.push(
               `attach:route ${route.routeId} carries no pre-assembled attachCalldata; the keeper attach lane is skipped (permissionless attach belongs to the consent-gate principals)`
             );
           } else if (this.attachEndpointsPresent(snapshot, route)) {
-            // attach 候选（existing）：挂接的链上前提是父单与目标单都已
-            // 出生，投影侧唯一命中才放行——否则广播必 revert
-            // （DockUnknownLocalOrder/DockUnknownTargetOrder）白烧 gas。
             summary.attachCandidates += 1;
             await this.#submitCalldata(
               route.attachCalldata,
               summary,
               "attach",
-              // 去重键与 open 车道同构（含 localOrderId + 模式由路由分岔
-              // 前置保证互斥）。
               `attach:${this.#chainId}:${route.routeId.toLowerCase()}:${route.localPlanId.toLowerCase()}:${route.localOrderId.toLowerCase()}`,
               undefined,
               touchedDedupeKeys
@@ -317,9 +224,6 @@ export class DockAutomationWorker implements LifecycleService {
           continue;
         }
 
-        // input 候选（existing 专属）：new 模式链上只登记出生锚绑定且由
-        // open 原子投递，submitDockedInput 对 new 模式无活面；existing 无
-        // 出生锚，逐端口全量活交付。
         if (route.orderMode === "existing") {
           for (const binding of route.inputs) {
             if (summary.attempted >= this.#config.maxCandidatesPerRun) {
@@ -331,13 +235,6 @@ export class DockAutomationWorker implements LifecycleService {
             if (!this.inputHookReady(snapshot, route, binding.localHookId, dock.stateMachineAddress, finalizedBlock)) {
               continue;
             }
-            // 事实槽预检（对称于 output 车道 targetFactExists 的正向门）：
-            // submitDockedInput 把镜像事实写进目标单 mailbox 槽
-            // (targetSourceId, targetSignalId)，槽已被不同 provenance 的
-            // 事实占用即合约永久 revert DockInputConflict——投递事实与
-            // 占用事实同 tx 入投影，"槽已占而本绑定未投递"是确定性的
-            // 冲突判据，不广播、留痕交人工裁决（route source 或事实槽
-            // 归属其一有误）。
             if (
               this.targetFactExists(
                 snapshot,
@@ -354,9 +251,6 @@ export class DockAutomationWorker implements LifecycleService {
               continue;
             }
             summary.inputCandidates += 1;
-            // attribution 造证与 output 车道同口径：词表富集 failed =
-            // 词表状态未知，跳过留痕待富集恢复，不让单条绑定毒害整轮
-            // keeper（runOnce reject 会冻结同 route 之后所有交付车道）。
             let inputAttribution: BuiltFactAttribution;
             try {
               inputAttribution = await this.#dockedInputAttribution(route.targetPlanId, binding);
@@ -385,9 +279,6 @@ export class DockAutomationWorker implements LifecycleService {
           }
         }
 
-        // output 候选（两模式同构）：目标事实已写入投影且 binding 未投递。
-        // attach 前已成立的目标输出在此重放回填；未成立时链上 revert
-        // DockOutputNotReady，由最终性窗口重试，投影呈现事实后收敛。
         for (const binding of route.outputs) {
           if (summary.attempted >= this.#config.maxCandidatesPerRun) {
             break;
@@ -408,16 +299,10 @@ export class DockAutomationWorker implements LifecycleService {
             continue;
           }
           summary.outputCandidates += 1;
-          // submitDockedSignal 携 attribution 造证：镜像事实落在父单
-          // （localPlanId/localSourceId/localSignalId），词表按父 plan 解析；
-          // 造证单源见 submissions/capability-proofs.ts。
           let proofs: DockedSignalProofs;
           try {
             proofs = await this.#dockedSignalProofs(dock.localPlanId, binding);
           } catch (error) {
-            // 词表富集 failed = 词表状态未知：全零造证会把必拒的
-            // InvalidSignalCapability 留到链上 revert 才暴露（白烧 gas）。
-            // 跳过留痕，下轮富集恢复后自然续上。
             summary.skipped.push(`output:${redactErrorMessage(error)}`);
             continue;
           }
@@ -445,12 +330,6 @@ export class DockAutomationWorker implements LifecycleService {
     }
   }
 
-  /**
-   * 进程内跟踪态淘汰：本轮未触过的去重键（候选已消失——绑定已交付/
-   * route 已下线）或距上次广播超过 4×去重窗的键即清理——去重窗语义只
-   * 覆盖 redeliveryWindowMs 内的记录，无淘汰的 Map 会随历史 route 单调
-   * 增长。
-   */
   #evictStaleTracking(touchedDedupeKeys: ReadonlySet<string>, nowMs: number): void {
     const evictionHorizonMs = 4 * this.#config.redeliveryWindowMs;
     for (const [key, lastBroadcastAt] of this.#lastBroadcastAt) {
@@ -461,15 +340,6 @@ export class DockAutomationWorker implements LifecycleService {
     }
   }
 
-  /**
-   * 广播 + 最终性窗口去重：同一 key 在 redeliveryWindowMs 内已尝试过
-   * （成败同占窗）则本轮跳过（计数 deduplicated，不静默）。窗口放行即
-   * 计入 summary.attempted（成败同计）——maxCandidatesPerRun 预算对
-   * attempted 封顶，全失败轮不会扫穿全部候选。binding（input/output
-   * 车道传入）携绑定身份供无收敛 revert 的升级告警引用（attach/open
-   * 车道无绑定粒度，不参与升级）。touchedDedupeKeys 记录本轮触过的键
-   * 供收尾淘汰。
-   */
   #submitCalldata(
     data: Hex,
     summary: DockAutomationRunSummary,
@@ -515,9 +385,6 @@ export class DockAutomationWorker implements LifecycleService {
         if (windows < TERMINAL_REVERT_ESCALATION_WINDOWS) {
           return;
         }
-        // 升级告警（不新造死信机制）：绑定每窗口照常重播（skipped 留痕），
-        // 但连续多个窗口撞同一无收敛原因说明 route source 或事实槽冲突
-        // 需要人工裁决——keeper 侧没有任何自动收敛路径。
         this.#logger.error(
           `dock ${label} binding has failed with a no-convergence revert for ${windows} consecutive redelivery windows; manual adjudication is required (correct the route source or resolve the fact-slot conflict)`,
           {
@@ -536,10 +403,6 @@ export class DockAutomationWorker implements LifecycleService {
     orderId: Hex,
     stateMachineAddress?: Hex
   ) {
-    // 订单身份含 stateMachineAddress——裸 (chainId,planId,orderId)
-    // 扫描在同号订单跨部署复用时会多命中；多命中 fail-closed 返回
-    // undefined（对齐同仓不变量），绝不静默取首条。有 dock 上下文时按
-    // 其状态机地址收敛。
     const matches = [...new Set(Object.values(snapshot.stateMachineOrders))].filter(
       (candidate) =>
         candidate.chainId === this.#chainId &&
@@ -556,23 +419,15 @@ export class DockAutomationWorker implements LifecycleService {
     route: DockRouteRecord,
     finalizedBlock: bigint
   ): boolean {
-    // new 模式恰一条 input 绑定（出生锚），其本地 hook 即 entrance。
     const entranceHookId = route.inputs[0]?.localHookId;
     if (!entranceHookId) {
       return false;
     }
     const order = this.#orderFor(snapshot, route.localPlanId, route.localOrderId);
     const hook = order?.hooks[entranceHookId.toLowerCase()];
-    // Ready 判据带最终性门：hook 的最近状态变更必须在 finalizedBlock 内，
-    // 未最终的 ready 不触发 open（镜像 timer keeper 的候选门）。
     return hook?.status === "ready" && hook.updatedAt.blockNumber <= finalizedBlock;
   }
 
-  /** attach 就绪门：父单与目标单都已 birth 在投影中。挂接前 dock 尚未
-   * 出生、无 dock.stateMachineAddress 可收敛——但 dock 两端订单同属一个
-   * 状态机部署（docking 模块只服务一个 stateMachine），父单唯一命中后
-   * 即以其合约地址收敛目标单查找，跨部署同 (planId, orderId) 不再把
-   * 目标侧误判成多命中 fail-closed；父侧自身多命中仍 fail-closed。 */
   attachEndpointsPresent(
     snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
     route: DockRouteRecord
@@ -586,12 +441,6 @@ export class DockAutomationWorker implements LifecycleService {
     );
   }
 
-  /**
-   * submitDockedSignal 的镜像事实造证：attribution 证本地事实键
-   * (localSourceId, localSignalId) 在父 plan 词表内的成员资格与属主阶段
-   * （与 submissions 车道同口径：词表外/无词表 → 全零由链上词表闸裁决；
-   * 富集 failed → 抛错由调用方跳过留痕）。
-   */
   async #dockedSignalProofs(
     localPlanId: Hex,
     binding: DockRouteOutputBinding
@@ -610,12 +459,6 @@ export class DockAutomationWorker implements LifecycleService {
     };
   }
 
-  /**
-   * submitDockedInput 的镜像事实造证：attribution 证目标事实键
-   * (targetSourceId, targetSignalId) 在目标 plan 词表内的成员资格与
-   * 属主阶段（与 output 车道 #dockedSignalProofs 同口径：词表外/无词表
-   * → 全零由链上词表闸裁决）。
-   */
   async #dockedInputAttribution(
     targetPlanId: Hex,
     binding: DockRouteInputBinding
@@ -644,17 +487,9 @@ export class DockAutomationWorker implements LifecycleService {
   ): boolean {
     const order = this.#orderFor(snapshot, route.localPlanId, route.localOrderId, stateMachineAddress);
     const hook = order?.hooks[localHookId.toLowerCase()];
-    // Ready 判据带最终性门（未最终的 ready 不触发 input 交付）。
     return hook?.status === "ready" && hook.updatedAt.blockNumber <= finalizedBlock;
   }
 
-  /** 目标单事实 (targetSourceId, targetSignalId) 是否已在投影中。
-   * output 车道作正向就绪门（未成立 revert DockOutputNotReady 由窗口
-   * 重试）；input 车道作冲突预检（已成立且本绑定未投递即永久
-   * DockInputConflict）。有 dock 上下文时传其状态机地址收敛跨部署同
-   * (planId, orderId) 的误命中（与 inputHookReady 同口径）。事实判据
-   * 带最终性门：信号的 submittedAt.blockNumber 必须在 finalizedBlock
-   * 内，未最终的目标事实不触发回填/预检。 */
   targetFactExists(
     snapshot: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>,
     route: DockRouteRecord,
@@ -675,34 +510,14 @@ const NON_ZERO_BYTES32 = /^0x[0-9a-fA-F]{64}$/;
 const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const CALLDATA_LIKE = /^0x(?:[0-9a-fA-F]{2})+$/;
 
-/**
- * 无收敛 revert（合约永久拒绝，keeper 无自动收敛路径）：目标事实槽已被
- * 占（DockInputConflict）与全零造证撞链上词表闸（InvalidSignalCapability）
- * ——失败原因从广播错误消息里按合约 revert 名识别（relayer 会把 revert
- * reason 原文带进错误消息）。
- */
 const NO_CONVERGENCE_REVERT = /DockInputConflict|InvalidSignalCapability/;
 
-/** 同一绑定连续撞同一无收敛 revert 达该窗口数即升级 error 级告警。 */
 const TERMINAL_REVERT_ESCALATION_WINDOWS = 3;
 
-/** 从已脱敏的广播错误消息里提取无收敛 revert 名（无则 undefined）。 */
 function terminalRevertReasonOf(message: string): string | undefined {
   return NO_CONVERGENCE_REVERT.exec(message)?.[0];
 }
 
-/**
- * route 来源记录的 fail-closed 校验。
- * route 数据是链下编译产物（DockRouteSource 由云侧实现），keeper 只提交
- * 可由链上 committed 投影推导的就绪性——记录本身的身份字段必须完整且
- * 形状合法：缺字段/零值/跨链记录即抛错，不静默跳过。抛错即响亮失败：
- * runOnce 上抛（轮询由 interval 捕获记 warn、运维可见），绝不带着可疑
- * 数据继续提交。两类载荷不在此列：new 模式缺 openCalldata 仍抛错（open
- * 是该模式唯一的车道，缺失即来源装配缺口）；existing 模式的
- * attachCalldata 缺失是 permissionless attach 的合法形态（挂接由目标单
- * creator/在任执行者自行上链完成），降级为跳过 attach 车道 + skipped
- * 留痕，见 runOnce 的挂接车道。
- */
 function validateDockRouteRecord(
   route: DockRouteRecord,
   workerChainId: number,
@@ -749,9 +564,6 @@ function validateDockRouteRecord(
     requireBytes32(binding.targetSignalId, `${bindingAt}.targetSignalId`);
   });
   if (route.orderMode === "new") {
-    // new 模式：entrance 绑定（inputs[0]）是出生锚，openCalldata 是
-    // openDockedOrder 的唯一载荷（route 来源预组装、含 publisher permit）。
-    // 两者任一缺失，该 route 永远无法开仓——来源装配缺口必须响亮暴露。
     if (route.inputs.length === 0) {
       throw new Error(`${at}: new-mode route must carry the entrance input binding`);
     }
@@ -763,7 +575,4 @@ function validateDockRouteRecord(
       throw new Error(`${at}.openCalldata must be pre-assembled calldata hex for a new-mode route`);
     }
   }
-  // existing 模式不要求 attachCalldata：permissionless attach 的 route
-  // 合法地不带该载荷（缺失时挂接车道跳过并留痕），形状校验（命中即
-  // calldata hex）由挂接车道的使用处承担。
-}
+  }

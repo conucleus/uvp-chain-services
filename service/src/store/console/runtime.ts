@@ -436,12 +436,6 @@ async function findStateMachineOrder(
     : await store.getStateMachineOrder(orderId);
 }
 
-/**
- * store 订单过滤的 status 映射对齐真实词表：
- * - 订单投影状态只有 "registered"（OrderStatus）与 "blocked"；
- * - 过滤词表收口到 STORE_ORDER_FILTER_STATUSES，未知 status 由
- *   路由层 400 拒绝，不静默返回空集。
- */
 const STORE_ORDER_FILTER_STATUSES = ["registered", "blocked"] as const;
 
 export function isSupportedStoreOrderFilterStatus(status: string): boolean {

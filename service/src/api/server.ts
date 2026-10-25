@@ -14,7 +14,12 @@ import {
 import { createConfiguredGovernanceChainAdapter, createGovernanceService } from "../governance/index.js";
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
-import { createNotificationService, WebhookNotificationDispatcher } from "../notifications/index.js";
+import {
+  createNotificationService,
+  createSupplierNotificationProfileConfigService,
+  MemorySupplierNotificationProfileConfigStore,
+  WebhookNotificationDispatcher
+} from "../notifications/index.js";
 import {
   AnvilProductOrderTriggerBroadcastAdapter,
   MemoryProductOrderTriggerBroadcastAdapter,
@@ -24,7 +29,7 @@ import { createViemReconcileReceiptClient, TxReconcileWorker } from "../reconcil
 import { createViemChainClock } from "../shared/chain-clock.js";
 import { createPublicClient, createWalletClient, defineChain, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { ProtocolOrderBirthAdapter, type OrderBirthPort } from "../order/v3/index.js";
+import { ProtocolOrderBirthAdapter, type OrderBirthPort } from "../order/index.js";
 import { DockAutomationWorker } from "../dock-automation/index.js";
 import {
   TimerKeeperWorker,
@@ -75,7 +80,7 @@ export async function startApiServer(
   const store = options.store ?? stores.projectionStore;
   const logger = createRedactingLogger(options.logger ?? consoleLogger, config.security.logRedactionEnabled);
   const audit = createLoggerAuditSink(logger);
-  const orderV3BirthPort = createConfiguredOrderV3BirthPort(config, logger);
+  const orderBirthPort = createConfiguredOrderBirthPort(config, logger);
   const configDiagnostics = await runConfigPreflight(config);
   const eventSource = options.eventSource === undefined
     ? createChainEventSourceForTarget(config, { logger })
@@ -87,9 +92,6 @@ export async function startApiServer(
     getProductSchemaByPlan: (planId: string, planHash: string) =>
       stores.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash)
   };
-  // 通用 webhook transport。产品渠道决策仍未做，默认关闭——
-  // 只在显式配置 UVP_NOTIFY_WEBHOOK_URL 时装配 dispatcher；未配置时保持
-  // 现状（delivery 记为 transport_adapter_missing），并给出一次性启动警告。
   const notificationDispatcher = config.notifications?.webhookUrl
     ? new WebhookNotificationDispatcher({
       url: config.notifications.webhookUrl,
@@ -99,48 +101,33 @@ export async function startApiServer(
     })
     : undefined;
   if (!notificationDispatcher) {
-    // 文案以代码为准：未装配 dispatcher 时 delivery 落 skipped
-    //（reason=transport_adapter_missing，可重投），不是 failed。
     logger.warn("NOTIFICATION DELIVERY IS NOT CONFIGURED: set UVP_NOTIFY_WEBHOOK_URL to enable the generic webhook transport; until then every delivery is recorded as skipped (transport_adapter_missing) and no external channel is notified");
   }
   const notificationService = createNotificationService({
     store,
     supplierMetadataStore: stores.storeSupplierMetadataStore,
     productSchemaResolver,
-    // delivery / read 状态落 sqlite（memory 驱动保持内存语义）。
-    ...(stores.notificationStateStore
-      ? {
-        deliveryStore: stores.notificationStateStore,
-        participantReadStateStore: stores.notificationStateStore
-      }
-      : {}),
+    deliveryStore: stores.notificationStateStore,
+    participantReadStateStore: stores.notificationStateStore,
     ...(notificationDispatcher ? { dispatcher: notificationDispatcher } : {})
   });
-  // open/input/output 的 dock 活性自动化（keeper 只提供活性）
-  // 由 DockAutomationWorker 按显式 route source 承担。
+  // supplier notification profile 配置目前只有内存实现（无 postgres 件）；
+  // 显式注入内存件以替代被删除的路由层缺省。
+  const supplierNotificationConfigService = createSupplierNotificationProfileConfigService({
+    store: new MemorySupplierNotificationProfileConfigStore()
+  });
   const indexer = eventSource
     ? new IndexerService({
       config,
       eventSource,
       store,
       notificationProcessor: notificationService,
-      // 词表产物富集源：join 口径与版本激活一致（zhixu 草稿 product
-      // schema 的 onchainHookPlanArtifact 按 (planId, planHash) 取最新，
-      // 见 store/console/zhixu-drafts.ts 的
-      // createPlanCapabilityTablesResolver）；重放侧再断言
-      // capabilitiesRoot 一致（fail-closed，见 indexer/projections/plan.ts）。
       resolvePlanCapabilityTables: createPlanCapabilityTablesResolver(stores.storeZhixuDraftStore),
-      // 语义 oracle 产物源：同一产物入口的完整形态（compiledHooks/
-      // dependencyIndex），重放后校验投影语义并计数分叉（只报告不覆盖）。
       resolveSemanticOraclePlan: createSemanticOraclePlanResolver(stores.storeZhixuDraftStore),
       logger
     })
     : undefined;
 
-  // 全量重建不得阻塞 listen——通知补投的 webhook 逐条最多一个超时
-  // 周期、串行跟在重建里会把启动拖成 N×超时。改为后台执行；投影轮询等
-  // 重建结束后再启动，避免增量刷新与全量重建并发写同一存储。失败由
-  // indexer 的 degraded 状态与错误日志暴露。
   const initialProjectionRebuild = indexer
     ? indexer.rebuildFromDeploymentBlock().catch((error: unknown) => {
         logger.error("api server background projection rebuild failed", {
@@ -150,15 +137,11 @@ export async function startApiServer(
     : undefined;
 
   const submissionVerifyingContract = stateMachineAddress(config.network.contracts);
-  // stage-patch / docking 模块地址必须显式存在于配置或
-  // 地址清单；缺失时不回退到状态机地址（strict preflight 亦会对清单
-  // 缺项 fail-fast），未配置即不装配对应 patch/docking 服务地址。
   const stagePatchVerifyingContract = stagePatchModuleAddress(config);
   const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(
     config,
     submissionVerifyingContract,
     audit,
-    // sqlite 驱动下 broadcast 去重状态持久化，重启后仍可去重。
     stores.broadcastDedupeStore
   );
   if (!submissionBroadcastAdapter && (config.security.environment !== "local" || config.relayer.broadcastEnabled)) {
@@ -173,7 +156,6 @@ export async function startApiServer(
     store: governanceStore,
     adapter: createConfiguredGovernanceChainAdapter(config, { logger }),
     audit,
-    // descriptor 托管：注册时快照被哈希原文，descriptorURI 指向公开端点。
     descriptorSnapshotStore: stores.identityDescriptorSnapshots,
     ...(config.api.identityDescriptorPublicBaseUrl
       ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
@@ -189,14 +171,8 @@ export async function startApiServer(
     productStore: productBffStore,
     submissionStore,
     governanceStore,
-    // stage-patch 台账对账：广播后回执未知/迟到的补丁行由同一 worker 收敛。
     ...(stores.stageExecutorPatchStore ? { stageExecutorPatchStore: stores.stageExecutorPatchStore } : {}),
     ...(stores.stageResourcePatchStore ? { stageResourcePatchStore: stores.stageResourcePatchStore } : {}),
-    // 证据绑定清扫：与 API 路由共用同一持久元数据仓与对象存储，
-    // 广播成功但绑定缺失的提交由 worker 周期性补绑。草稿期证据的归属
-    // 核验与 API 路由同源（resolveDraftOrder 装配在 BFF 台账上——trigger
-    // 记录是草稿与订单对应关系的服务端事实源）：缺解析器时补绑车道对
-    // draftId 来源凭证恒 409，草稿期证据补绑会永久卡死。
     evidenceBinder: createEvidenceService({
       metadataStore: stores.evidenceMetadataStore,
       storage: evidenceStorage,
@@ -206,8 +182,6 @@ export async function startApiServer(
     audit,
     logger
   });
-  // dock liveness worker。routeSource/submitter 未装配时为
-  // 显式 no-op（候选扫描归零），装配点由云编译 route 数据库接入方提供。
   const dockingModuleAddressValue = moduleAddress(config, "docking", "UVPDockingModule");
   const dockAutomationWorker = new DockAutomationWorker({
     config: config.dockAutomation,
@@ -216,24 +190,16 @@ export async function startApiServer(
     chainId: config.network.chainId,
     logger
   });
-  // 链上时钟拨表 keeper：pokeTimer 经 wallet client 代付（链上时钟活性
-  // 面，非业务签名），候选完全来自投影（waiting+dueAt）。未启用/未配
-  // keeper 私钥/未配状态机地址时 submitter 不装配，worker 显式 no-op。
   const timerKeeperSubmitter = createConfiguredTimerKeeperSubmitter(config, submissionVerifyingContract);
   const timerKeeperWorker = new TimerKeeperWorker({
     config: config.timerKeeper,
     projectionStore: store,
     stateMachineAddress: submissionVerifyingContract ?? "0x0000000000000000000000000000000000000000",
     chainId: config.network.chainId,
-    // 到期判定用链时钟（latest block timestamp），宿主墙钟偏移不参与。
     chainClock: createViemChainClock(config.network.rpcUrl),
     ...(timerKeeperSubmitter ? { submitter: timerKeeperSubmitter } : {}),
     logger
   });
-  // admin recovery actions 从既有 worker/indexer 原语构造，路由
-  // 拿不到 ops_dependency_unavailable 的假边界。retrySubmission 复用
-  // reconcile 原语（按 receipt 重新推进提交状态）并回报该提交的当前状态。
-  // 人工 rebuild 先等初始后台重建结束，避免与启动重建并发写同一存储。
   const opsRecoveryActions = {
     ...(indexer
       ? {
@@ -251,7 +217,6 @@ export async function startApiServer(
             }
           };
         },
-        // post-commit 失败批次（游标已前进）的人工补投入口。
         sweepPendingPostCommitSteps: async () => {
           const summary = await indexer.sweepPendingPostCommitSteps();
           return { status: "completed" as const, summary };
@@ -285,24 +250,22 @@ export async function startApiServer(
   const opsConsoleAdminIds = config.operatorRoles.opsConsoleAdmins ?? [];
   const router = createApiRouter(store, {
     productBffStore,
-    orderV3Store: stores.orderV3Store,
-    orderV3ChainId: config.network.chainId,
-    ...(submissionVerifyingContract ? { orderV3StateMachineAddress: submissionVerifyingContract } : {}),
-    orderV3ConfigPublisherWallets: [
+    orderStore: stores.orderStore,
+    orderChainId: config.network.chainId,
+    ...(submissionVerifyingContract ? { orderStateMachineAddress: submissionVerifyingContract } : {}),
+    orderConfigPublisherWallets: [
       ...(config.storeAuth?.walletSession?.operatorWallets ?? []),
       ...(config.storeAuth?.walletSession?.adminWallets ?? [])
     ],
-    orderV3OperatorWallets: [
+    orderOperatorWallets: [
       ...(config.storeAuth?.walletSession?.operatorWallets ?? []),
       ...(config.storeAuth?.walletSession?.adminWallets ?? [])
     ],
-    ...(orderV3BirthPort ? { orderV3BirthPort } : {}),
+    ...(orderBirthPort ? { orderBirthPort } : {}),
     orderRequirementsStore: stores.orderRequirementsStore,
     ...(config.operatorRoles.adminReviewers.length > 0
       ? { governanceAdminIds: config.operatorRoles.adminReviewers }
       : {}),
-    // 管理面口令因子：非 local 的自报 admin 头必须
-    // 叠加 x-uvp-admin-token 才构成完整凭据。
     ...((config.operatorRoles.adminTokenHashes ?? []).length > 0
       ? { governanceAdminTokenHashes: config.operatorRoles.adminTokenHashes }
       : {}),
@@ -312,7 +275,6 @@ export async function startApiServer(
     governanceStore,
     governanceService,
     productSchemaResolver,
-    // ops 控制台白名单进入鉴权；未配置时回退 governance admin 检查。
     ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
     opsRecoveryActions,
     storeZhixuDraftStore: stores.storeZhixuDraftStore,
@@ -330,7 +292,6 @@ export async function startApiServer(
     ...(config.api.identityDescriptorPublicBaseUrl
       ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
       : {}),
-    // 锚核验链直读：RPC + 状态机地址齐备时提供第二证据源。
     ...(config.network.rpcUrl && submissionVerifyingContract
       ? {
         listingAnchorChainView: createListingAnchorChainView({
@@ -339,9 +300,9 @@ export async function startApiServer(
         })
       }
       : {}),
-    // stage-patch 签名 deadline 的链时钟（latest block timestamp）。
     productChainClock: createViemChainClock(config.network.rpcUrl),
     notificationService,
+    supplierNotificationConfigService,
     submissionChainId: config.network.chainId,
     ...(submissionVerifyingContract ? { submissionVerifyingContract } : {}),
     ...(stagePatchVerifyingContract ? { stageExecutorPatchVerifyingContract: stagePatchVerifyingContract } : {}),
@@ -349,10 +310,8 @@ export async function startApiServer(
     ...(submissionBroadcastAdapter ? { submissionBroadcastAdapter } : {}),
     ...(stageExecutorPatchBroadcastAdapter ? { stageExecutorPatchBroadcastAdapter } : {}),
     ...(stageResourcePatchBroadcastAdapter ? { stageResourcePatchBroadcastAdapter } : {}),
-    // 持久驱动（sqlite/postgres）下注入持久化 stage-patch store；
-    // memory 驱动不注入，服务内部用内存 store。
-    ...(stores.stageExecutorPatchStore ? { stageExecutorPatchStore: stores.stageExecutorPatchStore } : {}),
-    ...(stores.stageResourcePatchStore ? { stageResourcePatchStore: stores.stageResourcePatchStore } : {}),
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
     productTriggerChainId: config.network.chainId,
     productRuntimeEnvironment: config.security.environment,
     ...(config.storeAuth ? { storeAuthConfig: config.storeAuth } : {}),
@@ -426,10 +385,6 @@ export async function startApiServer(
       const responseBody = apiResponse.status >= 400
         ? withErrorMetadata(apiResponse.body, requestId, runId)
         : apiResponse.body;
-      // 脱敏只属于日志：响应体是 API 契约载荷，按键名形状改写会吞掉
-      // 业务凭据字段（/store/auth/verify 签发的会话 token 即命中
-      // secret 键名模式，客户端拿到 [redacted:secret] 无法登录）。
-      // 日志只落白名单标识字段，且仍整体过脱敏保持"日志恒脱敏"不变量。
       response.end(JSON.stringify(responseBody, jsonReplacer));
       logger.info("api request completed", {
         requestId,
@@ -440,7 +395,6 @@ export async function startApiServer(
         ...extractResponseLogFields(redactSecrets(responseBody))
       });
     })().catch((error: unknown) => {
-      // 畸形路径参数是调用方可修正的 400，不落入兜底 500。
       if (error instanceof InvalidPathParameterError) {
         const body400 = withErrorMetadata(invalidPathParameterResponse().body, requestId, runId);
         response.statusCode = 400;
@@ -478,11 +432,6 @@ export async function startApiServer(
     server.listen(config.api.port, config.api.host, resolve);
   });
 
-  // 轮询在初始后台重建结束后启动（见上方注释），避免增量刷新与
-  // 全量重建并发写同一投影存储。reconcile/dock-automation 首轮同门：重建
-  // 进行中读投影会把本应 confirmed 的记录误标 indexing（下一轮自愈，但
-  // 状态与外部通知面失真一轮）。close 若发生在重建期间，置位 closed：
-  // 重建 settle 后的启动序列不得复活已 stop 的 worker/轮询。
   let closed = false;
   void (async () => {
     if (closed) {
@@ -521,15 +470,11 @@ export async function startApiServer(
   return server;
 }
 
-/**
- * V3 订单出生广播：birthAuthorizer key 只允许 local anvil（config.env 已
- * fail-closed 拒绝非 local）；私钥/派生账户不写日志，只记录 tx hash 与回执状态。
- */
-function createConfiguredOrderV3BirthPort(
+function createConfiguredOrderBirthPort(
   config: ChainServicesConfig,
   logger: Logger,
 ): OrderBirthPort | undefined {
-  const birth = config.orderV3Birth;
+  const birth = config.orderBirth;
   if (!birth) {
     return undefined;
   }
@@ -552,7 +497,7 @@ function createConfiguredOrderV3BirthPort(
   return new ProtocolOrderBirthAdapter({
     triggerSigner: (typedData) => account.signTypedData(typedData),
     onBroadcastError: (error) => {
-      logger.error("v3 order birth broadcast failed", {
+      logger.error("order birth broadcast failed", {
         message: error instanceof Error ? redactErrorMessage(error) : "unknown error",
       });
     },
@@ -565,7 +510,7 @@ function createConfiguredOrderV3BirthPort(
             chain,
           });
           const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-          logger.info("v3 order birth transaction settled", {
+          logger.info("order birth transaction settled", {
             txHash,
             status: receipt.status,
           });
@@ -611,9 +556,6 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
         forcePathStyle: evidenceStorageConfig.s3ForcePathStyle ?? false,
         accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv,
         secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv,
-        // forward the optional STS session-token env so temporary
-        // credentials actually reach the S3 client instead of dying at the
-        // first upload/read with a 403 that preflight never saw.
         ...(evidenceStorageConfig.s3SessionTokenEnv
           ? { sessionTokenEnv: evidenceStorageConfig.s3SessionTokenEnv }
           : {}),
@@ -625,8 +567,6 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
           : {})
       })
     });
-    // 配置了第二副本 bucket 时，put 同步写第二副本并提供
-    // 按 hash 校验/恢复能力；未配置时保持单副本（preflight 警告）。
     if (evidenceStorageConfig.s3BackupBucket) {
       const backup = new ObjectEvidenceStorage({
         client: new S3EvidenceStorageClient({
@@ -639,9 +579,6 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
           ...(evidenceStorageConfig.s3SessionTokenEnv
             ? { sessionTokenEnv: evidenceStorageConfig.s3SessionTokenEnv }
             : {}),
-          // 备份客户端必须沿用主存储的 uriMode/
-          // objectNamespace——object:// URI 空间下两边不一致会让 verify/
-          // restore 的 URI 翻译失效。
           ...(evidenceStorageConfig.s3UriMode === "object"
             ? {
                 uriMode: evidenceStorageConfig.s3UriMode,
@@ -668,8 +605,6 @@ export function createConfiguredEvidenceStorage(config: ChainServicesConfig): Ev
 function startProjectionRefresh(indexer: IndexerService, config: ChainServicesConfig, logger: Logger): NodeJS.Timeout | undefined {
   const pollIntervalMs = config.api.indexerPollIntervalMs;
   if (pollIntervalMs <= 0) {
-    // poll=0 意味着外部参与方事件永不入投影、reconcile 永卡，只能
-    // 人工 rebuild——必须响亮提示，不允许静默。
     logger.warn(
       "INDEXER POLLING IS DISABLED (UVP_INDEXER_POLL_INTERVAL_MS=0): chain events from external participants will never enter the projection, reconcile will stall at indexing, and recovery requires a manual projection rebuild"
     );
@@ -696,9 +631,6 @@ function normalizeStartOptions(
   return configOrOptions;
 }
 
-// 跨源默认关闭（不回 allow-origin，浏览器跨源读写被拦）；
-// 显式配置 UVP_API_CORS_ALLOWED_ORIGINS（逗号分隔）后按 Origin 精确回显。
-// 通配 "*" + 放行 x-uvp-* 身份头会让任意网页伪造管理员调用，禁止使用。
 const CORS_ALLOWED_ORIGINS = new Set(
   (process.env.UVP_API_CORS_ALLOWED_ORIGINS ?? "")
     .split(",")
@@ -707,10 +639,6 @@ const CORS_ALLOWED_ORIGINS = new Set(
 );
 
 function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): void {
-  // 服务端半：前端治理写链路使用 PUT，跨源部署下预检会拦
-  // 未列入 allow-methods 的方法，必须显式放行；非 local 管理面必携
-  // x-uvp-admin-token（governance/auth.ts），跨源管理台预检同样会拦
-  // 未列入 allow-headers 的头。
   response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
@@ -745,8 +673,6 @@ function moduleAddress(
   if (configuredAddress) {
     return configuredAddress;
   }
-  // D16：与 preflight 共用同一选择口径（精确 activeDeploymentId 优先，
-  // 其次 status=active）——OR 谓词首中曾在两处口径漂移时取错部署。
   const activeDeployment = selectActiveStateMachineDeployment(config);
   return activeDeployment?.modules?.[key];
 }
@@ -892,9 +818,6 @@ function normalizeHeaders(headers: IncomingMessage["headers"]): Record<string, s
 function requestIdFromHeaders(request: IncomingMessage): string {
   const header = request.headers["x-request-id"] ?? request.headers["x-uvp-request-id"];
   const value = Array.isArray(header) ? header[0] : header;
-  // 客户端自报请求 id 会原样回写响应头并落入每行日志：只采信通过
-  // normalizeRequestId 清洗（≤128、可打印 ASCII 白名单）的值，非法即
-  // 丢弃重建（服务端 UUID），不把任意客户端字节放进日志/响应头。
   return normalizeRequestId(value) ?? randomUUID();
 }
 
@@ -905,11 +828,6 @@ function runIdFromHeaders(request: IncomingMessage): string | undefined {
   return runId && runId.length > 0 ? runId : undefined;
 }
 
-/**
- * 匿名入口的请求方配额键：直连部署取 socket 对端地址并剥掉 IPv6
- * 映射前缀（::ffff:1.2.3.4），保证 IPv4 映射与原生写法归入同一桶。
- * 不读任何客户端自报头——自报的请求方键等于没有配额。
- */
 function clientAddressFromSocket(request: IncomingMessage): string | undefined {
   const remote = request.socket.remoteAddress;
   if (!remote) {

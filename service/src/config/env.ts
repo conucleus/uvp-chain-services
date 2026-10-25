@@ -7,7 +7,6 @@ import {
   type ChainTarget,
   type Hex,
 } from "../shared/types.js";
-import type { StorageDriver } from "../storage/types.js";
 import {
   ANVIL_DEFAULT_ADDRESSES,
   ANVIL_DEFAULT_PRIVATE_KEYS,
@@ -22,21 +21,7 @@ export interface NetworkConfig {
   readonly chainId: number;
   readonly rpcUrl: string;
   readonly deploymentBlock: bigint;
-  /**
-   * 游标最终性锚点（UVP_FINALITY_ANCHOR）：
-   * - finalized（默认）：以链的 finalized 标签为索引上界，深度 reorg 在
-   *   最终性边界之内被根除；
-   * - confirmations：latest - finalityConfirmations 浅缓冲，供 anvil 等
-   *   不支持 finalized 标签的本地/测试链环境显式覆盖——2 块深 reorg 即
-   *   越过 1 块缓冲，越窗回滚依赖哈希连续性校验兜底。
-   */
   readonly finalityAnchor: FinalityAnchor;
-  /**
-   * Finality buffer used before an event range is indexed (confirmations
-   * anchor only). The indexer also persists block hashes and rolls back to a
-   * common ancestor when a reorg is detected; this value bounds the normal
-   * exposure window.
-   */
   readonly finalityConfirmations: number;
   readonly contracts: Readonly<Record<string, Address>>;
   readonly stateMachineDeployments?: readonly StateMachineDeploymentConfig[];
@@ -64,13 +49,11 @@ export interface StateMachineDeploymentConfig {
 }
 
 export interface DatabaseConfig {
-  readonly driver: StorageDriver;
   readonly url: string;
   readonly migrationsAutoRun: boolean;
 }
 
 export interface ApiConfig {
-  /** Descriptor 托管公网基址（配置后 descriptorURI 指向 /identity/descriptors/...）。 */
   readonly identityDescriptorPublicBaseUrl?: string;
   readonly host: string;
   readonly port: number;
@@ -87,7 +70,6 @@ export interface RelayerConfig {
 
 export interface GovernanceConfig {
   readonly broadcastEnabled: boolean;
-  /** 私钥所在环境变量名：GOVERNANCE_SIGNER_PRIVATE_KEY_ENV 指向的变量名，缺省即值形态默认名。 */
   readonly signerPrivateKeyEnv: string;
   readonly signerPrivateKey?: Hex;
   readonly signerAddress?: Address;
@@ -118,10 +100,6 @@ export interface OperatorRoleConfig {
   readonly governanceSignerAddress?: Address;
   readonly adminReviewers: readonly string[];
   readonly opsConsoleAdmins?: readonly string[];
-  /**
-   * GOVERNANCE_ADMIN_TOKEN_HASHES（sha256 hex 列表）：非 local 管理面
-   * 口令因子——明文白名单自报头仅限 local 档（管理面生产基线）。
-   */
   readonly adminTokenHashes?: readonly string[];
 }
 
@@ -136,12 +114,6 @@ export interface DockAutomationConfig {
   readonly pollIntervalMs: number;
   readonly maxCandidatesPerRun: number;
   readonly maxGasPerTx?: bigint;
-  /**
-   * 最终性窗口去重：同一 binding 广播成功后，在该窗口内
-   * 不重复广播——投影要等链事件 finalize+索引后才呈现 delivery，逐轮
-   * 重发是纯 gas 浪费的 no-op 交易。窗口过后仍未投影为已投递才会重试
-   * （覆盖交易丢失的情形）。
-   */
   readonly redeliveryWindowMs: number;
 }
 
@@ -160,7 +132,6 @@ export interface EvidenceStorageConfig {
   readonly s3SessionTokenEnv?: string;
   readonly s3UriMode?: "s3" | "object";
   readonly s3ObjectNamespace?: string;
-  /** 可选第二副本 bucket（UVP_EVIDENCE_BACKUP_BUCKET）。 */
   readonly s3BackupBucket?: string;
 }
 
@@ -182,18 +153,9 @@ export interface StoreAuthConfig {
   readonly principalClaim: string;
   readonly displayNameClaim?: string;
   readonly clockToleranceSeconds: number;
-  /** 钱包会话（SIWE 式登录 + 地址锚定）子配置。 */
   readonly walletSession?: StoreWalletSessionConfig;
 }
 
-/**
- * 钱包会话配置：
- * - enabled：local/testnet 默认开；staging/production 必须显式开启。
- * - operatorWallets/adminWallets：MVP 单运营方地址清单——会话锚定地址
- *   命中清单即获得对应 Store 角色能力（会话能力继承所锚地址的链上角色
- *   与 Store 委托关系的运营方子集；plan 级权限另行按 planPublisher 核验）。
- * - devAnchoredAddressHeaderEnabled：仅 local 开发头锚定，非 local 直接拒绝启动。
- */
 export interface StoreWalletSessionConfig {
   readonly enabled: boolean;
   readonly operatorWallets: readonly Address[];
@@ -215,13 +177,11 @@ export interface SecurityConfig {
 }
 
 export interface NotificationsConfig {
-  /** 通用 webhook transport；未配置时不装配 dispatcher（默认关）。 */
   readonly webhookUrl?: string;
   readonly webhookSecretConfigured: boolean;
 }
 
-export interface OrderV3BirthConfig {
-  /** birthAuthorizer key; local anvil only, never logged. */
+export interface OrderBirthConfig {
   readonly signerPrivateKey: Hex;
   readonly broadcastEnabled: boolean;
 }
@@ -239,7 +199,7 @@ export interface ChainServicesConfig {
   readonly timerKeeper: TimerKeeperConfig;
   readonly evidenceStorage: EvidenceStorageConfig;
   readonly notifications?: NotificationsConfig;
-  readonly orderV3Birth?: OrderV3BirthConfig;
+  readonly orderBirth?: OrderBirthConfig;
   readonly storeAuth?: StoreAuthConfig;
   readonly security: SecurityConfig;
 }
@@ -275,12 +235,9 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
   };
   const chainId = parseInteger(env, "UVP_CHAIN_ID", manifest.chainId ?? 31337);
   const environment = parseRuntimeEnv(env);
-  const orderV3Birth = parseOrderV3BirthConfig(env, environment);
+  const orderBirth = parseOrderBirthConfig(env, environment);
   const rpcUrl = resolveRpcUrl(env, manifest.rpcUrlEnv, environment);
-  const databaseDriver = parseStorageDriver(
-    optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER"),
-  );
-  const databaseUrl = requiredEnv(env, "CHAIN_SERVICES_DATABASE_URL");
+  const databaseUrl = requiredDatabaseUrl(env);
   const registrationCreatorAddress = optionalAddressEnv(
     env,
     "UVP_PRODUCT_BFF_CREATOR_ADDRESS",
@@ -298,9 +255,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         "UVP_DEPLOYMENT_BLOCK",
         manifest.deploymentBlock ?? 0n,
       ),
-      // confirmations 锚仅供本地 anvil/浅最终性链显式覆盖（默认锚是
-      // finalized 标签，见 finalityAnchor）；production 预检在
-      // confirmations 锚下要求显式配置（validateProductionSafety）。
       finalityAnchor: parseFinalityAnchor(env),
       finalityConfirmations: parseInteger(env, "UVP_FINALITY_CONFIRMATIONS", 1),
       contracts,
@@ -310,7 +264,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         : {}),
     },
     database: {
-      driver: databaseDriver,
       url: databaseUrl,
       migrationsAutoRun: parseBoolean(env, "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN", false),
     },
@@ -399,7 +352,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     }),
     evidenceStorage: parseEvidenceStorageConfig(env),
     notifications: parseNotificationsConfig(env),
-    ...(orderV3Birth ? { orderV3Birth } : {}),
+    ...(orderBirth ? { orderBirth } : {}),
     storeAuth: parseStoreAuthConfig(env, environment),
     security: {
       environment,
@@ -443,11 +396,6 @@ interface ParsedAddressManifest {
   readonly activeDeploymentId?: Hex;
 }
 
-/**
- * timer keeper 的零预算/零去重窗是配置错误（A-13）：enabled 时
- * maxCandidatesPerRun=0 让每轮在首个候选前 break（永久静默失效），
- * redeliveryWindowMs=0 关闭去重逐轮重发。preflight 响亮拒绝。
- */
 function validateTimerKeeperConfig(config: TimerKeeperConfig): TimerKeeperConfig {
   if (!config.enabled) {
     return config;
@@ -526,9 +474,6 @@ function parseChainTarget(env: Env): ChainTarget {
 }
 
 function parseRuntimeEnv(env: Env): ChainServicesRuntimeEnv {
-  // 环境档位是整套 fail-closed 门禁（白名单/finality/禁自报 admin/
-  // postgres）的根开关：缺省即启动失败并报键名，不给"漏配即 local"
-  // 留任何降级路径。local 也必须显式声明。
   const rawValue = optionalEnv(env, "CHAIN_SERVICES_RUNTIME_ENV");
   if (!rawValue) {
     throw new ConfigError("CHAIN_SERVICES_RUNTIME_ENV is required (local, testnet, staging, or production)");
@@ -594,7 +539,6 @@ function parseEvidenceStorageConfig(env: Env): EvidenceStorageConfig {
     env,
     "UVP_EVIDENCE_S3_OBJECT_NAMESPACE",
   );
-  // 可选的第二副本 bucket；未配置时 preflight 警告。
   const s3BackupBucket = optionalEnv(env, "UVP_EVIDENCE_BACKUP_BUCKET");
 
   return {
@@ -615,16 +559,14 @@ function parseEvidenceStorageConfig(env: Env): EvidenceStorageConfig {
   };
 }
 
-function parseOrderV3BirthConfig(
+function parseOrderBirthConfig(
   env: Env,
   environment: ChainServicesRuntimeEnv,
-): OrderV3BirthConfig | undefined {
+): OrderBirthConfig | undefined {
   const raw = optionalEnv(env, "UVP_ORDER_V3_BIRTH_SIGNER_KEY");
   if (!raw) {
     return undefined;
   }
-  // birthAuthorizer key is only for local anvil e2e; never accept it on
-  // testnet/staging/production (fail-closed, no silent downgrade).
   if (environment !== "local") {
     throw new ConfigError(
       "UVP_ORDER_V3_BIRTH_SIGNER_KEY is only allowed in local development",
@@ -801,9 +743,6 @@ function parseStoreWalletSessionConfig(
     300,
   );
   const devHeaderRaw = optionalEnv(env, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER");
-  // dev 锚定地址头 local-only：非 local 环境自报地址锚定等于伪造身份，
-  // 显式开启也直接拒绝（testnet 是公开测试网，不比 staging 更宽松），
-  // 不留"配置打开、运行时才拦"的双层缝隙。
   const devAnchoredAddressHeaderEnabled = devHeaderRaw !== undefined
     ? parseBooleanFlag(devHeaderRaw, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")
     : !strict;
@@ -849,10 +788,6 @@ function parseStoreAuthMode(
   env: Env,
   environment: ChainServicesRuntimeEnv,
 ): StoreAuthConfigMode {
-  // 缺省档收紧——只有 local 允许缺省 dev_headers。
-  // testnet 未显式配置 STORE_AUTH_MODE 即启动失败（静默回落 dev_headers
-  // 等于任何人自报 store 头即可获得运营方能力）；显式配置
-  // dev_headers 在 local 之外同样拒绝。staging/production 保持必须 jwt。
   const rawValue = optionalEnv(env, "STORE_AUTH_MODE");
   if (!rawValue) {
     if (environment === "local") {
@@ -910,11 +845,6 @@ function validateNonLocalHttpsStoreAuthUrl(
   }
 }
 
-/**
- * 非 local 档的 RPC/S3 endpoint scheme 门（镜像 store-auth 的 https 先例）：
- * 必须 https://，http:// 仅回环 host（127.0.0.1/localhost/::1/[::1]/*.local）
- * 放行——明文 http 的节点/对象存储端点会把链凭据与证据流量暴露给链路窃听。
- */
 function validateNonLocalHttpsEndpointUrl(value: string, envName: string): void {
   let parsed: URL;
   try {
@@ -947,30 +877,22 @@ function discoveryUrlFromIssuer(issuer: string): string {
   return `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
 }
 
-function requiredEnv(env: Env, name: string): string {
-  const value = optionalEnv(env, name);
+function requiredDatabaseUrl(env: Env): string {
+  const value = optionalEnv(env, "CHAIN_SERVICES_DATABASE_URL");
   if (!value) {
-    throw new ConfigError(`${name} is required`);
-  }
-  return value;
-}
-
-function parseStorageDriver(rawDriver: string | undefined): StorageDriver {
-  if (!rawDriver) {
     throw new ConfigError(
-      "CHAIN_SERVICES_DATABASE_DRIVER is required (memory, sqlite, or postgres)",
+      "CHAIN_SERVICES_DATABASE_URL is required: storage is Postgres-only. " +
+        "For local runs start the bundled container with `./scripts/with-postgres.sh` " +
+        "(or `pnpm test`, which starts it automatically) and point the URL at it, " +
+        "e.g. postgres://uvp:uvp@127.0.0.1:5432/uvp_chain_services"
     );
   }
-  if (
-    rawDriver === "memory" ||
-    rawDriver === "sqlite" ||
-    rawDriver === "postgres"
-  ) {
-    return rawDriver;
+  if (!/^postgres(?:ql)?:\/\//.test(value)) {
+    throw new ConfigError(
+      "CHAIN_SERVICES_DATABASE_URL must be a postgres:// (or postgresql://) DSN"
+    );
   }
-  throw new ConfigError(
-    "CHAIN_SERVICES_DATABASE_DRIVER must be memory, sqlite, or postgres",
-  );
+  return value;
 }
 
 function parseBigIntValue(env: Env, name: string, fallback: bigint): bigint {
@@ -993,11 +915,6 @@ function parseBigIntValue(env: Env, name: string, fallback: bigint): bigint {
   }
 }
 
-/**
- * keeper/automation 的逐交易 gas 上限：显式配置 ≤0 即响亮拒绝（不存在
- * "0=无上限"语义——无上限的 keeper 会把异常昂贵的 poke/dock 全部放行）；
- * 未配置走 fallback，单一路径。
- */
 function optionalGasCap(
   env: Env,
   name: string,
@@ -1101,11 +1018,6 @@ function parseOperatorRoleConfig(env: Env): OperatorRoleConfig {
   };
 }
 
-/**
- * GOVERNANCE_ADMIN_TOKEN_HASHES：sha256 hex（64 位十六进制）逗号
- * 分隔列表。格式不合法即启动失败——半截哈希会把口令因子静默退化成
- * "永远不匹配"，管理面在非 local 直接锁死还难排查。
- */
 function parseAdminTokenHashes(env: Env): readonly string[] {
   const hashes = parseStringList(env, "GOVERNANCE_ADMIN_TOKEN_HASHES")
     .map((hash) => hash.toLowerCase());
@@ -1207,12 +1119,6 @@ function parseContracts(env: Env): Readonly<Record<string, Address>> {
   return contracts;
 }
 
-/**
- * UVP_CONTRACTS_JSON 覆盖地址清单（UVP_ADDRESS_MANIFEST）同名合约时的
- * 可见性出口：合并顺序是 env 内联 JSON 优先，覆盖会静默生效——清单与
- * JSON 分头维护的部署拿到的实际地址无从核对。返回被覆盖且地址不一致的
- * 合约名，供 preflight 诊断告警。
- */
 export function listContractJsonOverrides(env: Env): readonly string[] {
   const jsonContracts = parseContracts(env);
   const overridden = Object.keys(jsonContracts).filter((name) => {
@@ -1226,19 +1132,12 @@ export function listContractJsonOverrides(env: Env): readonly string[] {
         manifestAddress.toLowerCase() !== jsonAddress.toLowerCase()
       );
     } catch {
-      // 清单解析失败由 loadConfigFromEnv 的强校验负责报错；诊断侧不重复
-      // 抛错，只放弃覆盖检测。
       return false;
     }
   });
   return overridden;
 }
 
-/**
- * chainId 是否显式配置（env 直配或地址清单 network.chainId）：preflight
- * 对 production 显式性禁令的判定入口。清单不可解析时只剩 env 判定
- *（loadConfigFromEnv 的强校验会先对坏清单报错）。
- */
 export function isChainIdExplicitlyConfigured(env: Env): boolean {
   if (optionalEnv(env, "UVP_CHAIN_ID") !== undefined) {
     return true;
@@ -1274,8 +1173,6 @@ function parseAddressManifest(env: Env): ParsedAddressManifest {
   }
 
   const manifest = parsed as Record<string, unknown>;
-  // 地址清单是输入不是猜想：schemaVersion 不符直接拒绝，避免按已作废的
-  // 清单版本（如 v5）解析出口径漂移的部署记录。
   const schemaVersion = stringValue(manifest.schemaVersion);
   if (schemaVersion !== "uvp-eth.addresses.v1") {
     throw new ConfigError(
@@ -1442,8 +1339,6 @@ function resolveRpcUrl(
       return manifestRpcUrl;
     }
   }
-  // 非 local 环境的显式 RPC 强检在 validateProductionSafety 稍后执行；
-  // 能走到这里回落的只有 local。回落必须响亮，不允许静默指向默认节点。
   if (environment === "local") {
     console.warn(
       "[chain-services config] UVP_RPC_URL is not set; falling back to http://127.0.0.1:8545 (local Anvil default)"
@@ -1505,27 +1400,12 @@ function validateProductionSafety(
     return;
   }
 
-  if (
-    !optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER") ||
-    config.database.driver !== "postgres"
-  ) {
-    throw new ConfigError(
-      "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in production",
-    );
-  }
-  // 受管库成本安全门对三档非 local 环境同口径（.env.example 表述为
-  // 受管库通用要求）：production 的受管 PG 同样要求显式轮询配置与
-  // 禁轮询知情确认，漏检会把最贵的环境留在无界计费面上。
   validateManagedDatabaseCostSafety(config, env, "production");
-  // production 的 chainId 必须显式来自 env 或地址清单——静默回落 31337
-  //（Anvil 缺省）会把生产链身份锚到本地链语义。
   if (!options.chainIdExplicit) {
     throw new ConfigError(
       "UVP_CHAIN_ID must be explicitly configured in production (env var or address manifest network.chainId); refusing the 31337 fallback",
     );
   }
-  // production 必须显式配置 UVP_RPC_URL 且拒绝本地/回环地址——静默回落
-  // 127.0.0.1:8545 会把生产指向不存在的节点（staging/testnet 同样强检）。
   if (!optionalEnv(env, "UVP_RPC_URL")) {
     throw new ConfigError("UVP_RPC_URL is required in production");
   }
@@ -1535,12 +1415,7 @@ function validateProductionSafety(
     );
   }
   validateNonLocalHttpsEndpointUrl(config.network.rpcUrl, "UVP_RPC_URL");
-  // 治理广播 RPC 显式配置时同样受非 local 档 https 门约束：缺省回落
-  // network.rpcUrl（已检），显式 http 公网端点是 scheme 校验的绕行面。
   validateNonLocalHttpsEndpointUrl(config.governance.rpcUrl, "GOVERNANCE_RPC_URL");
-  // admin 白名单在 production 必须显式非空——
-  // 空白名单意味着任意 x-uvp-admin-id 自报即管理员（governance/auth.ts
-  // 是 fail-closed 的，这里把配置错误拦在启动前）。
   if (config.operatorRoles.adminReviewers.length === 0) {
     throw new ConfigError(
       "GOVERNANCE_ADMIN_REVIEWER_IDS is required in production",
@@ -1549,16 +1424,9 @@ function validateProductionSafety(
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in production");
   }
-  // 管理面生产基线：非 local 的运营面访问要求口令或
-  // 签名因子——白名单命中只是身份允许，不是凭据。缺口令哈希即拒绝
-  // 启动（governance/auth.ts 运行时同步 fail-closed）。
   if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
     throw new ConfigError("GOVERNANCE_ADMIN_TOKEN_HASHES is required in production");
   }
-  // confirmations 锚下禁止静默使用 env 默认值 1：2 块深 reorg 即越缓冲，
-  // finality 确认数必须显式配置为正整数。默认 finalized 锚以最终性标签
-  // 为上界，不消费该值。追加前的 block-hash continuity check 与有界共同
-  // 祖先回滚由 indexer 一并执行。
   if (
     config.network.finalityAnchor === "confirmations" &&
     (!optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
@@ -1626,15 +1494,11 @@ function validateProductionSafety(
       "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production",
     );
   }
-  // 档位倒挂收口（与 staging 同口径）：fire-and-forget 注册会让 BFF 在
-  // 交易未上链时就回报成功——生产必须等回执。
   if (!config.productBff.waitForReceipt) {
     throw new ConfigError(
       "UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in production",
     );
   }
-  // 档位倒挂收口（与 staging 同口径）：对账 worker 缺席时链上回执与
-  // 投影的漂移只能靠人工发现。
   if (!config.reconcile.enabled) {
     throw new ConfigError(
       "RECONCILE_WORKER_ENABLED=true is required in production",
@@ -1702,14 +1566,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
     );
   }
 
-  if (
-    optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER") !== "postgres" ||
-    config.database.driver !== "postgres"
-  ) {
-    throw new ConfigError(
-      "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in staging",
-    );
-  }
   if (!optionalEnv(env, "CHAIN_SERVICES_DATABASE_URL")) {
     throw new ConfigError("CHAIN_SERVICES_DATABASE_URL is required in staging");
   }
@@ -1751,8 +1607,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   ) {
     throw new ConfigError("UVP_CHAIN_ID=84532 is required in staging");
   }
-  // confirmations 锚是显式的浅缓冲覆盖：确认数必须显式为正
-  // （默认 finalized 锚不消费该值）。
   if (
     config.network.finalityAnchor === "confirmations" &&
     (!optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
@@ -1787,10 +1641,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in staging",
     );
   }
-  // 私钥变量名统一走可配置 *_ENV 解析（对齐 production）：直接名或间接名
-  // 二选一注入，只要解析出的变量名持有私钥即合法；不再强制要求间接变量
-  // 本身必须显式出现（该字面量要求曾使 production 可启动的合法配置在
-  // staging 被拒）。私钥存在性由下方按解析名强制。
   if (!optionalEnv(env, config.productBff.registrarPrivateKeyEnv)) {
     throw new ConfigError(
       `${config.productBff.registrarPrivateKeyEnv} is required when Product BFF registration adapter is anvil`,
@@ -1864,8 +1714,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
     );
   }
 
-  // 私钥名走可配置 UVP_ETH_DEPLOYER_PRIVATE_KEY_ENV 解析（对齐 production）；
-  // 存在性由下方按解析名强制。
   if (!optionalEnv(env, config.operatorRoles.deployerPrivateKeyEnv)) {
     throw new ConfigError(
       `${config.operatorRoles.deployerPrivateKeyEnv} is required in staging`,
@@ -1895,8 +1743,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   if (!config.governance.signerAddress) {
     throw new ConfigError("GOVERNANCE_SIGNER_ADDRESS is required in staging");
   }
-  // 治理广播在 staging 必须显式开启：缺省 false 会让治理写操作静默落
-  // simulated 适配器、永不上链（对照 relayer 广播的 staging 强制口径）。
   if (!config.governance.broadcastEnabled) {
     throw new ConfigError(
       "GOVERNANCE_BROADCAST_ENABLED=true is required in staging",
@@ -1915,8 +1761,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in staging");
   }
-  // 管理面生产基线：staging 与 production/testnet 同
-  // 口径要求口令因子，明文白名单自报头仅限 local 档。
   if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
     throw new ConfigError("GOVERNANCE_ADMIN_TOKEN_HASHES is required in staging");
   }
@@ -1953,16 +1797,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
 }
 
 function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
-  if (optionalEnv(env, "CHAIN_SERVICES_DATABASE_DRIVER") !== "postgres") {
-    throw new ConfigError(
-      "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in testnet",
-    );
-  }
-  if (config.database.driver !== "postgres") {
-    throw new ConfigError(
-      "CHAIN_SERVICES_DATABASE_DRIVER=postgres is required in testnet",
-    );
-  }
   const databaseUrl = optionalEnv(env, "CHAIN_SERVICES_DATABASE_URL");
   if (!databaseUrl) {
     throw new ConfigError("CHAIN_SERVICES_DATABASE_URL is required in testnet");
@@ -1972,8 +1806,6 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "CHAIN_SERVICES_DATABASE_URL must point to a Postgres database in testnet",
     );
   }
-  // 自动迁移知情门（对照 production/staging 档）：testnet 的受管 PG 同样
-  // 会在启动期自动执行 DDL，必须显式确认知情，避免部署管道无意间改库。
   if (
     config.database.migrationsAutoRun &&
     optionalEnv(env, "UVP_TESTNET_ALLOW_AUTO_MIGRATIONS") !== "1"
@@ -2010,9 +1842,6 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "UVPIdentityRegistry contract address is required in testnet",
     );
   }
-  // 公网测试网缺省 depth=1 等于几乎无 reorg 缓冲：confirmations 锚下
-  // finality 确认数必须显式配置为正整数（production/staging 同口径；
-  // 默认 finalized 锚不消费该值）。
   if (
     config.network.finalityAnchor === "confirmations" &&
     (!optionalEnv(env, "UVP_FINALITY_CONFIRMATIONS") ||
@@ -2022,7 +1851,6 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in testnet when UVP_FINALITY_ANCHOR=confirmations",
     );
   }
-  // testnet 同样强制 admin 白名单非空——空白名单等于任意自报 admin 通过。
   if (config.operatorRoles.adminReviewers.length === 0) {
     throw new ConfigError(
       "GOVERNANCE_ADMIN_REVIEWER_IDS is required in testnet",
@@ -2031,8 +1859,6 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in testnet");
   }
-  // 管理面生产基线：testnet 是公开测试网，与
-  // staging/production 同口径要求口令因子。
   if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
     throw new ConfigError("GOVERNANCE_ADMIN_TOKEN_HASHES is required in testnet");
   }
@@ -2060,9 +1886,6 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in testnet",
     );
   }
-  // 档位不对称收口（镜像 production/staging）：fire-and-forget 注册会让
-  // BFF 在交易未上链时就回报成功；对账 worker 缺席时链上回执与投影的
-  // 漂移只能靠人工发现——公开测试网同样要求两者在场。
   if (!config.productBff.waitForReceipt) {
     throw new ConfigError(
       "UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in testnet",
@@ -2129,17 +1952,11 @@ function validateManagedDatabaseCostSafety(
   env: Env,
   environment: "staging" | "testnet" | "production",
 ): void {
-  if (config.database.driver !== "postgres") {
-    return;
-  }
   const classification = classifyPostgresDatabaseUrl(config.database.url);
   if (!classification.isNonLocal) {
     return;
   }
   const host = classification.redactedHost ?? "non-local Postgres";
-  // 受管 PG 上不强制 poll=0（那会让外部参与方事件永不入投影、
-  // reconcile 永卡，只能人工 rebuild）。要求 poll 间隔显式配置；允许 0，
-  // 但 =0 必须同时显式确认知情键 UVP_INDEXER_POLL_DISABLED_ACK=1。
   const pollExplicit = env.UVP_INDEXER_POLL_INTERVAL_MS?.trim() !== undefined && env.UVP_INDEXER_POLL_INTERVAL_MS?.trim() !== "";
   if (!pollExplicit) {
     throw new ConfigError(
@@ -2279,4 +2096,3 @@ function isLocalRpcUrl(
     hostname.endsWith(".local")
   );
 }
-// Anvil 开发账户黑名单的单一来源在 anvil-defaults.ts（与 preflight.ts 共享）。

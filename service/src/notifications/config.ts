@@ -59,7 +59,7 @@ export interface SupplierNotificationProfileConfigQuery {
 }
 
 export interface SupplierNotificationProfileConfigServiceOptions {
-  readonly store?: SupplierNotificationProfileConfigStore;
+  readonly store: SupplierNotificationProfileConfigStore;
   readonly now?: () => Date;
 }
 
@@ -81,9 +81,9 @@ export class MemorySupplierNotificationProfileConfigStore implements SupplierNot
 }
 
 export function createSupplierNotificationProfileConfigService(
-  options: SupplierNotificationProfileConfigServiceOptions = {}
+  options: SupplierNotificationProfileConfigServiceOptions
 ): SupplierNotificationProfileConfigService {
-  const store = options.store ?? new MemorySupplierNotificationProfileConfigStore();
+  const store = options.store;
   const now = options.now ?? (() => new Date());
 
   return {

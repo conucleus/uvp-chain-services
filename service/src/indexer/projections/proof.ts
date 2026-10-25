@@ -1,5 +1,5 @@
 // 证明族：链事件事实提取与证明构造（事件参数解码、provenance/proof/timeline
-// 原语与比较器）。归位自原 indexer/projections.ts（意见书 B2 纯搬迁拆分）。
+// 原语与比较器）。
 import { chainEventKey, type ChainEvent } from "../events.js";
 import {
   ProjectionError,
@@ -63,7 +63,6 @@ interface StateMachineProofMetadata {
   readonly orderId?: Hex | undefined;
   readonly linkedOrderId?: Hex | undefined;
   readonly triggerOriginOrderId?: Hex | undefined;
-  /** fork 出生血缘（OrderForked）：父单号随证明元数据声明。 */
   readonly parentOrderId?: Hex | undefined;
   readonly originSourceId?: Hex | undefined;
   readonly originSignalId?: Hex | undefined;
@@ -85,9 +84,6 @@ function normalizeProofArg(value: unknown): string | number | boolean | null {
     return value.toString();
   }
   if (typeof value === "string") {
-    // 事件源解码边界已按 ABI 类型归一化（bytes/address 小写、
-    // string 保持原文）。这里不对 0x 开头的字符串二次小写化——
-    // metadataURI 等 string 参数大小写敏感，改写不可逆。
     return value;
   }
   if (typeof value === "number" || typeof value === "boolean" || value === null) {
@@ -178,8 +174,6 @@ export function optionalNonZeroBytes32Arg(event: ChainEvent, name: string): Hex 
   return value && value !== ZERO_BYTES32 ? value : undefined;
 }
 
-/** bytes32[] 事件参数（B-03 OrderForked.replayedFactKeys）：缺失/空数组
- * 按缺省处理，成员逐个归一为 bytes32 hex。 */
 export function optionalBytes32ArrayArg(event: ChainEvent, name: string): Hex[] | undefined {
   const value = event.args[name];
   if (!Array.isArray(value) || value.length === 0) {

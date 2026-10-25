@@ -4,17 +4,6 @@ import { principalFromHeaders, type EvidencePrincipal } from "../evidence/index.
 import { normalizeAddress, type Address } from "../shared/types.js";
 import type { ApiRequest, ApiResponse, ApiRouteContext } from "./route-context.js";
 
-/**
- * 参与者面身份收口。
- *
- * - 身份 = 会话锚定地址（钱包会话签名证明，或 local 显式开启的
- *   dev 锚定头）。自报钱包只允许作为"与锚定地址一致性"的校验对象，
- *   不一致即 403；不得把 query/body/header 自报钱包当作唯一身份，
- *   否则可读任意人活动流、代标已读、代任意 owner 上传证据。
- * - local 保留自报回退，且必须显式声明（runtimeEnvironment === "local"）；
- *   缺省环境不再是 local——组装层未传入运行环境时按 fail-closed 拒绝，
- *   否则任何漏传配置的调用点都会静默退化为自报身份可信。
- */
 export interface ParticipantWalletIdentity {
   readonly walletAddress: Address;
   readonly accountId?: string;
@@ -84,8 +73,6 @@ export async function resolveParticipantWalletIdentity(
     };
   }
 
-  // 仅显式 local 允许自报钱包；环境缺省（组装层漏传）按 fail-closed
-  // 拒绝，不给"未配置"留宽松兜底。
   if (runtimeEnvironment === "local") {
     const claimed = selfReportedWalletFromRequest(request, options);
     if (claimed) {
@@ -121,11 +108,6 @@ export async function resolveParticipantWalletIdentity(
   };
 }
 
-/**
- * evidence 身份取值——治理白名单口径的 admin（governance/
- * auth.ts 收口：非 local 空白名单 fail-closed）或钱包会话锚定地址；
- * 非 local 无会话即拒绝（service 的 requireAuthenticated 抛 401）。
- */
 export async function resolveEvidencePrincipal(
   request: ApiRequest,
   context: ApiRouteContext,
@@ -143,7 +125,6 @@ export async function resolveEvidencePrincipal(
       role: "participant"
     };
   }
-  // 仅显式 local 允许自报 principal 头；环境缺省 fail-closed（同上）。
   if (runtimeEnvironment === "local") {
     return principalFromHeaders(request.headers);
   }

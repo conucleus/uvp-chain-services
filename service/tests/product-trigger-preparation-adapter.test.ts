@@ -42,7 +42,6 @@ describe("Product BFF trigger broadcast adapter", () => {
         blockNumber: 12n,
         logs: [{
           address: stateMachineAddress,
-          // 一事一单：链上订单 id 由合约派生——回执事件携带派生 id。
           topics: [signalSubmittedTopic, planId, deriveTriggerOrderId(planId, sourceId, signalId, payloadHash), sourceId],
           data: signalSubmittedData
         }]
@@ -124,7 +123,6 @@ describe("Product BFF trigger broadcast adapter", () => {
   });
 
   it("carries the broadcast txHash through failures after writeContract succeeded", async () => {
-    // writeContract 成功（交易已上链）后等待回执抛错：failed 结果不得丢失 txHash。
     const walletClient: ProductTriggerBroadcastWalletClient = {
       account: { address: registrarAddress },
       writeContract: vi.fn(async () => startTxHash)
@@ -202,8 +200,6 @@ describe("Product BFF trigger broadcast adapter", () => {
   });
 
   it("transport envelopes like Invalid JSON RPC response stay retryable", async () => {
-    // "Invalid JSON RPC response" 是传输层错误，不是确定性业务拒绝：
-    // 误判成 retryable:false 会把草稿永久卡死在 failed。
     const walletClient: ProductTriggerBroadcastWalletClient = {
       account: { address: registrarAddress },
       writeContract: vi.fn(async () => {
@@ -299,7 +295,6 @@ describe("Product BFF trigger broadcast adapter", () => {
       unknownOrderMaxRetries: 2
     });
 
-    // registrar == submitter：确定性拒绝，不产生任何链上交易。
     const rejected = await adapter.broadcastOutsideTrigger({
       draftId: "draft_guard",
       triggerId: "trigger_guard",
@@ -325,7 +320,6 @@ describe("Product BFF trigger broadcast adapter", () => {
     });
     expect(walletClient.writeContract).not.toHaveBeenCalled();
 
-    // submitter != registrar：正常走广播路径。
     const participantSubmitter = address("aaaa");
     const allowed = await adapter.broadcastOutsideTrigger({
       draftId: "draft_guard",

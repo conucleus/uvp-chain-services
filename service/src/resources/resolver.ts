@@ -1,13 +1,11 @@
-// Minimal V3 fileResources resolver. Handles come from the published config;
-// authorization is re-checked here (route authorization is not the owner of the
-// decision). The result never contains a locator: only ok/empty/not_found/
-// forbidden/resolve_failed/unavailable. Without external storage the resolver
-// reports explicit unavailable (never empty).
+// Minimal fileResources resolver. Handles come from the published config;
+// authorization is re-checked here. The result never contains a locator: only
+// ok/empty/not_found/forbidden/resolve_failed/unavailable.
 
 import { createHash } from "node:crypto";
-import type { ConfigFileResourceRefV3, ConfigStageV3 } from "@uvp-eth/product-dto";
+import type { ConfigFileResourceRef, ConfigStage } from "@uvp-eth/product-dto";
 import type { Address } from "../shared/types.js";
-import type { OrderV3VisibilitySnapshot } from "../order/v3/service.js";
+import type { OrderVisibilitySnapshot } from "../order/service.js";
 import { createVisibilityResolver } from "../visibility/resolver.js";
 import type { ResourceResolution, ResourceResolverPort } from "../visibility/types.js";
 
@@ -15,13 +13,13 @@ export interface ResourceStoragePort {
   read(input: { readonly ref: string }): Promise<Uint8Array | undefined>;
 }
 
-export interface V3ResourceResolverOptions {
-  readonly loadOrder: (orderId: string) => Promise<OrderV3VisibilitySnapshot | undefined>;
+export interface ResourceResolverOptions {
+  readonly loadOrder: (orderId: string) => Promise<OrderVisibilitySnapshot | undefined>;
   readonly operatorWallets?: readonly Address[];
   readonly storage?: ResourceStoragePort;
 }
 
-export function createV3ResourceResolver(options: V3ResourceResolverOptions): ResourceResolverPort {
+export function createResourceResolver(options: ResourceResolverOptions): ResourceResolverPort {
   const visibility = createVisibilityResolver({
     loadOrder: options.loadOrder,
     ...(options.operatorWallets !== undefined ? { operatorWallets: options.operatorWallets } : {}),
@@ -77,9 +75,9 @@ export function createV3ResourceResolver(options: V3ResourceResolverOptions): Re
 }
 
 export function findHandle(
-  stage: ConfigStageV3,
+  stage: ConfigStage,
   handleKey: string,
-): ConfigFileResourceRefV3 | undefined {
+): ConfigFileResourceRef | undefined {
   const entry = (stage.fileResources ?? []).find((candidate) => {
     const value = typeof candidate === "string" ? candidate : (candidate.name ?? candidate.ref);
     return value === handleKey;

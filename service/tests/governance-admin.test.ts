@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
+import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import {
   createGovernanceBroadcasterAdapter,
@@ -11,13 +12,59 @@ import {
   type GovernanceWalletClient,
 } from "../src/governance/index.js";
 import type { Address, Hex } from "../src/shared/types.js";
-import { MemoryProjectionStore } from "../src/storage/projection-store.js";
+import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPostgresTestDatabase } from "./postgres.js";
+
+let stores: ChainServicesStores;
+
+beforeAll(async () => {
+  stores = createChainServicesStores({
+    database: { url: await createPostgresTestDatabase(), migrationsAutoRun: true }
+  });
+});
+
+afterAll(async () => {
+  await stores.close();
+});
+
+function requiredRouterStores() {
+  return {
+    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
+    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
+    storeWalletSessionStore: stores.storeWalletSessionStore,
+    storeDecorationStore: stores.storeDecorationStore,
+    storePublisherDelegationStore: stores.storePublisherDelegationStore,
+    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
+    storeListingStore: stores.storeListingStore,
+    storeJoinApplicationStore: stores.storeJoinApplicationStore,
+    productBffStore: stores.productBffStore,
+    orderStore: stores.orderStore,
+    orderRequirementsStore: stores.orderRequirementsStore,
+    evidenceMetadataStore: stores.evidenceMetadataStore,
+    submissionStore: stores.submissionStore,
+    governanceStore: stores.governanceStore,
+    stageExecutorPatchStore: stores.stageExecutorPatchStore,
+    stageResourcePatchStore: stores.stageResourcePatchStore,
+    storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
+    storeDockingSessionStore: stores.storeDockingSessionStore,
+    storeAuditStore: stores.storeAuditStore,
+    notificationService: createNotificationService({
+      store: stores.projectionStore,
+      supplierMetadataStore: stores.storeSupplierMetadataStore,
+      deliveryStore: stores.notificationStateStore,
+      participantReadStateStore: stores.notificationStateStore
+    }),
+    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
+      store: new MemorySupplierNotificationProfileConfigStore()
+    })
+  };
+}
 
 const adminHeaders = {
   "x-uvp-admin-id": "admin-1",
   "x-uvp-admin-role": "admin",
 };
-/** 管理面口令因子：sha256("test-admin-password")。 */
 const adminTokenHash = "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d";
 const subjectId = "0x0000000000000000000000000000000000000000000000000000000000003001" as Hex;
 const bindingId = "0x0000000000000000000000000000000000000000000000000000000000004001" as Hex;
@@ -29,7 +76,7 @@ const txHash = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 
 describe("identity governance API", () => {
   it("keeps admin review off-chain and requires an authenticated admin", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
     await expect(router.handle({
       method: "POST",
       pathname: "/admin/governance/review-supplier",
@@ -49,18 +96,17 @@ describe("identity governance API", () => {
 
   it("requires a password factor for the admin surface outside local", async () => {
     const routerOptions = {
+      ...requiredRouterStores(),
       productRuntimeEnvironment: "staging" as const,
       submissionChainId: 84532,
       submissionVerifyingContract: "0x1111111111111111111111111111111111111111" as Address,
       governanceAdminIds: ["admin-1"],
       opsConsoleAdminIds: ["admin-1"],
       governanceAdminTokenHashes: [adminTokenHash],
-      // staging/production 边界要求 production-safe 对象存储适配器。
       evidenceStorage: new ObjectEvidenceStorage({ client: memoryObjectClient() }),
     };
-    const router = createApiRouter(new MemoryProjectionStore(), routerOptions);
+    const router = createApiRouter(stores.projectionStore, routerOptions);
 
-    // staging：白名单命中的明文自报头不再是完整凭据 → 403。
     await expect(router.handle({
       method: "GET",
       pathname: "/admin/governance/reviews",
@@ -73,7 +119,6 @@ describe("identity governance API", () => {
       headers: adminHeaders,
     })).resolves.toMatchObject({ status: 403 });
 
-    // 口令因子命中（x-uvp-admin-token 哈希比对）→ 放行。
     await expect(router.handle({
       method: "GET",
       pathname: "/admin/governance/reviews",
@@ -86,15 +131,13 @@ describe("identity governance API", () => {
       headers: { ...adminHeaders, "x-uvp-admin-token": "test-admin-password" },
     })).resolves.toMatchObject({ status: 200, body: { ok: true } });
 
-    // 口令错误 → 403。
     await expect(router.handle({
       method: "GET",
       pathname: "/admin/governance/reviews",
       headers: { ...adminHeaders, "x-uvp-admin-token": "wrong-password" },
     })).resolves.toMatchObject({ status: 403 });
 
-    // production 同口径拒绝明文自报头。
-    const productionRouter = createApiRouter(new MemoryProjectionStore(), {
+    const productionRouter = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
       ...routerOptions,
       productRuntimeEnvironment: "production" as const,
     });
@@ -104,8 +147,7 @@ describe("identity governance API", () => {
       headers: adminHeaders,
     })).resolves.toMatchObject({ status: 403 });
 
-    // local 档保持明文白名单自报头（dev 便利）。
-    const localRouter = createApiRouter(new MemoryProjectionStore(), {
+    const localRouter = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
       ...routerOptions,
       productRuntimeEnvironment: "local" as const,
     });
@@ -128,8 +170,9 @@ describe("identity governance API", () => {
         return { status: "submitted", txHash, signer, retryable: false, simulated: false };
       },
     };
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      governanceService: createGovernanceService({ adapter }),
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      governanceService: createGovernanceService({
+    store: new InMemoryGovernanceStore(), adapter }),
     });
     await router.handle({
       method: "POST",
@@ -179,13 +222,11 @@ describe("identity governance API", () => {
         return { status: "submitted", txHash, signer, retryable: false, simulated: false };
       },
     };
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      governanceService: createGovernanceService({ adapter }),
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      governanceService: createGovernanceService({
+    store: new InMemoryGovernanceStore(), adapter }),
     });
 
-    // No review exists for the subject: the request must be refused—
-    // hashing the request body itself into an "approved_for_broadcast"
-    // review hash would broadcast a review that does not exist on chain.
     const unreviewed = await router.handle({
       method: "POST",
       pathname: "/admin/governance/register-identity",
@@ -198,7 +239,6 @@ describe("identity governance API", () => {
     });
     expect(requests).toEqual([]);
 
-    // A non-approved review keeps the existing guard as well.
     await router.handle({
       method: "POST",
       pathname: "/admin/governance/review-supplier",
@@ -255,8 +295,6 @@ describe("identity governance API", () => {
   });
 
   it("keeps the broadcast txHash when waiting for the receipt fails", async () => {
-    // 已广播的交易在等回执抛错时必须带着 txHash 失败——丢失哈希会造成
-    // 幽灵交易 + 重复登记（同仓其余广播适配器的共同防线）。
     const publicClient: GovernancePublicClient = {
       async getChainId() { return 31337; },
       async readContract() { return signer; },
@@ -290,10 +328,6 @@ describe("identity governance API", () => {
   });
 
   it("classifies viem's unknown-RPC transport envelope as retryable instead of a permanent failure", async () => {
-    // 事故形态：viem 对非标准节点错误的通用信封 UnknownRpcError（文本
-    // "An unknown RPC error occurred."）是瞬态传输故障。宽子串 "unknown"
-    // 匹配曾把它钉成 retryable:false 落库，之后同请求命中失败台账复用
-    // 短路，registerIdentity 永久卡死。
     const publicClient: GovernancePublicClient = {
       async getChainId() { return 31337; },
       async readContract() { return signer; },
@@ -359,10 +393,6 @@ describe("identity governance API", () => {
   });
 
   it("re-broadcasts after a permanent failure instead of reusing the failed ledger entry as a final answer", async () => {
-    // 事故形态：failed && !retryable 的陈年台账被 isReusableDuplicateLog
-    // 当"可复用终态"，同请求重放永久返回旧失败，治理通道卡死。复用只认
-    // 成功在途/终态（simulated_tx/submitted/confirmed）；失败档必须重新
-    // 广播并落新档。
     const broadcasts: string[] = [];
     const adapter: GovernanceChainAdapter = {
       async registerIdentity() {
@@ -398,12 +428,10 @@ describe("identity governance API", () => {
     const first = await service.registerIdentity(body, principal);
     expect(first.broadcast).toMatchObject({ status: "failed", retryable: false });
 
-    // 同请求重放：不复用失败档，重新广播并成功。
     const second = await service.registerIdentity(body, principal);
     expect(second.broadcast).toMatchObject({ status: "submitted", txHash });
     expect(broadcasts).toEqual(["register", "register"]);
 
-    // 成功在途档才是幂等复用对象：第三次重放直接返回已记录结果。
     const third = await service.registerIdentity(body, principal);
     expect(third.broadcast).toMatchObject({ status: "submitted", txHash });
     expect(third.log.logId).toBe(second.log.logId);
@@ -411,8 +439,6 @@ describe("identity governance API", () => {
   });
 
   it("records a persist_failed fallback log with the txHash when the tx log write fails after a real broadcast", async () => {
-    // 广播已成功（拿到 txHash）后写台账抛错——先补一条带 txHash 的
-    // failed 档（reconcile 凭哈希复核可自愈），再上抛原始错误。
     const adapter: GovernanceChainAdapter = {
       async registerIdentity() {
         return { status: "submitted", txHash, signer, retryable: false, simulated: false };
@@ -421,8 +447,6 @@ describe("identity governance API", () => {
         return { status: "submitted", txHash, signer, retryable: false, simulated: false };
       },
     };
-    // 先成功落一条 review 供登记使用；随后让 appendIdentityTxLog 只在第
-    // 一次（正常档）抛错，兜底档允许落库。
     let appendCalls = 0;
     const base = new InMemoryGovernanceStore();
     const flaky: InMemoryGovernanceStore = Object.create(base);
@@ -459,8 +483,6 @@ describe("identity governance API", () => {
   });
 
   it("rejects a review transition validated against a stale snapshot", async () => {
-    // review 状态机校验是 check-then-act：校验读取后行被并发迁移
-    //（如撤销），过期校验结果的整行写不得把 revoked 盖回 restricted。
     const base = new InMemoryGovernanceStore();
     const principal = { adminId: "admin-1", role: "admin" };
     const service = createGovernanceService({
@@ -484,8 +506,6 @@ describe("identity governance API", () => {
       principal,
     );
 
-    // 代理 getReview：下一次读取返回 approved_for_broadcast 的过期快照，
-    // 模拟"校验已读、写入未落"窗口内的并发撤销。
     let staleReadPending = false;
     const doctored: InMemoryGovernanceStore = Object.create(base);
     doctored.getReview = async (reviewId: string) => {
@@ -521,9 +541,6 @@ describe("identity governance API", () => {
   });
 
   it("assembles a fail-closed refusing governance adapter for production when broadcast is disabled", async () => {
-    // production 禁 env 私钥治理（GOVERNANCE_BROADCAST_ENABLED=true 被
-    // validateProductionSafety 拒绝），广播关闭时装配拒绝适配器——服务可
-    // 启动，治理写面一律 failed 拒绝（不假成功），而不是启动即死。
     const { createConfiguredGovernanceChainAdapter } = await import("../src/governance/adapter.js");
     const productionConfig = {
       security: { environment: "production" },
@@ -547,7 +564,6 @@ describe("identity governance API", () => {
   });
 });
 
-/** 非 local 边界可接受的内存对象存储客户端（production-safe 适配器用）。 */
 function memoryObjectClient() {
   const objects = new Map<string, Uint8Array>();
   return {

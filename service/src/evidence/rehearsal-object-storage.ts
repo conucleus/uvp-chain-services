@@ -76,19 +76,11 @@ export class RehearsalObjectEvidenceStorage implements EvidenceStorage {
     return join(this.#rootDir, `${evidenceId}.bin`);
   }
 
-  // EvidenceStorage 的可选翻译方法；BackupEvidenceStorage 的主/备 URI
-  // 空间翻译需要它。
   storageURIForEvidenceId(evidenceId: string): string {
     return `object://${this.#namespace}/${encodeURIComponent(evidenceId)}`;
   }
 }
 
-/**
- * The default root must be stable across restarts. Evidence
- * metadata references bytes under this root, so a per-process directory
- * (timestamp or pid) breaks every stored storageURI after a restart. Deployments
- * that need a different location set UVP_EVIDENCE_OBJECT_ROOT_DIR explicitly.
- */
 export function defaultRehearsalObjectStorageRoot(): string {
   return resolve(process.cwd(), "data", "evidence-object");
 }

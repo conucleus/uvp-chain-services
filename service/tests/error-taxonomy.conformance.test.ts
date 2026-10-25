@@ -12,29 +12,6 @@ import {
   STAGE_RESOURCE_PATCH_BROADCAST_LABELS
 } from '../src/stage-patches/broadcast-adapter.js';
 
-/**
- * Conformance suite for the unified UVP error taxonomy
- * (self-hosted in the uvp-core repo under protocol/uvp-error-taxonomy.v1.json).
- *
- * chain-services keeps its handwritten classification points (submissions
- * broadcast + safe-broadcast, stage-patches, reconcile, indexer sweep) — the
- * runtime is intentionally not table-driven — but this suite pins the taxonomy
- * version + sha256 and enforces, in both directions:
- *
- *   1. completeness — every errorCode literal emitted by the classification
- *      points (found by scanning the classification sources) is registered in
- *      the taxonomy's chain-services internal_names, and every registered
- *      internal name actually occurs in the sources. A new error code without
- *      a taxonomy entry, or a renamed one, fails here.
- *   2. consistency — the exported classifiers' verdicts (retryable /
- *      deadLetter) match the taxonomy attributes field by field for every
- *      probed condition (base attributes; chain-services has no
- *      producer_overrides except where noted in the table).
- *
- * Any edit to the taxonomy table or to a classification point must update both
- * sides in the same change or these tests fail loudly.
- */
-
 const TAXONOMY_VERSION = 'uvp.error-taxonomy.v1';
 const TAXONOMY_SHA256 = 'edd7a1ee1e1a1e6899c008f00aeb57da0918cb98bd8982d7469c855610e7ae84';
 
@@ -58,7 +35,6 @@ function taxonomyPath(): string {
   if (override) {
     return override;
   }
-  // tests/ -> service -> uvp-chain-services -> uvp-eth (workspace root)
   const workspaceRoot = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))));
   return join(workspaceRoot, 'uvp-core', 'protocol', 'uvp-error-taxonomy.v1.json');
 }
@@ -92,7 +68,6 @@ function entryByCode(code: string): TaxonomyErrorEntry {
   return entry;
 }
 
-/** The taxonomy entry whose chain-services internal_names contain the given error code. */
 function entryForInternalName(internalName: string): TaxonomyErrorEntry {
   const entry = taxonomy.errors.find((candidate) =>
     candidate.internal_names?.['chain-services']?.includes(internalName));
@@ -110,14 +85,6 @@ describe('uvp error taxonomy pinning (chain-services)', () => {
   });
 });
 
-/**
- * Classification-point sources whose emitted error codes the taxonomy must
- * fully register. Scoped to the retry/terminal classification lanes (relayer,
- * submissions/safe-broadcast, stage-patches, reconcile, governance identity
- * broadcast, Product BFF trigger broadcast); pure HTTP request-validation
- * codes from the API routes are out of the chain retry taxonomy's scope and
- * live in OUT_OF_TAXONOMY_SCOPE below.
- */
 const CLASSIFICATION_SOURCES: readonly string[] = [
   'src/submissions/broadcast-adapter.ts',
   'src/submissions/safe-broadcast-adapter.ts',
@@ -125,15 +92,11 @@ const CLASSIFICATION_SOURCES: readonly string[] = [
   'src/stage-patches/broadcast-adapter.ts',
   'src/stage-patches/service.ts',
   'src/reconcile/worker.ts',
-  // 治理身份注册/撤销的链上广播车道（broadcast 分类点在 adapter，persist
-  // 侧失败码在 service）与 Product BFF 触发订单广播车道（trigger.ts 的
-  // receipt/revert 分类）——同属在役重试/终态分类面，纳入扫描。
   'src/governance/adapter.ts',
   'src/governance/service.ts',
   'src/product/query/bff/trigger.ts',
 ];
 
-/** Patterns that surface every emitted errorCode literal in the sources above. */
 const CODE_PATTERNS: readonly RegExp[] = [
   /errorCode: "([a-z0-9_]+)"/g,
   /(?:failedBroadcastResult|failedResult|classifiedBroadcastError)\(\s*"([a-z0-9_]+)"/g,
@@ -141,27 +104,11 @@ const CODE_PATTERNS: readonly RegExp[] = [
   /(?:ProductSubmissionError|ProductStagePatchError)\(\s*\d+,\s*"([a-z0-9_]+)"/g,
 ];
 
-/**
- * The `case "…":` pattern is only meaningful in the two broadcast-adapter
- * files, where switches enumerate error codes (labels / dead-letter sets).
- * Elsewhere switches carry statuses and action names.
- */
 const CODE_CASE_PATTERN: ReadonlyMap<string, RegExp> = new Map([
   ['src/submissions/broadcast-adapter.ts', /case "([a-z0-9_]+)":/g],
   ['src/stage-patches/broadcast-adapter.ts', /case "([a-z0-9_]+)":/g],
 ]);
 
-/**
- * Taxonomy 内仍登记、但 chain-services 已刻意不再发射的内部名。
- * - broadcast_retry_blocked: 去重重放改为保留原始错误码（2609100406
- *   X-7 修复——泛化会抹掉 transaction_reverted 等真实错误码），该哨兵
- *   不再有发射点；taxonomy（冻结于 uvp-protocol 仓）的 chain-services
- *   登记项待其仓侧更新。
- * - relayer 框架专属名（2026-09-14 P2-1 裁决删除 src/relayer 死框架，
- *   无生产构造点；duplicate-transaction 车道已下沉两在役 broadcast
- *   adapter，其通用文本分类 executor-kit/protocol 自持）：下列内部名
- *   不再有发射点，taxonomy 登记项待 uvp-protocol 仓侧同步清理。
- */
 const INTENTIONALLY_UNEMITTED_NAMES: ReadonlySet<string> = new Set([
   'broadcast_retry_blocked',
   'duplicate_signer_nonce',
@@ -177,7 +124,6 @@ const INTENTIONALLY_UNEMITTED_NAMES: ReadonlySet<string> = new Set([
   'verified_signer_mismatch',
 ]);
 
-/** API request-validation / lifecycle codes outside the retry taxonomy scope. */
 const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'invalid_body',
   'invalid_signature',
@@ -197,12 +143,7 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'task_not_submittable',
   'submitter_not_authorized',
   'wallet_mismatch',
-  // IDOR 归属校验：广播/重试车道之外的 HTTP 访问控制 4xx（与
-  // draft_access_forbidden 同类，后者位于未被扫描的 BFF 服务源）。
   'submission_access_forbidden',
-  // Stage-patch / product domain-state request validations (HTTP 4xx before
-  // any broadcast attempt): deterministic request defects outside the
-  // broadcast retry/dead-letter lanes.
   'ambiguous_order_id',
   'executor_candidate_set_unavailable',
   'executor_patch_task_not_ready',
@@ -210,33 +151,19 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'invalid_manifest_uri',
   'invalid_previous_executor_signature',
   'invalid_target_stage',
-  // typed-data 域参数（chainId/模块地址/状态机地址）缺失的 prepare 时点
-  // fail-closed 预检：确定性 409，不在广播重试/死信词表。
   'chain_id_missing',
   'module_address_missing',
   'order_signal_authorization_missing',
   'prepared_patch_mismatch',
   'previous_executor_mismatch',
-  // 镜像合约 StagePreviousExecutorAmbiguous 的广播前快速失败（409，
-  // 与 previous_executor_mismatch 同族：领域状态预检，不在重试/死信词表）。
   'previous_executor_ambiguous',
   'previous_executor_not_allowed',
   'previous_executor_required',
   'previous_executor_signature_not_allowed',
   'previous_executor_signature_required',
-  // 镜像合约 StageExecutorPatchForbiddenOnBirthStage 的广播前快速失败
-  //（409 领域状态预检，与 target_stage_locked 同族）。
   'executor_patch_forbidden_on_birth_stage',
-  // 候选集闸（UB-36②③）的服务端 fail-closed 预检（prepare/submit 时点
-  // 409，合约侧同名 revert 由广播分类器的 executor_not_in_candidate_set
-  // 承接）——广播前领域状态预检，不入重试/死信词表。
   'executor_not_in_candidate_set',
-  // 词表 Merkle 化：plan 投影无词表两表（外部发布 plan）时 stage patch
-  // 无法构造必携的 bindingProof/stageFacts——广播前 fail-closed 预检，
-  // 不入重试/死信词表。
   'stage_patch_capability_tables_unavailable',
-  // 同族：submitSignalFor 造证时词表解析器故障（≠ 投影表空的合法全零
-  // 路径）——prepare 时点 fail-closed 拒绝零值造证，不入重试/死信词表。
   'capability_tables_unavailable',
   'product_order_not_found',
   'selector_wallet_not_authorized',
@@ -245,13 +172,6 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'target_stage_not_started',
   'target_stage_started_assign_rejected',
   'typed_data_mismatch',
-  // 治理身份广播与 Product BFF 触发广播车道的在役分类码：governance/
-  // BFF-trigger 广播已纳入 CLASSIFICATION_SOURCES 扫描面，但词表本体
-  //（uvp-protocol 仓的 uvp-error-taxonomy.v1.json，sha256 冻结）尚未为
-  // 它们登记 chain-services internal_names——词表收口不归本仓改，先在
-  // 此显式登记为"未入冻结词表"，防止扫描面扩大后测试假红/静默漂移。
-  // 已入词表的车道码（transaction_reverted / relayer_business_signer_reuse /
-  // transaction_receipt_unknown / persist_failed）不受此影响。
   'broadcast_failed',
   'governance_adapter_failed',
   'governance_broadcast_disabled',
@@ -261,14 +181,11 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'governance_signer_not_authorized',
   'trigger_order_broadcast_failed',
   'trigger_order_reverted',
-  // Product 任务多发射信号的显式选择错误（发布者/验收者按 fileResources 选信号）；
-  // 词表本体（uvp-core）尚未登记，按既有 OUT_OF_TAXONOMY_SCOPE 口径先显式登记。
   'signal_selection_required',
   'signal_not_available',
 ]);
 
 function serviceRoot(): string {
-  // tests/ -> service
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
 
@@ -317,8 +234,6 @@ describe('chain-services classification completeness against the taxonomy', () =
     const scanned = scannedErrorCodes();
     const stale: string[] = [];
     for (const name of taxonomyInternalNames()) {
-      // Descriptive (non-code) internal names — e.g. the post-commit sweep
-      // function identifiers — are pinned by their own source check below.
       if (!/^[a-z0-9_]+$/.test(name)) {
         continue;
       }
@@ -361,13 +276,9 @@ const SUBMISSION_PROBES: readonly { readonly internalName: string; readonly erro
   { internalName: 'unknown_order', error: new Error('UnknownOrder()') },
   { internalName: 'expired_signal_signature', error: new Error('ExpiredSignalSignature()') },
   { internalName: 'invalid_signal_signature', error: new Error('InvalidSignalSignature()') },
-  // duplicate-transaction 三车道（原 relayer 专属，已下沉两在役面）：基础
-  // 判定对齐 taxonomy nonce_conflict；broadcast() 捕获口的回执探针改判由
-  // broadcast-duplicate-transaction.test.ts 钉。
   { internalName: 'duplicate_transaction', error: new Error('nonce too low') },
   { internalName: 'duplicate_transaction', error: new Error('already known') },
   { internalName: 'duplicate_transaction', error: new Error('replacement transaction underpriced') },
-  // 未登记 revert 走泛规则（对齐 relayer 兜底）：永久失败，不得无限重放烧 gas。
   { internalName: 'transaction_reverted', error: new Error('execution reverted: SomeUnregisteredError()') },
   { internalName: 'relayer_insufficient_funds', error: new Error('insufficient funds') },
   { internalName: 'rpc_timeout', error: new Error('The request timed out') },
@@ -414,28 +325,11 @@ describe('chain-services classification consistency against the taxonomy', () =>
     expect(verdict.retryable).toBe(true);
     expect(verdict.deadLetter).toBe(entry.dead_letter);
     expect(entry.dead_letter).toBe(false);
-    // The unification removed the executor-kit override: no producer lane may
-    // reintroduce the old non-retryable/dead-letter disposition.
     expect(entry.producer_overrides).toBeUndefined();
   });
 });
 
-/**
- * 第三腿：stage-patch 广播分类器的"合约 revert 名→检测模式"conformance。
- * 前两腿（内部名登记完备性/双向、分类器判定与词表属性一致）不覆盖这
- * 一点——历史上分类器检查的自造近似名（StaleStagePatchNonce /
- * UnauthorizedStageSelector 等）与真实合约错误名互不为子串，全部失配，
- * 一切持久性 revert 落进泛 retryable 分支（同一 prepare 无限重试链上必
- * 拒的变更）。本腿把每个受检错误名钉在权威 ABI 上：
- * - UVPStateMachine 的错误名直接取自 @uvp-eth/protocol-bindings 的
- *   UVP_STATE_MACHINE_ARTIFACT_ABI（forge artifacts 生成，上游重命名
- *   即红）；
- * - UVPStagePatchModule 自身的错误名暂以合约源镜像清单锁定（bindings
- *   尚未导出模块 artifact ABI），与 state machine 重名的条目由 artifact
- *   ABI 交叉验证防拼写漂移。
- */
 describe('stage-patch contract revert names against the authoritative ABI (third leg)', () => {
-  /** UVPStagePatchModule.sol 声明的全部 custom error（合约源镜像，勿凭记忆改写）。 */
   const STAGE_PATCH_MODULE_ERROR_NAMES: readonly string[] = [
     'ExpiredStageExecutorPatchSignature',
     'ExpiredStageResourcePatchSignature',
@@ -466,7 +360,6 @@ describe('stage-patch contract revert names against the authoritative ABI (third
     'ZeroTargetStageId'
   ];
 
-  /** 与 UVPStateMachine（artifact ABI）重名的条目——可程序化交叉验证。 */
   const ARTIFACT_CROSS_CHECK_NAMES: readonly string[] = [
     'StageExecutorPatchNonceNotIncreasing',
     'UnknownOrder',
@@ -475,7 +368,6 @@ describe('stage-patch contract revert names against the authoritative ABI (third
     'ZeroTargetStageId'
   ];
 
-  /** 曾经失配的自造近似名——任何一侧出现即红（防回归）。 */
   const RETIRED_MISSPELLED_NAMES: readonly string[] = [
     'StaleStagePatchNonce',
     'StaleStageExecutorPatchNonce',
@@ -512,7 +404,6 @@ describe('stage-patch contract revert names against the authoritative ABI (third
     readonly labels?: 'resource';
   }
 
-  /** 各权威 revert 名的期望分类（内部名均已在 taxonomy 登记）。 */
   const REVERT_NAME_EXPECTATIONS: readonly (RevertNameExpectation & { readonly name: string })[] = [
     { name: 'ExpiredStageExecutorPatchSignature', internalName: 'expired_stage_executor_patch_signature', retryable: false },
     { name: 'ExpiredStageResourcePatchSignature', internalName: 'expired_stage_resource_patch_signature', retryable: false, labels: 'resource' },
@@ -524,12 +415,8 @@ describe('stage-patch contract revert names against the authoritative ABI (third
     { name: 'StageResourcePatchNonceNotIncreasing', internalName: 'stale_stage_resource_patch_nonce', retryable: false, labels: 'resource' },
     { name: 'UnauthorizedStageExecutorPatchSelector', internalName: 'selector_not_authorized', retryable: false },
     { name: 'UnauthorizedStageResourcePatchSelector', internalName: 'selector_not_authorized', retryable: false, labels: 'resource' },
-    // 瞬态优先于泛 revert：viem 复合文本同时含 "reverted." 与错误名。
     { name: 'UnknownOrder', internalName: 'unknown_order', retryable: true },
-    // 候选集闸（UB-36②③）：无候选集/不在集内同报此错——持久 revert
-    //（候选集随 plan commit 冻结，重试同载荷无意义）。
     { name: 'StageExecutorNotCandidate', internalName: 'executor_not_in_candidate_set', retryable: false },
-    // 其余持久 revert 走泛规则（estimateGas 阶段的未登记 revert）——永久。
     { name: 'InvalidStageExecutorPatchMode', internalName: 'transaction_reverted', retryable: false },
     { name: 'StageSelectorBindingNotFound', internalName: 'transaction_reverted', retryable: false },
     { name: 'StageExecutorPatchPreviousExecutorMismatch', internalName: 'transaction_reverted', retryable: false },
@@ -539,8 +426,6 @@ describe('stage-patch contract revert names against the authoritative ABI (third
 
   it('detects every authoritative revert name through both errorName and revert text, with taxonomy-consistent verdicts', () => {
     for (const expectation of REVERT_NAME_EXPECTATIONS) {
-      // 分类器对 labels 的泛型只约束 buildCall 的入参类型（分类路径不触
-      // 碰 buildCall），资源档标签按执行档标签类型传入即可统一断言。
       const labels = (expectation.labels === 'resource'
         ? STAGE_RESOURCE_PATCH_BROADCAST_LABELS
         : STAGE_EXECUTOR_PATCH_BROADCAST_LABELS) as typeof STAGE_EXECUTOR_PATCH_BROADCAST_LABELS;
@@ -566,11 +451,6 @@ describe('stage-patch contract revert names against the authoritative ABI (third
       ).toBe(expectation.internalName);
       expect(viaRevertText.retryable).toBe(expectation.retryable);
 
-      // 判定与 taxonomy 属性字段一致。例外：expired_stage_* 由模板拼接
-      //（沿用广播前 deadline 预检的既有内部名约定），与候选集闸的
-      // executor_not_in_candidate_set（UB-36②③ 新增分类点）都不在冻结
-      // 词表的 chain-services internal_names 登记内——词表仓（uvp-protocol）
-      // 补登记前跳过查表，仅锁定 retryable=false 的判定。
       if (
         expectation.internalName.startsWith('expired_stage_') ||
         expectation.internalName === 'executor_not_in_candidate_set'
@@ -592,15 +472,10 @@ describe('stage-patch contract revert names against the authoritative ABI (third
   });
 
   it('keeps the shared duplicate-transaction lanes retryable on both patch label sets (nonce_conflict single value)', () => {
-    // 基础判定对齐 taxonomy nonce_conflict 单值裁决（A-30：retryable=true/
-    // dead_letter=false）；broadcast() 捕获口的回执探针改判（receipt_failed
-    // 终态等）由 broadcast-duplicate-transaction.test.ts 单独钉。
     for (const labels of [STAGE_EXECUTOR_PATCH_BROADCAST_LABELS, STAGE_RESOURCE_PATCH_BROADCAST_LABELS] as const) {
       for (const text of ['nonce too low', 'already known', 'replacement transaction underpriced']) {
         const verdict = classifyStagePatchBroadcastError(
           new Error(text),
-          // 分类器对 labels 的泛型只约束 buildCall 的入参类型（分类路径不
-          // 触碰 buildCall），资源档标签按执行档标签类型传入即可统一断言。
           labels as typeof STAGE_EXECUTOR_PATCH_BROADCAST_LABELS
         ) as ClassifierVerdict & { errorCode: string };
         expect(verdict.errorCode, `${text} on ${labels.label}`).toBe('duplicate_transaction');
@@ -622,7 +497,6 @@ describe('stage-patch contract revert names against the authoritative ABI (third
   });
 });
 
-/** deadLetterForBroadcastError default: non-retryable codes in the DL switch are dead letters. */
 function branchDeadLetterFallback(errorCode: string, retryable: boolean): boolean {
   if (retryable) {
     return false;

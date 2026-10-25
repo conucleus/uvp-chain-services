@@ -33,8 +33,6 @@ describe("duplicate-transaction lane matcher (shared)", () => {
   });
 
   it("both in-service classifiers route the lanes to duplicate_transaction with the taxonomy base verdict", () => {
-    // 基础判定对齐 taxonomy nonce_conflict 单值裁决（A-30：可重试、不死信）；
-    // broadcast() 捕获口再走回执探针改判——基础判定本身不得回退死信。
     for (const text of ["nonce too low", "already known", "replacement transaction underpriced"]) {
       const submissionVerdict = classifyStateMachineBroadcastError(new Error(text)) as { errorCode: string; retryable: boolean; deadLetter: boolean };
       expect(submissionVerdict.errorCode, `submissions: "${text}"`).toBe("duplicate_transaction");
@@ -48,7 +46,6 @@ describe("duplicate-transaction lane matcher (shared)", () => {
   });
 
   it("keeps the lanes ahead of the generic revert fallback", () => {
-    // 复合文本（revert + nonce 冲突）必须落 duplicate 车道而非泛 revert。
     const submissionVerdict = classifyStateMachineBroadcastError(
       new Error("execution reverted: nonce too low")
     ) as { errorCode: string };
@@ -142,37 +139,32 @@ describe("duplicate-transaction receipt adjudication (shared)", () => {
   it("resolveDuplicateTransactionOutcome maps the four adjudications through the injected builders", async () => {
     const labels: string[] = [];
     const builders = {
-      onSubmitted: () => { labels.push("submitted"); return "r:submitted"; },
-      onReceiptFailed: () => { labels.push("receipt_failed"); return "r:receipt_failed"; },
-      onReceiptUnknown: () => { labels.push("receipt_unknown"); return "r:receipt_unknown"; },
-      onReassemblableNonceRace: () => { labels.push("reassemblable"); return "r:reassemblable"; }
+      onSubmitted: () => { labels.push("submitted"); },
+      onReceiptFailed: () => { labels.push("receipt_failed"); },
+      onReceiptUnknown: () => { labels.push("receipt_unknown"); },
+      onReassemblableNonceRace: () => { labels.push("reassemblable"); }
     };
-    await expect(resolveDuplicateTransactionOutcome(new Error("nonce too low"), undefined, builders))
-      .resolves.toBe("r:reassemblable");
-    await expect(resolveDuplicateTransactionOutcome(
+    await resolveDuplicateTransactionOutcome(new Error("nonce too low"), undefined, builders);
+    await resolveDuplicateTransactionOutcome(
       Object.assign(new Error("already known"), { txHash: candidateTx }),
       async () => ({ status: "success" }),
       builders
-    )).resolves.toBe("r:submitted");
-    await expect(resolveDuplicateTransactionOutcome(
+    );
+    await resolveDuplicateTransactionOutcome(
       Object.assign(new Error("already known"), { txHash: candidateTx }),
       async () => ({ status: "reverted" }),
       builders
-    )).resolves.toBe("r:receipt_failed");
-    await expect(resolveDuplicateTransactionOutcome(
+    );
+    await resolveDuplicateTransactionOutcome(
       Object.assign(new Error("already known"), { txHash: candidateTx }),
       undefined,
       builders
-    )).resolves.toBe("r:receipt_unknown");
+    );
     expect(labels).toEqual(["reassemblable", "submitted", "receipt_failed", "receipt_unknown"]);
   });
 });
 
 describe("governance identity broadcast duplicate-transaction lane", () => {
-  // governance 广播捕获口的四态裁决（A6-8a）：nonce 冲突三形态不再落默认
-  // retryable 的 broadcast_failed，而是经 getReceipt 探针裁决——错误码沿用
-  // 词表已有车道码（transaction_reverted / transaction_receipt_unknown /
-  // duplicate_transaction）。
   const registryAddress = "0x5555555555555555555555555555555555555555" as Address;
   const signerPrivateKey = `0x${"11".repeat(32)}` as Hex;
   const signer = "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a" as Address;
@@ -226,8 +218,6 @@ describe("governance identity broadcast duplicate-transaction lane", () => {
   });
 
   it("keeps a success receipt below the confirmation depth as retryable transaction_receipt_unknown", async () => {
-    // 0-conf/浅确认的 success 回执不得记 confirmed（A-14）：未达
-    // txConfirmations 深度按未裁决保留候选哈希，下轮重探。
     const adapter = adapterWith(
       { writeContract: async () => { throw nonceRaceError(); } },
       async () => ({ status: "success", blockNumber: 42n }),

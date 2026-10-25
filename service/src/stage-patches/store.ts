@@ -5,7 +5,6 @@ import type {
   StagePatchSubmissionScanCursor
 } from "./types.js";
 
-/** 台账扫描的"未闭环"状态判定（与持久实现的 SQL 口径同源）。 */
 function isOpenStagePatchSubmission(
   submission: StagePatchSubmissionBase & { readonly status?: string; readonly txHash?: string }
 ): boolean {
@@ -15,7 +14,6 @@ function isOpenStagePatchSubmission(
   return submission.status === "failed" && typeof submission.txHash === "string";
 }
 
-/** memory 驱动 prepare 表的硬上限（未配额入口的最后防线，见 putPrepared）。 */
 export const MEMORY_PREPARED_PATCH_HARD_LIMIT = 5_000;
 
 export class InMemoryProductStagePatchStore<
@@ -24,7 +22,6 @@ export class InMemoryProductStagePatchStore<
 > implements ProductStagePatchStore<TPrepared, TSubmission> {
   readonly #prepared = new Map<string, TPrepared & { readonly deadline?: string }>();
   readonly #submissions = new Map<string, TSubmission>();
-  /** nonce 预留 → 预留时刻（ISO）：staleBefore 接管需要预留年龄。 */
   readonly #reservedNonceKeys = new Map<string, string>();
   readonly #now: () => Date;
 
@@ -33,9 +30,6 @@ export class InMemoryProductStagePatchStore<
   }
 
   async putPrepared(record: TPrepared): Promise<void> {
-    // prepare 入口无配额：内存表必须有独立上界，否则换任务循环 prepare
-    // 会无界增长（OOM）。到上限先清过期行，仍满按最早 deadline 淘汰——
-    // 服务层写入时也会顺带清扫，这里是最后防线而非常规路径。
     if (this.#prepared.size >= MEMORY_PREPARED_PATCH_HARD_LIMIT) {
       await this.deleteExpiredPrepared(String(Math.floor(this.#now().getTime() / 1000)));
       while (this.#prepared.size >= MEMORY_PREPARED_PATCH_HARD_LIMIT) {
@@ -67,8 +61,6 @@ export class InMemoryProductStagePatchStore<
   }
 
   async deleteExpiredPrepared(deadlineBeforeSeconds: string): Promise<number> {
-    // 过期 prepare（deadline 为 unix 秒字符串）无论是否已消费都不再
-    // 参与判定：提交侧对过期记录只有拒绝路径。
     const boundary = Number(deadlineBeforeSeconds);
     let deleted = 0;
     for (const [prepareId, record] of this.#prepared) {
@@ -84,8 +76,6 @@ export class InMemoryProductStagePatchStore<
     const reservedAt = this.#now().toISOString();
     const existing = this.#reservedNonceKeys.get(key);
     if (existing !== undefined) {
-      // 与持久实现同判据：只接管早于 staleBefore 的陈旧预留，未过期的
-      // 预留可能属于存活中的提交，仍按重复拒绝。
       if (!options?.staleBefore || existing >= options.staleBefore) {
         return false;
       }
@@ -112,8 +102,6 @@ export class InMemoryProductStagePatchStore<
     after: StagePatchSubmissionScanCursor | undefined,
     limit: number
   ): Promise<readonly TSubmission[]> {
-    // 键序/剪除所需字段是台账行契约的一部分（createdAt 在基类之外由
-    // 具体 DTO 提供），此处按结构收窄。
     type Scannable = TSubmission & { readonly createdAt: string; readonly status: string; readonly txHash?: string };
     const open = (submission: TSubmission): submission is Scannable =>
       isOpenStagePatchSubmission(submission as Scannable);

@@ -1,10 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../../shared/types.js";
 import type { ProjectionStore } from "../../storage/projection-store.js";
-import {
-  InMemoryStorePublisherDelegationStore,
-  InMemoryStoreZhixuDecorationStore
-} from "./memory-store.js";
 import type {
   StoreDecorationActor,
   StorePublisherDelegationRecord,
@@ -18,8 +14,8 @@ import { validateStoreDecorationData } from "./validate.js";
 
 export interface StoreDecorationServiceOptions {
   readonly projectionStore: ProjectionStore;
-  readonly decorationStore?: StoreZhixuDecorationStore;
-  readonly delegationStore?: StorePublisherDelegationStore;
+  readonly decorationStore: StoreZhixuDecorationStore;
+  readonly delegationStore: StorePublisherDelegationStore;
   readonly now?: () => Date;
   readonly audit?: (event: StoreDecorationAuditEvent) => Promise<void> | void;
 }
@@ -57,15 +53,14 @@ export interface StoreDecorationService {
   listDelegations(publisherAddressRaw: string, actor: StoreDecorationActor): Promise<readonly StorePublisherDelegationRecord[]>;
   grantDelegation(input: unknown, actor: StoreDecorationActor): Promise<readonly StorePublisherDelegationRecord[]>;
   revokeDelegation(delegationId: string, input: unknown, actor: StoreDecorationActor): Promise<readonly StorePublisherDelegationRecord[]>;
-  /** 供加入域复用：地址对该 plan 是否有装修/审核权（publisher 或受托）。 */
   hasPublisherWriteAccess(planId: Hex, address: Address): Promise<boolean>;
   resolvePlanPublisher(planIdRaw: string): Promise<{ readonly planId: Hex; readonly publisher?: Address }>;
 }
 
 export function createStoreDecorationService(options: StoreDecorationServiceOptions): StoreDecorationService {
   const projectionStore = options.projectionStore;
-  const decorationStore = options.decorationStore ?? new InMemoryStoreZhixuDecorationStore();
-  const delegationStore = options.delegationStore ?? new InMemoryStorePublisherDelegationStore();
+  const decorationStore = options.decorationStore;
+  const delegationStore = options.delegationStore;
   const now = options.now ?? (() => new Date());
 
   return {
@@ -92,7 +87,6 @@ export function createStoreDecorationService(options: StoreDecorationServiceOpti
       try {
         await decorationStore.appendVersion(record);
       } catch {
-        // UNIQUE(plan_id, version) 冲突（并发保存）映射为可读的 409。
         throw new StoreDecorationServiceError(409, "decoration_version_conflict", "concurrent decoration save detected; retry");
       }
       await emitAudit({
@@ -127,8 +121,6 @@ export function createStoreDecorationService(options: StoreDecorationServiceOpti
       try {
         await decorationStore.appendVersion(record);
       } catch {
-        // 并发 restore/save 撞 UNIQUE(plan_id, version)——与 saveDecoration
-        // 同口径映射 409，而不是把存储错误裸抛成 503。
         throw new StoreDecorationServiceError(409, "decoration_version_conflict", "concurrent decoration save detected; retry");
       }
       await emitAudit({
@@ -248,13 +240,9 @@ export function createStoreDecorationService(options: StoreDecorationServiceOpti
   }
 
   async function findPlanByPlanId(planId: Hex): Promise<{ readonly planId: Hex; readonly publisher?: Address } | undefined> {
-    // 投影以 chainId:contract:planId 为键；按 planId 值匹配（大小写不敏感）。
     const snapshot = await projectionStore.getOrderSnapshot();
     const matches = Object.values(snapshot.stateMachinePlans)
       .filter((plan) => plan.planId.toLowerCase() === planId.toLowerCase());
-    // 同 planId 跨部署多命中时 publisher 无法唯一归位（与 listings 同口径
-    // fail-closed）：静默取首个会把别的部署的 publisher 当成本部署事实，
-    // 委托/加入审核的权限判断随之错位。
     if (matches.length > 1) {
       throw new StoreDecorationServiceError(
         409,
