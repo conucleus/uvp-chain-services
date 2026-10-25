@@ -1,4 +1,12 @@
-import type { ChainServicesRuntimeEnv, ConfigDiagnostics, StoreAuthConfig } from "../config/index.js";
+import type {
+  ChainServicesRuntimeEnv,
+  ConfigDiagnostics,
+  EscrowV3Config,
+  StoreAuthConfig,
+} from "../config/index.js";
+import type { BindingStore } from "../binding/index.js";
+import type { SettlementStore } from "../settlement/index.js";
+import type { RuntimeStore } from "../runtime/index.js";
 import type {
   EvidenceMetadataStore,
   EvidenceService,
@@ -11,7 +19,6 @@ import type {
   OrderRequirementsService,
   OrderRequirementsStore
 } from "../product/requirements/index.js";
-import type { ProductOrderTriggerBroadcastAdapter } from "../product/query/bff/trigger.js";
 import type { ProductBffStore } from "../product/query/bff/store.js";
 import type { ProductSchemaResolver, ProductService } from "../product/application/service.js";
 import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
@@ -71,6 +78,13 @@ import type { StoreDecorationService, StoreZhixuDecorationStore, StorePublisherD
 import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
 import type { ListingAnchorChainView, StoreListingService, StoreListingStore } from "../store/listings/index.js";
 import type { StoreJoinService, StoreJoinApplicationStore } from "../store/join/index.js";
+import type {
+  OrderBirthPort,
+  OrderTriggerPort,
+  OrderV3Service,
+  OrderV3Store,
+  PublishedPlanProvider,
+} from "../order/v3/index.js";
 import type { TimerKeeperRunSummary } from "../timer-keeper/types.js";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
@@ -118,17 +132,41 @@ export interface CreateApiRouterOptions {
   readonly stageResourcePatchVerifyingContract?: Address;
   readonly stageResourcePatchStore?: ProductStageResourcePatchStore;
   readonly productBffStore?: ProductBffStore;
+  /** V3 订单域持久化 store（sqlite/postgres 驱动注入；缺省内存）。 */
+  readonly orderV3Store?: OrderV3Store;
+  /** V3 订单域服务（测试可整体注入；缺省由 store/options 构造）。 */
+  readonly orderV3Service?: OrderV3Service;
+  readonly orderV3ChainId?: number;
+  readonly orderV3StateMachineAddress?: Address;
+  /** 允许发布 V3 配置版本的钱包（凝结核/运营），空名单 fail-closed。 */
+  readonly orderV3ConfigPublisherWallets?: readonly Address[];
+  /** V3 运营/凝结核最小视图钱包白名单；空名单 fail-closed（operator 端点 404）。 */
+  readonly orderV3OperatorWallets?: readonly Address[];
+  /** V3 fileResources 解析器（授权后才调用）；缺省 503，不伪造空文件。 */
+  readonly orderV3ResourceResolver?: import("../visibility/types.js").ResourceResolverPort;
+  readonly orderV3RuntimeIntervalMs?: number;
+  readonly orderV3TimerPoker?: () => Promise<unknown>;
+  readonly settlementRelayer?: import("../settlement/executor.js").SettlementRelayer;
+  /** 已发布 plan 查询源；缺省读配置版本登记的 planId/planHash。 */
+  readonly orderV3PublishedPlanProvider?: PublishedPlanProvider;
+  /** outside-trigger 出生适配器（ProtocolOrderBirthAdapter 或部署侧实现）。 */
+  readonly orderV3BirthPort?: OrderBirthPort;
+  readonly orderV3TriggerPort?: OrderTriggerPort;
+  /** V3 tranche binding / escrow intents 持久化 store（缺省内存）。 */
+  readonly bindingStore?: BindingStore;
+  /** V3 settlement instruction ledger 持久化 store（缺省内存）。 */
+  readonly settlementStore?: SettlementStore;
+  /** V3 time/hook runtime 持久化 store（缺省内存）。 */
+  readonly runtimeStore?: RuntimeStore;
+  /** V3 哑托管实例配置（地址/链/起点/fact source）。 */
+  readonly escrowV3?: EscrowV3Config;
   /** V1 订单要求包服务（缺省由 routes 从 productBffStore 构造）。 */
   readonly orderRequirementsService?: OrderRequirementsService;
   /** 订单要求包持久化 store（sqlite/postgres 驱动注入；缺省内存）。 */
   readonly orderRequirementsStore?: OrderRequirementsStore;
   /** StageEscrow V2 tranche 读服务（未配置 escrow 时 configured=false）。 */
   readonly escrowService?: EscrowQueryService;
-  readonly productRegistrationAdapter?: ProductOrderTriggerBroadcastAdapter;
-  readonly productTriggerAdapter?: ProductOrderTriggerBroadcastAdapter;
   readonly productTriggerChainId?: number;
-  readonly productRegistrationCreatorAddress?: Address;
-  readonly productRegistrarAddress?: Address;
   readonly productRuntimeEnvironment?: ChainServicesRuntimeEnv;
   readonly audit?: AuditSink;
   readonly configDiagnostics?: ConfigDiagnostics;
@@ -212,6 +250,10 @@ export interface ApiRouteContext {
   readonly store: ProjectionStore;
   readonly productService: ProductService;
   readonly productBffService: ProductBffService;
+  readonly orderV3Service: OrderV3Service;
+  readonly bindingStore?: BindingStore;
+  readonly settlementStore?: SettlementStore;
+  readonly runtimeStore?: RuntimeStore;
   readonly orderRequirementsService: OrderRequirementsService;
   readonly escrowService: EscrowQueryService;
   readonly storeConsoleService: StoreConsoleService;

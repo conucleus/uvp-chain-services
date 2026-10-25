@@ -6,6 +6,26 @@ import { createProductService, ProductOrderLookupError } from "../product/applic
 import {
   createProductBffService,
 } from "../product/query/bff/service.js";
+import {
+  createOrderV3Service,
+  MemoryOrderV3Store,
+} from "../order/v3/index.js";
+import {
+  MemoryBindingStore,
+  createBindingReadService,
+  createDepositIntentService,
+} from "../binding/index.js";
+import {
+  MemorySettlementStore,
+  createSettlementLedger,
+  instructionView,
+} from "../settlement/index.js";
+import { MemoryRuntimeStore } from "../runtime/index.js";
+import { createVisibilityResolver } from "../visibility/index.js";
+import {
+  createBindingScopeResolver,
+  createOrderAcceptedTermsProvider,
+} from "./v3-binding-wiring.js";
 import { MemoryProductBffStore, type ProductBffStore } from "../product/query/bff/store.js";
 import { createOrderRequirementsService } from "../product/requirements/index.js";
 import {
@@ -81,6 +101,21 @@ import { createEvidenceRouteModule } from "./routes/evidence.js";
 import { createGovernanceRouteModule } from "./routes/governance.js";
 import { createNotificationsRouteModule } from "./routes/notifications.js";
 import { createProductBffRouteModule } from "./routes/product-bff.js";
+import { createProductOrderV3RouteModule } from "./routes/product-order-v3.js";
+import { createProductBindingRouteModule } from "./routes/product-binding.js";
+import { createProductV3SignalsRouteModule } from "./routes/product-v3-signals.js";
+import { createProductReadV3RouteModule } from "./routes/product-read-v3.js";
+import { createV3ResourceResolver } from "../resources/resolver.js";
+import {
+  createBindingSettlementInstructionCreator,
+  createOrderSnapshotFactSource,
+  createTimerKeeperPoker,
+  RuntimeWorker,
+  seedRuntimeRulesFromOrder,
+} from "../runtime/wiring.js";
+import { createTimeRuntime } from "../runtime/service.js";
+import type { SettlementRelayer } from "../settlement/executor.js";
+import { createProductTasksV3RouteModule } from "./routes/product-tasks-v3.js";
 import { createProductEscrowRouteModule } from "./routes/product-escrow.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
 import { createProductRegistrationRouteModule } from "./routes/product-registration.js";
@@ -181,19 +216,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     store: new MemoryEscrowStore()
   });
   const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
-  if (productTriggerChainId === undefined) {
-    throw new Error("productTriggerChainId or submissionChainId is required to create the Product BFF service");
-  }
   const productBffService = createProductBffService({
     productService,
     store: productBffStore,
-    ...(options.productRegistrationAdapter ? { registrationAdapter: options.productRegistrationAdapter } : {}),
-    ...(options.productTriggerAdapter ? { triggerAdapter: options.productTriggerAdapter } : {}),
-    ...(options.productRegistrationCreatorAddress ? { productRegistrationCreatorAddress: options.productRegistrationCreatorAddress } : {}),
-    ...(options.productRegistrarAddress ? { registrarAddress: options.productRegistrarAddress } : {}),
-    // 出生事实属主自证从 plan 投影词表造（外部 plan 无词表 → 全零，链上闸兜底）。
-    resolvePlanCapabilityTables: resolvePlanCapabilityTablesFromStore(store),
-    triggerChainId: productTriggerChainId,
     versionResolver: storeZhixuVersionService,
     ...(options.now ? { now: options.now } : {})
   });
@@ -373,10 +398,81 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     // 同装修/上架域：提交/评审/决策/联动事件接 AuditSink。
     audit: (event) => recordStoreDomainAuditEvent(audit, "store.join", event.action, event)
   });
+  const orderV3Store = options.orderV3Store ?? new MemoryOrderV3Store();
+  const orderV3Service = options.orderV3Service ?? createOrderV3Service({
+    store: orderV3Store,
+    chainId: options.orderV3ChainId ?? options.productTriggerChainId ?? options.submissionChainId ?? 0,
+    ...(options.orderV3StateMachineAddress ?? options.submissionVerifyingContract
+      ? { stateMachine: options.orderV3StateMachineAddress ?? options.submissionVerifyingContract! }
+      : {}),
+    publisherWallets: options.orderV3ConfigPublisherWallets ?? [],
+    ...(options.orderV3PublishedPlanProvider ? { publishedPlanProvider: options.orderV3PublishedPlanProvider } : {}),
+    ...(options.orderV3BirthPort ? { birthPort: options.orderV3BirthPort } : {}),
+    ...(options.orderV3TriggerPort ? { triggerPort: options.orderV3TriggerPort } : {}),
+    ...(options.now ? { now: options.now } : {})
+  });
+  const bindingStore = options.bindingStore ?? new MemoryBindingStore();
+  const settlementStore = options.settlementStore ?? new MemorySettlementStore();
+  const runtimeStore = options.runtimeStore ?? new MemoryRuntimeStore();
+  const orderV3Visibility = createVisibilityResolver({
+    loadOrder: (orderId) => orderV3Service.loadOrderSnapshotForVisibility(orderId),
+    ...(options.orderV3OperatorWallets !== undefined
+      ? { operatorWallets: options.orderV3OperatorWallets }
+      : {})
+  });
+  const bindingScopeResolver = createBindingScopeResolver(orderV3Visibility);
+  const depositIntentService = createDepositIntentService({
+    store: bindingStore,
+    termsProvider: createOrderAcceptedTermsProvider(orderV3Store),
+    ...(options.escrowV3
+      ? { chainId: options.escrowV3.chainId, escrowAddress: options.escrowV3.address }
+      : {})
+  });
+  const bindingReadService = createBindingReadService({
+    store: bindingStore,
+    scopeResolver: bindingScopeResolver
+  });
+  const settlementLedger = createSettlementLedger({ store: settlementStore });
+  const orderV3ResourceResolver = options.orderV3ResourceResolver ?? createV3ResourceResolver({
+    loadOrder: (orderId) => orderV3Service.loadOrderSnapshotForVisibility(orderId),
+    ...(options.orderV3OperatorWallets !== undefined
+      ? { operatorWallets: options.orderV3OperatorWallets }
+      : {}),
+  });
+  const runtimeService = createTimeRuntime({
+    store: runtimeStore,
+    facts: createOrderSnapshotFactSource({ orderV3Service }),
+    instructions: createBindingSettlementInstructionCreator({
+      bindingStore,
+      settlementLedger,
+      loadOrder: async (orderId) => {
+        const snapshot = await orderV3Service.loadOrderSnapshotForVisibility(orderId);
+        return snapshot ? { planId: snapshot.order.planId } : undefined;
+      },
+    }),
+    uvpExecutorAddress: (options.escrowV3?.address ??
+      options.orderV3StateMachineAddress ??
+      "0x0000000000000000000000000000000000000000") as string as import("../shared/types.js").Address,
+    timerPoker: createTimerKeeperPoker({
+      ...(options.orderV3TimerPoker ? { poke: options.orderV3TimerPoker } : {}),
+    }),
+  });
+  const runtimeWorker = new RuntimeWorker({ runtimeStore, runtime: runtimeService });
+  runtimeWorker.start(options.orderV3RuntimeIntervalMs ?? 0);
+  const settlementInstructions = {
+    async listForOrder(orderId: string, limit = 100) {
+      const rows = await settlementStore.listByOrder(orderId, limit);
+      return rows.map((row) => instructionView(row));
+    }
+  };
   const context: ApiRouteContext = {
     store,
     productService,
     productBffService,
+    orderV3Service,
+    bindingStore,
+    settlementStore,
+    runtimeStore,
     orderRequirementsService,
     escrowService,
     storeConsoleService,
@@ -427,6 +523,33 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createStagePatchRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createSubmissionsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductBffRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
+    createProductV3SignalsRouteModule({
+      ...(options.orderV3OperatorWallets !== undefined ? { operatorWallets: options.orderV3OperatorWallets } : {}),
+      resourceResolver: orderV3ResourceResolver,
+      planCapabilities: resolvePlanCapabilityTablesFromStore(store)
+    }),
+    createProductReadV3RouteModule({
+      ...(options.orderV3OperatorWallets !== undefined ? { operatorWallets: options.orderV3OperatorWallets } : {}),
+      resourceResolver: orderV3ResourceResolver,
+      runtimeWorker,
+      runtimeSeeder: {
+        seed: (orderId: string) => seedRuntimeRulesFromOrder({ orderV3Service, store: runtimeStore, orderId }),
+      },
+    }),
+    createProductTasksV3RouteModule({
+      ...(options.orderV3OperatorWallets !== undefined ? { operatorWallets: options.orderV3OperatorWallets } : {}),
+    }),
+    createProductOrderV3RouteModule(),
+    createProductBindingRouteModule({
+      runtimeEnvironment: productRuntimeEnvironment,
+      deposits: depositIntentService,
+      bindings: bindingReadService,
+      scopeResolver: bindingScopeResolver,
+      instructions: settlementInstructions,
+      settlements: settlementLedger,
+      settlementStore,
+      ...(options.settlementRelayer ? { executeRelayer: options.settlementRelayer } : {})
+    }),
     createProductRequirementsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductEscrowRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductRegistrationRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),

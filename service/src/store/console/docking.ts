@@ -543,20 +543,6 @@ function sourcePortsForKind(
   zhixu: ZhixuDetailDTO
 ): ReadonlyMap<StoreDockBindingKind, ReadonlyMap<string, StoreDockingSignalPortDTO>> {
   const channels = new Map<string, StoreDockingSignalPortDTO>();
-  for (const entry of zhixu.orderPermissionTable) {
-    const stage = zhixu.stages.find((item) => item.stageId === entry.stageId);
-    const evidence = entry.requiredEvidence.length > 0 ? entry.requiredEvidence : stage?.evidence ?? [];
-    channels.set(entry.signalName, signalPort({
-      signalId: entry.signalName,
-      label: stage ? `${stage.name} / ${signalLabel(entry.signalName)}` : signalLabel(entry.signalName),
-      bindingKind: "input",
-      stageId: entry.stageId,
-      ...(stage ? { stageName: stage.name } : {}),
-      roleSlotId: entry.roleSlotId,
-      roleLabel: roleLabelForSlot(zhixu, entry.roleSlotId) ?? entry.roleSlotId,
-      evidence
-    }));
-  }
   const signals = new Map<string, StoreDockingSignalPortDTO>();
   for (const stage of zhixu.stages) {
     const roleSlotId = roleSlotIdForStage(zhixu, stage);
@@ -633,8 +619,7 @@ function buildCandidateMappings(
 }
 
 function roleSlotIdForStage(zhixu: ZhixuDetailDTO, stage: ZhixuStageDTO): string | undefined {
-  return zhixu.orderPermissionTable.find((entry) => entry.stageId === stage.stageId)?.roleSlotId ??
-    stage.ownerRole;
+  return stage.ownerRole;
 }
 
 function roleLabelForSlot(zhixu: ZhixuDetailDTO, roleSlotId: string | undefined): string | undefined {

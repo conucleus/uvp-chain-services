@@ -468,25 +468,6 @@ describe("Store supplier directory API", () => {
     });
   });
 
-  it("does not let Store capability tags create signal authorization", async () => {
-    const { router } = await createRouter([planRegisteredEvent(1n)]);
-    await createSupplier(router, {
-      wallet: "0x0000000000000000000000000000000000000009",
-      capabilityTags: ["logistics", "inspection"],
-    });
-
-    const draft = await createDraft(router);
-    const submitWithoutParticipants = await router.handle({
-      method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
-      body: { walletAddress: revokedWallet },
-    });
-
-    expect(submitWithoutParticipants.status).toBe(409);
-    expect(submitWithoutParticipants.body).toMatchObject({
-      error: "trigger_executor_not_accepted",
-    });
-  });
 
   it("counts open tasks by the supplier wallet stored in Store metadata", async () => {
     const store = new MemoryProjectionStore();
@@ -546,26 +527,6 @@ describe("Store supplier directory API", () => {
     });
   });
 
-  it("does not turn identity revocation into a Product BFF authorization ban", async () => {
-    const { router } = await createRouter([
-      ...activeDeploymentEvents(),
-      planRegisteredEvent(1n),
-      identityRegisteredEvent(2n, revokedSupplierSubjectId, revokedWallet),
-      identityRevokedEvent(3n, revokedSupplierSubjectId),
-    ]);
-    const draft = await createReadyDraft(router);
-
-    const response = await router.handle({
-      method: "POST",
-      pathname: `/product/order-drafts/${draft.draftId}/prepare-trigger`,
-      body: { walletAddress: revokedWallet },
-    });
-
-    expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({
-      prepared: { submitter: revokedWallet },
-    });
-  });
 
   it("returns 403 for unauthorized Store supplier write routes", async () => {
     const { router } = await createRouter([]);

@@ -126,6 +126,8 @@ const expectedMigrationVersions = [
   "0029_store_zhixu_draft_publisher",
   "0030_order_requirements",
   "0031_escrow_tranches",
+  "0032_order_domain_v3",
+  "0033_binding_settlement_runtime",
 ];
 const routeSmokeZhixuYaml = `
 apiVersion: uvp/v0
@@ -2155,20 +2157,7 @@ async function saveExplicitRouteSmokeSchema(
   const schema = (
     schemaResponse.body as { productSchema: StoreProductSchemaDTO }
   ).productSchema;
-  const roleSlots = schema.roleSlots.map((slot) => ({
-    ...slot,
-    capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
-      ...plugin,
-      source: "explicit" as const,
-    })),
-  }));
-  const explicitSchema = {
-    ...schema,
-    roleSlots,
-    capabilityPlugins: roleSlots.flatMap(
-      (slot) => slot.capabilityPlugins ?? [],
-    ),
-  };
+  const explicitSchema = schema;
   const updateResponse = await router.handle({
     method: "PUT",
     pathname: `/store/zhixu-drafts/${draftId}/product-schema`,
@@ -2592,37 +2581,6 @@ function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
           required: true,
           performanceSlotLabel: "Intake executor",
           businessPersonaLabels: ["Buyer ops"],
-          capabilityPlugins: [
-            {
-              pluginKind: "evidence_submission",
-              source: "explicit",
-              stageIds: ["intake"],
-              title: "Intake evidence",
-              summary: "Submit intake evidence.",
-              requiredEvidence: ["Intake evidence"],
-            },
-          ],
-        },
-      ],
-      orderPermissionTable: [
-        {
-          permissionId: "intake#TRIGGER",
-          roleSlotId: "intake",
-          stageId: "intake",
-          source: "buyer",
-          signalName: "TRIGGER",
-          payloadPolicy: "required",
-          requiredEvidence: ["Intake evidence"],
-        },
-      ],
-      capabilityPlugins: [
-        {
-          pluginKind: "evidence_submission",
-          source: "explicit",
-          stageIds: ["intake"],
-          title: "Intake evidence",
-          summary: "Submit intake evidence.",
-          requiredEvidence: ["Intake evidence"],
         },
       ],
       businessPersonaLabels: ["Buyer ops"],

@@ -1082,13 +1082,6 @@ async function isSelectorWalletAssignedToTask(
   if (!schema) {
     return false;
   }
-  const matchingRoleSlots = roleSlotIdsForTaskStage(
-    schema,
-    context.task.stageIdentifier,
-  );
-  if (matchingRoleSlots.size === 0) {
-    return false;
-  }
   const registration = (await productStore.listRegistrations()).find(
     (record) =>
       record.orderId.toLowerCase() === context.order.orderId.toLowerCase() &&
@@ -1106,33 +1099,8 @@ async function isSelectorWalletAssignedToTask(
   return participants.some(
     (participant) =>
       participant.status === "accepted" &&
-      matchingRoleSlots.has(participant.roleSlotId) &&
       participant.walletAddress?.toLowerCase() === selectorWallet.toLowerCase(),
   );
-}
-
-function roleSlotIdsForTaskStage(
-  schema: StoreProductSchemaDTO,
-  stageIdentifier: Hex,
-): ReadonlySet<string> {
-  const roleSlotIds = new Set<string>();
-  for (const entry of schema.orderPermissionTable) {
-    if (schemaStageMatchesProjectedStage(entry.stageId, stageIdentifier)) {
-      roleSlotIds.add(entry.roleSlotId);
-    }
-  }
-  for (const slot of schema.roleSlots) {
-    if (
-      (slot.capabilityPlugins ?? []).some((plugin) =>
-        plugin.stageIds.some((stageId) =>
-          schemaStageMatchesProjectedStage(stageId, stageIdentifier),
-        ),
-      )
-    ) {
-      roleSlotIds.add(slot.slotId);
-    }
-  }
-  return roleSlotIds;
 }
 
 function schemaStageMatchesProjectedStage(

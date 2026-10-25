@@ -1,18 +1,12 @@
-import { validateTaskEvidenceSpec } from "@uvp-eth/product-dto";
+// Store 装修数据结构校验：只做通用结构/白名单，不编码业务预期。
+
 import type {
   StoreZhixuDecorationData,
   StoreZhixuTaskDeclaration
 } from "./types.js";
 import { StoreDecorationServiceError } from "./types.js";
 
-/**
- * 装修数据结构校验（章程 §4：只做结构校验，永不编码业务预期）。
- *
- * - theme 字段是白名单纯展示字段（字符串/字符串数组 + 长度上限），
- *   拒绝任何可执行内容。
- * - taskDeclarations.evidenceSpec 复用冻结的 validateTaskEvidenceSpec
- *   结构校验（与 Product Workbench 的渲染口径同源）。
- */
+
 
 const MAX_THEME_STRING_LENGTH = 2000;
 const MAX_TAGS = 24;
@@ -20,8 +14,7 @@ const MAX_TAG_LENGTH = 64;
 const MAX_HIGHLIGHTS = 16;
 const MAX_TASK_DECLARATIONS = 64;
 const ALLOWED_THEME_FIELDS = new Set(["displayName", "description", "tags", "highlights", "heroImageURI"]);
-const ALLOWED_TASK_DECLARATION_FIELDS = new Set(["stageId", "taskId", "evidenceSpec"]);
-const ALLOWED_EVIDENCE_SPEC_FIELDS = new Set(["key", "label", "inputKind", "accept", "required", "description"]);
+const ALLOWED_TASK_DECLARATION_FIELDS = new Set(["stageId", "taskId"]);
 
 export function validateStoreDecorationData(input: unknown): StoreZhixuDecorationData {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -108,45 +101,11 @@ function validateTaskDeclarations(input: unknown): readonly StoreZhixuTaskDeclar
     const taskId = record.taskId !== undefined
       ? boundedString(record.taskId, `taskDeclarations[${index}].taskId`, 256)
       : undefined;
-    const evidenceSpec = record.evidenceSpec !== undefined
-      ? validateEvidenceSpecArray(record.evidenceSpec, index)
-      : undefined;
     return {
       ...(stageId ? { stageId } : {}),
-      ...(taskId ? { taskId } : {}),
-      ...(evidenceSpec ? { evidenceSpec } : {})
+      ...(taskId ? { taskId } : {})
     };
   });
-}
-
-function validateEvidenceSpecArray(input: unknown, declarationIndex: number): readonly unknown[] {
-  if (input === null) {
-    throw new StoreDecorationServiceError(400, "invalid_decoration", `taskDeclarations[${declarationIndex}].evidenceSpec must be an array when present`);
-  }
-  if (!Array.isArray(input)) {
-    throw new StoreDecorationServiceError(400, "invalid_decoration", `taskDeclarations[${declarationIndex}].evidenceSpec must be an array when present`);
-  }
-  for (const entry of input) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new StoreDecorationServiceError(400, "invalid_decoration", `taskDeclarations[${declarationIndex}].evidenceSpec entries must be JSON objects`);
-    }
-    for (const key of Object.keys(entry as Record<string, unknown>)) {
-      if (!ALLOWED_EVIDENCE_SPEC_FIELDS.has(key)) {
-        throw new StoreDecorationServiceError(400, "invalid_decoration_field", `unknown evidenceSpec field: ${key}`);
-      }
-    }
-  }
-  // 结构校验复用冻结 DTO 的 validateTaskEvidenceSpec（输入已是数组形态）。
-  const issues = validateTaskEvidenceSpec(input as never);
-  if (issues.length > 0) {
-    const first = issues[0]!;
-    throw new StoreDecorationServiceError(
-      400,
-      `invalid_evidence_spec:${first.code}`,
-      `taskDeclarations[${declarationIndex}].evidenceSpec: ${first.message}`
-    );
-  }
-  return input;
 }
 
 function boundedString(value: unknown, field: string, maxLength: number): string {

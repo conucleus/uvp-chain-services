@@ -86,25 +86,7 @@ export interface ParticipantPermissionDTO {
   readonly signalName: string;
   readonly submitterAddress: string;
   readonly payloadPolicy: PermissionPayloadPolicy;
-  /**
-   * 发布者携带的结构化证据要求（镜像 productDto.v1 ProductTaskDTO.evidenceSpec，
-   * schema 为不透明 JSON，结构化读取；缺省即无凭证槽位）。
-   */
-  readonly evidenceSpec?: readonly ProductEvidenceSpecDTO[];
   readonly deadlinePolicy?: string;
-}
-
-/**
- * evidenceSpec 槽位的局部结构镜像：key/label 必填，其余为发布者可选的
- * 渲染/上传约束。不 import protocol 包，跟随任务 DTO 的内联定义方式。
- */
-export interface ProductEvidenceSpecDTO {
-  readonly key: string;
-  readonly label: string;
-  readonly inputKind?: "file" | "text" | "date";
-  readonly accept?: readonly string[];
-  readonly required?: boolean;
-  readonly description?: string;
 }
 
 export interface SignalAuthorizationDTO {
@@ -217,16 +199,6 @@ export interface PreviewProductInviteInput {
   readonly walletAddress?: string;
 }
 
-export interface PrepareProductOrderTriggerInput {
-  readonly walletAddress: string;
-}
-
-export interface TriggerProductOrderInput {
-  readonly prepareId: string;
-  readonly signature: string;
-  readonly walletAddress: string;
-}
-
 export interface ProductOrderDraftResponse {
   readonly draft: ProductOrderDraftDTO;
   readonly participants: readonly DraftParticipantDTO[];
@@ -268,8 +240,6 @@ export interface ProductInviteRolePreviewDTO {
   readonly roleSlotId: string;
   readonly label: string;
   readonly duty: string;
-  /** 发布者携带的结构化证据要求；缺省即无凭证槽位。 */
-  readonly evidenceSpec?: readonly ProductEvidenceSpecDTO[];
 }
 
 /**
@@ -325,38 +295,3 @@ export interface ProductParticipantAssignmentDTO {
   readonly permissions: readonly ParticipantPermissionDTO[];
 }
 
-export interface SubmitProductOrderDraftResult {
-  readonly draft: ProductOrderDraftDTO;
-  readonly participants: readonly DraftParticipantDTO[];
-  readonly permissions: readonly ParticipantPermissionDTO[];
-  readonly trigger: ProductOrderTriggerDTO;
-}
-
-export interface PreparedProductOrderTriggerDTO {
-  readonly prepareId: string;
-  readonly triggerId: string;
-  readonly draftId: string;
-  readonly orderId: Hex;
-  readonly expiresAt: string;
-  readonly submitter: Address;
-  readonly typedData: unknown;
-  readonly summary: {
-    readonly orderTitle: string;
-    readonly planId: Hex;
-    readonly sourceId: Hex;
-    readonly signalId: Hex;
-    readonly triggerHookId: Hex;
-    readonly triggerStageId: Hex;
-    readonly walletAddress: Address;
-  };
-}
-
-export interface PrepareProductOrderTriggerResult {
-  readonly draft: ProductOrderDraftDTO;
-  readonly participants: readonly DraftParticipantDTO[];
-  readonly permissions: readonly ParticipantPermissionDTO[];
-  readonly trigger: ProductOrderTriggerDTO;
-  readonly prepared: PreparedProductOrderTriggerDTO;
-}
-
-export type TriggerProductOrderResult = SubmitProductOrderDraftResult;

@@ -124,7 +124,6 @@ const CLOSURE_SUPPLIER_WALLET =
   "0x1160000000000000000000000000000000000001" as Address;
 const CLOSURE_REGISTRY_ADDRESS =
   "0x1160000000000000000000000000000000000011" as Address;
-/** docking dry-run 探针的合成锚定地址（会话只落独立内存 store）。 */
 const CLOSURE_DOCKING_PROBE_ADDRESS =
   "0x1160000000000000000000000000000000000012" as Address;
 
@@ -286,9 +285,6 @@ async function checkSearchDetail(
 async function checkDraftImportCompileReview(
   options: StoreClosureDryRunOptions,
 ): Promise<StoreClosureCheckDTO> {
-  // store.draft.review 是治理级能力（submit-review 要求 governance
-  // admin）；operator dry-run 覆盖 import/compile/schema，review 子步骤
-  // 用 dry-run 治理身份在一次性模拟治理服务上演练，不触碰真实治理记录。
   const required = [
     "store.draft.import",
     "store.draft.compile",
@@ -345,20 +341,8 @@ async function checkDraftImportCompileReview(
           },
         });
       }
-      const productSchema = await draftWorkflow.getProductSchema(
-        imported.draftId,
-      );
-      const explicitSchema = productSchema
-        ? explicitProductSchema(productSchema)
-        : undefined;
-      const validation = explicitSchema
-        ? (
-            await draftWorkflow.updateProductSchema(imported.draftId, {
-              productSchema: explicitSchema,
-            })
-          ).validation
-        : await draftWorkflow.validateProductSchema(imported.draftId);
-      const reviewed = validation.ok
+      const compiledDraft = await draftWorkflow.getDraft(imported.draftId);
+      const reviewed = compiledDraft?.compilePreview
         ? await draftWorkflow.submitReview(
             imported.draftId,
             {
@@ -372,7 +356,7 @@ async function checkDraftImportCompileReview(
       return check({
         key: "draft_import_compile_review",
         label: "Draft import/compile/review dry-run",
-        status: validation.ok && reviewed ? "passed" : "warning",
+        status: reviewed ? "passed" : "warning",
         classification: "workflow_metadata",
         sourceOfTruth: "store-workflow-metadata",
         requiredCapabilities: required,
@@ -382,7 +366,6 @@ async function checkDraftImportCompileReview(
           planId: compiled.compilePreview.planId,
           planHash: compiled.compilePreview.planHash,
           artifactHash: compiled.compilePreview.artifactHash,
-          schemaValidationOk: validation.ok,
           reviewId: reviewed?.review.reviewId,
           nonPublishing: true,
         },
@@ -514,8 +497,6 @@ async function checkDockingCreateValidateSave(
         review: "all",
         publication: "published",
       });
-      // dock v2：target 必须是发布过具名接口的不同 zhixu；
-      // 列表行不携带接口信息，逐个用 detail 验证可拼性。
       const published = list.zhixus.filter(
         (zhixu) => zhixu.planPublication.status === "published",
       );
@@ -556,12 +537,8 @@ async function checkDockingCreateValidateSave(
         sessionStore: new MemoryStoreDockingSessionStore(),
         ...(options.now ? { now: options.now } : {}),
       });
-      // 试拼以目标发布的具名接口为前提（v2）：目标没有接口时显式 skip，
-      // 不静默降级回"任意两秩序可拼"。
       let created: Awaited<ReturnType<typeof docking.createSession>>;
       try {
-        // dry-run 会话落在独立内存 store，只验证工作流本身；探针锚定
-        // 地址是合成值，不进入任何租户的会话档案。
         created = await docking.createSession({
           sourceZhixuId: source.zhixuId,
           targetZhixuId: target.zhixuId,
@@ -806,31 +783,6 @@ function missingCapabilities(
   );
 }
 
-function explicitProductSchema(
-  schema: StoreProductSchemaDTO,
-): StoreProductSchemaDTO {
-  const roleSlots = schema.roleSlots.map((slot) => ({
-    ...slot,
-    capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
-      ...plugin,
-      source: "explicit" as const,
-    })),
-  }));
-  return {
-    ...schema,
-    roleSlots,
-    capabilityPlugins: roleSlots.flatMap(
-      (slot) => slot.capabilityPlugins ?? [],
-    ),
-  };
-}
-
-/**
- * dry-run 的治理 principal：优先沿用会话真实携带的治理身份；否则使用
- * 显式的 dry-run 标记身份。不再把任意 operator 的 roles[0] 包装成治理
- * 角色——dry-run 内部使用一次性的模拟治理服务，不触碰真实治理记录，
- * 但 principal 本身也不得伪装成某个真实运营方。
- */
 function dryRunGovernancePrincipal(
   access: StoreAccessState,
 ): GovernancePrincipal {

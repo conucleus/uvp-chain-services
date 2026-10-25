@@ -814,34 +814,6 @@ describe("stage executor/resource patch Product API", () => {
     });
   });
 
-  it("rejects resource controller or other participant wallets for an executor patch task inferred from Product metadata", async () => {
-    const { router } = await routerFixture({
-      events: baseEvents({
-        includeSelectorTaskAuthorization: false,
-        selectorStageId: selectorStageOnchainId,
-        targetStageId: targetStageOnchainId,
-      }),
-      productBffStore: await productStoreFixture([
-        participantFixture(selectorRoleSlotId, selectorWallet),
-        participantFixture(resourceControllerRoleSlotId, wrongWallet),
-      ]),
-      productSchema: productSchemaFixture(),
-    });
-
-    const response = await router.handle({
-      method: "POST",
-      pathname: `/product/tasks/${selectorTaskId()}/prepare-stage-executor-patch`,
-      body: prepareExecutorBody({
-        selectorWallet: wrongWallet,
-        targetStageId: "target.stage",
-      }),
-    });
-
-    expect(response).toMatchObject({
-      status: 403,
-      body: { error: "selector_wallet_not_authorized" },
-    });
-  });
 
   it("fails closed when raw task assignment is missing and Product participant context is unavailable", async () => {
     const { router } = await routerFixture({
@@ -1989,7 +1961,6 @@ function productSchemaFixture(): StoreProductSchemaDTO {
         status: "required",
         tone: "info",
         required: true,
-        capabilityPlugins: [selectorPlugin],
       },
       {
         slotId: resourceControllerRoleSlotId,
@@ -2000,30 +1971,9 @@ function productSchemaFixture(): StoreProductSchemaDTO {
         status: "required",
         tone: "info",
         required: true,
-        capabilityPlugins: [resourceControllerPlugin],
       },
     ],
-    orderPermissionTable: [
-      {
-        permissionId: "selector.executor-patch",
-        roleSlotId: selectorRoleSlotId,
-        stageId: "selector.stage",
-        source: "selector",
-        signalName: "select-executor",
-        payloadPolicy: "required",
-        requiredEvidence: [],
-      },
-      {
-        permissionId: "resource-controller.resource-patch",
-        roleSlotId: resourceControllerRoleSlotId,
-        stageId: "resource-controller.stage",
-        source: "resource-controller",
-        signalName: "publish-resource",
-        payloadPolicy: "required",
-        requiredEvidence: [],
-      },
-    ],
-    capabilityPlugins: [selectorPlugin, resourceControllerPlugin],
+
     businessPersonaLabels: ["buyer"],
     stages: [
       {

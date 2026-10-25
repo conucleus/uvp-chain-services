@@ -60,7 +60,7 @@ describe("API router composition", () => {
     expect(storeOrderOperator).toMatchObject({ status: 400, body: { error: "invalid_path_parameter" } });
   });
 
-  it("store runtime reads and submission/trigger reads require session identity", async () => {
+  it("store runtime reads and submission reads require session identity", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
 
     // /store 运行时读是运营观察面（无参与者过滤）：与 /store/audit 同
@@ -72,11 +72,10 @@ describe("API router composition", () => {
       const anonymous = await router.handle({ method: "GET", pathname });
       expect(anonymous).toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
     }
-    // 参与者面（候选清单/提交/触发档案）仍按会话锚定钱包门。
+    // 参与者面（候选清单/提交档案）仍按会话锚定钱包门。
     for (const pathname of [
       "/store/orders/0xabc/candidates",
-      "/product/submissions/sub_1",
-      "/product/order-triggers/trg_1"
+      "/product/submissions/sub_1"
     ]) {
       const anonymous = await router.handle({ method: "GET", pathname });
       expect(anonymous).toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });

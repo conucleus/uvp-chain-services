@@ -13,7 +13,6 @@ export * from "./indexer/identity-projections.js";
 export * from "./indexer/viem-event-source.js";
 export * from "./notifications/index.js";
 export * from "./product/application/service.js";
-export * from "./product/query/bff/authorization.js";
 export * from "./product/query/bff/trigger.js";
 export * from "./product/requirements/index.js";
 export * from "./proof-verifier/service.js";

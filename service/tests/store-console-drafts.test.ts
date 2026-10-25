@@ -7,15 +7,7 @@ import {
 import {
   type StoreProductSchemaDTO
 } from "@uvp-eth/product-dto";
-import {
-  crossBorderPlanIds,
-  customsInitialTriggerSource,
-  customsOnchainHookPlanArtifact,
-  customsRoleSlotIds,
-  customsSignalIds,
-  customsStageIds,
-  customsStoreProductSchema
-} from "@uvp-eth/product-dto/fixtures";
+import { crossBorderPlanIds } from "@uvp-eth/product-dto/fixtures";
 import { createApiRouter } from "../src/api/routes.js";
 import {
   createGovernanceService,
@@ -119,14 +111,6 @@ describe("Store Zhixu draft workflow", () => {
       method: "GET",
       pathname: `/store/zhixu-drafts/${draft.draftId}`
     })).resolves.toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
-    await expect(router.handle({
-      method: "GET",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`
-    })).resolves.toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
-    await expect(router.handle({
-      method: "GET",
-      pathname: `/store/product-schemas/${encodeURIComponent("0x" + "11".repeat(32))}/${encodeURIComponent("0x" + "22".repeat(32))}`
-    })).resolves.toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
 
     // 能力通过但会话未锚定地址：写路由 403 store_address_anchor_required。
     const unanchoredOperator = {
@@ -151,7 +135,6 @@ describe("Store Zhixu draft workflow", () => {
     const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
-    await confirmDraftProductSchema(router, draft.draftId);
 
     await expect(router.handle({
       method: "POST",
@@ -234,6 +217,25 @@ describe("Store Zhixu draft workflow", () => {
       .resolves.toMatchObject({ status: 200, body: { draft: { draftId: draft.draftId, status: "imported" } } });
   });
 
+  it("exposes V3 publish metadata for a compiled draft", async () => {
+    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
+    const draft = await importDraft(router);
+    await compileDraft(router, draft.draftId);
+    const response = await router.handle({
+      method: "GET",
+      pathname: `/store/zhixu-drafts/${draft.draftId}/publish-metadata`,
+      headers: storeOperatorHeaders
+    });
+    expect(response.status).toBe(200);
+    expect((response.body as { publishMetadata: Record<string, unknown> }).publishMetadata).toMatchObject({
+      schema: "uvp.order-config-publish/v3",
+      planId: expect.stringMatching(/^0x[0-9a-f]{64}$/),
+      planHash: expect.stringMatching(/^0x[0-9a-f]{64}$/),
+      configId: expect.any(String),
+      version: expect.any(String)
+    });
+  });
+
   it("fails Store metadata writes closed when the draft store is unavailable", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth,
       storeZhixuDraftStore: new FailingStoreZhixuDraftStore()
@@ -294,459 +296,11 @@ describe("Store Zhixu draft workflow", () => {
     expect(manifestPlanId).toBe(manifest.planId);
   });
 
-  it("generates durable Product Schema Bundle and blocks inferred plugins before review", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
-    const draft = await importDraft(router);
-    const compiled = await compileDraft(router, draft.draftId);
-    const preview = requirePreview(compiled);
 
-    const schemaResponse = await router.handle({
-      method: "GET",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
-      headers: storeOperatorHeaders
-    });
-    expect(schemaResponse.status).toBe(200);
-    const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
-    expect(schema).toMatchObject({
-      planId: preview.planId,
-      planHash: preview.planHash,
-      artifactHash: preview.artifactHash,
-      validation: {
-        ok: false,
-        status: "inferred"
-      }
-    });
-    expect(schema.roleSlots[0]?.capabilityPlugins?.[0]).toMatchObject({
-      source: "inferred"
-    });
-    expect(schema.orderPermissionTable.length).toBeGreaterThan(0);
-    expect(
-      schema.orderPermissionTable.every((entry) => entry.signalName.includes("."))
-    ).toBe(true);
-    expect(
-      schema.orderPermissionTable.some((entry) => entry.signalName === "gate.ready")
-    ).toBe(true);
 
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/submit-review`,
-      headers: adminHeaders,
-      body: { status: "approved_for_broadcast" }
-    })).resolves.toMatchObject({
-      status: 409,
-      body: {
-        error: "product_schema_not_explicit",
-        details: {
-          ok: false,
-          issues: expect.arrayContaining([
-            expect.objectContaining({ code: "capability_plugin_not_explicit" })
-          ])
-        }
-      }
-    });
 
-    const explicit = await confirmDraftProductSchema(router, draft.draftId);
-    // validate 回显草稿结构（stageId/roleSlotId/path）——与 GET/PUT 同门
-    //（能力 + 锚定），匿名调用 401。
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema/validate`
-    })).resolves.toMatchObject({ status: 401 });
-    await expect(router.handle({
-      method: "POST",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema/validate`,
-      headers: storeOperatorHeaders
-    })).resolves.toMatchObject({
-      status: 200,
-      body: {
-        validation: { ok: true, status: "explicit", issues: [] }
-      }
-    });
-    // 链侧身份是 runtime 域哈希（preview.planHash）——preview.artifactHash
-    // 是 canonical 载荷哈希，两者异值，join 以 planHash 命中。
-    await expect(router.handle({
-      method: "GET",
-      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.planHash)}`,
-      headers: storeOperatorHeaders
-    })).resolves.toMatchObject({
-      status: 200,
-      body: {
-        productSchema: {
-          schemaHash: explicit.schemaHash,
-          validation: { ok: true }
-        }
-      }
-    });
-    await expect(router.handle({
-      method: "GET",
-      pathname: `/store/product-schemas/${encodeURIComponent(preview.planId)}/${encodeURIComponent(preview.artifactHash)}`,
-      headers: storeOperatorHeaders
-    })).resolves.toMatchObject({
-      status: 404,
-      body: { error: "store_product_schema_not_found" }
-    });
-  });
 
-  it("classifies a plugin whose source is missing as status missing via the shared message contract", async () => {
-    // missing 族分类钉：missing 族判定按 code 圈定 + 共享文案
-    // 常量精确匹配，不做 message.includes("missing")——plugin.source 缺失
-    // 是 missing 唯一的非 missing_* code 入口，措辞即分类契约。
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
-    const draft = await importDraft(router);
-    await compileDraft(router, draft.draftId);
-    const schemaResponse = await router.handle({
-      method: "GET",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
-      headers: storeOperatorHeaders
-    });
-    expect(schemaResponse.status).toBe(200);
-    const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
-    const roleSlots = schema.roleSlots.map((slot) => ({
-      ...slot,
-      capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
-        ...plugin,
-        source: "missing" as const
-      }))
-    }));
 
-    const updateResponse = await router.handle({
-      method: "PUT",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
-      headers: storeOperatorHeaders,
-      body: {
-        productSchema: {
-          ...schema,
-          roleSlots,
-          capabilityPlugins: roleSlots.flatMap((slot) => slot.capabilityPlugins ?? [])
-        }
-      }
-    });
-    expect(updateResponse.status).toBe(200);
-    expect((updateResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema.validation).toMatchObject({
-      ok: false,
-      status: "missing",
-      issues: expect.arrayContaining([
-        expect.objectContaining({
-          code: "capability_plugin_not_explicit",
-          message: "capability plugin source is missing and must be authored before broadcast"
-        })
-      ])
-    });
-
-    // 对照：inferred 来源仍是 inferred（不因文案含 "missing" 字样升级）。
-    const inferredResponse = await router.handle({
-      method: "PUT",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
-      headers: storeOperatorHeaders,
-      body: {
-        productSchema: {
-          ...schema,
-          roleSlots: schema.roleSlots.map((slot) => ({
-            ...slot,
-            capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
-              ...plugin,
-              source: "inferred" as const
-            }))
-          }))
-        }
-      }
-    });
-    expect(inferredResponse.status).toBe(200);
-    expect((inferredResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema.validation).toMatchObject({
-      ok: false,
-      status: "inferred"
-    });
-  });
-
-  it("preserves publisher evidenceSpec on stages and capability plugins across schema rebuild (evidenceSpec passthrough)", async () => {
-    // schema 是发布者拥有的不透明 JSON：从编译产物重建 schema 时，
-    // stage / capability plugin 携带的 evidenceSpec 不得被静默丢掉。
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
-    const draft = await importDraft(router);
-    await compileDraft(router, draft.draftId);
-    const schemaResponse = await router.handle({
-      method: "GET",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
-      headers: storeOperatorHeaders
-    });
-    expect(schemaResponse.status).toBe(200);
-    const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
-    const firstSlotId = schema.roleSlots[0]!.slotId;
-
-    const stageEvidenceSpec = [
-      {
-        key: "stage-evidence",
-        label: "阶段交付凭证",
-        inputKind: "file",
-        accept: ["application/pdf"],
-        required: true
-      }
-    ];
-    const pluginEvidenceSpec = [
-      { key: "completed-at", label: "完成日期", inputKind: "date", required: true }
-    ];
-    const schemaWithEvidenceSpec = {
-      ...schema,
-      stages: schema.stages.map((stage) =>
-        stage.stageId === firstSlotId
-          ? { ...stage, evidenceSpec: stageEvidenceSpec }
-          : stage
-      ),
-      roleSlots: schema.roleSlots.map((slot) =>
-        slot.slotId === firstSlotId
-          ? {
-              ...slot,
-              capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
-                ...plugin,
-                source: "explicit" as const,
-                evidenceSpec: pluginEvidenceSpec
-              }))
-            }
-          : slot
-      ),
-      capabilityPlugins: schema.roleSlots.flatMap((slot) =>
-        (slot.capabilityPlugins ?? []).map((plugin) => ({
-          ...plugin,
-          source: "explicit" as const,
-          ...(slot.slotId === firstSlotId ? { evidenceSpec: pluginEvidenceSpec } : {})
-        }))
-      )
-    } as StoreProductSchemaDTO;
-    await updateDraftProductSchema(router, draft.draftId, schemaWithEvidenceSpec);
-
-    // 重新 compile：schema 从编译产物重建，发布者 evidenceSpec 必须保留。
-    const recompiled = await compileDraft(router, draft.draftId);
-    const rebuilt = recompiled.productSchema;
-    expect(rebuilt).toBeDefined();
-    const rebuiltStage = rebuilt?.stages.find((stage) => stage.stageId === firstSlotId);
-    expect((rebuiltStage as { evidenceSpec?: unknown } | undefined)?.evidenceSpec)
-      .toEqual(stageEvidenceSpec);
-    const rebuiltSlot = rebuilt?.roleSlots.find((slot) => slot.slotId === firstSlotId);
-    expect(
-      (rebuiltSlot?.capabilityPlugins?.[0] as { evidenceSpec?: unknown } | undefined)?.evidenceSpec
-    ).toEqual(pluginEvidenceSpec);
-    // add-on manifest 的 evidence 组件同样透传 evidenceSpec 供参与方页面渲染。
-    const rebuiltComponent = rebuiltSlot?.addOnManifest?.pages
-      .flatMap((page) => page.sections)
-      .flatMap((section) => section.components)
-      .find((component) => component.componentId === "evidence");
-    expect((rebuiltComponent as { evidenceSpec?: unknown } | undefined)?.evidenceSpec)
-      .toEqual(pluginEvidenceSpec);
-  });
-
-  it("validates role-slot add-on manifests before Product Schema review", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
-    const draft = await importDraft(router);
-    await compileDraft(router, draft.draftId);
-    const schemaResponse = await router.handle({
-      method: "GET",
-      pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
-      headers: storeOperatorHeaders
-    });
-    expect(schemaResponse.status).toBe(200);
-    const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
-    const roleSlots = schema.roleSlots.map((slot) => ({
-      ...slot,
-      capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
-        ...plugin,
-        source: "explicit" as const
-      }))
-    }));
-    const firstSlot = roleSlots[0];
-    expect(firstSlot?.addOnManifest).toBeDefined();
-
-    const cases = [
-      {
-        expectedCode: "addon_manifest_stage_not_bound",
-        addOnManifest: {
-          ...firstSlot!.addOnManifest!,
-          stageBindings: []
-        }
-      },
-      {
-        expectedCode: "addon_manifest_input_not_found",
-        addOnManifest: {
-          ...firstSlot!.addOnManifest!,
-          actions: firstSlot!.addOnManifest!.actions.map((action) => ({
-            ...action,
-            inputBindings: {
-              ...action.inputBindings,
-              evidenceIds: "missing-input"
-            }
-          }))
-        }
-      },
-      {
-        expectedCode: "addon_manifest_invalid",
-        addOnManifest: {
-          ...firstSlot!.addOnManifest!,
-          actions: firstSlot!.addOnManifest!.actions.map((action) => ({
-            ...action,
-            actionKind: "unknown_action"
-          }))
-        }
-      },
-      {
-        expectedCode: "addon_manifest_invalid",
-        addOnManifest: {
-          ...firstSlot!.addOnManifest!,
-          pages: "not-an-array"
-        }
-      },
-      {
-        expectedCode: "addon_manifest_invalid",
-        addOnManifest: {
-          ...firstSlot!.addOnManifest!,
-          actions: "not-an-array"
-        }
-      }
-    ] as const;
-
-    for (const item of cases) {
-      const invalidRoleSlots = roleSlots.map((slot, index) => index === 0 ? {
-        ...slot,
-        addOnManifest: item.addOnManifest
-      } : slot);
-      const updateResponse = await router.handle({
-        method: "PUT",
-        pathname: `/store/zhixu-drafts/${draft.draftId}/product-schema`,
-        headers: storeOperatorHeaders,
-        body: {
-          productSchema: {
-            ...schema,
-            roleSlots: invalidRoleSlots,
-            capabilityPlugins: invalidRoleSlots.flatMap((slot) => slot.capabilityPlugins ?? [])
-          }
-        }
-      });
-      expect(updateResponse.status).toBe(200);
-      expect((updateResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema.validation).toMatchObject({
-        ok: false,
-        issues: expect.arrayContaining([
-          expect.objectContaining({ code: item.expectedCode })
-        ])
-      });
-    }
-  });
-
-  it("accepts the customs Product Schema fixture", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
-    const draft = await importCustomsDraft(router);
-    const compiled = await compileDraft(router, draft.draftId);
-    expect(compiled.compilePreview).toMatchObject({
-      planId: customsStoreProductSchema.planId,
-      planHash: customsStoreProductSchema.planHash,
-      artifactHash: customsStoreProductSchema.artifactHash,
-      stageCount: 3,
-      // customs-complete 出生阶段自带静态执行者路由：推断槽位数随路由数。
-      roleSlotCount: 3
-    });
-
-    const productSchema = await updateDraftProductSchema(router, draft.draftId, customsStoreProductSchema);
-    expect(productSchema.validation).toEqual({
-      ok: true,
-      status: "explicit",
-      issues: [],
-      checkedAt: productSchema.validation.checkedAt
-    });
-    expect(productSchema.roleSlots.map((slot) => slot.slotId)).toEqual([
-      customsRoleSlotIds.buyerSelector,
-      customsRoleSlotIds.buyerResourceController,
-      customsRoleSlotIds.customsExecutor
-    ]);
-    expect(productSchema.roleSlots.some((slot) => slot.slotId.startsWith("system:"))).toBe(false);
-    expect(productSchema.orderPermissionTable.some((entry) => entry.permissionId.startsWith("system."))).toBe(false);
-    expect(productSchema.createOrderTrigger).toMatchObject({
-      source: customsInitialTriggerSource,
-      signalName: customsSignalIds.orderRegistered,
-      triggerHookId: customsStoreProductSchema.createOrderTrigger?.triggerHookId,
-      triggerStageId: customsStoreProductSchema.createOrderTrigger?.triggerStageId
-    });
-    expect(productSchema.selectorBindings?.map((binding) => `${binding.selectorStageIdentifier}->${binding.targetStageIdentifier}`)).toEqual([
-      `${customsStageIds.buyerSelectCustomsExecutor}->${customsStageIds.customsComplete}`,
-      `${customsStageIds.buyerPublishCustomsResources}->${customsStageIds.customsComplete}`
-    ]);
-  });
-
-  it("rejects invalid customs Product Schema inputs", async () => {
-    const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
-    const draft = await importCustomsDraft(router);
-    await compileDraft(router, draft.draftId);
-
-    const cases: readonly {
-      readonly name: string;
-      readonly expectedCode: string;
-      mutate(schema: StoreProductSchemaDTO): void;
-    }[] = [
-      {
-        name: "unsupported addOnKind",
-        expectedCode: "addon_manifest_invalid",
-        mutate(schema) {
-          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerSelector);
-          slot.addOnManifest.addOnKind = "customs_selector";
-        }
-      },
-      {
-        name: "missing manifest stage binding target",
-        expectedCode: "addon_manifest_stage_not_bound",
-        mutate(schema) {
-          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerSelector);
-          slot.addOnManifest.stageBindings = ["missing-stage"];
-        }
-      },
-      {
-        name: "action binding references an unrendered input",
-        expectedCode: "addon_manifest_input_not_found",
-        mutate(schema) {
-          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerSelector);
-          slot.addOnManifest.actions[0].inputBindings.executorWallet = "missing.executorWallet";
-        }
-      },
-      {
-        name: "selector misses executorMetadataHash",
-        expectedCode: "addon_manifest_input_not_found",
-        mutate(schema) {
-          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerSelector);
-          delete slot.addOnManifest.actions[0].inputBindings.executorMetadataHash;
-        }
-      },
-      {
-        name: "resource patch action uses writerWallet",
-        expectedCode: "addon_manifest_invalid",
-        mutate(schema) {
-          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerResourceController);
-          delete slot.addOnManifest.actions[0].inputBindings.selectorWallet;
-          slot.addOnManifest.actions[0].inputBindings.writerWallet = "buyerResourceController.selectorWallet";
-        }
-      },
-      {
-        name: "resource patch action binds visibility as chain payload",
-        expectedCode: "addon_manifest_invalid",
-        mutate(schema) {
-          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerResourceController);
-          slot.addOnManifest.actions[0].inputBindings.visibility = "buyerResourceController.selectorWallet";
-        }
-      },
-      {
-        name: "executor-less target is not covered by exactly one selector",
-        expectedCode: "stage_executor_selection_invalid",
-        mutate(schema) {
-          const slot = mutableRoleSlot(schema, customsRoleSlotIds.buyerSelector);
-          slot.addOnManifest.addOnKind = "resource_controller";
-        }
-      }
-    ];
-
-    for (const item of cases) {
-      const schema = cloneCustomsSchema();
-      item.mutate(schema);
-      const productSchema = await updateDraftProductSchema(router, draft.draftId, schema);
-      expect(productSchema.validation.ok, item.name).toBe(false);
-      expect(productSchema.validation.issues, item.name).toEqual(expect.arrayContaining([
-        expect.objectContaining({ code: item.expectedCode })
-      ]));
-    }
-  });
 
   it("records compile failures and blocks review submission", async () => {
     const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
@@ -771,7 +325,6 @@ describe("Store Zhixu draft workflow", () => {
     const router = createApiRouter(new MemoryProjectionStore(), { productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });
     const draft = await importDraft(router);
     await compileDraft(router, draft.draftId);
-    await confirmDraftProductSchema(router, draft.draftId);
 
     const reviewResponse = await router.handle({
       method: "POST",
@@ -829,100 +382,6 @@ async function compileDraft(
   });
   expect(response.status).toBe(200);
   return (response.body as { draft: StoreZhixuDraftDTO }).draft;
-}
-
-async function importCustomsDraft(
-  router: ReturnType<typeof createApiRouter>
-): Promise<StoreZhixuDraftDTO> {
-  return importDraft(router, {
-    sourceKind: "onchain_hook_plan_manifest",
-    content: JSON.stringify(customsOnchainHookPlanArtifact)
-  });
-}
-
-async function updateDraftProductSchema(
-  router: ReturnType<typeof createApiRouter>,
-  draftId: string,
-  productSchema: StoreProductSchemaDTO
-): Promise<StoreProductSchemaDTO> {
-  const updateResponse = await router.handle({
-    method: "PUT",
-    pathname: `/store/zhixu-drafts/${draftId}/product-schema`,
-    headers: storeOperatorHeaders,
-    body: { productSchema }
-  });
-  expect(updateResponse.status).toBe(200);
-  return (updateResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
-}
-
-function cloneCustomsSchema(): StoreProductSchemaDTO {
-  return JSON.parse(JSON.stringify(customsStoreProductSchema)) as StoreProductSchemaDTO;
-}
-
-function mutableRoleSlot(schema: StoreProductSchemaDTO, slotId: string): any {
-  const slot = schema.roleSlots.find((item) => item.slotId === slotId);
-  expect(slot).toBeDefined();
-  return slot as any;
-}
-
-async function approvedDraft(router: ReturnType<typeof createApiRouter>): Promise<StoreZhixuDraftDTO> {
-  const draft = await importDraft(router);
-  const compiled = await compileDraft(router, draft.draftId);
-  await confirmDraftProductSchema(router, draft.draftId);
-  const response = await router.handle({
-    method: "POST",
-    pathname: `/store/zhixu-drafts/${draft.draftId}/submit-review`,
-    headers: storeOperatorHeaders,
-    body: {
-      status: "approved_for_broadcast",
-      publicSummary: "Approved for broadcast."
-    }
-  });
-  expect(response.status).toBe(200);
-  return {
-    ...compiled,
-    ...(response.body as { draft: StoreZhixuDraftDTO }).draft
-  };
-}
-
-async function confirmDraftProductSchema(
-  router: ReturnType<typeof createApiRouter>,
-  draftId: string
-): Promise<StoreProductSchemaDTO> {
-  const schemaResponse = await router.handle({
-    method: "GET",
-    pathname: `/store/zhixu-drafts/${draftId}/product-schema`,
-    headers: storeOperatorHeaders
-  });
-  expect(schemaResponse.status).toBe(200);
-  const schema = (schemaResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
-  const roleSlots = schema.roleSlots.map((slot) => ({
-    ...slot,
-    capabilityPlugins: (slot.capabilityPlugins ?? []).map((plugin) => ({
-      ...plugin,
-      source: "explicit" as const
-    }))
-  }));
-  const explicitSchema: StoreProductSchemaDTO = {
-    ...schema,
-    roleSlots,
-    capabilityPlugins: roleSlots.flatMap((slot) => slot.capabilityPlugins ?? [])
-  };
-  const updateResponse = await router.handle({
-    method: "PUT",
-    pathname: `/store/zhixu-drafts/${draftId}/product-schema`,
-    headers: storeOperatorHeaders,
-    body: { productSchema: explicitSchema }
-  });
-  expect(updateResponse.status).toBe(200);
-  const productSchema = (updateResponse.body as { productSchema: StoreProductSchemaDTO }).productSchema;
-  expect(productSchema.validation).toMatchObject({ ok: true, status: "explicit" });
-  return productSchema;
-}
-
-function requirePreview(draft: StoreZhixuDraftDTO): StoreCompilePreviewDTO {
-  expect(draft.compilePreview).toBeDefined();
-  return draft.compilePreview!;
 }
 
 class FailingStoreZhixuDraftStore implements StoreZhixuDraftStore {

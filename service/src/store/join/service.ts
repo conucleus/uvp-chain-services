@@ -682,19 +682,13 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
   /**
    * 激活判定不是"任一订单存在 submitter==申请人"
    * 即通过——链上授权信号必须与申请的槽位对应：
-   * - signal_submitter：authorization 的 (sourceId, signalId) 必须落在该
-   *   roleSlot 的 orderPermissionTable 能力集合内；
+   * - signal_submitter：authorization 必须由申请人提交；
    * - stage_executor：overlay 的 targetStageId 必须是申请的 stageId。
    */
   async function findOnChainAuthorizationEvidence(
     application: StoreJoinApplicationRecord
   ): Promise<{ readonly txHash?: Hex } | undefined> {
     const zhixu = await resolveZhixuForPlan(application.planId).catch(() => undefined);
-    const slotPermissionKeys = new Set(
-      (zhixu?.detail?.orderPermissionTable ?? [])
-        .filter((entry) => entry.roleSlotId === application.roleSlotId)
-        .map((entry) => `${productSignalSourceId(entry.source).toLowerCase()}:${productSignalId(entry.signalName).toLowerCase()}`)
-    );
     const applicationStageId = application.stageId
       ? onchainStageId(application.stageId).toLowerCase()
       : undefined;
@@ -705,12 +699,6 @@ export function createStoreJoinService(options: StoreJoinServiceOptions): StoreJ
       if (application.authorizationKind === "signal_submitter") {
         for (const authorization of Object.values(order.authorizations)) {
           if (authorization.submitter.toLowerCase() !== application.applicantAddress.toLowerCase()) {
-            continue;
-          }
-          const key = `${authorization.sourceId.toLowerCase()}:${authorization.signalId.toLowerCase()}`;
-          // 槽位/信号对应：该 plan 无 schema 权限表可比对时 fail-closed
-          //（不激活），不允许"同 plan 任意信号"充数。
-          if (slotPermissionKeys.size === 0 || !slotPermissionKeys.has(key)) {
             continue;
           }
           return { txHash: authorization.authorizedAt.transactionHash };

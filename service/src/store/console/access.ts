@@ -399,7 +399,7 @@ async function discoverStoreAuthJwks(config: RequiredJwtStoreAuthConfig, strictR
   }
   let metadata: unknown;
   try {
-    metadata = await response.json() as unknown;
+    metadata = await response.json();
   } catch (cause) {
     throw namedDiscoveryError("OIDC discovery response is not valid JSON", cause);
   }

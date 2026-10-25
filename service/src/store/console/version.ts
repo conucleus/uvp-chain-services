@@ -420,7 +420,8 @@ function patchVersionRecord(
       continue;
     }
     const normalized = normalizeBytes32(rawValue, field);
-    const current = (record as unknown as { readonly [key: string]: string | undefined })[field];
+    const currentValue = record[field];
+    const current = typeof currentValue === "string" ? currentValue : undefined;
     if (current && current.toLowerCase() !== normalized.toLowerCase()) {
       throw new StoreZhixuVersionError(
         409,

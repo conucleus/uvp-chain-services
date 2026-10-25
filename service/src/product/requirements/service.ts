@@ -2,7 +2,7 @@
 // 参与者名单只读 v0 BFF 台账，要求包本身落独立 store；requirementsHash 只
 // 由本服务对 canonical JSON 计算，客户端自报的派生字段一律拒绝。合意消息
 // 格式单源在 @uvp-eth/product-dto（order-requirements.ts）。V1 不复用
-// capability/permission/createOrderTrigger/evidenceSpec 语义。
+// 能力/权限/开单触发语义由 V3 order/config 路径承载。
 
 import { randomUUID } from "node:crypto";
 import { verifyMessage } from "viem";

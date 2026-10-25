@@ -995,7 +995,7 @@ async function resolveEvidence(input: {
   readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
 }): Promise<readonly EvidenceRecordDTO[]> {
   if (input.evidenceIds.length === 0) {
-    // V1 任务可以不带 evidenceSpec 槽位：验收者读要求包句柄后显式发信号，
+    // 验收者读要求包句柄后显式发信号，
     // 没有必填槽位就允许空证据并跳过解析；v0 有必填槽位时保持证据必需的
     // 入口错误，槽位缺具体项仍由 validateEvidenceSlots 精确到因。
     if (input.requiredSlots.length === 0) {
@@ -1075,38 +1075,15 @@ async function validateEvidenceRecord(
 }
 
 interface RequiredEvidenceSlot {
-  /** 凭证槽位对应的 documentType（spec 槽位即 spec key，product-dto 约定）。 */
+  /** 资源要求槽位对应的 documentType（resourceType，缺省 resourceId）。 */
   readonly documentType: string;
   readonly label: string;
-  /** 文本/日期槽位的值随文件上传进 metadata.fields，按 spec key 检查。 */
-  readonly fieldKey?: string;
 }
 
-/**
- * 任务的必填凭证槽位（合并去重视图：《证据与存证规则》二.2）：
- * - evidenceSpec 槽位，required 缺省为 true，documentType = spec key；
- * - 非 metadata 型资源要求槽位，documentType = resourceType（缺省取
- *   resourceId）；同一 documentType 已由 spec 声明时以 spec 为准；
- * - 声明缺失即无槽位——不从声明文本臆造通用"阶段凭证"槽位。
- */
+/** 任务的必填凭证槽位只来自通用 resourceRequirements；声明缺失即无槽位。 */
 function requiredEvidenceSlotsForTask(task: ProductTaskDTO): readonly RequiredEvidenceSlot[] {
   const slots: RequiredEvidenceSlot[] = [];
   const documentTypes = new Set<string>();
-  for (const entry of task.evidenceSpec ?? []) {
-    if (!entry || typeof entry.key !== "string" || entry.key.trim().length === 0) {
-      continue;
-    }
-    if (entry.required === false) {
-      documentTypes.add(entry.key);
-      continue;
-    }
-    documentTypes.add(entry.key);
-    slots.push({
-      documentType: entry.key,
-      label: entry.label ?? entry.key,
-      ...(entry.inputKind === "text" || entry.inputKind === "date" ? { fieldKey: entry.key } : {})
-    });
-  }
   for (const resource of task.resourceRequirements ?? []) {
     if (resource.required === false || resource.resourceType === "metadata") {
       continue;
@@ -1116,10 +1093,7 @@ function requiredEvidenceSlotsForTask(task: ProductTaskDTO): readonly RequiredEv
       continue;
     }
     documentTypes.add(documentType);
-    slots.push({
-      documentType,
-      label: resource.label ?? documentType
-    });
+    slots.push({ documentType, label: resource.label ?? documentType });
   }
   return slots;
 }
@@ -1132,13 +1106,7 @@ function validateEvidenceSlots(
     return;
   }
   const documentTypes = new Set(records.map((record) => record.metadata.documentType));
-  const fieldValues = records.flatMap((record) =>
-    Object.entries(record.metadata.fields ?? {})
-      .filter(([, value]) => typeof value === "string" && value.trim().length > 0)
-      .map(([key]) => key));
-  const missing = slots.filter((slot) =>
-    !documentTypes.has(slot.documentType) &&
-    !(slot.fieldKey && fieldValues.includes(slot.fieldKey)));
+  const missing = slots.filter((slot) => !documentTypes.has(slot.documentType));
   if (missing.length > 0) {
     throw new ProductSubmissionError(409, "evidence_slot_required", "required evidence slots are not satisfied", {
       missingSlots: missing.map((slot) => ({ documentType: slot.documentType, label: slot.label }))

@@ -2,7 +2,6 @@ import {
   projectionStatusLabel,
   storeConsoleSummary,
   toStoreZhixuConsoleDTO,
-  toStoreZhixuDetailDTO,
   type PlanPublicationStatus,
   type ReviewStatus,
   type StoreConsoleSummaryDTO,
@@ -15,7 +14,6 @@ import {
   type StoreSearchSourceOfTruth,
   type StoreSearchType,
   type StoreZhixuConsoleDTO,
-  type StoreZhixuDetailDTO,
   type StoreZhixuLifecycleStatus,
   type ZhixuDetailDTO,
   type ZhixuSummaryDTO
@@ -45,19 +43,24 @@ export interface StoreConsoleListDTO {
   readonly projectionStatus?: StoreProjectionStatusDTO;
 }
 
+export interface StoreZhixuDetailV3DTO extends StoreZhixuConsoleDTO {
+  readonly schema: "store-zhixu-detail.v3";
+  readonly publishMetadata: {
+    readonly configId: string;
+    readonly version: string;
+    readonly planId: string;
+    readonly planHash: string;
+  } | null;
+}
+
 export interface StoreConsoleService {
   listZhixus(query?: StoreConsoleListQuery): Promise<StoreConsoleListDTO>;
-  getZhixu(zhixuId: string): Promise<StoreZhixuDetailDTO | undefined>;
+  getZhixu(zhixuId: string): Promise<StoreZhixuDetailV3DTO | undefined>;
   search(query: StoreSearchQuery, options?: StoreSearchOptions): Promise<StoreSearchResponseDTO>;
   listOrderCandidates(orderId: string): Promise<StoreOrderCandidatesResponseDTO>;
 }
 
 export interface StoreSearchOptions {
-  /**
-   * assigneeWallet 参与订单/任务匹配：钱包→订单关联是业务侧数据，
-   * 匿名查询按钱包串枚举他人订单与供应商命中同口径收敛——只有
-   * 已认证读（会话/JWT）允许按钱包字段匹配。
-   */
   readonly walletFieldMatching: boolean;
 }
 
@@ -90,8 +93,16 @@ export function createStoreConsoleService(options: {
       if (!row) {
         return undefined;
       }
-      const zhixu = await options.productService.getZhixu(row.zhixuId);
-      return zhixu ? toStoreZhixuDetailDTO(row, zhixu) : toStoreZhixuDetailDTO(row, detailFallbackFromRow(row));
+      return {
+        ...row,
+        schema: "store-zhixu-detail.v3",
+        publishMetadata: {
+          configId: row.zhixuId,
+          version: row.versionLabel,
+          planId: row.planId,
+          planHash: row.planHash,
+        },
+      };
     },
 
     async search(query, searchOptions) {
@@ -115,10 +126,6 @@ async function buildStoreConsoleZhixus(options: {
     options.productService.listTasks(),
     options.supplierMetadataStore.listSuppliers()
   ]);
-  // supplierCount 与 orderCount/openTaskCount 同行按 zhixu 过滤：全局
-  // 供应商总数不是任何单条秩序的属性，逐行投影会把同一计数虚增成每条
-  // 秩序的参与事实。zhixu 维度的供应商参与
-  // 事实 = 该秩序任务上出现过的受派钱包命中的在册供应商。
   const activeSupplierWallets = new Set(
     suppliers
       .filter((supplier) =>
@@ -399,7 +406,6 @@ function taskMatched(task: ProductTaskApiDTO, normalizedQuery: string, walletFie
     task.title,
     task.subtitle,
     task.assigneeRole,
-    // assigneeWallet 匹配是钱包→订单枚举通道，仅对已认证读开放。
     ...(walletFieldMatching && task.assigneeWallet ? [task.assigneeWallet] : []),
     task.stageName
   ].some((field) => typeof field === "string" && normalizeSearchText(field).includes(normalizedQuery));
@@ -554,12 +560,6 @@ function orderCandidateFromStateMachine(
   };
 }
 
-/**
- * Order candidates reuse the Product API's zhixu id for the same order so the
- * Store Console never derives a second, divergent id for one plan. The Product
- * API itself resolves schema-registered ids and falls back to the plan-derived
- * id; ambiguity across deployments falls back to that derived id as well.
- */
 async function orderCandidateZhixuId(options: {
   readonly productService: ProductService;
 }, order: StateMachineOrderProjection): Promise<string> {
@@ -569,7 +569,6 @@ async function orderCandidateZhixuId(options: {
       return dto.zhixuId;
     }
   } catch {
-    // Ambiguous or missing projection: keep going, fall back below.
   }
   return zhixuIdForPlan(order.planId);
 }
@@ -605,33 +604,6 @@ function storeProjectionSyncStatus(syncState: ProjectionSyncState): StoreProject
     case "degraded":
       return syncState.syncStatus;
   }
-}
-
-function detailFallbackFromRow(row: StoreZhixuConsoleDTO): ZhixuDetailDTO {
-  return {
-    zhixuId: row.zhixuId,
-    title: row.title,
-    subtitle: row.subtitle,
-    reviewStatus: row.reviewStatus,
-    reviewLabel: row.reviewLabel,
-    riskLevel: row.riskLevel,
-    applicableBusiness: [],
-    excludedBusiness: [],
-    stageCount: row.stageCount,
-    roleSlotCount: row.roleSlotCount,
-    supportedPaymentMethods: [],
-    maintainer: row.maintainer,
-    updatedAt: row.updatedAt,
-    planPublication: row.planPublication,
-    roleSlots: [],
-    dockableModules: [],
-    stages: [],
-    orderPermissionTable: [],
-    proofRows: row.proofRows,
-    createOrderHint: row.lifecycleStatus === "active"
-      ? "创建订单前需要补齐 Product UI schema。"
-      : "该秩序当前不应创建新订单。"
-  };
 }
 
 function zhixuSourceOfTruth(zhixu: StoreZhixuConsoleDTO): StoreSearchSourceOfTruth {

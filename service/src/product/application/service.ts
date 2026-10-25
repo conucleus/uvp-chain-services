@@ -7,7 +7,6 @@ import {
   type ProductExecutorOverlayDTO,
   type ProductOrderDTO,
   type ProductResourceRequirementDTO,
-  type ProductTaskCapabilityPluginDTO,
   type ProductTaskDTO,
   type ProductTimelineEventDTO,
   type SettlementPreviewDTO,
@@ -616,7 +615,6 @@ function zhixuDetailFromPlan(
     roleSlots: [],
     dockableModules: [],
     stages: [],
-    orderPermissionTable: [],
     proofRows: proofRowsFromProof(proofFromStateMachineProof(plan.proof)),
     createOrderHint:
       "订单创建必须使用链上 planId/planHash，并由 Product API 按该 schema 解释普通用户任务。",
@@ -768,67 +766,19 @@ async function productTaskFromStateMachineTask(
     proofFromStateMachineProof(task.proof),
     task,
   );
-  const capabilityResolution = await resolveTaskCapabilityPlugin(
-    task,
-    order,
-    productSchemaResolver,
-  );
-  const proof = proofWithCapabilitySubmitSignal(
-    baseProof,
-    capabilityResolution,
-  );
-  const submitSignals = await submitSignalsForTask(
-    task,
-    order,
-    productSchemaResolver,
-  );
   const productStage = await resolveProductStageForTask(
     task,
     order,
     productSchemaResolver,
   );
   const stageId = productStage?.stageId ?? decodedStageId;
-  const taskAddOnManifest =
-    capabilityResolution?.addOnManifest ??
-    (await resolveAddOnManifestForTask(
-      task,
-      order,
-      productSchemaResolver,
-      productStage?.addOnKind,
-    ));
   const stageExecutorOverlay =
     order?.stageExecutorOverlays[task.stageIdentifier.toLowerCase()];
   const effectiveAssigneeWallet =
-    stageExecutorOverlay?.activeExecutorWallet ??
-    capabilityResolution?.submitterWallet ??
-    task.assigneeWallet;
-  const pluginKind = capabilityResolution?.capabilityPlugin.pluginKind;
-  // evidenceSpec：发布者携带的结构化证据要求（productDto.v1 可选字段），
-  // 任务证据规则的唯一来源；schema 是不透明 JSON，按结构化读取逐字段
-  // 透传，缺失时缺省（消费方不再合成通用槽位），不参与鉴权或状态判定。
-  const evidenceSpec = evidenceSpecFromStage(productStage);
-  const requiredInputs = capabilityResolution
-    ? requiredInputsForCapability(
-        capabilityResolution.capabilityPlugin,
-        task.status === "submitted",
-      )
-    : undefined;
-  const hasGenericAddOn = Boolean(productStage?.addOnKind ?? taskAddOnManifest);
-  const productAddOnKind =
-    productStage?.addOnKind ?? taskAddOnManifest?.addOnKind;
-  const capabilityBacked = Boolean(capabilityResolution) || hasGenericAddOn;
-  const baseProductStatus = capabilityBacked
-    ? mapStateMachineTaskStatus(task.status)
-    : ("blocked" as const);
-  const protocolBlockedReason = blockedReasonForTask(
-    task,
-    capabilityResolution,
-    hasGenericAddOn,
-  );
-  const blockedReason = protocolBlockedReason;
-  const productStatus = blockedReason
-    ? ("blocked" as const)
-    : baseProductStatus;
+    stageExecutorOverlay?.activeExecutorWallet ?? task.assigneeWallet;
+  const productAddOnKind = productStage?.addOnKind;
+  const productStatus = mapStateMachineTaskStatus(task.status);
+  const proof = baseProof;
   const executorOverlayDto = stageExecutorOverlay
     ? productStageExecutorOverlayFromStateMachine(stageExecutorOverlay)
     : undefined;
@@ -844,10 +794,6 @@ async function productTaskFromStateMachineTask(
   const resourceRequirements = order
     ? productResourceRequirementsForStage(order, task.stageIdentifier)
     : [];
-
-  // 任务行的 plan 维度：任务投影自带 planId（plan 作用域展平行），
-  // 缺省回退所属订单投影的 planId——消费方按 (planId, orderId) 复合键
-  // join，裸 orderId 在同号订单跨 plan 复用时定位错订单。
   const taskPlanId = task.planId ?? order?.planId;
 
   return {
@@ -867,33 +813,10 @@ async function productTaskFromStateMachineTask(
     stageId,
     stageName,
     deadline: "以业务约定为准",
-    fundingImpact: pluginKind
-      ? fundingImpactForFulfillment(pluginKind)
-      : productAddOnKind
-        ? fundingImpactForAddOn(productAddOnKind)
-        : "缺少履约插槽能力插件元数据，当前只能展示链上证明，不能提交业务动作",
-  ...(evidenceSpec ? { evidenceSpec } : {}),
+    fundingImpact: productAddOnKind
+      ? fundingImpactForAddOn(productAddOnKind)
+      : "链上证明可查看；业务动作以 V3 config/order 任务投影为准",
     status: productStatus,
-    ...(capabilityResolution
-      ? {
-          performanceSlotId: capabilityResolution.roleSlotId,
-          performanceSlotLabel: capabilityResolution.performanceSlotLabel,
-          businessPersonaLabels: capabilityResolution.businessPersonaLabels,
-          capabilityPlugin: capabilityResolution.capabilityPlugin,
-          ...(taskAddOnManifest ? { addOnManifest: taskAddOnManifest } : {}),
-          primaryActionLabel:
-            capabilityResolution.capabilityPlugin.primaryActionLabel ??
-            primaryActionForFulfillment(
-              capabilityResolution.capabilityPlugin.pluginKind,
-            ),
-        }
-      : {
-          capabilityPlugin: missingTaskCapabilityPlugin(),
-        }),
-    ...(!capabilityResolution && taskAddOnManifest
-      ? { addOnManifest: taskAddOnManifest }
-      : {}),
-    ...(requiredInputs ? { requiredInputs } : {}),
     ...(productAddOnKind ? { addOnKind: productAddOnKind } : {}),
     ...(productStage?.selectableTargets
       ? { selectableTargets: productStage.selectableTargets }
@@ -902,20 +825,11 @@ async function productTaskFromStateMachineTask(
       ? { executorOverlay: productExecutorOverlayDto }
       : {}),
     ...(resourceRequirements.length > 0 ? { resourceRequirements } : {}),
-    ...(blockedReason ? { blockedReason } : {}),
-    ...(pluginKind === "payment_placeholder"
-      ? { settlementPreview: paymentPlaceholderSettlementPreview() }
-      : {}),
-    participantRoleLabel:
-      capabilityResolution?.participantRoleLabel ??
-      displayAssigneeRole(task.assigneeRole),
+    participantRoleLabel: displayAssigneeRole(task.assigneeRole),
     ...(effectiveAssigneeWallet
       ? { participantWallet: effectiveAssigneeWallet }
       : {}),
-    canSubmit:
-      capabilityBacked &&
-      task.status === "ready" &&
-      Boolean(effectiveAssigneeWallet),
+    canSubmit: task.status === "ready" && Boolean(effectiveAssigneeWallet),
     proofSummary: {
       label: task.status === "submitted" ? "已提交链上确认" : "等待提交确认",
       txHash:
@@ -953,7 +867,6 @@ async function productTaskFromStateMachineTask(
     hookName: hookLabel,
     stageIdentifier: stageId,
     chainStatus: task.status,
-    ...(submitSignals.length > 0 ? { submitSignals } : {}),
     readyTxHash: task.createdAt.transactionHash,
     ...(task.status === "submitted" &&
     task.proof.eventName === "SignalSubmitted"
@@ -965,192 +878,6 @@ async function productTaskFromStateMachineTask(
       : {}),
     proof,
     projection: projectionMetadataFromStateMachineTask(task, syncState),
-  };
-}
-
-interface TaskCapabilityResolution {
-  readonly roleSlotId: string;
-  readonly performanceSlotLabel: string;
-  readonly participantRoleLabel: string;
-  readonly businessPersonaLabels: readonly string[];
-  readonly capabilityPlugin: ProductTaskCapabilityPluginDTO;
-  readonly addOnManifest?: NonNullable<
-    ZhixuDetailDTO["roleSlots"][number]["addOnManifest"]
-  >;
-  readonly submitterWallet?: string;
-  readonly submitSignal?: {
-    readonly sourceId: Hex;
-    readonly signalId: Hex;
-  };
-}
-
-interface TaskCapabilityCandidate extends TaskCapabilityResolution {
-  readonly permissionCorroborated: boolean;
-}
-
-async function resolveTaskCapabilityPlugin(
-  task: StateMachineTaskProjection,
-  order?: StateMachineOrderProjection,
-  productSchemaResolver?: ProductSchemaResolver,
-): Promise<TaskCapabilityResolution | undefined> {
-  if (!order) {
-    return undefined;
-  }
-  const zhixu = await zhixuDetailForOrder(
-    order,
-    productSchemaResolver,
-  );
-  if (!zhixu || zhixu.roleSlots.length === 0) {
-    return undefined;
-  }
-
-  const decodedStageId = displayStageId(task.stageIdentifier);
-  const stageIds = new Set([
-    decodedStageId,
-    task.stageIdentifier.toLowerCase(),
-  ]);
-  const corroboratingRoleSlotIds = new Set(
-    zhixu.orderPermissionTable
-      .filter((entry) => taskStageMatches(entry.stageId, stageIds))
-      .map((entry) => entry.roleSlotId),
-  );
-  const candidates: TaskCapabilityCandidate[] = [];
-
-  for (const slot of zhixu.roleSlots) {
-    for (const plugin of slot.capabilityPlugins ?? []) {
-      if (
-        !plugin.stageIds.some((stageId) => taskStageMatches(stageId, stageIds))
-      ) {
-        continue;
-      }
-      const capabilityPlugin = taskCapabilityPluginFromSlot(
-        plugin,
-        slot.slotId,
-      );
-      const submitter = submitterForCapability(
-        order,
-        zhixu,
-        slot.slotId,
-        stageIds,
-      );
-      candidates.push({
-        roleSlotId: slot.slotId,
-        performanceSlotLabel: slot.performanceSlotLabel ?? slot.label,
-        participantRoleLabel: slot.label,
-        businessPersonaLabels: slot.businessPersonaLabels ?? [],
-        capabilityPlugin,
-        ...(slot.addOnManifest ? { addOnManifest: slot.addOnManifest } : {}),
-        ...(submitter
-          ? {
-              submitterWallet: submitter.wallet,
-              submitSignal: {
-                sourceId: submitter.sourceId,
-                signalId: submitter.signalId,
-              },
-            }
-          : {}),
-        permissionCorroborated: corroboratingRoleSlotIds.has(slot.slotId),
-      });
-    }
-  }
-
-  return candidates.sort(compareTaskCapabilityCandidates)[0];
-}
-
-function submitterForCapability(
-  order: StateMachineOrderProjection,
-  zhixu: ZhixuDetailDTO,
-  roleSlotId: string,
-  stageIds: ReadonlySet<string>,
-):
-  | { readonly wallet: string; readonly sourceId: Hex; readonly signalId: Hex }
-  | undefined {
-  const entries = zhixu.orderPermissionTable
-    .filter(
-      (entry) =>
-        entry.roleSlotId === roleSlotId &&
-        entry.source.length > 0 &&
-        taskStageMatches(entry.stageId, stageIds),
-    )
-    .sort(compareCapabilityPermissionEntries);
-
-  for (const entry of entries) {
-    const sourceId = keccak256(stringToBytes(entry.source)).toLowerCase();
-    const signalId = keccak256(stringToBytes(entry.signalName)).toLowerCase();
-    // 解析当前在任提交者而非插入序首个：投影维护的是"当前有效授权集"
-    //（执行者轮换后旧执行者的委任伴生授权已被收回），多授权并存时取
-    // 最新落链的一笔——有委任在任时即现任执行者。
-    const authorization = Object.values(order.authorizations)
-      .filter(
-        (item) =>
-          item.sourceId.toLowerCase() === sourceId &&
-          item.signalId.toLowerCase() === signalId,
-      )
-      .sort((left, right) => compareChainPointers(left.authorizedAt, right.authorizedAt))
-      .at(-1);
-    if (authorization) {
-      return {
-        wallet: authorization.submitter,
-        sourceId: sourceId as Hex,
-        signalId: signalId as Hex,
-      };
-    }
-  }
-  return undefined;
-}
-
-async function submitSignalsForTask(
-  task: StateMachineTaskProjection,
-  order: StateMachineOrderProjection | undefined,
-  productSchemaResolver: ProductSchemaResolver | undefined,
-): Promise<readonly { readonly signalName: string; readonly sourceId: Hex; readonly signalId: Hex }[]> {
-  if (!order) {
-    return [];
-  }
-  const zhixu = await zhixuDetailForOrder(order, productSchemaResolver);
-  if (!zhixu) {
-    return [];
-  }
-  const decodedStageId = displayStageId(task.stageIdentifier);
-  const stageIds = new Set([decodedStageId, task.stageIdentifier.toLowerCase()]);
-  const allowed = new Set(
-    (task.submitSignals ?? []).map(
-      (signal) => `${signal.sourceId.toLowerCase()}:${signal.signalId.toLowerCase()}`,
-    ),
-  );
-  const seen = new Set<string>();
-  const candidates: { signalName: string; sourceId: Hex; signalId: Hex }[] = [];
-  for (const entry of zhixu.orderPermissionTable) {
-    if (!entry.source || !entry.signalName || !taskStageMatches(entry.stageId, stageIds)) {
-      continue;
-    }
-    const sourceId = keccak256(stringToBytes(entry.source)).toLowerCase() as Hex;
-    const signalId = keccak256(stringToBytes(entry.signalName)).toLowerCase() as Hex;
-    const key = `${sourceId}:${signalId}`;
-    if (allowed.size > 0 && !allowed.has(key)) {
-      continue;
-    }
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    candidates.push({ signalName: entry.signalName, sourceId, signalId });
-  }
-  return candidates;
-}
-
-function proofWithCapabilitySubmitSignal(
-  proof: ProductChainProofDTO,
-  capabilityResolution?: TaskCapabilityResolution,
-): ProductChainProofDTO {
-  const submitSignal = capabilityResolution?.submitSignal;
-  if (!submitSignal || (proof.sourceId && proof.signalId)) {
-    return proof;
-  }
-  return {
-    ...proof,
-    ...(proof.sourceId ? {} : { sourceId: submitSignal.sourceId }),
-    ...(proof.signalId ? {} : { signalId: submitSignal.signalId }),
   };
 }
 
@@ -1167,27 +894,6 @@ function proofWithTaskSubmitSignal(
     ...(proof.sourceId ? {} : { sourceId: submitSignal.sourceId }),
     ...(proof.signalId ? {} : { signalId: submitSignal.signalId }),
   };
-}
-
-function compareCapabilityPermissionEntries(
-  left: ZhixuDetailDTO["orderPermissionTable"][number],
-  right: ZhixuDetailDTO["orderPermissionTable"][number],
-): number {
-  return (
-    permissionSignalPriority(left.signalName) -
-      permissionSignalPriority(right.signalName) ||
-    left.permissionId.localeCompare(right.permissionId)
-  );
-}
-
-function permissionSignalPriority(signalName: string): number {
-  if (signalName.endsWith(".confirm_stage")) {
-    return 0;
-  }
-  if (signalName.includes("confirm_stage")) {
-    return 1;
-  }
-  return 2;
 }
 
 async function resolveProductStageForTask(
@@ -1212,51 +918,6 @@ async function resolveProductStageForTask(
   ]);
   return zhixu.stages.find((stage) =>
     taskStageMatches(stage.stageId, stageIds),
-  );
-}
-
-async function resolveAddOnManifestForTask(
-  task: StateMachineTaskProjection,
-  order?: StateMachineOrderProjection,
-  productSchemaResolver?: ProductSchemaResolver,
-  preferredAddOnKind?: ZhixuStageDTO["addOnKind"],
-): Promise<
-  NonNullable<ZhixuDetailDTO["roleSlots"][number]["addOnManifest"]> | undefined
-> {
-  if (!order) {
-    return undefined;
-  }
-  const zhixu = await zhixuDetailForOrder(
-    order,
-    productSchemaResolver,
-  );
-  if (!zhixu) {
-    return undefined;
-  }
-  const decodedStageId = displayStageId(task.stageIdentifier);
-  const stageIds = new Set([
-    decodedStageId,
-    decodedStageId.toLowerCase(),
-    task.stageIdentifier.toLowerCase(),
-  ]);
-  const manifests = zhixu.roleSlots
-    .map((slot) => slot.addOnManifest)
-    .filter(
-      (
-        manifest,
-      ): manifest is NonNullable<
-        ZhixuDetailDTO["roleSlots"][number]["addOnManifest"]
-      > =>
-        Boolean(manifest) &&
-        manifest!.stageBindings.some((stageId) =>
-          taskStageMatches(stageId, stageIds),
-        ),
-    );
-  return (
-    manifests.find(
-      (manifest) =>
-        preferredAddOnKind && manifest.addOnKind === preferredAddOnKind,
-    ) ?? manifests[0]
   );
 }
 
@@ -1288,20 +949,7 @@ async function productSchemaForOrder(
     order.planId,
     planHash,
   );
-  return schema && isExplicitStoreProductSchema(schema) ? schema : undefined;
-}
-
-function isExplicitStoreProductSchema(schema: StoreProductSchemaDTO): boolean {
-  return (
-    schema.validation.ok &&
-    schema.roleSlots.every(
-      (slot) =>
-        (slot.capabilityPlugins ?? []).length > 0 &&
-        (slot.capabilityPlugins ?? []).every(
-          (plugin) => plugin.source === "explicit",
-        ),
-    )
-  );
+  return schema;
 }
 
 function zhixuDetailFromProductSchema(
@@ -1316,13 +964,6 @@ function zhixuDetailFromProductSchema(
     artifactHash: schema.artifactHash,
   } as const;
   const reviewStatus = schema.validation.ok ? "approved" : "unreviewed";
-  const paymentMethods = Array.from(
-    new Set(
-      schema.capabilityPlugins
-        .filter((plugin) => plugin.pluginKind === "payment_placeholder")
-        .map(() => "ERC20 stablecoin adapter"),
-    ),
-  );
   const zhixuId =
     schema.zhixuId ?? zhixuIdFromPlanIdentity(schema.planId, schema.planHash);
 
@@ -1340,17 +981,13 @@ function zhixuDetailFromProductSchema(
     excludedBusiness: [],
     stageCount: schema.stages.length,
     roleSlotCount: schema.roleSlots.length,
-    supportedPaymentMethods: paymentMethods,
+    supportedPaymentMethods: [],
     maintainer: schema.maintainer,
     updatedAt: schema.updatedAt,
     planPublication,
     roleSlots: schema.roleSlots,
     dockableModules: dockableModulesFromArtifact(schema.onchainHookPlanArtifact),
     stages: schema.stages,
-    orderPermissionTable: schema.orderPermissionTable,
-    ...(schema.createOrderTrigger
-      ? { createOrderTrigger: schema.createOrderTrigger }
-      : {}),
     proofRows: [
       { label: "秩序编号", value: zhixuId },
       { label: "Plan ID", value: schema.planId },
@@ -1464,25 +1101,6 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function taskCapabilityPluginFromSlot(
-  plugin: NonNullable<
-    ZhixuDetailDTO["roleSlots"][number]["capabilityPlugins"]
-  >[number],
-  roleSlotId: string,
-): ProductTaskCapabilityPluginDTO {
-  return {
-    pluginKind: plugin.pluginKind,
-    source: plugin.source,
-    roleSlotId,
-    ...(plugin.title ? { title: plugin.title } : {}),
-    ...(plugin.summary ? { summary: plugin.summary } : {}),
-    ...(plugin.primaryActionLabel
-      ? { primaryActionLabel: plugin.primaryActionLabel }
-      : {}),
-    ...(plugin.inputPolicy ? { inputPolicy: plugin.inputPolicy } : {}),
-  };
-}
-
 function taskStageMatches(
   stageId: string,
   taskStageIds: ReadonlySet<string>,
@@ -1494,108 +1112,6 @@ function taskStageMatches(
     taskStageIds.has(normalizedStageId) ||
     taskStageIds.has(hashedStageId)
   );
-}
-
-function compareTaskCapabilityCandidates(
-  left: TaskCapabilityCandidate,
-  right: TaskCapabilityCandidate,
-): number {
-  if (left.permissionCorroborated !== right.permissionCorroborated) {
-    return left.permissionCorroborated ? -1 : 1;
-  }
-  if (left.capabilityPlugin.source !== right.capabilityPlugin.source) {
-    return left.capabilityPlugin.source === "explicit"
-      ? -1
-      : right.capabilityPlugin.source === "explicit"
-        ? 1
-        : 0;
-  }
-  return 0;
-}
-
-/**
- * ProductTaskDTO.evidenceSpec 的本仓结构镜像（productDto.v1 可选字段，
- * 不 import protocol 包，跟随任务 DTO 的内联定义方式）。
- */
-export interface ProductTaskEvidenceSpecDTO {
-  readonly key: string;
-  readonly label: string;
-  readonly inputKind?: "file" | "text" | "date";
-  readonly accept?: readonly string[];
-  readonly required?: boolean;
-  readonly description?: string;
-}
-
-/**
- * schema 是不透明 JSON，发布者携带的 evidenceSpec 不在 protocol DTO 类型上；
- * 按结构化读取并做最小形状过滤（key/label 非空字符串的条目保留），
- * 避免逐字段投影静默丢掉发布者数据。
- */
-export function normalizeEvidenceSpec(
-  value: unknown,
-): readonly ProductTaskEvidenceSpecDTO[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const entries = value.filter(isEvidenceSpecEntry) as readonly ProductTaskEvidenceSpecDTO[];
-  return entries.length > 0 ? entries : undefined;
-}
-
-function isEvidenceSpecEntry(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  return (
-    typeof record.key === "string" &&
-    record.key.trim().length > 0 &&
-    typeof record.label === "string" &&
-    record.label.trim().length > 0
-  );
-}
-
-function evidenceSpecFromStage(
-  stage: ZhixuStageDTO | undefined,
-): readonly ProductTaskEvidenceSpecDTO[] | undefined {
-  return normalizeEvidenceSpec(
-    (stage as { readonly evidenceSpec?: unknown } | undefined)?.evidenceSpec,
-  );
-}
-
-function requiredInputsForCapability(
-  plugin: ProductTaskCapabilityPluginDTO,
-  completed: boolean,
-): NonNullable<ProductTaskDTO["requiredInputs"]> {
-  if (!plugin.inputPolicy) {
-    return requiredInputsForFulfillment(plugin.pluginKind, completed);
-  }
-  return plugin.inputPolicy.map((input) => ({
-    ...input,
-    completed: completed || input.completed,
-  }));
-}
-
-function missingTaskCapabilityPlugin(): ProductTaskCapabilityPluginDTO {
-  return {
-    pluginKind: "evidence_submission",
-    source: "missing",
-    title: "缺少履约插件配置",
-    summary: "该链上待办没有匹配到秩序 metadata 中的履约插槽能力插件。",
-  };
-}
-
-function blockedReasonForTask(
-  task: StateMachineTaskProjection,
-  capabilityResolution: TaskCapabilityResolution | undefined,
-  hasGenericAddOn = false,
-): string | undefined {
-  if (task.status === "cancelled") {
-    return "链上条件已取消，当前任务不能继续提交";
-  }
-  if (!capabilityResolution && !hasGenericAddOn) {
-    return "缺少履约插槽能力插件元数据，Product API 不会根据阶段或角色文案猜测可提交动作。";
-  }
-  return undefined;
 }
 
 function primaryActionForFulfillment(kind: FulfillmentPluginKind): string {
@@ -2248,7 +1764,7 @@ async function explicitStoreSchemaForPlan(
     return undefined;
   }
   const schema = await productSchemaResolver.getProductSchemaByPlan(plan.planId, plan.planHash);
-  return schema && isExplicitStoreProductSchema(schema) ? schema : undefined;
+  return schema;
 }
 
 async function explicitStoreSchemaForPlanId(
@@ -2260,7 +1776,7 @@ async function explicitStoreSchemaForPlanId(
     return undefined;
   }
   const schema = await productSchemaResolver.getProductSchemaByPlan(planId, planHash);
-  return schema && isExplicitStoreProductSchema(schema) ? schema : undefined;
+  return schema;
 }
 
 function planKey(planId: string, planHash: string): string {

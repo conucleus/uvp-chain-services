@@ -55,7 +55,6 @@ type ParsedStoreAuditQuery =
   | { readonly ok: false; readonly response: ApiResponse };
 
 export function createStoreConsoleRouteModule(options: {
-  /** 仅显式 local 允许自报钱包；缺省/非 local 无会话身份即 401。 */
   readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
 } = {}): RouteModule {
   return {
@@ -63,7 +62,6 @@ export function createStoreConsoleRouteModule(options: {
       if (request.method === "GET" && request.pathname === "/store/session") {
         const access = await context.storeIdentityProvider.resolve(request.headers);
         let session = storeSessionFromAccess(access);
-        // 有钱包会话时叠加锚定地址与账号地址表。
         const walletSession = await resolveWalletSessionView(request, context.sessionService);
         if (walletSession && access.anchoredAddress) {
           session = storeSessionDtoWithWalletOverlay(session, {
@@ -86,10 +84,6 @@ export function createStoreConsoleRouteModule(options: {
       }
 
       if (request.method === "GET" && request.pathname === "/store/search") {
-        // 供应商目录读门槛（与 /store/suppliers 同口径）：供应商命中暴露
-        // 钱包精确匹配与审核状态，匿名不可枚举。type=supplier 显式查询
-        // 未认证即 401/403；all 查询对匿名静默剔除供应商命中。订单的
-        // assigneeWallet 匹配同口径：匿名 q=钱包串 不得枚举钱包→订单关联。
         const type = parseStoreSearchType(request.query?.type);
         const supplierOnly = type === "supplier";
         const access = await context.storeIdentityProvider.resolve(request.headers);
@@ -104,8 +98,6 @@ export function createStoreConsoleRouteModule(options: {
         const body = await context.storeConsoleService.search(parseStoreSearchQuery(request.query), {
           walletFieldMatching: authenticatedRead
         });
-        // search 过滤已下架——与 /store/zhixus 的
-        // 口径一致（运营方可见，便于治理观察）。
         const filtered = await filterDelistedSearchResults(request, context, body);
         const record = filtered as { readonly results?: readonly { readonly resultType?: string }[] };
         if (!authenticatedRead && record?.results?.some((result) => result.resultType === "supplier")) {
@@ -134,10 +126,6 @@ export function createStoreConsoleRouteModule(options: {
         if (!isStoreAuthorizationResult(authorization)) {
           return authorization;
         }
-        // 审计流租户隔离：非管理员（reader/operator）只能读到自己
-        // actor 名下的记录——运营观察面的全局流是跨运营方枚举桥，只有
-        // canAdmin（store_admin/governance_admin）保留全量视角。显式点名
-        // 他人 actor 直接 403，不静默返回空集。
         let query: StoreAuditQuery = parsedQuery.query;
         if (!authorization.access.canAdmin) {
           const viewerActor = authorization.access.principalId;
@@ -202,10 +190,6 @@ export function createStoreConsoleRouteModule(options: {
 
       const storeOrderCandidatesMatch = /^\/store\/orders\/([^/]+)\/candidates$/.exec(request.pathname);
       if (request.method === "GET" && storeOrderCandidatesMatch) {
-        // 歧义订单消歧页是产品向能力（/store/search 的 order 结果与跨部署
-        // 候选页消费它），候选只携带部署级元数据（链/状态机地址/状态），
-        // 不含钱包或提交者映射——要求会话锚定钱包身份即可，匿名不可枚举。
-        // 运营观察面（observation/replay/audit-summary）才是能力门管辖面。
         const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
         if (!wallet.ok) {
           return wallet.response;
@@ -213,34 +197,6 @@ export function createStoreConsoleRouteModule(options: {
         return {
           status: 200,
           body: await context.storeConsoleService.listOrderCandidates(decodePathParameter(storeOrderCandidatesMatch[1] ?? ""))
-        };
-      }
-
-      const productSchemaMatch = /^\/store\/product-schemas\/([^/]+)\/([^/]+)$/.exec(request.pathname);
-      if (request.method === "GET" && productSchemaMatch) {
-        // 完整 Product Schema 是发布者创作资产（含能力插件/证据要求），
-        // 匿名不可读——与草稿面同口径要求 operator 级能力。
-        const capability = "store.draft.compile";
-        const resource = { type: "store_zhixu_draft" };
-        const authorization = await authorizeStoreCapability(context, request, capability, resource);
-        if (!isStoreAuthorizationResult(authorization)) {
-          return authorization;
-        }
-        // 路径 planHash 是链侧身份（runtime 域）；store 侧按
-        // schema.planHash join（见 findProductSchemaByPlan）。
-        const productSchema = await context.storeZhixuDraftWorkflowService.getProductSchemaByPlan(
-          decodePathParameter(productSchemaMatch[1] ?? ""),
-          decodePathParameter(productSchemaMatch[2] ?? "")
-        );
-        if (!productSchema) {
-          return {
-            status: 404,
-            body: { error: "store_product_schema_not_found" }
-          };
-        }
-        return {
-          status: 200,
-          body: { productSchema }
         };
       }
 
@@ -269,15 +225,12 @@ export function createStoreConsoleRouteModule(options: {
             body: { error: "store_zhixu_not_found" }
           };
         }
-        // 下架抑制与列表/search 同口径：delisted 对非运营方 404
-        //（不泄露存在），运营方保留治理可见性。
         if (await zhixuDelistedForRequester(request, context, zhixu.planId)) {
           return {
             status: 404,
             body: { error: "store_zhixu_not_found" }
           };
         }
-        // 详情页叠加锚核验 + listing 状态 + 装修数据。
         const overlay = await buildStoreZhixuOverlay(request, context, zhixu.planId);
         return {
           status: 200,
@@ -303,12 +256,6 @@ async function handleStoreRuntimeRequest(
       ? /^\/store\/orders\/([^/]+)\/(?:observation|replay|audit-summary)$/.exec(request.pathname)
       : null;
     if (isRuntimeSummary || zhixuOrdersMatch || storeOrderRuntimeMatch) {
-      // /store 运行时读（summary/订单观察/回放/审计汇总）是无参与者过滤
-      // 的运营观察面：响应含全部订单的 authorizations/signals submitter
-      // 地址、tasks assigneeWallet 与参与者钱包映射。这不是参与者自见
-      // 数据——任意第三方钱包 SIWE 登录不因"有锚定会话"即得全量运营
-      // 数据；与 /store/audit 同能力门（store.audit.read：运营方/管理员
-      // 钱包会话，或同级 dev/JWT 身份）。
       const capability = "store.audit.read";
       const authorization = await authorizeStoreCapability(context, request, capability, {
         type: "store_runtime"
@@ -327,8 +274,6 @@ async function handleStoreRuntimeRequest(
 
     if (zhixuOrdersMatch) {
       const zhixuId = decodePathParameter(zhixuOrdersMatch[1] ?? "");
-      // status 过滤词表校验——未知 status 400，
-      // 不静默返回空集。
       if (request.query?.status && !isSupportedStoreOrderFilterStatus(request.query.status)) {
         return {
           status: 400,
@@ -436,8 +381,6 @@ async function handleStoreZhixuVersionRequest(
     const listMatch = /^\/store\/zhixu-series\/([^/]+)\/versions$/.exec(request.pathname);
     if (request.method === "GET" && listMatch) {
       const seriesId = decodePathParameter(listMatch[1] ?? "");
-      // 版本清单是运营台数据（版本状态、plan 锚、订单计数），与运行时
-      // 观察面同门（store.audit.read）——不挂能力门即匿名可枚举。
       const capability: StoreCapability = "store.audit.read";
       const resource = { type: "store_zhixu_version", parentId: seriesId };
       const authorization = await authorizeStoreCapability(context, request, capability, resource);
@@ -466,7 +409,6 @@ async function handleStoreZhixuVersionRequest(
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
-      // 红线：版本激活/弃用（敏感写）要求会话已锚定地址。
       const anchored = await requireAnchoredStoreAddress(context, request, resource);
       if (!isAnchoredStoreAuthorizationResult(anchored)) {
         return anchored;
@@ -558,7 +500,6 @@ async function handleStoreZhixuDraftRequest(
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
-      // 红线：草稿流程写操作要求会话已锚定地址（能力通过但无锚定即 403）。
       const anchored = await requireAnchoredStoreAddress(context, request, { type: "store_zhixu_draft" });
       if (!isAnchoredStoreAuthorizationResult(anchored)) {
         return anchored;
@@ -584,77 +525,20 @@ async function handleStoreZhixuDraftRequest(
       }
     }
 
-    const productSchemaMatch = /^\/store\/zhixu-drafts\/([^/]+)\/product-schema(?:\/(validate))?$/.exec(
-      request.pathname
-    );
-    if (productSchemaMatch) {
-      const draftId = decodePathParameter(productSchemaMatch[1] ?? "");
-      const action = productSchemaMatch[2];
-      if (request.method === "GET" && !action) {
-        // 完整 Product Schema（DTO 含 compilePreview 材料）匿名不可读。
-        const capability = "store.draft.compile";
-        const resource = { type: "store_zhixu_draft", id: draftId };
-        const authorization = await authorizeStoreCapability(context, request, capability, resource);
-        if (!isStoreAuthorizationResult(authorization)) {
-          return authorization;
-        }
-        const productSchema = await context.storeZhixuDraftWorkflowService.getProductSchema(draftId);
-        if (!productSchema) {
-          return {
-            status: 404,
-            body: { error: "store_product_schema_not_found" }
-          };
-        }
-        return {
-          status: 200,
-          body: { productSchema }
-        };
+    const publishMetadataMatch = /^\/store\/zhixu-drafts\/([^/]+)\/publish-metadata$/.exec(request.pathname);
+    if (request.method === "GET" && publishMetadataMatch) {
+      const draftId = decodePathParameter(publishMetadataMatch[1] ?? "");
+      const capability = "store.draft.compile";
+      const resource = { type: "store_zhixu_draft", id: draftId };
+      const authorization = await authorizeStoreCapability(context, request, capability, resource);
+      if (!isStoreAuthorizationResult(authorization)) {
+        return authorization;
       }
-      if (request.method === "PUT" && !action) {
-        const capability = "store.draft.schema.save";
-        const resource = { type: "store_zhixu_draft", id: draftId };
-        const authorization = await authorizeStoreCapability(context, request, capability, resource);
-        if (!isStoreAuthorizationResult(authorization)) {
-          return authorization;
-        }
-        const anchored = await requireAnchoredStoreAddress(context, request, resource);
-        if (!isAnchoredStoreAuthorizationResult(anchored)) {
-          return anchored;
-        }
-        try {
-          const body = await context.storeZhixuDraftWorkflowService.updateProductSchema(draftId, request.body);
-          await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
-          return { status: 200, body };
-        } catch (error) {
-          await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
-          throw error;
-        }
+      const publishMetadata = await context.storeZhixuDraftWorkflowService.getPublishMetadata(draftId);
+      if (!publishMetadata) {
+        return { status: 404, body: { error: "store_publish_metadata_not_found" } };
       }
-      if (request.method === "POST" && action === "validate") {
-        // validate 无 body 时校验已存草稿并回显 stageId/roleSlotId/path——
-        // 与 GET/PUT 同资源同门（能力 + 锚定），否则匿名可枚举草稿结构。
-        const validateCapability: StoreCapability = "store.draft.compile";
-        const validateResource = { type: "store_zhixu_draft", id: draftId };
-        const validateAuthorization = await authorizeStoreCapability(context, request, validateCapability, validateResource);
-        if (!isStoreAuthorizationResult(validateAuthorization)) {
-          return validateAuthorization;
-        }
-        const validateAnchored = await requireAnchoredStoreAddress(context, request, validateResource);
-        if (!isAnchoredStoreAuthorizationResult(validateAnchored)) {
-          return validateAnchored;
-        }
-        try {
-          const validation = await context.storeZhixuDraftWorkflowService.validateProductSchema(draftId, request.body);
-          await recordStoreCapabilitySuccess(context, request, validateAuthorization.access, validateCapability, validateResource);
-          return {
-            status: 200,
-            body: { validation }
-          };
-        } catch (error) {
-          await recordStoreCapabilityFailure(context, request, validateAuthorization.access, validateCapability, validateResource, error);
-          throw error;
-        }
-      }
+      return { status: 200, body: { publishMetadata } };
     }
 
     const draftMatch = /^\/store\/zhixu-drafts\/([^/]+)(?:\/(compile-preview|submit-review))?$/.exec(
@@ -671,7 +555,6 @@ async function handleStoreZhixuDraftRequest(
     const action = draftMatch[2];
 
     if (request.method === "GET" && !action) {
-      // 草稿 DTO 含 compilePreview 与完整 schema 材料，匿名不可读。
       const capability = "store.draft.compile";
       const resource = { type: "store_zhixu_draft", id: draftId };
       const authorization = await authorizeStoreCapability(context, request, capability, resource);
@@ -722,9 +605,6 @@ async function handleStoreZhixuDraftRequest(
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
-      // 治理身份不可伪造：只有真实携带 governance principal 的会话
-      //（dev admin 头或 JWT governance_admin 角色）可以提交 zhixu 审核；
-      // 不再把 principalId/roles[0] 包装成 GovernancePrincipal。
       const governancePrincipal = authorization.access.governancePrincipal;
       if (!governancePrincipal) {
         await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, new Error("governance_principal_required"));
@@ -736,7 +616,6 @@ async function handleStoreZhixuDraftRequest(
           }
         };
       }
-      // 红线：审核写操作要求会话已锚定地址（治理权威 + 锚定钱包双门槛）。
       const anchored = await requireAnchoredStoreAddress(context, request, resource);
       if (!isAnchoredStoreAuthorizationResult(anchored)) {
         return anchored;
@@ -815,9 +694,6 @@ async function storeVersionConfirmationError(
   action: string | undefined
 ): Promise<StoreConfirmationError | undefined> {
   try {
-    // 确认期望值只取服务端记录——调用方自报的 planId/planHash 不能
-    // 同时充当期望值与确认值（自我印证）。版本记录尚不存在时（activate
-    // 顺带建版本），期望锚取链投影核对后的值，仍不以 body 为准。
     const body = optionalBodyRecord(request.body);
     const version = (await context.storeZhixuVersionService.listVersions(seriesId))
       .versions.find((item) => item.versionId === versionId);
@@ -845,7 +721,6 @@ async function storeVersionConfirmationError(
       isPlanRegisteredProjection(plan)
     );
     if (!planProjected) {
-      // 声称的锚在链投影中不存在（或尚未注册）：期望值无从服务端证明。
       throw new StoreConfirmationError(
         "store_confirmation_mismatch",
         "claimed plan anchors are not registered in the chain projection",
@@ -1034,7 +909,6 @@ async function resolveWalletSessionView(
   return resolved?.session;
 }
 
-/** 下架 listing 在目录中不可见（运营方除外，便于治理观察）。 */
 async function filterDelistedZhixus(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1],
@@ -1062,7 +936,6 @@ async function filterDelistedZhixus(
   return { ...record, zhixus, ...(isOperator ? { delistedPlanIds: [...delisted] } : {}) };
 }
 
-/** search 结果中的 zhixu 命中同样过滤已下架（非运营方）。 */
 async function filterDelistedSearchResults(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1],
@@ -1099,7 +972,6 @@ async function filterDelistedSearchResults(
   return { ...record, results };
 }
 
-/** zhixu 详情端点与列表/search 同口径的下架抑制：非运营方 404。 */
 async function zhixuDelistedForRequester(
   request: ApiRequest,
   context: Parameters<RouteModule["handle"]>[1],
@@ -1156,8 +1028,6 @@ async function buildStoreZhixuOverlay(
   }
   let decorationBlock: Pick<StoreZhixuOverlayDTO, "decoration" | "viewerPermission"> | undefined;
   if (context.decorationService) {
-    // 展示层叠加：plan 尚未投影时静默缺省（详情本身仍是链投影视图），
-    // 不得因为装修域查不到 plan 而 404 掉整个详情页。
     try {
       const access = await context.storeIdentityProvider.resolve(request.headers);
       decorationBlock = {

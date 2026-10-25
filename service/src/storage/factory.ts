@@ -6,11 +6,32 @@ import {
   SqliteEscrowStore,
   type EscrowProjectionStore
 } from "../escrow/index.js";
+import {
+  MemoryBindingStore,
+  SqliteBindingStore,
+  type BindingStore
+} from "../binding/index.js";
+import {
+  MemorySettlementStore,
+  SqliteSettlementStore,
+  type SettlementStore
+} from "../settlement/index.js";
+import {
+  MemoryRuntimeStore,
+  SqliteRuntimeStore,
+  type RuntimeStore
+} from "../runtime/index.js";
 import { InMemoryEvidenceMetadataStore, type EvidenceMetadataStore } from "../evidence/store.js";
 import { PostgresEvidenceStore } from "../evidence/postgres-store.js";
 import { InMemoryGovernanceStore, type GovernanceStore } from "../governance/store.js";
 import { PostgresGovernanceStore } from "../governance/postgres-store.js";
 import { SqliteGovernanceStore } from "../governance/sqlite-store.js";
+import {
+  MemoryOrderV3Store,
+  PostgresOrderV3Store,
+  SqliteOrderV3Store,
+  type OrderV3Store
+} from "../order/v3/index.js";
 import { PostgresProductBffStore } from "../product/query/bff/postgres-store.js";
 import { SqliteProductBffStore } from "../product/query/bff/sqlite-store.js";
 import { MemoryProductBffStore, type ProductBffStore } from "../product/query/bff/store.js";
@@ -134,6 +155,14 @@ export interface CreateProjectionStoreOptions {
 export interface ChainServicesStores {
   readonly projectionStore: ProjectionStore;
   readonly productBffStore: ProductBffStore;
+  /** V3 订单域（配置注册/草稿/阶段/slot/邀请/订单）持久化 store。 */
+  readonly orderV3Store: OrderV3Store;
+  /** V3 tranche binding/escrow intent 持久化 store。 */
+  readonly bindingStore: BindingStore;
+  /** V3 settlement instruction ledger 持久化 store。 */
+  readonly settlementStore: SettlementStore;
+  /** V3 time/hook runtime 持久化 store。 */
+  readonly runtimeStore: RuntimeStore;
   /** V1 订单要求包（声明/合意）持久化 store。 */
   readonly orderRequirementsStore: OrderRequirementsStore;
   /** StageEscrow V2 tranche 投影（链事件重放可重建）。 */
@@ -204,6 +233,10 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
       return {
         projectionStore: new MemoryProjectionStore(),
         productBffStore: new MemoryProductBffStore(),
+        orderV3Store: new MemoryOrderV3Store(),
+        bindingStore: new MemoryBindingStore(),
+        settlementStore: new MemorySettlementStore(),
+        runtimeStore: new MemoryRuntimeStore(),
         orderRequirementsStore: new MemoryOrderRequirementsStore(),
         escrowStore: new MemoryEscrowStore(),
         evidenceMetadataStore: new InMemoryEvidenceMetadataStore(),
@@ -241,6 +274,22 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
           migrations
         }),
         productBffStore: new SqliteProductBffStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        orderV3Store: new SqliteOrderV3Store({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        bindingStore: new SqliteBindingStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        settlementStore: new SqliteSettlementStore({
+          databaseUrl: options.database.url,
+          migrations
+        }),
+        runtimeStore: new SqliteRuntimeStore({
           databaseUrl: options.database.url,
           migrations
         }),
@@ -338,6 +387,10 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
           await closeStores([
             stores.projectionStore,
             stores.productBffStore,
+            stores.orderV3Store,
+            stores.bindingStore,
+            stores.settlementStore,
+            stores.runtimeStore,
             stores.orderRequirementsStore,
             stores.escrowStore,
             stores.evidenceMetadataStore,
@@ -382,6 +435,13 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
             : {})
         }),
         productBffStore: new PostgresProductBffStore({ database }),
+        orderV3Store: new PostgresOrderV3Store({ database }),
+        // V3 binding/settlement/runtime have no postgres adapters yet. Server
+        // refuses to start V3 escrow projection on postgres; without escrow
+        // these memory stores only back read surfaces (reported as a gap).
+        bindingStore: new MemoryBindingStore(),
+        settlementStore: new MemorySettlementStore(),
+        runtimeStore: new MemoryRuntimeStore(),
         orderRequirementsStore: new PostgresOrderRequirementsStore({ database }),
         escrowStore: new PostgresEscrowStore({ database }),
         evidenceMetadataStore: new PostgresEvidenceStore({ database }),

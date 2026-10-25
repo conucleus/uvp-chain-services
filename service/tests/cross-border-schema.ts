@@ -22,14 +22,7 @@ export const crossBorderStoreProductSchema: StoreProductSchemaDTO = {
   planId: crossBorderPlanIds.planId,
   planHash: crossBorderPlanIds.planHash,
   artifactHash: crossBorderPlanIds.artifactHash,
-  ...(demoZhixuDetail.createOrderTrigger
-    ? { createOrderTrigger: demoZhixuDetail.createOrderTrigger }
-    : {}),
   roleSlots: demoZhixuDetail.roleSlots,
-  orderPermissionTable: demoZhixuDetail.orderPermissionTable,
-  capabilityPlugins: demoZhixuDetail.roleSlots.flatMap(
-    (slot) => slot.capabilityPlugins ?? []
-  ),
   businessPersonaLabels: demoZhixuDetail.applicableBusiness,
   stages: demoZhixuDetail.stages,
   selectorBindings: [],
