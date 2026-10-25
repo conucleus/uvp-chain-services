@@ -7,7 +7,7 @@ import {
 import {
   type StoreProductSchemaDTO
 } from "@uvp-eth/product-dto";
-import { crossBorderPlanIds } from "@uvp-eth/product-dto/fixtures";
+import { crossBorderPlanIds } from "./fixtures/business/index.js";
 import { createApiRouter } from "../src/api/routes.js";
 import {
   createGovernanceService,

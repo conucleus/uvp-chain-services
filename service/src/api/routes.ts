@@ -10,13 +10,8 @@ import {
   createOrderV3Service,
   MemoryOrderV3Store,
 } from "../order/v3/index.js";
-import { MemoryExecutorInstructionStore, type ExecutorInstructionStore } from "../executor/instruction.js";
 import { MemoryProductBffStore, type ProductBffStore } from "../product/query/bff/store.js";
 import { createOrderRequirementsService } from "../product/requirements/index.js";
-import {
-  createEscrowQueryService,
-  MemoryEscrowStore
-} from "../escrow/index.js";
 import { createEvidenceService, LocalEvidenceStorage } from "../evidence/index.js";
 import { createGovernanceService } from "../governance/index.js";
 import {
@@ -91,7 +86,6 @@ import { createProductV3SignalsRouteModule } from "./routes/product-v3-signals.j
 import { createProductReadV3RouteModule } from "./routes/product-read-v3.js";
 import { createV3ResourceResolver } from "../resources/resolver.js";
 import { createProductTasksV3RouteModule } from "./routes/product-tasks-v3.js";
-import { createProductEscrowRouteModule } from "./routes/product-escrow.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
 import { createProductRegistrationRouteModule } from "./routes/product-registration.js";
 import { createProductRequirementsRouteModule } from "./routes/product-requirements.js";
@@ -186,9 +180,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     bffStore: productBffStore,
     ...(options.orderRequirementsStore ? { store: options.orderRequirementsStore } : {}),
     ...(options.now ? { now: options.now } : {})
-  });
-  const escrowService = options.escrowService ?? createEscrowQueryService({
-    store: new MemoryEscrowStore()
   });
   const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
   const productBffService = createProductBffService({
@@ -386,8 +377,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.orderV3TriggerPort ? { triggerPort: options.orderV3TriggerPort } : {}),
     ...(options.now ? { now: options.now } : {})
   });
-  const executorInstructionStore: ExecutorInstructionStore =
-    options.executorInstructionStore ?? new MemoryExecutorInstructionStore();
   const orderV3ResourceResolver = options.orderV3ResourceResolver ?? createV3ResourceResolver({
     loadOrder: (orderId) => orderV3Service.loadOrderSnapshotForVisibility(orderId),
     ...(options.orderV3OperatorWallets !== undefined
@@ -399,9 +388,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     productService,
     productBffService,
     orderV3Service,
-    executorInstructionStore,
     orderRequirementsService,
-    escrowService,
     storeConsoleService,
     storeDockingService,
     storeRuntimeService,
@@ -464,7 +451,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     }),
     createProductOrderV3RouteModule(),
     createProductRequirementsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
-    createProductEscrowRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductRegistrationRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductReadRouteModule({ runtimeEnvironment: productRuntimeEnvironment })
   ];

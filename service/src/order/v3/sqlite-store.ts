@@ -79,15 +79,14 @@ export class SqliteOrderV3Store implements OrderV3Store {
           .prepare(
             `INSERT INTO order_config_v3 (
                config_id, version, status, config_hash, plan_id, plan_hash,
-               birth_json, executor_profile_json, bundle_json, created_by, created_at, published_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               birth_json, bundle_json, created_by, created_at, published_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(config_id, version) DO UPDATE SET
                status = excluded.status,
                config_hash = excluded.config_hash,
                plan_id = excluded.plan_id,
                plan_hash = excluded.plan_hash,
                birth_json = excluded.birth_json,
-               executor_profile_json = excluded.executor_profile_json,
                bundle_json = excluded.bundle_json,
                published_at = excluded.published_at,
                updated_at = excluded.updated_at`,
@@ -100,7 +99,6 @@ export class SqliteOrderV3Store implements OrderV3Store {
             record.planId ?? null,
             record.planHash ?? null,
             record.birth ? stringifyStorageJson(record.birth) : null,
-            record.executorProfile ? stringifyStorageJson(record.executorProfile) : null,
             stringifyStorageJson(record.bundle),
             record.createdBy,
             record.createdAt,
@@ -236,12 +234,10 @@ export class SqliteOrderV3Store implements OrderV3Store {
           this.#database
             .prepare(
               `INSERT INTO order_stage_v3 (
-                 draft_id, stage_key, stage_id, stage_index, amount, fee_bps,
-                 fee_recipient, acceptance_mode, verifier_mode, payer_slot, payee_slot,
-                 verifier_slot, verifier_wallet, standard_json, final_standard_hash,
-                 invite_deadline, work_deadline, terms_hash,
-                 status, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 draft_id, stage_key, stage_id, stage_index, amount, slots_json,
+                 profile_ref, standard_json, final_standard_hash,
+                 invite_deadline, work_deadline, terms_hash, status, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(...stageParams(record));
         }
@@ -269,25 +265,17 @@ export class SqliteOrderV3Store implements OrderV3Store {
         const result = this.#database
           .prepare(
             `UPDATE order_stage_v3 SET
-               stage_id = ?, stage_index = ?, amount = ?, fee_bps = ?, fee_recipient = ?,
-               acceptance_mode = ?, verifier_mode = ?, payer_slot = ?, payee_slot = ?, verifier_slot = ?,
-               verifier_wallet = ?, standard_json = ?, final_standard_hash = ?,
-               invite_deadline = ?, work_deadline = ?,
-               terms_hash = ?, status = ?, updated_at = ?
+               stage_id = ?, stage_index = ?, amount = ?, slots_json = ?, profile_ref = ?,
+               standard_json = ?, final_standard_hash = ?,
+               invite_deadline = ?, work_deadline = ?, terms_hash = ?, status = ?, updated_at = ?
              WHERE draft_id = ? AND stage_key = ?`,
           )
           .run(
             record.stageId,
             record.stageIndex,
             record.amount,
-            record.feeBps,
-            record.feeRecipient ?? null,
-            record.acceptanceMode,
-            record.verifierMode,
-            record.payerSlot,
-            record.payeeSlot ?? null,
-            record.verifierSlot ?? null,
-            record.verifierWallet ?? null,
+            stringifyStorageJson(record.slots),
+            record.profileRef ?? null,
             record.standard ? stringifyStorageJson(record.standard) : null,
             record.finalStandardHash,
             record.inviteDeadline,
@@ -519,14 +507,8 @@ function stageParams(record: OrderStageRecord): readonly (string | number | null
     record.stageId,
     record.stageIndex,
     record.amount,
-    record.feeBps,
-    record.feeRecipient ?? null,
-    record.acceptanceMode,
-    record.verifierMode,
-    record.payerSlot,
-    record.payeeSlot ?? null,
-    record.verifierSlot ?? null,
-    record.verifierWallet ?? null,
+    stringifyStorageJson(record.slots),
+    record.profileRef ?? null,
     record.standard ? stringifyStorageJson(record.standard) : null,
     record.finalStandardHash,
     record.inviteDeadline,

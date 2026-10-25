@@ -5,7 +5,6 @@ import type { StageTaskKindV3 } from "@uvp-eth/product-dto";
 import type { OrderStageRecord, OrderStageSlotRecord } from "../order/v3/types.js";
 import type { TaskListViewV3, TaskProjectionInput, TaskViewV3 } from "./types.js";
 
-const PRE_WORK_STATES = new Set(["draft", "ready"]);
 const DONE_STATES = new Set(["completed", "skipped"]);
 
 export function projectTasks(input: TaskProjectionInput): TaskListViewV3 {
@@ -19,10 +18,8 @@ export function projectTasks(input: TaskProjectionInput): TaskListViewV3 {
     const stageSlots = snapshot.slots.filter((slot) => slot.stageKey === stage.stageKey);
     if (decision.scope === "buyer") {
       tasks.push(...buyerTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots));
-    } else if (decision.scope === "performer") {
-      tasks.push(...performerTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots));
     } else {
-      tasks.push(...verifierTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots));
+      tasks.push(...executorTasks(snapshot.order.orderId, decision.wallet, stage, stageSlots));
     }
   }
   tasks.sort(compareTasks);
@@ -39,65 +36,45 @@ function buyerTasks(
   stage: OrderStageRecord,
   slots: readonly OrderStageSlotRecord[],
 ): readonly TaskViewV3[] {
-  const payerSlot = slots.find((slot) => slot.slotKey === stage.payerSlot);
-  if (!payerSlot || payerSlot.status === "accepted" || DONE_STATES.has(stage.status)) {
+  if (DONE_STATES.has(stage.status)) {
     return [];
   }
-  return [
-    task(orderId, wallet, stage, payerSlot.slotKey, "accept_invite", "open", "确认条款", {
-      actionRef: `accept:${payerSlot.slotKey}`,
+  return slots
+    .filter((slot) => slot.status === "uninvited" || slot.status === "invited")
+    .map((slot) => task(orderId, wallet, stage, slot.slotKey, "accept_invite", "open", "邀请参与者", {
+      actionRef: `invite:${slot.slotKey}`,
       ...(stage.inviteDeadline !== undefined ? { dueAt: stage.inviteDeadline } : {}),
-    }),
-  ];
+    }));
 }
 
-function performerTasks(
+function executorTasks(
   orderId: string,
   wallet: string,
   stage: OrderStageRecord,
   slots: readonly OrderStageSlotRecord[],
 ): readonly TaskViewV3[] {
-  const payeeSlot = slots.find(
-    (slot) => slot.slotKey === stage.payeeSlot && slot.status === "accepted" && slot.wallet?.toLowerCase() === wallet,
+  const invited = slots.find(
+    (slot) => slot.status === "invited" && slot.wallet?.toLowerCase() === wallet,
   );
-  if (!payeeSlot || DONE_STATES.has(stage.status)) {
+  if (invited) {
+    return [
+      task(orderId, wallet, stage, invited.slotKey, "accept_invite", "open", "接受邀请", {
+        actionRef: `accept:${invited.slotKey}`,
+      }),
+    ];
+  }
+  const own = slots.find(
+    (slot) => slot.status === "accepted" && slot.wallet?.toLowerCase() === wallet,
+  );
+  if (!own || DONE_STATES.has(stage.status)) {
     return [];
   }
+  const open = stage.status !== "draft";
   return [
-    task(
-      orderId,
-      wallet,
-      stage,
-      payeeSlot.slotKey,
-      "perform_stage",
-      PRE_WORK_STATES.has(stage.status) ? "blocked" : "open",
-      "履约/提交",
-      {
-        ...(stage.workDeadline !== undefined ? { dueAt: stage.workDeadline } : {}),
-        actionRef: `perform:${stage.stageKey}`,
-        ...(PRE_WORK_STATES.has(stage.status) ? { blockedBy: [`stage:${stage.status}`] } : {}),
-      },
-    ),
-  ];
-}
-
-function verifierTasks(
-  orderId: string,
-  wallet: string,
-  stage: OrderStageRecord,
-  slots: readonly OrderStageSlotRecord[],
-): readonly TaskViewV3[] {
-  const verifierSlot = slots.find(
-    (slot) => slot.slotKey === stage.verifierSlot && slot.status === "accepted" && slot.wallet?.toLowerCase() === wallet,
-  );
-  if (!verifierSlot || DONE_STATES.has(stage.status)) {
-    return [];
-  }
-  return [
-    task(orderId, wallet, stage, verifierSlot.slotKey, "verify_stage", "blocked", "验收", {
+    task(orderId, wallet, stage, own.slotKey, "perform_stage", open ? "open" : "blocked", "履约/提交", {
       ...(stage.workDeadline !== undefined ? { dueAt: stage.workDeadline } : {}),
-      actionRef: `verify:${stage.stageKey}`,
-      blockedBy: [`perform:${stage.stageKey}`],
+      actionRef: `perform:${stage.stageKey}`,
+      ...(open ? {} : { blockedBy: [`stage:${stage.status}`] }),
     }),
   ];
 }

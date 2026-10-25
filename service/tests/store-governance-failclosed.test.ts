@@ -11,7 +11,7 @@ import {
   customsPlanIds,
   crossBorderPlanIds,
   demoZhixuDetail
-} from "@uvp-eth/product-dto/fixtures";
+} from "./fixtures/business/index.js";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
 import { loadConfigFromEnv } from "../src/config/env.js";
 import { adminPrincipalFromHeaders, createGovernanceService } from "../src/governance/index.js";

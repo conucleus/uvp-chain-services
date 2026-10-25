@@ -1,7 +1,6 @@
 import type {
   ChainServicesRuntimeEnv,
   ConfigDiagnostics,
-  EscrowV3Config,
   StoreAuthConfig,
 } from "../config/index.js";
 import type {
@@ -10,7 +9,6 @@ import type {
   EvidenceStorage
 } from "../evidence/index.js";
 import type { GovernanceAdminAuthPolicy, GovernanceService, GovernanceStore } from "../governance/index.js";
-import type { EscrowQueryService } from "../escrow/index.js";
 import type { ProductBffService } from "../product/query/bff/service.js";
 import type {
   OrderRequirementsService,
@@ -149,15 +147,10 @@ export interface CreateApiRouterOptions {
   readonly orderV3BirthPort?: OrderBirthPort;
   readonly orderV3TriggerPort?: OrderTriggerPort;
   /** Generic executor instruction store (profile-driven, no business actions). */
-  readonly executorInstructionStore?: import("../executor/instruction.js").ExecutorInstructionStore;
-  /** V3 哑托管实例配置（地址/链/起点/fact source）。 */
-  readonly escrowV3?: EscrowV3Config;
   /** V1 订单要求包服务（缺省由 routes 从 productBffStore 构造）。 */
   readonly orderRequirementsService?: OrderRequirementsService;
   /** 订单要求包持久化 store（sqlite/postgres 驱动注入；缺省内存）。 */
   readonly orderRequirementsStore?: OrderRequirementsStore;
-  /** StageEscrow V2 tranche 读服务（未配置 escrow 时 configured=false）。 */
-  readonly escrowService?: EscrowQueryService;
   readonly productTriggerChainId?: number;
   readonly productRuntimeEnvironment?: ChainServicesRuntimeEnv;
   readonly audit?: AuditSink;
@@ -243,9 +236,7 @@ export interface ApiRouteContext {
   readonly productService: ProductService;
   readonly productBffService: ProductBffService;
   readonly orderV3Service: OrderV3Service;
-  readonly executorInstructionStore?: import("../executor/instruction.js").ExecutorInstructionStore;
   readonly orderRequirementsService: OrderRequirementsService;
-  readonly escrowService: EscrowQueryService;
   readonly storeConsoleService: StoreConsoleService;
   readonly storeDockingService: StoreDockingService;
   readonly storeRuntimeService: StoreRuntimeService;

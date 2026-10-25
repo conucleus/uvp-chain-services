@@ -7,7 +7,6 @@ import { normalizeAddress } from "../shared/types.js";
 import { OrderV3Error } from "../order/v3/types.js";
 import type { OrderStageRecord, OrderStageSlotRecord } from "../order/v3/types.js";
 import type {
-  StageRole,
   VisibilityDecision,
   VisibilityFields,
   VisibilityResolver,
@@ -52,7 +51,11 @@ function resolveDecision(
   buyerWallet: string,
   stages: readonly OrderStageRecord[],
   slots: readonly OrderStageSlotRecord[],
-  configSlots: readonly { readonly key: string; readonly visibility?: ConfigSlotVisibilityV3 }[],
+  configSlots: readonly {
+    readonly key: string;
+    readonly kind?: string;
+    readonly visibility?: ConfigSlotVisibilityV3;
+  }[],
   operators: ReadonlySet<string>,
 ): VisibilityDecision | undefined {
   const allStageKeys = new Set(stages.map((stage) => stage.stageKey));
@@ -63,33 +66,34 @@ function resolveDecision(
       scope: "buyer",
       allowed: buyerFields(),
       stageKeys: allStageKeys,
-      roleByStage: new Map(),
+      slotKeysByStage: new Map(),
     };
   }
 
   const accepted = slots.filter((slot) => slot.status === "accepted" && slot.wallet?.toLowerCase() === wallet);
   if (accepted.length > 0) {
-    const roleByStage = new Map<string, StageRole>();
+    const slotKeysByStage = new Map<string, string>();
     for (const slot of accepted) {
       const stage = stages.find((candidate) => candidate.stageKey === slot.stageKey);
       if (!stage) {
         continue;
       }
-      roleByStage.set(stage.stageKey, slotRole(slot.slotKey, stage));
+      if (!slotKeysByStage.has(stage.stageKey)) {
+        slotKeysByStage.set(stage.stageKey, slot.slotKey);
+      }
     }
-    if (roleByStage.size === 0) {
+    if (slotKeysByStage.size === 0) {
       return undefined;
     }
     const ownSlot = accepted[0]!;
     const disclosure = configSlots.find((slot) => slot.key === ownSlot.slotKey)?.visibility;
-    const scope: VisibilityScope = [...roleByStage.values()].includes("verifier") ? "verifier" : "performer";
     return {
       orderId,
       wallet,
-      scope,
-      allowed: participantFields(scope, disclosure),
-      stageKeys: new Set(roleByStage.keys()),
-      roleByStage,
+      scope: "stage-executor",
+      allowed: participantFields("stage-executor", disclosure),
+      stageKeys: new Set(slotKeysByStage.keys()),
+      slotKeysByStage,
     };
   }
 
@@ -100,7 +104,7 @@ function resolveDecision(
       scope: "operator",
       allowed: operatorFields(),
       stageKeys: allStageKeys,
-      roleByStage: new Map(),
+      slotKeysByStage: new Map(),
     };
   }
   return undefined;
@@ -142,15 +146,3 @@ function operatorFields(): VisibilityFields {
   };
 }
 
-function slotRole(slotKey: string, stage: OrderStageRecord): StageRole {
-  if (slotKey === (stage.payerSlot ?? "buyer")) {
-    return "payer";
-  }
-  if (slotKey === (stage.payeeSlot ?? "performer")) {
-    return "payee";
-  }
-  if (slotKey === (stage.verifierSlot ?? "verifier")) {
-    return "verifier";
-  }
-  return "participant";
-}

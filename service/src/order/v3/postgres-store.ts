@@ -70,15 +70,14 @@ export class PostgresOrderV3Store implements OrderV3Store {
     await this.#database.query(
       `INSERT INTO order_config_v3 (
          config_id, version, status, config_hash, plan_id, plan_hash,
-         birth_json, executor_profile_json, bundle_json, created_by, created_at, published_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         birth_json, bundle_json, created_by, created_at, published_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT(config_id, version) DO UPDATE SET
          status = excluded.status,
          config_hash = excluded.config_hash,
          plan_id = excluded.plan_id,
          plan_hash = excluded.plan_hash,
          birth_json = excluded.birth_json,
-         executor_profile_json = excluded.executor_profile_json,
          bundle_json = excluded.bundle_json,
          published_at = excluded.published_at,
          updated_at = excluded.updated_at`,
@@ -90,7 +89,6 @@ export class PostgresOrderV3Store implements OrderV3Store {
         record.planId ?? null,
         record.planHash ?? null,
         record.birth ? stringifyStorageJson(record.birth) : null,
-        record.executorProfile ? stringifyStorageJson(record.executorProfile) : null,
         stringifyStorageJson(record.bundle),
         record.createdBy,
         record.createdAt,
@@ -222,24 +220,16 @@ export class PostgresOrderV3Store implements OrderV3Store {
   async saveStage(record: OrderStageRecord): Promise<void> {
     const result = await this.#database.query(
       `UPDATE order_stage_v3 SET
-         stage_id = $1, stage_index = $2, amount = $3, fee_bps = $4, fee_recipient = $5,
-         acceptance_mode = $6, verifier_mode = $7, payer_slot = $8, payee_slot = $9,
-         verifier_slot = $10, verifier_wallet = $11, standard_json = $12,
-         final_standard_hash = $13, invite_deadline = $14, work_deadline = $15,
-         terms_hash = $16, status = $17, updated_at = $18
-       WHERE draft_id = $19 AND stage_key = $20`,
+         stage_id = $1, stage_index = $2, amount = $3, slots_json = $4, profile_ref = $5,
+         standard_json = $6, final_standard_hash = $7,
+         invite_deadline = $8, work_deadline = $9, terms_hash = $10, status = $11, updated_at = $12
+       WHERE draft_id = $13 AND stage_key = $14`,
       [
         record.stageId,
         record.stageIndex,
         record.amount,
-        record.feeBps,
-        record.feeRecipient ?? null,
-        record.acceptanceMode,
-        record.verifierMode,
-        record.payerSlot,
-        record.payeeSlot ?? null,
-        record.verifierSlot ?? null,
-        record.verifierWallet ?? null,
+        stringifyStorageJson(record.slots),
+        record.profileRef ?? null,
         record.standard ? stringifyStorageJson(record.standard) : null,
         record.finalStandardHash,
         record.inviteDeadline,
@@ -414,11 +404,10 @@ export class PostgresOrderV3Store implements OrderV3Store {
 }
 
 const stageInsertSql = `INSERT INTO order_stage_v3 (
-  draft_id, stage_key, stage_id, stage_index, amount, fee_bps,
-  fee_recipient, acceptance_mode, verifier_mode, payer_slot, payee_slot, verifier_slot,
-  verifier_wallet, standard_json, final_standard_hash, invite_deadline,
+  draft_id, stage_key, stage_id, stage_index, amount, slots_json,
+  profile_ref, standard_json, final_standard_hash, invite_deadline,
   work_deadline, terms_hash, status, created_at, updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`;
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`;
 
 const slotInsertSql = `INSERT INTO order_stage_slot_v3 (
   draft_id, stage_key, slot_key, required, subject_label, contact_ref, wallet,
@@ -449,14 +438,8 @@ function stageParams(record: OrderStageRecord): readonly (string | number | null
     record.stageId,
     record.stageIndex,
     record.amount,
-    record.feeBps,
-    record.feeRecipient ?? null,
-    record.acceptanceMode,
-    record.verifierMode,
-    record.payerSlot,
-    record.payeeSlot ?? null,
-    record.verifierSlot ?? null,
-    record.verifierWallet ?? null,
+    stringifyStorageJson(record.slots),
+    record.profileRef ?? null,
     record.standard ? stringifyStorageJson(record.standard) : null,
     record.finalStandardHash,
     record.inviteDeadline,

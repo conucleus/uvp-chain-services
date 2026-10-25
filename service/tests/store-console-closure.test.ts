@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CROSS_BORDER_ZHIXU_ID, crossBorderPlanIds } from "@uvp-eth/product-dto/fixtures";
+import { CROSS_BORDER_ZHIXU_ID, crossBorderPlanIds } from "./fixtures/business/index.js";
 import { createApiRouter } from "../src/api/routes.js";
 import { crossBorderSchemaResolver, dockTargetPlanIds } from "./cross-border-schema.js";
 import type { ChainEvent } from "../src/indexer/events.js";

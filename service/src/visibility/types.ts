@@ -6,9 +6,7 @@ import type { ConfigSlotVisibilityV3 } from "@uvp-eth/product-dto";
 import type { Address } from "../shared/types.js";
 import type { OrderV3VisibilitySnapshot } from "../order/v3/service.js";
 
-export type VisibilityScope = "buyer" | "performer" | "verifier" | "operator";
-
-export type StageRole = "payer" | "payee" | "verifier" | "participant";
+export type VisibilityScope = "buyer" | "stage-executor" | "operator";
 
 export interface VisibilityFields {
   readonly orderTitle: boolean;
@@ -27,8 +25,8 @@ export interface VisibilityDecision {
   readonly allowed: VisibilityFields;
   /** 允许读取的 stageKey；buyer/operator 为全部 stage。 */
   readonly stageKeys: ReadonlySet<string>;
-  /** 本单 stageKey → 当前钱包在该 stage 的角色（buyer/operator 为空）。 */
-  readonly roleByStage: ReadonlyMap<string, StageRole>;
+  /** 本单 stageKey → 当前钱包已接受的 slotKey（buyer/operator 为空）。 */
+  readonly slotKeysByStage: ReadonlyMap<string, string>;
 }
 
 export type ResourceResolution =
@@ -96,9 +94,6 @@ export interface StageViewV3 {
   readonly index: number;
   readonly status: string;
   readonly amount?: string;
-  readonly feeBps?: number;
-  readonly acceptanceMode?: string;
-  readonly verifierMode?: string;
   readonly finalStandardHash?: string;
   readonly inviteDeadline?: string;
   readonly workDeadline?: string;

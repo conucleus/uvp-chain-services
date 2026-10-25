@@ -3,7 +3,6 @@
 // canonical.ts 单源；本模块不做行业解释。
 
 import type {
-  ConfigAcceptanceModeV3,
   ConfigBundleV3,
   OrderConfigStatusV3,
   OrderDraftStatusV3,
@@ -12,13 +11,11 @@ import type {
   StageStandardRefV3,
 } from "@uvp-eth/product-dto";
 import type { Address, Hex } from "../../shared/types.js";
-import type { ExecutorProfileV1 } from "../../executor/profile.js";
 
 export type OrderV3ErrorCode =
   | "invalid_request"
   | "invalid_address"
   | "invalid_amount"
-  | "invalid_fee_bps"
   | "invalid_deadline"
   | "invalid_window_value"
   | "window_override_forbidden"
@@ -34,7 +31,6 @@ export type OrderV3ErrorCode =
   | "config_not_found"
   | "config_not_published"
   | "config_publish_forbidden"
-  | "executor_profile_missing"
   | "config_hash_mismatch"
   | "config_version_exists"
   | "config_version_not_draft"
@@ -82,7 +78,6 @@ export type OrderV3ErrorCode =
   | "finalize_not_prepared"
   | "finalize_authorization_expired"
   | "finalize_authorization_mismatch"
-  | "fee_override_forbidden"
   | "stage_skipped"
   | "published_plan_missing"
   | "published_plan_invalid"
@@ -141,8 +136,6 @@ export interface ConfigVersionRecord {
   readonly planId?: Hex;
   readonly planHash?: Hex;
   readonly birth?: ConfigBirthRecord;
-  /** Business-owned executor profile (uvp.executor-profile/v1). */
-  readonly executorProfile?: ExecutorProfileV1;
   readonly bundle: ConfigBundleV3;
   readonly createdBy: Address;
   readonly createdAt: string;
@@ -178,14 +171,8 @@ export interface OrderStageRecord {
   readonly stageId: Hex;
   readonly stageIndex: number;
   readonly amount: string;
-  readonly feeBps: number;
-  readonly feeRecipient?: Address;
-  readonly acceptanceMode: ConfigAcceptanceModeV3;
-  readonly verifierMode: "self" | "third_party";
-  readonly payerSlot: string;
-  readonly payeeSlot?: string;
-  readonly verifierSlot?: string;
-  readonly verifierWallet?: Address;
+  readonly slots: Readonly<Record<string, Address>>;
+  readonly profileRef?: string;
   readonly standard?: StageStandardRefV3;
   readonly finalStandardHash: Hex;
   readonly inviteDeadline: string;

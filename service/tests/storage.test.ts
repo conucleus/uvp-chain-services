@@ -12,7 +12,7 @@ import type {
 import {
   CROSS_BORDER_ZHIXU_ID,
   crossBorderPlanIds,
-} from "@uvp-eth/product-dto/fixtures";
+} from "./fixtures/business/index.js";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
 import {
   DOCK_TARGET_ZHIXU_ID,
@@ -125,7 +125,6 @@ const expectedMigrationVersions = [
   "0028_store_entity_registration",
   "0029_store_zhixu_draft_publisher",
   "0030_order_requirements",
-  "0031_escrow_tranches",
   "0032_order_domain_v3",
   "0035_rename_evidence_adjudicator_readers",
 ];

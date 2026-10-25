@@ -9,7 +9,6 @@ import { buildUVPOrderFinalizeTypedData } from "@uvp-eth/protocol-bindings";
 import type {
   AcceptStageInviteV3Input,
   AcceptStageInviteV3Result,
-  ConfigAcceptanceModeV3,
   ConfigBundleV3,
   ConfigStageV3,
   ConfigVersionV3,
@@ -41,7 +40,6 @@ import {
   canonicalStageTerms,
   isoToUnixSeconds,
   normalizeAmount,
-  normalizeFeeBps,
   normalizeFinalStandardHash,
   normalizeIsoDeadline,
   optionalAddress,
@@ -50,11 +48,7 @@ import {
   requireString,
   requiredAddress,
   requiredSlotKeys,
-  resolveAcceptance,
   resolveStageStandard,
-  stagePayeeSlot,
-  stagePayerSlot,
-  stageVerifierSlot,
   stageByKey,
   stageTermsHash,
   verifyConfigContentHash,
@@ -83,8 +77,6 @@ import { OrderV3Error } from "./types.js";
 
 const INVITE_DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
-/** 资金费率固定 100bp（1%），订单/条款不得覆写。 */
-const FIXED_FEE_BPS = 100;
 /** finalize EIP-712 授权的有效期（管理性超时，不是 UVP 时间窗口）。 */
 const FINALIZE_AUTH_TTL_MS = 15 * 60 * 1000;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -231,7 +223,11 @@ export class OrderV3Service {
       await this.#store.createDraft(draft);
       await this.#store.createStages(stages);
       for (const stageSlots of slots) {
-        await this.#store.replaceStageSlots(draftId, stageSlots[0]!.stageKey, stageSlots);
+        const stageKey = stageSlots[0]?.stageKey;
+        if (stageKey === undefined) {
+          continue;
+        }
+        await this.#store.replaceStageSlots(draftId, stageKey, stageSlots);
       }
       return this.#draftDetail(draft, stages, slots.flat());
     });
@@ -469,10 +465,7 @@ export class OrderV3Service {
       slotKey: invite.slotKey,
       inviteId: invite.inviteId,
       invitee: wallet,
-      payee: terms.payee as Address | null,
-      verifier: terms.verifier as Address | null,
       amount: terms.amount,
-      feeBps: terms.feeBps,
       finalStandardHash: terms.finalStandardHash as Hex,
       workDeadline: terms.workDeadline,
       termsHash,
@@ -550,10 +543,7 @@ export class OrderV3Service {
         slotKey: invite.slotKey,
         inviteId: invite.inviteId,
         invitee: wallet,
-        payee: terms.payee as Address | null,
-        verifier: terms.verifier as Address | null,
         amount: terms.amount,
-        feeBps: terms.feeBps,
         finalStandardHash: terms.finalStandardHash as Hex,
         workDeadline: terms.workDeadline,
         termsHash: expectedTermsHash,
@@ -590,6 +580,23 @@ export class OrderV3Service {
         updatedAt: nowIso,
       };
       await this.#store.saveSlot(acceptedSlot);
+      const nextSlots = { ...stage.slots, [acceptedSlot.slotKey]: wallet };
+      const nextTerms = canonicalStageTerms({
+        orderDraftId: draft.draftId,
+        configId: draft.configId,
+        configVersion: draft.configVersion,
+        configHash: draft.configHash,
+        stageKey: stage.stageKey,
+        stageId: stage.stageId,
+        slots: nextSlots,
+        amount: stage.amount,
+        ...(stage.profileRef !== undefined ? { profileRef: stage.profileRef } : {}),
+        ...(stage.standard ? { standard: stage.standard } : {}),
+        finalStandardHash: stage.finalStandardHash,
+        inviteDeadline: stage.inviteDeadline,
+        workDeadline: stage.workDeadline,
+      });
+      await this.#store.saveStage({ ...stage, slots: nextSlots, termsHash: stageTermsHash(nextTerms), updatedAt: nowIso });
       const updatedDraft = await this.#recomputeDraftStatus(draft);
       return {
         invite: toInviteDto({ ...invite, status: "accepted", acceptedBy: wallet, acceptedAt: nowIso }),
@@ -848,7 +855,6 @@ export class OrderV3Service {
       readonly stageId: string;
       readonly slotKey: string;
       readonly wallet: string;
-      readonly role: "payer" | "payee" | "verifier" | "participant";
       readonly termsHash: string;
       readonly acceptedAt?: string;
     }[];
@@ -873,8 +879,7 @@ export class OrderV3Service {
       stageId: string;
       slotKey: string;
       wallet: string;
-      role: "payer" | "payee" | "verifier" | "participant";
-      termsHash: string;
+        termsHash: string;
       acceptedAt?: string;
     }[] = [];
     const fundedStageKeys: string[] = [];
@@ -886,7 +891,6 @@ export class OrderV3Service {
       } else {
         skippedStageKeys.push(stage.stageKey);
       }
-      const parties = this.#resolveParties(stage, slots);
       const terms = canonicalStageTerms({
         orderDraftId: draft.draftId,
         configId: draft.configId,
@@ -894,12 +898,9 @@ export class OrderV3Service {
         configHash: draft.configHash,
         stageKey: stage.stageKey,
         stageId: stage.stageId,
-        payer: draft.buyerWallet,
-        payee: parties.payee,
-        verifier: parties.verifier,
+        slots: stage.slots,
         amount: stage.amount,
-        feeBps: stage.feeBps,
-        feeRecipient: stage.feeRecipient ?? null,
+        ...(stage.profileRef !== undefined ? { profileRef: stage.profileRef } : {}),
         ...(stage.standard ? { standard: stage.standard } : {}),
         finalStandardHash: stage.finalStandardHash,
         inviteDeadline: stage.inviteDeadline,
@@ -919,7 +920,6 @@ export class OrderV3Service {
             stageId: stage.stageId,
             slotKey: slot.slotKey,
             wallet: slot.wallet ?? draft.buyerWallet,
-            role: slotRole(slot.slotKey, stage),
             termsHash: slot.acceptedTermsHash ?? termsHash,
             ...(slot.acceptedAt !== undefined ? { acceptedAt: slot.acceptedAt } : {}),
           })),
@@ -1182,22 +1182,6 @@ export class OrderV3Service {
     readonly now: string;
     readonly existing?: OrderStageRecord;
   }): OrderStageRecord {
-    const acceptance = resolveAcceptance({
-      config: input.config.bundle,
-      stage: input.stageConfig,
-      override: input.term.acceptanceMode,
-    });
-    const verifierMode = input.term.verifierMode ?? (acceptance.mode === "third_party" ? "third_party" : "self");
-    const payerSlot = stagePayerSlot(input.stageConfig);
-    const payeeSlot = stagePayeeSlot(input.stageConfig);
-    const verifierSlot = stageVerifierSlot(input.stageConfig, acceptance.verifierSlot);
-    if (verifierMode === "third_party" && acceptance.mode !== "third_party") {
-      throw new OrderV3Error(
-        422,
-        "invalid_stage_terms",
-        `stage ${input.stageConfig.key} requests a third-party verifier but acceptance mode is ${acceptance.mode}`,
-      );
-    }
     if (input.term.standard) {
       canonicalStandardHash(input.term.standard);
     }
@@ -1210,12 +1194,9 @@ export class OrderV3Service {
         configHash: input.config.configHash,
         stageKey: input.stageConfig.key,
         stageId,
-        payer: input.buyer,
-        payee: null,
-        verifier: input.term.verifierWallet ?? null,
+        slots: input.existing?.slots ?? {},
         amount: input.term.amount,
-        feeBps: input.term.feeBps,
-        feeRecipient: input.term.feeRecipient ?? null,
+        ...(input.term.profileRef !== undefined ? { profileRef: input.term.profileRef } : {}),
         ...(input.term.standard ? { standard: input.term.standard } : {}),
         finalStandardHash: input.term.finalStandardHash,
         inviteDeadline: input.term.inviteDeadline,
@@ -1228,14 +1209,8 @@ export class OrderV3Service {
       stageId,
       stageIndex: input.existing?.stageIndex ?? input.index,
       amount: input.term.amount,
-      feeBps: input.term.feeBps,
-      ...(input.term.feeRecipient !== undefined ? { feeRecipient: input.term.feeRecipient } : {}),
-      acceptanceMode: acceptance.mode,
-      verifierMode,
-      payerSlot,
-      ...(payeeSlot !== undefined ? { payeeSlot } : {}),
-      ...(verifierSlot !== undefined ? { verifierSlot } : {}),
-      ...(input.term.verifierWallet !== undefined ? { verifierWallet: input.term.verifierWallet } : {}),
+      slots: input.existing?.slots ?? {},
+      ...(input.term.profileRef !== undefined ? { profileRef: input.term.profileRef } : {}),
       ...(input.term.standard ? { standard: input.term.standard } : {}),
       finalStandardHash: input.term.finalStandardHash,
       inviteDeadline: input.term.inviteDeadline,
@@ -1259,23 +1234,8 @@ export class OrderV3Service {
     const slotKeys = skipped ? [] : requiredSlotKeys({
       config: input.config,
       stage: input.stageConfig,
-      acceptanceMode: input.stage.acceptanceMode,
-      ...(input.stage.verifierSlot !== undefined ? { verifierSlot: input.stage.verifierSlot } : {}),
     });
-    const payerSlot = stagePayerSlot(input.stageConfig);
-    const records: OrderStageSlotRecord[] = [
-      {
-        draftId: input.draftId,
-        stageKey: input.stage.stageKey,
-        slotKey: payerSlot,
-        required: true,
-        wallet: input.buyer,
-        status: "accepted",
-        acceptedAt: input.now,
-        createdAt: input.now,
-        updatedAt: input.now,
-      },
-    ];
+    const records: OrderStageSlotRecord[] = [];
     for (const slotKey of slotKeys) {
       if (!SLOT_KEY_PATTERN.test(slotKey)) {
         throw new OrderV3Error(422, "invalid_stage_terms", `slot key ${slotKey} is not a valid identifier`);
@@ -1293,27 +1253,12 @@ export class OrderV3Service {
     return records;
   }
 
-  #resolveParties(
-    stage: OrderStageRecord,
-    slots: readonly OrderStageSlotRecord[],
-  ): { readonly payee: Address | null; readonly verifier: Address | null } {
-    const stageSlots = slots.filter((slot) => slot.stageKey === stage.stageKey && slot.status === "accepted");
-    const payeeSlot = stage.payeeSlot ?? "performer";
-    const payee = stageSlots.find((slot) => slot.slotKey === payeeSlot)?.wallet ?? null;
-    const verifierSlot = stage.verifierSlot ?? "verifier";
-    const verifier = stageSlots.find((slot) => slot.slotKey === verifierSlot)?.wallet ?? stage.verifierWallet ?? null;
-    return { payee, verifier };
-  }
-
   #termsForInvitee(
     draft: OrderDraftRecord,
     stage: OrderStageRecord,
     invite: OrderInviteRecord,
     wallet: Address,
   ): StageTermsV3 {
-    const isPayeeSlot = invite.slotKey === (stage.payeeSlot ?? "performer");
-    const verifierSlot = stage.verifierSlot ?? "verifier";
-    const isVerifierSlot = invite.slotKey === verifierSlot;
     return canonicalStageTerms({
       orderDraftId: draft.draftId,
       configId: draft.configId,
@@ -1321,12 +1266,9 @@ export class OrderV3Service {
       configHash: draft.configHash,
       stageKey: stage.stageKey,
       stageId: stage.stageId,
-      payer: draft.buyerWallet,
-      payee: isPayeeSlot ? wallet : null,
-      verifier: isVerifierSlot ? wallet : stage.verifierWallet ?? null,
+      slots: stage.slots,
       amount: stage.amount,
-      feeBps: stage.feeBps,
-      feeRecipient: stage.feeRecipient ?? null,
+      ...(stage.profileRef !== undefined ? { profileRef: stage.profileRef } : {}),
       ...(stage.standard ? { standard: stage.standard } : {}),
       finalStandardHash: stage.finalStandardHash,
       inviteDeadline: stage.inviteDeadline,
@@ -1374,7 +1316,6 @@ export class OrderV3Service {
         currency: draft.currency,
         stageSubset: draft.stageSubset,
         stages: stages.map((stage) => {
-          const parties = this.#resolveParties(stage, slots);
           const terms = canonicalStageTerms({
             orderDraftId: draft.draftId,
             configId: draft.configId,
@@ -1382,12 +1323,9 @@ export class OrderV3Service {
             configHash: draft.configHash,
             stageKey: stage.stageKey,
             stageId: stage.stageId,
-            payer: draft.buyerWallet,
-            payee: parties.payee,
-            verifier: parties.verifier,
+            slots: stage.slots,
             amount: stage.amount,
-            feeBps: stage.feeBps,
-            feeRecipient: stage.feeRecipient ?? null,
+            ...(stage.profileRef !== undefined ? { profileRef: stage.profileRef } : {}),
             ...(stage.standard ? { standard: stage.standard } : {}),
             finalStandardHash: stage.finalStandardHash,
             inviteDeadline: stage.inviteDeadline,
@@ -1463,7 +1401,6 @@ export class OrderV3Service {
       readonly stageId: string;
       readonly slotKey: string;
       readonly wallet: string;
-      readonly role: "payer" | "payee" | "verifier" | "participant";
       readonly termsHash: string;
       readonly acceptedAt?: string;
     }[];
@@ -1543,11 +1480,7 @@ export class OrderV3Service {
 interface ParsedStageTerm {
   readonly stageKey: string;
   readonly amount: string;
-  readonly feeBps: number;
-  readonly feeRecipient?: Address;
-  readonly acceptanceMode?: ConfigAcceptanceModeV3;
-  readonly verifierMode?: "self" | "third_party";
-  readonly verifierWallet?: Address;
+  readonly profileRef?: string;
   readonly standard?: StageStandardRefV3;
   readonly finalStandardHash: Hex;
   readonly inviteDeadline: string;
@@ -1614,20 +1547,6 @@ function parseTerm(
   const standard = raw.standard !== undefined
     ? parseStandardRef(raw.standard)
     : resolveStageStandard(config, stageConfig);
-  const acceptanceMode = raw.acceptanceMode;
-  if (
-    acceptanceMode !== undefined &&
-    acceptanceMode !== "self" &&
-    acceptanceMode !== "third_party" &&
-    acceptanceMode !== "mutual" &&
-    acceptanceMode !== "none"
-  ) {
-    throw new OrderV3Error(422, "invalid_stage_terms", `stage ${stageKey} has an unsupported acceptanceMode`);
-  }
-  const verifierMode = raw.verifierMode;
-  if (verifierMode !== undefined && verifierMode !== "self" && verifierMode !== "third_party") {
-    throw new OrderV3Error(422, "invalid_stage_terms", `stage ${stageKey} has an unsupported verifierMode`);
-  }
   const inviteDeadline = normalizeIsoDeadline(requireString(raw.inviteDeadline, "inviteDeadline"), "inviteDeadline");
   const workDeadline = normalizeIsoDeadline(requireString(raw.workDeadline, "workDeadline"), "workDeadline");
   if (Date.parse(workDeadline) <= Date.parse(inviteDeadline)) {
@@ -1644,14 +1563,8 @@ function parseTerm(
   return {
     stageKey,
     amount: normalizeAmount(raw.amount ?? "0"),
-    feeBps: parseFixedFeeBps(raw.feeBps),
-    ...(optionalAddress(raw.feeRecipient, "feeRecipient") !== undefined
-      ? { feeRecipient: optionalAddress(raw.feeRecipient, "feeRecipient")! }
-      : {}),
-    ...(acceptanceMode !== undefined ? { acceptanceMode: acceptanceMode as ConfigAcceptanceModeV3 } : {}),
-    ...(verifierMode !== undefined ? { verifierMode: verifierMode as "self" | "third_party" } : {}),
-    ...(optionalAddress(raw.verifierWallet, "verifierWallet") !== undefined
-      ? { verifierWallet: optionalAddress(raw.verifierWallet, "verifierWallet")! }
+    ...(optionalString(raw.profileRef, "profileRef") !== undefined
+      ? { profileRef: optionalString(raw.profileRef, "profileRef")! }
       : {}),
     ...(standard ? { standard } : {}),
     finalStandardHash: normalizeFinalStandardHash({ finalStandardHash: raw.finalStandardHash, ...(standard ? { standard } : {}) }),
@@ -1660,21 +1573,11 @@ function parseTerm(
   };
 }
 
-/** fee 固定 100bp：订单/条款不得覆写；显式传非 100 一律 422。 */
-function parseFixedFeeBps(value: unknown): number {
-  if (value === undefined) {
-    return FIXED_FEE_BPS;
+function optionalString(value: unknown, fieldName: string): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
   }
-  const parsed = normalizeFeeBps(value);
-  if (parsed !== FIXED_FEE_BPS) {
-    throw new OrderV3Error(
-      422,
-      "fee_override_forbidden",
-      `feeBps is fixed at ${FIXED_FEE_BPS} (1%); orders cannot override it`,
-      { feeBps: parsed },
-    );
-  }
-  return FIXED_FEE_BPS;
+  return requireString(value, fieldName);
 }
 
 function parseStandardRef(value: unknown): StageStandardRefV3 {
@@ -1831,9 +1734,8 @@ function toOrderStageDto(record: OrderStageRecord): OrderStageV3 {
     stageId: record.stageId,
     index: record.stageIndex,
     amount: record.amount,
-    feeBps: record.feeBps,
-    acceptanceMode: record.acceptanceMode,
-    verifierMode: record.verifierMode,
+    slots: record.slots,
+    ...(record.profileRef !== undefined ? { profileRef: record.profileRef } : {}),
     finalStandardHash: record.finalStandardHash,
     inviteDeadline: record.inviteDeadline,
     workDeadline: record.workDeadline,
@@ -1841,18 +1743,3 @@ function toOrderStageDto(record: OrderStageRecord): OrderStageV3 {
   };
 }
 
-function slotRole(
-  slotKey: string,
-  stage: OrderStageRecord,
-): "payer" | "payee" | "verifier" | "participant" {
-  if (slotKey === (stage.payerSlot ?? "buyer")) {
-    return "payer";
-  }
-  if (slotKey === (stage.payeeSlot ?? "performer")) {
-    return "payee";
-  }
-  if (slotKey === (stage.verifierSlot ?? "verifier")) {
-    return "verifier";
-  }
-  return "participant";
-}

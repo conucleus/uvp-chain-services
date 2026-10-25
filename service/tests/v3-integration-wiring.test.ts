@@ -137,28 +137,14 @@ const mandatoryEnv = {
 } as const;
 
 describe("V3 env wiring", () => {
-  it("parses escrow v3 + fact source and local-only birth signer", () => {
+  it("accepts the local-only birth signer", () => {
     const key = `0x${randomBytes(32).toString("hex")}`;
     const config = loadConfigFromEnv({
       ...mandatoryEnv,
-      UVP_ESCROW_V3_ADDRESS: "0x3333333333333333333333333333333333333333",
-      UVP_ESCROW_V3_TOKEN_ADDRESS: "0x4444444444444444444444444444444444444444",
-      UVP_ESCROW_V3_START_BLOCK: "99",
-      UVP_ESCROW_V3_DEPLOYMENT_BLOCK: "42",
-      FACT_SOURCE_ADDRESS: "0x5555555555555555555555555555555555555555",
-      UVP_ORDER_V3_BINDING_INDEX_POLL_INTERVAL_MS: "2500",
       UVP_ORDER_V3_BIRTH_SIGNER_KEY: key,
     });
-    expect(config.escrowV3).toMatchObject({
-      chainId: 31337,
-      startBlock: 99n,
-      deploymentBlock: 42n,
-      indexPollIntervalMs: 2500,
-    });
-    expect(config.escrowV3?.factSourceAddress).toBe("0x5555555555555555555555555555555555555555");
     expect(config.orderV3Birth?.signerPrivateKey).toBe(key);
     expect(config.orderV3Birth?.broadcastEnabled).toBe(true);
-
     expect(() =>
       loadConfigFromEnv({
         ...mandatoryEnv,
@@ -166,13 +152,5 @@ describe("V3 env wiring", () => {
         UVP_ORDER_V3_BIRTH_SIGNER_KEY: key,
       }),
     ).toThrow(/only allowed in local/);
-
-    expect(() =>
-      loadConfigFromEnv({
-        ...mandatoryEnv,
-        UVP_ESCROW_V3_ADDRESS: "0x3333333333333333333333333333333333333333",
-        UVP_ESCROW_V3_CHAIN_ID: "1",
-      }),
-    ).toThrow(/UVP_ESCROW_V3_CHAIN_ID must match UVP_CHAIN_ID/);
   });
 });

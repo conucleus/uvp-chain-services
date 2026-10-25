@@ -9,7 +9,7 @@ import {
   customsOnchainHookPlanArtifact,
   customsPlanIds,
   customsStoreProductSchema
-} from "@uvp-eth/product-dto/fixtures";
+} from "./fixtures/business/index.js";
 import {
   createNotificationService,
   createWebhookReplayGuard,

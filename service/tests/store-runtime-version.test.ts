@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { crossBorderPlanIds } from "@uvp-eth/product-dto/fixtures";
+import { crossBorderPlanIds } from "./fixtures/business/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { createProductService } from "../src/product/application/service.js";
 import { createStoreRuntimeService } from "../src/store/console/runtime.js";

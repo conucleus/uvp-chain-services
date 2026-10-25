@@ -126,11 +126,9 @@ function projectStageView(
     stageId: stage.stageId,
     index: stage.stageIndex,
     status: stage.status,
-    ...(decision.allowed.amounts ? { amount: stage.amount, feeBps: stage.feeBps } : {}),
+    ...(decision.allowed.amounts ? { amount: stage.amount } : {}),
     ...(termsVisible
       ? {
-          acceptanceMode: stage.acceptanceMode,
-          verifierMode: stage.verifierMode,
           finalStandardHash: stage.finalStandardHash,
           inviteDeadline: stage.inviteDeadline,
           workDeadline: stage.workDeadline,

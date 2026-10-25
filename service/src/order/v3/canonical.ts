@@ -8,7 +8,6 @@ import {
 } from "@uvp-eth/protocol-bindings";
 import { onchainStageId } from "@uvp-eth/compiler";
 import type {
-  ConfigAcceptanceModeV3,
   ConfigBundleV3,
   ConfigStageV3,
   StageStandardRefV3,
@@ -68,12 +67,9 @@ export interface StageTermsSource {
   readonly configHash: Hex;
   readonly stageKey: string;
   readonly stageId: Hex;
-  readonly payer: Address;
-  readonly payee: Address | null;
-  readonly verifier: Address | null;
+  readonly slots: Readonly<Record<string, Address>>;
   readonly amount: string;
-  readonly feeBps: number;
-  readonly feeRecipient: Address | null;
+  readonly profileRef?: string;
   readonly standard?: StageStandardRefV3;
   readonly finalStandardHash: Hex;
   readonly inviteDeadline: string;
@@ -89,12 +85,9 @@ export function canonicalStageTerms(source: StageTermsSource): StageTermsV3 {
     configHash: source.configHash,
     stageKey: source.stageKey,
     stageId: source.stageId,
-    payer: source.payer,
-    payee: source.payee,
-    verifier: source.verifier,
+    slots: source.slots,
     amount: source.amount,
-    feeBps: source.feeBps,
-    feeRecipient: source.feeRecipient,
+    ...(source.profileRef !== undefined ? { profileRef: source.profileRef } : {}),
     ...(source.standard ? { standard: canonicalStandardRef(source.standard) } : {}),
     finalStandardHash: source.finalStandardHash,
     inviteDeadline: source.inviteDeadline,
@@ -283,67 +276,20 @@ export function windowKeyFromExpression(expr: string): string | undefined {
 }
 
 /** 有效验收方式：订单覆写 > stage 配置 > 默认配置 > self。 */
-export function resolveAcceptance(input: {
-  readonly config: ConfigBundleV3;
-  readonly stage: ConfigStageV3;
-  readonly override: ConfigAcceptanceModeV3 | undefined;
-}): { readonly mode: ConfigAcceptanceModeV3; readonly verifierSlot?: string } {
-  const mode = input.override ?? input.stage.acceptance?.mode ?? input.config.defaults?.acceptance?.mode ?? "self";
-  const verifierSlot =
-    input.stage.acceptance?.verifierSlot ??
-    input.stage.slots?.verifier ??
-    input.config.defaults?.acceptance?.verifierSlot;
-  return {
-    mode,
-    ...(verifierSlot !== undefined ? { verifierSlot } : {}),
-  };
-}
 
 function stageSenderSlots(stage: ConfigStageV3): readonly string[] {
   return (stage.senders ?? []).map((sender) => (typeof sender === "string" ? sender : sender.slot));
 }
 
-export function stagePayerSlot(stage: ConfigStageV3): string {
-  return stage.slots?.payer ?? "buyer";
-}
-
-export function stagePayeeSlot(stage: ConfigStageV3): string | undefined {
-  return stage.slots?.payee;
-}
-
-export function stageVerifierSlot(stage: ConfigStageV3, acceptanceVerifierSlot?: string): string | undefined {
-  return acceptanceVerifierSlot ?? stage.slots?.verifier;
-}
-
-/**
- * 本 stage 必须接受的 slot：senders 里除 payer 外的 slot、funded 阶段的
- * payee slot、第三方/合意验收的 verifier slot。buyer（payer）是开单人，
- * 以已接受记录落库，不重复要求邀请。
- */
+/** 本 stage 必须接受的 slot：配置声明的 slot 键 ∪ senders 引用的 slot 键。 */
 export function requiredSlotKeys(input: {
   readonly config: ConfigBundleV3;
   readonly stage: ConfigStageV3;
-  readonly acceptanceMode: ConfigAcceptanceModeV3;
-  readonly verifierSlot?: string;
 }): readonly string[] {
-  const payerSlot = stagePayerSlot(input.stage);
-  const keys = new Set<string>();
+  const keys = new Set<string>(Object.keys(input.stage.slots ?? {}));
   for (const slot of stageSenderSlots(input.stage)) {
-    if (slot !== payerSlot) {
-      keys.add(slot);
-    }
+    keys.add(slot);
   }
-  const payeeSlot = stagePayeeSlot(input.stage);
-  if (input.stage.funded === true && payeeSlot && payeeSlot !== payerSlot) {
-    keys.add(payeeSlot);
-  }
-  if (input.acceptanceMode === "third_party" || input.acceptanceMode === "mutual") {
-    const verifierSlot = stageVerifierSlot(input.stage, input.verifierSlot) ?? "verifier";
-    if (verifierSlot !== payerSlot) {
-      keys.add(verifierSlot);
-    }
-  }
-  keys.delete(payerSlot);
   return [...keys].sort();
 }
 
@@ -413,15 +359,6 @@ export function normalizeAmount(value: unknown): string {
   return value;
 }
 
-export function normalizeFeeBps(value: unknown): number {
-  const parsed = typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value)
-    ? Number(value)
-    : value;
-  if (typeof parsed !== "number" || !Number.isSafeInteger(parsed) || parsed < 0 || parsed > 10_000) {
-    throw new OrderV3Error(422, "invalid_fee_bps", "feeBps must be an integer between 0 and 10000");
-  }
-  return parsed;
-}
 
 export function optionalAddress(value: unknown, fieldName: string): Address | undefined {
   if (value === undefined || value === null || value === "") {
@@ -486,10 +423,7 @@ export interface InviteTypedDataInput {
   readonly slotKey: string;
   readonly inviteId: string;
   readonly invitee: Address;
-  readonly payee: Address | null;
-  readonly verifier: Address | null;
   readonly amount: string;
-  readonly feeBps: number;
   readonly finalStandardHash: Hex;
   readonly workDeadline: string;
   readonly termsHash: Hex;
@@ -509,10 +443,7 @@ export function buildInviteAcceptTypedData(
     stageId: input.stageId,
     slotKey: input.slotKey,
     invitee: input.invitee,
-    payee: input.payee ?? ZERO_ADDRESS,
-    verifier: input.verifier ?? ZERO_ADDRESS,
     amount: input.amount,
-    feeBps: input.feeBps,
     finalStandardHash: input.finalStandardHash,
     workDeadline: isoToUnixSeconds(input.workDeadline, "workDeadline"),
     termsHash: input.termsHash,

@@ -4,7 +4,7 @@ import {
   CROSS_BORDER_ZHIXU_ID,
   crossBorderPlanIds,
   demoZhixuDetail
-} from "@uvp-eth/product-dto/fixtures";
+} from "./fixtures/business/index.js";
 import type { ProductSchemaResolver } from "../src/product/application/service.js";
 
 /**

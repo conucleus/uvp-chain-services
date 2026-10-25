@@ -230,17 +230,6 @@ export interface EscrowIndexerConfig {
   readonly startBlock: bigint;
 }
 
-export interface EscrowV3Config {
-  readonly chainId: number;
-  readonly address: Address;
-  readonly startBlock: bigint;
-  readonly deploymentBlock: bigint;
-  readonly tokenAddress?: Address;
-  /** UVP fact source contract address used by settlement/runtime wiring. */
-  readonly factSourceAddress?: Address;
-  readonly indexPollIntervalMs: number;
-}
-
 export interface OrderV3BirthConfig {
   /** birthAuthorizer key; local anvil only, never logged. */
   readonly signerPrivateKey: Hex;
@@ -260,8 +249,6 @@ export interface ChainServicesConfig {
   readonly timerKeeper: TimerKeeperConfig;
   readonly evidenceStorage: EvidenceStorageConfig;
   readonly notifications?: NotificationsConfig;
-  readonly escrow?: EscrowIndexerConfig;
-  readonly escrowV3?: EscrowV3Config;
   readonly orderV3Birth?: OrderV3BirthConfig;
   readonly storeAuth?: StoreAuthConfig;
   readonly security: SecurityConfig;
@@ -297,12 +284,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     ...parseContracts(env),
   };
   const chainId = parseInteger(env, "UVP_CHAIN_ID", manifest.chainId ?? 31337);
-  const escrow = parseEscrowIndexerConfig(
-    env,
-    chainId,
-    manifest.deploymentBlock ?? 0n,
-  );
-  const escrowV3 = parseEscrowV3Config(env, chainId, manifest.deploymentBlock ?? 0n);
   const environment = parseRuntimeEnv(env);
   const orderV3Birth = parseOrderV3BirthConfig(env, environment);
   const rpcUrl = resolveRpcUrl(env, manifest.rpcUrlEnv, environment);
@@ -428,8 +409,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     }),
     evidenceStorage: parseEvidenceStorageConfig(env),
     notifications: parseNotificationsConfig(env),
-    ...(escrow ? { escrow } : {}),
-    ...(escrowV3 ? { escrowV3 } : {}),
     ...(orderV3Birth ? { orderV3Birth } : {}),
     storeAuth: parseStoreAuthConfig(env, environment),
     security: {
@@ -643,89 +622,6 @@ function parseEvidenceStorageConfig(env: Env): EvidenceStorageConfig {
     ...(s3SessionTokenEnv ? { s3SessionTokenEnv } : {}),
     ...(s3ObjectNamespace ? { s3ObjectNamespace } : {}),
     ...(s3BackupBucket ? { s3BackupBucket } : {}),
-  };
-}
-
-function parseEscrowIndexerConfig(
-  env: Env,
-  chainId: number,
-  defaultStartBlock: bigint,
-): EscrowIndexerConfig | undefined {
-  const address = optionalAddressEnv(env, "UVP_ESCROW_ADDRESS");
-  if (!address) {
-    if (
-      optionalEnv(env, "UVP_ESCROW_CHAIN_ID") !== undefined ||
-      optionalEnv(env, "UVP_ESCROW_DEPLOYMENT_BLOCK") !== undefined
-    ) {
-      throw new ConfigError(
-        "UVP_ESCROW_ADDRESS is required when UVP_ESCROW_CHAIN_ID or UVP_ESCROW_DEPLOYMENT_BLOCK is set",
-      );
-    }
-    return undefined;
-  }
-  const escrowChainId = parseInteger(env, "UVP_ESCROW_CHAIN_ID", chainId);
-  if (escrowChainId !== chainId) {
-    throw new ConfigError(
-      "UVP_ESCROW_CHAIN_ID must match UVP_CHAIN_ID: the escrow projection reads logs from the configured RPC chain",
-    );
-  }
-  return {
-    address,
-    chainId: escrowChainId,
-    startBlock: parseBigIntValue(
-      env,
-      "UVP_ESCROW_DEPLOYMENT_BLOCK",
-      defaultStartBlock,
-    ),
-  };
-}
-
-function parseEscrowV3Config(
-  env: Env,
-  chainId: number,
-  defaultStartBlock: bigint,
-): EscrowV3Config | undefined {
-  const address = optionalAddressEnv(env, "UVP_ESCROW_V3_ADDRESS");
-  if (!address) {
-    if (
-      optionalEnv(env, "UVP_ESCROW_V3_CHAIN_ID") !== undefined ||
-      optionalEnv(env, "UVP_ESCROW_V3_START_BLOCK") !== undefined ||
-      optionalEnv(env, "FACT_SOURCE_ADDRESS") !== undefined
-    ) {
-      throw new ConfigError(
-        "UVP_ESCROW_V3_ADDRESS is required when UVP_ESCROW_V3_* or FACT_SOURCE_ADDRESS is set",
-      );
-    }
-    return undefined;
-  }
-  const escrowChainId = parseInteger(env, "UVP_ESCROW_V3_CHAIN_ID", chainId);
-  if (escrowChainId !== chainId) {
-    throw new ConfigError("UVP_ESCROW_V3_CHAIN_ID must match UVP_CHAIN_ID");
-  }
-  const deploymentBlock = parseBigIntValue(
-    env,
-    "UVP_ESCROW_V3_DEPLOYMENT_BLOCK",
-    defaultStartBlock,
-  );
-  const startBlock = parseBigIntValue(
-    env,
-    "UVP_ESCROW_V3_START_BLOCK",
-    deploymentBlock,
-  );
-  const tokenAddress = optionalAddressEnv(env, "UVP_ESCROW_V3_TOKEN_ADDRESS");
-  const factSourceAddress = optionalAddressEnv(env, "FACT_SOURCE_ADDRESS");
-  return {
-    chainId: escrowChainId,
-    address,
-    startBlock,
-    deploymentBlock,
-    ...(tokenAddress ? { tokenAddress } : {}),
-    ...(factSourceAddress ? { factSourceAddress } : {}),
-    indexPollIntervalMs: parseInteger(
-      env,
-      "UVP_ORDER_V3_BINDING_INDEX_POLL_INTERVAL_MS",
-      5_000,
-    ),
   };
 }
 

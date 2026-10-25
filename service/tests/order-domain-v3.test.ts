@@ -18,6 +18,7 @@ import {
   SqliteOrderV3Store,
   configWindowValues,
   type OrderBirthInput,
+  type OrderStageRecord,
   type OrderTriggerInput,
 } from "../src/order/v3/index.js";
 import { openSqliteDatabase } from "../src/storage/sqlite.js";
@@ -88,8 +89,8 @@ function configBundle(overrides: Record<string, unknown> = {}) {
         name: "Alpha",
         index: 1,
         funded: true,
-        slots: { payer: "buyer", payee: "performer", verifier: "buyer" },
-        senders: ["performer", "buyer"],
+        slots: { performer: "performer" },
+        senders: ["performer"],
         acceptance: { mode: "self", verifierSlot: "buyer" },
         time: [{ name: "win_a" }],
         feeBps: 100,
@@ -100,8 +101,8 @@ function configBundle(overrides: Record<string, unknown> = {}) {
         name: "Beta",
         index: 2,
         funded: true,
-        slots: { payer: "buyer", payee: "performer", verifier: "verifier" },
-        senders: ["performer", "verifier", "buyer"],
+        slots: { performer: "performer", verifier: "verifier" },
+        senders: ["performer", "verifier"],
         acceptance: { mode: "third_party", verifierSlot: "verifier" },
         time: [{ name: "win_b" }],
         feeBps: 100,
@@ -474,7 +475,7 @@ describe("V3 order draft lifecycle", () => {
       draft: {
         draftId: string;
         status: string;
-        stages: { stageKey: string; stageId: string; feeBps: number; inviteDeadline: string; workDeadline: string }[];
+        stages: { stageKey: string; stageId: string; inviteDeadline: string; workDeadline: string }[];
         termsHash: string | null;
       };
       slots: { slotKey: string; status: string }[];
@@ -484,19 +485,16 @@ describe("V3 order draft lifecycle", () => {
     const alpha = detail.draft.stages[0]!;
     expect(alpha.stageKey).toBe("alpha");
     expect(alpha.stageId).toBe(keccak256(stringToHex("alpha")));
-    expect(alpha.feeBps).toBe(100);
     expect(alpha.inviteDeadline).toBe("2026-11-01T00:00:00.000Z");
     expect(alpha.workDeadline).toBe("2026-11-20T00:00:00.000Z");
     expect((alpha as { windowValues?: unknown }).windowValues).toBeUndefined();
-    expect(detail.slots.find((slot) => slot.slotKey === "buyer")?.status).toBe("accepted");
 
     const { created: invite, preview } = await inviteAndPreview(router, detail.draft.draftId, performer.address as Address);
     expect(preview.status, JSON.stringify(preview.body)).toBe(200);
     const previewBody = preview.body as {
-      terms: { termsHash: string; payee: string | null; stageId: string };
+      terms: { termsHash: string; stageId: string };
       typedData: { domain: { name: string; version: string; verifyingContract: string }; primaryType: string; message: { stageId: string; invitee: string } };
     };
-    expect(previewBody.terms.payee).toBe(performer.address.toLowerCase());
     expect(previewBody.terms.stageId).toBe(keccak256(stringToHex("alpha")));
     expect(previewBody.typedData.domain.name).toBe("UVPOrderBook");
     expect(previewBody.typedData.domain.version).toBe("1");
@@ -815,9 +813,6 @@ describe("V3 order birth channel (outside-trigger + birthAuthorizer)", () => {
       pathname: `/product/v3/order-drafts/${draftId}`,
       headers: headers(buyer.address),
     });
-    const slots = (detail.body as { slots: { stageKey: string; required: boolean }[] }).slots;
-    expect(slots.filter((slot) => slot.stageKey === "beta").map((slot) => slot.required)).toEqual([true]);
-
     const finalize = await finalizeWithSignature(router, draftId);
     expect(finalize.status, JSON.stringify(finalize.body)).toBe(200);
     const result = finalize.body as {
@@ -841,26 +836,6 @@ describe("V3 order birth channel (outside-trigger + birthAuthorizer)", () => {
       "alpha",
       "beta",
     ]);
-  });
-
-  it("fixes feeBps at 100 and rejects order-level fee overrides", async () => {
-    const { router } = fixture();
-    await publishConfig(router, configBundle());
-    const overridden = await createDraft(
-      router,
-      buyer.address as Address,
-      draftBody({ stageTerms: [term("alpha", { feeBps: 200 })] }),
-    );
-    expect(overridden.status).toBe(422);
-    expect((overridden.body as { error: string }).error).toBe("fee_override_forbidden");
-
-    const accepted = await createDraft(
-      router,
-      buyer.address as Address,
-      draftBody({ stageTerms: [term("alpha", { feeBps: 100 })] }),
-    );
-    expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
-    expect((accepted.body as { draft: { stages: { feeBps: number }[] } }).draft.stages[0]!.feeBps).toBe(100);
   });
 
   it("fails closed when the config version has no birth route", async () => {
@@ -1140,17 +1115,13 @@ describe("V3 order domain sqlite persistence", () => {
         createdAt: "2026-10-25T00:00:00.000Z",
         updatedAt: "2026-10-25T00:00:00.000Z",
       });
-      const stage = {
+      const stage: OrderStageRecord = {
         draftId: "draft-sqlite",
         stageKey: "alpha",
         stageId: keccak256(stringToHex("alpha")),
         stageIndex: 0,
         amount: "1000000",
-        feeBps: 100,
-        acceptanceMode: "self" as const,
-        verifierMode: "self" as const,
-        payerSlot: "buyer",
-        payeeSlot: "performer",
+        slots: {},
         finalStandardHash: `0x${"ab".repeat(32)}` as never,
         inviteDeadline: "2026-11-01T00:00:00.000Z",
         workDeadline: "2026-11-20T00:00:00.000Z",
@@ -1207,6 +1178,67 @@ describe("V3 order domain sqlite persistence", () => {
           updatedAt: "2026-10-25T02:00:00.000Z",
         }),
       ).toBe(false);
+    } finally {
+      database.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("updates an existing stage through saveStage for the invite-accept path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "uvp-order-v3-"));
+    const database = openSqliteDatabase(`sqlite://${join(dir, "order-v3.sqlite")}`);
+    try {
+      runSqliteMigrations({
+        database,
+        migrationsDirectory: fileURLToPath(new URL("../migrations", import.meta.url)),
+      });
+      const store = new SqliteOrderV3Store({ database });
+      await store.createDraft({
+        draftId: "draft-stage-update",
+        configId: "test/flow",
+        configVersion: "1.0.0",
+        configHash: `0x${"aa".repeat(32)}`,
+        buyerWallet: buyer.address.toLowerCase() as Address,
+        chainId: 31337,
+        stateMachine,
+        title: "Order",
+        currency: "USDT",
+        stageSubset: ["alpha"],
+        status: "inviting",
+        createdAt: "2026-10-25T00:00:00.000Z",
+        updatedAt: "2026-10-25T00:00:00.000Z",
+      });
+      const stage: OrderStageRecord = {
+        draftId: "draft-stage-update",
+        stageKey: "alpha",
+        stageId: keccak256(stringToHex("alpha")),
+        stageIndex: 0,
+        amount: "1000000",
+        slots: {},
+        finalStandardHash: `0x${"ab".repeat(32)}`,
+        inviteDeadline: "2026-11-01T00:00:00.000Z",
+        workDeadline: "2026-11-20T00:00:00.000Z",
+        termsHash: `0x${"cd".repeat(32)}`,
+        status: "draft",
+        createdAt: "2026-10-25T00:00:00.000Z",
+        updatedAt: "2026-10-25T00:00:00.000Z",
+      };
+      await store.createStages([stage]);
+
+      const accepted: OrderStageRecord = {
+        ...stage,
+        slots: { performer: performer.address.toLowerCase() as Address },
+        termsHash: `0x${"12".repeat(32)}`,
+        status: "ready",
+        updatedAt: "2026-10-25T01:00:00.000Z",
+      };
+      await expect(store.saveStage(accepted)).resolves.toBeUndefined();
+      await expect(store.getStage("draft-stage-update", "alpha")).resolves.toMatchObject({
+        slots: { performer: performer.address.toLowerCase() },
+        termsHash: `0x${"12".repeat(32)}`,
+        status: "ready",
+        updatedAt: "2026-10-25T01:00:00.000Z",
+      });
     } finally {
       database.close();
       rmSync(dir, { recursive: true, force: true });

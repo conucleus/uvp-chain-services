@@ -36,9 +36,6 @@ export function configRecord(row: unknown): ConfigVersionRecord {
     ...(optionalStringColumn(record, "birth_json") !== undefined
       ? { birth: parseStorageJson<NonNullable<ConfigVersionRecord["birth"]>>(optionalStringColumn(record, "birth_json")!) }
       : {}),
-    ...(optionalStringColumn(record, "executor_profile_json") !== undefined
-      ? { executorProfile: parseStorageJson<NonNullable<ConfigVersionRecord["executorProfile"]>>(optionalStringColumn(record, "executor_profile_json")!) }
-      : {}),
     bundle: parseStorageJson<ConfigBundleV3>(stringColumn(record, "bundle_json")),
     createdBy: stringColumn(record, "created_by") as Address,
     createdAt: stringColumn(record, "created_at"),
@@ -94,21 +91,9 @@ export function stageRecord(row: unknown): OrderStageRecord {
     stageId: stringColumn(record, "stage_id") as Hex,
     stageIndex: numberColumn(record, "stage_index"),
     amount: stringColumn(record, "amount"),
-    feeBps: numberColumn(record, "fee_bps"),
-    ...(optionalStringColumn(record, "fee_recipient") !== undefined
-      ? { feeRecipient: optionalStringColumn(record, "fee_recipient") as Address }
-      : {}),
-    acceptanceMode: stringColumn(record, "acceptance_mode") as OrderStageRecord["acceptanceMode"],
-    verifierMode: stringColumn(record, "verifier_mode") as "self" | "third_party",
-    payerSlot: stringColumn(record, "payer_slot"),
-    ...(optionalStringColumn(record, "payee_slot") !== undefined
-      ? { payeeSlot: optionalStringColumn(record, "payee_slot")! }
-      : {}),
-    ...(optionalStringColumn(record, "verifier_slot") !== undefined
-      ? { verifierSlot: optionalStringColumn(record, "verifier_slot")! }
-      : {}),
-    ...(optionalStringColumn(record, "verifier_wallet") !== undefined
-      ? { verifierWallet: optionalStringColumn(record, "verifier_wallet") as Address }
+    slots: parseStorageJson<Readonly<Record<string, Address>>>(stringColumn(record, "slots_json")),
+    ...(optionalStringColumn(record, "profile_ref") !== undefined
+      ? { profileRef: optionalStringColumn(record, "profile_ref")! }
       : {}),
     ...(optionalStringColumn(record, "standard_json") !== undefined
       ? { standard: parseStorageJson<StageStandardRefV3>(optionalStringColumn(record, "standard_json")!) }

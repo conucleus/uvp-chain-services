@@ -40,7 +40,7 @@ const stageConfig: ConfigStageV3 = {
     { name: "approved", by: "verifier" },
     { name: "rejected", by: "verifier" },
   ],
-  acceptance: { mode: "third_party", verifierSlot: "verifier" },
+  acceptance: { mode: "third_party" },
   fileResources: [{ name: "std/alpha", version: "1", hash: `sha256:${"ab".repeat(32)}`, ref: "harness/alpha.md" }],
 };
 
@@ -92,12 +92,7 @@ const stage: OrderStageRecord = {
   stageId,
   stageIndex: 1,
   amount: "1000000",
-  feeBps: 100,
-  acceptanceMode: "third_party",
-  verifierMode: "third_party",
-  payerSlot: "buyer",
-  payeeSlot: "performer",
-  verifierSlot: "verifier",
+  slots: {},
   finalStandardHash: `0x${"66".repeat(32)}` as Hex,
   inviteDeadline: "2026-11-01T00:00:00.000Z",
   workDeadline: "2026-11-20T00:00:00.000Z",

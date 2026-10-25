@@ -5,7 +5,7 @@ import type { StoreSupplierDTO } from "@uvp-eth/product-dto";
 import {
   crossBorderPlanIds,
   CROSS_BORDER_ZHIXU_ID,
-} from "@uvp-eth/product-dto/fixtures";
+} from "./fixtures/business/index.js";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
 import { crossBorderSchemaResolver } from "./cross-border-schema.js";
 import {

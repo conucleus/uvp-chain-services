@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { capabilitiesRootOf } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
-import { crossBorderPlanIds } from "@uvp-eth/product-dto/fixtures";
+import { crossBorderPlanIds } from "./fixtures/business/index.js";
 import { buildConfigDiagnostics, loadConfigFromEnv, type ConfigDiagnostics } from "../src/config/index.js";
 import { createApiRouter } from "../src/api/routes.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
