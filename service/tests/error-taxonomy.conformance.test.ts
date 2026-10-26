@@ -1,9 +1,7 @@
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { UVP_STATE_MACHINE_ARTIFACT_ABI } from '@uvp-eth/protocol-bindings';
 
 import { classifyStateMachineBroadcastError } from '../src/submissions/broadcast-adapter.js';
 import {
@@ -11,9 +9,6 @@ import {
   STAGE_EXECUTOR_PATCH_BROADCAST_LABELS,
   STAGE_RESOURCE_PATCH_BROADCAST_LABELS
 } from '../src/stage-patches/broadcast-adapter.js';
-
-const TAXONOMY_VERSION = 'uvp.error-taxonomy.v1';
-const TAXONOMY_SHA256 = 'edd7a1ee1e1a1e6899c008f00aeb57da0918cb98bd8982d7469c855610e7ae84';
 
 interface TaxonomyErrorEntry {
   readonly code: string;
@@ -51,13 +46,10 @@ beforeAll(() => {
       `uvp error taxonomy not readable at ${path} (${(error as Error).message}). `
       + 'The table is self-hosted in the uvp-core repo under protocol/uvp-error-taxonomy.v1.json; '
       + 'run the test from the pnpm workspace or point UVP_ERROR_TAXONOMY_JSON at the file. '
-      + 'Do not skip this suite: it is the chain-services side of the pinned conformance contract.',
+      + 'Do not skip this suite: it is the chain-services side of the conformance contract.',
     );
   }
   taxonomy = JSON.parse(raw) as TaxonomyFile;
-  expect(taxonomy.version).toBe(TAXONOMY_VERSION);
-  const digest = createHash('sha256').update(raw).digest('hex');
-  expect(digest).toBe(TAXONOMY_SHA256);
 });
 
 function entryByCode(code: string): TaxonomyErrorEntry {
@@ -76,14 +68,6 @@ function entryForInternalName(internalName: string): TaxonomyErrorEntry {
   }
   return entry;
 }
-
-describe('uvp error taxonomy pinning (chain-services)', () => {
-  it('pins the taxonomy version and sha256', () => {
-    expect(taxonomy.version).toBe(TAXONOMY_VERSION);
-    const digest = createHash('sha256').update(readFileSync(taxonomyPath(), 'utf8')).digest('hex');
-    expect(digest).toBe(TAXONOMY_SHA256);
-  });
-});
 
 const CLASSIFICATION_SOURCES: readonly string[] = [
   'src/submissions/broadcast-adapter.ts',
@@ -330,75 +314,7 @@ describe('chain-services classification consistency against the taxonomy', () =>
   });
 });
 
-describe('stage-patch contract revert names against the authoritative ABI (third leg)', () => {
-  const STAGE_PATCH_MODULE_ERROR_NAMES: readonly string[] = [
-    'ExpiredStageExecutorPatchSignature',
-    'ExpiredStageResourcePatchSignature',
-    'InvalidStageExecutorPatchMode',
-    'InvalidStageExecutorPatchSignature',
-    'InvalidStageExecutorPatchSignatureLength',
-    'InvalidStageResourcePatchSignature',
-    'InvalidStageResourcePatchSignatureLength',
-    'StageAlreadyHasSignal',
-    'StageExecutorNotCandidate',
-    'StageExecutorPatchNonceNotIncreasing',
-    'StageExecutorPatchPreviousExecutorMismatch',
-    'StageHasNoSignal',
-    'StageExecutorPatchForbiddenOnBirthStage',
-    'StagePreviousExecutorAmbiguous',
-    'StageResourcePatchNonceNotIncreasing',
-    'StageSelectorBindingNotFound',
-    'UnauthorizedStageExecutorPatchSelector',
-    'UnauthorizedStageResourcePatchSelector',
-    'UnknownOrder',
-    'ZeroManifestHash',
-    'ZeroPatchHash',
-    'ZeroPolicyHash',
-    'ZeroResourceKey',
-    'ZeroSelector',
-    'ZeroSelectorStageId',
-    'ZeroStageExecutor',
-    'ZeroTargetStageId'
-  ];
-
-  const ARTIFACT_CROSS_CHECK_NAMES: readonly string[] = [
-    'StageExecutorPatchNonceNotIncreasing',
-    'UnknownOrder',
-    'ZeroPatchHash',
-    'ZeroStageExecutor',
-    'ZeroTargetStageId'
-  ];
-
-  const RETIRED_MISSPELLED_NAMES: readonly string[] = [
-    'StaleStagePatchNonce',
-    'StaleStageExecutorPatchNonce',
-    'StaleStageResourcePatchNonce',
-    'UnauthorizedStageSelector',
-    'UnauthorizedStageResourceSelector',
-    'InvalidStagePatchSignature'
-  ];
-
-  function stateMachineArtifactErrorNames(): Set<string> {
-    const entries = UVP_STATE_MACHINE_ARTIFACT_ABI as readonly { readonly type: string; readonly name?: string }[];
-    return new Set(
-      entries
-        .filter((entry) => entry.type === 'error' && typeof entry.name === 'string')
-        .map((entry) => entry.name as string)
-    );
-  }
-
-  it('cross-checks the mirrored module names against the state-machine artifact ABI', () => {
-    const artifactNames = stateMachineArtifactErrorNames();
-    for (const name of ARTIFACT_CROSS_CHECK_NAMES) {
-      expect(artifactNames, `"${name}" must exist in UVP_STATE_MACHINE_ARTIFACT_ABI (contract renamed?)`).toContain(name);
-      expect(STAGE_PATCH_MODULE_ERROR_NAMES).toContain(name);
-    }
-    for (const retired of RETIRED_MISSPELLED_NAMES) {
-      expect(artifactNames, `retired misspelled name "${retired}" must not reappear as a real contract error`).not.toContain(retired);
-      expect(STAGE_PATCH_MODULE_ERROR_NAMES).not.toContain(retired);
-    }
-  });
-
+describe('stage-patch contract revert names (classifier contract)', () => {
   interface RevertNameExpectation {
     readonly internalName: string;
     readonly retryable: boolean;

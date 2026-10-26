@@ -14,7 +14,7 @@ import {
   type OrderRequirementPresetRefDTO,
   type OrderRequirementsDeclarationDTO,
 } from "@uvp-eth/product-dto";
-import { canonicalJson, hashCanonicalJson } from "../../shared/canonical-json.js";
+import { canonicalJson, hashCanonicalJson } from "@uvp-eth/canonical-json";
 import { normalizeBytes32, type Hex } from "../../shared/types.js";
 import { OrderRequirementsError } from "./types.js";
 
@@ -108,7 +108,7 @@ const SECRET_FIELD_NAMES = new Set([
 export function requirementsHashOf(
   declaration: OrderRequirementsDeclarationDTO,
 ): Hex {
-  return hashCanonicalJson(declaration, "requirementsHash");
+  return hashCanonicalJson(declaration);
 }
 
 export function parseOrderRequirementsDeclaration(

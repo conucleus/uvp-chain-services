@@ -1,6 +1,6 @@
 // 治理身份描述符快照的 postgres 持久化；schema 见 migrations/postgres/0001_schema.sql。
 
-import { canonicalStringify } from "@uvp-eth/compiler";
+import { canonicalJson } from "@uvp-eth/canonical-json";
 import type { PostgresDatabase } from "../storage/postgres-client.js";
 import type { Hex } from "../shared/types.js";
 import type {
@@ -27,7 +27,7 @@ export class PostgresStoreIdentityDescriptorSnapshotStore implements StoreIdenti
         record.snapshotId,
         record.subjectId.toLowerCase(),
         record.descriptorHash.toLowerCase(),
-        canonicalStringify(record.descriptorDocument),
+        canonicalJson(record.descriptorDocument),
         record.source,
         record.createdBy,
         record.createdAt

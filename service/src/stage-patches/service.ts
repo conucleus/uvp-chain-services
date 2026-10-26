@@ -7,7 +7,7 @@ import {
 } from "@uvp-eth/protocol-bindings";
 import type { StoreProductSchemaDTO } from "@uvp-eth/product-dto";
 import type { ChainServicesRuntimeEnv } from "../config/index.js";
-import { canonicalJson } from "../shared/canonical-json.js";
+import { canonicalJson } from "@uvp-eth/canonical-json";
 import {
   STAGE_EXECUTOR_PATCH_SIGNAL_ID,
   STAGE_RESOURCE_PATCH_SIGNAL_ID,

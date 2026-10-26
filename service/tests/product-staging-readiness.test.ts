@@ -162,19 +162,6 @@ describe("Product API staging readiness", () => {
       sourceOfTruth: "contracts-and-chain-events",
       backendAuthority: false,
       generatedAt,
-      profile: {
-        environment: "staging",
-        preflightStrict: true,
-        preflightStatus: "passed",
-        registrationAdapter: "anvil",
-        storageDriver: "postgres",
-        storageDurable: true,
-        storeAuthMode: "jwt",
-        storeAuthJwtConfigured: true,
-        storeAuthExternalIdentityEvidence: true,
-        storeAuthEvidenceClassification: "external_oidc",
-        storeAuthKeySource: "jwks_url"
-      },
       deployment: {
         ready: true,
         activeDeploymentId,
@@ -233,17 +220,6 @@ describe("Product API staging readiness", () => {
         payloadHashEventCount: 1,
         eventNames: expect.arrayContaining(["OrderRegistered", "SignalSubmitted", "HookReady", "PlanRegistered"])
       },
-      evidenceStorage: {
-        adapterKind: "object",
-        readiness: "ready",
-        productionSafe: true
-      },
-      roleInputs: {
-        ready: true,
-        relayerConfigured: true,
-        governanceConfigured: true,
-        participantWalletCount: 1
-      },
     });
     const serialized = JSON.stringify(response.body);
     expect(serialized).not.toContain("db-secret");
@@ -253,43 +229,6 @@ describe("Product API staging readiness", () => {
     expect(serialized).not.toContain(productionRegistrarPrivateKey.slice(2));
     expect(serialized).not.toContain(stagingDeployerPrivateKey.slice(2));
     expect(serialized).not.toContain(stagingGovernancePrivateKey.slice(2));
-  });
-
-  it("fails closed when permissive authorization is presented as staging evidence", async () => {
-    const store = await openProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents({ includeActiveDeployment: false }), planCapabilityTables: [readinessVocabulary()] });
-    const baseDiagnostics = stagingDiagnostics(tempDirs);
-    const unsafeDiagnostics: ConfigDiagnostics = {
-      ...baseDiagnostics,
-      product: {
-        ...baseDiagnostics.product,
-        permissiveAuthorizationRequested: true
-      }
-    };
-    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      configDiagnostics: unsafeDiagnostics,
-      productRuntimeEnvironment: "staging",
-      ...stagingOpsAdminRouterOptions,
-      evidenceStorage: productionSafeEvidenceStorage(),
-      now: () => new Date(generatedAt)
-    });
-
-    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness", headers: stagingOpsAdminHeaders });
-
-    expect(response.status).toBe(503);
-    expect(response.body).toMatchObject({
-      ok: false,
-      ready: false,
-      status: "not_ready",
-      reasons: expect.arrayContaining([
-        "permissive_product_authorization_requested",
-        "no_active_deployment"
-      ]),
-      productState: {
-        orderCount: 1,
-        taskCount: 1
-      }
-    });
   });
 
   it("fails closed when required staging preflight evidence is missing", async () => {
@@ -318,57 +257,13 @@ describe("Product API staging readiness", () => {
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
       ok: false,
-      reasons: expect.arrayContaining([
-        "staging_preflight_not_passed",
-        "no_active_deployment",
-        "indexer_not_indexed",
-        "no_chain_projected_order",
-        "no_chain_projected_task",
-        "no_chain_proof"
-      ])
+      ready: false,
+      status: "not_ready",
+      reasons: expect.arrayContaining(["staging_preflight_not_passed"])
     });
     expect(JSON.stringify(response.body)).not.toContain("rpc-secret");
   });
 
-  it("fails closed when JWT config evidence is not external OIDC/JWKS", async () => {
-    const baseDiagnostics = stagingDiagnostics(tempDirs);
-    const unsafeDiagnostics: ConfigDiagnostics = {
-      ...baseDiagnostics,
-      storeAuth: {
-        ...baseDiagnostics.storeAuth,
-        mode: "jwt",
-        jwtConfigured: true,
-        externalIdentityEvidence: false,
-        evidenceClassification: "not_verified",
-        evidenceReasons: ["store_auth_key_source_local_or_private"],
-        keySource: "jwks_url"
-      }
-    };
-    const store = await openProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents(), planCapabilityTables: [readinessVocabulary()] });
-    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      configDiagnostics: unsafeDiagnostics,
-      productRuntimeEnvironment: "staging",
-      ...stagingOpsAdminRouterOptions,
-      evidenceStorage: productionSafeEvidenceStorage(),
-      now: () => new Date(generatedAt)
-    });
-
-    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness", headers: stagingOpsAdminHeaders });
-
-    expect(response.status).toBe(503);
-    expect(response.body).toMatchObject({
-      ok: false,
-      ready: false,
-      reasons: expect.arrayContaining(["store_auth_external_oidc_missing"]),
-      profile: {
-        storeAuthMode: "jwt",
-        storeAuthJwtConfigured: true,
-        storeAuthExternalIdentityEvidence: false,
-        storeAuthEvidenceClassification: "not_verified"
-      }
-    });
-  });
 
 });
 

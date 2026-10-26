@@ -1,5 +1,5 @@
-import { canonicalStringify, keccak256Hex } from "@uvp-eth/compiler";
-import { normalizeBytes32, type Hex } from "../shared/types.js";
+import { hashCanonicalJson } from "@uvp-eth/canonical-json";
+import type { Hex } from "../shared/types.js";
 import type { GovernanceReviewStatus, GovernanceSubjectType } from "./types.js";
 
 export interface GovernanceReviewHashInput {
@@ -24,11 +24,11 @@ export interface IdentityDescriptorHashInput {
 }
 
 export function hashGovernanceReviewMetadata(input: GovernanceReviewHashInput): Hex {
-  return hashGovernanceCanonicalJson(buildGovernanceReviewMetadataDocument(input), "metadataHash");
+  return hashGovernanceCanonicalJson(buildGovernanceReviewMetadataDocument(input));
 }
 
 export function hashGovernanceReviewPolicy(input: GovernanceReviewHashInput): Hex {
-  return hashGovernanceCanonicalJson(buildGovernanceReviewPolicyDocument(input), "policyHash");
+  return hashGovernanceCanonicalJson(buildGovernanceReviewPolicyDocument(input));
 }
 
 export function hashIdentityDescriptor(input: IdentityDescriptorHashInput): Hex {
@@ -42,7 +42,7 @@ export function hashIdentityDescriptor(input: IdentityDescriptorHashInput): Hex 
     profile: input.profile ?? null,
     capability: input.capability ?? null,
     reputation: input.reputation ?? null
-  }, "descriptorHash");
+  });
 }
 
 export function hashRevocationReason(input: {
@@ -60,11 +60,11 @@ export function hashRevocationReason(input: {
     reason: input.reason ?? "",
     metadata: input.metadata ?? null,
     review: input.review ? publicReviewHashMaterial(input.review) : null
-  }, "reasonHash");
+  });
 }
 
-export function hashGovernanceCanonicalJson(value: unknown, fieldName: string): Hex {
-  return normalizeBytes32(keccak256Hex(canonicalStringify(value)), fieldName);
+export function hashGovernanceCanonicalJson(value: unknown): Hex {
+  return hashCanonicalJson(value);
 }
 
 function buildGovernanceReviewMetadataDocument(input: GovernanceReviewHashInput): Record<string, unknown> {

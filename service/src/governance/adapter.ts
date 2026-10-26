@@ -99,7 +99,7 @@ function simulatedBroadcast(request: unknown): GovernanceBroadcastResultDTO {
       version: 1,
       kind: "simulatedGovernanceTransaction",
       request
-    }, "txHash"),
+    }),
     retryable: false,
     simulated: true
   };

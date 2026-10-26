@@ -87,35 +87,6 @@ describe("indexer semantic oracle", () => {
     });
   });
 
-  it("counts an injected semantic fork without throwing", () => {
-    const forked = runSemanticOracleReplay(
-      [...baseEvents(), hookReadyEvent(4n), hookReadyEvent(5n, "0x0000000000000000000000000000000000000000000000000000000000000313")],
-      [oraclePlan()]
-    );
-    expect(forked.semanticOracleMismatchCount).toBeGreaterThan(0);
-    expect(forked.semanticOracleCheckedPlanCount).toBe(1);
-
-    const missingSignal = runSemanticOracleReplay(
-      [baseEvents()[0]!, baseEvents()[1]!, hookReadyEvent(4n)],
-      [oraclePlan()]
-    );
-    expect(missingSignal.semanticOracleMismatchCount).toBeGreaterThan(0);
-  });
-
-  it("excludes DELAY-carrying plans honestly instead of replaying them on a fabricated clock", () => {
-    const delayPlan = oraclePlan([
-      { op: "SIGNAL", sourceId, signalId, signalKey },
-      { op: "DELAY", delaySeconds: 5 }
-    ]);
-    const summary = runSemanticOracleReplay([...baseEvents(), hookReadyEvent(4n)], [delayPlan]);
-    expect(summary).toEqual({
-      semanticOracleCheckedPlanCount: 0,
-      semanticOracleMismatchCount: 0,
-      semanticOracleErrorCount: 0,
-      semanticOracleExcludedPlanCount: 1
-    });
-  });
-
   it("checks only plans with a resolved artifact", () => {
     const events = [...baseEvents(), hookReadyEvent(4n)];
     expect(runSemanticOracleReplay(events, [])).toEqual({

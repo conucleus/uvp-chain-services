@@ -14,7 +14,7 @@ import type {
   StageTerms,
   StageWindowValues,
 } from "@uvp-eth/product-dto";
-import { canonicalJson, hashCanonicalJson } from "../shared/canonical-json.js";
+import { hashCanonicalJson } from "@uvp-eth/canonical-json";
 import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import { OrderError } from "./types.js";
 
@@ -40,7 +40,7 @@ export function canonicalStageId(stageKey: string): Hex {
 
 export function configContentHash(bundle: ConfigBundle): Hex {
   const { status: _status, ...content } = bundle;
-  return hashCanonicalJson(content, "configHash");
+  return hashCanonicalJson(content);
 }
 
 export function verifyConfigContentHash(input: {
@@ -93,7 +93,7 @@ export function canonicalStageTerms(source: StageTermsSource): StageTerms {
 }
 
 export function stageTermsHash(terms: StageTerms): Hex {
-  return hashCanonicalJson(canonicalStageTerms(terms as StageTermsSource), "termsHash");
+  return hashCanonicalJson(canonicalStageTerms(terms as StageTermsSource));
 }
 
 export function orderTermsHash(input: {
@@ -111,7 +111,6 @@ export function orderTermsHash(input: {
       configHash: input.configHash,
       stages: input.stages.map((terms) => canonicalStageTerms(terms as StageTermsSource)),
     },
-    "termsHash",
   );
 }
 
@@ -434,4 +433,4 @@ export function buildInviteAcceptTypedData(
   });
 }
 
-export { ZERO_ADDRESS, WINDOW_NAME_PATTERN, canonicalJson };
+export { ZERO_ADDRESS, WINDOW_NAME_PATTERN };

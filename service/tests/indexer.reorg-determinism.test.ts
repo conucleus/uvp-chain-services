@@ -94,7 +94,7 @@ function goodStream(): ChainEvent[] {
   ];
 }
 
-describe("reorg synthetic lane: canonical ordering", () => {
+describe("reorg determinism: canonical ordering", () => {
   it("sortChainEvents orders an out-of-order stream into canonical chain order", () => {
     const blockSix = chainEvent(6n, 5, "OrderMaterialized", { orderId, planId, stageId });
     const blockSevenLate = chainEvent(7n, 3, "SignalSubmitted", {
@@ -157,7 +157,7 @@ describe("reorg synthetic lane: canonical ordering", () => {
   });
 });
 
-describe("reorg synthetic lane: tombstone/revive filter", () => {
+describe("reorg determinism: tombstone/revive filter", () => {
   it("removed tombstone removes the same-position event from the active set", () => {
     const stream = goodStream();
     const victim = stream[3] as ChainEvent;
@@ -211,7 +211,7 @@ describe("reorg synthetic lane: tombstone/revive filter", () => {
   });
 });
 
-describe("reorg synthetic lane: projection idempotence", () => {
+describe("reorg determinism: projection idempotence", () => {
   it("duplicate rows marching through the event list leave projections unchanged and are counted", () => {
     const stream = goodStream();
     const duplicated = [...stream, ...stream];

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { canonicalize } from "@uvp-eth/compiler";
-import { hashCanonicalJson, hashEvidenceBytes, hashEvidencePayload } from "./hashing.js";
+import { canonicalize, hashCanonicalJson, hashEvidenceBytes } from "@uvp-eth/canonical-json";
+import { hashEvidencePayload } from "./hashing.js";
 import { normalizeBytes32 } from "../shared/types.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { type EvidenceMetadataRecord, type EvidenceMetadataStore } from "./store.js";
@@ -140,8 +140,8 @@ export function createEvidenceService(options: EvidenceServiceOptions): Evidence
       const evidenceId = evidenceIdFactory();
       const canonicalMetadata = canonicalMetadataFromInput(input.metadata, documentType);
       const metadata = metadataDtoFromCanonical(evidenceId, canonicalMetadata);
-      const contentHash = hashEvidenceBytes(content.bytes, "contentHash");
-      const metadataHash = hashCanonicalJson(canonicalMetadata, "metadataHash");
+      const contentHash = hashEvidenceBytes(content.bytes).evidenceHash;
+      const metadataHash = hashCanonicalJson(canonicalMetadata);
       const payloadHash = hashEvidencePayload({
         contentHash,
         metadataHash,
@@ -453,8 +453,8 @@ async function verifyEvidenceRecord(
     return "missing_file";
   }
 
-  const actualContentHash = hashEvidenceBytes(bytes, "proof.contentHash");
-  const actualMetadataHash = hashCanonicalJson(record.canonicalMetadata, "proof.metadataHash");
+  const actualContentHash = hashEvidenceBytes(bytes).evidenceHash;
+  const actualMetadataHash = hashCanonicalJson(record.canonicalMetadata);
   if (actualContentHash !== record.evidence.contentHash || actualMetadataHash !== record.evidence.metadataHash) {
     return "mismatch";
   }

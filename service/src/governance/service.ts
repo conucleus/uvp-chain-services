@@ -588,7 +588,7 @@ function governanceRequestKey(action: GovernanceTxAction, request: GovernanceCha
     kind: "governanceDuplicateRequest",
     action,
     request
-  }, "governance duplicate request");
+  });
 }
 
 function broadcastFromLog(log: GovernanceTxLogDTO): GovernanceBroadcastResultDTO {

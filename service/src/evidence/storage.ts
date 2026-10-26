@@ -1,6 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { hashEvidenceBytes } from "./hashing.js";
+import { hashEvidenceBytes } from "@uvp-eth/canonical-json";
 
 export type EvidenceStorageAdapterKind = "local" | "object";
 export type EvidenceStorageRuntimeEnvironment = "local" | "testnet" | "staging" | "production";
@@ -247,7 +247,7 @@ export class BackupEvidenceStorage implements EvidenceStorage {
     }
     return {
       backupPresent: true,
-      hashMatches: hashEvidenceBytes(bytes, "backup.contentHash") === expectedContentHash.toLowerCase()
+      hashMatches: hashEvidenceBytes(bytes).evidenceHash === expectedContentHash.toLowerCase()
     };
   }
 
@@ -256,7 +256,7 @@ export class BackupEvidenceStorage implements EvidenceStorage {
     if (!bytes) {
       return false;
     }
-    if (hashEvidenceBytes(bytes, "backup.contentHash") !== expectedContentHash.toLowerCase()) {
+    if (hashEvidenceBytes(bytes).evidenceHash !== expectedContentHash.toLowerCase()) {
       return false;
     }
     await this.#primary.put({ evidenceId, bytes });

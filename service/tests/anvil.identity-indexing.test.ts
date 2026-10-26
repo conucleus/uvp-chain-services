@@ -26,8 +26,13 @@ const rootDir = resolve(__dirname, "../../..");
 const contractsDir = resolve(rootDir, "uvp-protocol/contracts/uvp-contracts");
 const registryArtifactPath = resolve(contractsDir, "out/UVPIdentityRegistry.sol/UVPIdentityRegistry.json");
 const anvilPrivateKey = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-const canRunAnvil = commandExists("anvil") && commandExists("forge");
-const maybeIt = canRunAnvil ? it : it.skip;
+// integration lane 前置由车道保证（TEST-BOUNDARY §5.1）：缺 anvil/forge 必须显式红，
+// 不允许用 it.skip 把 live-chain 覆盖静默变绿。
+if (!commandExists("anvil") || !commandExists("forge")) {
+  throw new Error(
+    "anvil identity indexing 是 integration lane 测试：需要 anvil 与 forge；缺工具链必须显式失败，不许 skip",
+  );
+}
 
 let databaseUrl: string;
 
@@ -50,7 +55,7 @@ describe("anvil identity registry indexing", () => {
     }
   });
 
-  maybeIt("indexes identity binding registration and revocation over HTTP", async () => {
+  it("indexes identity binding registration and revocation over HTTP", async () => {
     execFileSync("forge", ["build"], { cwd: contractsDir, stdio: "pipe" });
 
     const rpcPort = await freePort();

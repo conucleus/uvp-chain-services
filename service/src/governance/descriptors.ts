@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { canonicalStringify } from "@uvp-eth/compiler";
+import { canonicalJson } from "@uvp-eth/canonical-json";
 import { normalizeBytes32, type Hex } from "../shared/types.js";
 import { hashIdentityDescriptor, type IdentityDescriptorHashInput } from "./hashing.js";
 
@@ -98,7 +98,7 @@ export async function readIdentityDescriptorSnapshot(
   if (!snapshot) {
     throw new GovernanceDescriptorError(404, "descriptor_snapshot_not_found", "no descriptor snapshot matches this subject and hash");
   }
-  const descriptorJson = canonicalStringify(snapshot.descriptorDocument);
+  const descriptorJson = canonicalJson(snapshot.descriptorDocument);
   const recomputedDescriptorHash = hashIdentityDescriptor(snapshot.descriptorDocument as IdentityDescriptorHashInput);
   return {
     subjectId: snapshot.subjectId,

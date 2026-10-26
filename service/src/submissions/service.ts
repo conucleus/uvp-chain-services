@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { buildProductSubmitTypedData, recoverProductSubmitSigner } from "@uvp-eth/protocol-bindings";
 import type { ProductTaskDTO } from "@uvp-eth/product-dto";
-import { hashCanonicalJson } from "../evidence/index.js";
+import { hashCanonicalJson } from "@uvp-eth/canonical-json";
 import type { TxReconcileFields } from "../reconcile/status.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
@@ -988,7 +988,7 @@ function payloadForEvidence(records: readonly EvidenceRecordDTO[]): { readonly p
   const payloadHash = hashCanonicalJson({
     kind: "uvp.product.submission.evidenceBundle.v1",
     evidence: documents
-  }, "submission.payloadHash");
+  });
   return {
     payloadHash,
     payloadRef: `uvp-evidence-bundle://product/${payloadHash.slice(2)}`
@@ -1491,14 +1491,14 @@ function idempotencyKeyForPrepared(input: {
     signalName: input.signalName,
     submitter: input.submitter,
     nonce: input.nonce
-  }, "submission.idempotencyKey");
+  });
 }
 
 function signatureHashFor(signature: Hex): Hex {
   return hashCanonicalJson({
     kind: "uvp.product.submission.signature.v1",
     signature
-  }, "submission.signatureHash");
+  });
 }
 
 function submissionAuditSubject(prepared: PreparedSubmissionRecord): Record<string, unknown> {

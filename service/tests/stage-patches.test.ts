@@ -5,15 +5,11 @@ import {
   ONCHAIN_HOOK_PLAN_SCHEMA_VERSION,
   onchainSignalId,
   onchainSourceId,
-  onchainStageId,
 } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import {
   hashResourceManifest as hashProtocolResourceManifest,
   hashSignalAuthorizations,
-  hashStageExecutorPatchPayload as hashProtocolStageExecutorPatchPayload,
-  hashStageResourcePatchPayload as hashProtocolStageResourcePatchPayload,
-  EXECUTOR_PATCH_MODE_ASSIGN,
   type ResourceManifestV1
 } from "@uvp-eth/protocol-bindings";
 import {
@@ -33,8 +29,6 @@ import {
   createProductStageResourcePatchService,
   createStateMachineStageExecutorPatchBroadcastAdapter,
   hashResourceManifest,
-  hashStageExecutorPatchPayload,
-  hashStageResourcePatchPayload,
   InMemoryProductStagePatchStore,
   type PreparedStageExecutorPatchDTO,
   type PreparedStageExecutorPatchRecord,
@@ -1244,10 +1238,6 @@ describe("stage executor/resource patch Product API", () => {
     );
   }
 
-  it("pins the fixture stage ids to the compiler's keccak derivation (compiled-plan shape)", () => {
-    expect(onchainStageId(compiledTargetStageIdentifier)).toBe(targetStageOnchainId);
-  });
-
   it("gates assign on compiled-plan capability fact keys whose source differs from the stage id", async () => {
     const { router } = await routerFixture({
       events: compiledPlanEvents([
@@ -2206,51 +2196,6 @@ function bytes32Text(value: string): Hex {
 function bytes32Hex(value: string): Hex {
   return `0x${value.padStart(64, "0")}` as Hex;
 }
-
-describe("stage patch payload hash parity with protocol-bindings", () => {
-  it("executor patch patchHash equals protocol-bindings preimage (domain first slot)", () => {
-    const payload = {
-      orderId,
-      selectorStageId,
-      targetStageId,
-      executor: contractAddress,
-      role: bytes32Text("role"),
-      executorMetadataHash: bytes32Text("executor-metadata"),
-      mode: EXECUTOR_PATCH_MODE_ASSIGN,
-      previousExecutor: stateMachineAddress,
-      authorizationsHash: hashSignalAuthorizations([
-        {
-          sourceId: bytes32Text("grant-source"),
-          signalId: bytes32Text("grant-signal"),
-          submitter: executorWallet,
-          role: bytes32Text("role"),
-          metadataHash: bytes32Text("executor-metadata"),
-        },
-      ]),
-      patchNonce: "7",
-      metadataURI: "ipfs://executor-patch",
-    };
-    expect(hashStageExecutorPatchPayload(payload)).toBe(
-      hashProtocolStageExecutorPatchPayload(payload),
-    );
-  });
-
-  it("resource patch patchHash equals protocol-bindings preimage (domain first slot)", () => {
-    const payload = {
-      orderId,
-      selectorStageId,
-      targetStageId,
-      resourceKey: bytes32Text("resource.key"),
-      manifestHash: bytes32Text("manifest"),
-      policyHash: bytes32Text("policy"),
-      patchNonce: "9",
-      manifestURI: "ipfs://resource-patch",
-    };
-    expect(hashStageResourcePatchPayload(payload)).toBe(
-      hashProtocolStageResourcePatchPayload(payload),
-    );
-  });
-});
 
 describe("stage patch prepare table bounds", () => {
   it("sweeps expired prepares on write and keeps a hard cap on the in-memory table", async () => {

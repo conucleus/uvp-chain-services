@@ -28,7 +28,7 @@ import type {
   StageTerms,
   UpdateOrderDraftInput,
 } from "@uvp-eth/product-dto";
-import { canonicalJson, hashCanonicalJson } from "../shared/canonical-json.js";
+import { hashCanonicalJson } from "@uvp-eth/canonical-json";
 import { normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
 import {
   assertNoWindowOverride,
@@ -781,7 +781,7 @@ export class OrderService {
         creator: draft.buyerWallet,
         termsHash: context.frozenTermsHash,
         payloadHash: context.payloadHash,
-        idempotencyKey: idempotencyKey ?? hashCanonicalJson({ draftId, frozenTermsHash: context.frozenTermsHash }, "idempotencyKey"),
+        idempotencyKey: idempotencyKey ?? hashCanonicalJson({ draftId, frozenTermsHash: context.frozenTermsHash }),
         deadline: draft.finalizeDeadline,
         stageBindings: context.bindings,
         fundedStageKeys: context.fundedStageKeys,
@@ -929,7 +929,6 @@ export class OrderService {
     });
     const payloadHash = hashCanonicalJson(
       { draftId: draft.draftId, termsHash: frozenTermsHash, bindings, fundedStageKeys, skippedStageKeys },
-      "payloadHash",
     );
     const publishedPlan = await this.#resolvePublishedPlan({
       configId: draft.configId,
@@ -985,7 +984,7 @@ export class OrderService {
       planHash: context.publishedPlan.planHash,
       termsHash: context.frozenTermsHash,
       bindings: context.bindings,
-      idempotencyKey: idempotencyKey ?? hashCanonicalJson({ draftId: draft.draftId, termsHash: context.frozenTermsHash }, "idempotencyKey"),
+      idempotencyKey: idempotencyKey ?? hashCanonicalJson({ draftId: draft.draftId, termsHash: context.frozenTermsHash }),
     });
     const nowIso = this.#now().toISOString();
     await this.#store.createOrder({
@@ -1382,7 +1381,7 @@ export class OrderService {
     if (!IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
       throw new OrderError(400, "invalid_request", "Idempotency-Key must be 1-128 printable identifier characters");
     }
-    const requestHash = hashCanonicalJson(requestBody, "requestHash");
+    const requestHash = hashCanonicalJson(requestBody);
     const existing = await this.#store.getIdempotency(principal, operation, idempotencyKey);
     if (existing) {
       if (existing.requestHash !== requestHash) {

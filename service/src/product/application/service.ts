@@ -14,8 +14,7 @@ import {
   type ZhixuStageDTO,
   type ZhixuSummaryDTO,
 } from "@uvp-eth/product-dto";
-import { ONCHAIN_HOOK_PLAN_SCHEMA_VERSION } from "@uvp-eth/compiler";
-import { keccak256, stringToBytes, type Hex } from "viem";
+import { ONCHAIN_HOOK_PLAN_SCHEMA_VERSION, onchainStageId } from "@uvp-eth/compiler";
 import type {
   EventProofArgs,
   ProjectionSnapshot,
@@ -1065,7 +1064,7 @@ function taskStageMatches(
   taskStageIds: ReadonlySet<string>,
 ): boolean {
   const normalizedStageId = stageId.toLowerCase();
-  const hashedStageId = keccak256(stringToBytes(stageId)).toLowerCase();
+  const hashedStageId = onchainStageId(stageId).toLowerCase();
   return (
     taskStageIds.has(stageId) ||
     taskStageIds.has(normalizedStageId) ||
