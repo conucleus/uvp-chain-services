@@ -1,6 +1,7 @@
-// 订单域路由（配置注册/草稿/slot 邀请/EIP-712 接受/finalize/订单读）。
-// 身份只认会话锚定钱包（x-uvp-store-session 或 local dev 锚定头），不接受
-// 任何自报钱包；失败按因给 400/401/403/404/409/410/422/503。
+// 订单域写路由（配置注册/草稿/slot 邀请/EIP-712 接受/finalize）；订单/阶段
+// 读只有一个 handler，在 product-read-kernel.ts。身份只认会话锚定钱包
+// （x-uvp-store-session 或 local dev 锚定头），不接受任何自报钱包；失败按因
+// 给 400/401/403/404/409/410/422/503。
 
 import { OrderError, type OrderErrorCode } from "../../order/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
@@ -24,8 +25,6 @@ const DRAFT_INVITES_PATH = /^\/product\/v3\/order-drafts\/([^/]+)\/invites$/;
 const DRAFT_FINALIZE_PATH = /^\/product\/v3\/order-drafts\/([^/]+)\/finalize$/;
 const DRAFT_FINALIZE_PREPARE_PATH = /^\/product\/v3\/order-drafts\/([^/]+)\/finalize\/prepare$/;
 const INVITE_PATH = /^\/product\/v3\/invites\/([^/]+)\/(preview|accept|reject|revoke)$/;
-const ORDER_PATH = /^\/product\/v3\/orders\/([^/]+)$/;
-const ORDER_STAGE_PATH = /^\/product\/v3\/orders\/([^/]+)\/stages\/([^/]+)$/;
 
 export function createProductOrderRouteModule(): RouteModule {
   return {
@@ -184,25 +183,6 @@ async function handleRequest(
       return { status: 200, body: await service.revokeInvite(wallet, inviteId) };
     }
     return undefined;
-  }
-
-  const orderStageMatch = ORDER_STAGE_PATH.exec(request.pathname);
-  if (orderStageMatch && request.method === "GET") {
-    const wallet = await requireWallet(request, context);
-    return {
-      status: 200,
-      body: await service.getStage(
-        wallet,
-        decodePathParameter(orderStageMatch[1] ?? ""),
-        decodePathParameter(orderStageMatch[2] ?? ""),
-      ),
-    };
-  }
-
-  const orderMatch = ORDER_PATH.exec(request.pathname);
-  if (orderMatch && request.method === "GET") {
-    const wallet = await requireWallet(request, context);
-    return { status: 200, body: await service.getOrder(wallet, decodePathParameter(orderMatch[1] ?? "")) };
   }
 
   return undefined;

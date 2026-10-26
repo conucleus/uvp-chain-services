@@ -81,6 +81,18 @@ const routePlanId = "0x777777777777777777777777777777777777777777777777777777777
 const routeOnchainOrderId = "0x0000000000000000000000000000000000000000000000000000000000000311" as Hex;
 const routeSourceId = "0x0000000000000000000000000000000000000000000000000000000000000411" as Hex;
 const routeSignalId = "0x0000000000000000000000000000000000000000000000000000000000000511" as Hex;
+const routeStageId = "0x0000000000000000000000000000000000000000000000000000000000000611" as Hex;
+
+// 投影已 enrich 的 plan 词表：覆盖 routeTask 的 source/signal 对。
+const routePlanCapabilityTables = {
+  selectorBindings: [],
+  signalCapabilities: [{
+    stageId: routeStageId,
+    targetSourceId: routeSourceId,
+    signalId: routeSignalId,
+    targetOrderRelation: "current" as const
+  }]
+};
 
 const routeTask = {
   taskId: "task-route",
@@ -128,6 +140,7 @@ describe("submission API routes", () => {
       chainId: 31337,
       verifyingContract,
       resolveOrderPlanId: async () => routePlanId,
+      resolvePlanCapabilityTables: async () => routePlanCapabilityTables,
       authorization: allowListedSubmissionAuthorization([{
         orderId: routeTask.orderId,
         stageIdentifier: routeTask.stageId,
@@ -221,6 +234,7 @@ describe("submission API routes", () => {
       chainId: 31337,
       verifyingContract,
       resolveOrderPlanId: async () => routePlanId,
+      resolvePlanCapabilityTables: async () => routePlanCapabilityTables,
       authorization: allowListedSubmissionAuthorization([{
         orderId: routeTask.orderId,
         stageIdentifier: routeTask.stageId,
@@ -308,6 +322,7 @@ describe("submission API routes", () => {
       chainId: 31337,
       verifyingContract,
       resolveOrderPlanId: async () => routePlanId,
+      resolvePlanCapabilityTables: async () => routePlanCapabilityTables,
       authorization: allowListedSubmissionAuthorization([{
         orderId: routeTask.orderId,
         stageIdentifier: routeTask.stageId,
@@ -421,6 +436,7 @@ describe("submission API routes", () => {
       chainId: 31337,
       verifyingContract,
       resolveOrderPlanId: async () => routePlanId,
+      resolvePlanCapabilityTables: async () => routePlanCapabilityTables,
       authorization: allowListedSubmissionAuthorization([{
         orderId: projectedTask.orderId,
         stageIdentifier: projectedTask.stageId,
@@ -542,6 +558,7 @@ describe("submission API routes", () => {
       chainId: 31337,
       verifyingContract,
       resolveOrderPlanId: async () => routePlanId,
+      resolvePlanCapabilityTables: async () => routePlanCapabilityTables,
       authorization: allowListedSubmissionAuthorization([{
         orderId: routeTask.orderId,
         stageIdentifier: routeTask.stageId,
@@ -633,6 +650,7 @@ describe("submission API routes", () => {
       chainId: 31337,
       verifyingContract,
       resolveOrderPlanId: async () => routePlanId,
+      resolvePlanCapabilityTables: async () => routePlanCapabilityTables,
       authorization: allowListedSubmissionAuthorization([{
         orderId: v1Task.orderId,
         stageIdentifier: v1Task.stageId,

@@ -14,6 +14,7 @@ export * from "./notifications/index.js";
 export * from "./product/application/service.js";
 export * from "./product/query/bff/trigger.js";
 export * from "./product/requirements/index.js";
+export * from "./projection/plan-artifacts.js";
 export * from "./proof-verifier/service.js";
 export * from "./security/index.js";
 export * from "./storage/factory.js";

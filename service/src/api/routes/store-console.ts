@@ -4,9 +4,8 @@ import { GovernanceServiceError } from "../../governance/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import type { AuditOutcome } from "../../security/audit.js";
 import { ConfigError } from "../../shared/types.js";
-import { storeSessionFromAccess, hasStoreCapability, isStoreAccessAuthenticated, type StoreCapability } from "../../store/console/access.js";
+import { storeSessionFromAccess, isStoreAccessAuthenticated } from "../../store/console/access.js";
 import type { StoreAuditQuery } from "../../store/console/audit.js";
-import { buildStoreClosureDryRunSummary } from "../../store/console/closure.js";
 import {
   StoreRuntimeError,
   isSupportedStoreOrderFilterStatus
@@ -37,17 +36,19 @@ import type { StoreDecorationService } from "../../store/decoration/index.js";
 import type { StoreListingService } from "../../store/listings/index.js";
 import { normalizeBytes32 } from "../../shared/types.js";
 import {
-  authorizeStoreCapability,
-  forbiddenStoreCapabilityResponse,
+  authorizeStoreAdmin,
+  authorizeStoreGovernance,
+  authorizeStoreRead,
+  authorizeStoreWrite,
   isAnchoredStoreAuthorizationResult,
   isStoreAuthorizationResult,
-  recordStoreCapabilityFailure,
-  recordStoreCapabilitySuccess,
+  recordStoreAccessFailure,
+  recordStoreAccessSuccess,
   requireAnchoredStoreAddress,
   requireStoreConfirmation,
   StoreConfirmationError,
   storeConfirmationErrorResponse,
-  unauthorizedStoreCapabilityResponse
+  unauthorizedStoreAccessResponse
 } from "../store-authz.js";
 
 type ParsedStoreAuditQuery =
@@ -87,13 +88,9 @@ export function createStoreConsoleRouteModule(options: {
         const type = parseStoreSearchType(request.query?.type);
         const supplierOnly = type === "supplier";
         const access = await context.storeIdentityProvider.resolve(request.headers);
-        const authenticatedRead = hasStoreCapability(access, "store.read") && isStoreAccessAuthenticated(access);
+        const authenticatedRead = isStoreAccessAuthenticated(access);
         if (supplierOnly && !authenticatedRead) {
-          const resource = { type: "store_supplier" };
-          if (isStoreAccessAuthenticated(access)) {
-            return forbiddenStoreCapabilityResponse(access, "store.read");
-          }
-          return unauthorizedStoreCapabilityResponse(access, "store.read");
+          return unauthorizedStoreAccessResponse(access, "store_read");
         }
         const body = await context.storeConsoleService.search(parseStoreSearchQuery(request.query), {
           walletFieldMatching: authenticatedRead
@@ -120,9 +117,9 @@ export function createStoreConsoleRouteModule(options: {
         if (!parsedQuery.ok) {
           return parsedQuery.response;
         }
-        const capability = "store.audit.read";
+        const auditAction = "store.audit.read";
         const resource = { type: "store_audit" };
-        const authorization = await authorizeStoreCapability(context, request, capability, resource);
+        const authorization = await authorizeStoreRead(context, request, auditAction, resource);
         if (!isStoreAuthorizationResult(authorization)) {
           return authorization;
         }
@@ -130,7 +127,7 @@ export function createStoreConsoleRouteModule(options: {
         if (!authorization.access.canAdmin) {
           const viewerActor = authorization.access.principalId;
           if (!viewerActor || (parsedQuery.query.actor && parsedQuery.query.actor !== viewerActor)) {
-            await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, new Error("store_audit_actor_forbidden"));
+            await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, new Error("store_audit_actor_forbidden"));
             return {
               status: 403,
               body: { error: "store_audit_actor_forbidden" }
@@ -139,45 +136,13 @@ export function createStoreConsoleRouteModule(options: {
           query = { ...parsedQuery.query, actor: viewerActor };
         }
         const records = await context.storeAuditStore.query(query);
-        await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource, {
+        await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource, {
           resultCount: records.length
         });
         return {
           status: 200,
           body: { records }
         };
-      }
-
-      if (request.method === "GET" && request.pathname === "/store/closure/dry-run") {
-        const capability = "store.audit.read";
-        const resource = { type: "store_closure_dry_run" };
-        const authorization = await authorizeStoreCapability(context, request, capability, resource);
-        if (!isStoreAuthorizationResult(authorization)) {
-          return authorization;
-        }
-        try {
-          const summary = await buildStoreClosureDryRunSummary({
-            access: authorization.access,
-            productService: context.productService,
-            projectionStore: context.store,
-            storeConsoleService: context.storeConsoleService,
-            storeRuntimeService: context.storeRuntimeService,
-            storeAuditStore: context.storeAuditStore,
-            buildDiagnostics: context.buildDiagnostics,
-            now: context.now
-          });
-          await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource, {
-            releaseClassification: summary.releaseClassification,
-            checkCount: summary.checks.length
-          });
-          return {
-            status: 200,
-            body: { summary }
-          };
-        } catch (error) {
-          await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
-          throw error;
-        }
       }
 
       if (request.method === "GET" && request.pathname === "/store/zhixus") {
@@ -256,8 +221,7 @@ async function handleStoreRuntimeRequest(
       ? /^\/store\/orders\/([^/]+)\/(?:observation|replay|audit-summary)$/.exec(request.pathname)
       : null;
     if (isRuntimeSummary || zhixuOrdersMatch || storeOrderRuntimeMatch) {
-      const capability = "store.audit.read";
-      const authorization = await authorizeStoreCapability(context, request, capability, {
+      const authorization = await authorizeStoreRead(context, request, "store.audit.read", {
         type: "store_runtime"
       });
       if (!isStoreAuthorizationResult(authorization)) {
@@ -381,18 +345,18 @@ async function handleStoreZhixuVersionRequest(
     const listMatch = /^\/store\/zhixu-series\/([^/]+)\/versions$/.exec(request.pathname);
     if (request.method === "GET" && listMatch) {
       const seriesId = decodePathParameter(listMatch[1] ?? "");
-      const capability: StoreCapability = "store.audit.read";
+      const auditAction = "store.audit.read";
       const resource = { type: "store_zhixu_version", parentId: seriesId };
-      const authorization = await authorizeStoreCapability(context, request, capability, resource);
+      const authorization = await authorizeStoreRead(context, request, auditAction, resource);
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
       try {
         const body = await context.storeZhixuVersionService.listVersions(seriesId);
-        await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+        await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
         return { status: 200, body };
       } catch (error) {
-        await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+        await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
         throw error;
       }
     }
@@ -403,9 +367,9 @@ async function handleStoreZhixuVersionRequest(
       const seriesId = decodePathParameter(actionMatch[1] ?? "");
       const versionId = decodePathParameter(actionMatch[2] ?? "");
       const action = actionMatch[3];
-      const capability = versionCapability(action);
+      const auditAction = action === "deprecate" ? "store.version.deprecate" : "store.version.activate";
       const resource = { type: "store_zhixu_version", id: versionId, parentId: seriesId };
-      const authorization = await authorizeStoreCapability(context, request, capability, resource);
+      const authorization = await authorizeStoreAdmin(context, request, auditAction, resource);
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
@@ -415,26 +379,26 @@ async function handleStoreZhixuVersionRequest(
       }
       const confirmationError = await storeVersionConfirmationError(context, request, seriesId, versionId, action);
       if (confirmationError) {
-        await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, confirmationError);
+        await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, confirmationError);
         return storeConfirmationErrorResponse(confirmationError);
       }
       if (action === "activate") {
         try {
           const body = await context.storeZhixuVersionService.activate(seriesId, versionId, parseStoreVersionMutationBody(request.body));
-          await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+          await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
           return { status: 200, body };
         } catch (error) {
-          await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+          await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
           throw error;
         }
       }
       if (action === "deprecate") {
         try {
           const body = await context.storeZhixuVersionService.deprecate(seriesId, versionId, parseStoreVersionMutationBody(request.body));
-          await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+          await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
           return { status: 200, body };
         } catch (error) {
-          await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+          await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
           throw error;
         }
       }
@@ -494,7 +458,7 @@ async function handleStoreZhixuDraftRequest(
 
   try {
     if (request.method === "POST" && request.pathname === "/store/zhixu-drafts/import") {
-      const authorization = await authorizeStoreCapability(context, request, "store.draft.import", {
+      const authorization = await authorizeStoreWrite(context, request, "store.draft.import", {
         type: "store_zhixu_draft"
       });
       if (!isStoreAuthorizationResult(authorization)) {
@@ -509,7 +473,7 @@ async function handleStoreZhixuDraftRequest(
           request.body,
           anchored.anchoredAddress
         );
-        await recordStoreCapabilitySuccess(context, request, authorization.access, "store.draft.import", {
+        await recordStoreAccessSuccess(context, request, authorization.access, "store.draft.import", {
           type: "store_zhixu_draft",
           id: draft.draftId
         });
@@ -518,7 +482,7 @@ async function handleStoreZhixuDraftRequest(
           body: { draft }
         };
       } catch (error) {
-        await recordStoreCapabilityFailure(context, request, authorization.access, "store.draft.import", {
+        await recordStoreAccessFailure(context, request, authorization.access, "store.draft.import", {
           type: "store_zhixu_draft"
         }, error);
         throw error;
@@ -528,9 +492,9 @@ async function handleStoreZhixuDraftRequest(
     const publishMetadataMatch = /^\/store\/zhixu-drafts\/([^/]+)\/publish-metadata$/.exec(request.pathname);
     if (request.method === "GET" && publishMetadataMatch) {
       const draftId = decodePathParameter(publishMetadataMatch[1] ?? "");
-      const capability = "store.draft.compile";
+      const auditAction = "store.draft.compile";
       const resource = { type: "store_zhixu_draft", id: draftId };
-      const authorization = await authorizeStoreCapability(context, request, capability, resource);
+      const authorization = await authorizeStoreWrite(context, request, auditAction, resource);
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
@@ -555,9 +519,9 @@ async function handleStoreZhixuDraftRequest(
     const action = draftMatch[2];
 
     if (request.method === "GET" && !action) {
-      const capability = "store.draft.compile";
+      const auditAction = "store.draft.compile";
       const resource = { type: "store_zhixu_draft", id: draftId };
-      const authorization = await authorizeStoreCapability(context, request, capability, resource);
+      const authorization = await authorizeStoreWrite(context, request, auditAction, resource);
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
@@ -575,9 +539,9 @@ async function handleStoreZhixuDraftRequest(
     }
 
     if (request.method === "POST" && action === "compile-preview") {
-      const capability = "store.draft.compile";
+      const auditAction = "store.draft.compile";
       const resource = { type: "store_zhixu_draft", id: draftId };
-      const authorization = await authorizeStoreCapability(context, request, capability, resource);
+      const authorization = await authorizeStoreWrite(context, request, auditAction, resource);
       if (!isStoreAuthorizationResult(authorization)) {
         return authorization;
       }
@@ -587,34 +551,23 @@ async function handleStoreZhixuDraftRequest(
       }
       try {
         const draft = await context.storeZhixuDraftWorkflowService.compilePreview(draftId);
-        await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+        await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
         return {
           status: 200,
           body: { draft }
         };
       } catch (error) {
-        await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+        await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
         throw error;
       }
     }
 
     if (request.method === "POST" && action === "submit-review") {
-      const capability = "store.draft.review";
+      const auditAction = "store.draft.review";
       const resource = { type: "store_zhixu_draft", id: draftId };
-      const authorization = await authorizeStoreCapability(context, request, capability, resource);
-      if (!isStoreAuthorizationResult(authorization)) {
+      const authorization = await authorizeStoreGovernance(context, request, auditAction, resource);
+      if (!("access" in authorization)) {
         return authorization;
-      }
-      const governancePrincipal = authorization.access.governancePrincipal;
-      if (!governancePrincipal) {
-        await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, new Error("governance_principal_required"));
-        return {
-          status: 403,
-          body: {
-            error: "governance_principal_required",
-            message: "zhixu draft review requires a governance admin identity"
-          }
-        };
       }
       const anchored = await requireAnchoredStoreAddress(context, request, resource);
       if (!isAnchoredStoreAuthorizationResult(anchored)) {
@@ -624,15 +577,15 @@ async function handleStoreZhixuDraftRequest(
         const result = await context.storeZhixuDraftWorkflowService.submitReview(
           draftId,
           request.body,
-          governancePrincipal
+          authorization.governancePrincipal
         );
-        await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+        await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
         return {
           status: 200,
           body: result
         };
       } catch (error) {
-        await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+        await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
         throw error;
       }
     }
@@ -794,17 +747,6 @@ function parseStoreZhixuListQuery(query: ApiRequest["query"]): StoreConsoleListQ
     review: query?.review,
     publication: query?.publication
   }) as StoreConsoleListQuery;
-}
-
-function versionCapability(action: string | undefined): StoreCapability {
-  switch (action) {
-    case "activate":
-      return "store.version.activate";
-    case "deprecate":
-      return "store.version.deprecate";
-    default:
-      return "store.version.activate";
-  }
 }
 
 function parseStoreSearchType(value: string | undefined): StoreSearchQuery["type"] | undefined {

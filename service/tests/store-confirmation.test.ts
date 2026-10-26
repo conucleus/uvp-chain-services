@@ -98,8 +98,7 @@ describe("Store sensitive action confirmation", () => {
       pathname: "/store/suppliers/supplier-confirm/review",
       headers: operatorHeaders,
       body: {
-        reviewStatus: "approved_for_broadcast",
-        capabilityTags: ["tag-2"]
+        reviewStatus: "approved_for_broadcast"
       }
     })).resolves.toMatchObject({
       status: 400,
@@ -111,8 +110,7 @@ describe("Store sensitive action confirmation", () => {
       pathname: "/store/suppliers/supplier-confirm/review",
       headers: operatorHeaders,
       body: {
-        reviewStatus: "submitted",
-        capabilityTags: ["tag-2"]
+        reviewStatus: "submitted"
       }
     })).resolves.toMatchObject({ status: 200 });
 
@@ -122,7 +120,6 @@ describe("Store sensitive action confirmation", () => {
       headers: operatorHeaders,
       body: {
         reviewStatus: "approved_for_broadcast",
-        capabilityTags: ["tag-2"],
         confirmation: { supplierId: "wrong-supplier" }
       }
     })).resolves.toMatchObject({
@@ -136,7 +133,6 @@ describe("Store sensitive action confirmation", () => {
       headers: operatorHeaders,
       body: {
         reviewStatus: "approved_for_broadcast",
-        capabilityTags: ["tag-2"],
         confirmation: { supplierId: "supplier-confirm" }
       }
     })).resolves.toMatchObject({ status: 200 });
@@ -159,7 +155,6 @@ function supplierBody(): Record<string, unknown> {
     supplierSubjectId,
     displayName: "Confirmation Supplier",
     wallet: supplierWallet,
-    capabilityTags: ["tag-1"],
     supportedRoleSlotIds: ["slot-a"],
     supportedStageIds: ["stage-1"],
     registryAddresses: [registryAddress]

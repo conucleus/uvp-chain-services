@@ -227,8 +227,11 @@ export function resolvePlanCapabilityTablesFromStore(
     }
     if (plan.capabilityEnrichment === "failed") {
       throw new Error(
-        "plan capability enrichment failed in the last indexer replay; the plan vocabulary state is unknown"
+        "plan capability enrichment failed in the last indexer replay (the plan artifact does not reproduce the on-chain capabilitiesRoot); the plan vocabulary state is unknown"
       );
+    }
+    if (plan.capabilityEnrichment !== "enriched") {
+      return undefined;
     }
     return {
       selectorBindings: plan.selectorBindings,

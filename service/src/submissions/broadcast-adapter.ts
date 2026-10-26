@@ -19,7 +19,6 @@ import {
   requiredRpcUrl
 } from "../shared/broadcast/kit.js";
 import { resolveDuplicateTransactionOutcome } from "../shared/broadcast/duplicate-transaction.js";
-import { zeroFactAttribution } from "./capability-proofs.js";
 import type { SubmissionBroadcastAdapter, SubmissionBroadcastResult } from "./types.js";
 
 export interface StateMachineSubmissionPublicClient {
@@ -167,8 +166,7 @@ export function createStateMachineSubmissionBroadcastAdapter(
 
       let txHash: Hex;
       try {
-        const attribution: SignalAttributionPayload = request.prepared.attribution ??
-          zeroFactAttribution(request.prepared.sourceId, request.prepared.signalId);
+        const attribution: SignalAttributionPayload = request.prepared.attribution;
         const call = buildSubmitSignalForCall({
           stateMachineAddress: request.prepared.typedData.domain.verifyingContract ?? stateMachineAddress,
           chainId: options.chainId

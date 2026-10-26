@@ -163,7 +163,7 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
 
     async reviewListing(listingId, input, actor) {
       const listing = await requireListing(listingId);
-      assertOperator(actor, "store.listing.manage");
+      assertOperator(actor);
       const record = requireBodyRecord(input);
       const decision = requiredString(record, "decision");
       const note = optionalString(record, "note");
@@ -241,7 +241,7 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
 
     async delistListing(listingId, input, actor) {
       const listing = await requireListing(listingId);
-      assertOperator(actor, "store.listing.manage");
+      assertOperator(actor);
       const record = requireBodyRecord(input);
       const reason = optionalString(record, "reason");
       if (listing.status !== "public") {
@@ -267,7 +267,7 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
 
     async relistListing(listingId, actor) {
       const listing = await requireListing(listingId);
-      assertOperator(actor, "store.listing.manage");
+      assertOperator(actor);
       if (listing.status !== "delisted") {
         throw new StoreListingServiceError(409, "invalid_listing_transition", `${listing.status} listing cannot be relisted`);
       }
@@ -339,13 +339,13 @@ export function createStoreListingService(options: StoreListingServiceOptions): 
     return listing;
   }
 
-  function assertOperator(actor: StoreListingActor, capability: string): void {
+  function assertOperator(actor: StoreListingActor): void {
     if (!OPERATOR_LEVELS.has(actor.accessLevel)) {
       throw new StoreListingServiceError(
         403,
         "forbidden",
         "store operator access is required",
-        { requiredCapability: capability }
+        { requiredAccessLevel: "store_operator" }
       );
     }
   }

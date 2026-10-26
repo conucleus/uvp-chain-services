@@ -24,13 +24,11 @@ import {
   type StoreSupplierAuditRecord,
   type StoreSupplierMetadataRecord,
 } from "../src/store/suppliers/index.js";
-import type { StoreIdentityProvider } from "../src/store/console/access.js";
 import type {
   ProductService,
   ProductTaskApiDTO,
 } from "../src/product/application/service.js";
 import type { Address, Hex } from "../src/shared/types.js";
-import type { ProductOrderDraftDTO } from "../src/product/query/bff/types.js";
 
 let stores: ChainServicesStores;
 let cleanupDatabase: PostgresDatabase;
@@ -130,7 +128,6 @@ const activeDeploymentId =
   "0x0000000000000000000000000000000000000000000000000000000000000d02";
 const registrar = "0x2222222222222222222222222222222222222222";
 const supplierWallet = "0x4444444444444444444444444444444444444444";
-const revokedWallet = "0x0000000000000000000000000000000000000001";
 const supplierSubjectId =
   "0x0000000000000000000000000000000000000000000000000000000000003001" as Hex;
 const revokedSupplierSubjectId =
@@ -219,12 +216,13 @@ describe("Store supplier directory API", () => {
     expect(new Set(audits.map((audit) => audit.auditId)).size).toBe(2);
   });
 
-  it("combines Store metadata, capability tags, and identity projection", async () => {
+  it("combines Store metadata, supported slots, and identity projection", async () => {
     const { router } = await createRouter([identityRegisteredEvent(2n)]);
 
     const created = await createSupplier(router);
     expect(created.identityStatus).toBe("active");
-    expect(created.capabilityTags).toEqual(["example", "tag-1"]);
+    expect(created.supportedRoleSlotIds).toEqual(["slot-a"]);
+    expect(created.supportedStageIds).toEqual(["example-complete", "stage-1"]);
     expect(created.wallet).toBe(supplierWallet.toLowerCase());
     expect(created.proofRows).toContainEqual(
       expect.objectContaining({ value: "IdentityBindingRegistered" }),
@@ -234,7 +232,7 @@ describe("Store supplier directory API", () => {
       method: "GET",
       pathname: "/store/suppliers",
       headers: storeHeaders,
-      query: { identity: "active", tag: "tag-1", query: "Main" },
+      query: { identity: "active", query: "Main" },
     });
 
     expect(listResponse.status).toBe(200);
@@ -380,7 +378,7 @@ describe("Store supplier directory API", () => {
     ).toBe(true);
   });
 
-  it("audits tag edits and delegates identity registration and revocation", async () => {
+  it("audits supported slot edits and delegates identity registration and revocation", async () => {
     const requests: GovernanceChainRequestDTO[] = [];
     const adapter: GovernanceChainAdapter = {
       async registerIdentity(request) {
@@ -419,7 +417,6 @@ describe("Store supplier directory API", () => {
       headers: storeHeaders,
       body: {
         reviewStatus: "approved_for_broadcast",
-        capabilityTags: ["tag-2", "tag-1"],
         supportedRoleSlotIds: ["slot-b", "slot-c"],
         supportedStageIds: ["stage-a"],
         publicSummary: "Approved for Store broadcast.",
@@ -429,12 +426,10 @@ describe("Store supplier directory API", () => {
       },
     });
     expect(review.status).toBe(200);
-    // 服务端 normalizeCapabilityTags 会把标签规范化为去重+排序形态：
-    // 请求里故意乱序传 ["tag-2", "tag-1"]，回读必须是排序后的规范序。
+    // 服务端 normalizeStringArray 会把槽/阶段规范化为去重+排序形态。
     expect(
       (review.body as { supplier: StoreSupplierDTO }).supplier,
     ).toMatchObject({
-      capabilityTags: ["tag-1", "tag-2"],
       supportedRoleSlotIds: ["slot-b", "slot-c"],
       supportedStageIds: ["stage-a"],
     });
@@ -487,15 +482,13 @@ describe("Store supplier directory API", () => {
       "revokeIdentity",
     ]);
 
-    const tagAudit = (
+    const slotAudit = (
       await metadataStore.listAudits("supplier-main")
     ).find(
       (audit): audit is StoreSupplierAuditRecord =>
-        audit.action === "tags_updated",
+        audit.action === "supported_slots_updated",
     );
-    expect(tagAudit).toMatchObject({
-      beforeTags: ["example", "tag-1"],
-      afterTags: ["tag-1", "tag-2"],
+    expect(slotAudit).toMatchObject({
       beforeSupportedRoleSlotIds: ["slot-a"],
       afterSupportedRoleSlotIds: ["slot-b", "slot-c"],
       beforeSupportedStageIds: ["example-complete", "stage-1"],
@@ -514,10 +507,8 @@ describe("Store supplier directory API", () => {
         "IdentityBindingRegistered/IdentityBindingRevoked projection",
       records: expect.arrayContaining([
         expect.objectContaining({
-          action: "tags_updated",
+          action: "supported_slots_updated",
           actor: "store-operator-1",
-          beforeTags: ["example", "tag-1"],
-          afterTags: ["tag-1", "tag-2"],
           beforeSupportedRoleSlotIds: ["slot-a"],
           afterSupportedRoleSlotIds: ["slot-b", "slot-c"],
           beforeSupportedStageIds: ["example-complete", "stage-1"],
@@ -562,7 +553,6 @@ describe("Store supplier directory API", () => {
       supplierSubjectId: metadataOnlySupplierSubjectId,
       displayName: "Wallet Only Supplier",
       wallet: metadataOnlyWallet,
-      capabilityTags: ["tag-2"],
       supportedRoleSlotIds: ["slot-e2"],
       supportedStageIds: ["stage-a"],
     });
@@ -613,38 +603,6 @@ describe("Store supplier directory API", () => {
       }),
     ).resolves.toMatchObject({ status: 401 });
   });
-
-  it("requires store.supplier.tags.update for role-slot and stage support edits", async () => {
-    const metadataStore = stores.storeSupplierMetadataStore;
-    const store = stores.projectionStore;
-    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
-      storeSupplierMetadataStore: metadataStore,
-    });
-    await createSupplier(router);
-
-    const reviewOnlyRouter = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, productRuntimeEnvironment: "local" as const,
-      storeSupplierMetadataStore: metadataStore,
-      storeIdentityProvider: reviewOnlyStoreIdentityProvider(),
-    });
-
-    await expect(
-      reviewOnlyRouter.handle({
-        method: "POST",
-        pathname: "/store/suppliers/supplier-main/review",
-        body: {
-          reviewStatus: "submitted",
-          supportedRoleSlotIds: ["slot-b"],
-          supportedStageIds: ["stage-a"],
-        },
-      }),
-    ).resolves.toMatchObject({
-      status: 403,
-      body: {
-        error: "forbidden",
-        requiredCapability: "store.supplier.tags.update",
-      },
-    });
-  });
 });
 
 async function createRouter(events: readonly ChainEvent[]): Promise<{
@@ -667,32 +625,10 @@ function supplierBody(
     supplierSubjectId,
     displayName: "Main Partner",
     wallet: supplierWallet,
-    capabilityTags: ["tag-1", "example"],
     supportedRoleSlotIds: ["slot-a"],
     supportedStageIds: ["example-complete", "stage-1"],
     registryAddresses: [registryAddress],
     ...overrides,
-  };
-}
-
-function reviewOnlyStoreIdentityProvider(): StoreIdentityProvider {
-  return {
-    async resolve() {
-      return {
-        level: "store_operator",
-        principalId: "review-only-operator",
-        roles: ["store_operator"],
-        capabilities: [
-          "store.read",
-          "store.audit.read",
-          "store.supplier.review",
-        ],
-        authMode: "jwt",
-        anchoredAddress: operatorWallet,
-        canWrite: true,
-        canAdmin: false,
-      };
-    },
   };
 }
 
@@ -706,7 +642,6 @@ function metadataRecord(input: {
     supplierId: input.supplierId,
     supplierSubjectId: input.supplierSubjectId,
     displayName: input.displayName,
-    capabilityTags: [],
     supportedRoleSlotIds: [],
     supportedStageIds: [],
     registryAddresses: [registryAddress],
@@ -787,83 +722,6 @@ async function getSupplier(
   });
   expect(response.status).toBe(200);
   return (response.body as { supplier: StoreSupplierDTO }).supplier;
-}
-
-const creatorHeaders = { "x-uvp-wallet-address": operatorWallet };
-
-async function createDraft(router: ApiRouter): Promise<ProductOrderDraftDTO> {
-  const response = await router.handle({
-    method: "POST",
-    pathname: "/product/order-drafts",
-    headers: creatorHeaders,
-    body: {
-      zhixuId: EXAMPLE_ZHIXU_ID,
-      title: "A company purchase",
-      businessType: "type-1",
-      totalAmount: "10000",
-      currency: "tok-1",
-    },
-  });
-  expect(response.status).toBe(201);
-  return (response.body as { draft: ProductOrderDraftDTO }).draft;
-}
-
-async function createReadyDraft(
-  router: ApiRouter,
-): Promise<ProductOrderDraftDTO> {
-  const draft = await createDraft(router);
-  const participantsResponse = await router.handle({
-    method: "GET",
-    pathname: `/product/orders/${draft.draftId}/participants`,
-    headers: creatorHeaders,
-  });
-  const participants = (
-    participantsResponse.body as {
-      participants: Array<{
-        readonly roleSlotId: string;
-        readonly required: boolean;
-      }>;
-    }
-  ).participants.filter((participant) => participant.required);
-
-  for (const [index, participant] of participants.entries()) {
-    const inviteResponse = await router.handle({
-      method: "POST",
-      pathname: `/product/orders/${draft.draftId}/invites`,
-      headers: creatorHeaders,
-      body: {
-        roleSlotId: participant.roleSlotId,
-        contact: `${participant.roleSlotId}@example.com`,
-      },
-    });
-    const inviteId = (inviteResponse.body as { invite: { inviteId: string } })
-      .invite.inviteId;
-    const inviteToken = (inviteResponse.body as { inviteToken?: string }).inviteToken;
-    const acceptResponse = await router.handle({
-      method: "POST",
-      pathname: `/product/invites/${inviteId}/accept`,
-      headers: {
-        "x-uvp-wallet-address": index === 0 ? revokedWallet : testWallet(index + 10)
-      },
-      body: {
-        displayName: `${participant.roleSlotId} participant`,
-        walletAddress: index === 0 ? revokedWallet : testWallet(index + 10),
-        contact: `${participant.roleSlotId}@example.com`,
-        token: inviteToken,
-      },
-    });
-    expect(acceptResponse.status).toBe(200);
-  }
-
-  const readyResponse = await router.handle({
-    method: "GET",
-    pathname: `/product/order-drafts/${draft.draftId}`,
-    headers: creatorHeaders,
-  });
-  expect(
-    (readyResponse.body as { draft: ProductOrderDraftDTO }).draft.status,
-  ).toBe("ready_to_trigger");
-  return (readyResponse.body as { draft: ProductOrderDraftDTO }).draft;
 }
 
 function planRegisteredEvent(blockNumber: bigint): ChainEvent {
@@ -1041,10 +899,6 @@ function chainEvent(
     eventName,
     args,
   };
-}
-
-function testWallet(index: number): string {
-  return `0x${index.toString(16).padStart(40, "0")}`;
 }
 
 function bytes32Text(value: string): string {

@@ -58,7 +58,7 @@ export interface PreparedSubmissionDTO {
   readonly status: "prepared";
   readonly humanSummary: ProductSubmitHumanSummaryDTO;
   readonly typedData: ProductSubmitTypedData;
-  readonly attribution?: SignalAttributionPayload;
+  readonly attribution: SignalAttributionPayload;
   readonly selectorBinding?: SelectorBindingPayload;
   readonly evidence: readonly PreparedSubmissionEvidenceDTO[];
   readonly authorization: {

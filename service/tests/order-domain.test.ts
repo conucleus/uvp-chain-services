@@ -180,7 +180,6 @@ function identityProvider() {
         return {
           level: "anonymous_read" as const,
           roles: [] as const,
-          capabilities: [] as const,
           authMode: "anonymous" as const,
           canWrite: false,
           canAdmin: false,
@@ -189,7 +188,6 @@ function identityProvider() {
       return {
         level: "store_operator" as const,
         roles: [] as const,
-        capabilities: [] as const,
         authMode: "dev_store_headers" as const,
         canWrite: true,
         canAdmin: false,
@@ -1278,5 +1276,82 @@ describe("order Postgres persistence", () => {
     } finally {
       await store.close();
     }
+  });
+});
+
+function chainEvent(blockNumber: bigint, eventName: string, args: Record<string, unknown>) {
+  return {
+    chainId: 31337,
+    contractAddress: stateMachine,
+    blockNumber,
+    transactionHash: `0x${blockNumber.toString(16).padStart(64, "0")}` as const,
+    logIndex: 0,
+    eventName,
+    args
+  };
+}
+
+describe("V3 order status derives from the chain projection", () => {
+  it("moves the order/stage status and the perform task from pending to active once chain events exist", async () => {
+    const { router } = await fixture();
+    await publishConfig(router, configBundle());
+    const draftId = ((await createDraft(router, slotA.address as Address, draftBody())).body as {
+      draft: { draftId: string };
+    }).draft.draftId;
+    const { created, preview } = await inviteAndPreview(router, draftId, performer.address as Address);
+    const accepted = await acceptInvite(router, created.inviteId, created.inviteToken, performer, preview.body as never);
+    expect(accepted.status, JSON.stringify(accepted.body)).toBe(200);
+    const finalize = await finalizeWithSignature(router, draftId);
+    expect(finalize.status, JSON.stringify(finalize.body)).toBe(200);
+    const orderId = (finalize.body as { orderId: string }).orderId;
+    const stageId = keccak256(stringToHex("alpha"));
+
+    const pendingOrder = await router.handle({
+      method: "GET",
+      pathname: `/product/v3/orders/${orderId}`,
+      headers: headers(slotA.address)
+    });
+    expect(pendingOrder.status).toBe(200);
+    expect(pendingOrder.body).toMatchObject({
+      status: "unknown",
+      stages: [{ stageKey: "alpha", status: "pending" }]
+    });
+    const pendingTasks = await router.handle({
+      method: "GET",
+      pathname: `/product/v3/orders/${orderId}/stages/alpha/tasks`,
+      headers: headers(performer.address)
+    });
+    expect(pendingTasks.status).toBe(200);
+    expect((pendingTasks.body as { items: readonly { kind: string; status: string }[] }).items).toMatchObject([
+      { kind: "perform_stage", status: "blocked" }
+    ]);
+
+    await projectionStore.resetFromEvents({
+      deploymentBlock: 0n,
+      events: [
+        chainEvent(1n, "OrderRegistered", { orderId, planId: publishedPlanId }),
+        chainEvent(2n, "StageMaterialized", { orderId, planId: publishedPlanId, stageId })
+      ]
+    });
+
+    const activeOrder = await router.handle({
+      method: "GET",
+      pathname: `/product/v3/orders/${orderId}`,
+      headers: headers(slotA.address)
+    });
+    expect(activeOrder.status).toBe(200);
+    expect(activeOrder.body).toMatchObject({
+      status: "registered",
+      stages: [{ stageKey: "alpha", status: "active" }]
+    });
+    const activeTasks = await router.handle({
+      method: "GET",
+      pathname: `/product/v3/orders/${orderId}/stages/alpha/tasks`,
+      headers: headers(performer.address)
+    });
+    expect(activeTasks.status).toBe(200);
+    expect((activeTasks.body as { items: readonly { kind: string; status: string; actionRef?: string }[] }).items).toMatchObject([
+      { kind: "perform_stage", status: "open", actionRef: "perform:alpha" }
+    ]);
   });
 });

@@ -15,7 +15,6 @@ export interface StoreSupplierMetadataRecord {
   readonly notificationProfile?: SupplierNotificationProfile;
   readonly notificationProfileHash?: Hex;
   readonly notificationUpdatedAt?: string;
-  readonly capabilityTags: readonly string[];
   readonly supportedRoleSlotIds: readonly string[];
   readonly supportedStageIds: readonly string[];
   readonly registryAddresses: readonly Address[];
@@ -28,7 +27,7 @@ export interface StoreSupplierMetadataRecord {
 export type StoreSupplierAuditAction =
   | "create"
   | "review"
-  | "tags_updated"
+  | "supported_slots_updated"
   | "notification_profile_updated"
   | "request_identity_registration"
   | "request_identity_revocation";
@@ -39,8 +38,6 @@ export interface StoreSupplierAuditRecord {
   readonly supplierSubjectId: Hex;
   readonly action: StoreSupplierAuditAction;
   readonly actor: string;
-  readonly beforeTags?: readonly string[];
-  readonly afterTags?: readonly string[];
   readonly beforeSupportedRoleSlotIds?: readonly string[];
   readonly afterSupportedRoleSlotIds?: readonly string[];
   readonly beforeSupportedStageIds?: readonly string[];

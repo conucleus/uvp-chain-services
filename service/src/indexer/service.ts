@@ -26,10 +26,7 @@ import {
 } from "./semantic-oracle.js";
 import { createEmptyIdentityProjectionSnapshot, rebuildIdentityProjections } from "./identity-projections.js";
 import { createChainServicesStores } from "../storage/factory.js";
-import {
-  createPlanCapabilityTablesResolver,
-  createSemanticOraclePlanResolver
-} from "../store/console/zhixu-drafts.js";
+import { createPlanArtifactResolvers } from "../projection/plan-artifacts.js";
 import {
   defaultProjectionScope,
   projectionDiagnosticsFromSnapshots,
@@ -107,7 +104,7 @@ export interface IndexerServiceOptions {
   readonly resolvePlanCapabilityTables?: (
     planId: Hex,
     planHash: Hex
-  ) => Promise<PlanCapabilityTablesInput | undefined>;
+  ) => Promise<PlanCapabilityTablesInput>;
   readonly resolveSemanticOraclePlan?: (
     planId: Hex,
     planHash: Hex
@@ -174,7 +171,7 @@ export class IndexerService implements LifecycleService {
   readonly #notificationProcessor: ChainEventNotificationProcessor | undefined;
   readonly #projectionAutomationProcessor: ProjectionAutomationProcessor | undefined;
   readonly #resolvePlanCapabilityTables:
-    | ((planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput | undefined>)
+    | ((planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput>)
     | undefined;
   readonly #resolveSemanticOraclePlan:
     | ((planId: Hex, planHash: Hex) => Promise<SemanticOraclePlan | undefined>)
@@ -205,27 +202,23 @@ export class IndexerService implements LifecycleService {
     if (!resolver) {
       return undefined;
     }
-    const resolutionFailures: Hex[] = [];
     for (const anchor of this.#collectPlanAnchors(events).values()) {
       if (this.#planCapabilityTablesCache.has(anchor.planId.toLowerCase())) {
         continue;
       }
       try {
         const source = await resolver(anchor.planId, anchor.planHash);
-        if (source) {
-          this.#planCapabilityTablesCache.set(anchor.planId.toLowerCase(), source);
-        }
+        this.#planCapabilityTablesCache.set(anchor.planId.toLowerCase(), source);
       } catch (error) {
-        resolutionFailures.push(anchor.planId);
-        this.#logger.warn("plan capability tables resolution failed; the plan vocabulary is marked unenriched-failed for this replay (fail-closed)", {
+        this.#logger.error("plan artifact resolution failed; the rebuild aborts instead of serving an unverified plan vocabulary (fail-closed)", {
           planId: anchor.planId,
           message: error instanceof Error ? redactErrorMessage(error) : "unknown resolution error"
         });
+        throw error;
       }
     }
     return {
-      planCapabilityTables: [...this.#planCapabilityTablesCache.values()],
-      planCapabilityResolutionFailures: resolutionFailures
+      planCapabilityTables: [...this.#planCapabilityTablesCache.values()]
     };
   }
 
@@ -305,27 +298,19 @@ export class IndexerService implements LifecycleService {
     }
   }
 
-  #reconcileCapabilityEnrichmentMismatch(
-    snapshot: ProjectionSnapshot,
-    resolutionFailures?: readonly Hex[]
-  ): void {
-    const resolutionFailed = new Set(
-      (resolutionFailures ?? []).map((planId) => planId.toLowerCase())
-    );
+  #reconcileCapabilityEnrichmentMismatch(snapshot: ProjectionSnapshot): void {
     const mismatchedPlanIds: Hex[] = [];
     for (const plan of Object.values(snapshot.stateMachinePlans)) {
       if (plan.capabilityEnrichment !== "failed") {
         continue;
       }
       this.#planCapabilityTablesCache.delete(plan.planId.toLowerCase());
-      if (!resolutionFailed.has(plan.planId.toLowerCase())) {
-        mismatchedPlanIds.push(plan.planId);
-      }
+      mismatchedPlanIds.push(plan.planId);
     }
     const mismatches = snapshot.capabilityEnrichmentMismatchCount ?? 0;
     if (mismatches > 0) {
       this.#logger.warn(
-        "plan capability tables failed the on-chain anchor assertion (the artifact tables do not reproduce the chain capabilitiesRoot); correct the store-domain plan artifact for the listed plans - they stay unenriched-failed so the submission/trigger lanes refuse their vocabulary proofs, and the cached source is dropped so the next round re-resolves the corrected artifact",
+        "plan artifact vocabulary failed the on-chain anchor assertion (the artifact tables do not reproduce the chain capabilitiesRoot); the listed plans stay unenriched-failed so the submission/trigger lanes refuse their vocabulary proofs, and the cached source is dropped so the next round re-resolves the corrected artifact",
         {
           capabilityEnrichmentMismatchCount: mismatches,
           planIds: mismatchedPlanIds
@@ -564,7 +549,7 @@ export class IndexerService implements LifecycleService {
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
       });
-      this.#reconcileCapabilityEnrichmentMismatch(snapshot, enrichmentOptions?.planCapabilityResolutionFailures);
+      this.#reconcileCapabilityEnrichmentMismatch(snapshot);
       this.#reconcileSemanticOracle(semanticOracle);
 
       return { snapshot, summary };
@@ -863,7 +848,7 @@ export class IndexerService implements LifecycleService {
       nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
     });
-    this.#reconcileCapabilityEnrichmentMismatch(result.snapshot, enrichmentOptions?.planCapabilityResolutionFailures);
+    this.#reconcileCapabilityEnrichmentMismatch(result.snapshot);
     this.#reconcileSemanticOracle(oracleResult);
 
     return { snapshot: result.snapshot, summary: result.summary };
@@ -1106,7 +1091,7 @@ export class IndexerService implements LifecycleService {
       const snapshot = rebuildOrderProjections(remainingEvents, {
         ...(enrichmentOptions ?? {})
       });
-      this.#reconcileCapabilityEnrichmentMismatch(snapshot, enrichmentOptions?.planCapabilityResolutionFailures);
+      this.#reconcileCapabilityEnrichmentMismatch(snapshot);
       const semanticOracle = this.#runSemanticOracle(remainingEvents, semanticOraclePlans);
       this.#reconcileSemanticOracle(semanticOracle);
       const identitySnapshot = rebuildIdentityProjections(remainingEvents);
@@ -1644,12 +1629,16 @@ async function main(): Promise<void> {
       chainId: config.network.chainId
     });
     try {
+      const planArtifacts = createPlanArtifactResolvers({
+        store: stores.planArtifactStore,
+        chainId: config.network.chainId
+      });
       const service = createIndexerService({
         config,
         eventSource,
         store: stores.projectionStore,
-        resolvePlanCapabilityTables: createPlanCapabilityTablesResolver(stores.storeZhixuDraftStore),
-        resolveSemanticOraclePlan: createSemanticOraclePlanResolver(stores.storeZhixuDraftStore),
+        resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
+        resolveSemanticOraclePlan: planArtifacts.resolveSemanticOraclePlan,
         logger: consoleLogger
       });
       const targetBlock = parseTargetBlockArg(process.argv);

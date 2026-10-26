@@ -64,8 +64,8 @@ describe("dock delivery & projection blackbox", () => {
 
   it("delivers a hook that was already ready before the dock was attached (out-of-order arrival)", async () => {
     const events: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
-      planRegistered(2n, targetPlanId, targetPlanHash),
+      ...planPublished(1n, planId, planHash),
+      ...planPublished(2n, targetPlanId, targetPlanHash),
       orderRegistered(3n, parentOrderId, planId),
       orderRegistered(4n, targetOrderId, targetPlanId),
       moduleSet(5n),
@@ -91,8 +91,8 @@ describe("dock delivery & projection blackbox", () => {
 
   it("backfills a target fact that was established before the dock was attached", async () => {
     const events: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
-      planRegistered(2n, targetPlanId, targetPlanHash),
+      ...planPublished(1n, planId, planHash),
+      ...planPublished(2n, targetPlanId, targetPlanHash),
       orderRegistered(3n, parentOrderId, planId),
       orderRegistered(4n, targetOrderId, targetPlanId),
       moduleSet(5n),
@@ -129,7 +129,7 @@ describe("dock delivery & projection blackbox", () => {
       signalCapabilities
     };
     const baseEvents: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
+      ...planPublished(1n, planId, planHash),
       orderRegistered(3n, parentOrderId, planId),
       orderRegistered(4n, targetOrderId, targetPlanId),
       moduleSet(5n),
@@ -158,7 +158,7 @@ describe("dock delivery & projection blackbox", () => {
     });
 
     const plain = await buildWorker({
-      events: [planRegistered(2n, targetPlanId, targetPlanHash)].concat(baseEvents),
+      events: [...planPublished(2n, targetPlanId, targetPlanHash)].concat(baseEvents),
       routes: [route]
     });
     const plainSummary = await plain.worker.runOnce();
@@ -174,8 +174,8 @@ describe("dock delivery & projection blackbox", () => {
 
   it("keeps the keeper alive when the input-lane vocabulary resolution failed: skip with a trace, never reject the round", async () => {
     const baseEvents: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
-      planRegistered(2n, targetPlanId, targetPlanHash),
+      ...planPublished(1n, planId, planHash),
+      ...planPublished(2n, targetPlanId, targetPlanHash),
       orderRegistered(3n, parentOrderId, planId),
       orderRegistered(4n, targetOrderId, targetPlanId),
       moduleSet(5n),
@@ -189,7 +189,17 @@ describe("dock delivery & projection blackbox", () => {
     const { worker, submitted } = await buildWorker({
       events: baseEvents,
       routes: [route],
-      planCapabilityResolutionFailures: [targetPlanId]
+      planCapabilityTables: [{
+        planId: targetPlanId,
+        planHash: targetPlanHash,
+        selectorBindings: [],
+        signalCapabilities: [{
+          stageId: hookId,
+          targetSourceId: sourceId,
+          signalId,
+          targetOrderRelation: 0 as const
+        }]
+      }]
     });
     const summary = await worker.runOnce();
     expect(summary.inputCandidates).toBe(1);
@@ -230,8 +240,8 @@ describe("dock delivery & projection blackbox", () => {
     const routeIdB = bytes32Hex("f2");
     const dockInstanceB = bytes32Hex("e2");
     const events: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
-      planRegistered(2n, targetPlanId, targetPlanHash),
+      ...planPublished(1n, planId, planHash),
+      ...planPublished(2n, targetPlanId, targetPlanHash),
       orderRegistered(3n, parentOrderId, planId),
       orderRegistered(3n, parentB, planId, 1),
       orderRegistered(4n, targetOrderId, targetPlanId, 0),
@@ -377,8 +387,8 @@ describe("dock delivery & projection blackbox", () => {
 
   it("treats a not-yet-ready hook as a silent waiting state (no candidates, no skip traces)", async () => {
     const events: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
-      planRegistered(2n, targetPlanId, targetPlanHash),
+      ...planPublished(1n, planId, planHash),
+      ...planPublished(2n, targetPlanId, targetPlanHash),
       orderRegistered(3n, parentOrderId, planId),
       orderRegistered(4n, targetOrderId, targetPlanId),
       moduleSet(5n),
@@ -410,7 +420,7 @@ describe("dock delivery & projection blackbox", () => {
 
   it("counts genuinely unknown events explicitly and keeps neighbour projections intact", async () => {
     const events: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
+      ...planPublished(1n, planId, planHash),
       chainEvent(2n, 0, "OwnershipTransferred", {
         previousOwner: zeroAddress,
         newOwner: signer
@@ -430,7 +440,7 @@ describe("dock delivery & projection blackbox", () => {
 
     const snapshot = rebuildOrderProjections(events);
     expect(snapshot.unknownEventCount).toBe(2);
-    expect(snapshot.eventCount).toBe(6);
+    expect(snapshot.eventCount).toBe(8);
     expect(snapshot.stateMachineDeployments[`${chainId}:${deploymentRegistryAddress}:${bytes32Hex("7d01")}`])
       .toMatchObject({ status: "candidate" });
     expect(snapshot.stateMachineOrders[stateMachineScopedKey(chainId, stateMachineAddress, planId, parentOrderId)])
@@ -440,7 +450,7 @@ describe("dock delivery & projection blackbox", () => {
   it("projects OrderForked lineage and keeps the fork order an ordinary order that accepts signals", async () => {
     const forkOrderId = bytes32Hex("c5");
     const events: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
+      ...planPublished(1n, planId, planHash),
       orderRegistered(2n, parentOrderId, planId),
       orderRegistered(3n, forkOrderId, planId),
       chainEvent(4n, 0, "OrderForked", {
@@ -479,7 +489,7 @@ describe("dock delivery & projection blackbox", () => {
     const forkOrderId = bytes32Hex("c6");
     const events: readonly ChainEvent[] = [
       ...planPublishEvents(1n, planId, planHash, capabilitiesRootOf([], [])),
-      planRegistered(2n, targetPlanId, targetPlanHash),
+      ...planPublished(2n, targetPlanId, targetPlanHash),
       orderRegistered(3n, parentOrderId, planId),
       orderRegistered(4n, targetOrderId, targetPlanId),
       moduleSet(5n),
@@ -548,7 +558,7 @@ describe("dock delivery & projection blackbox", () => {
       initiator: signer
     });
     const base: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
+      ...planPublished(1n, planId, planHash),
       orderRegistered(2n, parentOrderId, planId)
     ];
 
@@ -561,13 +571,13 @@ describe("dock delivery & projection blackbox", () => {
 
     const rolled = rebuildOrderProjections([...base, forkedEvent, { ...forkedEvent, removed: true }]);
     expect(rolled.stateMachineOrders[forkKey]).toBeUndefined();
-    expect(rolled.eventCount).toBe(2);
+    expect(rolled.eventCount).toBe(4);
   });
 
   it("keeps the fork lineage when OrderForked arrives before the fork order's own OrderRegistered", async () => {
     const forkOrderId = bytes32Hex("c8");
     const events: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
+      ...planPublished(1n, planId, planHash),
       orderRegistered(2n, parentOrderId, planId),
       chainEvent(3n, 0, "OrderForked", {
         planId,
@@ -593,8 +603,8 @@ describe("dock delivery & projection blackbox", () => {
     const unknownDockInstance = bytes32Hex("e9");
     const childOrderId = bytes32Hex("c9");
     const events: readonly ChainEvent[] = [
-      planRegistered(1n, planId, planHash),
-      planRegistered(2n, targetPlanId, targetPlanHash),
+      ...planPublished(1n, planId, planHash),
+      ...planPublished(2n, targetPlanId, targetPlanHash),
       orderRegistered(3n, parentOrderId, planId),
       moduleSet(4n),
       chainEvent(5n, 0, "DockInputSubmitted", {
@@ -663,20 +673,22 @@ async function buildWorker(options: {
   readonly events: readonly ChainEvent[];
   readonly routes: readonly DockRouteRecord[];
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
-  readonly planCapabilityResolutionFailures?: readonly Hex[];
   readonly now?: () => Date;
   readonly maxCandidatesPerRun?: number;
   readonly redeliveryWindowMs?: number;
   readonly submit?: (submission: DockAutomationSubmission) => Promise<Hex>;
 }): Promise<{ readonly worker: DockAutomationWorker; readonly submitted: string[] }> {
   const store = stores.projectionStore;
+  const explicitTables = options.planCapabilityTables ?? [];
+  const explicitPlanIds = new Set(explicitTables.map((tables) => tables.planId.toLowerCase()));
   await store.resetFromEvents({
     deploymentBlock: 0n,
     events: options.events,
-    ...(options.planCapabilityTables ? { planCapabilityTables: options.planCapabilityTables } : {}),
-    ...(options.planCapabilityResolutionFailures
-      ? { planCapabilityResolutionFailures: options.planCapabilityResolutionFailures }
-      : {})
+    planCapabilityTables: [
+      ...explicitTables,
+      ...emptyVocabularyForPublishedPlans(options.events)
+        .filter((tables) => !explicitPlanIds.has(tables.planId.toLowerCase()))
+    ]
   });
   // PG 化后 resetFromEvents 只持久化派生同步态（不含 finalizedBlock）：
   // 与 timer-keeper.test.ts 的 freshStore 同型，显式补写已定稿高度，
@@ -716,8 +728,8 @@ async function buildWorker(options: {
 
 function attachedBase(hooks: readonly Hex[]): readonly ChainEvent[] {
   return [
-    planRegistered(1n, planId, planHash),
-    planRegistered(2n, targetPlanId, targetPlanHash),
+    ...planPublished(1n, planId, planHash),
+    ...planPublished(2n, targetPlanId, targetPlanHash),
     orderRegistered(3n, parentOrderId, planId),
     orderRegistered(4n, targetOrderId, targetPlanId),
     moduleSet(5n),
@@ -802,12 +814,41 @@ function planPublishEvents(
   ];
 }
 
-function planRegistered(block: bigint, registeredPlanId: Hex, registeredPlanHash: Hex): ChainEvent {
-  return chainEvent(block, 0, "PlanRegistered", {
-    planId: registeredPlanId,
-    planHash: registeredPlanHash,
-    hookCount: 1n
-  });
+function planPublished(block: bigint, publishedPlanId: Hex, publishedPlanHash: Hex): readonly ChainEvent[] {
+  const capabilitiesRoot = capabilitiesRootOf([], []);
+  return [
+    chainEvent(block, 0, "PlanCommitted", {
+      planId: publishedPlanId,
+      planHash: publishedPlanHash,
+      publisher: signer,
+      hooksHash: bytes32Hex("0e01"),
+      capabilitiesRoot,
+      hookCount: 1n,
+      dockRoutesRoot: bytes32Hex("0e03"),
+      dockInterfaceRoot: bytes32Hex("0e04")
+    }),
+    chainEvent(block, 1, "PlanFinalized", {
+      planId: publishedPlanId,
+      planHash: publishedPlanHash,
+      capabilitiesRoot
+    }),
+    chainEvent(block, 2, "PlanRegistered", {
+      planId: publishedPlanId,
+      planHash: publishedPlanHash,
+      hookCount: 1n
+    })
+  ];
+}
+
+function emptyVocabularyForPublishedPlans(events: readonly ChainEvent[]): readonly PlanCapabilityTablesInput[] {
+  return events
+    .filter((event) => event.eventName === "PlanCommitted")
+    .map((event) => ({
+      planId: String(event.args.planId) as Hex,
+      planHash: String(event.args.planHash) as Hex,
+      selectorBindings: [],
+      signalCapabilities: []
+    }));
 }
 
 function orderRegistered(block: bigint, order: Hex, orderPlanId: Hex, logIndex = 0): ChainEvent {

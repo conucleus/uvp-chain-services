@@ -432,9 +432,6 @@ function supplierMatchedFields(
   const fields = [...exactSupplierMatchedFields(supplier, normalizedQuery)];
   addMatch(fields, "displayName", supplier.displayName, normalizedQuery);
   addMatch(fields, "metadataURI", supplier.metadataURI, normalizedQuery);
-  if (supplier.capabilityTags.some((tag) => normalizeSearchText(tag).includes(normalizedQuery))) {
-    fields.push("capabilityTags");
-  }
   if (supplier.supportedRoleSlotIds.some((id) => normalizeSearchText(id).includes(normalizedQuery))) {
     fields.push("supportedRoleSlotIds");
   }

@@ -57,7 +57,7 @@ import { ConfigError, consoleLogger, type Address, type Logger } from "../shared
 import { createApiRouter, productBffStoreDraftOrderResolver } from "./routes.js";
 import { InvalidPathParameterError, invalidPathParameterResponse, normalizeRequestId } from "./route-context.js";
 import { createListingAnchorChainView } from "../store/listings/index.js";
-import { createPlanCapabilityTablesResolver, createSemanticOraclePlanResolver } from "../store/console/zhixu-drafts.js";
+import { createPlanArtifactResolvers } from "../projection/plan-artifacts.js";
 
 export interface StartApiServerOptions {
   readonly config?: ChainServicesConfig;
@@ -78,6 +78,10 @@ export async function startApiServer(
     chainId: config.network.chainId
   });
   const store = options.store ?? stores.projectionStore;
+  const planArtifacts = createPlanArtifactResolvers({
+    store: stores.planArtifactStore,
+    chainId: config.network.chainId
+  });
   const logger = createRedactingLogger(options.logger ?? consoleLogger, config.security.logRedactionEnabled);
   const audit = createLoggerAuditSink(logger);
   const orderBirthPort = createConfiguredOrderBirthPort(config, logger);
@@ -122,8 +126,8 @@ export async function startApiServer(
       eventSource,
       store,
       notificationProcessor: notificationService,
-      resolvePlanCapabilityTables: createPlanCapabilityTablesResolver(stores.storeZhixuDraftStore),
-      resolveSemanticOraclePlan: createSemanticOraclePlanResolver(stores.storeZhixuDraftStore),
+      resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
+      resolveSemanticOraclePlan: planArtifacts.resolveSemanticOraclePlan,
       logger
     })
     : undefined;
@@ -262,7 +266,6 @@ export async function startApiServer(
       ...(config.storeAuth?.walletSession?.adminWallets ?? [])
     ],
     ...(orderBirthPort ? { orderBirthPort } : {}),
-    orderRequirementsStore: stores.orderRequirementsStore,
     ...(config.operatorRoles.adminReviewers.length > 0
       ? { governanceAdminIds: config.operatorRoles.adminReviewers }
       : {}),
@@ -278,6 +281,8 @@ export async function startApiServer(
     ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
     opsRecoveryActions,
     storeZhixuDraftStore: stores.storeZhixuDraftStore,
+    recordPlanArtifact: (input) =>
+      stores.planArtifactStore.put({ chainId: config.network.chainId, ...input }),
     storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
     storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
     storeEntityRegistrationStore: stores.storeEntityRegistrationStore,

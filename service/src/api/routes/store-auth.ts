@@ -142,13 +142,15 @@ export function accessSummary(access: StoreAccessState): {
   readonly authMode: string;
   readonly anchoredAddress?: string;
   readonly anchorSource?: string;
-  readonly capabilities: readonly string[];
+  readonly canWrite: boolean;
+  readonly canAdmin: boolean;
 } {
   return {
     accessLevel: access.level,
     authMode: access.authMode,
     ...(access.anchoredAddress ? { anchoredAddress: access.anchoredAddress } : {}),
     ...(access.anchorSource ? { anchorSource: access.anchorSource } : {}),
-    capabilities: access.capabilities
+    canWrite: access.canWrite,
+    canAdmin: access.canAdmin
   };
 }

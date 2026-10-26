@@ -6,7 +6,6 @@ import { normalizeAddress, type Address, type Hex } from "../../shared/types.js"
 import type {
   StoreAccessLevel,
   StoreAccessState,
-  StoreCapability,
   StoreIdentityProvider,
   StoreRole,
   StoreSessionDTO
@@ -362,13 +361,11 @@ export function mergeWalletSessionIntoAccess(
 ): StoreAccessState {
   const walletLevel = walletSessionAccessLevel(session.anchoredAddress, config);
   const level = maxAccessLevel(base.level, walletLevel);
-  const capabilities = unionCapabilities(base.capabilities, capabilitiesForAccessLevel(walletLevel));
   return {
     ...base,
     level,
     principalId: base.principalId ?? `wallet:${session.accountId}`,
     roles: unionRoles(base.roles, walletLevel),
-    capabilities,
     canWrite: base.canWrite || walletLevel === "store_operator" || walletLevel === "store_admin",
     canAdmin: base.canAdmin || walletLevel === "store_admin",
     anchoredAddress: session.anchoredAddress,
@@ -406,51 +403,6 @@ export function walletSessionAccessLevel(address: Address, config: StoreWalletSe
   return "store_read";
 }
 
-function capabilitiesForAccessLevel(level: StoreAccessLevel): readonly StoreCapability[] {
-  switch (level) {
-    case "store_admin":
-      return [
-        ...storeReadCapabilities(),
-        "store.draft.import",
-        "store.draft.compile",
-        "store.draft.schema.save",
-        "store.supplier.create",
-        "store.supplier.review",
-        "store.supplier.tags.update",
-        "store.supplier.notification_profile.update",
-        "store.docking.create",
-        "store.docking.validate",
-        "store.docking.save",
-        "store.version.activate",
-        "store.version.deprecate",
-        "store.listing.manage"
-      ];
-    case "store_operator":
-      return [
-        ...storeReadCapabilities(),
-        "store.draft.import",
-        "store.draft.compile",
-        "store.draft.schema.save",
-        "store.supplier.create",
-        "store.supplier.review",
-        "store.supplier.tags.update",
-        "store.supplier.notification_profile.update",
-        "store.docking.create",
-        "store.docking.validate",
-        "store.docking.save",
-        "store.listing.manage"
-      ];
-    case "store_read":
-      return ["store.read"];
-    case "anonymous_read":
-      return ["store.read"];
-  }
-}
-
-function storeReadCapabilities(): readonly StoreCapability[] {
-  return ["store.read", "store.audit.read"];
-}
-
 function maxAccessLevel(left: StoreAccessLevel, right: StoreAccessLevel): StoreAccessLevel {
   const rank: Record<StoreAccessLevel, number> = {
     anonymous_read: 0,
@@ -459,10 +411,6 @@ function maxAccessLevel(left: StoreAccessLevel, right: StoreAccessLevel): StoreA
     store_admin: 3
   };
   return rank[left] >= rank[right] ? left : right;
-}
-
-function unionCapabilities(left: readonly StoreCapability[], right: readonly StoreCapability[]): readonly StoreCapability[] {
-  return [...new Set([...left, ...right])];
 }
 
 function unionRoles(left: readonly string[], level: StoreAccessLevel): readonly StoreRole[] {

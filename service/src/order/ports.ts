@@ -94,6 +94,24 @@ export interface OrderTriggerPort {
   triggerOrder(input: OrderTriggerInput): Promise<OrderTriggerResult>;
 }
 
+export interface ChainStageTaskFact {
+  readonly stageIdentifier?: string;
+  readonly status: string;
+}
+
+export interface ChainOrderProjection {
+  readonly orderId: string;
+  readonly planId: string;
+  readonly status: string;
+  readonly currentStage?: string;
+  readonly stageMaterializations: Readonly<Record<string, { readonly stageId: string }>>;
+  readonly tasks: Readonly<Record<string, ChainStageTaskFact>>;
+}
+
+export interface OrderChainProjectionPort {
+  findChainOrders(orderId: string): Promise<readonly ChainOrderProjection[]>;
+}
+
 export class UnconfiguredPublishedPlanProvider implements PublishedPlanProvider {
   async resolvePublishedPlan(_input: PublishedPlanInput): Promise<PublishedPlan> {
     throw new OrderError(

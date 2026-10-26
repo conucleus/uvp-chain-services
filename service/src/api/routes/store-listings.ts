@@ -2,11 +2,11 @@ import { redactErrorMessage } from "../../security/redaction.js";
 import type { StoreListingService } from "../../store/listings/index.js";
 import { StoreListingServiceError, type StoreListingStatus, type StoreListingRecord } from "../../store/listings/index.js";
 import {
-  authorizeStoreCapability,
+  authorizeStoreWrite,
   isAnchoredStoreAuthorizationResult,
   isStoreAuthorizationResult,
-  recordStoreCapabilityFailure,
-  recordStoreCapabilitySuccess,
+  recordStoreAccessFailure,
+  recordStoreAccessSuccess,
   requireAnchoredStoreAddress
 } from "../store-authz.js";
 import { cleanQuery, decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiRequest, type ApiResponse } from "../route-context.js";
@@ -22,8 +22,8 @@ export function createStoreListingsRouteModule(options: {
       }
       try {
         if (request.method === "POST" && request.pathname === "/store/listings/import") {
-          const capability = "store.listing.manage";
-          const authorization = await authorizeStoreCapability(context, request, capability, { type: "store_listing" });
+          const auditAction = "store.listing.manage";
+          const authorization = await authorizeStoreWrite(context, request, auditAction, { type: "store_listing" });
           if (isStoreAuthorizationResult(authorization)) {
             const anchored = await requireAnchoredStoreAddress(context, request, { type: "store_listing" });
             if (!isAnchoredStoreAuthorizationResult(anchored)) {
@@ -31,13 +31,13 @@ export function createStoreListingsRouteModule(options: {
             }
             try {
               const body = await options.listingService.importListing(request.body, listingActor(anchored.access));
-              await recordStoreCapabilitySuccess(context, request, authorization.access, capability, {
+              await recordStoreAccessSuccess(context, request, authorization.access, auditAction, {
                 type: "store_listing",
                 id: body.listing.listingId
               });
               return { status: 201, body };
             } catch (error) {
-              await recordStoreCapabilityFailure(context, request, authorization.access, capability, { type: "store_listing" }, error);
+              await recordStoreAccessFailure(context, request, authorization.access, auditAction, { type: "store_listing" }, error);
               throw error;
             }
           }
@@ -101,9 +101,9 @@ export function createStoreListingsRouteModule(options: {
         }
 
         if (request.method === "POST" && action) {
-          const capability = "store.listing.manage";
+          const auditAction = "store.listing.manage";
           const resource = { type: "store_listing", id: listingId };
-          const authorization = await authorizeStoreCapability(context, request, capability, resource);
+          const authorization = await authorizeStoreWrite(context, request, auditAction, resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
@@ -126,10 +126,10 @@ export function createStoreListingsRouteModule(options: {
               default:
                 return { status: 404, body: { error: "not_found" } };
             }
-            await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+            await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
             return { status: 200, body };
           } catch (error) {
-            await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+            await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
             throw error;
           }
         }

@@ -16,6 +16,7 @@ import {
   type GovernanceChainRequestDTO
 } from "../src/governance/index.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import { createPlanArtifactResolvers } from "../src/projection/plan-artifacts.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 import type {
   StoreCompilePreviewDTO,
@@ -184,7 +185,6 @@ describe("Store Zhixu draft workflow", () => {
       status: 403,
       body: {
         error: "forbidden",
-        requiredCapability: "store.draft.review",
         requiredAccess: "governance_admin"
       }
     });
@@ -337,6 +337,29 @@ describe("Store Zhixu draft workflow", () => {
 
 
 
+
+  it("records the compiled plan artifact so the projection seam can resolve the plan vocabulary", async () => {
+    const chainId = 84532;
+    const router = createApiRouter(stores.projectionStore, {
+      ...requiredRouterStores(),
+      productRuntimeEnvironment: "local",
+      submissionChainId: chainId,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+      storeAuthConfig: devAnchoredStoreAuth,
+      recordPlanArtifact: (input) => stores.planArtifactStore.put({ chainId, ...input })
+    });
+    const draft = await importDraft(router);
+    const compiled = await compileDraft(router, draft.draftId);
+    const preview = compiled.compilePreview!;
+    const resolvers = createPlanArtifactResolvers({ store: stores.planArtifactStore, chainId });
+
+    const tables = await resolvers.resolvePlanCapabilityTables(
+      preview.planId as `0x${string}`,
+      preview.planHash as `0x${string}`
+    );
+    expect(tables.planId).toBe(preview.planId);
+    expect(tables.signalCapabilities).toHaveLength(3);
+  });
 
   it("records compile failures and blocks review submission", async () => {
     const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth });

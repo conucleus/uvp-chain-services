@@ -92,7 +92,7 @@ const txHash = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 const signer = "0x3333333333333333333333333333333333333333" as Address;
 
 describe("Store operator audit events", () => {
-  it("audits blocked Store writes with actor, capability, resource, and request id", async () => {
+  it("audits blocked Store writes with actor, action, resource, and request id", async () => {
     const audit = new InMemoryAuditSink();
     const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", storeAuthConfig: devAnchoredStoreAuth, audit });
 
@@ -190,7 +190,6 @@ describe("Store operator audit events", () => {
       headers: operatorHeaders,
       body: {
         reviewStatus: "approved_for_broadcast",
-        capabilityTags: ["tag-2"],
         confirmation: {
           supplierId: "supplier-audit"
         }
@@ -235,7 +234,6 @@ function supplierBody(): Record<string, unknown> {
     supplierSubjectId,
     displayName: "Audit Supplier",
     wallet: supplierWallet,
-    capabilityTags: ["tag-1"],
     supportedRoleSlotIds: ["slot-a"],
     supportedStageIds: ["stage-1"],
     registryAddresses: [registryAddress]

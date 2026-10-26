@@ -8,11 +8,12 @@ import {
   type StoreDraftSignalMapEntryDTO
 } from "../../store/console/docking.js";
 import {
-  authorizeStoreCapability,
+  authorizeStoreRead,
+  authorizeStoreWrite,
   isAnchoredStoreAuthorizationResult,
   isStoreAuthorizationResult,
-  recordStoreCapabilityFailure,
-  recordStoreCapabilitySuccess,
+  recordStoreAccessFailure,
+  recordStoreAccessSuccess,
   requireAnchoredStoreAddress
 } from "../store-authz.js";
 import { redactErrorMessage } from "../../security/redaction.js";
@@ -26,8 +27,8 @@ export function createStoreDockingRouteModule(): RouteModule {
 
       try {
         if (request.method === "POST" && request.pathname === "/store/docking-sessions") {
-          const capability = "store.docking.create";
-          const authorization = await authorizeStoreCapability(context, request, capability, { type: "store_docking_session" });
+          const auditAction = "store.docking.create";
+          const authorization = await authorizeStoreWrite(context, request, auditAction, { type: "store_docking_session" });
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
@@ -40,7 +41,7 @@ export function createStoreDockingRouteModule(): RouteModule {
               parseStoreDockingCreateBody(request.body),
               { anchoredAddress: anchored.anchoredAddress }
             );
-            await recordStoreCapabilitySuccess(context, request, authorization.access, capability, {
+            await recordStoreAccessSuccess(context, request, authorization.access, auditAction, {
               type: "store_docking_session",
               id: session.sessionId
             });
@@ -49,7 +50,7 @@ export function createStoreDockingRouteModule(): RouteModule {
               body: { session }
             };
           } catch (error) {
-            await recordStoreCapabilityFailure(context, request, authorization.access, capability, {
+            await recordStoreAccessFailure(context, request, authorization.access, auditAction, {
               type: "store_docking_session"
             }, error);
             throw error;
@@ -60,7 +61,7 @@ export function createStoreDockingRouteModule(): RouteModule {
         if (request.method === "GET" && sessionMatch) {
           const sessionId = decodePathParameter(sessionMatch[1] ?? "");
           const resource = { type: "store_docking_session" as const, id: sessionId };
-          const authorization = await authorizeStoreCapability(context, request, "store.docking.read", resource);
+          const authorization = await authorizeStoreRead(context, request, "store.docking.read", resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
@@ -73,19 +74,19 @@ export function createStoreDockingRouteModule(): RouteModule {
                 "docking session was not found",
                 { sessionId }
               );
-              await recordStoreCapabilityFailure(context, request, authorization.access, "store.docking.read", resource, denied);
+              await recordStoreAccessFailure(context, request, authorization.access, "store.docking.read", resource, denied);
               return {
                 status: 404,
                 body: { error: "docking_session_not_found" }
               };
             }
-            await recordStoreCapabilitySuccess(context, request, authorization.access, "store.docking.read", resource);
+            await recordStoreAccessSuccess(context, request, authorization.access, "store.docking.read", resource);
             return {
               status: 200,
               body: { session }
             };
           } catch (error) {
-            await recordStoreCapabilityFailure(context, request, authorization.access, "store.docking.read", resource, error);
+            await recordStoreAccessFailure(context, request, authorization.access, "store.docking.read", resource, error);
             throw error;
           }
         }
@@ -93,9 +94,9 @@ export function createStoreDockingRouteModule(): RouteModule {
         const validateMatch = /^\/store\/docking-sessions\/([^/]+)\/validate$/.exec(request.pathname);
         if (request.method === "POST" && validateMatch) {
           const sessionId = decodePathParameter(validateMatch[1] ?? "");
-          const capability = "store.docking.validate";
+          const auditAction = "store.docking.validate";
           const resource = { type: "store_docking_session", id: sessionId };
-          const authorization = await authorizeStoreCapability(context, request, capability, resource);
+          const authorization = await authorizeStoreWrite(context, request, auditAction, resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
@@ -105,7 +106,7 @@ export function createStoreDockingRouteModule(): RouteModule {
           }
           const ownership = await dockingSessionOwnership(context, sessionId, authorization.access);
           if ("response" in ownership) {
-            await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, ownership.error);
+            await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, ownership.error);
             return ownership.response;
           }
           try {
@@ -113,13 +114,13 @@ export function createStoreDockingRouteModule(): RouteModule {
               sessionId,
               parseStoreDraftSignalMapBody(request.body)
             );
-            await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+            await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
             return {
               status: 200,
               body: { session }
             };
           } catch (error) {
-            await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+            await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
             throw error;
           }
         }
@@ -127,9 +128,9 @@ export function createStoreDockingRouteModule(): RouteModule {
         const saveMatch = /^\/store\/docking-sessions\/([^/]+)\/save-draft-map$/.exec(request.pathname);
         if (request.method === "POST" && saveMatch) {
           const sessionId = decodePathParameter(saveMatch[1] ?? "");
-          const capability = "store.docking.save";
+          const auditAction = "store.docking.save";
           const resource = { type: "store_docking_session", id: sessionId };
-          const authorization = await authorizeStoreCapability(context, request, capability, resource);
+          const authorization = await authorizeStoreWrite(context, request, auditAction, resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
@@ -139,7 +140,7 @@ export function createStoreDockingRouteModule(): RouteModule {
           }
           const ownership = await dockingSessionOwnership(context, sessionId, authorization.access);
           if ("response" in ownership) {
-            await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, ownership.error);
+            await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, ownership.error);
             return ownership.response;
           }
           try {
@@ -147,13 +148,13 @@ export function createStoreDockingRouteModule(): RouteModule {
               sessionId,
               parseStoreDraftSignalMapBody(request.body)
             );
-            await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+            await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
             return {
               status: 200,
               body: { session }
             };
           } catch (error) {
-            await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+            await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
             throw error;
           }
         }

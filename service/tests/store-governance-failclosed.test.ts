@@ -371,76 +371,6 @@ describe("store, governance, and evidence fail-closed behaviors", () => {
     });
   });
 
-  describe("invite token", () => {
-    it("rejects invite accept/reject without the one-time token", async () => {
-      const store = stores.projectionStore;
-      await seedPlan(store);
-      const router = createApiRouter(store, { ...requiredRouterStores(),
-        productSchemaResolver: exampleSchemaResolver(),
-        submissionChainId: 31337,
-        submissionVerifyingContract: contractAddress,
-        productRuntimeEnvironment: "local"
-      });
-      const draft = await createDraft(router);
-      const invite = await router.handle({
-        method: "POST",
-        pathname: `/product/orders/${draft.draftId}/invites`,
-        headers: bffCreatorHeaders,
-        body: { roleSlotId: "funds", contact: "funds@example.com" }
-      });
-      expect(invite.status).toBe(201);
-      const inviteId = (invite.body as { invite: { inviteId: string } }).invite.inviteId;
-      const inviteToken = (invite.body as { inviteToken?: string }).inviteToken;
-      expect(typeof inviteToken).toBe("string");
-      expect(invite.body).not.toHaveProperty(["invite", "tokenHash"]);
-
-      const missing = await router.handle({
-        method: "POST",
-        pathname: `/product/invites/${inviteId}/accept`,
-        headers: { "x-uvp-wallet-address": supplierWallet },
-        body: {
-          displayName: "Funds",
-          walletAddress: supplierWallet,
-          contact: "funds@example.com"
-        }
-      });
-      expect(missing).toMatchObject({ status: 400, body: { error: "invalid_body" } });
-
-      const wrong = await router.handle({
-        method: "POST",
-        pathname: `/product/invites/${inviteId}/accept`,
-        headers: { "x-uvp-wallet-address": supplierWallet },
-        body: {
-          displayName: "Funds",
-          walletAddress: supplierWallet,
-          contact: "funds@example.com",
-          token: "not-the-token"
-        }
-      });
-      expect(wrong).toMatchObject({ status: 403, body: { error: "invite_token_mismatch" } });
-
-      const accepted = await router.handle({
-        method: "POST",
-        pathname: `/product/invites/${inviteId}/accept`,
-        headers: { "x-uvp-wallet-address": supplierWallet },
-        body: {
-          displayName: "Funds",
-          walletAddress: supplierWallet,
-          contact: "funds@example.com",
-          token: inviteToken
-        }
-      });
-      expect(accepted.status).toBe(200);
-
-      const rejectWithoutToken = await router.handle({
-        method: "POST",
-        pathname: `/product/invites/${inviteId}/reject`,
-        body: { token: "wrong" }
-      });
-      expect(rejectWithoutToken.status).toBe(409);
-    });
-  });
-
   describe("join loop", () => {
     it("blocks approval when the subject is actively bound to another account (409)", async () => {
       const store = stores.projectionStore;
@@ -1192,25 +1122,6 @@ async function login(router: ApiRouter, account: ReturnType<typeof privateKeyToA
   });
   expect(verify.status).toBe(201);
   return (verify.body as { token: string }).token;
-}
-
-const bffCreatorHeaders = { "x-uvp-wallet-address": "0x7777777777777777777777777777777777777777" };
-
-async function createDraft(router: ApiRouter): Promise<{ readonly draftId: string }> {
-  const response = await router.handle({
-    method: "POST",
-    pathname: "/product/order-drafts",
-    headers: bffCreatorHeaders,
-    body: {
-      zhixuId: EXAMPLE_ZHIXU_ID,
-      title: "audit3 draft",
-      businessType: "type-1",
-      totalAmount: "100",
-      currency: "tok-1"
-    }
-  });
-  expect(response.status, JSON.stringify(response.body)).toBe(201);
-  return (response.body as { draft: { draftId: string } }).draft;
 }
 
 async function seedPlan(

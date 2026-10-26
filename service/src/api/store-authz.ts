@@ -1,10 +1,11 @@
 import type { ApiRequest, ApiResponse, ApiRouteContext } from "./route-context.js";
 import {
-  hasStoreCapability,
   isStoreAccessAuthenticated,
-  storeAccessRequiredLevel,
-  type StoreAccessState,
-  type StoreCapability
+  storeAccessIsAdmin,
+  storeAccessIsOperator,
+  storeAccessIsReader,
+  type StoreAccessLevel,
+  type StoreAccessState
 } from "../store/console/access.js";
 import {
   recordStoreAudit,
@@ -12,9 +13,15 @@ import {
 } from "../store/console/audit.js";
 import type { AuditOutcome } from "../security/audit.js";
 import type { Address } from "../shared/types.js";
+import type { GovernancePrincipal } from "../governance/index.js";
 
 export interface StoreAuthorizationResult {
   readonly access: StoreAccessState;
+}
+
+export interface GovernanceStoreAuthorizationResult {
+  readonly access: StoreAccessState;
+  readonly governancePrincipal: GovernancePrincipal;
 }
 
 export interface AnchoredStoreAuthorizationResult {
@@ -63,18 +70,54 @@ export async function requireAnchoredStoreAddress(
   };
 }
 
-export async function authorizeStoreCapability(
+export async function authorizeStoreAuthenticated(
   context: ApiRouteContext,
   request: ApiRequest,
-  capability: StoreCapability,
+  action: string,
   resource: StoreAuditResource
 ): Promise<StoreAuthorizationResult | ApiResponse> {
+  return authorizeStoreGate(context, request, "store_read", isStoreAccessAuthenticated, action, resource);
+}
+
+export async function authorizeStoreRead(
+  context: ApiRouteContext,
+  request: ApiRequest,
+  action: string,
+  resource: StoreAuditResource
+): Promise<StoreAuthorizationResult | ApiResponse> {
+  return authorizeStoreGate(context, request, "store_read", storeAccessIsReader, action, resource);
+}
+
+export async function authorizeStoreWrite(
+  context: ApiRouteContext,
+  request: ApiRequest,
+  action: string,
+  resource: StoreAuditResource
+): Promise<StoreAuthorizationResult | ApiResponse> {
+  return authorizeStoreGate(context, request, "store_operator", storeAccessIsOperator, action, resource);
+}
+
+export async function authorizeStoreAdmin(
+  context: ApiRouteContext,
+  request: ApiRequest,
+  action: string,
+  resource: StoreAuditResource
+): Promise<StoreAuthorizationResult | ApiResponse> {
+  return authorizeStoreGate(context, request, "store_admin", storeAccessIsAdmin, action, resource);
+}
+
+export async function authorizeStoreGovernance(
+  context: ApiRouteContext,
+  request: ApiRequest,
+  action: string,
+  resource: StoreAuditResource
+): Promise<GovernanceStoreAuthorizationResult | ApiResponse> {
   const access = await context.storeIdentityProvider.resolve(request.headers);
-  if (hasStoreCapability(access, capability)) {
-    return { access };
+  if (access.governancePrincipal) {
+    return { access, governancePrincipal: access.governancePrincipal };
   }
   await recordStoreAudit(context.audit, {
-    action: capability,
+    action,
     outcome: "blocked",
     access,
     resource,
@@ -82,21 +125,21 @@ export async function authorizeStoreCapability(
     ...(request.headers ? { headers: request.headers } : {})
   }, { store: context.storeAuditStore, now: context.now });
   if (!isStoreAccessAuthenticated(access)) {
-    return unauthorizedStoreCapabilityResponse(access, capability);
+    return unauthorizedStoreAccessResponse(access, "governance_admin");
   }
-  return forbiddenStoreCapabilityResponse(access, capability);
+  return forbiddenStoreAccessResponse(access, "governance_admin");
 }
 
-export async function recordStoreCapabilitySuccess(
+export async function recordStoreAccessSuccess(
   context: ApiRouteContext,
   request: ApiRequest,
   access: StoreAccessState,
-  capability: StoreCapability,
+  action: string,
   resource: StoreAuditResource,
   metadata?: Readonly<Record<string, unknown>>
 ): Promise<void> {
   await recordStoreAudit(context.audit, {
-    action: capability,
+    action,
     outcome: "succeeded",
     access,
     resource,
@@ -105,16 +148,16 @@ export async function recordStoreCapabilitySuccess(
   }, { store: context.storeAuditStore, now: context.now });
 }
 
-export async function recordStoreCapabilityFailure(
+export async function recordStoreAccessFailure(
   context: ApiRouteContext,
   request: ApiRequest,
   access: StoreAccessState,
-  capability: StoreCapability,
+  action: string,
   resource: StoreAuditResource,
   error: unknown
 ): Promise<void> {
   await recordStoreAudit(context.audit, {
-    action: capability,
+    action,
     outcome: storeFailureAuditOutcome(error),
     access,
     resource,
@@ -127,13 +170,14 @@ export function isStoreAuthorizationResult(value: StoreAuthorizationResult | Api
   return "access" in value;
 }
 
-export function forbiddenStoreCapabilityResponse(access: StoreAccessState, capability: StoreCapability): ApiResponse {
-  const requiredAccess = storeAccessRequiredLevel(capability);
+export function forbiddenStoreAccessResponse(
+  access: StoreAccessState,
+  requiredAccess: StoreAccessLevel | "governance_admin"
+): ApiResponse {
   return {
     status: 403,
     body: {
       error: "forbidden",
-      requiredCapability: capability,
       requiredAccess,
       accessLevel: access.level,
       authMode: access.authMode
@@ -141,19 +185,46 @@ export function forbiddenStoreCapabilityResponse(access: StoreAccessState, capab
   };
 }
 
-export function unauthorizedStoreCapabilityResponse(access: StoreAccessState, capability: StoreCapability): ApiResponse {
-  const requiredAccess = storeAccessRequiredLevel(capability);
+export function unauthorizedStoreAccessResponse(
+  access: StoreAccessState,
+  requiredAccess: StoreAccessLevel | "governance_admin"
+): ApiResponse {
   return {
     status: 401,
     body: {
       error: access.authenticationFailure?.code ?? "store_identity_missing",
       message: access.authenticationFailure?.message ?? "Store identity is required",
-      requiredCapability: capability,
       requiredAccess,
       accessLevel: access.level,
       authMode: access.authMode
     }
   };
+}
+
+async function authorizeStoreGate(
+  context: ApiRouteContext,
+  request: ApiRequest,
+  requiredAccess: StoreAccessLevel,
+  allows: (access: StoreAccessState) => boolean,
+  action: string,
+  resource: StoreAuditResource
+): Promise<StoreAuthorizationResult | ApiResponse> {
+  const access = await context.storeIdentityProvider.resolve(request.headers);
+  if (allows(access)) {
+    return { access };
+  }
+  await recordStoreAudit(context.audit, {
+    action,
+    outcome: "blocked",
+    access,
+    resource,
+    errorCode: isStoreAccessAuthenticated(access) ? "forbidden" : access.authenticationFailure?.code ?? "store_identity_missing",
+    ...(request.headers ? { headers: request.headers } : {})
+  }, { store: context.storeAuditStore, now: context.now });
+  if (!isStoreAccessAuthenticated(access)) {
+    return unauthorizedStoreAccessResponse(access, requiredAccess);
+  }
+  return forbiddenStoreAccessResponse(access, requiredAccess);
 }
 
 function errorCode(error: unknown): string {

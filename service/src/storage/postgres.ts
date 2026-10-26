@@ -103,10 +103,7 @@ export class PostgresProjectionStore implements DurableProjectionStore {
       (event) => event.blockNumber >= input.deploymentBlock,
     );
     const orderSnapshot = rebuildOrderProjections(events, {
-      ...(input.planCapabilityTables ? { planCapabilityTables: input.planCapabilityTables } : {}),
-      ...(input.planCapabilityResolutionFailures
-        ? { planCapabilityResolutionFailures: input.planCapabilityResolutionFailures }
-        : {})
+      ...(input.planCapabilityTables ? { planCapabilityTables: input.planCapabilityTables } : {})
     });
     const identitySnapshot = rebuildIdentityProjections(events);
     const scope = input.scope ?? this.#scopeFromEvents(events);

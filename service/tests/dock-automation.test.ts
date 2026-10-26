@@ -80,7 +80,7 @@ describe("dock liveness keeper", () => {
 
   it("fails closed on route records with missing or malformed identity fields", async () => {
     const store = stores.projectionStore;
-    await store.resetFromEvents({ deploymentBlock: 0n, events: dockEvents() });
+    await seedProjection(dockEvents());
     const submitted: string[] = [];
     const build = (routes: readonly DockRouteRecord[]) =>
       new DockAutomationWorker({
@@ -621,7 +621,7 @@ describe("dock liveness keeper", () => {
       targetSignalId: signalId
     }] };
     const store = stores.projectionStore;
-    await store.resetFromEvents({ deploymentBlock: 0n, events });
+    await seedProjection(events);
     const submitted: string[] = [];
     const worker = new DockAutomationWorker({
       config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
@@ -650,7 +650,7 @@ describe("dock liveness keeper", () => {
 
   it("fails the whole round closed while finality is unknown or a rebuild is in progress", async () => {
     const store = stores.projectionStore;
-    await store.resetFromEvents({ deploymentBlock: 0n, events: attachedEvents() });
+    await seedProjection(attachedEvents());
     const submitted: string[] = [];
     const worker = new DockAutomationWorker({
       config: { enabled: true, pollIntervalMs: 5_000, maxCandidatesPerRun: 4, redeliveryWindowMs: 60_000 },
@@ -767,17 +767,12 @@ describe("dock liveness keeper", () => {
       targetSignalId: signalId
     }] };
 
-    const buildWorker = async (
-      planCapabilityTables: readonly PlanCapabilityTablesInput[],
-      resolutionFailures?: readonly Hex[]
-    ) => {
+    const buildWorker = async (planCapabilityTables: readonly PlanCapabilityTablesInput[]) => {
       const store = stores.projectionStore;
-      await store.resetFromEvents({
-        deploymentBlock: 0n,
-        events: planPublishEvents(capabilitiesRootOf([], signalCapabilities)).concat(events),
-        ...(planCapabilityTables.length > 0 ? { planCapabilityTables } : {}),
-        ...(resolutionFailures ? { planCapabilityResolutionFailures: resolutionFailures } : {})
-      });
+      await seedProjection(
+        planPublishEvents(capabilitiesRootOf([], signalCapabilities)).concat(events),
+        planCapabilityTables
+      );
       await store.saveSyncState(dockSyncState(10n));
       const submitted: string[] = [];
       const worker = new DockAutomationWorker({
@@ -809,7 +804,17 @@ describe("dock liveness keeper", () => {
       { sourceId, signalId, stageId: hookId, capabilityProof: [expect.any(String)] }
     ]);
 
-    const failed = await buildWorker([], [planId]);
+    const failed = await buildWorker([{
+      planId,
+      planHash,
+      selectorBindings: [],
+      signalCapabilities: [{
+        stageId: hookId,
+        targetSourceId: sourceId,
+        signalId: bytes32Hex("0f0f"),
+        targetOrderRelation: 0 as const
+      }]
+    }]);
     const failedSummary = await failed.worker.runOnce();
     expect(failedSummary).toMatchObject({ outputCandidates: 1, submitted: 0 });
     expect(failedSummary.skipped[0]).toMatch(/enrichment failed/);
@@ -1115,9 +1120,71 @@ function dockSyncState(finalizedBlock: bigint) {
 // 与 timer-keeper.test.ts 的 freshStore 同型：resetFromEvents 只持久化派生
 // 同步态（不含 finalizedBlock），这里显式补写已定稿高度，keeper 才会放行候选。
 async function resetProjection(events: readonly ChainEvent[], finalizedBlock = 10n): Promise<void> {
-  const store = stores.projectionStore;
-  await store.resetFromEvents({ deploymentBlock: 0n, events });
-  await store.saveSyncState(dockSyncState(finalizedBlock));
+  await seedProjection(events);
+  await stores.projectionStore.saveSyncState(dockSyncState(finalizedBlock));
+}
+
+// 链上注册一个 plan 必然先有 commit/finalize：夹具只写 PlanRegistered 时补上
+// 空词表的发布锚（同块高位 logIndex，避开夹具既有事件），让 plan 投影可被
+// plan artifact 词表 enrich；显式词表优先，其余 plan 用空词表。
+async function seedProjection(
+  events: readonly ChainEvent[],
+  planCapabilityTables: readonly PlanCapabilityTablesInput[] = []
+): Promise<void> {
+  const seeded = withPublishedPlanAnchors(events);
+  const explicitPlanIds = new Set(planCapabilityTables.map((tables) => tables.planId.toLowerCase()));
+  await stores.projectionStore.resetFromEvents({
+    deploymentBlock: 0n,
+    events: seeded,
+    planCapabilityTables: [
+      ...planCapabilityTables,
+      ...seeded
+        .filter((event) => event.eventName === "PlanCommitted")
+        .map((event) => ({
+          planId: String(event.args.planId) as Hex,
+          planHash: String(event.args.planHash) as Hex,
+          selectorBindings: [],
+          signalCapabilities: []
+        }))
+        .filter((tables) => !explicitPlanIds.has(tables.planId.toLowerCase()))
+    ]
+  });
+}
+
+function withPublishedPlanAnchors(events: readonly ChainEvent[]): readonly ChainEvent[] {
+  const emptyRoot = capabilitiesRootOf([], []);
+  const committed = new Set(
+    events
+      .filter((event) => event.eventName === "PlanCommitted")
+      .map((event) => String(event.args.planId).toLowerCase())
+  );
+  const anchors: ChainEvent[] = [];
+  let logIndex = 900;
+  for (const event of events) {
+    if (event.eventName !== "PlanRegistered") continue;
+    const anchorPlanId = String(event.args.planId);
+    if (committed.has(anchorPlanId.toLowerCase())) continue;
+    committed.add(anchorPlanId.toLowerCase());
+    const anchorPlanHash = String(event.args.planHash);
+    anchors.push(
+      chainEvent(0n, logIndex++, "PlanCommitted", {
+        planId: anchorPlanId,
+        planHash: anchorPlanHash,
+        publisher: signer,
+        hooksHash: bytes32Hex("0e01"),
+        capabilitiesRoot: emptyRoot,
+        hookCount: 1n,
+        dockRoutesRoot: bytes32Hex("0e03"),
+        dockInterfaceRoot: bytes32Hex("0e04")
+      }),
+      chainEvent(0n, logIndex++, "PlanFinalized", {
+        planId: anchorPlanId,
+        planHash: anchorPlanHash,
+        capabilitiesRoot: emptyRoot
+      })
+    );
+  }
+  return [...anchors, ...events];
 }
 
 function bytes32Hex(value: string): Hex {

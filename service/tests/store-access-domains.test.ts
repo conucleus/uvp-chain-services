@@ -190,7 +190,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect(afterLogout.status).toBe(401);
   });
 
-  it("operator wallet list grants operator capabilities to anchored sessions", async () => {
+  it("operator wallet list grants store_operator level to anchored sessions", async () => {
     const router = await buildRouter({ operatorWallets: [operatorWallet] });
     const token = await login(router, operatorWallet);
 
@@ -199,12 +199,12 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       pathname: "/store/session",
       headers: { "x-uvp-store-session": token }
     });
-    const session = (sessionResponse.body as { session: { accessLevel: string; capabilities: readonly string[] } }).session;
+    const session = (sessionResponse.body as { session: { accessLevel: string; canWrite: boolean } }).session;
     expect(session.accessLevel).toBe("store_operator");
-    expect(session.capabilities).toContain("store.listing.manage");
+    expect(session.canWrite).toBe(true);
   });
 
-  it("plain wallet sessions only get the public read capability, not store.audit.read", async () => {
+  it("plain wallet sessions get store_read level without a Store read role", async () => {
     const router = await buildRouter({ operatorWallets: [operatorWallet] });
     const plainToken = await login(router, supplierWallet);
     const operatorToken = await login(router, operatorWallet);
@@ -213,20 +213,20 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
       method: "GET",
       pathname: "/store/session",
       headers: { "x-uvp-store-session": plainToken }
-    })).body as { session: { accessLevel: string; capabilities: readonly string[] } };
+    })).body as { session: { accessLevel: string; roles: readonly string[]; canWrite: boolean } };
     expect(plainSession.session.accessLevel).toBe("store_read");
-    expect(plainSession.session.capabilities).toContain("store.read");
-    expect(plainSession.session.capabilities).not.toContain("store.audit.read");
+    expect(plainSession.session.roles).toEqual(["anonymous_read"]);
+    expect(plainSession.session.canWrite).toBe(false);
 
     const operatorSession = (await router.handle({
       method: "GET",
       pathname: "/store/session",
       headers: { "x-uvp-store-session": operatorToken }
-    })).body as { session: { capabilities: readonly string[] } };
-    expect(operatorSession.session.capabilities).toContain("store.audit.read");
+    })).body as { session: { roles: readonly string[] } };
+    expect(operatorSession.session.roles).toContain("store_operator");
   });
 
-  it("store runtime observation reads require the store.audit.read capability", async () => {
+  it("store runtime observation reads require a Store read role", async () => {
     const router = await buildRouter({ operatorWallets: [operatorWallet] });
     const plainToken = await login(router, supplierWallet);
     const operatorToken = await login(router, operatorWallet);
@@ -271,7 +271,6 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
         return {
           level: "anonymous_read" as const,
           roles: ["anonymous_read" as const],
-          capabilities: ["store.read" as const],
           authMode: "anonymous" as const,
           canWrite: false,
           canAdmin: false
@@ -310,7 +309,7 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
     expect((await testnetProvider.resolve(headers)).anchoredAddress).toBeUndefined();
   });
 
-  it("wallet sessions never receive store.draft.review (governance-only capability)", async () => {
+  it("wallet sessions never receive the governance_admin role", async () => {
     const router = await buildRouter({ operatorWallets: [operatorWallet], adminWallets: [teamDerivedWallet] });
     const operatorToken = await login(router, operatorWallet);
     const adminToken = await login(router, teamDerivedWallet);
@@ -321,9 +320,9 @@ describe("store access domains (sessions, descriptors, decoration, listings, joi
         pathname: "/store/session",
         headers: { "x-uvp-store-session": token }
       });
-      const session = (sessionResponse.body as { session: { accessLevel: string; capabilities: readonly string[] } }).session;
+      const session = (sessionResponse.body as { session: { accessLevel: string; roles: readonly string[] } }).session;
       expect(["store_operator", "store_admin"]).toContain(session.accessLevel);
-      expect(session.capabilities).not.toContain("store.draft.review");
+      expect(session.roles).not.toContain("governance_admin");
     }
   });
 

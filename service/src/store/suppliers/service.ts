@@ -57,7 +57,6 @@ export class StoreSupplierServiceError extends Error {
 export interface StoreSupplierListQuery {
   readonly query?: string;
   readonly identity?: "active" | "revoked" | "not_found";
-  readonly tag?: string;
 }
 
 export interface StoreSupplierListDTO {
@@ -240,11 +239,9 @@ export function createStoreSupplierService(
             reviewStatus: record.reviewStatus,
           }),
         );
-        if (supplierCapabilitiesChanged(current, record)) {
+        if (supplierSupportedSlotsChanged(current, record)) {
           await metadataStore.appendAudit(
-            auditRecord(record, "tags_updated", principal, now, {
-              beforeTags: current.capabilityTags,
-              afterTags: record.capabilityTags,
+            auditRecord(record, "supported_slots_updated", principal, now, {
               beforeSupportedRoleSlotIds: current.supportedRoleSlotIds,
               afterSupportedRoleSlotIds: record.supportedRoleSlotIds,
               beforeSupportedStageIds: current.supportedStageIds,
@@ -498,7 +495,6 @@ function supplierDtoFromSources(input: {
       : {}),
     identityStatus,
     identityLabel: supplierIdentityLabel(identityStatus),
-    capabilityTags: input.metadata?.capabilityTags ?? [],
     supportedRoleSlotIds: input.metadata?.supportedRoleSlotIds ?? [],
     supportedStageIds: input.metadata?.supportedStageIds ?? [],
     registryAddresses,
@@ -522,17 +518,14 @@ function matchesSupplierQuery(
   query: StoreSupplierListQuery,
 ): boolean {
   const identityStatus = query.identity;
-  const tag = query.tag?.trim().toLowerCase();
   const needle = query.query?.trim().toLowerCase();
   return (
     (!identityStatus || supplier.identityStatus === identityStatus) &&
-    (!tag || supplier.capabilityTags.includes(tag)) &&
     (!needle ||
       supplier.displayName.toLowerCase().includes(needle) ||
       supplier.supplierId.toLowerCase().includes(needle) ||
       supplier.supplierSubjectId.toLowerCase().includes(needle) ||
       supplier.wallet?.toLowerCase().includes(needle) ||
-      supplier.capabilityTags.some((item) => item.includes(needle)) ||
       supplier.registryAddresses.some((registryAddress) =>
         registryAddress.toLowerCase().includes(needle),
       ))
@@ -599,9 +592,6 @@ function createMetadataRecord(
     supplierSubjectId,
     displayName: requiredString(record, "displayName"),
     ...optionalWallet(record),
-    capabilityTags: normalizeCapabilityTags(
-      optionalStringArray(record, "capabilityTags") ?? [],
-    ),
     supportedRoleSlotIds: normalizeStringArray(
       optionalStringArray(record, "supportedRoleSlotIds") ?? [],
     ),
@@ -625,7 +615,6 @@ function mergeReviewMetadata(
 ): StoreSupplierMetadataRecord {
   const record = requireBodyRecord(input);
   const displayName = optionalString(record, "displayName");
-  const capabilityTags = optionalStringArray(record, "capabilityTags");
   const supportedRoleSlotIds = optionalStringArray(
     record,
     "supportedRoleSlotIds",
@@ -636,9 +625,6 @@ function mergeReviewMetadata(
     ...current,
     ...(displayName !== undefined ? { displayName } : {}),
     ...optionalWallet(record, current.wallet),
-    ...(capabilityTags !== undefined
-      ? { capabilityTags: normalizeCapabilityTags(capabilityTags) }
-      : {}),
     ...(supportedRoleSlotIds !== undefined
       ? { supportedRoleSlotIds: normalizeStringArray(supportedRoleSlotIds) }
       : {}),
@@ -698,7 +684,6 @@ function governanceReviewInput(
       storeSupplierId: record.supplierId,
       displayName: record.displayName,
       wallet: record.wallet ?? null,
-      capabilityTags: record.capabilityTags,
       supportedRoleSlotIds: record.supportedRoleSlotIds,
       supportedStageIds: record.supportedStageIds,
     },
@@ -738,7 +723,6 @@ function supplierNotificationProfileConfigInput(
       wallet,
     },
     capability: optionalUnknown(body, "capability") ?? {
-      tags: supplier.capabilityTags,
       supportedRoleSlotIds: supplier.supportedRoleSlotIds,
       supportedStageIds: supplier.supportedStageIds,
       notificationProfileOwner: "store_supplier",
@@ -913,7 +897,7 @@ function supplierNextAction(
     return "默认目录不再展示该钱包；仍可手工输入原始地址";
   }
   if (identityStatus === "active") {
-    return "可显示线下主体名称；匹配标签仅由 Store 维护";
+    return "可显示线下主体名称";
   }
   switch (reviewStatus) {
     case "draft":
@@ -1107,12 +1091,6 @@ function optionalMetadataURI(
   return { metadataURI: value };
 }
 
-function normalizeCapabilityTags(tags: readonly string[]): readonly string[] {
-  return uniqueSorted(
-    tags.map((tag) => tag.trim().toLowerCase()).filter((tag) => tag.length > 0),
-  );
-}
-
 function normalizeStringArray(values: readonly string[]): readonly string[] {
   return uniqueSorted(
     values.map((value) => value.trim()).filter((value) => value.length > 0),
@@ -1168,12 +1146,11 @@ function sameStringArray(
   );
 }
 
-function supplierCapabilitiesChanged(
+function supplierSupportedSlotsChanged(
   left: StoreSupplierMetadataRecord,
   right: StoreSupplierMetadataRecord,
 ): boolean {
   return (
-    !sameStringArray(left.capabilityTags, right.capabilityTags) ||
     !sameStringArray(left.supportedRoleSlotIds, right.supportedRoleSlotIds) ||
     !sameStringArray(left.supportedStageIds, right.supportedStageIds)
   );

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AuditEvent, AuditOutcome, AuditSink } from "../../security/audit.js";
 import { redactSecrets } from "../../security/redaction.js";
-import type { StoreAccessLevel, StoreAccessState, StoreAuthMode, StoreCapability, StoreRole } from "./access.js";
+import type { StoreAccessLevel, StoreAccessState, StoreAuthMode, StoreRole } from "./access.js";
 
 const REDACTED_AUDIT_VALUE = "[redacted]";
 const SENSITIVE_AUDIT_KEY_PATTERN =
@@ -14,7 +14,7 @@ export interface StoreAuditResource {
 }
 
 export interface StoreAuditInput {
-  readonly action: StoreCapability | "store.address_anchor_required";
+  readonly action: string;
   readonly outcome: AuditOutcome;
   readonly access: StoreAccessState;
   readonly resource: StoreAuditResource;
@@ -27,7 +27,7 @@ export interface StoreAuditRecord {
   readonly auditId: string;
   readonly createdAt: string;
   readonly actor: string;
-  readonly action: StoreCapability | "store.address_anchor_required";
+  readonly action: string;
   readonly outcome: AuditOutcome;
   readonly resourceType: string;
   readonly resourceId?: string;

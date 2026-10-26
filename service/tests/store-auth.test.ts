@@ -72,15 +72,17 @@ const governanceAdminHeaders = {
   "x-uvp-admin-role": "admin"
 };
 
-describe("Store operator identity and capability auth", () => {
-  it("resolves Store sessions through the identity provider capability matrix", async () => {
+describe("Store operator identity and access auth", () => {
+  it("resolves Store sessions through the identity provider access roles", async () => {
     const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(session(router, undefined)).resolves.toMatchObject({
       authenticated: false,
       accessLevel: "anonymous_read",
       authMode: "anonymous",
-      capabilities: ["store.read"]
+      roles: ["anonymous_read"],
+      canWrite: false,
+      canAdmin: false
     });
 
     await expect(session(router, readHeaders)).resolves.toMatchObject({
@@ -88,41 +90,43 @@ describe("Store operator identity and capability auth", () => {
       principalId: "reader-1",
       accessLevel: "store_read",
       authMode: "dev_store_headers",
-      capabilities: ["store.read", "store.audit.read", "store.docking.read"]
+      roles: ["store_read"],
+      canWrite: false,
+      canAdmin: false
     });
 
-    const operator = await session(router, operatorHeaders);
-    expect(operator).toMatchObject({
+    await expect(session(router, operatorHeaders)).resolves.toMatchObject({
       authenticated: true,
       principalId: "operator-1",
       accessLevel: "store_operator",
-      authMode: "dev_store_headers"
+      authMode: "dev_store_headers",
+      roles: ["store_operator"],
+      canWrite: true,
+      canAdmin: false
     });
-    expect(operator.capabilities).toContain("store.draft.import");
-    expect(operator.capabilities).toContain("store.docking.save");
 
-    const storeAdmin = await session(router, storeAdminHeaders);
-    expect(storeAdmin).toMatchObject({
+    await expect(session(router, storeAdminHeaders)).resolves.toMatchObject({
       authenticated: true,
       principalId: "store-admin-1",
       accessLevel: "store_admin",
-      authMode: "dev_store_headers"
+      authMode: "dev_store_headers",
+      roles: ["store_admin"],
+      canWrite: true,
+      canAdmin: true
     });
-    expect(storeAdmin.capabilities).toContain("store.version.activate");
 
-    const governanceAdmin = await session(router, governanceAdminHeaders);
-    expect(governanceAdmin).toMatchObject({
+    await expect(session(router, governanceAdminHeaders)).resolves.toMatchObject({
       authenticated: true,
       principalId: "governance-admin-1",
       accessLevel: "store_admin",
       authMode: "dev_governance_admin_headers",
-      roles: ["store_admin", "governance_admin"]
+      roles: ["store_admin", "governance_admin"],
+      canWrite: true,
+      canAdmin: true
     });
-    expect(governanceAdmin.capabilities).toContain("store.supplier.identity.register");
-    expect(governanceAdmin.capabilities).toContain("store.supplier.identity.revoke");
   });
 
-  it("fails Store writes closed when a principal lacks the named capability", async () => {
+  it("fails Store writes closed below store_operator access", async () => {
     const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     await expect(router.handle({
@@ -133,7 +137,6 @@ describe("Store operator identity and capability auth", () => {
       status: 401,
       body: {
         error: "store_identity_missing",
-        requiredCapability: "store.draft.import",
         requiredAccess: "store_operator",
         accessLevel: "anonymous_read"
       }
@@ -148,7 +151,6 @@ describe("Store operator identity and capability auth", () => {
       status: 403,
       body: {
         error: "forbidden",
-        requiredCapability: "store.draft.import",
         requiredAccess: "store_operator",
         accessLevel: "store_read"
       }
@@ -164,8 +166,7 @@ describe("Store operator identity and capability auth", () => {
     await expect(session(router, operatorHeaders)).resolves.toMatchObject({
       authenticated: false,
       accessLevel: "anonymous_read",
-      authMode: "dev_headers_disabled",
-      capabilities: ["store.read"]
+      authMode: "dev_headers_disabled"
     });
 
     await expect(router.handle({
@@ -177,7 +178,7 @@ describe("Store operator identity and capability auth", () => {
       status: 401,
       body: {
         error: "store_identity_missing",
-        requiredCapability: "store.draft.import",
+        requiredAccess: "store_operator",
         accessLevel: "anonymous_read",
         authMode: "dev_headers_disabled"
       }

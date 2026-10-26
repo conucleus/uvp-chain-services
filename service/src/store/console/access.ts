@@ -17,34 +17,12 @@ export type StoreAuthMode =
 
 export type StoreRole = StoreAccessLevel | "store_reader" | "governance_admin";
 
-export type StoreCapability =
-  | "store.read"
-  | "store.audit.read"
-  | "store.draft.import"
-  | "store.draft.compile"
-  | "store.draft.schema.save"
-  | "store.draft.review"
-  | "store.version.activate"
-  | "store.version.deprecate"
-  | "store.listing.manage"
-  | "store.supplier.create"
-  | "store.supplier.review"
-  | "store.supplier.tags.update"
-  | "store.supplier.identity.register"
-  | "store.supplier.identity.revoke"
-  | "store.supplier.notification_profile.update"
-  | "store.docking.read"
-  | "store.docking.create"
-  | "store.docking.validate"
-  | "store.docking.save";
-
 export type StoreAnchorSource = "wallet_session" | "dev_header";
 
 export interface StoreAccessState {
   readonly level: StoreAccessLevel;
   readonly principalId?: string;
   readonly roles: readonly StoreRole[];
-  readonly capabilities: readonly StoreCapability[];
   readonly authMode: StoreAuthMode;
   readonly displayName?: string;
   readonly authenticationFailure?: StoreAuthenticationFailure;
@@ -68,8 +46,9 @@ export interface StoreSessionDTO {
   readonly displayName?: string;
   readonly accessLevel: StoreAccessLevel;
   readonly roles: readonly StoreRole[];
-  readonly capabilities: readonly StoreCapability[];
   readonly authMode: StoreAuthMode;
+  readonly canWrite: boolean;
+  readonly canAdmin: boolean;
 }
 
 export interface StoreIdentityProvider {
@@ -83,47 +62,14 @@ export interface StoreIdentityProviderOptions {
   readonly governanceAdminTokenHashes?: readonly string[];
 }
 
-const STORE_PUBLIC_READ_CAPABILITIES = ["store.read"] as const satisfies readonly StoreCapability[];
-const STORE_READ_CAPABILITIES = [
-  ...STORE_PUBLIC_READ_CAPABILITIES,
-  "store.audit.read",
-  "store.docking.read"
-] as const satisfies readonly StoreCapability[];
-
-const STORE_OPERATOR_CAPABILITIES = [
-  ...STORE_READ_CAPABILITIES,
-  "store.draft.import",
-  "store.draft.compile",
-  "store.draft.schema.save",
-  "store.listing.manage",
-  "store.supplier.create",
-  "store.supplier.review",
-  "store.supplier.tags.update",
-  "store.supplier.notification_profile.update",
-  "store.docking.create",
-  "store.docking.validate",
-  "store.docking.save"
-] as const satisfies readonly StoreCapability[];
-
-const STORE_ADMIN_CAPABILITIES = [
-  ...STORE_OPERATOR_CAPABILITIES,
-  "store.version.activate",
-  "store.version.deprecate"
-] as const satisfies readonly StoreCapability[];
-
-const GOVERNANCE_ADMIN_CAPABILITIES = [
-  ...STORE_ADMIN_CAPABILITIES,
-  "store.draft.review",
-  "store.supplier.identity.register",
-  "store.supplier.identity.revoke"
-] as const satisfies readonly StoreCapability[];
-
-const JWT_GOVERNANCE_ADMIN_CAPABILITIES = [
-  ...STORE_READ_CAPABILITIES,
-  "store.draft.review",
-  "store.supplier.identity.register",
-  "store.supplier.identity.revoke"
-] as const satisfies readonly StoreCapability[];
+const STORE_READ_ROLES: readonly StoreRole[] = [
+  "store_read",
+  "store_reader",
+  "store_operator",
+  "store_admin",
+  "governance_admin"
+];
+const STORE_OPERATE_ROLES: readonly StoreRole[] = ["store_operator", "store_admin"];
 
 export function createStoreIdentityProvider(options: StoreIdentityProviderOptions): StoreIdentityProvider {
   const runtimeEnvironment = options.runtimeEnvironment;
@@ -164,8 +110,9 @@ export function storeSessionFromAccess(access: StoreAccessState): StoreSessionDT
     ...(access.displayName ? { displayName: access.displayName } : {}),
     accessLevel: access.level,
     roles: access.roles,
-    capabilities: access.capabilities,
-    authMode: access.authMode
+    authMode: access.authMode,
+    canWrite: access.canWrite,
+    canAdmin: access.canAdmin
   };
 }
 
@@ -173,28 +120,20 @@ export function isStoreAccessAuthenticated(access: StoreAccessState): boolean {
   return Boolean(access.principalId);
 }
 
-export function hasStoreCapability(access: StoreAccessState, capability: StoreCapability): boolean {
-  return access.capabilities.includes(capability);
+export function storeAccessIsReader(access: StoreAccessState): boolean {
+  return access.roles.some((role) => STORE_READ_ROLES.includes(role));
 }
 
-export function storeAccessRequiredLevel(capability: StoreCapability): StoreAccessLevel | "governance_admin" {
-  switch (capability) {
-    case "store.supplier.identity.register":
-    case "store.supplier.identity.revoke":
-    case "store.draft.review":
-      return "governance_admin";
-    case "store.version.activate":
-    case "store.version.deprecate":
-      return "store_admin";
-    case "store.listing.manage":
-      return "store_operator";
-    case "store.read":
-    case "store.audit.read":
-    case "store.docking.read":
-      return "store_read";
-    default:
-      return "store_operator";
-  }
+export function storeAccessIsOperator(access: StoreAccessState): boolean {
+  return access.roles.some((role) => STORE_OPERATE_ROLES.includes(role));
+}
+
+export function storeAccessIsAdmin(access: StoreAccessState): boolean {
+  return access.roles.includes("store_admin");
+}
+
+export function storeAccessIsGovernanceAdmin(access: StoreAccessState): boolean {
+  return Boolean(access.governancePrincipal);
 }
 
 function resolveStoreAccessFromHeaders(
@@ -217,7 +156,6 @@ function resolveStoreAccessFromHeaders(
       level: "store_admin",
       principalId: admin.adminId,
       roles: ["store_admin", "governance_admin"],
-      capabilities: GOVERNANCE_ADMIN_CAPABILITIES,
       authMode: "dev_governance_admin_headers",
       governancePrincipal: admin,
       canWrite: true,
@@ -242,7 +180,6 @@ function resolveStoreAccessFromHeaders(
       level: "store_admin",
       principalId,
       roles: ["store_admin"],
-      capabilities: STORE_ADMIN_CAPABILITIES,
       authMode: "dev_store_headers",
       canWrite: true,
       canAdmin: true
@@ -254,7 +191,6 @@ function resolveStoreAccessFromHeaders(
       level: "store_operator",
       principalId,
       roles: ["store_operator"],
-      capabilities: STORE_OPERATOR_CAPABILITIES,
       authMode: "dev_store_headers",
       canWrite: true,
       canAdmin: false
@@ -265,7 +201,6 @@ function resolveStoreAccessFromHeaders(
     level: "store_read",
     principalId,
     roles: ["store_read"],
-    capabilities: STORE_READ_CAPABILITIES,
     authMode: "dev_store_headers",
     canWrite: false,
     canAdmin: false
@@ -418,7 +353,6 @@ function storeAccessFromJwtPayload(
   const roles = canonicalStoreRoles(jwtRoles).filter((role) =>
     role !== "governance_admin" || governanceAdminAllowed(principalId, governanceAdminPolicy)
   );
-  const capabilities = capabilitiesForStoreRoles(roles);
   const level = accessLevelForStoreRoles(roles);
   const displayName = stringClaim(payload, config.displayNameClaim);
   const governancePrincipal = roles.includes("governance_admin")
@@ -430,14 +364,10 @@ function storeAccessFromJwtPayload(
     principalId,
     ...(displayName ? { displayName } : {}),
     roles,
-    capabilities,
     authMode: "jwt",
     ...(governancePrincipal ? { governancePrincipal } : {}),
-    canWrite: capabilities.some((capability) =>
-      capability !== "store.read" &&
-      capability !== "store.audit.read" &&
-      capability !== "store.docking.read"),
-    canAdmin: roles.includes("store_admin") || roles.includes("governance_admin")
+    canWrite: storeRoleCanWrite(roles),
+    canAdmin: storeRoleCanAdmin(roles)
   };
 }
 
@@ -459,21 +389,14 @@ function canonicalStoreRoles(roles: readonly string[]): readonly StoreRole[] {
   return mapped;
 }
 
-function capabilitiesForStoreRoles(roles: readonly StoreRole[]): readonly StoreCapability[] {
-  const capabilities = new Set<StoreCapability>(STORE_PUBLIC_READ_CAPABILITIES);
-  if (roles.includes("store_reader")) {
-    addCapabilities(capabilities, STORE_READ_CAPABILITIES);
-  }
-  if (roles.includes("store_operator")) {
-    addCapabilities(capabilities, STORE_OPERATOR_CAPABILITIES);
-  }
-  if (roles.includes("store_admin")) {
-    addCapabilities(capabilities, STORE_ADMIN_CAPABILITIES);
-  }
-  if (roles.includes("governance_admin")) {
-    addCapabilities(capabilities, JWT_GOVERNANCE_ADMIN_CAPABILITIES);
-  }
-  return [...capabilities];
+function storeRoleCanWrite(roles: readonly StoreRole[]): boolean {
+  return roles.includes("store_operator") ||
+    roles.includes("store_admin") ||
+    roles.includes("governance_admin");
+}
+
+function storeRoleCanAdmin(roles: readonly StoreRole[]): boolean {
+  return roles.includes("store_admin") || roles.includes("governance_admin");
 }
 
 function accessLevelForStoreRoles(roles: readonly StoreRole[]): StoreAccessLevel {
@@ -484,12 +407,6 @@ function accessLevelForStoreRoles(roles: readonly StoreRole[]): StoreAccessLevel
     return "store_operator";
   }
   return "store_read";
-}
-
-function addCapabilities(capabilities: Set<StoreCapability>, values: readonly StoreCapability[]): void {
-  for (const value of values) {
-    capabilities.add(value);
-  }
 }
 
 function hasAny(values: ReadonlySet<string>, candidates: readonly string[]): boolean {
@@ -553,7 +470,6 @@ function anonymousAccess(authMode: StoreAuthMode, authenticationFailure?: StoreA
   return {
     level: "anonymous_read",
     roles: ["anonymous_read"],
-    capabilities: STORE_PUBLIC_READ_CAPABILITIES,
     authMode,
     ...(authenticationFailure ? { authenticationFailure } : {}),
     canWrite: false,

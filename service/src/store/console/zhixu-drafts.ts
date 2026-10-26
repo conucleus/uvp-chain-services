@@ -1,11 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
   assertOnchainHookPlanArtifact,
-  capabilityTablesOf,
   compileZhixuOnchainHookPlan,
   displayIdentity,
   hashCanonical,
-  ONCHAIN_HOOK_PLAN_SCHEMA_VERSION,
   parseZhixuDefinition,
   planIdForPublisher,
   toSolidityRegisterPlanArgs,
@@ -26,10 +24,9 @@ import type {
   GovernanceService
 } from "../../governance/index.js";
 import type { ProjectionStore } from "../../storage/projection-store.js";
-import type { Address, Hex } from "../../shared/types.js";
+import type { Address } from "../../shared/types.js";
 import { buildPublishMetadata, type PublishMetadata } from "../store-publishing.js";
-import type { PlanCapabilityTablesInput } from "../../indexer/projections/plan.js";
-import type { SemanticOraclePlan } from "../../indexer/semantic-oracle.js";
+import type { PlanArtifactRecorder } from "../../projection/plan-artifacts.js";
 import { isPlanRegisteredProjection } from "./version.js";
 
 export type StoreZhixuDraftSourceKind = "zhixu_yaml" | "onchain_hook_plan_manifest";
@@ -114,174 +111,6 @@ export interface StoreZhixuDraftStore {
   updateDraft(draft: StoreZhixuDraftRecord): Promise<void>;
 }
 
-export function createPlanCapabilityTablesResolver(
-  draftStore: StoreZhixuDraftStore
-): (planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput | undefined> {
-  return async (planId, planHash) => {
-    const schema = await draftStore.findProductSchemaByPlan(planId, planHash);
-    if (!schema) {
-      return undefined;
-    }
-    const artifact = schema.onchainHookPlanArtifact as
-      | Parameters<typeof capabilityTablesOf>[0]
-      | undefined;
-    if (
-      !artifact ||
-      !Array.isArray(artifact.selectorBindings) ||
-      !Array.isArray(artifact.signalCapabilities)
-    ) {
-      throw new Error(
-        `product schema for plan ${planId} carries no usable onchainHookPlanArtifact; a missing or malformed artifact is a validation failure, not an empty vocabulary (fail-closed)`
-      );
-    }
-    return {
-      planId,
-      planHash,
-      ...capabilityTablesOf(artifact),
-      ...executorCandidatesFromArtifact(artifact),
-    };
-  };
-}
-
-function executorCandidatesFromArtifact(
-  artifact: Parameters<typeof capabilityTablesOf>[0],
-): { readonly executorCandidates?: NonNullable<PlanCapabilityTablesInput["executorCandidates"]> } {
-  const raw = (artifact as { readonly executorCandidates?: unknown }).executorCandidates;
-  if (!Array.isArray(raw)) {
-    return {};
-  }
-  const candidates: { readonly stageId: Hex; readonly executor: Address }[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      return {};
-    }
-    const record = entry as { readonly stageId?: unknown; readonly executor?: unknown };
-    if (typeof record.stageId !== "string" || typeof record.executor !== "string") {
-      return {};
-    }
-    if (!/^0x[0-9a-fA-F]{64}$/.test(record.stageId) || !/^0x[0-9a-fA-F]{40}$/.test(record.executor)) {
-      return {};
-    }
-    candidates.push({
-      stageId: record.stageId.toLowerCase() as Hex,
-      executor: record.executor.toLowerCase() as Address,
-    });
-  }
-  return { executorCandidates: candidates };
-}
-
-export function createSemanticOraclePlanResolver(
-  draftStore: StoreZhixuDraftStore
-): (planId: Hex, planHash: Hex) => Promise<SemanticOraclePlan | undefined> {
-  return async (planId, planHash) => {
-    const schema = await draftStore.findProductSchemaByPlan(planId, planHash);
-    if (!schema) {
-      return undefined;
-    }
-    const plan = semanticOraclePlanFromArtifact(
-      planId,
-      schema.zhixuId,
-      schema.onchainHookPlanArtifact
-    );
-    if (!plan) {
-      throw new Error(
-        `product schema for plan ${planId} carries an unusable onchainHookPlanArtifact for semantic verification; the plan is not silently excluded (fail-closed)`
-      );
-    }
-    return plan;
-  };
-}
-
-function semanticOraclePlanFromArtifact(
-  planId: Hex,
-  zhixuId: string | undefined,
-  artifact: unknown
-): SemanticOraclePlan | undefined {
-  if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) {
-    return undefined;
-  }
-  const record = artifact as Record<string, unknown>;
-  if (record.schemaVersion !== ONCHAIN_HOOK_PLAN_SCHEMA_VERSION) {
-    throw new Error(
-      `onchainHookPlanArtifact for plan ${planId} carries schemaVersion ${String(record.schemaVersion)}; the semantic oracle consumer only interprets ${ONCHAIN_HOOK_PLAN_SCHEMA_VERSION}`
-    );
-  }
-  const rawHooks = record.compiledHooks;
-  const rawDependencyIndex = record.dependencyIndex;
-  if (!Array.isArray(rawHooks) || rawHooks.length === 0) {
-    return undefined;
-  }
-  if (!rawDependencyIndex || typeof rawDependencyIndex !== "object" || Array.isArray(rawDependencyIndex)) {
-    return undefined;
-  }
-  const compiledHooks: SemanticOraclePlan["compiledHooks"][number][] = [];
-  for (const rawHook of rawHooks) {
-    if (!rawHook || typeof rawHook !== "object" || Array.isArray(rawHook)) {
-      return undefined;
-    }
-    const hook = rawHook as Record<string, unknown>;
-    if (typeof hook.hookId !== "string" || !Array.isArray(hook.instructions)) {
-      return undefined;
-    }
-    compiledHooks.push({
-      hookId: hook.hookId as Hex,
-      ...(typeof hook.stageId === "string" ? { stageId: hook.stageId as Hex } : {}),
-      ...(typeof hook.stageIdentifier === "string" ? { stageIdentifier: hook.stageIdentifier } : {}),
-      ...(typeof hook.hookName === "string" ? { hookName: hook.hookName } : {}),
-      ...(hook.orderTriggerKind === "none" || hook.orderTriggerKind === "mint" || hook.orderTriggerKind === "dock"
-        ? { orderTriggerKind: hook.orderTriggerKind }
-        : {}),
-      ...(typeof hook.emitReady === "boolean" ? { emitReady: hook.emitReady } : {}),
-      instructions: hook.instructions.filter(
-        (instruction): instruction is Record<string, unknown> =>
-          Boolean(instruction) && typeof instruction === "object" && !Array.isArray(instruction)
-      )
-    });
-  }
-  const dependencyIndex: Record<string, readonly unknown[]> = {};
-  for (const [key, targets] of Object.entries(rawDependencyIndex)) {
-    if (!Array.isArray(targets)) {
-      return undefined;
-    }
-    dependencyIndex[key] = targets;
-  }
-  const admissions = semanticOracleAdmissionsOf(record.admissions);
-  return {
-    planId,
-    zhixuId: zhixuId && zhixuId.length > 0 ? zhixuId : planId,
-    compiledHooks,
-    dependencyIndex,
-    ...(admissions ? { admissions } : {})
-  };
-}
-
-function semanticOracleAdmissionsOf(raw: unknown): SemanticOraclePlan["admissions"] | undefined {
-  if (!Array.isArray(raw)) {
-    return undefined;
-  }
-  const admissions: NonNullable<SemanticOraclePlan["admissions"]>[number][] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      return undefined;
-    }
-    const admission = entry as Record<string, unknown>;
-    admissions.push({
-      ...(typeof admission.admissionId === "string" ? { admissionId: admission.admissionId as Hex } : {}),
-      ...(typeof admission.stageIdentifier === "string" ? { stageIdentifier: admission.stageIdentifier } : {}),
-      ...(typeof admission.signalName === "string" ? { signalName: admission.signalName } : {}),
-      ...(Array.isArray(admission.instructions)
-        ? {
-          instructions: admission.instructions.filter(
-            (instruction): instruction is Record<string, unknown> =>
-              Boolean(instruction) && typeof instruction === "object" && !Array.isArray(instruction)
-          )
-        }
-        : {})
-    });
-  }
-  return admissions;
-}
-
 export class MemoryStoreZhixuDraftStore implements StoreZhixuDraftStore {
   readonly #drafts = new Map<string, StoreZhixuDraftRecord>();
 
@@ -344,6 +173,7 @@ export function createStoreZhixuDraftWorkflowService(options: {
   readonly draftStore: StoreZhixuDraftStore;
   readonly governanceService: GovernanceService;
   readonly projectionStore: ProjectionStore;
+  readonly recordPlanArtifact?: PlanArtifactRecorder;
   readonly now?: () => Date;
   readonly draftIdFactory?: () => string;
 }): StoreZhixuDraftWorkflowService {
@@ -416,6 +246,9 @@ export function createStoreZhixuDraftWorkflowService(options: {
             updatedAt: timestamp
           };
       await draftStore.updateDraft(updated);
+      if (compiled.ok) {
+        await recordPlanArtifact(options.recordPlanArtifact, compiled.preview, compiled.artifact);
+      }
       return toDraftDTO(updated, options.projectionStore);
     },
 
@@ -479,6 +312,29 @@ async function requireDraft(
     throw new StoreZhixuDraftWorkflowError(404, "store_zhixu_draft_not_found", "Store Zhixu draft not found");
   }
   return draft;
+}
+
+async function recordPlanArtifact(
+  recorder: PlanArtifactRecorder | undefined,
+  preview: StoreCompilePreviewDTO,
+  artifact: OnchainHookPlanArtifact
+): Promise<void> {
+  if (!recorder) {
+    return;
+  }
+  try {
+    await recorder({
+      planId: preview.planId as `0x${string}`,
+      planHash: preview.planHash as `0x${string}`,
+      artifact
+    });
+  } catch (error) {
+    throw new StoreZhixuDraftWorkflowError(
+      503,
+      "plan_artifact_record_failed",
+      `compiled plan artifact could not be recorded in plan_artifacts; refusing to hand out publish metadata for a plan whose vocabulary is not indexable (${errorMessage(error)})`
+    );
+  }
 }
 
 function assertDraftCompiledForReview(

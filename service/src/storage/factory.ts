@@ -59,6 +59,7 @@ import {
 } from "../store/console/postgres-store.js";
 import type { StoreZhixuDraftStore } from "../store/console/zhixu-drafts.js";
 import type { StoreZhixuVersionMetadataStore } from "../store/console/version.js";
+import { PostgresPlanArtifactStore, type PlanArtifactStore } from "../projection/plan-artifacts.js";
 import {
   PostgresStoreWalletSessionStore,
   type StoreWalletSessionStore
@@ -92,6 +93,8 @@ export interface CreateProjectionStoreOptions {
 
 export interface ChainServicesStores {
   readonly projectionStore: ProjectionStore;
+  /** 计划编译产物（索引重建/提交造证的唯一 off-chain 权威）。 */
+  readonly planArtifactStore: PlanArtifactStore;
   readonly productBffStore: ProductBffStore;
   /** 订单域（配置注册/草稿/阶段/slot/邀请/订单）持久化 store。 */
   readonly orderStore: OrderStore;
@@ -158,6 +161,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         ? { projectionScopeContractAddress: options.projectionScopeContractAddress }
         : {})
     }),
+    planArtifactStore: new PostgresPlanArtifactStore({ database }),
     productBffStore: new PostgresProductBffStore({ database }),
     orderStore: new PostgresOrderStore({ database }),
     orderRequirementsStore: new PostgresOrderRequirementsStore({ database }),

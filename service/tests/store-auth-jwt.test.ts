@@ -49,14 +49,14 @@ describe("Store JWT/JWKS operator identity", () => {
       displayName: "Operator One",
       accessLevel: "store_operator",
       roles: ["store_operator"],
-      authMode: "jwt"
+      authMode: "jwt",
+      canWrite: true,
+      canAdmin: false
     });
-    expect(session.capabilities).toContain("store.draft.import");
-    expect(session.capabilities).toContain("store.docking.save");
     expect(JSON.stringify(session)).not.toContain("Bearer");
   });
 
-  it("maps JWT Store roles to the existing capability matrix", async () => {
+  it("maps JWT Store roles to access levels and write flags", async () => {
     const fixture = await createJwksFixture(servers);
     const router = createJwtRouter(fixture);
 
@@ -66,27 +66,29 @@ describe("Store JWT/JWKS operator identity", () => {
     }))).resolves.toMatchObject({
       accessLevel: "store_read",
       roles: ["store_reader"],
-      capabilities: ["store.read", "store.audit.read", "store.docking.read"]
+      canWrite: false,
+      canAdmin: false
     });
 
-    const storeAdmin = await storeSession(router, await signStoreToken(fixture, {
+    await expect(storeSession(router, await signStoreToken(fixture, {
       sub: "store-admin-1",
       roles: ["store_admin"]
-    }));
-    expect(storeAdmin.capabilities).toContain("store.version.activate");
+    }))).resolves.toMatchObject({
+      accessLevel: "store_admin",
+      roles: ["store_admin"],
+      canWrite: true,
+      canAdmin: true
+    });
 
-    const governanceAdmin = await storeSession(router, await signStoreToken(fixture, {
+    await expect(storeSession(router, await signStoreToken(fixture, {
       sub: "governance-admin-1",
       roles: ["governance_admin"]
-    }));
-    expect(governanceAdmin).toMatchObject({
+    }))).resolves.toMatchObject({
       accessLevel: "store_read",
-      roles: ["governance_admin"]
+      roles: ["governance_admin"],
+      canWrite: true,
+      canAdmin: true
     });
-    expect(governanceAdmin.capabilities).toContain("store.supplier.identity.register");
-    expect(governanceAdmin.capabilities).toContain("store.supplier.identity.revoke");
-    expect(governanceAdmin.capabilities).not.toContain("store.draft.import");
-    expect(governanceAdmin.capabilities).not.toContain("store.version.activate");
   });
 
   it("does not grant canWrite to read-level Store JWT identities", async () => {
@@ -107,14 +109,15 @@ describe("Store JWT/JWKS operator identity", () => {
     const reader = await provider.resolve({
       authorization: `Bearer ${await signStoreToken(fixture, { sub: "reader-1", roles: ["store_reader"] })}`
     });
-    expect(reader.capabilities).toEqual(["store.read", "store.audit.read", "store.docking.read"]);
+    expect(reader.level).toBe("store_read");
     expect(reader.canWrite).toBe(false);
+    expect(reader.canAdmin).toBe(false);
 
     const operator = await provider.resolve({
       authorization: `Bearer ${await signStoreToken(fixture, { sub: "operator-1", roles: ["store_operator"] })}`
     });
-    expect(operator.capabilities).toContain("store.docking.read");
     expect(operator.canWrite).toBe(true);
+    expect(operator.canAdmin).toBe(false);
   });
 
   it("requires JWT governance_admin principals to pass the governance whitelist", async () => {
@@ -125,16 +128,15 @@ describe("Store JWT/JWKS operator identity", () => {
       roles: ["governance_admin"]
     }));
     expect(unlisted.roles).not.toContain("governance_admin");
-    expect(unlisted.capabilities).not.toContain("store.supplier.identity.register");
-    expect(unlisted.capabilities).not.toContain("store.draft.review");
-    expect(unlisted.capabilities).toEqual(["store.read"]);
+    expect(unlisted.canAdmin).toBe(false);
+    expect(unlisted.accessLevel).toBe("store_read");
 
     const listed = await storeSession(router, await signStoreToken(fixture, {
       sub: "gov-reviewer-1",
       roles: ["governance_admin"]
     }));
     expect(listed.roles).toContain("governance_admin");
-    expect(listed.capabilities).toContain("store.supplier.identity.register");
+    expect(listed.canAdmin).toBe(true);
   });
 
   it("returns 401 for missing or invalid JWT identity and 403 for underprivileged JWT identity", async () => {
@@ -145,7 +147,7 @@ describe("Store JWT/JWKS operator identity", () => {
       status: 401,
       body: {
         error: "store_identity_missing",
-        requiredCapability: "store.draft.import",
+        requiredAccess: "store_operator",
         authMode: "jwt"
       }
     });
@@ -162,7 +164,7 @@ describe("Store JWT/JWKS operator identity", () => {
       status: 403,
       body: {
         error: "forbidden",
-        requiredCapability: "store.draft.import",
+        requiredAccess: "store_operator",
         accessLevel: "store_read",
         authMode: "jwt"
       }
@@ -362,7 +364,6 @@ function createJwtRouter(
     storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
-    orderRequirementsStore: stores.orderRequirementsStore,
     evidenceMetadataStore: stores.evidenceMetadataStore,
     submissionStore: stores.submissionStore,
     governanceStore: stores.governanceStore,

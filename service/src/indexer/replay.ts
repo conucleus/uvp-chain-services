@@ -119,9 +119,6 @@ export function rebuildOrderProjections(
   for (const source of options.planCapabilityTables ?? []) {
     capabilityTables.set(source.planId.toLowerCase(), source);
   }
-  const capabilityResolutionFailures = new Set<string>(
-    (options.planCapabilityResolutionFailures ?? []).map((planId) => planId.toLowerCase())
-  );
   let activeStateMachineDeploymentId: Hex | undefined;
   let eventCount = 0;
   let lastEvent: ProjectionProvenance | undefined;
@@ -136,7 +133,6 @@ export function rebuildOrderProjections(
       orders: stateMachineOrders,
       docks: stateMachineDocks,
       capabilityTables,
-      capabilityResolutionFailures,
       diagnostics
     }, event);
     eventCount += 1;
@@ -222,7 +218,6 @@ export function rebuildOrderProjections(
 
 export interface ProjectionReplayOptions {
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
-  readonly planCapabilityResolutionFailures?: readonly Hex[];
 }
 
 function deriveOrderDockChainDepth(
@@ -283,7 +278,6 @@ function applyStateMachineEvent(
     orders: Map<string, MutableStateMachineOrderProjection>;
     docks: Map<string, MutableStateMachineDockProjection>;
     capabilityTables: ReadonlyMap<string, PlanCapabilityTablesInput>;
-    capabilityResolutionFailures: ReadonlySet<string>;
     diagnostics: ProjectionReplayDiagnostics;
   },
   event: ChainEvent

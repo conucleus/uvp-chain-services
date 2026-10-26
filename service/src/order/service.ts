@@ -20,9 +20,6 @@ import type {
   OrderDraftDetail,
   OrderDraftStatus,
   OrderDraft,
-  OrderStage,
-  Order,
-  OrderStageDetail,
   RejectStageInviteInput,
   StageInviteCreated,
   StageInvitePreview,
@@ -59,11 +56,13 @@ import {
   UnconfiguredOrderBirthPort,
   type OrderBirthPort,
   type OrderBirthRoute,
+  type OrderChainProjectionPort,
   type OrderTriggerPort,
   type PublishedPlan,
   type PublishedPlanInput,
   type PublishedPlanProvider,
 } from "./ports.js";
+import { deriveOrderChainStatus } from "./chain-status.js";
 import type {
   ConfigVersionRecord,
   OrderDraftRecord,
@@ -105,6 +104,7 @@ export interface OrderServiceOptions {
   readonly publishedPlanProvider?: PublishedPlanProvider;
   readonly birthPort?: OrderBirthPort;
   readonly triggerPort?: OrderTriggerPort;
+  readonly chainProjection: OrderChainProjectionPort;
   readonly now?: () => Date;
 }
 
@@ -116,6 +116,7 @@ export class OrderService {
   readonly #publishedPlanProvider: PublishedPlanProvider | undefined;
   readonly #birthPort: OrderBirthPort;
   readonly #triggerPort: OrderTriggerPort | undefined;
+  readonly #chainProjection: OrderChainProjectionPort;
   readonly #now: () => Date;
 
   constructor(options: OrderServiceOptions) {
@@ -126,6 +127,7 @@ export class OrderService {
     this.#publishedPlanProvider = options.publishedPlanProvider;
     this.#birthPort = options.birthPort ?? new UnconfiguredOrderBirthPort();
     this.#triggerPort = options.triggerPort;
+    this.#chainProjection = options.chainProjection;
     this.config = new OrderConfigService({
       store: options.store,
       publisherWallets: options.publisherWallets,
@@ -1020,68 +1022,6 @@ export class OrderService {
     };
   }
 
-  async getOrder(actor: Address, orderId: string): Promise<Order> {
-    const wallet = normalizeActor(actor);
-    const order = await this.#store.getOrder(orderId);
-    if (!order) {
-      throw new OrderError(404, "order_not_found", "order was not found");
-    }
-    const stages = await this.#store.listStages(order.draftId);
-    const slots = await this.#store.listSlots(order.draftId);
-    const participantStageKeys = new Set(
-      slots.filter((slot) => slot.status === "accepted" && slot.wallet === wallet).map((slot) => slot.stageKey),
-    );
-    if (order.buyerWallet !== wallet && participantStageKeys.size === 0) {
-      throw new OrderError(404, "order_not_found", "order was not found");
-    }
-    const visibleStages = order.buyerWallet === wallet
-      ? stages
-      : stages.filter((stage) => participantStageKeys.has(stage.stageKey));
-    return {
-      orderId: order.orderId,
-      draftId: order.draftId,
-      planId: order.planId,
-      stateMachine: order.stateMachine,
-      chainId: order.chainId,
-      buyerWallet: order.buyerWallet,
-      status: order.status,
-      termsHash: order.termsHash,
-      ...(order.txHash !== undefined ? { txHash: order.txHash } : {}),
-      createdAt: order.createdAt,
-      stages: visibleStages.map(toOrderStageDto),
-    };
-  }
-
-  async getStage(actor: Address, orderId: string, stageKey: string): Promise<OrderStageDetail> {
-    const wallet = normalizeActor(actor);
-    const order = await this.#store.getOrder(orderId);
-    if (!order) {
-      throw new OrderError(404, "order_not_found", "order was not found");
-    }
-    const stages = await this.#store.listStages(order.draftId);
-    const stage = stages.find((candidate) => candidate.stageKey === stageKey);
-    if (!stage) {
-      throw new OrderError(404, "stage_not_found", "stage was not found on this order");
-    }
-    const slots = await this.#store.listSlots(order.draftId);
-    const stageSlots = slots.filter((slot) => slot.stageKey === stageKey);
-    const isOwner = order.buyerWallet === wallet;
-    const ownSlots = stageSlots.filter((slot) => slot.status === "accepted" && slot.wallet === wallet);
-    if (!isOwner && ownSlots.length === 0) {
-      const isParticipant = slots.some((slot) => slot.status === "accepted" && slot.wallet === wallet);
-      if (!isParticipant) {
-        throw new OrderError(404, "order_not_found", "order was not found");
-      }
-      throw new OrderError(403, "stage_scope_forbidden", "the session wallet can only read its own stage");
-    }
-    const visibleSlots = isOwner ? stageSlots : ownSlots;
-    return {
-      order: await this.getOrder(actor, orderId),
-      stage: toOrderStageDto(stage),
-      slots: visibleSlots.map((slot) => toSlotDto(slot, stage.stageId)),
-    };
-  }
-
   async loadOrderSnapshotForVisibility(orderId: string): Promise<OrderVisibilitySnapshot> {
     const order = await this.#store.getOrder(requireString(orderId, "orderId"));
     if (!order) {
@@ -1095,11 +1035,17 @@ export class OrderService {
     if (config.configHash !== draft.configHash) {
       throw new OrderError(503, "projection_unavailable", "order config hash does not match the draft");
     }
-    return {
+    const chainOrders = await this.#chainProjection.findChainOrders(order.orderId);
+    const derived = deriveOrderChainStatus({
       order,
+      stages: await this.#store.listStages(draft.draftId),
+      chainOrders,
+    });
+    return {
+      order: derived.order,
       draft,
       config: config.bundle,
-      stages: await this.#store.listStages(draft.draftId),
+      stages: derived.stages,
       slots: await this.#store.listSlots(draft.draftId),
     };
   }
@@ -1708,21 +1654,6 @@ function toSlotDto(record: OrderStageSlotRecord, stageId: string): StageSlot {
     ...(record.acceptedTermsHash !== undefined ? { acceptedTermsHash: record.acceptedTermsHash } : {}),
     ...(record.acceptedAt !== undefined ? { acceptedAt: record.acceptedAt } : {}),
     ...(record.signature !== undefined ? { signature: record.signature } : {}),
-  };
-}
-
-function toOrderStageDto(record: OrderStageRecord): OrderStage {
-  return {
-    stageKey: record.stageKey,
-    stageId: record.stageId,
-    index: record.stageIndex,
-    amount: record.amount,
-    slots: record.slots,
-    ...(record.profileRef !== undefined ? { profileRef: record.profileRef } : {}),
-    finalStandardHash: record.finalStandardHash,
-    inviteDeadline: record.inviteDeadline,
-    workDeadline: record.workDeadline,
-    status: record.status,
   };
 }
 

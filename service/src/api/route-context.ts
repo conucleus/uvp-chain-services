@@ -10,10 +10,6 @@ import type {
 } from "../evidence/index.js";
 import type { GovernanceAdminAuthPolicy, GovernanceService, GovernanceStore } from "../governance/index.js";
 import type { ProductBffService } from "../product/query/bff/service.js";
-import type {
-  OrderRequirementsService,
-  OrderRequirementsStore
-} from "../product/requirements/index.js";
 import type { ProductBffStore } from "../product/query/bff/store.js";
 import type { ProductSchemaResolver, ProductService } from "../product/application/service.js";
 import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
@@ -59,6 +55,7 @@ import type {
   StoreZhixuDraftStore,
   StoreZhixuDraftWorkflowService
 } from "../store/console/zhixu-drafts.js";
+import type { PlanArtifactRecorder } from "../projection/plan-artifacts.js";
 import type {
   StoreZhixuVersionMetadataStore,
   StoreZhixuVersionService
@@ -134,8 +131,6 @@ export interface CreateApiRouterOptions {
   readonly orderPublishedPlanProvider?: PublishedPlanProvider;
   readonly orderBirthPort?: OrderBirthPort;
   readonly orderTriggerPort?: OrderTriggerPort;
-  readonly orderRequirementsService?: OrderRequirementsService;
-  readonly orderRequirementsStore: OrderRequirementsStore;
   readonly productTriggerChainId?: number;
   readonly productRuntimeEnvironment?: ChainServicesRuntimeEnv;
   readonly audit?: AuditSink;
@@ -149,6 +144,7 @@ export interface CreateApiRouterOptions {
   readonly supplierNotificationConfigService: SupplierNotificationProfileConfigService;
   readonly storeZhixuDraftStore: StoreZhixuDraftStore;
   readonly storeZhixuDraftWorkflowService?: StoreZhixuDraftWorkflowService;
+  readonly recordPlanArtifact?: PlanArtifactRecorder;
   readonly productSchemaResolver?: ProductSchemaResolver;
   readonly storeZhixuVersionMetadataStore: StoreZhixuVersionMetadataStore;
   readonly storeDockingSessionStore: StoreDockingSessionStore;
@@ -203,7 +199,6 @@ export interface ApiRouteContext {
   readonly productService: ProductService;
   readonly productBffService: ProductBffService;
   readonly orderService: OrderService;
-  readonly orderRequirementsService: OrderRequirementsService;
   readonly storeConsoleService: StoreConsoleService;
   readonly storeDockingService: StoreDockingService;
   readonly storeRuntimeService: StoreRuntimeService;

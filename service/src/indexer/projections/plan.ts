@@ -84,7 +84,7 @@ export interface StateMachineSignalCapabilityProjection {
   readonly proof: StateMachineProofProjection;
 }
 
-export type PlanCapabilityEnrichmentStatus = "enriched" | "empty" | "failed";
+export type PlanCapabilityEnrichmentStatus = "enriched" | "failed";
 
 export type MutableStateMachinePlanProjection = Writable<StateMachinePlanProjection>;
 
@@ -158,7 +158,6 @@ export function applyPlanFinalized(
     deployments: Map<string, MutableStateMachineDeploymentProjection>;
     plans: Map<string, MutableStateMachinePlanProjection>;
     capabilityTables?: ReadonlyMap<string, PlanCapabilityTablesInput>;
-    capabilityResolutionFailures?: ReadonlySet<string>;
     diagnostics?: ProjectionReplayDiagnostics;
   },
   event: ChainEvent
@@ -207,7 +206,6 @@ export function applyPlanRegistered(
     plans: Map<string, MutableStateMachinePlanProjection>;
     orders: Map<string, MutableStateMachineOrderProjection>;
     capabilityTables?: ReadonlyMap<string, PlanCapabilityTablesInput>;
-    capabilityResolutionFailures?: ReadonlySet<string>;
     diagnostics?: ProjectionReplayDiagnostics;
   },
   event: ChainEvent
@@ -308,7 +306,6 @@ function enrichPlanCapabilityTables(
   event: ChainEvent,
   state: {
     capabilityTables?: ReadonlyMap<string, PlanCapabilityTablesInput>;
-    capabilityResolutionFailures?: ReadonlySet<string>;
     diagnostics?: ProjectionReplayDiagnostics;
   },
   options: { readonly countMismatch: boolean }
@@ -324,12 +321,8 @@ function enrichPlanCapabilityTables(
     return;
   }
   if (!source) {
-    if (state.capabilityResolutionFailures?.has(plan.planId.toLowerCase())) {
-      countMismatch();
-      plan.capabilityEnrichment = "failed";
-      return;
-    }
-    plan.capabilityEnrichment = "empty";
+    countMismatch();
+    plan.capabilityEnrichment = "failed";
     return;
   }
   if (source.planHash && source.planHash.toLowerCase() !== plan.planHash.toLowerCase()) {
@@ -364,7 +357,6 @@ function enrichExecutorCandidates(
   plan: MutableStateMachinePlanProjection,
   source: PlanCapabilityTablesInput | undefined,
   state: {
-    capabilityResolutionFailures?: ReadonlySet<string>;
     diagnostics?: ProjectionReplayDiagnostics;
   },
   options: { readonly countMismatch: boolean }

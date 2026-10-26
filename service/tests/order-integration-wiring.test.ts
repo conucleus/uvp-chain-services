@@ -19,7 +19,6 @@ function identityProvider() {
         return {
           level: "anonymous_read" as const,
           roles: [] as const,
-          capabilities: [] as const,
           authMode: "anonymous" as const,
           canWrite: false,
           canAdmin: false,
@@ -28,7 +27,6 @@ function identityProvider() {
       return {
         level: "store_operator" as const,
         roles: [] as const,
-        capabilities: [] as const,
         authMode: "dev_store_headers" as const,
         canWrite: true,
         canAdmin: false,

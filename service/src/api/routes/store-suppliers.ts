@@ -7,21 +7,22 @@ import {
   type StoreOperatorPrincipal,
   type StoreSupplierListQuery
 } from "../../store/suppliers/service.js";
-import type { StoreAccessState, StoreCapability } from "../../store/console/access.js";
-import { isStoreAccessAuthenticated } from "../../store/console/access.js";
+import type { StoreAccessState } from "../../store/console/access.js";
 import { cleanQuery, decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import {
-  authorizeStoreCapability,
+  authorizeStoreAuthenticated,
+  authorizeStoreGovernance,
+  authorizeStoreRead,
+  authorizeStoreWrite,
   isAnchoredStoreAuthorizationResult,
   isStoreAuthorizationResult,
-  recordStoreCapabilityFailure,
-  recordStoreCapabilitySuccess,
+  recordStoreAccessFailure,
+  recordStoreAccessSuccess,
   requireAnchoredStoreAddress,
   requireStoreConfirmation,
   StoreConfirmationError,
-  storeConfirmationErrorResponse,
-  unauthorizedStoreCapabilityResponse
+  storeConfirmationErrorResponse
 } from "../store-authz.js";
 
 type ParsedStoreSupplierQuery =
@@ -41,14 +42,10 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           if (!parsedQuery.ok) {
             return parsedQuery.response;
           }
-          const capability = "store.read";
           const resource = { type: "store_supplier" };
-          const authorization = await authorizeStoreCapability(context, request, capability, resource);
+          const authorization = await authorizeStoreAuthenticated(context, request, "store.read", resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
-          }
-          if (!isStoreAccessAuthenticated(authorization.access)) {
-            return unauthorizedStoreCapabilityResponse(authorization.access, capability);
           }
           return {
             status: 200,
@@ -57,9 +54,9 @@ export function createStoreSuppliersRouteModule(): RouteModule {
         }
 
         if (request.method === "POST" && request.pathname === "/store/suppliers") {
-          const capability = "store.supplier.create";
+          const auditAction = "store.supplier.create";
           const resource = { type: "store_supplier" };
-          const authorization = await authorizeStoreCapability(context, request, capability, resource);
+          const authorization = await authorizeStoreWrite(context, request, auditAction, resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
@@ -73,7 +70,7 @@ export function createStoreSuppliersRouteModule(): RouteModule {
               storeOperatorPrincipalFromAccess(authorization.access)
             );
             const createdSupplierId = supplierIdFromBody(body);
-            await recordStoreCapabilitySuccess(context, request, authorization.access, capability, {
+            await recordStoreAccessSuccess(context, request, authorization.access, auditAction, {
               type: "store_supplier",
               ...(createdSupplierId ? { id: createdSupplierId } : {})
             });
@@ -82,7 +79,7 @@ export function createStoreSuppliersRouteModule(): RouteModule {
               body
             };
           } catch (error) {
-            await recordStoreCapabilityFailure(context, request, authorization.access, capability, { type: "store_supplier" }, error);
+            await recordStoreAccessFailure(context, request, authorization.access, auditAction, { type: "store_supplier" }, error);
             throw error;
           }
         }
@@ -90,14 +87,14 @@ export function createStoreSuppliersRouteModule(): RouteModule {
         const supplierAuditMatch = /^\/store\/suppliers\/([^/]+)\/audits$/.exec(request.pathname);
         if (request.method === "GET" && supplierAuditMatch) {
           const supplierId = decodePathParameter(supplierAuditMatch[1] ?? "");
-          const capability = "store.audit.read";
+          const auditAction = "store.audit.read";
           const resource = { type: "store_supplier", id: supplierId };
-          const authorization = await authorizeStoreCapability(context, request, capability, resource);
+          const authorization = await authorizeStoreRead(context, request, auditAction, resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
           const body = await context.storeSupplierService.listSupplierAudits(supplierId);
-          await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource, {
+          await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource, {
             resultCount: body.records.length
           });
           return {
@@ -110,9 +107,8 @@ export function createStoreSuppliersRouteModule(): RouteModule {
         if (request.method === "POST" && notificationProfileMatch) {
           const supplierId = decodePathParameter(notificationProfileMatch[1] ?? "");
           const action = notificationProfileMatch[2];
-          const profileCapability: StoreCapability = "store.supplier.notification_profile.update";
           const profileResource = { type: "store_supplier", id: supplierId };
-          const profileAuthorization = await authorizeStoreCapability(context, request, profileCapability, profileResource);
+          const profileAuthorization = await authorizeStoreWrite(context, request, "store.supplier.notification_profile.update", profileResource);
           if (!isStoreAuthorizationResult(profileAuthorization)) {
             return profileAuthorization;
           }
@@ -144,12 +140,9 @@ export function createStoreSuppliersRouteModule(): RouteModule {
         const action = supplierMatch[2];
 
         if (request.method === "GET" && !action) {
-          const readAuthorization = await authorizeStoreCapability(context, request, "store.read", { type: "store_supplier", id: supplierId });
+          const readAuthorization = await authorizeStoreAuthenticated(context, request, "store.read", { type: "store_supplier", id: supplierId });
           if (!isStoreAuthorizationResult(readAuthorization)) {
             return readAuthorization;
-          }
-          if (!isStoreAccessAuthenticated(readAuthorization.access)) {
-            return unauthorizedStoreCapabilityResponse(readAuthorization.access, "store.read");
           }
           const supplier = await context.storeSupplierService.getSupplier(supplierId);
           if (!supplier) {
@@ -165,9 +158,11 @@ export function createStoreSuppliersRouteModule(): RouteModule {
         }
 
         if (request.method === "POST" && action) {
-          const capability = supplierCapability(action);
+          const auditAction = supplierAuditAction(action);
           const resource = { type: "store_supplier", id: supplierId };
-          const authorization = await authorizeStoreCapability(context, request, capability, resource);
+          const authorization = action === "review"
+            ? await authorizeStoreWrite(context, request, auditAction, resource)
+            : await authorizeStoreGovernance(context, request, auditAction, resource);
           if (!isStoreAuthorizationResult(authorization)) {
             return authorization;
           }
@@ -175,15 +170,9 @@ export function createStoreSuppliersRouteModule(): RouteModule {
           if (!isAnchoredStoreAuthorizationResult(anchored)) {
             return anchored;
           }
-          if (action === "review" && bodyHasSupplierCapabilityEditField(request.body)) {
-            const tagAuthorization = await authorizeStoreCapability(context, request, "store.supplier.tags.update", resource);
-            if (!isStoreAuthorizationResult(tagAuthorization)) {
-              return tagAuthorization;
-            }
-          }
           const confirmationError = await supplierConfirmationError(context, request, supplierId, action);
           if (confirmationError) {
-            await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, confirmationError);
+            await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, confirmationError);
             return storeConfirmationErrorResponse(confirmationError);
           }
           switch (action) {
@@ -194,13 +183,10 @@ export function createStoreSuppliersRouteModule(): RouteModule {
                   request.body,
                   storeOperatorPrincipalFromAccess(authorization.access)
                 );
-                await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
-                if (bodyHasSupplierCapabilityEditField(request.body)) {
-                  await recordStoreCapabilitySuccess(context, request, authorization.access, "store.supplier.tags.update", resource);
-                }
+                await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
                 return { status: 200, body };
               } catch (error) {
-                await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+                await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
                 throw error;
               }
             }
@@ -211,10 +197,10 @@ export function createStoreSuppliersRouteModule(): RouteModule {
                   request.body,
                   storeOperatorPrincipalFromAccess(authorization.access)
                 );
-                await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+                await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
                 return { status: 202, body };
               } catch (error) {
-                await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+                await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
                 throw error;
               }
             }
@@ -225,10 +211,10 @@ export function createStoreSuppliersRouteModule(): RouteModule {
                   request.body,
                   storeOperatorPrincipalFromAccess(authorization.access)
                 );
-                await recordStoreCapabilitySuccess(context, request, authorization.access, capability, resource);
+                await recordStoreAccessSuccess(context, request, authorization.access, auditAction, resource);
                 return { status: 202, body };
               } catch (error) {
-                await recordStoreCapabilityFailure(context, request, authorization.access, capability, resource, error);
+                await recordStoreAccessFailure(context, request, authorization.access, auditAction, resource, error);
                 throw error;
               }
             }
@@ -309,16 +295,13 @@ function parseStoreSupplierQuery(query: ApiRequest["query"]): ParsedStoreSupplie
     ok: true,
     query: cleanQuery({
       query: query?.query,
-      tag: query?.tag,
       identity
     }) as StoreSupplierListQuery
   };
 }
 
-function supplierCapability(action: string): StoreCapability {
+function supplierAuditAction(action: string): string {
   switch (action) {
-    case "review":
-      return "store.supplier.review";
     case "request-identity-registration":
       return "store.supplier.identity.register";
     case "request-identity-revocation":
@@ -360,16 +343,6 @@ function storeOperatorPrincipalFromAccess(access: StoreAccessState): StoreOperat
     operatorId: access.principalId ?? (access.anchoredAddress ? `wallet:${access.anchoredAddress}` : "unauthenticated"),
     role: access.roles.includes("governance_admin") ? "governance_admin" : access.level
   };
-}
-
-function bodyHasField(body: unknown, field: string): boolean {
-  return Boolean(body && typeof body === "object" && !Array.isArray(body) && Object.hasOwn(body, field));
-}
-
-function bodyHasSupplierCapabilityEditField(body: unknown): boolean {
-  return bodyHasField(body, "capabilityTags") ||
-    bodyHasField(body, "supportedRoleSlotIds") ||
-    bodyHasField(body, "supportedStageIds");
 }
 
 function bodyRecord(body: unknown): Record<string, unknown> {

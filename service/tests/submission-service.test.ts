@@ -70,6 +70,19 @@ const baseNow = new Date("2026-04-28T00:00:00Z");
 const fixtureOnchainOrderId = "0x0000000000000000000000000000000000000000000000000000000000000301" as Hex;
 const fixtureSourceId = "0x0000000000000000000000000000000000000000000000000000000000000401" as Hex;
 const fixtureSignalId = "0x0000000000000000000000000000000000000000000000000000000000000501" as Hex;
+const fixtureStageId = "0x0000000000000000000000000000000000000000000000000000000000000601" as Hex;
+
+// 已 enrich 的 plan artifact 词表：覆盖 fixture 的 source/signal 对，
+// 让 prepare 能造出非零 attribution（默认 fixture 的 plan 词表单源）。
+const verifiedPlanCapabilityTables = {
+  selectorBindings: [],
+  signalCapabilities: [{
+    stageId: fixtureStageId,
+    targetSourceId: fixtureSourceId,
+    signalId: fixtureSignalId,
+    targetOrderRelation: "current" as const
+  }]
+};
 
 const task = {
   taskId: "task-1",
@@ -297,11 +310,11 @@ describe("product task submissions", () => {
     });
   });
 
-  it("fails prepare loudly when the plan capability-table resolver throws instead of minting zero proofs", async () => {
+  it("returns 503 for a plan-scoped prepare while the plan artifact vocabulary is unavailable instead of minting zero proofs", async () => {
     const base = await submissionFixture({
       authorization: permissiveProductProjectionAuthorization()
     });
-    const resolverFailure = new Error("projection snapshot unreadable");
+    const resolverFailure = new Error("plan artifact store unreadable");
     const failing = createProductSubmissionService({
       store: new InMemoryProductSubmissionStore(),
       productTasks: {
@@ -324,10 +337,10 @@ describe("product task submissions", () => {
       intent: "confirm_stage"
     }, owner)).rejects.toMatchObject({
       code: "capability_tables_unavailable",
-      status: 409
+      status: 503
     });
 
-    const externalPlan = createProductSubmissionService({
+    const withoutArtifact = createProductSubmissionService({
       store: new InMemoryProductSubmissionStore(),
       productTasks: {
         getTask: async (taskId) => taskId === task.taskId ? task : undefined
@@ -340,14 +353,17 @@ describe("product task submissions", () => {
       authorization: permissiveProductProjectionAuthorization(),
       now: () => baseNow
     });
-    await expect(externalPlan.prepareSubmit(task.taskId, {
+    await expect(withoutArtifact.prepareSubmit(task.taskId, {
       evidenceIds: [base.evidence.evidence.evidenceId],
       walletAddress: submitter,
       intent: "confirm_stage"
-    }, owner)).resolves.toMatchObject({ status: "prepared" });
+    }, owner)).rejects.toMatchObject({
+      code: "capability_tables_unavailable",
+      status: 503
+    });
   });
 
-  it("refuses zero-proof minting when the persisted plan snapshot carries the failed enrichment marker", async () => {
+  it("mints vocabulary-backed attribution only from an enriched plan projection", async () => {
     const fixture = await submissionFixture({
       authorization: permissiveProductProjectionAuthorization()
     });
@@ -384,26 +400,15 @@ describe("product task submissions", () => {
       now: () => baseNow
     });
 
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: planEvents,
-      planCapabilityResolutionFailures: [planId]
-    });
+    await store.resetFromEvents({ deploymentBlock: 0n, events: planEvents });
     await expect(serviceForStore().prepareSubmit(task.taskId, {
       evidenceIds: [fixture.evidence.evidence.evidenceId],
       walletAddress: submitter,
       intent: "confirm_stage"
     }, owner)).rejects.toMatchObject({
       code: "capability_tables_unavailable",
-      status: 409
+      status: 503
     });
-
-    await store.resetFromEvents({ deploymentBlock: 0n, events: planEvents });
-    await expect(serviceForStore().prepareSubmit(task.taskId, {
-      evidenceIds: [fixture.evidence.evidence.evidenceId],
-      walletAddress: submitter,
-      intent: "confirm_stage"
-    }, owner)).resolves.toMatchObject({ status: "prepared" });
 
     await store.resetFromEvents({
       deploymentBlock: 0n,
@@ -414,7 +419,13 @@ describe("product task submissions", () => {
       evidenceIds: [fixture.evidence.evidence.evidenceId],
       walletAddress: submitter,
       intent: "confirm_stage"
-    }, owner)).resolves.toMatchObject({ status: "prepared" });
+    }, owner)).resolves.toMatchObject({
+      status: "prepared",
+      attribution: {
+        stageId: fixtureSourceId,
+        capabilityProof: [expect.any(String)]
+      }
+    });
   });
 
   it("recovers and verifies the submitter signature without broadcasting by default", async () => {
@@ -1143,6 +1154,7 @@ describe("product task submissions", () => {
       chainId,
       verifyingContract,
       resolveOrderPlanId: async () => planId,
+      resolvePlanCapabilityTables: async () => verifiedPlanCapabilityTables,
       authorization: allowListedSubmissionAuthorization([{
         orderId: task.orderId,
         stageIdentifier: task.stageId,
@@ -1226,6 +1238,7 @@ describe("product task submissions", () => {
       chainId,
       verifyingContract,
       resolveOrderPlanId: async () => planId,
+      resolvePlanCapabilityTables: async () => verifiedPlanCapabilityTables,
       authorization: allowListedSubmissionAuthorization([{
         orderId: task.orderId,
         stageIdentifier: task.stageId,
@@ -1366,12 +1379,7 @@ describe("product task submissions", () => {
       prepared.submitter,
       BigInt(prepared.deadline),
       signature,
-      prepared.attribution ?? {
-        sourceId: prepared.sourceId,
-        signalId: prepared.signalId,
-        stageId: "0x0000000000000000000000000000000000000000000000000000000000000000",
-        capabilityProof: []
-      }
+      prepared.attribution
     ]);
     expect(submission).toMatchObject({
       status: "submitted",
@@ -1987,6 +1995,7 @@ describe("product task submissions", () => {
         chainId,
         verifyingContract,
         resolveOrderPlanId: async () => planId,
+        resolvePlanCapabilityTables: async () => verifiedPlanCapabilityTables,
         authorization: permissiveProductProjectionAuthorization(),
         ...(resolveDraftOrder ? { resolveDraftOrder } : {}),
         now: () => baseNow
@@ -2063,6 +2072,7 @@ async function submissionFixture(options: {
     chainId,
     verifyingContract,
     resolveOrderPlanId: async () => planId,
+    resolvePlanCapabilityTables: async () => verifiedPlanCapabilityTables,
     authorization,
     ...(options.broadcastAdapter ? { broadcastAdapter: options.broadcastAdapter } : {}),
     ...(options.probePriorSubmissionOnChain
@@ -2086,6 +2096,7 @@ function submissionServiceForEvidence(evidenceService: EvidenceService): Product
     chainId,
     verifyingContract,
     resolveOrderPlanId: async () => planId,
+    resolvePlanCapabilityTables: async () => verifiedPlanCapabilityTables,
     authorization: allowListedSubmissionAuthorization([{
       orderId: task.orderId,
       stageIdentifier: task.stageId,

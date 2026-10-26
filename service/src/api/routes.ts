@@ -8,7 +8,6 @@ import {
 } from "../product/query/bff/service.js";
 import { createOrderService } from "../order/index.js";
 import type { ProductBffStore } from "../product/query/bff/store.js";
-import { createOrderRequirementsService } from "../product/requirements/index.js";
 import { createEvidenceService, LocalEvidenceStorage } from "../evidence/index.js";
 import { createGovernanceService } from "../governance/index.js";
 import { createStoreZhixuDraftWorkflowService } from "../store/console/zhixu-drafts.js";
@@ -49,7 +48,7 @@ import { createAdminOpsRouteModule } from "./routes/admin-ops.js";
 import { createEvidenceRouteModule } from "./routes/evidence.js";
 import { createGovernanceRouteModule } from "./routes/governance.js";
 import { createNotificationsRouteModule } from "./routes/notifications.js";
-import { createProductBffRouteModule } from "./routes/product-bff.js";
+import { createV1OrderGoneRouteModule } from "./routes/v1-gone.js";
 import { createProductOrderRouteModule } from "./routes/product-order.js";
 import { createProductSignalsRouteModule } from "./routes/product-signals.js";
 import { createProductReadKernelRouteModule } from "./routes/product-read-kernel.js";
@@ -57,7 +56,6 @@ import { createResourceResolver } from "../resources/resolver.js";
 import { createProductTasksRouteModule } from "./routes/product-tasks.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
 import { createProductRegistrationRouteModule } from "./routes/product-registration.js";
-import { createProductRequirementsRouteModule } from "./routes/product-requirements.js";
 import { createStoreConsoleRouteModule } from "./routes/store-console.js";
 import { createStoreDockingRouteModule } from "./routes/store-docking.js";
 import { createStoreSuppliersRouteModule } from "./routes/store-suppliers.js";
@@ -130,14 +128,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     metadataStore: storeZhixuVersionMetadataStore,
     ...(options.now ? { now: options.now } : {})
   });
-  const submissionAuthorization = productBffStoreSubmissionAuthorization(options.productBffStore, store);
+  const submissionAuthorization = projectionSubmissionAuthorization(store);
   const resolveDraftOrder = productBffStoreDraftOrderResolver(options.productBffStore);
   const productBffStore = options.productBffStore;
-  const orderRequirementsService = options.orderRequirementsService ?? createOrderRequirementsService({
-    bffStore: productBffStore,
-    store: options.orderRequirementsStore,
-    ...(options.now ? { now: options.now } : {})
-  });
   const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
   const productBffService = createProductBffService({
     productService,
@@ -160,6 +153,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       draftStore: storeZhixuDraftStore,
       governanceService,
       projectionStore: store,
+      ...(options.recordPlanArtifact ? { recordPlanArtifact: options.recordPlanArtifact } : {}),
       ...(options.now ? { now: options.now } : {})
     });
   const storeSupplierService = createStoreSupplierService({
@@ -308,6 +302,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     ...(options.orderPublishedPlanProvider ? { publishedPlanProvider: options.orderPublishedPlanProvider } : {}),
     ...(options.orderBirthPort ? { birthPort: options.orderBirthPort } : {}),
     ...(options.orderTriggerPort ? { triggerPort: options.orderTriggerPort } : {}),
+    chainProjection: {
+      findChainOrders: (orderId) => store.findStateMachineOrdersByOrderId(orderId)
+    },
     ...(options.now ? { now: options.now } : {})
   });
   const orderResourceResolver = options.orderResourceResolver ?? createResourceResolver({
@@ -321,7 +318,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     productService,
     productBffService,
     orderService,
-    orderRequirementsService,
     storeConsoleService,
     storeDockingService,
     storeRuntimeService,
@@ -355,6 +351,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const modules: readonly RouteModule[] = [
     createDiagnosticsRouteModule(),
     createAdminOpsRouteModule(),
+    createV1OrderGoneRouteModule(),
     createStoreAuthRouteModule({ sessionService }),
     createStoreConsoleRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createStoreDecorationRouteModule({ decorationService: storeDecorationService }),
@@ -369,7 +366,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     }),
     createStagePatchRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createSubmissionsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
-    createProductBffRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductSignalsRouteModule({
       ...(options.orderOperatorWallets !== undefined ? { operatorWallets: options.orderOperatorWallets } : {}),
       resourceResolver: orderResourceResolver,
@@ -383,7 +379,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       ...(options.orderOperatorWallets !== undefined ? { operatorWallets: options.orderOperatorWallets } : {}),
     }),
     createProductOrderRouteModule(),
-    createProductRequirementsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductRegistrationRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductReadRouteModule({ runtimeEnvironment: productRuntimeEnvironment })
   ];
@@ -416,63 +411,35 @@ export function productBffStoreDraftOrderResolver(
   };
 }
 
-export function productBffStoreSubmissionAuthorization(
-  store: ProductBffStore,
-  projectionStore?: ProjectionStore
-): SubmissionAuthorizationAdapter {  return {
+export function projectionSubmissionAuthorization(
+  projectionStore: ProjectionStore
+): SubmissionAuthorizationAdapter {
+  return {
     async authorize(request) {
-      const registrations = await store.listRegistrations();
-      const matches = registrations.filter((item) =>
-        equalHex(item.orderId, request.onchainOrderId) || item.orderId.toLowerCase() === request.orderId.toLowerCase()
-      );
-      const distinctPlanIds = new Set(matches.map((item) => item.planId.toLowerCase()));
-      if (distinctPlanIds.size > 1) {
-        return {
-          authorized: false,
-          source: "product_bff_trigger",
-          reason: "ambiguous_order_id: order id exists on multiple plans"
-        };
-      }
-      const registration = matches[0];
-      if (registration) {
-        const authorized = registration.authorizations.some((authorization) =>
-          equalHex(authorization.sourceId, request.sourceId) &&
-          equalHex(authorization.signalId, request.signalId) &&
-          authorization.submitter.toLowerCase() === request.submitter.toLowerCase()
-        );
-        if (authorized) {
-          return { authorized: true, source: "product_bff_trigger" };
-        }
-      }
       const chainAuthorization = await chainSignalSubmitterAuthorization(projectionStore, request);
       if (chainAuthorization?.verdict) {
         return chainAuthorization.verdict;
       }
-      const overlayAuthorization = productBffActiveStageExecutorAuthorization(request);
+      const overlayAuthorization = activeStageExecutorAuthorization(request);
       if (overlayAuthorization) {
         return overlayAuthorization;
       }
       return chainAuthorization?.miss ?? {
         authorized: false,
-        source: "product_bff_trigger",
-        reason: registration
-          ? "submitter is not present in order trigger authorizations"
-          : "order trigger authorization was not found"
+        source: "chain_signal_authorization",
+        reason: "order projection was not found for this order id"
       };
     }
   };
 }
 
 async function chainSignalSubmitterAuthorization(
-  projectionStore: ProjectionStore | undefined,
+  projectionStore: ProjectionStore,
   request: SubmissionAuthorizationRequest
 ): Promise<
   | { readonly verdict?: SubmissionAuthorizationResult; readonly miss?: SubmissionAuthorizationResult }
   | undefined
 > {
-  if (!projectionStore) {
-    return undefined;
-  }
   const orders = await projectionStore.findStateMachineOrdersByOrderId(request.onchainOrderId);
   if (orders.length === 0) {
     return undefined;
@@ -515,7 +482,7 @@ type ProductTaskExecutorOverlay = {
   readonly activeExecutorWallet?: string;
 };
 
-function productBffActiveStageExecutorAuthorization(
+function activeStageExecutorAuthorization(
   request: SubmissionAuthorizationRequest
 ): SubmissionAuthorizationResult | undefined {
   if (!request.task) {

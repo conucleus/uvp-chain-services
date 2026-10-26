@@ -117,7 +117,6 @@ export interface ProjectionRebuildInput {
   readonly deploymentBlock: bigint;
   readonly events: readonly ChainEvent[];
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
-  readonly planCapabilityResolutionFailures?: readonly Hex[];
   readonly scope?: ProjectionScope;
   readonly syncState?: Omit<ProjectionSyncState, "updatedAt">;
   readonly cursor?: Omit<StoredProjectionCursor, "updatedAt">;

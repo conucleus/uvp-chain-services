@@ -1,11 +1,13 @@
-// 任务投影：只根据配置 stage/slot、已接受的 slot 绑定、stage 状态与
-// 窗口期限派生待办；不写回订单，不引入第二套状态词表。未知状态不产生动作。
+// 任务投影：只根据配置 stage/slot、已接受的 slot 绑定、chain 派生的 stage
+// 状态与窗口期限派生待办；不写回订单，不引入第二套状态词表。stage 未上链
+// 时履约待办是 blocked（不是永远 open），上链后 open，链上任务提交后 done。
 
 import type { StageTaskKind } from "@uvp-eth/product-dto";
+import { FINAL_STAGE_STATUSES } from "../order/chain-status.js";
 import type { OrderStageRecord, OrderStageSlotRecord } from "../order/types.js";
 import type { TaskListView, TaskProjectionInput, TaskView } from "./types.js";
 
-const DONE_STATES = new Set(["completed", "skipped"]);
+const OPEN_STAGE_STATUS = "active";
 
 export function projectTasks(input: TaskProjectionInput): TaskListView {
   const { decision, snapshot } = input;
@@ -36,7 +38,7 @@ function ownerTasks(
   stage: OrderStageRecord,
   slots: readonly OrderStageSlotRecord[],
 ): readonly TaskView[] {
-  if (DONE_STATES.has(stage.status)) {
+  if (FINAL_STAGE_STATUSES.has(stage.status)) {
     return [];
   }
   return slots
@@ -66,10 +68,10 @@ function executorTasks(
   const own = slots.find(
     (slot) => slot.status === "accepted" && slot.wallet?.toLowerCase() === wallet,
   );
-  if (!own || DONE_STATES.has(stage.status)) {
+  if (!own || FINAL_STAGE_STATUSES.has(stage.status)) {
     return [];
   }
-  const open = stage.status !== "draft";
+  const open = stage.status === OPEN_STAGE_STATUS;
   return [
     task(orderId, wallet, stage, own.slotKey, "perform_stage", open ? "open" : "blocked", "履约/提交", {
       ...(stage.workDeadline !== undefined ? { dueAt: stage.workDeadline } : {}),

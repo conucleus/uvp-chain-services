@@ -601,11 +601,6 @@ async function withSubmissionStoreTransaction<T>(
   return store.withTransaction ? store.withTransaction(operation) : operation();
 }
 
-const EMPTY_PLAN_CAPABILITY_TABLES: PlanCapabilityTables = {
-  selectorBindings: [],
-  signalCapabilities: []
-};
-
 async function resolveSubmissionCapabilityProofs(
   resolvePlanCapabilityTables:
     | ((planId: Hex) => Promise<PlanCapabilityTables | undefined>)
@@ -624,20 +619,27 @@ async function resolveSubmissionCapabilityProofs(
       : undefined;
   } catch (error) {
     throw new ProductSubmissionError(
-      409,
+      503,
       "capability_tables_unavailable",
-      "plan capability tables could not be read from the projection; refusing to mint zero-value proofs while the vocabulary state is unknown",
+      "plan capability tables could not be read from the plan artifact; refusing to prepare a plan-scoped submission without a verified vocabulary",
       { planId, sourceId, signalId, cause: redactErrorMessage(error) }
     );
   }
-  const effectiveTables = tables ?? EMPTY_PLAN_CAPABILITY_TABLES;
-  const attribution = factAttributionPayload(effectiveTables, sourceId, signalId);
+  if (!tables) {
+    throw new ProductSubmissionError(
+      503,
+      "capability_tables_unavailable",
+      "no verified plan artifact is projected for this plan; refusing to mint zero-value capability proofs for a plan-scoped submission",
+      { planId, sourceId, signalId }
+    );
+  }
+  const attribution = factAttributionPayload(tables, sourceId, signalId);
   if (attribution.stageId === ZERO_BYTES32) {
     return { attribution, selectorBinding: zeroSelectorBinding() };
   }
   return {
     attribution,
-    selectorBinding: selectorBindingForTargetStage(effectiveTables, attribution.stageId)
+    selectorBinding: selectorBindingForTargetStage(tables, attribution.stageId)
   };
 }
 

@@ -63,6 +63,21 @@ describe("API router composition", () => {
       });
   });
 
+  it("retires the V1 order draft/invite/participant/requirements surface with 410", async () => {
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+
+    for (const request of [
+      { method: "POST", pathname: "/product/order-drafts", body: { title: "gone" } },
+      { method: "GET", pathname: "/product/orders/0xabc/participants" },
+      { method: "PUT", pathname: "/product/order-drafts/draft-1/requirements", body: {} }
+    ]) {
+      await expect(router.handle(request)).resolves.toMatchObject({
+        status: 410,
+        body: { error: "v1_order_surface_removed" }
+      });
+    }
+  });
+
   it("serves production reads without demo fallback data", async () => {
     const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "production",
@@ -123,9 +138,8 @@ describe("API router composition", () => {
   });
 
   it("active-executor overlay authorization only covers the task's recorded submit signal", async () => {
-    const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
-    const { MemoryProductBffStore } = await import("../src/product/query/bff/store.js");
-    const authorization = productBffStoreSubmissionAuthorization(new MemoryProductBffStore());
+    const { projectionSubmissionAuthorization } = await import("../src/api/routes.js");
+    const authorization = projectionSubmissionAuthorization(stores.projectionStore);
     const executor = "0x8888888888888888888888888888888888888888";
     const targetStageId = "0x" + "1".repeat(64);
     const recordedSignalId = "0x" + "2".repeat(64);
@@ -168,8 +182,7 @@ describe("API router composition", () => {
   });
 
   it("submission authorization honors on-chain SignalSubmitterAuthorized projections", async () => {
-    const { productBffStoreSubmissionAuthorization } = await import("../src/api/routes.js");
-    const { MemoryProductBffStore } = await import("../src/product/query/bff/store.js");
+    const { projectionSubmissionAuthorization } = await import("../src/api/routes.js");
 
     const submitter = "0x7777777777777777777777777777777777777777";
     const onchainOrderId = "0x" + "9".repeat(64);
@@ -193,7 +206,7 @@ describe("API router composition", () => {
         })
       ]
     });
-    const authorization = productBffStoreSubmissionAuthorization(new MemoryProductBffStore(), store);
+    const authorization = projectionSubmissionAuthorization(store);
 
     const authorized = await authorization.authorize({
       orderId: "order-1",

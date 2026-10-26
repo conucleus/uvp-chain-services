@@ -9,6 +9,7 @@ export * from "./birth-adapter.js";
 export * from "./postgres-store.js";
 export * from "./signal-service.js";
 export * from "./acceptance-service.js";
+export * from "./chain-status.js";
 export {
   OrderService,
   createOrderService,

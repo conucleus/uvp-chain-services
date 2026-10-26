@@ -404,14 +404,14 @@ describe("postgres durable storage", () => {
       ),
     ).resolves.toMatchObject({
       supplierId: storeSupplier.supplierId,
-      capabilityTags: ["example", "tag-1"],
+      supportedRoleSlotIds: ["slot-b", "slot-c"],
     });
     await expect(
       reopened.storeSupplierMetadataStore.listAudits(
         storeSupplier.supplierId,
       ),
     ).resolves.toMatchObject([
-      { auditId: storeAudit.auditId, action: "tags_updated" },
+      { auditId: storeAudit.auditId, action: "supported_slots_updated" },
     ]);
     await expect(
       reopened.storeDockingSessionStore.getSession(storeDocking.sessionId),
@@ -663,6 +663,15 @@ function preparedSubmission(): PreparedSubmissionRecord {
         verificationStatus: "unbound",
       },
     ],
+    attribution: {
+      sourceId:
+        "0x9999999999999999999999999999999999999999999999999999999999999999",
+      signalId:
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      stageId:
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      capabilityProof: [],
+    },
     authorization: { source: "test" },
     evidenceRecords: [
       {
@@ -893,7 +902,6 @@ function storeSupplierMetadataRecord(): StoreSupplierMetadataRecord {
       "0x0000000000000000000000000000000000000000000000000000000000003301",
     displayName: "Store Durable Supplier",
     wallet: slotB as Address,
-    capabilityTags: ["example", "tag-1"],
     supportedRoleSlotIds: ["slot-b", "slot-c"],
     supportedStageIds: ["shipment", "example"],
     registryAddresses: [registryAddress],
@@ -911,10 +919,8 @@ function storeSupplierAuditRecord(
     auditId: "audit_000001",
     supplierId: supplier.supplierId,
     supplierSubjectId: supplier.supplierSubjectId,
-    action: "tags_updated",
+    action: "supported_slots_updated",
     actor: "operator-1",
-    beforeTags: ["tag-1"],
-    afterTags: ["example", "tag-1"],
     beforeSupportedRoleSlotIds: ["slot-c"],
     afterSupportedRoleSlotIds: ["slot-c", "slot-b"],
     beforeSupportedStageIds: ["shipment"],

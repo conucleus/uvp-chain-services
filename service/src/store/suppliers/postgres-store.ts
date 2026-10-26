@@ -48,7 +48,6 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
     const result = await this.#database.query(
       `SELECT
          *,
-         capability_tags_json::text AS capability_tags_json,
          supported_role_slot_ids_json::text AS supported_role_slot_ids_json,
          supported_stage_ids_json::text AS supported_stage_ids_json,
          registry_addresses_json::text AS registry_addresses_json,
@@ -64,7 +63,6 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
     const result = await this.#database.query(
       `SELECT
          *,
-         capability_tags_json::text AS capability_tags_json,
          supported_role_slot_ids_json::text AS supported_role_slot_ids_json,
          supported_stage_ids_json::text AS supported_stage_ids_json,
          registry_addresses_json::text AS registry_addresses_json,
@@ -80,7 +78,6 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
     const result = await this.#database.query(
       `SELECT
          *,
-         capability_tags_json::text AS capability_tags_json,
          supported_role_slot_ids_json::text AS supported_role_slot_ids_json,
          supported_stage_ids_json::text AS supported_stage_ids_json,
          registry_addresses_json::text AS registry_addresses_json,
@@ -95,17 +92,16 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
     await this.#database.query(
       `INSERT INTO store_supplier_metadata (
          supplier_id, supplier_subject_id, display_name, wallet,
-         capability_tags_json, supported_role_slot_ids_json,
-         supported_stage_ids_json, registry_addresses_json, review_status, metadata_uri,
+         supported_role_slot_ids_json, supported_stage_ids_json,
+         registry_addresses_json, review_status, metadata_uri,
          notification_profile_json, notification_profile_hash, notification_updated_at,
          created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11::jsonb, $12, $13, $14, $15)
+       ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb, $11, $12, $13, $14)
        ON CONFLICT(supplier_id)
        DO UPDATE SET
          supplier_subject_id = excluded.supplier_subject_id,
          display_name = excluded.display_name,
          wallet = excluded.wallet,
-         capability_tags_json = excluded.capability_tags_json,
          supported_role_slot_ids_json = excluded.supported_role_slot_ids_json,
          supported_stage_ids_json = excluded.supported_stage_ids_json,
          registry_addresses_json = excluded.registry_addresses_json,
@@ -124,17 +120,16 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
     const updated = await this.#database.query(
       `INSERT INTO store_supplier_metadata (
            supplier_id, supplier_subject_id, display_name, wallet,
-           capability_tags_json, supported_role_slot_ids_json,
+           supported_role_slot_ids_json,
            supported_stage_ids_json, registry_addresses_json, review_status, metadata_uri,
            notification_profile_json, notification_profile_hash, notification_updated_at,
            created_at, updated_at
-         ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11::jsonb, $12, $13, $14, $15)
+         ) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb, $11, $12, $13, $14)
          ON CONFLICT(supplier_id)
          DO UPDATE SET
          supplier_subject_id = EXCLUDED.supplier_subject_id,
            display_name = EXCLUDED.display_name,
            wallet = EXCLUDED.wallet,
-           capability_tags_json = EXCLUDED.capability_tags_json,
            supported_role_slot_ids_json = EXCLUDED.supported_role_slot_ids_json,
            supported_stage_ids_json = EXCLUDED.supported_stage_ids_json,
            registry_addresses_json = EXCLUDED.registry_addresses_json,
@@ -145,7 +140,7 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
            notification_updated_at = EXCLUDED.notification_updated_at,
            created_at = EXCLUDED.created_at,
            updated_at = EXCLUDED.updated_at
-       WHERE store_supplier_metadata.review_status = $16`,
+       WHERE store_supplier_metadata.review_status = $15`,
       [...supplierValues(record), expected]
     );
     return (updated.rowCount ?? 0) > 0;
@@ -155,14 +150,13 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
     await this.#database.query(
       `INSERT INTO store_supplier_audit (
          audit_id, supplier_id, supplier_subject_id, action, actor,
-         before_tags_json, after_tags_json,
          before_supported_role_slot_ids_json, after_supported_role_slot_ids_json,
          before_supported_stage_ids_json, after_supported_stage_ids_json,
          review_status, created_at
        ) VALUES (
          -- auditId 库端生成（跨实例/重启唯一），不接调用方进程内序号
          COALESCE($1, 'audit_' || gen_random_uuid()::text),
-         $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13)`,
+         $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11)`,
       [record.auditId ?? null, ...auditValues(withoutAuditId(record))]
     );
   }
@@ -176,8 +170,6 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
       ? await this.#database.query(
           `SELECT
              *,
-             before_tags_json::text AS before_tags_json,
-             after_tags_json::text AS after_tags_json,
              before_supported_role_slot_ids_json::text AS before_supported_role_slot_ids_json,
              after_supported_role_slot_ids_json::text AS after_supported_role_slot_ids_json,
              before_supported_stage_ids_json::text AS before_supported_stage_ids_json,
@@ -190,8 +182,6 @@ export class PostgresStoreSupplierMetadataStore implements StoreSupplierMetadata
       : await this.#database.query(
           `SELECT
              *,
-             before_tags_json::text AS before_tags_json,
-             after_tags_json::text AS after_tags_json,
              before_supported_role_slot_ids_json::text AS before_supported_role_slot_ids_json,
              after_supported_role_slot_ids_json::text AS after_supported_role_slot_ids_json,
              before_supported_stage_ids_json::text AS before_supported_stage_ids_json,
@@ -209,7 +199,6 @@ function supplierValues(record: StoreSupplierMetadataRecord): readonly unknown[]
     record.supplierSubjectId,
     record.displayName,
     record.wallet ?? null,
-    stringifyStorageJson(record.capabilityTags),
     stringifyStorageJson(record.supportedRoleSlotIds),
     stringifyStorageJson(record.supportedStageIds),
     stringifyStorageJson(record.registryAddresses),
@@ -238,7 +227,6 @@ function supplierRow(row: unknown): StoreSupplierMetadataRecord {
     ...(notificationProfile !== undefined ? { notificationProfile } : {}),
     ...(notificationProfileHash !== undefined ? { notificationProfileHash } : {}),
     ...(notificationUpdatedAt !== undefined ? { notificationUpdatedAt } : {}),
-    capabilityTags: parseStorageJson<readonly string[]>(stringColumn(record, "capability_tags_json")),
     supportedRoleSlotIds: parseStorageJson<readonly string[]>(stringColumn(record, "supported_role_slot_ids_json")),
     supportedStageIds: parseStorageJson<readonly string[]>(stringColumn(record, "supported_stage_ids_json")),
     registryAddresses: parseStorageJson<StoreSupplierMetadataRecord["registryAddresses"]>(stringColumn(record, "registry_addresses_json")),
@@ -260,8 +248,6 @@ function auditValues(record: Omit<StoreSupplierAuditRecord, "auditId">): readonl
     record.supplierSubjectId,
     record.action,
     record.actor,
-    record.beforeTags ? stringifyStorageJson(record.beforeTags) : null,
-    record.afterTags ? stringifyStorageJson(record.afterTags) : null,
     record.beforeSupportedRoleSlotIds ? stringifyStorageJson(record.beforeSupportedRoleSlotIds) : null,
     record.afterSupportedRoleSlotIds ? stringifyStorageJson(record.afterSupportedRoleSlotIds) : null,
     record.beforeSupportedStageIds ? stringifyStorageJson(record.beforeSupportedStageIds) : null,
@@ -273,8 +259,6 @@ function auditValues(record: Omit<StoreSupplierAuditRecord, "auditId">): readonl
 
 function auditRow(row: unknown): StoreSupplierAuditRecord {
   const record = rowObject(row, "store_supplier_audit query");
-  const beforeTags = optionalJson<readonly string[]>(record, "before_tags_json");
-  const afterTags = optionalJson<readonly string[]>(record, "after_tags_json");
   const beforeSupportedRoleSlotIds = optionalJson<readonly string[]>(record, "before_supported_role_slot_ids_json");
   const afterSupportedRoleSlotIds = optionalJson<readonly string[]>(record, "after_supported_role_slot_ids_json");
   const beforeSupportedStageIds = optionalJson<readonly string[]>(record, "before_supported_stage_ids_json");
@@ -286,8 +270,6 @@ function auditRow(row: unknown): StoreSupplierAuditRecord {
     supplierSubjectId: stringColumn(record, "supplier_subject_id") as StoreSupplierAuditRecord["supplierSubjectId"],
     action: stringColumn(record, "action") as StoreSupplierAuditRecord["action"],
     actor: stringColumn(record, "actor"),
-    ...(beforeTags !== undefined ? { beforeTags } : {}),
-    ...(afterTags !== undefined ? { afterTags } : {}),
     ...(beforeSupportedRoleSlotIds !== undefined ? { beforeSupportedRoleSlotIds } : {}),
     ...(afterSupportedRoleSlotIds !== undefined ? { afterSupportedRoleSlotIds } : {}),
     ...(beforeSupportedStageIds !== undefined ? { beforeSupportedStageIds } : {}),

@@ -59,7 +59,6 @@ function createRouter(options: {
     storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
-    orderRequirementsStore: stores.orderRequirementsStore,
     evidenceMetadataStore: stores.evidenceMetadataStore,
     submissionStore: stores.submissionStore,
     governanceStore: stores.governanceStore,

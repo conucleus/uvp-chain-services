@@ -182,7 +182,6 @@ describe("durable Store operator audit", () => {
         level: "store_operator",
         principalId: "audit-operator",
         roles: ["store_operator"],
-        capabilities: ["store.read", "store.audit.read", "store.draft.import"],
         authMode: "dev_store_headers",
         canWrite: true,
         canAdmin: false
@@ -316,7 +315,6 @@ function supplierBody(): Record<string, unknown> {
     supplierSubjectId,
     displayName: "Durable Audit Supplier",
     wallet: supplierWallet,
-    capabilityTags: ["tag-1"],
     supportedRoleSlotIds: ["slot-a"],
     supportedStageIds: ["stage-1"],
     registryAddresses: [registryAddress]

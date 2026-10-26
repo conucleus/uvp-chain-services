@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { encodeAbiParameters, keccak256 } from "viem";
-import { capabilitiesRootOf } from "@uvp-eth/compiler";
+import {
+  capabilitiesRootOf,
+  compileZhixuOnchainHookPlan,
+  parseZhixuDefinition,
+  planIdForPublisher,
+  toSolidityRegisterPlanArgs
+} from "@uvp-eth/compiler";
 import { createApiRouter } from "../src/api/routes.js";
 import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
@@ -14,6 +20,7 @@ import { stateMachineScopedKey, stateMachineTaskProjectionKey } from "../src/ind
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { PostgresProjectionStore } from "../src/storage/postgres.js";
 import { PostgresDatabase } from "../src/storage/postgres-client.js";
+import { PlanArtifactMissingError, createPlanArtifactResolvers } from "../src/projection/plan-artifacts.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 import type { Hex } from "../src/shared/types.js";
 import { buildActiveChainEventReplaySummary, sortChainEvents, type ChainEvent } from "../src/indexer/events.js";
@@ -1580,10 +1587,7 @@ describe("indexer projection replay", () => {
           );
         }
       };
-      const resolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> =>
-        anchorPlanId.toLowerCase() === planId.toLowerCase() && anchorPlanHash.toLowerCase() === planHash.toLowerCase()
-          ? vocabulary
-          : undefined;
+      const resolver = vocabularyResolver(vocabulary);
 
       const firstIndexer = new IndexerService({
         config: testConfig(),
@@ -1626,7 +1630,7 @@ describe("indexer projection replay", () => {
     }
   });
 
-  it("persists the failed enrichment marker on resolver-failure rounds and recovers once the resolver is healthy", async () => {
+  it("aborts the rebuild closed when the plan vocabulary resolver fails and recovers once it resolves", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-enrichment-failed-"));
     const store = new PostgresProjectionStore({
       databaseUrl: projectionDatabaseUrl,
@@ -1653,33 +1657,28 @@ describe("indexer projection replay", () => {
           );
         }
       };
-      const healthyResolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> =>
-        anchorPlanId.toLowerCase() === planId.toLowerCase() && anchorPlanHash.toLowerCase() === planHash.toLowerCase()
-          ? vocabulary
-          : undefined;
+      const healthyResolver = vocabularyResolver(vocabulary);
 
       const failingIndexer = new IndexerService({
         config: testConfig(),
         eventSource,
         store,
         resolvePlanCapabilityTables: async () => {
-          throw new Error("draft store unreadable");
+          throw new PlanArtifactMissingError({ chainId: 31337, planId, planHash });
         }
       });
-      const failed = await failingIndexer.rebuildFromDeploymentBlockWithSummary();
-      const planKey = stateMachineScopedKey(31337, contractAddress, planId);
-      expect(failed.snapshot.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("failed");
-      expect(failed.snapshot.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(0);
-      const persisted = await store.getOrderSnapshot();
-      expect(persisted.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("failed");
-      expect(persisted.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(0);
+      await expect(failingIndexer.rebuildFromDeploymentBlockWithSummary()).rejects.toThrow(PlanArtifactMissingError);
+      await expect(store.getSyncState()).resolves.toMatchObject({
+        syncStatus: "degraded",
+        rebuild: { status: "failed" }
+      });
 
       finalizedBlock = 4n;
       const laterOrderEvent = chainEvent(4n, 0, "OrderRegistered", {
         orderId: "0x0000000000000000000000000000000000000000000000000000000000000305",
         planId
       });
-      eventSource.readEvents = async (range) => [laterOrderEvent].filter(
+      eventSource.readEvents = async (range) => [...planEvents, laterOrderEvent].filter(
         (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
       );
       const recoveredIndexer = new IndexerService({
@@ -1688,7 +1687,8 @@ describe("indexer projection replay", () => {
         store,
         resolvePlanCapabilityTables: healthyResolver
       });
-      const refreshed = await recoveredIndexer.refreshFromCursorWithSummary();
+      const refreshed = await recoveredIndexer.rebuildFromDeploymentBlockWithSummary();
+      const planKey = stateMachineScopedKey(31337, contractAddress, planId);
 
       expect(refreshed.snapshot.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("enriched");
       expect(refreshed.snapshot.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(1);
@@ -1699,6 +1699,68 @@ describe("indexer projection replay", () => {
       await store.close();
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("fails the rebuild closed without the recorded plan artifact and enriches from it once recorded", async () => {
+    const artifact = compileZhixuOnchainHookPlan(parseZhixuDefinition(planArtifactZhixuYaml, "plan-artifact.yaml"));
+    const registerArgs = toSolidityRegisterPlanArgs(artifact);
+    const planHash = registerArgs.planHash as Hex;
+    const planId = planIdForPublisher(signer, planHash) as Hex;
+    const events: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanCommitted", {
+        planId,
+        planHash,
+        publisher: signer,
+        hooksHash: registerArgs.hooksHash,
+        capabilitiesRoot: registerArgs.capabilitiesRoot,
+        hookCount: BigInt(artifact.compiledHooks.length),
+        dockRoutesRoot: registerArgs.dockRoutesRoot,
+        dockInterfaceRoot: registerArgs.dockInterfaceRoot
+      }),
+      chainEvent(2n, 0, "PlanFinalized", { planId, planHash, capabilitiesRoot: registerArgs.capabilitiesRoot }),
+      chainEvent(2n, 1, "PlanRegistered", { planId, planHash, hookCount: BigInt(artifact.compiledHooks.length) })
+    ];
+    const eventSource: ChainEventSource = {
+      async getFinalizedBlock() {
+        return 3n;
+      },
+      async readEvents() {
+        return events;
+      }
+    };
+    const resolvers = createPlanArtifactResolvers({
+      store: stores.planArtifactStore,
+      chainId: 31337
+    });
+    const missingArtifactIndexer = new IndexerService({
+      config: testConfig(),
+      eventSource,
+      store: stores.projectionStore,
+      resolvePlanCapabilityTables: resolvers.resolvePlanCapabilityTables
+    });
+    await expect(missingArtifactIndexer.rebuildFromDeploymentBlockWithSummary())
+      .rejects.toThrow(PlanArtifactMissingError);
+    await expect(stores.projectionStore.getSyncState()).resolves.toMatchObject({
+      syncStatus: "degraded",
+      rebuild: { status: "failed" }
+    });
+
+    await stores.planArtifactStore.put({ chainId: 31337, planId, planHash, artifact });
+
+    const indexer = new IndexerService({
+      config: testConfig(),
+      eventSource,
+      store: stores.projectionStore,
+      resolvePlanCapabilityTables: resolvers.resolvePlanCapabilityTables
+    });
+    const rebuilt = await indexer.rebuildFromDeploymentBlockWithSummary();
+    const planKey = stateMachineScopedKey(31337, contractAddress, planId);
+
+    expect(rebuilt.snapshot.stateMachinePlans[planKey]?.capabilityEnrichment).toBe("enriched");
+    expect(rebuilt.snapshot.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(
+      artifact.signalCapabilities.length
+    );
+    expect(rebuilt.snapshot.capabilityEnrichmentMismatchCount).toBe(0);
   });
 
   it("re-enriches the plan vocabulary from surviving events when a restarted indexer rolls back after a reorg", async () => {
@@ -1743,12 +1805,9 @@ describe("indexer projection replay", () => {
         }
       };
       let resolverCalls = 0;
-      const resolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> => {
+      const resolver = vocabularyResolver(vocabulary, () => {
         resolverCalls += 1;
-        return anchorPlanId.toLowerCase() === planId.toLowerCase() && anchorPlanHash.toLowerCase() === planHash.toLowerCase()
-          ? vocabulary
-          : undefined;
-      };
+      });
 
       const firstIndexer = new IndexerService({
         config: testConfig(),
@@ -1819,10 +1878,10 @@ describe("indexer projection replay", () => {
       };
       let servingStale = true;
       let resolverCalls = 0;
-      const resolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> => {
+      const resolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput> => {
         resolverCalls += 1;
         if (anchorPlanId.toLowerCase() !== planId.toLowerCase() || anchorPlanHash.toLowerCase() !== planHash.toLowerCase()) {
-          return undefined;
+          throw new Error(`unexpected plan anchor ${anchorPlanId}:${anchorPlanHash}`);
         }
         return servingStale ? stale : good;
       };
@@ -1849,7 +1908,7 @@ describe("indexer projection replay", () => {
       expect(mismatched.snapshot.capabilityEnrichmentMismatchCount).toBe(1);
       expect(resolverCalls).toBe(1);
       expect(warnings.some((entry) =>
-        entry.message.includes("plan capability tables failed the on-chain anchor assertion") &&
+        entry.message.includes("plan artifact vocabulary failed the on-chain anchor assertion") &&
         entry.context?.planIds
       )).toBe(true);
 
@@ -1898,12 +1957,9 @@ describe("indexer projection replay", () => {
         }
       };
       let resolverCalls = 0;
-      const resolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> => {
+      const resolver = vocabularyResolver(vocabulary, () => {
         resolverCalls += 1;
-        return anchorPlanId.toLowerCase() === planId.toLowerCase() && anchorPlanHash.toLowerCase() === planHash.toLowerCase()
-          ? vocabulary
-          : undefined;
-      };
+      });
 
       const indexer = new IndexerService({
         config: testConfig(),
@@ -2064,12 +2120,9 @@ describe("indexer projection replay", () => {
         }
       };
       let resolverCalls = 0;
-      const resolver = async (anchorPlanId: Hex, anchorPlanHash: Hex): Promise<PlanCapabilityTablesInput | undefined> => {
+      const resolver = vocabularyResolver(vocabulary, () => {
         resolverCalls += 1;
-        return anchorPlanId.toLowerCase() === planId.toLowerCase() && anchorPlanHash.toLowerCase() === planHash.toLowerCase()
-          ? vocabulary
-          : undefined;
-      };
+      });
       const infos: string[] = [];
       const logger = {
         debug: () => undefined,
@@ -2933,33 +2986,13 @@ describe("indexer projection replay", () => {
     expect(plan?.capabilityEnrichment).toBe("failed");
   });
 
-  it("keeps externally published plans on an empty vocabulary without counting a mismatch", () => {
+  it("marks the vocabulary failed when no plan artifact table backs the plan instead of claiming an empty vocabulary", () => {
     const chainVocabulary = planVocabulary({});
     const events: readonly ChainEvent[] = [
       ...planPublishEvents(chainVocabulary)
     ];
 
     const snapshot = rebuildOrderProjections(events);
-    const plan = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
-
-    expect(plan?.signalCapabilities).toHaveLength(0);
-    expect(plan?.selectorBindings).toHaveLength(0);
-    expect(snapshot.capabilityEnrichmentMismatchCount).toBe(0);
-    expect(plan?.capabilityEnrichment).toBe("empty");
-  });
-
-  it("marks the vocabulary enrichment failed when the resolver threw for the plan this round", () => {
-    const chainVocabulary = planVocabulary({
-      selectorBindings: [{ selectorStageId, targetStageId: stageId }],
-      signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
-    });
-    const events: readonly ChainEvent[] = [
-      ...planPublishEvents(chainVocabulary)
-    ];
-
-    const snapshot = rebuildOrderProjections(events, {
-      planCapabilityResolutionFailures: [planId]
-    });
     const plan = snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)];
 
     expect(plan?.signalCapabilities).toHaveLength(0);
@@ -3689,6 +3722,54 @@ function planVocabulary(input: {
     selectorBindings,
     signalCapabilities,
     capabilitiesRoot: capabilitiesRootOf(selectorBindings, signalCapabilities)
+  };
+}
+
+const planArtifactZhixuYaml = `
+apiVersion: uvp/v0
+kind: Zhixu
+metadata:
+  name: plan-artifact-demo
+  annotations:
+    version: "1"
+spec:
+  platform:
+    type: blockchain
+    provider: eth
+  nucleation:
+    id: plan-artifact
+  stages:
+    - name: gate
+      source: slot-a
+      receiveSignals:
+        START: "slot-a::gate.seed"
+      sendSignals: [{ name: "ready" }, { name: "seed" }]
+      executor:
+        supplierType: organization
+        supplierID: selector-ops
+    - name: intake
+      source: slot-a
+      receiveSignals:
+        START: "slot-a::gate.ready"
+      sendSignals: [{ name: "cmp" }]
+      executor:
+        supplierType: organization
+        supplierID: intake-ops
+`;
+
+function vocabularyResolver(
+  vocabulary: PlanCapabilityTablesInput,
+  onCall?: () => void
+): (anchorPlanId: Hex, anchorPlanHash: Hex) => Promise<PlanCapabilityTablesInput> {
+  return async (anchorPlanId, anchorPlanHash) => {
+    onCall?.();
+    if (
+      anchorPlanId.toLowerCase() !== planId.toLowerCase() ||
+      anchorPlanHash.toLowerCase() !== planHash.toLowerCase()
+    ) {
+      throw new Error(`unexpected plan anchor ${anchorPlanId}:${anchorPlanHash}`);
+    }
+    return vocabulary;
   };
 }
 
