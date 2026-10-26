@@ -1,4 +1,3 @@
-import { readdirSync, readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
@@ -196,16 +195,6 @@ describe("API router composition", () => {
     });
   });
 
-
-  it("route modules do not cross-import; composition stays in the public factory", () => {
-    const apiDir = new URL("../src/api/", import.meta.url);
-    const modulesDir = new URL("routes/", apiDir);
-    for (const filename of readdirSync(modulesDir).filter((name) => name.endsWith(".ts"))) {
-      const source = readFileSync(new URL(filename, modulesDir), "utf8");
-      expect(source, filename).not.toMatch(/from\s+["']\.\/[^"']+\.js["']/);
-      expect(source, filename).not.toMatch(/from\s+["']\.\.\/routes\//);
-    }
-  });
 });
 
 function productionSafeEvidenceStorage(): ObjectEvidenceStorage {

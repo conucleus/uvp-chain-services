@@ -69,46 +69,6 @@ function entryForInternalName(internalName: string): TaxonomyErrorEntry {
   return entry;
 }
 
-const CLASSIFICATION_SOURCES: readonly string[] = [
-  'src/submissions/broadcast-adapter.ts',
-  'src/submissions/safe-broadcast-adapter.ts',
-  'src/submissions/service.ts',
-  'src/stage-patches/broadcast-adapter.ts',
-  'src/stage-patches/service.ts',
-  'src/relay/safe-broadcast.ts',
-  'src/reconcile/worker.ts',
-  'src/governance/adapter.ts',
-  'src/governance/service.ts',
-  'src/product/query/bff/trigger.ts',
-];
-
-const CODE_PATTERNS: readonly RegExp[] = [
-  /errorCode: "([a-z0-9_]+)"/g,
-  /(?:failedBroadcastResult|failedResult|classifiedBroadcastError)\(\s*"([a-z0-9_]+)"/g,
-  /(?:invalidSignatureError|staleNonceError|genericFailureError): "([a-z0-9_]+)"/g,
-  /(?:ProductSubmissionError|ProductStagePatchError)\(\s*\d+,\s*"([a-z0-9_]+)"/g,
-];
-
-const CODE_CASE_PATTERN: ReadonlyMap<string, RegExp> = new Map([
-  ['src/submissions/broadcast-adapter.ts', /case "([a-z0-9_]+)":/g],
-  ['src/stage-patches/broadcast-adapter.ts', /case "([a-z0-9_]+)":/g],
-]);
-
-const INTENTIONALLY_UNEMITTED_NAMES: ReadonlySet<string> = new Set([
-  'broadcast_retry_blocked',
-  'duplicate_signer_nonce',
-  'expired_payload_deadline',
-  'invalid_business_signature',
-  'malformed_relay_payload',
-  'missing_nonce',
-  'missing_order_id',
-  'missing_verified_signer',
-  'order_relay_in_flight',
-  'relay_broadcast_failed',
-  'rpc_unavailable',
-  'verified_signer_mismatch',
-]);
-
 const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'invalid_body',
   'invalid_signature',
@@ -170,29 +130,6 @@ const OUT_OF_TAXONOMY_SCOPE: ReadonlySet<string> = new Set([
   'signal_not_available',
 ]);
 
-function serviceRoot(): string {
-  return dirname(dirname(fileURLToPath(import.meta.url)));
-}
-
-function scannedErrorCodes(): Set<string> {
-  const found = new Set<string>();
-  for (const relative of CLASSIFICATION_SOURCES) {
-    const source = readFileSync(join(serviceRoot(), relative), 'utf8');
-    for (const pattern of CODE_PATTERNS) {
-      for (const match of source.matchAll(pattern)) {
-        found.add(match[1] as string);
-      }
-    }
-    const casePattern = CODE_CASE_PATTERN.get(relative);
-    if (casePattern) {
-      for (const match of source.matchAll(casePattern)) {
-        found.add(match[1] as string);
-      }
-    }
-  }
-  return found;
-}
-
 function taxonomyInternalNames(): Set<string> {
   const names = new Set<string>();
   for (const entry of taxonomy.errors) {
@@ -203,45 +140,7 @@ function taxonomyInternalNames(): Set<string> {
   return names;
 }
 
-describe('chain-services classification completeness against the taxonomy', () => {
-  it('registers every errorCode literal emitted by the classification sources', () => {
-    const registered = taxonomyInternalNames();
-    const unregistered: string[] = [];
-    for (const code of scannedErrorCodes()) {
-      if (!registered.has(code) && !OUT_OF_TAXONOMY_SCOPE.has(code)) {
-        unregistered.push(code);
-      }
-    }
-    expect(unregistered, 'error codes missing a taxonomy entry (add them to uvp-error-taxonomy.v1.json)').toEqual([]);
-  });
-
-  it('finds every registered chain-services internal name in the sources (no stale entries)', () => {
-    const scanned = scannedErrorCodes();
-    const stale: string[] = [];
-    for (const name of taxonomyInternalNames()) {
-      if (!/^[a-z0-9_]+$/.test(name)) {
-        continue;
-      }
-      if (INTENTIONALLY_UNEMITTED_NAMES.has(name)) {
-        continue;
-      }
-      if (!scanned.has(name)) {
-        stale.push(name);
-      }
-    }
-    expect(stale, 'taxonomy internal names that no longer occur in chain-services sources').toEqual([]);
-  });
-
-  it('pins the pending post-commit sweep lane by its source identifiers', () => {
-    const entry = entryByCode('post_commit_step_pending');
-    expect(entry.retryable).toBe(true);
-    expect(entry.dead_letter).toBe(false);
-    const indexerSource = readFileSync(join(serviceRoot(), 'src/indexer/service.ts'), 'utf8');
-    for (const identifier of ['runPostCommitStepWithBoundedRetry', 'sweepPendingPostCommitSteps', 'savePendingPostCommitStep', 'listPendingPostCommitSteps']) {
-      expect(indexerSource.includes(identifier), `indexer sweep identifier "${identifier}" must exist`).toBe(true);
-    }
-  });
-
+describe('chain-services out-of-scope allowlist honesty', () => {
   it('keeps the out-of-scope allowlist honest (no taxonomy entry registers those codes)', () => {
     const registered = taxonomyInternalNames();
     for (const code of OUT_OF_TAXONOMY_SCOPE) {

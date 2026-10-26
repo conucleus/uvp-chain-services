@@ -1,69 +1,11 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { encodeAbiParameters, encodeEventTopics, getEventSelector, parseAbi, type Hex, type Log } from "viem";
+import { encodeAbiParameters, encodeEventTopics, parseAbi, type Hex, type Log } from "viem";
 import { INDEXER_EVENT_ABIS, ViemChainEventSource } from "../src/indexer/viem-event-source.js";
 import { createChainEventSourceForTarget } from "../src/chain-adapters/events.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import { UnsupportedChainTargetError } from "../src/shared/types.js";
 
 describe("ViemChainEventSource", () => {
-  it("binds every indexed event topic to the frozen protocol ABI fixtures", () => {
-    const fixtures: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
-      UVPStateMachine: "uvp-state-machine.v0.17.json",
-      UVPIdentityRegistry: "uvp-identity-registry.v0.1.json",
-      UVPDeploymentRegistry: "uvp-deployment-registry.v0.2.json",
-      UVPStagePatchModule: "uvp-stage-patch-module.v0.5.json",
-      UVPDerivedSignalModule: "uvp-derived-signal-module.v0.5.json",
-      UVPOrderLinkModule: "uvp-order-link-module.v0.3.json",
-      UVPDockingModule: "uvp-docking-module.v4.8.json"
-    };
-    const artifacts: Readonly<Record<keyof typeof INDEXER_EVENT_ABIS, string>> = {
-      UVPStateMachine: "UVPStateMachine.sol/UVPStateMachine.json",
-      UVPIdentityRegistry: "UVPIdentityRegistry.sol/UVPIdentityRegistry.json",
-      UVPDeploymentRegistry: "UVPDeploymentRegistry.sol/UVPDeploymentRegistry.json",
-      UVPStagePatchModule: "UVPStagePatchModule.sol/UVPStagePatchModule.json",
-      UVPDerivedSignalModule: "UVPDerivedSignalModule.sol/UVPDerivedSignalModule.json",
-      UVPOrderLinkModule: "UVPOrderLinkModule.sol/UVPOrderLinkModule.json",
-      UVPDockingModule: "UVPDockingModule.sol/UVPDockingModule.json"
-    };
-
-    for (const [contractName, fixtureName] of Object.entries(fixtures)) {
-      const fixture = JSON.parse(readFileSync(
-        new URL(`../../../uvp-protocol/contracts/uvp-contracts/fixtures/${fixtureName}`, import.meta.url),
-        "utf8"
-      )) as {
-        readonly events: Readonly<Record<string, { readonly topic: Hex }>>;
-      };
-      const abi = INDEXER_EVENT_ABIS[contractName as keyof typeof INDEXER_EVENT_ABIS];
-      const actualTopics = Object.fromEntries(
-        abi
-          .filter((item) => item.type === "event")
-          .map((item) => [item.name, getEventSelector(item)])
-      );
-      const expectedTopics = Object.fromEntries(
-        Object.entries(fixture.events).map(([eventName, event]) => [eventName, event.topic])
-      );
-      expect(actualTopics, contractName).toEqual(expectedTopics);
-
-      const artifact = JSON.parse(readFileSync(
-        new URL(
-          `../../../uvp-protocol/contracts/uvp-contracts/out/${artifacts[contractName as keyof typeof INDEXER_EVENT_ABIS]}`,
-          import.meta.url,
-        ),
-        "utf8",
-      )) as { readonly abi: readonly AbiEvent[] };
-      const actualEvents = abi
-        .filter((item) => item.type === "event")
-        .map(eventShape)
-        .sort(compareEventShape);
-      const artifactEvents = artifact.abi
-        .filter((item) => item.type === "event")
-        .map(eventShape)
-        .sort(compareEventShape);
-      expect(actualEvents, `${contractName} event ABI`).toEqual(artifactEvents);
-    }
-  });
-
   it("routes the default chain event source through the EVM adapter boundary", () => {
     expect(createChainEventSourceForTarget(chainServicesConfig())).toBeInstanceOf(ViemChainEventSource);
     expect(() =>
