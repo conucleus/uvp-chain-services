@@ -18,6 +18,7 @@ const ORDERS_PATH = "/chain/orders";
 const ORDER_PATH = /^\/chain\/orders\/([^/]+)$/;
 const ORDER_TASKS_PATH = /^\/chain\/orders\/([^/]+)\/tasks$/;
 const TASKS_PATH = "/chain/tasks";
+const SYNC_STATE_PATH = "/chain/sync-state";
 const TASK_PATH = /^\/chain\/tasks\/([^/]+)$/;
 
 export function createChainReadRouteModule(): RouteModule {
@@ -60,6 +61,14 @@ async function handleRead(
   if (request.pathname === TASKS_PATH) {
     const tasks = await context.store.listStateMachineTasks();
     return { status: 200, body: { tasks: toChainJson(tasks) } };
+  }
+
+  if (request.pathname === SYNC_STATE_PATH) {
+    const syncState = await context.store.getSyncState();
+    if (!syncState) {
+      return { status: 404, body: { error: "chain_sync_state_not_found" } };
+    }
+    return { status: 200, body: { syncState: toChainJson(syncState) } };
   }
 
   const orderTasksMatch = ORDER_TASKS_PATH.exec(request.pathname);

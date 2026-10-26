@@ -116,6 +116,7 @@ function contextWithStore(
     | "findStateMachineOrdersByOrderId"
     | "listStateMachineTasks"
     | "getStateMachineTask"
+    | "getSyncState"
   >,
 ): ApiRouteContext {
   return { store } as unknown as ApiRouteContext;
@@ -140,6 +141,7 @@ describe("generic chain read routes", () => {
       findStateMachineOrdersByOrderId: async () => [],
       listStateMachineTasks: async () => [],
       getStateMachineTask: async () => undefined,
+      getSyncState: async () => undefined,
     });
 
     const response = await get(context, "/chain/orders");
@@ -207,6 +209,7 @@ describe("generic chain read routes", () => {
       findStateMachineOrdersByOrderId: async () => [],
       listStateMachineTasks: async () => [],
       getStateMachineTask: async () => undefined,
+      getSyncState: async () => undefined,
     });
 
     await expect(get(context, `/chain/orders/${ORDER_ID}`)).resolves.toEqual({
@@ -229,6 +232,7 @@ describe("generic chain read routes", () => {
       findStateMachineOrdersByOrderId: async () => [],
       listStateMachineTasks: async () => [],
       getStateMachineTask: async () => undefined,
+      getSyncState: async () => undefined,
     });
     await expect(get(healthy, "/chain/orders/%ZZ")).resolves.toMatchObject({
       status: 400,
@@ -242,6 +246,7 @@ describe("generic chain read routes", () => {
       findStateMachineOrdersByOrderId: async () => [],
       listStateMachineTasks: async () => [],
       getStateMachineTask: async () => undefined,
+      getSyncState: async () => undefined,
     });
     await expect(get(unavailable, "/chain/orders")).resolves.toMatchObject({
       status: 503,
@@ -258,6 +263,7 @@ describe("generic chain read routes", () => {
       ],
       listStateMachineTasks: async () => [],
       getStateMachineTask: async () => undefined,
+      getSyncState: async () => undefined,
     });
 
     const response = await get(context, `/chain/orders/${ORDER_ID}`);
@@ -281,6 +287,7 @@ describe("generic chain read routes", () => {
       listStateMachineTasks: async () => [taskA, taskB],
       getStateMachineTask: async (taskId) =>
         taskId === taskA.taskId ? taskA : undefined,
+      getSyncState: async () => undefined,
     });
 
     const orderTasks = await get(context, `/chain/orders/${ORDER_ID}/tasks`);
@@ -290,6 +297,41 @@ describe("generic chain read routes", () => {
     const singleTask = await get(context, `/chain/tasks/${taskA.taskId}`);
     expect(singleTask.status).toBe(200);
     expect(singleTask.body).toEqual({ task: taskJson(taskA) });
+  });
+  it("passes the projection sync state through and 404s when it is absent", async () => {
+    const syncState = {
+      chainId: CHAIN_ID,
+      contractAddress: STATE_MACHINE,
+      syncStatus: "indexed" as const,
+      latestIndexedBlock: 42n,
+      finalizedBlock: 40n,
+      confirmationDepth: 2,
+      eventCount: 7,
+      updatedAt: "2026-10-27T00:00:00.000Z",
+    };
+    const present = contextWithStore({
+      listStateMachineOrders: async () => [],
+      findStateMachineOrdersByOrderId: async () => [],
+      listStateMachineTasks: async () => [],
+      getStateMachineTask: async () => undefined,
+      getSyncState: async () => syncState,
+    });
+    await expect(get(present, "/chain/sync-state")).resolves.toEqual({
+      status: 200,
+      body: { syncState: { ...syncState, latestIndexedBlock: "42", finalizedBlock: "40" } },
+    });
+
+    const absent = contextWithStore({
+      listStateMachineOrders: async () => [],
+      findStateMachineOrdersByOrderId: async () => [],
+      listStateMachineTasks: async () => [],
+      getStateMachineTask: async () => undefined,
+      getSyncState: async () => undefined,
+    });
+    await expect(get(absent, "/chain/sync-state")).resolves.toEqual({
+      status: 404,
+      body: { error: "chain_sync_state_not_found" },
+    });
   });
 });
 
