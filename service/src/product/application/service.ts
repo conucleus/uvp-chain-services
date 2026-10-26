@@ -38,7 +38,23 @@ import type {
 } from "../../storage/projection-store.js";
 import { compareChainPointers, type Address } from "../../shared/types.js";
 import { decodeBytes32Text, displayBytes32 } from "../../shared/display.js";
-import { isPlanRegisteredProjection } from "../../store/console/version.js";
+
+function isPlanRegisteredProjection(
+  plan: Awaited<ReturnType<ProjectionStore["getOrderSnapshot"]>>["stateMachinePlans"][string],
+): boolean {
+  if (plan.finalizedAt !== undefined) {
+    return true;
+  }
+  if (plan.committedAt === undefined) {
+    return true;
+  }
+  const committed = plan.committedAt;
+  const registered = plan.registeredAt;
+  return (
+    registered.transactionHash !== committed.transactionHash ||
+    registered.logIndex !== committed.logIndex
+  );
+}
 
 export interface ProductChainProofDTO {
   readonly eventId: string;

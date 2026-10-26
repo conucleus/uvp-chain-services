@@ -5,7 +5,6 @@ import type { ConfigBundle, ConfigStage } from "@uvp-eth/product-dto";
 import { privateKeyToAccount } from "viem/accounts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiRouter, type ApiRouter } from "../src/api/routes.js";
-import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import {
   ProtocolOrderBirthAdapter,
   PostgresOrderStore,
@@ -76,14 +75,8 @@ afterAll(async () => {
 
 function requiredRouterStores(stores: ChainServicesStores) {
   return {
-    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
-    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,
-    storeDecorationStore: stores.storeDecorationStore,
-    storePublisherDelegationStore: stores.storePublisherDelegationStore,
     identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    storeListingStore: stores.storeListingStore,
-    storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
     orderRequirementsStore: stores.orderRequirementsStore,
@@ -92,19 +85,6 @@ function requiredRouterStores(stores: ChainServicesStores) {
     governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
-    notificationService: createNotificationService({
-      store: stores.projectionStore,
-      supplierMetadataStore: stores.storeSupplierMetadataStore,
-      deliveryStore: stores.notificationStateStore,
-      participantReadStateStore: stores.notificationStateStore
-    }),
-    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
-      store: new MemorySupplierNotificationProfileConfigStore()
-    })
   };
 }
 

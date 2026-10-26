@@ -20,6 +20,7 @@ import {
   type Address,
   type Hex,
 } from "../shared/types.js";
+import { releaseRelayNonce, reserveRelayNonce } from "../relay/nonce.js";
 import type {
   StateMachineOrderProjection,
   StateMachinePlanProjection,
@@ -53,6 +54,7 @@ import {
   notSupportedStageExecutorPatchBroadcastAdapter,
   notSupportedStageResourcePatchBroadcastAdapter,
 } from "./broadcast-adapter.js";
+import { stagePatchNonceKey } from "./keys.js";
 import type {
   PrepareProductStageExecutorPatchInput,
   PrepareProductStageResourcePatchInput,
@@ -455,10 +457,9 @@ export function createProductStageExecutorPatchService(
           { recoveredPreviousExecutor },
         );
       }
-      const reserved = await stageExecutorPatchStore.reserveNonce(
-        prepared.nonceKey,
-        { staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString() },
-      );
+      const reserved = await reserveRelayNonce(stageExecutorPatchStore, prepared.nonceKey, {
+        staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString(),
+      });
       if (!reserved) {
         throw new ProductStagePatchError(
           409,
@@ -511,7 +512,7 @@ export function createProductStageExecutorPatchService(
         await withStagePatchStoreTransaction(stageExecutorPatchStore, async () => {
           await stageExecutorPatchStore.putSubmission(submission);
           if (notAttempted || reopenForRetry) {
-            await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
+            await releaseRelayNonce(stageExecutorPatchStore, prepared.nonceKey);
             return;
           }
           await stageExecutorPatchStore.markPreparedUsed(
@@ -522,7 +523,7 @@ export function createProductStageExecutorPatchService(
         });
       } catch (error) {
         if (!broadcastTxHash || !broadcastSubmissionId) {
-          await stageExecutorPatchStore.releaseNonce?.(prepared.nonceKey);
+          await releaseRelayNonce(stageExecutorPatchStore, prepared.nonceKey);
           throw error;
         }
         try {
@@ -763,10 +764,9 @@ export function createProductStageResourcePatchService(
         prepared.selectorStageId,
         prepared.targetStageId,
       );
-      const reserved = await stageResourcePatchStore.reserveNonce(
-        prepared.nonceKey,
-        { staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString() },
-      );
+      const reserved = await reserveRelayNonce(stageResourcePatchStore, prepared.nonceKey, {
+        staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString(),
+      });
       if (!reserved) {
         throw new ProductStagePatchError(
           409,
@@ -806,7 +806,7 @@ export function createProductStageResourcePatchService(
         await withStagePatchStoreTransaction(stageResourcePatchStore, async () => {
           await stageResourcePatchStore.putSubmission(submission);
           if (notAttempted || reopenForRetry) {
-            await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
+            await releaseRelayNonce(stageResourcePatchStore, prepared.nonceKey);
             return;
           }
           await stageResourcePatchStore.markPreparedUsed(
@@ -817,7 +817,7 @@ export function createProductStageResourcePatchService(
         });
       } catch (error) {
         if (!broadcastTxHash || !broadcastSubmissionId) {
-          await stageResourcePatchStore.releaseNonce?.(prepared.nonceKey);
+          await releaseRelayNonce(stageResourcePatchStore, prepared.nonceKey);
           throw error;
         }
         try {
@@ -1960,28 +1960,6 @@ function requiredChainId(configured: number | undefined): number {
     );
   }
   return configured;
-}
-
-function stagePatchNonceKey(input: {
-  readonly kind: "executor" | "resource";
-  readonly chainId: number;
-  readonly stateMachineAddress: Address;
-  readonly orderId: Hex;
-  readonly targetStageId: Hex;
-  readonly targetSignalId?: Hex;
-  readonly resourceKey?: Hex;
-  readonly patchNonce: string;
-}): string {
-  return [
-    input.kind,
-    input.chainId,
-    input.stateMachineAddress,
-    input.orderId,
-    input.targetStageId,
-    input.targetSignalId ?? "",
-    input.resourceKey ?? "",
-    input.patchNonce,
-  ].join(":");
 }
 
 function stageResourceOverlayProjectionKey(

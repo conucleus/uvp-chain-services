@@ -21,11 +21,6 @@ import {
   type BroadcastDedupeStore
 } from "../submissions/broadcast-dedupe-postgres-store.js";
 import type { ProductSubmissionStore } from "../submissions/types.js";
-import { PostgresNotificationStateStore } from "../notifications/postgres-store.js";
-import type {
-  NotificationDeliveryStore,
-  ParticipantNotificationReadStateStore
-} from "../notifications/service.js";
 import {
   PostgresProductStagePatchStore
 } from "../stage-patches/postgres-store.js";
@@ -37,49 +32,15 @@ import type {
   StageExecutorPatchSubmissionDTO,
   StageResourcePatchSubmissionDTO
 } from "../stage-patches/types.js";
-import {
-  PostgresStoreSupplierMetadataStore,
-  type StoreSupplierMetadataStore
-} from "../store/suppliers/index.js";
-import {
-  PostgresStoreEntityRegistrationStore,
-  type StoreEntityRegistrationStore
-} from "../store/registration/index.js";
-import type {
-  StoreDockingSessionStore
-} from "../store/console/docking.js";
-import type {
-  StoreAuditStore
-} from "../store/console/audit.js";
-import {
-  PostgresStoreAuditStore,
-  PostgresStoreDockingSessionStore,
-  PostgresStoreZhixuDraftStore,
-  PostgresStoreZhixuVersionMetadataStore
-} from "../store/console/postgres-store.js";
-import type { StoreZhixuDraftStore } from "../store/console/zhixu-drafts.js";
-import type { StoreZhixuVersionMetadataStore } from "../store/console/version.js";
 import { PostgresPlanArtifactStore, type PlanArtifactStore } from "../projection/plan-artifacts.js";
 import {
   PostgresStoreWalletSessionStore,
   type StoreWalletSessionStore
 } from "../store/sessions/index.js";
 import type {
-  StoreZhixuDecorationStore,
-  StorePublisherDelegationStore
-} from "../store/decoration/index.js";
-import type {
   StoreIdentityDescriptorSnapshotStore
 } from "../governance/descriptors.js";
-import {
-  PostgresStoreIdentityDescriptorSnapshotStore,
-  PostgresStoreJoinApplicationStore,
-  PostgresStoreListingStore,
-  PostgresStorePublisherDelegationStore,
-  PostgresStoreZhixuDecorationStore
-} from "../store-access-postgres-stores.js";
-import type { StoreListingStore } from "../store/listings/index.js";
-import type { StoreJoinApplicationStore } from "../store/join/index.js";
+import { PostgresStoreIdentityDescriptorSnapshotStore } from "../governance/descriptors-postgres-store.js";
 import { PostgresDatabase } from "./postgres-client.js";
 import { PostgresProjectionStore } from "./postgres.js";
 import type { ProjectionStore } from "./projection-store.js";
@@ -104,22 +65,9 @@ export interface ChainServicesStores {
   readonly evidenceMetadataStore: EvidenceMetadataStore;
   readonly submissionStore: ProductSubmissionStore;
   readonly governanceStore: GovernanceStore;
-  readonly storeZhixuDraftStore: StoreZhixuDraftStore;
-  readonly storeZhixuVersionMetadataStore: StoreZhixuVersionMetadataStore;
-  readonly storeSupplierMetadataStore: StoreSupplierMetadataStore;
-  /** 参与者实体自助登记（链下档案，未核验）。 */
-  readonly storeEntityRegistrationStore: StoreEntityRegistrationStore;
-  readonly storeDockingSessionStore: StoreDockingSessionStore;
-  readonly storeAuditStore: StoreAuditStore;
-  /** 钱包会话 / descriptor 快照 / 装修与委托 / 上架 / 加入申请的持久化 store。 */
+  /** 钱包会话 / descriptor 快照的持久化 store。 */
   readonly storeWalletSessionStore: StoreWalletSessionStore;
   readonly identityDescriptorSnapshots: StoreIdentityDescriptorSnapshotStore;
-  readonly storeDecorationStore: StoreZhixuDecorationStore;
-  readonly storePublisherDelegationStore: StorePublisherDelegationStore;
-  readonly storeListingStore: StoreListingStore;
-  readonly storeJoinApplicationStore: StoreJoinApplicationStore;
-  /** postgres 驱动下提供持久化通知状态。 */
-  readonly notificationStateStore: NotificationDeliveryStore & ParticipantNotificationReadStateStore;
   /** postgres 驱动下提供持久化 broadcast 去重状态。 */
   readonly broadcastDedupeStore: BroadcastDedupeStore;
   /** postgres 驱动下提供持久化 stage-patch 状态。 */
@@ -168,19 +116,8 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
     evidenceMetadataStore: new PostgresEvidenceStore({ database }),
     submissionStore: new PostgresSubmissionStore({ database }),
     governanceStore: new PostgresGovernanceStore({ database }),
-    storeZhixuDraftStore: new PostgresStoreZhixuDraftStore({ database }),
-    storeZhixuVersionMetadataStore: new PostgresStoreZhixuVersionMetadataStore({ database }),
-    storeSupplierMetadataStore: new PostgresStoreSupplierMetadataStore({ database }),
-    storeEntityRegistrationStore: new PostgresStoreEntityRegistrationStore({ database }),
-    storeDockingSessionStore: new PostgresStoreDockingSessionStore({ database }),
-    storeAuditStore: new PostgresStoreAuditStore({ database }),
     storeWalletSessionStore: new PostgresStoreWalletSessionStore({ database }),
     identityDescriptorSnapshots: new PostgresStoreIdentityDescriptorSnapshotStore({ database }),
-    storeDecorationStore: new PostgresStoreZhixuDecorationStore({ database }),
-    storePublisherDelegationStore: new PostgresStorePublisherDelegationStore({ database }),
-    storeListingStore: new PostgresStoreListingStore({ database }),
-    storeJoinApplicationStore: new PostgresStoreJoinApplicationStore({ database }),
-    notificationStateStore: new PostgresNotificationStateStore({ database }),
     broadcastDedupeStore: new PostgresBroadcastDedupeStore({ database }),
     stageExecutorPatchStore: new PostgresProductStagePatchStore<
       PreparedStageExecutorPatchRecord,

@@ -1,8 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
 import type { ChainEvent } from "../src/indexer/events.js";
-import { createNotificationService, MemoryNotificationDeliveryStore, MemoryParticipantNotificationReadStateStore } from "../src/notifications/service.js";
-import { createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/config.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 import {
@@ -26,14 +24,8 @@ afterAll(async () => {
 
 function requiredRouterStores() {
   return {
-    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
-    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,
-    storeDecorationStore: stores.storeDecorationStore,
-    storePublisherDelegationStore: stores.storePublisherDelegationStore,
     identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    storeListingStore: stores.storeListingStore,
-    storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
     orderRequirementsStore: stores.orderRequirementsStore,
@@ -42,19 +34,6 @@ function requiredRouterStores() {
     governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
-    notificationService: createNotificationService({
-      store: stores.projectionStore,
-      supplierMetadataStore: stores.storeSupplierMetadataStore,
-      deliveryStore: stores.notificationStateStore,
-      participantReadStateStore: stores.notificationStateStore
-    }),
-    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
-      store: new MemorySupplierNotificationProfileConfigStore()
-    })
   };
 }
 
@@ -171,19 +150,6 @@ describe("bytes32 展示跨视图一致（活动流 vs 阶段视图）", () => {
       stageIdentifier: "示例阶段"
     });
 
-    const feed = await createNotificationService({
-      store,
-      deliveryStore: new MemoryNotificationDeliveryStore(),
-      participantReadStateStore: new MemoryParticipantNotificationReadStateStore(),
-    })
-      .listParticipantNotifications({ walletAddress: participantWallet });
-    const taskNotification = feed.notifications.find(
-      (notification) => notification.kind === "task_ready"
-    );
-    expect(taskNotification).toBeDefined();
-    expect(taskNotification?.stageLabel).toBe(order.currentStageId);
-    expect(taskNotification?.stageId).toBe(order.currentStageId);
-    expect(taskNotification?.taskTitle).toBe("处理示例复核");
   });
 });
 

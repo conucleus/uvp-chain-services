@@ -1,7 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
-import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { createPostgresTestDatabase } from "./postgres.js";
@@ -20,14 +19,8 @@ afterAll(async () => {
 
 function requiredRouterStores() {
   return {
-    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
-    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,
-    storeDecorationStore: stores.storeDecorationStore,
-    storePublisherDelegationStore: stores.storePublisherDelegationStore,
     identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    storeListingStore: stores.storeListingStore,
-    storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
     orderRequirementsStore: stores.orderRequirementsStore,
@@ -36,19 +29,6 @@ function requiredRouterStores() {
     governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
-    notificationService: createNotificationService({
-      store: stores.projectionStore,
-      supplierMetadataStore: stores.storeSupplierMetadataStore,
-      deliveryStore: stores.notificationStateStore,
-      participantReadStateStore: stores.notificationStateStore
-    }),
-    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
-      store: new MemorySupplierNotificationProfileConfigStore()
-    })
   };
 }
 
@@ -104,37 +84,13 @@ describe("API router composition", () => {
     });
     expect(productOrder).toMatchObject({ status: 400, body: { error: "invalid_path_parameter" } });
 
-    const storeOrder = await router.handle({
-      method: "GET",
-      pathname: "/store/zhixus/%E0%A4%A/orders",
-      headers: { "x-uvp-wallet-address": "0x9999999999999999999999999999999999999999" }
-    });
-    expect(storeOrder).toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
-    const storeOrderOperator = await router.handle({
-      method: "GET",
-      pathname: "/store/zhixus/%E0%A4%A/orders",
-      headers: { "x-uvp-store-user-id": "operator-1", "x-uvp-store-role": "operator" }
-    });
-    expect(storeOrderOperator).toMatchObject({ status: 400, body: { error: "invalid_path_parameter" } });
   });
 
-  it("store runtime reads and submission reads require session identity", async () => {
+  it("submission reads require wallet identity", async () => {
     const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
 
-    for (const pathname of [
-      "/store/runtime/summary",
-      "/store/zhixus/zhixu-1/orders"
-    ]) {
-      const anonymous = await router.handle({ method: "GET", pathname });
-      expect(anonymous).toMatchObject({ status: 401, body: { error: "store_identity_missing" } });
-    }
-    for (const pathname of [
-      "/store/orders/0xabc/candidates",
-      "/product/submissions/sub_1"
-    ]) {
-      const anonymous = await router.handle({ method: "GET", pathname });
-      expect(anonymous).toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
-    }
+    const anonymous = await router.handle({ method: "GET", pathname: "/product/submissions/sub_1" });
+    expect(anonymous).toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
   });
 
   it("active-executor overlay authorization only covers the task's recorded submit signal", async () => {

@@ -15,12 +15,6 @@ import { createConfiguredGovernanceChainAdapter, createGovernanceService } from 
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import {
-  createNotificationService,
-  createSupplierNotificationProfileConfigService,
-  MemorySupplierNotificationProfileConfigStore,
-  WebhookNotificationDispatcher
-} from "../notifications/index.js";
-import {
   AnvilProductOrderTriggerBroadcastAdapter,
   MemoryProductOrderTriggerBroadcastAdapter,
   type ProductOrderTriggerBroadcastAdapter
@@ -30,12 +24,6 @@ import { createViemChainClock } from "../shared/chain-clock.js";
 import { createPublicClient, createWalletClient, defineChain, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { ProtocolOrderBirthAdapter, type OrderBirthPort } from "../order/index.js";
-import { DockAutomationWorker } from "../dock-automation/index.js";
-import {
-  TimerKeeperWorker,
-  createTimerKeeperWalletSubmitter,
-  type TimerKeeperSubmitter
-} from "../timer-keeper/index.js";
 import { createChainServicesStores } from "../storage/factory.js";
 import type { Hex } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
@@ -45,18 +33,20 @@ import {
   type SubmissionBroadcastAdapter
 } from "../submissions/index.js";
 import {
+  createSecureStageExecutorPatchBroadcastAdapter,
+  createSecureStageResourcePatchBroadcastAdapter,
   createStateMachineStageExecutorPatchBroadcastAdapter,
   createStateMachineStageResourcePatchBroadcastAdapter,
   type StageExecutorPatchBroadcastAdapter,
   type StageResourcePatchBroadcastAdapter
 } from "../stage-patches/index.js";
+import type { RelayDedupeStore } from "../relay/index.js";
 import { createLoggerAuditSink, type AuditSink } from "../security/audit.js";
 import { createRedactingLogger, redactErrorMessage, redactSecrets } from "../security/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
 import { ConfigError, consoleLogger, type Address, type Logger } from "../shared/types.js";
 import { createApiRouter, productBffStoreDraftOrderResolver } from "./routes.js";
 import { InvalidPathParameterError, invalidPathParameterResponse, normalizeRequestId } from "./route-context.js";
-import { createListingAnchorChainView } from "../store/listings/index.js";
 import { createPlanArtifactResolvers } from "../projection/plan-artifacts.js";
 
 export interface StartApiServerOptions {
@@ -92,40 +82,11 @@ export async function startApiServer(
   const productBffStore = stores.productBffStore;
   const submissionStore = stores.submissionStore;
   const governanceStore = stores.governanceStore;
-  const productSchemaResolver = {
-    getProductSchemaByPlan: (planId: string, planHash: string) =>
-      stores.storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash)
-  };
-  const notificationDispatcher = config.notifications?.webhookUrl
-    ? new WebhookNotificationDispatcher({
-      url: config.notifications.webhookUrl,
-      ...(config.notifications.webhookSecretConfigured && process.env.UVP_NOTIFY_WEBHOOK_SECRET?.trim()
-        ? { secret: process.env.UVP_NOTIFY_WEBHOOK_SECRET.trim() }
-        : {})
-    })
-    : undefined;
-  if (!notificationDispatcher) {
-    logger.warn("NOTIFICATION DELIVERY IS NOT CONFIGURED: set UVP_NOTIFY_WEBHOOK_URL to enable the generic webhook transport; until then every delivery is recorded as skipped (transport_adapter_missing) and no external channel is notified");
-  }
-  const notificationService = createNotificationService({
-    store,
-    supplierMetadataStore: stores.storeSupplierMetadataStore,
-    productSchemaResolver,
-    deliveryStore: stores.notificationStateStore,
-    participantReadStateStore: stores.notificationStateStore,
-    ...(notificationDispatcher ? { dispatcher: notificationDispatcher } : {})
-  });
-  // supplier notification profile 配置目前只有内存实现（无 postgres 件）；
-  // 显式注入内存件以替代被删除的路由层缺省。
-  const supplierNotificationConfigService = createSupplierNotificationProfileConfigService({
-    store: new MemorySupplierNotificationProfileConfigStore()
-  });
   const indexer = eventSource
     ? new IndexerService({
       config,
       eventSource,
       store,
-      notificationProcessor: notificationService,
       resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
       resolveSemanticOraclePlan: planArtifacts.resolveSemanticOraclePlan,
       logger
@@ -153,8 +114,18 @@ export async function startApiServer(
       `state-machine signal broadcast is not configured: UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED=true and a non-empty ${config.relayer.stateMachinePrivateKeyEnv} are required when the runtime is not local or broadcast was explicitly enabled`,
     );
   }
-  const stageExecutorPatchBroadcastAdapter = createConfiguredStageExecutorPatchBroadcastAdapter(config, stagePatchVerifyingContract);
-  const stageResourcePatchBroadcastAdapter = createConfiguredStageResourcePatchBroadcastAdapter(config, stagePatchVerifyingContract);
+  const stageExecutorPatchBroadcastAdapter = createConfiguredStageExecutorPatchBroadcastAdapter(
+    config,
+    stagePatchVerifyingContract,
+    audit,
+    stores.broadcastDedupeStore
+  );
+  const stageResourcePatchBroadcastAdapter = createConfiguredStageResourcePatchBroadcastAdapter(
+    config,
+    stagePatchVerifyingContract,
+    audit,
+    stores.broadcastDedupeStore
+  );
   const evidenceStorage = createConfiguredEvidenceStorage(config);
   const governanceService = createGovernanceService({
     store: governanceStore,
@@ -184,24 +155,6 @@ export async function startApiServer(
       resolveDraftOrder: productBffStoreDraftOrderResolver(productBffStore)
     }),
     audit,
-    logger
-  });
-  const dockingModuleAddressValue = moduleAddress(config, "docking", "UVPDockingModule");
-  const dockAutomationWorker = new DockAutomationWorker({
-    config: config.dockAutomation,
-    projectionStore: store,
-    dockingAddress: dockingModuleAddressValue ?? "0x0000000000000000000000000000000000000000",
-    chainId: config.network.chainId,
-    logger
-  });
-  const timerKeeperSubmitter = createConfiguredTimerKeeperSubmitter(config, submissionVerifyingContract);
-  const timerKeeperWorker = new TimerKeeperWorker({
-    config: config.timerKeeper,
-    projectionStore: store,
-    stateMachineAddress: submissionVerifyingContract ?? "0x0000000000000000000000000000000000000000",
-    chainId: config.network.chainId,
-    chainClock: createViemChainClock(config.network.rpcUrl),
-    ...(timerKeeperSubmitter ? { submitter: timerKeeperSubmitter } : {}),
     logger
   });
   const opsRecoveryActions = {
@@ -277,37 +230,14 @@ export async function startApiServer(
     submissionStore,
     governanceStore,
     governanceService,
-    productSchemaResolver,
     ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
     opsRecoveryActions,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    recordPlanArtifact: (input) =>
-      stores.planArtifactStore.put({ chainId: config.network.chainId, ...input }),
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
-    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,
     identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    storeDecorationStore: stores.storeDecorationStore,
-    storePublisherDelegationStore: stores.storePublisherDelegationStore,
-    storeListingStore: stores.storeListingStore,
-    storeJoinApplicationStore: stores.storeJoinApplicationStore,
     ...(config.api.identityDescriptorPublicBaseUrl
       ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
       : {}),
-    ...(config.network.rpcUrl && submissionVerifyingContract
-      ? {
-        listingAnchorChainView: createListingAnchorChainView({
-          rpcUrl: config.network.rpcUrl,
-          stateMachineAddress: submissionVerifyingContract
-        })
-      }
-      : {}),
     productChainClock: createViemChainClock(config.network.rpcUrl),
-    notificationService,
-    supplierNotificationConfigService,
     submissionChainId: config.network.chainId,
     ...(submissionVerifyingContract ? { submissionVerifyingContract } : {}),
     ...(stagePatchVerifyingContract ? { stageExecutorPatchVerifyingContract: stagePatchVerifyingContract } : {}),
@@ -326,7 +256,6 @@ export async function startApiServer(
       pollIntervalMs: config.api.indexerPollIntervalMs
     },
     reconcileDiagnostics: () => reconcileWorker.getDiagnostics(),
-    timerKeeperDiagnostics: () => timerKeeperWorker.getLastSummary(),
     audit,
     configDiagnostics,
     ...(indexer
@@ -451,14 +380,10 @@ export async function startApiServer(
       server.on("close", () => clearInterval(pollInterval));
     }
     await reconcileWorker.start();
-    await dockAutomationWorker.start();
-    await timerKeeperWorker.start();
   })();
   server.on("close", () => {
     closed = true;
     void (async () => {
-      await timerKeeperWorker.stop();
-      await dockAutomationWorker.stop();
       await reconcileWorker.stop();
       await stores.close();
     })();
@@ -665,10 +590,6 @@ function stagePatchModuleAddress(config: ChainServicesConfig): Address | undefin
   return moduleAddress(config, "stagePatch", "UVPStagePatchModule");
 }
 
-function dockingModuleAddress(config: ChainServicesConfig): Address | undefined {
-  return moduleAddress(config, "docking", "UVPDockingModule");
-}
-
 function moduleAddress(
   config: ChainServicesConfig,
   key: "stagePatch" | "derivedSignal" | "docking" | "planMetadata" | "orderLink" | "lens",
@@ -740,30 +661,11 @@ function createConfiguredSubmissionBroadcastAdapter(
   });
 }
 
-function createConfiguredTimerKeeperSubmitter(
-  config: ChainServicesConfig,
-  stateMachine: Address | undefined
-): TimerKeeperSubmitter | undefined {
-  if (!config.timerKeeper.enabled) {
-    return undefined;
-  }
-  if (!stateMachine) {
-    return undefined;
-  }
-  if (!process.env[config.timerKeeper.privateKeyEnv]?.trim()) {
-    return undefined;
-  }
-  return createTimerKeeperWalletSubmitter({
-    stateMachineAddress: stateMachine,
-    chainId: config.network.chainId,
-    rpcUrl: config.network.rpcUrl,
-    privateKeyEnv: config.timerKeeper.privateKeyEnv
-  });
-}
-
 function createConfiguredStageExecutorPatchBroadcastAdapter(
   config: ChainServicesConfig,
-  stateMachine: Address | undefined
+  stateMachine: Address | undefined,
+  audit: AuditSink,
+  dedupeStore?: RelayDedupeStore
 ): StageExecutorPatchBroadcastAdapter | undefined {
   if (!config.relayer.broadcastEnabled) {
     return undefined;
@@ -775,20 +677,30 @@ function createConfiguredStageExecutorPatchBroadcastAdapter(
   if (!process.env[privateKeyEnv]?.trim()) {
     return undefined;
   }
-  return createStateMachineStageExecutorPatchBroadcastAdapter({
-    stateMachineAddress: stateMachine,
-    chainId: config.network.chainId,
-    rpcUrl: config.network.rpcUrl,
-    relayerPrivateKeyEnv: privateKeyEnv,
-    waitForReceipt: true,
-    rejectGasPayerAsSelector: config.security.environment !== "local",
-    receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
+  return createSecureStageExecutorPatchBroadcastAdapter({
+    adapter: createStateMachineStageExecutorPatchBroadcastAdapter({
+      stateMachineAddress: stateMachine,
+      chainId: config.network.chainId,
+      rpcUrl: config.network.rpcUrl,
+      relayerPrivateKeyEnv: privateKeyEnv,
+      waitForReceipt: true,
+      rejectGasPayerAsSelector: config.security.environment !== "local",
+      receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
+    }),
+    maxInFlightPerOrder: config.security.broadcastMaxInFlightPerOrder,
+    maxRetryAttempts: config.security.broadcastMaxRetry,
+    retryBaseMs: config.security.broadcastRetryBaseMs,
+    retryMaxMs: config.security.broadcastRetryMaxMs,
+    ...(dedupeStore ? { dedupeStore } : {}),
+    audit
   });
 }
 
 function createConfiguredStageResourcePatchBroadcastAdapter(
   config: ChainServicesConfig,
-  stateMachine: Address | undefined
+  stateMachine: Address | undefined,
+  audit: AuditSink,
+  dedupeStore?: RelayDedupeStore
 ): StageResourcePatchBroadcastAdapter | undefined {
   if (!config.relayer.broadcastEnabled) {
     return undefined;
@@ -800,14 +712,22 @@ function createConfiguredStageResourcePatchBroadcastAdapter(
   if (!process.env[privateKeyEnv]?.trim()) {
     return undefined;
   }
-  return createStateMachineStageResourcePatchBroadcastAdapter({
-    stateMachineAddress: stateMachine,
-    chainId: config.network.chainId,
-    rpcUrl: config.network.rpcUrl,
-    relayerPrivateKeyEnv: privateKeyEnv,
-    waitForReceipt: true,
-    rejectGasPayerAsSelector: config.security.environment !== "local",
-    receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
+  return createSecureStageResourcePatchBroadcastAdapter({
+    adapter: createStateMachineStageResourcePatchBroadcastAdapter({
+      stateMachineAddress: stateMachine,
+      chainId: config.network.chainId,
+      rpcUrl: config.network.rpcUrl,
+      relayerPrivateKeyEnv: privateKeyEnv,
+      waitForReceipt: true,
+      rejectGasPayerAsSelector: config.security.environment !== "local",
+      receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
+    }),
+    maxInFlightPerOrder: config.security.broadcastMaxInFlightPerOrder,
+    maxRetryAttempts: config.security.broadcastMaxRetry,
+    retryBaseMs: config.security.broadcastRetryBaseMs,
+    retryMaxMs: config.security.broadcastRetryMaxMs,
+    ...(dedupeStore ? { dedupeStore } : {}),
+    audit
   });
 }
 

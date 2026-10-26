@@ -11,7 +11,6 @@ import {
   toSolidityRegisterPlanArgs
 } from "@uvp-eth/compiler";
 import { createApiRouter } from "../src/api/routes.js";
-import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import { IndexerService, type ChainEventSource } from "../src/indexer/service.js";
 import { rebuildOrderProjections } from "../src/indexer/replay.js";
@@ -56,14 +55,8 @@ afterAll(async () => {
 
 function requiredRouterStores() {
   return {
-    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
-    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,
-    storeDecorationStore: stores.storeDecorationStore,
-    storePublisherDelegationStore: stores.storePublisherDelegationStore,
     identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    storeListingStore: stores.storeListingStore,
-    storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
     orderRequirementsStore: stores.orderRequirementsStore,
@@ -72,19 +65,6 @@ function requiredRouterStores() {
     governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
-    notificationService: createNotificationService({
-      store: stores.projectionStore,
-      supplierMetadataStore: stores.storeSupplierMetadataStore,
-      deliveryStore: stores.notificationStateStore,
-      participantReadStateStore: stores.notificationStateStore
-    }),
-    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
-      store: new MemorySupplierNotificationProfileConfigStore()
-    })
   };
 }
 
@@ -3926,21 +3906,6 @@ function testConfig(): ChainServicesConfig {
       enabled: false,
       pollIntervalMs: 50,
       txTimeoutMs: 60_000
-    },
-    dockAutomation: {
-      enabled: false,
-      pollIntervalMs: 5_000,
-      maxCandidatesPerRun: 4,
-      maxGasPerTx: 500_000n,
-      redeliveryWindowMs: 120_000
-    },
-    timerKeeper: {
-      enabled: false,
-      pollIntervalMs: 5_000,
-      maxCandidatesPerRun: 4,
-      maxGasPerTx: 500_000n,
-      redeliveryWindowMs: 120_000,
-      privateKeyEnv: "UVP_TIMER_KEEPER_PRIVATE_KEY"
     },
     evidenceStorage: {
       adapter: "local",

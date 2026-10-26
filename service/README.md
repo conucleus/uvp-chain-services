@@ -1,14 +1,13 @@
 # UVP Chain Services
 
-Chain Services 把 UVP 链上事实投影成 Product、Store 和运维接口，并负责证据存储、签名交易广播、回执对账及索引重建。投影可以删除后从链上重建，不是新的事实来源。
+Chain Services 把 UVP 链上事实投影成 Product 和运维接口，并负责证据存储、签名交易广播、回执对账及索引重建。投影可以删除后从链上重建，不是新的事实来源。
 
 ## 责任边界
 
 - `UVPStateMachine` 及其冻结模块定义 Order、Stage、Signal、Plan 发布、提交授权和资源补丁。
-- 计划词表（selectorBindings / signalCapabilities / executorCandidates）的唯一 off-chain 权威是 `plan_artifacts`：按 `(chain_id, plan_id, plan_hash)` 内容寻址、行级不可变，由 Store 草稿编译落库；索引重建与提交造证只读该表。产物缺失即重建失败、提交造证 503，不再从 `store_zhixu_draft` 富集，也不得退化成空词表继续。
+- 计划词表（selectorBindings / signalCapabilities / executorCandidates）的唯一 off-chain 权威是 `plan_artifacts`：按 `(chain_id, plan_id, plan_hash)` 内容寻址、行级不可变；索引重建与提交造证只读该表。产物缺失即重建失败、提交造证 503，不得退化成空词表继续。当前没有 config publish 之外的产物写入 API（Store 草稿编译入口已随 B2 删除，需后续 publish/backfill 入口补齐）。
 - `UVPIdentityRegistry` 只记录线下主体标识与链上账户的绑定和撤销。
-- Store 的供应商档案、能力标签、搜索、推荐、审核记录均为链下经营数据，不形成协议级信用或平台担保。
-- Chain Services 可以代付 gas，但业务签名仍由对应参与者产生，服务在任何路径上都不生成业务签名。代付广播的交易面不止一处：plan-scoped 的 `submitSignalFor`（Signal 提交）、`applyStageExecutorPatchFor` / `applyStageResourcePatchFor`（stage 补丁代发）、`triggerOrderFromOutsideFor`（订单注册）、`pokeTimer`（timer keeper 链上时钟拨表，`src/timer-keeper/` 的 `TimerKeeperWorker` 按投影轮询 waiting 且 dueAt 已到的 hook，keeper 用独立 env 私钥角色 `UVP_TIMER_KEEPER_PRIVATE_KEY`/`UVP_TIMER_KEEPER_ADDRESS`）、`submitDockedInput` / `submitDockedSignal`（dock keeper 活性提交），以及治理身份注册/撤销（`registerIdentityBinding` / `revokeIdentityBinding`）。信号/补丁/触发提交均由 capability-proofs 单源（`@uvp-eth/compiler`，见 `src/submissions/capability-proofs.ts`）现场造证随交易携带。dock keeper 装配口径：`submitDockedInput` / `submitDockedSignal` 是 permissionless 合约面，其 route 清单（binding 全集 + 预组装 open/attach calldata）只存在于云编译产物（`uvp.dockRoute.v2`）——链上事件只暴露已投递的 binding，链轨没有可重建清单的投影源，`DockAutomationWorker` 因此保持显式 no-op 直到云编译 route 数据库接入方接线 route source 与代付 submitter；staging readiness 探针（`/product/staging/readiness` 的 automation 摘要）呈现该装配状态。
+- Chain Services 可以代付 gas，但业务签名仍由对应参与者产生，服务在任何路径上都不生成业务签名。代付广播的交易面保留在：plan-scoped 的 `submitSignalFor`（Signal 提交）、`applyStageExecutorPatchFor` / `applyStageResourcePatchFor`（stage 补丁代发）、`triggerOrderFromOutsideFor`（订单注册），以及治理身份注册/撤销（`registerIdentityBinding` / `revokeIdentityBinding`）。信号/补丁/触发提交均由 capability-proofs 单源（`@uvp-eth/compiler`，见 `src/submissions/capability-proofs.ts`）现场造证随交易携带。dock/timer keeper 等应用自动化已移出 chain-services（见 ARCHITECTURE Phase B）。
 - 证据正文保存在链下，链上和投影层只保存可校验的哈希与资源句柄。
 
 ## 目录结构
@@ -20,8 +19,8 @@ Chain Services 把 UVP 链上事实投影成 Product、Store 和运维接口，�
 - `indexer/replay.ts`：统一事件顺序与重放编排。`rebuildOrderProjections` 是投影重建的单一入口，同时推进部署注册表事件族与显式诊断计数（幻影订单、dock 未开启、激活缺补丁等不允许静默的计数）。
 - `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件）、`signal`（信号/授权/委派）、`stage`（阶段补丁与 hook 生命周期）、`docking`（dock 具名接口委托）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
 - `product/application/`：产品用例与命令（订单草稿、证据、Signal/补丁/dock 提交编排）；`product/query/`：读模型与 BFF（含 `bff/` 各存储实现与 staging 就绪检查）。
-- `store/`：Store 链下业务数据的聚合目录——`sessions`（钱包会话与挑战）、`suppliers`（供应商档案）、`listings`、`join`（入驻申请）、`decoration`（店铺装修）、`console`（运营台：草稿编译、审计、closure、运行时视图）。供应商、会话和经营资料是链下业务数据，不属于"删除后从链重建"的范围。
-- 其余：`api/`（HTTP 路由与边界）、`submissions/`、`reconcile/`、`dock-automation/`、`timer-keeper/`（链上时钟拨表 keeper）、`evidence/`、`stage-patches/`、`notifications/`、`governance/`、`storage/`、`config/`、`security/`、`chain-adapters/`、`proof-verifier/`、`shared/broadcast/`（两条在役广播链路的装配套件与 duplicate-transaction 车道单源）。
+- `store/`：仅保留 Product 写路径所需的最小 Store 面——`sessions`（钱包会话/JWT 身份）与 `console/access.ts`（身份解析）、`store-publishing.ts`（config publish 元数据）。Store 草稿、供应商、上架、入驻、装修、运营台等业务后端已随 Phase B2 删除，由 zhixu-registry 等独立服务接管。
+- 其余：`api/`（HTTP 路由与边界）、`submissions/`、`stage-patches/`、`relay/`、`reconcile/`（relay 回执/尝试操作态）、`evidence/`、`governance/`、`storage/`、`config/`、`security/`、`chain-adapters/`、`proof-verifier/`、`shared/broadcast/`（两条在役广播链路的装配套件与 duplicate-transaction 车道单源）。
 
 ## 运行
 
@@ -73,10 +72,6 @@ Product：
 - `GET /product/tasks`、`GET /product/tasks/:taskId`
 - `GET /product/me`、`GET /product/me/orders`、`GET /product/me/tasks`
 - `GET /product/me/activity-feed`
-- `POST /product/registration`、`GET /product/registration/me`：参与者实体自助
-  登记（链下档案；账号地址取会话锚定地址，单账号单活跃记录；状态恒为
-  `self_declared`/未核验，响应 `verified:false`、`chainWritten:false`；不写链、
-  不创建 supplier、不调用治理身份登记）
 - `POST /product/evidence` 及证据读取
 - 订单面只有 V3：`/product/v3/configs`、`/product/v3/order-drafts`（含
   invites/finalize）、`/product/v3/orders/:orderId`（订单/阶段/tasks 读，阶段
@@ -85,29 +80,19 @@ Product：
   已删除，统一返回 `410 v1_order_surface_removed`。
 - Stage executor、resource、Signal 提交及 docked order link 流程
 
-Store：
+Store（仅会话身份面，Store 业务后端已删除）：
 
-- `GET /store/zhixus`
-- `/store/zhixu-drafts` 下的导入、编辑、校验、编译与发布准备流程
-- `/store/suppliers` 下的链下供应商档案元数据
-- `/store/docking-sessions` 下的凝结核工作流
-- `GET /store/search`、`GET /store/audit`、`GET /store/runtime/summary`
-- Store 运行时读端点（订单/任务的运营视图）：
-  - `GET /store/zhixus/:zhixuId/orders`
-  - `GET /store/orders/:orderId/observation`
-  - `GET /store/orders/:orderId/replay`
-  - `GET /store/orders/:orderId/audit-summary`
-- `GET /store/orders/:orderId/candidates`（歧义订单消歧页，产品向）
+- `POST /store/auth/challenge`、`POST /store/auth/verify`、`POST /store/auth/logout`
+- `GET /store/auth/addresses`、`POST /store/auth/addresses/revoke`、`GET /store/auth/session`
+- `GET /store/session`：当前 Store 身份/角色的只读摘要
 
 ### API 访问策略
 
 接口按三档身份门执行（以路由实际代码为准，本节是索引不是权威）：
 
-- **参与者面**（Product 提交/触发档案/证据读取、实体登记读写、`/store/orders/:orderId/candidates`）：要求会话锚定钱包身份（匿名 `wallet_identity_required`）。candidates 只携带部署级元数据，不含钱包或提交者映射。
-- **Store 公共读**（匿名可读）：`/store/zhixus`、`/store/search` 等公开目录面。
-- **运营观察面**（需 Store read 角色，匿名与纯钱包会话不可读）：`/store/audit`、`/store/runtime/summary`、`/store/zhixu-series/:seriesId/versions`、`/store/zhixus/:zhixuId/orders`、`/store/orders/:orderId/{observation,replay,audit-summary}`。这些响应含全部订单的 submitter 地址、tasks assigneeWallet 与参与者钱包映射（无参与者过滤）——持有者是运营方/管理员钱包会话，以及 dev/JWT 形态的 reader 及以上身份；任意第三方钱包 SIWE 会话不因"有锚定会话"即得全量运营数据。`/store/audit` 在此之上按租户过滤：非管理员（reader/operator）只能读到自己 actor 名下的审计记录，管理员保留全量视角。
-- **试拼会话归属**：`/store/docking-sessions` 的会话档案（含 draftSignalMap）按创建者锚定地址做租户归属断言——非创建者读 404（与不存在同响应）、写 403；管理员保留跨租户治理可见性。
-- Store 写操作面（草稿导入/编译、schema 保存、listing/supplier/docking 管理）要求 `store_operator`；版本激活/废弃与治理动作（草稿审核、身份登记/撤销）分别要求 `store_admin` / 治理管理员。
+- **参与者面**（Product 提交/触发档案/证据读取）：要求会话锚定钱包身份（匿名 `wallet_identity_required`）。
+- **Store 会话面**：`/store/auth/*` 与 `GET /store/session` 解析 Store 身份（dev headers 或 JWT）；Store 业务读/写路由已随 Phase B2 删除，不再暴露运营数据面。
+- **治理动作**（身份登记/撤销）：要求治理管理员。
 
 治理与身份：
 

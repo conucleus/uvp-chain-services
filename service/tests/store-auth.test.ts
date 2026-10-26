@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import { createApiRouter } from "../src/api/routes.js";
-import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 import type { StoreSessionDTO } from "../src/store/console/access.js";
@@ -20,14 +19,8 @@ afterAll(async () => {
 
 function requiredRouterStores() {
   return {
-    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
-    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,
-    storeDecorationStore: stores.storeDecorationStore,
-    storePublisherDelegationStore: stores.storePublisherDelegationStore,
     identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    storeListingStore: stores.storeListingStore,
-    storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
     orderRequirementsStore: stores.orderRequirementsStore,
@@ -36,19 +29,6 @@ function requiredRouterStores() {
     governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
-    notificationService: createNotificationService({
-      store: stores.projectionStore,
-      supplierMetadataStore: stores.storeSupplierMetadataStore,
-      deliveryStore: stores.notificationStateStore,
-      participantReadStateStore: stores.notificationStateStore
-    }),
-    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
-      store: new MemorySupplierNotificationProfileConfigStore()
-    })
   };
 }
 
@@ -126,37 +106,6 @@ describe("Store operator identity and access auth", () => {
     });
   });
 
-  it("fails Store writes closed below store_operator access", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: "/store/zhixu-drafts/import",
-      body: importBody()
-    })).resolves.toMatchObject({
-      status: 401,
-      body: {
-        error: "store_identity_missing",
-        requiredAccess: "store_operator",
-        accessLevel: "anonymous_read"
-      }
-    });
-
-    await expect(router.handle({
-      method: "POST",
-      pathname: "/store/zhixu-drafts/import",
-      headers: readHeaders,
-      body: importBody()
-    })).resolves.toMatchObject({
-      status: 403,
-      body: {
-        error: "forbidden",
-        requiredAccess: "store_operator",
-        accessLevel: "store_read"
-      }
-    });
-  });
-
   it("disables development header auth in staging and production runtime", async () => {
     const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       productRuntimeEnvironment: "staging",
@@ -169,20 +118,6 @@ describe("Store operator identity and access auth", () => {
       authMode: "dev_headers_disabled"
     });
 
-    await expect(router.handle({
-      method: "POST",
-      pathname: "/store/zhixu-drafts/import",
-      headers: operatorHeaders,
-      body: importBody()
-    })).resolves.toMatchObject({
-      status: 401,
-      body: {
-        error: "store_identity_missing",
-        requiredAccess: "store_operator",
-        accessLevel: "anonymous_read",
-        authMode: "dev_headers_disabled"
-      }
-    });
   });
 
   it("binds wallet challenges to the issuing domain and rejects cross-domain replay", async () => {
@@ -259,9 +194,3 @@ async function session(
   return (response.body as { session: StoreSessionDTO }).session;
 }
 
-function importBody(): Record<string, unknown> {
-  return {
-    sourceKind: "zhixu_yaml",
-    content: "apiVersion: uvp/v0\nkind: Zhixu\nmetadata:\n  name: auth-probe\n"
-  };
-}

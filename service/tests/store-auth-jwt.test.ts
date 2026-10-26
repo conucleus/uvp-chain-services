@@ -3,7 +3,6 @@ import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { createApiRouter } from "../src/api/routes.js";
-import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 import type { StoreAuthConfig } from "../src/config/index.js";
@@ -139,35 +138,33 @@ describe("Store JWT/JWKS operator identity", () => {
     expect(listed.canAdmin).toBe(true);
   });
 
-  it("returns 401 for missing or invalid JWT identity and 403 for underprivileged JWT identity", async () => {
+  it("does not authenticate missing, invalid, or under-privileged JWT identities", async () => {
     const fixture = await createJwksFixture(servers);
     const router = createJwtRouter(fixture);
 
-    await expect(importDraft(router)).resolves.toMatchObject({
-      status: 401,
-      body: {
-        error: "store_identity_missing",
-        requiredAccess: "store_operator",
-        authMode: "jwt"
-      }
+    const missing = await router.handle({ method: "GET", pathname: "/store/session" });
+    expect(missing).toMatchObject({
+      status: 200,
+      body: { session: { authenticated: false, accessLevel: "anonymous_read", authMode: "jwt" } }
     });
 
-    await expect(importDraft(router, "not-a-jwt")).resolves.toMatchObject({
-      status: 401,
-      body: { error: "store_identity_invalid" }
+    const invalid = await router.handle({
+      method: "GET",
+      pathname: "/store/session",
+      headers: { authorization: "Bearer not-a-jwt" }
+    });
+    expect(invalid).toMatchObject({
+      status: 200,
+      body: { session: { authenticated: false, accessLevel: "anonymous_read" } }
     });
 
-    await expect(importDraft(router, await signStoreToken(fixture, {
+    await expect(storeSession(router, await signStoreToken(fixture, {
       sub: "reader-1",
       roles: ["store_reader"]
     }))).resolves.toMatchObject({
-      status: 403,
-      body: {
-        error: "forbidden",
-        requiredAccess: "store_operator",
-        accessLevel: "store_read",
-        authMode: "jwt"
-      }
+      authenticated: true,
+      accessLevel: "store_read",
+      canWrite: false
     });
   });
 
@@ -188,9 +185,9 @@ describe("Store JWT/JWKS operator identity", () => {
         .setExpirationTime("5m")
         .sign(wrongKey.privateKey)
     ]) {
-      await expect(importDraft(router, token)).resolves.toMatchObject({
-        status: 401,
-        body: { error: "store_identity_invalid" }
+      await expect(storeSession(router, token)).resolves.toMatchObject({
+        authenticated: false,
+        accessLevel: "anonymous_read"
       });
     }
   });
@@ -203,12 +200,10 @@ describe("Store JWT/JWKS operator identity", () => {
       roles: ["store_operator"]
     });
 
-    await expect(importDraft(router, token)).resolves.toMatchObject({
-      status: 401,
-      body: {
-        error: "store_identity_invalid",
-        authMode: "jwt"
-      }
+    await expect(storeSession(router, token)).resolves.toMatchObject({
+      authenticated: false,
+      accessLevel: "anonymous_read",
+      authMode: "jwt"
     });
   });
 
@@ -354,14 +349,8 @@ function createJwtRouter(
   overrides: JwtRouterOverrides = {}
 ): ReturnType<typeof createApiRouter> {
   return createApiRouter(stores.projectionStore, { submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
-    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,
-    storeDecorationStore: stores.storeDecorationStore,
-    storePublisherDelegationStore: stores.storePublisherDelegationStore,
     identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    storeListingStore: stores.storeListingStore,
-    storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
     evidenceMetadataStore: stores.evidenceMetadataStore,
@@ -369,19 +358,6 @@ function createJwtRouter(
     governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
-    notificationService: createNotificationService({
-      store: stores.projectionStore,
-      supplierMetadataStore: stores.storeSupplierMetadataStore,
-      deliveryStore: stores.notificationStateStore,
-      participantReadStateStore: stores.notificationStateStore
-    }),
-    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
-      store: new MemorySupplierNotificationProfileConfigStore()
-    }),
     productRuntimeEnvironment: overrides.runtimeEnvironment ?? "local",
     ...(overrides.governanceAdminIds ? { governanceAdminIds: overrides.governanceAdminIds } : {}),
     evidenceRuntimeEnvironment: "local",
@@ -425,21 +401,6 @@ async function storeSession(
   });
   expect(response.status).toBe(200);
   return (response.body as { session: StoreSessionDTO }).session;
-}
-
-async function importDraft(
-  router: ReturnType<typeof createApiRouter>,
-  token?: string
-) {
-  return router.handle({
-    method: "POST",
-    pathname: "/store/zhixu-drafts/import",
-    ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}),
-    body: {
-      sourceKind: "zhixu_yaml",
-      content: "apiVersion: uvp/v0\nkind: Zhixu\nmetadata:\n  name: jwt-auth-probe\n"
-    }
-  });
 }
 
 async function closeServer(server: Server): Promise<void> {

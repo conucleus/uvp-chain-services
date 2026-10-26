@@ -12,7 +12,6 @@ import {
   ANVIL_DEFAULT_PRIVATE_KEYS,
 } from "./anvil-defaults.js";
 import { storeAuthUrlEvidenceFailure } from "./store-auth-evidence.js";
-import type { TimerKeeperConfig } from "../timer-keeper/types.js";
 
 export type FinalityAnchor = "finalized" | "confirmations";
 
@@ -109,14 +108,6 @@ export interface ReconcileConfig {
   readonly txTimeoutMs: number;
 }
 
-export interface DockAutomationConfig {
-  readonly enabled: boolean;
-  readonly pollIntervalMs: number;
-  readonly maxCandidatesPerRun: number;
-  readonly maxGasPerTx?: bigint;
-  readonly redeliveryWindowMs: number;
-}
-
 export interface EvidenceStorageConfig {
   readonly adapter: "local" | "rehearsal-object" | "s3";
   readonly localDir?: string;
@@ -195,8 +186,6 @@ export interface ChainServicesConfig {
   readonly productBff: ProductBffConfig;
   readonly operatorRoles: OperatorRoleConfig;
   readonly reconcile: ReconcileConfig;
-  readonly dockAutomation: DockAutomationConfig;
-  readonly timerKeeper: TimerKeeperConfig;
   readonly evidenceStorage: EvidenceStorageConfig;
   readonly notifications?: NotificationsConfig;
   readonly orderBirth?: OrderBirthConfig;
@@ -242,7 +231,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     env,
     "UVP_PRODUCT_BFF_CREATOR_ADDRESS",
   );
-  const timerKeeperAddress = optionalAddressEnv(env, "UVP_TIMER_KEEPER_ADDRESS");
   const broadcastMaxRetry = parseInteger(env, "BROADCAST_MAX_RETRY_ATTEMPTS", 3);
 
   const config: ChainServicesConfig = {
@@ -312,44 +300,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
       pollIntervalMs: parseInteger(env, "RECONCILE_POLL_INTERVAL_MS", 5_000),
       txTimeoutMs: parseInteger(env, "RECONCILE_TX_TIMEOUT_MS", 30 * 60 * 1000),
     },
-    dockAutomation: {
-      enabled: parseBoolean(
-        env,
-        "UVP_DOCK_AUTOMATION_ENABLED",
-        false,
-      ),
-      pollIntervalMs: parseInteger(env, "UVP_DOCK_AUTOMATION_POLL_INTERVAL_MS", 5_000),
-      maxCandidatesPerRun: parseInteger(
-        env,
-        "UVP_DOCK_AUTOMATION_MAX_CANDIDATES_PER_RUN",
-        4,
-      ),
-      ...optionalGasCap(env, "UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX", 500_000n),
-      redeliveryWindowMs: parseInteger(
-        env,
-        "UVP_DOCK_AUTOMATION_REDELIVERY_WINDOW_MS",
-        120_000,
-      ),
-    },
-    timerKeeper: validateTimerKeeperConfig({
-      enabled: parseBoolean(env, "UVP_TIMER_KEEPER_ENABLED", false),
-      pollIntervalMs: parseInteger(env, "UVP_TIMER_KEEPER_POLL_INTERVAL_MS", 5_000),
-      maxCandidatesPerRun: parseInteger(
-        env,
-        "UVP_TIMER_KEEPER_MAX_CANDIDATES_PER_RUN",
-        4,
-      ),
-      ...optionalGasCap(env, "UVP_TIMER_KEEPER_MAX_GAS_PER_TX", 500_000n),
-      redeliveryWindowMs: parseInteger(
-        env,
-        "UVP_TIMER_KEEPER_REDELIVERY_WINDOW_MS",
-        120_000,
-      ),
-      privateKeyEnv:
-        optionalEnv(env, "UVP_TIMER_KEEPER_PRIVATE_KEY_ENV") ??
-        "UVP_TIMER_KEEPER_PRIVATE_KEY",
-      ...(timerKeeperAddress ? { expectedAddress: timerKeeperAddress } : {}),
-    }),
     evidenceStorage: parseEvidenceStorageConfig(env),
     notifications: parseNotificationsConfig(env),
     ...(orderBirth ? { orderBirth } : {}),
@@ -394,23 +344,6 @@ interface ParsedAddressManifest {
   readonly contracts: Readonly<Record<string, Address>>;
   readonly stateMachineDeployments: readonly StateMachineDeploymentConfig[];
   readonly activeDeploymentId?: Hex;
-}
-
-function validateTimerKeeperConfig(config: TimerKeeperConfig): TimerKeeperConfig {
-  if (!config.enabled) {
-    return config;
-  }
-  if (config.maxCandidatesPerRun <= 0) {
-    throw new ConfigError(
-      "UVP_TIMER_KEEPER_MAX_CANDIDATES_PER_RUN must be positive when UVP_TIMER_KEEPER_ENABLED=true (0 silently disables every run)"
-    );
-  }
-  if (config.redeliveryWindowMs <= 0) {
-    throw new ConfigError(
-      "UVP_TIMER_KEEPER_REDELIVERY_WINDOW_MS must be positive when UVP_TIMER_KEEPER_ENABLED=true (0 disables deduplication and re-broadcasts every run)"
-    );
-  }
-  return config;
 }
 
 function optionalEnv(env: Env, name: string): string | undefined {
@@ -913,20 +846,6 @@ function parseBigIntValue(env: Env, name: string, fallback: bigint): bigint {
     }
     throw new ConfigError(`${name} must be parseable as bigint`);
   }
-}
-
-function optionalGasCap(
-  env: Env,
-  name: string,
-  fallback: bigint,
-): { readonly maxGasPerTx: bigint } {
-  const value = parseBigIntValue(env, name, fallback);
-  if (value <= 0n) {
-    throw new ConfigError(
-      `${name} must be a positive integer; unset it to fall back to the default cap of ${fallback}`,
-    );
-  }
-  return { maxGasPerTx: value };
 }
 
 function parseGovernanceConfig(
@@ -1455,7 +1374,6 @@ function validateProductionSafety(
     config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
-    config.timerKeeper.privateKeyEnv,
   ]);
   for (const envName of privateKeyEnvNames) {
     const privateKey = optionalEnv(env, envName)?.toLowerCase();
@@ -1776,7 +1694,6 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
     config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
-    config.timerKeeper.privateKeyEnv,
   ]);
   for (const envName of privateKeyEnvNames) {
     const privateKey = optionalEnv(env, envName)?.toLowerCase();
@@ -1910,7 +1827,6 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
     config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
     config.operatorRoles.deployerPrivateKeyEnv,
-    config.timerKeeper.privateKeyEnv,
   ]);
   for (const envName of privateKeyEnvNames) {
     const privateKey = optionalEnv(env, envName)?.toLowerCase();

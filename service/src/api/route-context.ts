@@ -32,44 +32,10 @@ import type {
   StageResourcePatchBroadcastAdapter
 } from "../stage-patches/index.js";
 import type {
-  NotificationService,
-  SupplierNotificationProfileConfigService
-} from "../notifications/index.js";
-import type {
-  StoreConsoleService
-} from "../store/console/service.js";
-import type {
-  StoreAuditStore
-} from "../store/console/audit.js";
-import type {
   StoreIdentityProvider
 } from "../store/console/access.js";
-import type {
-  StoreDockingSessionStore,
-  StoreDockingService
-} from "../store/console/docking.js";
-import type {
-  StoreRuntimeService
-} from "../store/console/runtime.js";
-import type {
-  StoreZhixuDraftStore,
-  StoreZhixuDraftWorkflowService
-} from "../store/console/zhixu-drafts.js";
-import type { PlanArtifactRecorder } from "../projection/plan-artifacts.js";
-import type {
-  StoreZhixuVersionMetadataStore,
-  StoreZhixuVersionService
-} from "../store/console/version.js";
-import type { StoreSupplierMetadataStore, StoreSupplierService } from "../store/suppliers/service.js";
-import type {
-  StoreEntityRegistrationService,
-  StoreEntityRegistrationStore
-} from "../store/registration/index.js";
 import type { StoreSessionService, StoreWalletSessionStore } from "../store/sessions/index.js";
-import type { StoreDecorationService, StoreZhixuDecorationStore, StorePublisherDelegationStore } from "../store/decoration/index.js";
 import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
-import type { ListingAnchorChainView, StoreListingService, StoreListingStore } from "../store/listings/index.js";
-import type { StoreJoinService, StoreJoinApplicationStore } from "../store/join/index.js";
 import type {
   OrderBirthPort,
   OrderTriggerPort,
@@ -77,7 +43,6 @@ import type {
   OrderStore,
   PublishedPlanProvider,
 } from "../order/index.js";
-import type { TimerKeeperRunSummary } from "../timer-keeper/types.js";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
 export interface ApiRequest {
@@ -137,35 +102,15 @@ export interface CreateApiRouterOptions {
   readonly configDiagnostics?: ConfigDiagnostics;
   readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
   readonly reconcileDiagnostics?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
-  readonly timerKeeperDiagnostics?: TimerKeeperRunSummary | (() => TimerKeeperRunSummary | undefined);
   readonly evidenceStorage?: EvidenceStorage;
   readonly evidenceRuntimeEnvironment?: ChainServicesRuntimeEnv;
-  readonly notificationService: NotificationService;
-  readonly supplierNotificationConfigService: SupplierNotificationProfileConfigService;
-  readonly storeZhixuDraftStore: StoreZhixuDraftStore;
-  readonly storeZhixuDraftWorkflowService?: StoreZhixuDraftWorkflowService;
-  readonly recordPlanArtifact?: PlanArtifactRecorder;
   readonly productSchemaResolver?: ProductSchemaResolver;
-  readonly storeZhixuVersionMetadataStore: StoreZhixuVersionMetadataStore;
-  readonly storeDockingSessionStore: StoreDockingSessionStore;
-  readonly storeSupplierMetadataStore: StoreSupplierMetadataStore;
-  readonly storeEntityRegistrationStore: StoreEntityRegistrationStore;
-  readonly storeEntityRegistrationService?: StoreEntityRegistrationService;
-  readonly storeAuditStore: StoreAuditStore;
   readonly storeIdentityProvider?: StoreIdentityProvider;
   readonly storeAuthConfig?: StoreAuthConfig;
   readonly storeWalletSessionStore: StoreWalletSessionStore;
   readonly storeSessionService?: StoreSessionService;
-  readonly storeDecorationStore: StoreZhixuDecorationStore;
-  readonly storePublisherDelegationStore: StorePublisherDelegationStore;
-  readonly storeDecorationService?: StoreDecorationService;
   readonly identityDescriptorSnapshots: StoreIdentityDescriptorSnapshotStore;
   readonly descriptorPublicBaseUrl?: string;
-  readonly storeListingStore: StoreListingStore;
-  readonly storeListingService?: StoreListingService;
-  readonly listingAnchorChainView?: ListingAnchorChainView;
-  readonly storeJoinService?: StoreJoinService;
-  readonly storeJoinApplicationStore: StoreJoinApplicationStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   readonly opsConsoleAdminIds?: readonly string[];
   readonly governanceAdminIds?: readonly string[];
@@ -199,23 +144,10 @@ export interface ApiRouteContext {
   readonly productService: ProductService;
   readonly productBffService: ProductBffService;
   readonly orderService: OrderService;
-  readonly storeConsoleService: StoreConsoleService;
-  readonly storeDockingService: StoreDockingService;
-  readonly storeRuntimeService: StoreRuntimeService;
-  readonly storeZhixuVersionService: StoreZhixuVersionService;
-  readonly storeZhixuDraftWorkflowService: StoreZhixuDraftWorkflowService;
-  readonly storeSupplierService: StoreSupplierService;
-  readonly storeEntityRegistrationService: StoreEntityRegistrationService;
-  readonly storeAuditStore: StoreAuditStore;
   readonly storeIdentityProvider: StoreIdentityProvider;
   readonly sessionService?: StoreSessionService;
-  readonly decorationService?: StoreDecorationService;
-  readonly listingService?: StoreListingService;
-  readonly joinService?: StoreJoinService;
   readonly identityDescriptorSnapshots: StoreIdentityDescriptorSnapshotStore;
   readonly governanceService: GovernanceService;
-  readonly notificationService: NotificationService;
-  readonly supplierNotificationConfigService: SupplierNotificationProfileConfigService;
   readonly evidenceService: EvidenceService;
   readonly submissionService: ProductSubmissionService;
   readonly productStageExecutorPatchService: ProductStageExecutorPatchService;

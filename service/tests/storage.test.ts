@@ -18,13 +18,6 @@ import type {
   GovernanceReviewDTO,
   IdentityTxLogDTO,
 } from "../src/governance/types.js";
-import type { StoreDockingSessionDTO } from "../src/store/console/docking.js";
-import type { StoreZhixuDraftRecord } from "../src/store/console/zhixu-drafts.js";
-import type { StoreZhixuVersionRecord } from "../src/store/console/version.js";
-import type {
-  StoreSupplierAuditRecord,
-  StoreSupplierMetadataRecord,
-} from "../src/store/suppliers/index.js";
 import { submissionStatusLabel } from "../src/submissions/service.js";
 import type {
   PreparedSubmissionRecord,
@@ -181,7 +174,7 @@ describe("postgres durable storage", () => {
     ).resolves.toHaveLength(2);
   });
 
-  it("assembles and persists notification state and broadcast dedupe stores in the Postgres factory wiring", async () => {
+  it("assembles and persists the broadcast dedupe store in the Postgres factory wiring", async () => {
     const databaseUrl = await createPostgresTestDatabase();
     const factoryStores = createChainServicesStores({
       database: {
@@ -193,23 +186,7 @@ describe("postgres durable storage", () => {
     });
     stores.push(factoryStores);
 
-    expect(factoryStores.notificationStateStore).toBeDefined();
     expect(factoryStores.broadcastDedupeStore).toBeDefined();
-
-    const notificationState = factoryStores.notificationStateStore!;
-    const marked = await notificationState.markRead({
-      participantKey: "supplier:postgres-1",
-      notificationId: planId as Hex,
-      readAt: "2026-04-28T00:00:00.000Z",
-    });
-    expect(marked.readAt).toBe("2026-04-28T00:00:00.000Z");
-    await expect(
-      notificationState.getReadState("supplier:postgres-1", planId as Hex),
-    ).resolves.toMatchObject({
-      participantKey: "supplier:postgres-1",
-      notificationId: planId,
-      readAt: "2026-04-28T00:00:00.000Z",
-    });
 
     const dedupe = factoryStores.broadcastDedupeStore!;
     const dedupeTxHash =
@@ -252,14 +229,6 @@ describe("postgres durable storage", () => {
     const submission = productSubmission(prepared);
     const review = governanceReview();
     const log = identityTxLog();
-    const storeDraft = storeZhixuDraftRecord();
-    const storeVersion = storeZhixuVersionRecord("v-postgres", "active", {
-      cutoverAt: "2026-04-28T00:00:07.000Z",
-      cutoverReason: "Postgres durable Store metadata test.",
-    });
-    const storeSupplier = storeSupplierMetadataRecord();
-    const storeAudit = storeSupplierAuditRecord(storeSupplier);
-    const storeDocking = storeDockingSession();
 
     await first.projectionStore.resetFromEvents({
       deploymentBlock: 0n,
@@ -309,11 +278,6 @@ describe("postgres durable storage", () => {
     );
     await first.governanceStore.putReview(review);
     await first.governanceStore.appendIdentityTxLog(log);
-    await first.storeZhixuDraftStore.createDraft(storeDraft);
-    await first.storeZhixuVersionMetadataStore.upsertVersion(storeVersion);
-    await first.storeSupplierMetadataStore.putSupplier(storeSupplier);
-    await first.storeSupplierMetadataStore.appendAudit(storeAudit);
-    await first.storeDockingSessionStore.createSession(storeDocking);
     await first.close();
     stores.splice(stores.indexOf(first), 1);
 
@@ -382,43 +346,6 @@ describe("postgres durable storage", () => {
     await expect(
       reopened.governanceStore.getTxLog(log.txLogId),
     ).resolves.toMatchObject(log);
-    await expect(
-      reopened.storeZhixuDraftStore.getDraft(storeDraft.draftId),
-    ).resolves.toMatchObject({
-      draftId: storeDraft.draftId,
-      status: "compiled",
-    });
-    await expect(
-      reopened.storeZhixuVersionMetadataStore.getVersion(
-        storeVersion.seriesId,
-        storeVersion.versionId,
-      ),
-    ).resolves.toMatchObject({
-      versionId: storeVersion.versionId,
-      status: "active",
-      cutoverReason: "Postgres durable Store metadata test.",
-    });
-    await expect(
-      reopened.storeSupplierMetadataStore.findSupplierBySubjectId(
-        storeSupplier.supplierSubjectId,
-      ),
-    ).resolves.toMatchObject({
-      supplierId: storeSupplier.supplierId,
-      supportedRoleSlotIds: ["slot-b", "slot-c"],
-    });
-    await expect(
-      reopened.storeSupplierMetadataStore.listAudits(
-        storeSupplier.supplierId,
-      ),
-    ).resolves.toMatchObject([
-      { auditId: storeAudit.auditId, action: "supported_slots_updated" },
-    ]);
-    await expect(
-      reopened.storeDockingSessionStore.getSession(storeDocking.sessionId),
-    ).resolves.toMatchObject({
-      sessionId: storeDocking.sessionId,
-      status: "valid",
-    });
   });
 });
 
@@ -797,190 +724,6 @@ function identityTxLog(): IdentityTxLogDTO {
     },
     createdAt: "2026-04-28T00:00:00.000Z",
     updatedAt: "2026-04-28T00:00:00.000Z",
-  };
-}
-
-function storeZhixuDraftRecord(): StoreZhixuDraftRecord {
-  return {
-    draftId: "store_draft_durable",
-    sourceKind: "zhixu_yaml",
-    content:
-      "apiVersion: uvp/v0\nkind: Zhixu\nmetadata:\n  name: durable-store\n",
-    publisherAddress: "0x1234567890123456789012345678901234567890",
-    status: "compiled",
-    zhixuId: "zhixu-store-durable",
-    title: "Durable Store Zhixu",
-    maintainer: "Store team",
-    publicSummary: "Durable metadata test draft.",
-    tags: ["durable", "store"],
-    compilePreview: {
-      planId,
-      planHash,
-      artifactHash,
-      stageCount: 2,
-      roleSlotCount: 2,
-      sourceCount: 1,
-      signalCount: 2,
-    },
-    productSchema: {
-      schemaVersion: "store-product-schema.v1",
-      version: 1,
-      zhixuId: "zhixu-store-durable",
-      title: "Durable Store Zhixu",
-      maintainer: "Store team",
-      planId,
-      planHash,
-      artifactHash,
-      roleSlots: [
-        {
-          slotId: "intake",
-          title: "Intake executor",
-          label: "Intake executor",
-          duty: "Submit intake evidence.",
-          evidence: ["Intake evidence"],
-          status: "required",
-          tone: "info",
-          required: true,
-          performanceSlotLabel: "Intake executor",
-          businessPersonaLabels: ["Slot-a ops"],
-        },
-      ],
-      businessPersonaLabels: ["Slot-a ops"],
-      stages: [
-        {
-          stageId: "intake",
-          index: 0,
-          name: "Intake",
-          evidence: ["Intake evidence"],
-          ownerRole: "intake",
-          status: "pending",
-        },
-      ],
-      schemaHash: "0xstoreproductschema",
-      validation: {
-        ok: true,
-        status: "explicit",
-        issues: [],
-      },
-      createdAt: "2026-04-28T00:00:00.000Z",
-      updatedAt: "2026-04-28T00:00:01.000Z",
-    },
-    reviewId: "review_store_draft",
-    errors: [],
-    reviewStatus: "approved_for_broadcast",
-    createdAt: "2026-04-28T00:00:00.000Z",
-    updatedAt: "2026-04-28T00:00:01.000Z",
-  };
-}
-
-function storeZhixuVersionRecord(
-  versionId: string,
-  status: StoreZhixuVersionRecord["status"],
-  overrides: Partial<StoreZhixuVersionRecord> = {},
-): StoreZhixuVersionRecord {
-  return {
-    versionId,
-    zhixuId: "zhixu-store-durable",
-    seriesId: "zhixu-store-durable",
-    versionLabel: versionId,
-    status,
-    planId: planId as Hex,
-    planHash: planHash as Hex,
-    artifactHash: artifactHash as Hex,
-    createdAt:
-      versionId === "v1"
-        ? "2026-04-28T00:00:00.000Z"
-        : "2026-04-28T00:00:01.000Z",
-    ...overrides,
-  };
-}
-
-function storeSupplierMetadataRecord(): StoreSupplierMetadataRecord {
-  return {
-    supplierId: "supplier-store-durable",
-    supplierSubjectId:
-      "0x0000000000000000000000000000000000000000000000000000000000003301",
-    displayName: "Store Durable Supplier",
-    wallet: slotB as Address,
-    supportedRoleSlotIds: ["slot-b", "slot-c"],
-    supportedStageIds: ["shipment", "example"],
-    registryAddresses: [registryAddress],
-    reviewStatus: "approved_for_broadcast",
-    metadataURI: "https://store.example/suppliers/durable",
-    createdAt: "2026-04-28T00:00:00.000Z",
-    updatedAt: "2026-04-28T00:00:04.000Z",
-  };
-}
-
-function storeSupplierAuditRecord(
-  supplier: StoreSupplierMetadataRecord,
-): StoreSupplierAuditRecord {
-  return {
-    auditId: "audit_000001",
-    supplierId: supplier.supplierId,
-    supplierSubjectId: supplier.supplierSubjectId,
-    action: "supported_slots_updated",
-    actor: "operator-1",
-    beforeSupportedRoleSlotIds: ["slot-c"],
-    afterSupportedRoleSlotIds: ["slot-c", "slot-b"],
-    beforeSupportedStageIds: ["shipment"],
-    afterSupportedStageIds: ["example", "shipment"],
-    reviewStatus: "approved_for_broadcast",
-    createdAt: "2026-04-28T00:00:05.000Z",
-  };
-}
-
-function storeDockingSession(): StoreDockingSessionDTO {
-  return {
-    sessionId: "dock_durable",
-    status: "valid",
-    createdBy: "0x1234567890123456789012345678901234567890",
-    source: {
-      zhixuId: "source-zhixu",
-      title: "Source Zhixu",
-      lifecycleStatus: "active",
-      publicationStatus: "published",
-      planId,
-      planHash,
-    },
-    target: {
-      zhixuId: "target-zhixu",
-      title: "Target Zhixu",
-      lifecycleStatus: "active",
-      publicationStatus: "published",
-      planId:
-        "0x0000000000000000000000000000000000000000000000000000000000000202",
-      planHash:
-        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    },
-    interfaces: [
-      {
-        interfaceName: "fulfillment_service",
-        orderModes: ["new"],
-        inputs: [{ portName: "execute", label: "执行入口", hook: "intake#EXECUTE" }],
-        outputs: [{ portName: "completed", label: "完成", signal: "target::intake.cmp" }],
-      },
-    ],
-    selectedInterfaceName: "fulfillment_service",
-    orderMode: "new",
-    candidateMappings: [],
-    draftSignalMap: [
-      {
-        entryId: "map_1",
-        bindingKind: "input",
-        sourceSignalId: "source.done",
-        targetSignalId: "target.start",
-        note: "Durable draft map",
-      },
-    ],
-    validation: {
-      ok: true,
-      errors: [],
-      checkedAt: "2026-04-28T00:00:06.000Z",
-      nonPublishing: true,
-    },
-    createdAt: "2026-04-28T00:00:00.000Z",
-    updatedAt: "2026-04-28T00:00:06.000Z",
   };
 }
 

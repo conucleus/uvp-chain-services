@@ -10,9 +10,6 @@ import { createOrderService } from "../order/index.js";
 import type { ProductBffStore } from "../product/query/bff/store.js";
 import { createEvidenceService, LocalEvidenceStorage } from "../evidence/index.js";
 import { createGovernanceService } from "../governance/index.js";
-import { createStoreZhixuDraftWorkflowService } from "../store/console/zhixu-drafts.js";
-import { createStoreRuntimeService } from "../store/console/runtime.js";
-import { createStoreZhixuVersionService } from "../store/console/version.js";
 import {
   createProductSubmissionService,
   type SubmissionAuthorizationAdapter,
@@ -25,29 +22,18 @@ import {
 } from "../stage-patches/index.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { buildOperationalDiagnostics } from "./diagnostics.js";
-import { createStoreConsoleService } from "../store/console/service.js";
 import { createStoreIdentityProvider } from "../store/console/access.js";
-import { createStoreDockingService } from "../store/console/docking.js";
-import { createStoreSupplierService } from "../store/suppliers/service.js";
-import { createStoreEntityRegistrationService } from "../store/registration/index.js";
 import {
   createStoreSessionService,
   createWalletSessionStoreIdentityProvider
 } from "../store/sessions/index.js";
-import { createStoreDecorationService } from "../store/decoration/index.js";
-import { createStoreListingService } from "../store/listings/index.js";
-import { createStoreJoinService } from "../store/join/index.js";
 import { createStoreAuthRouteModule } from "./routes/store-auth.js";
-import { createStoreDecorationRouteModule } from "./routes/store-decoration.js";
-import { createStoreJoinRouteModule } from "./routes/store-join.js";
-import { createStoreListingsRouteModule } from "./routes/store-listings.js";
 import type { ApiRouteContext, ApiRouter, CreateApiRouterOptions } from "./route-context.js";
 import type { RouteModule } from "./route-module.js";
 import { createDiagnosticsRouteModule } from "./routes/diagnostics.js";
 import { createAdminOpsRouteModule } from "./routes/admin-ops.js";
 import { createEvidenceRouteModule } from "./routes/evidence.js";
 import { createGovernanceRouteModule } from "./routes/governance.js";
-import { createNotificationsRouteModule } from "./routes/notifications.js";
 import { createV1OrderGoneRouteModule } from "./routes/v1-gone.js";
 import { createProductOrderRouteModule } from "./routes/product-order.js";
 import { createProductSignalsRouteModule } from "./routes/product-signals.js";
@@ -55,10 +41,6 @@ import { createProductReadKernelRouteModule } from "./routes/product-read-kernel
 import { createResourceResolver } from "../resources/resolver.js";
 import { createProductTasksRouteModule } from "./routes/product-tasks.js";
 import { createProductReadRouteModule } from "./routes/product-read.js";
-import { createProductRegistrationRouteModule } from "./routes/product-registration.js";
-import { createStoreConsoleRouteModule } from "./routes/store-console.js";
-import { createStoreDockingRouteModule } from "./routes/store-docking.js";
-import { createStoreSuppliersRouteModule } from "./routes/store-suppliers.js";
 import { createSubmissionsRouteModule } from "./routes/submissions.js";
 import { createStagePatchRouteModule } from "./routes/stage-patches.js";
 
@@ -85,48 +67,17 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       ? { adminTokenHashes: options.governanceAdminTokenHashes }
       : {})
   };
-  const storeZhixuDraftStore = options.storeZhixuDraftStore;
-  const storeZhixuVersionMetadataStore = options.storeZhixuVersionMetadataStore;
-  const storeSupplierMetadataStore = options.storeSupplierMetadataStore;
-  const storeEntityRegistrationService = options.storeEntityRegistrationService ??
-    createStoreEntityRegistrationService({
-      store: options.storeEntityRegistrationStore,
-      ...(options.now ? { now: options.now } : {})
-    });
-  const storeDockingSessionStore = options.storeDockingSessionStore;
-  const storeAuditStore = options.storeAuditStore;
-  const productSchemaResolver = options.productSchemaResolver ?? {
-    getProductSchemaByPlan: (planId: string, planHash: string) =>
-      storeZhixuDraftStore.findProductSchemaByPlan(planId, planHash)
-  };
-  const productService = createProductService(store, { productSchemaResolver });
-  const storeConsoleService = createStoreConsoleService({
-    productService,
+  const productSchemaResolver = options.productSchemaResolver;
+  const productService = createProductService(
     store,
-    supplierMetadataStore: storeSupplierMetadataStore
-  });
-  const storeDockingService = createStoreDockingService({
-    productService,
-    sessionStore: storeDockingSessionStore,
-    ...(options.now ? { now: options.now } : {})
-  });
+    productSchemaResolver ? { productSchemaResolver } : {},
+  );
   const identityDescriptorSnapshots = options.identityDescriptorSnapshots;
   const governanceService = options.governanceService ?? createGovernanceService({
     store: options.governanceStore,
     audit,
     descriptorSnapshotStore: identityDescriptorSnapshots,
     ...(options.descriptorPublicBaseUrl ? { descriptorPublicBaseUrl: options.descriptorPublicBaseUrl } : {})
-  });
-  const storeRuntimeService = createStoreRuntimeService({
-    productService,
-    store,
-    ...(options.now ? { now: options.now } : {})
-  });
-  const storeZhixuVersionService = createStoreZhixuVersionService({
-    productService,
-    projectionStore: store,
-    metadataStore: storeZhixuVersionMetadataStore,
-    ...(options.now ? { now: options.now } : {})
   });
   const submissionAuthorization = projectionSubmissionAuthorization(store);
   const resolveDraftOrder = productBffStoreDraftOrderResolver(options.productBffStore);
@@ -135,7 +86,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const productBffService = createProductBffService({
     productService,
     store: productBffStore,
-    versionResolver: storeZhixuVersionService,
     ...(options.now ? { now: options.now } : {})
   });
   const defaultEvidenceStorage = options.evidenceStorage ?? (options.evidenceService ? undefined : new LocalEvidenceStorage());
@@ -148,22 +98,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       audit
     })
   );
-  const storeZhixuDraftWorkflowService = options.storeZhixuDraftWorkflowService ??
-    createStoreZhixuDraftWorkflowService({
-      draftStore: storeZhixuDraftStore,
-      governanceService,
-      projectionStore: store,
-      ...(options.recordPlanArtifact ? { recordPlanArtifact: options.recordPlanArtifact } : {}),
-      ...(options.now ? { now: options.now } : {})
-    });
-  const storeSupplierService = createStoreSupplierService({
-    productService,
-    store,
-    governanceService,
-    metadataStore: storeSupplierMetadataStore
-  });
-  const notificationService = options.notificationService;
-  const supplierNotificationConfigService = options.supplierNotificationConfigService;
   const submissionChainId = options.submissionChainId;
   if (submissionChainId === undefined) {
     throw new Error("submissionChainId is required to create the product submission service");
@@ -190,7 +124,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const stageExecutorPatchVerifyingContract = options.stageExecutorPatchVerifyingContract;
   const productStageExecutorPatchService = options.productStageExecutorPatchService ?? createProductStageExecutorPatchService({
     store,
-    productSchemaResolver,
+    ...(productSchemaResolver ? { productSchemaResolver } : {}),
     ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
     ...(stageExecutorPatchChainId !== undefined ? { chainId: stageExecutorPatchChainId } : {}),
     ...(stageExecutorPatchVerifyingContract ? { stagePatchModuleAddress: stageExecutorPatchVerifyingContract } : {}),
@@ -203,7 +137,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   const stageResourcePatchVerifyingContract = options.stageResourcePatchVerifyingContract;
   const productStageResourcePatchService = options.productStageResourcePatchService ?? createProductStageResourcePatchService({
     store,
-    productSchemaResolver,
+    ...(productSchemaResolver ? { productSchemaResolver } : {}),
     ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
     ...(stageResourcePatchChainId !== undefined ? { chainId: stageResourcePatchChainId } : {}),
     ...(stageResourcePatchVerifyingContract ? { stagePatchModuleAddress: stageResourcePatchVerifyingContract } : {}),
@@ -219,15 +153,8 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     runtimeEnvironment: productRuntimeEnvironment,
     ...(options.indexerDiagnostics ? { indexer: options.indexerDiagnostics } : {}),
     ...(options.reconcileDiagnostics ? { reconcile: options.reconcileDiagnostics } : {}),
-    ...(options.timerKeeperDiagnostics ? { timerKeeper: options.timerKeeperDiagnostics } : {}),
     submissionStore: options.submissionStore,
     governanceStore: options.governanceStore,
-    storeMetadataStores: {
-      draft: storeZhixuDraftStore,
-      version: storeZhixuVersionMetadataStore,
-      supplier: storeSupplierMetadataStore,
-      docking: storeDockingSessionStore
-    },
     ...(defaultEvidenceStorage ? { evidenceStorage: defaultEvidenceStorage } : {}),
     evidenceRuntimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
   });
@@ -252,44 +179,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     sessionService,
     ...(storeAuthConfig?.walletSession ? { config: storeAuthConfig.walletSession } : {}),
     runtimeEnvironment: productRuntimeEnvironment
-  });
-  const storeDecorationService = options.storeDecorationService ?? createStoreDecorationService({
-    projectionStore: store,
-    decorationStore: options.storeDecorationStore,
-    delegationStore: options.storePublisherDelegationStore,
-    ...(options.now ? { now: options.now } : {}),
-    audit: (event) => recordStoreDomainAuditEvent(audit, "store.decoration", event.action, event)
-  });
-  const listingService = options.storeListingService ?? createStoreListingService({
-    projectionStore: store,
-    listingStore: options.storeListingStore,
-    ...(options.listingAnchorChainView ? { chainView: options.listingAnchorChainView } : {}),
-    ...(options.now ? { now: options.now } : {}),
-    audit: (event) => recordStoreDomainAuditEvent(audit, "store.listing", event.action, event)
-  });
-  const joinService = options.storeJoinService ?? createStoreJoinService({
-    projectionStore: store,
-    productService,
-    supplierService: storeSupplierService,
-    publisherAccess: storeDecorationService,
-    listingGate: {
-      getListingForPlan: async (planId) => {
-        const detail = await listingService.findListingByPlanId(planId);
-        if (!detail) {
-          return undefined;
-        }
-        return {
-          status: detail.listing.status,
-          anchorVerification: {
-            status: detail.anchorVerification.status,
-            ...(detail.anchorVerification.chainReadFailed === true ? { chainReadFailed: true } : {})
-          }
-        };
-      }
-    },
-    joinStore: options.storeJoinApplicationStore,
-    ...(options.now ? { now: options.now } : {}),
-    audit: (event) => recordStoreDomainAuditEvent(audit, "store.join", event.action, event)
   });
   const orderStore = options.orderStore;
   const orderService = options.orderService ?? createOrderService({
@@ -318,23 +207,10 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     productService,
     productBffService,
     orderService,
-    storeConsoleService,
-    storeDockingService,
-    storeRuntimeService,
-    storeZhixuVersionService,
-    storeZhixuDraftWorkflowService,
-    storeSupplierService,
-    storeEntityRegistrationService,
-    storeAuditStore,
     storeIdentityProvider,
     sessionService,
-    decorationService: storeDecorationService,
-    listingService,
-    joinService,
     identityDescriptorSnapshots,
     governanceService,
-    notificationService,
-    supplierNotificationConfigService,
     evidenceService,
     submissionService,
     productStageExecutorPatchService,
@@ -353,14 +229,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createAdminOpsRouteModule(),
     createV1OrderGoneRouteModule(),
     createStoreAuthRouteModule({ sessionService }),
-    createStoreConsoleRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
-    createStoreDecorationRouteModule({ decorationService: storeDecorationService }),
-    createStoreJoinRouteModule({ joinService }),
-    createStoreListingsRouteModule({ listingService }),
-    createStoreDockingRouteModule(),
-    createStoreSuppliersRouteModule(),
     createGovernanceRouteModule(),
-    createNotificationsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createEvidenceRouteModule({
       runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
     }),
@@ -379,7 +248,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
       ...(options.orderOperatorWallets !== undefined ? { operatorWallets: options.orderOperatorWallets } : {}),
     }),
     createProductOrderRouteModule(),
-    createProductRegistrationRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
     createProductReadRouteModule({ runtimeEnvironment: productRuntimeEnvironment })
   ];
 
@@ -566,25 +434,4 @@ function priorSubmissionChainProbeFromStore(
       return { outcome: "unknown" };
     }
   };
-}
-
-async function recordStoreDomainAuditEvent(
-  audit: AuditSink,
-  type: "store.join" | "store.listing" | "store.decoration",
-  action: string,
-  event: {
-    readonly outcome: "succeeded" | "blocked";
-    readonly errorCode?: string;
-    readonly createdAt: string;
-  }
-): Promise<void> {
-  const { outcome, errorCode, createdAt, ...subject } = event;
-  await audit.record({
-    type,
-    action,
-    outcome,
-    ...(errorCode ? { errorCode } : {}),
-    createdAt,
-    subject
-  });
 }

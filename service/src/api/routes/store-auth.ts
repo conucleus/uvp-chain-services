@@ -4,7 +4,7 @@ import {
   StoreSessionServiceError,
   type StoreSessionService
 } from "../../store/sessions/index.js";
-import type { StoreAccessState } from "../../store/console/access.js";
+import type { StoreAccessState, StoreSessionDTO } from "../../store/console/access.js";
 import { readApiHeader, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 import type { ResolveWalletSessionResult } from "../../store/sessions/index.js";
@@ -14,6 +14,13 @@ export function createStoreAuthRouteModule(options: {
 }): RouteModule {
   return {
     async handle(request, context) {
+      if (request.pathname === "/store/session" && request.method === "GET") {
+        const access = await context.storeIdentityProvider.resolve(request.headers);
+        return {
+          status: 200,
+          body: { session: sessionFromAccess(access) }
+        };
+      }
       if (!request.pathname.startsWith("/store/auth")) {
         return undefined;
       }
@@ -150,6 +157,19 @@ export function accessSummary(access: StoreAccessState): {
     authMode: access.authMode,
     ...(access.anchoredAddress ? { anchoredAddress: access.anchoredAddress } : {}),
     ...(access.anchorSource ? { anchorSource: access.anchorSource } : {}),
+    canWrite: access.canWrite,
+    canAdmin: access.canAdmin
+  };
+}
+
+function sessionFromAccess(access: StoreAccessState): StoreSessionDTO {
+  return {
+    authenticated: access.level !== "anonymous_read",
+    ...(access.principalId ? { principalId: access.principalId } : {}),
+    ...(access.displayName ? { displayName: access.displayName } : {}),
+    accessLevel: access.level,
+    roles: access.roles,
+    authMode: access.authMode,
     canWrite: access.canWrite,
     canAdmin: access.canAdmin
   };

@@ -76,8 +76,6 @@ export interface ConfigDiagnostics {
       readonly configuredCount: number;
     };
   };
-  readonly timerKeeper: PrivateKeyRoleDiagnostics & { readonly enabled: boolean };
-  readonly dockAutomation: { readonly enabled: boolean; readonly routeSourceAssembled: false };
   readonly storage: {
     readonly driver: string;
     readonly durable: boolean;
@@ -282,14 +280,6 @@ export function buildConfigDiagnostics(
       allowedOperatorCount: config.governance.allowedOperators.length
     },
     operatorRoles: operatorRoleDiagnostics(config, env),
-    timerKeeper: {
-      enabled: config.timerKeeper.enabled,
-      ...privateKeyRoleDiagnostics(config.timerKeeper.privateKeyEnv, env, config.timerKeeper.expectedAddress)
-    },
-    dockAutomation: {
-      enabled: config.dockAutomation.enabled,
-      routeSourceAssembled: false
-    },
     storage: {
       driver: "postgres",
       durable: true,
@@ -394,7 +384,6 @@ function runStaticPreflight(
   }
 
   runProductRegistrationPreflight(config, env, checks, errors);
-  runTimerKeeperPreflight(config, env, checks, errors);
 
   if (config.governance.broadcastEnabled) {
     const identityRegistry = identityRegistryAddress(config.network.contracts);
@@ -1226,42 +1215,6 @@ function runProductRegistrationPreflight(
   }
 }
 
-function runTimerKeeperPreflight(
-  config: ChainServicesConfig,
-  env: Env,
-  checks: ConfigDiagnosticCheck[],
-  errors: string[]
-): void {
-  const envName = config.timerKeeper.privateKeyEnv;
-  const privateKey = env[envName]?.trim();
-  if (!config.timerKeeper.enabled) {
-    skip(checks, "operator.timer_keeper", "timer keeper is disabled");
-    return;
-  }
-  if (!privateKey) {
-    fail(checks, errors, "operator.timer_keeper", `${envName} is required when UVP_TIMER_KEEPER_ENABLED=true`);
-    return;
-  }
-  if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
-    fail(checks, errors, "operator.timer_keeper", `${envName} must be a 32-byte private key`);
-    return;
-  }
-  if (ANVIL_DEFAULT_PRIVATE_KEYS.has(privateKey.toLowerCase())) {
-    fail(checks, errors, "operator.timer_keeper", `${envName} must not use an Anvil default private key`);
-    return;
-  }
-  const address = privateKeyAddress(privateKey, envName);
-  if (!address) {
-    fail(checks, errors, "operator.timer_keeper", `${envName} must derive a valid EVM address`);
-    return;
-  }
-  if (config.timerKeeper.expectedAddress && address !== config.timerKeeper.expectedAddress) {
-    fail(checks, errors, "operator.timer_keeper", `${envName} does not match UVP_TIMER_KEEPER_ADDRESS`);
-    return;
-  }
-  pass(checks, "operator.timer_keeper");
-}
-
 async function runRpcPreflight(
   config: ChainServicesConfig,
   clients: RunConfigPreflightOptions["clients"],
@@ -1631,8 +1584,7 @@ function privateKeyEnvNames(config: ChainServicesConfig): readonly string[] {
     config.relayer.stateMachinePrivateKeyEnv,
     config.governance.signerPrivateKeyEnv,
     config.productBff.registrarPrivateKeyEnv,
-    config.operatorRoles.deployerPrivateKeyEnv,
-    config.timerKeeper.privateKeyEnv
+    config.operatorRoles.deployerPrivateKeyEnv
   ])];
 }
 

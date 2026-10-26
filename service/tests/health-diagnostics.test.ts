@@ -14,7 +14,6 @@ import {
 } from "../src/evidence/index.js";
 import { InMemoryGovernanceStore, type IdentityTxLogDTO } from "../src/governance/index.js";
 import { createApiRouter } from "../src/api/routes.js";
-import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { projectionScopeContractAddress } from "../src/storage/projection-store.js";
 import { createPostgresTestDatabase } from "./postgres.js";
@@ -43,14 +42,8 @@ afterAll(async () => {
 
 function requiredRouterStores() {
   return {
-    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
-    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,
-    storeDecorationStore: stores.storeDecorationStore,
-    storePublisherDelegationStore: stores.storePublisherDelegationStore,
     identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    storeListingStore: stores.storeListingStore,
-    storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
     orderRequirementsStore: stores.orderRequirementsStore,
@@ -59,19 +52,6 @@ function requiredRouterStores() {
     governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
-    notificationService: createNotificationService({
-      store: stores.projectionStore,
-      supplierMetadataStore: stores.storeSupplierMetadataStore,
-      deliveryStore: stores.notificationStateStore,
-      participantReadStateStore: stores.notificationStateStore
-    }),
-    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
-      store: new MemorySupplierNotificationProfileConfigStore()
-    })
   };
 }
 
@@ -140,18 +120,6 @@ describe("ops health diagnostics", () => {
       governanceStore,
       evidenceStorage: localEvidenceStorage(),
       indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 },
-      timerKeeperDiagnostics: {
-        scannedOrders: 1,
-        waitingHooks: 1,
-        pokeCandidates: 1,
-        attempted: 1,
-        submitted: 0,
-        receiptReverted: 1,
-        receiptUnknown: 0,
-        deduplicated: 0,
-        converged: [],
-        skipped: ["poke:0xorder:0xhook:[redacted:error]"]
-      },
       reconcileDiagnostics: {
         enabled: true,
         running: true,
@@ -211,9 +179,6 @@ describe("ops health diagnostics", () => {
           enabled: true,
           running: true,
           lastSummary: { submissionsChecked: 1, governanceLogsChecked: 1 }
-        },
-        timerKeeperRuntime: {
-          lastSummary: { receiptReverted: 1, receiptUnknown: 0, deduplicated: 0 }
         },
         submissions: {
           submissionCount: 1,
@@ -399,17 +364,6 @@ describe("ops health diagnostics", () => {
         finalizedBlock: "12",
         lagBlocks: "2"
       },
-      storeMetadata: {
-        readiness: "ready",
-        stores: {
-          draft: { kind: "postgres", readiness: "ready" },
-          productSchema: { kind: "postgres", readiness: "ready", representedBy: "draft" },
-          version: { kind: "postgres", readiness: "ready" },
-          supplier: { kind: "postgres", readiness: "ready" },
-          supplierAudit: { kind: "postgres", readiness: "ready", representedBy: "supplier" },
-          docking: { kind: "postgres", readiness: "ready" }
-        }
-      },
       recoveryPolicy: {
         actionsAreNonAuthoritative: true,
         canCreateBusinessSignatures: false,
@@ -427,14 +381,6 @@ describe("ops health diagnostics", () => {
           retryableSubmissions: 0,
           deadLetterSubmissions: 0
         },
-        storeMetadata: {
-          readiness: "ready",
-          stores: {
-            productSchema: { representedBy: "draft", kind: "postgres", readiness: "ready" },
-            supplierAudit: { representedBy: "supplier", kind: "postgres", readiness: "ready" },
-            docking: { kind: "postgres", readiness: "ready" }
-          }
-        }
       }
     });
     expect(JSON.stringify(statusResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
@@ -907,21 +853,6 @@ function serverTestConfig(): ChainServicesConfig {
       enabled: false,
       pollIntervalMs: 0,
       txTimeoutMs: 60_000
-    },
-    dockAutomation: {
-      enabled: false,
-      pollIntervalMs: 5_000,
-      maxCandidatesPerRun: 4,
-      maxGasPerTx: 500_000n,
-      redeliveryWindowMs: 120_000
-    },
-    timerKeeper: {
-      enabled: false,
-      pollIntervalMs: 5_000,
-      maxCandidatesPerRun: 4,
-      maxGasPerTx: 500_000n,
-      redeliveryWindowMs: 120_000,
-      privateKeyEnv: "UVP_TIMER_KEEPER_PRIVATE_KEY"
     },
     evidenceStorage: {
       adapter: "local",

@@ -91,6 +91,7 @@ const CLASSIFICATION_SOURCES: readonly string[] = [
   'src/submissions/service.ts',
   'src/stage-patches/broadcast-adapter.ts',
   'src/stage-patches/service.ts',
+  'src/relay/safe-broadcast.ts',
   'src/reconcile/worker.ts',
   'src/governance/adapter.ts',
   'src/governance/service.ts',

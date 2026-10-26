@@ -227,21 +227,6 @@ function testConfig(): ChainServicesConfig {
       adminReviewers: []
     },
     reconcile: { enabled: false, pollIntervalMs: 5000, txTimeoutMs: 30_000 },
-    dockAutomation: {
-      enabled: false,
-      pollIntervalMs: 5000,
-      maxCandidatesPerRun: 4,
-      maxGasPerTx: 500_000n,
-      redeliveryWindowMs: 120_000
-    },
-    timerKeeper: {
-      enabled: false,
-      pollIntervalMs: 5000,
-      maxCandidatesPerRun: 4,
-      maxGasPerTx: 500_000n,
-      redeliveryWindowMs: 120_000,
-      privateKeyEnv: "UVP_TIMER_KEEPER_PRIVATE_KEY"
-    },
     evidenceStorage: { adapter: "local", objectNamespace: "uvp-rehearsal" },
     security: {
       environment: "local",

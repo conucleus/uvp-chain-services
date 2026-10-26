@@ -6,6 +6,7 @@ import type { TxReconcileFields } from "../reconcile/status.js";
 import { redactErrorMessage } from "../security/redaction.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
 import { assertHex, normalizeAddress, normalizeBytes32, type Address, type Hex } from "../shared/types.js";
+import { releaseRelayNonce, reserveRelayNonce } from "../relay/nonce.js";
 import type {
   PreparedSubmissionDTO,
   PreparedSubmissionEvidenceDTO,
@@ -453,7 +454,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
       }
 
       const nonceKey = submissionNonceKey(prepared);
-      const reserved = await store.reserveNonce(nonceKey, {
+      const reserved = await reserveRelayNonce(store, nonceKey, {
         staleBefore: new Date(now().getTime() - ttlSeconds * 1000).toISOString()
       });
       if (!reserved) {
@@ -493,7 +494,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
         await withSubmissionStoreTransaction(store, async () => {
           await store.putSubmission(submission);
           if (broadcast.status === "failed" && broadcast.retryable && !submission.txHash) {
-            await store.releaseNonce?.(nonceKey);
+            await releaseRelayNonce(store, nonceKey);
             return;
           }
           await store.markPreparedUsed(prepared.prepareId, submissionId, submission.updatedAt);
@@ -533,7 +534,7 @@ export function createProductSubmissionService(options: ProductSubmissionService
               retryable: classifiedThrow.retryable
             }
           })));
-          await store.releaseNonce?.(nonceKey);
+          await releaseRelayNonce(store, nonceKey);
         });
         throw error;
       }

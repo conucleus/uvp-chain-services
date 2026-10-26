@@ -10,11 +10,6 @@ import {
   type ProjectionSyncDiagnosticsCounts,
   type ProjectionSyncState
 } from "../storage/projection-store.js";
-import type { StoreDockingSessionStore } from "../store/console/docking.js";
-import type { StoreZhixuDraftStore } from "../store/console/zhixu-drafts.js";
-import type { StoreZhixuVersionMetadataStore } from "../store/console/version.js";
-import type { StoreSupplierMetadataStore } from "../store/suppliers/index.js";
-import type { TimerKeeperRunSummary } from "../timer-keeper/types.js";
 import type {
   ProductSubmissionAttemptDTO,
   ProductSubmissionDTO,
@@ -24,10 +19,7 @@ import type {
 type HealthStatus = "ok" | "degraded";
 type ReadinessStatus = "ready" | "not_ready";
 type EvidenceReadiness = "ready" | "degraded" | "unknown";
-type StoreMetadataReadiness = "ready" | "degraded" | "unknown";
-type StoreMetadataKind = "memory" | "postgres" | "unknown";
 type JsonRecord = Record<string, unknown>;
-type StoreMetadataRepresentation = "draft" | "supplier";
 
 export interface IndexerRuntimeDiagnostics {
   readonly configured: boolean;
@@ -40,17 +32,10 @@ export interface BuildOperationalDiagnosticsOptions {
   readonly runtimeEnvironment: ChainServicesRuntimeEnv;
   readonly indexer?: IndexerRuntimeDiagnostics;
   readonly reconcile?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
-  readonly timerKeeper?: TimerKeeperRunSummary | (() => TimerKeeperRunSummary | undefined);
   readonly submissionStore?: ProductSubmissionStore;
   readonly governanceStore?: GovernanceStore;
   readonly evidenceStorage?: Pick<EvidenceStorage, "adapterKind" | "productionSafe">;
   readonly evidenceRuntimeEnvironment?: EvidenceStorageRuntimeEnvironment;
-  readonly storeMetadataStores?: {
-    readonly draft?: StoreZhixuDraftStore;
-    readonly version?: StoreZhixuVersionMetadataStore;
-    readonly supplier?: StoreSupplierMetadataStore;
-    readonly docking?: StoreDockingSessionStore;
-  };
   readonly now?: () => Date;
 }
 
@@ -72,13 +57,8 @@ export async function buildOperationalDiagnostics(
     runtimeEnvironment: options.evidenceRuntimeEnvironment ?? options.runtimeEnvironment
   });
   const runtimeEnvironment = options.configDiagnostics?.environment ?? options.runtimeEnvironment;
-  const storeMetadata = buildStoreMetadataDiagnostics({
-    stores: options.storeMetadataStores,
-    runtimeEnvironment
-  });
   const reconcile = buildReconcileDiagnostics(options.reconcile);
   const indexer = buildIndexerDiagnostics(syncStateResult, options.indexer);
-  const timerKeeperRuntime = buildTimerKeeperDiagnostics(options.timerKeeper);
 
   const diagnostics = {
     ...(options.configDiagnostics ?? fallbackConfigDiagnostics(options.runtimeEnvironment)),
@@ -93,11 +73,9 @@ export async function buildOperationalDiagnostics(
     indexer,
     projectionRebuild: indexer.rebuild,
     reconcile,
-    timerKeeperRuntime,
     submissions,
     governanceTxs,
-    evidenceStorage,
-    storeMetadata
+    evidenceStorage
   };
 
   return redactSecrets({
@@ -134,7 +112,6 @@ export function buildOperatorOpsStatus(diagnostics: Record<string, unknown>): Re
     submissions: diagnostics.submissions ?? {},
     governanceTxs: diagnostics.governanceTxs ?? {},
     evidenceStorage: diagnostics.evidenceStorage ?? {},
-    storeMetadata: diagnostics.storeMetadata ?? {},
     operatorRoles: diagnostics.operatorRoles ?? {},
     recoveryPolicy: {
       sourceOfTruth: "contracts-and-chain-events",
@@ -165,7 +142,6 @@ export function buildOperatorOpsSummary(diagnostics: Record<string, unknown>): R
   const governanceTxs = recordOf(status.governanceTxs);
   const indexer = recordOf(status.indexer);
   const evidenceStorage = recordOf(status.evidenceStorage);
-  const storeMetadata = recordOf(status.storeMetadata);
   return redactSecrets({
     generatedAt: status.generatedAt ?? null,
     sourceOfTruth: status.sourceOfTruth ?? "contracts-and-chain-events",
@@ -190,10 +166,6 @@ export function buildOperatorOpsSummary(diagnostics: Record<string, unknown>): R
     evidenceStorage: {
       adapterKind: evidenceStorage?.adapterKind ?? "unknown",
       readiness: evidenceStorage?.readiness ?? "unknown"
-    },
-    storeMetadata: {
-      readiness: storeMetadata?.readiness ?? "unknown",
-      stores: storeMetadata?.stores ?? {}
     },
     recoveryPolicy: status.recoveryPolicy ?? {}
   });
@@ -291,31 +263,25 @@ function buildReconcileDiagnostics(
   };
 }
 
-function buildTimerKeeperDiagnostics(
-  source: BuildOperationalDiagnosticsOptions["timerKeeper"]
-): Record<string, unknown> {
-  const summary = typeof source === "function" ? source() : source;
-  return {
-    lastSummary: summary ?? null
-  };
-}
-
-async function readDiagnosticsStoreValue<TValue>(
-  read: () => Promise<TValue>
-): Promise<{ readonly ok: true; readonly value: TValue } | { readonly ok: false; readonly degradedReason: string }> {
-  try {
-    return { ok: true, value: await read() };
-  } catch (error) {
-    return { ok: false, degradedReason: redactErrorMessage(error) };
-  }
-}
-
 function storeUnavailableDiagnostics(degradedReason: string): Record<string, unknown> {
   return {
     configured: true,
     unavailable: true,
     degradedReason
   };
+}
+
+async function readDiagnosticsStoreValue<TValue>(
+  read: () => Promise<readonly TValue[]>
+): Promise<
+  | { readonly ok: true; readonly value: readonly TValue[] }
+  | { readonly ok: false; readonly degradedReason: string }
+> {
+  try {
+    return { ok: true, value: await read() };
+  } catch (error) {
+    return { ok: false, degradedReason: redactErrorMessage(error) };
+  }
 }
 
 async function buildSubmissionDiagnostics(
@@ -421,83 +387,6 @@ function buildEvidenceStorageDiagnostics(input: {
   };
 }
 
-function buildStoreMetadataDiagnostics(input: {
-  readonly stores: BuildOperationalDiagnosticsOptions["storeMetadataStores"] | undefined;
-  readonly runtimeEnvironment: ChainServicesRuntimeEnv;
-}): Record<string, unknown> {
-  const nonLocalRuntime = input.runtimeEnvironment === "testnet" ||
-    input.runtimeEnvironment === "staging" ||
-    input.runtimeEnvironment === "production";
-  const stores = {
-    draft: storeMetadataStoreStatus(input.stores?.draft, nonLocalRuntime),
-    productSchema: storeMetadataStoreStatus(input.stores?.draft, nonLocalRuntime, "draft"),
-    version: storeMetadataStoreStatus(input.stores?.version, nonLocalRuntime),
-    supplier: storeMetadataStoreStatus(input.stores?.supplier, nonLocalRuntime),
-    supplierAudit: storeMetadataStoreStatus(input.stores?.supplier, nonLocalRuntime, "supplier"),
-    docking: storeMetadataStoreStatus(input.stores?.docking, nonLocalRuntime)
-  };
-  const readiness: StoreMetadataReadiness = Object.values(stores)
-    .some((store) => store.readiness === "degraded")
-    ? "degraded"
-    : Object.values(stores).some((store) => store.readiness === "unknown")
-      ? "unknown"
-      : "ready";
-  return {
-    readiness,
-    nonAuthoritative: true,
-    sourceOfTruth: "contracts-and-chain-events",
-    stores
-  };
-}
-
-function storeMetadataStoreStatus(
-  source: unknown,
-  nonLocalRuntime: boolean,
-  representedBy?: StoreMetadataRepresentation
-): {
-  readonly configured: boolean;
-  readonly kind: StoreMetadataKind;
-  readonly durable: boolean;
-  readonly readiness: StoreMetadataReadiness;
-  readonly representedBy?: StoreMetadataRepresentation;
-} {
-  const kind = storeMetadataKind(source);
-  const durable = kind === "postgres";
-  return {
-    configured: source !== undefined,
-    kind,
-    durable,
-    readiness: source === undefined || kind === "unknown"
-      ? nonLocalRuntime ? "degraded" : "unknown"
-      : nonLocalRuntime && !durable
-        ? "degraded"
-        : "ready",
-    ...(representedBy ? { representedBy } : {})
-  };
-}
-
-function storeMetadataKind(source: unknown): StoreMetadataKind {
-  if (source === undefined) {
-    return "unknown";
-  }
-  if (source && typeof source === "object") {
-    const driver = (source as { readonly driver?: unknown }).driver;
-    if (driver === "postgres" || driver === "memory") {
-      return driver;
-    }
-  }
-  const constructorName = source && typeof source === "object"
-    ? (source as { readonly constructor?: { readonly name?: string } }).constructor?.name?.toLowerCase() ?? ""
-    : "";
-  if (constructorName.includes("postgres")) {
-    return "postgres";
-  }
-  if (constructorName.includes("memory")) {
-    return "memory";
-  }
-  return "unknown";
-}
-
 function operationalHealthStatus(diagnostics: Record<string, unknown>): HealthStatus {
   return operationalDegradedReasons(diagnostics).length > 0 ? "degraded" : "ok";
 }
@@ -526,7 +415,6 @@ function operationalNotReadyReasons(diagnostics: Record<string, unknown>): reado
   const indexer = (diagnostics.indexer ?? {}) as { readonly syncStatus?: string };
   const reconcile = (diagnostics.reconcile ?? {}) as { readonly lastError?: string | null };
   const evidenceStorage = (diagnostics.evidenceStorage ?? {}) as { readonly readiness?: string };
-  const storeMetadata = (diagnostics.storeMetadata ?? {}) as { readonly readiness?: string };
   const submissions = (diagnostics.submissions ?? {}) as { readonly unavailable?: boolean };
   const governanceTxs = (diagnostics.governanceTxs ?? {}) as { readonly unavailable?: boolean };
 
@@ -541,9 +429,6 @@ function operationalNotReadyReasons(diagnostics: Record<string, unknown>): reado
   }
   if (evidenceStorage.readiness === "degraded") {
     reasons.push("evidence_storage_degraded");
-  }
-  if (storeMetadata.readiness === "degraded") {
-    reasons.push("store_metadata_degraded");
   }
   if (submissions.unavailable === true) {
     reasons.push("submission_store_unavailable");

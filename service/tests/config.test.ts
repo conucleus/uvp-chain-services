@@ -14,15 +14,9 @@ function loadConfigFromEnv(env: Record<string, string | undefined> = {}): Return
   return loadRawConfigFromEnv({ ...MANDATORY_STORAGE_AND_REGISTRATION_ENV, ...env });
 }
 import { createApiRouter } from "../src/api/routes.js";
-import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import { PostgresProjectionStore } from "../src/storage/postgres.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
-import type {
-  StoreSupplierAuditRecord,
-  StoreSupplierMetadataRecord,
-  StoreSupplierMetadataStore
-} from "../src/store/suppliers/index.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 import { redactSecrets } from "../src/security/index.js";
 
@@ -38,44 +32,10 @@ afterAll(async () => {
   await stores.close();
 });
 
-// 本文件断言聚焦 config 诊断（storeMetadata.stores.supplier 必须保持
-// kind: "memory"），因此 supplier 件用测试内存件，其余必填路由件取 PG bundle。
-class ConfigTestMemorySupplierMetadataStore implements StoreSupplierMetadataStore {
-  async getSupplier(): Promise<StoreSupplierMetadataRecord | undefined> {
-    return undefined;
-  }
-
-  async findSupplierBySubjectId(): Promise<StoreSupplierMetadataRecord | undefined> {
-    return undefined;
-  }
-
-  async listSuppliers(): Promise<readonly StoreSupplierMetadataRecord[]> {
-    return [];
-  }
-
-  async putSupplier(): Promise<void> {}
-
-  async putSupplierIfReviewStatus(): Promise<boolean> {
-    return false;
-  }
-
-  async appendAudit(): Promise<void> {}
-
-  async listAudits(): Promise<readonly StoreSupplierAuditRecord[]> {
-    return [];
-  }
-}
-
 function requiredRouterStores() {
   return {
-    storeSupplierMetadataStore: new ConfigTestMemorySupplierMetadataStore(),
-    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,
-    storeDecorationStore: stores.storeDecorationStore,
-    storePublisherDelegationStore: stores.storePublisherDelegationStore,
     identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    storeListingStore: stores.storeListingStore,
-    storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
     orderRequirementsStore: stores.orderRequirementsStore,
@@ -84,19 +44,6 @@ function requiredRouterStores() {
     governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
-    notificationService: createNotificationService({
-      store: stores.projectionStore,
-      supplierMetadataStore: stores.storeSupplierMetadataStore,
-      deliveryStore: stores.notificationStateStore,
-      participantReadStateStore: stores.notificationStateStore
-    }),
-    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
-      store: new MemorySupplierNotificationProfileConfigStore()
-    })
   };
 }
 
@@ -342,56 +289,6 @@ describe("chain-services config", () => {
     expect(config.database).toEqual({
       url: "postgres://uvp:uvp@127.0.0.1:5432/local-db",
       migrationsAutoRun: true
-    });
-  });
-
-  it("loads timer keeper config and keeps the role consistent in preflight", async () => {
-    const config = loadConfigFromEnv({
-      UVP_TIMER_KEEPER_ENABLED: "true",
-      UVP_TIMER_KEEPER_POLL_INTERVAL_MS: "250",
-      UVP_TIMER_KEEPER_MAX_CANDIDATES_PER_RUN: "2",
-      UVP_TIMER_KEEPER_MAX_GAS_PER_TX: "250000",
-      UVP_TIMER_KEEPER_REDELIVERY_WINDOW_MS: "60000",
-      UVP_TIMER_KEEPER_PRIVATE_KEY_ENV: "UVP_STAGING_TIMER_KEEPER_PRIVATE_KEY",
-      UVP_STAGING_TIMER_KEEPER_PRIVATE_KEY: anvilPrivateKey
-    });
-
-    expect(config.timerKeeper).toEqual({
-      enabled: true,
-      pollIntervalMs: 250,
-      maxCandidatesPerRun: 2,
-      maxGasPerTx: 250_000n,
-      redeliveryWindowMs: 60_000,
-      privateKeyEnv: "UVP_STAGING_TIMER_KEEPER_PRIVATE_KEY"
-    });
-
-    const missing = loadConfigFromEnv({
-      UVP_TIMER_KEEPER_ENABLED: "true"
-    });
-    await expect(runConfigPreflight(missing, { env: { ...MANDATORY_STORAGE_AND_REGISTRATION_ENV, UVP_TIMER_KEEPER_ENABLED: "true" } }))
-      .rejects.toThrow(/UVP_TIMER_KEEPER_PRIVATE_KEY is required when UVP_TIMER_KEEPER_ENABLED=true/);
-
-    const anvilDefaultEnv = {
-      ...MANDATORY_STORAGE_AND_REGISTRATION_ENV,
-      UVP_TIMER_KEEPER_ENABLED: "true",
-      UVP_TIMER_KEEPER_PRIVATE_KEY: anvilPrivateKey
-    };
-    await expect(runConfigPreflight(loadConfigFromEnv(anvilDefaultEnv), { env: anvilDefaultEnv }))
-      .rejects.toThrow(/UVP_TIMER_KEEPER_PRIVATE_KEY must not use an Anvil default private key/);
-
-    const mismatchedEnv = {
-      ...MANDATORY_STORAGE_AND_REGISTRATION_ENV,
-      UVP_TIMER_KEEPER_ENABLED: "true",
-      UVP_TIMER_KEEPER_PRIVATE_KEY: productionRegistrarPrivateKey,
-      UVP_TIMER_KEEPER_ADDRESS: productionRelayerAddress
-    };
-    await expect(runConfigPreflight(loadConfigFromEnv(mismatchedEnv), { env: mismatchedEnv }))
-      .rejects.toThrow(/UVP_TIMER_KEEPER_PRIVATE_KEY does not match UVP_TIMER_KEEPER_ADDRESS/);
-
-    const disabled = loadConfigFromEnv({});
-    await expect(runConfigPreflight(disabled, { env: MANDATORY_STORAGE_AND_REGISTRATION_ENV })).resolves.toMatchObject({
-      timerKeeper: { enabled: false, privateKeyConfigured: false },
-      dockAutomation: { enabled: false, routeSourceAssembled: false }
     });
   });
 
@@ -1240,19 +1137,6 @@ describe("chain-services config", () => {
     }))).not.toThrow();
   });
 
-  it("rejects zero-or-negative keeper gas caps instead of treating them as uncapped", () => {
-    expect(() => loadConfigFromEnv({
-      UVP_TIMER_KEEPER_MAX_GAS_PER_TX: "0"
-    })).toThrow(/UVP_TIMER_KEEPER_MAX_GAS_PER_TX must be a positive integer/);
-
-    expect(() => loadConfigFromEnv({
-      UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX: "0"
-    })).toThrow(/UVP_DOCK_AUTOMATION_MAX_GAS_PER_TX must be a positive integer/);
-
-    expect(loadConfigFromEnv({}).timerKeeper.maxGasPerTx).toBe(500_000n);
-    expect(loadConfigFromEnv({}).dockAutomation.maxGasPerTx).toBe(500_000n);
-  });
-
   it("requires an informed acknowledgement for testnet auto migrations", () => {
     expect(() => loadConfigFromEnv(testnetEnv(testnetPostgresConfigUrl(), {
       UVP_TESTNET_ALLOW_AUTO_MIGRATIONS: undefined
@@ -1765,19 +1649,6 @@ describe("chain-services config", () => {
         },
         security: {
           logRedactionEnabled: true
-        },
-        storeMetadata: {
-          readiness: "ready",
-          nonAuthoritative: true,
-          sourceOfTruth: "contracts-and-chain-events",
-          stores: {
-            draft: { kind: "postgres", readiness: "ready", durable: true },
-            productSchema: { kind: "postgres", readiness: "ready", durable: true, representedBy: "draft" },
-            version: { kind: "postgres", readiness: "ready", durable: true },
-            supplier: { kind: "memory", readiness: "ready", durable: false },
-            supplierAudit: { kind: "memory", readiness: "ready", durable: false, representedBy: "supplier" },
-            docking: { kind: "postgres", readiness: "ready", durable: true }
-          }
         }
       }
     });
@@ -1785,59 +1656,6 @@ describe("chain-services config", () => {
     await store.close();
   });
 
-  it("marks non-local readiness degraded when Store metadata wiring falls back to memory", async () => {
-    const config = loadConfigFromEnv(productionEnv());
-    const diagnostics = buildConfigDiagnostics(config, {
-      env: productionEnv(),
-      preflight: {
-        status: "passed",
-        checks: [{ name: "store_metadata.durable", status: "passed" }]
-      }
-    });
-    const store = new PostgresProjectionStore({
-      databaseUrl: await createPostgresTestDatabase()
-    });
-    const router = createApiRouter(store, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      configDiagnostics: diagnostics,
-      productRuntimeEnvironment: "production",
-      governanceAdminIds: ["gov-reviewer-1"],
-      governanceAdminTokenHashes: [productionAdminTokenHash],
-      evidenceStorage: productionSafeEvidenceStorage()
-    });
-
-    const response = await router.handle({ method: "GET", pathname: "/readyz" });
-
-    expect(response.status).toBe(503);
-    expect(response.body).toMatchObject({
-      ok: false,
-      ready: false,
-      reasons: expect.arrayContaining(["store_metadata_degraded"])
-    });
-    expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
-
-    const adminResponse = await router.handle({
-      method: "GET",
-      pathname: "/admin/diagnostics",
-      headers: { "x-uvp-admin-id": "gov-reviewer-1", "x-uvp-admin-role": "governance_admin", "x-uvp-admin-token": "test-admin-password" }
-    });
-    expect(adminResponse.status).toBe(200);
-    expect(adminResponse.body).toMatchObject({
-      diagnostics: {
-        storeMetadata: {
-          readiness: "degraded",
-          stores: {
-            draft: { kind: "postgres", readiness: "ready" },
-            productSchema: { kind: "postgres", readiness: "ready", representedBy: "draft" },
-            version: { kind: "postgres", readiness: "ready" },
-            supplier: { kind: "memory", readiness: "degraded" },
-            supplierAudit: { kind: "memory", readiness: "degraded", representedBy: "supplier" },
-            docking: { kind: "postgres", readiness: "ready" }
-          }
-        }
-      }
-    });
-    await store.close();
-  });
 });
 
 function productionEnv(overrides: Record<string, string | undefined> = {}): Record<string, string | undefined> {

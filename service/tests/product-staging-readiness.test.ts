@@ -8,7 +8,6 @@ import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.
 import { examplePlanIds } from "./fixtures/business/index.js";
 import { buildConfigDiagnostics, loadConfigFromEnv, type ConfigDiagnostics } from "../src/config/index.js";
 import { createApiRouter } from "../src/api/routes.js";
-import { createNotificationService, createSupplierNotificationProfileConfigService, MemorySupplierNotificationProfileConfigStore } from "../src/notifications/index.js";
 import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { PostgresProjectionStore } from "../src/storage/postgres.js";
@@ -32,14 +31,8 @@ afterAll(async () => {
 
 function requiredRouterStores() {
   return {
-    storeSupplierMetadataStore: stores.storeSupplierMetadataStore,
-    storeEntityRegistrationStore: stores.storeEntityRegistrationStore,
     storeWalletSessionStore: stores.storeWalletSessionStore,
-    storeDecorationStore: stores.storeDecorationStore,
-    storePublisherDelegationStore: stores.storePublisherDelegationStore,
     identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    storeListingStore: stores.storeListingStore,
-    storeJoinApplicationStore: stores.storeJoinApplicationStore,
     productBffStore: stores.productBffStore,
     orderStore: stores.orderStore,
     orderRequirementsStore: stores.orderRequirementsStore,
@@ -48,19 +41,6 @@ function requiredRouterStores() {
     governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
-    storeZhixuDraftStore: stores.storeZhixuDraftStore,
-    storeZhixuVersionMetadataStore: stores.storeZhixuVersionMetadataStore,
-    storeDockingSessionStore: stores.storeDockingSessionStore,
-    storeAuditStore: stores.storeAuditStore,
-    notificationService: createNotificationService({
-      store: stores.projectionStore,
-      supplierMetadataStore: stores.storeSupplierMetadataStore,
-      deliveryStore: stores.notificationStateStore,
-      participantReadStateStore: stores.notificationStateStore
-    }),
-    supplierNotificationConfigService: createSupplierNotificationProfileConfigService({
-      store: new MemorySupplierNotificationProfileConfigStore()
-    })
   };
 }
 
@@ -88,8 +68,6 @@ const stagingDeployerPrivateKey = "0x3333333333333333333333333333333333333333333
 const stagingDeployerAddress = "0x5cbdd86a2fa8dc4bddd8a8f69dba48572eec07fb";
 const stagingGovernancePrivateKey = "0x4444444444444444444444444444444444444444444444444444444444444444";
 const stagingGovernanceAddress = "0x7564105e977516c53be337314c7e53838967bdac";
-const stagingTimerKeeperPrivateKey = "0x5555555555555555555555555555555555555555555555555555555555555555";
-const stagingTimerKeeperAddress = "0xe1fae9b4fab2f5726677ecfa912d96b0b683e6a9";
 const generatedAt = "2026-05-01T00:00:00.000Z";
 const stagingOpsAdminToken = "staging-ops-readiness-token";
 const stagingOpsAdminHeaders = {
@@ -266,13 +244,6 @@ describe("Product API staging readiness", () => {
         governanceConfigured: true,
         participantWalletCount: 1
       },
-      automation: {
-        timerKeeperReady: true,
-        dockAutomation: {
-          enabled: false,
-          routeSourceAssembled: false
-        }
-      }
     });
     const serialized = JSON.stringify(response.body);
     expect(serialized).not.toContain("db-secret");
@@ -399,32 +370,6 @@ describe("Product API staging readiness", () => {
     });
   });
 
-  it("fails closed on staging when the timer keeper role is not assembled", async () => {
-    const store = await openProjectionStore();
-    await store.resetFromEvents({ deploymentBlock: 0n, events: readinessEvents(), planCapabilityTables: [readinessVocabulary()] });
-    const router = createApiRouter(store, { ...requiredRouterStores(), productSchemaResolver: exampleSchemaResolver(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      configDiagnostics: stagingDiagnostics(tempDirs, { UVP_TIMER_KEEPER_ENABLED: undefined }),
-      productRuntimeEnvironment: "staging",
-      ...stagingOpsAdminRouterOptions,
-      evidenceStorage: productionSafeEvidenceStorage(),
-      now: () => new Date(generatedAt)
-    });
-
-    const response = await router.handle({ method: "GET", pathname: "/product/staging/readiness", headers: stagingOpsAdminHeaders });
-
-    expect(response.status).toBe(503);
-    expect(response.body).toMatchObject({
-      ok: false,
-      ready: false,
-      status: "not_ready",
-      reasons: expect.arrayContaining(["timer_keeper_not_assembled"]),
-      automation: {
-        timerKeeperReady: false,
-        timerKeeper: expect.objectContaining({ enabled: false })
-      }
-    });
-  });
-
 });
 
 function stagingDiagnostics(
@@ -496,10 +441,6 @@ function stagingEnv(tempDirs: string[]): Record<string, string | undefined> {
     GOVERNANCE_SIGNER_ADDRESS: stagingGovernanceAddress,
     GOVERNANCE_SIGNER_PRIVATE_KEY_ENV: "UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY",
     UVP_STAGING_GOVERNANCE_SIGNER_PRIVATE_KEY: stagingGovernancePrivateKey,
-    UVP_TIMER_KEEPER_ENABLED: "true",
-    UVP_TIMER_KEEPER_PRIVATE_KEY_ENV: "UVP_STAGING_TIMER_KEEPER_PRIVATE_KEY",
-    UVP_STAGING_TIMER_KEEPER_PRIVATE_KEY: stagingTimerKeeperPrivateKey,
-    UVP_TIMER_KEEPER_ADDRESS: stagingTimerKeeperAddress,
     GOVERNANCE_ADMIN_REVIEWER_IDS: "gov-reviewer-1",
     OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
     GOVERNANCE_ADMIN_TOKEN_HASHES: "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d",
