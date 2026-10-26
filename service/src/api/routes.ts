@@ -31,6 +31,7 @@ import { createStoreAuthRouteModule } from "./routes/store-auth.js";
 import type { ApiRouteContext, ApiRouter, CreateApiRouterOptions } from "./route-context.js";
 import type { RouteModule } from "./route-module.js";
 import { createDiagnosticsRouteModule } from "./routes/diagnostics.js";
+import { createChainReadRouteModule } from "./routes/chain-read.js";
 import { createAdminOpsRouteModule } from "./routes/admin-ops.js";
 import { createEvidenceRouteModule } from "./routes/evidence.js";
 import { createGovernanceRouteModule } from "./routes/governance.js";
@@ -226,6 +227,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   };
   const modules: readonly RouteModule[] = [
     createDiagnosticsRouteModule(),
+    createChainReadRouteModule(),
     createAdminOpsRouteModule(),
     createV1OrderGoneRouteModule(),
     createStoreAuthRouteModule({ sessionService }),

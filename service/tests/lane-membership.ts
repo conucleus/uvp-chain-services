@@ -2,6 +2,7 @@
 // 其余测试文件留在 integration。两个 vitest 配置都从这里取名单，避免双源。
 export const UNIT_TEST_FILES = [
   "broadcast-duplicate-transaction.test.ts",
+  "chain-read.test.ts",
   "error-taxonomy.conformance.test.ts",
   "evidence-service.test.ts",
   "indexer.reorg-determinism.test.ts",
