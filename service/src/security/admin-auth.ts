@@ -1,19 +1,23 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { ChainServicesRuntimeEnv } from "../config/index.js";
-import type { GovernancePrincipal } from "./types.js";
 
 const ADMIN_ROLES = new Set(["admin", "governance_admin", "governance"]);
 const ADMIN_TOKEN_HEADER = "x-uvp-admin-token";
 
-export interface GovernanceAdminAuthPolicy {
+export interface AdminPrincipal {
+  readonly adminId: string;
+  readonly role: string;
+}
+
+export interface AdminAuthPolicy {
   readonly runtimeEnvironment: ChainServicesRuntimeEnv;
   readonly allowedAdminIds: readonly string[];
   readonly adminTokenHashes?: readonly string[];
 }
 
-export function governanceAdminAllowed(
+export function adminAllowed(
   adminId: string,
-  policy: GovernanceAdminAuthPolicy
+  policy: AdminAuthPolicy
 ): boolean {
   if (policy.allowedAdminIds.length > 0) {
     return policy.allowedAdminIds.some((allowed) => allowed === adminId);
@@ -23,14 +27,14 @@ export function governanceAdminAllowed(
 
 export function adminPrincipalFromHeaders(
   headers: Readonly<Record<string, string | undefined>> | undefined,
-  policy: GovernanceAdminAuthPolicy
-): GovernancePrincipal | undefined {
+  policy: AdminAuthPolicy
+): AdminPrincipal | undefined {
   const adminId = readHeader(headers, "x-uvp-admin-id")?.trim();
   const role = readHeader(headers, "x-uvp-admin-role")?.trim().toLowerCase();
   if (!adminId || !role || !ADMIN_ROLES.has(role)) {
     return undefined;
   }
-  if (!governanceAdminAllowed(adminId, policy)) {
+  if (!adminAllowed(adminId, policy)) {
     return undefined;
   }
   if (policy.runtimeEnvironment !== "local" && !adminTokenMatches(headers, policy)) {
@@ -41,7 +45,7 @@ export function adminPrincipalFromHeaders(
 
 function adminTokenMatches(
   headers: Readonly<Record<string, string | undefined>> | undefined,
-  policy: GovernanceAdminAuthPolicy
+  policy: AdminAuthPolicy
 ): boolean {
   const token = readHeader(headers, ADMIN_TOKEN_HEADER)?.trim();
   if (!token) {

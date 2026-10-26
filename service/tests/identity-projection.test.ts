@@ -19,14 +19,7 @@ afterAll(async () => {
 
 function requiredRouterStores() {
   return {
-    storeWalletSessionStore: stores.storeWalletSessionStore,
-    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    productBffStore: stores.productBffStore,
-    orderStore: stores.orderStore,
-    orderRequirementsStore: stores.orderRequirementsStore,
-    evidenceMetadataStore: stores.evidenceMetadataStore,
     submissionStore: stores.submissionStore,
-    governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
   };
@@ -111,7 +104,7 @@ describe("identity registry projection", () => {
     });
 
     expect(await store.listIdentityBindings({ account })).toHaveLength(1);
-    const response = await createApiRouter(store, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({
+    const response = await createApiRouter(store, { ...requiredRouterStores(), runtimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({
       method: "GET",
       pathname: "/identity/bindings",
       query: { registryAddress, account },
@@ -141,7 +134,7 @@ describe("identity registry projection", () => {
         }),
       ],
     });
-    const router = createApiRouter(store, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { ...requiredRouterStores(), runtimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
 
     const all = await router.handle({
       method: "GET",

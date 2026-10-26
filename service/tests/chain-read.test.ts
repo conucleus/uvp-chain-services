@@ -10,6 +10,7 @@ import type {
 import { createChainReadRouteModule } from "../src/api/routes/chain-read.js";
 import type {
   ProjectionProvenance,
+  ProjectionSnapshot,
   StateMachineOrderProjection,
   StateMachineProofProjection,
   StateMachineTaskProjection,
@@ -36,6 +37,8 @@ const WALLET = "0x2222222222222222222222222222222222222222" as const;
 const CREATOR = "0x3333333333333333333333333333333333333333" as const;
 const RELAYER = "0x4444444444444444444444444444444444444444" as const;
 const TX_HASH = `0x${"5".repeat(64)}` as const;
+const DOCK_ID = `0x${"6".repeat(64)}` as const;
+const PAYLOAD_HASH = `0x${"7".repeat(64)}` as const;
 
 function provenance(blockNumber: bigint): ProjectionProvenance {
   return {
@@ -109,6 +112,125 @@ function task(
     createdAt: provenance(20n),
     updatedAt: provenance(21n),
     proof: proof(21n, { hookId: overrides.hookId }),
+  };
+}
+
+function projectionSnapshot(): ProjectionSnapshot {
+  return {
+    rebuildable: true,
+    eventCount: 15,
+    activeStateMachineDeploymentId: DEPLOYMENT_ID,
+    stateMachineDeployments: {
+      [DEPLOYMENT_ID]: {
+        deploymentId: DEPLOYMENT_ID,
+        stateMachineAddress: STATE_MACHINE,
+        artifactHash: `0x${"8".repeat(64)}`,
+        abiHash: `0x${"9".repeat(64)}`,
+        deploymentBlock: "4",
+        metadataURI: "ipfs://deployment",
+        status: "active",
+        registeredAt: provenance(4n),
+        updatedAt: provenance(5n),
+        proof: proof(4n, {}),
+      },
+    },
+    stateMachineModules: {
+      [`${CHAIN_ID}:${STATE_MACHINE}`]: {
+        chainId: CHAIN_ID,
+        stateMachineAddress: STATE_MACHINE,
+        moduleId: `0x${"a".repeat(64)}`,
+        previousModule: "0x0000000000000000000000000000000000000000",
+        moduleAddress: STATE_MACHINE,
+        updatedAt: provenance(6n),
+        proof: proof(6n, {}),
+      },
+    },
+    contractGovernance: {
+      [`${CHAIN_ID}:${STATE_MACHINE}`]: {
+        chainId: CHAIN_ID,
+        contractAddress: STATE_MACHINE,
+        owner: CREATOR,
+        ownerUpdatedAt: provenance(7n),
+        ownerProof: proof(7n, {}),
+      },
+    },
+    stateMachinePlans: {
+      [`${CHAIN_ID}:${STATE_MACHINE}:${PLAN_A}`]: {
+        planId: PLAN_A,
+        deploymentId: DEPLOYMENT_ID,
+        stateMachineAddress: STATE_MACHINE,
+        planHash: PLAN_HASH,
+        hookCount: "0",
+        selectorBindings: [],
+        signalCapabilities: [],
+        executorCandidates: [],
+        registeredAt: provenance(8n),
+        updatedAt: provenance(8n),
+        proof: proof(8n, {}),
+        commitProof: proof(8n, {}),
+      },
+    },
+    stateMachineOrders: {
+      [ORDER_ID]: {
+        ...order(),
+        signals: {
+          [SIGNAL_ID]: {
+            orderId: ORDER_ID,
+            sourceId: SOURCE_ID,
+            signalId: SIGNAL_ID,
+            payloadHash: PAYLOAD_HASH,
+            idempotencyKey: `0x${"b".repeat(64)}`,
+            submitter: WALLET,
+            submittedAt: provenance(13n),
+            proof: proof(13n, { signalId: SIGNAL_ID }),
+          },
+        },
+      },
+    },
+    stateMachineDocks: {
+      [DOCK_ID]: {
+        dockInstanceId: DOCK_ID,
+        chainId: CHAIN_ID,
+        stateMachineAddress: STATE_MACHINE,
+        mode: "new",
+        localPlanId: PLAN_A,
+        localOrderId: ORDER_ID,
+        routeId: `0x${"c".repeat(64)}`,
+        routeHash: `0x${"d".repeat(64)}`,
+        interfaceNameId: `0x${"e".repeat(64)}`,
+        targetPlanId: PLAN_B,
+        linkedOrderId: ORDER_ID,
+        depth: 1,
+        inputDeliveries: {
+          delivery: {
+            inputBindingHash: `0x${"f".repeat(64)}`,
+            localPlanId: PLAN_A,
+            localOrderId: ORDER_ID,
+            targetPlanId: PLAN_B,
+            linkedOrderId: ORDER_ID,
+            targetSignalId: SIGNAL_ID,
+            payloadHash: PAYLOAD_HASH,
+            submitter: WALLET,
+            deliveredAt: provenance(14n),
+            proof: proof(14n, {}),
+          },
+        },
+        outputDeliveries: {},
+        openedAt: provenance(14n),
+        updatedAt: provenance(14n),
+        proof: proof(14n, {}),
+      },
+    },
+    stateMachineDocksByTargetOrder: {},
+    stateMachineOrderDockChainDepth: {},
+    stateMachineTasks: {},
+    lastEvent: provenance(15n),
+    unresolvedModuleOrderEventCount: 0,
+    unresolvedDockEventCount: 2,
+    unresolvedStageActivationEventCount: 0,
+    unresolvedDockTargetDeploymentCount: 0,
+    capabilityEnrichmentMismatchCount: 0,
+    unknownEventCount: 0,
   };
 }
 
@@ -353,6 +475,63 @@ describe("generic chain read routes", () => {
       body: { error: "chain_sync_state_not_found" },
     });
   });
+
+  it("serves the whole projection snapshot with recursive bigint serialization in a single store read", async () => {
+    let snapshotReads = 0;
+    const context = {
+      store: {
+        getOrderSnapshot: async () => {
+          snapshotReads += 1;
+          return projectionSnapshot();
+        },
+        listStateMachineOrders: async () => {
+          throw new Error("snapshot read must not list orders");
+        },
+        findStateMachineOrdersByOrderId: async () => {
+          throw new Error("snapshot read must not look up a single order");
+        },
+        listStateMachineTasks: async () => {
+          throw new Error("snapshot read must not list tasks");
+        },
+        getStateMachineTask: async () => {
+          throw new Error("snapshot read must not look up a single task");
+        },
+        getSyncState: async () => {
+          throw new Error("snapshot read must not read the sync state");
+        },
+      },
+    } as unknown as ApiRouteContext;
+
+    const response = await get(context, "/chain/snapshot");
+
+    expect(response.status).toBe(200);
+    expect(snapshotReads).toBe(1);
+    expect(Object.keys(record(response.body))).toEqual(["snapshot"]);
+    const snapshot = record(record(response.body)["snapshot"]);
+    expect(snapshot["rebuildable"]).toBe(true);
+    expect(snapshot["eventCount"]).toBe(15);
+    expect(snapshot["activeStateMachineDeploymentId"]).toBe(DEPLOYMENT_ID);
+    expect(snapshot["unresolvedDockEventCount"]).toBe(2);
+    expect(Object.keys(record(snapshot["stateMachineOrders"]))).toEqual([ORDER_ID]);
+    expect(
+      record(record(snapshot["stateMachineDeployments"])[DEPLOYMENT_ID])["registeredAt"],
+    ).toMatchObject({ blockNumber: "4" });
+    expect(
+      record(record(snapshot["stateMachinePlans"])[`${CHAIN_ID}:${STATE_MACHINE}:${PLAN_A}`])[
+        "commitProof"
+      ],
+    ).toMatchObject({ blockNumber: "8" });
+    expect(
+      record(record(snapshot["stateMachineOrders"])[ORDER_ID])["signals"],
+    ).toMatchObject({ [SIGNAL_ID]: { submittedAt: { blockNumber: "13" } } });
+    expect(
+      record(record(record(snapshot["stateMachineDocks"])[DOCK_ID])["inputDeliveries"])[
+        "delivery"
+      ],
+    ).toMatchObject({ proof: { blockNumber: "14" } });
+    expect(snapshot["lastEvent"]).toMatchObject({ blockNumber: "15" });
+    expect(findBigints(response.body)).toEqual([]);
+  });
 });
 
 function taskJson(task: StateMachineTaskProjection): Record<string, unknown> {
@@ -398,4 +577,24 @@ function taskJson(task: StateMachineTaskProjection): Record<string, unknown> {
       args: { hookId: task.hookId },
     },
   };
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("expected the chain read response to contain a JSON object");
+  }
+  return value as Record<string, unknown>;
+}
+
+function findBigints(value: unknown): bigint[] {
+  if (typeof value === "bigint") {
+    return [value];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => findBigints(entry));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.values(value).flatMap((entry) => findBigints(entry));
+  }
+  return [];
 }

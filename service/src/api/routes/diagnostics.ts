@@ -1,4 +1,4 @@
-import { adminPrincipalFromHeaders } from "../../governance/index.js";
+import { adminPrincipalFromHeaders } from "../../security/admin-auth.js";
 import { operationalReadiness } from "../diagnostics.js";
 import type { RouteModule } from "../route-module.js";
 
@@ -34,7 +34,7 @@ export function createDiagnosticsRouteModule(): RouteModule {
       }
 
       if (request.method === "GET" && request.pathname === "/admin/diagnostics") {
-        const principal = adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
+        const principal = adminPrincipalFromHeaders(request.headers, context.adminAuthPolicy);
         if (!principal) {
           return {
             status: 403,

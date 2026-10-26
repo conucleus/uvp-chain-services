@@ -1,17 +1,13 @@
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type { Hex } from "../shared/types.js";
 import { submissionProjectionConfirmation } from "../reconcile/worker.js";
-import { resolvePlanCapabilityTablesFromStore, type PlanCapabilityTables } from "../submissions/capability-proofs.js";
-import { createProductService, ProductOrderLookupError } from "../product/application/service.js";
-import {
-  createProductBffService,
-} from "../product/query/bff/service.js";
-import { createOrderService } from "../order/index.js";
-import type { ProductBffStore } from "../product/query/bff/store.js";
-import { createEvidenceService, LocalEvidenceStorage } from "../evidence/index.js";
-import { createGovernanceService } from "../governance/index.js";
+import { resolvePlanCapabilityTablesFromStore } from "../submissions/capability-proofs.js";
 import {
   createProductSubmissionService,
+  ProductOrderLookupError,
+  ProductSubmissionError,
+  type ProductTaskReader,
+  type ProductSubmissionEvidenceReader,
   type SubmissionAuthorizationAdapter,
   type SubmissionAuthorizationRequest,
   type SubmissionAuthorizationResult
@@ -21,29 +17,17 @@ import {
   createProductStageResourcePatchService
 } from "../stage-patches/index.js";
 import { noopAuditSink, type AuditSink } from "../security/audit.js";
+import type { AdminAuthPolicy } from "../security/admin-auth.js";
 import { buildOperationalDiagnostics } from "./diagnostics.js";
-import { createStoreIdentityProvider } from "../store/console/access.js";
-import {
-  createStoreSessionService,
-  createWalletSessionStoreIdentityProvider
-} from "../store/sessions/index.js";
-import { createStoreAuthRouteModule } from "./routes/store-auth.js";
 import type { ApiRouteContext, ApiRouter, CreateApiRouterOptions } from "./route-context.js";
 import type { RouteModule } from "./route-module.js";
 import { createDiagnosticsRouteModule } from "./routes/diagnostics.js";
 import { createChainReadRouteModule } from "./routes/chain-read.js";
 import { createAdminOpsRouteModule } from "./routes/admin-ops.js";
-import { createEvidenceRouteModule } from "./routes/evidence.js";
-import { createGovernanceRouteModule } from "./routes/governance.js";
 import { createV1OrderGoneRouteModule } from "./routes/v1-gone.js";
-import { createProductOrderRouteModule } from "./routes/product-order.js";
-import { createProductSignalsRouteModule } from "./routes/product-signals.js";
-import { createProductReadKernelRouteModule } from "./routes/product-read-kernel.js";
-import { createResourceResolver } from "../resources/resolver.js";
-import { createProductTasksRouteModule } from "./routes/product-tasks.js";
-import { createProductReadRouteModule } from "./routes/product-read.js";
 import { createSubmissionsRouteModule } from "./routes/submissions.js";
 import { createStagePatchRouteModule } from "./routes/stage-patches.js";
+import { createIdentityBindingsRouteModule } from "./routes/identity-bindings.js";
 
 export type {
   AdminOpsActionEffect,
@@ -57,48 +41,10 @@ export type {
 
 export function createApiRouter(store: ProjectionStore, options: CreateApiRouterOptions): ApiRouter {
   const audit = options.audit ?? noopAuditSink;
-  const productRuntimeEnvironment = options.productRuntimeEnvironment ?? options.configDiagnostics?.environment;
-  if (!productRuntimeEnvironment) {
-    throw new Error("productRuntimeEnvironment (or configDiagnostics.environment) is required to create the API router");
+  const runtimeEnvironment = options.runtimeEnvironment;
+  if (!runtimeEnvironment) {
+    throw new Error("runtimeEnvironment is required to create the API router");
   }
-  const governanceAdminPolicy = {
-    runtimeEnvironment: productRuntimeEnvironment,
-    allowedAdminIds: options.governanceAdminIds ?? [],
-    ...(options.governanceAdminTokenHashes && options.governanceAdminTokenHashes.length > 0
-      ? { adminTokenHashes: options.governanceAdminTokenHashes }
-      : {})
-  };
-  const productSchemaResolver = options.productSchemaResolver;
-  const productService = createProductService(
-    store,
-    productSchemaResolver ? { productSchemaResolver } : {},
-  );
-  const identityDescriptorSnapshots = options.identityDescriptorSnapshots;
-  const governanceService = options.governanceService ?? createGovernanceService({
-    store: options.governanceStore,
-    audit,
-    descriptorSnapshotStore: identityDescriptorSnapshots,
-    ...(options.descriptorPublicBaseUrl ? { descriptorPublicBaseUrl: options.descriptorPublicBaseUrl } : {})
-  });
-  const submissionAuthorization = projectionSubmissionAuthorization(store);
-  const resolveDraftOrder = productBffStoreDraftOrderResolver(options.productBffStore);
-  const productBffStore = options.productBffStore;
-  const productTriggerChainId = options.productTriggerChainId ?? options.submissionChainId;
-  const productBffService = createProductBffService({
-    productService,
-    store: productBffStore,
-    ...(options.now ? { now: options.now } : {})
-  });
-  const defaultEvidenceStorage = options.evidenceStorage ?? (options.evidenceService ? undefined : new LocalEvidenceStorage());
-  const evidenceService = options.evidenceService ?? (
-    createEvidenceService({
-      metadataStore: options.evidenceMetadataStore,
-      storage: defaultEvidenceStorage ?? new LocalEvidenceStorage(),
-      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment,
-      resolveDraftOrder,
-      audit
-    })
-  );
   const submissionChainId = options.submissionChainId;
   if (submissionChainId === undefined) {
     throw new Error("submissionChainId is required to create the product submission service");
@@ -108,120 +54,66 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     throw new Error("submissionVerifyingContract is required to create the product submission service");
   }
   const submissionService = options.submissionService ?? createProductSubmissionService({
-    productTasks: productService,
-    evidenceReader: evidenceService,
+    productTasks: legacyProductTaskReader(),
+    evidenceReader: legacyEvidenceReader(),
     store: options.submissionStore,
     chainId: submissionChainId,
     verifyingContract: submissionVerifyingContract,
     resolveOrderPlanId: resolveOrderPlanIdFromStore(store),
     resolvePlanCapabilityTables: resolvePlanCapabilityTablesFromStore(store),
-    resolveDraftOrder,
     probePriorSubmissionOnChain: priorSubmissionChainProbeFromStore(store),
     ...(options.submissionBroadcastAdapter ? { broadcastAdapter: options.submissionBroadcastAdapter } : {}),
-    ...(submissionAuthorization ? { authorization: submissionAuthorization } : {}),
+    authorization: projectionSubmissionAuthorization(store),
     audit
   });
   const stageExecutorPatchChainId = options.stageExecutorPatchChainId ?? options.submissionChainId;
   const stageExecutorPatchVerifyingContract = options.stageExecutorPatchVerifyingContract;
   const productStageExecutorPatchService = options.productStageExecutorPatchService ?? createProductStageExecutorPatchService({
     store,
-    ...(productSchemaResolver ? { productSchemaResolver } : {}),
-    ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
     ...(stageExecutorPatchChainId !== undefined ? { chainId: stageExecutorPatchChainId } : {}),
     ...(stageExecutorPatchVerifyingContract ? { stagePatchModuleAddress: stageExecutorPatchVerifyingContract } : {}),
     ...(options.stageExecutorPatchBroadcastAdapter ? { broadcastAdapter: options.stageExecutorPatchBroadcastAdapter } : {}),
     stageExecutorPatchStore: options.stageExecutorPatchStore,
-    ...(options.productChainClock ? { chainClock: options.productChainClock } : {}),
+    ...(options.chainClock ? { chainClock: options.chainClock } : {}),
+    runtimeEnvironment: runtimeEnvironment,
     ...(options.now ? { now: options.now } : {})
   });
   const stageResourcePatchChainId = options.stageResourcePatchChainId ?? options.submissionChainId;
   const stageResourcePatchVerifyingContract = options.stageResourcePatchVerifyingContract;
   const productStageResourcePatchService = options.productStageResourcePatchService ?? createProductStageResourcePatchService({
     store,
-    ...(productSchemaResolver ? { productSchemaResolver } : {}),
-    ...(options.productBffStore ? { productBffStore: options.productBffStore } : {}),
     ...(stageResourcePatchChainId !== undefined ? { chainId: stageResourcePatchChainId } : {}),
     ...(stageResourcePatchVerifyingContract ? { stagePatchModuleAddress: stageResourcePatchVerifyingContract } : {}),
     ...(options.stageResourcePatchBroadcastAdapter ? { broadcastAdapter: options.stageResourcePatchBroadcastAdapter } : {}),
     stageResourcePatchStore: options.stageResourcePatchStore,
-    ...(options.productChainClock ? { chainClock: options.productChainClock } : {}),
-    ...(productRuntimeEnvironment ? { runtimeEnvironment: productRuntimeEnvironment } : {}),
+    ...(options.chainClock ? { chainClock: options.chainClock } : {}),
+    runtimeEnvironment: runtimeEnvironment,
     ...(options.now ? { now: options.now } : {})
   });
   const buildDiagnostics = () => buildOperationalDiagnostics({
     store,
     ...(options.configDiagnostics ? { configDiagnostics: options.configDiagnostics } : {}),
-    runtimeEnvironment: productRuntimeEnvironment,
+    runtimeEnvironment: runtimeEnvironment,
     ...(options.indexerDiagnostics ? { indexer: options.indexerDiagnostics } : {}),
     ...(options.reconcileDiagnostics ? { reconcile: options.reconcileDiagnostics } : {}),
-    submissionStore: options.submissionStore,
-    governanceStore: options.governanceStore,
-    ...(defaultEvidenceStorage ? { evidenceStorage: defaultEvidenceStorage } : {}),
-    evidenceRuntimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
+    submissionStore: options.submissionStore
   });
   const now = options.now ?? (() => new Date());
-  const storeWalletSessionStore = options.storeWalletSessionStore;
-  const storeAuthConfig = options.storeAuthConfig;
-  const sessionService = options.storeSessionService ?? createStoreSessionService({
-    store: storeWalletSessionStore,
-    ...(storeAuthConfig?.walletSession ? { config: storeAuthConfig.walletSession } : {}),
-    ...(options.now ? { now: options.now } : {})
-  });
-  const baseStoreIdentityProvider = options.storeIdentityProvider ?? createStoreIdentityProvider({
-    runtimeEnvironment: productRuntimeEnvironment,
-    ...(storeAuthConfig ? { authConfig: storeAuthConfig } : {}),
-    ...(options.governanceAdminIds ? { governanceAdminIds: options.governanceAdminIds } : {}),
-    ...(options.governanceAdminTokenHashes && options.governanceAdminTokenHashes.length > 0
-      ? { governanceAdminTokenHashes: options.governanceAdminTokenHashes }
-      : {})
-  });
-  const storeIdentityProvider = createWalletSessionStoreIdentityProvider({
-    base: baseStoreIdentityProvider,
-    sessionService,
-    ...(storeAuthConfig?.walletSession ? { config: storeAuthConfig.walletSession } : {}),
-    runtimeEnvironment: productRuntimeEnvironment
-  });
-  const orderStore = options.orderStore;
-  const orderService = options.orderService ?? createOrderService({
-    store: orderStore,
-    chainId: options.orderChainId ?? options.productTriggerChainId ?? options.submissionChainId ?? 0,
-    ...(options.orderStateMachineAddress ?? options.submissionVerifyingContract
-      ? { stateMachine: options.orderStateMachineAddress ?? options.submissionVerifyingContract! }
-      : {}),
-    publisherWallets: options.orderConfigPublisherWallets ?? [],
-    ...(options.orderPublishedPlanProvider ? { publishedPlanProvider: options.orderPublishedPlanProvider } : {}),
-    ...(options.orderBirthPort ? { birthPort: options.orderBirthPort } : {}),
-    ...(options.orderTriggerPort ? { triggerPort: options.orderTriggerPort } : {}),
-    chainProjection: {
-      findChainOrders: (orderId) => store.findStateMachineOrdersByOrderId(orderId)
-    },
-    ...(options.now ? { now: options.now } : {})
-  });
-  const orderResourceResolver = options.orderResourceResolver ?? createResourceResolver({
-    loadOrder: (orderId) => orderService.loadOrderSnapshotForVisibility(orderId),
-    ...(options.orderOperatorWallets !== undefined
-      ? { operatorWallets: options.orderOperatorWallets }
-      : {}),
-  });
+  const adminAuthPolicy: AdminAuthPolicy = options.adminAuthPolicy ?? {
+    runtimeEnvironment: runtimeEnvironment,
+    allowedAdminIds: options.opsConsoleAdminIds ?? []
+  };
   const context: ApiRouteContext = {
     store,
-    productService,
-    productBffService,
-    orderService,
-    storeIdentityProvider,
-    sessionService,
-    identityDescriptorSnapshots,
-    governanceService,
-    evidenceService,
     submissionService,
     productStageExecutorPatchService,
     productStageResourcePatchService,
     submissionStore: options.submissionStore,
     ...(options.opsRecoveryActions ? { opsRecoveryActions: options.opsRecoveryActions } : {}),
     ...(options.opsConsoleAdminIds ? { opsConsoleAdminIds: options.opsConsoleAdminIds } : {}),
+    adminAuthPolicy,
     audit,
     buildDiagnostics,
-    governanceAdminPolicy,
     ...(options.onTxMined ? { onTxMined: options.onTxMined } : {}),
     now
   };
@@ -230,27 +122,9 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     createChainReadRouteModule(),
     createAdminOpsRouteModule(),
     createV1OrderGoneRouteModule(),
-    createStoreAuthRouteModule({ sessionService }),
-    createGovernanceRouteModule(),
-    createEvidenceRouteModule({
-      runtimeEnvironment: options.evidenceRuntimeEnvironment ?? productRuntimeEnvironment
-    }),
-    createStagePatchRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
-    createSubmissionsRouteModule({ runtimeEnvironment: productRuntimeEnvironment }),
-    createProductSignalsRouteModule({
-      ...(options.orderOperatorWallets !== undefined ? { operatorWallets: options.orderOperatorWallets } : {}),
-      resourceResolver: orderResourceResolver,
-      planCapabilities: resolvePlanCapabilityTablesFromStore(store)
-    }),
-    createProductReadKernelRouteModule({
-      ...(options.orderOperatorWallets !== undefined ? { operatorWallets: options.orderOperatorWallets } : {}),
-      resourceResolver: orderResourceResolver,
-    }),
-    createProductTasksRouteModule({
-      ...(options.orderOperatorWallets !== undefined ? { operatorWallets: options.orderOperatorWallets } : {}),
-    }),
-    createProductOrderRouteModule(),
-    createProductReadRouteModule({ runtimeEnvironment: productRuntimeEnvironment })
+    createIdentityBindingsRouteModule(),
+    createStagePatchRouteModule({ runtimeEnvironment }),
+    createSubmissionsRouteModule({ runtimeEnvironment })
   ];
 
   return {
@@ -269,15 +143,32 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   };
 }
 
-export function productBffStoreDraftOrderResolver(
-  store: ProductBffStore
-): (draftId: string) => Promise<string | undefined> {
-  return async (draftId) => {
-    const registration = await store.getRegistrationByDraft(draftId);
-    if (registration) {
-      return registration.orderId;
+// Product task and evidence reads moved to uvp-app-backend. Keep the legacy
+// prepare surface explicit about it instead of fabricating task/evidence rows.
+function legacyProductTaskReader(): ProductTaskReader {
+  return {
+    async getTask() {
+      throw new ProductSubmissionError(
+        503,
+        "product_task_read_moved",
+        "product task reads are served by uvp-app-backend; chain-services prepare is legacy"
+      );
     }
-    return (await store.getDraft(draftId))?.triggeredOrderId;
+  };
+}
+
+function legacyEvidenceReader(): ProductSubmissionEvidenceReader {
+  const moved = async (): Promise<never> => {
+    throw new ProductSubmissionError(
+      503,
+      "evidence_service_moved",
+      "evidence metadata is served by uvp-app-backend; chain-services prepare is legacy"
+    );
+  };
+  return {
+    getEvidence: moved,
+    getProof: moved,
+    bindEvidence: moved
   };
 }
 
@@ -437,3 +328,4 @@ function priorSubmissionChainProbeFromStore(
     }
   };
 }
+

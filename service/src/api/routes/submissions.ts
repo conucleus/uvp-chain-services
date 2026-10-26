@@ -1,6 +1,3 @@
-import {
-  EvidenceServiceError
-} from "../../evidence/index.js";
 import { redactErrorMessage } from "../../security/redaction.js";
 import { ConfigError } from "../../shared/types.js";
 import {
@@ -9,8 +6,9 @@ import {
   type ProductSubmitIntent,
   type SubmitProductTaskInput
 } from "../../submissions/index.js";
-import { resolveEvidencePrincipal, resolveParticipantWalletIdentity } from "../participant-identity.js";
 import type { ChainServicesRuntimeEnv } from "../../config/index.js";
+import type { EvidencePrincipal } from "../../submissions/types.js";
+import { resolveChainWalletClaim } from "../wallet-claim.js";
 import { decodePathParameter, InvalidPathParameterError, invalidPathParameterResponse, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
@@ -23,11 +21,14 @@ export function createSubmissionsRouteModule(options: {
       if (request.method === "POST" && productTaskPrepareSubmitMatch) {
         return handleSubmissionRequest(async () => {
           const taskId = decodePathParameter(productTaskPrepareSubmitMatch[1] ?? "");
-          const principal = await resolveEvidencePrincipal(request, context, options.runtimeEnvironment);
-          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          const wallet = resolveChainWalletClaim(request, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
           }
+          const principal: EvidencePrincipal = {
+            id: wallet.identity.walletAddress.toLowerCase(),
+            role: "participant"
+          };
           return {
             status: 201,
             body: await context.submissionService.prepareSubmit(
@@ -60,7 +61,7 @@ export function createSubmissionsRouteModule(options: {
       const productSubmissionMatch = /^\/product\/submissions\/([^/]+)$/.exec(request.pathname);
       if (request.method === "GET" && productSubmissionMatch) {
         return handleSubmissionRequest(async () => {
-          const wallet = await resolveParticipantWalletIdentity(request, context, options.runtimeEnvironment);
+          const wallet = resolveChainWalletClaim(request, options.runtimeEnvironment);
           if (!wallet.ok) {
             return wallet.response;
           }
@@ -98,15 +99,6 @@ async function handleSubmissionRequest(action: () => Promise<ApiResponse>): Prom
           error: error.code,
           message: redactErrorMessage(error),
           ...(error.details !== undefined ? { details: error.details } : {})
-        }
-      };
-    }
-    if (error instanceof EvidenceServiceError) {
-      return {
-        status: error.status,
-        body: {
-          error: error.code,
-          message: redactErrorMessage(error)
         }
       };
     }

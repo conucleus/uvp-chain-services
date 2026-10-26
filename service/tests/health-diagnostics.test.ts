@@ -1,18 +1,9 @@
 import type { Server } from "node:http";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startApiServer } from "../src/api/server.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import type { ChainEventSource } from "../src/indexer/service.js";
 import { buildConfigDiagnostics, loadConfigFromEnv } from "../src/config/index.js";
-import {
-  LocalEvidenceStorage,
-  type EvidencePrincipal,
-  type EvidenceService
-} from "../src/evidence/index.js";
-import { InMemoryGovernanceStore, type IdentityTxLogDTO } from "../src/governance/index.js";
 import { createApiRouter } from "../src/api/routes.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { projectionScopeContractAddress } from "../src/storage/projection-store.js";
@@ -42,28 +33,10 @@ afterAll(async () => {
 
 function requiredRouterStores() {
   return {
-    storeWalletSessionStore: stores.storeWalletSessionStore,
-    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    productBffStore: stores.productBffStore,
-    orderStore: stores.orderStore,
-    orderRequirementsStore: stores.orderRequirementsStore,
-    evidenceMetadataStore: stores.evidenceMetadataStore,
     submissionStore: stores.submissionStore,
-    governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
   };
-}
-
-function localEvidenceStorage(): LocalEvidenceStorage {
-  return new LocalEvidenceStorage({ rootDir: evidenceTempRoot() });
-}
-
-let evidenceRoot: string | undefined;
-
-function evidenceTempRoot(): string {
-  evidenceRoot ??= mkdtempSync(join(tmpdir(), "uvp-health-diagnostics-"));
-  return evidenceRoot;
 }
 
 const stateMachine = "0x1111111111111111111111111111111111111111" as Address;
@@ -79,7 +52,6 @@ const planId = bytes32("4002");
 const planHash = bytes32("4003");
 const artifactHash = bytes32("4004");
 const policyHash = bytes32("4005");
-const metadataHash = bytes32("4006");
 const now = "2026-04-29T00:00:00.000Z";
 const adminHeaders = {
   "x-uvp-admin-id": "ops-admin-1",
@@ -87,7 +59,7 @@ const adminHeaders = {
 };
 
 describe("ops health diagnostics", () => {
-  it("exposes safe runtime, indexer, submission, governance, evidence, and preflight summaries", async () => {
+  it("exposes safe runtime, indexer, submission, reconcile, and preflight summaries", async () => {
     const projectionStore = stores.projectionStore;
     await projectionStore.saveSyncState({
       chainId: 31337,
@@ -111,14 +83,13 @@ describe("ops health diagnostics", () => {
 
     const submissionStore = new InMemoryProductSubmissionStore();
     await submissionStore.putSubmission(deadLetterSubmission());
-    const governanceStore = new InMemoryGovernanceStore();
-    await governanceStore.appendIdentityTxLog(pendingGovernanceLog());
 
-    const router = createApiRouter(projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(projectionStore, { ...requiredRouterStores(),
+      runtimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: buildConfigDiagnostics(testConfig()),
       submissionStore,
-      governanceStore,
-      evidenceStorage: localEvidenceStorage(),
       indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 },
       reconcileDiagnostics: {
         enabled: true,
@@ -128,12 +99,8 @@ describe("ops health diagnostics", () => {
         txTimeoutMs: 60_000,
         lastRunAt: now,
         lastSummary: {
-          registrationsChecked: 0,
           submissionsChecked: 1,
-          governanceLogsChecked: 1,
           stagePatchesChecked: 0,
-          evidenceBindsSwept: 0,
-          evidenceBindsRepaired: 0,
           updated: 0,
           failed: 0
         }
@@ -178,7 +145,7 @@ describe("ops health diagnostics", () => {
         reconcile: {
           enabled: true,
           running: true,
-          lastSummary: { submissionsChecked: 1, governanceLogsChecked: 1 }
+          lastSummary: { submissionsChecked: 1 }
         },
         submissions: {
           submissionCount: 1,
@@ -190,19 +157,6 @@ describe("ops health diagnostics", () => {
             errorCode: "unauthorized_signal_submitter",
             txHash
           })]
-        },
-        governanceTxs: {
-          txCount: 1,
-          byStatus: { pending: 1 },
-          pendingOrIndexing: [expect.objectContaining({
-            txLogId: "gov_tx_1",
-            action: "register_identity",
-            txHash
-          })]
-        },
-        evidenceStorage: {
-          adapterKind: "local",
-          readiness: "ready"
         }
       }
     });
@@ -210,7 +164,11 @@ describe("ops health diagnostics", () => {
   });
 
   it("requires admin headers for operator console routes", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
+      runtimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111"
+    });
 
     for (const request of [
       { method: "GET", pathname: "/admin/ops/status" },
@@ -226,7 +184,10 @@ describe("ops health diagnostics", () => {
   });
 
   it("enforces the OPS_CONSOLE_ADMIN_IDS allowlist when configured", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
+      runtimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       opsConsoleAdminIds: ["ops-admin-1", "ops-admin-2"]
     });
 
@@ -237,25 +198,26 @@ describe("ops health diagnostics", () => {
     });
     expect(allowed.status).toBe(200);
 
-    const outsideGovernanceAdmin = await router.handle({
+    const outsideAdmin = await router.handle({
       method: "GET",
       pathname: "/admin/ops/status",
-      headers: { "x-uvp-admin-id": "governance-reviewer-9", "x-uvp-admin-role": "governance_admin" }
+      headers: { "x-uvp-admin-id": "other-admin-9", "x-uvp-admin-role": "admin" }
     });
-    expect(outsideGovernanceAdmin.status).toBe(403);
-    expect(outsideGovernanceAdmin.body).toMatchObject({
-      error: "forbidden",
-      reason: "ops_console_admin_allowlist"
-    });
+    expect(outsideAdmin.status).toBe(403);
+    expect(outsideAdmin.body).toEqual({ error: "forbidden" });
   });
 
-  it("falls back to the governance admin check when no ops allowlist is configured", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+  it("falls back to the admin header check when no ops allowlist is configured", async () => {
+    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
+      runtimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111"
+    });
 
     const response = await router.handle({
       method: "GET",
       pathname: "/admin/ops/status",
-      headers: { "x-uvp-admin-id": "governance-reviewer-9", "x-uvp-admin-role": "governance_admin" }
+      headers: { "x-uvp-admin-id": "reviewer-9", "x-uvp-admin-role": "governance_admin" }
     });
     expect(response.status).toBe(200);
   });
@@ -291,7 +253,7 @@ describe("ops health diagnostics", () => {
         ok: true,
         action: "reconcile.run",
         status: "completed",
-        summary: { registrationsChecked: 0, submissionsChecked: 0, governanceLogsChecked: 0 }
+        summary: { submissionsChecked: 0, stagePatchesChecked: 0 }
       });
 
       const rebuild = await fetch(`${base}/admin/ops/projections/rebuild`, {
@@ -326,9 +288,11 @@ describe("ops health diagnostics", () => {
       eventCount: 4,
       rebuild: { status: "completed", toBlock: 12n, eventCount: 4 }
     });
-    const router = createApiRouter(projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(projectionStore, { ...requiredRouterStores(),
+      runtimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: buildConfigDiagnostics(testConfig()),
-      evidenceStorage: localEvidenceStorage(),
       now: () => new Date(now)
     });
 
@@ -380,7 +344,7 @@ describe("ops health diagnostics", () => {
         counts: {
           retryableSubmissions: 0,
           deadLetterSubmissions: 0
-        },
+        }
       }
     });
     expect(JSON.stringify(statusResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
@@ -392,7 +356,10 @@ describe("ops health diagnostics", () => {
     const submissionStore = new InMemoryProductSubmissionStore();
     await submissionStore.putSubmission(retryableSubmission());
     const seenRetries: string[] = [];
-    const router = createApiRouter(projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const router = createApiRouter(projectionStore, { ...requiredRouterStores(),
+      runtimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       submissionStore,
       now: () => new Date(now),
       opsRecoveryActions: {
@@ -487,7 +454,10 @@ describe("ops health diagnostics", () => {
         }]
       }
     };
-    const preflightFailedRouter = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
+    const preflightFailedRouter = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
+      runtimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: failedDiagnostics,
       opsRecoveryActions: {
         async runReconcile() {
@@ -496,7 +466,11 @@ describe("ops health diagnostics", () => {
         }
       }
     });
-    const missingDependencyRouter = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const missingDependencyRouter = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
+      runtimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111"
+    });
 
     const failedResponse = await preflightFailedRouter.handle({
       method: "POST",
@@ -542,10 +516,10 @@ describe("ops health diagnostics", () => {
       degradedReason: "RPC timeout token=secret"
     });
 
-    const router = createApiRouter(projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      evidenceService: noopEvidenceService(),
-      evidenceStorage: localEvidenceStorage(),
-      evidenceRuntimeEnvironment: "production",
+    const router = createApiRouter(projectionStore, { ...requiredRouterStores(),
+      runtimeEnvironment: "local",
+      submissionChainId: 84532,
+      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       reconcileDiagnostics: {
         enabled: true,
         running: true,
@@ -562,7 +536,7 @@ describe("ops health diagnostics", () => {
     expect(response.body).toMatchObject({
       ready: false,
       status: "not_ready",
-      reasons: expect.arrayContaining(["indexer_degraded", "reconcile_error", "evidence_storage_degraded"])
+      reasons: expect.arrayContaining(["indexer_degraded", "reconcile_error"])
     });
     expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
 
@@ -578,30 +552,23 @@ describe("ops health diagnostics", () => {
           syncStatus: "degraded",
           degradedReason: expect.stringContaining("[redacted:secret]")
         },
-        evidenceStorage: { readiness: "degraded" },
         reconcile: { lastError: expect.stringContaining("[redacted:secret]") }
       }
     });
   });
 
-  it("reports storage failures as 503-with-reason on /readyz instead of letting the probe die with 500", async () => {
+  it("reports submission storage failures as 503-with-reason on /readyz instead of letting the probe die with 500", async () => {
     const failingSubmissionStore = new InMemoryProductSubmissionStore();
     (failingSubmissionStore as unknown as { listSubmissions(): Promise<readonly ProductSubmissionDTO[]> }).listSubmissions =
       async () => {
         throw new Error("postgres unavailable: connection refused (password=secret)");
       };
-    const failingGovernanceStore = new InMemoryGovernanceStore();
-    (failingGovernanceStore as unknown as { listIdentityTxLogs(): Promise<readonly IdentityTxLogDTO[]> }).listIdentityTxLogs =
-      async () => {
-        throw new Error("governance ledger unreachable");
-      };
 
     const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
-      productRuntimeEnvironment: "local",
+      runtimeEnvironment: "local",
       submissionChainId: 84532,
       submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      submissionStore: failingSubmissionStore,
-      governanceStore: failingGovernanceStore
+      submissionStore: failingSubmissionStore
     });
 
     const readyResponse = await router.handle({ method: "GET", pathname: "/readyz" });
@@ -609,7 +576,7 @@ describe("ops health diagnostics", () => {
     expect(readyResponse.body).toMatchObject({
       ready: false,
       status: "not_ready",
-      reasons: expect.arrayContaining(["submission_store_unavailable", "governance_store_unavailable"])
+      reasons: expect.arrayContaining(["submission_store_unavailable"])
     });
 
     const healthResponse = await router.handle({ method: "GET", pathname: "/healthz" });
@@ -623,8 +590,7 @@ describe("ops health diagnostics", () => {
     });
     expect(opsResponse.status).toBe(200);
     expect(opsResponse.body).toMatchObject({
-      submissions: { unavailable: true, degradedReason: expect.stringContaining("connection refused") },
-      governanceTxs: { unavailable: true, degradedReason: "governance ledger unreachable" }
+      submissions: { unavailable: true, degradedReason: expect.stringContaining("connection refused") }
     });
     expect(JSON.stringify(opsResponse.body)).not.toContain("password=secret");
   });
@@ -649,7 +615,6 @@ describe("ops health diagnostics", () => {
     expect(serialized).toContain("[redacted:presigned-url]");
     expect(serialized).toContain("[redacted:evidence]");
   });
-
 });
 
 function testConfig() {
@@ -750,56 +715,6 @@ function retryableSubmission(): ProductSubmissionDTO {
   };
 }
 
-function pendingGovernanceLog(): IdentityTxLogDTO {
-  return {
-    logId: "gov_log_1",
-    txLogId: "gov_tx_1",
-    action: "register_identity",
-    subjectId: planId,
-    account: submitter,
-    descriptorHash: metadataHash,
-    descriptorURI: "uvp-store://identities/acme",
-    txHash,
-    signer: submitter,
-    requester: "admin-1",
-    status: "pending",
-    broadcastStatus: "submitted",
-    retryable: false,
-    request: {
-      kind: "registerIdentity",
-      subjectId: planId,
-      account: submitter,
-      descriptorHash: metadataHash,
-      descriptorURI: "uvp-store://identities/acme"
-    },
-    createdAt: now,
-    updatedAt: now
-  };
-}
-
-function noopEvidenceService(): EvidenceService {
-  return {
-    async uploadEvidence() {
-      throw new Error("not used");
-    },
-    async getEvidence(_evidenceId: string, _principal: EvidencePrincipal) {
-      return undefined;
-    },
-    async getProof(_evidenceId: string, _principal: EvidencePrincipal) {
-      return undefined;
-    },
-    async verifyEvidenceBackup() {
-      return undefined;
-    },
-    async restoreEvidenceBackup() {
-      return undefined;
-    },
-    async bindEvidence() {
-      return undefined;
-    }
-  };
-}
-
 function bytes32(value: string): Hex {
   return `0x${value.padStart(64, "0")}` as Hex;
 }
@@ -831,35 +746,11 @@ function serverTestConfig(): ChainServicesConfig {
       stateMachinePrivateKeyEnv: "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY",
       maxRetries: 0
     },
-    governance: {
-      broadcastEnabled: false,
-      signerPrivateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY",
-      rpcUrl: "http://127.0.0.1:8545",
-      chainId: 31337,
-      txConfirmations: 1,
-      allowedOperators: []
-    },
-    productBff: {
-      registrationAdapter: "memory-trigger",
-      registrarPrivateKeyEnv: "UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY",
-      waitForReceipt: false
-    },
-    operatorRoles: {
-      deployerPrivateKeyEnv: "UVP_ETH_DEPLOYER_PRIVATE_KEY",
-      participantWallets: [],
-      adminReviewers: []
-    },
+    operatorRoles: {},
     reconcile: {
       enabled: false,
       pollIntervalMs: 0,
       txTimeoutMs: 60_000
-    },
-    evidenceStorage: {
-      adapter: "local",
-      objectNamespace: "uvp-rehearsal"
-    },
-    notifications: {
-      webhookSecretConfigured: false
     },
     security: {
       environment: "local",

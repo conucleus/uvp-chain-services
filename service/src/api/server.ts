@@ -2,30 +2,11 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { loadConfigFromEnv, runConfigPreflight, type ChainServicesConfig } from "../config/index.js";
 import { selectActiveStateMachineDeployment } from "../config/preflight.js";
-import {
-  BackupEvidenceStorage,
-  LocalEvidenceStorage,
-  ObjectEvidenceStorage,
-  RehearsalObjectEvidenceStorage,
-  S3EvidenceStorageClient,
-  createEvidenceService,
-  type EvidenceStorage
-} from "../evidence/index.js";
-import { createConfiguredGovernanceChainAdapter, createGovernanceService } from "../governance/index.js";
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
-import {
-  AnvilProductOrderTriggerBroadcastAdapter,
-  MemoryProductOrderTriggerBroadcastAdapter,
-  type ProductOrderTriggerBroadcastAdapter
-} from "../product/query/bff/trigger.js";
 import { createViemReconcileReceiptClient, TxReconcileWorker } from "../reconcile/index.js";
 import { createViemChainClock } from "../shared/chain-clock.js";
-import { createPublicClient, createWalletClient, defineChain, http } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
-import { ProtocolOrderBirthAdapter, type OrderBirthPort } from "../order/index.js";
 import { createChainServicesStores } from "../storage/factory.js";
-import type { Hex } from "../shared/types.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import {
   createSecureSubmissionBroadcastAdapter,
@@ -45,7 +26,7 @@ import { createLoggerAuditSink, type AuditSink } from "../security/audit.js";
 import { createRedactingLogger, redactErrorMessage, redactSecrets } from "../security/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
 import { ConfigError, consoleLogger, type Address, type Logger } from "../shared/types.js";
-import { createApiRouter, productBffStoreDraftOrderResolver } from "./routes.js";
+import { createApiRouter } from "./routes.js";
 import { InvalidPathParameterError, invalidPathParameterResponse, normalizeRequestId } from "./route-context.js";
 import { createPlanArtifactResolvers } from "../projection/plan-artifacts.js";
 
@@ -74,14 +55,11 @@ export async function startApiServer(
   });
   const logger = createRedactingLogger(options.logger ?? consoleLogger, config.security.logRedactionEnabled);
   const audit = createLoggerAuditSink(logger);
-  const orderBirthPort = createConfiguredOrderBirthPort(config, logger);
   const configDiagnostics = await runConfigPreflight(config);
   const eventSource = options.eventSource === undefined
     ? createChainEventSourceForTarget(config, { logger })
     : options.eventSource;
-  const productBffStore = stores.productBffStore;
   const submissionStore = stores.submissionStore;
-  const governanceStore = stores.governanceStore;
   const indexer = eventSource
     ? new IndexerService({
       config,
@@ -126,16 +104,6 @@ export async function startApiServer(
     audit,
     stores.broadcastDedupeStore
   );
-  const evidenceStorage = createConfiguredEvidenceStorage(config);
-  const governanceService = createGovernanceService({
-    store: governanceStore,
-    adapter: createConfiguredGovernanceChainAdapter(config, { logger }),
-    audit,
-    descriptorSnapshotStore: stores.identityDescriptorSnapshots,
-    ...(config.api.identityDescriptorPublicBaseUrl
-      ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
-      : {})
-  });
   const reconcileWorker = new TxReconcileWorker({
     config: config.reconcile,
     receiptClient: createViemReconcileReceiptClient({
@@ -143,17 +111,9 @@ export async function startApiServer(
       chainId: config.network.chainId
     }),
     projectionStore: store,
-    productStore: productBffStore,
     submissionStore,
-    governanceStore,
     ...(stores.stageExecutorPatchStore ? { stageExecutorPatchStore: stores.stageExecutorPatchStore } : {}),
     ...(stores.stageResourcePatchStore ? { stageResourcePatchStore: stores.stageResourcePatchStore } : {}),
-    evidenceBinder: createEvidenceService({
-      metadataStore: stores.evidenceMetadataStore,
-      storage: evidenceStorage,
-      runtimeEnvironment: config.security.environment,
-      resolveDraftOrder: productBffStoreDraftOrderResolver(productBffStore)
-    }),
     audit,
     logger
   });
@@ -206,51 +166,27 @@ export async function startApiServer(
   };
   const opsConsoleAdminIds = config.operatorRoles.opsConsoleAdmins ?? [];
   const router = createApiRouter(store, {
-    productBffStore,
-    orderStore: stores.orderStore,
-    orderChainId: config.network.chainId,
-    ...(submissionVerifyingContract ? { orderStateMachineAddress: submissionVerifyingContract } : {}),
-    orderConfigPublisherWallets: [
-      ...(config.storeAuth?.walletSession?.operatorWallets ?? []),
-      ...(config.storeAuth?.walletSession?.adminWallets ?? [])
-    ],
-    orderOperatorWallets: [
-      ...(config.storeAuth?.walletSession?.operatorWallets ?? []),
-      ...(config.storeAuth?.walletSession?.adminWallets ?? [])
-    ],
-    ...(orderBirthPort ? { orderBirthPort } : {}),
-    ...(config.operatorRoles.adminReviewers.length > 0
-      ? { governanceAdminIds: config.operatorRoles.adminReviewers }
-      : {}),
-    ...((config.operatorRoles.adminTokenHashes ?? []).length > 0
-      ? { governanceAdminTokenHashes: config.operatorRoles.adminTokenHashes }
-      : {}),
-    evidenceMetadataStore: stores.evidenceMetadataStore,
-    evidenceStorage,
     submissionStore,
-    governanceStore,
-    governanceService,
-    ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
-    opsRecoveryActions,
-    storeWalletSessionStore: stores.storeWalletSessionStore,
-    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    ...(config.api.identityDescriptorPublicBaseUrl
-      ? { descriptorPublicBaseUrl: config.api.identityDescriptorPublicBaseUrl }
-      : {}),
-    productChainClock: createViemChainClock(config.network.rpcUrl),
-    submissionChainId: config.network.chainId,
     ...(submissionVerifyingContract ? { submissionVerifyingContract } : {}),
     ...(stagePatchVerifyingContract ? { stageExecutorPatchVerifyingContract: stagePatchVerifyingContract } : {}),
     ...(stagePatchVerifyingContract ? { stageResourcePatchVerifyingContract: stagePatchVerifyingContract } : {}),
+    submissionChainId: config.network.chainId,
     ...(submissionBroadcastAdapter ? { submissionBroadcastAdapter } : {}),
     ...(stageExecutorPatchBroadcastAdapter ? { stageExecutorPatchBroadcastAdapter } : {}),
     ...(stageResourcePatchBroadcastAdapter ? { stageResourcePatchBroadcastAdapter } : {}),
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
-    productTriggerChainId: config.network.chainId,
-    productRuntimeEnvironment: config.security.environment,
-    ...(config.storeAuth ? { storeAuthConfig: config.storeAuth } : {}),
-    evidenceRuntimeEnvironment: config.security.environment,
+    runtimeEnvironment: config.security.environment,
+    chainClock: createViemChainClock(config.network.rpcUrl),
+    ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
+    adminAuthPolicy: {
+      runtimeEnvironment: config.security.environment,
+      allowedAdminIds: opsConsoleAdminIds,
+      ...((config.operatorRoles.adminTokenHashes ?? []).length > 0
+        ? { adminTokenHashes: config.operatorRoles.adminTokenHashes }
+        : {})
+    },
+    opsRecoveryActions,
     indexerDiagnostics: {
       configured: Boolean(eventSource),
       pollIntervalMs: config.api.indexerPollIntervalMs
@@ -400,138 +336,6 @@ export async function startApiServer(
   return server;
 }
 
-function createConfiguredOrderBirthPort(
-  config: ChainServicesConfig,
-  logger: Logger,
-): OrderBirthPort | undefined {
-  const birth = config.orderBirth;
-  if (!birth) {
-    return undefined;
-  }
-  const chain = defineChain({
-    id: config.network.chainId,
-    name: `uvp-${config.network.chainId}`,
-    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-    rpcUrls: { default: { http: [config.network.rpcUrl] } },
-  });
-  const account = privateKeyToAccount(birth.signerPrivateKey);
-  const walletClient = createWalletClient({
-    account,
-    chain,
-    transport: http(config.network.rpcUrl),
-  });
-  const publicClient = createPublicClient({
-    chain,
-    transport: http(config.network.rpcUrl),
-  });
-  return new ProtocolOrderBirthAdapter({
-    triggerSigner: (typedData) => account.signTypedData(typedData),
-    onBroadcastError: (error) => {
-      logger.error("order birth broadcast failed", {
-        message: error instanceof Error ? redactErrorMessage(error) : "unknown error",
-      });
-    },
-    ...(birth.broadcastEnabled
-      ? {
-        broadcast: async (call) => {
-          const txHash = await walletClient.sendTransaction({
-            to: call.address,
-            data: call.data,
-            chain,
-          });
-          const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-          logger.info("order birth transaction settled", {
-            txHash,
-            status: receipt.status,
-          });
-          return {
-            status: receipt.status === "success" ? "confirmed" : "unknown",
-            txHash,
-          };
-        },
-      }
-      : {}),
-  });
-}
-
-export function createConfiguredEvidenceStorage(config: ChainServicesConfig): EvidenceStorage {
-  const evidenceStorageConfig = config.evidenceStorage;
-  if (evidenceStorageConfig.adapter === "s3") {
-    if (!evidenceStorageConfig.s3Bucket) {
-      throw new ConfigError(
-        "UVP_EVIDENCE_S3_BUCKET is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
-      );
-    }
-    if (!evidenceStorageConfig.s3Region) {
-      throw new ConfigError(
-        "UVP_EVIDENCE_S3_REGION is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
-      );
-    }
-    if (!evidenceStorageConfig.s3AccessKeyIdEnv) {
-      throw new ConfigError(
-        "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
-      );
-    }
-    if (!evidenceStorageConfig.s3SecretAccessKeyEnv) {
-      throw new ConfigError(
-        "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV is required when UVP_EVIDENCE_STORAGE_ADAPTER=s3",
-      );
-    }
-    const primary = new ObjectEvidenceStorage({
-      client: new S3EvidenceStorageClient({
-        bucket: evidenceStorageConfig.s3Bucket,
-        ...(evidenceStorageConfig.s3Prefix ? { prefix: evidenceStorageConfig.s3Prefix } : {}),
-        region: evidenceStorageConfig.s3Region,
-        ...(evidenceStorageConfig.s3Endpoint ? { endpoint: evidenceStorageConfig.s3Endpoint } : {}),
-        forcePathStyle: evidenceStorageConfig.s3ForcePathStyle ?? false,
-        accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv,
-        secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv,
-        ...(evidenceStorageConfig.s3SessionTokenEnv
-          ? { sessionTokenEnv: evidenceStorageConfig.s3SessionTokenEnv }
-          : {}),
-        ...(evidenceStorageConfig.s3UriMode === "object"
-          ? {
-              uriMode: evidenceStorageConfig.s3UriMode,
-              ...(evidenceStorageConfig.s3ObjectNamespace ? { objectNamespace: evidenceStorageConfig.s3ObjectNamespace } : {})
-            }
-          : {})
-      })
-    });
-    if (evidenceStorageConfig.s3BackupBucket) {
-      const backup = new ObjectEvidenceStorage({
-        client: new S3EvidenceStorageClient({
-          bucket: evidenceStorageConfig.s3BackupBucket,
-          region: evidenceStorageConfig.s3Region,
-          ...(evidenceStorageConfig.s3Endpoint ? { endpoint: evidenceStorageConfig.s3Endpoint } : {}),
-          forcePathStyle: evidenceStorageConfig.s3ForcePathStyle ?? false,
-          accessKeyIdEnv: evidenceStorageConfig.s3AccessKeyIdEnv,
-          secretAccessKeyEnv: evidenceStorageConfig.s3SecretAccessKeyEnv,
-          ...(evidenceStorageConfig.s3SessionTokenEnv
-            ? { sessionTokenEnv: evidenceStorageConfig.s3SessionTokenEnv }
-            : {}),
-          ...(evidenceStorageConfig.s3UriMode === "object"
-            ? {
-                uriMode: evidenceStorageConfig.s3UriMode,
-                ...(evidenceStorageConfig.s3ObjectNamespace ? { objectNamespace: evidenceStorageConfig.s3ObjectNamespace } : {})
-              }
-            : {})
-        })
-      });
-      return new BackupEvidenceStorage({ primary, backup });
-    }
-    return primary;
-  }
-  if (evidenceStorageConfig.adapter === "rehearsal-object") {
-    return new RehearsalObjectEvidenceStorage({
-      ...(evidenceStorageConfig.objectRootDir ? { rootDir: evidenceStorageConfig.objectRootDir } : {}),
-      namespace: evidenceStorageConfig.objectNamespace
-    });
-  }
-  return new LocalEvidenceStorage({
-    ...(evidenceStorageConfig.localDir ? { rootDir: evidenceStorageConfig.localDir } : {})
-  });
-}
-
 function startProjectionRefresh(indexer: IndexerService, config: ChainServicesConfig, logger: Logger): NodeJS.Timeout | undefined {
   const pollIntervalMs = config.api.indexerPollIntervalMs;
   if (pollIntervalMs <= 0) {
@@ -572,7 +376,7 @@ function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): vo
   response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
-    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-principal-id, x-uvp-principal-role, x-uvp-admin-id, x-uvp-admin-role, x-uvp-admin-token, x-uvp-store-operator-id, x-uvp-store-operator-role, x-uvp-store-user-id, x-uvp-store-role, x-uvp-store-session, x-uvp-store-dev-anchored-address"
+    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-admin-id, x-uvp-admin-role, x-uvp-admin-token, x-uvp-wallet-address"
   );
   response.setHeader("access-control-max-age", "86400");
   const origin = request?.headers.origin?.trim() ?? "";
@@ -601,29 +405,6 @@ function moduleAddress(
   }
   const activeDeployment = selectActiveStateMachineDeployment(config);
   return activeDeployment?.modules?.[key];
-}
-
-function productRegistrationAdapterFromConfig(config: ChainServicesConfig): ProductOrderTriggerBroadcastAdapter {
-  if (config.productBff.registrationAdapter === "memory-trigger") {
-    return new MemoryProductOrderTriggerBroadcastAdapter();
-  }
-
-  const stateMachine = stateMachineAddress(config.network.contracts);
-  if (!stateMachine) {
-    throw new ConfigError("UVPStateMachine contract address is required when Product BFF registration adapter is anvil");
-  }
-  const privateKey = process.env[config.productBff.registrarPrivateKeyEnv];
-  if (!privateKey?.trim()) {
-    throw new ConfigError(`${config.productBff.registrarPrivateKeyEnv} is required when Product BFF registration adapter is anvil`);
-  }
-  return new AnvilProductOrderTriggerBroadcastAdapter({
-    stateMachineAddress: stateMachine,
-    rpcUrl: config.network.rpcUrl,
-    chainId: config.network.chainId,
-    privateKey,
-    waitForReceipt: config.productBff.waitForReceipt,
-    rejectGasPayerAsSubmitter: config.security.environment !== "local"
-  });
 }
 
 function createConfiguredSubmissionBroadcastAdapter(

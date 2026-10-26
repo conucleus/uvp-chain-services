@@ -12,10 +12,48 @@ import type {
   ProductTaskDTO
 } from "@uvp-eth/product-dto";
 import type { ProductSubmitTypedData, ProductSubmitTypedDataField, SelectorBindingPayload, SignalAttributionPayload } from "@uvp-eth/protocol-bindings";
-import type { EvidencePrincipal, EvidenceRecordDTO, EvidenceService } from "../evidence/index.js";
+import type { EvidenceProofDTO } from "@uvp-eth/product-dto";
 import type { Address, Hex } from "../shared/types.js";
 
 export type { ProductSubmitTypedData, ProductSubmitTypedDataField };
+
+// Evidence types kept as a narrow port for the legacy prepare path. The
+// evidence service itself lives in uvp-app-backend after the split.
+export type EvidencePrincipalRole = "anonymous" | "participant" | "adjudicator" | "admin";
+
+export interface EvidencePrincipal {
+  readonly id?: string;
+  readonly role: EvidencePrincipalRole;
+}
+
+export interface SubmissionEvidenceObjectDTO {
+  readonly evidenceId: string;
+  readonly orderId?: string;
+  readonly draftId?: string;
+  readonly taskId?: string;
+  readonly stageIdentifier: string;
+  readonly payloadHash: Hex;
+  readonly payloadRef: string;
+  readonly status: string;
+}
+
+export interface SubmissionEvidenceRecordDTO {
+  readonly evidence: SubmissionEvidenceObjectDTO;
+  readonly metadata: {
+    readonly documentType: string;
+  };
+}
+
+export interface BindEvidenceRequestDTO {
+  readonly evidenceId: string;
+  readonly submissionId?: string;
+  readonly txHash: Hex;
+  readonly orderId: string;
+  readonly onchainOrderId: Hex;
+  readonly sourceId: Hex;
+  readonly signalId: Hex;
+  readonly boundAt?: string;
+}
 
 export type {
   PrepareProductTaskSubmitInput,
@@ -84,8 +122,20 @@ export interface ProductTaskReader {
   getTask(taskId: string): Promise<ProductTaskDTO | undefined>;
 }
 
-export type ProductSubmissionEvidenceReader = Pick<EvidenceService, "getEvidence" | "getProof"> &
-  Partial<Pick<EvidenceService, "bindEvidence">>;
+export interface ProductSubmissionEvidenceReader {
+  getEvidence(
+    evidenceId: string,
+    principal: EvidencePrincipal
+  ): Promise<SubmissionEvidenceRecordDTO | undefined>;
+  getProof(
+    evidenceId: string,
+    principal: EvidencePrincipal
+  ): Promise<EvidenceProofDTO | undefined>;
+  bindEvidence?(
+    input: BindEvidenceRequestDTO,
+    principal: EvidencePrincipal
+  ): Promise<unknown>;
+}
 
 export interface SubmissionAuthorizationRequest {
   readonly task: ProductTaskDTO;
@@ -114,7 +164,7 @@ export interface SubmissionBroadcastRequest {
   readonly prepared: PreparedSubmissionDTO;
   readonly signature: Hex;
   readonly recoveredSubmitter: Address;
-  readonly evidence: readonly EvidenceRecordDTO[];
+  readonly evidence: readonly SubmissionEvidenceRecordDTO[];
 }
 
 export interface SubmissionBroadcastAttemptResult {
@@ -198,7 +248,7 @@ export interface ProductSubmissionStore {
 }
 
 export interface PreparedSubmissionRecord extends PreparedSubmissionDTO {
-  readonly evidenceRecords: readonly EvidenceRecordDTO[];
+  readonly evidenceRecords: readonly SubmissionEvidenceRecordDTO[];
   readonly usedAt?: string;
   readonly submissionId?: string;
 }

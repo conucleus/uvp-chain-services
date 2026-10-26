@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { adminPrincipalFromHeaders } from "../../governance/index.js";
+import { adminPrincipalFromHeaders } from "../../security/admin-auth.js";
 import type { AuditSink } from "../../security/audit.js";
 import { redactErrorMessage, redactSecrets } from "../../security/redaction.js";
 import type { ProductSubmissionDTO } from "../../submissions/index.js";
@@ -16,7 +16,7 @@ type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions
 interface AdminOpsRequestContext {
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
   readonly audit?: AuditSink;
-  readonly governanceAdminPolicy: Parameters<RouteModule["handle"]>[1]["governanceAdminPolicy"];
+  readonly adminAuthPolicy: Parameters<RouteModule["handle"]>[1]["adminAuthPolicy"];
   readonly opsConsoleAdminIds?: readonly string[];
   readonly actions?: {
     runReconcile?(): Promise<AdminOpsActionEffect | void>;
@@ -40,7 +40,7 @@ export function createAdminOpsRouteModule(): RouteModule {
       return handleAdminOpsRequest(request, {
         buildDiagnostics: context.buildDiagnostics,
         audit: context.audit,
-        governanceAdminPolicy: context.governanceAdminPolicy,
+        adminAuthPolicy: context.adminAuthPolicy,
         ...(context.opsConsoleAdminIds ? { opsConsoleAdminIds: context.opsConsoleAdminIds } : {}),
         ...(context.opsRecoveryActions ? { actions: context.opsRecoveryActions } : {}),
         ...(context.submissionStore ? { submissionStore: context.submissionStore } : {}),
@@ -58,7 +58,7 @@ async function handleAdminOpsRequest(
     return undefined;
   }
 
-  const principal = adminPrincipalFromHeaders(request.headers, context.governanceAdminPolicy);
+  const principal = adminPrincipalFromHeaders(request.headers, context.adminAuthPolicy);
   if (!principal) {
     return {
       status: 403,

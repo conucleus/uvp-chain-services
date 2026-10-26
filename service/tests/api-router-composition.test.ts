@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiRouter } from "../src/api/routes.js";
-import { ObjectEvidenceStorage } from "../src/evidence/index.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 
@@ -18,22 +17,24 @@ afterAll(async () => {
 
 function requiredRouterStores() {
   return {
-    storeWalletSessionStore: stores.storeWalletSessionStore,
-    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    productBffStore: stores.productBffStore,
-    orderStore: stores.orderStore,
-    orderRequirementsStore: stores.orderRequirementsStore,
-    evidenceMetadataStore: stores.evidenceMetadataStore,
     submissionStore: stores.submissionStore,
-    governanceStore: stores.governanceStore,
     stageExecutorPatchStore: stores.stageExecutorPatchStore,
     stageResourcePatchStore: stores.stageResourcePatchStore,
   };
 }
 
+function routerOptions(runtimeEnvironment: "local" | "production" = "local") {
+  return {
+    ...requiredRouterStores(),
+    runtimeEnvironment,
+    submissionChainId: 84532,
+    submissionVerifyingContract: "0x1111111111111111111111111111111111111111" as const
+  };
+}
+
 describe("API router composition", () => {
   it("returns not_found for unknown routes", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, routerOptions());
 
     await expect(router.handle({ method: "GET", pathname: "/unknown-route" }))
       .resolves.toEqual({
@@ -43,7 +44,7 @@ describe("API router composition", () => {
   });
 
   it("retires the V1 order draft/invite/participant/requirements surface with 410", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), productRuntimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(stores.projectionStore, routerOptions());
 
     for (const request of [
       { method: "POST", pathname: "/product/order-drafts", body: { title: "gone" } },
@@ -57,36 +58,18 @@ describe("API router composition", () => {
     }
   });
 
-  it("serves production reads without demo fallback data", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      productRuntimeEnvironment: "production",
-      evidenceStorage: productionSafeEvidenceStorage()
-    });
-
-    await expect(router.handle({
-      method: "GET",
-      pathname: "/product/zhixus",
-      query: { fallback: "demo" }
-    })).resolves.toMatchObject({
-      status: 200,
-      body: { zhixus: [] }
-    });
-  });
-
   it("rejects malformed percent-encoded path parameters with 400 instead of 500", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
+    const router = createApiRouter(stores.projectionStore, routerOptions());
 
-    const productOrder = await router.handle({
+    const response = await router.handle({
       method: "GET",
-      pathname: "/product/orders/%ZZ",
-      headers: { "x-uvp-wallet-address": "0x9999999999999999999999999999999999999999" }
+      pathname: "/chain/orders/%ZZ"
     });
-    expect(productOrder).toMatchObject({ status: 400, body: { error: "invalid_path_parameter" } });
-
+    expect(response).toMatchObject({ status: 400, body: { error: "invalid_path_parameter" } });
   });
 
   it("submission reads require wallet identity", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" });
+    const router = createApiRouter(stores.projectionStore, routerOptions());
 
     const anonymous = await router.handle({ method: "GET", pathname: "/product/submissions/sub_1" });
     expect(anonymous).toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
@@ -194,27 +177,7 @@ describe("API router composition", () => {
       reason: expect.stringContaining("not authorized on chain")
     });
   });
-
 });
-
-function productionSafeEvidenceStorage(): ObjectEvidenceStorage {
-  return new ObjectEvidenceStorage({
-    client: {
-      async put(input) {
-        return {
-          storageURI: `object://evidence/${encodeURIComponent(input.evidenceId)}`,
-          size: input.bytes.byteLength
-        };
-      },
-      async get() {
-        return undefined;
-      },
-      async exists() {
-        return false;
-      }
-    }
-  });
-}
 
 function chainEvent(blockNumber: bigint, eventName: string, args: Record<string, unknown>) {
   return {

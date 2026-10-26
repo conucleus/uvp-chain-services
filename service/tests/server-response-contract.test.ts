@@ -1,17 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { privateKeyToAccount } from "viem/accounts";
 import { connect } from "node:net";
 import type { Server } from "node:http";
 import { loadConfigFromEnv } from "../src/config/index.js";
 import { startApiServer } from "../src/api/server.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 import type { ChainEventSource } from "../src/indexer/service.js";
-import type { Address } from "../src/shared/types.js";
-
-const walletKey = "0x1111111111111111111111111111111111111111111111111111111111111111";
-const account = privateKeyToAccount(walletKey);
-const wallet = account.address as Address;
-
 const noOpEventSource: ChainEventSource = {
   async getFinalizedBlock() {
     return 0n;
@@ -31,43 +24,6 @@ describe("api server response contract", () => {
       });
       server = undefined;
     }
-  });
-
-  it("delivers the wallet session token verbatim through the HTTP wrapper", async () => {
-    server = await startApiServer({
-      config: await localConfig(),
-      eventSource: noOpEventSource
-    });
-    const base = `http://127.0.0.1:${serverPort(server)}`;
-    const jsonHeaders = { "content-type": "application/json" };
-
-    const challengeResponse = await fetch(`${base}/store/auth/challenge`, {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({ address: wallet })
-    });
-    expect(challengeResponse.status).toBe(201);
-    const challenge = (await challengeResponse.json()) as { challenge: { nonce: string; message: string } };
-
-    const verifyResponse = await fetch(`${base}/store/auth/verify`, {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({
-        nonce: challenge.challenge.nonce,
-        signature: await account.signMessage({ message: challenge.challenge.message })
-      })
-    });
-    expect(verifyResponse.status).toBe(201);
-    const verified = (await verifyResponse.json()) as { token: string };
-    expect(verified.token).toMatch(/^uvs_[0-9a-f]{64}$/);
-    expect(verified.token).not.toContain("redacted");
-
-    const sessionResponse = await fetch(`${base}/store/auth/session`, {
-      headers: { "x-uvp-store-session": verified.token }
-    });
-    expect(sessionResponse.status).toBe(200);
-    const session = (await sessionResponse.json()) as { session: { anchoredAddress?: string } };
-    expect(session.session.anchoredAddress?.toLowerCase()).toBe(wallet.toLowerCase());
   });
 
   it("echoes a sanitized client request id and rebuilds unsafe ones instead of trusting raw header bytes", async () => {

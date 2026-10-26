@@ -179,26 +179,8 @@ function testConfig(): ChainServicesConfig {
       stateMachinePrivateKeyEnv: "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY",
       maxRetries: 3
     },
-    governance: {
-      broadcastEnabled: false,
-      signerPrivateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY",
-      rpcUrl: "http://127.0.0.1:8545",
-      chainId: 31337,
-      txConfirmations: 1,
-      allowedOperators: []
-    },
-    productBff: {
-      registrationAdapter: "memory-trigger",
-      registrarPrivateKeyEnv: "UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY",
-      waitForReceipt: false
-    },
-    operatorRoles: {
-      deployerPrivateKeyEnv: "UVP_ETH_DEPLOYER_PRIVATE_KEY",
-      participantWallets: [],
-      adminReviewers: []
-    },
+    operatorRoles: {},
     reconcile: { enabled: false, pollIntervalMs: 5000, txTimeoutMs: 30_000 },
-    evidenceStorage: { adapter: "local", objectNamespace: "uvp-rehearsal" },
     security: {
       environment: "local",
       preflightStrict: false,

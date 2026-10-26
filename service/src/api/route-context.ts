@@ -1,21 +1,7 @@
-import type {
-  ChainServicesRuntimeEnv,
-  ConfigDiagnostics,
-  StoreAuthConfig,
-} from "../config/index.js";
-import type {
-  EvidenceMetadataStore,
-  EvidenceService,
-  EvidenceStorage
-} from "../evidence/index.js";
-import type { GovernanceAdminAuthPolicy, GovernanceService, GovernanceStore } from "../governance/index.js";
-import type { ProductBffService } from "../product/query/bff/service.js";
-import type { ProductBffStore } from "../product/query/bff/store.js";
-import type { ProductSchemaResolver, ProductService } from "../product/application/service.js";
+import type { ConfigDiagnostics, ChainServicesRuntimeEnv } from "../config/index.js";
 import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
+import type { AdminAuthPolicy } from "../security/admin-auth.js";
 import type { AuditSink } from "../security/audit.js";
-import type { Address } from "../shared/types.js";
-import type { ChainClock } from "../shared/chain-clock.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import type {
   ProductSubmissionDTO,
@@ -31,18 +17,6 @@ import type {
   StageExecutorPatchBroadcastAdapter,
   StageResourcePatchBroadcastAdapter
 } from "../stage-patches/index.js";
-import type {
-  StoreIdentityProvider
-} from "../store/console/access.js";
-import type { StoreSessionService, StoreWalletSessionStore } from "../store/sessions/index.js";
-import type { StoreIdentityDescriptorSnapshotStore } from "../governance/descriptors.js";
-import type {
-  OrderBirthPort,
-  OrderTriggerPort,
-  OrderService,
-  OrderStore,
-  PublishedPlanProvider,
-} from "../order/index.js";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
 export interface ApiRequest {
@@ -64,60 +38,32 @@ export interface ApiRouter {
 }
 
 export interface CreateApiRouterOptions {
-  readonly evidenceService?: EvidenceService;
-  readonly evidenceMetadataStore: EvidenceMetadataStore;
-  readonly governanceService?: GovernanceService;
-  readonly governanceStore: GovernanceStore;
   readonly submissionService?: ProductSubmissionService;
   readonly submissionStore: ProductSubmissionStore;
   readonly submissionChainId?: number;
-  readonly submissionVerifyingContract?: Address;
+  readonly submissionVerifyingContract?: `0x${string}`;
   readonly submissionBroadcastAdapter?: SubmissionBroadcastAdapter;
   readonly productStageExecutorPatchService?: ProductStageExecutorPatchService;
   readonly stageExecutorPatchBroadcastAdapter?: StageExecutorPatchBroadcastAdapter;
   readonly stageExecutorPatchChainId?: number;
-  readonly stageExecutorPatchVerifyingContract?: Address;
+  readonly stageExecutorPatchVerifyingContract?: `0x${string}`;
   readonly stageExecutorPatchStore: ProductStageExecutorPatchStore;
   readonly productStageResourcePatchService?: ProductStageResourcePatchService;
   readonly stageResourcePatchBroadcastAdapter?: StageResourcePatchBroadcastAdapter;
   readonly stageResourcePatchChainId?: number;
-  readonly stageResourcePatchVerifyingContract?: Address;
+  readonly stageResourcePatchVerifyingContract?: `0x${string}`;
   readonly stageResourcePatchStore: ProductStageResourcePatchStore;
-  readonly productBffStore: ProductBffStore;
-  readonly orderStore: OrderStore;
-  readonly orderService?: OrderService;
-  readonly orderChainId?: number;
-  readonly orderStateMachineAddress?: Address;
-  readonly orderConfigPublisherWallets?: readonly Address[];
-  readonly orderOperatorWallets?: readonly Address[];
-  readonly orderResourceResolver?: import("../visibility/types.js").ResourceResolverPort;
-  readonly orderRuntimeIntervalMs?: number;
-  readonly orderTimerPoker?: () => Promise<unknown>;
-  readonly orderPublishedPlanProvider?: PublishedPlanProvider;
-  readonly orderBirthPort?: OrderBirthPort;
-  readonly orderTriggerPort?: OrderTriggerPort;
-  readonly productTriggerChainId?: number;
-  readonly productRuntimeEnvironment?: ChainServicesRuntimeEnv;
+  readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
   readonly audit?: AuditSink;
   readonly configDiagnostics?: ConfigDiagnostics;
   readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
   readonly reconcileDiagnostics?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
-  readonly evidenceStorage?: EvidenceStorage;
-  readonly evidenceRuntimeEnvironment?: ChainServicesRuntimeEnv;
-  readonly productSchemaResolver?: ProductSchemaResolver;
-  readonly storeIdentityProvider?: StoreIdentityProvider;
-  readonly storeAuthConfig?: StoreAuthConfig;
-  readonly storeWalletSessionStore: StoreWalletSessionStore;
-  readonly storeSessionService?: StoreSessionService;
-  readonly identityDescriptorSnapshots: StoreIdentityDescriptorSnapshotStore;
-  readonly descriptorPublicBaseUrl?: string;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   readonly opsConsoleAdminIds?: readonly string[];
-  readonly governanceAdminIds?: readonly string[];
-  readonly governanceAdminTokenHashes?: readonly string[];
+  readonly adminAuthPolicy?: AdminAuthPolicy;
   readonly onTxMined?: () => void;
   readonly now?: () => Date;
-  readonly productChainClock?: ChainClock;
+  readonly chainClock?: import("../shared/chain-clock.js").ChainClock;
 }
 
 export interface AdminOpsActionEffect {
@@ -141,21 +87,13 @@ export interface AdminOpsRecoveryActions {
 
 export interface ApiRouteContext {
   readonly store: ProjectionStore;
-  readonly productService: ProductService;
-  readonly productBffService: ProductBffService;
-  readonly orderService: OrderService;
-  readonly storeIdentityProvider: StoreIdentityProvider;
-  readonly sessionService?: StoreSessionService;
-  readonly identityDescriptorSnapshots: StoreIdentityDescriptorSnapshotStore;
-  readonly governanceService: GovernanceService;
-  readonly evidenceService: EvidenceService;
   readonly submissionService: ProductSubmissionService;
   readonly productStageExecutorPatchService: ProductStageExecutorPatchService;
   readonly productStageResourcePatchService: ProductStageResourcePatchService;
   readonly submissionStore?: ProductSubmissionStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   readonly opsConsoleAdminIds?: readonly string[];
-  readonly governanceAdminPolicy: GovernanceAdminAuthPolicy;
+  readonly adminAuthPolicy: AdminAuthPolicy;
   readonly audit: AuditSink;
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
   readonly onTxMined?: () => void;

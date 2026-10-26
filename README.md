@@ -6,8 +6,10 @@
 
 Non-trusted service boundary for the EVM-native UVP track.
 
-This domain owns indexers, relayers, proof projection, Product APIs, storage
-adapters, submission services, and governance/admin APIs. The concrete package is:
+This domain owns indexers, projection storage, relay operation state, generic
+chain reads, and chain/admin diagnostics. Business rows, wallet sessions,
+evidence, governance writes, and Product APIs live in `uvp-app-backend`. The
+concrete package is:
 
 - `service/`: chain services workspace package.
 
@@ -22,20 +24,16 @@ resolve those cross-repository `workspace:*` dependencies. A standalone checkout
 requires the protocol packages to be published or linked into an equivalent local
 workspace.
 
-Services may cache, project, relay, and translate chain facts, but they must not
-become the source of truth for plans, orders, signals, hooks, or identity
-bindings. The relayed transaction surfaces are the plan-scoped `submitSignalFor`
-broadcast of participant-signed signals plus several narrowly scoped paid-gas
-submissions — stage patches (`applyStageExecutorPatchFor` /
-`applyStageResourcePatchFor`), order registration
-(`triggerOrderFromOutsideFor`), timer keeper clock pokes (`pokeTimer`, driven
-by the `TimerKeeperWorker` polling dueAt-elapsed waiting hooks from the
-projection), dock keeper liveness submissions
-(`submitDockedInput` / `submitDockedSignal`), and governance identity
-registration/revocation (`registerIdentityBinding` /
-`revokeIdentityBinding`, see `service/README.md`); signal, patch, and
-trigger submissions all carry capability proofs minted on the spot by the
-capability-proofs single source (`@uvp-eth/compiler`) inside the transaction.
+Services may cache, project, and relay chain facts, but they must not become
+the source of truth for plans, orders, signals, hooks, or identity bindings.
+The relayed transaction surfaces kept here are the plan-scoped `submitSignalFor`
+broadcast of participant-signed signals and stage patches
+(`applyStageExecutorPatchFor` / `applyStageResourcePatchFor`); order registration,
+governance identity registration/revocation, and the business prepare
+orchestration in front of them are being retired in favour of client-signed
+operations. Signal and patch submissions carry capability proofs minted on the
+spot by the capability-proofs single source (`@uvp-eth/compiler`) inside the
+transaction.
 Dock keeper assembly: `submitDockedInput` / `submitDockedSignal` are
 permissionless contract surfaces, and their route rosters (the binding sets plus
 the pre-assembled open/attach calldata) exist only in cloud-compile artifacts
@@ -47,10 +45,10 @@ paid-gas submitter; the staging readiness probe surfaces this assembly state.
 Relayers pay gas and carry no business-action vocabulary of their own.
 Rebuildability from contract events is the default rule.
 
-This domain implements the service-side convergence gate for Product Schema v1,
-dynamic stage executor authority, docked Zhixu projection language, resource
-manifest/access state, Store authoring, proof/read models, operator audit, and
-signal-container producer APIs.
+This domain implements the service-side convergence gate for chain projections,
+plan artifacts, relay operation state, generic chain reads, and operator
+diagnostics. Product Schema, Store authoring, evidence, and governance review
+surfaces are owned by `uvp-app-backend`.
 
 ## Deployment Assumptions
 
@@ -67,14 +65,10 @@ single-writer partitioning first.
 
 ## API Access Policy
 
-Order/task reads are participant-gated: `GET /product/orders/:orderId` (with
-its `/timeline` and `/proof` views, which disclose participant wallets and
-signer details) requires a session identity, and orders assigned to other
-participants are indistinguishable from nonexistent (404). Business-record
-endpoints (`GET /product/submissions/:submissionId`, `GET
-/product/order-triggers/:triggerId`, and the invite preview `GET
-/product/invites/:inviteId`) always require a session identity (the invite
-preview additionally requires the one-time invite token). Outside the `local`
-runtime profile, admin/ops surfaces additionally require a password factor
-(`x-uvp-admin-token`); plaintext whitelisted self-declared admin headers are a
-local-only development mode.
+Chain reads, `GET /healthz`, and `GET /readyz` are anonymous. `/admin/*`
+surfaces require admin headers (`x-uvp-admin-id` / `x-uvp-admin-role`); outside
+the `local` runtime profile they also require `x-uvp-admin-token` matching
+`CHAIN_SERVICES_ADMIN_TOKEN_HASHES`, plus the `OPS_CONSOLE_ADMIN_IDS`
+allowlist. Wallet sessions and participant-scoped Product reads are served by
+`uvp-app-backend`; the remaining legacy prepare routes fail closed outside
+`local`.

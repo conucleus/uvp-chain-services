@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createProductService } from "../src/product/application/service.js";
 import { rebuildOrderProjections } from "../src/indexer/replay.js";
 import {
   stateMachineScopedKey,
@@ -59,65 +58,6 @@ describe("plan-scoped state-machine identities", () => {
     await expect(store.listStateMachineTasks()).resolves.toHaveLength(2);
   });
 
-  it("does not leak a plan when participant visibility starts with a bare accepted order id", async () => {
-    const events = collisionEvents();
-    const store = stores.projectionStore;
-    await store.resetFromEvents({ deploymentBlock: 0n, events });
-    const product = createProductService(store);
-
-    const ambiguous = await product.getParticipantView({
-      walletAddress: walletA,
-      acceptedParticipants: [{
-        participantId: "participant-a",
-        displayName: "Participant A",
-        walletAddress: walletA,
-        roleLabel: "执行方",
-        roleSlotId: "slot-a",
-        draftId: "draft-a",
-        draftTitle: "Draft A",
-        orderId,
-      }],
-    });
-    expect(ambiguous.orders).toHaveLength(1);
-    expect(ambiguous.orders[0]?.planId).toBe(planA);
-    expect(ambiguous.tasks).toHaveLength(1);
-    expect(ambiguous.tasks[0]?.assigneeWallet).toBe(walletA);
-
-    const walletC = "0xcccccccccccccccccccccccccccccccccccccccccc";
-    const bare = await product.getParticipantView({
-      walletAddress: walletC,
-      acceptedParticipants: [{
-        participantId: "participant-c",
-        displayName: "Participant C",
-        walletAddress: walletC,
-        roleLabel: "查看方",
-        roleSlotId: "slot-c",
-        draftId: "draft-c",
-        draftTitle: "Draft C",
-        orderId,
-      }],
-    });
-    expect(bare.orders).toHaveLength(0);
-    expect(bare.tasks).toHaveLength(0);
-
-    const canonical = await product.getParticipantView({
-      walletAddress: walletC,
-      acceptedParticipants: [{
-        participantId: "participant-c",
-        displayName: "Participant C",
-        walletAddress: walletC,
-        roleLabel: "查看方",
-        roleSlotId: "slot-c",
-        draftId: "draft-c",
-        draftTitle: "Draft C",
-        planId: planB,
-        orderId,
-      }],
-    });
-    expect(canonical.orders).toHaveLength(1);
-    expect(canonical.orders[0]?.planId).toBe(planB);
-    expect(canonical.tasks).toHaveLength(0);
-  });
 });
 
 function collisionEvents(): readonly ChainEvent[] {

@@ -1,5 +1,3 @@
-import type { Hex } from "../shared/types.js";
-
 export type TxReconcileStatus =
   | "broadcasting"
   | "submitted"
@@ -19,23 +17,9 @@ export interface TxReconcileFields {
   readonly projectionStatus?: TxProjectionStatus;
 }
 
-export function isReopenableFailedTriggerRecord(
-  record: {
-    readonly status: string;
-    readonly retryable: boolean;
-    readonly txHash?: Hex;
-  },
-): boolean {
-  return record.status === "failed" && record.retryable && !record.txHash;
-}
-
 export interface ReconcileRunSummary {
-  readonly registrationsChecked: number;
   readonly submissionsChecked: number;
-  readonly governanceLogsChecked: number;
   readonly stagePatchesChecked: number;
-  readonly evidenceBindsSwept: number;
-  readonly evidenceBindsRepaired: number;
   readonly updated: number;
   readonly failed: number;
 }

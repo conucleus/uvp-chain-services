@@ -10,7 +10,6 @@ import {
   planIdForPublisher,
   toSolidityRegisterPlanArgs
 } from "@uvp-eth/compiler";
-import { createApiRouter } from "../src/api/routes.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import { IndexerService, type ChainEventSource } from "../src/indexer/service.js";
 import { rebuildOrderProjections } from "../src/indexer/replay.js";
@@ -53,20 +52,6 @@ afterAll(async () => {
   await stores.close();
 });
 
-function requiredRouterStores() {
-  return {
-    storeWalletSessionStore: stores.storeWalletSessionStore,
-    identityDescriptorSnapshots: stores.identityDescriptorSnapshots,
-    productBffStore: stores.productBffStore,
-    orderStore: stores.orderStore,
-    orderRequirementsStore: stores.orderRequirementsStore,
-    evidenceMetadataStore: stores.evidenceMetadataStore,
-    submissionStore: stores.submissionStore,
-    governanceStore: stores.governanceStore,
-    stageExecutorPatchStore: stores.stageExecutorPatchStore,
-    stageResourcePatchStore: stores.stageResourcePatchStore,
-  };
-}
 
 const contractAddress = "0x1111111111111111111111111111111111111111";
 const contractAddressV2 = "0x9999999999999999999999999999999999999999";
@@ -760,23 +745,7 @@ describe("indexer projection replay", () => {
 
     const store = stores.projectionStore;
     await store.resetFromEvents({ deploymentBlock: 0n, events });
-    const router = createApiRouter(store, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
-    const response = await router.handle({
-      method: "GET",
-      pathname: `/product/orders/${stateMachineOrderId}`,
-      headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" }
-    });
-
-    expect(response.status).toBe(409);
-    expect(response.body).toMatchObject({
-      error: "ambiguous_order_id",
-      details: {
-        candidates: expect.arrayContaining([
-          expect.objectContaining({ stateMachineAddress: contractAddress }),
-          expect.objectContaining({ stateMachineAddress: contractAddressV2 })
-        ])
-      }
-    });
+    await expect(store.findStateMachineOrdersByOrderId(stateMachineOrderId)).resolves.toHaveLength(2);
   });
 
   it("projects state-machine module and plan publisher provenance", () => {
@@ -2726,19 +2695,11 @@ describe("indexer projection replay", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
-    const router = createApiRouter(store, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
-    const proofResponse = await router.handle({
-      method: "GET",
-      pathname: `/product/orders/${stateMachineOrderId}/proof`,
-      headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" }
-    });
-
-    expect(proofResponse.status).toBe(200);
-    expect((proofResponse.body as { proof: Array<{ eventName: string; transactionHash: string }> }).proof)
-      .toContainEqual(expect.objectContaining({
-        eventName: "SignalSubmitted",
-        transactionHash: finalSubmit.transactionHash
-      }));
+    const orders = await store.findStateMachineOrdersByOrderId(stateMachineOrderId);
+    const signals = orders.flatMap((order) => Object.values(order.signals));
+    expect(signals).toContainEqual(expect.objectContaining({
+      submittedAt: expect.objectContaining({ transactionHash: finalSubmit.transactionHash })
+    }));
   });
 
   it("passes finalized SignalSubmitted events to the notification processor after projection commit", async () => {
@@ -2839,19 +2800,10 @@ describe("indexer projection replay", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
-    const router = createApiRouter(store, { ...requiredRouterStores(), submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111", productRuntimeEnvironment: "local" as const });
-    const proofResponse = await router.handle({
-      method: "GET",
-      pathname: `/product/orders/${queuedOrderId}/proof`,
-      headers: { "x-uvp-wallet-address": "0x3333333333333333333333333333333333333333" }
-    });
-
-    expect(proofResponse.status).toBe(200);
-    expect((proofResponse.body as { proof: Array<{ eventName: string; transactionHash: string }> }).proof)
-      .toContainEqual(expect.objectContaining({
-        eventName: "OrderRegistered",
-        transactionHash: registerTxHash
-      }));
+    const orders = await store.findStateMachineOrdersByOrderId(queuedOrderId);
+    expect(orders).toContainEqual(expect.objectContaining({
+      registeredAt: expect.objectContaining({ transactionHash: registerTxHash })
+    }));
   });
 
   it("refreshIfIdle resets rebuilding flag after error so next call can proceed", async () => {
@@ -3884,32 +3836,11 @@ function testConfig(): ChainServicesConfig {
       stateMachinePrivateKeyEnv: "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY",
       maxRetries: 0
     },
-    governance: {
-      broadcastEnabled: false,
-      signerPrivateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY",
-      rpcUrl: "http://127.0.0.1:8545",
-      chainId: 31337,
-      txConfirmations: 1,
-      allowedOperators: []
-    },
-    productBff: {
-      registrationAdapter: "memory-trigger",
-      registrarPrivateKeyEnv: "UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY",
-      waitForReceipt: false
-    },
-    operatorRoles: {
-      deployerPrivateKeyEnv: "UVP_ETH_DEPLOYER_PRIVATE_KEY",
-      participantWallets: [],
-      adminReviewers: []
-    },
+    operatorRoles: {},
     reconcile: {
       enabled: false,
       pollIntervalMs: 50,
       txTimeoutMs: 60_000
-    },
-    evidenceStorage: {
-      adapter: "local",
-      objectNamespace: "uvp-rehearsal"
     },
     security: {
       environment: "local",

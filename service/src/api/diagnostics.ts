@@ -1,6 +1,4 @@
 import type { ChainServicesRuntimeEnv, ConfigDiagnostics } from "../config/index.js";
-import type { EvidenceStorage, EvidenceStorageRuntimeEnvironment } from "../evidence/index.js";
-import type { GovernanceStore, GovernanceTxLogDTO } from "../governance/index.js";
 import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
 import { redactErrorMessage, redactSecrets } from "../security/redaction.js";
 import {
@@ -18,7 +16,6 @@ import type {
 
 type HealthStatus = "ok" | "degraded";
 type ReadinessStatus = "ready" | "not_ready";
-type EvidenceReadiness = "ready" | "degraded" | "unknown";
 type JsonRecord = Record<string, unknown>;
 
 export interface IndexerRuntimeDiagnostics {
@@ -33,9 +30,6 @@ export interface BuildOperationalDiagnosticsOptions {
   readonly indexer?: IndexerRuntimeDiagnostics;
   readonly reconcile?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
   readonly submissionStore?: ProductSubmissionStore;
-  readonly governanceStore?: GovernanceStore;
-  readonly evidenceStorage?: Pick<EvidenceStorage, "adapterKind" | "productionSafe">;
-  readonly evidenceRuntimeEnvironment?: EvidenceStorageRuntimeEnvironment;
   readonly now?: () => Date;
 }
 
@@ -51,11 +45,6 @@ export async function buildOperationalDiagnostics(
   const generatedAt = (options.now ?? (() => new Date()))().toISOString();
   const syncStateResult = await readSyncState(options.store);
   const submissions = await buildSubmissionDiagnostics(options.submissionStore);
-  const governanceTxs = await buildGovernanceTxDiagnostics(options.governanceStore);
-  const evidenceStorage = buildEvidenceStorageDiagnostics({
-    source: options.evidenceStorage,
-    runtimeEnvironment: options.evidenceRuntimeEnvironment ?? options.runtimeEnvironment
-  });
   const runtimeEnvironment = options.configDiagnostics?.environment ?? options.runtimeEnvironment;
   const reconcile = buildReconcileDiagnostics(options.reconcile);
   const indexer = buildIndexerDiagnostics(syncStateResult, options.indexer);
@@ -73,9 +62,7 @@ export async function buildOperationalDiagnostics(
     indexer,
     projectionRebuild: indexer.rebuild,
     reconcile,
-    submissions,
-    governanceTxs,
-    evidenceStorage
+    submissions
   };
 
   return redactSecrets({
@@ -110,8 +97,6 @@ export function buildOperatorOpsStatus(diagnostics: Record<string, unknown>): Re
     projectionRebuild: diagnostics.projectionRebuild ?? recordOf(diagnostics.indexer)?.rebuild ?? {},
     reconcile: diagnostics.reconcile ?? {},
     submissions: diagnostics.submissions ?? {},
-    governanceTxs: diagnostics.governanceTxs ?? {},
-    evidenceStorage: diagnostics.evidenceStorage ?? {},
     operatorRoles: diagnostics.operatorRoles ?? {},
     recoveryPolicy: {
       sourceOfTruth: "contracts-and-chain-events",
@@ -127,7 +112,6 @@ export function buildOperatorOpsStatus(diagnostics: Record<string, unknown>): Re
         "private_keys",
         "raw_calldata",
         "full_signatures",
-        "evidence_plaintext",
         "database_credentials",
         "object_credentials",
         "presigned_urls"
@@ -139,9 +123,7 @@ export function buildOperatorOpsStatus(diagnostics: Record<string, unknown>): Re
 export function buildOperatorOpsSummary(diagnostics: Record<string, unknown>): Record<string, unknown> {
   const status = buildOperatorOpsStatus(diagnostics);
   const submissions = recordOf(status.submissions);
-  const governanceTxs = recordOf(status.governanceTxs);
   const indexer = recordOf(status.indexer);
-  const evidenceStorage = recordOf(status.evidenceStorage);
   return redactSecrets({
     generatedAt: status.generatedAt ?? null,
     sourceOfTruth: status.sourceOfTruth ?? "contracts-and-chain-events",
@@ -152,9 +134,7 @@ export function buildOperatorOpsSummary(diagnostics: Record<string, unknown>): R
     counts: {
       retryableSubmissions: numberOf(submissions?.retryableCount),
       deadLetterSubmissions: numberOf(submissions?.deadLetterCount),
-      deadLetterAttempts: numberOf(submissions?.deadLetterAttemptCount),
-      governancePendingOrIndexing: arrayCount(governanceTxs?.pendingOrIndexing),
-      governanceFailed: arrayCount(governanceTxs?.failed)
+      deadLetterAttempts: numberOf(submissions?.deadLetterAttemptCount)
     },
     sync: {
       indexerStatus: indexer?.syncStatus ?? "unknown",
@@ -162,10 +142,6 @@ export function buildOperatorOpsSummary(diagnostics: Record<string, unknown>): R
       latestIndexedBlock: indexer?.latestIndexedBlock ?? null,
       lagBlocks: indexer?.lagBlocks ?? null,
       rebuild: status.projectionRebuild ?? {}
-    },
-    evidenceStorage: {
-      adapterKind: evidenceStorage?.adapterKind ?? "unknown",
-      readiness: evidenceStorage?.readiness ?? "unknown"
     },
     recoveryPolicy: status.recoveryPolicy ?? {}
   });
@@ -327,66 +303,6 @@ async function buildSubmissionDiagnostics(
   };
 }
 
-async function buildGovernanceTxDiagnostics(
-  store: GovernanceStore | undefined
-): Promise<Record<string, unknown>> {
-  if (!store) {
-    return {
-      configured: false,
-      txCount: 0,
-      byStatus: {},
-      byBroadcastStatus: {},
-      pendingOrIndexing: [],
-      failed: []
-    };
-  }
-
-  const logsResult = await readDiagnosticsStoreValue(() => store.listIdentityTxLogs());
-  if (!logsResult.ok) {
-    return storeUnavailableDiagnostics(logsResult.degradedReason);
-  }
-  const logs = [...logsResult.value].sort(compareGovernanceUpdatedDesc);
-
-  return {
-    configured: true,
-    txCount: logs.length,
-    byStatus: countBy(logs, (log) => log.status),
-    byBroadcastStatus: countBy(logs, (log) => log.broadcastStatus),
-    latestUpdatedAt: latestTimestamp(logs.map((log) => log.updatedAt)),
-    pendingOrIndexing: logs
-      .filter((log) => log.status === "pending" || log.status === "broadcasting" || log.status === "indexing")
-      .slice(0, 20)
-      .map(safeGovernanceTx),
-    failed: logs
-      .filter((log) => log.status === "failed")
-      .slice(0, 20)
-      .map(safeGovernanceTx)
-  };
-}
-
-function buildEvidenceStorageDiagnostics(input: {
-  readonly source: Pick<EvidenceStorage, "adapterKind" | "productionSafe"> | undefined;
-  readonly runtimeEnvironment: EvidenceStorageRuntimeEnvironment;
-}): Record<string, unknown> {
-  if (!input.source) {
-    return {
-      adapterKind: "unknown",
-      productionSafe: false,
-      readiness: "unknown" satisfies EvidenceReadiness
-    };
-  }
-
-  const productionReady = input.source.adapterKind === "object" && input.source.productionSafe;
-  const readiness: EvidenceReadiness = input.runtimeEnvironment !== "local" && !productionReady
-    ? "degraded"
-    : "ready";
-  return {
-    adapterKind: input.source.adapterKind,
-    productionSafe: input.source.productionSafe,
-    readiness
-  };
-}
-
 function operationalHealthStatus(diagnostics: Record<string, unknown>): HealthStatus {
   return operationalDegradedReasons(diagnostics).length > 0 ? "degraded" : "ok";
 }
@@ -394,14 +310,10 @@ function operationalHealthStatus(diagnostics: Record<string, unknown>): HealthSt
 function operationalDegradedReasons(diagnostics: Record<string, unknown>): readonly string[] {
   const reasons = operationalNotReadyReasons(diagnostics);
   const submissions = diagnostics.submissions as { readonly deadLetterCount?: number } | undefined;
-  const governanceTxs = diagnostics.governanceTxs as { readonly failed?: readonly unknown[] } | undefined;
   const indexer = diagnostics.indexer as { readonly projectionDiagnostics?: ProjectionSyncDiagnosticsCounts | null } | undefined;
   const degraded = [...reasons];
   if ((submissions?.deadLetterCount ?? 0) > 0) {
     degraded.push("submission_dead_letters");
-  }
-  if ((governanceTxs?.failed?.length ?? 0) > 0) {
-    degraded.push("governance_failed_txs");
   }
   if (hasProjectionDiagnosticsAnomalies(indexer?.projectionDiagnostics ?? undefined)) {
     degraded.push("projection_unresolved_counts");
@@ -414,9 +326,7 @@ function operationalNotReadyReasons(diagnostics: Record<string, unknown>): reado
   const preflight = (diagnostics.preflight ?? {}) as { readonly status?: string };
   const indexer = (diagnostics.indexer ?? {}) as { readonly syncStatus?: string };
   const reconcile = (diagnostics.reconcile ?? {}) as { readonly lastError?: string | null };
-  const evidenceStorage = (diagnostics.evidenceStorage ?? {}) as { readonly readiness?: string };
   const submissions = (diagnostics.submissions ?? {}) as { readonly unavailable?: boolean };
-  const governanceTxs = (diagnostics.governanceTxs ?? {}) as { readonly unavailable?: boolean };
 
   if (preflight.status === "failed") {
     reasons.push("preflight_failed");
@@ -427,14 +337,8 @@ function operationalNotReadyReasons(diagnostics: Record<string, unknown>): reado
   if (reconcile.lastError) {
     reasons.push("reconcile_error");
   }
-  if (evidenceStorage.readiness === "degraded") {
-    reasons.push("evidence_storage_degraded");
-  }
   if (submissions.unavailable === true) {
     reasons.push("submission_store_unavailable");
-  }
-  if (governanceTxs.unavailable === true) {
-    reasons.push("governance_store_unavailable");
   }
   return reasons;
 }
@@ -458,20 +362,6 @@ function safeDeadLetterSubmission(submission: ProductSubmissionDTO): Record<stri
   };
 }
 
-function safeGovernanceTx(log: GovernanceTxLogDTO): Record<string, unknown> {
-  return {
-    txLogId: log.txLogId,
-    action: log.action,
-    subjectId: log.subjectId,
-    status: log.status,
-    broadcastStatus: log.broadcastStatus,
-    txHash: log.txHash ?? null,
-    errorCode: log.errorCode ?? null,
-    retryable: log.retryable,
-    updatedAt: log.updatedAt
-  };
-}
-
 function countBy<TItem>(items: readonly TItem[], select: (item: TItem) => string): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const item of items) {
@@ -491,10 +381,6 @@ function compareUpdatedDesc(left: ProductSubmissionDTO, right: ProductSubmission
 
 function compareAttemptUpdatedDesc(left: ProductSubmissionAttemptDTO, right: ProductSubmissionAttemptDTO): number {
   return right.updatedAt.localeCompare(left.updatedAt) || right.attemptId.localeCompare(left.attemptId);
-}
-
-function compareGovernanceUpdatedDesc(left: GovernanceTxLogDTO, right: GovernanceTxLogDTO): number {
-  return right.updatedAt.localeCompare(left.updatedAt) || right.txLogId.localeCompare(left.txLogId);
 }
 
 function lagBlocks(state: ProjectionSyncState | undefined): string | null {
@@ -533,10 +419,6 @@ function recordOf(value: unknown): JsonRecord | undefined {
 
 function numberOf(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function arrayCount(value: unknown): number {
-  return Array.isArray(value) ? value.length : 0;
 }
 
 function fallbackConfigDiagnostics(environment: ChainServicesRuntimeEnv): Record<string, unknown> {

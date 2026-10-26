@@ -1,6 +1,6 @@
 // V1 订单面墓碑：草稿/邀请/参与者/要求包写入路由已删除，只保留显式 410，
-// 让仍在调用的旧客户端拿到确定错误而不是 404 或静默成功。V3 订单面在
-// /product/v3/*（product-order / product-read-kernel / product-tasks）。
+// 让仍在调用的旧客户端拿到确定错误而不是 404 或静默成功。V3 业务面已迁
+// uvp-app-backend（:8788）；链侧不再提供 /product/v3/* 业务路由。
 
 import type { RouteModule } from "../route-module.js";
 
@@ -23,7 +23,7 @@ export function createV1OrderGoneRouteModule(): RouteModule {
         status: 410,
         body: {
           error: "v1_order_surface_removed",
-          message: "the V1 order draft/invite/participant/requirements surface was removed; use /product/v3 order routes"
+          message: "the V1 order draft/invite/participant/requirements surface was removed; use the app-backend /product/v3 order routes"
         }
       };
     }

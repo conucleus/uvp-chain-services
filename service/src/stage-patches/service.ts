@@ -31,7 +31,6 @@ import type {
 import { signalProjectionKey } from "../indexer/projections/signal.js";
 import type { ProjectionProvenance } from "../indexer/projections/proof.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
-import type { ProductSchemaResolver } from "../product/application/service.js";
 import type { ChainClock } from "../shared/chain-clock.js";
 import {
   executorCandidateProofFor,
@@ -79,6 +78,13 @@ import type {
 } from "./types.js";
 
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
+
+export interface ProductSchemaResolver {
+  getProductSchemaByPlan(
+    planId: string,
+    planHash: string,
+  ): Promise<StoreProductSchemaDTO | undefined>;
+}
 
 function requireChainClockNowSeconds(
   options: ProductStagePatchServiceOptions,

@@ -182,32 +182,11 @@ function testConfig(input: {
       stateMachinePrivateKeyEnv: "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY",
       maxRetries: 0
     },
-    governance: {
-      broadcastEnabled: false,
-      signerPrivateKeyEnv: "GOVERNANCE_SIGNER_PRIVATE_KEY",
-      rpcUrl: input.rpcUrl,
-      chainId: input.chainId,
-      txConfirmations: 1,
-      allowedOperators: []
-    },
-    productBff: {
-      registrationAdapter: "memory-trigger",
-      registrarPrivateKeyEnv: "UVP_PRODUCT_BFF_REGISTRAR_PRIVATE_KEY",
-      waitForReceipt: false
-    },
-    operatorRoles: {
-      deployerPrivateKeyEnv: "UVP_ETH_DEPLOYER_PRIVATE_KEY",
-      participantWallets: [],
-      adminReviewers: []
-    },
+    operatorRoles: {},
     reconcile: {
       enabled: false,
       pollIntervalMs: 50,
       txTimeoutMs: 60_000
-    },
-    evidenceStorage: {
-      adapter: "local",
-      objectNamespace: "uvp-rehearsal"
     },
     security: {
       environment: "local",

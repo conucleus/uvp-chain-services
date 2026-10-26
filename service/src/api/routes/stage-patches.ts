@@ -10,8 +10,8 @@ import {
 } from "../../stage-patches/index.js";
 import { ConfigError, normalizeAddress, type Address } from "../../shared/types.js";
 import type { ChainServicesRuntimeEnv } from "../../config/index.js";
-import { decodePathParameter, type ApiRequest, type ApiResponse, type ApiRouteContext } from "../route-context.js";
-import { resolveParticipantWalletIdentity } from "../participant-identity.js";
+import { decodePathParameter, type ApiRequest, type ApiResponse } from "../route-context.js";
+import { resolveChainWalletClaim } from "../wallet-claim.js";
 import type { RouteModule } from "../route-module.js";
 
 export function createStagePatchRouteModule(options: {
@@ -24,7 +24,7 @@ export function createStagePatchRouteModule(options: {
         return handleStagePatchRequest(async () => {
           const taskId = decodePathParameter(prepareExecutorMatch[1] ?? "");
           const input = parsePrepareExecutorBody(request.body);
-          const identity = await resolveSelectorWalletIdentity(request, context, options.runtimeEnvironment, input.selectorWallet);
+          const identity = resolveSelectorWalletIdentity(request, options.runtimeEnvironment, input.selectorWallet);
           if (!identity.ok) {
             return identity.response;
           }
@@ -43,7 +43,7 @@ export function createStagePatchRouteModule(options: {
         return handleStagePatchRequest(async () => {
           const taskId = decodePathParameter(submitExecutorMatch[1] ?? "");
           const input = parseSubmitExecutorBody(request.body);
-          const identity = await resolveSelectorWalletIdentity(request, context, options.runtimeEnvironment, input.selectorWallet);
+          const identity = resolveSelectorWalletIdentity(request, options.runtimeEnvironment, input.selectorWallet);
           if (!identity.ok) {
             return identity.response;
           }
@@ -62,7 +62,7 @@ export function createStagePatchRouteModule(options: {
         return handleStagePatchRequest(async () => {
           const taskId = decodePathParameter(prepareResourceMatch[1] ?? "");
           const input = parsePrepareResourceBody(request.body);
-          const identity = await resolveSelectorWalletIdentity(request, context, options.runtimeEnvironment, input.selectorWallet);
+          const identity = resolveSelectorWalletIdentity(request, options.runtimeEnvironment, input.selectorWallet);
           if (!identity.ok) {
             return identity.response;
           }
@@ -81,7 +81,7 @@ export function createStagePatchRouteModule(options: {
         return handleStagePatchRequest(async () => {
           const taskId = decodePathParameter(submitResourceMatch[1] ?? "");
           const input = parseSubmitResourceBody(request.body);
-          const identity = await resolveSelectorWalletIdentity(request, context, options.runtimeEnvironment, input.selectorWallet);
+          const identity = resolveSelectorWalletIdentity(request, options.runtimeEnvironment, input.selectorWallet);
           if (!identity.ok) {
             return identity.response;
           }
@@ -100,12 +100,11 @@ export function createStagePatchRouteModule(options: {
   };
 }
 
-async function resolveSelectorWalletIdentity(
+function resolveSelectorWalletIdentity(
   request: ApiRequest,
-  context: ApiRouteContext,
   runtimeEnvironment: ChainServicesRuntimeEnv | undefined,
   selectorWallet: string
-): Promise<{ readonly ok: true; readonly walletAddress: Address } | { readonly ok: false; readonly response: ApiResponse }> {
+): { readonly ok: true; readonly walletAddress: Address } | { readonly ok: false; readonly response: ApiResponse } {
   let claimed: Address;
   try {
     claimed = normalizeAddress(selectorWallet, "selectorWallet");
@@ -118,28 +117,28 @@ async function resolveSelectorWalletIdentity(
       }
     };
   }
-  const resolved = await resolveParticipantWalletIdentity(request, context, runtimeEnvironment, { includeBodyWallet: false });
-  if (resolved.ok) {
-    if (claimed.toLowerCase() !== resolved.identity.walletAddress.toLowerCase()) {
-      return {
-        ok: false,
-        response: {
-          status: 403,
-          body: {
-            error: "wrong_wallet",
-            message: "claimed selectorWallet does not match the session-anchored address",
-            anchoredAddress: resolved.identity.walletAddress,
-            walletAddress: claimed
-          }
-        }
-      };
+  const resolved = resolveChainWalletClaim(request, runtimeEnvironment, { includeBodyWallet: false });
+  if (!resolved.ok) {
+    if (runtimeEnvironment === "local") {
+      return { ok: true, walletAddress: claimed };
     }
-    return { ok: true, walletAddress: resolved.identity.walletAddress };
+    return resolved;
   }
-  if (runtimeEnvironment === "local") {
-    return { ok: true, walletAddress: claimed };
+  if (claimed.toLowerCase() !== resolved.identity.walletAddress.toLowerCase()) {
+    return {
+      ok: false,
+      response: {
+        status: 403,
+        body: {
+          error: "wrong_wallet",
+          message: "claimed selectorWallet does not match the anchored wallet",
+          anchoredAddress: resolved.identity.walletAddress,
+          walletAddress: claimed
+        }
+      }
+    };
   }
-  return { ok: false, response: resolved.response };
+  return { ok: true, walletAddress: resolved.identity.walletAddress };
 }
 
 async function handleStagePatchRequest(action: () => Promise<ApiResponse>): Promise<ApiResponse> {

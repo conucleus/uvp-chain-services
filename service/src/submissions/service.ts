@@ -21,6 +21,8 @@ import type {
   ProductSubmitHumanSummaryDTO,
   ProductSubmitIntent,
   ProductTaskReader,
+  EvidencePrincipal,
+  SubmissionEvidenceRecordDTO,
   SubmissionAuthorizationAdapter,
   SubmissionAuthorizationRequest,
   SubmissionAuthorizationResult,
@@ -37,10 +39,19 @@ import {
   zeroSelectorBinding,
   type PlanCapabilityTables
 } from "./capability-proofs.js";
-import type { EvidencePrincipal, EvidenceRecordDTO } from "../evidence/index.js";
-import { ProductOrderLookupError } from "../product/application/service.js";
-
 const DEFAULT_PREPARE_TTL_SECONDS = 10 * 60;
+
+export class ProductOrderLookupError extends Error {
+  override readonly name = "ProductOrderLookupError";
+
+  constructor(
+    readonly code: "ambiguous_order_id",
+    message: string,
+    readonly details?: unknown
+  ) {
+    super(message);
+  }
+}
 
 export class ProductSubmissionError extends Error {
   override readonly name = "ProductSubmissionError";
@@ -857,7 +868,7 @@ async function resolveEvidence(input: {
   readonly taskId: string;
   readonly stageIdentifier: string;
   readonly resolveDraftOrder?: (draftId: string) => Promise<string | undefined>;
-}): Promise<readonly EvidenceRecordDTO[]> {
+}): Promise<readonly SubmissionEvidenceRecordDTO[]> {
   if (input.evidenceIds.length === 0) {
     if (input.requiredSlots.length === 0) {
       return [];
@@ -865,7 +876,7 @@ async function resolveEvidence(input: {
     throw new ProductSubmissionError(400, "evidence_required", "at least one evidenceId is required");
   }
 
-  const records: EvidenceRecordDTO[] = [];
+  const records: SubmissionEvidenceRecordDTO[] = [];
   for (const evidenceId of uniqueNonEmpty(input.evidenceIds, "evidenceIds")) {
     const record = await input.evidenceReader.getEvidence(evidenceId, input.principal);
     if (!record) {
@@ -888,7 +899,7 @@ async function resolveEvidence(input: {
 }
 
 async function validateEvidenceRecord(
-  record: EvidenceRecordDTO,
+  record: SubmissionEvidenceRecordDTO,
   expected: {
     readonly orderId: string;
     readonly taskId: string;
@@ -956,7 +967,7 @@ function requiredEvidenceSlotsForTask(task: ProductTaskDTO): readonly RequiredEv
 
 function validateEvidenceSlots(
   slots: readonly RequiredEvidenceSlot[],
-  records: readonly EvidenceRecordDTO[]
+  records: readonly SubmissionEvidenceRecordDTO[]
 ): void {
   if (slots.length === 0) {
     return;
@@ -970,7 +981,7 @@ function validateEvidenceSlots(
   }
 }
 
-function payloadForEvidence(records: readonly EvidenceRecordDTO[]): { readonly payloadHash: Hex; readonly payloadRef: string } {
+function payloadForEvidence(records: readonly SubmissionEvidenceRecordDTO[]): { readonly payloadHash: Hex; readonly payloadRef: string } {
   if (records.length === 1) {
     return {
       payloadHash: records[0]!.evidence.payloadHash,
@@ -995,7 +1006,7 @@ function payloadForEvidence(records: readonly EvidenceRecordDTO[]): { readonly p
   };
 }
 
-function evidenceSummary(record: EvidenceRecordDTO): PreparedSubmissionEvidenceDTO {
+function evidenceSummary(record: SubmissionEvidenceRecordDTO): PreparedSubmissionEvidenceDTO {
   return {
     evidenceId: record.evidence.evidenceId,
     payloadHash: record.evidence.payloadHash,

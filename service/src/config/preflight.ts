@@ -1,13 +1,9 @@
 import { createPublicClient, http, parseAbi, type Address as ViemAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { isChainIdExplicitlyConfigured, listContractJsonOverrides, type ChainServicesConfig } from "./env.js";
+import { listContractJsonOverrides, type ChainServicesConfig } from "./env.js";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
 import { redactErrorMessage } from "../security/redaction.js";
-import { assessStoreAuthEvidence, type StoreAuthEvidenceClassification, type StoreAuthKeySource } from "./store-auth-evidence.js";
-import {
-  ANVIL_DEFAULT_ADDRESSES,
-  ANVIL_DEFAULT_PRIVATE_KEYS,
-} from "./anvil-defaults.js";
+import { ANVIL_DEFAULT_PRIVATE_KEYS } from "./anvil-defaults.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -46,76 +42,17 @@ export interface ConfigDiagnostics {
     readonly expectedGasPayer?: Address;
     readonly maxRetries: number;
   };
-  readonly governance: {
-    readonly broadcastEnabled: boolean;
-    readonly configured: boolean;
-    readonly contractConfigured: boolean;
-    readonly signerConfigured: boolean;
-    readonly signerAddress?: Address;
-    readonly expectedSignerAddress?: Address;
-    readonly expectedRegistryOwnerAddress?: Address;
-    readonly allowedOperatorCount: number;
-  };
   readonly operatorRoles: {
-    readonly deployer: PrivateKeyRoleDiagnostics;
-    readonly stateMachineOwner: AddressRoleDiagnostics;
-    readonly planPublisher: AddressRoleDiagnostics;
-    readonly orderRegistrar: PrivateKeyRoleDiagnostics;
     readonly relayerGasPayer: PrivateKeyRoleDiagnostics;
-    readonly participantWallet: {
-      readonly configuredCount: number;
-    };
-    readonly governanceRegistryOwner: AddressRoleDiagnostics;
-    readonly governanceSigner: PrivateKeyRoleDiagnostics;
-    readonly governanceAdminReviewer: {
-      readonly configuredCount: number;
-      readonly adminTokenConfigured: boolean;
-      readonly publicTrustAuthority: false;
-    };
     readonly opsConsoleAdmin: {
       readonly configuredCount: number;
+      readonly adminTokenConfigured: boolean;
     };
   };
   readonly storage: {
     readonly driver: string;
     readonly durable: boolean;
     readonly migrationsAutoRun: boolean;
-  };
-  readonly evidenceStorage: {
-    readonly adapter: ChainServicesConfig["evidenceStorage"]["adapter"];
-    readonly objectNamespace?: string;
-    readonly s3?: {
-      readonly bucketConfigured: boolean;
-      readonly regionConfigured: boolean;
-      readonly endpointConfigured: boolean;
-      readonly prefixConfigured: boolean;
-      readonly forcePathStyle: boolean;
-      readonly uriMode: "s3" | "object";
-      readonly objectNamespaceConfigured: boolean;
-      readonly accessKeyIdEnv?: string;
-      readonly secretAccessKeyEnv?: string;
-      readonly sessionTokenEnv?: string;
-    };
-  };
-  readonly storeAuth: {
-    readonly mode: NonNullable<ChainServicesConfig["storeAuth"]>["mode"];
-    readonly jwtConfigured: boolean;
-    readonly externalIdentityEvidence: boolean;
-    readonly evidenceClassification: StoreAuthEvidenceClassification;
-    readonly evidenceReasons: readonly string[];
-    readonly keySource: StoreAuthKeySource;
-    readonly jwksUrlConfigured: boolean;
-    readonly oidcDiscoveryUrlConfigured: boolean;
-    readonly issuerConfigured: boolean;
-    readonly audienceConfigured: boolean;
-    readonly roleClaim: string;
-    readonly principalClaim: string;
-    readonly displayNameClaimConfigured: boolean;
-    readonly clockToleranceSeconds: number;
-  };
-  readonly product: {
-    readonly registrationAdapter: ChainServicesConfig["productBff"]["registrationAdapter"];
-    readonly permissiveAuthorizationRequested: boolean;
   };
   readonly security: {
     readonly logRedactionEnabled: boolean;
@@ -142,22 +79,13 @@ interface PrivateKeyRoleDiagnostics {
   readonly addressMatches?: boolean;
 }
 
-interface AddressRoleDiagnostics {
-  readonly configured: boolean;
-  readonly address?: Address;
-}
-
 export interface RunConfigPreflightOptions {
   readonly env?: Env;
   readonly clients?: {
     readonly network?: PreflightPublicClient;
-    readonly governance?: PreflightPublicClient;
   };
 }
 
-const identityRegistryOwnerAbi = parseAbi([
-  "function owner() view returns (address)"
-]);
 const stateMachineModuleAbi = parseAbi([
   "function stagePatchModule() view returns (address)",
   "function derivedSignalModule() view returns (address)",
@@ -217,15 +145,6 @@ export function buildConfigDiagnostics(
   const relayerPrivateKeyConfigured = Boolean(env[config.relayer.stateMachinePrivateKeyEnv]?.trim());
   const relayerGasPayer = privateKeyAddress(env[config.relayer.stateMachinePrivateKeyEnv], "relayer gas payer");
   const relayerConfigured = Boolean(config.relayer.broadcastEnabled && stateMachine && relayerPrivateKeyConfigured);
-  const governanceSignerConfigured = Boolean(config.governance.signerPrivateKey);
-  const governanceSignerAddress = config.governance.signerPrivateKey
-    ? privateKeyAddress(config.governance.signerPrivateKey, "governance signer")
-    : undefined;
-  const governanceContractConfigured = Boolean(identityRegistry);
-  const permissiveAuthorizationRequested = enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") ||
-    isPermissiveAuthorizationRequested(env);
-  const storeAuth = effectiveStoreAuthConfig(config);
-  const storeAuthEvidence = assessStoreAuthEvidence(storeAuth, config.security.environment);
   const preflight = options.preflight ?? {
     status: "skipped" as const,
     checks: []
@@ -246,8 +165,7 @@ export function buildConfigDiagnostics(
     warnings: [
       ...diagnosticWarnings(config, {
         relayerConfigured,
-        relayerPrivateKeyConfigured,
-        permissiveAuthorizationRequested
+        relayerPrivateKeyConfigured
       }),
       ...safeListContractJsonOverrides(env).map((name) =>
         `UVP_CONTRACTS_JSON overrides the UVP_ADDRESS_MANIFEST entry for ${name}; the inline JSON address silently wins`
@@ -267,65 +185,11 @@ export function buildConfigDiagnostics(
       ...(config.relayer.expectedGasPayer ? { expectedGasPayer: config.relayer.expectedGasPayer } : {}),
       maxRetries: config.relayer.maxRetries
     },
-    governance: {
-      broadcastEnabled: config.governance.broadcastEnabled,
-      configured: config.governance.broadcastEnabled &&
-        governanceContractConfigured &&
-        governanceSignerConfigured,
-      contractConfigured: governanceContractConfigured,
-      signerConfigured: governanceSignerConfigured,
-      ...(governanceSignerAddress ? { signerAddress: governanceSignerAddress } : {}),
-      ...(config.governance.signerAddress ? { expectedSignerAddress: config.governance.signerAddress } : {}),
-      ...(config.governance.registryOwnerAddress ? { expectedRegistryOwnerAddress: config.governance.registryOwnerAddress } : {}),
-      allowedOperatorCount: config.governance.allowedOperators.length
-    },
     operatorRoles: operatorRoleDiagnostics(config, env),
     storage: {
       driver: "postgres",
       durable: true,
       migrationsAutoRun: config.database.migrationsAutoRun
-    },
-    evidenceStorage: {
-      adapter: config.evidenceStorage.adapter,
-      ...(config.evidenceStorage.adapter === "rehearsal-object"
-        ? { objectNamespace: config.evidenceStorage.objectNamespace }
-        : {}),
-      ...(config.evidenceStorage.adapter === "s3"
-        ? {
-            s3: {
-              bucketConfigured: Boolean(config.evidenceStorage.s3Bucket),
-              regionConfigured: Boolean(config.evidenceStorage.s3Region),
-              endpointConfigured: Boolean(config.evidenceStorage.s3Endpoint),
-              prefixConfigured: Boolean(config.evidenceStorage.s3Prefix),
-              forcePathStyle: config.evidenceStorage.s3ForcePathStyle ?? false,
-              uriMode: config.evidenceStorage.s3UriMode ?? "s3",
-              objectNamespaceConfigured: Boolean(config.evidenceStorage.s3ObjectNamespace),
-              ...(config.evidenceStorage.s3AccessKeyIdEnv ? { accessKeyIdEnv: config.evidenceStorage.s3AccessKeyIdEnv } : {}),
-              ...(config.evidenceStorage.s3SecretAccessKeyEnv ? { secretAccessKeyEnv: config.evidenceStorage.s3SecretAccessKeyEnv } : {}),
-              ...(config.evidenceStorage.s3SessionTokenEnv ? { sessionTokenEnv: config.evidenceStorage.s3SessionTokenEnv } : {})
-            }
-          }
-        : {})
-    },
-    storeAuth: {
-      mode: storeAuth.mode,
-      jwtConfigured: storeAuthJwtConfigured(config),
-      externalIdentityEvidence: storeAuthEvidence.externalIdentityEvidence,
-      evidenceClassification: storeAuthEvidence.evidenceClassification,
-      evidenceReasons: storeAuthEvidence.reasons,
-      keySource: storeAuthEvidence.keySource,
-      jwksUrlConfigured: Boolean(storeAuth.jwksUrl),
-      oidcDiscoveryUrlConfigured: Boolean(storeAuth.oidcDiscoveryUrl),
-      issuerConfigured: Boolean(storeAuth.issuer),
-      audienceConfigured: Boolean(storeAuth.audience),
-      roleClaim: storeAuth.roleClaim,
-      principalClaim: storeAuth.principalClaim,
-      displayNameClaimConfigured: Boolean(storeAuth.displayNameClaim),
-      clockToleranceSeconds: storeAuth.clockToleranceSeconds
-    },
-    product: {
-      registrationAdapter: config.productBff.registrationAdapter,
-      permissiveAuthorizationRequested
     },
     security: {
       logRedactionEnabled: config.security.logRedactionEnabled
@@ -343,10 +207,6 @@ function runStaticPreflight(
   const stateMachine = stateMachineAddress(config.network.contracts);
   const relayerPrivateKey = env[config.relayer.stateMachinePrivateKeyEnv]?.trim();
 
-  runProductionSafetyPreflight(config, env, checks, errors);
-  runTestnetSafetyPreflight(config, env, checks, errors);
-  runStagingSafetyPreflight(config, env, checks, errors);
-  runStoreAuthPreflight(config, env, checks, errors);
   runStateMachineModulesManifestPreflight(config, checks, errors);
   runModuleAddressDriftPreflight(config, checks, errors);
   runStateMachineAddressDriftPreflight(config, checks, errors);
@@ -382,512 +242,6 @@ function runStaticPreflight(
       skip(checks, "relayer.configured", "relayer private key is not configured");
     }
   }
-
-  runProductRegistrationPreflight(config, env, checks, errors);
-
-  if (config.governance.broadcastEnabled) {
-    const identityRegistry = identityRegistryAddress(config.network.contracts);
-    if (!identityRegistry) {
-      fail(checks, errors, "governance.contract", "UVPIdentityRegistry contract address is required when governance broadcast is enabled");
-    } else {
-      pass(checks, "governance.contract");
-    }
-    if (!config.governance.signerPrivateKey) {
-      fail(checks, errors, "governance.signer", `${config.governance.signerPrivateKeyEnv} is required when governance broadcast is enabled`);
-    } else {
-      const signer = privateKeyAddress(config.governance.signerPrivateKey, "governance signer");
-      if (config.governance.signerAddress && signer && signer !== config.governance.signerAddress) {
-        fail(checks, errors, "governance.signer", `${config.governance.signerPrivateKeyEnv} does not match GOVERNANCE_SIGNER_ADDRESS`);
-      } else {
-        pass(checks, "governance.signer");
-      }
-    }
-  } else {
-    skip(checks, "governance.configured", "governance broadcast is disabled");
-  }
-}
-
-function runStoreAuthPreflight(
-  config: ChainServicesConfig,
-  env: Env,
-  checks: ConfigDiagnosticCheck[],
-  errors: string[]
-): void {
-  const envMode = env.STORE_AUTH_MODE?.trim();
-  const storeAuth = effectiveStoreAuthConfig(config);
-  const mode = envMode === "dev_headers" || envMode === "jwt" ? envMode : storeAuth.mode;
-  const strictRuntime = config.security.environment !== "local";
-  const devHeadersAllowed = config.security.environment === "local";
-  const evidence = assessStoreAuthEvidence(storeAuth, config.security.environment);
-
-  if (!devHeadersAllowed && !envMode) {
-    fail(checks, errors, "store_auth.mode", `STORE_AUTH_MODE must be explicitly configured in ${config.security.environment}`);
-  } else if (!devHeadersAllowed && mode !== "jwt") {
-    fail(checks, errors, "store_auth.mode", `STORE_AUTH_MODE=jwt is required in ${config.security.environment}`);
-  } else if (mode === "jwt") {
-    pass(checks, "store_auth.mode");
-  } else {
-    pass(checks, "store_auth.dev_headers");
-  }
-
-  if (strictRuntime && enabledEnv(env, "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER")) {
-    fail(checks, errors, "store_auth.dev_anchored_header", "STORE_AUTH_DEV_ANCHORED_ADDRESS_HEADER is only allowed in local development");
-  } else {
-    pass(checks, "store_auth.dev_anchored_header");
-  }
-
-  if (mode !== "jwt") {
-    return;
-  }
-
-  if (storeAuthJwtConfigured(config)) {
-    pass(checks, "store_auth.jwt_configured");
-  } else {
-    fail(checks, errors, "store_auth.jwt_configured", "STORE_AUTH_JWKS_URL or STORE_AUTH_OIDC_DISCOVERY_URL, plus STORE_AUTH_ISSUER and STORE_AUTH_AUDIENCE are required when STORE_AUTH_MODE=jwt");
-  }
-
-  if (evidence.externalIdentityEvidence) {
-    pass(checks, "store_auth.external_oidc");
-  } else if (strictRuntime) {
-    fail(checks, errors, "store_auth.external_oidc", `Store identity outside local development must use external HTTPS OIDC/JWKS evidence; rejected reasons: ${evidence.reasons.join(", ")}`);
-  } else {
-    skip(checks, "store_auth.external_oidc", "external Store OIDC/JWKS evidence is not required in local development");
-  }
-}
-
-function storeAuthJwtConfigured(config: ChainServicesConfig): boolean {
-  const storeAuth = effectiveStoreAuthConfig(config);
-  return Boolean(
-    (storeAuth.jwksUrl || storeAuth.oidcDiscoveryUrl) &&
-    storeAuth.issuer &&
-    storeAuth.audience &&
-    storeAuth.roleClaim &&
-    storeAuth.principalClaim
-  );
-}
-
-function effectiveStoreAuthConfig(config: ChainServicesConfig): NonNullable<ChainServicesConfig["storeAuth"]> {
-  return config.storeAuth ?? {
-    mode: "dev_headers",
-    roleClaim: "roles",
-    principalClaim: "sub",
-    displayNameClaim: "name",
-    clockToleranceSeconds: 60
-  };
-}
-
-function runProductionSafetyPreflight(
-  config: ChainServicesConfig,
-  env: Env,
-  checks: ConfigDiagnosticCheck[],
-  errors: string[]
-): void {
-  if (config.security.environment !== "production") {
-    return;
-  }
-
-  const stateMachine = stateMachineAddress(config.network.contracts);
-  const identityRegistry = identityRegistryAddress(config.network.contracts);
-
-  if (config.security.preflightStrict) {
-    pass(checks, "security.preflight_strict");
-  } else {
-    fail(checks, errors, "security.preflight_strict", "SECURITY_PREFLIGHT_STRICT=false is forbidden in production");
-  }
-
-  if (config.security.logRedactionEnabled) {
-    pass(checks, "security.log_redaction");
-  } else {
-    fail(checks, errors, "security.log_redaction", "LOG_REDACTION_ENABLED=false is forbidden in production");
-  }
-
-  if (/^postgres(?:ql)?:\/\//.test(config.database.url)) {
-    pass(checks, "storage.driver");
-  } else {
-    fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_URL must be a postgres:// DSN in production");
-  }
-  if (isNonLocalRpcUrl(config.network.rpcUrl)) {
-    pass(checks, "network.rpc_url_configured");
-  } else {
-    fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must be explicitly configured to a non-local RPC endpoint in production");
-  }
-  checkEndpointScheme(config, checks, errors);
-  if (isChainIdExplicitlyConfigured(env)) {
-    pass(checks, "network.chain_id_explicit");
-  } else {
-    fail(checks, errors, "network.chain_id_explicit", "UVP_CHAIN_ID must be explicitly configured in production (env var or address manifest network.chainId); refusing the 31337 fallback");
-  }
-  if (config.operatorRoles.adminReviewers.length > 0) {
-    pass(checks, "operator.governance_admin_reviewer");
-  } else {
-    fail(checks, errors, "operator.governance_admin_reviewer", "GOVERNANCE_ADMIN_REVIEWER_IDS is required in production");
-  }
-  if ((config.operatorRoles.opsConsoleAdmins ?? []).length > 0) {
-    pass(checks, "operator.ops_console_admin");
-  } else {
-    fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in production");
-  }
-  if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
-    pass(checks, "operator.governance_admin_token");
-  } else {
-    fail(checks, errors, "operator.governance_admin_token", "GOVERNANCE_ADMIN_TOKEN_HASHES is required in production");
-  }
-  requireDurableStoreMetadata(config, checks, errors, "production");
-  if (config.database.migrationsAutoRun && env.UVP_PRODUCTION_ALLOW_AUTO_MIGRATIONS?.trim() !== "1") {
-    fail(checks, errors, "storage.migrations_auto_run", "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN=true is forbidden in production without UVP_PRODUCTION_ALLOW_AUTO_MIGRATIONS=1");
-  } else {
-    pass(checks, "storage.migrations_auto_run");
-  }
-
-  if (config.network.finalityAnchor === "confirmations") {
-    if (env.UVP_FINALITY_CONFIRMATIONS?.trim() && config.network.finalityConfirmations > 0) {
-      pass(checks, "network.finality_confirmations_explicit");
-    } else {
-      fail(checks, errors, "network.finality_confirmations_explicit", "UVP_FINALITY_CONFIRMATIONS must be explicitly configured to a positive integer in production when UVP_FINALITY_ANCHOR=confirmations");
-    }
-
-    if (config.network.finalityConfirmations >= 2) {
-      pass(checks, "network.finality_confirmations_floor");
-    } else {
-      fail(
-        checks,
-        errors,
-        "network.finality_confirmations_floor",
-        "UVP_FINALITY_CONFIRMATIONS must be at least 2 in production when UVP_FINALITY_ANCHOR=confirmations; a 1-block buffer lets a single-block reorg slip past the finality window"
-      );
-    }
-  } else {
-    pass(checks, "network.finality_confirmations_explicit");
-    pass(checks, "network.finality_confirmations_floor");
-  }
-
-  if (config.productBff.registrationAdapter !== "anvil") {
-    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in production");
-  } else {
-    pass(checks, "product.registration_adapter");
-  }
-
-  if (config.productBff.waitForReceipt) {
-    pass(checks, "product.registration_receipt");
-  } else {
-    fail(checks, errors, "product.registration_receipt", "UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in production");
-  }
-
-  if (config.reconcile.enabled) {
-    pass(checks, "reconcile.worker_enabled");
-  } else {
-    fail(checks, errors, "reconcile.worker_enabled", "RECONCILE_WORKER_ENABLED=true is required in production");
-  }
-
-  if (enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") || isPermissiveAuthorizationRequested(env)) {
-    fail(checks, errors, "product.permissive_authorization", "permissive Product submission authorization is forbidden in production");
-  } else {
-    pass(checks, "product.permissive_authorization");
-  }
-
-  for (const envName of privateKeyEnvNames(config)) {
-    const privateKey = env[envName]?.trim().toLowerCase();
-    if (privateKey && ANVIL_DEFAULT_PRIVATE_KEYS.has(privateKey)) {
-      fail(checks, errors, `private_key.${envName}`, `${envName} must not use an Anvil default private key in production`);
-    }
-  }
-
-  if (stateMachine) {
-    pass(checks, "contracts.state_machine");
-  } else {
-    fail(checks, errors, "contracts.state_machine", "UVPStateMachine contract address is required in production");
-  }
-
-  if (identityRegistry) {
-    pass(checks, "contracts.identity_registry");
-  } else {
-    fail(checks, errors, "contracts.identity_registry", "UVPIdentityRegistry contract address is required in production");
-  }
-
-  if (config.governance.broadcastEnabled) {
-    fail(checks, errors, "governance.broadcast_enabled", "GOVERNANCE_BROADCAST_ENABLED=true uses env private-key governance and is forbidden in production");
-  } else {
-    pass(checks, "governance.broadcast_enabled");
-  }
-
-  if (config.evidenceStorage.adapter === "s3") {
-    pass(checks, "evidence.storage_adapter");
-  } else {
-    fail(checks, errors, "evidence.storage_adapter", "UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in production");
-  }
-  if (config.evidenceStorage.s3Bucket && config.evidenceStorage.s3Region) {
-    pass(checks, "evidence.s3_location");
-  } else {
-    fail(checks, errors, "evidence.s3_location", "UVP_EVIDENCE_S3_BUCKET and UVP_EVIDENCE_S3_REGION are required in production");
-  }
-  if (config.evidenceStorage.s3AccessKeyIdEnv && env[config.evidenceStorage.s3AccessKeyIdEnv]?.trim()) {
-    pass(checks, "evidence.s3_access_key");
-  } else {
-    fail(checks, errors, "evidence.s3_access_key", `${config.evidenceStorage.s3AccessKeyIdEnv ?? "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV"} is required in production`);
-  }
-  if (config.evidenceStorage.s3SecretAccessKeyEnv && env[config.evidenceStorage.s3SecretAccessKeyEnv]?.trim()) {
-    pass(checks, "evidence.s3_secret_key");
-  } else {
-    fail(checks, errors, "evidence.s3_secret_key", `${config.evidenceStorage.s3SecretAccessKeyEnv ?? "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV"} is required in production`);
-  }
-}
-
-function requireDurableStoreMetadata(
-  config: ChainServicesConfig,
-  checks: ConfigDiagnosticCheck[],
-  errors: string[],
-  environment: "production" | "testnet" | "staging"
-): void {
-  if (/^postgres(?:ql)?:\/\//.test(config.database.url)) {
-    pass(checks, "store_metadata.durable");
-    return;
-  }
-  fail(
-    checks,
-    errors,
-    "store_metadata.durable",
-    `Store metadata stores must use durable Postgres storage in ${environment}`
-  );
-}
-
-function runTestnetSafetyPreflight(
-  config: ChainServicesConfig,
-  env: Env,
-  checks: ConfigDiagnosticCheck[],
-  errors: string[]
-): void {
-  if (config.security.environment !== "testnet") {
-    return;
-  }
-
-  const stateMachine = stateMachineAddress(config.network.contracts);
-  const identityRegistry = identityRegistryAddress(config.network.contracts);
-
-  if (config.security.preflightStrict) {
-    pass(checks, "security.preflight_strict");
-  } else {
-    fail(checks, errors, "security.preflight_strict", "SECURITY_PREFLIGHT_STRICT=false is forbidden in testnet");
-  }
-
-  if (config.security.logRedactionEnabled) {
-    pass(checks, "security.log_redaction");
-  } else {
-    fail(checks, errors, "security.log_redaction", "LOG_REDACTION_ENABLED=false is forbidden in testnet");
-  }
-
-  if (/^postgres(?:ql)?:\/\//.test(config.database.url)) {
-    pass(checks, "storage.driver");
-  } else {
-    fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_URL must be a postgres:// DSN in testnet");
-  }
-  requireDurableStoreMetadata(config, checks, errors, "testnet");
-  if (config.database.migrationsAutoRun && env.UVP_TESTNET_ALLOW_AUTO_MIGRATIONS?.trim() !== "1") {
-    fail(checks, errors, "storage.migrations_auto_run", "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN=true is forbidden in testnet without UVP_TESTNET_ALLOW_AUTO_MIGRATIONS=1");
-  } else {
-    pass(checks, "storage.migrations_auto_run");
-  }
-
-  if (config.network.chainId === 84532) {
-    pass(checks, "network.chain_id_configured");
-  } else {
-    fail(checks, errors, "network.chain_id_configured", "UVP_CHAIN_ID=84532 is required in testnet");
-  }
-
-  if (isNonLocalRpcUrl(config.network.rpcUrl)) {
-    pass(checks, "network.rpc_url_configured");
-  } else {
-    fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia RPC in testnet");
-  }
-  checkEndpointScheme(config, checks, errors);
-
-  if (config.operatorRoles.adminReviewers.length > 0) {
-    pass(checks, "operator.governance_admin_reviewer");
-  } else {
-    fail(checks, errors, "operator.governance_admin_reviewer", "GOVERNANCE_ADMIN_REVIEWER_IDS is required in testnet");
-  }
-  if ((config.operatorRoles.opsConsoleAdmins ?? []).length > 0) {
-    pass(checks, "operator.ops_console_admin");
-  } else {
-    fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in testnet");
-  }
-  if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
-    pass(checks, "operator.governance_admin_token");
-  } else {
-    fail(checks, errors, "operator.governance_admin_token", "GOVERNANCE_ADMIN_TOKEN_HASHES is required in testnet");
-  }
-
-  if (stateMachine) {
-    pass(checks, "contracts.state_machine");
-  } else {
-    fail(checks, errors, "contracts.state_machine", "UVPStateMachine contract address is required in testnet");
-  }
-
-  if (identityRegistry) {
-    pass(checks, "contracts.identity_registry");
-  } else {
-    fail(checks, errors, "contracts.identity_registry", "UVPIdentityRegistry contract address is required in testnet");
-  }
-
-  if (config.productBff.registrationAdapter !== "anvil") {
-    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in testnet");
-  } else {
-    pass(checks, "product.registration_adapter");
-  }
-
-  if (config.productBff.waitForReceipt) {
-    pass(checks, "product.registration_receipt");
-  } else {
-    fail(checks, errors, "product.registration_receipt", "UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in testnet");
-  }
-
-  if (config.reconcile.enabled) {
-    pass(checks, "reconcile.worker_enabled");
-  } else {
-    fail(checks, errors, "reconcile.worker_enabled", "RECONCILE_WORKER_ENABLED=true is required in testnet");
-  }
-
-  if (config.relayer.broadcastEnabled) {
-    pass(checks, "relayer.broadcast_enabled");
-  } else {
-    fail(checks, errors, "relayer.broadcast_enabled", "UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED=false is forbidden in testnet");
-  }
-
-  if (config.evidenceStorage.adapter === "rehearsal-object") {
-    pass(checks, "evidence.storage_adapter");
-  } else {
-    fail(checks, errors, "evidence.storage_adapter", "UVP_EVIDENCE_STORAGE_ADAPTER=rehearsal-object is required in testnet");
-  }
-
-  if (enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") || isPermissiveAuthorizationRequested(env)) {
-    fail(checks, errors, "product.permissive_authorization", "permissive Product submission authorization is forbidden in testnet");
-  } else {
-    pass(checks, "product.permissive_authorization");
-  }
-
-  for (const envName of privateKeyEnvNames(config)) {
-    const privateKey = env[envName]?.trim().toLowerCase();
-    if (privateKey && ANVIL_DEFAULT_PRIVATE_KEYS.has(privateKey)) {
-      fail(checks, errors, `private_key.${envName}`, `${envName} must not use an Anvil default private key in testnet`);
-    }
-  }
-
-  if (config.governance.broadcastEnabled && config.governance.chainId !== 84532) {
-    fail(checks, errors, "governance.chain_id_configured", "GOVERNANCE_CHAIN_ID=84532 is required in testnet when governance broadcast is enabled");
-  }
-}
-
-function runStagingSafetyPreflight(
-  config: ChainServicesConfig,
-  env: Env,
-  checks: ConfigDiagnosticCheck[],
-  errors: string[]
-): void {
-  if (config.security.environment !== "staging") {
-    return;
-  }
-
-  const stateMachine = stateMachineAddress(config.network.contracts);
-  const identityRegistry = identityRegistryAddress(config.network.contracts);
-
-  if (config.security.preflightStrict) {
-    pass(checks, "security.preflight_strict");
-  } else {
-    fail(checks, errors, "security.preflight_strict", "SECURITY_PREFLIGHT_STRICT=false is forbidden in staging");
-  }
-
-  if (config.security.logRedactionEnabled) {
-    pass(checks, "security.log_redaction");
-  } else {
-    fail(checks, errors, "security.log_redaction", "LOG_REDACTION_ENABLED=false is forbidden in staging");
-  }
-
-  if (/^postgres(?:ql)?:\/\//.test(config.database.url)) {
-    pass(checks, "storage.driver");
-  } else {
-    fail(checks, errors, "storage.driver", "CHAIN_SERVICES_DATABASE_URL must be a postgres:// DSN in staging");
-  }
-  requireDurableStoreMetadata(config, checks, errors, "staging");
-  if (config.database.migrationsAutoRun && env.UVP_STAGING_ALLOW_AUTO_MIGRATIONS?.trim() !== "1") {
-    fail(checks, errors, "storage.migrations_auto_run", "CHAIN_SERVICES_MIGRATIONS_AUTO_RUN=true is forbidden in staging without UVP_STAGING_ALLOW_AUTO_MIGRATIONS=1");
-  } else {
-    pass(checks, "storage.migrations_auto_run");
-  }
-
-  if (config.network.chainId === 84532) {
-    pass(checks, "network.chain_id_configured");
-  } else {
-    fail(checks, errors, "network.chain_id_configured", "UVP_CHAIN_ID=84532 is required in staging");
-  }
-  if (isNonLocalRpcUrl(config.network.rpcUrl)) {
-    pass(checks, "network.rpc_url_configured");
-  } else {
-    fail(checks, errors, "network.rpc_url_configured", "UVP_RPC_URL must point to a non-local Base Sepolia or staging RPC in staging");
-  }
-  checkEndpointScheme(config, checks, errors);
-  if (config.network.finalityConfirmations > 0) {
-    pass(checks, "network.finality_confirmations");
-  } else {
-    fail(checks, errors, "network.finality_confirmations", "UVP_FINALITY_CONFIRMATIONS must be positive in staging");
-  }
-  if (stateMachine) {
-    pass(checks, "contracts.state_machine");
-  } else {
-    fail(checks, errors, "contracts.state_machine", "UVPStateMachine contract address is required in staging");
-  }
-  if (identityRegistry) {
-    pass(checks, "contracts.identity_registry");
-  } else {
-    fail(checks, errors, "contracts.identity_registry", "UVPIdentityRegistry contract address is required in staging");
-  }
-
-  if (config.productBff.registrationAdapter === "anvil") {
-    pass(checks, "product.registration_adapter");
-  } else {
-    fail(checks, errors, "product.registration_adapter", "UVP_PRODUCT_BFF_REGISTRATION_ADAPTER=anvil is required in staging");
-  }
-  if (config.productBff.waitForReceipt) {
-    pass(checks, "product.registration_receipt");
-  } else {
-    fail(checks, errors, "product.registration_receipt", "UVP_PRODUCT_BFF_WAIT_FOR_RECEIPT=true is required in staging");
-  }
-  if (config.relayer.broadcastEnabled) {
-    pass(checks, "relayer.broadcast_enabled");
-  } else {
-    fail(checks, errors, "relayer.broadcast_enabled", "UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED=true is required in staging");
-  }
-  if (config.evidenceStorage.adapter === "s3") {
-    pass(checks, "evidence.storage_adapter");
-  } else {
-    fail(checks, errors, "evidence.storage_adapter", "UVP_EVIDENCE_STORAGE_ADAPTER=s3 is required in staging");
-  }
-  if (config.evidenceStorage.s3Bucket && config.evidenceStorage.s3Region) {
-    pass(checks, "evidence.s3_location");
-  } else {
-    fail(checks, errors, "evidence.s3_location", "UVP_EVIDENCE_S3_BUCKET and UVP_EVIDENCE_S3_REGION are required in staging");
-  }
-  if (config.evidenceStorage.s3AccessKeyIdEnv && env[config.evidenceStorage.s3AccessKeyIdEnv]?.trim()) {
-    pass(checks, "evidence.s3_access_key");
-  } else {
-    fail(checks, errors, "evidence.s3_access_key", `${config.evidenceStorage.s3AccessKeyIdEnv ?? "UVP_EVIDENCE_S3_ACCESS_KEY_ID_ENV"} is required in staging`);
-  }
-  if (config.evidenceStorage.s3SecretAccessKeyEnv && env[config.evidenceStorage.s3SecretAccessKeyEnv]?.trim()) {
-    pass(checks, "evidence.s3_secret_key");
-  } else {
-    fail(checks, errors, "evidence.s3_secret_key", `${config.evidenceStorage.s3SecretAccessKeyEnv ?? "UVP_EVIDENCE_S3_SECRET_ACCESS_KEY_ENV"} is required in staging`);
-  }
-  if (config.evidenceStorage.s3UriMode === "object" && !config.evidenceStorage.s3ObjectNamespace) {
-    fail(checks, errors, "evidence.s3_object_namespace", "UVP_EVIDENCE_S3_OBJECT_NAMESPACE is required when UVP_EVIDENCE_S3_URI_MODE=object in staging");
-  } else {
-    pass(checks, "evidence.s3_object_namespace");
-  }
-
-  if (enabledEnv(env, "UVP_PRODUCT_PERMISSIVE_AUTH") || isPermissiveAuthorizationRequested(env)) {
-    fail(checks, errors, "product.permissive_authorization", "permissive Product submission authorization is forbidden in staging");
-  } else {
-    pass(checks, "product.permissive_authorization");
-  }
-
-  runStagingRolePreflight(config, env, checks, errors);
 }
 
 const REQUIRED_STATE_MACHINE_MODULE_KEYS = [
@@ -1062,159 +416,6 @@ function runStateMachineAddressDriftPreflight(
   pass(checks, "contracts.state_machine_address_consistency");
 }
 
-function runStagingRolePreflight(
-  config: ChainServicesConfig,
-  env: Env,
-  checks: ConfigDiagnosticCheck[],
-  errors: string[]
-): void {
-  checkPrivateKeyRole({
-    checks,
-    errors,
-    name: "operator.deployer",
-    envName: config.operatorRoles.deployerPrivateKeyEnv,
-    privateKey: env[config.operatorRoles.deployerPrivateKeyEnv],
-    expectedAddress: config.operatorRoles.deployerAddress,
-    missingMessage: `${config.operatorRoles.deployerPrivateKeyEnv} is required in staging`,
-    mismatchMessage: `${config.operatorRoles.deployerPrivateKeyEnv} does not match UVP_ETH_DEPLOYER_ADDRESS`
-  });
-
-  if (config.operatorRoles.stateMachineOwnerAddress) {
-    pass(checks, "operator.state_machine_owner");
-  } else {
-    fail(checks, errors, "operator.state_machine_owner", "UVP_STATE_MACHINE_OWNER_ADDRESS is required in staging");
-  }
-  if (config.operatorRoles.planPublisherAddress) {
-    pass(checks, "operator.plan_publisher");
-  } else {
-    fail(checks, errors, "operator.plan_publisher", "UVP_PLAN_PUBLISHER_ADDRESS is required in staging");
-  }
-  if (config.productBff.registrarAddress) {
-    pass(checks, "operator.order_registrar");
-  } else {
-    fail(checks, errors, "operator.order_registrar", "UVP_ORDER_REGISTRAR_ADDRESS is required in staging");
-  }
-  if (config.relayer.expectedGasPayer) {
-    pass(checks, "operator.relayer_gas_payer");
-  } else {
-    fail(checks, errors, "operator.relayer_gas_payer", "UVP_RELAYER_GAS_PAYER_ADDRESS is required in staging");
-  }
-  if (config.operatorRoles.participantWallets.length > 0) {
-    pass(checks, "operator.participant_wallets");
-  } else {
-    fail(checks, errors, "operator.participant_wallets", "UVP_REHEARSAL_PARTICIPANT_WALLETS is required in staging");
-  }
-  for (const participantWallet of config.operatorRoles.participantWallets) {
-    if (ANVIL_DEFAULT_ADDRESSES.has(participantWallet)) {
-      fail(checks, errors, "operator.participant_wallets", "UVP_REHEARSAL_PARTICIPANT_WALLETS must not include Anvil default wallet addresses in staging");
-      break;
-    }
-  }
-
-  checkPrivateKeyRole({
-    checks,
-    errors,
-    name: "operator.governance_signer",
-    envName: config.governance.signerPrivateKeyEnv,
-    privateKey: config.governance.signerPrivateKey,
-    expectedAddress: config.governance.signerAddress,
-    missingMessage: `${config.governance.signerPrivateKeyEnv} is required in staging`,
-    mismatchMessage: `${config.governance.signerPrivateKeyEnv} does not match GOVERNANCE_SIGNER_ADDRESS`
-  });
-  if (config.governance.registryOwnerAddress) {
-    pass(checks, "operator.governance_registry_owner");
-  } else {
-    fail(checks, errors, "operator.governance_registry_owner", "GOVERNANCE_REGISTRY_OWNER_ADDRESS is required in staging");
-  }
-  if (config.operatorRoles.adminReviewers.length > 0) {
-    pass(checks, "operator.governance_admin_reviewer");
-  } else {
-    fail(checks, errors, "operator.governance_admin_reviewer", "GOVERNANCE_ADMIN_REVIEWER_IDS is required in staging");
-  }
-  if ((config.operatorRoles.opsConsoleAdmins ?? []).length > 0) {
-    pass(checks, "operator.ops_console_admin");
-  } else {
-    fail(checks, errors, "operator.ops_console_admin", "OPS_CONSOLE_ADMIN_IDS is required in staging");
-  }
-  if ((config.operatorRoles.adminTokenHashes ?? []).length > 0) {
-    pass(checks, "operator.governance_admin_token");
-  } else {
-    fail(checks, errors, "operator.governance_admin_token", "GOVERNANCE_ADMIN_TOKEN_HASHES is required in staging");
-  }
-}
-
-function checkPrivateKeyRole(input: {
-  readonly checks: ConfigDiagnosticCheck[];
-  readonly errors: string[];
-  readonly name: string;
-  readonly envName: string;
-  readonly privateKey: string | undefined;
-  readonly expectedAddress: Address | undefined;
-  readonly missingMessage: string;
-  readonly mismatchMessage: string;
-}): void {
-  const privateKey = input.privateKey?.trim();
-  if (!privateKey) {
-    fail(input.checks, input.errors, input.name, input.missingMessage);
-    return;
-  }
-  if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
-    fail(input.checks, input.errors, input.name, `${input.envName} must be a 32-byte private key`);
-    return;
-  }
-  if (ANVIL_DEFAULT_PRIVATE_KEYS.has(privateKey.toLowerCase())) {
-    fail(input.checks, input.errors, input.name, `${input.envName} must not use an Anvil default private key in staging`);
-    return;
-  }
-  const address = privateKeyAddress(privateKey, input.envName);
-  if (!address) {
-    fail(input.checks, input.errors, input.name, `${input.envName} must derive a valid EVM address`);
-    return;
-  }
-  if (!input.expectedAddress) {
-    fail(input.checks, input.errors, input.name, `${input.name} expected address is required in staging`);
-    return;
-  }
-  if (address !== input.expectedAddress) {
-    fail(input.checks, input.errors, input.name, input.mismatchMessage);
-    return;
-  }
-  pass(input.checks, input.name);
-}
-
-function runProductRegistrationPreflight(
-  config: ChainServicesConfig,
-  env: Env,
-  checks: ConfigDiagnosticCheck[],
-  errors: string[]
-): void {
-  if (config.productBff.registrationAdapter === "memory-trigger") {
-    skip(checks, "product.registration_configured", "Product BFF registration adapter is memory-trigger");
-    return;
-  }
-
-  const stateMachine = stateMachineAddress(config.network.contracts);
-  if (!stateMachine) {
-    fail(checks, errors, "product.registration_contract", "UVPStateMachine contract address is required when Product BFF registration adapter is anvil");
-  } else {
-    pass(checks, "product.registration_contract");
-  }
-
-  const privateKey = env[config.productBff.registrarPrivateKeyEnv]?.trim();
-  if (!privateKey) {
-    fail(checks, errors, "product.registration_private_key", `${config.productBff.registrarPrivateKeyEnv} is required when Product BFF registration adapter is anvil`);
-  } else if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
-    fail(checks, errors, "product.registration_private_key", `${config.productBff.registrarPrivateKeyEnv} must be a 32-byte private key`);
-  } else {
-    const registrar = privateKeyAddress(privateKey, "order registrar");
-    if (config.productBff.registrarAddress && registrar && registrar !== config.productBff.registrarAddress) {
-      fail(checks, errors, "product.registration_private_key", `${config.productBff.registrarPrivateKeyEnv} does not match configured order registrar address`);
-    } else {
-      pass(checks, "product.registration_private_key");
-    }
-  }
-}
-
 async function runRpcPreflight(
   config: ChainServicesConfig,
   clients: RunConfigPreflightOptions["clients"],
@@ -1252,56 +453,6 @@ async function runRpcPreflight(
     checks,
     errors
   });
-
-  const shouldCheckGovernanceOwner = config.governance.broadcastEnabled ||
-    (config.security.environment === "staging" && Boolean(config.governance.signerPrivateKey));
-  if (!shouldCheckGovernanceOwner || !config.governance.signerPrivateKey) {
-    return;
-  }
-
-  const identityRegistry = identityRegistryAddress(config.network.contracts);
-  if (!identityRegistry) {
-    return;
-  }
-
-  const governanceClient = clients?.governance ?? publicClient(config.governance.rpcUrl);
-  await checkChainId({
-    name: "governance.chain_id",
-    expectedChainId: config.governance.chainId,
-    client: governanceClient,
-    checks,
-    errors
-  });
-
-  if (!governanceClient.readContract) {
-    if (config.security.environment === "staging" || config.security.environment === "production") {
-      fail(checks, errors, "governance.owner", "governance preflight client must read registry owner in staging and production");
-      return;
-    }
-    skip(checks, "governance.owner", "governance preflight client cannot read registry owner");
-    return;
-  }
-
-  try {
-    const signer = normalizeAddress(privateKeyToAccount(config.governance.signerPrivateKey).address, "governance signer");
-    const owner = normalizeAddress(String(await governanceClient.readContract({
-      address: identityRegistry as ViemAddress,
-      abi: identityRegistryOwnerAbi,
-      functionName: "owner"
-    })), "governance registry owner");
-    if (config.governance.registryOwnerAddress && owner !== config.governance.registryOwnerAddress) {
-      fail(checks, errors, "governance.owner", "on-chain governance registry owner does not match GOVERNANCE_REGISTRY_OWNER_ADDRESS");
-      return;
-    }
-    const allowedOperators = new Set(config.governance.allowedOperators.map((address) => normalizeAddress(address, "governance allowed operator")));
-    if (owner !== signer && !allowedOperators.has(signer)) {
-      fail(checks, errors, "governance.owner", "governance signer is not the registry owner or an allowed operator");
-      return;
-    }
-    pass(checks, "governance.owner");
-  } catch (error) {
-    fail(checks, errors, "governance.owner", redactErrorMessage(error));
-  }
 }
 
 async function checkStateMachineModules(input: {
@@ -1454,40 +605,16 @@ function diagnosticWarnings(
   values: {
     readonly relayerConfigured: boolean;
     readonly relayerPrivateKeyConfigured: boolean;
-    readonly permissiveAuthorizationRequested: boolean;
   }
 ): readonly string[] {
   const warnings: string[] = [];
-  if (config.productBff.registrationAdapter === "memory-trigger") {
-    warnings.push("Product BFF registration uses the memory-trigger adapter");
-  }
-  if (values.permissiveAuthorizationRequested) {
-    warnings.push("permissive Product authorization is requested");
-  }
   if (!values.relayerConfigured && values.relayerPrivateKeyConfigured) {
     warnings.push("relayer private key is configured without a state-machine contract");
   }
   if (!config.security.logRedactionEnabled) {
     warnings.push("log redaction is disabled");
   }
-  if (config.governance.allowedOperators.length > 0) {
-    warnings.push("GOVERNANCE_ALLOWED_OPERATORS is a rehearsal seam; current contracts still enforce domain-owner authority");
-  }
-  if (config.governance.broadcastEnabled && config.security.environment !== "testnet" && config.security.environment !== "staging") {
-    warnings.push("env-key governance broadcaster is for testnet/staging rehearsal only and is not production governance");
-  }
-  if (!config.notifications?.webhookUrl) {
-    warnings.push("UVP_NOTIFY_WEBHOOK_URL is not configured; notification delivery will be recorded as skipped (transport_adapter_missing)");
-  }
-  if (config.evidenceStorage.adapter === "s3" && !config.evidenceStorage.s3BackupBucket) {
-    warnings.push("UVP_EVIDENCE_BACKUP_BUCKET is not configured; evidence objects have no code-level backup copy");
-  }
   return warnings;
-}
-
-function enabledEnv(env: Env, name: string): boolean {
-  const rawValue = env[name]?.trim().toLowerCase();
-  return rawValue === "1" || rawValue === "true" || rawValue === "yes";
 }
 
 function safeListContractJsonOverrides(env: Env): readonly string[] {
@@ -1498,48 +625,16 @@ function safeListContractJsonOverrides(env: Env): readonly string[] {
   }
 }
 
-function isPermissiveAuthorizationRequested(env: Env): boolean {
-  const rawValue = env.UVP_PRODUCT_SUBMISSION_AUTHORIZATION?.trim().toLowerCase();
-  return rawValue === "permissive" || rawValue === "product_projection_demo";
-}
-
 function operatorRoleDiagnostics(config: ChainServicesConfig, env: Env): ConfigDiagnostics["operatorRoles"] {
   return {
-    deployer: privateKeyRoleDiagnostics(
-      config.operatorRoles.deployerPrivateKeyEnv,
-      env,
-      config.operatorRoles.deployerAddress
-    ),
-    stateMachineOwner: addressRoleDiagnostics(config.operatorRoles.stateMachineOwnerAddress),
-    planPublisher: addressRoleDiagnostics(config.operatorRoles.planPublisherAddress),
-    orderRegistrar: privateKeyRoleDiagnostics(
-      config.productBff.registrarPrivateKeyEnv,
-      env,
-      config.productBff.registrarAddress ?? config.operatorRoles.orderRegistrarAddress
-    ),
     relayerGasPayer: privateKeyRoleDiagnostics(
       config.relayer.stateMachinePrivateKeyEnv,
       env,
       config.relayer.expectedGasPayer ?? config.operatorRoles.relayerGasPayerAddress
     ),
-    participantWallet: {
-      configuredCount: config.operatorRoles.participantWallets.length
-    },
-    governanceRegistryOwner: addressRoleDiagnostics(
-      config.operatorRoles.governanceRegistryOwnerAddress ?? config.governance.registryOwnerAddress
-    ),
-    governanceSigner: privateKeyRoleDiagnostics(
-      config.governance.signerPrivateKeyEnv,
-      env,
-      config.governance.signerAddress ?? config.operatorRoles.governanceSignerAddress
-    ),
-    governanceAdminReviewer: {
-      configuredCount: config.operatorRoles.adminReviewers.length,
-      adminTokenConfigured: (config.operatorRoles.adminTokenHashes ?? []).length > 0,
-      publicTrustAuthority: false
-    },
     opsConsoleAdmin: {
-      configuredCount: (config.operatorRoles.opsConsoleAdmins ?? []).length
+      configuredCount: (config.operatorRoles.opsConsoleAdmins ?? []).length,
+      adminTokenConfigured: (config.operatorRoles.adminTokenHashes ?? []).length > 0
     }
   };
 }
@@ -1560,13 +655,6 @@ function privateKeyRoleDiagnostics(
   };
 }
 
-function addressRoleDiagnostics(address: Address | undefined): AddressRoleDiagnostics {
-  return {
-    configured: Boolean(address),
-    ...(address ? { address } : {})
-  };
-}
-
 function privateKeyAddress(privateKey: string | undefined, label: string): Address | undefined {
   const trimmed = privateKey?.trim();
   if (!trimmed || !/^0x[0-9a-fA-F]{64}$/.test(trimmed)) {
@@ -1579,89 +667,13 @@ function privateKeyAddress(privateKey: string | undefined, label: string): Addre
   }
 }
 
-function privateKeyEnvNames(config: ChainServicesConfig): readonly string[] {
-  return [...new Set([
-    config.relayer.stateMachinePrivateKeyEnv,
-    config.governance.signerPrivateKeyEnv,
-    config.productBff.registrarPrivateKeyEnv,
-    config.operatorRoles.deployerPrivateKeyEnv
-  ])];
-}
-
-function isNonLocalRpcUrl(rpcUrl: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(rpcUrl);
-  } catch {
-    return false;
-  }
-
-  const hostname = parsed.hostname.toLowerCase();
-  return hostname !== "localhost" &&
-    hostname !== "127.0.0.1" &&
-    hostname !== "0.0.0.0" &&
-    hostname !== "::1" &&
-    hostname !== "[::1]" &&
-    !hostname.endsWith(".local");
-}
-
-function isHttpsEndpointUrl(url: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol === "https:") {
-    return true;
-  }
-  const hostname = parsed.hostname.toLowerCase();
-  return parsed.protocol === "http:" && (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname === "[::1]" ||
-    hostname.endsWith(".local")
-  );
-}
-
-function checkEndpointScheme(
-  config: ChainServicesConfig,
-  checks: ConfigDiagnosticCheck[],
-  errors: string[]
-): void {
-  if (isHttpsEndpointUrl(config.network.rpcUrl)) {
-    pass(checks, "network.rpc_scheme");
-  } else {
-    fail(
-      checks,
-      errors,
-      "network.rpc_scheme",
-      `UVP_RPC_URL must use https in ${config.security.environment} (http is only allowed for loopback hosts)`
-    );
-  }
-  if (config.evidenceStorage.s3Endpoint) {
-    if (isHttpsEndpointUrl(config.evidenceStorage.s3Endpoint)) {
-      pass(checks, "evidence.s3_endpoint_scheme");
-    } else {
-      fail(
-        checks,
-        errors,
-        "evidence.s3_endpoint_scheme",
-        "UVP_EVIDENCE_S3_ENDPOINT must use https outside local development (http is only allowed for loopback hosts)"
-      );
-    }
-  }
-}
-
 function pass(checks: ConfigDiagnosticCheck[], name: string): void {
   checks.push({ name, status: "passed" });
 }
 
 function fail(checks: ConfigDiagnosticCheck[], errors: string[], name: string, message: string): void {
-  const redacted = redactErrorMessage(message);
-  checks.push({ name, status: "failed", message: redacted });
-  errors.push(redacted);
+  errors.push(message);
+  checks.push({ name, status: "failed", message });
 }
 
 function skip(checks: ConfigDiagnosticCheck[], name: string, message: string): void {

@@ -1,7 +1,7 @@
-// Generic chain projection reads (anonymous): orders/tasks/sync state straight
-// from ProjectionStore, with no session, business rows, or participant clipping.
-// Order ids are plan-scoped, so the item read always returns `{ orders }`
-// (one or many) and 404s only when no projection exists.
+// Generic chain projection reads (anonymous): orders/tasks/sync state/snapshot
+// straight from ProjectionStore, with no session, business rows, or participant
+// clipping. Order ids are plan-scoped, so the item read always returns
+// `{ orders }` (one or many) and 404s only when no projection exists.
 
 import { StorageUnavailableError } from "../../storage/errors.js";
 import {
@@ -20,6 +20,7 @@ const ORDER_TASKS_PATH = /^\/chain\/orders\/([^/]+)\/tasks$/;
 const TASKS_PATH = "/chain/tasks";
 const TASK_PATH = /^\/chain\/tasks\/([^/]+)$/;
 const SYNC_STATE_PATH = "/chain/sync-state";
+const SNAPSHOT_PATH = "/chain/snapshot";
 
 export function createChainReadRouteModule(): RouteModule {
   return {
@@ -69,6 +70,11 @@ async function handleRead(
       return { status: 404, body: { error: "chain_sync_state_not_found" } };
     }
     return { status: 200, body: { syncState: toChainJson(syncState) } };
+  }
+
+  if (request.pathname === SNAPSHOT_PATH) {
+    const snapshot = await context.store.getOrderSnapshot();
+    return { status: 200, body: { snapshot: toChainJson(snapshot) } };
   }
 
   const orderTasksMatch = ORDER_TASKS_PATH.exec(request.pathname);

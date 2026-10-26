@@ -1,13 +1,4 @@
 import { createPublicClient, defineChain, http } from "viem";
-import type { GovernanceStore, GovernanceTxLogScanCursor } from "../governance/store.js";
-import type { GovernanceBroadcastStatus, GovernanceTxLogDTO, GovernanceTxLogStatus, IdentityTxLogDTO } from "../governance/types.js";
-import type { BindEvidenceRequestDTO, EvidencePrincipal, EvidenceProofDTO, EvidenceRecordDTO } from "../evidence/types.js";
-import type { ProductBffStore } from "../product/query/bff/store.js";
-import type {
-  ProductOrderDraftDTO,
-  ProductOrderTriggerRecord,
-  ProductOrderTriggerStatus
-} from "../product/query/bff/types.js";
 import type { AuditSink } from "../security/audit.js";
 import type { Address, Logger, Hex, LifecycleService } from "../shared/types.js";
 import { noopLogger } from "../shared/types.js";
@@ -24,11 +15,10 @@ import type {
 } from "../stage-patches/types.js";
 import type { StateMachineOrderProjection } from "../indexer/projection-types.js";
 import { redactErrorMessage } from "../security/redaction.js";
-import {
-  isReopenableFailedTriggerRecord,
-  type ReconcileRunSummary,
-  type ReconcileWorkerDiagnostics,
-  type TxReconcileFields
+import type {
+  ReconcileRunSummary,
+  ReconcileWorkerDiagnostics,
+  TxReconcileFields
 } from "./status.js";
 
 export interface ReconcileWorkerConfig {
@@ -58,21 +48,13 @@ export interface ViemReconcileReceiptClientOptions {
   readonly chainId: number;
 }
 
-export interface EvidenceBindingSweeper {
-  getProof(evidenceId: string, principal: EvidencePrincipal): Promise<EvidenceProofDTO | undefined>;
-  bindEvidence(input: BindEvidenceRequestDTO, principal: EvidencePrincipal): Promise<EvidenceRecordDTO | undefined>;
-}
-
 export interface TxReconcileWorkerOptions {
   readonly config: ReconcileWorkerConfig;
   readonly receiptClient: ReconcileReceiptClient;
   readonly projectionStore: ProjectionStore;
-  readonly productStore?: ProductBffStore;
   readonly submissionStore?: ProductSubmissionStore;
-  readonly governanceStore?: GovernanceStore;
   readonly stageExecutorPatchStore?: ProductStageExecutorPatchStore;
   readonly stageResourcePatchStore?: ProductStageResourcePatchStore;
-  readonly evidenceBinder?: EvidenceBindingSweeper;
   readonly audit?: AuditSink;
   readonly logger?: Logger;
   readonly now?: () => Date;
@@ -91,12 +73,9 @@ export class TxReconcileWorker implements LifecycleService {
   readonly #config: ReconcileWorkerConfig;
   readonly #receiptClient: ReconcileReceiptClient;
   readonly #projectionStore: ProjectionStore;
-  readonly #productStore: ProductBffStore | undefined;
   readonly #submissionStore: ProductSubmissionStore | undefined;
-  readonly #governanceStore: GovernanceStore | undefined;
   readonly #stageExecutorPatchStore: ProductStageExecutorPatchStore | undefined;
   readonly #stageResourcePatchStore: ProductStageResourcePatchStore | undefined;
-  readonly #evidenceBinder: EvidenceBindingSweeper | undefined;
   readonly #audit: AuditSink | undefined;
   readonly #logger: Logger;
   readonly #now: () => Date;
@@ -106,19 +85,15 @@ export class TxReconcileWorker implements LifecycleService {
   #lastRunAt: string | undefined;
   #lastSummary: ReconcileRunSummary | undefined;
   #lastError: string | undefined;
-  readonly #orphanRevokedAlerted = new Set<string>();
   readonly #failedRecheckExhaustedAlerted = new Set<string>();
 
   constructor(options: TxReconcileWorkerOptions) {
     this.#config = options.config;
     this.#receiptClient = options.receiptClient;
     this.#projectionStore = options.projectionStore;
-    this.#productStore = options.productStore;
     this.#submissionStore = options.submissionStore;
-    this.#governanceStore = options.governanceStore;
     this.#stageExecutorPatchStore = options.stageExecutorPatchStore;
     this.#stageResourcePatchStore = options.stageResourcePatchStore;
-    this.#evidenceBinder = options.evidenceBinder;
     this.#audit = options.audit;
     this.#logger = options.logger ?? noopLogger;
     this.#now = options.now ?? (() => new Date());
@@ -176,12 +151,8 @@ export class TxReconcileWorker implements LifecycleService {
   async runOnce(): Promise<ReconcileRunSummary> {
     if (this.#checking) {
       return {
-        registrationsChecked: 0,
         submissionsChecked: 0,
-        governanceLogsChecked: 0,
         stagePatchesChecked: 0,
-        evidenceBindsSwept: 0,
-        evidenceBindsRepaired: 0,
         updated: 0,
         failed: 0
       };
@@ -196,42 +167,11 @@ export class TxReconcileWorker implements LifecycleService {
 
   async #runReconcilePass(): Promise<ReconcileRunSummary> {
     const summary = {
-      registrationsChecked: 0,
       submissionsChecked: 0,
-      governanceLogsChecked: 0,
       stagePatchesChecked: 0,
-      evidenceBindsSwept: 0,
-      evidenceBindsRepaired: 0,
       updated: 0,
       failed: 0
     };
-
-    await this.#sweepEvidenceBinds(summary);
-
-    if (this.#productStore) {
-      for (const registration of (await this.#productStore.listRegistrations()).filter(isReconcileableRegistration)) {
-        if (registration.status === "failed" && !this.#failedTxRecheckDue(`registration:${registration.triggerId}`, registration)) {
-          continue;
-        }
-        summary.registrationsChecked += 1;
-        try {
-          const updated = await this.#reconcileRegistration(registration);
-          if (updated) {
-            summary.updated += 1;
-            if (updated.status === "failed") {
-              summary.failed += 1;
-            }
-          }
-        } catch (error) {
-          summary.failed += 1;
-          this.#logger.warn("reconcile worker skipped a broken registration record", {
-            triggerId: registration.triggerId,
-            orderId: registration.orderId,
-            message: redactErrorMessage(error)
-          });
-        }
-      }
-    }
 
     if (this.#submissionStore) {
       for await (const submission of iterateOpenSubmissions(
@@ -264,177 +204,12 @@ export class TxReconcileWorker implements LifecycleService {
       }
     }
 
-    if (this.#governanceStore) {
-      let skippedSimulatedCount = 0;
-      for await (const log of iterateOpenGovernanceLogs(
-        this.#governanceStore,
-        this.#config.scanPageSize ?? DEFAULT_RECONCILE_SCAN_PAGE_SIZE
-      )) {
-        if (!isReconcileableGovernanceLog(log)) {
-          continue;
-        }
-        if (isSimulatedGovernanceLog(log)) {
-          skippedSimulatedCount += 1;
-          continue;
-        }
-        if (log.status === "failed" && !this.#failedTxRecheckDue(`governance-log:${log.logId}`, log)) {
-          continue;
-        }
-        summary.governanceLogsChecked += 1;
-        try {
-          const updated = await this.#reconcileGovernanceLog(log);
-          if (updated) {
-            summary.updated += 1;
-            if (updated.status === "failed") {
-              summary.failed += 1;
-            }
-          }
-        } catch (error) {
-          summary.failed += 1;
-          this.#logger.warn("reconcile worker skipped a broken governance ledger record", {
-            logId: log.logId,
-            message: redactErrorMessage(error)
-          });
-        }
-      }
-      if (skippedSimulatedCount > 0) {
-        this.#logger.warn("reconcile worker skipped simulated governance ledger entries; they never hit chain and cannot be reconciled", {
-          skippedSimulatedCount
-        });
-      }
-      await this.#sweepOrphanRevokedReviews(summary);
-    }
-
     await this.#reconcileStagePatches(summary);
 
     this.#lastRunAt = this.#now().toISOString();
     this.#lastSummary = summary;
     this.#lastError = undefined;
     return summary;
-  }
-
-  async #sweepEvidenceBinds(summary: ReconcileRunSummaryDraft): Promise<void> {
-    if (!this.#submissionStore || !this.#evidenceBinder) {
-      return;
-    }
-    for await (const submission of iterateOpenSubmissions(
-      this.#submissionStore,
-      this.#config.scanPageSize ?? DEFAULT_RECONCILE_SCAN_PAGE_SIZE
-    )) {
-      if (!isEvidenceBindSweepable(submission)) {
-        continue;
-      }
-      summary.evidenceBindsSwept += 1;
-      try {
-        summary.evidenceBindsRepaired += await this.#repairSubmissionEvidenceBinds(submission);
-      } catch (error) {
-        summary.failed += 1;
-        this.#logger.warn("reconcile worker failed to rebind submission evidence", {
-          submissionId: submission.submissionId,
-          orderId: submission.orderId,
-          message: redactErrorMessage(error)
-        });
-      }
-    }
-  }
-
-  async #repairSubmissionEvidenceBinds(submission: ProductSubmissionDTO): Promise<number> {
-    if (!this.#evidenceBinder || !submission.txHash) {
-      return 0;
-    }
-    const evidenceIds = submission.evidenceIds ?? [];
-    const binderPrincipal: EvidencePrincipal = {
-      id: submission.submitter.toLowerCase(),
-      role: "participant"
-    };
-    const repaired: string[] = [];
-    for (const evidenceId of evidenceIds) {
-      const proof = await this.#evidenceBinder.getProof(evidenceId, binderPrincipal);
-      if (proof?.verificationStatus !== "unbound") {
-        continue;
-      }
-      await this.#evidenceBinder.bindEvidence({
-        evidenceId,
-        submissionId: submission.submissionId,
-        txHash: submission.txHash,
-        orderId: submission.orderId,
-        onchainOrderId: submission.onchainOrderId,
-        sourceId: submission.sourceId,
-        signalId: submission.signalId,
-        boundAt: this.#now().toISOString()
-      }, binderPrincipal);
-      repaired.push(evidenceId);
-    }
-    if (repaired.length > 0) {
-      await this.#audit?.record({
-        type: "reconcile.evidence_bind.succeeded",
-        action: submission.signalName,
-        outcome: "succeeded",
-        subject: {
-          submissionId: submission.submissionId,
-          prepareId: submission.prepareId,
-          taskId: submission.taskId,
-          orderId: submission.orderId,
-          onchainOrderId: submission.onchainOrderId,
-          stageIdentifier: submission.stageIdentifier,
-          signalName: submission.signalName,
-          submitter: submission.submitter
-        },
-        ...(submission.txHash ? { txHash: submission.txHash } : {}),
-        metadata: {
-          repairedEvidenceIds: repaired
-        }
-      });
-    }
-    return repaired.length;
-  }
-
-  async #sweepOrphanRevokedReviews(summary: ReconcileRunSummaryDraft): Promise<void> {
-    if (!this.#governanceStore || !this.#projectionStore) {
-      return;
-    }
-    const revokedReviews = await this.#governanceStore.listReviews({
-      subjectType: "supplier",
-      status: "revoked"
-    });
-    if (revokedReviews.length === 0) {
-      return;
-    }
-    const loggedSubjectIds = new Set(
-      (await this.#governanceStore.listIdentityTxLogs()).map((log) => log.subjectId.toLowerCase())
-    );
-    for (const review of revokedReviews) {
-      const subjectKey = review.subjectId.toLowerCase();
-      if (loggedSubjectIds.has(subjectKey)) {
-        continue;
-      }
-      const activeBindings = await this.#projectionStore.listIdentityBindings({
-        subjectId: review.subjectId,
-        activeOnly: true
-      });
-      if (activeBindings.length === 0) {
-        continue;
-      }
-      if (this.#orphanRevokedAlerted.has(review.reviewId)) {
-        continue;
-      }
-      this.#orphanRevokedAlerted.add(review.reviewId);
-      summary.failed += 1;
-      await this.#audit?.record({
-        type: "reconcile.governance_revoke_orphan",
-        action: "revoke_identity",
-        outcome: "failed",
-        actor: "tx-indexer-reconcile",
-        subject: {
-          reviewId: review.reviewId,
-          subjectId: review.subjectId
-        },
-        retryable: true,
-        metadata: {
-          fork: "review is marked revoked with no governance tx log while the on-chain binding is still active; re-issue revoke-identity to rebuild the ledger entry"
-        }
-      });
-    }
   }
 
   async #reconcileStagePatches(summary: ReconcileRunSummaryDraft): Promise<void> {
@@ -519,42 +294,6 @@ export class TxReconcileWorker implements LifecycleService {
     }
   }
 
-  async #reconcileRegistration(
-    registration: ProductOrderTriggerRecord
-  ): Promise<ProductOrderTriggerRecord | undefined> {
-    const outcome = await this.#resolveOutcome(
-      registration,
-      () => registrationProjectionConfirmation(
-        this.#projectionStore,
-        registration
-      ),
-      `registration:${registration.triggerId}`
-    );
-    if (!outcome) {
-      return undefined;
-    }
-
-    const updated: ProductOrderTriggerRecord = {
-      ...registration,
-      status: outcome.registrationStatus,
-      ...outcome.fields,
-      ...(outcome.txHash ? { txHash: outcome.txHash } : {}),
-      ...(outcome.blockNumber ? { blockNumber: outcome.blockNumber } : {}),
-      ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
-      ...(outcome.errorMessage ? { errorMessage: outcome.errorMessage } : {}),
-      retryable: outcome.retryable,
-      updatedAt: outcome.checkedAt
-    };
-    await this.#productStore?.updateRegistration(updated);
-
-    const draft = await this.#productStore?.getDraft(registration.draftId);
-    if (draft) {
-      await this.#productStore?.updateDraft(draftFromReconciledRegistration(draft, updated, outcome.checkedAt));
-    }
-
-    return updated;
-  }
-
   async #reconcileSubmission(submission: ProductSubmissionDTO): Promise<ProductSubmissionDTO | undefined> {
     const outcome = await this.#resolveOutcome(
       submission,
@@ -590,62 +329,6 @@ export class TxReconcileWorker implements LifecycleService {
       updatedAt: outcome.checkedAt
     };
     await this.#submissionStore?.putSubmission(updated);
-    return updated;
-  }
-
-  async #reconcileGovernanceLog(log: GovernanceTxLogDTO): Promise<GovernanceTxLogDTO | undefined> {
-    const outcome = await this.#resolveOutcome(
-      log,
-      () => governanceProjectionConfirmation(
-        this.#projectionStore,
-        log
-      ),
-      `governance-log:${log.logId}`
-    );
-    if (!outcome) {
-      return undefined;
-    }
-
-    const status = governanceStatusFromOutcome(outcome);
-    const updated: GovernanceTxLogDTO = {
-      ...log,
-      status,
-      broadcastStatus: governanceBroadcastStatusFromOutcome(log.broadcastStatus, outcome),
-      ...outcome.fields,
-      ...(outcome.txHash ? { txHash: outcome.txHash } : {}),
-      ...(outcome.blockNumber ? { blockNumber: outcome.blockNumber } : {}),
-      ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
-      ...(outcome.errorMessage ? { errorMessage: outcome.errorMessage } : {}),
-      retryable: outcome.retryable,
-      updatedAt: outcome.checkedAt
-    };
-    await this.#governanceStore?.updateTxLog(updated);
-    if (
-      log.action === "revoke_identity" &&
-      outcome.kind === "failed" &&
-      log.status !== "failed"
-    ) {
-      await this.#audit?.record({
-        type: "reconcile.governance_revoke_reverted",
-        action: "revoke_identity",
-        outcome: "failed",
-        actor: "tx-indexer-reconcile",
-        subject: {
-          logId: log.logId,
-          subjectId: log.subjectId,
-          ...(log.bindingId ? { bindingId: log.bindingId } : {}),
-          ...(log.txHash ? { txHash: log.txHash } : {})
-        },
-        ...(log.txHash ? { txHash: log.txHash } : {}),
-        ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
-        retryable: outcome.retryable,
-        metadata: {
-          beforeStatus: log.status,
-          afterStatus: status,
-          fork: "review is marked revoked while the on-chain binding is still active; re-issue revoke-identity to re-broadcast"
-        }
-      });
-    }
     return updated;
   }
 
@@ -697,7 +380,6 @@ export class TxReconcileWorker implements LifecycleService {
       if (!timedOut(record, this.#config.txTimeoutMs, this.#now())) {
         return {
           kind: "pending",
-          registrationStatus: record.status as ProductOrderTriggerStatus,
           checkedAt,
           fields: {
             reconcileStatus: "broadcasting",
@@ -728,7 +410,6 @@ export class TxReconcileWorker implements LifecycleService {
       }
       return {
         kind: "pending",
-        registrationStatus: record.status as ProductOrderTriggerStatus,
         checkedAt,
         fields: {
           reconcileStatus: "submitted",
@@ -744,7 +425,6 @@ export class TxReconcileWorker implements LifecycleService {
     if (receipt.status === "reverted" || receipt.status === "failed") {
       return {
         kind: "failed",
-        registrationStatus: "failed",
         checkedAt,
         fields: {
           reconcileStatus: "failed",
@@ -761,7 +441,6 @@ export class TxReconcileWorker implements LifecycleService {
     if (receipt.status !== "success") {
       return {
         kind: "pending",
-        registrationStatus: record.status as ProductOrderTriggerStatus,
         checkedAt,
         fields: {
           reconcileStatus: "submitted",
@@ -778,7 +457,6 @@ export class TxReconcileWorker implements LifecycleService {
     if (!projected) {
       return {
         kind: "indexing",
-        registrationStatus: "indexing",
         checkedAt,
         fields: {
           reconcileStatus: "indexing",
@@ -829,7 +507,6 @@ export class TxReconcileWorker implements LifecycleService {
 function confirmedOutcome(checkedAt: string, blockNumber?: string): ResolvedReconcileOutcome {
   return {
     kind: "confirmed",
-    registrationStatus: "confirmed",
     checkedAt,
     fields: {
       reconcileStatus: "confirmed",
@@ -903,7 +580,6 @@ export function createViemReconcileReceiptClient(
 
 interface ResolvedReconcileOutcome {
   readonly kind: "pending" | "indexing" | "confirmed" | "failed" | "stale_pending";
-  readonly registrationStatus: ProductOrderTriggerStatus;
   readonly checkedAt: string;
   readonly fields: Required<Pick<TxReconcileFields, "reconcileStatus" | "lastCheckedAt" | "receiptStatus" | "projectionStatus">>;
   readonly blockNumber?: string;
@@ -920,7 +596,6 @@ type ReconcileRunSummaryDraft = {
 function staleOutcome(checkedAt: string): ResolvedReconcileOutcome {
   return {
     kind: "stale_pending",
-    registrationStatus: "failed",
     checkedAt,
     fields: {
       reconcileStatus: "stale_pending",
@@ -934,39 +609,11 @@ function staleOutcome(checkedAt: string): ResolvedReconcileOutcome {
   };
 }
 
-function isReconcileableRegistration(registration: ProductOrderTriggerRecord): boolean {
-  if (registration.status === "failed") {
-    return !isReopenableFailedTriggerRecord(registration)
-      && Boolean(registration.txHash);
-  }
-  return registration.status === "submitted" || registration.status === "indexing";
-}
-
 function isReconcileableSubmission(submission: ProductSubmissionDTO): boolean {
   if (submission.status === "failed") {
     return Boolean(submission.txHash);
   }
   return submission.status === "broadcasting" || submission.status === "submitted" || submission.status === "indexing";
-}
-
-function isEvidenceBindSweepable(submission: ProductSubmissionDTO): boolean {
-  if (!submission.txHash || !submission.evidenceIds?.length) {
-    return false;
-  }
-  return submission.status === "broadcasting"
-    || submission.status === "submitted"
-    || submission.status === "indexing";
-}
-
-function isReconcileableGovernanceLog(log: GovernanceTxLogDTO): boolean {
-  if (log.status === "failed") {
-    return Boolean(log.txHash);
-  }
-  return log.status === "pending" || log.status === "broadcasting" || log.status === "indexing";
-}
-
-function isSimulatedGovernanceLog(log: GovernanceTxLogDTO): boolean {
-  return log.executionMode === "simulated" || log.broadcastStatus === "simulated_tx";
 }
 
 async function* iterateOpenStagePatches<TSubmission extends {
@@ -1104,53 +751,6 @@ async function* iterateOpenSubmissions(
   }
 }
 
-async function* iterateOpenGovernanceLogs(
-  store: GovernanceStore,
-  pageSize: number
-): AsyncGenerator<IdentityTxLogDTO, void, unknown> {
-  if (!store.listOpenIdentityTxLogsPage) {
-    for (const log of await store.listIdentityTxLogs()) {
-      yield log;
-    }
-    return;
-  }
-  let after: GovernanceTxLogScanCursor | undefined;
-  while (true) {
-    const page = await store.listOpenIdentityTxLogsPage(after, pageSize);
-    if (page.length === 0) {
-      return;
-    }
-    for (const log of page) {
-      yield log;
-    }
-    const last = page[page.length - 1]!;
-    after = { createdAt: last.createdAt, logId: last.logId };
-    if (page.length < pageSize) {
-      return;
-    }
-  }
-}
-
-async function registrationProjectionConfirmation(
-  projectionStore: ProjectionStore,
-  registration: ProductOrderTriggerRecord
-): Promise<ProjectionConfirmation | undefined> {
-  const order = await projectionStore.getStateMachineOrder(
-    registration.orderId,
-    registration.planId
-  );
-  if (!order?.registeredAt) {
-    return undefined;
-  }
-  if (
-    registration.stateMachineAddress &&
-    order.contractAddress.toLowerCase() !== registration.stateMachineAddress.toLowerCase()
-  ) {
-    return undefined;
-  }
-  return projectionConfirmationFromProvenance(order.registeredAt, registration.txHash);
-}
-
 export async function submissionProjectionConfirmation(
   projectionStore: ProjectionStore,
   submission: {
@@ -1181,58 +781,6 @@ export async function submissionProjectionConfirmation(
   return matches ? projectionConfirmationFromProvenance(signal?.submittedAt, submission.txHash) : undefined;
 }
 
-async function governanceProjectionConfirmation(
-  projectionStore: ProjectionStore,
-  log: GovernanceTxLogDTO
-): Promise<ProjectionConfirmation | undefined> {
-  const identities = await projectionStore.listIdentityBindings({
-    ...(log.bindingId ? { bindingId: log.bindingId } : {}),
-    subjectId: log.subjectId
-  });
-  if (log.action === "register_identity") {
-    const identity = identities.find((item) =>
-      item.subjectId === log.subjectId &&
-      (!log.account || item.account.toLowerCase() === log.account.toLowerCase()) &&
-      (!log.txHash || item.registeredAt.transactionHash.toLowerCase() === log.txHash.toLowerCase())
-    );
-    return projectionConfirmationFromProvenance(identity?.registeredAt, log.txHash);
-  }
-  const identity = identities.find((item) =>
-    item.bindingId === log.bindingId &&
-    item.status === "revoked" &&
-    (!log.txHash || item.revokedAt?.transactionHash.toLowerCase() === log.txHash.toLowerCase())
-  );
-  return projectionConfirmationFromProvenance(identity?.revokedAt, log.txHash);
-}
-
-function draftFromReconciledRegistration(
-  draft: ProductOrderDraftDTO,
-  registration: ProductOrderTriggerRecord,
-  updatedAt: string
-): ProductOrderDraftDTO {
-  if (registration.status === "confirmed") {
-    return {
-      ...draft,
-      status: "triggered",
-      triggeredOrderId: registration.orderId,
-      ...(registration.txHash ? { triggerTxHash: registration.txHash } : {}),
-      updatedAt
-    };
-  }
-  if (registration.status === "failed") {
-    return {
-      ...draft,
-      status: "failed",
-      updatedAt
-    };
-  }
-  return {
-    ...draft,
-    status: "triggering",
-    updatedAt
-  };
-}
-
 function submissionStatusFromOutcome(
   outcome: ResolvedReconcileOutcome,
   submission: ProductSubmissionDTO
@@ -1247,36 +795,6 @@ function submissionStatusFromOutcome(
       return "indexing";
     case "pending":
       return submission.txHash ? "submitted" : submission.status;
-  }
-}
-
-function governanceStatusFromOutcome(outcome: ResolvedReconcileOutcome): GovernanceTxLogStatus {
-  switch (outcome.kind) {
-    case "confirmed":
-      return "confirmed";
-    case "failed":
-    case "stale_pending":
-      return "failed";
-    case "indexing":
-      return "indexing";
-    case "pending":
-      return "pending";
-  }
-}
-
-function governanceBroadcastStatusFromOutcome(
-  current: GovernanceBroadcastStatus,
-  outcome: ResolvedReconcileOutcome
-): GovernanceBroadcastStatus {
-  switch (outcome.kind) {
-    case "confirmed":
-      return "confirmed";
-    case "failed":
-    case "stale_pending":
-      return "failed";
-    case "pending":
-    case "indexing":
-      return current === "broadcasting" ? "submitted" : current;
   }
 }
 
