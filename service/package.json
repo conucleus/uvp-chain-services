@@ -24,13 +24,12 @@
     "plan-artifact:record": "tsx src/cli/record-plan-artifact.ts"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1038.0",
     "@uvp-eth/canonical-json": "workspace:*",
+    "@uvp-eth/chain-read-contract": "workspace:*",
     "@uvp-eth/compiler": "workspace:*",
     "@uvp-eth/product-dto": "workspace:*",
     "@uvp-eth/protocol-bindings": "workspace:*",
     "@uvp-eth/statemachine": "workspace:*",
-    "jose": "^5.10.0",
     "pg": "^8.20.0",
     "viem": "^2.21.58"
   },

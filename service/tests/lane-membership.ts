@@ -6,6 +6,7 @@ export const UNIT_TEST_FILES = [
   "chain-read.test.ts",
   "error-taxonomy.conformance.test.ts",
   "indexer.reorg-determinism.test.ts",
+  "plan-capabilities.test.ts",
   "plan-artifact-cli.test.ts",
   "proof-verifier.test.ts",
   "viem-event-source.test.ts"

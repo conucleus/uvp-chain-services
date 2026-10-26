@@ -3,6 +3,13 @@
 // clipping. Order ids are plan-scoped, so the item read always returns
 // `{ orders }` (one or many) and 404s only when no projection exists.
 
+import {
+  toWire,
+  type ChainOrderProjection,
+  type ChainProjectionSnapshot,
+  type ChainSyncState,
+  type ChainTaskProjection,
+} from "@uvp-eth/chain-read-contract";
 import { StorageUnavailableError } from "../../storage/errors.js";
 import {
   decodePathParameter,
@@ -55,26 +62,33 @@ async function handleRead(
   context: ApiRouteContext,
 ): Promise<ApiResponse | undefined> {
   if (request.pathname === ORDERS_PATH) {
-    const orders = await context.store.listStateMachineOrders();
-    return { status: 200, body: { orders: toChainJson(orders) } };
+    const orders: readonly ChainOrderProjection[] = toWire(
+      await context.store.listStateMachineOrders(),
+    );
+    return { status: 200, body: { orders } };
   }
 
   if (request.pathname === TASKS_PATH) {
-    const tasks = await context.store.listStateMachineTasks();
-    return { status: 200, body: { tasks: toChainJson(tasks) } };
+    const tasks: readonly ChainTaskProjection[] = toWire(
+      await context.store.listStateMachineTasks(),
+    );
+    return { status: 200, body: { tasks } };
   }
 
   if (request.pathname === SYNC_STATE_PATH) {
-    const syncState = await context.store.getSyncState();
-    if (!syncState) {
+    const current = await context.store.getSyncState();
+    if (!current) {
       return { status: 404, body: { error: "chain_sync_state_not_found" } };
     }
-    return { status: 200, body: { syncState: toChainJson(syncState) } };
+    const syncState: ChainSyncState = toWire(current);
+    return { status: 200, body: { syncState } };
   }
 
   if (request.pathname === SNAPSHOT_PATH) {
-    const snapshot = await context.store.getOrderSnapshot();
-    return { status: 200, body: { snapshot: toChainJson(snapshot) } };
+    const snapshot: ChainProjectionSnapshot = toWire(
+      await context.store.getOrderSnapshot(),
+    );
+    return { status: 200, body: { snapshot } };
   }
 
   const orderTasksMatch = ORDER_TASKS_PATH.exec(request.pathname);
@@ -85,13 +99,12 @@ async function handleRead(
       return orderNotFound();
     }
     const tasks = await context.store.listStateMachineTasks();
+    const orderTasks: readonly ChainTaskProjection[] = toWire(
+      tasks.filter((task) => task.orderId.toLowerCase() === orderId.toLowerCase()),
+    );
     return {
       status: 200,
-      body: {
-        tasks: toChainJson(
-          tasks.filter((task) => task.orderId.toLowerCase() === orderId.toLowerCase()),
-        ),
-      },
+      body: { tasks: orderTasks },
     };
   }
 
@@ -102,7 +115,8 @@ async function handleRead(
     if (orders.length === 0) {
       return orderNotFound();
     }
-    return { status: 200, body: { orders: toChainJson(orders) } };
+    const projections: readonly ChainOrderProjection[] = toWire(orders);
+    return { status: 200, body: { orders: projections } };
   }
 
   const taskMatch = TASK_PATH.exec(request.pathname);
@@ -112,7 +126,8 @@ async function handleRead(
     if (!task) {
       return { status: 404, body: { error: "chain_task_not_found" } };
     }
-    return { status: 200, body: { task: toChainJson(task) } };
+    const projection: ChainTaskProjection = toWire(task);
+    return { status: 200, body: { task: projection } };
   }
 
   return undefined;
@@ -120,23 +135,4 @@ async function handleRead(
 
 function orderNotFound(): ApiResponse {
   return { status: 404, body: { error: "chain_order_not_found" } };
-}
-
-function toChainJson(value: unknown): unknown {
-  if (typeof value === "bigint") {
-    return value.toString();
-  }
-  if (Array.isArray(value)) {
-    return value.map((entry) => toChainJson(entry));
-  }
-  if (value !== null && typeof value === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value)) {
-      if (entry !== undefined) {
-        result[key] = toChainJson(entry);
-      }
-    }
-    return result;
-  }
-  return value;
 }

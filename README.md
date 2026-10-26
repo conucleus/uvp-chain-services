@@ -50,6 +50,10 @@ plan artifacts, relay operation state, generic chain reads, and operator
 diagnostics. Product Schema, Store authoring, evidence, and governance review
 surfaces are owned by `uvp-app-backend`.
 
+The `/chain/*` wire DTOs and runtime decoders are owned by
+`@uvp-eth/chain-read-contract`; this service keeps only indexer-internal
+projection types and serializes them through `toWire`.
+
 ## Deployment Assumptions
 
 The service assumes a single writer instance per database. The BFF trigger

@@ -94,10 +94,21 @@ pnpm --silent run plan-artifact:record \
 - `GET /chain/orders`、`GET /chain/orders/:orderId`、`GET /chain/orders/:orderId/tasks`
 - `GET /chain/tasks`、`GET /chain/tasks/:taskId`
 - `GET /chain/sync-state`、`GET /chain/snapshot`
+- `GET /chain/plans/:planId/capabilities[?planHash=0x…]`：从 `plan_artifacts` 读该计划的
+  selectorBindings / signalCapabilities / executorCandidates / hooks / dependencyKeys（无业务行）。
+  缺少产物 404 `chain_plan_artifact_not_found`，产物不可读 400 `chain_plan_artifact_malformed`，
+  同 planId 多 planHash 且未指定 `?planHash=` 时 409 `chain_plan_ambiguous`；不返回空词表冒充。
+  未指定 planHash 时从投影的计划（`PlanCommitted`）取；`plan_artifacts` 行键仍是
+  `(chain_id, plan_id, plan_hash)`。
+
+响应 wire DTO/字段名由 `@uvp-eth/chain-read-contract` 拥有；本服务只保留 indexer 内部投影类型，
+经 `toWire` 序列化为 contract 类型（bigint 区块号/计数器 → 十进制字符串）。
 
 身份投影：
 
-- `GET /identity/bindings`（只读 `ProjectionStore`，无 review/descriptor/tx）
+- `GET /identity/bindings`（只读 `ProjectionStore`，无 review/descriptor/tx）。这是链-only 的
+  投影读：链上身份注册/撤销事件由本服务索引，app-backend 不持有 identity registry 状态，
+  也不代用户读链上治理注册表。
 
 Relay 操作态 / 遗留 prepare：
 
