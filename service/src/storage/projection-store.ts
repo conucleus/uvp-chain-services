@@ -11,7 +11,7 @@ import type {
   IdentityBindingQuery,
   IdentityProjectionSnapshot,
 } from "../indexer/identity-projections.js";
-import type { Address, Hex } from "../shared/types.js";
+import type { Address, Hex } from "@uvp-eth/service-runtime";
 import type { StorageAdapterLifecycle, TransactionalStorage } from "./types.js";
 
 export const projectionScopeContractAddress =

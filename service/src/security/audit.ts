@@ -1,5 +1,5 @@
-import type { Logger } from "../shared/types.js";
-import { redactSecrets } from "./redaction.js";
+import type { Logger } from "@uvp-eth/service-runtime";
+import { redactSecrets } from "@uvp-eth/service-runtime";
 
 export type AuditOutcome = "accepted" | "blocked" | "failed" | "succeeded" | "duplicate" | "rejected" | "retry" | "skipped";
 

@@ -37,8 +37,8 @@ import {
   type ProjectionStore,
   type ProjectionSyncState
 } from "../storage/projection-store.js";
-import { consoleLogger, noopLogger, ConfigError, ProjectionError, type Hex, type LifecycleService, type Logger } from "../shared/types.js";
-import { redactErrorMessage, redactSecrets } from "../security/redaction.js";
+import { consoleLogger, noopLogger, ConfigError, ProjectionError, type Hex, type LifecycleService, type Logger } from "@uvp-eth/service-runtime";
+import { redactErrorMessage, redactSecrets } from "@uvp-eth/service-runtime";
 import { isDirectRun } from "../shared/runtime.js";
 
 export interface ChainEventRange {
@@ -310,7 +310,7 @@ export class IndexerService implements LifecycleService {
     const mismatches = snapshot.capabilityEnrichmentMismatchCount ?? 0;
     if (mismatches > 0) {
       this.#logger.warn(
-        "plan artifact vocabulary failed the on-chain anchor assertion (the artifact tables do not reproduce the chain capabilitiesRoot); the listed plans stay unenriched-failed so the submission/trigger lanes refuse their vocabulary proofs, and the cached source is dropped so the next round re-resolves the corrected artifact",
+        "plan artifact vocabulary failed the on-chain anchor assertion (the artifact tables do not reproduce the chain capabilitiesRoot); the listed plans stay unenriched-failed so consumers refuse their vocabulary proofs, and the cached source is dropped so the next round re-resolves the corrected artifact",
         {
           capabilityEnrichmentMismatchCount: mismatches,
           planIds: mismatchedPlanIds

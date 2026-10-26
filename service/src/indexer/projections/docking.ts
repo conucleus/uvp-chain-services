@@ -1,7 +1,7 @@
 // Docking 族：DockOpened/DockAttached/DockInputSubmitted/
 // DockOutputSubmitted/DockOutputSatisfied 与 uvp.dock.v2 具名接口委托投影。
 import type { ChainEvent } from "../events.js";
-import type { Address, Hex } from "../../shared/types.js";
+import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {
   proofOf,
   provenanceOf,

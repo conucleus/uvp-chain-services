@@ -6,24 +6,46 @@
 
 EVM 原生 UVP 方向的非信任服务边界。
 
-本域负责 indexer、relayer、proof projection、Product API、storage adapter、submission service 和 governance/admin API。当前具体 package 是：
+本域负责 indexer、链投影存储、通用链读、身份投影读和 chain/admin 诊断。
+业务行、钱包会话、证据、治理写路径、Product API 与签名交易的中继都在本进程
+之外。当前具体 package 是：
 
 - `service/`：chain services workspace package。
 
 ## 开发拓扑
 
-本仓库由 `uvp-eth` 作为 Git submodule 挂载。`service` package 依赖 `@uvp-eth/compiler`、`@uvp-eth/product-dto` 和 `@uvp-eth/protocol-bindings`，这些 package 由 `uvp-protocol` 拥有。
+本仓库由 `uvp-eth` 作为 Git submodule 挂载。`service` package 依赖
+`@uvp-eth/compiler`、`@uvp-eth/protocol-bindings`、
+`@uvp-eth/chain-read-contract` 和 `@uvp-eth/statemachine`，这些 package 由
+`uvp-protocol` 拥有。本地集成开发请使用 `uvp-eth` umbrella checkout，这样
+pnpm 可以解析这些跨仓库 `workspace:*` 依赖；独立 checkout 需要把 protocol
+packages 发布出去，或链接到等价的本地 workspace。
 
-本地集成开发请使用 `uvp-eth` umbrella checkout，这样 pnpm 可以解析这些跨仓库 `workspace:*` 依赖。独立 checkout 需要把 protocol packages 发布出去，或链接到等价的本地 workspace。
+Services 可以缓存、投影链上事实，但不能成为 plans、orders、signals、hooks 或
+identity bindings 的事实来源。Chain Services 不广播交易、不持有 gas payer 或
+业务签名 key、也不接收 prepare/submit 操作：已签名操作走 direct 或应用侧
+relay，本进程只索引其产生的合约事件。默认规则是必须能从 contract events
+重建投影。
 
-Services 可以缓存、投影、relay 和翻译链上事实，但不能成为 plans、orders、signals、hooks 或 identity bindings 的事实来源。中继的交易面不止一处：plan-scoped 的 `submitSignalFor` 广播（参与者已签名的信号），以及若干窄口径的代付提交——stage 补丁（`applyStageExecutorPatchFor`/`applyStageResourcePatchFor`）、订单注册（`triggerOrderFromOutsideFor`）、timer keeper 时钟拨表（`pokeTimer`，由 `TimerKeeperWorker` 按投影轮询 waiting 且 dueAt 已到的 hook 驱动）、dock keeper 活性提交（`submitDockedInput`/`submitDockedSignal`）与治理身份注册/撤销（`registerIdentityBinding`/`revokeIdentityBinding`，全表见 `service/README.md`）。信号/补丁/触发提交均由 capability-proofs 单源（`@uvp-eth/compiler`）现场造证随交易携带。dock keeper 装配口径：`submitDockedInput`/`submitDockedSignal` 是 permissionless 合约面，其 route 清单（binding 全集 + 预组装 open/attach calldata）只存在于云编译产物（`uvp.dockRoute.v2`）——链上事件只暴露已投递的 binding，链轨没有可重建清单的投影源，`DockAutomationWorker` 因此保持显式 no-op 直到云编译 route 数据库接入方接线 route source 与代付 submitter；staging readiness 探针呈现该装配状态。relayer 只代付 gas，不携带自己的业务动作词表。默认规则是必须能从 contract events 重建。
+本域实现 service 侧收束门禁，覆盖链投影、plan artifacts、通用链读与运维诊断。
+Product Schema、Store authoring、证据、治理 review 与全部业务 HTTP 面由
+`uvp-app-backend` 拥有。
 
-本域实现 service 侧收束门禁，覆盖 Product Schema v1、dynamic stage executor authority、docked Zhixu projection language、resource manifest/access state、Store authoring、proof/read models、operator audit 和 signal-container producer APIs。
+`/chain/*` 的 wire DTO 与运行时 decoder 由 `@uvp-eth/chain-read-contract`
+拥有；本服务只保留 indexer 内部投影类型，经 `toWire` 序列化。
 
 ## 部署假设
 
-本服务假设每个数据库只有一个单写者实例。BFF 触发锁、广播去重 claim、在途广播限流与 stage 补丁 nonce 预留都是进程内的："每单/每提交者至多一笔在途广播"、"一稿一 trigger"等保证只在单进程拥有 API 与中继循环时成立。跨进程的竞态由存储层约束与条件更新裁决（invite 单活、join 决策、钱包-角色绑定、迁移 advisory lock），但多 API/relayer 实例共写一个数据库不是受支持拓扑；横向扩展必须先做单写者分区。
+本服务假设每个数据库只有一个 indexer/写者实例：投影游标推进、迁移执行与
+indexer pending post-commit sweep 都是单写者。迁移 advisory lock 会让重叠的
+迁移运行显式失败而不是并发写，但多个 indexer/API 实例共写同一投影不是受支持
+拓扑；横向扩展必须先做单写者分区。
 
 ## API 访问口径
 
-订单/任务读取是参与者门控：`GET /product/orders/:orderId`（连同其 `/timeline` 与 `/proof` 视图——两者披露参与者钱包与签名者细节）要求会话身份，且其他参与者的订单与不存在的订单不可区分（404）。与之相对，业务档案端点（`GET /product/submissions/:submissionId`、`GET /product/order-triggers/:triggerId` 与邀请预览 `GET /product/invites/:inviteId`）一律要求会话身份（邀请预览另需一次性 invite token）。local 运行档之外，管理/运营面还要求口令因子（`x-uvp-admin-token`）；明文白名单自报 admin 头仅限 local 开发档。
+链读（`/chain/*`）、`GET /identity/bindings`、`GET /healthz` 与 `GET /readyz`
+匿名。`/admin/*` 需要 admin 头（`x-uvp-admin-id` / `x-uvp-admin-role`）；local
+以外还要求 `x-uvp-admin-token` 匹配 `CHAIN_SERVICES_ADMIN_TOKEN_HASHES`，并受
+`OPS_CONSOLE_ADMIN_IDS` 白名单约束。运维操作只能重建投影与重试 indexer pending
+post-commit steps，不能生成业务签名或伪造链上状态；没有 submission/stage-patch
+retry 端点。

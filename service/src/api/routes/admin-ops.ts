@@ -1,17 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { adminPrincipalFromHeaders } from "../../security/admin-auth.js";
 import type { AuditSink } from "../../security/audit.js";
-import { redactErrorMessage, redactSecrets } from "../../security/redaction.js";
-import type { ProductSubmissionDTO } from "../../submissions/index.js";
+import { redactErrorMessage, redactSecrets } from "@uvp-eth/service-runtime";
 import {
   buildOperatorOpsStatus,
   buildOperatorOpsSummary
 } from "../diagnostics.js";
 import type { AdminOpsActionEffect, ApiRequest, ApiResponse } from "../route-context.js";
-import { decodePathParameter, normalizeRequestId, readApiHeader } from "../route-context.js";
+import { normalizeRequestId, readApiHeader } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-type AdminOpsActionName = "reconcile.run" | "projections.rebuild" | "submissions.retry" | "indexer.sweep_pending";
+type AdminOpsActionName = "projections.rebuild" | "indexer.sweep_pending";
 
 interface AdminOpsRequestContext {
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
@@ -19,17 +18,9 @@ interface AdminOpsRequestContext {
   readonly adminAuthPolicy: Parameters<RouteModule["handle"]>[1]["adminAuthPolicy"];
   readonly opsConsoleAdminIds?: readonly string[];
   readonly actions?: {
-    runReconcile?(): Promise<AdminOpsActionEffect | void>;
     rebuildProjections?(): Promise<AdminOpsActionEffect | void>;
-    retrySubmission?(input: {
-      readonly submissionId: string;
-      readonly submission?: ProductSubmissionDTO;
-    }): Promise<AdminOpsActionEffect | void>;
     sweepPendingPostCommitSteps?(): Promise<AdminOpsActionEffect | void>;
     listPendingPostCommitSteps?(): Promise<unknown>;
-  };
-  readonly submissionStore?: {
-    getSubmission(submissionId: string): Promise<ProductSubmissionDTO | undefined>;
   };
   readonly now: () => Date;
 }
@@ -43,7 +34,6 @@ export function createAdminOpsRouteModule(): RouteModule {
         adminAuthPolicy: context.adminAuthPolicy,
         ...(context.opsConsoleAdminIds ? { opsConsoleAdminIds: context.opsConsoleAdminIds } : {}),
         ...(context.opsRecoveryActions ? { actions: context.opsRecoveryActions } : {}),
-        ...(context.submissionStore ? { submissionStore: context.submissionStore } : {}),
         now: context.now
       });
     }
@@ -100,14 +90,6 @@ async function handleAdminOpsRequest(
     };
   }
 
-  if (request.method === "POST" && request.pathname === "/admin/ops/reconcile/run") {
-    return runAdminOpsAction(request, context, {
-      action: "reconcile.run",
-      actor: principal.adminId,
-      run: context.actions?.runReconcile
-    });
-  }
-
   if (request.method === "POST" && request.pathname === "/admin/ops/projections/rebuild") {
     return runAdminOpsAction(request, context, {
       action: "projections.rebuild",
@@ -135,50 +117,6 @@ async function handleAdminOpsRequest(
       action: "indexer.sweep_pending",
       actor: principal.adminId,
       run: context.actions?.sweepPendingPostCommitSteps
-    });
-  }
-
-  const retrySubmissionMatch = /^\/admin\/ops\/submissions\/([^/]+)\/retry$/.exec(request.pathname);
-  if (request.method === "POST" && retrySubmissionMatch) {
-    const submissionId = decodePathParameter(retrySubmissionMatch[1] ?? "").trim();
-    if (!submissionId) {
-      return {
-        status: 400,
-        body: { error: "invalid_submission_id" }
-      };
-    }
-
-    let submission: ProductSubmissionDTO | undefined;
-    if (context.submissionStore) {
-      submission = await context.submissionStore.getSubmission(submissionId);
-      if (!submission) {
-        return {
-          status: 404,
-          body: { error: "submission_not_found" }
-        };
-      }
-      if (!submission.retryable) {
-        return {
-          status: 409,
-          body: {
-            error: "submission_not_retryable",
-            submissionId,
-            retryState: submission.retryState
-          }
-        };
-      }
-    }
-
-    return runAdminOpsAction(request, context, {
-      action: "submissions.retry",
-      actor: principal.adminId,
-      targetId: submissionId,
-      run: context.actions?.retrySubmission
-        ? () => context.actions!.retrySubmission!({
-            submissionId,
-            ...(submission ? { submission } : {})
-          })
-        : undefined
     });
   }
 

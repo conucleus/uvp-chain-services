@@ -20,9 +20,9 @@ import { PostgresProjectionStore } from "../src/storage/postgres.js";
 import { PostgresDatabase } from "../src/storage/postgres-client.js";
 import { PlanArtifactMissingError, createPlanArtifactResolvers } from "../src/projection/plan-artifacts.js";
 import { createPostgresTestDatabase } from "./postgres.js";
-import type { Hex } from "../src/shared/types.js";
+import type { Hex } from "@uvp-eth/service-runtime";
 import { buildActiveChainEventReplaySummary, sortChainEvents, type ChainEvent } from "../src/indexer/events.js";
-import { EXECUTOR_PATCH_MODE_ASSIGN } from "../src/stage-patches/typed-data.js";
+import { EXECUTOR_PATCH_MODE_ASSIGN } from "../src/shared/protocol-constants.js";
 
 let stores: ChainServicesStores;
 let projectionDatabaseUrl: string;

@@ -24,11 +24,10 @@
     "plan-artifact:record": "tsx src/cli/record-plan-artifact.ts"
   },
   "dependencies": {
-    "@uvp-eth/canonical-json": "workspace:*",
     "@uvp-eth/chain-read-contract": "workspace:*",
     "@uvp-eth/compiler": "workspace:*",
-    "@uvp-eth/product-dto": "workspace:*",
     "@uvp-eth/protocol-bindings": "workspace:*",
+    "@uvp-eth/service-runtime": "workspace:*",
     "@uvp-eth/statemachine": "workspace:*",
     "pg": "^8.20.0",
     "viem": "^2.21.58"

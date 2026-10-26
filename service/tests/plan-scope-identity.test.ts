@@ -7,7 +7,7 @@ import {
 import type { ChainEvent } from "../src/indexer/events.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { createPostgresTestDatabase } from "./postgres.js";
-import type { Address, Hex } from "../src/shared/types.js";
+import type { Address, Hex } from "@uvp-eth/service-runtime";
 
 let stores: ChainServicesStores;
 

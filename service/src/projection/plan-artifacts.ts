@@ -8,9 +8,9 @@ import {
 } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "../indexer/projections/plan.js";
 import type { SemanticOraclePlan } from "../indexer/semantic-oracle.js";
-import { normalizeBytes32, normalizeAddress, type Hex } from "../shared/types.js";
+import { normalizeBytes32, normalizeAddress, type Hex } from "@uvp-eth/service-runtime";
 import type { PostgresDatabase } from "../storage/postgres-client.js";
-import { rowObject, stringColumn } from "../storage/postgres-rows.js";
+import { rowObject, stringColumn } from "@uvp-eth/service-runtime";
 
 export interface PlanArtifactRecord {
   readonly chainId: number;

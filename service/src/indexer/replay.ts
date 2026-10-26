@@ -2,7 +2,7 @@
 // （含部署注册表事件族与显式诊断计数的推进），供索引器与存储对账调用。
 // 各事件族与投影构造见 ./projections/。
 import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "./events.js";
-import type { Address, Hex } from "../shared/types.js";
+import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {
   ZERO_BYTES32,
   compareProofEvents,

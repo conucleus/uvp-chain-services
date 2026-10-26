@@ -6,7 +6,7 @@ import {
   EXECUTOR_PATCH_MODE_ASSIGN,
   EXECUTOR_PATCH_MODE_HANDOFF
 } from "../../shared/protocol-constants.js";
-import { ProjectionError, type Address, type Hex } from "../../shared/types.js";
+import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtime";
 import {
   optionalAddressArg,
   optionalBytes32Arg,

@@ -9,12 +9,7 @@ import { createChainServicesStores, type ChainServicesStores } from "../src/stor
 import { projectionScopeContractAddress } from "../src/storage/projection-store.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 import { redactSecrets } from "../src/security/index.js";
-import {
-  InMemoryProductSubmissionStore,
-  submissionStatusLabel,
-  type ProductSubmissionDTO
-} from "../src/submissions/index.js";
-import type { Address, Hex } from "../src/shared/types.js";
+import type { Address } from "@uvp-eth/service-runtime";
 
 let stores: ChainServicesStores;
 let databaseUrl: string;
@@ -31,27 +26,8 @@ afterAll(async () => {
   await stores.close();
 });
 
-function requiredRouterStores() {
-  return {
-    submissionStore: stores.submissionStore,
-    stageExecutorPatchStore: stores.stageExecutorPatchStore,
-    stageResourcePatchStore: stores.stageResourcePatchStore,
-  };
-}
-
 const stateMachine = "0x1111111111111111111111111111111111111111" as Address;
 const identityRegistry = "0x2222222222222222222222222222222222222222" as Address;
-const orderId = bytes32("1001");
-const sourceId = bytes32("2001");
-const signalId = bytes32("2002");
-const payloadHash = bytes32("3001");
-const idempotencyKey = bytes32("3002");
-const submitter = "0x3333333333333333333333333333333333333333" as Address;
-const txHash = bytes32("aaaa");
-const planId = bytes32("4002");
-const planHash = bytes32("4003");
-const artifactHash = bytes32("4004");
-const policyHash = bytes32("4005");
 const now = "2026-04-29T00:00:00.000Z";
 const adminHeaders = {
   "x-uvp-admin-id": "ops-admin-1",
@@ -59,7 +35,7 @@ const adminHeaders = {
 };
 
 describe("ops health diagnostics", () => {
-  it("exposes safe runtime, indexer, submission, reconcile, and preflight summaries", async () => {
+  it("exposes safe runtime, indexer, and preflight summaries without business or reconcile blocks", async () => {
     const projectionStore = stores.projectionStore;
     await projectionStore.saveSyncState({
       chainId: 31337,
@@ -81,30 +57,10 @@ describe("ops health diagnostics", () => {
       }
     });
 
-    const submissionStore = new InMemoryProductSubmissionStore();
-    await submissionStore.putSubmission(deadLetterSubmission());
-
-    const router = createApiRouter(projectionStore, { ...requiredRouterStores(),
+    const router = createApiRouter(projectionStore, {
       runtimeEnvironment: "local",
-      submissionChainId: 84532,
-      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: buildConfigDiagnostics(testConfig()),
-      submissionStore,
-      indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 },
-      reconcileDiagnostics: {
-        enabled: true,
-        running: true,
-        checking: false,
-        pollIntervalMs: 5_000,
-        txTimeoutMs: 60_000,
-        lastRunAt: now,
-        lastSummary: {
-          submissionsChecked: 1,
-          stagePatchesChecked: 0,
-          updated: 0,
-          failed: 0
-        }
-      }
+      indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 }
     });
 
     const response = await router.handle({ method: "GET", pathname: "/healthz" });
@@ -141,41 +97,24 @@ describe("ops health diagnostics", () => {
           finalizedBlock: "12",
           lagBlocks: "2",
           rebuild: { status: "completed", eventCount: 4 }
-        },
-        reconcile: {
-          enabled: true,
-          running: true,
-          lastSummary: { submissionsChecked: 1 }
-        },
-        submissions: {
-          submissionCount: 1,
-          submissionsByStatus: { failed: 1 },
-          attemptsByStatus: { failed: 1 },
-          deadLetterCount: 1,
-          deadLetters: [expect.objectContaining({
-            submissionId: "sub_dead",
-            errorCode: "unauthorized_signal_submitter",
-            txHash
-          })]
         }
       }
     });
+    const diagnostics = (detailResponse.body as { diagnostics: Record<string, unknown> }).diagnostics;
+    expect(diagnostics).not.toHaveProperty("submissions");
+    expect(diagnostics).not.toHaveProperty("reconcile");
     expect(JSON.stringify(detailResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
   });
 
   it("requires admin headers for operator console routes", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
-      runtimeEnvironment: "local",
-      submissionChainId: 84532,
-      submissionVerifyingContract: "0x1111111111111111111111111111111111111111"
-    });
+    const router = createApiRouter(stores.projectionStore, { runtimeEnvironment: "local" });
 
     for (const request of [
       { method: "GET", pathname: "/admin/ops/status" },
       { method: "GET", pathname: "/admin/ops/summary" },
-      { method: "POST", pathname: "/admin/ops/reconcile/run" },
       { method: "POST", pathname: "/admin/ops/projections/rebuild" },
-      { method: "POST", pathname: "/admin/ops/submissions/sub_1/retry" }
+      { method: "GET", pathname: "/admin/ops/indexer/pending-steps" },
+      { method: "POST", pathname: "/admin/ops/indexer/pending-steps/retry" }
     ]) {
       const response = await router.handle(request);
       expect(response.status).toBe(403);
@@ -184,10 +123,8 @@ describe("ops health diagnostics", () => {
   });
 
   it("enforces the OPS_CONSOLE_ADMIN_IDS allowlist when configured", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
+    const router = createApiRouter(stores.projectionStore, {
       runtimeEnvironment: "local",
-      submissionChainId: 84532,
-      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       opsConsoleAdminIds: ["ops-admin-1", "ops-admin-2"]
     });
 
@@ -208,11 +145,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("falls back to the admin header check when no ops allowlist is configured", async () => {
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
-      runtimeEnvironment: "local",
-      submissionChainId: 84532,
-      submissionVerifyingContract: "0x1111111111111111111111111111111111111111"
-    });
+    const router = createApiRouter(stores.projectionStore, { runtimeEnvironment: "local" });
 
     const response = await router.handle({
       method: "GET",
@@ -244,18 +177,6 @@ describe("ops health diagnostics", () => {
       const base = `http://127.0.0.1:${address.port}`;
       const headers = { "content-type": "application/json", ...adminHeaders, "x-request-id": "req-eth06-1" };
 
-      const reconcile = await fetch(`${base}/admin/ops/reconcile/run`, {
-        method: "POST",
-        headers
-      });
-      expect(reconcile.status).toBe(202);
-      expect(await reconcile.json()).toMatchObject({
-        ok: true,
-        action: "reconcile.run",
-        status: "completed",
-        summary: { submissionsChecked: 0, stagePatchesChecked: 0 }
-      });
-
       const rebuild = await fetch(`${base}/admin/ops/projections/rebuild`, {
         method: "POST",
         headers
@@ -266,6 +187,21 @@ describe("ops health diagnostics", () => {
         action: "projections.rebuild",
         status: "completed",
         summary: { eventCount: 0, syncStatus: "indexed" }
+      });
+
+      const pending = await fetch(`${base}/admin/ops/indexer/pending-steps`, { headers });
+      expect(pending.status).toBe(200);
+      expect(await pending.json()).toMatchObject({ ok: true, pendingSteps: [] });
+
+      const sweep = await fetch(`${base}/admin/ops/indexer/pending-steps/retry`, {
+        method: "POST",
+        headers
+      });
+      expect(sweep.status).toBe(202);
+      expect(await sweep.json()).toMatchObject({
+        ok: true,
+        action: "indexer.sweep_pending",
+        status: "completed"
       });
     } finally {
       if (server) {
@@ -288,10 +224,8 @@ describe("ops health diagnostics", () => {
       eventCount: 4,
       rebuild: { status: "completed", toBlock: 12n, eventCount: 4 }
     });
-    const router = createApiRouter(projectionStore, { ...requiredRouterStores(),
+    const router = createApiRouter(projectionStore, {
       runtimeEnvironment: "local",
-      submissionChainId: 84532,
-      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: buildConfigDiagnostics(testConfig()),
       now: () => new Date(now)
     });
@@ -331,9 +265,12 @@ describe("ops health diagnostics", () => {
       recoveryPolicy: {
         actionsAreNonAuthoritative: true,
         canCreateBusinessSignatures: false,
-        canForgeChainState: false
+        canForgeChainState: false,
+        allowedActions: ["projections.rebuild", "indexer.sweep_pending"]
       }
     });
+    expect(statusResponse.body).not.toHaveProperty("submissions");
+    expect(statusResponse.body).not.toHaveProperty("reconcile");
     expect(summaryResponse.status).toBe(200);
     expect(summaryResponse.body).toMatchObject({
       ok: true,
@@ -341,103 +278,88 @@ describe("ops health diagnostics", () => {
       mimeType: "application/json",
       summary: {
         sourceOfTruth: "contracts-and-chain-events",
-        counts: {
-          retryableSubmissions: 0,
-          deadLetterSubmissions: 0
+        sync: {
+          indexerStatus: "indexed",
+          latestIndexedBlock: "10",
+          finalizedBlock: "12",
+          lagBlocks: "2"
         }
       }
     });
+    expect(summaryResponse.body).not.toHaveProperty("summary.counts");
     expect(JSON.stringify(statusResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
     expect(JSON.stringify(summaryResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
   });
 
   it("returns stable safe action records for recovery hooks", async () => {
     const projectionStore = stores.projectionStore;
-    const submissionStore = new InMemoryProductSubmissionStore();
-    await submissionStore.putSubmission(retryableSubmission());
-    const seenRetries: string[] = [];
-    const router = createApiRouter(projectionStore, { ...requiredRouterStores(),
+    const router = createApiRouter(projectionStore, {
       runtimeEnvironment: "local",
-      submissionChainId: 84532,
-      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      submissionStore,
       now: () => new Date(now),
       opsRecoveryActions: {
-        async runReconcile() {
-          return { status: "completed", summary: { submissionsChecked: 1, updated: 0 } };
-        },
         async rebuildProjections() {
           return { status: "queued", nextCheckAt: "2026-04-29T00:00:30.000Z" };
         },
-        async retrySubmission(input) {
-          seenRetries.push(input.submissionId);
+        async sweepPendingPostCommitSteps() {
           return {
-            status: "queued",
-            summary: {
-              submissionId: input.submissionId,
-              retryable: input.submission?.retryable ?? false
-            }
+            status: "completed",
+            summary: { swept: 0, delivered: 0, failed: 0, waitingFinality: 0, ghostDropped: 0 }
           };
+        },
+        async listPendingPostCommitSteps() {
+          return [];
         }
       }
     });
 
-    const retryHeaders = { ...adminHeaders, "x-request-id": "req-ops-retry-1" };
-    const firstRetry = await router.handle({
-      method: "POST",
-      pathname: "/admin/ops/submissions/sub_retry/retry",
-      headers: retryHeaders
-    });
-    const secondRetry = await router.handle({
-      method: "POST",
-      pathname: "/admin/ops/submissions/sub_retry/retry",
-      headers: retryHeaders
-    });
-    const reconcile = await router.handle({
-      method: "POST",
-      pathname: "/admin/ops/reconcile/run",
-      headers: { ...adminHeaders, "x-request-id": "req-ops-reconcile-1" }
-    });
-    const rebuild = await router.handle({
+    const rebuildHeaders = { ...adminHeaders, "x-request-id": "req-ops-rebuild-1" };
+    const firstRebuild = await router.handle({
       method: "POST",
       pathname: "/admin/ops/projections/rebuild",
-      headers: { ...adminHeaders, "x-request-id": "req-ops-rebuild-1" }
+      headers: rebuildHeaders
+    });
+    const secondRebuild = await router.handle({
+      method: "POST",
+      pathname: "/admin/ops/projections/rebuild",
+      headers: rebuildHeaders
+    });
+    const pending = await router.handle({
+      method: "GET",
+      pathname: "/admin/ops/indexer/pending-steps",
+      headers: adminHeaders
+    });
+    const sweep = await router.handle({
+      method: "POST",
+      pathname: "/admin/ops/indexer/pending-steps/retry",
+      headers: { ...adminHeaders, "x-request-id": "req-ops-sweep-1" }
     });
 
-    expect(firstRetry.status).toBe(202);
-    expect(secondRetry.status).toBe(202);
-    expect(firstRetry.body).toMatchObject({
+    expect(firstRebuild.status).toBe(202);
+    expect(secondRebuild.status).toBe(202);
+    expect(firstRebuild.body).toMatchObject({
       ok: true,
-      requestId: "req-ops-retry-1",
-      action: "submissions.retry",
-      targetId: "sub_retry",
+      requestId: "req-ops-rebuild-1",
+      action: "projections.rebuild",
       status: "queued",
       sourceOfTruth: "contracts-and-chain-events",
       recoveryBoundary: {
         nonAuthoritative: true,
         businessSignaturesCreated: false,
         chainStateForged: false
-      },
-      summary: {
-        submissionId: "sub_retry",
-        retryable: true
       }
     });
-    expect((secondRetry.body as Record<string, unknown>).actionId).toBe((firstRetry.body as Record<string, unknown>).actionId);
-    expect(reconcile.body).toMatchObject({
-      requestId: "req-ops-reconcile-1",
-      action: "reconcile.run",
+    expect((secondRebuild.body as Record<string, unknown>).actionId)
+      .toBe((firstRebuild.body as Record<string, unknown>).actionId);
+    expect(pending.status).toBe(200);
+    expect(pending.body).toEqual({ ok: true, pendingSteps: [] });
+    expect(sweep.status).toBe(202);
+    expect(sweep.body).toMatchObject({
+      requestId: "req-ops-sweep-1",
+      action: "indexer.sweep_pending",
       status: "completed",
-      nextCheckAt: "2026-04-29T00:00:15.000Z"
+      summary: { swept: 0, delivered: 0, failed: 0, waitingFinality: 0, ghostDropped: 0 }
     });
-    expect(rebuild.body).toMatchObject({
-      requestId: "req-ops-rebuild-1",
-      action: "projections.rebuild",
-      status: "queued",
-      nextCheckAt: "2026-04-29T00:00:30.000Z"
-    });
-    expect(seenRetries).toEqual(["sub_retry", "sub_retry"]);
-    expect(JSON.stringify(firstRetry.body)).not.toContain("signature");
+    expect(JSON.stringify(firstRebuild.body)).not.toContain("signature");
   });
 
   it("fails recovery actions closed when preflight fails or dependencies are missing", async () => {
@@ -454,27 +376,21 @@ describe("ops health diagnostics", () => {
         }]
       }
     };
-    const preflightFailedRouter = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
+    const preflightFailedRouter = createApiRouter(stores.projectionStore, {
       runtimeEnvironment: "local",
-      submissionChainId: 84532,
-      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
       configDiagnostics: failedDiagnostics,
       opsRecoveryActions: {
-        async runReconcile() {
+        async rebuildProjections() {
           called = true;
           return { status: "completed" };
         }
       }
     });
-    const missingDependencyRouter = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
-      runtimeEnvironment: "local",
-      submissionChainId: 84532,
-      submissionVerifyingContract: "0x1111111111111111111111111111111111111111"
-    });
+    const missingDependencyRouter = createApiRouter(stores.projectionStore, { runtimeEnvironment: "local" });
 
     const failedResponse = await preflightFailedRouter.handle({
       method: "POST",
-      pathname: "/admin/ops/reconcile/run",
+      pathname: "/admin/ops/projections/rebuild",
       headers: { ...adminHeaders, "x-request-id": "req-preflight-failed" }
     });
     const missingResponse = await missingDependencyRouter.handle({
@@ -482,12 +398,17 @@ describe("ops health diagnostics", () => {
       pathname: "/admin/ops/projections/rebuild",
       headers: { ...adminHeaders, "x-request-id": "req-missing-rebuild" }
     });
+    const missingPendingResponse = await missingDependencyRouter.handle({
+      method: "GET",
+      pathname: "/admin/ops/indexer/pending-steps",
+      headers: { ...adminHeaders, "x-request-id": "req-missing-pending" }
+    });
 
     expect(failedResponse.status).toBe(503);
     expect(failedResponse.body).toMatchObject({
       ok: false,
       requestId: "req-preflight-failed",
-      action: "reconcile.run",
+      action: "projections.rebuild",
       status: "rejected",
       error: "preflight_failed"
     });
@@ -500,10 +421,12 @@ describe("ops health diagnostics", () => {
       status: "rejected",
       error: "ops_dependency_unavailable"
     });
+    expect(missingPendingResponse.status).toBe(503);
+    expect(missingPendingResponse.body).toEqual({ ok: false, error: "ops_dependency_unavailable" });
     expect(JSON.stringify(failedResponse.body)).not.toContain("secret");
   });
 
-  it("returns not ready when critical diagnostics are degraded", async () => {
+  it("returns not ready when the indexer projection is degraded", async () => {
     const projectionStore = stores.projectionStore;
     await projectionStore.saveSyncState({
       chainId: 31337,
@@ -516,19 +439,7 @@ describe("ops health diagnostics", () => {
       degradedReason: "RPC timeout token=secret"
     });
 
-    const router = createApiRouter(projectionStore, { ...requiredRouterStores(),
-      runtimeEnvironment: "local",
-      submissionChainId: 84532,
-      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      reconcileDiagnostics: {
-        enabled: true,
-        running: true,
-        checking: false,
-        pollIntervalMs: 5_000,
-        txTimeoutMs: 60_000,
-        lastError: "rpc rejected private key 0x1111111111111111111111111111111111111111111111111111111111111111"
-      }
-    });
+    const router = createApiRouter(projectionStore, { runtimeEnvironment: "local" });
 
     const response = await router.handle({ method: "GET", pathname: "/readyz" });
 
@@ -536,7 +447,7 @@ describe("ops health diagnostics", () => {
     expect(response.body).toMatchObject({
       ready: false,
       status: "not_ready",
-      reasons: expect.arrayContaining(["indexer_degraded", "reconcile_error"])
+      reasons: ["indexer_degraded"]
     });
     expect((response.body as Record<string, unknown>).diagnostics).toBeUndefined();
 
@@ -551,48 +462,11 @@ describe("ops health diagnostics", () => {
         indexer: {
           syncStatus: "degraded",
           degradedReason: expect.stringContaining("[redacted:secret]")
-        },
-        reconcile: { lastError: expect.stringContaining("[redacted:secret]") }
+        }
       }
     });
-  });
-
-  it("reports submission storage failures as 503-with-reason on /readyz instead of letting the probe die with 500", async () => {
-    const failingSubmissionStore = new InMemoryProductSubmissionStore();
-    (failingSubmissionStore as unknown as { listSubmissions(): Promise<readonly ProductSubmissionDTO[]> }).listSubmissions =
-      async () => {
-        throw new Error("postgres unavailable: connection refused (password=secret)");
-      };
-
-    const router = createApiRouter(stores.projectionStore, { ...requiredRouterStores(),
-      runtimeEnvironment: "local",
-      submissionChainId: 84532,
-      submissionVerifyingContract: "0x1111111111111111111111111111111111111111",
-      submissionStore: failingSubmissionStore
-    });
-
-    const readyResponse = await router.handle({ method: "GET", pathname: "/readyz" });
-    expect(readyResponse.status).toBe(503);
-    expect(readyResponse.body).toMatchObject({
-      ready: false,
-      status: "not_ready",
-      reasons: expect.arrayContaining(["submission_store_unavailable"])
-    });
-
-    const healthResponse = await router.handle({ method: "GET", pathname: "/healthz" });
-    expect(healthResponse.status).toBe(200);
-    expect(healthResponse.body).toMatchObject({ status: "degraded" });
-
-    const opsResponse = await router.handle({
-      method: "GET",
-      pathname: "/admin/ops/status",
-      headers: adminHeaders
-    });
-    expect(opsResponse.status).toBe(200);
-    expect(opsResponse.body).toMatchObject({
-      submissions: { unavailable: true, degradedReason: expect.stringContaining("connection refused") }
-    });
-    expect(JSON.stringify(opsResponse.body)).not.toContain("password=secret");
+    expect((detailResponse.body as { diagnostics: Record<string, unknown> }).diagnostics)
+      .not.toHaveProperty("reconcile");
   });
 
   it("redacts private keys, full signatures, RPC tokens, presigned URLs, and evidence plaintext", () => {
@@ -629,94 +503,6 @@ function testConfig() {
     }),
     UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222"
   });
-}
-
-function deadLetterSubmission(): ProductSubmissionDTO {
-  return {
-    submissionId: "sub_dead",
-    prepareId: "prep_dead",
-    taskId: "task_dead",
-    orderId: "order-dead",
-    onchainOrderId: orderId,
-    planId,
-    stageIdentifier: "example",
-    signalName: "confirm_stage",
-    sourceId,
-    signalId,
-    intent: "confirm_stage",
-    payloadHash,
-    payloadRef: "uvp-evidence://product/ev_dead",
-    idempotencyKey,
-    submitter,
-    nonce: "1",
-    deadline: "1770000000",
-    status: "failed",
-    statusLabel: submissionStatusLabel("failed"),
-    signatureStatus: "signature_verified",
-    signatureHash: bytes32("5001"),
-    recoveredSubmitter: submitter,
-    broadcastStatus: "failed",
-    txHash,
-    errorCode: "unauthorized_signal_submitter",
-    errorMessage: "submitter is not authorized",
-    retryable: false,
-    retryState: "dead_letter",
-    deadLetter: true,
-    attempts: [{
-      attemptId: "attempt_dead_1",
-      submissionId: "sub_dead",
-      orderId,
-      sourceId,
-      signalId,
-      submitter,
-      txHash,
-      status: "failed",
-      errorCode: "unauthorized_signal_submitter",
-      errorMessage: "submitter is not authorized",
-      attemptNumber: 1,
-      retryable: false,
-      retryState: "dead_letter",
-      deadLetter: true,
-      createdAt: now,
-      updatedAt: now
-    }],
-    attemptCount: 1,
-    proofRows: [],
-    createdAt: now,
-    updatedAt: now
-  };
-}
-
-function retryableSubmission(): ProductSubmissionDTO {
-  const submission = deadLetterSubmission();
-  return {
-    ...submission,
-    submissionId: "sub_retry",
-    prepareId: "prep_retry",
-    status: "failed",
-    broadcastStatus: "failed",
-    retryable: true,
-    retryState: "retryable",
-    deadLetter: false,
-    errorCode: "tx_reconcile_timeout",
-    errorMessage: "transaction did not produce a receipt before timeout",
-    attempts: [{
-      ...submission.attempts[0]!,
-      attemptId: "attempt_retry_1",
-      submissionId: "sub_retry",
-      errorCode: "tx_reconcile_timeout",
-      errorMessage: "transaction did not produce a receipt before timeout",
-      retryable: true,
-      retryState: "retryable",
-      deadLetter: false
-    }],
-    proofRows: [],
-    updatedAt: now
-  };
-}
-
-function bytes32(value: string): Hex {
-  return `0x${value.padStart(64, "0")}` as Hex;
 }
 
 function serverTestConfig(): ChainServicesConfig {

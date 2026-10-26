@@ -7,7 +7,7 @@ import {
   type ChainEvent,
 } from "../src/indexer/events.js";
 import { countDuplicateActiveEventAnomalies, rebuildOrderProjections } from "../src/indexer/replay.js";
-import { compareChainPointers } from "../src/shared/types.js";
+import { compareChainPointers } from "@uvp-eth/service-runtime";
 
 const contractAddress = "0x" + "24".repeat(20);
 const planId = "0x0000000000000000000000000000000000000000000000000000000000000101";

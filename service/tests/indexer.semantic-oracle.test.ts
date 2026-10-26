@@ -7,7 +7,7 @@ import { hasProjectionDiagnosticsAnomalies } from "../src/storage/projection-sto
 import { createPostgresTestDatabase } from "./postgres.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
-import type { Hex } from "../src/shared/types.js";
+import type { Hex } from "@uvp-eth/service-runtime";
 
 let stores: ChainServicesStores;
 let databaseUrl: string;

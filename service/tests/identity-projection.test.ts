@@ -17,14 +17,6 @@ afterAll(async () => {
   await stores.close();
 });
 
-function requiredRouterStores() {
-  return {
-    submissionStore: stores.submissionStore,
-    stageExecutorPatchStore: stores.stageExecutorPatchStore,
-    stageResourcePatchStore: stores.stageResourcePatchStore,
-  };
-}
-
 const registryAddress = "0x1111111111111111111111111111111111111111";
 const registrar = "0x2222222222222222222222222222222222222222";
 const account = "0x4444444444444444444444444444444444444444";
@@ -104,7 +96,7 @@ describe("identity registry projection", () => {
     });
 
     expect(await store.listIdentityBindings({ account })).toHaveLength(1);
-    const response = await createApiRouter(store, { ...requiredRouterStores(), runtimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" }).handle({
+    const response = await createApiRouter(store, { runtimeEnvironment: "local" }).handle({
       method: "GET",
       pathname: "/identity/bindings",
       query: { registryAddress, account },
@@ -134,7 +126,7 @@ describe("identity registry projection", () => {
         }),
       ],
     });
-    const router = createApiRouter(store, { ...requiredRouterStores(), runtimeEnvironment: "local", submissionChainId: 84532, submissionVerifyingContract: "0x1111111111111111111111111111111111111111" });
+    const router = createApiRouter(store, { runtimeEnvironment: "local" });
 
     const all = await router.handle({
       method: "GET",

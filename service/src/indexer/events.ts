@@ -1,4 +1,4 @@
-import { compareChainPointers, type ChainPointer, type Hex } from "../shared/types.js";
+import { compareChainPointers, type ChainPointer, type Hex } from "@uvp-eth/service-runtime";
 
 export type EventArgs = Readonly<Record<string, unknown>>;
 

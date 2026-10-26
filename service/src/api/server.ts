@@ -1,31 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { loadConfigFromEnv, runConfigPreflight, type ChainServicesConfig } from "../config/index.js";
-import { selectActiveStateMachineDeployment } from "../config/preflight.js";
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
-import { createViemReconcileReceiptClient, TxReconcileWorker } from "../reconcile/index.js";
-import { createViemChainClock } from "../shared/chain-clock.js";
 import { createChainServicesStores } from "../storage/factory.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
-import {
-  createSecureSubmissionBroadcastAdapter,
-  createStateMachineSubmissionBroadcastAdapter,
-  type SubmissionBroadcastAdapter
-} from "../submissions/index.js";
-import {
-  createSecureStageExecutorPatchBroadcastAdapter,
-  createSecureStageResourcePatchBroadcastAdapter,
-  createStateMachineStageExecutorPatchBroadcastAdapter,
-  createStateMachineStageResourcePatchBroadcastAdapter,
-  type StageExecutorPatchBroadcastAdapter,
-  type StageResourcePatchBroadcastAdapter
-} from "../stage-patches/index.js";
-import type { RelayDedupeStore } from "../relay/index.js";
-import { createLoggerAuditSink, type AuditSink } from "../security/audit.js";
-import { createRedactingLogger, redactErrorMessage, redactSecrets } from "../security/redaction.js";
+import { createLoggerAuditSink } from "../security/audit.js";
+import { createRedactingLogger, redactErrorMessage, redactSecrets } from "@uvp-eth/service-runtime";
 import { isDirectRun } from "../shared/runtime.js";
-import { ConfigError, consoleLogger, type Address, type Logger } from "../shared/types.js";
+import { consoleLogger, type Logger } from "@uvp-eth/service-runtime";
 import { createApiRouter } from "./routes.js";
 import { InvalidPathParameterError, invalidPathParameterResponse, normalizeRequestId } from "./route-context.js";
 import { createPlanArtifactResolvers } from "../projection/plan-artifacts.js";
@@ -59,7 +42,6 @@ export async function startApiServer(
   const eventSource = options.eventSource === undefined
     ? createChainEventSourceForTarget(config, { logger })
     : options.eventSource;
-  const submissionStore = stores.submissionStore;
   const indexer = eventSource
     ? new IndexerService({
       config,
@@ -79,105 +61,32 @@ export async function startApiServer(
       })
     : undefined;
 
-  const submissionVerifyingContract = stateMachineAddress(config.network.contracts);
-  const stagePatchVerifyingContract = stagePatchModuleAddress(config);
-  const submissionBroadcastAdapter = createConfiguredSubmissionBroadcastAdapter(
-    config,
-    submissionVerifyingContract,
-    audit,
-    stores.broadcastDedupeStore
-  );
-  if (!submissionBroadcastAdapter && (config.security.environment !== "local" || config.relayer.broadcastEnabled)) {
-    throw new ConfigError(
-      `state-machine signal broadcast is not configured: UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED=true and a non-empty ${config.relayer.stateMachinePrivateKeyEnv} are required when the runtime is not local or broadcast was explicitly enabled`,
-    );
-  }
-  const stageExecutorPatchBroadcastAdapter = createConfiguredStageExecutorPatchBroadcastAdapter(
-    config,
-    stagePatchVerifyingContract,
-    audit,
-    stores.broadcastDedupeStore
-  );
-  const stageResourcePatchBroadcastAdapter = createConfiguredStageResourcePatchBroadcastAdapter(
-    config,
-    stagePatchVerifyingContract,
-    audit,
-    stores.broadcastDedupeStore
-  );
-  const reconcileWorker = new TxReconcileWorker({
-    config: config.reconcile,
-    receiptClient: createViemReconcileReceiptClient({
-      rpcUrl: config.network.rpcUrl,
-      chainId: config.network.chainId
-    }),
-    projectionStore: store,
-    submissionStore,
-    ...(stores.stageExecutorPatchStore ? { stageExecutorPatchStore: stores.stageExecutorPatchStore } : {}),
-    ...(stores.stageResourcePatchStore ? { stageResourcePatchStore: stores.stageResourcePatchStore } : {}),
-    audit,
-    logger
-  });
-  const opsRecoveryActions = {
-    ...(indexer
-      ? {
-        rebuildProjections: async () => {
-          await initialProjectionRebuild;
-          const { summary } = await indexer.rebuildFromDeploymentBlockWithSummary();
-          return {
-            status: "completed" as const,
-            summary: {
-              eventCount: summary.eventCount,
-              activeEventCount: summary.activeEventCount,
-              mismatchCount: summary.mismatchCount,
-              finalizedBlock: summary.finalizedBlock,
-              syncStatus: summary.syncStatus
-            }
-          };
-        },
-        sweepPendingPostCommitSteps: async () => {
-          const summary = await indexer.sweepPendingPostCommitSteps();
-          return { status: "completed" as const, summary };
-        },
-        listPendingPostCommitSteps: async () => indexer.listPendingPostCommitSteps()
-      }
-      : {}),
-    runReconcile: async () => {
-      const summary = await reconcileWorker.runOnce();
-      return { status: "completed" as const, summary };
-    },
-    ...(stores.submissionStore
-      ? {
-        retrySubmission: async (input: { readonly submissionId: string }) => {
-          const reconcileSummary = await reconcileWorker.runOnce();
-          const submission = await stores.submissionStore!.getSubmission(input.submissionId);
-          return {
-            status: "completed" as const,
-            summary: {
-              reconcile: reconcileSummary,
-              submissionId: input.submissionId,
-              ...(submission
-                ? { status: submission.status, retryState: submission.retryState }
-                : { found: false })
-            }
-          };
-        }
-      }
-      : {})
-  };
+  const opsRecoveryActions = indexer
+    ? {
+      rebuildProjections: async () => {
+        await initialProjectionRebuild;
+        const { summary } = await indexer.rebuildFromDeploymentBlockWithSummary();
+        return {
+          status: "completed" as const,
+          summary: {
+            eventCount: summary.eventCount,
+            activeEventCount: summary.activeEventCount,
+            mismatchCount: summary.mismatchCount,
+            finalizedBlock: summary.finalizedBlock,
+            syncStatus: summary.syncStatus
+          }
+        };
+      },
+      sweepPendingPostCommitSteps: async () => {
+        const summary = await indexer.sweepPendingPostCommitSteps();
+        return { status: "completed" as const, summary };
+      },
+      listPendingPostCommitSteps: async () => indexer.listPendingPostCommitSteps()
+    }
+    : {};
   const opsConsoleAdminIds = config.operatorRoles.opsConsoleAdmins ?? [];
   const router = createApiRouter(store, {
-    submissionStore,
-    ...(submissionVerifyingContract ? { submissionVerifyingContract } : {}),
-    ...(stagePatchVerifyingContract ? { stageExecutorPatchVerifyingContract: stagePatchVerifyingContract } : {}),
-    ...(stagePatchVerifyingContract ? { stageResourcePatchVerifyingContract: stagePatchVerifyingContract } : {}),
-    submissionChainId: config.network.chainId,
-    ...(submissionBroadcastAdapter ? { submissionBroadcastAdapter } : {}),
-    ...(stageExecutorPatchBroadcastAdapter ? { stageExecutorPatchBroadcastAdapter } : {}),
-    ...(stageResourcePatchBroadcastAdapter ? { stageResourcePatchBroadcastAdapter } : {}),
-    stageExecutorPatchStore: stores.stageExecutorPatchStore,
-    stageResourcePatchStore: stores.stageResourcePatchStore,
     runtimeEnvironment: config.security.environment,
-    chainClock: createViemChainClock(config.network.rpcUrl),
     ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
     adminAuthPolicy: {
       runtimeEnvironment: config.security.environment,
@@ -191,7 +100,6 @@ export async function startApiServer(
       configured: Boolean(eventSource),
       pollIntervalMs: config.api.indexerPollIntervalMs
     },
-    reconcileDiagnostics: () => reconcileWorker.getDiagnostics(),
     audit,
     configDiagnostics,
     ...(indexer
@@ -315,12 +223,10 @@ export async function startApiServer(
     if (pollInterval) {
       server.on("close", () => clearInterval(pollInterval));
     }
-    await reconcileWorker.start();
   })();
   server.on("close", () => {
     closed = true;
     void (async () => {
-      await reconcileWorker.stop();
       await stores.close();
     })();
   });
@@ -328,9 +234,7 @@ export async function startApiServer(
   logger.info("api server listening", {
     host: config.api.host,
     port: config.api.port,
-    indexerPollIntervalMs: config.api.indexerPollIntervalMs,
-    reconcileWorkerEnabled: config.reconcile.enabled,
-    reconcilePollIntervalMs: config.reconcile.pollIntervalMs
+    indexerPollIntervalMs: config.api.indexerPollIntervalMs
   });
 
   return server;
@@ -340,7 +244,7 @@ function startProjectionRefresh(indexer: IndexerService, config: ChainServicesCo
   const pollIntervalMs = config.api.indexerPollIntervalMs;
   if (pollIntervalMs <= 0) {
     logger.warn(
-      "INDEXER POLLING IS DISABLED (UVP_INDEXER_POLL_INTERVAL_MS=0): chain events from external participants will never enter the projection, reconcile will stall at indexing, and recovery requires a manual projection rebuild"
+      "INDEXER POLLING IS DISABLED (UVP_INDEXER_POLL_INTERVAL_MS=0): chain events from external participants will never enter the projection and recovery requires a manual projection rebuild"
     );
     return undefined;
   }
@@ -386,131 +290,6 @@ function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): vo
   }
 }
 
-function stateMachineAddress(contracts: Readonly<Record<string, Address>>): Address | undefined {
-  return contracts.UVPStateMachine;
-}
-
-function stagePatchModuleAddress(config: ChainServicesConfig): Address | undefined {
-  return moduleAddress(config, "stagePatch", "UVPStagePatchModule");
-}
-
-function moduleAddress(
-  config: ChainServicesConfig,
-  key: "stagePatch" | "derivedSignal" | "docking" | "planMetadata" | "orderLink" | "lens",
-  contractName: string
-): Address | undefined {
-  const configuredAddress = config.network.contracts[contractName];
-  if (configuredAddress) {
-    return configuredAddress;
-  }
-  const activeDeployment = selectActiveStateMachineDeployment(config);
-  return activeDeployment?.modules?.[key];
-}
-
-function createConfiguredSubmissionBroadcastAdapter(
-  config: ChainServicesConfig,
-  stateMachine: Address | undefined,
-  audit: AuditSink,
-  dedupeStore?: import("../submissions/index.js").BroadcastDedupeStore
-): SubmissionBroadcastAdapter | undefined {
-  if (!config.relayer.broadcastEnabled) {
-    return undefined;
-  }
-  if (!stateMachine) {
-    return undefined;
-  }
-  const privateKeyEnv = config.relayer.stateMachinePrivateKeyEnv;
-  if (!process.env[privateKeyEnv]?.trim()) {
-    return undefined;
-  }
-  return createSecureSubmissionBroadcastAdapter({
-    adapter: createStateMachineSubmissionBroadcastAdapter({
-      stateMachineAddress: stateMachine,
-      chainId: config.network.chainId,
-      rpcUrl: config.network.rpcUrl,
-      relayerPrivateKeyEnv: privateKeyEnv,
-      waitForReceipt: true,
-      rejectGasPayerAsSubmitter: config.security.environment !== "local",
-      receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
-    }),
-    maxInFlightPerOrder: config.security.broadcastMaxInFlightPerOrder,
-    maxRetryAttempts: config.security.broadcastMaxRetry,
-    retryBaseMs: config.security.broadcastRetryBaseMs,
-    retryMaxMs: config.security.broadcastRetryMaxMs,
-    ...(dedupeStore ? { dedupeStore } : {}),
-    audit
-  });
-}
-
-function createConfiguredStageExecutorPatchBroadcastAdapter(
-  config: ChainServicesConfig,
-  stateMachine: Address | undefined,
-  audit: AuditSink,
-  dedupeStore?: RelayDedupeStore
-): StageExecutorPatchBroadcastAdapter | undefined {
-  if (!config.relayer.broadcastEnabled) {
-    return undefined;
-  }
-  if (!stateMachine) {
-    return undefined;
-  }
-  const privateKeyEnv = config.relayer.stateMachinePrivateKeyEnv;
-  if (!process.env[privateKeyEnv]?.trim()) {
-    return undefined;
-  }
-  return createSecureStageExecutorPatchBroadcastAdapter({
-    adapter: createStateMachineStageExecutorPatchBroadcastAdapter({
-      stateMachineAddress: stateMachine,
-      chainId: config.network.chainId,
-      rpcUrl: config.network.rpcUrl,
-      relayerPrivateKeyEnv: privateKeyEnv,
-      waitForReceipt: true,
-      rejectGasPayerAsSelector: config.security.environment !== "local",
-      receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
-    }),
-    maxInFlightPerOrder: config.security.broadcastMaxInFlightPerOrder,
-    maxRetryAttempts: config.security.broadcastMaxRetry,
-    retryBaseMs: config.security.broadcastRetryBaseMs,
-    retryMaxMs: config.security.broadcastRetryMaxMs,
-    ...(dedupeStore ? { dedupeStore } : {}),
-    audit
-  });
-}
-
-function createConfiguredStageResourcePatchBroadcastAdapter(
-  config: ChainServicesConfig,
-  stateMachine: Address | undefined,
-  audit: AuditSink,
-  dedupeStore?: RelayDedupeStore
-): StageResourcePatchBroadcastAdapter | undefined {
-  if (!config.relayer.broadcastEnabled) {
-    return undefined;
-  }
-  if (!stateMachine) {
-    return undefined;
-  }
-  const privateKeyEnv = config.relayer.stateMachinePrivateKeyEnv;
-  if (!process.env[privateKeyEnv]?.trim()) {
-    return undefined;
-  }
-  return createSecureStageResourcePatchBroadcastAdapter({
-    adapter: createStateMachineStageResourcePatchBroadcastAdapter({
-      stateMachineAddress: stateMachine,
-      chainId: config.network.chainId,
-      rpcUrl: config.network.rpcUrl,
-      relayerPrivateKeyEnv: privateKeyEnv,
-      waitForReceipt: true,
-      rejectGasPayerAsSelector: config.security.environment !== "local",
-      receiptTimeoutMs: config.security.broadcastReceiptTimeoutMs
-    }),
-    maxInFlightPerOrder: config.security.broadcastMaxInFlightPerOrder,
-    maxRetryAttempts: config.security.broadcastMaxRetry,
-    retryBaseMs: config.security.broadcastRetryBaseMs,
-    retryMaxMs: config.security.broadcastRetryMaxMs,
-    ...(dedupeStore ? { dedupeStore } : {}),
-    audit
-  });
-}
 
 function normalizeHeaders(headers: IncomingMessage["headers"]): Record<string, string | undefined> {
   return Object.fromEntries(
@@ -564,7 +343,7 @@ function extractResponseLogFields(body: unknown): Record<string, unknown> {
   }
   const record = body as Record<string, unknown>;
   const fields: Record<string, unknown> = {};
-  for (const key of ["error", "errorCode", "txHash", "orderId", "submissionId", "requestId", "runId"]) {
+  for (const key of ["error", "errorCode", "txHash", "orderId", "requestId", "runId"]) {
     const value = findFirstString(record, key);
     if (value) {
       fields[key === "error" ? "errorCode" : key] = value;

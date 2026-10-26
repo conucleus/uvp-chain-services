@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { StorageMigrationError } from "./errors.js";
 import type { PostgresDatabase } from "./postgres-client.js";
-import { numberColumn, rowObject, stringColumn } from "./postgres-rows.js";
+import { numberColumn, rowObject, stringColumn } from "@uvp-eth/service-runtime";
 
 export interface RunPostgresMigrationsOptions {
   readonly database: PostgresDatabase;

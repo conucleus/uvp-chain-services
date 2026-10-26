@@ -1,10 +1,9 @@
 // 计划族（PlanCommitted/Finalized/Registered/PublisherRecorded）投影：链上
 // 只携带 capabilitiesRoot，selectorBindings/signalCapabilities/executorCandidates
 // 由重放方按 planId 从编译产物富集并重算 root 断言（fail-closed）。
-import { capabilitiesRootOf } from "@uvp-eth/compiler";
-import { executorCandidatesRootOf } from "../../submissions/capability-proofs.js";
+import { capabilitiesRootOf, executorCandidatesRootOf } from "@uvp-eth/compiler";
 import type { ChainEvent } from "../events.js";
-import { ProjectionError, type Address, type Hex } from "../../shared/types.js";
+import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtime";
 import {
   optionalAddressArg,
   optionalBytes32Arg,

@@ -1,6 +1,5 @@
 import type { ChainServicesRuntimeEnv, ConfigDiagnostics } from "../config/index.js";
-import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
-import { redactErrorMessage, redactSecrets } from "../security/redaction.js";
+import { redactErrorMessage, redactSecrets } from "@uvp-eth/service-runtime";
 import {
   hasProjectionDiagnosticsAnomalies,
   type ProjectionRebuildMetadata,
@@ -8,11 +7,6 @@ import {
   type ProjectionSyncDiagnosticsCounts,
   type ProjectionSyncState
 } from "../storage/projection-store.js";
-import type {
-  ProductSubmissionAttemptDTO,
-  ProductSubmissionDTO,
-  ProductSubmissionStore
-} from "../submissions/index.js";
 
 type HealthStatus = "ok" | "degraded";
 type ReadinessStatus = "ready" | "not_ready";
@@ -28,8 +22,6 @@ export interface BuildOperationalDiagnosticsOptions {
   readonly configDiagnostics?: ConfigDiagnostics;
   readonly runtimeEnvironment: ChainServicesRuntimeEnv;
   readonly indexer?: IndexerRuntimeDiagnostics;
-  readonly reconcile?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
-  readonly submissionStore?: ProductSubmissionStore;
   readonly now?: () => Date;
 }
 
@@ -44,9 +36,7 @@ export async function buildOperationalDiagnostics(
 ): Promise<Record<string, unknown>> {
   const generatedAt = (options.now ?? (() => new Date()))().toISOString();
   const syncStateResult = await readSyncState(options.store);
-  const submissions = await buildSubmissionDiagnostics(options.submissionStore);
   const runtimeEnvironment = options.configDiagnostics?.environment ?? options.runtimeEnvironment;
-  const reconcile = buildReconcileDiagnostics(options.reconcile);
   const indexer = buildIndexerDiagnostics(syncStateResult, options.indexer);
 
   const diagnostics = {
@@ -60,9 +50,7 @@ export async function buildOperationalDiagnostics(
       contracts: options.configDiagnostics?.network.contracts ?? {}
     },
     indexer,
-    projectionRebuild: indexer.rebuild,
-    reconcile,
-    submissions
+    projectionRebuild: indexer.rebuild
   };
 
   return redactSecrets({
@@ -95,8 +83,6 @@ export function buildOperatorOpsStatus(diagnostics: Record<string, unknown>): Re
     preflight: diagnostics.preflight ?? { status: "skipped", checks: [] },
     indexer: diagnostics.indexer ?? {},
     projectionRebuild: diagnostics.projectionRebuild ?? recordOf(diagnostics.indexer)?.rebuild ?? {},
-    reconcile: diagnostics.reconcile ?? {},
-    submissions: diagnostics.submissions ?? {},
     operatorRoles: diagnostics.operatorRoles ?? {},
     recoveryPolicy: {
       sourceOfTruth: "contracts-and-chain-events",
@@ -104,9 +90,8 @@ export function buildOperatorOpsStatus(diagnostics: Record<string, unknown>): Re
       canCreateBusinessSignatures: false,
       canForgeChainState: false,
       allowedActions: [
-        "reconcile.run",
         "projections.rebuild",
-        "submissions.retry"
+        "indexer.sweep_pending"
       ],
       forbiddenOutputs: [
         "private_keys",
@@ -122,7 +107,6 @@ export function buildOperatorOpsStatus(diagnostics: Record<string, unknown>): Re
 
 export function buildOperatorOpsSummary(diagnostics: Record<string, unknown>): Record<string, unknown> {
   const status = buildOperatorOpsStatus(diagnostics);
-  const submissions = recordOf(status.submissions);
   const indexer = recordOf(status.indexer);
   return redactSecrets({
     generatedAt: status.generatedAt ?? null,
@@ -131,11 +115,6 @@ export function buildOperatorOpsSummary(diagnostics: Record<string, unknown>): R
     runtime: status.runtime ?? {},
     health: status.health ?? {},
     readiness: status.readiness ?? {},
-    counts: {
-      retryableSubmissions: numberOf(submissions?.retryableCount),
-      deadLetterSubmissions: numberOf(submissions?.deadLetterCount),
-      deadLetterAttempts: numberOf(submissions?.deadLetterAttemptCount)
-    },
     sync: {
       indexerStatus: indexer?.syncStatus ?? "unknown",
       finalizedBlock: indexer?.finalizedBlock ?? null,
@@ -215,106 +194,14 @@ function formatRebuild(rebuild: ProjectionRebuildMetadata | undefined): Record<s
   };
 }
 
-function buildReconcileDiagnostics(
-  source: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics) | undefined
-): Record<string, unknown> {
-  const diagnostics = typeof source === "function" ? source() : source;
-  if (!diagnostics) {
-    return {
-      enabled: false,
-      running: false,
-      checking: false,
-      pollIntervalMs: null,
-      txTimeoutMs: null,
-      lastRunAt: null,
-      lastSummary: null,
-      lastError: null
-    };
-  }
-  return {
-    ...diagnostics,
-    lastRunAt: diagnostics.lastRunAt ?? null,
-    lastSummary: diagnostics.lastSummary ?? null,
-    lastError: diagnostics.lastError ? redactErrorMessage(diagnostics.lastError) : null
-  };
-}
-
-function storeUnavailableDiagnostics(degradedReason: string): Record<string, unknown> {
-  return {
-    configured: true,
-    unavailable: true,
-    degradedReason
-  };
-}
-
-async function readDiagnosticsStoreValue<TValue>(
-  read: () => Promise<readonly TValue[]>
-): Promise<
-  | { readonly ok: true; readonly value: readonly TValue[] }
-  | { readonly ok: false; readonly degradedReason: string }
-> {
-  try {
-    return { ok: true, value: await read() };
-  } catch (error) {
-    return { ok: false, degradedReason: redactErrorMessage(error) };
-  }
-}
-
-async function buildSubmissionDiagnostics(
-  store: ProductSubmissionStore | undefined
-): Promise<Record<string, unknown>> {
-  if (!store) {
-    return {
-      configured: false,
-      submissionsByStatus: {},
-      broadcastByStatus: {},
-      attemptsByStatus: {},
-      attemptCount: 0,
-      deadLetterCount: 0,
-      retryableCount: 0,
-      deadLetters: []
-    };
-  }
-
-  const submissionsResult = await readDiagnosticsStoreValue(() => store.listSubmissions());
-  if (!submissionsResult.ok) {
-    return storeUnavailableDiagnostics(submissionsResult.degradedReason);
-  }
-  const submissions = submissionsResult.value;
-  const attempts = submissions.flatMap((submission) => [...submission.attempts]);
-  const deadLetters = submissions.filter((submission) =>
-    submission.deadLetter || submission.attempts.some((attempt) => attempt.deadLetter)
-  );
-  return {
-    configured: true,
-    submissionCount: submissions.length,
-    submissionsByStatus: countBy(submissions, (submission) => submission.status),
-    broadcastByStatus: countBy(submissions, (submission) => submission.broadcastStatus),
-    attemptsByStatus: countBy(attempts, (attempt) => attempt.status),
-    attemptCount: attempts.length,
-    deadLetterCount: deadLetters.length,
-    deadLetterAttemptCount: attempts.filter((attempt) => attempt.deadLetter).length,
-    retryableCount: submissions.filter((submission) => submission.retryable).length,
-    latestUpdatedAt: latestTimestamp(submissions.map((submission) => submission.updatedAt)),
-    deadLetters: deadLetters
-      .sort(compareUpdatedDesc)
-      .slice(0, 20)
-      .map(safeDeadLetterSubmission)
-  };
-}
-
 function operationalHealthStatus(diagnostics: Record<string, unknown>): HealthStatus {
   return operationalDegradedReasons(diagnostics).length > 0 ? "degraded" : "ok";
 }
 
 function operationalDegradedReasons(diagnostics: Record<string, unknown>): readonly string[] {
   const reasons = operationalNotReadyReasons(diagnostics);
-  const submissions = diagnostics.submissions as { readonly deadLetterCount?: number } | undefined;
   const indexer = diagnostics.indexer as { readonly projectionDiagnostics?: ProjectionSyncDiagnosticsCounts | null } | undefined;
   const degraded = [...reasons];
-  if ((submissions?.deadLetterCount ?? 0) > 0) {
-    degraded.push("submission_dead_letters");
-  }
   if (hasProjectionDiagnosticsAnomalies(indexer?.projectionDiagnostics ?? undefined)) {
     degraded.push("projection_unresolved_counts");
   }
@@ -325,8 +212,6 @@ function operationalNotReadyReasons(diagnostics: Record<string, unknown>): reado
   const reasons: string[] = [];
   const preflight = (diagnostics.preflight ?? {}) as { readonly status?: string };
   const indexer = (diagnostics.indexer ?? {}) as { readonly syncStatus?: string };
-  const reconcile = (diagnostics.reconcile ?? {}) as { readonly lastError?: string | null };
-  const submissions = (diagnostics.submissions ?? {}) as { readonly unavailable?: boolean };
 
   if (preflight.status === "failed") {
     reasons.push("preflight_failed");
@@ -334,53 +219,7 @@ function operationalNotReadyReasons(diagnostics: Record<string, unknown>): reado
   if (indexer.syncStatus === "degraded") {
     reasons.push("indexer_degraded");
   }
-  if (reconcile.lastError) {
-    reasons.push("reconcile_error");
-  }
-  if (submissions.unavailable === true) {
-    reasons.push("submission_store_unavailable");
-  }
   return reasons;
-}
-
-function safeDeadLetterSubmission(submission: ProductSubmissionDTO): Record<string, unknown> {
-  const latestAttempt = [...submission.attempts].sort(compareAttemptUpdatedDesc)[0];
-  return {
-    submissionId: submission.submissionId,
-    orderId: submission.orderId,
-    onchainOrderId: submission.onchainOrderId,
-    sourceId: submission.sourceId,
-    signalId: submission.signalId,
-    submitter: submission.submitter,
-    status: submission.status,
-    broadcastStatus: submission.broadcastStatus,
-    retryState: submission.retryState,
-    deadLetter: submission.deadLetter,
-    txHash: submission.txHash ?? latestAttempt?.txHash ?? null,
-    errorCode: submission.errorCode ?? latestAttempt?.errorCode ?? null,
-    updatedAt: submission.updatedAt
-  };
-}
-
-function countBy<TItem>(items: readonly TItem[], select: (item: TItem) => string): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const item of items) {
-    const key = select(item);
-    counts[key] = (counts[key] ?? 0) + 1;
-  }
-  return counts;
-}
-
-function latestTimestamp(values: readonly string[]): string | null {
-  return values.reduce<string | null>((latest, value) => latest === null || value > latest ? value : latest, null);
-}
-
-function compareUpdatedDesc(left: ProductSubmissionDTO, right: ProductSubmissionDTO): number {
-  return right.updatedAt.localeCompare(left.updatedAt) || right.submissionId.localeCompare(left.submissionId);
-}
-
-function compareAttemptUpdatedDesc(left: ProductSubmissionAttemptDTO, right: ProductSubmissionAttemptDTO): number {
-  return right.updatedAt.localeCompare(left.updatedAt) || right.attemptId.localeCompare(left.attemptId);
 }
 
 function lagBlocks(state: ProjectionSyncState | undefined): string | null {
@@ -415,10 +254,6 @@ function recordOf(value: unknown): JsonRecord | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as JsonRecord
     : undefined;
-}
-
-function numberOf(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function fallbackConfigDiagnostics(environment: ChainServicesRuntimeEnv): Record<string, unknown> {

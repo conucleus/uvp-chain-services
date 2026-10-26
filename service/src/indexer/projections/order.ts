@@ -2,7 +2,7 @@
 // Triggered/Linked 与 StateMachineModuleSet 模块登记）、订单投影桶构造与
 // 复合键（chainId:stateMachineAddress:planId:orderId）。
 import type { ChainEvent } from "../events.js";
-import { ProjectionError, type Address, type Hex } from "../../shared/types.js";
+import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtime";
 import {
   ZERO_BYTES32,
   optionalBytes32Arg,

@@ -18,8 +18,8 @@ import {
   type IdentityBindingQuery,
   type IdentityProjectionSnapshot,
 } from "../indexer/identity-projections.js";
-import { normalizeAddress, type Address, type Hex } from "../shared/types.js";
-import { parseStorageJson, stringifyStorageJson } from "./json.js";
+import { normalizeAddress, type Address, type Hex } from "@uvp-eth/service-runtime";
+import { parseStorageJson, stringifyStorageJson } from "@uvp-eth/service-runtime";
 import { PostgresDatabase } from "./postgres-client.js";
 import {
   booleanColumn,
@@ -28,7 +28,7 @@ import {
   optionalNumberColumn,
   rowObject,
   stringColumn,
-} from "./postgres-rows.js";
+} from "@uvp-eth/service-runtime";
 import {
   projectionDiagnosticsFromSnapshots,
   projectionScopeContractAddress,

@@ -1,8 +1,8 @@
 import { createPublicClient, http, parseAbi, type Address as ViemAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { listContractJsonOverrides, type ChainServicesConfig } from "./env.js";
-import { ConfigError, normalizeAddress, type Address, type Hex } from "../shared/types.js";
-import { redactErrorMessage } from "../security/redaction.js";
+import { ConfigError, normalizeAddress, type Address, type Hex } from "@uvp-eth/service-runtime";
+import { redactErrorMessage } from "@uvp-eth/service-runtime";
 import { ANVIL_DEFAULT_PRIVATE_KEYS } from "./anvil-defaults.js";
 
 type Env = Record<string, string | undefined>;

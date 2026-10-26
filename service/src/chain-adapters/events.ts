@@ -1,8 +1,8 @@
 import type { ChainServicesConfig } from "../config/index.js";
 import type { ChainEventSource } from "../indexer/service.js";
 import { ViemChainEventSource, hasConfiguredEvmIndexerContracts } from "../indexer/viem-event-source.js";
-import type { Logger } from "../shared/types.js";
-import { UnsupportedChainTargetError } from "../shared/types.js";
+import type { Logger } from "@uvp-eth/service-runtime";
+import { UnsupportedChainTargetError } from "@uvp-eth/service-runtime";
 
 export function createChainEventSourceForTarget(
   config: ChainServicesConfig,

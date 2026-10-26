@@ -1,4 +1,4 @@
-import { ConfigError, normalizeBytes32, type Hex } from "../shared/types.js";
+import { ConfigError, normalizeBytes32, type Hex } from "@uvp-eth/service-runtime";
 
 export type ProofCheckStatus = "matched" | "missing" | "mismatch" | "invalid";
 

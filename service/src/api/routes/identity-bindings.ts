@@ -2,7 +2,7 @@
 // governance-adjacent endpoint kept on chain-services. It reads indexer
 // projections only (no reviews, descriptors, or tx signing).
 import type { IdentityBindingQuery } from "../../indexer/identity-projections.js";
-import { ConfigError, normalizeAddress, normalizeBytes32 } from "../../shared/types.js";
+import { ConfigError, normalizeAddress, normalizeBytes32 } from "@uvp-eth/service-runtime";
 import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 

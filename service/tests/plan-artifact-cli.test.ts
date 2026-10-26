@@ -11,7 +11,7 @@ import {
   buildPlanArtifactRecord,
   PlanArtifactPlanIdMismatchError
 } from "../src/cli/record-plan-artifact.js";
-import type { Hex } from "../src/shared/types.js";
+import type { Hex } from "@uvp-eth/service-runtime";
 
 const zhixuYaml = `
 apiVersion: uvp/v0

@@ -18,7 +18,7 @@ afterAll(async () => {
   await stores.close();
 });
 import type { ChainEvent } from "../src/indexer/events.js";
-import type { Hex } from "../src/shared/types.js";
+import type { Hex } from "@uvp-eth/service-runtime";
 
 const chainId = 31337;
 const stateMachineAddress = "0x1111111111111111111111111111111111111111" as Hex;

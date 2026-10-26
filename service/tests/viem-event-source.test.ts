@@ -3,7 +3,7 @@ import { encodeAbiParameters, encodeEventTopics, parseAbi, type Hex, type Log } 
 import { INDEXER_EVENT_ABIS, ViemChainEventSource } from "../src/indexer/viem-event-source.js";
 import { createChainEventSourceForTarget } from "../src/chain-adapters/events.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
-import { UnsupportedChainTargetError } from "../src/shared/types.js";
+import { UnsupportedChainTargetError } from "@uvp-eth/service-runtime";
 
 describe("ViemChainEventSource", () => {
   it("routes the default chain event source through the EVM adapter boundary", () => {

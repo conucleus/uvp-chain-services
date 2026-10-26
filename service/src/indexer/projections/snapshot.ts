@@ -1,6 +1,6 @@
 // 快照族：重放快照形状、空快照与部署注册表快照读取选择器（部署注册表状态
 // 随快照存储，其写入事件族见 indexer/replay.ts）。
-import { compareChainPointers, type Address, type Hex } from "../../shared/types.js";
+import { compareChainPointers, type Address, type Hex } from "@uvp-eth/service-runtime";
 import type { ProjectionProvenance, StateMachineProofProjection } from "./proof.js";
 import type {
   StateMachineModuleProjection,

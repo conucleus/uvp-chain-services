@@ -6,7 +6,7 @@ import {
   type Address,
   type ChainTarget,
   type Hex,
-} from "../shared/types.js";
+} from "@uvp-eth/service-runtime";
 import { ANVIL_DEFAULT_PRIVATE_KEYS } from "./anvil-defaults.js";
 
 export type FinalityAnchor = "finalized" | "confirmations";

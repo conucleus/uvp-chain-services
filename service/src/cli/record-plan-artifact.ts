@@ -13,9 +13,9 @@ import {
   PostgresPlanArtifactStore,
   type PlanArtifactRecord
 } from "../projection/plan-artifacts.js";
-import { redactErrorMessage } from "../security/redaction.js";
+import { redactErrorMessage } from "@uvp-eth/service-runtime";
 import { isDirectRun } from "../shared/runtime.js";
-import { normalizeAddress, normalizeBytes32, type Hex } from "../shared/types.js";
+import { normalizeAddress, normalizeBytes32, type Hex } from "@uvp-eth/service-runtime";
 import { PostgresDatabase } from "../storage/postgres-client.js";
 
 const RECORD_PLAN_ARTIFACT_USAGE =

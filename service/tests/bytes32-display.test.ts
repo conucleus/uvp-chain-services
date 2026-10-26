@@ -3,8 +3,8 @@ import {
   decodeBytes32Text,
   displayBytes32,
   shortBytes32
-} from "../src/shared/display.js";
-import type { Hex } from "../src/shared/types.js";
+} from "@uvp-eth/service-runtime";
+import type { Hex } from "@uvp-eth/service-runtime";
 
 const zeroBytes32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
 

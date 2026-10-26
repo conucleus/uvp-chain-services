@@ -14,7 +14,7 @@ import { onchainSignalKey } from "@uvp-eth/compiler";
 import type { ChainEvent } from "./events.js";
 import { buildActiveChainEventReplaySummary } from "./events.js";
 import { optionalBytes32Arg, optionalUintArgAsString } from "./projections/proof.js";
-import type { Hex } from "../shared/types.js";
+import type { Hex } from "@uvp-eth/service-runtime";
 
 const ORACLE_STATUS: Record<number, ChainOracleHookStatus> = {
   0: "init",

@@ -1,23 +1,6 @@
 import { basename, join } from "node:path";
 import type { DatabaseConfig } from "../config/index.js";
-import type { Address } from "../shared/types.js";
-import { PostgresSubmissionStore } from "../submissions/postgres-store.js";
-import {
-  PostgresBroadcastDedupeStore,
-  type BroadcastDedupeStore
-} from "../submissions/broadcast-dedupe-postgres-store.js";
-import type { ProductSubmissionStore } from "../submissions/types.js";
-import {
-  PostgresProductStagePatchStore
-} from "../stage-patches/postgres-store.js";
-import type {
-  PreparedStageExecutorPatchRecord,
-  PreparedStageResourcePatchRecord,
-  ProductStageExecutorPatchStore,
-  ProductStageResourcePatchStore,
-  StageExecutorPatchSubmissionDTO,
-  StageResourcePatchSubmissionDTO
-} from "../stage-patches/types.js";
+import type { Address } from "@uvp-eth/service-runtime";
 import { PostgresPlanArtifactStore, type PlanArtifactStore } from "../projection/plan-artifacts.js";
 import { PostgresDatabase } from "./postgres-client.js";
 import { PostgresProjectionStore } from "./postgres.js";
@@ -34,12 +17,6 @@ export interface ChainServicesStores {
   readonly projectionStore: ProjectionStore;
   /** 计划编译产物（索引重建/提交造证的唯一 off-chain 权威）。 */
   readonly planArtifactStore: PlanArtifactStore;
-  readonly submissionStore: ProductSubmissionStore;
-  /** postgres 驱动下提供持久化 broadcast 去重状态。 */
-  readonly broadcastDedupeStore: BroadcastDedupeStore;
-  /** postgres 驱动下提供持久化 stage-patch 状态。 */
-  readonly stageExecutorPatchStore: ProductStageExecutorPatchStore;
-  readonly stageResourcePatchStore: ProductStageResourcePatchStore;
   close(): Promise<void>;
 }
 
@@ -76,17 +53,7 @@ export function createChainServicesStores(options: CreateProjectionStoreOptions)
         ? { projectionScopeContractAddress: options.projectionScopeContractAddress }
         : {})
     }),
-    planArtifactStore: new PostgresPlanArtifactStore({ database }),
-    submissionStore: new PostgresSubmissionStore({ database }),
-    broadcastDedupeStore: new PostgresBroadcastDedupeStore({ database }),
-    stageExecutorPatchStore: new PostgresProductStagePatchStore<
-      PreparedStageExecutorPatchRecord,
-      StageExecutorPatchSubmissionDTO
-    >({ database, patchKind: "executor" }),
-    stageResourcePatchStore: new PostgresProductStagePatchStore<
-      PreparedStageResourcePatchRecord,
-      StageResourcePatchSubmissionDTO
-    >({ database, patchKind: "resource" })
+    planArtifactStore: new PostgresPlanArtifactStore({ database })
   };
   return {
     ...stores,

@@ -15,21 +15,8 @@ afterAll(async () => {
   await stores.close();
 });
 
-function requiredRouterStores() {
-  return {
-    submissionStore: stores.submissionStore,
-    stageExecutorPatchStore: stores.stageExecutorPatchStore,
-    stageResourcePatchStore: stores.stageResourcePatchStore,
-  };
-}
-
 function routerOptions(runtimeEnvironment: "local" | "production" = "local") {
-  return {
-    ...requiredRouterStores(),
-    runtimeEnvironment,
-    submissionChainId: 84532,
-    submissionVerifyingContract: "0x1111111111111111111111111111111111111111" as const
-  };
+  return { runtimeEnvironment };
 }
 
 describe("API router composition", () => {
@@ -58,6 +45,23 @@ describe("API router composition", () => {
     }
   });
 
+  it("drops the legacy prepare/submission/wallet-claim surface instead of serving it", async () => {
+    const router = createApiRouter(stores.projectionStore, routerOptions());
+
+    for (const request of [
+      { method: "POST", pathname: "/product/tasks/task-1/prepare-submit", body: {} },
+      { method: "POST", pathname: "/product/tasks/task-1/submit", body: {} },
+      { method: "GET", pathname: "/product/submissions/sub_1" },
+      { method: "POST", pathname: "/product/tasks/task-1/prepare-stage-executor-patch", body: {} },
+      { method: "POST", pathname: "/product/tasks/task-1/submit-stage-resource-patch", body: {} }
+    ]) {
+      await expect(router.handle(request)).resolves.toEqual({
+        status: 404,
+        body: { error: "not_found" }
+      });
+    }
+  });
+
   it("rejects malformed percent-encoded path parameters with 400 instead of 500", async () => {
     const router = createApiRouter(stores.projectionStore, routerOptions());
 
@@ -67,126 +71,4 @@ describe("API router composition", () => {
     });
     expect(response).toMatchObject({ status: 400, body: { error: "invalid_path_parameter" } });
   });
-
-  it("submission reads require wallet identity", async () => {
-    const router = createApiRouter(stores.projectionStore, routerOptions());
-
-    const anonymous = await router.handle({ method: "GET", pathname: "/product/submissions/sub_1" });
-    expect(anonymous).toMatchObject({ status: 401, body: { error: "wallet_identity_required" } });
-  });
-
-  it("active-executor overlay authorization only covers the task's recorded submit signal", async () => {
-    const { projectionSubmissionAuthorization } = await import("../src/api/routes.js");
-    const authorization = projectionSubmissionAuthorization(stores.projectionStore);
-    const executor = "0x8888888888888888888888888888888888888888";
-    const targetStageId = "0x" + "1".repeat(64);
-    const recordedSignalId = "0x" + "2".repeat(64);
-    const derivedSignalId = "0x" + "3".repeat(64);
-    const onchainOrderId = "0x" + "4".repeat(64) as `0x${string}`;
-    const baseRequest = {
-      orderId: "order-1",
-      taskId: "task-1",
-      stageIdentifier: "stage-1",
-      signalName: "confirm_stage",
-      onchainOrderId,
-      sourceId: targetStageId as `0x${string}`,
-      intent: "confirm_stage" as const,
-      submitter: executor as `0x${string}`
-    };
-
-    const derived = await authorization.authorize({
-      ...baseRequest,
-      signalId: derivedSignalId as `0x${string}`,
-      task: {
-        taskId: "task-1",
-        stageExecutorOverlay: { targetStageId, activeExecutorWallet: executor }
-      } as never
-    });
-    expect(derived).toMatchObject({
-      authorized: false,
-      source: "active_stage_executor_overlay"
-    });
-
-    const recorded = await authorization.authorize({
-      ...baseRequest,
-      signalId: recordedSignalId as `0x${string}`,
-      task: {
-        taskId: "task-1",
-        stageExecutorOverlay: { targetStageId, activeExecutorWallet: executor },
-        proof: { signalId: recordedSignalId }
-      } as never
-    });
-    expect(recorded).toMatchObject({ authorized: true, source: "active_stage_executor_overlay" });
-  });
-
-  it("submission authorization honors on-chain SignalSubmitterAuthorized projections", async () => {
-    const { projectionSubmissionAuthorization } = await import("../src/api/routes.js");
-
-    const submitter = "0x7777777777777777777777777777777777777777";
-    const onchainOrderId = "0x" + "9".repeat(64);
-    const sourceId = "0x" + "a".repeat(64);
-    const signalId = "0x" + "b".repeat(64);
-    const planId = "0x" + "c".repeat(64);
-    const store = stores.projectionStore;
-    await store.resetFromEvents({
-      deploymentBlock: 0n,
-      events: [
-        chainEvent(1n, "PlanRegistered", { planId, planHash: "0x" + "d".repeat(64), hookCount: 1n }),
-        chainEvent(2n, "OrderRegistered", { orderId: onchainOrderId, planId }),
-        chainEvent(3n, "SignalSubmitterAuthorized", {
-          orderId: onchainOrderId,
-          planId,
-          sourceId,
-          signalId,
-          submitter,
-          role: "0x" + "3".repeat(64),
-          metadataHash: "0x" + "4".repeat(64)
-        })
-      ]
-    });
-    const authorization = projectionSubmissionAuthorization(store);
-
-    const authorized = await authorization.authorize({
-      orderId: "order-1",
-      taskId: "task-1",
-      stageIdentifier: "stage-1",
-      signalName: "confirm_stage",
-      onchainOrderId,
-      sourceId,
-      signalId,
-      intent: "confirm_stage",
-      submitter
-    } as never);
-    expect(authorized).toMatchObject({ authorized: true, source: "chain_signal_authorization" });
-
-    const stranger = "0x6666666666666666666666666666666666666666";
-    const denied = await authorization.authorize({
-      orderId: "order-1",
-      taskId: "task-1",
-      stageIdentifier: "stage-1",
-      signalName: "confirm_stage",
-      onchainOrderId,
-      sourceId,
-      signalId,
-      intent: "confirm_stage",
-      submitter: stranger
-    } as never);
-    expect(denied).toMatchObject({
-      authorized: false,
-      source: "chain_signal_authorization",
-      reason: expect.stringContaining("not authorized on chain")
-    });
-  });
 });
-
-function chainEvent(blockNumber: bigint, eventName: string, args: Record<string, unknown>) {
-  return {
-    chainId: 31337,
-    contractAddress: "0x1111111111111111111111111111111111111111" as `0x${string}`,
-    blockNumber,
-    transactionHash: `0x${blockNumber.toString(16).padStart(64, "0")}` as `0x${string}`,
-    logIndex: 0,
-    eventName,
-    args
-  };
-}

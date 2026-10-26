@@ -14,7 +14,7 @@ import {
 } from "../src/projection/plan-artifacts.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
 import { createPostgresTestDatabase } from "./postgres.js";
-import type { Hex } from "../src/shared/types.js";
+import type { Hex } from "@uvp-eth/service-runtime";
 
 const planArtifactZhixuYaml = `
 apiVersion: uvp/v0

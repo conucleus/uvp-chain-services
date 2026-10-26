@@ -1,2 +1,2 @@
 export * from "./audit.js";
-export * from "./redaction.js";
+export * from "@uvp-eth/service-runtime";

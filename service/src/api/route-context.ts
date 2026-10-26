@@ -1,22 +1,7 @@
 import type { ConfigDiagnostics, ChainServicesRuntimeEnv } from "../config/index.js";
-import type { ReconcileWorkerDiagnostics } from "../reconcile/index.js";
 import type { AdminAuthPolicy } from "../security/admin-auth.js";
 import type { AuditSink } from "../security/audit.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
-import type {
-  ProductSubmissionDTO,
-  ProductSubmissionService,
-  ProductSubmissionStore,
-  SubmissionBroadcastAdapter
-} from "../submissions/index.js";
-import type {
-  ProductStageExecutorPatchService,
-  ProductStageExecutorPatchStore,
-  ProductStageResourcePatchService,
-  ProductStageResourcePatchStore,
-  StageExecutorPatchBroadcastAdapter,
-  StageResourcePatchBroadcastAdapter
-} from "../stage-patches/index.js";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
 export interface ApiRequest {
@@ -38,32 +23,15 @@ export interface ApiRouter {
 }
 
 export interface CreateApiRouterOptions {
-  readonly submissionService?: ProductSubmissionService;
-  readonly submissionStore: ProductSubmissionStore;
-  readonly submissionChainId?: number;
-  readonly submissionVerifyingContract?: `0x${string}`;
-  readonly submissionBroadcastAdapter?: SubmissionBroadcastAdapter;
-  readonly productStageExecutorPatchService?: ProductStageExecutorPatchService;
-  readonly stageExecutorPatchBroadcastAdapter?: StageExecutorPatchBroadcastAdapter;
-  readonly stageExecutorPatchChainId?: number;
-  readonly stageExecutorPatchVerifyingContract?: `0x${string}`;
-  readonly stageExecutorPatchStore: ProductStageExecutorPatchStore;
-  readonly productStageResourcePatchService?: ProductStageResourcePatchService;
-  readonly stageResourcePatchBroadcastAdapter?: StageResourcePatchBroadcastAdapter;
-  readonly stageResourcePatchChainId?: number;
-  readonly stageResourcePatchVerifyingContract?: `0x${string}`;
-  readonly stageResourcePatchStore: ProductStageResourcePatchStore;
   readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
   readonly audit?: AuditSink;
   readonly configDiagnostics?: ConfigDiagnostics;
   readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
-  readonly reconcileDiagnostics?: ReconcileWorkerDiagnostics | (() => ReconcileWorkerDiagnostics);
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   readonly opsConsoleAdminIds?: readonly string[];
   readonly adminAuthPolicy?: AdminAuthPolicy;
   readonly onTxMined?: () => void;
   readonly now?: () => Date;
-  readonly chainClock?: import("../shared/chain-clock.js").ChainClock;
 }
 
 export interface AdminOpsActionEffect {
@@ -72,25 +40,14 @@ export interface AdminOpsActionEffect {
   readonly summary?: unknown;
 }
 
-export interface AdminOpsRetrySubmissionInput {
-  readonly submissionId: string;
-  readonly submission?: ProductSubmissionDTO;
-}
-
 export interface AdminOpsRecoveryActions {
-  runReconcile?(): Promise<AdminOpsActionEffect | void>;
   rebuildProjections?(): Promise<AdminOpsActionEffect | void>;
-  retrySubmission?(input: AdminOpsRetrySubmissionInput): Promise<AdminOpsActionEffect | void>;
   sweepPendingPostCommitSteps?(): Promise<AdminOpsActionEffect | void>;
   listPendingPostCommitSteps?(): Promise<unknown>;
 }
 
 export interface ApiRouteContext {
   readonly store: ProjectionStore;
-  readonly submissionService: ProductSubmissionService;
-  readonly productStageExecutorPatchService: ProductStageExecutorPatchService;
-  readonly productStageResourcePatchService: ProductStageResourcePatchService;
-  readonly submissionStore?: ProductSubmissionStore;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   readonly opsConsoleAdminIds?: readonly string[];
   readonly adminAuthPolicy: AdminAuthPolicy;

@@ -1,4 +1,4 @@
-import type { Address } from "../shared/types.js";
+import type { Address } from "@uvp-eth/service-runtime";
 
 type Hex = `0x${string}`;
 

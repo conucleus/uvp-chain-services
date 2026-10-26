@@ -3,7 +3,7 @@
 // patch 生效授权由 authorizeSignalSubmittersFromModule 写显式订单级
 // 授权（本文件投影的 SignalSubmitterAuthorized 事件流即其完整重建源）。
 import type { ChainEvent } from "../events.js";
-import type { Address, Hex } from "../../shared/types.js";
+import type { Address, Hex } from "@uvp-eth/service-runtime";
 import { encodeAbiParameters, keccak256 } from "viem";
 import {
   compareProofEvents,

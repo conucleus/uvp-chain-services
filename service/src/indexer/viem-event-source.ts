@@ -16,7 +16,7 @@ import {
   STAGE_PATCH_MODULE_ABI,
   STATE_MACHINE_ABI
 } from "@uvp-eth/protocol-bindings";
-import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type Logger } from "../shared/types.js";
+import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type Logger } from "@uvp-eth/service-runtime";
 import type { ChainEvent, EventArgs } from "./events.js";
 import type { ChainEventRange, ChainEventSource } from "./service.js";
 

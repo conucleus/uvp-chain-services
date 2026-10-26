@@ -9,7 +9,7 @@ import {
   type Address,
   type ChainPointer,
   type Hex
-} from "../../shared/types.js";
+} from "@uvp-eth/service-runtime";
 
 export interface ProjectionProvenance {
   readonly chainId: number;

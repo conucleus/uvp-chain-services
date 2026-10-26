@@ -1,6 +1,6 @@
 // 任务族：任务投影与提交信号构造/推进（refreshTaskSubmitSignals 等），供
 // plan/signal/stage 事件族在任务指派与完成判定中复用。
-import type { Address, Hex } from "../../shared/types.js";
+import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {
   compareProofEvents,
   type ProjectionProvenance,
