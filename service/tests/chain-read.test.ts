@@ -14,7 +14,10 @@ import type {
   StateMachineProofProjection,
   StateMachineTaskProjection,
 } from "../src/indexer/projections/index.js";
-import type { ProjectionStore } from "../src/storage/projection-store.js";
+import type {
+  ProjectionStore,
+  ProjectionSyncState,
+} from "../src/storage/projection-store.js";
 import { StorageUnavailableError } from "../src/storage/errors.js";
 
 const CHAIN_ID = 31337;
@@ -298,15 +301,25 @@ describe("generic chain read routes", () => {
     expect(singleTask.status).toBe(200);
     expect(singleTask.body).toEqual({ task: taskJson(taskA) });
   });
+
   it("passes the projection sync state through and 404s when it is absent", async () => {
-    const syncState = {
+    const syncState: ProjectionSyncState = {
       chainId: CHAIN_ID,
       contractAddress: STATE_MACHINE,
-      syncStatus: "indexed" as const,
+      syncStatus: "syncing",
       latestIndexedBlock: 42n,
       finalizedBlock: 40n,
       confirmationDepth: 2,
+      lastEventName: "HookReady",
       eventCount: 7,
+      rebuild: {
+        status: "completed",
+        fromBlock: 38n,
+        toBlock: 42n,
+        eventCount: 7,
+        removedLogsFiltered: true,
+      },
+      degradedReason: "rpc lag",
       updatedAt: "2026-10-27T00:00:00.000Z",
     };
     const present = contextWithStore({
@@ -318,7 +331,14 @@ describe("generic chain read routes", () => {
     });
     await expect(get(present, "/chain/sync-state")).resolves.toEqual({
       status: 200,
-      body: { syncState: { ...syncState, latestIndexedBlock: "42", finalizedBlock: "40" } },
+      body: {
+        syncState: {
+          ...syncState,
+          latestIndexedBlock: "42",
+          finalizedBlock: "40",
+          rebuild: { ...syncState.rebuild, fromBlock: "38", toBlock: "42" },
+        },
+      },
     });
 
     const absent = contextWithStore({

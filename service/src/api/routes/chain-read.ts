@@ -1,5 +1,5 @@
-// Generic chain projection reads (anonymous): orders/tasks straight from
-// ProjectionStore, with no session, business rows, or participant clipping.
+// Generic chain projection reads (anonymous): orders/tasks/sync state straight
+// from ProjectionStore, with no session, business rows, or participant clipping.
 // Order ids are plan-scoped, so the item read always returns `{ orders }`
 // (one or many) and 404s only when no projection exists.
 
@@ -18,8 +18,8 @@ const ORDERS_PATH = "/chain/orders";
 const ORDER_PATH = /^\/chain\/orders\/([^/]+)$/;
 const ORDER_TASKS_PATH = /^\/chain\/orders\/([^/]+)\/tasks$/;
 const TASKS_PATH = "/chain/tasks";
-const SYNC_STATE_PATH = "/chain/sync-state";
 const TASK_PATH = /^\/chain\/tasks\/([^/]+)$/;
+const SYNC_STATE_PATH = "/chain/sync-state";
 
 export function createChainReadRouteModule(): RouteModule {
   return {
