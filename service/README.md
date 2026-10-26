@@ -5,7 +5,7 @@ Chain Services 把 UVP 链上事实投影成 Product 和运维接口，并负责
 ## 责任边界
 
 - `UVPStateMachine` 及其冻结模块定义 Order、Stage、Signal、Plan 发布、提交授权和资源补丁。
-- 计划词表（selectorBindings / signalCapabilities / executorCandidates）的唯一 off-chain 权威是 `plan_artifacts`：按 `(chain_id, plan_id, plan_hash)` 内容寻址、行级不可变；索引重建与提交造证只读该表。产物缺失即重建失败、提交造证 503，不得退化成空词表继续。当前没有 config publish 之外的产物写入 API（Store 草稿编译入口已随 B2 删除，需后续 publish/backfill 入口补齐）。
+- 计划词表（selectorBindings / signalCapabilities / executorCandidates）的唯一 off-chain 权威是 `plan_artifacts`：按 `(chain_id, plan_id, plan_hash)` 内容寻址、行级不可变；索引重建与提交造证只读该表。产物缺失即重建失败、提交造证 503，不得退化成空词表继续。产物写入入口是 `plan-artifact:record` CLI（见下文「记录计划编译产物」）；Store 草稿编译入口已随 B2 删除。
 - `UVPIdentityRegistry` 只记录线下主体标识与链上账户的绑定和撤销。
 - Chain Services 可以代付 gas，但业务签名仍由对应参与者产生，服务在任何路径上都不生成业务签名。代付广播的交易面保留在：plan-scoped 的 `submitSignalFor`（Signal 提交）、`applyStageExecutorPatchFor` / `applyStageResourcePatchFor`（stage 补丁代发）、`triggerOrderFromOutsideFor`（订单注册），以及治理身份注册/撤销（`registerIdentityBinding` / `revokeIdentityBinding`）。信号/补丁/触发提交均由 capability-proofs 单源（`@uvp-eth/compiler`，见 `src/submissions/capability-proofs.ts`）现场造证随交易携带。dock/timer keeper 等应用自动化已移出 chain-services（见 ARCHITECTURE Phase B）。
 - 证据正文保存在链下，链上和投影层只保存可校验的哈希与资源句柄。
@@ -15,6 +15,7 @@ Chain Services 把 UVP 链上事实投影成 Product 和运维接口，并负责
 `src/` 按链事实、投影、执行与业务数据分界（意见书 B2 结构治理后的目标布局）：
 
 - `indexer/service.ts`：扫描与索引入口（增量刷新、重组回滚、`--rebuild` 全量重建）。
+- `cli/record-plan-artifact.ts`：`plan_artifacts` 的生产写入入口（校验产物身份后写入，不跑迁移；见下文「记录计划编译产物」）。
 - `projection/plan-artifacts.ts`：计划编译产物表（`plan_artifacts`）的 Postgres store 与索引/语义 oracle 解析器；缺失产物抛 `PlanArtifactMissingError`。
 - `indexer/replay.ts`：统一事件顺序与重放编排。`rebuildOrderProjections` 是投影重建的单一入口，同时推进部署注册表事件族与显式诊断计数（幻影订单、dock 未开启、激活缺补丁等不允许静默的计数）。
 - `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件）、`signal`（信号/授权/委派）、`stage`（阶段补丁与 hook 生命周期）、`docking`（dock 具名接口委托）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
@@ -62,6 +63,29 @@ node --env-file=.env.local --import tsx src/api/server.ts
 ## 迁移口径
 
 系统未上线：`service/migrations/` 的迁移字节以 dev 活线为准，不承诺跨版本升级路径；已编号的迁移文件不再修改，需要结构变化时开新编号迁移。启动时 migration checksum 失配即拒启：按 `chain_services_migrations` 台账清账后重建该库。
+
+## 记录计划编译产物（plan_artifacts）
+
+`registerPlan` 上链后，运营者用 CLI 把编译器产出的 `OnchainHookPlanArtifact` 写入服务库（一次一个 artifact，不起 HTTP 服务、不扫描、不回填）：
+
+```bash
+cd uvp-chain-services/service
+export CHAIN_SERVICES_DATABASE_URL='postgres://<user>:<password>@<host>:5432/<database>'
+pnpm --silent run plan-artifact:record \
+  --file ./artifacts/plan.json \
+  --chain-id 31337 \
+  --publisher 0x1111111111111111111111111111111111111111 \
+  --dry-run
+```
+
+`--dry-run` 只做参数/产物校验并打印结果（连 DSN 都不需要）；去掉后写入并打印 `recorded: true`。建议先 dry-run，把输出的 `planId`/`planHash` 与 `PlanCommitted`/`PlanRegistered` 事件核对后再写。用 `pnpm --silent` 是为了让 stdout 只剩下面那一行 JSON。
+
+- `--file`：编译器产出的 raw `OnchainHookPlanArtifact` JSON（不是 Store 草稿）。如果来自 `uvp-client plan compile --out`，该文件是 `{artifact, registerArgs, planId}` 包装对象，需要先取出其中的 `artifact`（CLI 只接受 raw artifact）。`schemaVersion` 必须等于编译器 `ONCHAIN_HOOK_PLAN_SCHEMA_VERSION`；未知字段、被篡改的 `planHash`、非法形状都会在任何写入前拒绝。
+- `--chain-id`：目标链 ID（正整数）。
+- 键必须是链上注册身份：`plan_hash = toSolidityRegisterPlanArgs(artifact).planHash`（运行时 planHash，不是 `artifact.planHash`），`plan_id = planIdForPublisher(publisher, plan_hash)`。`artifact.planId` 是编译器计划身份，**不是**链上 planId；用 `--publisher <address>` 推导，或把注册事件里的 planId 用 `--plan-id <bytes32>` 传入；两者同时给出时必须一致，否则拒绝。用错键不会报错但索引永远解析不到，是这条写路径要防的主要事故。
+- 幂等：主键 `(chain_id, plan_id, plan_hash)` 加 `ON CONFLICT DO NOTHING`，重复执行成功且不新增行；写入前 store 会重算 planHash 并拒绝身份不符的记录（`PlanArtifactIdentityError`）。这样索引重建/提交造证只会读到与链上 planHash 对应的词表，不会静默退化为空词表。
+- 迁移：CLI 不建表、不跑迁移。表不存在时原样报出 Postgres 错误并提示先跑 service migrations；本地/部署需要按上文「迁移口径」先完成迁移。
+- DSN 只从 `CHAIN_SERVICES_DATABASE_URL` 读取，缺失或不是 `postgres://`/`postgresql://` 即失败；错误与日志不会回显 DSN 或密码。成功时 stdout 只有一行 `{"chainId":31337,"planId":"0x…","planHash":"0x…","recorded":true}`（dry-run 为 `recorded:false`），诊断走 stderr（默认不带 stack，`--verbose` 才打印）。
 
 ## 接口概览
 

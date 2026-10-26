@@ -7,6 +7,7 @@ export const UNIT_TEST_FILES = [
   "indexer.reorg-determinism.test.ts",
   "order-chain-status.test.ts",
   "order-legacy-replacement.test.ts",
+  "plan-artifact-cli.test.ts",
   "product-trigger-preparation-adapter.test.ts",
   "proof-verifier.test.ts",
   "viem-event-source.test.ts"
