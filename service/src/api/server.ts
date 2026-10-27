@@ -87,6 +87,10 @@ export async function startApiServer(
   const opsConsoleAdminIds = config.operatorRoles.opsConsoleAdmins ?? [];
   const router = createApiRouter(store, {
     runtimeEnvironment: config.security.environment,
+    planArtifacts: {
+      chainId: config.network.chainId,
+      store: stores.planArtifactStore
+    },
     ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
     adminAuthPolicy: {
       runtimeEnvironment: config.security.environment,

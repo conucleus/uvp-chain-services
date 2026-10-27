@@ -38,6 +38,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   };
   const context: ApiRouteContext = {
     store,
+    ...(options.planArtifacts ? { planArtifacts: options.planArtifacts } : {}),
     ...(options.opsRecoveryActions ? { opsRecoveryActions: options.opsRecoveryActions } : {}),
     ...(options.opsConsoleAdminIds ? { opsConsoleAdminIds: options.opsConsoleAdminIds } : {}),
     adminAuthPolicy,

@@ -1,4 +1,5 @@
 import type { ConfigDiagnostics, ChainServicesRuntimeEnv } from "../config/index.js";
+import type { PlanArtifactStore } from "../projection/plan-artifacts.js";
 import type { AdminAuthPolicy } from "../security/admin-auth.js";
 import type { AuditSink } from "../security/audit.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
@@ -22,11 +23,17 @@ export interface ApiRouter {
   handle(request: ApiRequest): Promise<ApiResponse>;
 }
 
+export interface PlanArtifactReadSurface {
+  readonly chainId: number;
+  readonly store: PlanArtifactStore;
+}
+
 export interface CreateApiRouterOptions {
   readonly runtimeEnvironment?: ChainServicesRuntimeEnv;
   readonly audit?: AuditSink;
   readonly configDiagnostics?: ConfigDiagnostics;
   readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
+  readonly planArtifacts?: PlanArtifactReadSurface;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   readonly opsConsoleAdminIds?: readonly string[];
   readonly adminAuthPolicy?: AdminAuthPolicy;
@@ -48,6 +55,7 @@ export interface AdminOpsRecoveryActions {
 
 export interface ApiRouteContext {
   readonly store: ProjectionStore;
+  readonly planArtifacts?: PlanArtifactReadSurface;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   readonly opsConsoleAdminIds?: readonly string[];
   readonly adminAuthPolicy: AdminAuthPolicy;
