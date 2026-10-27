@@ -61,78 +61,12 @@ node --env-file=.env.local --import tsx src/api/server.ts
 
 ## 迁移口径
 
-系统未上线：`service/migrations/` 的迁移字节以 dev 活线为准，不承诺跨版本升级路径；已编号的迁移文件不再修改，需要结构变化时开新编号迁移。启动时 migration checksum 失配即拒启：按 `chain_services_migrations` 台账清账后重建该库。
+系统未上线：`service/migrations/postgres/` 只有**单一基线 `0001_schema.sql`**，由当前最终 schema 的
+`pg_dump --schema-only` 生成（6 张 chain/投影表 + 函数/触发器/索引/约束）。不再保留 0002/0003/0004
+历史迁移；旧库直接重建，不做升级路径。迁移台账 `chain_services_migrations` 由 runner 创建，
+checksum 漂移/已应用版本消失仍 fail-closed。
 
-- `0001_schema.sql`：初始全部表（含后来移交 app 的业务表与已无代码引用的 `submission*`、
-  `stage_patch_*`、`broadcast_dedupe_*` 遗留表）。
-- `0002_plan_artifacts.sql`：`plan_artifacts` + supplier 标签列删除。
-- `0003_drop_business_tables.sql`：业务表所有权移交给 `uvp-app-backend`——22 张业务表已由 app 迁移
-  `0002_app_business_schema.sql` 建在 `app` schema（app 连接池 `search_path=app`），本迁移 drop
-  `public` 旧副本，并 drop 14 张无代码引用的退役 store/notification 表。链事件/投影/
-  `plan_artifacts`/`indexer_pending_post_commit` 与 relay 遗留表（`submission*`、`stage_patch_*`、
-  `broadcast_dedupe_*`）保留；后者如确认无引用再由后续编号迁移单独删除。
-
-本服务继续以 `public` 为默认 schema 读自己的表；不读写 `app`。
-
-## 记录计划编译产物（plan_artifacts）
-
-`registerPlan` 上链后，运营者用 CLI 把编译器产出的 `OnchainHookPlanArtifact` 写入服务库（一次一个 artifact，不起 HTTP 服务、不扫描、不回填）：
-
-```bash
-cd uvp-chain-services/service
-export CHAIN_SERVICES_DATABASE_URL='postgres://<user>:<password>@<host>:5432/<database>'
-pnpm --silent run plan-artifact:record \
-  --file ./artifacts/plan.json \
-  --chain-id 31337 \
-  --publisher 0x1111111111111111111111111111111111111111 \
-  --dry-run
-```
-
-`--dry-run` 只做参数/产物校验并打印结果（连 DSN 都不需要）；去掉后写入并打印 `recorded: true`。建议先 dry-run，把输出的 `planId`/`planHash` 与 `PlanCommitted`/`PlanRegistered` 事件核对后再写。用 `pnpm --silent` 是为了让 stdout 只剩下面那一行 JSON。
-
-- `--file`：编译器产出的 raw `OnchainHookPlanArtifact` JSON（不是 Store 草稿）。如果来自 `uvp-client plan compile --out`，该文件是 `{artifact, registerArgs, planId}` 包装对象，需要先取出其中的 `artifact`（CLI 只接受 raw artifact）。`schemaVersion` 必须等于编译器 `ONCHAIN_HOOK_PLAN_SCHEMA_VERSION`；未知字段、被篡改的 `planHash`、非法形状都会在任何写入前拒绝。
-- `--chain-id`：目标链 ID（正整数）。
-- 键必须是链上注册身份：`plan_hash = toSolidityRegisterPlanArgs(artifact).planHash`（运行时 planHash，不是 `artifact.planHash`），`plan_id = planIdForPublisher(publisher, plan_hash)`。`artifact.planId` 是编译器计划身份，**不是**链上 planId；用 `--publisher <address>` 推导，或把注册事件里的 planId 用 `--plan-id <bytes32>` 传入；两者同时给出时必须一致，否则拒绝。用错键不会报错但索引永远解析不到，是这条写路径要防的主要事故。
-- 幂等：主键 `(chain_id, plan_id, plan_hash)` 加 `ON CONFLICT DO NOTHING`，重复执行成功且不新增行；写入前 store 会重算 planHash 并拒绝身份不符的记录（`PlanArtifactIdentityError`）。这样索引重建只会读到与链上 planHash 对应的词表，不会静默退化为空词表。
-- 迁移：CLI 不建表、不跑迁移。表不存在时原样报出 Postgres 错误并提示先跑 service migrations；本地/部署需要按上文「迁移口径」先完成迁移。
-- DSN 只从 `CHAIN_SERVICES_DATABASE_URL` 读取，缺失或不是 `postgres://`/`postgresql://` 即失败；错误与日志不会回显 DSN 或密码。成功时 stdout 只有一行 `{"chainId":31337,"planId":"0x…","planHash":"0x…","recorded":true}`（dry-run 为 `recorded:false`），诊断走 stderr（默认不带 stack，`--verbose` 才打印）。
-
-## 接口概览
-
-匿名链读：
-
-- `GET /chain/orders`、`GET /chain/orders/:orderId`、`GET /chain/orders/:orderId/tasks`
-- `GET /chain/tasks`、`GET /chain/tasks/:taskId`
-- `GET /chain/sync-state`、`GET /chain/snapshot`
-
-响应 wire DTO/字段名由 `@uvp-eth/chain-read-contract` 拥有；本服务只保留 indexer 内部投影类型，
-经 `toWire` 序列化为 contract 类型（bigint 区块号/计数器 → 十进制字符串）。
-
-身份投影：
-
-- `GET /identity/bindings`（只读 `ProjectionStore`，无 review/descriptor/tx）。这是链-only 的
-  投影读：链上身份注册/撤销事件由本服务索引，app-backend 不持有 identity registry 状态，
-  也不代用户读链上治理注册表。
-
-运维：
-
-- `GET /healthz`、`GET /readyz`
-- `GET /admin/diagnostics`
-- `GET /admin/ops/status`、`GET /admin/ops/summary`
-- `POST /admin/ops/projections/rebuild`
-- `GET /admin/ops/indexer/pending-steps`、`POST /admin/ops/indexer/pending-steps/retry`
-
-V1 墓碑：
-
-- `/product/order-drafts*`、`/product/orders/:id/{invites,participants}`、`/product/invites/*` 返回 `410 v1_order_surface_removed`。
-
-### API 访问策略
-
-- 链读、`/healthz`、`/readyz`：匿名。
-- `/admin/*`：`x-uvp-admin-id` + `x-uvp-admin-role`；非 local 必须带 `x-uvp-admin-token`（`CHAIN_SERVICES_ADMIN_TOKEN_HASHES`），并受 `OPS_CONSOLE_ADMIN_IDS` 白名单约束。
-
-精确请求与响应结构以 `src/api/routes`、投影 DTO 和自动化测试为准。
-
-## 验证原则
-
-测试覆盖现行协议不变量、权限边界、索引重放、重组恢复、持久化和公开接口；不再表达现行行为或风险的测试会被移除。持久化测试统一走 Postgres（见上文「存储与测试（PG-only）」）。
+- chain 只拥有 `chain_event_log`、`chain_index_cursor`、`chain_projection_snapshot`、
+  `chain_projection_sync_state`、`indexer_pending_post_commit`、`plan_artifacts`；
+- 业务表全部归 `uvp-app-backend` 的 `app` schema，fresh DB 不会在 `public` 创建它们；
+- 本服务以 `public` 为默认 schema 读自己的表，不读写 `app`。
