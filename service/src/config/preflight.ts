@@ -1,9 +1,7 @@
 import { createPublicClient, http, parseAbi, type Address as ViemAddress } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
 import { listContractJsonOverrides, type ChainServicesConfig } from "./env.js";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "@uvp-eth/service-runtime";
 import { redactErrorMessage } from "@uvp-eth/service-runtime";
-import { ANVIL_DEFAULT_PRIVATE_KEYS } from "./anvil-defaults.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -18,7 +16,6 @@ export interface ConfigDiagnosticCheck {
 export interface ConfigDiagnostics {
   readonly environment: ChainServicesConfig["security"]["environment"];
   readonly storageDriver: string;
-  readonly relayerConfigured: boolean;
   readonly network: {
     readonly chainId: number;
     readonly deploymentBlock: string;
@@ -33,17 +30,7 @@ export interface ConfigDiagnostics {
     readonly status: ConfigPreflightStatus;
     readonly checks: readonly ConfigDiagnosticCheck[];
   };
-  readonly relayer: {
-    readonly broadcastEnabled: boolean;
-    readonly configured: boolean;
-    readonly contractConfigured: boolean;
-    readonly privateKeyConfigured: boolean;
-    readonly gasPayer?: Address;
-    readonly expectedGasPayer?: Address;
-    readonly maxRetries: number;
-  };
   readonly operatorRoles: {
-    readonly relayerGasPayer: PrivateKeyRoleDiagnostics;
     readonly opsConsoleAdmin: {
       readonly configuredCount: number;
       readonly adminTokenConfigured: boolean;
@@ -57,7 +44,6 @@ export interface ConfigDiagnostics {
   readonly security: {
     readonly logRedactionEnabled: boolean;
   };
-  readonly lastReconcileError: string | null;
 }
 
 export interface PreflightPublicClient {
@@ -69,14 +55,6 @@ export interface PreflightPublicClient {
     readonly functionName: string;
     readonly args?: readonly unknown[];
   }): Promise<unknown>;
-}
-
-interface PrivateKeyRoleDiagnostics {
-  readonly privateKeyEnv: string;
-  readonly privateKeyConfigured: boolean;
-  readonly address?: Address;
-  readonly expectedAddress?: Address;
-  readonly addressMatches?: boolean;
 }
 
 export interface RunConfigPreflightOptions {
@@ -105,7 +83,7 @@ export async function runConfigPreflight(
   const checks: ConfigDiagnosticCheck[] = [];
   const errors: string[] = [];
 
-  runStaticPreflight(config, env, checks, errors);
+  runStaticPreflight(config, checks, errors);
 
   if (config.security.preflightStrict) {
     await runRpcPreflight(config, options.clients, checks, errors);
@@ -136,15 +114,11 @@ export function buildConfigDiagnostics(
       readonly status: ConfigPreflightStatus;
       readonly checks: readonly ConfigDiagnosticCheck[];
     };
-    readonly lastReconcileError?: string | null;
   } = {}
 ): ConfigDiagnostics {
   const env = options.env ?? process.env;
   const stateMachine = stateMachineAddress(config.network.contracts);
   const identityRegistry = identityRegistryAddress(config.network.contracts);
-  const relayerPrivateKeyConfigured = Boolean(env[config.relayer.stateMachinePrivateKeyEnv]?.trim());
-  const relayerGasPayer = privateKeyAddress(env[config.relayer.stateMachinePrivateKeyEnv], "relayer gas payer");
-  const relayerConfigured = Boolean(config.relayer.broadcastEnabled && stateMachine && relayerPrivateKeyConfigured);
   const preflight = options.preflight ?? {
     status: "skipped" as const,
     checks: []
@@ -153,7 +127,6 @@ export function buildConfigDiagnostics(
   return {
     environment: config.security.environment,
     storageDriver: "postgres",
-    relayerConfigured,
     network: {
       chainId: config.network.chainId,
       deploymentBlock: config.network.deploymentBlock.toString(),
@@ -163,10 +136,7 @@ export function buildConfigDiagnostics(
       identityRegistryConfigured: Boolean(identityRegistry)
     },
     warnings: [
-      ...diagnosticWarnings(config, {
-        relayerConfigured,
-        relayerPrivateKeyConfigured
-      }),
+      ...diagnosticWarnings(config),
       ...safeListContractJsonOverrides(env).map((name) =>
         `UVP_CONTRACTS_JSON overrides the UVP_ADDRESS_MANIFEST entry for ${name}; the inline JSON address silently wins`
       )
@@ -176,16 +146,7 @@ export function buildConfigDiagnostics(
       status: preflight.status,
       checks: preflight.checks
     },
-    relayer: {
-      broadcastEnabled: config.relayer.broadcastEnabled,
-      configured: relayerConfigured,
-      contractConfigured: Boolean(stateMachine),
-      privateKeyConfigured: relayerPrivateKeyConfigured,
-      ...(relayerGasPayer ? { gasPayer: relayerGasPayer } : {}),
-      ...(config.relayer.expectedGasPayer ? { expectedGasPayer: config.relayer.expectedGasPayer } : {}),
-      maxRetries: config.relayer.maxRetries
-    },
-    operatorRoles: operatorRoleDiagnostics(config, env),
+    operatorRoles: operatorRoleDiagnostics(config),
     storage: {
       driver: "postgres",
       durable: true,
@@ -193,55 +154,18 @@ export function buildConfigDiagnostics(
     },
     security: {
       logRedactionEnabled: config.security.logRedactionEnabled
-    },
-    lastReconcileError: options.lastReconcileError ? redactErrorMessage(options.lastReconcileError) : null
+    }
   };
 }
 
 function runStaticPreflight(
   config: ChainServicesConfig,
-  env: Env,
   checks: ConfigDiagnosticCheck[],
   errors: string[]
 ): void {
-  const stateMachine = stateMachineAddress(config.network.contracts);
-  const relayerPrivateKey = env[config.relayer.stateMachinePrivateKeyEnv]?.trim();
-
   runStateMachineModulesManifestPreflight(config, checks, errors);
   runModuleAddressDriftPreflight(config, checks, errors);
   runStateMachineAddressDriftPreflight(config, checks, errors);
-
-  if (config.relayer.broadcastEnabled) {
-    if (!stateMachine) {
-      fail(checks, errors, "relayer.contract", "UVPStateMachine contract address is required when relayer broadcast is configured");
-    } else {
-      pass(checks, "relayer.contract");
-    }
-    if (!relayerPrivateKey) {
-      fail(checks, errors, "relayer.configured", `${config.relayer.stateMachinePrivateKeyEnv} is required when relayer broadcast is enabled`);
-    } else if (!/^0x[0-9a-fA-F]{64}$/.test(relayerPrivateKey)) {
-      fail(checks, errors, "relayer.private_key", `${config.relayer.stateMachinePrivateKeyEnv} must be a 32-byte private key`);
-    } else {
-      try {
-        const gasPayer = normalizeAddress(privateKeyToAccount(relayerPrivateKey as Hex).address, "relayer gas payer");
-        if (gasPayer === zeroAddress) {
-          fail(checks, errors, "relayer.gas_payer", "relayer gas payer address must not be zero");
-        } else if (config.relayer.expectedGasPayer && gasPayer !== config.relayer.expectedGasPayer) {
-          fail(checks, errors, "relayer.gas_payer", "relayer private key does not match configured relayer gas payer address");
-        } else {
-          pass(checks, "relayer.gas_payer");
-        }
-      } catch (error) {
-        fail(checks, errors, "relayer.gas_payer", redactErrorMessage(error));
-      }
-    }
-  } else {
-    if (config.security.environment === "production" || config.security.environment === "testnet") {
-      fail(checks, errors, "relayer.configured", `${config.relayer.stateMachinePrivateKeyEnv} is required in ${config.security.environment}`);
-    } else {
-      skip(checks, "relayer.configured", "relayer private key is not configured");
-    }
-  }
 }
 
 const REQUIRED_STATE_MACHINE_MODULE_KEYS = [
@@ -600,17 +524,8 @@ function identityRegistryAddress(contracts: Readonly<Record<string, Address>>): 
     : undefined;
 }
 
-function diagnosticWarnings(
-  config: ChainServicesConfig,
-  values: {
-    readonly relayerConfigured: boolean;
-    readonly relayerPrivateKeyConfigured: boolean;
-  }
-): readonly string[] {
+function diagnosticWarnings(config: ChainServicesConfig): readonly string[] {
   const warnings: string[] = [];
-  if (!values.relayerConfigured && values.relayerPrivateKeyConfigured) {
-    warnings.push("relayer private key is configured without a state-machine contract");
-  }
   if (!config.security.logRedactionEnabled) {
     warnings.push("log redaction is disabled");
   }
@@ -625,46 +540,13 @@ function safeListContractJsonOverrides(env: Env): readonly string[] {
   }
 }
 
-function operatorRoleDiagnostics(config: ChainServicesConfig, env: Env): ConfigDiagnostics["operatorRoles"] {
+function operatorRoleDiagnostics(config: ChainServicesConfig): ConfigDiagnostics["operatorRoles"] {
   return {
-    relayerGasPayer: privateKeyRoleDiagnostics(
-      config.relayer.stateMachinePrivateKeyEnv,
-      env,
-      config.relayer.expectedGasPayer ?? config.operatorRoles.relayerGasPayerAddress
-    ),
     opsConsoleAdmin: {
       configuredCount: (config.operatorRoles.opsConsoleAdmins ?? []).length,
       adminTokenConfigured: (config.operatorRoles.adminTokenHashes ?? []).length > 0
     }
   };
-}
-
-function privateKeyRoleDiagnostics(
-  privateKeyEnv: string,
-  env: Env,
-  expectedAddress: Address | undefined
-): PrivateKeyRoleDiagnostics {
-  const privateKeyConfigured = Boolean(env[privateKeyEnv]?.trim());
-  const address = privateKeyAddress(env[privateKeyEnv], privateKeyEnv);
-  return {
-    privateKeyEnv,
-    privateKeyConfigured,
-    ...(address ? { address } : {}),
-    ...(expectedAddress ? { expectedAddress } : {}),
-    ...(address && expectedAddress ? { addressMatches: address === expectedAddress } : {})
-  };
-}
-
-function privateKeyAddress(privateKey: string | undefined, label: string): Address | undefined {
-  const trimmed = privateKey?.trim();
-  if (!trimmed || !/^0x[0-9a-fA-F]{64}$/.test(trimmed)) {
-    return undefined;
-  }
-  try {
-    return normalizeAddress(privateKeyToAccount(trimmed as Hex).address, label);
-  } catch {
-    return undefined;
-  }
 }
 
 function pass(checks: ConfigDiagnosticCheck[], name: string): void {

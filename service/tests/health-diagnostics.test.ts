@@ -35,7 +35,7 @@ const adminHeaders = {
 };
 
 describe("ops health diagnostics", () => {
-  it("exposes safe runtime, indexer, and preflight summaries without business or reconcile blocks", async () => {
+  it("exposes safe runtime, indexer, and preflight summaries without retired business blocks", async () => {
     const projectionStore = stores.projectionStore;
     await projectionStore.saveSyncState({
       chainId: 31337,
@@ -102,8 +102,6 @@ describe("ops health diagnostics", () => {
     });
     const diagnostics = (detailResponse.body as { diagnostics: Record<string, unknown> }).diagnostics;
     expect(diagnostics).not.toHaveProperty("submissions");
-    expect(diagnostics).not.toHaveProperty("reconcile");
-    expect(JSON.stringify(detailResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
   });
 
   it("requires admin headers for operator console routes", async () => {
@@ -270,7 +268,6 @@ describe("ops health diagnostics", () => {
       }
     });
     expect(statusResponse.body).not.toHaveProperty("submissions");
-    expect(statusResponse.body).not.toHaveProperty("reconcile");
     expect(summaryResponse.status).toBe(200);
     expect(summaryResponse.body).toMatchObject({
       ok: true,
@@ -287,8 +284,6 @@ describe("ops health diagnostics", () => {
       }
     });
     expect(summaryResponse.body).not.toHaveProperty("summary.counts");
-    expect(JSON.stringify(statusResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
-    expect(JSON.stringify(summaryResponse.body)).not.toContain("2222222222222222222222222222222222222222222222222222222222222222");
   });
 
   it("returns stable safe action records for recovery hooks", async () => {
@@ -465,8 +460,6 @@ describe("ops health diagnostics", () => {
         }
       }
     });
-    expect((detailResponse.body as { diagnostics: Record<string, unknown> }).diagnostics)
-      .not.toHaveProperty("reconcile");
   });
 
   it("redacts private keys, full signatures, RPC tokens, presigned URLs, and evidence plaintext", () => {
@@ -500,8 +493,7 @@ function testConfig() {
     UVP_CONTRACTS_JSON: JSON.stringify({
       UVPStateMachine: stateMachine,
       UVPIdentityRegistry: identityRegistry
-    }),
-    UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: "0x2222222222222222222222222222222222222222222222222222222222222222"
+    })
   });
 }
 
@@ -526,27 +518,11 @@ function serverTestConfig(): ChainServicesConfig {
       port: 0,
       indexerPollIntervalMs: 0
     },
-    relayer: {
-      businessSigning: "forbidden",
-      broadcastEnabled: false,
-      stateMachinePrivateKeyEnv: "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY",
-      maxRetries: 0
-    },
     operatorRoles: {},
-    reconcile: {
-      enabled: false,
-      pollIntervalMs: 0,
-      txTimeoutMs: 60_000
-    },
     security: {
       environment: "local",
       preflightStrict: false,
-      logRedactionEnabled: true,
-      broadcastMaxInFlightPerOrder: 1,
-      broadcastMaxRetry: 0,
-      broadcastRetryBaseMs: 250,
-      broadcastRetryMaxMs: 5_000,
-      broadcastReceiptTimeoutMs: 0
+      logRedactionEnabled: true
     }
   };
 }

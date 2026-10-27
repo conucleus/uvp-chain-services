@@ -46,8 +46,9 @@ node --env-file=.env.local --import tsx src/api/server.ts
 - `UVP_ADDRESS_MANIFEST`: 当前网络地址清单
 - `UVP_RPC_URL`, `UVP_CHAIN_ID`: RPC 与链 ID
 - `CHAIN_SERVICES_DATABASE_URL`: 链投影存储（唯一存储 env，PG-only，必须是 `postgres://` DSN；未设置时启动直接报错并提示用 docker 起库）
-- `UVP_STATE_MACHINE_RELAYER_*` / `RECONCILE_*`: 仍由共享 config/preflight 解析，但本进程已没有广播或回执对账消费者
 - `OPS_CONSOLE_ADMIN_IDS` / `CHAIN_SERVICES_ADMIN_TOKEN_HASHES`: 运维 admin 白名单与 token hash
+
+本进程没有 relayer/私钥/广播/回执对账配置：config/preflight 只解析链、索引、存储与运维 admin env。
 
 非本地环境应使用持久数据库并通过安全预检。demo/fixture/mock 运行路径仅存在于 local 档，非 local 环境不含。
 

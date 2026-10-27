@@ -28,8 +28,9 @@ of truth for plans, orders, signals, hooks, or identity bindings. Chain
 Services does not broadcast transactions, hold a gas-payer or business-signing
 key, or accept prepare/submit operations: signed operations are delivered
 directly or through an app-owned relay, and this process only indexes the
-resulting contract events. Rebuildability from contract events is the default
-rule.
+resulting contract events. Its configuration surface therefore contains no
+relayer, private-key, broadcast, or receipt-reconcile settings. Rebuildability
+from contract events is the default rule.
 
 This domain implements the service-side convergence gate for chain projections,
 plan artifacts, generic chain reads, and operator diagnostics. Product Schema,

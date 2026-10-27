@@ -3,12 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  buildConfigDiagnostics,
   loadConfigFromEnv as loadRawConfigFromEnv,
   runConfigPreflight
 } from "../src/config/index.js";
 import type { PreflightPublicClient } from "../src/config/preflight.js";
-import { redactSecrets } from "../src/security/index.js";
 
 const MANDATORY_ENV = {
   CHAIN_SERVICES_RUNTIME_ENV: "local",
@@ -21,15 +19,11 @@ function loadConfigFromEnv(env: Record<string, string | undefined> = {}): Return
 
 const stateMachine = "0x1111111111111111111111111111111111111111";
 const identityRegistry = "0x2222222222222222222222222222222222222222";
-const relayerPrivateKey = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const adminTokenHash = "f7a03f48c0e2aa2d5e55ca186c20032ddbf53b7f5f93fce387d65c3f83433e8d";
 
 const profileEnv = {
   OPS_CONSOLE_ADMIN_IDS: "ops-admin-1",
   CHAIN_SERVICES_ADMIN_TOKEN_HASHES: adminTokenHash,
-  UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: relayerPrivateKey,
-  UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED: "true",
-  RECONCILE_WORKER_ENABLED: "true",
   UVP_CONTRACTS_JSON: JSON.stringify({
     UVPStateMachine: stateMachine,
     UVPIdentityRegistry: identityRegistry
@@ -227,12 +221,6 @@ describe("chain-services config", () => {
     expect(config.database.migrationsAutoRun).toBe(true);
   });
 
-  it("propagates the broadcast retry budget into the relayer config", () => {
-    const config = loadConfigFromEnv({ BROADCAST_MAX_RETRY_ATTEMPTS: "7" });
-    expect(config.relayer.maxRetries).toBe(7);
-    expect(config.security.broadcastMaxRetry).toBe(7);
-  });
-
   it("loads the Base Sepolia testnet profile with chain-only env", () => {
     const config = loadConfigFromEnv({
       CHAIN_SERVICES_RUNTIME_ENV: "testnet",
@@ -243,7 +231,6 @@ describe("chain-services config", () => {
     expect(config.security.environment).toBe("testnet");
     expect(config.operatorRoles.opsConsoleAdmins).toEqual(["ops-admin-1"]);
     expect(config.operatorRoles.adminTokenHashes).toEqual([adminTokenHash]);
-    expect(config.relayer.broadcastEnabled).toBe(true);
   });
 
   it("rejects testnet profiles without the chain-safe operator and RPC env", () => {
@@ -285,11 +272,10 @@ describe("chain-services config", () => {
       UVP_ADDRESS_MANIFEST: manifestPath,
       UVP_RPC_URL: "https://sepolia.example/rpc",
       UVP_CHAIN_ID: "84532",
-      UVP_RELAYER_GAS_PAYER_ADDRESS: "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
       ...profileEnv
     });
     expect(config.security.environment).toBe("staging");
-    expect(config.relayer.expectedGasPayer).toBe("0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a");
+    expect(config.network.contracts.UVPStateMachine).toBe(stateMachine);
   });
 
   it("loads the production profile with chain-only env", () => {
@@ -359,7 +345,6 @@ describe("chain-services config", () => {
       UVP_ADDRESS_MANIFEST: manifestPath,
       UVP_RPC_URL: "https://sepolia.example/rpc",
       UVP_CHAIN_ID: "84532",
-      UVP_RELAYER_GAS_PAYER_ADDRESS: "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
       ...profileEnv
     });
 
@@ -384,7 +369,6 @@ describe("chain-services config", () => {
     };
 
     const diagnostics = await runConfigPreflight(config, {
-      env: { UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: relayerPrivateKey },
       clients: { network: client }
     });
     expect(diagnostics.preflight.status).toBe("passed");
@@ -412,19 +396,5 @@ describe("chain-services config", () => {
     await expect(runConfigPreflight(config, { clients: { network: client } })).rejects.toThrow(
       /RPC chainId 1 does not match configured chainId 84532/
     );
-  });
-
-  it("redacts relayer private keys from config diagnostics", () => {
-    const config = loadConfigFromEnv({
-      UVP_CONTRACTS_JSON: JSON.stringify({
-        UVPStateMachine: stateMachine
-      }),
-      UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: relayerPrivateKey
-    });
-    const diagnostics = buildConfigDiagnostics(config, {
-      env: { UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY: relayerPrivateKey }
-    });
-    const serialized = JSON.stringify(redactSecrets(diagnostics));
-    expect(serialized).not.toContain(relayerPrivateKey.slice(2));
   });
 });

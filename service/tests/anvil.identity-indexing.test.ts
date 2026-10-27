@@ -176,27 +176,11 @@ function testConfig(input: {
       port: 0,
       indexerPollIntervalMs: 50
     },
-    relayer: {
-      businessSigning: "forbidden",
-      broadcastEnabled: false,
-      stateMachinePrivateKeyEnv: "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY",
-      maxRetries: 0
-    },
     operatorRoles: {},
-    reconcile: {
-      enabled: false,
-      pollIntervalMs: 50,
-      txTimeoutMs: 60_000
-    },
     security: {
       environment: "local",
       preflightStrict: false,
-      logRedactionEnabled: true,
-      broadcastMaxInFlightPerOrder: 1,
-      broadcastMaxRetry: 0,
-      broadcastRetryBaseMs: 250,
-      broadcastRetryMaxMs: 5_000,
-      broadcastReceiptTimeoutMs: 0
+      logRedactionEnabled: true
     }
   };
 }

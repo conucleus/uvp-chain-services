@@ -260,7 +260,6 @@ function fallbackConfigDiagnostics(environment: ChainServicesRuntimeEnv): Record
   return {
     environment,
     storageDriver: "unknown",
-    relayerConfigured: false,
     network: {
       chainId: null,
       deploymentBlock: null,

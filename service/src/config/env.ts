@@ -7,7 +7,6 @@ import {
   type ChainTarget,
   type Hex,
 } from "@uvp-eth/service-runtime";
-import { ANVIL_DEFAULT_PRIVATE_KEYS } from "./anvil-defaults.js";
 
 export type FinalityAnchor = "finalized" | "confirmations";
 
@@ -54,24 +53,9 @@ export interface ApiConfig {
   readonly indexerPollIntervalMs: number;
 }
 
-export interface RelayerConfig {
-  readonly businessSigning: "forbidden";
-  readonly broadcastEnabled: boolean;
-  readonly stateMachinePrivateKeyEnv: string;
-  readonly expectedGasPayer?: Address;
-  readonly maxRetries: number;
-}
-
 export interface OperatorRoleConfig {
-  readonly relayerGasPayerAddress?: Address;
   readonly opsConsoleAdmins?: readonly string[];
   readonly adminTokenHashes?: readonly string[];
-}
-
-export interface ReconcileConfig {
-  readonly enabled: boolean;
-  readonly pollIntervalMs: number;
-  readonly txTimeoutMs: number;
 }
 
 export type ChainServicesRuntimeEnv =
@@ -84,20 +68,13 @@ export interface SecurityConfig {
   readonly environment: ChainServicesRuntimeEnv;
   readonly preflightStrict: boolean;
   readonly logRedactionEnabled: boolean;
-  readonly broadcastMaxInFlightPerOrder: number;
-  readonly broadcastMaxRetry: number;
-  readonly broadcastRetryBaseMs: number;
-  readonly broadcastRetryMaxMs: number;
-  readonly broadcastReceiptTimeoutMs: number;
 }
 
 export interface ChainServicesConfig {
   readonly network: NetworkConfig;
   readonly database: DatabaseConfig;
   readonly api: ApiConfig;
-  readonly relayer: RelayerConfig;
   readonly operatorRoles: OperatorRoleConfig;
-  readonly reconcile: ReconcileConfig;
   readonly security: SecurityConfig;
 }
 
@@ -118,9 +95,6 @@ export interface PostgresDatabaseClassification {
 }
 
 export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
-  const stateMachinePrivateKeyEnv =
-    optionalEnv(env, "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY_ENV") ??
-    "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY";
   const operatorRoles = parseOperatorRoleConfig(env);
   const manifest = parseAddressManifest(env);
   const contracts = {
@@ -131,7 +105,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
   const environment = parseRuntimeEnv(env);
   const rpcUrl = resolveRpcUrl(env, manifest.rpcUrlEnv, environment);
   const databaseUrl = requiredDatabaseUrl(env);
-  const broadcastMaxRetry = parseInteger(env, "BROADCAST_MAX_RETRY_ATTEMPTS", 3);
 
   const config: ChainServicesConfig = {
     network: {
@@ -164,25 +137,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
         5_000,
       ),
     },
-    relayer: {
-      businessSigning: "forbidden",
-      broadcastEnabled: parseBoolean(
-        env,
-        "UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED",
-        Boolean(optionalEnv(env, stateMachinePrivateKeyEnv)),
-      ),
-      stateMachinePrivateKeyEnv,
-      ...(operatorRoles.relayerGasPayerAddress
-        ? { expectedGasPayer: operatorRoles.relayerGasPayerAddress }
-        : {}),
-      maxRetries: broadcastMaxRetry,
-    },
     operatorRoles,
-    reconcile: {
-      enabled: parseBoolean(env, "RECONCILE_WORKER_ENABLED", false),
-      pollIntervalMs: parseInteger(env, "RECONCILE_POLL_INTERVAL_MS", 5_000),
-      txTimeoutMs: parseInteger(env, "RECONCILE_TX_TIMEOUT_MS", 30 * 60 * 1000),
-    },
     security: {
       environment,
       preflightStrict: parseBoolean(
@@ -193,19 +148,6 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
           environment === "staging",
       ),
       logRedactionEnabled: parseBoolean(env, "LOG_REDACTION_ENABLED", true),
-      broadcastMaxInFlightPerOrder: parseInteger(
-        env,
-        "BROADCAST_MAX_IN_FLIGHT_PER_ORDER",
-        1,
-      ),
-      broadcastMaxRetry,
-      broadcastRetryBaseMs: parseInteger(env, "BROADCAST_RETRY_BASE_MS", 250),
-      broadcastRetryMaxMs: parseInteger(env, "BROADCAST_RETRY_MAX_MS", 5_000),
-      broadcastReceiptTimeoutMs: parseInteger(
-        env,
-        "BROADCAST_RECEIPT_TIMEOUT_MS",
-        0,
-      ),
     },
   };
 
@@ -374,12 +316,7 @@ function parseBigIntValue(env: Env, name: string, fallback: bigint): bigint {
 }
 
 function parseOperatorRoleConfig(env: Env): OperatorRoleConfig {
-  const relayerGasPayerAddress = firstOptionalAddressEnv(env, [
-    "UVP_RELAYER_GAS_PAYER_ADDRESS",
-    "UVP_STATE_MACHINE_RELAYER_ADDRESS",
-  ]);
   return {
-    ...(relayerGasPayerAddress ? { relayerGasPayerAddress } : {}),
     opsConsoleAdmins: parseStringList(env, "OPS_CONSOLE_ADMIN_IDS"),
     adminTokenHashes: parseAdminTokenHashes(env),
   };
@@ -396,40 +333,6 @@ function parseAdminTokenHashes(env: Env): readonly string[] {
     }
   }
   return hashes;
-}
-
-function optionalAddressEnv(env: Env, name: string): Address | undefined {
-  const rawValue = optionalEnv(env, name);
-  return rawValue ? normalizeAddress(rawValue, name) : undefined;
-}
-
-function firstOptionalAddressEnv(
-  env: Env,
-  names: readonly string[],
-): Address | undefined {
-  for (const name of names) {
-    const address = optionalAddressEnv(env, name);
-    if (address) {
-      return address;
-    }
-  }
-  return undefined;
-}
-
-function optionalBytes32Env(env: Env, name: string): Hex | undefined {
-  const rawValue = optionalEnv(env, name);
-  return rawValue ? normalizeBytes32(rawValue, name) : undefined;
-}
-
-function optionalPrivateKeyEnv(env: Env, name: string): Hex | undefined {
-  const rawValue = optionalEnv(env, name);
-  if (!rawValue) {
-    return undefined;
-  }
-  if (!/^0x[0-9a-fA-F]{64}$/.test(rawValue)) {
-    throw new ConfigError(`${name} must be a 32-byte 0x-prefixed hex string`);
-  }
-  return rawValue.toLowerCase() as Hex;
 }
 
 function parseStringList(env: Env, name: string): readonly string[] {
@@ -789,16 +692,6 @@ function validateProductionSafety(
     );
   }
 
-  const privateKeyEnvNames = new Set([config.relayer.stateMachinePrivateKeyEnv]);
-  for (const envName of privateKeyEnvNames) {
-    const privateKey = optionalEnv(env, envName)?.toLowerCase();
-    if (privateKey && ANVIL_DEFAULT_PRIVATE_KEYS.has(privateKey)) {
-      throw new ConfigError(
-        `${envName} must not use an Anvil default private key in production`,
-      );
-    }
-  }
-
   if (!config.security.preflightStrict) {
     throw new ConfigError(
       "SECURITY_PREFLIGHT_STRICT=false is forbidden in production",
@@ -809,11 +702,6 @@ function validateProductionSafety(
       "LOG_REDACTION_ENABLED=false is forbidden in production",
     );
   }
-  if (!config.reconcile.enabled) {
-    throw new ConfigError(
-      "RECONCILE_WORKER_ENABLED=true is required in production",
-    );
-  }
   if (!stateMachineAddress(config.network.contracts)) {
     throw new ConfigError(
       "UVPStateMachine contract address is required in production",
@@ -822,11 +710,6 @@ function validateProductionSafety(
   if (!identityRegistryAddress(config.network.contracts)) {
     throw new ConfigError(
       "UVPIdentityRegistry contract address is required in production",
-    );
-  }
-  if (!optionalEnv(env, config.relayer.stateMachinePrivateKeyEnv)) {
-    throw new ConfigError(
-      `${config.relayer.stateMachinePrivateKeyEnv} is required in production`,
     );
   }
 }
@@ -903,44 +786,13 @@ function validateStagingSafety(config: ChainServicesConfig, env: Env): void {
     );
   }
 
-  if (!config.relayer.broadcastEnabled) {
-    throw new ConfigError(
-      "UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED=true is required in staging",
-    );
-  }
-  if (!optionalEnv(env, config.relayer.stateMachinePrivateKeyEnv)) {
-    throw new ConfigError(
-      `${config.relayer.stateMachinePrivateKeyEnv} is required in staging`,
-    );
-  }
-  if (!config.relayer.expectedGasPayer) {
-    throw new ConfigError(
-      "UVP_RELAYER_GAS_PAYER_ADDRESS is required in staging",
-    );
-  }
-
   if ((config.operatorRoles.opsConsoleAdmins ?? []).length === 0) {
     throw new ConfigError("OPS_CONSOLE_ADMIN_IDS is required in staging");
   }
   if ((config.operatorRoles.adminTokenHashes ?? []).length === 0) {
     throw new ConfigError("CHAIN_SERVICES_ADMIN_TOKEN_HASHES is required in staging");
   }
-  if (!config.reconcile.enabled) {
-    throw new ConfigError(
-      "RECONCILE_WORKER_ENABLED=true is required in staging",
-    );
-  }
   validateManagedDatabaseCostSafety(config, env, "staging");
-
-  const privateKeyEnvNames = new Set([config.relayer.stateMachinePrivateKeyEnv]);
-  for (const envName of privateKeyEnvNames) {
-    const privateKey = optionalEnv(env, envName)?.toLowerCase();
-    if (privateKey && ANVIL_DEFAULT_PRIVATE_KEYS.has(privateKey)) {
-      throw new ConfigError(
-        `${envName} must not use an Anvil default private key in staging`,
-      );
-    }
-  }
 }
 
 function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
@@ -1014,32 +866,6 @@ function validateTestnetSafety(config: ChainServicesConfig, env: Env): void {
       "LOG_REDACTION_ENABLED=false is forbidden in testnet",
     );
   }
-  if (!config.reconcile.enabled) {
-    throw new ConfigError(
-      "RECONCILE_WORKER_ENABLED=true is required in testnet",
-    );
-  }
-
-  const privateKeyEnvNames = new Set([config.relayer.stateMachinePrivateKeyEnv]);
-  for (const envName of privateKeyEnvNames) {
-    const privateKey = optionalEnv(env, envName)?.toLowerCase();
-    if (privateKey && ANVIL_DEFAULT_PRIVATE_KEYS.has(privateKey)) {
-      throw new ConfigError(
-        `${envName} must not use an Anvil default private key in testnet`,
-      );
-    }
-  }
-
-  if (!optionalEnv(env, config.relayer.stateMachinePrivateKeyEnv)) {
-    throw new ConfigError(
-      `${config.relayer.stateMachinePrivateKeyEnv} is required in testnet`,
-    );
-  }
-  if (!config.relayer.broadcastEnabled) {
-    throw new ConfigError(
-      "UVP_STATE_MACHINE_RELAYER_BROADCAST_ENABLED=false is forbidden in testnet",
-    );
-  }
   validateManagedDatabaseCostSafety(config, env, "testnet");
 }
 
@@ -1064,16 +890,7 @@ function validateManagedDatabaseCostSafety(
     env.UVP_INDEXER_POLL_DISABLED_ACK?.trim() !== "1"
   ) {
     throw new ConfigError(
-      `UVP_INDEXER_POLL_DISABLED_ACK=1 is required to acknowledge the consequences of UVP_INDEXER_POLL_INTERVAL_MS=0 (external participants' events will never enter the projection; reconcile stalls; recovery needs a manual rebuild) when CHAIN_SERVICES_DATABASE_URL points to ${host} in ${environment}`,
-    );
-  }
-  if (
-    config.reconcile.enabled &&
-    config.reconcile.pollIntervalMs > 0 &&
-    config.reconcile.pollIntervalMs < 30_000
-  ) {
-    throw new ConfigError(
-      `RECONCILE_POLL_INTERVAL_MS must be 0 or at least 30000 when CHAIN_SERVICES_DATABASE_URL points to ${host} in ${environment}`,
+      `UVP_INDEXER_POLL_DISABLED_ACK=1 is required to acknowledge the consequences of UVP_INDEXER_POLL_INTERVAL_MS=0 (external participants' events will never enter the projection; recovery needs a manual rebuild) when CHAIN_SERVICES_DATABASE_URL points to ${host} in ${environment}`,
     );
   }
 }

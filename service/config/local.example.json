@@ -15,10 +15,6 @@
     "canonical": false,
     "rebuildSource": "chain-events"
   },
-  "relayer": {
-    "businessSigning": "forbidden",
-    "maxRetries": 3
-  },
   "api": {
     "host": "127.0.0.1",
     "port": 8787,

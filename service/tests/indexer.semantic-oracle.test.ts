@@ -173,23 +173,11 @@ function testConfig(): ChainServicesConfig {
     },
     database: { url: databaseUrl, migrationsAutoRun: true },
     api: { host: "127.0.0.1", port: 8787, indexerPollIntervalMs: 5000 },
-    relayer: {
-      businessSigning: "forbidden",
-      broadcastEnabled: false,
-      stateMachinePrivateKeyEnv: "UVP_STATE_MACHINE_RELAYER_PRIVATE_KEY",
-      maxRetries: 3
-    },
     operatorRoles: {},
-    reconcile: { enabled: false, pollIntervalMs: 5000, txTimeoutMs: 30_000 },
     security: {
       environment: "local",
       preflightStrict: false,
-      logRedactionEnabled: true,
-      broadcastMaxInFlightPerOrder: 1,
-      broadcastMaxRetry: 3,
-      broadcastRetryBaseMs: 250,
-      broadcastRetryMaxMs: 5000,
-      broadcastReceiptTimeoutMs: 0
+      logRedactionEnabled: true
     }
   };
 }
