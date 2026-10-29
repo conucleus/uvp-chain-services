@@ -29,7 +29,7 @@ relay，本进程只索引其产生的合约事件。默认规则是必须能从
 
 本域实现 service 侧收束门禁，覆盖链投影、plan artifacts、通用链读与运维诊断。
 Product Schema、Store authoring、证据、治理 review 与全部业务 HTTP 面由
-`uvp-app-backend` 拥有。
+`used-car/backend`（:8788）拥有。
 
 `/chain/*` 的 wire DTO 与运行时 decoder 由 `@uvp-eth/chain-read-contract`
 拥有；本服务只保留 indexer 内部投影类型，经 `toWire` 序列化。

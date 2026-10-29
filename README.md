@@ -35,7 +35,7 @@ from contract events is the default rule.
 This domain implements the service-side convergence gate for chain projections,
 plan artifacts, generic chain reads, and operator diagnostics. Product Schema,
 Store authoring, evidence, governance review, and all business HTTP surfaces are
-owned by `uvp-app-backend`.
+owned by the used-car backend (`used-car/backend`, :8788).
 
 The `/chain/*` wire DTOs and runtime decoders are owned by
 `@uvp-eth/chain-read-contract`; this service keeps only indexer-internal

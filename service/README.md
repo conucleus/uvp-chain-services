@@ -1,6 +1,6 @@
 # UVP Chain Services
 
-Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负责索引重建。业务行、钱包会话、证据/治理写路径与提交编排已迁 `uvp-app-backend`（:8788）；chain 进程只持链投影，不广播交易、不生成业务签名。投影可以删除后从链上重建，不是新的事实来源。
+Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负责索引重建。业务行、钱包会话、证据/治理写路径与提交编排已迁 `used-car/backend`（:8788）；chain 进程只持链投影，不广播交易、不生成业务签名。投影可以删除后从链上重建，不是新的事实来源。
 
 ## 责任边界
 
@@ -8,7 +8,7 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 - 计划词表（selectorBindings / signalCapabilities / executorCandidates）的唯一 off-chain 权威是 `plan_artifacts`：按 `(chain_id, plan_id, plan_hash)` 内容寻址、行级不可变；索引重建与链读只读该表。产物缺失即重建失败、链读 404，不得退化成空词表继续。产物写入入口是 `plan-artifact:record` CLI（见下文「记录计划编译产物」）；Store 草稿编译入口已随 B2 删除。
 - `UVPIdentityRegistry` 只记录线下主体标识与链上账户的绑定和撤销。
 - Chain Services 不代付 gas、不广播交易、不生成业务签名。Signal/补丁/订单注册的签名与 direct/relay 投递由 `uvp-client` 或应用侧完成；本服务只索引链事件并对外提供链读。dock/timer keeper 等应用自动化已移出 chain-services（见 ARCHITECTURE Phase B）。
-- `GET /identity/bindings` 只读身份投影；治理 review、descriptor 快照和治理签名 key 已迁 `uvp-app-backend`。
+- `GET /identity/bindings` 只读身份投影；治理 review、descriptor 快照和治理签名 key 已迁 `used-car/backend`。
 
 ## 目录结构
 
@@ -20,7 +20,7 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 - `indexer/replay.ts`：统一事件顺序与重放编排。`rebuildOrderProjections` 是投影重建的单一入口，同时推进部署注册表事件族与显式诊断计数（幻影订单、dock 未开启、激活缺补丁等不允许静默的计数）。
 - `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件）、`signal`（信号/授权/委派）、`stage`（阶段补丁与 hook 生命周期）、`docking`（dock 具名接口委托）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
 - 其余：`api/`（链读/运维路由与边界）、`storage/`（projection store）、`config/`（链/索引/运维 env）、`security/`、`chain-adapters/`、`proof-verifier/`、`shared/`（链常量与运行时工具）。
-- 业务模块 `order/`、`product/`、`evidence/`、`governance/`、`store/`、`task/`、`visibility/`、`resources/` 已删除；对应 HTTP/表/签名 key 由 `uvp-app-backend` 拥有。
+- 业务模块 `order/`、`product/`、`evidence/`、`governance/`、`store/`、`task/`、`visibility/`、`resources/` 已删除；对应 HTTP/表/签名 key 由 `used-car/backend` 拥有。
 
 ## 运行
 
@@ -68,5 +68,5 @@ checksum 漂移/已应用版本消失仍 fail-closed。
 
 - chain 只拥有 `chain_event_log`、`chain_index_cursor`、`chain_projection_snapshot`、
   `chain_projection_sync_state`、`indexer_pending_post_commit`、`plan_artifacts`；
-- 业务表全部归 `uvp-app-backend` 的 `app` schema，fresh DB 不会在 `public` 创建它们；
+- 业务表全部归 `used-car/backend` 的 `app` schema，fresh DB 不会在 `public` 创建它们；
 - 本服务以 `public` 为默认 schema 读自己的表，不读写 `app`。
