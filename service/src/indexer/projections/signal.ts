@@ -1,5 +1,5 @@
-// 信号族：SignalSubmitterAuthorized/SignalSubmitted/DerivedSignalSubmitted 与
-// 授权-任务匹配、信号投影键。
+// 信号族：SignalSubmitterAuthorized/SignalSubmitterRevoked/SignalSubmitted/
+// DerivedSignalSubmitted 与授权-任务匹配、信号投影键。
 // patch 生效授权由 authorizeSignalSubmittersFromModule 写显式订单级
 // 授权（本文件投影的 SignalSubmitterAuthorized 事件流即其完整重建源）。
 import type { ChainEvent } from "../events.js";
@@ -104,6 +104,26 @@ export function applySignalSubmitterAuthorized(
   markMatchingTasksAssigned(order, authorization);
   appendOrderProof(order, authorization.proof);
   appendOrderTimeline(order, timelineOf(event, "执行授权已写入链上", authorization.proof, { orderId, planId: order.planId }));
+}
+
+export function applySignalSubmitterRevoked(
+  state: {
+    orders: Map<string, MutableStateMachineOrderProjection>;
+  },
+  event: ChainEvent
+): void {
+  const orderId = requiredBytes32Arg(event, "orderId");
+  const planId = optionalBytes32Arg(event, "planId");
+  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
+  const sourceId = requiredBytes32Arg(event, "sourceId");
+  const signalId = requiredBytes32Arg(event, "signalId");
+  const submitter = requiredAddressArg(event, "submitter");
+  const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash, submitter });
+
+  delete order.authorizations[signalAuthorizationProjectionKey(sourceId, signalId, submitter)];
+  order.updatedAt = provenanceOf(event);
+  appendOrderProof(order, proof);
+  appendOrderTimeline(order, timelineOf(event, "执行授权已撤销", proof, { orderId, planId: order.planId }));
 }
 
 export function applySignalSubmitted(

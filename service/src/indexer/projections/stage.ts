@@ -51,17 +51,17 @@ export type StateMachineStageExecutorPatchMode = "assign" | "handoff";
 
 export interface StateMachineStageExecutorOverlayProjection {
   readonly orderId: Hex;
-  readonly selectorStageId: Hex;
+  readonly selectorStageId?: Hex;
   readonly targetStageId: Hex;
-  readonly selectorWallet: Address;
+  readonly selectorWallet?: Address;
   readonly activeExecutorWallet: Address;
-  readonly mode: StateMachineStageExecutorPatchMode;
+  readonly mode?: StateMachineStageExecutorPatchMode;
   readonly modeHash?: Hex;
   readonly previousExecutor?: Address;
   readonly authorizationsHash?: Hex;
   readonly roleHash: Hex;
   readonly executorMetadataHash: Hex;
-  readonly patchHash: Hex;
+  readonly patchHash?: Hex;
   readonly patchNonce: string;
   readonly metadataURI: string;
   readonly updatedAt: ProjectionProvenance;
@@ -264,21 +264,38 @@ export function applyStageExecutorActivated(
   });
   const key = stageExecutorOverlayProjectionKey(targetStageId);
   const existing = order.stageExecutorOverlays[key];
-  if (!existing) {
-    state.diagnostics.unresolvedStageActivationEventCount += 1;
-  }
-  if (existing && compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
-    const overlay: StateMachineStageExecutorOverlayProjection = {
-      ...existing,
-      activeExecutorWallet: executor,
-      roleHash: requiredBytes32Arg(event, "role"),
-      executorMetadataHash: requiredBytes32Arg(event, "metadataHash"),
-      patchNonce,
-      metadataURI: optionalStringArg(event, "metadataURI") ?? existing.metadataURI,
-      updatedAt: provenanceOf(event),
-      activatedAt: provenanceOf(event),
-      activationProof: proof
-    };
+  if (!existing || compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
+    const roleHash = requiredBytes32Arg(event, "role");
+    const executorMetadataHash = requiredBytes32Arg(event, "metadataHash");
+    const metadataURI = optionalStringArg(event, "metadataURI") ?? existing?.metadataURI ?? "";
+    const nonceIncreased =
+      existing !== undefined && compareUintStrings(patchNonce, existing.patchNonce) > 0;
+    const overlay: StateMachineStageExecutorOverlayProjection = existing && !nonceIncreased
+      ? {
+        ...existing,
+        activeExecutorWallet: executor,
+        roleHash,
+        executorMetadataHash,
+        patchNonce,
+        metadataURI,
+        updatedAt: provenanceOf(event),
+        activatedAt: provenanceOf(event),
+        activationProof: proof
+      }
+      : {
+        orderId,
+        targetStageId,
+        activeExecutorWallet: executor,
+        roleHash,
+        executorMetadataHash,
+        patchNonce,
+        metadataURI,
+        ...(nonceIncreased ? { previousExecutor: existing.activeExecutorWallet } : {}),
+        updatedAt: provenanceOf(event),
+        activatedAt: provenanceOf(event),
+        proof,
+        activationProof: proof
+      };
     order.stageExecutorOverlays[key] = overlay;
     markTargetStageTasksAssignedFromOverlay(order, overlay);
   }

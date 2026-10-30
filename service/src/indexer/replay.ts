@@ -41,7 +41,8 @@ import {
 import {
   applyDerivedSignalSubmitted,
   applySignalSubmitted,
-  applySignalSubmitterAuthorized
+  applySignalSubmitterAuthorized,
+  applySignalSubmitterRevoked
 } from "./projections/signal.js";
 import {
   applyHookReady,
@@ -309,6 +310,9 @@ function applyStateMachineEvent(
       return;
     case "SignalSubmitterAuthorized":
       applySignalSubmitterAuthorized(state, event);
+      return;
+    case "SignalSubmitterRevoked":
+      applySignalSubmitterRevoked(state, event);
       return;
     case "SignalSubmitted":
       applySignalSubmitted(state, event);
