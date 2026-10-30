@@ -265,11 +265,12 @@ export function applyStageExecutorActivated(
   const key = stageExecutorOverlayProjectionKey(targetStageId);
   const existing = order.stageExecutorOverlays[key];
   if (!existing || compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
-    const roleHash = requiredBytes32Arg(event, "role");
-    const executorMetadataHash = requiredBytes32Arg(event, "metadataHash");
-    const metadataURI = optionalStringArg(event, "metadataURI") ?? existing?.metadataURI ?? "";
     const nonceIncreased =
       existing !== undefined && compareUintStrings(patchNonce, existing.patchNonce) > 0;
+    const roleHash = requiredBytes32Arg(event, "role");
+    const executorMetadataHash = requiredBytes32Arg(event, "metadataHash");
+    const metadataURI =
+      optionalStringArg(event, "metadataURI") ?? (nonceIncreased ? "" : existing?.metadataURI ?? "");
     const overlay: StateMachineStageExecutorOverlayProjection = existing && !nonceIncreased
       ? {
         ...existing,

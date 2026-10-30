@@ -166,15 +166,16 @@ describe("ViemChainEventSource", () => {
     ]);
   });
 
-  it("decodes StageExecutorActivated metadata URI from EVM logs", async () => {
+  it("decodes StageExecutorActivated metadata URI and SignalSubmitterRevoked args from EVM logs", async () => {
     const activatedLog = stageExecutorActivatedLog();
+    const revokedLog = signalSubmitterRevokedLog();
     const eventSource = new ViemChainEventSource({
       publicClient: {
         async getBlockNumber() {
           return 0n;
         },
         async getLogs() {
-          return [activatedLog];
+          return [activatedLog, revokedLog];
         }
       }
     });
@@ -193,6 +194,14 @@ describe("ViemChainEventSource", () => {
         eventName: "StageExecutorActivated",
         args: expect.objectContaining({
           metadataURI: "ipfs://stage-executor-patch/1"
+        })
+      }),
+      expect.objectContaining({
+        eventName: "SignalSubmitterRevoked",
+        args: expect.objectContaining({
+          sourceId: bytes32Hex("04"),
+          signalId: bytes32Hex("05"),
+          submitter: "0x3333333333333333333333333333333333333333"
         })
       })
     ]);
@@ -414,7 +423,8 @@ function compareEventShape(
 
 const stateMachineTestAbi = parseAbi([
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",
-  "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)"
+  "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)",
+  "event SignalSubmitterRevoked(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,address submitter)"
 ]);
 
 function planRegisteredLog(input: { readonly removed?: boolean } = {}): Log {
@@ -474,6 +484,32 @@ function stageExecutorActivatedLog(
       abi: stateMachineTestAbi,
       eventName: "StageExecutorActivated",
       args: { planId, orderId, targetStageId }
+    }),
+    removed: false
+  } as Log;
+}
+
+function signalSubmitterRevokedLog(): Log {
+  const planId = "0x0000000000000000000000000000000000000000000000000000000000000303";
+  const orderId = "0x0000000000000000000000000000000000000000000000000000000000000101";
+  const sourceId = bytes32Hex("04");
+  const signalId = bytes32Hex("05");
+  const submitter = "0x3333333333333333333333333333333333333333";
+  return {
+    address: "0x1111111111111111111111111111111111111111",
+    blockNumber: 100n,
+    blockHash: bytes32Hex("ab"),
+    transactionHash: bytes32Hex("cf"),
+    transactionIndex: 0,
+    logIndex: 1,
+    data: encodeAbiParameters(
+      [{ type: "bytes32" }, { type: "address" }],
+      [signalId, submitter]
+    ),
+    topics: encodeEventTopics({
+      abi: stateMachineTestAbi,
+      eventName: "SignalSubmitterRevoked",
+      args: { planId, orderId, sourceId }
     }),
     removed: false
   } as Log;
