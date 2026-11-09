@@ -99,6 +99,7 @@ describe("chain-services config", () => {
           stateMachineAddress: stateMachine,
           modules: {
             stagePatch: "0x4444444444444444444444444444444444444444",
+            fileResource: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             derivedSignal: "0x5555555555555555555555555555555555555555",
             docking: "0x6666666666666666666666666666666666666666",
             planMetadata: "0x8888888888888888888888888888888888888888",
@@ -136,6 +137,7 @@ describe("chain-services config", () => {
         stateMachineAddress: stateMachine,
         modules: {
           stagePatch: "0x4444444444444444444444444444444444444444",
+          fileResource: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           derivedSignal: "0x5555555555555555555555555555555555555555",
           docking: "0x6666666666666666666666666666666666666666",
           planMetadata: "0x8888888888888888888888888888888888888888",
@@ -328,6 +330,7 @@ describe("chain-services config", () => {
         status: "active",
         modules: {
           stagePatch: "0x4444444444444444444444444444444444444444",
+          fileResource: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           derivedSignal: "0x5555555555555555555555555555555555555555",
           docking: "0x6666666666666666666666666666666666666666",
           planMetadata: "0x8888888888888888888888888888888888888888",
@@ -350,6 +353,7 @@ describe("chain-services config", () => {
 
     const moduleAddress = {
       stagePatchModule: "0x4444444444444444444444444444444444444444",
+      fileResourceModule: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       derivedSignalModule: "0x5555555555555555555555555555555555555555",
       dockingModule: "0x6666666666666666666666666666666666666666",
       planMetadataModule: "0x8888888888888888888888888888888888888888",

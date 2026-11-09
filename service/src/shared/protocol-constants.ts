@@ -9,4 +9,3 @@ export {
 } from "@uvp-eth/protocol-bindings";
 
 export const STAGE_EXECUTOR_PATCH_SIGNAL_ID = "0xbbb1770c9313f4029a89e03f4719037cdad52864ab4da5f623bc7c8a0c489e97" as const;
-export const STAGE_RESOURCE_PATCH_SIGNAL_ID = "0x6dff331f2bb7b785cbcd99a911e6d30dc8714f43b3b9ba80c658215445ddd0ba" as const;

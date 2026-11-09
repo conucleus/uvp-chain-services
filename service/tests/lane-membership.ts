@@ -10,6 +10,7 @@ export const UNIT_TEST_FILES = [
   "indexer.reorg-determinism.test.ts",
   "plan-artifact-cli.test.ts",
   "proof-verifier.test.ts",
+  "stage-files.test.ts",
   "storage.test.ts",
   "viem-event-source.test.ts"
 ] as const;

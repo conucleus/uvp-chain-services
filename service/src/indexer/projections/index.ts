@@ -35,11 +35,14 @@ export { signalAuthorizationMatchesHook } from "./signal.js";
 export type {
   StateMachineStageExecutorPatchMode,
   StateMachineStageExecutorOverlayProjection,
-  StateMachineStageResourceOverlayProjection,
   StateMachineStageMaterializationProjection,
   StateMachineHookStatus,
   StateMachineHookProjection
 } from "./stage.js";
+export type {
+  StateMachineStageFileEntryProjection,
+  StateMachineStageFileMapProjection
+} from "./stage-files.js";
 export type {
   StateMachineDockInputDeliveryProjection,
   StateMachineDockOutputDeliveryProjection,

@@ -66,6 +66,7 @@ export interface RunConfigPreflightOptions {
 
 const stateMachineModuleAbi = parseAbi([
   "function stagePatchModule() view returns (address)",
+  "function fileResourceModule() view returns (address)",
   "function derivedSignalModule() view returns (address)",
   "function dockingModule() view returns (address)",
   "function planMetadataModule() view returns (address)",
@@ -170,6 +171,7 @@ function runStaticPreflight(
 
 const REQUIRED_STATE_MACHINE_MODULE_KEYS = [
   "stagePatch",
+  "fileResource",
   "derivedSignal",
   "docking",
   "planMetadata",
@@ -265,6 +267,7 @@ function runStateMachineModulesManifestPreflight(
 
 const FLAT_CONTRACT_BY_MODULE_KEY = {
   stagePatch: "UVPStagePatchModule",
+  fileResource: "UVPFileResourceModule",
   derivedSignal: "UVPDerivedSignalModule",
   docking: "UVPDockingModule",
   planMetadata: "UVPPlanMetadataModule",
@@ -401,6 +404,7 @@ async function checkStateMachineModules(input: {
 
   const getterByKey = {
     stagePatch: "stagePatchModule",
+    fileResource: "fileResourceModule",
     derivedSignal: "derivedSignalModule",
     docking: "dockingModule",
     planMetadata: "planMetadataModule",

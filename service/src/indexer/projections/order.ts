@@ -33,9 +33,9 @@ import type {
   MutableStateMachineHookProjection,
   StateMachineHookProjection,
   StateMachineStageExecutorOverlayProjection,
-  StateMachineStageMaterializationProjection,
-  StateMachineStageResourceOverlayProjection
+  StateMachineStageMaterializationProjection
 } from "./stage.js";
+import type { StateMachineStageFileMapProjection } from "./stage-files.js";
 import type { MutableStateMachineTaskProjection, StateMachineTaskProjection } from "./task.js";
 
 export type StateMachineOrderStatus = "registered" | "unknown";
@@ -79,7 +79,7 @@ export interface StateMachineOrderProjection {
   readonly derivedSignals: Readonly<Record<string, StateMachineDerivedSignalProjection>>;
   readonly stageMaterializations: Readonly<Record<string, StateMachineStageMaterializationProjection>>;
   readonly stageExecutorOverlays: Readonly<Record<string, StateMachineStageExecutorOverlayProjection>>;
-  readonly stageResourceOverlays: Readonly<Record<string, StateMachineStageResourceOverlayProjection>>;
+  readonly stageFiles: Readonly<Record<string, StateMachineStageFileMapProjection>>;
   readonly triggerLink?: StateMachineOrderTriggerLinkProjection;
   readonly forkLineage?: StateMachineOrderForkProjection;
   readonly hooks: Readonly<Record<string, StateMachineHookProjection>>;
@@ -110,7 +110,7 @@ export type MutableStateMachineOrderProjection = Writable<
     | "derivedSignals"
     | "stageMaterializations"
     | "stageExecutorOverlays"
-    | "stageResourceOverlays"
+    | "stageFiles"
     | "triggerLink"
     | "forkLineage"
     | "hooks"
@@ -124,7 +124,7 @@ export type MutableStateMachineOrderProjection = Writable<
   derivedSignals: Record<string, StateMachineDerivedSignalProjection>;
   stageMaterializations: Record<string, StateMachineStageMaterializationProjection>;
   stageExecutorOverlays: Record<string, StateMachineStageExecutorOverlayProjection>;
-  stageResourceOverlays: Record<string, StateMachineStageResourceOverlayProjection>;
+  stageFiles: Record<string, StateMachineStageFileMapProjection>;
   triggerLink?: StateMachineOrderTriggerLinkProjection;
   forkLineage?: StateMachineOrderForkProjection;
   hooks: Record<string, MutableStateMachineHookProjection>;
@@ -515,7 +515,7 @@ export function ensureStateMachineOrder(
     derivedSignals: {},
     stageMaterializations: {},
     stageExecutorOverlays: {},
-    stageResourceOverlays: {},
+    stageFiles: {},
     hooks: {},
     tasks: {},
     timeline: [],

@@ -75,9 +75,6 @@ const signalId = "0x000000000000000000000000000000000000000000000000000000000000
 const payloadHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const idempotencyKey = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const patchHash = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-const manifestHash = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-const policyHash = "0x1212121212121212121212121212121212121212121212121212121212121212";
-const resourceKey = bytes32Text("doc-1");
 const deploymentIdV1 = "0x0000000000000000000000000000000000000000000000000000000000000d01";
 const deploymentIdV2 = "0x0000000000000000000000000000000000000000000000000000000000000d02";
 const abiHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
@@ -526,18 +523,6 @@ describe("indexer projection replay", () => {
         patchNonce: 1n,
         metadataURI: "ipfs://stage-executor-patch/1"
       }),
-      chainEvent(5n, 0, "StageResourcePatchApplied", {
-        orderId: stateMachineOrderId,
-        selectorStageId,
-        targetStageId: stageId,
-        resourceKey,
-        selector: signer,
-        manifestHash,
-        policyHash,
-        patchHash: bytes32Hex("9001"),
-        patchNonce: 1n,
-        manifestURI: "ipfs://resource-manifests/doc-1"
-      }),
       chainEvent(6n, 0, "SignalSubmitterAuthorized", {
         orderId: stateMachineOrderId,
         sourceId: stageId,
@@ -615,18 +600,6 @@ describe("indexer projection replay", () => {
     expect(activationOnlyOverlay?.patchHash).toBeUndefined();
     expect(activationOnlyOverlay?.previousExecutor).toBeUndefined();
     expect(snapshot.unresolvedStageActivationEventCount).toBe(0);
-    expect(order?.stageResourceOverlays[`${stageId}:${resourceKey}`]).toMatchObject({
-      orderId: stateMachineOrderId,
-      selectorStageId,
-      targetStageId: stageId,
-      resourceKey,
-      selectorWallet: signer,
-      manifestHash,
-      policyHash,
-      patchNonce: "1",
-      manifestURI: "ipfs://resource-manifests/doc-1",
-      proof: expect.objectContaining({ eventName: "StageResourcePatchApplied" })
-    });
     expect(targetTask).toMatchObject({
       assigneeRole: "stage_overlay_executor",
       assigneeWallet: replacementExecutor,
@@ -635,13 +608,11 @@ describe("indexer projection replay", () => {
     });
     expect(order?.proof.map((proof) => proof.eventName)).toEqual(expect.arrayContaining([
       "StageExecutorPatchApplied",
-      "StageResourcePatchApplied",
       "StageExecutorActivated",
       "HookReady"
     ]));
     expect(order?.proof.filter((proof) => proof.eventName === "StageExecutorActivated")).toHaveLength(3);
     expect(order?.timeline.map((event) => event.eventName)).toContain("StageExecutorPatchApplied");
-    expect(order?.timeline.map((event) => event.eventName)).toContain("StageResourcePatchApplied");
   });
 
   it("projects module-level derived signal provenance on the target order", () => {

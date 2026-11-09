@@ -27,6 +27,7 @@ export interface StateMachineDeploymentConfig {
   readonly stateMachineAddress: Address;
   readonly modules?: {
     readonly stagePatch?: Address;
+    readonly fileResource?: Address;
     readonly derivedSignal?: Address;
     readonly docking?: Address;
     readonly planMetadata?: Address;
@@ -555,6 +556,7 @@ function parseStateMachineDeploymentModules(
   const modules: Record<string, Address> = {};
   for (const key of [
     "stagePatch",
+    "fileResource",
     "derivedSignal",
     "docking",
     "planMetadata",

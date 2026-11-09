@@ -50,9 +50,14 @@ import {
   applyStageExecutorActivated,
   applyStageExecutorPatchApplied,
   applyStageMaterialized,
-  applyStageResourcePatchApplied,
   applyTimerPoked
 } from "./projections/stage.js";
+import {
+  assertStageFilePatchReplaysComplete,
+  applyStageFileOpApplied,
+  applyStageFilePatchApplied,
+  type StageFileReplayIndex
+} from "./projections/stage-files.js";
 import {
   applyDockAttached,
   applyDockInputSubmitted,
@@ -108,6 +113,7 @@ export function rebuildOrderProjections(
   const stateMachinePlans = new Map<string, MutableStateMachinePlanProjection>();
   const stateMachineOrders = new Map<string, MutableStateMachineOrderProjection>();
   const stateMachineDocks = new Map<string, MutableStateMachineDockProjection>();
+  const stageFileReplay: StageFileReplayIndex = new Map();
   const diagnostics: ProjectionReplayDiagnostics = {
     unresolvedModuleOrderEventCount: 0,
     unresolvedDockEventCount: 0,
@@ -134,11 +140,13 @@ export function rebuildOrderProjections(
       orders: stateMachineOrders,
       docks: stateMachineDocks,
       capabilityTables,
+      stageFileReplay,
       diagnostics
     }, event);
     eventCount += 1;
     lastEvent = provenanceOf(event);
   }
+  assertStageFilePatchReplaysComplete(stageFileReplay);
 
   const stateMachineOrderRecord: Record<string, StateMachineOrderProjection> = {};
   const stateMachineTaskRecord: Record<string, StateMachineTaskProjection> = {};
@@ -183,7 +191,12 @@ export function rebuildOrderProjections(
       derivedSignals: { ...order.derivedSignals },
       stageMaterializations: { ...order.stageMaterializations },
       stageExecutorOverlays: { ...order.stageExecutorOverlays },
-      stageResourceOverlays: { ...order.stageResourceOverlays },
+      stageFiles: Object.fromEntries(
+        Object.entries(order.stageFiles).map(([targetStageId, stageFile]) => [
+          targetStageId,
+          { ...stageFile, files: { ...stageFile.files } }
+        ])
+      ),
       ...(order.triggerLink ? { triggerLink: order.triggerLink } : {}),
       ...(order.forkLineage ? { forkLineage: order.forkLineage } : {}),
       hooks: Object.fromEntries(Object.entries(order.hooks).map(([hookId, hook]) => [hookId, { ...hook }])),
@@ -279,6 +292,7 @@ function applyStateMachineEvent(
     orders: Map<string, MutableStateMachineOrderProjection>;
     docks: Map<string, MutableStateMachineDockProjection>;
     capabilityTables: ReadonlyMap<string, PlanCapabilityTablesInput>;
+    stageFileReplay: StageFileReplayIndex;
     diagnostics: ProjectionReplayDiagnostics;
   },
   event: ChainEvent
@@ -332,8 +346,11 @@ function applyStateMachineEvent(
     case "StageExecutorPatchApplied":
       applyStageExecutorPatchApplied(state, event);
       return;
-    case "StageResourcePatchApplied":
-      applyStageResourcePatchApplied(state, event);
+    case "StageFilePatchApplied":
+      applyStageFilePatchApplied(state, event);
+      return;
+    case "StageFileOpApplied":
+      applyStageFileOpApplied(state, event);
       return;
     case "StageExecutorActivated":
       applyStageExecutorActivated(state, event);

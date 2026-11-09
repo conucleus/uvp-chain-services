@@ -4,7 +4,7 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 
 ## 责任边界
 
-- `UVPStateMachine` 及其冻结模块定义 Order、Stage、Signal、Plan 发布、提交授权和资源补丁。
+- `UVPStateMachine` 及其冻结模块定义 Order、Stage、Signal、Plan 发布、提交授权和阶段文件补丁。
 - 计划词表（selectorBindings / signalCapabilities / executorCandidates）的唯一 off-chain 权威是 `plan_artifacts`：按 `(chain_id, plan_id, plan_hash)` 内容寻址、行级不可变；索引重建与链读只读该表。产物缺失即重建失败、链读 404，不得退化成空词表继续。产物写入入口是 `plan-artifact:record` CLI（见下文「记录计划编译产物」）；Store 草稿编译入口已随 B2 删除。
 - `UVPIdentityRegistry` 只记录线下主体标识与链上账户的绑定和撤销。
 - Chain Services 不代付 gas、不广播交易、不生成业务签名。Signal/补丁/订单注册的签名与 direct/relay 投递由 `uvp-client` 或应用侧完成；本服务只索引链事件并对外提供链读。dock/timer keeper 等应用自动化已移出 chain-services（见 ARCHITECTURE Phase B）。
@@ -18,7 +18,7 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 - `cli/record-plan-artifact.ts`：`plan_artifacts` 的生产写入入口（校验产物身份后写入，不跑迁移；见下文「记录计划编译产物」）。
 - `projection/plan-artifacts.ts`：计划编译产物表（`plan_artifacts`）的 Postgres store 与索引/语义 oracle 解析器；缺失产物抛 `PlanArtifactMissingError`。
 - `indexer/replay.ts`：统一事件顺序与重放编排。`rebuildOrderProjections` 是投影重建的单一入口，同时推进部署注册表事件族与显式诊断计数（幻影订单、dock 未开启、激活缺补丁等不允许静默的计数）。
-- `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件）、`signal`（信号/授权/委派）、`stage`（阶段补丁与 hook 生命周期）、`docking`（dock 具名接口委托）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
+- `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件）、`signal`（信号/授权/委派）、`stage`（阶段执行方补丁与 hook 生命周期）、`stage-files`（阶段文件补丁重放）、`docking`（dock 具名接口委托）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
 - 其余：`api/`（链读/运维路由与边界）、`storage/`（projection store）、`config/`（链/索引/运维 env）、`security/`、`chain-adapters/`、`proof-verifier/`、`shared/`（链常量与运行时工具）。
 - 业务模块 `order/`、`product/`、`evidence/`、`governance/`、`store/`、`task/`、`visibility/`、`resources/` 已删除；对应 HTTP/表/签名 key 由 `used-car/backend` 拥有。
 

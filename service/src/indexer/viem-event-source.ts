@@ -12,6 +12,7 @@ import type { ChainServicesConfig } from "../config/index.js";
 import {
   DERIVED_SIGNAL_MODULE_ABI,
   DOCKING_MODULE_ABI,
+  FILE_RESOURCE_MODULE_ABI,
   ORDER_LINK_MODULE_ABI,
   STAGE_PATCH_MODULE_ABI,
   STATE_MACHINE_ABI
@@ -28,6 +29,10 @@ const stateMachineAbi: Abi = (STATE_MACHINE_ABI as Abi).filter(
 );
 
 const stagePatchModuleAbi: Abi = (STAGE_PATCH_MODULE_ABI as Abi).filter(
+  (entry) => entry.type === "event"
+);
+
+const fileResourceModuleAbi: Abi = (FILE_RESOURCE_MODULE_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
 
@@ -63,6 +68,7 @@ export const INDEXER_EVENT_ABIS = {
   UVPIdentityRegistry: identityRegistryAbi,
   UVPDeploymentRegistry: deploymentRegistryAbi,
   UVPStagePatchModule: stagePatchModuleAbi,
+  UVPFileResourceModule: fileResourceModuleAbi,
   UVPDerivedSignalModule: derivedSignalModuleAbi,
   UVPOrderLinkModule: orderLinkModuleAbi,
   UVPDockingModule: dockingModuleAbi
@@ -78,6 +84,7 @@ type IndexedContractName =
   | "UVPIdentityRegistry"
   | "UVPDeploymentRegistry"
   | "UVPStagePatchModule"
+  | "UVPFileResourceModule"
   | "UVPDerivedSignalModule"
   | "UVPOrderLinkModule"
   | "UVPDockingModule";
@@ -298,6 +305,11 @@ function indexedContracts(
       stagePatchModuleAbi,
     ),
     indexedContract(
+      "UVPFileResourceModule",
+      config.network.contracts,
+      fileResourceModuleAbi,
+    ),
+    indexedContract(
       "UVPDerivedSignalModule",
       config.network.contracts,
       derivedSignalModuleAbi,
@@ -317,6 +329,9 @@ function indexedContracts(
       const moduleContracts = [
         modules.stagePatch
           ? moduleContract("UVPStagePatchModule", modules.stagePatch, stagePatchModuleAbi)
+          : undefined,
+        modules.fileResource
+          ? moduleContract("UVPFileResourceModule", modules.fileResource, fileResourceModuleAbi)
           : undefined,
         modules.derivedSignal
           ? moduleContract("UVPDerivedSignalModule", modules.derivedSignal, derivedSignalModuleAbi)

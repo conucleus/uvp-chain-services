@@ -1,5 +1,5 @@
-// 阶段族：StageMaterialized、阶段补丁/资源/激活与 hook 生命周期
-// 事件（HookStatusChanged/HookReady/TimerPoked）及 overlay 投影。
+// 阶段族：StageMaterialized、阶段执行方补丁/激活与 hook 生命周期事件
+// （HookStatusChanged/HookReady/TimerPoked）及 executor overlay 投影。
 // patch 生效授权走 SignalSubmitterAuthorized 事件流（显式订单级授权）。
 import type { ChainEvent } from "../events.js";
 import {
@@ -68,21 +68,6 @@ export interface StateMachineStageExecutorOverlayProjection {
   readonly activatedAt?: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
   readonly activationProof?: StateMachineProofProjection;
-}
-
-export interface StateMachineStageResourceOverlayProjection {
-  readonly orderId: Hex;
-  readonly selectorStageId: Hex;
-  readonly targetStageId: Hex;
-  readonly resourceKey: Hex;
-  readonly selectorWallet: Address;
-  readonly manifestHash: Hex;
-  readonly policyHash: Hex;
-  readonly patchHash: Hex;
-  readonly patchNonce: string;
-  readonly manifestURI: string;
-  readonly updatedAt: ProjectionProvenance;
-  readonly proof: StateMachineProofProjection;
 }
 
 export interface StateMachineHookProjection {
@@ -196,51 +181,6 @@ export function applyStageExecutorPatchApplied(
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "阶段执行方已更新", proof, { orderId, planId: order.planId }));
-}
-
-export function applyStageResourcePatchApplied(
-  state: {
-    modules: StateMachineModuleIndex;
-    diagnostics: ProjectionReplayDiagnostics;
-    orders: Map<string, MutableStateMachineOrderProjection>;
-  },
-  event: ChainEvent
-): void {
-  const orderId = requiredBytes32Arg(event, "orderId");
-  const planId = optionalBytes32Arg(event, "planId");
-  const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId, planId);
-  const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
-  const targetStageId = requiredBytes32Arg(event, "targetStageId");
-  const resourceKey = requiredBytes32Arg(event, "resourceKey");
-  const selectorWallet = requiredAddressArg(event, "selector");
-  const patchNonce = uintArgAsString(event, "patchNonce");
-  const proof = proofOf(event, {
-    orderId,
-    planId: order.planId,
-    planHash: order.planHash,
-    submitter: selectorWallet
-  });
-  const key = stageResourceOverlayProjectionKey(targetStageId, resourceKey);
-  const existing = order.stageResourceOverlays[key];
-  if (!existing || compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
-    order.stageResourceOverlays[key] = {
-      orderId,
-      selectorStageId,
-      targetStageId,
-      resourceKey,
-      selectorWallet,
-      manifestHash: requiredBytes32Arg(event, "manifestHash"),
-      policyHash: requiredBytes32Arg(event, "policyHash"),
-      patchHash: requiredBytes32Arg(event, "patchHash"),
-      patchNonce,
-      manifestURI: optionalStringArg(event, "manifestURI") ?? "",
-      updatedAt: provenanceOf(event),
-      proof
-    };
-  }
-  order.updatedAt = provenanceOf(event);
-  appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "阶段资源清单已更新", proof, { orderId, planId: order.planId }));
 }
 
 export function applyStageExecutorActivated(
@@ -476,10 +416,6 @@ export function markTargetStageTasksAssignedFromOverlay(
 
 function stageExecutorOverlayProjectionKey(targetStageId: Hex): string {
   return targetStageId.toLowerCase();
-}
-
-function stageResourceOverlayProjectionKey(targetStageId: Hex, resourceKey: Hex): string {
-  return `${targetStageId.toLowerCase()}:${resourceKey.toLowerCase()}`;
 }
 
 export function findActiveStageOverlayForHook(
