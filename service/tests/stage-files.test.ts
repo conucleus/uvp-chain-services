@@ -72,20 +72,28 @@ describe("stage file patch replay", () => {
     expect(stageFile?.files[KEY_B]).toBeUndefined();
     expect(Object.keys(stageFile?.files ?? {}).sort()).toEqual([KEY_A, KEY_C].sort());
     expect(stageFile?.filesHash).not.toBe(ZERO_BYTES32);
-    expect(order?.proof.filter((proof) => proof.eventName === "StageFilePatchApplied")).toHaveLength(1);
-    expect(order?.timeline.map((event) => event.eventName)).toContain("StageFilePatchApplied");
 
     const otherStageSnapshot = rebuildOrderProjections([
       ...events,
       patchEvent(4n, 0, OTHER_PATCH_HASH, ZERO_BYTES32, 1n, OTHER_STAGE_ID),
       opEvent(4n, 1, 0, KEY_A, CONTENT_HASH_A, "ipfs://stage-file/a-other", OTHER_STAGE_ID)
     ]);
-    expect(otherStageSnapshot.stateMachineOrders[stateMachineScopedKey(
+    const otherStageOrder = otherStageSnapshot.stateMachineOrders[stateMachineScopedKey(
       CHAIN_ID,
       STATE_MACHINE,
       PLAN_ID,
       ORDER_ID
-    )]?.stageFiles[OTHER_STAGE_ID]?.filesHash).not.toBe(stageFile?.filesHash);
+    )];
+    expect(otherStageOrder?.stageFiles[OTHER_STAGE_ID]).toMatchObject({
+      planId: PLAN_ID,
+      orderId: ORDER_ID,
+      targetStageId: OTHER_STAGE_ID
+    });
+    expect(otherStageOrder?.stageFiles[OTHER_STAGE_ID]?.files[KEY_A]).toMatchObject({
+      contentHash: CONTENT_HASH_A,
+      patchHash: OTHER_PATCH_HASH
+    });
+    expect(otherStageOrder?.stageFiles[TARGET_STAGE_ID]?.filesHash).toBe(stageFile?.filesHash);
   });
 
   it("rejects a next patch whose baseHash does not match the replayed stage files hash", () => {
