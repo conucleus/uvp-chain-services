@@ -1,13 +1,14 @@
 // Generic chain projection reads (anonymous): orders/tasks/sync state/snapshot
-// and plan artifact admissions straight from ProjectionStore / plan_artifacts,
-// with no session, business rows, or participant clipping. Order ids are
-// plan-scoped, so the item read always returns `{ orders }` (one or many) and
-// 404s only when no projection exists.
+// and plan artifact admissions/trigger enumeration straight from
+// ProjectionStore / plan_artifacts, with no session, business rows, or
+// participant clipping. Order ids are plan-scoped, so the item read always
+// returns `{ orders }` (one or many) and 404s only when no projection exists.
 
 import {
   toWire,
   type ChainOrderProjection,
   type ChainPlanAdmissionsResponse,
+  type ChainPlanTriggersResponse,
   type ChainProjectionSnapshot,
   type ChainSyncState,
   type ChainTaskProjection,
@@ -32,6 +33,7 @@ const TASK_PATH = /^\/chain\/tasks\/([^/]+)$/;
 const SYNC_STATE_PATH = "/chain/sync-state";
 const SNAPSHOT_PATH = "/chain/snapshot";
 const PLAN_ADMISSIONS_PATH = /^\/chain\/plans\/([^/]+)\/([^/]+)\/admissions$/;
+const PLAN_TRIGGERS_PATH = /^\/chain\/plans\/([^/]+)\/([^/]+)\/triggers$/;
 
 export function createChainReadRouteModule(): RouteModule {
   return {
@@ -101,6 +103,15 @@ async function handleRead(
       context,
       decodePathParameter(planAdmissionsMatch[1] ?? ""),
       decodePathParameter(planAdmissionsMatch[2] ?? ""),
+    );
+  }
+
+  const planTriggersMatch = PLAN_TRIGGERS_PATH.exec(request.pathname);
+  if (planTriggersMatch) {
+    return planTriggersRead(
+      context,
+      decodePathParameter(planTriggersMatch[1] ?? ""),
+      decodePathParameter(planTriggersMatch[2] ?? ""),
     );
   }
 
@@ -186,6 +197,50 @@ async function planAdmissionsRead(
       signalName: admission.signalName,
       signalId: admission.signalId,
       sourceId: admission.sourceId,
+    })),
+  };
+  return { status: 200, body: response };
+}
+
+async function planTriggersRead(
+  context: ApiRouteContext,
+  rawPlanId: string,
+  rawPlanHash: string,
+): Promise<ApiResponse> {
+  const planId = planIdentifier(rawPlanId, "planId");
+  if (!planId) {
+    return invalidPlanIdentifier("planId");
+  }
+  const planHash = planIdentifier(rawPlanHash, "planHash");
+  if (!planHash) {
+    return invalidPlanIdentifier("planHash");
+  }
+  const planArtifacts = context.planArtifacts;
+  if (!planArtifacts) {
+    throw new Error("plan artifact store is not wired into the chain read API");
+  }
+  const record = await planArtifacts.store.get({
+    chainId: planArtifacts.chainId,
+    planId,
+    planHash,
+  });
+  if (!record) {
+    return { status: 404, body: { error: "plan_artifact_missing" } };
+  }
+  const response: ChainPlanTriggersResponse = {
+    chainId: record.chainId,
+    planId: record.planId,
+    planHash: record.planHash,
+    triggers: record.artifact.triggers.map((trigger) => ({
+      hookId: trigger.hookId,
+      stageIdentifier: trigger.stageIdentifier,
+      stageId: trigger.stageId,
+      hookName: trigger.hookName,
+      orderTriggerKind: trigger.orderTriggerKind,
+      source: trigger.source,
+      signalName: trigger.signalName,
+      sourceId: trigger.sourceId,
+      signalId: trigger.signalId,
     })),
   };
   return { status: 200, body: response };
