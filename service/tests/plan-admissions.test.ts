@@ -238,10 +238,9 @@ describe("plan triggers read", () => {
     expect(parsed.triggers.map((trigger) => trigger.hookId)).toEqual(
       triggersArtifact.triggers.map((trigger) => trigger.hookId)
     );
-    expect(parsed.triggers.map((trigger) => trigger.signalName)).toEqual([
-      "intake.orderPlaced",
-      "cutting.cutDone"
-    ]);
+    expect(parsed.triggers.map((trigger) => trigger.signalName)).toEqual(
+      triggersArtifact.triggers.map((trigger) => trigger.signalName)
+    );
   });
 
   it("404s with plan_artifact_missing when no artifact is recorded for the plan hash", async () => {
