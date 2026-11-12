@@ -7,7 +7,7 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 - `UVPStateMachine` 及其冻结模块定义 Order、Stage、Signal、Plan 发布、提交授权和阶段文件补丁。
 - 计划词表（selectorBindings / signalCapabilities / executorCandidates）的唯一 off-chain 权威是 `plan_artifacts`：按 `(chain_id, plan_id, plan_hash)` 内容寻址、行级不可变；索引重建与链读只读该表。产物缺失即重建失败、链读 404，不得退化成空词表继续。产物写入入口是 `plan-artifact:record` CLI（见下文「记录计划编译产物」）；Store 草稿编译入口已随 B2 删除。
 - `UVPIdentityRegistry` 只记录线下主体标识与链上账户的绑定和撤销。
-- Chain Services 不代付 gas、不广播交易、不生成业务签名。Signal/补丁/订单注册的签名与 direct/relay 投递由 `uvp-client` 或应用侧完成；本服务只索引链事件并对外提供链读。dock/timer keeper 等应用自动化已移出 chain-services（见 ARCHITECTURE Phase B）。
+- Chain Services 不代付 gas、不广播交易、不生成业务签名。Signal/补丁/订单注册的签名与 direct/relay 投递由 `uvp-client` 或应用侧完成；本服务只索引链事件并对外提供链读。timer keeper 等应用自动化已移出 chain-services（见 ARCHITECTURE Phase B）。
 - `GET /identity/bindings` 只读身份投影；治理 review、descriptor 快照和治理签名 key 已迁 `used-car/backend`。
 
 ## 目录结构
@@ -16,9 +16,12 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 
 - `indexer/service.ts`：扫描与索引入口（增量刷新、重组回滚、`--rebuild` 全量重建）。
 - `cli/record-plan-artifact.ts`：`plan_artifacts` 的生产写入入口（校验产物身份后写入，不跑迁移；见下文「记录计划编译产物」）。
+- `cli/record-dock-artifact.ts`：`dock_artifacts` 的生产写入入口（校验 `uvp.dock.v1` 产物身份后写入，不跑迁移）。
 - `projection/plan-artifacts.ts`：计划编译产物表（`plan_artifacts`）的 Postgres store 与索引/语义 oracle 解析器；缺失产物抛 `PlanArtifactMissingError`。
-- `indexer/replay.ts`：统一事件顺序与重放编排。`rebuildOrderProjections` 是投影重建的单一入口，同时推进部署注册表事件族与显式诊断计数（幻影订单、dock 未开启、激活缺补丁等不允许静默的计数）。
-- `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件）、`signal`（信号/授权/委派）、`stage`（阶段执行方补丁与 hook 生命周期）、`stage-files`（阶段文件补丁重放）、`docking`（dock 具名接口委托）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
+- `projection/dock-artifacts.ts`：Dock 文档产物表（`dock_artifacts`）的 Postgres store 与索引解析器；保存 `uvp.dock.v1`（validWhen AST/dependencies/atoms），是可从链上事件 + 记录产物重建的链下读投影，不是第二权威；缺失或身份不一致抛 `DockArtifactMissingError`/`DockArtifactIdentityError`，重建 fail-closed。
+- 链读 snapshot 提供静态 Dock（`uvp.dock.v1`）与 DockBinding/per-output 投影（`uvp.dockBinding.v1`），没有 Link 行/状态。binding 身份、payload generation、emitted/emitted_by 来自链上事件，可从 `chain_event_log` 重建；A/B 窗口的当前 `satisfied`/相对 due 是 API 读时对 stage-patch `dockOutputWindow` view 的 live enrichment（不持久、不构成历史），无历史时 `opened_by`/`closed_by` 省略。chain-services 不实现第二套 Hook AST 求值器；view 读取按 binding+output 做短 TTL 缓存，view 不可用时 snapshot 读 fail-closed 503。
+- `indexer/replay.ts`：统一事件顺序与重放编排。`rebuildOrderProjections` 是投影重建的单一入口，同时推进部署注册表事件族与显式诊断计数（幻影订单、激活缺补丁等不允许静默的计数）。
+- `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件）、`signal`（信号/授权/委派）、`stage`（阶段执行方补丁与 hook 生命周期）、`stage-files`（阶段文件补丁重放）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
 - 其余：`api/`（链读/运维路由与边界）、`storage/`（projection store）、`config/`（链/索引/运维 env）、`security/`、`chain-adapters/`、`proof-verifier/`、`shared/`（链常量与运行时工具）。
 - 业务模块 `order/`、`product/`、`evidence/`、`governance/`、`store/`、`task/`、`visibility/`、`resources/` 已删除；对应 HTTP/表/签名 key 由 `used-car/backend` 拥有。
 
@@ -52,6 +55,18 @@ node --env-file=.env.local --import tsx src/api/server.ts
 
 非本地环境应使用持久数据库并通过安全预检。demo/fixture/mock 运行路径仅存在于 local 档，非 local 环境不含。
 
+## 记录 Dock 编译产物
+
+`dock_artifacts` 是 Dock 文档的链下读投影（可从链上 `DockRegistered` 事件 + 已记录产物重建），不是第二权威；链上 `UVPDockRegistry` 仍是 Dock 存在性的权威。写入入口只接受 uvp-core `analyzeDock` 生成的 `uvp.dock.v1` 产物：
+
+```bash
+CHAIN_SERVICES_DATABASE_URL=postgres://... \
+  pnpm --filter @uvp-eth/chain-services dock-artifact:record -- \
+  --file <dock-artifact.json> --chain-id <n> [--dry-run] [--verbose]
+```
+
+CLI 校验产物封闭字段集、`dkid = zd-<docHash 前 32 hex>`、各 id/validWhen AST/dependencies/atoms 形状后写入 `(chain_id, dkid, doc_hash)`；缺失或身份不一致时索引重建 fail-closed，不返回空 Dock。`--dry-run` 只校验并打印身份；CLI 不跑迁移。
+
 ## 存储与测试（PG-only）
 
 存储引擎只保留 Postgres：部署跑什么，本地与测试就跑什么。
@@ -62,11 +77,11 @@ node --env-file=.env.local --import tsx src/api/server.ts
 ## 迁移口径
 
 系统未上线：`service/migrations/postgres/` 只有**单一基线 `0001_schema.sql`**，由当前最终 schema 的
-`pg_dump --schema-only` 生成（6 张 chain/投影表 + 函数/触发器/索引/约束）。不再保留 0002/0003/0004
+`pg_dump --schema-only` 生成（7 张 chain/投影表 + 函数/触发器/索引/约束）。不再保留 0002/0003/0004
 历史迁移；旧库直接重建，不做升级路径。迁移台账 `chain_services_migrations` 由 runner 创建，
 checksum 漂移/已应用版本消失仍 fail-closed。
 
 - chain 只拥有 `chain_event_log`、`chain_index_cursor`、`chain_projection_snapshot`、
-  `chain_projection_sync_state`、`indexer_pending_post_commit`、`plan_artifacts`；
+  `chain_projection_sync_state`、`indexer_pending_post_commit`、`plan_artifacts`、`dock_artifacts`；
 - 业务表全部归 `used-car/backend` 的 `app` schema，fresh DB 不会在 `public` 创建它们；
 - 本服务以 `public` 为默认 schema 读自己的表，不读写 `app`。

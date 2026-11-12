@@ -44,11 +44,11 @@ export type {
   StateMachineStageFileMapProjection
 } from "./stage-files.js";
 export type {
-  StateMachineDockInputDeliveryProjection,
-  StateMachineDockOutputDeliveryProjection,
-  StateMachineDockMode,
-  StateMachineDockProjection
-} from "./docking.js";
+  StateMachineDockAtomProjection,
+  StateMachineDockOutputProjection,
+  StateMachineDockProjection,
+  StateMachineDockBindingProjection
+} from "./dock.js";
 export type {
   StateMachineTaskStatus,
   StateMachineTaskProjection,

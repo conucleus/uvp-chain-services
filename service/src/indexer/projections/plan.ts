@@ -40,8 +40,6 @@ export interface StateMachinePlanProjection {
   readonly publisher?: Address;
   readonly hooksHash?: Hex;
   readonly capabilitiesRoot?: Hex;
-  readonly dockRoutesRoot?: Hex;
-  readonly dockInterfaceRoot?: Hex;
   readonly executorCandidatesRoot?: Hex;
   readonly birthAuthorizer?: Address;
   readonly committedAt?: ProjectionProvenance;
@@ -129,8 +127,6 @@ export function applyPlanCommitted(
     publisher,
     hooksHash: requiredBytes32Arg(event, "hooksHash"),
     capabilitiesRoot: requiredBytes32Arg(event, "capabilitiesRoot"),
-    dockRoutesRoot: requiredBytes32Arg(event, "dockRoutesRoot"),
-    dockInterfaceRoot: requiredBytes32Arg(event, "dockInterfaceRoot"),
     ...(optionalBytes32Arg(event, "executorCandidatesRoot")
       ? { executorCandidatesRoot: optionalBytes32Arg(event, "executorCandidatesRoot")! }
       : {}),

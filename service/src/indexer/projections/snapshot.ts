@@ -7,7 +7,10 @@ import type {
   StateMachineOrderProjection
 } from "./order.js";
 import type { MutableStateMachinePlanProjection, StateMachinePlanProjection } from "./plan.js";
-import type { StateMachineDockProjection } from "./docking.js";
+import type {
+  StateMachineDockBindingProjection,
+  StateMachineDockProjection
+} from "./dock.js";
 import type { StateMachineTaskProjection } from "./task.js";
 
 export type StateMachineDeploymentStatus =
@@ -57,14 +60,11 @@ export interface ProjectionSnapshot {
   readonly stateMachinePlans: Readonly<Record<string, StateMachinePlanProjection>>;
   readonly stateMachineOrders: Readonly<Record<string, StateMachineOrderProjection>>;
   readonly stateMachineDocks: Readonly<Record<string, StateMachineDockProjection>>;
-  readonly stateMachineDocksByTargetOrder: Readonly<Record<string, readonly string[]>>;
-  readonly stateMachineOrderDockChainDepth: Readonly<Record<string, number>>;
+  readonly stateMachineDockBindings: Readonly<Record<string, StateMachineDockBindingProjection>>;
   readonly stateMachineTasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly lastEvent?: ProjectionProvenance;
   readonly unresolvedModuleOrderEventCount?: number;
-  readonly unresolvedDockEventCount?: number;
   readonly unresolvedStageActivationEventCount?: number;
-  readonly unresolvedDockTargetDeploymentCount?: number;
   readonly capabilityEnrichmentMismatchCount?: number;
   readonly unknownEventCount?: number;
 }
@@ -77,9 +77,7 @@ export type MutableStateMachineDeploymentProjection = Writable<StateMachineDeplo
 
 export interface ProjectionReplayDiagnostics {
   unresolvedModuleOrderEventCount: number;
-  unresolvedDockEventCount: number;
   unresolvedStageActivationEventCount: number;
-  unresolvedDockTargetDeploymentCount: number;
   capabilityEnrichmentMismatchCount: number;
   unknownEventCount: number;
 }
@@ -94,13 +92,10 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     stateMachinePlans: {},
     stateMachineOrders: {},
     stateMachineDocks: {},
-    stateMachineDocksByTargetOrder: {},
-    stateMachineOrderDockChainDepth: {},
+    stateMachineDockBindings: {},
     stateMachineTasks: {},
     unresolvedModuleOrderEventCount: 0,
-    unresolvedDockEventCount: 0,
     unresolvedStageActivationEventCount: 0,
-    unresolvedDockTargetDeploymentCount: 0,
     capabilityEnrichmentMismatchCount: 0,
     unknownEventCount: 0
   };

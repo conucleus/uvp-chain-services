@@ -17,6 +17,7 @@ import {
   rebuildOrderProjections
 } from "./replay.js";
 import type { ProjectionReplayOptions } from "./replay.js";
+import type { DockArtifact } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "./projections/plan.js";
 import {
   emptySemanticOracleSummary,
@@ -26,6 +27,7 @@ import {
 } from "./semantic-oracle.js";
 import { createEmptyIdentityProjectionSnapshot, rebuildIdentityProjections } from "./identity-projections.js";
 import { createChainServicesStores } from "../storage/factory.js";
+import { createDockArtifactResolver } from "../projection/dock-artifacts.js";
 import { createPlanArtifactResolvers } from "../projection/plan-artifacts.js";
 import {
   defaultProjectionScope,
@@ -109,6 +111,10 @@ export interface IndexerServiceOptions {
     planId: Hex,
     planHash: Hex
   ) => Promise<SemanticOraclePlan | undefined>;
+  readonly resolveDockArtifact?: (
+    dkid: Hex,
+    docHash: Hex
+  ) => Promise<DockArtifact>;
   readonly logger?: Logger;
 }
 
@@ -164,6 +170,7 @@ export class IndexerService implements LifecycleService {
   #cursor: EventCursor | undefined;
   #consecutiveCursorCasFailures = 0;
   #planCapabilityTablesCache = new Map<string, PlanCapabilityTablesInput>();
+  #dockArtifactsCache = new Map<string, DockArtifact>();
   #semanticOraclePlansCache = new Map<string, SemanticOraclePlan>();
   readonly #config: ChainServicesConfig;
   readonly #eventSource: ChainEventSource;
@@ -176,6 +183,9 @@ export class IndexerService implements LifecycleService {
   readonly #resolveSemanticOraclePlan:
     | ((planId: Hex, planHash: Hex) => Promise<SemanticOraclePlan | undefined>)
     | undefined;
+  readonly #resolveDockArtifact:
+    | ((dkid: Hex, docHash: Hex) => Promise<DockArtifact>)
+    | undefined;
   readonly #logger: Logger;
   readonly #scope: ProjectionScope;
 
@@ -187,6 +197,7 @@ export class IndexerService implements LifecycleService {
     this.#projectionAutomationProcessor = options.projectionAutomationProcessor;
     this.#resolvePlanCapabilityTables = options.resolvePlanCapabilityTables;
     this.#resolveSemanticOraclePlan = options.resolveSemanticOraclePlan;
+    this.#resolveDockArtifact = options.resolveDockArtifact;
     this.#logger = options.logger ?? noopLogger;
     this.#scope = defaultProjectionScope(options.config.network.chainId);
   }
@@ -220,6 +231,55 @@ export class IndexerService implements LifecycleService {
     return {
       planCapabilityTables: [...this.#planCapabilityTablesCache.values()]
     };
+  }
+
+  async #projectionReplayOptionsFor(
+    events: readonly ChainEvent[]
+  ): Promise<ProjectionReplayOptions | undefined> {
+    const planOptions = await this.#planCapabilityTablesFor(events);
+    const resolver = this.#resolveDockArtifact;
+    if (resolver) {
+      for (const anchor of this.#collectDockAnchors(events).values()) {
+        const key = `${anchor.dkid.toLowerCase()}:${anchor.docHash.toLowerCase()}`;
+        if (this.#dockArtifactsCache.has(key)) {
+          continue;
+        }
+        try {
+          this.#dockArtifactsCache.set(key, await resolver(anchor.dkid, anchor.docHash));
+        } catch (error) {
+          this.#logger.error("dock artifact resolution failed; the rebuild aborts instead of serving an unverified dock projection (fail-closed)", {
+            dkid: anchor.dkid,
+            docHash: anchor.docHash,
+            message: error instanceof Error ? redactErrorMessage(error) : "unknown resolution error"
+          });
+          throw error;
+        }
+      }
+    }
+    const dockArtifacts = [...this.#dockArtifactsCache.values()];
+    if (!planOptions && dockArtifacts.length === 0) {
+      return undefined;
+    }
+    return {
+      ...(planOptions ?? {}),
+      ...(dockArtifacts.length > 0 ? { dockArtifacts } : {})
+    };
+  }
+
+  #collectDockAnchors(events: readonly ChainEvent[]): Map<string, { readonly dkid: Hex; readonly docHash: Hex }> {
+    const anchors = new Map<string, { readonly dkid: Hex; readonly docHash: Hex }>();
+    for (const event of events) {
+      if (event.removed === true || event.eventName !== "DockRegistered") {
+        continue;
+      }
+      const dkid = optionalBytes32Arg(event, "dkid");
+      const docHash = optionalBytes32Arg(event, "docHash");
+      if (!dkid || !docHash) {
+        continue;
+      }
+      anchors.set(`${dkid.toLowerCase()}:${docHash.toLowerCase()}`, { dkid, docHash });
+    }
+    return anchors;
   }
 
   async #semanticOraclePlansFor(
@@ -478,7 +538,7 @@ export class IndexerService implements LifecycleService {
         finalizedBlock,
         ...(await this.#cursorBlockHash(finalizedBlock))
       };
-      const enrichmentOptions = await this.#planCapabilityTablesFor(events);
+      const enrichmentOptions = await this.#projectionReplayOptionsFor(events);
       const semanticOraclePlans = await this.#semanticOraclePlansFor(events);
       rebuildNotificationStepId = await this.#prePersistRebuildNotificationStep(activeEvents);
       const snapshot = await this.#store.resetFromEvents({
@@ -536,9 +596,7 @@ export class IndexerService implements LifecycleService {
         unresolvedIdentityRevokeEventCount: identitySnapshot.unresolvedRevokeEventCount ?? 0,
         mismatchCount: summary.mismatchCount,
         unresolvedModuleOrderEventCount: snapshot.unresolvedModuleOrderEventCount ?? 0,
-        unresolvedDockEventCount: snapshot.unresolvedDockEventCount ?? 0,
         unresolvedStageActivationEventCount: snapshot.unresolvedStageActivationEventCount ?? 0,
-        unresolvedDockTargetDeploymentCount: snapshot.unresolvedDockTargetDeploymentCount ?? 0,
         capabilityEnrichmentMismatchCount: snapshot.capabilityEnrichmentMismatchCount ?? 0,
         unknownEventCount: snapshot.unknownEventCount ?? 0,
         semanticOracleMismatchCount: semanticOracle.semanticOracleMismatchCount,
@@ -750,7 +808,7 @@ export class IndexerService implements LifecycleService {
     const enrichmentEvents = this.#resolvePlanCapabilityTables
       ? [...(await durableStore.listEvents({ chainId: this.#scope.chainId })), ...events]
       : events;
-    const enrichmentOptions = await this.#planCapabilityTablesFor(enrichmentEvents);
+    const enrichmentOptions = await this.#projectionReplayOptionsFor(enrichmentEvents);
     const semanticOraclePlans = await this.#semanticOraclePlansFor(enrichmentEvents);
 
     let identitySnapshot: Awaited<ReturnType<typeof rebuildIdentityProjections>> | undefined;
@@ -834,9 +892,7 @@ export class IndexerService implements LifecycleService {
       stateMachineOrderCount: result.summary.stateMachineOrderCount,
       mismatchCount: result.summary.mismatchCount,
       unresolvedModuleOrderEventCount: result.snapshot.unresolvedModuleOrderEventCount ?? 0,
-      unresolvedDockEventCount: result.snapshot.unresolvedDockEventCount ?? 0,
       unresolvedStageActivationEventCount: result.snapshot.unresolvedStageActivationEventCount ?? 0,
-      unresolvedDockTargetDeploymentCount: result.snapshot.unresolvedDockTargetDeploymentCount ?? 0,
       capabilityEnrichmentMismatchCount: result.snapshot.capabilityEnrichmentMismatchCount ?? 0,
       unknownEventCount: result.snapshot.unknownEventCount ?? 0,
       semanticOracleMismatchCount: oracleResult.semanticOracleMismatchCount,
@@ -1080,7 +1136,7 @@ export class IndexerService implements LifecycleService {
     const deploymentBlock = this.#config.network.deploymentBlock;
     const survivingEvents = (await durableStore.listEvents({ chainId: this.#scope.chainId }))
       .filter((event) => event.blockNumber <= ancestorBlock);
-    const enrichmentOptions = await this.#planCapabilityTablesFor(survivingEvents);
+    const enrichmentOptions = await this.#projectionReplayOptionsFor(survivingEvents);
     const semanticOraclePlans = await this.#semanticOraclePlansFor(survivingEvents);
     await durableStore.withTransaction(async () => {
       const deleted = await durableStore.deleteEventsAfterBlock(
@@ -1633,12 +1689,17 @@ async function main(): Promise<void> {
         store: stores.planArtifactStore,
         chainId: config.network.chainId
       });
+      const dockArtifacts = createDockArtifactResolver({
+        store: stores.dockArtifactStore,
+        chainId: config.network.chainId
+      });
       const service = createIndexerService({
         config,
         eventSource,
         store: stores.projectionStore,
         resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
         resolveSemanticOraclePlan: planArtifacts.resolveSemanticOraclePlan,
+        resolveDockArtifact: dockArtifacts.resolveDockArtifact,
         logger: consoleLogger
       });
       const targetBlock = parseTargetBlockArg(process.argv);

@@ -11,7 +11,7 @@ import {
 import type { ChainServicesConfig } from "../config/index.js";
 import {
   DERIVED_SIGNAL_MODULE_ABI,
-  DOCKING_MODULE_ABI,
+  DOCK_REGISTRY_ABI,
   FILE_RESOURCE_MODULE_ABI,
   ORDER_LINK_MODULE_ABI,
   STAGE_PATCH_MODULE_ABI,
@@ -40,11 +40,11 @@ const derivedSignalModuleAbi: Abi = (DERIVED_SIGNAL_MODULE_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
 
-const orderLinkModuleAbi: Abi = (ORDER_LINK_MODULE_ABI as Abi).filter(
+const dockRegistryAbi: Abi = (DOCK_REGISTRY_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
 
-const dockingModuleAbi: Abi = (DOCKING_MODULE_ABI as Abi).filter(
+const orderLinkModuleAbi: Abi = (ORDER_LINK_MODULE_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
 
@@ -70,8 +70,8 @@ export const INDEXER_EVENT_ABIS = {
   UVPStagePatchModule: stagePatchModuleAbi,
   UVPFileResourceModule: fileResourceModuleAbi,
   UVPDerivedSignalModule: derivedSignalModuleAbi,
-  UVPOrderLinkModule: orderLinkModuleAbi,
-  UVPDockingModule: dockingModuleAbi
+  UVPDockRegistry: dockRegistryAbi,
+  UVPOrderLinkModule: orderLinkModuleAbi
 } as const;
 
 const maxGetLogsBlockSpan = 9_999n;
@@ -86,8 +86,8 @@ type IndexedContractName =
   | "UVPStagePatchModule"
   | "UVPFileResourceModule"
   | "UVPDerivedSignalModule"
-  | "UVPOrderLinkModule"
-  | "UVPDockingModule";
+  | "UVPDockRegistry"
+  | "UVPOrderLinkModule";
 
 interface IndexedContract {
   readonly name: IndexedContractName;
@@ -315,14 +315,14 @@ function indexedContracts(
       derivedSignalModuleAbi,
     ),
     indexedContract(
+      "UVPDockRegistry",
+      config.network.contracts,
+      dockRegistryAbi,
+    ),
+    indexedContract(
       "UVPOrderLinkModule",
       config.network.contracts,
       orderLinkModuleAbi,
-    ),
-    indexedContract(
-      "UVPDockingModule",
-      config.network.contracts,
-      dockingModuleAbi,
     ),
     ...stateMachineDeployments.flatMap((deployment) => {
       const modules = deployment.modules ?? {};
@@ -336,11 +336,11 @@ function indexedContracts(
         modules.derivedSignal
           ? moduleContract("UVPDerivedSignalModule", modules.derivedSignal, derivedSignalModuleAbi)
           : undefined,
+        modules.dockRegistry
+          ? moduleContract("UVPDockRegistry", modules.dockRegistry, dockRegistryAbi)
+          : undefined,
         modules.orderLink
           ? moduleContract("UVPOrderLinkModule", modules.orderLink, orderLinkModuleAbi)
-          : undefined,
-        modules.docking
-          ? moduleContract("UVPDockingModule", modules.docking, dockingModuleAbi)
           : undefined,
       ].filter((contract): contract is IndexedContract => Boolean(contract));
       return [

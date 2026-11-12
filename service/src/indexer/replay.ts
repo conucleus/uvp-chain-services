@@ -2,6 +2,7 @@
 // （含部署注册表事件族与显式诊断计数的推进），供索引器与存储对账调用。
 // 各事件族与投影构造见 ./projections/。
 import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "./events.js";
+import type { DockArtifact } from "@uvp-eth/compiler";
 import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {
   ZERO_BYTES32,
@@ -24,8 +25,6 @@ import {
   applyOrderRelayerRecorded,
   applyOrderTriggered,
   applyStateMachineModuleSet,
-  stateMachineOrderProjectionKey,
-  stateMachineScopedKey,
   stateMachineTaskProjectionKey,
   type MutableStateMachineModuleProjection,
   type MutableStateMachineOrderProjection,
@@ -59,15 +58,17 @@ import {
   type StageFileReplayIndex
 } from "./projections/stage-files.js";
 import {
-  applyDockAttached,
-  applyDockInputSubmitted,
-  applyDockOpened,
-  applyDockOutputSatisfied,
+  applyDockBindingPoked,
   applyDockOutputSubmitted,
-  type MutableStateMachineDockProjection,
-  type StateMachineDockProjection
-} from "./projections/docking.js";
+  applyDockRegistered,
+  applyStageDockExecutorSelected
+} from "./projections/dock.js";
 import type { MutableStateMachinePlanProjection } from "./projections/plan.js";
+import type {
+  MutableStateMachineDockBindingProjection,
+  StateMachineDockProjection,
+  StateMachineDockSelectionProjection
+} from "./projections/dock.js";
 import type { StateMachineTaskProjection } from "./projections/task.js";
 import {
   type MutableStateMachineDeploymentProjection,
@@ -112,19 +113,25 @@ export function rebuildOrderProjections(
   const contractGovernance = new Map<string, MutableContractGovernanceProjection>();
   const stateMachinePlans = new Map<string, MutableStateMachinePlanProjection>();
   const stateMachineOrders = new Map<string, MutableStateMachineOrderProjection>();
-  const stateMachineDocks = new Map<string, MutableStateMachineDockProjection>();
+  const stateMachineDocks = new Map<string, StateMachineDockProjection>();
+  const stateMachineDockSelections = new Map<string, StateMachineDockSelectionProjection>();
+  const stateMachineDockBindings = new Map<string, MutableStateMachineDockBindingProjection>();
   const stageFileReplay: StageFileReplayIndex = new Map();
   const diagnostics: ProjectionReplayDiagnostics = {
     unresolvedModuleOrderEventCount: 0,
-    unresolvedDockEventCount: 0,
     unresolvedStageActivationEventCount: 0,
-    unresolvedDockTargetDeploymentCount: 0,
     capabilityEnrichmentMismatchCount: 0,
     unknownEventCount: 0
   };
   const capabilityTables = new Map<string, PlanCapabilityTablesInput>();
   for (const source of options.planCapabilityTables ?? []) {
     capabilityTables.set(source.planId.toLowerCase(), source);
+  }
+  const dockArtifacts = new Map<string, DockArtifact>();
+  const dockArtifactsByDkid = new Map<string, DockArtifact>();
+  for (const artifact of options.dockArtifacts ?? []) {
+    dockArtifacts.set(artifact.docHash.toLowerCase(), artifact);
+    dockArtifactsByDkid.set(artifact.dkid, artifact);
   }
   let activeStateMachineDeploymentId: Hex | undefined;
   let eventCount = 0;
@@ -139,6 +146,10 @@ export function rebuildOrderProjections(
       plans: stateMachinePlans,
       orders: stateMachineOrders,
       docks: stateMachineDocks,
+      dockSelections: stateMachineDockSelections,
+      dockBindings: stateMachineDockBindings,
+      dockArtifacts,
+      dockArtifactsByDkid,
       capabilityTables,
       stageFileReplay,
       diagnostics
@@ -150,24 +161,6 @@ export function rebuildOrderProjections(
 
   const stateMachineOrderRecord: Record<string, StateMachineOrderProjection> = {};
   const stateMachineTaskRecord: Record<string, StateMachineTaskProjection> = {};
-  const stateMachineDockRecord: Record<string, StateMachineDockProjection> = {};
-  const stateMachineDocksByTargetOrder: Record<string, string[]> = {};
-  for (const [dockKey, dock] of stateMachineDocks) {
-    stateMachineDockRecord[dockKey] = {
-      ...dock,
-      inputDeliveries: { ...dock.inputDeliveries },
-      outputDeliveries: { ...dock.outputDeliveries }
-    };
-    const targetOrderKey = stateMachineScopedKey(
-      dock.chainId,
-      dock.stateMachineAddress,
-      dock.targetPlanId,
-      dock.linkedOrderId
-    );
-    const dockKeys = (stateMachineDocksByTargetOrder[targetOrderKey] ??= []);
-    dockKeys.push(dockKey);
-  }
-  const stateMachineOrderDockChainDepth = deriveOrderDockChainDepth(stateMachineDocks);
   for (const [orderId, order] of stateMachineOrders) {
     const readonlyTasks: Record<string, StateMachineTaskProjection> = {};
     for (const [taskId, task] of Object.entries(order.tasks)) {
@@ -216,14 +209,11 @@ export function rebuildOrderProjections(
     contractGovernance: Object.fromEntries(contractGovernance),
     stateMachinePlans: Object.fromEntries(stateMachinePlans),
     stateMachineOrders: stateMachineOrderRecord,
-    stateMachineDocks: stateMachineDockRecord,
-    stateMachineDocksByTargetOrder,
-    stateMachineOrderDockChainDepth,
+    stateMachineDocks: Object.fromEntries(stateMachineDocks),
+    stateMachineDockBindings: Object.fromEntries(stateMachineDockBindings),
     stateMachineTasks: stateMachineTaskRecord,
     unresolvedModuleOrderEventCount: diagnostics.unresolvedModuleOrderEventCount,
-    unresolvedDockEventCount: diagnostics.unresolvedDockEventCount,
     unresolvedStageActivationEventCount: diagnostics.unresolvedStageActivationEventCount,
-    unresolvedDockTargetDeploymentCount: diagnostics.unresolvedDockTargetDeploymentCount,
     capabilityEnrichmentMismatchCount: diagnostics.capabilityEnrichmentMismatchCount,
     unknownEventCount: diagnostics.unknownEventCount,
     ...(lastEvent ? { lastEvent } : {})
@@ -232,55 +222,7 @@ export function rebuildOrderProjections(
 
 export interface ProjectionReplayOptions {
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
-}
-
-function deriveOrderDockChainDepth(
-  docks: Map<string, MutableStateMachineDockProjection>
-): Record<string, number> {
-  const edgesByTarget = new Map<string, { parentKey: string; targetKey: string }[]>();
-  for (const dock of docks.values()) {
-    const parentKey = stateMachineOrderProjectionKey(
-      dock.chainId,
-      dock.stateMachineAddress,
-      dock.localPlanId,
-      dock.localOrderId
-    );
-    const targetKey = stateMachineOrderProjectionKey(
-      dock.chainId,
-      dock.stateMachineAddress,
-      dock.targetPlanId,
-      dock.linkedOrderId
-    );
-    const edges = edgesByTarget.get(targetKey) ?? [];
-    edges.push({ parentKey, targetKey });
-    edgesByTarget.set(targetKey, edges);
-  }
-  const memo = new Map<string, number>();
-  const longestPathOf = (orderKey: string, visiting: Set<string>): number => {
-    const cached = memo.get(orderKey);
-    if (cached !== undefined) {
-      return cached;
-    }
-    if (visiting.has(orderKey)) {
-      return 0;
-    }
-    visiting.add(orderKey);
-    let longest = 0;
-    for (const edge of edgesByTarget.get(orderKey) ?? []) {
-      longest = Math.max(longest, longestPathOf(edge.parentKey, visiting) + 1);
-    }
-    visiting.delete(orderKey);
-    memo.set(orderKey, longest);
-    return longest;
-  };
-  const depths: Record<string, number> = {};
-  for (const targetKey of edgesByTarget.keys()) {
-    const depth = longestPathOf(targetKey, new Set());
-    if (depth > 0) {
-      depths[targetKey] = depth;
-    }
-  }
-  return depths;
+  readonly dockArtifacts?: readonly DockArtifact[];
 }
 
 function applyStateMachineEvent(
@@ -290,7 +232,11 @@ function applyStateMachineEvent(
     governance: Map<string, MutableContractGovernanceProjection>;
     plans: Map<string, MutableStateMachinePlanProjection>;
     orders: Map<string, MutableStateMachineOrderProjection>;
-    docks: Map<string, MutableStateMachineDockProjection>;
+    docks: Map<string, StateMachineDockProjection>;
+    dockSelections: Map<string, StateMachineDockSelectionProjection>;
+    dockBindings: Map<string, MutableStateMachineDockBindingProjection>;
+    dockArtifacts: ReadonlyMap<string, DockArtifact>;
+    dockArtifactsByDkid: ReadonlyMap<string, DockArtifact>;
     capabilityTables: ReadonlyMap<string, PlanCapabilityTablesInput>;
     stageFileReplay: StageFileReplayIndex;
     diagnostics: ProjectionReplayDiagnostics;
@@ -355,20 +301,17 @@ function applyStateMachineEvent(
     case "StageExecutorActivated":
       applyStageExecutorActivated(state, event);
       return;
-    case "DockOpened":
-      applyDockOpened(state, event);
+    case "DockRegistered":
+      applyDockRegistered(state, event);
       return;
-    case "DockAttached":
-      applyDockAttached(state, event);
+    case "StageDockExecutorSelected":
+      applyStageDockExecutorSelected(state, event);
       return;
-    case "DockInputSubmitted":
-      applyDockInputSubmitted(state, event);
+    case "DockBindingPoked":
+      applyDockBindingPoked(state, event);
       return;
     case "DockOutputSubmitted":
       applyDockOutputSubmitted(state, event);
-      return;
-    case "DockOutputSatisfied":
-      applyDockOutputSatisfied(state, event);
       return;
     case "DerivedSignalSubmitted":
       applyDerivedSignalSubmitted(state, event);

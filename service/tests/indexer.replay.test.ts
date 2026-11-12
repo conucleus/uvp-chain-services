@@ -152,8 +152,6 @@ describe("indexer projection replay", () => {
         hooksHash: bytes32Hex("9001"),
         capabilitiesRoot: emptyHash,
         hookCount: 1n,
-        dockRoutesRoot: bytes32Hex("9003"),
-        dockInterfaceRoot: bytes32Hex("9004"),
         birthAuthorizer: signer
       }),
       chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
@@ -784,7 +782,7 @@ describe("indexer projection replay", () => {
   });
 
   it("projects state-machine module and plan publisher provenance", () => {
-    const moduleId = bytes32Text("uvp.module.docking.v1") as `0x${string}`;
+    const moduleId = bytes32Text("uvp.module.stage-patch.v1") as `0x${string}`;
     const moduleAddress = "0x6666666666666666666666666666666666666666";
     const previousModule = "0x7777777777777777777777777777777777777777";
     const events: readonly ChainEvent[] = [
@@ -828,351 +826,6 @@ describe("indexer projection replay", () => {
       moduleAddress,
       proof: expect.objectContaining({ eventName: "StateMachineModuleSet" })
     });
-  });
-
-  it("routes module-emitted order events to the owning state-machine order instead of phantom module buckets", () => {
-    const moduleId = bytes32Text("uvp.module.stage-patch.v1");
-    const moduleAddress = "0x6666666666666666666666666666666666666666";
-    const dockInstanceId = bytes32Hex("900");
-    const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }),
-      chainEvent(2n, 0, "OrderRegistered", {
-        orderId: stateMachineOrderId,
-        planId
-      }),
-      chainEvent(3n, 0, "StateMachineModuleSet", {
-        moduleId,
-        previousModule: "0x0000000000000000000000000000000000000000",
-        newModule: moduleAddress
-      }),
-      chainEvent(4n, 0, "StageExecutorPatchApplied", {
-        orderId: stateMachineOrderId,
-        selectorStageId,
-        targetStageId: stageId,
-        selector: signer,
-        executor: overlayExecutor,
-        role: bytes32Text("overlay-role"),
-        executorMetadataHash: bytes32Hex("8001"),
-        mode: EXECUTOR_PATCH_MODE_ASSIGN,
-        patchHash,
-        patchNonce: 1n,
-        metadataURI: "ipfs://stage-executor-patch/1"
-      }, moduleAddress),
-      chainEvent(5n, 0, "DockOpened", {
-        dockInstanceId: dockInstanceId,
-        localOrderId: stateMachineOrderId,
-        linkedOrderId: bytes32Hex("303"),
-        interfaceNameId: bytes32Text("production_service"),
-        localPlanId: planId,
-        targetPlanId: bytes32Hex("404"),
-        routeId: bytes32Hex("505"),
-        routeHash: patchHash,
-        depth: 1n,
-        opener: signer
-      }, moduleAddress),
-      chainEvent(6n, 0, "DockInputSubmitted", {
-        dockInstanceId: dockInstanceId,
-        linkedOrderId: bytes32Hex("303"),
-        inputBindingHash: bytes32Hex("606"),
-        localPlanId: planId,
-        localOrderId: stateMachineOrderId,
-        targetPlanId: bytes32Hex("404"),
-        targetSignalId: signalId,
-        payloadHash,
-        submitter: signer
-      }, moduleAddress),
-      chainEvent(7n, 0, "DerivedSignalSubmitted", {
-        fromOrderId: stateMachineOrderId,
-        fromPlanId: planId,
-        targetOrderId: stateMachineOrderId,
-        targetPlanId: planId,
-        signalId,
-        fromStageId: stageId,
-        targetSourceId: sourceId,
-        payloadHash,
-        idempotencyKey,
-        submitter: signer,
-        relation: 0n
-      }, moduleAddress)
-    ];
-
-    const snapshot = rebuildOrderProjections(events);
-    const orderKey = stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId);
-    const order = snapshot.stateMachineOrders[orderKey];
-
-    expect(order).toBeDefined();
-    expect(order?.stageExecutorOverlays[stageId]).toMatchObject({
-      activeExecutorWallet: overlayExecutor,
-      proof: expect.objectContaining({ eventName: "StageExecutorPatchApplied" })
-    });
-    expect(order?.proof.map((proof) => proof.eventName)).toEqual(expect.arrayContaining([
-      "StageExecutorPatchApplied",
-      "DockOpened",
-      "DockInputSubmitted",
-      "DerivedSignalSubmitted"
-    ]));
-    const dockKey = stateMachineScopedKey(31337, contractAddress, dockInstanceId);
-    expect(snapshot.stateMachineDocks[dockKey]).toMatchObject({
-      localOrderId: stateMachineOrderId,
-      linkedOrderId: bytes32Hex("303"),
-      targetPlanId: bytes32Hex("404"),
-      interfaceNameId: bytes32Text("production_service")
-    });
-    expect(Object.keys(snapshot.stateMachineDocks[dockKey]?.inputDeliveries ?? {})).toEqual([
-      bytes32Hex("606")
-    ]);
-    const linkedOrderKey = stateMachineScopedKey(31337, contractAddress, bytes32Hex("404"), bytes32Hex("303"));
-    expect(Object.keys(snapshot.stateMachineOrders).sort()).toEqual([orderKey, linkedOrderKey].sort());
-    expect(Object.values(snapshot.stateMachineOrders).every((entry) => entry.contractAddress === contractAddress)).toBe(true);
-    expect(snapshot.stateMachineDocks[dockKey]?.stateMachineAddress).toBe(contractAddress);
-    expect(snapshot.unresolvedModuleOrderEventCount).toBe(0);
-  });
-
-  it("projects DockAttached births under the N:1 target-order index with multiple parents", () => {
-    const moduleAddress = "0x6666666666666666666666666666666666666666";
-    const parentOrderIdA = bytes32Hex("901");
-    const parentOrderIdB = bytes32Hex("902");
-    const dockInstanceA = bytes32Hex("911");
-    const dockInstanceB = bytes32Hex("912");
-    const linkedOrderId = bytes32Hex("903");
-    const targetPlan = bytes32Hex("904");
-    const dockKeyA = stateMachineScopedKey(31337, contractAddress, dockInstanceA);
-    const dockKeyB = stateMachineScopedKey(31337, contractAddress, dockInstanceB);
-    const targetOrderKey = stateMachineScopedKey(31337, contractAddress, targetPlan, linkedOrderId);
-    const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
-      chainEvent(2n, 0, "PlanRegistered", { planId: targetPlan, planHash: bytes32Hex("905"), hookCount: 1n }),
-      chainEvent(3n, 0, "OrderRegistered", { orderId: parentOrderIdA, planId }),
-      chainEvent(4n, 0, "OrderRegistered", { orderId: parentOrderIdB, planId }),
-      chainEvent(5n, 0, "OrderRegistered", { orderId: linkedOrderId, planId: targetPlan }),
-      chainEvent(6n, 0, "StateMachineModuleSet", {
-        moduleId: bytes32Text("uvp.module.docking.v1"),
-        previousModule: "0x0000000000000000000000000000000000000000",
-        newModule: moduleAddress
-      }),
-      chainEvent(7n, 0, "DockAttached", {
-        dockInstanceId: dockInstanceA,
-        localOrderId: parentOrderIdA,
-        linkedOrderId,
-        interfaceNameId: bytes32Text("production_service"),
-        localPlanId: planId,
-        targetPlanId: targetPlan,
-        routeId: bytes32Hex("906"),
-        routeHash: planHash,
-        depth: 1n,
-        attacher: signer
-      }, moduleAddress),
-      chainEvent(8n, 0, "DockAttached", {
-        dockInstanceId: dockInstanceB,
-        localOrderId: parentOrderIdB,
-        linkedOrderId,
-        interfaceNameId: bytes32Text("production_service"),
-        localPlanId: planId,
-        targetPlanId: targetPlan,
-        routeId: bytes32Hex("908"),
-        routeHash: planHash,
-        depth: 2n,
-        attacher: overlayExecutor
-      }, moduleAddress),
-      chainEvent(9n, 0, "DockOutputSubmitted", {
-        dockInstanceId: dockInstanceA,
-        linkedOrderId,
-        outputBindingHash: bytes32Hex("907"),
-        localPlanId: planId,
-        localOrderId: parentOrderIdA,
-        targetPlanId: targetPlan,
-        targetSignalId: signalId,
-        localSignalId: signalId,
-        payloadHash,
-        submitter: signer
-      }, moduleAddress)
-    ];
-
-    const snapshot = rebuildOrderProjections(events);
-
-    expect(snapshot.stateMachineDocks[dockKeyA]).toMatchObject({
-      mode: "existing",
-      attacher: signer,
-      depth: 1,
-      localOrderId: parentOrderIdA,
-      targetPlanId: targetPlan,
-      linkedOrderId,
-      stateMachineAddress: contractAddress
-    });
-    expect(snapshot.stateMachineDocks[dockKeyB]).toMatchObject({
-      mode: "existing",
-      attacher: overlayExecutor,
-      depth: 2
-    });
-    expect(snapshot.stateMachineDocksByTargetOrder[targetOrderKey]).toEqual([dockKeyA, dockKeyB]);
-    expect(snapshot.stateMachineOrders[targetOrderKey]).toBeDefined();
-    expect(Object.keys(snapshot.stateMachineDocks[dockKeyA]?.outputDeliveries ?? {})).toEqual([
-      bytes32Hex("907")
-    ]);
-    expect(
-      snapshot.stateMachineOrders[targetOrderKey]?.timeline.filter((item) => item.eventName === "DockAttached")
-    ).toHaveLength(2);
-    expect(snapshot.unresolvedDockEventCount).toBe(0);
-    expect(snapshot.unresolvedDockTargetDeploymentCount).toBe(0);
-  });
-
-  it("indexes new-mode dock births under their own target-order key alongside attached docks", () => {
-    const moduleAddress = "0x6666666666666666666666666666666666666666";
-    const dockInstanceId = bytes32Hex("921");
-    const childOrderId = bytes32Hex("923");
-    const childPlan = bytes32Hex("924");
-    const childOrderKey = stateMachineScopedKey(31337, contractAddress, childPlan, childOrderId);
-    const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
-      chainEvent(2n, 0, "PlanRegistered", { planId: childPlan, planHash: bytes32Hex("925"), hookCount: 1n }),
-      chainEvent(3n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
-      chainEvent(4n, 0, "StateMachineModuleSet", {
-        moduleId: bytes32Text("uvp.module.docking.v1"),
-        previousModule: "0x0000000000000000000000000000000000000000",
-        newModule: moduleAddress
-      }),
-      chainEvent(5n, 0, "DockOpened", {
-        dockInstanceId,
-        localOrderId: stateMachineOrderId,
-        linkedOrderId: childOrderId,
-        interfaceNameId: bytes32Text("production_service"),
-        localPlanId: planId,
-        targetPlanId: childPlan,
-        routeId: bytes32Hex("926"),
-        routeHash: planHash,
-        depth: 1n,
-        opener: signer
-      }, moduleAddress)
-    ];
-
-    const snapshot = rebuildOrderProjections(events);
-
-    const dockKey = stateMachineScopedKey(31337, contractAddress, dockInstanceId);
-    expect(snapshot.stateMachineDocks[dockKey]).toMatchObject({ mode: "new", opener: signer });
-    expect(snapshot.stateMachineDocksByTargetOrder[childOrderKey]).toEqual([dockKey]);
-  });
-
-  it("derives per-order longest dock chain depth from the dock event graph (B-02 edge ledger)", () => {
-    const moduleAddress = "0x6666666666666666666666666666666666666666";
-    const planB = bytes32Hex("941");
-    const planC = bytes32Hex("942");
-    const orderRoot = bytes32Hex("943");
-    const orderSibling = bytes32Hex("944");
-    const orderMid = bytes32Hex("945");
-    const orderLeaf = bytes32Hex("946");
-    const dockInstanceRoot = bytes32Hex("947");
-    const dockInstanceChain = bytes32Hex("948");
-    const dockInstanceSibling = bytes32Hex("949");
-    const moduleSet = chainEvent(1n, 0, "StateMachineModuleSet", {
-      moduleId: bytes32Text("uvp.module.docking.v1"),
-      previousModule: "0x0000000000000000000000000000000000000000",
-      newModule: moduleAddress
-    });
-    const events: readonly ChainEvent[] = [
-      moduleSet,
-      chainEvent(2n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
-      chainEvent(3n, 0, "PlanRegistered", { planId: planB, planHash: bytes32Hex("94a"), hookCount: 1n }),
-      chainEvent(4n, 0, "PlanRegistered", { planId: planC, planHash: bytes32Hex("94b"), hookCount: 1n }),
-      chainEvent(5n, 0, "OrderRegistered", { orderId: orderRoot, planId }),
-      chainEvent(6n, 0, "OrderRegistered", { orderId: orderSibling, planId }),
-      chainEvent(7n, 0, "DockOpened", {
-        dockInstanceId: dockInstanceRoot,
-        localOrderId: orderRoot,
-        linkedOrderId: orderMid,
-        interfaceNameId: bytes32Text("production_service"),
-        localPlanId: planId,
-        targetPlanId: planB,
-        routeId: bytes32Hex("94c"),
-        routeHash: planHash,
-        depth: 1n,
-        opener: signer
-      }, moduleAddress),
-      chainEvent(8n, 0, "DockAttached", {
-        dockInstanceId: dockInstanceChain,
-        localOrderId: orderMid,
-        linkedOrderId: orderLeaf,
-        interfaceNameId: bytes32Text("production_service"),
-        localPlanId: planB,
-        targetPlanId: planC,
-        routeId: bytes32Hex("94d"),
-        routeHash: planHash,
-        depth: 2n,
-        attacher: signer
-      }, moduleAddress),
-      chainEvent(9n, 0, "DockAttached", {
-        dockInstanceId: dockInstanceSibling,
-        localOrderId: orderSibling,
-        linkedOrderId: orderLeaf,
-        interfaceNameId: bytes32Text("production_service"),
-        localPlanId: planId,
-        targetPlanId: planC,
-        routeId: bytes32Hex("94e"),
-        routeHash: planHash,
-        depth: 1n,
-        attacher: signer
-      }, moduleAddress)
-    ];
-
-    const snapshot = rebuildOrderProjections(events);
-
-    const midKey = stateMachineScopedKey(31337, contractAddress, planB, orderMid);
-    const leafKey = stateMachineScopedKey(31337, contractAddress, planC, orderLeaf);
-    expect(snapshot.stateMachineOrderDockChainDepth[midKey]).toBe(1);
-    expect(snapshot.stateMachineOrderDockChainDepth[leafKey]).toBe(2);
-    expect(snapshot.stateMachineOrderDockChainDepth[
-      stateMachineScopedKey(31337, contractAddress, planId, orderRoot)
-    ]).toBeUndefined();
-    const rolled = rebuildOrderProjections([
-      ...events,
-      { ...events[6]!, removed: true }
-    ]);
-    expect(rolled.stateMachineOrderDockChainDepth[midKey]).toBeUndefined();
-    expect(rolled.stateMachineOrderDockChainDepth[leafKey]).toBe(1);
-  });
-
-  it("drops an attached dock and its target-order index entry when the birth log is reorged away", () => {
-    const moduleAddress = "0x6666666666666666666666666666666666666666";
-    const dockInstanceId = bytes32Hex("931");
-    const linkedOrderId = bytes32Hex("933");
-    const targetPlan = bytes32Hex("934");
-    const attach = chainEvent(6n, 0, "DockAttached", {
-      dockInstanceId,
-      localOrderId: stateMachineOrderId,
-      linkedOrderId,
-      interfaceNameId: bytes32Text("production_service"),
-      localPlanId: planId,
-      targetPlanId: targetPlan,
-      routeId: bytes32Hex("936"),
-      routeHash: planHash,
-      depth: 1n,
-      attacher: signer
-    }, moduleAddress);
-    const base: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "PlanRegistered", { planId: targetPlan, planHash: bytes32Hex("935"), hookCount: 1n }),
-      chainEvent(2n, 0, "PlanRegistered", { planId, planHash, hookCount: 1n }),
-      chainEvent(3n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
-      chainEvent(4n, 0, "OrderRegistered", { orderId: linkedOrderId, planId: targetPlan }),
-      chainEvent(5n, 0, "StateMachineModuleSet", {
-        moduleId: bytes32Text("uvp.module.docking.v1"),
-        previousModule: "0x0000000000000000000000000000000000000000",
-        newModule: moduleAddress
-      })
-    ];
-
-    const withAttach = rebuildOrderProjections([...base, attach]);
-    const dockKey = stateMachineScopedKey(31337, contractAddress, dockInstanceId);
-    const targetOrderKey = stateMachineScopedKey(31337, contractAddress, targetPlan, linkedOrderId);
-    expect(withAttach.stateMachineDocks[dockKey]).toBeDefined();
-    expect(withAttach.stateMachineDocksByTargetOrder[targetOrderKey]).toEqual([dockKey]);
-
-    const rolled = rebuildOrderProjections([...base, attach, { ...attach, removed: true }]);
-    expect(rolled.stateMachineDocks[dockKey]).toBeUndefined();
-    expect(rolled.stateMachineDocksByTargetOrder[targetOrderKey]).toBeUndefined();
-    expect(rolled.eventCount).toBe(base.length);
   });
 
   it("counts module order events that cannot be attributed to a state machine instead of silently bucketing", () => {
@@ -1697,9 +1350,7 @@ describe("indexer projection replay", () => {
         publisher: signer,
         hooksHash: registerArgs.hooksHash,
         capabilitiesRoot: registerArgs.capabilitiesRoot,
-        hookCount: BigInt(artifact.compiledHooks.length),
-        dockRoutesRoot: registerArgs.dockRoutesRoot,
-        dockInterfaceRoot: registerArgs.dockInterfaceRoot
+        hookCount: BigInt(artifact.compiledHooks.length)
       }),
       chainEvent(2n, 0, "PlanFinalized", { planId, planHash, capabilitiesRoot: registerArgs.capabilitiesRoot }),
       chainEvent(2n, 1, "PlanRegistered", { planId, planHash, hookCount: BigInt(artifact.compiledHooks.length) })
@@ -2885,8 +2536,6 @@ describe("indexer projection replay", () => {
 
   it("replays the real two-step plan publish transaction log order without a ProjectionError", () => {
     const hooksHash = bytes32Hex("9001");
-    const dockRoutesRoot = bytes32Hex("9003");
-    const dockInterfaceRoot = bytes32Hex("9004");
     const vocabulary = planVocabulary({
       selectorBindings: [{ selectorStageId, targetStageId: stageId }],
       signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }]
@@ -2894,8 +2543,6 @@ describe("indexer projection replay", () => {
     const events: readonly ChainEvent[] = [
       ...planPublishEvents(vocabulary, contractAddress, {
         hooksHash,
-        dockRoutesRoot,
-        dockInterfaceRoot,
         hookCount: 2n
       })
     ];
@@ -2911,9 +2558,7 @@ describe("indexer projection replay", () => {
       publisher: signer,
       hookCount: "2",
       capabilitiesRoot: vocabulary.capabilitiesRoot,
-      hooksHash,
-      dockRoutesRoot,
-      dockInterfaceRoot
+      hooksHash
     });
     expect(plan?.committedAt).toMatchObject({ blockNumber: 1n, logIndex: 0 });
     expect(plan?.finalizedAt).toMatchObject({ blockNumber: 2n, logIndex: 0 });
@@ -3745,14 +3390,10 @@ function planPublishEvents(
   stateMachineAddress = contractAddress,
   overrides: {
     readonly hooksHash?: Hex;
-    readonly dockRoutesRoot?: Hex;
-    readonly dockInterfaceRoot?: Hex;
     readonly hookCount?: bigint;
   } = {}
 ): readonly ChainEvent[] {
   const hooksHash = overrides.hooksHash ?? bytes32Hex("9001");
-  const dockRoutesRoot = overrides.dockRoutesRoot ?? bytes32Hex("9003");
-  const dockInterfaceRoot = overrides.dockInterfaceRoot ?? bytes32Hex("9004");
   const hookCount = overrides.hookCount ?? 1n;
   return [
     chainEvent(1n, 0, "PlanCommitted", {
@@ -3761,9 +3402,7 @@ function planPublishEvents(
       publisher: signer,
       hooksHash,
       capabilitiesRoot: vocabulary.capabilitiesRoot,
-      hookCount,
-      dockRoutesRoot,
-      dockInterfaceRoot
+      hookCount
     }, stateMachineAddress),
     chainEvent(1n, 1, "PlanPublisherRecorded", {
       planId,

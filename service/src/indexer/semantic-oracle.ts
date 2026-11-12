@@ -37,7 +37,7 @@ export interface SemanticOraclePlan {
     readonly stageId?: Hex;
     readonly stageIdentifier?: string;
     readonly hookName?: string;
-    readonly orderTriggerKind?: "none" | "trigger" | "dock";
+    readonly orderTriggerKind?: "none" | "trigger";
     readonly emitReady?: boolean;
     readonly instructions: readonly Record<string, unknown>[];
   }[];

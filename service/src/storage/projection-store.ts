@@ -1,3 +1,4 @@
+import type { DockArtifact } from "@uvp-eth/compiler";
 import type { ChainEvent } from "../indexer/events.js";
 import { filterActiveChainEvents, sortChainEvents } from "../indexer/events.js";
 import type { PlanCapabilityTablesInput } from "../indexer/projections/plan.js";
@@ -46,9 +47,7 @@ export interface ProjectionRebuildMetadata {
 
 export interface ProjectionSyncDiagnosticsCounts {
   readonly unresolvedModuleOrderEventCount: number;
-  readonly unresolvedDockEventCount: number;
   readonly unresolvedStageActivationEventCount: number;
-  readonly unresolvedDockTargetDeploymentCount: number;
   readonly unresolvedIdentityRevokeEventCount: number;
   readonly capabilityEnrichmentMismatchCount: number;
   readonly unknownEventCount: number;
@@ -70,9 +69,7 @@ export function projectionDiagnosticsFromSnapshots(
 ): ProjectionSyncDiagnosticsCounts {
   return {
     unresolvedModuleOrderEventCount: orderSnapshot.unresolvedModuleOrderEventCount ?? 0,
-    unresolvedDockEventCount: orderSnapshot.unresolvedDockEventCount ?? 0,
     unresolvedStageActivationEventCount: orderSnapshot.unresolvedStageActivationEventCount ?? 0,
-    unresolvedDockTargetDeploymentCount: orderSnapshot.unresolvedDockTargetDeploymentCount ?? 0,
     unresolvedIdentityRevokeEventCount: identitySnapshot.unresolvedRevokeEventCount ?? 0,
     capabilityEnrichmentMismatchCount: orderSnapshot.capabilityEnrichmentMismatchCount ?? 0,
     unknownEventCount: orderSnapshot.unknownEventCount ?? 0,
@@ -90,9 +87,7 @@ export function hasProjectionDiagnosticsAnomalies(
     return false;
   }
   return counts.unresolvedModuleOrderEventCount > 0 ||
-    counts.unresolvedDockEventCount > 0 ||
     counts.unresolvedStageActivationEventCount > 0 ||
-    counts.unresolvedDockTargetDeploymentCount > 0 ||
     counts.unresolvedIdentityRevokeEventCount > 0 ||
     counts.capabilityEnrichmentMismatchCount > 0 ||
     counts.unknownEventCount > 0 ||
@@ -117,6 +112,7 @@ export interface ProjectionRebuildInput {
   readonly deploymentBlock: bigint;
   readonly events: readonly ChainEvent[];
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
+  readonly dockArtifacts?: readonly DockArtifact[];
   readonly scope?: ProjectionScope;
   readonly syncState?: Omit<ProjectionSyncState, "updatedAt">;
   readonly cursor?: Omit<StoredProjectionCursor, "updatedAt">;

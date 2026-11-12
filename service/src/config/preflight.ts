@@ -68,7 +68,7 @@ const stateMachineModuleAbi = parseAbi([
   "function stagePatchModule() view returns (address)",
   "function fileResourceModule() view returns (address)",
   "function derivedSignalModule() view returns (address)",
-  "function dockingModule() view returns (address)",
+  "function dockRegistry() view returns (address)",
   "function planMetadataModule() view returns (address)",
   "function orderLinkModule() view returns (address)",
   "function lens() view returns (address)"
@@ -173,7 +173,7 @@ const REQUIRED_STATE_MACHINE_MODULE_KEYS = [
   "stagePatch",
   "fileResource",
   "derivedSignal",
-  "docking",
+  "dockRegistry",
   "planMetadata",
   "orderLink",
   "lens"
@@ -269,7 +269,7 @@ const FLAT_CONTRACT_BY_MODULE_KEY = {
   stagePatch: "UVPStagePatchModule",
   fileResource: "UVPFileResourceModule",
   derivedSignal: "UVPDerivedSignalModule",
-  docking: "UVPDockingModule",
+  dockRegistry: "UVPDockRegistry",
   planMetadata: "UVPPlanMetadataModule",
   orderLink: "UVPOrderLinkModule"
 } as const;
@@ -406,7 +406,7 @@ async function checkStateMachineModules(input: {
     stagePatch: "stagePatchModule",
     fileResource: "fileResourceModule",
     derivedSignal: "derivedSignalModule",
-    docking: "dockingModule",
+    dockRegistry: "dockRegistry",
     planMetadata: "planMetadataModule",
     orderLink: "orderLinkModule",
     lens: "lens"

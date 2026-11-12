@@ -52,8 +52,6 @@ function goodStream(): ChainEvent[] {
       hooksHash: "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       capabilitiesRoot: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       hookCount: 1n,
-      dockRoutesRoot: "0x0000000000000000000000000000000000000000000000000000000000000000",
-      dockInterfaceRoot: "0x0000000000000000000000000000000000000000000000000000000000000000",
       executorCandidatesRoot,
     }),
     chainEvent(1n, 1, "PlanPublisherRecorded", { planId, publisher: signer }),

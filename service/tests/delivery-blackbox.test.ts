@@ -22,7 +22,6 @@ import type { Hex } from "@uvp-eth/service-runtime";
 
 const chainId = 31337;
 const stateMachineAddress = "0x1111111111111111111111111111111111111111" as Hex;
-const dockingModuleAddress = "0x6666666666666666666666666666666666666666" as Hex;
 const deploymentRegistryAddress = "0x8888888888888888888888888888888888888888" as Hex;
 const signer = "0x4444444444444444444444444444444444444444" as Hex;
 const zeroAddress = "0x0000000000000000000000000000000000000000" as Hex;
@@ -31,14 +30,11 @@ const planId = bytes32Hex("a1");
 const planHash = bytes32Hex("b101");
 const targetPlanId = bytes32Hex("a2");
 const targetPlanHash = bytes32Hex("b102");
-const unregisteredPlanId = bytes32Hex("a3");
 const parentOrderId = bytes32Hex("c1");
 const targetOrderId = bytes32Hex("c2");
 const hookId = bytes32Hex("d1");
 const secondHookId = bytes32Hex("d2");
 const thirdHookId = bytes32Hex("d3");
-const dockInstanceId = bytes32Hex("e1");
-const routeId = bytes32Hex("f1");
 const targetStageId = bytes32Text("stage-b");
 const sourceId = bytes32Hex("0501");
 const signalId = bytes32Hex("0502");
@@ -49,7 +45,7 @@ const thirdSignalId = bytes32Hex("0506");
 const payloadHash = bytes32Hex("0601");
 const idempotencyKey = bytes32Hex("0602");
 
-describe("dock projection blackbox", () => {
+describe("order projection blackbox", () => {
 
   it("counts genuinely unknown events explicitly and keeps neighbour projections intact", async () => {
     const events: readonly ChainEvent[] = [
@@ -125,34 +121,9 @@ describe("dock projection blackbox", () => {
       ...planPublished(2n, targetPlanId, targetPlanHash),
       orderRegistered(3n, parentOrderId, planId),
       orderRegistered(4n, targetOrderId, targetPlanId),
-      moduleSet(5n),
-      hookReady(6n, parentOrderId, hookId, planId),
-      dockAttached(7n, dockInstanceId, parentOrderId, targetOrderId, routeId),
-      chainEvent(8n, 0, "DockInputSubmitted", {
-        dockInstanceId,
-        linkedOrderId: targetOrderId,
-        inputBindingHash: bindingHash("0e"),
-        localPlanId: planId,
-        localOrderId: parentOrderId,
-        targetPlanId,
-        targetSignalId: signalId,
-        payloadHash,
-        submitter: signer
-      }, dockingModuleAddress),
-      signalSubmitted(9n, targetOrderId, targetPlanId, sourceId, signalId),
-      chainEvent(10n, 0, "DockOutputSubmitted", {
-        dockInstanceId,
-        linkedOrderId: targetOrderId,
-        outputBindingHash: bindingHash("0f"),
-        localPlanId: planId,
-        localOrderId: parentOrderId,
-        targetPlanId,
-        targetSignalId: signalId,
-        localSignalId: signalId,
-        payloadHash,
-        submitter: signer
-      }, dockingModuleAddress),
-      chainEvent(11n, 0, "OrderForked", {
+      hookReady(5n, parentOrderId, hookId, planId),
+      signalSubmitted(6n, targetOrderId, targetPlanId, sourceId, signalId),
+      chainEvent(7n, 0, "OrderForked", {
         planId,
         orderId: forkOrderId,
         parentOrderId,
@@ -160,8 +131,8 @@ describe("dock projection blackbox", () => {
         approvalSignalId: bytes32Hex("8102"),
         initiator: signer
       }),
-      signalSubmitted(12n, forkOrderId, planId, otherSourceId, otherSignalId),
-      chainEvent(13n, 0, "TimerPoked", {
+      signalSubmitted(8n, forkOrderId, planId, otherSourceId, otherSignalId),
+      chainEvent(9n, 0, "TimerPoked", {
         orderId: parentOrderId,
         planId,
         hookId,
@@ -232,74 +203,6 @@ describe("dock projection blackbox", () => {
     expect(timelineNames).toContain("OrderRegistered");
   });
 
-  it("counts delivery events for an unborn dock instance instead of silently dropping them", async () => {
-    const unknownDockInstance = bytes32Hex("e9");
-    const childOrderId = bytes32Hex("c9");
-    const events: readonly ChainEvent[] = [
-      ...planPublished(1n, planId, planHash),
-      ...planPublished(2n, targetPlanId, targetPlanHash),
-      orderRegistered(3n, parentOrderId, planId),
-      moduleSet(4n),
-      chainEvent(5n, 0, "DockInputSubmitted", {
-        dockInstanceId: unknownDockInstance,
-        linkedOrderId: targetOrderId,
-        inputBindingHash: bindingHash("10"),
-        localPlanId: planId,
-        localOrderId: parentOrderId,
-        targetPlanId,
-        targetSignalId: signalId,
-        payloadHash,
-        submitter: signer
-      }, dockingModuleAddress),
-      chainEvent(5n, 1, "DockOutputSubmitted", {
-        dockInstanceId: unknownDockInstance,
-        linkedOrderId: targetOrderId,
-        outputBindingHash: bindingHash("11"),
-        localPlanId: planId,
-        localOrderId: parentOrderId,
-        targetPlanId,
-        targetSignalId: signalId,
-        localSignalId: signalId,
-        payloadHash,
-        submitter: signer
-      }, dockingModuleAddress),
-      chainEvent(5n, 2, "DockOutputSatisfied", {
-        dockInstanceId: unknownDockInstance,
-        linkedOrderId: targetOrderId,
-        outputBindingHash: bindingHash("12"),
-        localPlanId: planId,
-        localOrderId: parentOrderId,
-        targetPlanId,
-        targetSignalId: signalId,
-        localSignalId: signalId,
-        payloadHash,
-        submitter: signer
-      }, dockingModuleAddress),
-      chainEvent(6n, 0, "DockOpened", {
-        dockInstanceId: bytes32Hex("e8"),
-        localOrderId: parentOrderId,
-        linkedOrderId: childOrderId,
-        interfaceNameId: bytes32Text("production_service"),
-        localPlanId: planId,
-        targetPlanId: unregisteredPlanId,
-        routeId,
-        routeHash: bytes32Hex("aa01"),
-        depth: 1n,
-        opener: signer
-      }, dockingModuleAddress)
-    ];
-
-    const snapshot = rebuildOrderProjections(events);
-    expect(snapshot.unresolvedDockEventCount).toBe(3);
-    expect(snapshot.unresolvedDockTargetDeploymentCount).toBe(1);
-    expect(snapshot.unresolvedModuleOrderEventCount).toBe(0);
-    expect(snapshot.stateMachineDocks[stateMachineScopedKey(chainId, stateMachineAddress, unknownDockInstance)])
-      .toBeUndefined();
-    expect(snapshot.stateMachineDocks[stateMachineScopedKey(chainId, stateMachineAddress, bytes32Hex("e8"))])
-      .toMatchObject({ mode: "new", targetPlanId: unregisteredPlanId });
-    expect(snapshot.stateMachineOrders[stateMachineScopedKey(chainId, stateMachineAddress, planId, parentOrderId)])
-      .toBeDefined();
-  });
 });
 
 function planPublishEvents(
@@ -315,9 +218,7 @@ function planPublishEvents(
       publisher: signer,
       hooksHash: bytes32Hex("0e01"),
       capabilitiesRoot,
-      hookCount: 1n,
-      dockRoutesRoot: bytes32Hex("0e03"),
-      dockInterfaceRoot: bytes32Hex("0e04")
+      hookCount: 1n
     }),
     chainEvent(startBlock, 1, "PlanPublisherRecorded", {
       planId: publishedPlanId,
@@ -345,9 +246,7 @@ function planPublished(block: bigint, publishedPlanId: Hex, publishedPlanHash: H
       publisher: signer,
       hooksHash: bytes32Hex("0e01"),
       capabilitiesRoot,
-      hookCount: 1n,
-      dockRoutesRoot: bytes32Hex("0e03"),
-      dockInterfaceRoot: bytes32Hex("0e04")
+      hookCount: 1n
     }),
     chainEvent(block, 1, "PlanFinalized", {
       planId: publishedPlanId,
@@ -395,36 +294,6 @@ function signalSubmitted(
   });
 }
 
-function moduleSet(block: bigint): ChainEvent {
-  return chainEvent(block, 0, "StateMachineModuleSet", {
-    moduleId: bytes32Text("uvp.module.docking.v1"),
-    previousModule: zeroAddress,
-    newModule: dockingModuleAddress
-  });
-}
-
-function dockAttached(
-  block: bigint,
-  instance: Hex,
-  localOrder: Hex,
-  linkedOrder: Hex,
-  attachedRouteId: Hex,
-  logIndex = 0
-): ChainEvent {
-  return chainEvent(block, logIndex, "DockAttached", {
-    dockInstanceId: instance,
-    localOrderId: localOrder,
-    linkedOrderId: linkedOrder,
-    interfaceNameId: bytes32Text("production_service"),
-    localPlanId: planId,
-    targetPlanId,
-    routeId: attachedRouteId,
-    routeHash: bytes32Hex("aa01"),
-    depth: 1n,
-    attacher: signer
-  }, dockingModuleAddress);
-}
-
 function chainEvent(
   blockNumber: bigint,
   logIndex: number,
@@ -441,10 +310,6 @@ function chainEvent(
     eventName,
     args
   };
-}
-
-function bindingHash(tag: string): Hex {
-  return bytes32Hex(tag);
 }
 
 function bytes32Hex(value: string): Hex {

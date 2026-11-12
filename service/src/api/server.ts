@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { loadConfigFromEnv, runConfigPreflight, type ChainServicesConfig } from "../config/index.js";
 import { IndexerService, type ChainEventSource } from "../indexer/service.js";
+import { selectActiveStateMachineDeployment } from "../config/preflight.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import { createChainServicesStores } from "../storage/factory.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
@@ -11,14 +12,19 @@ import { isDirectRun } from "../shared/runtime.js";
 import { consoleLogger, type Logger } from "@uvp-eth/service-runtime";
 import { createApiRouter } from "./routes.js";
 import { InvalidPathParameterError, invalidPathParameterResponse, normalizeRequestId } from "./route-context.js";
+import { createDockBindingWindowReader } from "./dock-binding-windows.js";
+import { createDockArtifactResolver } from "../projection/dock-artifacts.js";
 import { createPlanArtifactResolvers } from "../projection/plan-artifacts.js";
 
 export interface StartApiServerOptions {
   readonly config?: ChainServicesConfig;
   readonly store?: ProjectionStore;
   readonly eventSource?: ChainEventSource | false;
+  readonly dockBindingWindowReader?: DockBindingWindowReader;
   readonly logger?: Logger;
 }
+
+type DockBindingWindowReader = ReturnType<typeof createDockBindingWindowReader>;
 
 export async function startApiServer(
   configOrOptions: ChainServicesConfig | StartApiServerOptions = {},
@@ -36,12 +42,23 @@ export async function startApiServer(
     store: stores.planArtifactStore,
     chainId: config.network.chainId
   });
+  const dockArtifacts = createDockArtifactResolver({
+    store: stores.dockArtifactStore,
+    chainId: config.network.chainId
+  });
   const logger = createRedactingLogger(options.logger ?? consoleLogger, config.security.logRedactionEnabled);
   const audit = createLoggerAuditSink(logger);
   const configDiagnostics = await runConfigPreflight(config);
   const eventSource = options.eventSource === undefined
     ? createChainEventSourceForTarget(config, { logger })
     : options.eventSource;
+  const stagePatchAddress = selectActiveStateMachineDeployment(config)?.modules?.stagePatch;
+  const dockBindingWindowReader = options.dockBindingWindowReader ?? (stagePatchAddress
+    ? createDockBindingWindowReader({
+      rpcUrl: config.network.rpcUrl,
+      stagePatchAddress
+    })
+    : undefined);
   const indexer = eventSource
     ? new IndexerService({
       config,
@@ -49,6 +66,7 @@ export async function startApiServer(
       store,
       resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
       resolveSemanticOraclePlan: planArtifacts.resolveSemanticOraclePlan,
+      resolveDockArtifact: dockArtifacts.resolveDockArtifact,
       logger
     })
     : undefined;
@@ -91,6 +109,7 @@ export async function startApiServer(
       chainId: config.network.chainId,
       store: stores.planArtifactStore
     },
+    ...(dockBindingWindowReader ? { dockBindingWindows: dockBindingWindowReader } : {}),
     ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
     adminAuthPolicy: {
       runtimeEnvironment: config.security.environment,

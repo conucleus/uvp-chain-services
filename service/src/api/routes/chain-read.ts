@@ -14,6 +14,10 @@ import {
   type ChainTaskProjection,
 } from "@uvp-eth/chain-read-contract";
 import { ConfigError, normalizeBytes32, type Hex } from "@uvp-eth/service-runtime";
+import {
+  DockBindingWindowUnavailableError,
+  wireDockBindings
+} from "../dock-binding-windows.js";
 import { StorageUnavailableError } from "../../storage/errors.js";
 import {
   decodePathParameter,
@@ -57,6 +61,16 @@ export function createChainReadRouteModule(): RouteModule {
             },
           };
         }
+        if (error instanceof DockBindingWindowUnavailableError) {
+          return {
+            status: 503,
+            body: {
+              error: "chain_read_unavailable",
+              message: error.message,
+              retryable: true,
+            },
+          };
+        }
         throw error;
       }
     },
@@ -91,9 +105,9 @@ async function handleRead(
   }
 
   if (request.pathname === SNAPSHOT_PATH) {
-    const snapshot: ChainProjectionSnapshot = toWire(
-      await context.store.getOrderSnapshot(),
-    );
+    const stored = await context.store.getOrderSnapshot();
+    const bindings = await wireDockBindings(stored, context.dockBindingWindows);
+    const snapshot = { ...toWire(stored), stateMachineDockBindings: bindings };
     return { status: 200, body: { snapshot } };
   }
 

@@ -82,15 +82,13 @@ spec:
   stages:
     - name: intake
       source: brand
-      trigger: [orderPlaced]
-      sendSignals: [{ name: "orderPlaced" }]
+      sendSignals: [{ name: "orderPlaced", trigger: true }]
       executor:
         supplierType: organization
         supplierID: intake-ops
     - name: cutting
       source: atelier
-      trigger: [cutDone]
-      sendSignals: [{ name: "cutDone" }]
+      sendSignals: [{ name: "cutDone", trigger: true }]
       executor:
         supplierType: organization
         supplierID: cutting-ops

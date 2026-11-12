@@ -29,7 +29,7 @@ export interface StateMachineDeploymentConfig {
     readonly stagePatch?: Address;
     readonly fileResource?: Address;
     readonly derivedSignal?: Address;
-    readonly docking?: Address;
+    readonly dockRegistry?: Address;
     readonly planMetadata?: Address;
     readonly orderLink?: Address;
     readonly lens?: Address;
@@ -558,7 +558,7 @@ function parseStateMachineDeploymentModules(
     "stagePatch",
     "fileResource",
     "derivedSignal",
-    "docking",
+    "dockRegistry",
     "planMetadata",
     "orderLink",
     "lens",

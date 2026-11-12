@@ -37,7 +37,6 @@ const WALLET = "0x2222222222222222222222222222222222222222" as const;
 const CREATOR = "0x3333333333333333333333333333333333333333" as const;
 const RELAYER = "0x4444444444444444444444444444444444444444" as const;
 const TX_HASH = `0x${"5".repeat(64)}` as const;
-const DOCK_ID = `0x${"6".repeat(64)}` as const;
 const PAYLOAD_HASH = `0x${"7".repeat(64)}` as const;
 
 function provenance(blockNumber: bigint): ProjectionProvenance {
@@ -187,48 +186,12 @@ function projectionSnapshot(): ProjectionSnapshot {
         },
       },
     },
-    stateMachineDocks: {
-      [DOCK_ID]: {
-        dockInstanceId: DOCK_ID,
-        chainId: CHAIN_ID,
-        stateMachineAddress: STATE_MACHINE,
-        mode: "new",
-        localPlanId: PLAN_A,
-        localOrderId: ORDER_ID,
-        routeId: `0x${"c".repeat(64)}`,
-        routeHash: `0x${"d".repeat(64)}`,
-        interfaceNameId: `0x${"e".repeat(64)}`,
-        targetPlanId: PLAN_B,
-        linkedOrderId: ORDER_ID,
-        depth: 1,
-        inputDeliveries: {
-          delivery: {
-            inputBindingHash: `0x${"f".repeat(64)}`,
-            localPlanId: PLAN_A,
-            localOrderId: ORDER_ID,
-            targetPlanId: PLAN_B,
-            linkedOrderId: ORDER_ID,
-            targetSignalId: SIGNAL_ID,
-            payloadHash: PAYLOAD_HASH,
-            submitter: WALLET,
-            deliveredAt: provenance(14n),
-            proof: proof(14n, {}),
-          },
-        },
-        outputDeliveries: {},
-        openedAt: provenance(14n),
-        updatedAt: provenance(14n),
-        proof: proof(14n, {}),
-      },
-    },
-    stateMachineDocksByTargetOrder: {},
-    stateMachineOrderDockChainDepth: {},
+    stateMachineDocks: {},
+    stateMachineDockBindings: {},
     stateMachineTasks: {},
     lastEvent: provenance(15n),
     unresolvedModuleOrderEventCount: 0,
-    unresolvedDockEventCount: 2,
     unresolvedStageActivationEventCount: 0,
-    unresolvedDockTargetDeploymentCount: 0,
     capabilityEnrichmentMismatchCount: 0,
     unknownEventCount: 0,
   };
@@ -511,7 +474,6 @@ describe("generic chain read routes", () => {
     expect(snapshot["rebuildable"]).toBe(true);
     expect(snapshot["eventCount"]).toBe(15);
     expect(snapshot["activeStateMachineDeploymentId"]).toBe(DEPLOYMENT_ID);
-    expect(snapshot["unresolvedDockEventCount"]).toBe(2);
     expect(Object.keys(record(snapshot["stateMachineOrders"]))).toEqual([ORDER_ID]);
     expect(
       record(record(snapshot["stateMachineDeployments"])[DEPLOYMENT_ID])["registeredAt"],
@@ -524,11 +486,6 @@ describe("generic chain read routes", () => {
     expect(
       record(record(snapshot["stateMachineOrders"])[ORDER_ID])["signals"],
     ).toMatchObject({ [SIGNAL_ID]: { submittedAt: { blockNumber: "13" } } });
-    expect(
-      record(record(record(snapshot["stateMachineDocks"])[DOCK_ID])["inputDeliveries"])[
-        "delivery"
-      ],
-    ).toMatchObject({ proof: { blockNumber: "14" } });
     expect(snapshot["lastEvent"]).toMatchObject({ blockNumber: "15" });
     expect(findBigints(response.body)).toEqual([]);
   });
