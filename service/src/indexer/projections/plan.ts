@@ -95,6 +95,10 @@ export interface PlanCapabilityTablesInput {
     readonly signalId: Hex;
     readonly targetOrderRelation: 0 | 1;
   }[];
+  readonly fileWriterBindings?: readonly {
+    readonly targetStageId: Hex;
+    readonly writerStageId: Hex;
+  }[];
   readonly executorCandidates?: readonly {
     readonly stageId: Hex;
     readonly executor: Address;
@@ -325,7 +329,11 @@ function enrichPlanCapabilityTables(
     plan.capabilityEnrichment = "failed";
     return;
   }
-  const capabilitiesRoot = capabilitiesRootOf(source.selectorBindings, source.signalCapabilities);
+  const capabilitiesRoot = capabilitiesRootOf(
+    source.selectorBindings,
+    source.signalCapabilities,
+    source.fileWriterBindings ?? [],
+  );
   if (!plan.capabilitiesRoot || plan.capabilitiesRoot.toLowerCase() !== capabilitiesRoot.toLowerCase()) {
     countMismatch();
     plan.capabilityEnrichment = "failed";
