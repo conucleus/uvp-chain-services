@@ -79,6 +79,14 @@ describe("plan artifact projection seam", () => {
     expect(tables.selectorBindings).toHaveLength(0);
     expect(tables.signalCapabilities).toHaveLength(3);
     expect(tables.signalCapabilities.every((row) => row.targetOrderRelation === 0)).toBe(true);
+    expect(tables.executorBindings).toEqual(
+      registerArgs.executorBindings.map((binding) => ({
+        stageId: binding.stageId,
+        supplierId: binding.supplierId,
+        kind: binding.kind
+      }))
+    );
+    expect(tables.dynamicExecutorStages ?? []).toEqual([]);
 
     const oraclePlan = await resolvers.resolveSemanticOraclePlan(planId, planHash);
     expect(oraclePlan.zhixuId).toBe(artifact.zhixuId);

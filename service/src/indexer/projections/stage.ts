@@ -1,17 +1,12 @@
 // 阶段族：StageMaterialized、阶段执行方补丁/激活与 hook 生命周期事件
 // （HookStatusChanged/HookReady/TimerPoked）及 executor overlay 投影。
-// patch 生效授权走 SignalSubmitterAuthorized 事件流（显式订单级授权）。
+// overlay 只表达链上 active patch（supplierId/patchNonce/dockId）；effective
+// executor 由 SupplierRegistry 事件重放解析，不在本文件查链或查库。
 import type { ChainEvent } from "../events.js";
+import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {
-  EXECUTOR_PATCH_MODE_ASSIGN,
-  EXECUTOR_PATCH_MODE_HANDOFF
-} from "../../shared/protocol-constants.js";
-import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtime";
-import {
-  optionalAddressArg,
   optionalBytes32Arg,
   optionalNonZeroBytes32Arg,
-  optionalStringArg,
   optionalUintArgAsString,
   proofOf,
   provenanceOf,
@@ -32,13 +27,8 @@ import {
 } from "./order.js";
 import { findPlanForOrder, type MutableStateMachinePlanProjection } from "./plan.js";
 import {
-  findSignalAuthorizationForHook,
-  type SignalAuthorizationHookMatchInput
-} from "./signal.js";
-import {
   cancelTask,
   markTaskSubmittedFromExistingSignals,
-  planSubmitSignalsForStage,
   refreshTaskSubmitSignals,
   taskProjectionId,
   type MutableStateMachineTaskProjection
@@ -47,28 +37,25 @@ import type { ProjectionReplayDiagnostics, Writable } from "./snapshot.js";
 
 export type StateMachineHookStatus = "init" | "waiting" | "ready" | "cancelled" | "unknown";
 
-export type StateMachineStageExecutorPatchMode = "assign" | "handoff";
-
 export interface StateMachineStageExecutorOverlayProjection {
   readonly orderId: Hex;
   readonly selectorStageId?: Hex;
   readonly targetStageId: Hex;
-  readonly selectorWallet?: Address;
-  readonly activeExecutorWallet: Address;
-  readonly mode?: StateMachineStageExecutorPatchMode;
-  readonly modeHash?: Hex;
-  readonly previousExecutor?: Address;
-  readonly authorizationsHash?: Hex;
-  readonly roleHash: Hex;
-  readonly executorMetadataHash: Hex;
-  readonly patchHash?: Hex;
+  readonly selector?: Address;
+  readonly supplierId: Hex;
+  readonly previousSupplierId?: Hex;
   readonly patchNonce: string;
-  readonly metadataURI: string;
+  readonly dockId?: Hex;
+  readonly fromPlanId?: Hex;
+  readonly effectiveExecutor?: Address;
   readonly updatedAt: ProjectionProvenance;
   readonly activatedAt?: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
   readonly activationProof?: StateMachineProofProjection;
 }
+
+export type MutableStateMachineStageExecutorOverlayProjection =
+  Writable<StateMachineStageExecutorOverlayProjection>;
 
 export interface StateMachineHookProjection {
   readonly orderId: Hex;
@@ -94,11 +81,6 @@ export interface StateMachineStageMaterializationProjection {
 }
 
 export type MutableStateMachineHookProjection = Writable<StateMachineHookProjection>;
-
-const EXECUTOR_PATCH_MODE_VALUES = {
-  assign: EXECUTOR_PATCH_MODE_ASSIGN,
-  handoff: EXECUTOR_PATCH_MODE_HANDOFF
-} as const satisfies Record<StateMachineStageExecutorPatchMode, Hex>;
 
 export function applyStageMaterialized(
   state: {
@@ -143,40 +125,43 @@ export function applyStageExecutorPatchApplied(
   const order = ensureStateMachineOrderFromModuleEvent(state, event, orderId, planId);
   const selectorStageId = requiredBytes32Arg(event, "selectorStageId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
-  const selectorWallet = requiredAddressArg(event, "selector");
+  const selector = requiredAddressArg(event, "selector");
+  const supplierId = requiredBytes32Arg(event, "supplierId");
+  const previousSupplierId = optionalNonZeroBytes32Arg(event, "previousSupplierId");
   const patchNonce = uintArgAsString(event, "patchNonce");
-  const modeHash = optionalBytes32Arg(event, "mode");
-  const mode = executorPatchModeFromArg(modeHash);
-  const previousExecutor = optionalAddressArg(event, "previousExecutor");
-  const authorizationsHash = optionalNonZeroBytes32Arg(event, "authorizationsHash");
   const proof = proofOf(event, {
     orderId,
     planId: order.planId,
     planHash: order.planHash,
-    submitter: selectorWallet
+    submitter: selector
   });
-  const existing = order.stageExecutorOverlays[stageExecutorOverlayProjectionKey(targetStageId)];
-  if (!existing || compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
-    const overlay: StateMachineStageExecutorOverlayProjection = {
+  const key = stageExecutorOverlayProjectionKey(targetStageId);
+  const existing = order.stageExecutorOverlays[key];
+  if (!existing || compareUintStrings(patchNonce, existing.patchNonce) === 0) {
+    order.stageExecutorOverlays[key] = {
+      ...(existing ?? {}),
       orderId,
       selectorStageId,
       targetStageId,
-      selectorWallet,
-      activeExecutorWallet: requiredAddressArg(event, "executor"),
-      mode,
-      ...(modeHash ? { modeHash } : {}),
-      ...(previousExecutor ? { previousExecutor } : {}),
-      ...(authorizationsHash ? { authorizationsHash } : {}),
-      roleHash: requiredBytes32Arg(event, "role"),
-      executorMetadataHash: requiredBytes32Arg(event, "executorMetadataHash"),
-      patchHash: requiredBytes32Arg(event, "patchHash"),
+      selector,
+      supplierId,
+      ...(previousSupplierId ? { previousSupplierId } : {}),
       patchNonce,
-      metadataURI: optionalStringArg(event, "metadataURI") ?? "",
       updatedAt: provenanceOf(event),
       proof
     };
-    order.stageExecutorOverlays[stageExecutorOverlayProjectionKey(targetStageId)] = overlay;
-    markTargetStageTasksAssignedFromOverlay(order, overlay);
+  } else if (compareUintStrings(patchNonce, existing.patchNonce) > 0) {
+    order.stageExecutorOverlays[key] = {
+      orderId,
+      selectorStageId,
+      targetStageId,
+      selector,
+      supplierId,
+      ...(previousSupplierId ? { previousSupplierId } : {}),
+      patchNonce,
+      updatedAt: provenanceOf(event),
+      proof
+    };
   }
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
@@ -194,51 +179,37 @@ export function applyStageExecutorActivated(
   const planId = optionalBytes32Arg(event, "planId");
   const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
-  const executor = requiredAddressArg(event, "executor");
+  const supplierId = requiredBytes32Arg(event, "supplierId");
   const patchNonce = uintArgAsString(event, "patchNonce");
   const proof = proofOf(event, {
     orderId,
     planId: order.planId,
-    planHash: order.planHash,
-    submitter: executor
+    planHash: order.planHash
   });
   const key = stageExecutorOverlayProjectionKey(targetStageId);
   const existing = order.stageExecutorOverlays[key];
   if (!existing || compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
-    const nonceIncreased =
-      existing !== undefined && compareUintStrings(patchNonce, existing.patchNonce) > 0;
-    const roleHash = requiredBytes32Arg(event, "role");
-    const executorMetadataHash = requiredBytes32Arg(event, "metadataHash");
-    const metadataURI =
-      optionalStringArg(event, "metadataURI") ?? (nonceIncreased ? "" : existing?.metadataURI ?? "");
-    const overlay: StateMachineStageExecutorOverlayProjection = existing && !nonceIncreased
+    const sameNonce = existing !== undefined && compareUintStrings(patchNonce, existing.patchNonce) === 0;
+    order.stageExecutorOverlays[key] = sameNonce
       ? {
         ...existing,
-        activeExecutorWallet: executor,
-        roleHash,
-        executorMetadataHash,
+        supplierId,
         patchNonce,
-        metadataURI,
         updatedAt: provenanceOf(event),
         activatedAt: provenanceOf(event),
+        proof,
         activationProof: proof
       }
       : {
         orderId,
         targetStageId,
-        activeExecutorWallet: executor,
-        roleHash,
-        executorMetadataHash,
+        supplierId,
         patchNonce,
-        metadataURI,
-        ...(nonceIncreased ? { previousExecutor: existing.activeExecutorWallet } : {}),
         updatedAt: provenanceOf(event),
         activatedAt: provenanceOf(event),
         proof,
         activationProof: proof
       };
-    order.stageExecutorOverlays[key] = overlay;
-    markTargetStageTasksAssignedFromOverlay(order, overlay);
   }
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
@@ -304,19 +275,6 @@ export function applyHookReady(
   hook.proof = proof;
 
   const plan = findPlanForOrder(state.plans, order);
-  const planSubmitSignals = planSubmitSignalsForStage(plan, stageIdentifier);
-  const overlay = findActiveStageOverlayForHook(order, {
-    stageIdentifier,
-    hookId,
-    hookName
-  });
-  const authorization = findSignalAuthorizationForHook(order, {
-    stageIdentifier,
-    hookId,
-    hookName,
-    submitSignals: planSubmitSignals
-  });
-  const overlayAssignment = overlay ? stageOverlayTaskAssignment(overlay) : undefined;
   const taskId = taskProjectionId(orderId, hookId, order.contractAddress);
   const task: MutableStateMachineTaskProjection = {
     taskId,
@@ -327,22 +285,12 @@ export function applyHookReady(
     hookId,
     stageIdentifier,
     hookName,
-    assigneeRole: overlayAssignment?.assigneeRole ?? (authorization ? "authorized_submitter" : "unknown"),
-    ...(overlayAssignment ? {
-      assigneeWallet: overlayAssignment.assigneeWallet,
-      assigneeRoleHash: overlayAssignment.assigneeRoleHash,
-      authorizationMetadataHash: overlayAssignment.authorizationMetadataHash
-    } : authorization ? {
-      assigneeWallet: authorization.submitter,
-      assigneeRoleHash: authorization.role,
-      authorizationMetadataHash: authorization.metadataHash
-    } : {}),
     status: "ready",
     createdAt: provenanceOf(event),
     updatedAt: provenanceOf(event),
     proof
   };
-  refreshTaskSubmitSignals(order, task, plan);
+  refreshTaskSubmitSignals(task, plan);
   markTaskSubmittedFromExistingSignals(order, task);
   order.tasks[taskId] = task;
   order.currentStage = stageIdentifier;
@@ -398,47 +346,15 @@ export function ensureStateMachineHook(
   return created;
 }
 
-export function markTargetStageTasksAssignedFromOverlay(
+export function findStageExecutorOverlay(
   order: MutableStateMachineOrderProjection,
-  overlay: StateMachineStageExecutorOverlayProjection
-): void {
-  for (const task of Object.values(order.tasks)) {
-    if (task.stageIdentifier !== overlay.targetStageId) {
-      continue;
-    }
-    task.assigneeRole = "stage_overlay_executor";
-    task.assigneeWallet = overlay.activeExecutorWallet;
-    task.assigneeRoleHash = overlay.roleHash;
-    task.authorizationMetadataHash = overlay.executorMetadataHash;
-    task.updatedAt = overlay.updatedAt;
-  }
+  targetStageId: Hex
+): MutableStateMachineStageExecutorOverlayProjection | undefined {
+  return order.stageExecutorOverlays[stageExecutorOverlayProjectionKey(targetStageId)];
 }
 
 function stageExecutorOverlayProjectionKey(targetStageId: Hex): string {
   return targetStageId.toLowerCase();
-}
-
-export function findActiveStageOverlayForHook(
-  order: MutableStateMachineOrderProjection,
-  hook: SignalAuthorizationHookMatchInput
-): StateMachineStageExecutorOverlayProjection | undefined {
-  return order.stageExecutorOverlays[stageExecutorOverlayProjectionKey(hook.stageIdentifier)];
-}
-
-export function stageOverlayTaskAssignment(
-  overlay: StateMachineStageExecutorOverlayProjection
-): {
-  readonly assigneeRole: string;
-  readonly assigneeWallet: Address;
-  readonly assigneeRoleHash: Hex;
-  readonly authorizationMetadataHash: Hex;
-} {
-  return {
-    assigneeRole: "stage_overlay_executor",
-    assigneeWallet: overlay.activeExecutorWallet,
-    assigneeRoleHash: overlay.roleHash,
-    authorizationMetadataHash: overlay.executorMetadataHash
-  };
 }
 
 function hookStatusFromArg(value: unknown): StateMachineHookStatus {
@@ -476,17 +392,4 @@ function compareUintStrings(left: string, right: string): number {
   const leftValue = BigInt(left);
   const rightValue = BigInt(right);
   return leftValue === rightValue ? 0 : leftValue < rightValue ? -1 : 1;
-}
-
-function executorPatchModeFromArg(modeHash: Hex | undefined): StateMachineStageExecutorPatchMode {
-  if (!modeHash) {
-    return "assign";
-  }
-  if (modeHash === EXECUTOR_PATCH_MODE_VALUES.assign) {
-    return "assign";
-  }
-  if (modeHash === EXECUTOR_PATCH_MODE_VALUES.handoff) {
-    return "handoff";
-  }
-  throw new ProjectionError(`StageExecutorPatchApplied.mode is not a supported executor patch mode`);
 }

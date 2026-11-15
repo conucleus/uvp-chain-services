@@ -22,18 +22,15 @@ export type {
   StateMachineStageSelectorBindingProjection,
   StateMachineSignalTargetRelation,
   StateMachineSignalCapabilityProjection,
-  StateMachineExecutorCandidateProjection,
+  StateMachineExecutorBindingProjection,
+  StateMachineExecutorBindingKind,
   PlanCapabilityEnrichmentStatus
 } from "./plan.js";
 export type {
   StateMachineSignalProjection,
-  StateMachineSignalAuthorizationProjection,
-  StateMachineDerivedSignalProjection,
-  SignalAuthorizationHookMatchInput
+  StateMachineDerivedSignalProjection
 } from "./signal.js";
-export { signalAuthorizationMatchesHook } from "./signal.js";
 export type {
-  StateMachineStageExecutorPatchMode,
   StateMachineStageExecutorOverlayProjection,
   StateMachineStageMaterializationProjection,
   StateMachineHookStatus,
@@ -54,6 +51,9 @@ export type {
   StateMachineTaskProjection,
   StateMachineTaskSubmitSignalProjection
 } from "./task.js";
+export type {
+  StateMachineSupplierProjection
+} from "./supplier.js";
 export type {
   StateMachineDeploymentStatus,
   StateMachineDeploymentProjection,

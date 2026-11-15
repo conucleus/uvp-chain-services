@@ -1,12 +1,9 @@
-// 信号族：SignalSubmitterAuthorized/SignalSubmitterRevoked/SignalSubmitted/
-// DerivedSignalSubmitted 与授权-任务匹配、信号投影键。
-// patch 生效授权由 authorizeSignalSubmittersFromModule 写显式订单级
-// 授权（本文件投影的 SignalSubmitterAuthorized 事件流即其完整重建源）。
+// 信号族：SignalSubmitted/DerivedSignalSubmitted 投影与信号投影键；发信权
+// 由合约按 effective stage executor 判定，本模块只重放链上事件。
 import type { ChainEvent } from "../events.js";
 import type { Address, Hex } from "@uvp-eth/service-runtime";
 import { encodeAbiParameters, keccak256 } from "viem";
 import {
-  compareProofEvents,
   optionalAddressArg,
   optionalBytes32Arg,
   optionalNonZeroBytes32Arg,
@@ -27,14 +24,8 @@ import {
   type MutableStateMachineOrderProjection,
   type StateMachineModuleIndex
 } from "./order.js";
-import { findActiveStageOverlayForHook } from "./stage.js";
 import type { MutableStateMachinePlanProjection } from "./plan.js";
-import {
-  addTaskSubmitSignal,
-  markMatchingTasksSubmitted,
-  markTaskSubmittedFromExistingSignals
-} from "./task.js";
-import type { StateMachineTaskSubmitSignalProjection } from "./task.js";
+import { markMatchingTasksSubmitted } from "./task.js";
 import type { ProjectionReplayDiagnostics } from "./snapshot.js";
 
 export interface StateMachineSignalProjection {
@@ -44,6 +35,7 @@ export interface StateMachineSignalProjection {
   readonly payloadHash: Hex;
   readonly idempotencyKey: Hex;
   readonly submitter: Address;
+  readonly relayer?: Address;
   readonly factStageId?: Hex;
   readonly replayedFromFork?: boolean;
   readonly submittedAt: ProjectionProvenance;
@@ -65,67 +57,6 @@ export interface StateMachineDerivedSignalProjection {
   readonly proof: StateMachineProofProjection;
 }
 
-export interface StateMachineSignalAuthorizationProjection {
-  readonly orderId: Hex;
-  readonly sourceId: Hex;
-  readonly signalId: Hex;
-  readonly submitter: Address;
-  readonly role: Hex;
-  readonly metadataHash: Hex;
-  readonly authorizedAt: ProjectionProvenance;
-  readonly proof: StateMachineProofProjection;
-}
-
-export function applySignalSubmitterAuthorized(
-  state: {
-    orders: Map<string, MutableStateMachineOrderProjection>;
-  },
-  event: ChainEvent
-): void {
-  const orderId = requiredBytes32Arg(event, "orderId");
-  const planId = optionalBytes32Arg(event, "planId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
-  const sourceId = requiredBytes32Arg(event, "sourceId");
-  const signalId = requiredBytes32Arg(event, "signalId");
-  const submitter = requiredAddressArg(event, "submitter");
-  const authorization: StateMachineSignalAuthorizationProjection = {
-    orderId,
-    sourceId,
-    signalId,
-    submitter,
-    role: requiredBytes32Arg(event, "role"),
-    metadataHash: requiredBytes32Arg(event, "metadataHash"),
-    authorizedAt: provenanceOf(event),
-    proof: proofOf(event, { orderId, planId: order.planId, planHash: order.planHash, submitter })
-  };
-
-  order.authorizations[signalAuthorizationProjectionKey(sourceId, signalId, submitter)] = authorization;
-  order.updatedAt = provenanceOf(event);
-  markMatchingTasksAssigned(order, authorization);
-  appendOrderProof(order, authorization.proof);
-  appendOrderTimeline(order, timelineOf(event, "执行授权已写入链上", authorization.proof, { orderId, planId: order.planId }));
-}
-
-export function applySignalSubmitterRevoked(
-  state: {
-    orders: Map<string, MutableStateMachineOrderProjection>;
-  },
-  event: ChainEvent
-): void {
-  const orderId = requiredBytes32Arg(event, "orderId");
-  const planId = optionalBytes32Arg(event, "planId");
-  const order = ensureStateMachineOrder(state.orders, event, orderId, planId);
-  const sourceId = requiredBytes32Arg(event, "sourceId");
-  const signalId = requiredBytes32Arg(event, "signalId");
-  const submitter = requiredAddressArg(event, "submitter");
-  const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash, submitter });
-
-  delete order.authorizations[signalAuthorizationProjectionKey(sourceId, signalId, submitter)];
-  order.updatedAt = provenanceOf(event);
-  appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "执行授权已撤销", proof, { orderId, planId: order.planId }));
-}
-
 export function applySignalSubmitted(
   state: {
     plans: Map<string, MutableStateMachinePlanProjection>;
@@ -139,6 +70,7 @@ export function applySignalSubmitted(
   const sourceId = requiredBytes32Arg(event, "sourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
   const submitter = requiredAddressArg(event, "submitter");
+  const relayer = optionalAddressArg(event, "relayer");
   const factStageId = optionalNonZeroBytes32Arg(event, "factStageId");
   const proof = proofOf(event, { orderId, planId: order.planId, planHash: order.planHash, submitter });
   const signal: StateMachineSignalProjection = {
@@ -148,6 +80,7 @@ export function applySignalSubmitted(
     payloadHash: requiredBytes32Arg(event, "payloadHash"),
     idempotencyKey: requiredBytes32Arg(event, "idempotencyKey"),
     submitter,
+    ...(relayer ? { relayer } : {}),
     ...(factStageId ? { factStageId } : {}),
     ...(isForkReplayedFact(order, sourceId, signalId) ? { replayedFromFork: true } : {}),
     submittedAt: provenanceOf(event),
@@ -189,13 +122,13 @@ export function applyDerivedSignalSubmitted(
   const order = ensureStateMachineOrderFromModuleEvent(state, event, targetOrderId, planId);
   const targetSourceId = requiredBytes32Arg(event, "targetSourceId");
   const signalId = requiredBytes32Arg(event, "signalId");
+  const derivedSubmitter = optionalAddressArg(event, "submitter");
   const proof = proofOf(event, {
     orderId: targetOrderId,
     planId: order.planId,
     planHash: order.planHash,
-    submitter: optionalAddressArg(event, "submitter")
+    submitter: derivedSubmitter
   });
-  const derivedSubmitter = optionalAddressArg(event, "submitter");
   const derivedRelation = optionalUintArgAsString(event, "relation");
   const derived: StateMachineDerivedSignalProjection = {
     targetOrderId,
@@ -217,79 +150,6 @@ export function applyDerivedSignalSubmitted(
   appendOrderTimeline(order, timelineOf(event, "派生信号已提交", proof, { orderId: targetOrderId, planId: order.planId }));
 }
 
-export function markMatchingTasksAssigned(
-  order: MutableStateMachineOrderProjection,
-  authorization: StateMachineSignalAuthorizationProjection
-): void {
-  let changed = false;
-  for (const task of Object.values(order.tasks)) {
-    if (findActiveStageOverlayForHook(order, task)) {
-      continue;
-    }
-    if (!signalAuthorizationMatchesHook(authorization, task)) {
-      continue;
-    }
-    task.assigneeRole = "authorized_submitter";
-    task.assigneeWallet = authorization.submitter;
-    task.assigneeRoleHash = authorization.role;
-    task.authorizationMetadataHash = authorization.metadataHash;
-    task.updatedAt = authorization.authorizedAt;
-    addTaskSubmitSignal(task, {
-      sourceId: authorization.sourceId,
-      signalId: authorization.signalId,
-      source: "authorization"
-    });
-    changed = markTaskSubmittedFromExistingSignals(order, task) || changed;
-  }
-  void changed;
-}
-
 export function signalProjectionKey(sourceId: Hex, signalId: Hex): string {
   return `${sourceId}:${signalId}`;
-}
-
-export function signalAuthorizationProjectionKey(sourceId: Hex, signalId: Hex, submitter: Address): string {
-  return `${sourceId}:${signalId}:${submitter.toLowerCase()}`;
-}
-
-export function findSignalAuthorizationForHook(
-  order: MutableStateMachineOrderProjection,
-  hook: SignalAuthorizationHookMatchInput
-): StateMachineSignalAuthorizationProjection | undefined {
-  return Object.values(order.authorizations)
-    .sort(compareSignalAuthorizations)
-    .find((authorization) => signalAuthorizationMatchesHook(authorization, hook));
-}
-
-export interface SignalAuthorizationHookMatchInput {
-  readonly stageIdentifier: Hex;
-  readonly hookId: Hex;
-  readonly hookName: Hex;
-  readonly submitSignals?: readonly StateMachineTaskSubmitSignalProjection[];
-}
-
-export function signalAuthorizationMatchesHook(
-  authorization: StateMachineSignalAuthorizationProjection,
-  hook: SignalAuthorizationHookMatchInput
-): boolean {
-  if (hook.hookId === authorization.sourceId || hook.hookId === authorization.signalId) {
-    return true;
-  }
-  return authorizationMatchesSubmitSignals(authorization, hook.submitSignals ?? []);
-}
-
-function authorizationMatchesSubmitSignals(
-  authorization: StateMachineSignalAuthorizationProjection,
-  submitSignals: readonly StateMachineTaskSubmitSignalProjection[]
-): boolean {
-  return submitSignals.some((signal) =>
-    signal.sourceId === authorization.sourceId && signal.signalId === authorization.signalId
-  );
-}
-
-export function compareSignalAuthorizations(
-  left: StateMachineSignalAuthorizationProjection,
-  right: StateMachineSignalAuthorizationProjection
-): number {
-  return compareProofEvents(left.proof, right.proof);
 }

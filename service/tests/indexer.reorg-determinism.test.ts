@@ -21,7 +21,7 @@ const signalId = "0x000000000000000000000000000000000000000000000000000000000000
 const payloadHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const idempotencyKey = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const signer = "0x4444444444444444444444444444444444444444";
-const executorCandidatesRoot = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+const executorBindingsRoot = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 const dueAt = 99n;
 
 function chainEvent(
@@ -52,7 +52,7 @@ function goodStream(): ChainEvent[] {
       hooksHash: "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       capabilitiesRoot: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       hookCount: 1n,
-      executorCandidatesRoot,
+      executorBindingsRoot,
     }),
     chainEvent(1n, 1, "PlanPublisherRecorded", { planId, publisher: signer }),
     chainEvent(2n, 0, "PlanFinalized", {

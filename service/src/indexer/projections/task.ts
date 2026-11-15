@@ -1,5 +1,5 @@
-// 任务族：任务投影与提交信号构造/推进（refreshTaskSubmitSignals 等），供
-// plan/signal/stage 事件族在任务指派与完成判定中复用。
+// 任务族：hook ready 生成的任务投影与提交信号推进，供 plan/signal/stage 事件族
+// 在任务完成判定中复用；任务的 supplier/effective executor 由重放期统一解析。
 import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {
   compareProofEvents,
@@ -8,7 +8,7 @@ import {
 } from "./proof.js";
 import type { MutableStateMachineOrderProjection } from "./order.js";
 import type { MutableStateMachinePlanProjection } from "./plan.js";
-import { signalAuthorizationMatchesHook, signalProjectionKey } from "./signal.js";
+import { signalProjectionKey } from "./signal.js";
 import type { Writable } from "./snapshot.js";
 
 export type StateMachineTaskStatus = "ready" | "submitted" | "cancelled" | "unknown";
@@ -22,10 +22,8 @@ export interface StateMachineTaskProjection {
   readonly hookId: Hex;
   readonly stageIdentifier: Hex;
   readonly hookName: Hex;
-  readonly assigneeRole: string;
-  readonly assigneeWallet?: Address;
-  readonly assigneeRoleHash?: Hex;
-  readonly authorizationMetadataHash?: Hex;
+  readonly assigneeSupplierId?: Hex;
+  readonly assigneeExecutor?: Address;
   readonly status: StateMachineTaskStatus;
   readonly submitSignals?: readonly StateMachineTaskSubmitSignalProjection[];
   readonly createdAt: ProjectionProvenance;
@@ -36,7 +34,6 @@ export interface StateMachineTaskProjection {
 export interface StateMachineTaskSubmitSignalProjection {
   readonly sourceId: Hex;
   readonly signalId: Hex;
-  readonly source: "plan_capability" | "authorization";
 }
 
 export type MutableStateMachineTaskProjection = Writable<StateMachineTaskProjection>;
@@ -47,42 +44,19 @@ export function markMatchingTasksSubmitted(
   signalId: Hex,
   proof: StateMachineProofProjection
 ): void {
-  let changed = false;
   for (const task of Object.values(order.tasks)) {
     if (!taskMatchesSubmittedSignal(task, sourceId, signalId)) {
       continue;
     }
-    changed = markTaskSubmitted(task, proof) || changed;
+    markTaskSubmitted(task, proof);
   }
-
-  void changed;
 }
 
 export function refreshTaskSubmitSignals(
-  order: MutableStateMachineOrderProjection,
   task: MutableStateMachineTaskProjection,
   plan?: MutableStateMachinePlanProjection
 ): void {
-  const signals: StateMachineTaskSubmitSignalProjection[] = [...planSubmitSignalsForStage(plan, task.stageIdentifier)];
-  for (const authorization of Object.values(order.authorizations)) {
-    if (!signalAuthorizationMatchesHook(authorization, { ...task, submitSignals: signals })) {
-      continue;
-    }
-    signals.push({
-      sourceId: authorization.sourceId,
-      signalId: authorization.signalId,
-      source: "authorization"
-    });
-  }
-  for (const authorization of Object.values(order.authorizations)) {
-    if (task.hookId === authorization.sourceId || task.hookId === authorization.signalId) {
-      signals.push({
-        sourceId: authorization.sourceId,
-        signalId: authorization.signalId,
-        source: "authorization"
-      });
-    }
-  }
+  const signals = [...planSubmitSignalsForStage(plan, task.stageIdentifier)];
   task.submitSignals = dedupeTaskSubmitSignals(signals);
   if (task.submitSignals.length === 0) {
     delete task.submitSignals;
@@ -97,16 +71,8 @@ export function planSubmitSignalsForStage(
     .filter((capability) => capability.stageId === stageId && capability.targetOrderRelation === "current")
     .map((capability) => ({
       sourceId: capability.targetSourceId,
-      signalId: capability.signalId,
-      source: "plan_capability" as const
+      signalId: capability.signalId
     }));
-}
-
-export function addTaskSubmitSignal(
-  task: MutableStateMachineTaskProjection,
-  signal: StateMachineTaskSubmitSignalProjection
-): void {
-  task.submitSignals = dedupeTaskSubmitSignals([...(task.submitSignals ?? []), signal]);
 }
 
 function dedupeTaskSubmitSignals(
@@ -114,11 +80,7 @@ function dedupeTaskSubmitSignals(
 ): readonly StateMachineTaskSubmitSignalProjection[] {
   const byKey = new Map<string, StateMachineTaskSubmitSignalProjection>();
   for (const signal of signals) {
-    const key = signalProjectionKey(signal.sourceId, signal.signalId);
-    const existing = byKey.get(key);
-    if (!existing || existing.source !== "plan_capability") {
-      byKey.set(key, signal);
-    }
+    byKey.set(signalProjectionKey(signal.sourceId, signal.signalId), signal);
   }
   return [...byKey.values()].sort(compareTaskSubmitSignals);
 }
@@ -127,12 +89,7 @@ function compareTaskSubmitSignals(
   left: StateMachineTaskSubmitSignalProjection,
   right: StateMachineTaskSubmitSignalProjection
 ): number {
-  const sourcePriority = taskSubmitSignalSourcePriority(left.source) - taskSubmitSignalSourcePriority(right.source);
-  return sourcePriority || left.sourceId.localeCompare(right.sourceId) || left.signalId.localeCompare(right.signalId);
-}
-
-function taskSubmitSignalSourcePriority(source: StateMachineTaskSubmitSignalProjection["source"]): number {
-  return source === "plan_capability" ? 0 : 1;
+  return left.sourceId.localeCompare(right.sourceId) || left.signalId.localeCompare(right.signalId);
 }
 
 function taskMatchesSubmittedSignal(

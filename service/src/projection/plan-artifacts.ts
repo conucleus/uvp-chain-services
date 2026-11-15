@@ -8,7 +8,7 @@ import {
 } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "../indexer/projections/plan.js";
 import type { SemanticOraclePlan } from "../indexer/semantic-oracle.js";
-import { normalizeBytes32, normalizeAddress, type Hex } from "@uvp-eth/service-runtime";
+import { normalizeBytes32, type Hex } from "@uvp-eth/service-runtime";
 import type { PostgresDatabase } from "../storage/postgres-client.js";
 import { rowObject, stringColumn } from "@uvp-eth/service-runtime";
 
@@ -124,15 +124,24 @@ export function createPlanArtifactResolvers(options: {
   return {
     async resolvePlanCapabilityTables(planId, planHash) {
       const record = await require(planId, planHash);
-      const candidates = record.artifact.executorCandidates.map((candidate) => ({
-        stageId: normalizeBytes32(candidate.stageId, "executorCandidate.stageId"),
-        executor: normalizeAddress(candidate.executor, "executorCandidate.executor")
+      const executorBindings = record.artifact.executorBindings.map((binding, index) => ({
+        stageId: normalizeBytes32(binding.stageId, `executorBindings[${index}].stageId`),
+        supplierId: normalizeBytes32(binding.supplierId, `executorBindings[${index}].supplierId`),
+        kind: binding.kind
       }));
+      const dynamicExecutorStages = [
+        ...new Map(
+          record.artifact.compiledHooks
+            .filter((hook) => hook.dynamicExecutor)
+            .map((hook) => [hook.stageId.toLowerCase(), hook.stageId] as const)
+        ).values()
+      ];
       return {
         planId: record.planId,
         planHash: record.planHash,
         ...capabilityTablesOf(record.artifact),
-        ...(candidates.length > 0 ? { executorCandidates: candidates } : {})
+        executorBindings,
+        ...(dynamicExecutorStages.length > 0 ? { dynamicExecutorStages } : {})
       };
     },
     async resolveSemanticOraclePlan(planId, planHash) {

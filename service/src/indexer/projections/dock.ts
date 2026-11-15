@@ -5,7 +5,6 @@ import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtim
 import { DockArtifactMissingError } from "../../projection/dock-artifacts.js";
 import type { ChainEvent } from "../events.js";
 import {
-  optionalStringArg,
   proofOf,
   provenanceOf,
   requiredAddressArg,
@@ -65,11 +64,9 @@ export interface StateMachineDockSelectionProjection {
   readonly dockId: Hex;
   readonly dkid: string;
   readonly fromPlanId: Hex;
-  readonly executor: Address;
+  readonly supplierId: Hex;
   readonly selector: Address;
-  readonly patchHash: Hex;
   readonly patchNonce: string;
-  readonly metadataURI: string;
   readonly selectedAt: ProjectionProvenance;
 }
 
@@ -175,18 +172,16 @@ export function applyStageDockExecutorSelected(
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
   const dockId = requiredBytes32Arg(event, "dockId");
   const fromPlanId = requiredBytes32Arg(event, "fromPlanId");
-  state.dockSelections.set(dockStageKey(planId, orderId, targetStageId), {
+  state.dockSelections.set(dockSelectionKey(planId, orderId, targetStageId), {
     planId,
     orderId,
     targetStageId,
     dockId,
     dkid: dkidOfDockId(dockId),
     fromPlanId,
-    executor: requiredAddressArg(event, "executor"),
+    supplierId: requiredBytes32Arg(event, "supplierId"),
     selector: requiredAddressArg(event, "selector"),
-    patchHash: requiredBytes32Arg(event, "patchHash"),
     patchNonce: uintArgAsString(event, "patchNonce"),
-    metadataURI: optionalStringArg(event, "metadataURI") ?? "",
     selectedAt: provenanceOf(event)
   });
 }
@@ -212,7 +207,7 @@ export function applyDockBindingPoked(
       `${event.eventName} references dock ${dkid} with no recorded uvp.dock.v1 artifact`
     );
   }
-  const selection = state.dockSelections.get(dockStageKey(planId, orderId, targetStageId));
+  const selection = state.dockSelections.get(dockSelectionKey(planId, orderId, targetStageId));
   const key = bindingId.toLowerCase();
   const existing = state.dockBindings.get(key);
   state.dockBindings.set(key, {
@@ -264,7 +259,7 @@ export function applyDockOutputSubmitted(
 
 export type MutableStateMachineDockBindingProjection = Writable<StateMachineDockBindingProjection>;
 
-function dockStageKey(planId: Hex, orderId: Hex, targetStageId: Hex): string {
+export function dockSelectionKey(planId: Hex, orderId: Hex, targetStageId: Hex): string {
   return `${planId.toLowerCase()}:${orderId.toLowerCase()}:${targetStageId.toLowerCase()}`;
 }
 

@@ -1,7 +1,8 @@
 // 计划族（PlanCommitted/Finalized/Registered/PublisherRecorded）投影：链上
-// 只携带 capabilitiesRoot，selectorBindings/signalCapabilities/executorCandidates
-// 由重放方按 planId 从编译产物富集并重算 root 断言（fail-closed）。
-import { capabilitiesRootOf, executorCandidatesRootOf } from "@uvp-eth/compiler";
+// 只携带 capabilitiesRoot 与 executorBindingsRoot，selectorBindings/
+// signalCapabilities/executorBindings/dynamicExecutorStages 由重放方按 planId
+// 从编译产物富集并重算两棵树根断言（fail-closed）。
+import { capabilitiesRootOf, executorBindingsRootOf } from "@uvp-eth/compiler";
 import type { ChainEvent } from "../events.js";
 import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtime";
 import {
@@ -31,6 +32,14 @@ import {
   type Writable
 } from "./snapshot.js";
 
+export type StateMachineExecutorBindingKind = "default" | "candidate";
+
+export interface StateMachineExecutorBindingProjection {
+  readonly stageId: Hex;
+  readonly supplierId: Hex;
+  readonly kind: StateMachineExecutorBindingKind;
+}
+
 export interface StateMachinePlanProjection {
   readonly planId: Hex;
   readonly deploymentId?: Hex;
@@ -40,13 +49,14 @@ export interface StateMachinePlanProjection {
   readonly publisher?: Address;
   readonly hooksHash?: Hex;
   readonly capabilitiesRoot?: Hex;
-  readonly executorCandidatesRoot?: Hex;
+  readonly executorBindingsRoot?: Hex;
   readonly birthAuthorizer?: Address;
   readonly committedAt?: ProjectionProvenance;
   readonly finalizedAt?: ProjectionProvenance;
   readonly selectorBindings: readonly StateMachineStageSelectorBindingProjection[];
   readonly signalCapabilities: readonly StateMachineSignalCapabilityProjection[];
-  readonly executorCandidates: readonly StateMachineExecutorCandidateProjection[];
+  readonly executorBindings: readonly StateMachineExecutorBindingProjection[];
+  readonly dynamicExecutorStages?: readonly Hex[];
   readonly capabilityEnrichment?: PlanCapabilityEnrichmentStatus;
   readonly registeredAt: ProjectionProvenance;
   readonly publisherRecordedAt?: ProjectionProvenance;
@@ -66,11 +76,6 @@ export interface StateMachineStageSelectorBindingProjection {
 }
 
 export type StateMachineSignalTargetRelation = "current" | "triggerOrigin" | "unknown";
-
-export interface StateMachineExecutorCandidateProjection {
-  readonly stageId: Hex;
-  readonly executor: Address;
-}
 
 export interface StateMachineSignalCapabilityProjection {
   readonly stageId: Hex;
@@ -99,10 +104,12 @@ export interface PlanCapabilityTablesInput {
     readonly targetStageId: Hex;
     readonly writerStageId: Hex;
   }[];
-  readonly executorCandidates?: readonly {
+  readonly executorBindings?: readonly {
     readonly stageId: Hex;
-    readonly executor: Address;
+    readonly supplierId: Hex;
+    readonly kind: 0 | 1;
   }[];
+  readonly dynamicExecutorStages?: readonly Hex[];
 }
 
 export function applyPlanCommitted(
@@ -131,9 +138,7 @@ export function applyPlanCommitted(
     publisher,
     hooksHash: requiredBytes32Arg(event, "hooksHash"),
     capabilitiesRoot: requiredBytes32Arg(event, "capabilitiesRoot"),
-    ...(optionalBytes32Arg(event, "executorCandidatesRoot")
-      ? { executorCandidatesRoot: optionalBytes32Arg(event, "executorCandidatesRoot")! }
-      : {}),
+    executorBindingsRoot: requiredBytes32Arg(event, "executorBindingsRoot"),
     ...((() => {
       const birthAuthorizer = optionalAddressArg(event, "birthAuthorizer");
       return birthAuthorizer && birthAuthorizer !== "0x0000000000000000000000000000000000000000"
@@ -143,7 +148,7 @@ export function applyPlanCommitted(
     committedAt: provenanceOf(event),
     selectorBindings: [],
     signalCapabilities: [],
-    executorCandidates: [],
+    executorBindings: [],
     registeredAt: provenanceOf(event),
     updatedAt: provenanceOf(event),
     proof,
@@ -173,7 +178,7 @@ export function applyPlanFinalized(
       existing.finalizationProof = proof;
       existing.capabilitiesRoot = capabilitiesRoot;
       existing.updatedAt = provenanceOf(event);
-      enrichPlanCapabilityTables(existing, event, state, { countMismatch: true });
+      enrichPlanVocabulary(existing, event, state, { countMismatch: true });
     }
     return;
   }
@@ -189,13 +194,13 @@ export function applyPlanFinalized(
     finalizedAt: provenanceOf(event),
     selectorBindings: [],
     signalCapabilities: [],
-    executorCandidates: [],
+    executorBindings: [],
     registeredAt: provenanceOf(event),
     updatedAt: provenanceOf(event),
     proof,
     finalizationProof: proof
   };
-  enrichPlanCapabilityTables(plan, event, state, { countMismatch: true });
+  enrichPlanVocabulary(plan, event, state, { countMismatch: true });
   state.plans.set(key, plan);
 }
 
@@ -232,12 +237,12 @@ export function applyPlanRegistered(
       hookCount: uintArgAsString(event, "hookCount"),
       selectorBindings: [],
       signalCapabilities: [],
-      executorCandidates: [],
+      executorBindings: [],
       registeredAt: provenanceOf(event),
       updatedAt: provenanceOf(event),
       proof
     };
-  enrichPlanCapabilityTables(plan, event, state, {
+  enrichPlanVocabulary(plan, event, state, {
     countMismatch: existing === undefined || existing.finalizedAt === undefined
   });
   state.plans.set(key, plan);
@@ -300,7 +305,16 @@ export function findPlanForOrder(
   return plans.get(stateMachineScopedKey(order.chainId, order.contractAddress, order.planId));
 }
 
-function enrichPlanCapabilityTables(
+export function planDefaultSupplierForStage(
+  plan: StateMachinePlanProjection | undefined,
+  stageId: Hex
+): Hex | undefined {
+  return plan?.executorBindings.find(
+    (binding) => binding.kind === "default" && binding.stageId === stageId
+  )?.supplierId;
+}
+
+function enrichPlanVocabulary(
   plan: MutableStateMachinePlanProjection,
   event: ChainEvent,
   state: {
@@ -309,16 +323,15 @@ function enrichPlanCapabilityTables(
   },
   options: { readonly countMismatch: boolean }
 ): void {
-  const source = state.capabilityTables?.get(plan.planId.toLowerCase());
-  enrichExecutorCandidates(plan, source, state, options);
+  if (plan.capabilityEnrichment !== undefined) {
+    return;
+  }
   const countMismatch = (): void => {
     if (options.countMismatch) {
       state.diagnostics && (state.diagnostics.capabilityEnrichmentMismatchCount += 1);
     }
   };
-  if (plan.selectorBindings.length > 0 || plan.signalCapabilities.length > 0) {
-    return;
-  }
+  const source = state.capabilityTables?.get(plan.planId.toLowerCase());
   if (!source) {
     countMismatch();
     plan.capabilityEnrichment = "failed";
@@ -329,12 +342,19 @@ function enrichPlanCapabilityTables(
     plan.capabilityEnrichment = "failed";
     return;
   }
+  const executorBindings = source.executorBindings ?? [];
   const capabilitiesRoot = capabilitiesRootOf(
     source.selectorBindings,
     source.signalCapabilities,
     source.fileWriterBindings ?? [],
   );
-  if (!plan.capabilitiesRoot || plan.capabilitiesRoot.toLowerCase() !== capabilitiesRoot.toLowerCase()) {
+  const executorBindingsRoot = executorBindingsRootOf(executorBindings);
+  if (
+    !plan.capabilitiesRoot ||
+    plan.capabilitiesRoot.toLowerCase() !== capabilitiesRoot.toLowerCase() ||
+    !plan.executorBindingsRoot ||
+    plan.executorBindingsRoot.toLowerCase() !== executorBindingsRoot.toLowerCase()
+  ) {
     countMismatch();
     plan.capabilityEnrichment = "failed";
     return;
@@ -353,41 +373,17 @@ function enrichPlanCapabilityTables(
       proof: proofOf(event, { planId: plan.planId })
     }))
     .sort(compareSignalCapabilities);
-  plan.capabilityEnrichment = "enriched";
-}
-
-function enrichExecutorCandidates(
-  plan: MutableStateMachinePlanProjection,
-  source: PlanCapabilityTablesInput | undefined,
-  state: {
-    diagnostics?: ProjectionReplayDiagnostics;
-  },
-  options: { readonly countMismatch: boolean }
-): void {
-  if (plan.executorCandidates.length > 0) {
-    return;
-  }
-  const candidates = source?.executorCandidates;
-  if (!candidates || candidates.length === 0) {
-    return;
-  }
-  const countMismatch = (): void => {
-    if (options.countMismatch) {
-      state.diagnostics && (state.diagnostics.capabilityEnrichmentMismatchCount += 1);
-    }
-  };
-  const candidatesRoot = executorCandidatesRootOf(candidates);
-  if (
-    !plan.executorCandidatesRoot ||
-    plan.executorCandidatesRoot.toLowerCase() !== candidatesRoot.toLowerCase()
-  ) {
-    countMismatch();
-    return;
-  }
-  plan.executorCandidates = candidates.map((candidate) => ({
-    stageId: candidate.stageId,
-    executor: candidate.executor,
+  plan.executorBindings = executorBindings.map((binding): StateMachineExecutorBindingProjection => ({
+    stageId: binding.stageId,
+    supplierId: binding.supplierId,
+    kind: binding.kind === 0 ? "default" : "candidate"
   }));
+  if (source.dynamicExecutorStages && source.dynamicExecutorStages.length > 0) {
+    plan.dynamicExecutorStages = [...source.dynamicExecutorStages];
+  } else {
+    delete plan.dynamicExecutorStages;
+  }
+  plan.capabilityEnrichment = "enriched";
 }
 
 function compareSignalCapabilities(

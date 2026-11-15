@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { encodeAbiParameters, encodeEventTopics, parseAbi, type Hex, type Log } from "viem";
-import { INDEXER_EVENT_ABIS, ViemChainEventSource } from "../src/indexer/viem-event-source.js";
+import { ViemChainEventSource } from "../src/indexer/viem-event-source.js";
 import { createChainEventSourceForTarget } from "../src/chain-adapters/events.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import { UnsupportedChainTargetError } from "@uvp-eth/service-runtime";
@@ -91,16 +91,16 @@ describe("ViemChainEventSource", () => {
     ]);
   });
 
-  it("decodes StageExecutorActivated metadata URI and SignalSubmitterRevoked args from EVM logs", async () => {
-    const activatedLog = stageExecutorActivatedLog();
-    const revokedLog = signalSubmitterRevokedLog();
+  it("decodes deployment registry and supplier registry logs from configured contracts", async () => {
+    const deploymentLog = deploymentRegisteredLog();
+    const supplierLog = supplierRegisteredLog();
     const eventSource = new ViemChainEventSource({
       publicClient: {
         async getBlockNumber() {
           return 0n;
         },
-        async getLogs() {
-          return [activatedLog, revokedLog];
+        async getLogs(input) {
+          return [deploymentLog, supplierLog].filter((log) => log.address === input.address);
         }
       }
     });
@@ -111,23 +111,25 @@ describe("ViemChainEventSource", () => {
         fromBlock: 100n,
         toBlock: 100n
       },
-      chainServicesConfig()
+      registryConfig()
     );
 
     expect(events).toEqual([
       expect.objectContaining({
-        eventName: "StageExecutorActivated",
+        contractAddress: deploymentRegistryAddress,
+        eventName: "DeploymentRegistered",
         args: expect.objectContaining({
-          metadataURI: "ipfs://stage-executor-patch/1"
+          deploymentId: bytes32Hex("0a"),
+          metadataURI: "ipfs://deployment/registry"
         })
       }),
       expect.objectContaining({
-        eventName: "SignalSubmitterRevoked",
-        args: expect.objectContaining({
-          sourceId: bytes32Hex("04"),
-          signalId: bytes32Hex("05"),
-          submitter: "0x3333333333333333333333333333333333333333"
-        })
+        contractAddress: supplierRegistryAddress,
+        eventName: "SupplierRegistered",
+        args: {
+          supplierId: bytes32Hex("0b"),
+          executor: "0x2222222222222222222222222222222222222222"
+        }
       })
     ]);
   });
@@ -274,7 +276,7 @@ describe("ViemChainEventSource", () => {
           return 0n;
         },
         async getLogs() {
-          return [stageExecutorActivatedLog({ metadataURI: "ipfs://Stage-Executor-Patch/0XAb" })];
+          return [deploymentRegisteredLog({ metadataURI: "ipfs://Deployment-Registry/0XAb" })];
         }
       }
     });
@@ -285,14 +287,14 @@ describe("ViemChainEventSource", () => {
         fromBlock: 100n,
         toBlock: 100n
       },
-      chainServicesConfig()
+      registryConfig()
     );
 
     expect(events).toEqual([
       expect.objectContaining({
-        eventName: "StageExecutorActivated",
+        eventName: "DeploymentRegistered",
         args: expect.objectContaining({
-          metadataURI: "ipfs://Stage-Executor-Patch/0XAb"
+          metadataURI: "ipfs://Deployment-Registry/0XAb"
         })
       })
     ]);
@@ -346,17 +348,27 @@ function compareEventShape(
   return left.name.localeCompare(right.name);
 }
 
+const stateMachineAddress = "0x1111111111111111111111111111111111111111";
+const deploymentRegistryAddress = "0x4444444444444444444444444444444444444444";
+const supplierRegistryAddress = "0x5555555555555555555555555555555555555555";
+
 const stateMachineTestAbi = parseAbi([
-  "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)",
-  "event StageExecutorActivated(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed targetStageId,address executor,bytes32 role,bytes32 metadataHash,uint256 patchNonce,string metadataURI)",
-  "event SignalSubmitterRevoked(bytes32 indexed planId,bytes32 indexed orderId,bytes32 indexed sourceId,bytes32 signalId,address submitter)"
+  "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)"
+]);
+
+const deploymentRegistryTestAbi = parseAbi([
+  "event DeploymentRegistered(bytes32 indexed deploymentId,address indexed stateMachine,bytes32 artifactHash,bytes32 abiHash,uint64 deploymentBlock,string metadataURI)"
+]);
+
+const supplierRegistryTestAbi = parseAbi([
+  "event SupplierRegistered(bytes32 indexed supplierId,address indexed executor)"
 ]);
 
 function planRegisteredLog(input: { readonly removed?: boolean } = {}): Log {
   const planId = "0x0000000000000000000000000000000000000000000000000000000000000101";
   const planHash = "0x0000000000000000000000000000000000000000000000000000000000000201";
   return {
-    address: "0x1111111111111111111111111111111111111111",
+    address: stateMachineAddress,
     blockNumber: 100n,
     blockHash: bytes32Hex("ab"),
     transactionHash: bytes32Hex("cd"),
@@ -375,15 +387,13 @@ function planRegisteredLog(input: { readonly removed?: boolean } = {}): Log {
   } as Log;
 }
 
-function stageExecutorActivatedLog(
-  input: { readonly metadataURI?: string } = {}
+function deploymentRegisteredLog(
+  input: { readonly metadataURI?: string; readonly removed?: boolean } = {}
 ): Log {
-  const planId = "0x0000000000000000000000000000000000000000000000000000000000000303";
-  const orderId = "0x0000000000000000000000000000000000000000000000000000000000000101";
-  const targetStageId = "0x0000000000000000000000000000000000000000000000000000000000000202";
-  const executor = "0x2222222222222222222222222222222222222222";
+  const deploymentId = bytes32Hex("0a");
+  const stateMachine = "0x3333333333333333333333333333333333333333";
   return {
-    address: "0x1111111111111111111111111111111111111111",
+    address: deploymentRegistryAddress,
     blockNumber: 100n,
     blockHash: bytes32Hex("ab"),
     transactionHash: bytes32Hex("ce"),
@@ -391,50 +401,43 @@ function stageExecutorActivatedLog(
     logIndex: 0,
     data: encodeAbiParameters(
       [
-        { type: "address" },
         { type: "bytes32" },
         { type: "bytes32" },
-        { type: "uint256" },
+        { type: "uint64" },
         { type: "string" }
       ],
       [
-        executor,
-        bytes32Hex("01"),
-        bytes32Hex("02"),
+        bytes32Hex("0c"),
+        bytes32Hex("0d"),
         1n,
-        input.metadataURI ?? "ipfs://stage-executor-patch/1"
+        input.metadataURI ?? "ipfs://deployment/registry"
       ]
     ),
     topics: encodeEventTopics({
-      abi: stateMachineTestAbi,
-      eventName: "StageExecutorActivated",
-      args: { planId, orderId, targetStageId }
+      abi: deploymentRegistryTestAbi,
+      eventName: "DeploymentRegistered",
+      args: { deploymentId, stateMachine }
     }),
-    removed: false
+    removed: input.removed === true
   } as Log;
 }
 
-function signalSubmitterRevokedLog(): Log {
-  const planId = "0x0000000000000000000000000000000000000000000000000000000000000303";
-  const orderId = "0x0000000000000000000000000000000000000000000000000000000000000101";
-  const sourceId = bytes32Hex("04");
-  const signalId = bytes32Hex("05");
-  const submitter = "0x3333333333333333333333333333333333333333";
+function supplierRegisteredLog(): Log {
   return {
-    address: "0x1111111111111111111111111111111111111111",
+    address: supplierRegistryAddress,
     blockNumber: 100n,
     blockHash: bytes32Hex("ab"),
     transactionHash: bytes32Hex("cf"),
     transactionIndex: 0,
     logIndex: 1,
-    data: encodeAbiParameters(
-      [{ type: "bytes32" }, { type: "address" }],
-      [signalId, submitter]
-    ),
+    data: "0x",
     topics: encodeEventTopics({
-      abi: stateMachineTestAbi,
-      eventName: "SignalSubmitterRevoked",
-      args: { planId, orderId, sourceId }
+      abi: supplierRegistryTestAbi,
+      eventName: "SupplierRegistered",
+      args: {
+        supplierId: bytes32Hex("0b"),
+        executor: "0x2222222222222222222222222222222222222222"
+      }
     }),
     removed: false
   } as Log;
@@ -452,7 +455,22 @@ function chainServicesConfig(): ChainServicesConfig {
       deploymentBlock: 100n,
       finalityConfirmations: 2,
       contracts: {
-        UVPStateMachine: "0x1111111111111111111111111111111111111111"
+        UVPStateMachine: stateMachineAddress
+      }
+    }
+  } as unknown as ChainServicesConfig;
+}
+
+function registryConfig(): ChainServicesConfig {
+  const base = chainServicesConfig();
+  return {
+    ...base,
+    network: {
+      ...base.network,
+      contracts: {
+        ...base.network.contracts,
+        UVPDeploymentRegistry: deploymentRegistryAddress,
+        UVPSupplierRegistry: supplierRegistryAddress
       }
     }
   } as unknown as ChainServicesConfig;

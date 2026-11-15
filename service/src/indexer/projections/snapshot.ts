@@ -12,6 +12,7 @@ import type {
   StateMachineDockProjection
 } from "./dock.js";
 import type { StateMachineTaskProjection } from "./task.js";
+import type { StateMachineSupplierProjection } from "./supplier.js";
 
 export type StateMachineDeploymentStatus =
   | "candidate"
@@ -62,6 +63,7 @@ export interface ProjectionSnapshot {
   readonly stateMachineDocks: Readonly<Record<string, StateMachineDockProjection>>;
   readonly stateMachineDockBindings: Readonly<Record<string, StateMachineDockBindingProjection>>;
   readonly stateMachineTasks: Readonly<Record<string, StateMachineTaskProjection>>;
+  readonly stateMachineSuppliers: Readonly<Record<string, StateMachineSupplierProjection>>;
   readonly lastEvent?: ProjectionProvenance;
   readonly unresolvedModuleOrderEventCount?: number;
   readonly unresolvedStageActivationEventCount?: number;
@@ -94,6 +96,7 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     stateMachineDocks: {},
     stateMachineDockBindings: {},
     stateMachineTasks: {},
+    stateMachineSuppliers: {},
     unresolvedModuleOrderEventCount: 0,
     unresolvedStageActivationEventCount: 0,
     capabilityEnrichmentMismatchCount: 0,

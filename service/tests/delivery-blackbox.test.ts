@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { capabilitiesRootOf } from "@uvp-eth/compiler";
+import { capabilitiesRootOf, executorBindingsRootOf } from "@uvp-eth/compiler";
 import { rebuildOrderProjections } from "../src/indexer/replay.js";
 import { stateMachineScopedKey } from "../src/indexer/projections/index.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
@@ -26,6 +26,7 @@ const deploymentRegistryAddress = "0x8888888888888888888888888888888888888888" a
 const signer = "0x4444444444444444444444444444444444444444" as Hex;
 const zeroAddress = "0x0000000000000000000000000000000000000000" as Hex;
 const zeroBytes32 = ("0x" + "00".repeat(32)) as Hex;
+const emptyExecutorBindingsRoot = executorBindingsRootOf([]);
 const planId = bytes32Hex("a1");
 const planHash = bytes32Hex("b101");
 const targetPlanId = bytes32Hex("a2");
@@ -218,6 +219,7 @@ function planPublishEvents(
       publisher: signer,
       hooksHash: bytes32Hex("0e01"),
       capabilitiesRoot,
+      executorBindingsRoot: emptyExecutorBindingsRoot,
       hookCount: 1n
     }),
     chainEvent(startBlock, 1, "PlanPublisherRecorded", {
@@ -246,6 +248,7 @@ function planPublished(block: bigint, publishedPlanId: Hex, publishedPlanHash: H
       publisher: signer,
       hooksHash: bytes32Hex("0e01"),
       capabilitiesRoot,
+      executorBindingsRoot: emptyExecutorBindingsRoot,
       hookCount: 1n
     }),
     chainEvent(block, 1, "PlanFinalized", {

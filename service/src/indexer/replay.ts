@@ -39,9 +39,7 @@ import {
 } from "./projections/plan.js";
 import {
   applyDerivedSignalSubmitted,
-  applySignalSubmitted,
-  applySignalSubmitterAuthorized,
-  applySignalSubmitterRevoked
+  applySignalSubmitted
 } from "./projections/signal.js";
 import {
   applyHookReady,
@@ -57,6 +55,11 @@ import {
   applyStageFilePatchApplied,
   type StageFileReplayIndex
 } from "./projections/stage-files.js";
+import {
+  applySupplierRegistryEvent,
+  resolveStageExecutorAssignments,
+  type MutableStateMachineSupplierProjection
+} from "./projections/supplier.js";
 import {
   applyDockBindingPoked,
   applyDockOutputSubmitted,
@@ -116,6 +119,7 @@ export function rebuildOrderProjections(
   const stateMachineDocks = new Map<string, StateMachineDockProjection>();
   const stateMachineDockSelections = new Map<string, StateMachineDockSelectionProjection>();
   const stateMachineDockBindings = new Map<string, MutableStateMachineDockBindingProjection>();
+  const stateMachineSuppliers = new Map<string, MutableStateMachineSupplierProjection>();
   const stageFileReplay: StageFileReplayIndex = new Map();
   const diagnostics: ProjectionReplayDiagnostics = {
     unresolvedModuleOrderEventCount: 0,
@@ -139,6 +143,11 @@ export function rebuildOrderProjections(
 
   for (const event of filterActiveChainEvents(events)) {
     activeStateMachineDeploymentId = applyDeploymentRegistryEvent(stateMachineDeployments, activeStateMachineDeploymentId, event);
+    if (applySupplierRegistryEvent(stateMachineSuppliers, event)) {
+      eventCount += 1;
+      lastEvent = provenanceOf(event);
+      continue;
+    }
     applyStateMachineEvent({
       deployments: stateMachineDeployments,
       modules: stateMachineModules,
@@ -158,6 +167,12 @@ export function rebuildOrderProjections(
     lastEvent = provenanceOf(event);
   }
   assertStageFilePatchReplaysComplete(stageFileReplay);
+  resolveStageExecutorAssignments({
+    suppliers: stateMachineSuppliers,
+    plans: stateMachinePlans,
+    orders: stateMachineOrders,
+    dockSelections: stateMachineDockSelections
+  });
 
   const stateMachineOrderRecord: Record<string, StateMachineOrderProjection> = {};
   const stateMachineTaskRecord: Record<string, StateMachineTaskProjection> = {};
@@ -179,7 +194,6 @@ export function rebuildOrderProjections(
     }
     const readonlyOrder = {
       ...order,
-      authorizations: { ...order.authorizations },
       signals: { ...order.signals },
       derivedSignals: { ...order.derivedSignals },
       stageMaterializations: { ...order.stageMaterializations },
@@ -212,6 +226,7 @@ export function rebuildOrderProjections(
     stateMachineDocks: Object.fromEntries(stateMachineDocks),
     stateMachineDockBindings: Object.fromEntries(stateMachineDockBindings),
     stateMachineTasks: stateMachineTaskRecord,
+    stateMachineSuppliers: Object.fromEntries(stateMachineSuppliers),
     unresolvedModuleOrderEventCount: diagnostics.unresolvedModuleOrderEventCount,
     unresolvedStageActivationEventCount: diagnostics.unresolvedStageActivationEventCount,
     capabilityEnrichmentMismatchCount: diagnostics.capabilityEnrichmentMismatchCount,
@@ -267,12 +282,6 @@ function applyStateMachineEvent(
       return;
     case "OrderRelayerRecorded":
       applyOrderRelayerRecorded(state, event);
-      return;
-    case "SignalSubmitterAuthorized":
-      applySignalSubmitterAuthorized(state, event);
-      return;
-    case "SignalSubmitterRevoked":
-      applySignalSubmitterRevoked(state, event);
       return;
     case "SignalSubmitted":
       applySignalSubmitted(state, event);

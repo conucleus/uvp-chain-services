@@ -24,13 +24,10 @@ import {
   type Writable
 } from "./snapshot.js";
 import type { MutableStateMachinePlanProjection } from "./plan.js";
-import type {
-  StateMachineDerivedSignalProjection,
-  StateMachineSignalAuthorizationProjection,
-  StateMachineSignalProjection
-} from "./signal.js";
+import type { StateMachineDerivedSignalProjection, StateMachineSignalProjection } from "./signal.js";
 import type {
   MutableStateMachineHookProjection,
+  MutableStateMachineStageExecutorOverlayProjection,
   StateMachineHookProjection,
   StateMachineStageExecutorOverlayProjection,
   StateMachineStageMaterializationProjection
@@ -74,7 +71,6 @@ export interface StateMachineOrderProjection {
   readonly currentStage?: Hex;
   readonly relayer?: Address;
   readonly creator?: Address;
-  readonly authorizations: Readonly<Record<string, StateMachineSignalAuthorizationProjection>>;
   readonly signals: Readonly<Record<string, StateMachineSignalProjection>>;
   readonly derivedSignals: Readonly<Record<string, StateMachineDerivedSignalProjection>>;
   readonly stageMaterializations: Readonly<Record<string, StateMachineStageMaterializationProjection>>;
@@ -105,7 +101,6 @@ export type MutableStateMachineModuleProjection = Writable<StateMachineModulePro
 export type MutableStateMachineOrderProjection = Writable<
   Omit<
     StateMachineOrderProjection,
-    | "authorizations"
     | "signals"
     | "derivedSignals"
     | "stageMaterializations"
@@ -119,11 +114,10 @@ export type MutableStateMachineOrderProjection = Writable<
     | "proof"
   >
 > & {
-  authorizations: Record<string, StateMachineSignalAuthorizationProjection>;
   signals: Record<string, StateMachineSignalProjection>;
   derivedSignals: Record<string, StateMachineDerivedSignalProjection>;
   stageMaterializations: Record<string, StateMachineStageMaterializationProjection>;
-  stageExecutorOverlays: Record<string, StateMachineStageExecutorOverlayProjection>;
+  stageExecutorOverlays: Record<string, MutableStateMachineStageExecutorOverlayProjection>;
   stageFiles: Record<string, StateMachineStageFileMapProjection>;
   triggerLink?: StateMachineOrderTriggerLinkProjection;
   forkLineage?: StateMachineOrderForkProjection;
@@ -510,7 +504,6 @@ export function ensureStateMachineOrder(
     ...(deploymentId ? { deploymentId } : {}),
     planId: planId ?? ZERO_BYTES32,
     status: planId ? "registered" : "unknown",
-    authorizations: {},
     signals: {},
     derivedSignals: {},
     stageMaterializations: {},

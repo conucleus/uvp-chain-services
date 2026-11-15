@@ -38,6 +38,8 @@ const CREATOR = "0x3333333333333333333333333333333333333333" as const;
 const RELAYER = "0x4444444444444444444444444444444444444444" as const;
 const TX_HASH = `0x${"5".repeat(64)}` as const;
 const PAYLOAD_HASH = `0x${"7".repeat(64)}` as const;
+const SUPPLIER_ID = `0x${"6".repeat(64)}` as const;
+const DOCK_ID = `0x${"8".repeat(64)}` as const;
 
 function provenance(blockNumber: bigint): ProjectionProvenance {
   return {
@@ -50,11 +52,15 @@ function provenance(blockNumber: bigint): ProjectionProvenance {
   };
 }
 
-function proof(blockNumber: bigint, args: StateMachineProofProjection["args"]): StateMachineProofProjection {
+function proof(
+  blockNumber: bigint,
+  args: StateMachineProofProjection["args"],
+  eventName = "HookReady",
+): StateMachineProofProjection {
   return {
     ...provenance(blockNumber),
     eventId: `event-${blockNumber.toString()}`,
-    eventName: "HookReady",
+    eventName,
     args,
   };
 }
@@ -74,7 +80,6 @@ function order(overrides: {
     currentStage: STAGE_ID,
     relayer: RELAYER,
     creator: CREATOR,
-    authorizations: {},
     signals: {},
     derivedSignals: {},
     stageMaterializations: {},
@@ -104,10 +109,10 @@ function task(
     hookId: overrides.hookId,
     stageIdentifier: STAGE_ID,
     hookName: HOOK_A,
-    assigneeRole: "performer",
-    assigneeWallet: WALLET,
+    assigneeSupplierId: SUPPLIER_ID,
+    assigneeExecutor: WALLET,
     status: "ready",
-    submitSignals: [{ sourceId: SOURCE_ID, signalId: SIGNAL_ID, source: "authorization" }],
+    submitSignals: [{ sourceId: SOURCE_ID, signalId: SIGNAL_ID }],
     createdAt: provenance(20n),
     updatedAt: provenance(21n),
     proof: proof(21n, { hookId: overrides.hookId }),
@@ -162,7 +167,9 @@ function projectionSnapshot(): ProjectionSnapshot {
         hookCount: "0",
         selectorBindings: [],
         signalCapabilities: [],
-        executorCandidates: [],
+        executorBindings: [{ stageId: STAGE_ID, supplierId: SUPPLIER_ID, kind: "default" }],
+        executorBindingsRoot: `0x${"a".repeat(64)}`,
+        dynamicExecutorStages: [STAGE_ID],
         registeredAt: provenance(8n),
         updatedAt: provenance(8n),
         proof: proof(8n, {}),
@@ -172,6 +179,23 @@ function projectionSnapshot(): ProjectionSnapshot {
     stateMachineOrders: {
       [ORDER_ID]: {
         ...order(),
+        stageExecutorOverlays: {
+          [STAGE_ID]: {
+            orderId: ORDER_ID,
+            selectorStageId: STAGE_ID,
+            targetStageId: STAGE_ID,
+            selector: CREATOR,
+            supplierId: SUPPLIER_ID,
+            patchNonce: "2",
+            dockId: DOCK_ID,
+            fromPlanId: PLAN_A,
+            effectiveExecutor: WALLET,
+            updatedAt: provenance(14n),
+            activatedAt: provenance(14n),
+            proof: proof(14n, { supplierId: SUPPLIER_ID }, "StageExecutorPatchApplied"),
+            activationProof: proof(14n, { supplierId: SUPPLIER_ID }, "StageExecutorActivated"),
+          },
+        },
         signals: {
           [SIGNAL_ID]: {
             orderId: ORDER_ID,
@@ -189,6 +213,17 @@ function projectionSnapshot(): ProjectionSnapshot {
     stateMachineDocks: {},
     stateMachineDockBindings: {},
     stateMachineTasks: {},
+    stateMachineSuppliers: {
+      [SUPPLIER_ID]: {
+        supplierId: SUPPLIER_ID,
+        executor: WALLET,
+        registeredAt: provenance(6n),
+        updatedAt: provenance(14n),
+        proof: proof(6n, { supplierId: SUPPLIER_ID }, "SupplierRegistered"),
+        rotatedAt: provenance(14n),
+        rotationProof: proof(14n, { supplierId: SUPPLIER_ID }, "SupplierExecutorRotated"),
+      },
+    },
     lastEvent: provenance(15n),
     unresolvedModuleOrderEventCount: 0,
     unresolvedStageActivationEventCount: 0,
@@ -248,7 +283,6 @@ describe("generic chain read routes", () => {
           currentStage: STAGE_ID,
           relayer: RELAYER,
           creator: CREATOR,
-          authorizations: {},
           signals: {},
           derivedSignals: {},
           stageMaterializations: {},
@@ -486,6 +520,26 @@ describe("generic chain read routes", () => {
     expect(
       record(record(snapshot["stateMachineOrders"])[ORDER_ID])["signals"],
     ).toMatchObject({ [SIGNAL_ID]: { submittedAt: { blockNumber: "13" } } });
+    const snapshotOrder = record(record(snapshot["stateMachineOrders"])[ORDER_ID]);
+    expect(record(snapshotOrder["stageExecutorOverlays"])[STAGE_ID]).toMatchObject({
+      supplierId: SUPPLIER_ID,
+      effectiveExecutor: WALLET,
+      patchNonce: "2",
+      dockId: DOCK_ID,
+    });
+    expect(
+      record(record(snapshot["stateMachinePlans"])[`${CHAIN_ID}:${STATE_MACHINE}:${PLAN_A}`])[
+        "executorBindings"
+      ],
+    ).toEqual([{ stageId: STAGE_ID, supplierId: SUPPLIER_ID, kind: "default" }]);
+    expect(
+      record(record(snapshot["stateMachineSuppliers"])[SUPPLIER_ID]),
+    ).toMatchObject({
+      supplierId: SUPPLIER_ID,
+      executor: WALLET,
+      registeredAt: { blockNumber: "6" },
+      rotatedAt: { blockNumber: "14" },
+    });
     expect(snapshot["lastEvent"]).toMatchObject({ blockNumber: "15" });
     expect(findBigints(response.body)).toEqual([]);
   });
@@ -500,11 +554,11 @@ function taskJson(task: StateMachineTaskProjection): Record<string, unknown> {
     hookId: task.hookId,
     stageIdentifier: task.stageIdentifier,
     hookName: task.hookName,
-    assigneeRole: task.assigneeRole,
-    assigneeWallet: task.assigneeWallet,
+    assigneeSupplierId: task.assigneeSupplierId,
+    assigneeExecutor: task.assigneeExecutor,
     status: task.status,
     submitSignals: [
-      { sourceId: SOURCE_ID, signalId: SIGNAL_ID, source: "authorization" },
+      { sourceId: SOURCE_ID, signalId: SIGNAL_ID },
     ],
     createdAt: {
       chainId: CHAIN_ID,
