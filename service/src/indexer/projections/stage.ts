@@ -1,7 +1,7 @@
-// 阶段族：StageMaterialized、阶段执行方补丁/激活与 hook 生命周期事件
-// （HookStatusChanged/HookReady/TimerPoked）及 executor overlay 投影。
-// overlay 只表达链上 active patch（supplierId/patchNonce/dockId）；effective
-// executor 由 SupplierRegistry 事件重放解析，不在本文件查链或查库。
+// 阶段族：StageMaterialized、stage→supplier 指派（补丁/激活）与 hook 生命周期
+// 事件（HookStatusChanged/HookReady/TimerPoked）及指派投影。
+// 指派只表达链上 active StageSupplierAssignment（supplierId/patchNonce/dockId）；
+// supplier account 由 SupplierRegistry 事件重放解析，不在本文件查链或查库。
 import type { ChainEvent } from "../events.js";
 import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {
@@ -37,7 +37,7 @@ import type { ProjectionReplayDiagnostics, Writable } from "./snapshot.js";
 
 export type StateMachineHookStatus = "init" | "waiting" | "ready" | "cancelled" | "unknown";
 
-export interface StateMachineStageExecutorOverlayProjection {
+export interface StateMachineStageSupplierAssignmentProjection {
   readonly orderId: Hex;
   readonly selectorStageId?: Hex;
   readonly targetStageId: Hex;
@@ -46,16 +46,15 @@ export interface StateMachineStageExecutorOverlayProjection {
   readonly previousSupplierId?: Hex;
   readonly patchNonce: string;
   readonly dockId?: Hex;
-  readonly fromPlanId?: Hex;
-  readonly effectiveExecutor?: Address;
+  readonly supplierAccount?: Address;
   readonly updatedAt: ProjectionProvenance;
   readonly activatedAt?: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
   readonly activationProof?: StateMachineProofProjection;
 }
 
-export type MutableStateMachineStageExecutorOverlayProjection =
-  Writable<StateMachineStageExecutorOverlayProjection>;
+export type MutableStateMachineStageSupplierAssignmentProjection =
+  Writable<StateMachineStageSupplierAssignmentProjection>;
 
 export interface StateMachineHookProjection {
   readonly orderId: Hex;
@@ -112,7 +111,7 @@ export function applyStageMaterialized(
   appendOrderTimeline(order, timelineOf(event, "环节已启动", proof, { orderId, planId: order.planId }));
 }
 
-export function applyStageExecutorPatchApplied(
+export function applyStageSupplierPatchApplied(
   state: {
     modules: StateMachineModuleIndex;
     diagnostics: ProjectionReplayDiagnostics;
@@ -135,11 +134,11 @@ export function applyStageExecutorPatchApplied(
     planHash: order.planHash,
     submitter: selector
   });
-  const key = stageExecutorOverlayProjectionKey(targetStageId);
-  const existing = order.stageExecutorOverlays[key];
-  if (!existing || compareUintStrings(patchNonce, existing.patchNonce) === 0) {
-    order.stageExecutorOverlays[key] = {
-      ...(existing ?? {}),
+  const key = stageSupplierAssignmentProjectionKey(targetStageId);
+  const existing = order.stageSupplierAssignments[key];
+  if (!existing || compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
+    const sameNonce = existing !== undefined && compareUintStrings(patchNonce, existing.patchNonce) === 0;
+    order.stageSupplierAssignments[key] = {
       orderId,
       selectorStageId,
       targetStageId,
@@ -147,31 +146,21 @@ export function applyStageExecutorPatchApplied(
       supplierId,
       ...(previousSupplierId ? { previousSupplierId } : {}),
       patchNonce,
-      updatedAt: provenanceOf(event),
-      proof
-    };
-  } else if (compareUintStrings(patchNonce, existing.patchNonce) > 0) {
-    order.stageExecutorOverlays[key] = {
-      orderId,
-      selectorStageId,
-      targetStageId,
-      selector,
-      supplierId,
-      ...(previousSupplierId ? { previousSupplierId } : {}),
-      patchNonce,
+      ...(sameNonce && existing?.dockId ? { dockId: existing.dockId } : {}),
+      ...(sameNonce && existing?.activatedAt ? { activatedAt: existing.activatedAt } : {}),
+      ...(sameNonce && existing?.activationProof ? { activationProof: existing.activationProof } : {}),
       updatedAt: provenanceOf(event),
       proof
     };
   }
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "阶段执行方已更新", proof, { orderId, planId: order.planId }));
+  appendOrderTimeline(order, timelineOf(event, "阶段供应商已更新", proof, { orderId, planId: order.planId }));
 }
 
-export function applyStageExecutorActivated(
+export function applyStageSupplierAssigned(
   state: {
     orders: Map<string, MutableStateMachineOrderProjection>;
-    diagnostics: ProjectionReplayDiagnostics;
   },
   event: ChainEvent
 ): void {
@@ -186,34 +175,33 @@ export function applyStageExecutorActivated(
     planId: order.planId,
     planHash: order.planHash
   });
-  const key = stageExecutorOverlayProjectionKey(targetStageId);
-  const existing = order.stageExecutorOverlays[key];
+  const key = stageSupplierAssignmentProjectionKey(targetStageId);
+  const existing = order.stageSupplierAssignments[key];
   if (!existing || compareUintStrings(patchNonce, existing.patchNonce) >= 0) {
     const sameNonce = existing !== undefined && compareUintStrings(patchNonce, existing.patchNonce) === 0;
-    order.stageExecutorOverlays[key] = sameNonce
+    order.stageSupplierAssignments[key] = sameNonce
       ? {
         ...existing,
         supplierId,
         patchNonce,
-        updatedAt: provenanceOf(event),
         activatedAt: provenanceOf(event),
-        proof,
-        activationProof: proof
+        activationProof: proof,
+        updatedAt: provenanceOf(event)
       }
       : {
         orderId,
         targetStageId,
         supplierId,
         patchNonce,
-        updatedAt: provenanceOf(event),
         activatedAt: provenanceOf(event),
-        proof,
-        activationProof: proof
+        activationProof: proof,
+        updatedAt: provenanceOf(event),
+        proof
       };
   }
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "阶段执行方已激活", proof, { orderId, planId: order.planId }));
+  appendOrderTimeline(order, timelineOf(event, "阶段供应商已激活", proof, { orderId, planId: order.planId }));
 }
 
 export function applyHookStatusChanged(
@@ -346,14 +334,14 @@ export function ensureStateMachineHook(
   return created;
 }
 
-export function findStageExecutorOverlay(
+export function findStageSupplierAssignment(
   order: MutableStateMachineOrderProjection,
   targetStageId: Hex
-): MutableStateMachineStageExecutorOverlayProjection | undefined {
-  return order.stageExecutorOverlays[stageExecutorOverlayProjectionKey(targetStageId)];
+): MutableStateMachineStageSupplierAssignmentProjection | undefined {
+  return order.stageSupplierAssignments[stageSupplierAssignmentProjectionKey(targetStageId)];
 }
 
-function stageExecutorOverlayProjectionKey(targetStageId: Hex): string {
+function stageSupplierAssignmentProjectionKey(targetStageId: Hex): string {
   return targetStageId.toLowerCase();
 }
 

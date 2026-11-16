@@ -1,13 +1,12 @@
 // Dock 族：静态 Dock 注册投影与 binding/per-output 窗口读面形状
 // （uvp.dock.v1 / uvp.dockBinding.v1）；事件族写入见 indexer/replay.ts。
 import type { DockArtifact } from "@uvp-eth/compiler";
-import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtime";
+import { ProjectionError, type Hex } from "@uvp-eth/service-runtime";
 import { DockArtifactMissingError } from "../../projection/dock-artifacts.js";
 import type { ChainEvent } from "../events.js";
 import {
   proofOf,
   provenanceOf,
-  requiredAddressArg,
   requiredBytes32Arg,
   uintArgAsString,
   type ProjectionProvenance,
@@ -63,9 +62,7 @@ export interface StateMachineDockSelectionProjection {
   readonly targetStageId: Hex;
   readonly dockId: Hex;
   readonly dkid: string;
-  readonly fromPlanId: Hex;
   readonly supplierId: Hex;
-  readonly selector: Address;
   readonly patchNonce: string;
   readonly selectedAt: ProjectionProvenance;
 }
@@ -161,7 +158,7 @@ export function applyDockRegistered(
   });
 }
 
-export function applyStageDockExecutorSelected(
+export function applyStageDockSupplierSelected(
   state: {
     dockSelections: Map<string, StateMachineDockSelectionProjection>;
   },
@@ -171,16 +168,13 @@ export function applyStageDockExecutorSelected(
   const orderId = requiredBytes32Arg(event, "orderId");
   const targetStageId = requiredBytes32Arg(event, "targetStageId");
   const dockId = requiredBytes32Arg(event, "dockId");
-  const fromPlanId = requiredBytes32Arg(event, "fromPlanId");
   state.dockSelections.set(dockSelectionKey(planId, orderId, targetStageId), {
     planId,
     orderId,
     targetStageId,
     dockId,
     dkid: dkidOfDockId(dockId),
-    fromPlanId,
     supplierId: requiredBytes32Arg(event, "supplierId"),
-    selector: requiredAddressArg(event, "selector"),
     patchNonce: uintArgAsString(event, "patchNonce"),
     selectedAt: provenanceOf(event)
   });

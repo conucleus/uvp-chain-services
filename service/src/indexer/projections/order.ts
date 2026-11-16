@@ -27,10 +27,10 @@ import type { MutableStateMachinePlanProjection } from "./plan.js";
 import type { StateMachineDerivedSignalProjection, StateMachineSignalProjection } from "./signal.js";
 import type {
   MutableStateMachineHookProjection,
-  MutableStateMachineStageExecutorOverlayProjection,
+  MutableStateMachineStageSupplierAssignmentProjection,
   StateMachineHookProjection,
-  StateMachineStageExecutorOverlayProjection,
-  StateMachineStageMaterializationProjection
+  StateMachineStageMaterializationProjection,
+  StateMachineStageSupplierAssignmentProjection
 } from "./stage.js";
 import type { StateMachineStageFileMapProjection } from "./stage-files.js";
 import type { MutableStateMachineTaskProjection, StateMachineTaskProjection } from "./task.js";
@@ -74,7 +74,7 @@ export interface StateMachineOrderProjection {
   readonly signals: Readonly<Record<string, StateMachineSignalProjection>>;
   readonly derivedSignals: Readonly<Record<string, StateMachineDerivedSignalProjection>>;
   readonly stageMaterializations: Readonly<Record<string, StateMachineStageMaterializationProjection>>;
-  readonly stageExecutorOverlays: Readonly<Record<string, StateMachineStageExecutorOverlayProjection>>;
+  readonly stageSupplierAssignments: Readonly<Record<string, StateMachineStageSupplierAssignmentProjection>>;
   readonly stageFiles: Readonly<Record<string, StateMachineStageFileMapProjection>>;
   readonly triggerLink?: StateMachineOrderTriggerLinkProjection;
   readonly forkLineage?: StateMachineOrderForkProjection;
@@ -104,7 +104,7 @@ export type MutableStateMachineOrderProjection = Writable<
     | "signals"
     | "derivedSignals"
     | "stageMaterializations"
-    | "stageExecutorOverlays"
+    | "stageSupplierAssignments"
     | "stageFiles"
     | "triggerLink"
     | "forkLineage"
@@ -117,7 +117,7 @@ export type MutableStateMachineOrderProjection = Writable<
   signals: Record<string, StateMachineSignalProjection>;
   derivedSignals: Record<string, StateMachineDerivedSignalProjection>;
   stageMaterializations: Record<string, StateMachineStageMaterializationProjection>;
-  stageExecutorOverlays: Record<string, MutableStateMachineStageExecutorOverlayProjection>;
+  stageSupplierAssignments: Record<string, MutableStateMachineStageSupplierAssignmentProjection>;
   stageFiles: Record<string, StateMachineStageFileMapProjection>;
   triggerLink?: StateMachineOrderTriggerLinkProjection;
   forkLineage?: StateMachineOrderForkProjection;
@@ -507,7 +507,7 @@ export function ensureStateMachineOrder(
     signals: {},
     derivedSignals: {},
     stageMaterializations: {},
-    stageExecutorOverlays: {},
+    stageSupplierAssignments: {},
     stageFiles: {},
     hooks: {},
     tasks: {},

@@ -1,5 +1,5 @@
 // 任务族：hook ready 生成的任务投影与提交信号推进，供 plan/signal/stage 事件族
-// 在任务完成判定中复用；任务的 supplier/effective executor 由重放期统一解析。
+// 在任务完成判定中复用；任务的 assigned supplier/account 由重放期统一解析。
 import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {
   compareProofEvents,
@@ -23,7 +23,7 @@ export interface StateMachineTaskProjection {
   readonly stageIdentifier: Hex;
   readonly hookName: Hex;
   readonly assigneeSupplierId?: Hex;
-  readonly assigneeExecutor?: Address;
+  readonly assigneeSupplierAccount?: Address;
   readonly status: StateMachineTaskStatus;
   readonly submitSignals?: readonly StateMachineTaskSubmitSignalProjection[];
   readonly createdAt: ProjectionProvenance;

@@ -1,6 +1,7 @@
-// Supplier 族：UVPSupplierRegistry 的 supplierId ↔ executor 绑定事件投影
-// （registration/rotation/revocation），以及 effective executor 的重放期解析。
-// 链上只有绑定这一个事实源：本模块只按事件顺序重放，不保存身份/KYC 状态。
+// Supplier 族：UVPSupplierRegistry 的 supplierId ↔ supplier account 永久绑定与
+// 状态事件投影（SupplierRegistered/SupplierStatusChanged），以及 stage 指派的
+// supplier account 重放期解析。链上注册表是唯一身份事实源：本模块只按事件顺序
+// 重放，不保存链下身份/KYC 数据，account 永不改写。
 import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtime";
 import type { ChainEvent } from "../events.js";
 import {
@@ -15,17 +16,20 @@ import {
 import { stateMachineScopedKey, type MutableStateMachineOrderProjection } from "./order.js";
 import { planDefaultSupplierForStage, type StateMachinePlanProjection } from "./plan.js";
 import { dockSelectionKey, type StateMachineDockSelectionProjection } from "./dock.js";
-import { findStageExecutorOverlay } from "./stage.js";
+import { findStageSupplierAssignment } from "./stage.js";
 import type { Writable } from "./snapshot.js";
+
+export type StateMachineSupplierStatus = "pending" | "active" | "suspended" | "revoked";
 
 export interface StateMachineSupplierProjection {
   readonly supplierId: Hex;
-  readonly executor: Address;
+  readonly account: Address;
+  readonly status: StateMachineSupplierStatus;
   readonly registeredAt: ProjectionProvenance;
   readonly updatedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
-  readonly rotatedAt?: ProjectionProvenance;
-  readonly rotationProof?: StateMachineProofProjection;
+  readonly statusChangedAt?: ProjectionProvenance;
+  readonly statusChangedProof?: StateMachineProofProjection;
   readonly revokedAt?: ProjectionProvenance;
   readonly revocationProof?: StateMachineProofProjection;
 }
@@ -42,11 +46,8 @@ export function applySupplierRegistryEvent(
     case "SupplierRegistered":
       applySupplierRegistered(suppliers, event);
       return true;
-    case "SupplierExecutorRotated":
-      applySupplierExecutorRotated(suppliers, event);
-      return true;
-    case "SupplierRevoked":
-      applySupplierRevoked(suppliers, event);
+    case "SupplierStatusChanged":
+      applySupplierStatusChanged(suppliers, event);
       return true;
     case "SupplierRegistrarSet":
       return true;
@@ -60,87 +61,91 @@ function applySupplierRegistered(
   event: ChainEvent
 ): void {
   const supplierId = requiredBytes32Arg(event, "supplierId");
-  const executor = requiredAddressArg(event, "executor");
+  const account = requiredAddressArg(event, "account");
   const key = supplierId.toLowerCase();
-  const existing = suppliers.get(key);
-  if (existing && existing.revokedAt === undefined) {
-    throw new ProjectionError(
-      `${event.eventName} re-registers supplier ${supplierId} while it is still bound to ${existing.executor}`
-    );
+  if (suppliers.has(key)) {
+    throw new ProjectionError(`${event.eventName} re-registers supplier ${supplierId}`);
   }
   suppliers.set(key, {
     supplierId,
-    executor,
+    account,
+    status: "pending",
     registeredAt: provenanceOf(event),
     updatedAt: provenanceOf(event),
     proof: proofOf(event)
   });
 }
 
-function applySupplierExecutorRotated(
+function applySupplierStatusChanged(
   suppliers: Map<string, MutableStateMachineSupplierProjection>,
   event: ChainEvent
 ): void {
   const supplierId = requiredBytes32Arg(event, "supplierId");
-  const supplier = requireSupplier(suppliers, event, supplierId);
-  if (supplier.revokedAt !== undefined) {
-    throw new ProjectionError(
-      `${event.eventName} rotates revoked supplier ${supplierId}`
-    );
-  }
-  const newExecutor = requiredAddressArg(event, "newExecutor");
-  const proof = proofOf(event);
-  supplier.executor = newExecutor;
-  supplier.rotatedAt = provenanceOf(event);
-  supplier.rotationProof = proof;
-  supplier.updatedAt = provenanceOf(event);
-}
-
-function applySupplierRevoked(
-  suppliers: Map<string, MutableStateMachineSupplierProjection>,
-  event: ChainEvent
-): void {
-  const supplierId = requiredBytes32Arg(event, "supplierId");
-  const supplier = requireSupplier(suppliers, event, supplierId);
-  if (supplier.revokedAt !== undefined) {
-    throw new ProjectionError(
-      `${event.eventName} revokes supplier ${supplierId} that is already revoked`
-    );
-  }
-  supplier.revokedAt = provenanceOf(event);
-  supplier.revocationProof = proofOf(event);
-  supplier.updatedAt = provenanceOf(event);
-}
-
-function requireSupplier(
-  suppliers: Map<string, MutableStateMachineSupplierProjection>,
-  event: ChainEvent,
-  supplierId: Hex
-): MutableStateMachineSupplierProjection {
   const supplier = suppliers.get(supplierId.toLowerCase());
   if (!supplier) {
+    throw new ProjectionError(`${event.eventName} references unregistered supplier ${supplierId}`);
+  }
+  const account = requiredAddressArg(event, "account");
+  if (account !== supplier.account) {
     throw new ProjectionError(
-      `${event.eventName} references unregistered supplier ${supplierId}`
+      `${event.eventName} reports account ${account} for supplier ${supplierId} whose permanent account is ${supplier.account}`
     );
   }
-  return supplier;
+  if (supplier.status === "revoked") {
+    throw new ProjectionError(`${event.eventName} changes already revoked supplier ${supplierId}`);
+  }
+  const previousStatus = requiredSupplierStatusArg(event, "previousStatus");
+  if (previousStatus !== supplier.status) {
+    throw new ProjectionError(
+      `${event.eventName} previousStatus ${previousStatus} does not match replayed status ${supplier.status} for supplier ${supplierId}`
+    );
+  }
+  const newStatus = requiredSupplierStatusArg(event, "newStatus");
+  const proof = proofOf(event);
+  supplier.status = newStatus;
+  supplier.statusChangedAt = provenanceOf(event);
+  supplier.statusChangedProof = proof;
+  supplier.updatedAt = provenanceOf(event);
+  if (newStatus === "revoked") {
+    supplier.revokedAt = provenanceOf(event);
+    supplier.revocationProof = proof;
+  }
 }
 
-export function supplierExecutorOf(
+function requiredSupplierStatusArg(event: ChainEvent, name: string): StateMachineSupplierStatus {
+  const value = event.args[name];
+  const numeric = typeof value === "bigint"
+    ? Number(value)
+    : typeof value === "number"
+      ? value
+      : typeof value === "string" && /^\d+$/.test(value)
+        ? Number(value)
+        : undefined;
+  switch (numeric) {
+    case 0:
+      return "pending";
+    case 1:
+      return "active";
+    case 2:
+      return "suspended";
+    case 3:
+      return "revoked";
+    default:
+      throw new ProjectionError(`${event.eventName}.${name} is not a known SupplierStatus`);
+  }
+}
+
+export function supplierAccountOf(
   suppliers: StateMachineSupplierIndex,
   supplierId: Hex | undefined
 ): Address | undefined {
   if (!supplierId || supplierId === ZERO_BYTES32) {
     return undefined;
   }
-  const supplier = suppliers.get(supplierId.toLowerCase());
-  if (!supplier || supplier.revokedAt !== undefined) {
-    return undefined;
-  }
-  return supplier.executor;
+  return suppliers.get(supplierId.toLowerCase())?.account;
 }
 
-export function resolveStageExecutorAssignments(state: {
+export function resolveStageSupplierAssignments(state: {
   suppliers: StateMachineSupplierIndex;
   plans: ReadonlyMap<string, StateMachinePlanProjection>;
   orders: Map<string, MutableStateMachineOrderProjection>;
@@ -150,46 +155,44 @@ export function resolveStageExecutorAssignments(state: {
     const plan = state.plans.get(
       stateMachineScopedKey(order.chainId, order.contractAddress, order.planId)
     );
-    for (const overlay of Object.values(order.stageExecutorOverlays)) {
+    for (const assignment of Object.values(order.stageSupplierAssignments)) {
       const selection = state.dockSelections.get(
-        dockSelectionKey(order.planId, order.orderId, overlay.targetStageId)
+        dockSelectionKey(order.planId, order.orderId, assignment.targetStageId)
       );
-      if (selection && selection.patchNonce === overlay.patchNonce) {
-        overlay.dockId = selection.dockId;
-        overlay.fromPlanId = selection.fromPlanId;
-        overlay.selector = overlay.selector ?? selection.selector;
+      if (selection && selection.patchNonce === assignment.patchNonce) {
+        assignment.dockId = selection.dockId;
       }
-      assignExecutor(state.suppliers, overlay, overlay.supplierId);
+      assignSupplierAccount(state.suppliers, assignment, assignment.supplierId);
     }
     for (const task of Object.values(order.tasks)) {
-      const activeOverlay = findStageExecutorOverlay(order, task.stageIdentifier);
-      const supplierId = activeOverlay?.supplierId ??
+      const assignment = findStageSupplierAssignment(order, task.stageIdentifier);
+      const supplierId = assignment?.supplierId ??
         planDefaultSupplierForStage(plan, task.stageIdentifier);
       if (!supplierId) {
         delete task.assigneeSupplierId;
-        delete task.assigneeExecutor;
+        delete task.assigneeSupplierAccount;
         continue;
       }
       task.assigneeSupplierId = supplierId;
-      const executor = supplierExecutorOf(state.suppliers, supplierId);
-      if (executor) {
-        task.assigneeExecutor = executor;
+      const account = supplierAccountOf(state.suppliers, supplierId);
+      if (account) {
+        task.assigneeSupplierAccount = account;
       } else {
-        delete task.assigneeExecutor;
+        delete task.assigneeSupplierAccount;
       }
     }
   }
 }
 
-function assignExecutor(
+function assignSupplierAccount(
   suppliers: StateMachineSupplierIndex,
-  target: { effectiveExecutor?: Address },
+  target: { supplierAccount?: Address },
   supplierId: Hex
 ): void {
-  const executor = supplierExecutorOf(suppliers, supplierId);
-  if (executor) {
-    target.effectiveExecutor = executor;
+  const account = supplierAccountOf(suppliers, supplierId);
+  if (account) {
+    target.supplierAccount = account;
   } else {
-    delete target.effectiveExecutor;
+    delete target.supplierAccount;
   }
 }

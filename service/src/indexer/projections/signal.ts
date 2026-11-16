@@ -1,5 +1,5 @@
 // 信号族：SignalSubmitted/DerivedSignalSubmitted 投影与信号投影键；发信权
-// 由合约按 effective stage executor 判定，本模块只重放链上事件。
+// 由合约按 stage 的 assigned supplier account 判定，本模块只重放链上事件。
 import type { ChainEvent } from "../events.js";
 import type { Address, Hex } from "@uvp-eth/service-runtime";
 import { encodeAbiParameters, keccak256 } from "viem";

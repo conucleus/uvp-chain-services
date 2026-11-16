@@ -83,7 +83,7 @@ function order(overrides: {
     signals: {},
     derivedSignals: {},
     stageMaterializations: {},
-    stageExecutorOverlays: {},
+    stageSupplierAssignments: {},
     stageFiles: {},
     hooks: {},
     tasks: {},
@@ -110,7 +110,7 @@ function task(
     stageIdentifier: STAGE_ID,
     hookName: HOOK_A,
     assigneeSupplierId: SUPPLIER_ID,
-    assigneeExecutor: WALLET,
+    assigneeSupplierAccount: WALLET,
     status: "ready",
     submitSignals: [{ sourceId: SOURCE_ID, signalId: SIGNAL_ID }],
     createdAt: provenance(20n),
@@ -167,9 +167,9 @@ function projectionSnapshot(): ProjectionSnapshot {
         hookCount: "0",
         selectorBindings: [],
         signalCapabilities: [],
-        executorBindings: [{ stageId: STAGE_ID, supplierId: SUPPLIER_ID, kind: "default" }],
-        executorBindingsRoot: `0x${"a".repeat(64)}`,
-        dynamicExecutorStages: [STAGE_ID],
+        supplierBindings: [{ stageId: STAGE_ID, supplierId: SUPPLIER_ID, kind: "default" }],
+        supplierBindingsRoot: `0x${"a".repeat(64)}`,
+        dynamicSupplierStages: [STAGE_ID],
         registeredAt: provenance(8n),
         updatedAt: provenance(8n),
         proof: proof(8n, {}),
@@ -179,7 +179,7 @@ function projectionSnapshot(): ProjectionSnapshot {
     stateMachineOrders: {
       [ORDER_ID]: {
         ...order(),
-        stageExecutorOverlays: {
+        stageSupplierAssignments: {
           [STAGE_ID]: {
             orderId: ORDER_ID,
             selectorStageId: STAGE_ID,
@@ -188,12 +188,11 @@ function projectionSnapshot(): ProjectionSnapshot {
             supplierId: SUPPLIER_ID,
             patchNonce: "2",
             dockId: DOCK_ID,
-            fromPlanId: PLAN_A,
-            effectiveExecutor: WALLET,
+            supplierAccount: WALLET,
             updatedAt: provenance(14n),
             activatedAt: provenance(14n),
-            proof: proof(14n, { supplierId: SUPPLIER_ID }, "StageExecutorPatchApplied"),
-            activationProof: proof(14n, { supplierId: SUPPLIER_ID }, "StageExecutorActivated"),
+            proof: proof(14n, { supplierId: SUPPLIER_ID }, "StageSupplierPatchApplied"),
+            activationProof: proof(14n, { supplierId: SUPPLIER_ID }, "StageSupplierAssigned"),
           },
         },
         signals: {
@@ -216,12 +215,13 @@ function projectionSnapshot(): ProjectionSnapshot {
     stateMachineSuppliers: {
       [SUPPLIER_ID]: {
         supplierId: SUPPLIER_ID,
-        executor: WALLET,
+        account: WALLET,
+        status: "active",
         registeredAt: provenance(6n),
         updatedAt: provenance(14n),
         proof: proof(6n, { supplierId: SUPPLIER_ID }, "SupplierRegistered"),
-        rotatedAt: provenance(14n),
-        rotationProof: proof(14n, { supplierId: SUPPLIER_ID }, "SupplierExecutorRotated"),
+        statusChangedAt: provenance(14n),
+        statusChangedProof: proof(14n, { supplierId: SUPPLIER_ID }, "SupplierStatusChanged"),
       },
     },
     lastEvent: provenance(15n),
@@ -286,7 +286,7 @@ describe("generic chain read routes", () => {
           signals: {},
           derivedSignals: {},
           stageMaterializations: {},
-          stageExecutorOverlays: {},
+          stageSupplierAssignments: {},
           stageFiles: {},
           hooks: {},
           tasks: {},
@@ -521,24 +521,25 @@ describe("generic chain read routes", () => {
       record(record(snapshot["stateMachineOrders"])[ORDER_ID])["signals"],
     ).toMatchObject({ [SIGNAL_ID]: { submittedAt: { blockNumber: "13" } } });
     const snapshotOrder = record(record(snapshot["stateMachineOrders"])[ORDER_ID]);
-    expect(record(snapshotOrder["stageExecutorOverlays"])[STAGE_ID]).toMatchObject({
+    expect(record(snapshotOrder["stageSupplierAssignments"])[STAGE_ID]).toMatchObject({
       supplierId: SUPPLIER_ID,
-      effectiveExecutor: WALLET,
+      supplierAccount: WALLET,
       patchNonce: "2",
       dockId: DOCK_ID,
     });
     expect(
       record(record(snapshot["stateMachinePlans"])[`${CHAIN_ID}:${STATE_MACHINE}:${PLAN_A}`])[
-        "executorBindings"
+        "supplierBindings"
       ],
     ).toEqual([{ stageId: STAGE_ID, supplierId: SUPPLIER_ID, kind: "default" }]);
     expect(
       record(record(snapshot["stateMachineSuppliers"])[SUPPLIER_ID]),
     ).toMatchObject({
       supplierId: SUPPLIER_ID,
-      executor: WALLET,
+      account: WALLET,
+      status: "active",
       registeredAt: { blockNumber: "6" },
-      rotatedAt: { blockNumber: "14" },
+      statusChangedAt: { blockNumber: "14" },
     });
     expect(snapshot["lastEvent"]).toMatchObject({ blockNumber: "15" });
     expect(findBigints(response.body)).toEqual([]);
@@ -555,7 +556,7 @@ function taskJson(task: StateMachineTaskProjection): Record<string, unknown> {
     stageIdentifier: task.stageIdentifier,
     hookName: task.hookName,
     assigneeSupplierId: task.assigneeSupplierId,
-    assigneeExecutor: task.assigneeExecutor,
+    assigneeSupplierAccount: task.assigneeSupplierAccount,
     status: task.status,
     submitSignals: [
       { sourceId: SOURCE_ID, signalId: SIGNAL_ID },

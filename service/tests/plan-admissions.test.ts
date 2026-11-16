@@ -44,7 +44,7 @@ spec:
       sendSignals: [{ name: "seed" }, { name: "ready" }]
       executor:
         supplierType: organization
-        supplierID: sales-ops
+        supplierID: 5f0b1e2a-7c9d-4e1f-9a2b-000000000043
     - name: intake
       source: slot-a
       receiveSignals:
@@ -55,7 +55,7 @@ spec:
         - name: cmp_err
       executor:
         supplierType: organization
-        supplierID: intake-ops
+        supplierID: 5f0b1e2a-7c9d-4e1f-9a2b-000000000042
 `;
 
 const chainId = 31337;
@@ -85,13 +85,13 @@ spec:
       sendSignals: [{ name: "orderPlaced", trigger: true }]
       executor:
         supplierType: organization
-        supplierID: intake-ops
+        supplierID: 5f0b1e2a-7c9d-4e1f-9a2b-000000000042
     - name: cutting
       source: atelier
       sendSignals: [{ name: "cutDone", trigger: true }]
       executor:
         supplierType: organization
-        supplierID: cutting-ops
+        supplierID: 5f0b1e2a-7c9d-4e1f-9a2b-000000000044
 `;
 
 const triggersArtifact = compileZhixuOnchainHookPlan(

@@ -44,9 +44,9 @@ import {
 import {
   applyHookReady,
   applyHookStatusChanged,
-  applyStageExecutorActivated,
-  applyStageExecutorPatchApplied,
   applyStageMaterialized,
+  applyStageSupplierAssigned,
+  applyStageSupplierPatchApplied,
   applyTimerPoked
 } from "./projections/stage.js";
 import {
@@ -57,14 +57,14 @@ import {
 } from "./projections/stage-files.js";
 import {
   applySupplierRegistryEvent,
-  resolveStageExecutorAssignments,
+  resolveStageSupplierAssignments,
   type MutableStateMachineSupplierProjection
 } from "./projections/supplier.js";
 import {
   applyDockBindingPoked,
   applyDockOutputSubmitted,
   applyDockRegistered,
-  applyStageDockExecutorSelected
+  applyStageDockSupplierSelected
 } from "./projections/dock.js";
 import type { MutableStateMachinePlanProjection } from "./projections/plan.js";
 import type {
@@ -167,7 +167,7 @@ export function rebuildOrderProjections(
     lastEvent = provenanceOf(event);
   }
   assertStageFilePatchReplaysComplete(stageFileReplay);
-  resolveStageExecutorAssignments({
+  resolveStageSupplierAssignments({
     suppliers: stateMachineSuppliers,
     plans: stateMachinePlans,
     orders: stateMachineOrders,
@@ -197,7 +197,7 @@ export function rebuildOrderProjections(
       signals: { ...order.signals },
       derivedSignals: { ...order.derivedSignals },
       stageMaterializations: { ...order.stageMaterializations },
-      stageExecutorOverlays: { ...order.stageExecutorOverlays },
+      stageSupplierAssignments: { ...order.stageSupplierAssignments },
       stageFiles: Object.fromEntries(
         Object.entries(order.stageFiles).map(([targetStageId, stageFile]) => [
           targetStageId,
@@ -298,8 +298,8 @@ function applyStateMachineEvent(
     case "OrderForked":
       applyOrderForked(state, event);
       return;
-    case "StageExecutorPatchApplied":
-      applyStageExecutorPatchApplied(state, event);
+    case "StageSupplierPatchApplied":
+      applyStageSupplierPatchApplied(state, event);
       return;
     case "StageFilePatchApplied":
       applyStageFilePatchApplied(state, event);
@@ -307,14 +307,14 @@ function applyStateMachineEvent(
     case "StageFileOpApplied":
       applyStageFileOpApplied(state, event);
       return;
-    case "StageExecutorActivated":
-      applyStageExecutorActivated(state, event);
+    case "StageSupplierAssigned":
+      applyStageSupplierAssigned(state, event);
       return;
     case "DockRegistered":
       applyDockRegistered(state, event);
       return;
-    case "StageDockExecutorSelected":
-      applyStageDockExecutorSelected(state, event);
+    case "StageDockSupplierSelected":
+      applyStageDockSupplierSelected(state, event);
       return;
     case "DockBindingPoked":
       applyDockBindingPoked(state, event);

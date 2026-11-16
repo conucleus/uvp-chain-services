@@ -22,8 +22,8 @@ export type {
   StateMachineStageSelectorBindingProjection,
   StateMachineSignalTargetRelation,
   StateMachineSignalCapabilityProjection,
-  StateMachineExecutorBindingProjection,
-  StateMachineExecutorBindingKind,
+  StateMachineSupplierBindingProjection,
+  StateMachineSupplierBindingKind,
   PlanCapabilityEnrichmentStatus
 } from "./plan.js";
 export type {
@@ -31,7 +31,7 @@ export type {
   StateMachineDerivedSignalProjection
 } from "./signal.js";
 export type {
-  StateMachineStageExecutorOverlayProjection,
+  StateMachineStageSupplierAssignmentProjection,
   StateMachineStageMaterializationProjection,
   StateMachineHookStatus,
   StateMachineHookProjection
@@ -52,7 +52,8 @@ export type {
   StateMachineTaskSubmitSignalProjection
 } from "./task.js";
 export type {
-  StateMachineSupplierProjection
+  StateMachineSupplierProjection,
+  StateMachineSupplierStatus
 } from "./supplier.js";
 export type {
   StateMachineDeploymentStatus,

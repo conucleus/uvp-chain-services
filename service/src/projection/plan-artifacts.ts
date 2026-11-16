@@ -124,12 +124,12 @@ export function createPlanArtifactResolvers(options: {
   return {
     async resolvePlanCapabilityTables(planId, planHash) {
       const record = await require(planId, planHash);
-      const executorBindings = record.artifact.executorBindings.map((binding, index) => ({
-        stageId: normalizeBytes32(binding.stageId, `executorBindings[${index}].stageId`),
-        supplierId: normalizeBytes32(binding.supplierId, `executorBindings[${index}].supplierId`),
+      const supplierBindings = record.artifact.supplierBindings.map((binding, index) => ({
+        stageId: normalizeBytes32(binding.stageId, `supplierBindings[${index}].stageId`),
+        supplierId: normalizeBytes32(binding.supplierId, `supplierBindings[${index}].supplierId`),
         kind: binding.kind
       }));
-      const dynamicExecutorStages = [
+      const dynamicSupplierStages = [
         ...new Map(
           record.artifact.compiledHooks
             .filter((hook) => hook.dynamicExecutor)
@@ -140,8 +140,8 @@ export function createPlanArtifactResolvers(options: {
         planId: record.planId,
         planHash: record.planHash,
         ...capabilityTablesOf(record.artifact),
-        executorBindings,
-        ...(dynamicExecutorStages.length > 0 ? { dynamicExecutorStages } : {})
+        supplierBindings,
+        ...(dynamicSupplierStages.length > 0 ? { dynamicSupplierStages } : {})
       };
     },
     async resolveSemanticOraclePlan(planId, planHash) {

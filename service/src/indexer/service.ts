@@ -370,7 +370,7 @@ export class IndexerService implements LifecycleService {
     const mismatches = snapshot.capabilityEnrichmentMismatchCount ?? 0;
     if (mismatches > 0) {
       this.#logger.warn(
-        "plan artifact vocabulary failed the on-chain anchor assertion (the artifact tables do not reproduce the chain capabilitiesRoot/executorBindingsRoot); the listed plans stay unenriched-failed so consumers refuse their vocabulary proofs, and the cached source is dropped so the next round re-resolves the corrected artifact",
+        "plan artifact vocabulary failed the on-chain anchor assertion (the artifact tables do not reproduce the chain capabilitiesRoot/supplierBindingsRoot); the listed plans stay unenriched-failed so consumers refuse their vocabulary proofs, and the cached source is dropped so the next round re-resolves the corrected artifact",
         {
           capabilityEnrichmentMismatchCount: mismatches,
           planIds: mismatchedPlanIds

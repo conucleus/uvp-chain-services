@@ -34,7 +34,7 @@ spec:
       sendSignals: [{ name: "ready" }, { name: "seed" }]
       executor:
         supplierType: organization
-        supplierID: selector-ops
+        supplierID: 5f0b1e2a-7c9d-4e1f-9a2b-000000000041
 `;
 
 const publisher = "0x1111111111111111111111111111111111111111" as const;

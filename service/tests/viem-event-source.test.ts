@@ -128,7 +128,7 @@ describe("ViemChainEventSource", () => {
         eventName: "SupplierRegistered",
         args: {
           supplierId: bytes32Hex("0b"),
-          executor: "0x2222222222222222222222222222222222222222"
+          account: "0x2222222222222222222222222222222222222222"
         }
       })
     ]);
@@ -361,7 +361,7 @@ const deploymentRegistryTestAbi = parseAbi([
 ]);
 
 const supplierRegistryTestAbi = parseAbi([
-  "event SupplierRegistered(bytes32 indexed supplierId,address indexed executor)"
+  "event SupplierRegistered(bytes32 indexed supplierId,address indexed account)"
 ]);
 
 function planRegisteredLog(input: { readonly removed?: boolean } = {}): Log {
@@ -436,7 +436,7 @@ function supplierRegisteredLog(): Log {
       eventName: "SupplierRegistered",
       args: {
         supplierId: bytes32Hex("0b"),
-        executor: "0x2222222222222222222222222222222222222222"
+        account: "0x2222222222222222222222222222222222222222"
       }
     }),
     removed: false

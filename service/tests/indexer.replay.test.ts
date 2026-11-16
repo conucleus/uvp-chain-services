@@ -6,7 +6,7 @@ import { encodeAbiParameters, keccak256 } from "viem";
 import {
   capabilitiesRootOf,
   compileZhixuOnchainHookPlan,
-  executorBindingsRootOf,
+  supplierBindingsRootOf,
   parseZhixuDefinition,
   planIdForPublisher,
   toSolidityRegisterPlanArgs
@@ -59,7 +59,6 @@ const deploymentRegistryAddress = "0x8888888888888888888888888888888888888888";
 const slotA = "0x2222222222222222222222222222222222222222";
 const slotB = "0x3333333333333333333333333333333333333333";
 const signer = "0x4444444444444444444444444444444444444444";
-const overlayExecutor = "0x5555555555555555555555555555555555555555";
 const emptyHash = "0x0000000000000000000000000000000000000000000000000000000000000000";
 const evidenceHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const planId = "0x0000000000000000000000000000000000000000000000000000000000000101";
@@ -69,7 +68,6 @@ const hookId = "0x00000000000000000000000000000000000000000000000000000000000003
 const stageId = bytes32Text("stage-example");
 const selectorStageId = bytes32Text("stage-selector");
 const hookName = bytes32Text("example-review");
-const selectorHookName = bytes32Text("select-executor");
 const sourceId = "0x0000000000000000000000000000000000000000000000000000000000000404";
 const signalId = "0x0000000000000000000000000000000000000000000000000000000000000505";
 const payloadHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -79,10 +77,9 @@ const supplierRegistryAddress = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const stagePatchModuleAddress = "0x6666666666666666666666666666666666666666";
 const supplierA = bytes32Hex("5a01");
 const supplierB = bytes32Hex("5a02");
-const executorA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const executorB = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const executorC = "0xcccccccccccccccccccccccccccccccccccccccc";
-const emptyExecutorBindingsRoot = executorBindingsRootOf([]);
+const supplierAccountA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const supplierAccountB = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const emptySupplierBindingsRoot = supplierBindingsRootOf([]);
 const deploymentIdV1 = "0x0000000000000000000000000000000000000000000000000000000000000d01";
 const deploymentIdV2 = "0x0000000000000000000000000000000000000000000000000000000000000d02";
 const abiHash = "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
@@ -161,7 +158,7 @@ describe("indexer projection replay", () => {
         publisher: signer,
         hooksHash: bytes32Hex("9001"),
         capabilitiesRoot: emptyHash,
-        executorBindingsRoot: emptyExecutorBindingsRoot,
+        supplierBindingsRoot: emptySupplierBindingsRoot,
         hookCount: 1n,
         birthAuthorizer: signer
       }),
@@ -382,7 +379,7 @@ describe("indexer projection replay", () => {
     });
   });
 
-  it("replays stage executor patches, dock selections, and supplier registry rotations into effective executors and task assignees", () => {
+  it("replays stage supplier patches, dock selections, and supplier status changes into supplier accounts and task assignees", () => {
     const dockHookId = bytes32Hex("0606");
     const dockStageId = bytes32Text("stage-dock");
     const dynamicStageId = bytes32Text("stage-dynamic");
@@ -390,11 +387,11 @@ describe("indexer projection replay", () => {
     const stagePatchModuleId = bytes32Text("uvp.module.stage-patch.v1");
     const vocabulary = planVocabulary({
       signalCapabilities: [{ stageId, targetSourceId: sourceId, signalId, targetOrderRelation: 0 }],
-      executorBindings: [
+      supplierBindings: [
         { stageId, supplierId: supplierA, kind: 0 },
         { stageId, supplierId: supplierB, kind: 1 }
       ],
-      dynamicExecutorStages: [dynamicStageId]
+      dynamicSupplierStages: [dynamicStageId]
     });
     const events: readonly ChainEvent[] = [
       ...planPublishEvents(vocabulary),
@@ -405,11 +402,23 @@ describe("indexer projection replay", () => {
       }),
       chainEvent(1n, 3, "SupplierRegistered", {
         supplierId: supplierA,
-        executor: executorA
+        account: supplierAccountA
       }, supplierRegistryAddress),
       chainEvent(1n, 4, "SupplierRegistered", {
         supplierId: supplierB,
-        executor: executorB
+        account: supplierAccountB
+      }, supplierRegistryAddress),
+      chainEvent(1n, 5, "SupplierStatusChanged", {
+        supplierId: supplierA,
+        previousStatus: 0n,
+        newStatus: 1n,
+        account: supplierAccountA
+      }, supplierRegistryAddress),
+      chainEvent(1n, 6, "SupplierStatusChanged", {
+        supplierId: supplierB,
+        previousStatus: 0n,
+        newStatus: 1n,
+        account: supplierAccountB
       }, supplierRegistryAddress),
       chainEvent(3n, 0, "OrderRegistered", {
         orderId: stateMachineOrderId,
@@ -427,14 +436,14 @@ describe("indexer projection replay", () => {
         stageId: dockStageId,
         hookName
       }),
-      chainEvent(5n, 0, "StageExecutorActivated", {
+      chainEvent(5n, 0, "StageSupplierAssigned", {
         planId,
         orderId: stateMachineOrderId,
         targetStageId: stageId,
         supplierId: supplierB,
         patchNonce: 1n
       }),
-      chainEvent(5n, 1, "StageExecutorPatchApplied", {
+      chainEvent(5n, 1, "StageSupplierPatchApplied", {
         planId,
         orderId: stateMachineOrderId,
         selectorStageId,
@@ -444,26 +453,19 @@ describe("indexer projection replay", () => {
         previousSupplierId: supplierA,
         patchNonce: 1n
       }, stagePatchModuleAddress),
-      chainEvent(6n, 0, "SupplierExecutorRotated", {
-        supplierId: supplierB,
-        previousExecutor: executorB,
-        newExecutor: executorC
-      }, supplierRegistryAddress),
-      chainEvent(7n, 0, "StageExecutorActivated", {
+      chainEvent(7n, 0, "StageSupplierAssigned", {
         planId,
         orderId: stateMachineOrderId,
         targetStageId: dockStageId,
         supplierId: supplierA,
         patchNonce: 1n
       }),
-      chainEvent(7n, 1, "StageDockExecutorSelected", {
+      chainEvent(7n, 1, "StageDockSupplierSelected", {
         planId,
         orderId: stateMachineOrderId,
         targetStageId: dockStageId,
         dockId,
-        fromPlanId: planId,
         supplierId: supplierA,
-        selector: signer,
         patchNonce: 1n
       }, stagePatchModuleAddress)
     ];
@@ -476,7 +478,7 @@ describe("indexer projection replay", () => {
     const targetTask = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
     const dockTask = snapshot.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, dockHookId)];
 
-    expect(order?.stageExecutorOverlays[stageId]).toMatchObject({
+    expect(order?.stageSupplierAssignments[stageId]).toMatchObject({
       orderId: stateMachineOrderId,
       selectorStageId,
       targetStageId: stageId,
@@ -484,68 +486,72 @@ describe("indexer projection replay", () => {
       supplierId: supplierB,
       previousSupplierId: supplierA,
       patchNonce: "1",
-      effectiveExecutor: executorC,
+      supplierAccount: supplierAccountB,
       activatedAt: expect.objectContaining({ blockNumber: 5n }),
-      activationProof: expect.objectContaining({ eventName: "StageExecutorActivated" }),
-      proof: expect.objectContaining({ eventName: "StageExecutorPatchApplied" })
+      activationProof: expect.objectContaining({ eventName: "StageSupplierAssigned" }),
+      proof: expect.objectContaining({ eventName: "StageSupplierPatchApplied" })
     });
-    expect(order?.stageExecutorOverlays[dockStageId]).toMatchObject({
+    expect(order?.stageSupplierAssignments[dockStageId]).toMatchObject({
       targetStageId: dockStageId,
       supplierId: supplierA,
       patchNonce: "1",
       dockId,
-      fromPlanId: planId,
-      effectiveExecutor: executorA,
-      activationProof: expect.objectContaining({ eventName: "StageExecutorActivated" })
+      supplierAccount: supplierAccountA,
+      activationProof: expect.objectContaining({ eventName: "StageSupplierAssigned" })
     });
-    expect(order?.stageExecutorOverlays[dockStageId]?.selectorStageId).toBeUndefined();
-    expect(plan?.executorBindings).toEqual([
+    expect(order?.stageSupplierAssignments[dockStageId]?.selectorStageId).toBeUndefined();
+    expect(plan?.supplierBindings).toEqual([
       { stageId, supplierId: supplierA, kind: "default" },
       { stageId, supplierId: supplierB, kind: "candidate" }
     ]);
-    expect(plan?.dynamicExecutorStages).toEqual([dynamicStageId]);
+    expect(plan?.dynamicSupplierStages).toEqual([dynamicStageId]);
     expect(snapshot.stateMachineSuppliers[supplierA]).toMatchObject({
       supplierId: supplierA,
-      executor: executorA,
+      account: supplierAccountA,
+      status: "active",
       registeredAt: expect.objectContaining({ blockNumber: 1n }),
-      proof: expect.objectContaining({ eventName: "SupplierRegistered" })
+      proof: expect.objectContaining({ eventName: "SupplierRegistered" }),
+      statusChangedAt: expect.objectContaining({ blockNumber: 1n }),
+      statusChangedProof: expect.objectContaining({ eventName: "SupplierStatusChanged" })
     });
     expect(snapshot.stateMachineSuppliers[supplierB]).toMatchObject({
-      executor: executorC,
-      rotatedAt: expect.objectContaining({ blockNumber: 6n }),
-      rotationProof: expect.objectContaining({ eventName: "SupplierExecutorRotated" })
+      account: supplierAccountB,
+      status: "active"
     });
     expect(targetTask).toMatchObject({
       assigneeSupplierId: supplierB,
-      assigneeExecutor: executorC
+      assigneeSupplierAccount: supplierAccountB
     });
     expect(dockTask).toMatchObject({
       assigneeSupplierId: supplierA,
-      assigneeExecutor: executorA
+      assigneeSupplierAccount: supplierAccountA
     });
-    expect(order?.proof.filter((proof) => proof.eventName === "StageExecutorActivated")).toHaveLength(2);
-    expect(order?.timeline.map((event) => event.eventName)).toContain("StageExecutorPatchApplied");
+    expect(order?.proof.filter((proof) => proof.eventName === "StageSupplierAssigned")).toHaveLength(2);
+    expect(order?.timeline.map((event) => event.eventName)).toContain("StageSupplierPatchApplied");
     expect(snapshot.unresolvedModuleOrderEventCount).toBe(0);
     expect(snapshot.unresolvedStageActivationEventCount).toBe(0);
 
     const revoked = rebuildOrderProjections([
       ...events,
-      chainEvent(8n, 0, "SupplierRevoked", {
+      chainEvent(8n, 0, "SupplierStatusChanged", {
         supplierId: supplierB,
-        executor: executorC
+        previousStatus: 1n,
+        newStatus: 3n,
+        account: supplierAccountB
       }, supplierRegistryAddress)
     ], { planCapabilityTables: [vocabulary] });
     const revokedOrder = revoked.stateMachineOrders[orderKey];
     const revokedTask = revoked.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
 
     expect(revoked.stateMachineSuppliers[supplierB]).toMatchObject({
-      executor: executorC,
+      account: supplierAccountB,
+      status: "revoked",
       revokedAt: expect.objectContaining({ blockNumber: 8n }),
-      revocationProof: expect.objectContaining({ eventName: "SupplierRevoked" })
+      revocationProof: expect.objectContaining({ eventName: "SupplierStatusChanged" })
     });
-    expect(revokedOrder?.stageExecutorOverlays[stageId]?.effectiveExecutor).toBeUndefined();
+    expect(revokedOrder?.stageSupplierAssignments[stageId]?.supplierAccount).toBe(supplierAccountB);
     expect(revokedTask?.assigneeSupplierId).toBe(supplierB);
-    expect(revokedTask?.assigneeExecutor).toBeUndefined();
+    expect(revokedTask?.assigneeSupplierAccount).toBe(supplierAccountB);
   });
 
   it("projects module-level derived signal provenance on the target order", () => {
@@ -766,7 +772,7 @@ describe("indexer projection replay", () => {
   it("counts module order events that cannot be attributed to a state machine instead of silently bucketing", () => {
     const unregisteredModuleAddress = "0x7777777777777777777777777777777777777777";
     const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "StageExecutorPatchApplied", {
+      chainEvent(1n, 0, "StageSupplierPatchApplied", {
         planId,
         orderId: stateMachineOrderId,
         selectorStageId,
@@ -1282,7 +1288,7 @@ describe("indexer projection replay", () => {
         publisher: signer,
         hooksHash: registerArgs.hooksHash,
         capabilitiesRoot: registerArgs.capabilitiesRoot,
-        executorBindingsRoot: registerArgs.executorBindingsRoot,
+        supplierBindingsRoot: registerArgs.supplierBindingsRoot,
         hookCount: BigInt(artifact.compiledHooks.length)
       }),
       chainEvent(2n, 0, "PlanFinalized", { planId, planHash, capabilitiesRoot: registerArgs.capabilitiesRoot }),
@@ -1328,17 +1334,17 @@ describe("indexer projection replay", () => {
     expect(rebuilt.snapshot.stateMachinePlans[planKey]?.signalCapabilities).toHaveLength(
       artifact.signalCapabilities.length
     );
-    expect(rebuilt.snapshot.stateMachinePlans[planKey]?.executorBindingsRoot).toBe(
-      registerArgs.executorBindingsRoot
+    expect(rebuilt.snapshot.stateMachinePlans[planKey]?.supplierBindingsRoot).toBe(
+      registerArgs.supplierBindingsRoot
     );
     expect(
-      rebuilt.snapshot.stateMachinePlans[planKey]?.executorBindings.map((binding) => ({
+      rebuilt.snapshot.stateMachinePlans[planKey]?.supplierBindings.map((binding) => ({
         stageId: binding.stageId,
         supplierId: binding.supplierId,
         kind: binding.kind
       }))
     ).toEqual(
-      registerArgs.executorBindings.map((binding) => ({
+      registerArgs.supplierBindings.map((binding) => ({
         stageId: binding.stageId,
         supplierId: binding.supplierId,
         kind: binding.kind === 0 ? "default" : "candidate"
@@ -2507,7 +2513,7 @@ describe("indexer projection replay", () => {
       publisher: signer,
       hookCount: "2",
       capabilitiesRoot: vocabulary.capabilitiesRoot,
-      executorBindingsRoot: vocabulary.executorBindingsRoot,
+      supplierBindingsRoot: vocabulary.supplierBindingsRoot,
       hooksHash
     });
     expect(plan?.committedAt).toMatchObject({ blockNumber: 1n, logIndex: 0 });
@@ -2524,8 +2530,8 @@ describe("indexer projection replay", () => {
     expect(plan?.selectorBindings).toEqual([
       expect.objectContaining({ selectorStageId, targetStageId: stageId })
     ]);
-    expect(plan?.executorBindings).toEqual([]);
-    expect(plan?.dynamicExecutorStages).toBeUndefined();
+    expect(plan?.supplierBindings).toEqual([]);
+    expect(plan?.dynamicSupplierStages).toBeUndefined();
     expect(plan?.capabilityEnrichment).toBe("enriched");
   });
 
@@ -3259,7 +3265,7 @@ function deploymentRegistryEvents(): readonly ChainEvent[] {
 
 interface VocabularyFixture extends PlanCapabilityTablesInput {
   readonly capabilitiesRoot: Hex;
-  readonly executorBindingsRoot: Hex;
+  readonly supplierBindingsRoot: Hex;
 }
 
 function planVocabulary(input: {
@@ -3270,12 +3276,12 @@ function planVocabulary(input: {
     readonly signalId: string;
     readonly targetOrderRelation: 0 | 1;
   }[];
-  readonly executorBindings?: readonly {
+  readonly supplierBindings?: readonly {
     readonly stageId: string;
     readonly supplierId: string;
     readonly kind: 0 | 1;
   }[];
-  readonly dynamicExecutorStages?: readonly string[];
+  readonly dynamicSupplierStages?: readonly string[];
 }): VocabularyFixture {
   const selectorBindings = (input.selectorBindings ?? []).map((binding) => ({
     selectorStageId: binding.selectorStageId as Hex,
@@ -3287,21 +3293,21 @@ function planVocabulary(input: {
     signalId: capability.signalId as Hex,
     targetOrderRelation: capability.targetOrderRelation
   }));
-  const executorBindings = (input.executorBindings ?? []).map((binding) => ({
+  const supplierBindings = (input.supplierBindings ?? []).map((binding) => ({
     stageId: binding.stageId as Hex,
     supplierId: binding.supplierId as Hex,
     kind: binding.kind
   }));
-  const dynamicExecutorStages = (input.dynamicExecutorStages ?? []).map((stageIdentifier) => stageIdentifier as Hex);
+  const dynamicSupplierStages = (input.dynamicSupplierStages ?? []).map((stageIdentifier) => stageIdentifier as Hex);
   return {
     planId: planId as Hex,
     planHash: planHash as Hex,
     selectorBindings,
     signalCapabilities,
-    executorBindings,
-    ...(dynamicExecutorStages.length > 0 ? { dynamicExecutorStages } : {}),
+    supplierBindings,
+    ...(dynamicSupplierStages.length > 0 ? { dynamicSupplierStages } : {}),
     capabilitiesRoot: capabilitiesRootOf(selectorBindings, signalCapabilities),
-    executorBindingsRoot: executorBindingsRootOf(executorBindings)
+    supplierBindingsRoot: supplierBindingsRootOf(supplierBindings)
   };
 }
 
@@ -3326,7 +3332,7 @@ spec:
       sendSignals: [{ name: "ready" }, { name: "seed" }]
       executor:
         supplierType: organization
-        supplierID: selector-ops
+        supplierID: 5f0b1e2a-7c9d-4e1f-9a2b-000000000041
     - name: intake
       source: slot-a
       receiveSignals:
@@ -3334,7 +3340,7 @@ spec:
       sendSignals: [{ name: "cmp" }]
       executor:
         supplierType: organization
-        supplierID: intake-ops
+        supplierID: 5f0b1e2a-7c9d-4e1f-9a2b-000000000042
 `;
 
 function vocabularyResolver(
@@ -3370,7 +3376,7 @@ function planPublishEvents(
       publisher: signer,
       hooksHash,
       capabilitiesRoot: vocabulary.capabilitiesRoot,
-      executorBindingsRoot: vocabulary.executorBindingsRoot,
+      supplierBindingsRoot: vocabulary.supplierBindingsRoot,
       hookCount
     }, stateMachineAddress),
     chainEvent(1n, 1, "PlanPublisherRecorded", {

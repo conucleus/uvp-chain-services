@@ -1,8 +1,8 @@
 // 计划族（PlanCommitted/Finalized/Registered/PublisherRecorded）投影：链上
-// 只携带 capabilitiesRoot 与 executorBindingsRoot，selectorBindings/
-// signalCapabilities/executorBindings/dynamicExecutorStages 由重放方按 planId
+// 只携带 capabilitiesRoot 与 supplierBindingsRoot，selectorBindings/
+// signalCapabilities/supplierBindings/dynamicSupplierStages 由重放方按 planId
 // 从编译产物富集并重算两棵树根断言（fail-closed）。
-import { capabilitiesRootOf, executorBindingsRootOf } from "@uvp-eth/compiler";
+import { capabilitiesRootOf, supplierBindingsRootOf } from "@uvp-eth/compiler";
 import type { ChainEvent } from "../events.js";
 import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtime";
 import {
@@ -32,12 +32,12 @@ import {
   type Writable
 } from "./snapshot.js";
 
-export type StateMachineExecutorBindingKind = "default" | "candidate";
+export type StateMachineSupplierBindingKind = "default" | "candidate";
 
-export interface StateMachineExecutorBindingProjection {
+export interface StateMachineSupplierBindingProjection {
   readonly stageId: Hex;
   readonly supplierId: Hex;
-  readonly kind: StateMachineExecutorBindingKind;
+  readonly kind: StateMachineSupplierBindingKind;
 }
 
 export interface StateMachinePlanProjection {
@@ -49,14 +49,14 @@ export interface StateMachinePlanProjection {
   readonly publisher?: Address;
   readonly hooksHash?: Hex;
   readonly capabilitiesRoot?: Hex;
-  readonly executorBindingsRoot?: Hex;
+  readonly supplierBindingsRoot?: Hex;
   readonly birthAuthorizer?: Address;
   readonly committedAt?: ProjectionProvenance;
   readonly finalizedAt?: ProjectionProvenance;
   readonly selectorBindings: readonly StateMachineStageSelectorBindingProjection[];
   readonly signalCapabilities: readonly StateMachineSignalCapabilityProjection[];
-  readonly executorBindings: readonly StateMachineExecutorBindingProjection[];
-  readonly dynamicExecutorStages?: readonly Hex[];
+  readonly supplierBindings: readonly StateMachineSupplierBindingProjection[];
+  readonly dynamicSupplierStages?: readonly Hex[];
   readonly capabilityEnrichment?: PlanCapabilityEnrichmentStatus;
   readonly registeredAt: ProjectionProvenance;
   readonly publisherRecordedAt?: ProjectionProvenance;
@@ -104,12 +104,12 @@ export interface PlanCapabilityTablesInput {
     readonly targetStageId: Hex;
     readonly writerStageId: Hex;
   }[];
-  readonly executorBindings?: readonly {
+  readonly supplierBindings?: readonly {
     readonly stageId: Hex;
     readonly supplierId: Hex;
     readonly kind: 0 | 1;
   }[];
-  readonly dynamicExecutorStages?: readonly Hex[];
+  readonly dynamicSupplierStages?: readonly Hex[];
 }
 
 export function applyPlanCommitted(
@@ -138,7 +138,7 @@ export function applyPlanCommitted(
     publisher,
     hooksHash: requiredBytes32Arg(event, "hooksHash"),
     capabilitiesRoot: requiredBytes32Arg(event, "capabilitiesRoot"),
-    executorBindingsRoot: requiredBytes32Arg(event, "executorBindingsRoot"),
+    supplierBindingsRoot: requiredBytes32Arg(event, "supplierBindingsRoot"),
     ...((() => {
       const birthAuthorizer = optionalAddressArg(event, "birthAuthorizer");
       return birthAuthorizer && birthAuthorizer !== "0x0000000000000000000000000000000000000000"
@@ -148,7 +148,7 @@ export function applyPlanCommitted(
     committedAt: provenanceOf(event),
     selectorBindings: [],
     signalCapabilities: [],
-    executorBindings: [],
+    supplierBindings: [],
     registeredAt: provenanceOf(event),
     updatedAt: provenanceOf(event),
     proof,
@@ -194,7 +194,7 @@ export function applyPlanFinalized(
     finalizedAt: provenanceOf(event),
     selectorBindings: [],
     signalCapabilities: [],
-    executorBindings: [],
+    supplierBindings: [],
     registeredAt: provenanceOf(event),
     updatedAt: provenanceOf(event),
     proof,
@@ -237,7 +237,7 @@ export function applyPlanRegistered(
       hookCount: uintArgAsString(event, "hookCount"),
       selectorBindings: [],
       signalCapabilities: [],
-      executorBindings: [],
+      supplierBindings: [],
       registeredAt: provenanceOf(event),
       updatedAt: provenanceOf(event),
       proof
@@ -309,7 +309,7 @@ export function planDefaultSupplierForStage(
   plan: StateMachinePlanProjection | undefined,
   stageId: Hex
 ): Hex | undefined {
-  return plan?.executorBindings.find(
+  return plan?.supplierBindings.find(
     (binding) => binding.kind === "default" && binding.stageId === stageId
   )?.supplierId;
 }
@@ -342,18 +342,18 @@ function enrichPlanVocabulary(
     plan.capabilityEnrichment = "failed";
     return;
   }
-  const executorBindings = source.executorBindings ?? [];
+  const supplierBindings = source.supplierBindings ?? [];
   const capabilitiesRoot = capabilitiesRootOf(
     source.selectorBindings,
     source.signalCapabilities,
     source.fileWriterBindings ?? [],
   );
-  const executorBindingsRoot = executorBindingsRootOf(executorBindings);
+  const supplierBindingsRoot = supplierBindingsRootOf(supplierBindings);
   if (
     !plan.capabilitiesRoot ||
     plan.capabilitiesRoot.toLowerCase() !== capabilitiesRoot.toLowerCase() ||
-    !plan.executorBindingsRoot ||
-    plan.executorBindingsRoot.toLowerCase() !== executorBindingsRoot.toLowerCase()
+    !plan.supplierBindingsRoot ||
+    plan.supplierBindingsRoot.toLowerCase() !== supplierBindingsRoot.toLowerCase()
   ) {
     countMismatch();
     plan.capabilityEnrichment = "failed";
@@ -373,15 +373,15 @@ function enrichPlanVocabulary(
       proof: proofOf(event, { planId: plan.planId })
     }))
     .sort(compareSignalCapabilities);
-  plan.executorBindings = executorBindings.map((binding): StateMachineExecutorBindingProjection => ({
+  plan.supplierBindings = supplierBindings.map((binding): StateMachineSupplierBindingProjection => ({
     stageId: binding.stageId,
     supplierId: binding.supplierId,
     kind: binding.kind === 0 ? "default" : "candidate"
   }));
-  if (source.dynamicExecutorStages && source.dynamicExecutorStages.length > 0) {
-    plan.dynamicExecutorStages = [...source.dynamicExecutorStages];
+  if (source.dynamicSupplierStages && source.dynamicSupplierStages.length > 0) {
+    plan.dynamicSupplierStages = [...source.dynamicSupplierStages];
   } else {
-    delete plan.dynamicExecutorStages;
+    delete plan.dynamicSupplierStages;
   }
   plan.capabilityEnrichment = "enriched";
 }

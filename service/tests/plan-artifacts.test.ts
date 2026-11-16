@@ -37,7 +37,7 @@ spec:
       sendSignals: [{ name: "ready" }, { name: "seed" }]
       executor:
         supplierType: organization
-        supplierID: selector-ops
+        supplierID: 5f0b1e2a-7c9d-4e1f-9a2b-000000000041
     - name: intake
       source: slot-a
       receiveSignals:
@@ -45,7 +45,7 @@ spec:
       sendSignals: [{ name: "cmp" }]
       executor:
         supplierType: organization
-        supplierID: intake-ops
+        supplierID: 5f0b1e2a-7c9d-4e1f-9a2b-000000000042
 `;
 
 const publisher = "0x1111111111111111111111111111111111111111" as Hex;
@@ -79,14 +79,14 @@ describe("plan artifact projection seam", () => {
     expect(tables.selectorBindings).toHaveLength(0);
     expect(tables.signalCapabilities).toHaveLength(3);
     expect(tables.signalCapabilities.every((row) => row.targetOrderRelation === 0)).toBe(true);
-    expect(tables.executorBindings).toEqual(
-      registerArgs.executorBindings.map((binding) => ({
+    expect(tables.supplierBindings).toEqual(
+      registerArgs.supplierBindings.map((binding) => ({
         stageId: binding.stageId,
         supplierId: binding.supplierId,
         kind: binding.kind
       }))
     );
-    expect(tables.dynamicExecutorStages ?? []).toEqual([]);
+    expect(tables.dynamicSupplierStages ?? []).toEqual([]);
 
     const oraclePlan = await resolvers.resolveSemanticOraclePlan(planId, planHash);
     expect(oraclePlan.zhixuId).toBe(artifact.zhixuId);
