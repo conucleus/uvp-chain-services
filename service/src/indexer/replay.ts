@@ -18,8 +18,6 @@ import {
   type ProjectionProvenance
 } from "./projections/proof.js";
 import {
-  applyOrderForked,
-  applyOrderLinked,
   applyOrderMaterialized,
   applyOrderRegistered,
   applyOrderRelayerRecorded,
@@ -204,8 +202,6 @@ export function rebuildOrderProjections(
           { ...stageFile, files: { ...stageFile.files } }
         ])
       ),
-      ...(order.triggerLink ? { triggerLink: order.triggerLink } : {}),
-      ...(order.forkLineage ? { forkLineage: order.forkLineage } : {}),
       hooks: Object.fromEntries(Object.entries(order.hooks).map(([hookId, hook]) => [hookId, { ...hook }])),
       tasks: readonlyTasks,
       timeline: [...order.timeline].sort(compareTimelineEvents),
@@ -291,12 +287,6 @@ function applyStateMachineEvent(
       return;
     case "OrderTriggered":
       applyOrderTriggered(state, event);
-      return;
-    case "OrderLinked":
-      applyOrderLinked(state, event);
-      return;
-    case "OrderForked":
-      applyOrderForked(state, event);
       return;
     case "StageSupplierPatchApplied":
       applyStageSupplierPatchApplied(state, event);

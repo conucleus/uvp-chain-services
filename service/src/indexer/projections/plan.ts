@@ -6,7 +6,6 @@ import { capabilitiesRootOf, supplierBindingsRootOf } from "@uvp-eth/compiler";
 import type { ChainEvent } from "../events.js";
 import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtime";
 import {
-  optionalAddressArg,
   optionalBytes32Arg,
   proofOf,
   provenanceOf,
@@ -50,7 +49,6 @@ export interface StateMachinePlanProjection {
   readonly hooksHash?: Hex;
   readonly capabilitiesRoot?: Hex;
   readonly supplierBindingsRoot?: Hex;
-  readonly birthAuthorizer?: Address;
   readonly committedAt?: ProjectionProvenance;
   readonly finalizedAt?: ProjectionProvenance;
   readonly selectorBindings: readonly StateMachineStageSelectorBindingProjection[];
@@ -75,7 +73,7 @@ export interface StateMachineStageSelectorBindingProjection {
   readonly bindingHash?: Hex;
 }
 
-export type StateMachineSignalTargetRelation = "current" | "triggerOrigin" | "unknown";
+export type StateMachineSignalTargetRelation = "current" | "unknown";
 
 export interface StateMachineSignalCapabilityProjection {
   readonly stageId: Hex;
@@ -98,7 +96,7 @@ export interface PlanCapabilityTablesInput {
     readonly stageId: Hex;
     readonly targetSourceId: Hex;
     readonly signalId: Hex;
-    readonly targetOrderRelation: 0 | 1;
+    readonly targetOrderRelation: 0;
   }[];
   readonly fileWriterBindings?: readonly {
     readonly targetStageId: Hex;
@@ -139,12 +137,6 @@ export function applyPlanCommitted(
     hooksHash: requiredBytes32Arg(event, "hooksHash"),
     capabilitiesRoot: requiredBytes32Arg(event, "capabilitiesRoot"),
     supplierBindingsRoot: requiredBytes32Arg(event, "supplierBindingsRoot"),
-    ...((() => {
-      const birthAuthorizer = optionalAddressArg(event, "birthAuthorizer");
-      return birthAuthorizer && birthAuthorizer !== "0x0000000000000000000000000000000000000000"
-        ? { birthAuthorizer }
-        : {};
-    })()),
     committedAt: provenanceOf(event),
     selectorBindings: [],
     signalCapabilities: [],
@@ -368,7 +360,7 @@ function enrichPlanVocabulary(
       stageId: capability.stageId,
       targetSourceId: capability.targetSourceId,
       signalId: capability.signalId,
-      targetOrderRelation: capability.targetOrderRelation === 0 ? "current" : "triggerOrigin",
+      targetOrderRelation: "current",
       registeredAt: provenanceOf(event),
       proof: proofOf(event, { planId: plan.planId })
     }))

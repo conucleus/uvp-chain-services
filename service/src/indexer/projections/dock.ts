@@ -139,7 +139,7 @@ export function applyDockRegistered(
       signalId: output.signalId,
       sourceId: output.sourceId,
       stageId: output.stageId,
-      targetOrderRelation: output.targetOrderRelation === 0 ? "current" : "current",
+      targetOrderRelation: "current",
       rawExpression: output.rawExpression,
       ast: output.ast,
       dependencies: output.dependencies.map((dependency) => ({ ...dependency })),
@@ -150,7 +150,7 @@ export function applyDockRegistered(
         stageId: atom.stageId,
         signal: atom.signal,
         signalId: atom.signalId,
-        targetOrderRelation: atom.targetOrderRelation === 0 ? "current" : "current"
+        targetOrderRelation: "current"
       }))
     })),
     registeredAt: provenanceOf(event),

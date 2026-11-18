@@ -7,8 +7,6 @@ export type {
 } from "./proof.js";
 export type {
   StateMachineOrderStatus,
-  StateMachineOrderTriggerLinkProjection,
-  StateMachineOrderForkProjection,
   StateMachineOrderProjection,
   StateMachineModuleProjection
 } from "./order.js";

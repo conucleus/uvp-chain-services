@@ -70,7 +70,6 @@ const stateMachineModuleAbi = parseAbi([
   "function derivedSignalModule() view returns (address)",
   "function dockRegistry() view returns (address)",
   "function planMetadataModule() view returns (address)",
-  "function orderLinkModule() view returns (address)",
   "function lens() view returns (address)"
 ]);
 
@@ -175,7 +174,6 @@ const REQUIRED_STATE_MACHINE_MODULE_KEYS = [
   "derivedSignal",
   "dockRegistry",
   "planMetadata",
-  "orderLink",
   "lens"
 ] as const;
 
@@ -270,8 +268,7 @@ const FLAT_CONTRACT_BY_MODULE_KEY = {
   fileResource: "UVPFileResourceModule",
   derivedSignal: "UVPDerivedSignalModule",
   dockRegistry: "UVPDockRegistry",
-  planMetadata: "UVPPlanMetadataModule",
-  orderLink: "UVPOrderLinkModule"
+  planMetadata: "UVPPlanMetadataModule"
 } as const;
 
 type ModuleManifestKey = keyof typeof FLAT_CONTRACT_BY_MODULE_KEY;
@@ -408,7 +405,6 @@ async function checkStateMachineModules(input: {
     derivedSignal: "derivedSignalModule",
     dockRegistry: "dockRegistry",
     planMetadata: "planMetadataModule",
-    orderLink: "orderLinkModule",
     lens: "lens"
   } as const;
 

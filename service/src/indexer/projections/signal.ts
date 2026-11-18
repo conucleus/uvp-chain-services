@@ -2,7 +2,6 @@
 // 由合约按 stage 的 assigned supplier account 判定，本模块只重放链上事件。
 import type { ChainEvent } from "../events.js";
 import type { Address, Hex } from "@uvp-eth/service-runtime";
-import { encodeAbiParameters, keccak256 } from "viem";
 import {
   optionalAddressArg,
   optionalBytes32Arg,
@@ -37,7 +36,6 @@ export interface StateMachineSignalProjection {
   readonly submitter: Address;
   readonly relayer?: Address;
   readonly factStageId?: Hex;
-  readonly replayedFromFork?: boolean;
   readonly submittedAt: ProjectionProvenance;
   readonly proof: StateMachineProofProjection;
 }
@@ -82,7 +80,6 @@ export function applySignalSubmitted(
     submitter,
     ...(relayer ? { relayer } : {}),
     ...(factStageId ? { factStageId } : {}),
-    ...(isForkReplayedFact(order, sourceId, signalId) ? { replayedFromFork: true } : {}),
     submittedAt: provenanceOf(event),
     proof
   };
@@ -92,21 +89,6 @@ export function applySignalSubmitted(
   markMatchingTasksSubmitted(order, sourceId, signalId, proof);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "确认动作已写入链上", proof, { orderId, planId: order.planId }));
-}
-
-function isForkReplayedFact(
-  order: MutableStateMachineOrderProjection,
-  sourceId: Hex,
-  signalId: Hex
-): boolean {
-  const replayedFactKeys = order.forkLineage?.replayedFactKeys;
-  if (!replayedFactKeys || replayedFactKeys.length === 0) {
-    return false;
-  }
-  const factKey = keccak256(
-    encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }], [sourceId, signalId])
-  );
-  return replayedFactKeys.some((key) => key.toLowerCase() === factKey.toLowerCase());
 }
 
 export function applyDerivedSignalSubmitted(

@@ -1,12 +1,11 @@
 // 订单族：订单维度链事件（OrderRegistered/Materialized/RelayerRecorded/
-// Triggered/Linked 与 StateMachineModuleSet 模块登记）、订单投影桶构造与
+// Triggered 与 StateMachineModuleSet 模块登记）、订单投影桶构造与
 // 复合键（chainId:stateMachineAddress:planId:orderId）。
 import type { ChainEvent } from "../events.js";
 import { ProjectionError, type Address, type Hex } from "@uvp-eth/service-runtime";
 import {
   ZERO_BYTES32,
   optionalBytes32Arg,
-  optionalBytes32ArrayArg,
   proofOf,
   provenanceOf,
   requiredAddressArg,
@@ -17,7 +16,6 @@ import {
   type StateMachineTimelineEventProjection
 } from "./proof.js";
 import {
-  findDeploymentByStateMachine,
   orderDeploymentIdFromPlanOrStateMachine,
   type MutableStateMachineDeploymentProjection,
   type ProjectionReplayDiagnostics,
@@ -37,29 +35,6 @@ import type { MutableStateMachineTaskProjection, StateMachineTaskProjection } fr
 
 export type StateMachineOrderStatus = "registered" | "unknown";
 
-export interface StateMachineOrderTriggerLinkProjection {
-  readonly triggeredOrderId: Hex;
-  readonly triggerOriginOrderId: Hex;
-  readonly triggerStageId: Hex;
-  readonly originPlanId?: Hex;
-  readonly originSourceId: Hex;
-  readonly originSignalId: Hex;
-  readonly linkedAt: ProjectionProvenance;
-  readonly proof: StateMachineProofProjection;
-}
-
-export interface StateMachineOrderForkProjection {
-  readonly orderId: Hex;
-  readonly parentOrderId: Hex;
-  readonly approvalSourceId: Hex;
-  readonly approvalSignalId: Hex;
-  readonly initiator: Address;
-  readonly forkPayloadHash?: Hex;
-  readonly replayedFactKeys?: readonly Hex[];
-  readonly forkedAt: ProjectionProvenance;
-  readonly proof: StateMachineProofProjection;
-}
-
 export interface StateMachineOrderProjection {
   readonly orderId: Hex;
   readonly chainId: number;
@@ -70,14 +45,11 @@ export interface StateMachineOrderProjection {
   readonly status: StateMachineOrderStatus;
   readonly currentStage?: Hex;
   readonly relayer?: Address;
-  readonly creator?: Address;
   readonly signals: Readonly<Record<string, StateMachineSignalProjection>>;
   readonly derivedSignals: Readonly<Record<string, StateMachineDerivedSignalProjection>>;
   readonly stageMaterializations: Readonly<Record<string, StateMachineStageMaterializationProjection>>;
   readonly stageSupplierAssignments: Readonly<Record<string, StateMachineStageSupplierAssignmentProjection>>;
   readonly stageFiles: Readonly<Record<string, StateMachineStageFileMapProjection>>;
-  readonly triggerLink?: StateMachineOrderTriggerLinkProjection;
-  readonly forkLineage?: StateMachineOrderForkProjection;
   readonly hooks: Readonly<Record<string, StateMachineHookProjection>>;
   readonly tasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly timeline: readonly StateMachineTimelineEventProjection[];
@@ -106,8 +78,6 @@ export type MutableStateMachineOrderProjection = Writable<
     | "stageMaterializations"
     | "stageSupplierAssignments"
     | "stageFiles"
-    | "triggerLink"
-    | "forkLineage"
     | "hooks"
     | "tasks"
     | "timeline"
@@ -119,8 +89,6 @@ export type MutableStateMachineOrderProjection = Writable<
   stageMaterializations: Record<string, StateMachineStageMaterializationProjection>;
   stageSupplierAssignments: Record<string, MutableStateMachineStageSupplierAssignmentProjection>;
   stageFiles: Record<string, StateMachineStageFileMapProjection>;
-  triggerLink?: StateMachineOrderTriggerLinkProjection;
-  forkLineage?: StateMachineOrderForkProjection;
   hooks: Record<string, MutableStateMachineHookProjection>;
   tasks: Record<string, MutableStateMachineTaskProjection>;
   timeline: StateMachineTimelineEventProjection[];
@@ -272,13 +240,11 @@ export function applyOrderRelayerRecorded(
   const orderId = requiredBytes32Arg(event, "orderId");
   const planId = requiredBytes32Arg(event, "planId");
   const relayer = requiredAddressArg(event, "relayer");
-  const creator = requiredAddressArg(event, "creator");
   const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
   const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
   const order = ensureStateMachineOrder(state.orders, event, orderId, planId, deploymentId);
   const proof = proofOf(event, { orderId, planId, planHash: order.planHash, submitter: relayer });
   order.relayer = relayer;
-  order.creator = creator;
   order.updatedAt = provenanceOf(event);
   appendOrderProof(order, proof);
   appendOrderTimeline(order, timelineOf(event, "订单中继方已记录", proof, { orderId, planId }));
@@ -322,110 +288,6 @@ export function applyOrderTriggered(
     sourceId,
     signalId,
     ...(triggerHookId !== undefined ? { triggerHookId } : {})
-  }));
-}
-
-export function applyOrderLinked(
-  state: {
-    deployments: Map<string, MutableStateMachineDeploymentProjection>;
-    modules: StateMachineModuleIndex;
-    diagnostics: ProjectionReplayDiagnostics;
-    orders: Map<string, MutableStateMachineOrderProjection>;
-  },
-  event: ChainEvent
-): void {
-  const triggeredOrderId = requiredBytes32Arg(event, "triggeredOrderId");
-  const triggerOriginOrderId = requiredBytes32Arg(event, "triggerOriginOrderId");
-  const triggerStageId = requiredBytes32Arg(event, "triggerStageId");
-  const originSourceId = requiredBytes32Arg(event, "originSourceId");
-  const originSignalId = requiredBytes32Arg(event, "originSignalId");
-  const originPlanId = optionalBytes32Arg(event, "originPlanId");
-  const planId = optionalBytes32Arg(event, "planId");
-  const stateMachineAddress = stateMachineAddressForOrderEvent(state, event);
-  const childOrder = ensureStateMachineOrder(
-    state.orders,
-    event,
-    triggeredOrderId,
-    planId,
-    findDeploymentByStateMachine(state.deployments, event.chainId, stateMachineAddress)?.deploymentId,
-    stateMachineAddress
-  );
-  const proof = proofOf(event, {
-    orderId: triggeredOrderId,
-    triggerOriginOrderId,
-    planId: childOrder.planId,
-    planHash: childOrder.planHash
-  });
-  childOrder.triggerLink = {
-    triggeredOrderId,
-    triggerOriginOrderId,
-    triggerStageId,
-    ...(originPlanId !== undefined ? { originPlanId } : {}),
-    originSourceId,
-    originSignalId,
-    linkedAt: provenanceOf(event),
-    proof
-  };
-  childOrder.currentStage = triggerStageId;
-  childOrder.updatedAt = provenanceOf(event);
-  appendOrderProof(childOrder, proof);
-  appendOrderTimeline(childOrder, timelineOf(event, "订单已连接到触发来源", proof, {
-    orderId: triggeredOrderId,
-    triggerOriginOrderId,
-    originSourceId,
-    originSignalId
-  }));
-}
-
-export function applyOrderForked(
-  state: {
-    deployments: Map<string, MutableStateMachineDeploymentProjection>;
-    plans: Map<string, MutableStateMachinePlanProjection>;
-    orders: Map<string, MutableStateMachineOrderProjection>;
-  },
-  event: ChainEvent
-): void {
-  const planId = requiredBytes32Arg(event, "planId");
-  const orderId = requiredBytes32Arg(event, "orderId");
-  const parentOrderId = requiredBytes32Arg(event, "parentOrderId");
-  const approvalSourceId = requiredBytes32Arg(event, "approvalSourceId");
-  const approvalSignalId = requiredBytes32Arg(event, "approvalSignalId");
-  const initiator = requiredAddressArg(event, "initiator");
-  const forkPayloadHash = optionalBytes32Arg(event, "forkPayloadHash");
-  const replayedFactKeys = optionalBytes32ArrayArg(event, "replayedFactKeys");
-  const plan = state.plans.get(stateMachineScopedKey(event.chainId, event.contractAddress, planId));
-  const deploymentId = orderDeploymentIdFromPlanOrStateMachine(plan, state.deployments, event.chainId, event.contractAddress);
-  const order = ensureStateMachineOrder(
-    state.orders,
-    event,
-    orderId,
-    planId,
-    deploymentId
-  );
-  const proof = proofOf(event, {
-    orderId,
-    planId,
-    parentOrderId,
-    submitter: initiator,
-  });
-  order.status = "registered";
-  order.forkLineage = {
-    orderId,
-    parentOrderId,
-    approvalSourceId,
-    approvalSignalId,
-    initiator,
-    ...(forkPayloadHash !== undefined ? { forkPayloadHash } : {}),
-    ...(replayedFactKeys !== undefined ? { replayedFactKeys } : {}),
-    forkedAt: provenanceOf(event),
-    proof,
-  };
-  order.updatedAt = provenanceOf(event);
-  appendOrderProof(order, proof);
-  appendOrderTimeline(order, timelineOf(event, "订单已从父单分叉", proof, {
-    orderId,
-    planId,
-    parentOrderId,
   }));
 }
 

@@ -31,7 +31,6 @@ export interface StateMachineDeploymentConfig {
     readonly derivedSignal?: Address;
     readonly dockRegistry?: Address;
     readonly planMetadata?: Address;
-    readonly orderLink?: Address;
     readonly lens?: Address;
   };
   readonly status?:
@@ -560,7 +559,6 @@ function parseStateMachineDeploymentModules(
     "derivedSignal",
     "dockRegistry",
     "planMetadata",
-    "orderLink",
     "lens",
   ] as const) {
     const raw = stringValue(record[key]);

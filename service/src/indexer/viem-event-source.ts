@@ -13,7 +13,6 @@ import {
   DERIVED_SIGNAL_MODULE_ABI,
   DOCK_REGISTRY_ABI,
   FILE_RESOURCE_MODULE_ABI,
-  ORDER_LINK_MODULE_ABI,
   STAGE_PATCH_MODULE_ABI,
   STATE_MACHINE_ABI,
   SUPPLIER_REGISTRY_ABI,
@@ -46,10 +45,6 @@ const dockRegistryAbi: Abi = (DOCK_REGISTRY_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
 
-const orderLinkModuleAbi: Abi = (ORDER_LINK_MODULE_ABI as Abi).filter(
-  (entry) => entry.type === "event"
-);
-
 const supplierRegistryAbi: Abi = (SUPPLIER_REGISTRY_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
@@ -77,7 +72,6 @@ export const INDEXER_EVENT_ABIS = {
   UVPFileResourceModule: fileResourceModuleAbi,
   UVPDerivedSignalModule: derivedSignalModuleAbi,
   UVPDockRegistry: dockRegistryAbi,
-  UVPOrderLinkModule: orderLinkModuleAbi,
   [SUPPLIER_REGISTRY_CONTRACT_NAME]: supplierRegistryAbi
 } as const;
 
@@ -94,7 +88,6 @@ type IndexedContractName =
   | "UVPFileResourceModule"
   | "UVPDerivedSignalModule"
   | "UVPDockRegistry"
-  | "UVPOrderLinkModule"
   | typeof SUPPLIER_REGISTRY_CONTRACT_NAME;
 
 interface IndexedContract {
@@ -328,11 +321,6 @@ function indexedContracts(
       dockRegistryAbi,
     ),
     indexedContract(
-      "UVPOrderLinkModule",
-      config.network.contracts,
-      orderLinkModuleAbi,
-    ),
-    indexedContract(
       SUPPLIER_REGISTRY_CONTRACT_NAME,
       config.network.contracts,
       supplierRegistryAbi,
@@ -351,9 +339,6 @@ function indexedContracts(
           : undefined,
         modules.dockRegistry
           ? moduleContract("UVPDockRegistry", modules.dockRegistry, dockRegistryAbi)
-          : undefined,
-        modules.orderLink
-          ? moduleContract("UVPOrderLinkModule", modules.orderLink, orderLinkModuleAbi)
           : undefined,
       ].filter((contract): contract is IndexedContract => Boolean(contract));
       return [

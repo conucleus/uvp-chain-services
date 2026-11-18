@@ -2,7 +2,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { encodeAbiParameters, keccak256 } from "viem";
 import {
   capabilitiesRootOf,
   compileZhixuOnchainHookPlan,
@@ -143,14 +142,7 @@ describe("indexer projection replay", () => {
     expect(order?.proof.some((proof) => proof.eventName === "HookReady" && proof.transactionHash)).toBe(true);
   });
 
-  it("rebuilds B-03 self-contained fields: fork lineage, derived params, and governance", () => {
-    const forkedOrderId = "0x0000000000000000000000000000000000000000000000000000000000000f0f";
-    const newSourceId = "0x0000000000000000000000000000000000000000000000000000000000000606";
-    const newSignalId = "0x0000000000000000000000000000000000000000000000000000000000000707";
-    const forkPayloadHash = "0x2222222222222222222222222222222222222222222222222222222222222222";
-    const replayedFactKey = keccak256(
-      encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }], [sourceId, signalId])
-    );
+  it("rebuilds derived signal params and governance", () => {
     const events: readonly ChainEvent[] = [
       chainEvent(1n, 0, "PlanCommitted", {
         planId,
@@ -159,8 +151,7 @@ describe("indexer projection replay", () => {
         hooksHash: bytes32Hex("9001"),
         capabilitiesRoot: emptyHash,
         supplierBindingsRoot: emptySupplierBindingsRoot,
-        hookCount: 1n,
-        birthAuthorizer: signer
+        hookCount: 1n
       }),
       chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
       chainEvent(3n, 0, "SignalSubmitted", {
@@ -172,37 +163,8 @@ describe("indexer projection replay", () => {
         submitter: signer,
         factStageId: stageId
       }),
-      chainEvent(4n, 0, "OrderRegistered", { orderId: forkedOrderId, planId }),
-      chainEvent(4n, 1, "OrderForked", {
-        planId,
-        orderId: forkedOrderId,
-        parentOrderId: stateMachineOrderId,
-        approvalSourceId: sourceId,
-        approvalSignalId: signalId,
-        initiator: signer,
-        forkPayloadHash,
-        replayedFactKeys: [replayedFactKey]
-      }),
-      chainEvent(4n, 2, "SignalSubmitted", {
-        orderId: forkedOrderId,
-        sourceId,
-        signalId,
-        payloadHash,
-        idempotencyKey,
-        submitter: signer,
-        factStageId: stageId
-      }),
-      chainEvent(4n, 3, "SignalSubmitted", {
-        orderId: forkedOrderId,
-        sourceId: newSourceId,
-        signalId: newSignalId,
-        payloadHash,
-        idempotencyKey,
-        submitter: slotA,
-        factStageId: emptyHash
-      }),
-      chainEvent(5n, 0, "DerivedSignalSubmitted", {
-        targetOrderId: forkedOrderId,
+      chainEvent(4n, 0, "DerivedSignalSubmitted", {
+        targetOrderId: stateMachineOrderId,
         targetPlanId: planId,
         fromPlanId: planId,
         fromOrderId: stateMachineOrderId,
@@ -212,40 +174,33 @@ describe("indexer projection replay", () => {
         payloadHash,
         idempotencyKey,
         submitter: signer,
-        relation: 1n
+        relation: 0n
       }),
-      chainEvent(6n, 0, "OwnershipTransferred", { previousOwner: signer, newOwner: slotA }),
-      chainEvent(7n, 0, "StateMachineModulesFrozen", {
+      chainEvent(5n, 0, "OwnershipTransferred", { previousOwner: signer, newOwner: slotA }),
+      chainEvent(6n, 0, "StateMachineModulesFrozen", {
         moduleSetHash: "0x3333333333333333333333333333333333333333333333333333333333333333"
       })
     ];
 
     const snapshot = rebuildOrderProjections(events);
-    const forkKey = stateMachineScopedKey(31337, contractAddress, planId, forkedOrderId);
-    const forkOrder = snapshot.stateMachineOrders[forkKey];
+    const order = snapshot.stateMachineOrders[
+      stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)
+    ];
     const governanceKey = `31337:${contractAddress}`;
 
-    expect(forkOrder?.forkLineage).toMatchObject({
-      parentOrderId: stateMachineOrderId,
-      forkPayloadHash,
-      replayedFactKeys: [replayedFactKey]
-    });
-    expect(forkOrder?.signals[`${sourceId}:${signalId}`]?.replayedFromFork).toBe(true);
-    expect(forkOrder?.signals[`${newSourceId}:${newSignalId}`]?.replayedFromFork).toBeUndefined();
-    expect(forkOrder?.derivedSignals[`${sourceId}:${signalId}`]).toMatchObject({
+    expect(order?.signals[`${sourceId}:${signalId}`]?.submitter).toBe(signer);
+    expect(order?.derivedSignals[`${sourceId}:${signalId}`]).toMatchObject({
       fromPlanId: planId,
       fromOrderId: stateMachineOrderId,
       fromStageId: stageId,
       targetSourceId: sourceId,
       payloadHash,
-      relation: "1"
+      relation: "0"
     });
     expect(snapshot.contractGovernance[governanceKey]).toMatchObject({
       owner: slotA,
       modulesFrozen: true
     });
-    expect(snapshot.stateMachinePlans[stateMachineScopedKey(31337, contractAddress, planId)]?.birthAuthorizer)
-      .toBe(signer);
   });
 
   it("marks HookReady tasks submitted from explicit plan signal capabilities", () => {
@@ -820,44 +775,6 @@ describe("indexer projection replay", () => {
     expect(snapshot.eventCount).toBe(6);
     expect(Object.keys(snapshot.stateMachineOrders)).toEqual([]);
     expect(Object.keys(snapshot.stateMachineModules)).toEqual([]);
-  });
-
-  it("projects the OrderLinked originPlanId onto the child order trigger link", () => {
-    const orderLinkModuleAddress = "0x6666666666666666666666666666666666666666";
-    const originPlanId = bytes32Hex("707");
-    const originOrderId = bytes32Hex("808");
-    const triggeredOrderId = bytes32Hex("909");
-    const events: readonly ChainEvent[] = [
-      chainEvent(1n, 0, "StateMachineModuleSet", {
-        moduleId: bytes32Text("uvp.module.order-link.v1"),
-        previousModule: "0x0000000000000000000000000000000000000000",
-        newModule: orderLinkModuleAddress
-      }),
-      chainEvent(2n, 0, "OrderLinked", {
-        triggeredOrderId,
-        triggerOriginOrderId: originOrderId,
-        triggerStageId: stageId,
-        planId,
-        originPlanId,
-        originSourceId: sourceId,
-        originSignalId: signalId
-      }, orderLinkModuleAddress)
-    ];
-
-    const snapshot = rebuildOrderProjections(events);
-    const childOrder = snapshot.stateMachineOrders[
-      stateMachineScopedKey(31337, contractAddress, planId, triggeredOrderId)
-    ];
-
-    expect(childOrder?.triggerLink).toMatchObject({
-      triggeredOrderId,
-      triggerOriginOrderId: originOrderId,
-      triggerStageId: stageId,
-      originPlanId,
-      originSourceId: sourceId,
-      originSignalId: signalId
-    });
-    expect(snapshot.unresolvedModuleOrderEventCount).toBe(0);
   });
 
   it("enriches the same planId on every deployment from the artifact vocabulary (content-scoped, not address-scoped)", () => {
@@ -2287,8 +2204,7 @@ describe("indexer projection replay", () => {
       chainEvent(2n, 1, "OrderRelayerRecorded", {
         orderId: stateMachineOrderId,
         planId,
-        relayer: slotB,
-        creator: slotB
+        relayer: slotB
       })
     ];
     const finalSubmit = chainEvent(8n, 0, "SignalSubmitted", {
@@ -2400,8 +2316,7 @@ describe("indexer projection replay", () => {
       ...chainEvent(2n, 1, "OrderRelayerRecorded", {
         orderId: queuedOrderId,
         planId,
-        relayer: slotB,
-        creator: slotB
+        relayer: slotB
       }),
       transactionHash: registerTxHash
     };
@@ -3178,46 +3093,6 @@ describe("indexer projection replay", () => {
     await expect(store.getStateMachineOrder(stateMachineOrderId)).resolves.toBeUndefined();
   });
 
-  it("projects OrderForked lineage onto the forked order without landing in the unknown-event bucket", () => {
-    const forkedOrderId = "0x0000000000000000000000000000000000000000000000000000000000000212";
-    const approvalSourceId = bytes32Hex("8101");
-    const approvalSignalId = bytes32Hex("8102");
-    const initiator = signer;
-    const snapshot = rebuildOrderProjections([
-      chainEvent(1n, 0, "PlanRegistered", {
-        planId,
-        planHash,
-        hookCount: 1n
-      }),
-      chainEvent(2n, 0, "OrderRegistered", {
-        orderId: stateMachineOrderId,
-        planId
-      }),
-      chainEvent(3n, 0, "OrderForked", {
-        planId,
-        orderId: forkedOrderId,
-        parentOrderId: stateMachineOrderId,
-        approvalSourceId,
-        approvalSignalId,
-        initiator
-      })
-    ]);
-    const orderKey = stateMachineScopedKey(31337, contractAddress, planId, forkedOrderId);
-    const fork = snapshot.stateMachineOrders[orderKey];
-    expect(fork).toBeDefined();
-    expect(fork?.forkLineage).toMatchObject({
-      parentOrderId: stateMachineOrderId,
-      approvalSourceId,
-      approvalSignalId,
-      initiator
-    });
-    const parent = snapshot.stateMachineOrders[
-      stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)
-    ];
-    expect(parent?.forkLineage).toBeUndefined();
-    expect(snapshot.unknownEventCount).toBe(0);
-    expect(fork?.timeline.some((item) => item.text === "订单已从父单分叉")).toBe(true);
-  });
 });
 
 function deploymentRegistryEvents(): readonly ChainEvent[] {
@@ -3274,7 +3149,7 @@ function planVocabulary(input: {
     readonly stageId: string;
     readonly targetSourceId: string;
     readonly signalId: string;
-    readonly targetOrderRelation: 0 | 1;
+    readonly targetOrderRelation: 0;
   }[];
   readonly supplierBindings?: readonly {
     readonly stageId: string;

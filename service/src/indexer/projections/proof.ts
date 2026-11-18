@@ -61,11 +61,6 @@ export function proofOf(event: ChainEvent, metadata: StateMachineProofMetadata =
 
 interface StateMachineProofMetadata {
   readonly orderId?: Hex | undefined;
-  readonly linkedOrderId?: Hex | undefined;
-  readonly triggerOriginOrderId?: Hex | undefined;
-  readonly parentOrderId?: Hex | undefined;
-  readonly originSourceId?: Hex | undefined;
-  readonly originSignalId?: Hex | undefined;
   readonly planId?: Hex | undefined;
   readonly planHash?: Hex | undefined;
   readonly sourceId?: Hex | undefined;
@@ -172,16 +167,6 @@ export function optionalBytes32Arg(event: ChainEvent, name: string): Hex | undef
 export function optionalNonZeroBytes32Arg(event: ChainEvent, name: string): Hex | undefined {
   const value = optionalBytes32Arg(event, name);
   return value && value !== ZERO_BYTES32 ? value : undefined;
-}
-
-export function optionalBytes32ArrayArg(event: ChainEvent, name: string): Hex[] | undefined {
-  const value = event.args[name];
-  if (!Array.isArray(value) || value.length === 0) {
-    return undefined;
-  }
-  return value.map((item, index) =>
-    typeof item === "string" ? normalizeBytes32(item, `${event.eventName}.${name}[${index}]`) : undefined
-  ).filter((item): item is Hex => item !== undefined);
 }
 
 export function uintArgAsString(event: ChainEvent, name: string): string {

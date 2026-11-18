@@ -34,7 +34,7 @@ const HOOK_B = `0x${"2".repeat(64)}` as const;
 const SOURCE_ID = `0x${"3".repeat(64)}` as const;
 const SIGNAL_ID = `0x${"4".repeat(64)}` as const;
 const WALLET = "0x2222222222222222222222222222222222222222" as const;
-const CREATOR = "0x3333333333333333333333333333333333333333" as const;
+const ACTOR = "0x3333333333333333333333333333333333333333" as const;
 const RELAYER = "0x4444444444444444444444444444444444444444" as const;
 const TX_HASH = `0x${"5".repeat(64)}` as const;
 const PAYLOAD_HASH = `0x${"7".repeat(64)}` as const;
@@ -79,7 +79,6 @@ function order(overrides: {
     status: "registered",
     currentStage: STAGE_ID,
     relayer: RELAYER,
-    creator: CREATOR,
     signals: {},
     derivedSignals: {},
     stageMaterializations: {},
@@ -153,7 +152,7 @@ function projectionSnapshot(): ProjectionSnapshot {
       [`${CHAIN_ID}:${STATE_MACHINE}`]: {
         chainId: CHAIN_ID,
         contractAddress: STATE_MACHINE,
-        owner: CREATOR,
+        owner: ACTOR,
         ownerUpdatedAt: provenance(7n),
         ownerProof: proof(7n, {}),
       },
@@ -184,7 +183,7 @@ function projectionSnapshot(): ProjectionSnapshot {
             orderId: ORDER_ID,
             selectorStageId: STAGE_ID,
             targetStageId: STAGE_ID,
-            selector: CREATOR,
+            selector: ACTOR,
             supplierId: SUPPLIER_ID,
             patchNonce: "2",
             dockId: DOCK_ID,
@@ -282,7 +281,6 @@ describe("generic chain read routes", () => {
           status: "registered",
           currentStage: STAGE_ID,
           relayer: RELAYER,
-          creator: CREATOR,
           signals: {},
           derivedSignals: {},
           stageMaterializations: {},
