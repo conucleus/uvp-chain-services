@@ -45,6 +45,7 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     adminAuthPolicy,
     audit,
     buildDiagnostics,
+    ...(options.indexerDiagnostics ? { indexerDiagnostics: options.indexerDiagnostics } : {}),
     ...(options.onTxMined ? { onTxMined: options.onTxMined } : {}),
     now
   };

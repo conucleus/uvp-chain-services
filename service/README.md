@@ -15,7 +15,7 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 
 `src/` 按链事实、投影、索引与运维读面分界：
 
-- `indexer/service.ts`：扫描与索引入口（增量刷新、重组回滚、`--rebuild` 全量重建）。
+- `indexer/service.ts`：扫描与索引入口（增量刷新、重组回滚、`--rebuild` 全量重建）；索引合约的日志解码失败时整批抛 `UndecodableChainLogError`，cursor 与投影不前进，不做跳过计数。
 - `cli/record-plan-artifact.ts`：`plan_artifacts` 的生产写入入口（校验产物身份后写入，不跑迁移；见下文「记录计划编译产物」）。
 - `cli/record-dock-artifact.ts`：`dock_artifacts` 的生产写入入口（校验 `uvp.dock.v1` 产物身份后写入，不跑迁移）。
 - `projection/plan-artifacts.ts`：计划编译产物表（`plan_artifacts`）的 Postgres store 与索引/语义 oracle 解析器；缺失产物抛 `PlanArtifactMissingError`。
@@ -53,6 +53,24 @@ node --env-file=.env.local --import tsx src/api/server.ts
 - `OPS_CONSOLE_ADMIN_IDS` / `CHAIN_SERVICES_ADMIN_TOKEN_HASHES`: 运维 admin 白名单与 token hash
 
 本进程没有 relayer/私钥/广播/回执对账配置：config/preflight 只解析链、索引、存储与运维 admin env。
+
+## 运维接口（admin-ops）
+
+`/admin/ops/*` 只暴露链投影自身的恢复动作，`src/api/routes/admin-ops.ts` 是唯一清单：
+
+- `GET /admin/ops/status`、`GET /admin/ops/summary`；
+- `POST /admin/ops/projections/rebuild`；
+- `GET /admin/ops/indexer/pending-steps`、`POST /admin/ops/indexer/pending-steps/retry`。
+
+reconcile worker 与 submission 重试属于已迁出的应用/relayer 域（本进程没有
+submission 表、也没有 reconcile 配置），chain-services 不提供
+`/admin/ops/reconcile/run` 或 `/admin/ops/submissions/:id/retry`。
+`uvp-deploy/ops/console-web` 必须对齐上面的清单：它只调用 pending-step sweep 与
+projection rebuild；不得为了兼容旧 UI 在本服务补死路由或 submission 面。
+
+链读的 `syncStatus` 在投影重建中（`syncStatus=rebuilding` 或 `rebuild.status=running`）、
+durable cursor 未追到 finalized bound、或 indexer heartbeat 超过 3 个 poll interval
+时返回 `stale`；`degraded` 保持原样，不被降级成 `stale`。
 
 非本地环境应使用持久数据库并通过安全预检。demo/fixture/mock 运行路径仅存在于 local 档，非 local 环境不含。
 

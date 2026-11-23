@@ -210,6 +210,27 @@ describe("ops health diagnostics", () => {
     }
   });
 
+  it("does not serve the retired console reconcile and submission retry actions", async () => {
+    const router = createApiRouter(stores.projectionStore, {
+      runtimeEnvironment: "local",
+      opsRecoveryActions: {
+        async rebuildProjections() {
+          return { status: "completed" };
+        }
+      }
+    });
+
+    for (const pathname of ["/admin/ops/reconcile/run", "/admin/ops/submissions/sub_1/retry"]) {
+      const response = await router.handle({
+        method: "POST",
+        pathname,
+        headers: adminHeaders
+      });
+      expect(response.status).toBe(404);
+      expect(response.body).toEqual({ error: "not_found" });
+    }
+  });
+
   it("exposes admin operator status and redacted downloadable summary fields", async () => {
     const projectionStore = stores.projectionStore;
     await projectionStore.saveSyncState({

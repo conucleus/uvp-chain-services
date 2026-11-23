@@ -116,24 +116,47 @@ export interface ViemChainEventSourceOptions {
   readonly logger?: Logger;
 }
 
+export class UndecodableChainLogError extends Error {
+  override readonly name = "UndecodableChainLogError";
+  readonly chainId: number;
+  readonly contract: string;
+  readonly address: Address;
+  readonly blockNumber: bigint | undefined;
+  readonly transactionHash: string | undefined;
+  readonly logIndex: number | undefined;
+
+  constructor(input: {
+    readonly chainId: number;
+    readonly contract: string;
+    readonly address: Address;
+    readonly blockNumber?: bigint | undefined;
+    readonly transactionHash?: string | undefined;
+    readonly logIndex?: number | undefined;
+    readonly cause?: unknown;
+  }) {
+    super(
+      `undecodable ${input.contract} log at ${input.address}`
+        + `${input.blockNumber === undefined ? "" : ` in block ${input.blockNumber}`}`
+        + `${input.logIndex === undefined ? "" : ` log ${input.logIndex}`}:`
+        + ` the indexed contract ABI does not decode this log`,
+      input.cause === undefined ? undefined : { cause: input.cause },
+    );
+    this.chainId = input.chainId;
+    this.contract = input.contract;
+    this.address = input.address;
+    this.blockNumber = input.blockNumber;
+    this.transactionHash = input.transactionHash;
+    this.logIndex = input.logIndex;
+  }
+}
+
 export class ViemChainEventSource implements ChainEventSource {
   readonly #publicClient: ViemLogReader | undefined;
   readonly #logger: Logger;
-  #unresolvedLogCount = 0;
 
   constructor(options: ViemChainEventSourceOptions = {}) {
     this.#publicClient = options.publicClient;
     this.#logger = options.logger ?? noopLogger;
-  }
-
-  get unresolvedLogCount(): number {
-    return this.#unresolvedLogCount;
-  }
-
-  consumeUnresolvedLogCount(): number {
-    const count = this.#unresolvedLogCount;
-    this.#unresolvedLogCount = 0;
-    return count;
   }
 
   async getFinalizedBlock(config: ChainServicesConfig): Promise<bigint> {
@@ -214,21 +237,7 @@ export class ViemChainEventSource implements ChainEventSource {
         continue;
       }
       for (const log of taskLogs) {
-        const event = decodeChainEventLog(log, range.chainId, contract);
-        if (event) {
-          decoded.push(event);
-        } else {
-          this.#unresolvedLogCount += 1;
-          this.#logger.warn("skipped undecodable chain log; cursor still advances", {
-            chainId: range.chainId,
-            contract: contract.name,
-            address: contract.address,
-            blockNumber: log.blockNumber?.toString(),
-            transactionHash: log.transactionHash,
-            logIndex: log.logIndex?.toString(),
-            unresolvedLogCount: this.#unresolvedLogCount,
-          });
-        }
+        decoded.push(decodeChainEventLog(log, range.chainId, contract));
       }
     }
     return decoded;
@@ -406,7 +415,7 @@ function decodeChainEventLog(
   log: Log,
   chainId: number,
   contract: IndexedContract,
-): ChainEvent | undefined {
+): ChainEvent {
   if (
     log.blockNumber == null ||
     !log.transactionHash ||
@@ -419,7 +428,6 @@ function decodeChainEventLog(
   }
   const normalizedAddress = normalizeLogAddress(log.address);
 
-  let event: ChainEvent | undefined;
   try {
     const decoded = decodeEventLog({
       abi: contract.abi,
@@ -427,28 +435,36 @@ function decodeChainEventLog(
       topics: log.topics,
     });
     const eventName = decoded.eventName;
-    event = eventName
-      ? {
-        chainId,
-        contractAddress: normalizedAddress,
-        blockNumber: log.blockNumber,
-        transactionHash: log.transactionHash.toLowerCase() as Hex,
-        logIndex: Number(log.logIndex),
-        ...(log.blockHash
-          ? { blockHash: log.blockHash.toLowerCase() as Hex }
-          : {}),
-        ...(log.transactionIndex != null
-          ? { transactionIndex: Number(log.transactionIndex) }
-          : {}),
-        ...(logRemoved(log) ? { removed: true } : {}),
-        eventName,
-        args: normalizeEventArgs(decoded.args, eventInputTypes(contract.abi, eventName)),
-      }
-      : undefined;
-  } catch {
-    return undefined;
+    if (!eventName) {
+      throw new Error("decoded log carries no event name");
+    }
+    return {
+      chainId,
+      contractAddress: normalizedAddress,
+      blockNumber: log.blockNumber,
+      transactionHash: log.transactionHash.toLowerCase() as Hex,
+      logIndex: Number(log.logIndex),
+      ...(log.blockHash
+        ? { blockHash: log.blockHash.toLowerCase() as Hex }
+        : {}),
+      ...(log.transactionIndex != null
+        ? { transactionIndex: Number(log.transactionIndex) }
+        : {}),
+      ...(logRemoved(log) ? { removed: true } : {}),
+      eventName,
+      args: normalizeEventArgs(decoded.args, eventInputTypes(contract.abi, eventName)),
+    };
+  } catch (error) {
+    throw new UndecodableChainLogError({
+      chainId,
+      contract: contract.name,
+      address: normalizedAddress,
+      blockNumber: log.blockNumber,
+      transactionHash: log.transactionHash,
+      logIndex: Number(log.logIndex),
+      cause: error,
+    });
   }
-  return event;
 }
 
 function normalizeEventArgs(args: unknown, inputTypes: ReadonlyMap<string, string>): EventArgs {

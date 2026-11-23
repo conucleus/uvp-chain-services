@@ -471,6 +471,51 @@ describe("generic chain read routes", () => {
     });
   });
 
+  it("returns stale while rebuilding and when the durable cursor is behind the finalized bound", async () => {
+    const rebuilding: ProjectionSyncState = {
+      chainId: CHAIN_ID,
+      contractAddress: STATE_MACHINE,
+      syncStatus: "rebuilding",
+      latestIndexedBlock: 20n,
+      finalizedBlock: 40n,
+      confirmationDepth: 2,
+      eventCount: 7,
+      rebuild: { status: "running", fromBlock: 0n, toBlock: 40n },
+      updatedAt: "2026-10-27T00:00:00.000Z",
+    };
+    const rebuildingContext = {
+      store: {
+        getSyncState: async () => rebuilding,
+      },
+      now: () => new Date("2026-10-27T00:01:00.000Z"),
+      indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 },
+    } as unknown as ApiRouteContext;
+
+    await expect(get(rebuildingContext, "/chain/sync-state")).resolves.toMatchObject({
+      status: 200,
+      body: { syncState: { syncStatus: "stale" } },
+    });
+
+    const behind = {
+      ...rebuilding,
+      syncStatus: "indexed" as const,
+      rebuild: { status: "completed" as const, fromBlock: 0n, toBlock: 20n },
+    };
+    const behindContext = {
+      store: {
+        getSyncState: async () => behind,
+        getCursor: async () => ({ nextBlock: 21n, finalizedBlock: 40n }),
+      },
+      now: () => new Date("2026-10-27T00:01:00.000Z"),
+      indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 },
+    } as unknown as ApiRouteContext;
+
+    await expect(get(behindContext, "/chain/sync-state")).resolves.toMatchObject({
+      status: 200,
+      body: { syncState: { syncStatus: "stale" } },
+    });
+  });
+
   it("serves the whole projection snapshot with recursive bigint serialization in a single store read", async () => {
     let snapshotReads = 0;
     const context = {

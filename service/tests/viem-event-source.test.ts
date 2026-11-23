@@ -206,14 +206,12 @@ describe("ViemChainEventSource", () => {
       .rejects.toThrow(/carries no number/);
   });
 
-  it("skips an undecodable log with an explicit count instead of failing the index range", async () => {
+  it("fails closed with a named error when an indexed contract log cannot be decoded", async () => {
     const invalidLog = {
       ...planRegisteredLog(),
       data: "0x01" as Hex
     } as Log;
-    const logger = new CapturingLogger();
     const eventSource = new ViemChainEventSource({
-      logger,
       publicClient: {
         async getBlockNumber() {
           return 0n;
@@ -224,20 +222,57 @@ describe("ViemChainEventSource", () => {
       }
     });
 
-    const events = await eventSource.readEvents(
+    const error = await captureRejection(eventSource.readEvents(
       {
         chainId: 84532,
         fromBlock: 100n,
         toBlock: 100n
       },
       chainServicesConfig()
-    );
+    ));
 
-    expect(events).toEqual([]);
-    expect(eventSource.unresolvedLogCount).toBe(1);
-    expect(eventSource.consumeUnresolvedLogCount()).toBe(1);
-    expect(eventSource.unresolvedLogCount).toBe(0);
-    expect(logger.warns.some((line) => line.includes("skipped undecodable chain log"))).toBe(true);
+    expect(error).toMatchObject({
+      name: "UndecodableChainLogError",
+      chainId: 84532,
+      contract: "UVPStateMachine",
+      address: stateMachineAddress,
+      blockNumber: 100n,
+      transactionHash: bytes32Hex("cd"),
+      logIndex: 0
+    });
+    expect((error as Error).message).toContain("the indexed contract ABI does not decode this log");
+    expect("unresolvedLogCount" in eventSource).toBe(false);
+  });
+
+  it("rejects a batch instead of returning the decodable prefix when any later log is undecodable", async () => {
+    const validLog = planRegisteredLog();
+    const invalidLog = {
+      ...planRegisteredLog(),
+      logIndex: 1,
+      data: "0x01" as Hex
+    } as Log;
+    const eventSource = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 0n;
+        },
+        async getLogs() {
+          return [validLog, invalidLog];
+        }
+      }
+    });
+
+    await expect(eventSource.readEvents(
+      {
+        chainId: 84532,
+        fromBlock: 100n,
+        toBlock: 100n
+      },
+      chainServicesConfig()
+    )).rejects.toMatchObject({
+      name: "UndecodableChainLogError",
+      logIndex: 1
+    });
   });
 
   it("fails loudly on a malformed log address instead of swallowing it as undecodable", async () => {
@@ -245,9 +280,7 @@ describe("ViemChainEventSource", () => {
       ...planRegisteredLog(),
       address: "0xnot-an-address"
     } as Log;
-    const logger = new CapturingLogger();
     const eventSource = new ViemChainEventSource({
-      logger,
       publicClient: {
         async getBlockNumber() {
           return 0n;
@@ -266,7 +299,6 @@ describe("ViemChainEventSource", () => {
       },
       chainServicesConfig()
     )).rejects.toThrow(/20-byte EVM address/);
-    expect(eventSource.unresolvedLogCount).toBe(0);
   });
 
   it("keeps 0x-prefixed string event args verbatim while lowercasing bytes args", async () => {
@@ -275,8 +307,9 @@ describe("ViemChainEventSource", () => {
         async getBlockNumber() {
           return 0n;
         },
-        async getLogs() {
-          return [deploymentRegisteredLog({ metadataURI: "ipfs://Deployment-Registry/0XAb" })];
+        async getLogs(input) {
+          return [deploymentRegisteredLog({ metadataURI: "ipfs://Deployment-Registry/0XAb" })]
+            .filter((log) => log.address === input.address);
         }
       }
     });
@@ -301,21 +334,13 @@ describe("ViemChainEventSource", () => {
   });
 });
 
-class CapturingLogger {
-  readonly warns: string[] = [];
-
-  warn(message: string): void {
-    this.warns.push(message);
+async function captureRejection(run: Promise<unknown>): Promise<unknown> {
+  try {
+    await run;
+  } catch (error) {
+    return error;
   }
-
-  info(): void {
-  }
-
-  error(): void {
-  }
-
-  debug(): void {
-  }
+  throw new Error("expected the read to reject");
 }
 
 type AbiEvent = {

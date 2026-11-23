@@ -57,7 +57,6 @@ export interface ChainEventSource {
   getFinalizedBlock(config: ChainServicesConfig): Promise<bigint>;
   readEvents(range: ChainEventRange, config: ChainServicesConfig): Promise<readonly ChainEvent[]>;
   getBlockHash?(blockNumber: bigint, config: ChainServicesConfig): Promise<Hex>;
-  consumeUnresolvedLogCount?(): number;
 }
 
 export interface ChainEventNotificationProcessor {
@@ -603,7 +602,6 @@ export class IndexerService implements LifecycleService {
         semanticOracleCheckedPlanCount: semanticOracle.semanticOracleCheckedPlanCount,
         semanticOracleErrorCount: semanticOracle.semanticOracleErrorCount,
         semanticOracleExcludedPlanCount: semanticOracle.semanticOracleExcludedPlanCount,
-        unresolvedLogCount: this.#consumeUnresolvedLogCount(),
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
       });
@@ -690,7 +688,12 @@ export class IndexerService implements LifecycleService {
   }
 
   async refreshFromCursorWithSummary(options: IndexerRebuildOptions = {}): Promise<IndexerRebuildResult> {
-    return this.#withExclusiveGuard(() => this.#refreshFromCursor(options));
+    return this.#withExclusiveGuard(() =>
+      this.#refreshFromCursor(options).catch(async (error: unknown) => {
+        await this.#markDegraded(undefined, error);
+        throw error;
+      })
+    );
   }
 
   async #refreshFromCursor(options: IndexerRebuildOptions = {}): Promise<IndexerRebuildResult> {
@@ -900,7 +903,6 @@ export class IndexerService implements LifecycleService {
       semanticOracleErrorCount: oracleResult.semanticOracleErrorCount,
       semanticOracleExcludedPlanCount: oracleResult.semanticOracleExcludedPlanCount,
       unresolvedIdentityRevokeEventCount: identitySnapshot?.unresolvedRevokeEventCount ?? 0,
-      unresolvedLogCount: this.#consumeUnresolvedLogCount(),
       nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
     });
@@ -1572,10 +1574,6 @@ export class IndexerService implements LifecycleService {
       return [];
     }
     return durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
-  }
-
-  #consumeUnresolvedLogCount(): number {
-    return this.#eventSource.consumeUnresolvedLogCount?.() ?? 0;
   }
 
   async #deliverPendingPostCommitStep(

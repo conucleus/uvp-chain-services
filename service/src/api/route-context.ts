@@ -64,6 +64,7 @@ export interface ApiRouteContext {
   readonly adminAuthPolicy: AdminAuthPolicy;
   readonly audit: AuditSink;
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
+  readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
   readonly onTxMined?: () => void;
   readonly now: () => Date;
 }

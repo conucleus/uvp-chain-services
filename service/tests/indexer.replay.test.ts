@@ -12,6 +12,7 @@ import {
 } from "@uvp-eth/compiler";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import { IndexerService, type ChainEventSource } from "../src/indexer/service.js";
+import { UndecodableChainLogError } from "../src/indexer/viem-event-source.js";
 import { rebuildOrderProjections } from "../src/indexer/replay.js";
 import type { PlanCapabilityTablesInput } from "../src/indexer/projections/plan.js";
 import { stateMachineScopedKey, stateMachineTaskProjectionKey } from "../src/indexer/projections/index.js";
@@ -1052,8 +1053,67 @@ describe("indexer projection replay", () => {
     }
   });
 
-  it("keeps enriched plan capability tables across a restart and an incremental refresh without new plan events", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-enrichment-restart-"));
+  it("fails an incremental refresh closed without advancing the cursor or replacing the projection when a log is undecodable", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-undecodable-"));
+    const store = new PostgresProjectionStore({
+      databaseUrl: projectionDatabaseUrl,
+      chainId: 31337
+    });
+    try {
+      const events = stateMachineEvents();
+      let finalizedBlock = 3n;
+      let failReads = false;
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return finalizedBlock;
+        },
+        async readEvents(range) {
+          if (failReads) {
+            throw new UndecodableChainLogError({
+              chainId: 31337,
+              contract: "UVPStateMachine",
+              address: contractAddress,
+              blockNumber: 5n,
+              transactionHash: bytes32Hex("e1"),
+              logIndex: 0
+            });
+          }
+          return events.filter((event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock);
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store
+      });
+
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+      const scope = { chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" as const };
+      const cursorBefore = await store.getCursor(scope);
+      const snapshotBefore = await store.getOrderSnapshot();
+      expect(cursorBefore).toMatchObject({ nextBlock: 4n, finalizedBlock: 3n });
+
+      finalizedBlock = 7n;
+      failReads = true;
+      await expect(indexer.refreshFromCursorWithSummary()).rejects.toMatchObject({
+        name: "UndecodableChainLogError",
+        contract: "UVPStateMachine",
+        blockNumber: 5n
+      });
+
+      await expect(store.getCursor(scope)).resolves.toEqual(cursorBefore);
+      await expect(store.getOrderSnapshot()).resolves.toEqual(snapshotBefore);
+      await expect(store.getSyncState()).resolves.toMatchObject({
+        syncStatus: "degraded",
+        rebuild: { status: "failed" }
+      });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps enriched plan capability tables across a restart and an incremental refresh without new plan events", async () => {    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-enrichment-restart-"));
     const store = new PostgresProjectionStore({
       databaseUrl: projectionDatabaseUrl,
       chainId: 31337

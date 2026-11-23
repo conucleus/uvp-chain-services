@@ -20,6 +20,15 @@ import {
 } from "../dock-binding-windows.js";
 import { StorageUnavailableError } from "../../storage/errors.js";
 import {
+  DEFAULT_SYNC_STALE_AFTER_MS,
+  readableSyncState,
+  syncStaleAfterMs
+} from "../../storage/sync-state.js";
+import type {
+  ProjectionSyncState,
+  StoredProjectionCursor,
+} from "../../storage/projection-store.js";
+import {
   decodePathParameter,
   InvalidPathParameterError,
   invalidPathParameterResponse,
@@ -100,7 +109,7 @@ async function handleRead(
     if (!current) {
       return { status: 404, body: { error: "chain_sync_state_not_found" } };
     }
-    const syncState: ChainSyncState = toWire(current);
+    const syncState: ChainSyncState = toWire(await syncStateForRead(context, current));
     return { status: 200, body: { syncState } };
   }
 
@@ -173,6 +182,39 @@ async function handleRead(
 
 function orderNotFound(): ApiResponse {
   return { status: 404, body: { error: "chain_order_not_found" } };
+}
+
+async function syncStateForRead(
+  context: ApiRouteContext,
+  state: ProjectionSyncState,
+): Promise<ProjectionSyncState> {
+  const cursor = await readCursor(context.store, state);
+  const staleAfterMs = context.indexerDiagnostics?.configured
+    ? syncStaleAfterMs(context.indexerDiagnostics.pollIntervalMs) ?? DEFAULT_SYNC_STALE_AFTER_MS
+    : undefined;
+  return readableSyncState(state, {
+    now: context.now?.() ?? new Date(),
+    ...(staleAfterMs !== undefined ? { staleAfterMs } : {}),
+    ...(cursor !== undefined ? { cursor } : {}),
+  });
+}
+
+async function readCursor(
+  store: ApiRouteContext["store"],
+  state: ProjectionSyncState,
+): Promise<StoredProjectionCursor | undefined> {
+  const getCursor = (store as {
+    readonly getCursor?: (
+      scope: { readonly chainId: number; readonly contractAddress: ProjectionSyncState["contractAddress"] },
+    ) => Promise<StoredProjectionCursor | undefined>;
+  }).getCursor;
+  if (typeof getCursor !== "function") {
+    return undefined;
+  }
+  return getCursor.call(store, {
+    chainId: state.chainId,
+    contractAddress: state.contractAddress,
+  });
 }
 
 async function planAdmissionsRead(
