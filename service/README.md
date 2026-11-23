@@ -6,8 +6,7 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 
 - `UVPStateMachine` 及其冻结模块定义 Order、Stage、Signal、Plan 发布、stage→supplier 指派和阶段文件补丁。
 - 计划词表（selectorBindings / signalCapabilities / stageFileWriters / supplierBindings）的唯一 off-chain 权威是 `plan_artifacts`：按 `(chain_id, plan_id, plan_hash)` 内容寻址、行级不可变；索引重建与链读只读该表。产物缺失即重建失败、链读 404，不得退化成空词表继续。产物写入入口是 `plan-artifact:record` CLI（见下文「记录计划编译产物」）；Store 草稿编译入口已随 B2 删除。
-- `UVPIdentityRegistry` 只记录线下主体标识与链上账户的绑定和撤销。
-- `UVPSupplierRegistry` 是 SID 身份边界：自注册产生 `pending`、store registrar 激活/暂停/撤销；`supplierId` 是 UUID 编码的 `bytes32`，与 supplier account 永久一对一绑定（无 rotate）。链读按 `SupplierRegistered`/`SupplierStatusChanged` 事件重放 SID→account 与状态，stage 发信账户按计划 default supplier → active stage patch supplier 的 supplierId 经 `accountOf` 解析；不持链下身份/KYC 数据。
+- `UVPIdentityRegistry` 是唯一链上身份边界：既有 owner 登记的 subject↔account 绑定，也有 supplier capability 命名空间——自注册产生 `pending`、store registrar 激活/暂停/撤销；`supplierId` 是 UUID 编码的 `bytes32`，与 supplier account 永久一对一绑定（无 rotate）。链读按同一合约的 `SupplierRegistered`/`SupplierStatusChanged` 事件重放 SID→account 与状态，stage 发信账户按计划 default supplier → active stage patch supplier 的 supplierId 经 `accountOf` 解析；不持链下身份/KYC 数据。
 - Chain Services 不代付 gas、不广播交易、不生成业务签名。Signal/补丁/订单注册的签名与 direct/relay 投递由 `uvp-client` 或应用侧完成；本服务只索引链事件并对外提供链读。timer keeper 等应用自动化已移出 chain-services（见 ARCHITECTURE Phase B）。
 - `GET /identity/bindings` 只读身份投影；治理 review、descriptor 快照和治理签名 key 已迁 `used-car/backend`。
 
@@ -22,7 +21,7 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 - `projection/dock-artifacts.ts`：Dock 文档产物表（`dock_artifacts`）的 Postgres store 与索引解析器；保存 `uvp.dock.v1`（validWhen AST/dependencies/atoms），是可从链上事件 + 记录产物重建的链下读投影，不是第二权威；缺失或身份不一致抛 `DockArtifactMissingError`/`DockArtifactIdentityError`，重建 fail-closed。
 - 链读 snapshot 提供静态 Dock（`uvp.dock.v1`）与 DockBinding/per-output 投影（`uvp.dockBinding.v1`），没有 Link 行/状态。binding 身份、payload generation、emitted/emitted_by 来自链上事件，可从 `chain_event_log` 重建；A/B 窗口的当前 `satisfied`/相对 due 是 API 读时对 stage-patch `dockOutputWindow` view 的 live enrichment（不持久、不构成历史），无历史时 `opened_by`/`closed_by` 省略。chain-services 不实现第二套 Hook AST 求值器；view 读取按 binding+output 做短 TTL 缓存，view 不可用时 snapshot 读 fail-closed 503。
 - `indexer/replay.ts`：统一事件顺序与重放编排。`rebuildOrderProjections` 是投影重建的单一入口，同时推进部署注册表事件族与显式诊断计数（幻影订单、激活缺补丁等不允许静默的计数）。
-- `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件，含 `supplierBindingsRoot`/`supplierBindings`）、`signal`（SignalSubmitted/DerivedSignalSubmitted 与 relayer 字段）、`stage`（stage supplier 指派补丁/active supplier 与 hook 生命周期）、`stage-files`（阶段文件补丁重放）、`supplier`（`UVPSupplierRegistry` 的 SID↔account 永久绑定与状态事件重放，及 assigned supplier account 解析）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
+- `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件，含 `supplierBindingsRoot`/`supplierBindings`）、`signal`（SignalSubmitted/DerivedSignalSubmitted 与 relayer 字段）、`stage`（stage supplier 指派补丁/active supplier 与 hook 生命周期）、`stage-files`（`StageFileWritten` 的不透明 key→payload 重放）、`supplier`（`UVPIdentityRegistry` 供应商命名空间的 SID↔account 永久绑定与状态事件重放，及 assigned supplier account 解析）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
 - 其余：`api/`（链读/运维路由与边界）、`storage/`（projection store）、`config/`（链/索引/运维 env）、`security/`、`chain-adapters/`、`proof-verifier/`、`shared/`（链常量与运行时工具）。
 - 业务模块 `order/`、`product/`、`evidence/`、`governance/`、`store/`、`task/`、`visibility/`、`resources/` 已删除；对应 HTTP/表/签名 key 由 `used-car/backend` 拥有。
 

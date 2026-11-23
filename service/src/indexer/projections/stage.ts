@@ -1,7 +1,7 @@
 // 阶段族：StageMaterialized、stage→supplier 指派（补丁/激活）与 hook 生命周期
 // 事件（HookStatusChanged/HookReady/TimerPoked）及指派投影。
 // 指派只表达链上 active StageSupplierAssignment（supplierId/patchNonce/dockId）；
-// supplier account 由 SupplierRegistry 事件重放解析，不在本文件查链或查库。
+// supplier account 由 UVPIdentityRegistry 事件重放解析，不在本文件查链或查库。
 import type { ChainEvent } from "../events.js";
 import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {

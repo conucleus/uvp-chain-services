@@ -98,10 +98,6 @@ export interface PlanCapabilityTablesInput {
     readonly signalId: Hex;
     readonly targetOrderRelation: 0;
   }[];
-  readonly fileWriterBindings?: readonly {
-    readonly targetStageId: Hex;
-    readonly writerStageId: Hex;
-  }[];
   readonly supplierBindings?: readonly {
     readonly stageId: Hex;
     readonly supplierId: Hex;
@@ -338,7 +334,6 @@ function enrichPlanVocabulary(
   const capabilitiesRoot = capabilitiesRootOf(
     source.selectorBindings,
     source.signalCapabilities,
-    source.fileWriterBindings ?? [],
   );
   const supplierBindingsRoot = supplierBindingsRootOf(supplierBindings);
   if (

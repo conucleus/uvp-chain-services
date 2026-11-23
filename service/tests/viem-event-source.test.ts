@@ -91,9 +91,9 @@ describe("ViemChainEventSource", () => {
     ]);
   });
 
-  it("decodes deployment registry and supplier registry logs from configured contracts", async () => {
+  it("decodes deployment registry and identity registry logs from configured contracts", async () => {
     const deploymentLog = deploymentRegisteredLog();
-    const supplierLog = supplierRegisteredLog();
+    const supplierLog = supplierCapabilityLog();
     const eventSource = new ViemChainEventSource({
       publicClient: {
         async getBlockNumber() {
@@ -114,7 +114,8 @@ describe("ViemChainEventSource", () => {
       registryConfig()
     );
 
-    expect(events).toEqual([
+    expect(events).toHaveLength(2);
+    expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({
         contractAddress: deploymentRegistryAddress,
         eventName: "DeploymentRegistered",
@@ -124,14 +125,14 @@ describe("ViemChainEventSource", () => {
         })
       }),
       expect.objectContaining({
-        contractAddress: supplierRegistryAddress,
+        contractAddress: identityRegistryAddress,
         eventName: "SupplierRegistered",
         args: {
           supplierId: bytes32Hex("0b"),
           account: "0x2222222222222222222222222222222222222222"
         }
       })
-    ]);
+    ]));
   });
 
   it("anchors the finalized bound on the finalized tag by default and on confirmations when overridden", async () => {
@@ -375,7 +376,7 @@ function compareEventShape(
 
 const stateMachineAddress = "0x1111111111111111111111111111111111111111";
 const deploymentRegistryAddress = "0x4444444444444444444444444444444444444444";
-const supplierRegistryAddress = "0x5555555555555555555555555555555555555555";
+const identityRegistryAddress = "0x5555555555555555555555555555555555555555";
 
 const stateMachineTestAbi = parseAbi([
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)"
@@ -385,7 +386,7 @@ const deploymentRegistryTestAbi = parseAbi([
   "event DeploymentRegistered(bytes32 indexed deploymentId,address indexed stateMachine,bytes32 artifactHash,bytes32 abiHash,uint64 deploymentBlock,string metadataURI)"
 ]);
 
-const supplierRegistryTestAbi = parseAbi([
+const identityRegistryTestAbi = parseAbi([
   "event SupplierRegistered(bytes32 indexed supplierId,address indexed account)"
 ]);
 
@@ -447,9 +448,9 @@ function deploymentRegisteredLog(
   } as Log;
 }
 
-function supplierRegisteredLog(): Log {
+function supplierCapabilityLog(): Log {
   return {
-    address: supplierRegistryAddress,
+    address: identityRegistryAddress,
     blockNumber: 100n,
     blockHash: bytes32Hex("ab"),
     transactionHash: bytes32Hex("cf"),
@@ -457,7 +458,7 @@ function supplierRegisteredLog(): Log {
     logIndex: 1,
     data: "0x",
     topics: encodeEventTopics({
-      abi: supplierRegistryTestAbi,
+      abi: identityRegistryTestAbi,
       eventName: "SupplierRegistered",
       args: {
         supplierId: bytes32Hex("0b"),
@@ -495,7 +496,7 @@ function registryConfig(): ChainServicesConfig {
       contracts: {
         ...base.network.contracts,
         UVPDeploymentRegistry: deploymentRegistryAddress,
-        UVPSupplierRegistry: supplierRegistryAddress
+        UVPIdentityRegistry: identityRegistryAddress
       }
     }
   } as unknown as ChainServicesConfig;

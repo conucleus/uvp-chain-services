@@ -47,14 +47,9 @@ import {
   applyStageSupplierPatchApplied,
   applyTimerPoked
 } from "./projections/stage.js";
+import { applyStageFileWritten } from "./projections/stage-files.js";
 import {
-  assertStageFilePatchReplaysComplete,
-  applyStageFileOpApplied,
-  applyStageFilePatchApplied,
-  type StageFileReplayIndex
-} from "./projections/stage-files.js";
-import {
-  applySupplierRegistryEvent,
+  applySupplierCapabilityEvent,
   resolveStageSupplierAssignments,
   type MutableStateMachineSupplierProjection
 } from "./projections/supplier.js";
@@ -118,7 +113,6 @@ export function rebuildOrderProjections(
   const stateMachineDockSelections = new Map<string, StateMachineDockSelectionProjection>();
   const stateMachineDockBindings = new Map<string, MutableStateMachineDockBindingProjection>();
   const stateMachineSuppliers = new Map<string, MutableStateMachineSupplierProjection>();
-  const stageFileReplay: StageFileReplayIndex = new Map();
   const diagnostics: ProjectionReplayDiagnostics = {
     unresolvedModuleOrderEventCount: 0,
     unresolvedStageActivationEventCount: 0,
@@ -141,7 +135,7 @@ export function rebuildOrderProjections(
 
   for (const event of filterActiveChainEvents(events)) {
     activeStateMachineDeploymentId = applyDeploymentRegistryEvent(stateMachineDeployments, activeStateMachineDeploymentId, event);
-    if (applySupplierRegistryEvent(stateMachineSuppliers, event)) {
+    if (applySupplierCapabilityEvent(stateMachineSuppliers, event)) {
       eventCount += 1;
       lastEvent = provenanceOf(event);
       continue;
@@ -158,13 +152,11 @@ export function rebuildOrderProjections(
       dockArtifacts,
       dockArtifactsByDkid,
       capabilityTables,
-      stageFileReplay,
       diagnostics
     }, event);
     eventCount += 1;
     lastEvent = provenanceOf(event);
   }
-  assertStageFilePatchReplaysComplete(stageFileReplay);
   resolveStageSupplierAssignments({
     suppliers: stateMachineSuppliers,
     plans: stateMachinePlans,
@@ -249,7 +241,6 @@ function applyStateMachineEvent(
     dockArtifacts: ReadonlyMap<string, DockArtifact>;
     dockArtifactsByDkid: ReadonlyMap<string, DockArtifact>;
     capabilityTables: ReadonlyMap<string, PlanCapabilityTablesInput>;
-    stageFileReplay: StageFileReplayIndex;
     diagnostics: ProjectionReplayDiagnostics;
   },
   event: ChainEvent
@@ -291,11 +282,8 @@ function applyStateMachineEvent(
     case "StageSupplierPatchApplied":
       applyStageSupplierPatchApplied(state, event);
       return;
-    case "StageFilePatchApplied":
-      applyStageFilePatchApplied(state, event);
-      return;
-    case "StageFileOpApplied":
-      applyStageFileOpApplied(state, event);
+    case "StageFileWritten":
+      applyStageFileWritten(state, event);
       return;
     case "StageSupplierAssigned":
       applyStageSupplierAssigned(state, event);

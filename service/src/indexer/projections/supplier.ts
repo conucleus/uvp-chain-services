@@ -1,4 +1,4 @@
-// Supplier 族：UVPSupplierRegistry 的 supplierId ↔ supplier account 永久绑定与
+// Supplier 族：UVPIdentityRegistry 的 supplierId ↔ supplier account 永久绑定与
 // 状态事件投影（SupplierRegistered/SupplierStatusChanged），以及 stage 指派的
 // supplier account 重放期解析。链上注册表是唯一身份事实源：本模块只按事件顺序
 // 重放，不保存链下身份/KYC 数据，account 永不改写。
@@ -38,7 +38,7 @@ export type MutableStateMachineSupplierProjection = Writable<StateMachineSupplie
 
 export type StateMachineSupplierIndex = ReadonlyMap<string, MutableStateMachineSupplierProjection>;
 
-export function applySupplierRegistryEvent(
+export function applySupplierCapabilityEvent(
   suppliers: Map<string, MutableStateMachineSupplierProjection>,
   event: ChainEvent
 ): boolean {

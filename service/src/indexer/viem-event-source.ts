@@ -15,8 +15,7 @@ import {
   FILE_RESOURCE_MODULE_ABI,
   STAGE_PATCH_MODULE_ABI,
   STATE_MACHINE_ABI,
-  SUPPLIER_REGISTRY_ABI,
-  SUPPLIER_REGISTRY_CONTRACT_NAME
+  IDENTITY_REGISTRY_ABI,
 } from "@uvp-eth/protocol-bindings";
 import { ConfigError, normalizeAddress, noopLogger, type Address, type Hex, type Logger } from "@uvp-eth/service-runtime";
 import type { ChainEvent, EventArgs } from "./events.js";
@@ -45,15 +44,9 @@ const dockRegistryAbi: Abi = (DOCK_REGISTRY_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
 
-const supplierRegistryAbi: Abi = (SUPPLIER_REGISTRY_ABI as Abi).filter(
+const identityRegistryAbi: Abi = (IDENTITY_REGISTRY_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
-
-const identityRegistryAbi = parseAbi([
-  "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
-  "event IdentityBindingRegistered(bytes32 indexed bindingId,bytes32 indexed subjectId,address indexed account,bytes32 descriptorHash,string descriptorURI,address registrar)",
-  "event IdentityBindingRevoked(bytes32 indexed bindingId,bytes32 reasonHash,string reasonURI,address revoker)",
-]);
 
 const deploymentRegistryAbi = parseAbi([
   "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
@@ -71,8 +64,7 @@ export const INDEXER_EVENT_ABIS = {
   UVPStagePatchModule: stagePatchModuleAbi,
   UVPFileResourceModule: fileResourceModuleAbi,
   UVPDerivedSignalModule: derivedSignalModuleAbi,
-  UVPDockRegistry: dockRegistryAbi,
-  [SUPPLIER_REGISTRY_CONTRACT_NAME]: supplierRegistryAbi
+  UVPDockRegistry: dockRegistryAbi
 } as const;
 
 const maxGetLogsBlockSpan = 9_999n;
@@ -87,8 +79,7 @@ type IndexedContractName =
   | "UVPStagePatchModule"
   | "UVPFileResourceModule"
   | "UVPDerivedSignalModule"
-  | "UVPDockRegistry"
-  | typeof SUPPLIER_REGISTRY_CONTRACT_NAME;
+  | "UVPDockRegistry";
 
 interface IndexedContract {
   readonly name: IndexedContractName;
@@ -328,11 +319,6 @@ function indexedContracts(
       "UVPDockRegistry",
       config.network.contracts,
       dockRegistryAbi,
-    ),
-    indexedContract(
-      SUPPLIER_REGISTRY_CONTRACT_NAME,
-      config.network.contracts,
-      supplierRegistryAbi,
     ),
     ...stateMachineDeployments.flatMap((deployment) => {
       const modules = deployment.modules ?? {};

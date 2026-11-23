@@ -5,7 +5,7 @@
 // omitted when no history exists.
 import { toWire } from "@uvp-eth/chain-read-contract";
 import type { ChainDockBinding, ChainDockBindingOutput } from "@uvp-eth/chain-read-contract";
-import { DOCK_PAYLOAD_FILE_KEY, STAGE_PATCH_MODULE_ABI } from "@uvp-eth/protocol-bindings";
+import { DOCK_PAYLOAD_FILE_KEY_NAME, STAGE_PATCH_MODULE_ABI } from "@uvp-eth/protocol-bindings";
 import { compareChainPointers } from "@uvp-eth/service-runtime";
 import {
   createPublicClient,
@@ -161,9 +161,7 @@ function bindingStageFile(
   if (!stageFiles) {
     return undefined;
   }
-  const entry = Object.entries(stageFiles.files).find(
-    ([key]) => key.toLowerCase() === DOCK_PAYLOAD_FILE_KEY.toLowerCase()
-  )?.[1];
+  const entry = stageFiles.files[DOCK_PAYLOAD_FILE_KEY_NAME];
   return entry === undefined ? undefined : { updatedAt: entry.updatedAt };
 }
 

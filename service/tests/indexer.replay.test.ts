@@ -73,7 +73,7 @@ const signalId = "0x000000000000000000000000000000000000000000000000000000000000
 const payloadHash = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const idempotencyKey = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const patchHash = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-const supplierRegistryAddress = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const identityRegistryAddress = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const stagePatchModuleAddress = "0x6666666666666666666666666666666666666666";
 const supplierA = bytes32Hex("5a01");
 const supplierB = bytes32Hex("5a02");
@@ -359,23 +359,23 @@ describe("indexer projection replay", () => {
       chainEvent(1n, 3, "SupplierRegistered", {
         supplierId: supplierA,
         account: supplierAccountA
-      }, supplierRegistryAddress),
+      }, identityRegistryAddress),
       chainEvent(1n, 4, "SupplierRegistered", {
         supplierId: supplierB,
         account: supplierAccountB
-      }, supplierRegistryAddress),
+      }, identityRegistryAddress),
       chainEvent(1n, 5, "SupplierStatusChanged", {
         supplierId: supplierA,
         previousStatus: 0n,
         newStatus: 1n,
         account: supplierAccountA
-      }, supplierRegistryAddress),
+      }, identityRegistryAddress),
       chainEvent(1n, 6, "SupplierStatusChanged", {
         supplierId: supplierB,
         previousStatus: 0n,
         newStatus: 1n,
         account: supplierAccountB
-      }, supplierRegistryAddress),
+      }, identityRegistryAddress),
       chainEvent(3n, 0, "OrderRegistered", {
         orderId: stateMachineOrderId,
         planId
@@ -494,7 +494,7 @@ describe("indexer projection replay", () => {
         previousStatus: 1n,
         newStatus: 3n,
         account: supplierAccountB
-      }, supplierRegistryAddress)
+      }, identityRegistryAddress)
     ], { planCapabilityTables: [vocabulary] });
     const revokedOrder = revoked.stateMachineOrders[orderKey];
     const revokedTask = revoked.stateMachineTasks[stateMachineTaskProjectionKey(31337, contractAddress, planId, stateMachineOrderId, hookId)];
