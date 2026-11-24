@@ -47,7 +47,6 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
     audit,
     buildDiagnostics,
     ...(options.indexerDiagnostics ? { indexerDiagnostics: options.indexerDiagnostics } : {}),
-    ...(options.onTxMined ? { onTxMined: options.onTxMined } : {}),
     now
   };
   const modules: readonly RouteModule[] = [

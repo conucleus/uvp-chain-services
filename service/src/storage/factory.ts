@@ -26,21 +26,6 @@ export interface ChainServicesStores {
   close(): Promise<void>;
 }
 
-export function createProjectionStore(options: CreateProjectionStoreOptions): ProjectionStore {
-  const postgresDirectory = postgresMigrationsDirectory(options.migrationsDirectory);
-  return new PostgresProjectionStore({
-    databaseUrl: options.database.url,
-    ...(options.chainId !== undefined ? { chainId: options.chainId } : {}),
-    ...(options.projectionScopeContractAddress
-      ? { projectionScopeContractAddress: options.projectionScopeContractAddress }
-      : {}),
-    migrations: {
-      autoRun: options.database.migrationsAutoRun,
-      ...(postgresDirectory ? { directory: postgresDirectory } : {})
-    }
-  });
-}
-
 export function createChainServicesStores(options: CreateProjectionStoreOptions): ChainServicesStores {
   const postgresDirectory = postgresMigrationsDirectory(options.migrationsDirectory);
   const migrations = {

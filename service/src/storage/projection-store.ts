@@ -47,9 +47,9 @@ export interface ProjectionRebuildMetadata {
 
 export interface ProjectionSyncDiagnosticsCounts {
   readonly unresolvedModuleOrderEventCount: number;
-  readonly unresolvedStageActivationEventCount: number;
   readonly unresolvedIdentityRevokeEventCount: number;
   readonly capabilityEnrichmentMismatchCount: number;
+  readonly dockEnrichmentMismatchCount: number;
   readonly unknownEventCount: number;
   readonly semanticOracleMismatchCount: number;
   readonly semanticOracleCheckedPlanCount: number;
@@ -69,9 +69,9 @@ export function projectionDiagnosticsFromSnapshots(
 ): ProjectionSyncDiagnosticsCounts {
   return {
     unresolvedModuleOrderEventCount: orderSnapshot.unresolvedModuleOrderEventCount ?? 0,
-    unresolvedStageActivationEventCount: orderSnapshot.unresolvedStageActivationEventCount ?? 0,
     unresolvedIdentityRevokeEventCount: identitySnapshot.unresolvedRevokeEventCount ?? 0,
     capabilityEnrichmentMismatchCount: orderSnapshot.capabilityEnrichmentMismatchCount ?? 0,
+    dockEnrichmentMismatchCount: orderSnapshot.dockEnrichmentMismatchCount ?? 0,
     unknownEventCount: orderSnapshot.unknownEventCount ?? 0,
     semanticOracleMismatchCount: semanticOracle?.semanticOracleMismatchCount ?? 0,
     semanticOracleCheckedPlanCount: semanticOracle?.semanticOracleCheckedPlanCount ?? 0,
@@ -87,9 +87,9 @@ export function hasProjectionDiagnosticsAnomalies(
     return false;
   }
   return counts.unresolvedModuleOrderEventCount > 0 ||
-    counts.unresolvedStageActivationEventCount > 0 ||
     counts.unresolvedIdentityRevokeEventCount > 0 ||
     counts.capabilityEnrichmentMismatchCount > 0 ||
+    counts.dockEnrichmentMismatchCount > 0 ||
     counts.unknownEventCount > 0 ||
     counts.semanticOracleMismatchCount > 0 ||
     counts.semanticOracleErrorCount > 0;
@@ -132,26 +132,6 @@ export interface StoredProjectionCursor extends ProjectionScope {
 }
 
 export type ProjectionSnapshotKind = "order" | "identity";
-
-export type PendingPostCommitKind = "signal_notification" | "projection_automation";
-
-export interface PendingPostCommitStep {
-  readonly stepId: string;
-  readonly chainId: number;
-  readonly kind: PendingPostCommitKind;
-  readonly events?: readonly ChainEvent[];
-  readonly attempts: number;
-  readonly lastError?: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-export interface SavePendingPostCommitStepInput {
-  readonly stepId: string;
-  readonly chainId: number;
-  readonly kind: PendingPostCommitKind;
-  readonly events?: readonly ChainEvent[];
-}
 
 export interface StoredProjectionSnapshot<TSnapshot> extends ProjectionScope {
   readonly kind: ProjectionSnapshotKind;
@@ -218,10 +198,6 @@ export interface DurableProjectionStore
     scope: ProjectionScope,
     kind: ProjectionSnapshotKind,
   ): Promise<StoredProjectionSnapshot<TSnapshot> | undefined>;
-  savePendingPostCommitStep(input: SavePendingPostCommitStepInput): Promise<PendingPostCommitStep>;
-  listPendingPostCommitSteps(scope: { readonly chainId: number }): Promise<readonly PendingPostCommitStep[]>;
-  recordPendingPostCommitAttempt(stepId: string, error: string): Promise<void>;
-  deletePendingPostCommitStep(stepId: string): Promise<void>;
 }
 
 export function defaultProjectionScope(chainId: number): ProjectionScope {

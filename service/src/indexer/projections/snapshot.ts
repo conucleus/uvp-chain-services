@@ -66,8 +66,8 @@ export interface ProjectionSnapshot {
   readonly stateMachineSuppliers: Readonly<Record<string, StateMachineSupplierProjection>>;
   readonly lastEvent?: ProjectionProvenance;
   readonly unresolvedModuleOrderEventCount?: number;
-  readonly unresolvedStageActivationEventCount?: number;
   readonly capabilityEnrichmentMismatchCount?: number;
+  readonly dockEnrichmentMismatchCount?: number;
   readonly unknownEventCount?: number;
 }
 
@@ -79,8 +79,8 @@ export type MutableStateMachineDeploymentProjection = Writable<StateMachineDeplo
 
 export interface ProjectionReplayDiagnostics {
   unresolvedModuleOrderEventCount: number;
-  unresolvedStageActivationEventCount: number;
   capabilityEnrichmentMismatchCount: number;
+  dockEnrichmentMismatchCount: number;
   unknownEventCount: number;
 }
 
@@ -98,8 +98,8 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     stateMachineTasks: {},
     stateMachineSuppliers: {},
     unresolvedModuleOrderEventCount: 0,
-    unresolvedStageActivationEventCount: 0,
     capabilityEnrichmentMismatchCount: 0,
+    dockEnrichmentMismatchCount: 0,
     unknownEventCount: 0
   };
 }

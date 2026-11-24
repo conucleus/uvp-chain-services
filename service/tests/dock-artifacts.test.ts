@@ -64,14 +64,19 @@ describe("dock artifact projection seam", () => {
 
     const record = await store.get({ chainId, dkid: canonicalDockId, docHash });
     expect(record?.artifact).toEqual(artifact);
+    const scopedDockId = `0x${"f".repeat(64)}` as const;
+    const scopedRecord = await store.get({ chainId, dkid: scopedDockId, docHash });
+    expect(scopedRecord?.artifact).toEqual(artifact);
+
+    const otherDocHash = keccak256Hex("dock-document-missing");
     await expect(
-      store.get({ chainId, dkid: `0x${"f".repeat(64)}`, docHash })
+      store.get({ chainId, dkid: canonicalDockId, docHash: otherDocHash })
     ).resolves.toBeUndefined();
 
     const resolver = createDockArtifactResolver({ store, chainId });
-    await expect(resolver.resolveDockArtifact(canonicalDockId, docHash)).resolves.toEqual(artifact);
+    await expect(resolver.resolveDockArtifact(scopedDockId, docHash)).resolves.toEqual(artifact);
     await expect(
-      resolver.resolveDockArtifact(`0x${"e".repeat(64)}`, docHash)
+      resolver.resolveDockArtifact(`0x${"e".repeat(64)}`, otherDocHash)
     ).rejects.toBeInstanceOf(DockArtifactMissingError);
   });
 
@@ -132,6 +137,83 @@ describe("dock artifact projection seam", () => {
     }[];
     expect(outputs[0]?.window[0]?.delaySeconds).toBe("15");
     expect(() => JSON.stringify(toWire(dockProof))).not.toThrow();
+  });
+
+  it("degrades missing or mismatched DockRegistered artifacts per dock without aborting valid docks", async () => {
+    const missingDocHash = keccak256Hex("dock-document-missing");
+    const missingDockId = `zd-${missingDocHash.slice(2, 34)}`;
+    const mismatchedDocHash = keccak256Hex("dock-document-mismatch");
+    const mismatchedDockId = `zd-${mismatchedDocHash.slice(2, 34)}`;
+    const baseMismatched = dockArtifactFor(mismatchedDocHash);
+    const mismatchedArtifact = {
+      ...baseMismatched,
+      from: {
+        ...baseMismatched.from,
+        source: "other-source",
+        sourceId: keccak256Hex("other-source")
+      }
+    };
+    await store.put({ chainId, docHash: mismatchedDocHash, artifact: mismatchedArtifact });
+
+    const resolver = createDockArtifactResolver({ store, chainId });
+    const eventSource = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 0n;
+        },
+        async getLogs() {
+          return [
+            dockRegisteredLog(),
+            dockRegisteredLogFixture({
+              address: dockRegistryAddress,
+              docHash: missingDocHash,
+              blockNumber: 6n,
+              blockHash: `0x${"e".repeat(64)}`,
+              transactionHash: `0x${"f".repeat(64)}`,
+              logIndex: 0
+            }),
+            dockRegisteredLogFixture({
+              address: dockRegistryAddress,
+              docHash: mismatchedDocHash,
+              blockNumber: 7n,
+              blockHash: `0x${"a".repeat(64)}`,
+              transactionHash: `0x${"b".repeat(64)}`,
+              logIndex: 0
+            })
+          ];
+        },
+        async getBlock() {
+          return { hash: `0x${"c".repeat(64)}`, number: 7n };
+        }
+      }
+    });
+    const projectionStore = new PostgresProjectionStore({ database, chainId });
+    const indexer = new IndexerService({
+      config: indexerConfig(),
+      eventSource,
+      store: projectionStore,
+      resolveDockArtifact: resolver.resolveDockArtifact
+    });
+
+    const { snapshot, summary } = await indexer.rebuildFromDeploymentBlockWithSummary();
+
+    expect(summary.syncStatus).toBe("indexed");
+    expect(snapshot.dockEnrichmentMismatchCount).toBe(2);
+    expect(snapshot.stateMachineDocks[dockId]?.enrichment).toBe("enriched");
+    expect(snapshot.stateMachineDocks[missingDockId]).toMatchObject({
+      dkid: missingDockId,
+      enrichment: "failed",
+      signalMap: []
+    });
+    expect(snapshot.stateMachineDocks[mismatchedDockId]).toMatchObject({
+      dkid: mismatchedDockId,
+      enrichment: "failed",
+      signalMap: []
+    });
+    await expect(projectionStore.getSyncState()).resolves.toMatchObject({
+      syncStatus: "indexed",
+      projectionDiagnostics: { dockEnrichmentMismatchCount: 2 }
+    });
   });
 });
 

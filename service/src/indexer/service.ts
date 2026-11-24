@@ -1,11 +1,9 @@
 import type { ChainServicesConfig } from "../config/index.js";
-import { createHash } from "node:crypto";
 import { loadConfigFromEnv } from "../config/index.js";
 import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import type { ChainEvent, EventCursor } from "./events.js";
 import {
   buildActiveChainEventReplaySummary,
-  chainEventKey,
   sortChainEvents
 } from "./events.js";
 import type { ProjectionSnapshot } from "./projections/index.js";
@@ -33,14 +31,11 @@ import {
   defaultProjectionScope,
   projectionDiagnosticsFromSnapshots,
   type DurableProjectionStore,
-  type PendingPostCommitKind,
-  type PendingPostCommitStep,
   type ProjectionScope,
   type ProjectionStore,
   type ProjectionSyncState
 } from "../storage/projection-store.js";
 import { consoleLogger, noopLogger, ConfigError, ProjectionError, type Hex, type LifecycleService, type Logger } from "@uvp-eth/service-runtime";
-import { redactSecrets } from "@uvp-eth/service-runtime";
 import { redactEndpointErrorMessage } from "../shared/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
 
@@ -58,15 +53,6 @@ export interface ChainEventSource {
   getFinalizedBlock(config: ChainServicesConfig): Promise<bigint>;
   readEvents(range: ChainEventRange, config: ChainServicesConfig): Promise<readonly ChainEvent[]>;
   getBlockHash?(blockNumber: bigint, config: ChainServicesConfig): Promise<Hex>;
-}
-
-export interface ChainEventNotificationProcessor {
-  processSignalSubmittedEvents(events: readonly ChainEvent[]): Promise<unknown>;
-  invalidateDeliveriesAboveBlock?(input: { readonly chainId: number; readonly blockNumber: bigint }): Promise<unknown>;
-}
-
-export interface ProjectionAutomationProcessor {
-  processProjection(snapshot: ProjectionSnapshot): Promise<unknown>;
 }
 
 export interface IndexerRebuildSummary {
@@ -101,8 +87,6 @@ export interface IndexerServiceOptions {
   readonly config: ChainServicesConfig;
   readonly eventSource: ChainEventSource;
   readonly store: ProjectionStore;
-  readonly notificationProcessor?: ChainEventNotificationProcessor;
-  readonly projectionAutomationProcessor?: ProjectionAutomationProcessor;
   readonly resolvePlanCapabilityTables?: (
     planId: Hex,
     planHash: Hex
@@ -116,30 +100,6 @@ export interface IndexerServiceOptions {
     docHash: Hex
   ) => Promise<DockArtifact>;
   readonly logger?: Logger;
-}
-
-export interface PendingPostCommitSweepSummary {
-  readonly swept: number;
-  readonly delivered: number;
-  readonly failed: number;
-  readonly waitingFinality: number;
-  readonly ghostDropped: number;
-}
-
-export class PendingPostCommitFinalityWaitError extends Error {
-  override readonly name = "PendingPostCommitFinalityWaitError";
-
-  constructor(message: string) {
-    super(message);
-  }
-}
-
-export class PendingPostCommitGhostStepError extends Error {
-  override readonly name = "PendingPostCommitGhostStepError";
-
-  constructor(message: string) {
-    super(message);
-  }
 }
 
 class ReorgCursorMovedError extends Error {
@@ -158,8 +118,6 @@ class IncrementalEarlyExitDeclinedError extends Error {
   }
 }
 
-type MutablePendingPostCommitSweepSummary = Writable<PendingPostCommitSweepSummary>;
-
 export class IndexerService implements LifecycleService {
   readonly name = "indexer";
 
@@ -175,8 +133,6 @@ export class IndexerService implements LifecycleService {
   readonly #config: ChainServicesConfig;
   readonly #eventSource: ChainEventSource;
   readonly #store: ProjectionStore;
-  readonly #notificationProcessor: ChainEventNotificationProcessor | undefined;
-  readonly #projectionAutomationProcessor: ProjectionAutomationProcessor | undefined;
   readonly #resolvePlanCapabilityTables:
     | ((planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput>)
     | undefined;
@@ -193,8 +149,6 @@ export class IndexerService implements LifecycleService {
     this.#config = options.config;
     this.#eventSource = options.eventSource;
     this.#store = options.store;
-    this.#notificationProcessor = options.notificationProcessor;
-    this.#projectionAutomationProcessor = options.projectionAutomationProcessor;
     this.#resolvePlanCapabilityTables = options.resolvePlanCapabilityTables;
     this.#resolveSemanticOraclePlan = options.resolveSemanticOraclePlan;
     this.#resolveDockArtifact = options.resolveDockArtifact;
@@ -221,11 +175,10 @@ export class IndexerService implements LifecycleService {
         const source = await resolver(anchor.planId, anchor.planHash);
         this.#planCapabilityTablesCache.set(anchor.planId.toLowerCase(), source);
       } catch (error) {
-        this.#logger.error("plan artifact resolution failed; the rebuild aborts instead of serving an unverified plan vocabulary (fail-closed)", {
+        this.#logger.warn("plan artifact resolution failed; the plan will be marked capabilityEnrichment=failed while other plans continue", {
           planId: anchor.planId,
           message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown resolution error"
         });
-        throw error;
       }
     }
     return {
@@ -247,12 +200,11 @@ export class IndexerService implements LifecycleService {
         try {
           this.#dockArtifactsCache.set(key, await resolver(anchor.dkid, anchor.docHash));
         } catch (error) {
-          this.#logger.error("dock artifact resolution failed; the rebuild aborts instead of serving an unverified dock projection (fail-closed)", {
+          this.#logger.warn("dock artifact resolution failed; the dock will be marked enrichment=failed while other plans and docks continue", {
             dkid: anchor.dkid,
             docHash: anchor.docHash,
             message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown resolution error"
           });
-          throw error;
         }
       }
     }
@@ -377,6 +329,28 @@ export class IndexerService implements LifecycleService {
         }
       );
     }
+    const mismatchedDockIds: string[] = [];
+    for (const dock of Object.values(snapshot.stateMachineDocks)) {
+      if (dock.enrichment !== "failed") {
+        continue;
+      }
+      for (const [cacheKey, cached] of this.#dockArtifactsCache) {
+        if (cached.dkid === dock.dkid) {
+          this.#dockArtifactsCache.delete(cacheKey);
+        }
+      }
+      mismatchedDockIds.push(dock.dkid);
+    }
+    const dockMismatches = snapshot.dockEnrichmentMismatchCount ?? 0;
+    if (dockMismatches > 0) {
+      this.#logger.warn(
+        "dock artifact enrichment failed or mismatched on-chain DockRegistered fields; the listed docks stay enrichment=failed while other plans and docks continue",
+        {
+          dockEnrichmentMismatchCount: dockMismatches,
+          dkids: mismatchedDockIds
+        }
+      );
+    }
   }
 
   async start(): Promise<void> {
@@ -474,8 +448,6 @@ export class IndexerService implements LifecycleService {
 
     const startedAt = new Date().toISOString();
     let mismatchCount = 0;
-    let rebuildNotificationStepId: string | undefined;
-    let rebuildCommitted = false;
     await this.#store.saveSyncState({
       ...this.#scope,
       syncStatus: "rebuilding",
@@ -541,7 +513,6 @@ export class IndexerService implements LifecycleService {
       };
       const enrichmentOptions = await this.#projectionReplayOptionsFor(events);
       const semanticOraclePlans = await this.#semanticOraclePlansFor(events);
-      rebuildNotificationStepId = await this.#prePersistRebuildNotificationStep(activeEvents);
       const snapshot = await this.#store.resetFromEvents({
         deploymentBlock,
         events,
@@ -557,17 +528,6 @@ export class IndexerService implements LifecycleService {
           ...(nextCursor.blockHash !== undefined ? { blockHash: nextCursor.blockHash } : {})
         }
       });
-      rebuildCommitted = true;
-      await this.#invalidateNotificationsAfterReorg(finalizedBlock);
-      await this.#dropGhostPendingNotificationStepsAfterRebuild(events, finalizedBlock);
-      const notificationStatus = await this.#processSignalNotifications(activeEvents);
-      if (rebuildNotificationStepId !== undefined && notificationStatus === "delivered") {
-        await this.#dropPendingPostCommitStep(
-          rebuildNotificationStepId,
-          "rebuild notification step withdrawn after in-process delivery succeeded"
-        );
-      }
-      await this.#processProjectionAutomation(snapshot);
       this.#cursor = nextCursor;
 
       const semanticOracle = this.#runSemanticOracle(events, semanticOraclePlans);
@@ -598,8 +558,8 @@ export class IndexerService implements LifecycleService {
         unresolvedIdentityRevokeEventCount: identitySnapshot.unresolvedRevokeEventCount ?? 0,
         mismatchCount: summary.mismatchCount,
         unresolvedModuleOrderEventCount: snapshot.unresolvedModuleOrderEventCount ?? 0,
-        unresolvedStageActivationEventCount: snapshot.unresolvedStageActivationEventCount ?? 0,
         capabilityEnrichmentMismatchCount: snapshot.capabilityEnrichmentMismatchCount ?? 0,
+        dockEnrichmentMismatchCount: snapshot.dockEnrichmentMismatchCount ?? 0,
         unknownEventCount: snapshot.unknownEventCount ?? 0,
         semanticOracleMismatchCount: semanticOracle.semanticOracleMismatchCount,
         semanticOracleCheckedPlanCount: semanticOracle.semanticOracleCheckedPlanCount,
@@ -613,80 +573,9 @@ export class IndexerService implements LifecycleService {
 
       return { snapshot, summary };
     } catch (error) {
-      if (rebuildNotificationStepId !== undefined && !rebuildCommitted) {
-        await this.#dropPendingPostCommitStep(
-          rebuildNotificationStepId,
-          "rebuild notification step withdrawn after the rebuild transaction failed before commit"
-        );
-      }
       const applyFailureCount = error instanceof ProjectionError ? 1 : 0;
       await this.#markDegraded(finalizedBlock, error, mismatchCount + applyFailureCount);
       throw error;
-    }
-  }
-
-  async #prePersistRebuildNotificationStep(events: readonly ChainEvent[]): Promise<string | undefined> {
-    const durableStore = this.#store;
-    if (!isDurableProjectionStore(durableStore) || !this.#notificationProcessor || events.length === 0) {
-      return undefined;
-    }
-    const stepId = pendingPostCommitStepId("signal_notification", events);
-    try {
-      await durableStore.savePendingPostCommitStep({
-        stepId,
-        chainId: this.#scope.chainId,
-        kind: "signal_notification",
-        events
-      });
-      return stepId;
-    } catch (error) {
-      this.#logger.error("failed to pre-persist the rebuild notification step; notifications for this rebuild may be lost if the process crashes before delivery", {
-        message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown error"
-      });
-      return undefined;
-    }
-  }
-
-  async #dropPendingPostCommitStep(stepId: string, reason: string): Promise<void> {
-    const durableStore = this.#store;
-    if (!isDurableProjectionStore(durableStore)) {
-      return;
-    }
-    await durableStore.deletePendingPostCommitStep(stepId).catch((error: unknown) => {
-      this.#logger.error("failed to withdraw a pending post-commit step; the sweep may redeliver it", {
-        stepId,
-        reason,
-        message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown error"
-      });
-    });
-  }
-
-  async #dropGhostPendingNotificationStepsAfterRebuild(
-    events: readonly ChainEvent[],
-    finalizedBlock: bigint
-  ): Promise<void> {
-    const durableStore = this.#store;
-    if (!isDurableProjectionStore(durableStore)) {
-      return;
-    }
-    const incomingEventIds = new Set(events.map(chainEventKey));
-    const pendingSteps = await durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
-    for (const step of pendingSteps) {
-      if (step.kind !== "signal_notification" || !step.events || step.events.length === 0) {
-        continue;
-      }
-      if (step.events.some((event) => event.blockNumber > finalizedBlock)) {
-        continue;
-      }
-      const missingEvents = step.events.filter((event) => !incomingEventIds.has(chainEventKey(event)));
-      if (missingEvents.length === 0) {
-        continue;
-      }
-      await durableStore.deletePendingPostCommitStep(step.stepId).catch(() => undefined);
-      this.#logger.warn("pending signal notification batch dropped after the full rebuild; its events are no longer on the rebuilt event log", {
-        stepId: step.stepId,
-        droppedEvents: missingEvents.length
-      });
     }
   }
 
@@ -719,7 +608,6 @@ export class IndexerService implements LifecycleService {
 
     const fromBlock = cursor.nextBlock > deploymentBlock ? cursor.nextBlock : deploymentBlock;
     const effectiveFromBlock = await this.#rollbackOnReorg(fromBlock);
-    await this.#sweepPendingPostCommitStepsUnderGuard();
     const priorFinalizedBlock = maxBlockOf(
       (await durableStore.getCursor(this.#scope))?.finalizedBlock,
       this.#cursor?.finalizedBlock
@@ -743,7 +631,6 @@ export class IndexerService implements LifecycleService {
         toBlock: reportedFinalizedBlock,
         newEventCount: 0
       });
-      await this.#processProjectionAutomation(result.snapshot);
       return result;
     }
 
@@ -804,7 +691,6 @@ export class IndexerService implements LifecycleService {
           toBlock: reportedFinalizedBlock,
           newEventCount: 0
         });
-        await this.#processProjectionAutomation(result.snapshot);
         this.#logger.info("indexer skipped the full replay on a zero-new-events round; the stored projection already covers the finalized range", {
           fromBlock: effectiveFromBlock.toString(),
           toBlock: reportedFinalizedBlock.toString(),
@@ -815,7 +701,7 @@ export class IndexerService implements LifecycleService {
         return result;
       }
     }
-    const enrichmentEvents = this.#resolvePlanCapabilityTables
+    const enrichmentEvents = this.#resolvePlanCapabilityTables || this.#resolveDockArtifact
       ? [...(await durableStore.listEvents({ chainId: this.#scope.chainId })), ...events]
       : events;
     const enrichmentOptions = await this.#projectionReplayOptionsFor(enrichmentEvents);
@@ -883,8 +769,6 @@ export class IndexerService implements LifecycleService {
       };
     });
 
-    await this.#processSignalNotifications(activeNewEvents);
-
     const nextCursor: EventCursor = {
       chainId: this.#config.network.chainId,
       deploymentBlock,
@@ -893,7 +777,6 @@ export class IndexerService implements LifecycleService {
       ...(nextCursorBlockHash ?? {})
     };
     await this.#saveCursorAdvancingFrom(nextCursor, effectiveFromBlock);
-    await this.#processProjectionAutomation(result.snapshot);
 
     this.#logger.info("indexer incrementally refreshed projections from chain events", {
       fromBlock: effectiveFromBlock.toString(),
@@ -903,8 +786,8 @@ export class IndexerService implements LifecycleService {
       stateMachineOrderCount: result.summary.stateMachineOrderCount,
       mismatchCount: result.summary.mismatchCount,
       unresolvedModuleOrderEventCount: result.snapshot.unresolvedModuleOrderEventCount ?? 0,
-      unresolvedStageActivationEventCount: result.snapshot.unresolvedStageActivationEventCount ?? 0,
       capabilityEnrichmentMismatchCount: result.snapshot.capabilityEnrichmentMismatchCount ?? 0,
+      dockEnrichmentMismatchCount: result.snapshot.dockEnrichmentMismatchCount ?? 0,
       unknownEventCount: result.snapshot.unknownEventCount ?? 0,
       semanticOracleMismatchCount: oracleResult.semanticOracleMismatchCount,
       semanticOracleCheckedPlanCount: oracleResult.semanticOracleCheckedPlanCount,
@@ -1277,100 +1160,7 @@ export class IndexerService implements LifecycleService {
       finalizedBlock: ancestorBlock,
       blockHash: ancestorHash
     };
-    await this.#invalidateNotificationsAfterReorg(ancestorBlock);
-    await this.#trimPendingPostCommitStepsAfterReorg(ancestorBlock);
     return nextBlock;
-  }
-
-  async #trimPendingPostCommitStepsAfterReorg(ancestorBlock: bigint): Promise<void> {
-    const durableStore = this.#store;
-    if (!isDurableProjectionStore(durableStore)) {
-      return;
-    }
-    const trimPass = async (): Promise<void> => {
-      const pendingSteps = await durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
-      for (const step of pendingSteps) {
-        if (step.kind !== "signal_notification" || !step.events || step.events.length === 0) {
-          continue;
-        }
-        const surviving = step.events.filter((event) => event.blockNumber <= ancestorBlock);
-        if (surviving.length === step.events.length) {
-          continue;
-        }
-        await durableStore.withTransaction(async () => {
-          await durableStore.deletePendingPostCommitStep(step.stepId);
-          if (surviving.length > 0) {
-            await durableStore.savePendingPostCommitStep({
-              stepId: pendingPostCommitStepId("signal_notification", surviving),
-              chainId: step.chainId,
-              kind: step.kind,
-              events: surviving
-            });
-          }
-        });
-        this.#logger.warn("pending signal notification batch trimmed after reorg rollback; reorged-out events will not be delivered", {
-          stepId: step.stepId,
-          ancestorBlock: ancestorBlock.toString(),
-          droppedEvents: step.events.length - surviving.length,
-          survivingEvents: surviving.length
-        });
-      }
-    };
-    try {
-      await trimPass();
-    } catch (error) {
-      try {
-        await trimPass();
-        this.#logger.warn("indexer recovered pending post-commit trim after one retry", {
-          ancestorBlock: ancestorBlock.toString(),
-          firstError: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown error"
-        });
-        return;
-      } catch (retryError) {
-        this.#logger.error("failed to trim pending post-commit steps after reorg rollback (retry exhausted); ghost notifications may be delivered when finalization catches up", {
-          ancestorBlock: ancestorBlock.toString(),
-          message: retryError instanceof Error ? redactEndpointErrorMessage(retryError) : "unknown error"
-        });
-      }
-    }
-  }
-
-  async #invalidateNotificationsAfterReorg(ancestorBlock: bigint): Promise<void> {
-    const invalidate = this.#notificationProcessor?.invalidateDeliveriesAboveBlock;
-    if (!invalidate) {
-      return;
-    }
-    const runInvalidate = async (): Promise<unknown> =>
-      invalidate({
-        chainId: this.#scope.chainId,
-        blockNumber: ancestorBlock
-      });
-    const toInvalidatedCount = (value: unknown): number | undefined =>
-      value === undefined ? undefined : Number(value);
-    try {
-      const invalidated = toInvalidatedCount(await runInvalidate());
-      if (invalidated !== undefined && invalidated > 0) {
-        this.#logger.warn("indexer invalidated notification deliveries targeting reorged-out blocks", {
-          ancestorBlock: ancestorBlock.toString(),
-          invalidated
-        });
-      }
-    } catch (error) {
-      try {
-        const invalidated = toInvalidatedCount(await runInvalidate());
-        this.#logger.warn("indexer recovered notification delivery invalidation after one retry", {
-          ancestorBlock: ancestorBlock.toString(),
-          invalidated: invalidated !== undefined ? Number(invalidated) : undefined,
-          firstError: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown error"
-        });
-        return;
-      } catch (retryError) {
-        this.#logger.error("indexer failed to invalidate notification deliveries after reorg rollback (retry exhausted); stale deliveries may reference reorged-out blocks until the next rollback", {
-          ancestorBlock: ancestorBlock.toString(),
-          message: retryError instanceof Error ? redactEndpointErrorMessage(retryError) : "unknown error"
-        });
-      }
-    }
   }
 
   async #sweepCommittedButUnadvancedEvents(
@@ -1468,233 +1258,6 @@ export class IndexerService implements LifecycleService {
     };
   }
 
-  async #processSignalNotifications(events: readonly ChainEvent[]): Promise<PostCommitStepStatus> {
-    const processor = this.#notificationProcessor;
-    if (!processor || events.length === 0) {
-      return "skipped";
-    }
-    return this.#runPostCommitStepWithBoundedRetry(
-      { kind: "signal_notification", step: "signal notification", events },
-      () => processor.processSignalSubmittedEvents(events)
-    );
-  }
-
-  async #processProjectionAutomation(
-    snapshot: ProjectionSnapshot
-  ): Promise<void> {
-    const processor = this.#projectionAutomationProcessor;
-    if (!processor) {
-      return;
-    }
-    await this.#runPostCommitStepWithBoundedRetry(
-      { kind: "projection_automation", step: "projection automation" },
-      () => processor.processProjection(snapshot)
-    );
-  }
-
-  async #runPostCommitStepWithBoundedRetry(
-    pending: {
-      readonly kind: PendingPostCommitKind;
-      readonly step: string;
-      readonly events?: readonly ChainEvent[];
-    },
-    run: () => Promise<unknown>
-  ): Promise<PostCommitStepStatus> {
-    for (let attempt = 1; attempt <= POST_COMMIT_STEP_MAX_ATTEMPTS; attempt += 1) {
-      try {
-        await run();
-        return "delivered";
-      } catch (error) {
-        const message = error instanceof Error ? redactEndpointErrorMessage(error) : `unknown ${pending.step} error`;
-        if (attempt === POST_COMMIT_STEP_MAX_ATTEMPTS) {
-          const persisted = await this.#persistPendingPostCommitStep(pending, message);
-          this.#logger.error(`post-commit ${pending.step} failed after ${POST_COMMIT_STEP_MAX_ATTEMPTS} attempts`, {
-            message,
-            persisted
-          });
-          return "persisted";
-        }
-        const nextDelayMs = postCommitStepRetryDelayMs(attempt);
-        this.#logger.warn(`post-commit ${pending.step} failed; retrying`, { attempt, nextDelayMs, message });
-        await sleep(nextDelayMs);
-      }
-    }
-    return "persisted";
-  }
-
-  async #persistPendingPostCommitStep(
-    pending: {
-      readonly kind: PendingPostCommitKind;
-      readonly events?: readonly ChainEvent[];
-    },
-    error: string
-  ): Promise<boolean> {
-    const durableStore = this.#store;
-    if (!isDurableProjectionStore(durableStore)) {
-      return false;
-    }
-    const stepId = pendingPostCommitStepId(pending.kind, pending.events);
-    try {
-      await durableStore.savePendingPostCommitStep({
-        stepId,
-        chainId: this.#scope.chainId,
-        kind: pending.kind,
-        ...(pending.kind === "signal_notification" && pending.events ? { events: pending.events } : {})
-      });
-      await durableStore.recordPendingPostCommitAttempt(stepId, error);
-      return true;
-    } catch (persistError) {
-      const message = persistError instanceof Error ? redactEndpointErrorMessage(persistError) : "unknown persist error";
-      this.#logger.error("failed to persist pending post-commit step; manual replay may be required", {
-        kind: pending.kind,
-        message
-      });
-      return false;
-    }
-  }
-
-  sweepPendingPostCommitSteps(): Promise<PendingPostCommitSweepSummary> {
-    return this.#withExclusiveGuard(() => this.#sweepPendingPostCommitStepsUnderGuard());
-  }
-
-  async #sweepPendingPostCommitStepsUnderGuard(): Promise<PendingPostCommitSweepSummary> {
-    const summary: MutablePendingPostCommitSweepSummary = {
-      swept: 0,
-      delivered: 0,
-      failed: 0,
-      waitingFinality: 0,
-      ghostDropped: 0
-    };
-    const durableStore = this.#store;
-    if (!isDurableProjectionStore(durableStore)) {
-      return summary;
-    }
-    const pendingSteps = await durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
-    const storedEventIds = pendingSteps.some((step) => step.kind === "signal_notification")
-      ? new Set(
-          (await durableStore.listEvents({ chainId: this.#scope.chainId }))
-            .filter((event) => event.removed !== true)
-            .map(chainEventKey),
-        )
-      : new Set<string>();
-    for (const step of pendingSteps) {
-      summary.swept += 1;
-      try {
-        await this.#deliverPendingPostCommitStep(step, storedEventIds);
-        await durableStore.deletePendingPostCommitStep(step.stepId);
-        summary.delivered += 1;
-      } catch (error) {
-        if (error instanceof PendingPostCommitGhostStepError) {
-          summary.ghostDropped += 1;
-          await durableStore.deletePendingPostCommitStep(step.stepId)
-            .catch((dropError: unknown) => {
-              this.#logger.error("failed to drop a ghost pending post-commit step", {
-                stepId: step.stepId,
-                kind: step.kind,
-                message: dropError instanceof Error ? redactEndpointErrorMessage(dropError) : "unknown drop error"
-              });
-            });
-          this.#logger.warn("pending post-commit step dropped; its events are no longer in the projection event log", {
-            stepId: step.stepId,
-            kind: step.kind,
-            message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown ghost"
-          });
-          continue;
-        }
-        if (error instanceof PendingPostCommitFinalityWaitError) {
-          summary.waitingFinality += 1;
-          this.#logger.info("pending post-commit step waits for finality; it stays queued without consuming the retry budget", {
-            stepId: step.stepId,
-            kind: step.kind,
-            message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown wait"
-          });
-          continue;
-        }
-        summary.failed += 1;
-        const message = error instanceof Error ? redactEndpointErrorMessage(error) : "unknown sweep error";
-        const attempts = step.attempts + 1;
-        if (attempts >= PENDING_POST_COMMIT_MAX_SWEEP_ATTEMPTS) {
-          await durableStore.deletePendingPostCommitStep(step.stepId)
-            .catch((dropError: unknown) => {
-              this.#logger.error("failed to dead-letter an exhausted pending post-commit step", {
-                stepId: step.stepId,
-                kind: step.kind,
-                message: dropError instanceof Error ? redactEndpointErrorMessage(dropError) : "unknown drop error"
-              });
-            });
-          this.#logger.error("pending post-commit step dead-lettered after exhausting the sweep attempt budget; manual replay is required", {
-            stepId: step.stepId,
-            kind: step.kind,
-            attempts,
-            message
-          });
-          continue;
-        }
-        await durableStore.recordPendingPostCommitAttempt(step.stepId, message).catch(() => undefined);
-        this.#logger.warn("pending post-commit step retry failed; it stays queued", {
-          stepId: step.stepId,
-          kind: step.kind,
-          attempts,
-          message
-        });
-      }
-    }
-    if (summary.swept > 0) {
-      this.#logger.info("indexer pending post-commit sweep completed", { ...summary });
-    }
-    return summary;
-  }
-
-  async listPendingPostCommitSteps(): Promise<readonly PendingPostCommitStep[]> {
-    const durableStore = this.#store;
-    if (!isDurableProjectionStore(durableStore)) {
-      return [];
-    }
-    return durableStore.listPendingPostCommitSteps({ chainId: this.#scope.chainId });
-  }
-
-  async #deliverPendingPostCommitStep(
-    step: PendingPostCommitStep,
-    storedEventIds: ReadonlySet<string>
-  ): Promise<void> {
-    if (step.kind === "signal_notification") {
-      const processor = this.#notificationProcessor;
-      const events = step.events ?? [];
-      if (!processor || events.length === 0) {
-        throw new Error(`signal notification processor unavailable for pending step ${step.stepId}`);
-      }
-      const finalizedBlock = (await this.#store.getSyncState(this.#scope))?.finalizedBlock;
-      if (finalizedBlock === undefined) {
-        throw new PendingPostCommitFinalityWaitError(
-          `pending signal notification batch ${step.stepId} cannot be judged without a finalized bound; it stays queued until the projection sync state provides one`
-        );
-      }
-      const maxEventBlock = events.reduce(
-        (max, event) => (event.blockNumber > max ? event.blockNumber : max),
-        0n
-      );
-      if (maxEventBlock > finalizedBlock) {
-        throw new PendingPostCommitFinalityWaitError(
-          `pending signal notification batch ${step.stepId} extends to block ${maxEventBlock} above the finalized bound ${finalizedBlock}; it stays queued until finalization catches up`
-        );
-      }
-      const missingEvents = events.filter((event) => !storedEventIds.has(chainEventKey(event)));
-      if (missingEvents.length > 0) {
-        throw new PendingPostCommitGhostStepError(
-          `pending signal notification batch ${step.stepId} references ${missingEvents.length} event(s) absent from the projection event log; dropping it instead of delivering a ghost notification`
-        );
-      }
-      await processor.processSignalSubmittedEvents(events);
-      return;
-    }
-    const processor = this.#projectionAutomationProcessor;
-    if (!processor) {
-      throw new Error(`projection automation processor unavailable for pending step ${step.stepId}`);
-    }
-    const snapshot = await this.#store.getOrderSnapshot();
-    await processor.processProjection(snapshot);
-  }
-
   async #markDegraded(
     finalizedBlock: bigint | undefined,
     error: unknown,
@@ -1750,48 +1313,43 @@ export function createIndexerService(options: IndexerServiceOptions): IndexerSer
 
 async function main(): Promise<void> {
   const config = loadConfigFromEnv();
-  if (process.argv.includes("--rebuild")) {
-    const eventSource = createChainEventSourceForTarget(config, { logger: consoleLogger });
-    if (!eventSource) {
-      throw new Error("no configured indexer contracts; set UVP_CONTRACTS_JSON or an address manifest");
-    }
-    const stores = createChainServicesStores({
-      database: config.database,
+  if (!process.argv.includes("--rebuild")) {
+    throw new Error("indexer CLI requires --rebuild");
+  }
+  const eventSource = createChainEventSourceForTarget(config, { logger: consoleLogger });
+  if (!eventSource) {
+    throw new Error("no configured indexer contracts; set UVP_CONTRACTS_JSON or an address manifest");
+  }
+  const stores = createChainServicesStores({
+    database: config.database,
+    chainId: config.network.chainId
+  });
+  try {
+    const planArtifacts = createPlanArtifactResolvers({
+      store: stores.planArtifactStore,
       chainId: config.network.chainId
     });
-    try {
-      const planArtifacts = createPlanArtifactResolvers({
-        store: stores.planArtifactStore,
-        chainId: config.network.chainId
-      });
-      const dockArtifacts = createDockArtifactResolver({
-        store: stores.dockArtifactStore,
-        chainId: config.network.chainId
-      });
-      const service = createIndexerService({
-        config,
-        eventSource,
-        store: stores.projectionStore,
-        resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
-        resolveSemanticOraclePlan: planArtifacts.resolveSemanticOraclePlan,
-        resolveDockArtifact: dockArtifacts.resolveDockArtifact,
-        logger: consoleLogger
-      });
-      const targetBlock = parseTargetBlockArg(process.argv);
-      const { summary } = await service.rebuildFromDeploymentBlockWithSummary(
-        targetBlock === undefined ? {} : { targetBlock }
-      );
-      console.log(JSON.stringify(summary, null, 2));
-    } finally {
-      await stores.close();
-    }
-    return;
+    const dockArtifacts = createDockArtifactResolver({
+      store: stores.dockArtifactStore,
+      chainId: config.network.chainId
+    });
+    const service = createIndexerService({
+      config,
+      eventSource,
+      store: stores.projectionStore,
+      resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
+      resolveSemanticOraclePlan: planArtifacts.resolveSemanticOraclePlan,
+      resolveDockArtifact: dockArtifacts.resolveDockArtifact,
+      logger: consoleLogger
+    });
+    const targetBlock = parseTargetBlockArg(process.argv);
+    const { summary } = await service.rebuildFromDeploymentBlockWithSummary(
+      targetBlock === undefined ? {} : { targetBlock }
+    );
+    console.log(JSON.stringify(summary, null, 2));
+  } finally {
+    await stores.close();
   }
-  consoleLogger.info("indexer framework ready", redactSecrets({
-    chainId: config.network.chainId,
-    deploymentBlock: config.network.deploymentBlock.toString(),
-    databaseUrl: config.database.url
-  }));
 }
 
 if (isDirectRun(import.meta.url)) {
@@ -1818,45 +1376,6 @@ const CURSOR_CAS_FAILURE_LIMIT = 3;
 
 function isSameBlockHash(left: Hex, right: Hex): boolean {
   return left.toLowerCase() === right.toLowerCase();
-}
-
-function pendingPostCommitStepId(
-  kind: PendingPostCommitKind,
-  events: readonly ChainEvent[] | undefined
-): string {
-  const digestSource = kind === "signal_notification" && events && events.length > 0
-    ? events
-        .map((event) =>
-          [
-            event.chainId,
-            event.contractAddress.toLowerCase(),
-            event.blockNumber.toString(),
-            event.transactionHash.toLowerCase(),
-            event.logIndex
-          ].join(":")
-        )
-        .join("|")
-    : kind;
-  const digest = createHash("sha256").update(digestSource).digest("hex").slice(0, 24);
-  return `pending_${kind}_${digest}`;
-}
-
-const POST_COMMIT_STEP_MAX_ATTEMPTS = 3;
-const POST_COMMIT_STEP_RETRY_BASE_DELAY_MS = 100;
-const POST_COMMIT_STEP_RETRY_MAX_DELAY_MS = 2000;
-const PENDING_POST_COMMIT_MAX_SWEEP_ATTEMPTS = 16;
-
-type PostCommitStepStatus = "delivered" | "persisted" | "skipped";
-
-function postCommitStepRetryDelayMs(attempt: number): number {
-  return Math.min(
-    POST_COMMIT_STEP_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
-    POST_COMMIT_STEP_RETRY_MAX_DELAY_MS
-  );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function summaryFromSnapshot(input: {

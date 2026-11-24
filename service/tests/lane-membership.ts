@@ -10,7 +10,6 @@ export const UNIT_TEST_FILES = [
   "dock-binding-windows.test.ts",
   "indexer.reorg-determinism.test.ts",
   "plan-artifact-cli.test.ts",
-  "proof-verifier.test.ts",
   "stage-files.test.ts",
   "storage.test.ts",
   "viem-event-source.test.ts"

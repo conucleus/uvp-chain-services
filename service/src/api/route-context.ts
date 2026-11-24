@@ -39,7 +39,6 @@ export interface CreateApiRouterOptions {
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   readonly opsConsoleAdminIds?: readonly string[];
   readonly adminAuthPolicy?: AdminAuthPolicy;
-  readonly onTxMined?: () => void;
   readonly now?: () => Date;
 }
 
@@ -51,8 +50,6 @@ export interface AdminOpsActionEffect {
 
 export interface AdminOpsRecoveryActions {
   rebuildProjections?(): Promise<AdminOpsActionEffect | void>;
-  sweepPendingPostCommitSteps?(): Promise<AdminOpsActionEffect | void>;
-  listPendingPostCommitSteps?(): Promise<unknown>;
 }
 
 export interface ApiRouteContext {
@@ -65,7 +62,6 @@ export interface ApiRouteContext {
   readonly audit: AuditSink;
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
   readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
-  readonly onTxMined?: () => void;
   readonly now: () => Date;
 }
 

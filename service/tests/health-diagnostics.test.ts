@@ -120,9 +120,7 @@ describe("ops health diagnostics", () => {
     for (const request of [
       { method: "GET", pathname: "/admin/ops/status" },
       { method: "GET", pathname: "/admin/ops/summary" },
-      { method: "POST", pathname: "/admin/ops/projections/rebuild" },
-      { method: "GET", pathname: "/admin/ops/indexer/pending-steps" },
-      { method: "POST", pathname: "/admin/ops/indexer/pending-steps/retry" }
+      { method: "POST", pathname: "/admin/ops/projections/rebuild" }
     ]) {
       const response = await router.handle(request);
       expect(response.status).toBe(403);
@@ -195,21 +193,6 @@ describe("ops health diagnostics", () => {
         action: "projections.rebuild",
         status: "completed",
         summary: { eventCount: 0, syncStatus: "indexed" }
-      });
-
-      const pending = await fetch(`${base}/admin/ops/indexer/pending-steps`, { headers });
-      expect(pending.status).toBe(200);
-      expect(await pending.json()).toMatchObject({ ok: true, pendingSteps: [] });
-
-      const sweep = await fetch(`${base}/admin/ops/indexer/pending-steps/retry`, {
-        method: "POST",
-        headers
-      });
-      expect(sweep.status).toBe(202);
-      expect(await sweep.json()).toMatchObject({
-        ok: true,
-        action: "indexer.sweep_pending",
-        status: "completed"
       });
     } finally {
       if (server) {
@@ -302,7 +285,7 @@ describe("ops health diagnostics", () => {
         actionsAreNonAuthoritative: true,
         canCreateBusinessSignatures: false,
         canForgeChainState: false,
-        allowedActions: ["projections.rebuild", "indexer.sweep_pending"]
+        allowedActions: ["projections.rebuild"]
       }
     });
     expect(statusResponse.body).not.toHaveProperty("submissions");
@@ -332,15 +315,6 @@ describe("ops health diagnostics", () => {
       opsRecoveryActions: {
         async rebuildProjections() {
           return { status: "queued", nextCheckAt: "2026-04-29T00:00:30.000Z" };
-        },
-        async sweepPendingPostCommitSteps() {
-          return {
-            status: "completed",
-            summary: { swept: 0, delivered: 0, failed: 0, waitingFinality: 0, ghostDropped: 0 }
-          };
-        },
-        async listPendingPostCommitSteps() {
-          return [];
         }
       }
     });
@@ -355,16 +329,6 @@ describe("ops health diagnostics", () => {
       method: "POST",
       pathname: "/admin/ops/projections/rebuild",
       headers: rebuildHeaders
-    });
-    const pending = await router.handle({
-      method: "GET",
-      pathname: "/admin/ops/indexer/pending-steps",
-      headers: adminHeaders
-    });
-    const sweep = await router.handle({
-      method: "POST",
-      pathname: "/admin/ops/indexer/pending-steps/retry",
-      headers: { ...adminHeaders, "x-request-id": "req-ops-sweep-1" }
     });
 
     expect(firstRebuild.status).toBe(202);
@@ -383,15 +347,6 @@ describe("ops health diagnostics", () => {
     });
     expect((secondRebuild.body as Record<string, unknown>).actionId)
       .toBe((firstRebuild.body as Record<string, unknown>).actionId);
-    expect(pending.status).toBe(200);
-    expect(pending.body).toEqual({ ok: true, pendingSteps: [] });
-    expect(sweep.status).toBe(202);
-    expect(sweep.body).toMatchObject({
-      requestId: "req-ops-sweep-1",
-      action: "indexer.sweep_pending",
-      status: "completed",
-      summary: { swept: 0, delivered: 0, failed: 0, waitingFinality: 0, ghostDropped: 0 }
-    });
     expect(JSON.stringify(firstRebuild.body)).not.toContain("signature");
   });
 
@@ -431,11 +386,6 @@ describe("ops health diagnostics", () => {
       pathname: "/admin/ops/projections/rebuild",
       headers: { ...adminHeaders, "x-request-id": "req-missing-rebuild" }
     });
-    const missingPendingResponse = await missingDependencyRouter.handle({
-      method: "GET",
-      pathname: "/admin/ops/indexer/pending-steps",
-      headers: { ...adminHeaders, "x-request-id": "req-missing-pending" }
-    });
 
     expect(failedResponse.status).toBe(503);
     expect(failedResponse.body).toMatchObject({
@@ -454,8 +404,6 @@ describe("ops health diagnostics", () => {
       status: "rejected",
       error: "ops_dependency_unavailable"
     });
-    expect(missingPendingResponse.status).toBe(503);
-    expect(missingPendingResponse.body).toEqual({ ok: false, error: "ops_dependency_unavailable" });
     expect(JSON.stringify(failedResponse.body)).not.toContain("secret");
   });
 

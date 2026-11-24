@@ -10,10 +10,6 @@ export class StorageMigrationError extends StorageError {
   override readonly name = "StorageMigrationError";
 }
 
-export class StorageUnsupportedError extends StorageError {
-  override readonly name = "StorageUnsupportedError";
-}
-
 export class StorageUnavailableError extends StorageError {
   override readonly name = "StorageUnavailableError";
 }

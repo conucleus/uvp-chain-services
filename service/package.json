@@ -19,7 +19,6 @@
     "test:integration": "./scripts/with-postgres.sh --env CHAIN_SERVICES_POSTGRES_TEST_URL -- vitest run --config vitest.integration.config.ts",
     "check": "pnpm run typecheck && pnpm run test",
     "dev:api": "tsx src/api/server.ts",
-    "dev:indexer": "tsx src/indexer/service.ts",
     "rebuild:indexer": "tsx src/indexer/service.ts --rebuild",
     "plan-artifact:record": "tsx src/cli/record-plan-artifact.ts",
     "dock-artifact:record": "tsx src/cli/record-dock-artifact.ts"

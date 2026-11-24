@@ -100,12 +100,7 @@ export async function startApiServer(
             syncStatus: summary.syncStatus
           }
         };
-      },
-      sweepPendingPostCommitSteps: async () => {
-        const summary = await indexer.sweepPendingPostCommitSteps();
-        return { status: "completed" as const, summary };
-      },
-      listPendingPostCommitSteps: async () => indexer.listPendingPostCommitSteps()
+      }
     }
     : {};
   const opsConsoleAdminIds = config.operatorRoles.opsConsoleAdmins ?? [];
@@ -130,14 +125,7 @@ export async function startApiServer(
       pollIntervalMs: config.api.indexerPollIntervalMs
     },
     audit,
-    configDiagnostics,
-    ...(indexer
-      ? {
-        onTxMined: () => {
-          indexer.refreshIfIdle();
-        }
-      }
-      : {})
+    configDiagnostics
   });
   const server = createServer((request, response) => {
     const requestId = requestIdFromHeaders(request);

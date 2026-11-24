@@ -113,8 +113,9 @@ export class PostgresDockArtifactStore implements DockArtifactStore {
     const result = await this.#database.query(
       `SELECT artifact_json::text AS artifact_json
        FROM dock_artifacts
-       WHERE chain_id = $1 AND dkid = $2 AND doc_hash = $3`,
-      [query.chainId, dkid, docHash]
+       WHERE chain_id = $1 AND doc_hash = $2 AND (dkid = $3 OR dkid = $4)
+       LIMIT 1`,
+      [query.chainId, docHash, dkid, canonicalDockIdOf(docHash)]
     );
     const row = result.rows[0];
     if (!row) {

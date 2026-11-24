@@ -115,8 +115,8 @@ export function rebuildOrderProjections(
   const stateMachineSuppliers = new Map<string, MutableStateMachineSupplierProjection>();
   const diagnostics: ProjectionReplayDiagnostics = {
     unresolvedModuleOrderEventCount: 0,
-    unresolvedStageActivationEventCount: 0,
     capabilityEnrichmentMismatchCount: 0,
+    dockEnrichmentMismatchCount: 0,
     unknownEventCount: 0
   };
   const capabilityTables = new Map<string, PlanCapabilityTablesInput>();
@@ -216,8 +216,8 @@ export function rebuildOrderProjections(
     stateMachineTasks: stateMachineTaskRecord,
     stateMachineSuppliers: Object.fromEntries(stateMachineSuppliers),
     unresolvedModuleOrderEventCount: diagnostics.unresolvedModuleOrderEventCount,
-    unresolvedStageActivationEventCount: diagnostics.unresolvedStageActivationEventCount,
     capabilityEnrichmentMismatchCount: diagnostics.capabilityEnrichmentMismatchCount,
+    dockEnrichmentMismatchCount: diagnostics.dockEnrichmentMismatchCount,
     unknownEventCount: diagnostics.unknownEventCount,
     ...(lastEvent ? { lastEvent } : {})
   };

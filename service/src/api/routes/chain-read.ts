@@ -121,7 +121,16 @@ async function handleRead(
     if (!current) {
       return projectionUnavailableResponse("not_started");
     }
-    const syncState: ChainSyncState = toWire(current.readable);
+    const { projectionDiagnostics, ...syncBase } = toWire(current.readable);
+    const syncState: ChainSyncState = projectionDiagnostics
+      ? {
+          ...syncBase,
+          projectionDiagnostics: {
+            ...projectionDiagnostics,
+            unresolvedStageActivationEventCount: 0
+          }
+        }
+      : syncBase;
     return { status: 200, body: { syncState } };
   }
 

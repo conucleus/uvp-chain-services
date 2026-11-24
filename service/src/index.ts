@@ -9,7 +9,6 @@ export * from "./indexer/service.js";
 export * from "./indexer/identity-projections.js";
 export * from "./indexer/viem-event-source.js";
 export * from "./projection/plan-artifacts.js";
-export * from "./proof-verifier/service.js";
 export * from "./security/index.js";
 export * from "./storage/factory.js";
 export * from "./storage/projection-store.js";

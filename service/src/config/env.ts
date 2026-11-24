@@ -273,10 +273,6 @@ function isLoopbackEndpointHost(hostname: string): boolean {
   );
 }
 
-function discoveryUrlFromIssuer(issuer: string): string {
-  return `${issuer.replace(/\/+$/, "")}/.well-known/openid-configuration`;
-}
-
 function requiredDatabaseUrl(env: Env): string {
   const value = optionalEnv(env, "CHAIN_SERVICES_DATABASE_URL");
   if (!value) {

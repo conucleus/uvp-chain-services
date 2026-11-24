@@ -11,7 +11,7 @@ import type { AdminOpsActionEffect, ApiRequest, ApiResponse } from "../route-con
 import { normalizeRequestId, readApiHeader } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
-type AdminOpsActionName = "projections.rebuild" | "indexer.sweep_pending";
+type AdminOpsActionName = "projections.rebuild";
 
 interface AdminOpsRequestContext {
   readonly buildDiagnostics: () => Promise<Record<string, unknown>>;
@@ -20,8 +20,6 @@ interface AdminOpsRequestContext {
   readonly opsConsoleAdminIds?: readonly string[];
   readonly actions?: {
     rebuildProjections?(): Promise<AdminOpsActionEffect | void>;
-    sweepPendingPostCommitSteps?(): Promise<AdminOpsActionEffect | void>;
-    listPendingPostCommitSteps?(): Promise<unknown>;
   };
   readonly now: () => Date;
 }
@@ -97,28 +95,6 @@ async function handleAdminOpsRequest(
       action: "projections.rebuild",
       actor: principal.adminId,
       run: context.actions?.rebuildProjections
-    });
-  }
-
-  if (request.method === "GET" && request.pathname === "/admin/ops/indexer/pending-steps") {
-    if (!context.actions?.listPendingPostCommitSteps) {
-      return {
-        status: 503,
-        body: { ok: false, error: "ops_dependency_unavailable" }
-      };
-    }
-    const pendingSteps = await context.actions.listPendingPostCommitSteps();
-    return {
-      status: 200,
-      body: redactSecrets({ ok: true, pendingSteps })
-    };
-  }
-
-  if (request.method === "POST" && request.pathname === "/admin/ops/indexer/pending-steps/retry") {
-    return runAdminOpsAction(request, context, {
-      action: "indexer.sweep_pending",
-      actor: principal.adminId,
-      run: context.actions?.sweepPendingPostCommitSteps
     });
   }
 

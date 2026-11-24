@@ -120,22 +120,6 @@ CREATE TABLE public.chain_projection_sync_state (
 
 
 --
--- Name: indexer_pending_post_commit; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.indexer_pending_post_commit (
-    step_id text NOT NULL,
-    chain_id integer NOT NULL,
-    kind text NOT NULL,
-    events_json jsonb,
-    attempts integer DEFAULT 0 NOT NULL,
-    last_error text,
-    created_at text NOT NULL,
-    updated_at text NOT NULL
-);
-
-
---
 -- Name: plan_artifacts; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -199,14 +183,6 @@ ALTER TABLE ONLY public.chain_projection_sync_state
 
 
 --
--- Name: indexer_pending_post_commit indexer_pending_post_commit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.indexer_pending_post_commit
-    ADD CONSTRAINT indexer_pending_post_commit_pkey PRIMARY KEY (step_id);
-
-
---
 -- Name: plan_artifacts plan_artifacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -223,13 +199,6 @@ ALTER TABLE ONLY public.dock_artifacts
 --
 
 CREATE INDEX chain_event_log_order_idx ON public.chain_event_log USING btree (chain_id, block_number, transaction_index, log_index);
-
-
---
--- Name: indexer_pending_post_commit_chain_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX indexer_pending_post_commit_chain_idx ON public.indexer_pending_post_commit USING btree (chain_id, kind, updated_at);
 
 
 --

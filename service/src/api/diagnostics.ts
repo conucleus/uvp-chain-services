@@ -100,8 +100,7 @@ export function buildOperatorOpsStatus(diagnostics: Record<string, unknown>): Re
       canCreateBusinessSignatures: false,
       canForgeChainState: false,
       allowedActions: [
-        "projections.rebuild",
-        "indexer.sweep_pending"
+        "projections.rebuild"
       ],
       forbiddenOutputs: [
         "private_keys",

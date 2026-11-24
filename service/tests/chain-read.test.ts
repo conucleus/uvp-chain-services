@@ -226,7 +226,6 @@ function projectionSnapshot(): ProjectionSnapshot {
     },
     lastEvent: provenance(15n),
     unresolvedModuleOrderEventCount: 0,
-    unresolvedStageActivationEventCount: 0,
     capabilityEnrichmentMismatchCount: 0,
     unknownEventCount: 0,
   };
