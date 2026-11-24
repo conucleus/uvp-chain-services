@@ -460,7 +460,6 @@ describe("indexer projection replay", () => {
       targetStageId: dockStageId,
       supplierId: supplierA,
       patchNonce: "1",
-      dockId,
       supplierAccount: supplierAccountA,
       activationProof: expect.objectContaining({ eventName: "StageSupplierAssigned" })
     });
@@ -2329,25 +2328,6 @@ describe("indexer projection replay", () => {
     expect(result.snapshot.stateMachineOrders[
       stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)
     ]).toMatchObject({ orderId: stateMachineOrderId, planId });
-  });
-
-  it("treats DockOutputDeferred as a known dock event instead of an unknown event", () => {
-    const snapshot = rebuildOrderProjections([
-      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 0n }),
-      chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
-      chainEvent(3n, 0, "DockOutputDeferred", {
-        planId,
-        orderId: stateMachineOrderId,
-        bindingId: bytes32Hex("0b01"),
-        outputIndex: 0n,
-        signalId,
-        verdict: 1,
-        dueAt: 1_700_000_000n
-      })
-    ]);
-
-    expect(snapshot.unknownEventCount).toBe(0);
-    expect(snapshot.eventCount).toBe(3);
   });
 
   it("replays the canonical chain from the deployment block when a reorg hits a cursor with no stored live events", async () => {

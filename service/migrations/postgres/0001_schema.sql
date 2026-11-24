@@ -36,15 +36,6 @@ END;
 $$;
 
 
-CREATE FUNCTION public.dock_artifacts_reject_mutation() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    RAISE EXCEPTION 'dock_artifacts rows are immutable: % rejected for dock %', TG_OP, OLD.dkid;
-END;
-$$;
-
-
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
@@ -132,15 +123,6 @@ CREATE TABLE public.plan_artifacts (
 );
 
 
-CREATE TABLE public.dock_artifacts (
-    chain_id integer NOT NULL,
-    dkid text NOT NULL,
-    doc_hash text NOT NULL,
-    artifact_json jsonb NOT NULL,
-    recorded_at text NOT NULL
-);
-
-
 --
 -- Name: chain_event_log chain_event_log_chain_id_contract_address_event_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
@@ -190,10 +172,6 @@ ALTER TABLE ONLY public.plan_artifacts
     ADD CONSTRAINT plan_artifacts_pkey PRIMARY KEY (chain_id, plan_id, plan_hash);
 
 
-ALTER TABLE ONLY public.dock_artifacts
-    ADD CONSTRAINT dock_artifacts_pkey PRIMARY KEY (chain_id, dkid, doc_hash);
-
-
 --
 -- Name: chain_event_log_order_idx; Type: INDEX; Schema: public; Owner: -
 --
@@ -206,4 +184,3 @@ CREATE INDEX chain_event_log_order_idx ON public.chain_event_log USING btree (ch
 --
 
 CREATE TRIGGER plan_artifacts_immutable BEFORE DELETE OR UPDATE ON public.plan_artifacts FOR EACH ROW EXECUTE FUNCTION public.plan_artifacts_reject_mutation();
-CREATE TRIGGER dock_artifacts_immutable BEFORE DELETE OR UPDATE ON public.dock_artifacts FOR EACH ROW EXECUTE FUNCTION public.dock_artifacts_reject_mutation();

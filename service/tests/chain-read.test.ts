@@ -20,7 +20,6 @@ import type {
   ProjectionSyncState,
 } from "../src/storage/projection-store.js";
 import { StorageUnavailableError } from "../src/storage/errors.js";
-import { DockBindingWindowUnavailableError } from "../src/api/dock-binding-windows.js";
 
 const CHAIN_ID = 31337;
 const STATE_MACHINE = "0x1111111111111111111111111111111111111111" as const;
@@ -209,8 +208,6 @@ function projectionSnapshot(): ProjectionSnapshot {
         },
       },
     },
-    stateMachineDocks: {},
-    stateMachineDockBindings: {},
     stateMachineTasks: {},
     stateMachineSuppliers: {
       [SUPPLIER_ID]: {
@@ -685,28 +682,6 @@ describe("generic chain read routes", () => {
     expect(serializedSyncState).not.toContain("other-key");
     expect(serializedSyncState).not.toContain("user:pass");
     expect(serializedSyncState).toContain("[redacted:url]");
-
-    const dockContext = {
-      ...contextWithStore(currentStore({
-        getOrderSnapshot: async () => dockBindingSnapshot(),
-      })),
-      dockBindingWindows: {
-        async readWindow() {
-          throw new DockBindingWindowUnavailableError(
-            "dock binding window view failed: HTTP request failed. URL: https://base-mainnet.g.alchemy.com/v2/secret-rpc-key",
-          );
-        },
-      },
-    } as unknown as ApiRouteContext;
-    const dockResponse = await get(dockContext, "/chain/snapshot");
-    expect(dockResponse.status).toBe(503);
-    expect(dockResponse.body).toMatchObject({
-      error: "chain_read_unavailable",
-      retryable: true,
-    });
-    const serializedDockBody = JSON.stringify(dockResponse.body);
-    expect(serializedDockBody).not.toContain("secret-rpc-key");
-    expect(serializedDockBody).toContain("[redacted:url]");
   });
 
 });
@@ -774,60 +749,4 @@ function findBigints(value: unknown): bigint[] {
     return Object.values(value).flatMap((entry) => findBigints(entry));
   }
   return [];
-}
-
-const DOCK_BINDING_ID = `0x${"d".repeat(64)}` as const;
-const DOCK_FROM_ORDER_ID = `0x${"e".repeat(64)}` as const;
-
-function dockBindingSnapshot(): ProjectionSnapshot {
-  const snapshot = projectionSnapshot();
-  return {
-    ...snapshot,
-    stateMachineDockBindings: {
-      [DOCK_BINDING_ID]: {
-        bindingId: DOCK_BINDING_ID,
-        dkid: `zd-${"a".repeat(32)}`,
-        planId: PLAN_A,
-        orderId: ORDER_ID,
-        targetStageId: STAGE_ID,
-        fromZhixuId: `zx-${"b".repeat(32)}`,
-        fromSource: "buyer",
-        fromOrderId: DOCK_FROM_ORDER_ID,
-        toZhixuId: `zx-${"c".repeat(32)}`,
-        toStageIdentifier: "intake",
-        pokedAt: provenance(15n),
-        outputs: [
-          {
-            signal: "picked",
-            signalId: SIGNAL_ID,
-            outputIndex: 0,
-            emitted: false,
-          },
-        ],
-        proof: proof(15n, {}),
-      },
-    },
-    stateMachineOrders: {
-      [ORDER_ID]: {
-        ...snapshot.stateMachineOrders[ORDER_ID]!,
-        stageFiles: {
-          [STAGE_ID]: {
-            planId: PLAN_A,
-            orderId: ORDER_ID,
-            targetStageId: STAGE_ID,
-            files: {
-              dock_link: {
-                key: "dock_link",
-                payload: `0x${"9".repeat(64)}`,
-                updatedAt: provenance(14n),
-                proof: proof(14n, {}),
-              },
-            },
-            updatedAt: provenance(14n),
-            proof: proof(14n, {}),
-          },
-        },
-      },
-    },
-  };
 }

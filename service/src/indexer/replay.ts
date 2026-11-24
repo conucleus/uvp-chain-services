@@ -2,7 +2,6 @@
 // （含部署注册表事件族与显式诊断计数的推进），供索引器与存储对账调用。
 // 各事件族与投影构造见 ./projections/。
 import { chainEventKey, filterActiveChainEvents, type ChainEvent } from "./events.js";
-import type { DockArtifact } from "@uvp-eth/compiler";
 import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {
   ZERO_BYTES32,
@@ -53,18 +52,7 @@ import {
   resolveStageSupplierAssignments,
   type MutableStateMachineSupplierProjection
 } from "./projections/supplier.js";
-import {
-  applyDockBindingPoked,
-  applyDockOutputSubmitted,
-  applyDockRegistered,
-  applyStageDockSupplierSelected
-} from "./projections/dock.js";
 import type { MutableStateMachinePlanProjection } from "./projections/plan.js";
-import type {
-  MutableStateMachineDockBindingProjection,
-  StateMachineDockProjection,
-  StateMachineDockSelectionProjection
-} from "./projections/dock.js";
 import type { StateMachineTaskProjection } from "./projections/task.js";
 import {
   type MutableStateMachineDeploymentProjection,
@@ -109,25 +97,15 @@ export function rebuildOrderProjections(
   const contractGovernance = new Map<string, MutableContractGovernanceProjection>();
   const stateMachinePlans = new Map<string, MutableStateMachinePlanProjection>();
   const stateMachineOrders = new Map<string, MutableStateMachineOrderProjection>();
-  const stateMachineDocks = new Map<string, StateMachineDockProjection>();
-  const stateMachineDockSelections = new Map<string, StateMachineDockSelectionProjection>();
-  const stateMachineDockBindings = new Map<string, MutableStateMachineDockBindingProjection>();
   const stateMachineSuppliers = new Map<string, MutableStateMachineSupplierProjection>();
   const diagnostics: ProjectionReplayDiagnostics = {
     unresolvedModuleOrderEventCount: 0,
     capabilityEnrichmentMismatchCount: 0,
-    dockEnrichmentMismatchCount: 0,
     unknownEventCount: 0
   };
   const capabilityTables = new Map<string, PlanCapabilityTablesInput>();
   for (const source of options.planCapabilityTables ?? []) {
     capabilityTables.set(source.planId.toLowerCase(), source);
-  }
-  const dockArtifacts = new Map<string, DockArtifact>();
-  const dockArtifactsByDkid = new Map<string, DockArtifact>();
-  for (const artifact of options.dockArtifacts ?? []) {
-    dockArtifacts.set(artifact.docHash.toLowerCase(), artifact);
-    dockArtifactsByDkid.set(artifact.dkid, artifact);
   }
   let activeStateMachineDeploymentId: Hex | undefined;
   let eventCount = 0;
@@ -146,11 +124,6 @@ export function rebuildOrderProjections(
       governance: contractGovernance,
       plans: stateMachinePlans,
       orders: stateMachineOrders,
-      docks: stateMachineDocks,
-      dockSelections: stateMachineDockSelections,
-      dockBindings: stateMachineDockBindings,
-      dockArtifacts,
-      dockArtifactsByDkid,
       capabilityTables,
       diagnostics
     }, event);
@@ -160,8 +133,7 @@ export function rebuildOrderProjections(
   resolveStageSupplierAssignments({
     suppliers: stateMachineSuppliers,
     plans: stateMachinePlans,
-    orders: stateMachineOrders,
-    dockSelections: stateMachineDockSelections
+    orders: stateMachineOrders
   });
 
   const stateMachineOrderRecord: Record<string, StateMachineOrderProjection> = {};
@@ -211,13 +183,10 @@ export function rebuildOrderProjections(
     contractGovernance: Object.fromEntries(contractGovernance),
     stateMachinePlans: Object.fromEntries(stateMachinePlans),
     stateMachineOrders: stateMachineOrderRecord,
-    stateMachineDocks: Object.fromEntries(stateMachineDocks),
-    stateMachineDockBindings: Object.fromEntries(stateMachineDockBindings),
     stateMachineTasks: stateMachineTaskRecord,
     stateMachineSuppliers: Object.fromEntries(stateMachineSuppliers),
     unresolvedModuleOrderEventCount: diagnostics.unresolvedModuleOrderEventCount,
     capabilityEnrichmentMismatchCount: diagnostics.capabilityEnrichmentMismatchCount,
-    dockEnrichmentMismatchCount: diagnostics.dockEnrichmentMismatchCount,
     unknownEventCount: diagnostics.unknownEventCount,
     ...(lastEvent ? { lastEvent } : {})
   };
@@ -225,7 +194,6 @@ export function rebuildOrderProjections(
 
 export interface ProjectionReplayOptions {
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
-  readonly dockArtifacts?: readonly DockArtifact[];
 }
 
 function applyStateMachineEvent(
@@ -235,11 +203,6 @@ function applyStateMachineEvent(
     governance: Map<string, MutableContractGovernanceProjection>;
     plans: Map<string, MutableStateMachinePlanProjection>;
     orders: Map<string, MutableStateMachineOrderProjection>;
-    docks: Map<string, StateMachineDockProjection>;
-    dockSelections: Map<string, StateMachineDockSelectionProjection>;
-    dockBindings: Map<string, MutableStateMachineDockBindingProjection>;
-    dockArtifacts: ReadonlyMap<string, DockArtifact>;
-    dockArtifactsByDkid: ReadonlyMap<string, DockArtifact>;
     capabilityTables: ReadonlyMap<string, PlanCapabilityTablesInput>;
     diagnostics: ProjectionReplayDiagnostics;
   },
@@ -287,20 +250,6 @@ function applyStateMachineEvent(
       return;
     case "StageSupplierAssigned":
       applyStageSupplierAssigned(state, event);
-      return;
-    case "DockRegistered":
-      applyDockRegistered(state, event);
-      return;
-    case "StageDockSupplierSelected":
-      applyStageDockSupplierSelected(state, event);
-      return;
-    case "DockBindingPoked":
-      applyDockBindingPoked(state, event);
-      return;
-    case "DockOutputSubmitted":
-      applyDockOutputSubmitted(state, event);
-      return;
-    case "DockOutputDeferred":
       return;
     case "DerivedSignalSubmitted":
       applyDerivedSignalSubmitted(state, event);

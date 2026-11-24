@@ -1,4 +1,3 @@
-import type { DockArtifact } from "@uvp-eth/compiler";
 import type { ChainEvent } from "../indexer/events.js";
 import { filterActiveChainEvents, sortChainEvents } from "../indexer/events.js";
 import type { PlanCapabilityTablesInput } from "../indexer/projections/plan.js";
@@ -49,7 +48,6 @@ export interface ProjectionSyncDiagnosticsCounts {
   readonly unresolvedModuleOrderEventCount: number;
   readonly unresolvedIdentityRevokeEventCount: number;
   readonly capabilityEnrichmentMismatchCount: number;
-  readonly dockEnrichmentMismatchCount: number;
   readonly unknownEventCount: number;
 }
 
@@ -61,7 +59,6 @@ export function projectionDiagnosticsFromSnapshots(
     unresolvedModuleOrderEventCount: orderSnapshot.unresolvedModuleOrderEventCount ?? 0,
     unresolvedIdentityRevokeEventCount: identitySnapshot.unresolvedRevokeEventCount ?? 0,
     capabilityEnrichmentMismatchCount: orderSnapshot.capabilityEnrichmentMismatchCount ?? 0,
-    dockEnrichmentMismatchCount: orderSnapshot.dockEnrichmentMismatchCount ?? 0,
     unknownEventCount: orderSnapshot.unknownEventCount ?? 0
   };
 }
@@ -96,7 +93,6 @@ export interface ProjectionRebuildInput {
   readonly deploymentBlock: bigint;
   readonly events: readonly ChainEvent[];
   readonly planCapabilityTables?: readonly PlanCapabilityTablesInput[];
-  readonly dockArtifacts?: readonly DockArtifact[];
   readonly scope?: ProjectionScope;
   readonly syncState?: Omit<ProjectionSyncState, "updatedAt">;
   readonly cursor?: Omit<StoredProjectionCursor, "updatedAt">;

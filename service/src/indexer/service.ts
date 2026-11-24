@@ -15,11 +15,9 @@ import {
   rebuildOrderProjections
 } from "./replay.js";
 import type { ProjectionReplayOptions } from "./replay.js";
-import type { DockArtifact } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "./projections/plan.js";
 import { createEmptyIdentityProjectionSnapshot, rebuildIdentityProjections } from "./identity-projections.js";
 import { createChainServicesStores } from "../storage/factory.js";
-import { createDockArtifactResolver } from "../projection/dock-artifacts.js";
 import { createPlanArtifactResolvers } from "../projection/plan-artifacts.js";
 import {
   defaultProjectionScope,
@@ -85,10 +83,6 @@ export interface IndexerServiceOptions {
     planId: Hex,
     planHash: Hex
   ) => Promise<PlanCapabilityTablesInput>;
-  readonly resolveDockArtifact?: (
-    dkid: Hex,
-    docHash: Hex
-  ) => Promise<DockArtifact>;
   readonly logger?: Logger;
 }
 
@@ -118,15 +112,11 @@ export class IndexerService implements LifecycleService {
   #cursor: EventCursor | undefined;
   #consecutiveCursorCasFailures = 0;
   #planCapabilityTablesCache = new Map<string, PlanCapabilityTablesInput>();
-  #dockArtifactsCache = new Map<string, DockArtifact>();
   readonly #config: ChainServicesConfig;
   readonly #eventSource: ChainEventSource;
   readonly #store: ProjectionStore;
   readonly #resolvePlanCapabilityTables:
     | ((planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput>)
-    | undefined;
-  readonly #resolveDockArtifact:
-    | ((dkid: Hex, docHash: Hex) => Promise<DockArtifact>)
     | undefined;
   readonly #logger: Logger;
   readonly #scope: ProjectionScope;
@@ -136,7 +126,6 @@ export class IndexerService implements LifecycleService {
     this.#eventSource = options.eventSource;
     this.#store = options.store;
     this.#resolvePlanCapabilityTables = options.resolvePlanCapabilityTables;
-    this.#resolveDockArtifact = options.resolveDockArtifact;
     this.#logger = options.logger ?? noopLogger;
     this.#scope = defaultProjectionScope(options.config.network.chainId);
   }
@@ -174,49 +163,7 @@ export class IndexerService implements LifecycleService {
   async #projectionReplayOptionsFor(
     events: readonly ChainEvent[]
   ): Promise<ProjectionReplayOptions | undefined> {
-    const planOptions = await this.#planCapabilityTablesFor(events);
-    const resolver = this.#resolveDockArtifact;
-    if (resolver) {
-      for (const anchor of this.#collectDockAnchors(events).values()) {
-        const key = `${anchor.dkid.toLowerCase()}:${anchor.docHash.toLowerCase()}`;
-        if (this.#dockArtifactsCache.has(key)) {
-          continue;
-        }
-        try {
-          this.#dockArtifactsCache.set(key, await resolver(anchor.dkid, anchor.docHash));
-        } catch (error) {
-          this.#logger.warn("dock artifact resolution failed; the dock will be marked enrichment=failed while other plans and docks continue", {
-            dkid: anchor.dkid,
-            docHash: anchor.docHash,
-            message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown resolution error"
-          });
-        }
-      }
-    }
-    const dockArtifacts = [...this.#dockArtifactsCache.values()];
-    if (!planOptions && dockArtifacts.length === 0) {
-      return undefined;
-    }
-    return {
-      ...(planOptions ?? {}),
-      ...(dockArtifacts.length > 0 ? { dockArtifacts } : {})
-    };
-  }
-
-  #collectDockAnchors(events: readonly ChainEvent[]): Map<string, { readonly dkid: Hex; readonly docHash: Hex }> {
-    const anchors = new Map<string, { readonly dkid: Hex; readonly docHash: Hex }>();
-    for (const event of events) {
-      if (event.removed === true || event.eventName !== "DockRegistered") {
-        continue;
-      }
-      const dkid = optionalBytes32Arg(event, "dkid");
-      const docHash = optionalBytes32Arg(event, "docHash");
-      if (!dkid || !docHash) {
-        continue;
-      }
-      anchors.set(`${dkid.toLowerCase()}:${docHash.toLowerCase()}`, { dkid, docHash });
-    }
-    return anchors;
+    return this.#planCapabilityTablesFor(events);
   }
 
   #collectPlanAnchors(events: readonly ChainEvent[]): Map<string, { readonly planId: Hex; readonly planHash: Hex }> {
@@ -254,28 +201,6 @@ export class IndexerService implements LifecycleService {
         {
           capabilityEnrichmentMismatchCount: mismatches,
           planIds: mismatchedPlanIds
-        }
-      );
-    }
-    const mismatchedDockIds: string[] = [];
-    for (const dock of Object.values(snapshot.stateMachineDocks)) {
-      if (dock.enrichment !== "failed") {
-        continue;
-      }
-      for (const [cacheKey, cached] of this.#dockArtifactsCache) {
-        if (cached.dkid === dock.dkid) {
-          this.#dockArtifactsCache.delete(cacheKey);
-        }
-      }
-      mismatchedDockIds.push(dock.dkid);
-    }
-    const dockMismatches = snapshot.dockEnrichmentMismatchCount ?? 0;
-    if (dockMismatches > 0) {
-      this.#logger.warn(
-        "dock artifact enrichment failed or mismatched on-chain DockRegistered fields; the listed docks stay enrichment=failed while other plans and docks continue",
-        {
-          dockEnrichmentMismatchCount: dockMismatches,
-          dkids: mismatchedDockIds
         }
       );
     }
@@ -485,7 +410,6 @@ export class IndexerService implements LifecycleService {
         mismatchCount: summary.mismatchCount,
         unresolvedModuleOrderEventCount: snapshot.unresolvedModuleOrderEventCount ?? 0,
         capabilityEnrichmentMismatchCount: snapshot.capabilityEnrichmentMismatchCount ?? 0,
-        dockEnrichmentMismatchCount: snapshot.dockEnrichmentMismatchCount ?? 0,
         unknownEventCount: snapshot.unknownEventCount ?? 0,
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
@@ -622,7 +546,7 @@ export class IndexerService implements LifecycleService {
         return result;
       }
     }
-    const enrichmentEvents = this.#resolvePlanCapabilityTables || this.#resolveDockArtifact
+    const enrichmentEvents = this.#resolvePlanCapabilityTables
       ? [...(await durableStore.listEvents({ chainId: this.#scope.chainId })), ...events]
       : events;
     const enrichmentOptions = await this.#projectionReplayOptionsFor(enrichmentEvents);
@@ -704,7 +628,6 @@ export class IndexerService implements LifecycleService {
       mismatchCount: result.summary.mismatchCount,
       unresolvedModuleOrderEventCount: result.snapshot.unresolvedModuleOrderEventCount ?? 0,
       capabilityEnrichmentMismatchCount: result.snapshot.capabilityEnrichmentMismatchCount ?? 0,
-      dockEnrichmentMismatchCount: result.snapshot.dockEnrichmentMismatchCount ?? 0,
       unknownEventCount: result.snapshot.unknownEventCount ?? 0,
       unresolvedIdentityRevokeEventCount: identitySnapshot?.unresolvedRevokeEventCount ?? 0,
       nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
@@ -1238,16 +1161,11 @@ async function main(): Promise<void> {
       store: stores.planArtifactStore,
       chainId: config.network.chainId
     });
-    const dockArtifacts = createDockArtifactResolver({
-      store: stores.dockArtifactStore,
-      chainId: config.network.chainId
-    });
     const service = createIndexerService({
       config,
       eventSource,
       store: stores.projectionStore,
       resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
-      resolveDockArtifact: dockArtifacts.resolveDockArtifact,
       logger: consoleLogger
     });
     const targetBlock = parseTargetBlockArg(process.argv);

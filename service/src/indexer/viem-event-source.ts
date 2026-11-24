@@ -11,7 +11,6 @@ import {
 import type { ChainServicesConfig } from "../config/index.js";
 import {
   DERIVED_SIGNAL_MODULE_ABI,
-  DOCK_REGISTRY_ABI,
   FILE_RESOURCE_MODULE_ABI,
   STAGE_PATCH_MODULE_ABI,
   STATE_MACHINE_ABI,
@@ -40,10 +39,6 @@ const derivedSignalModuleAbi: Abi = (DERIVED_SIGNAL_MODULE_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
 
-const dockRegistryAbi: Abi = (DOCK_REGISTRY_ABI as Abi).filter(
-  (entry) => entry.type === "event"
-);
-
 const identityRegistryAbi: Abi = (IDENTITY_REGISTRY_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
@@ -53,8 +48,7 @@ export const INDEXER_EVENT_ABIS = {
   UVPIdentityRegistry: identityRegistryAbi,
   UVPStagePatchModule: stagePatchModuleAbi,
   UVPFileResourceModule: fileResourceModuleAbi,
-  UVPDerivedSignalModule: derivedSignalModuleAbi,
-  UVPDockRegistry: dockRegistryAbi
+  UVPDerivedSignalModule: derivedSignalModuleAbi
 } as const;
 
 const maxGetLogsBlockSpan = 9_999n;
@@ -67,8 +61,7 @@ type IndexedContractName =
   | "UVPIdentityRegistry"
   | "UVPStagePatchModule"
   | "UVPFileResourceModule"
-  | "UVPDerivedSignalModule"
-  | "UVPDockRegistry";
+  | "UVPDerivedSignalModule";
 
 interface IndexedContract {
   readonly name: IndexedContractName;
@@ -299,11 +292,6 @@ function indexedContracts(
       config.network.contracts,
       derivedSignalModuleAbi,
     ),
-    indexedContract(
-      "UVPDockRegistry",
-      config.network.contracts,
-      dockRegistryAbi,
-    ),
     ...stateMachineDeployments.flatMap((deployment) => {
       const modules = deployment.modules ?? {};
       const moduleContracts = [
@@ -315,9 +303,6 @@ function indexedContracts(
           : undefined,
         modules.derivedSignal
           ? moduleContract("UVPDerivedSignalModule", modules.derivedSignal, derivedSignalModuleAbi)
-          : undefined,
-        modules.dockRegistry
-          ? moduleContract("UVPDockRegistry", modules.dockRegistry, dockRegistryAbi)
           : undefined,
       ].filter((contract): contract is IndexedContract => Boolean(contract));
       return [

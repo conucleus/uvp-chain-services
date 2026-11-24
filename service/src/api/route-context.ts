@@ -3,7 +3,6 @@ import type { PlanArtifactStore } from "../projection/plan-artifacts.js";
 import type { AdminAuthPolicy } from "../security/admin-auth.js";
 import type { AuditSink } from "../security/audit.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
-import type { DockBindingWindowReader } from "./dock-binding-windows.js";
 import type { IndexerRuntimeDiagnostics } from "./diagnostics.js";
 
 export interface ApiRequest {
@@ -35,7 +34,6 @@ export interface CreateApiRouterOptions {
   readonly configDiagnostics?: ConfigDiagnostics;
   readonly indexerDiagnostics?: IndexerRuntimeDiagnostics;
   readonly planArtifacts?: PlanArtifactReadSurface;
-  readonly dockBindingWindows?: DockBindingWindowReader;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   readonly opsConsoleAdminIds?: readonly string[];
   readonly adminAuthPolicy?: AdminAuthPolicy;
@@ -55,7 +53,6 @@ export interface AdminOpsRecoveryActions {
 export interface ApiRouteContext {
   readonly store: ProjectionStore;
   readonly planArtifacts?: PlanArtifactReadSurface;
-  readonly dockBindingWindows?: DockBindingWindowReader;
   readonly opsRecoveryActions?: AdminOpsRecoveryActions;
   readonly opsConsoleAdminIds?: readonly string[];
   readonly adminAuthPolicy: AdminAuthPolicy;

@@ -15,7 +15,6 @@ import {
 } from "./proof.js";
 import { stateMachineScopedKey, type MutableStateMachineOrderProjection } from "./order.js";
 import { planDefaultSupplierForStage, type StateMachinePlanProjection } from "./plan.js";
-import { dockSelectionKey, type StateMachineDockSelectionProjection } from "./dock.js";
 import { findStageSupplierAssignment } from "./stage.js";
 import type { Writable } from "./snapshot.js";
 
@@ -149,19 +148,12 @@ export function resolveStageSupplierAssignments(state: {
   suppliers: StateMachineSupplierIndex;
   plans: ReadonlyMap<string, StateMachinePlanProjection>;
   orders: Map<string, MutableStateMachineOrderProjection>;
-  dockSelections: ReadonlyMap<string, StateMachineDockSelectionProjection>;
 }): void {
   for (const order of state.orders.values()) {
     const plan = state.plans.get(
       stateMachineScopedKey(order.chainId, order.contractAddress, order.planId)
     );
     for (const assignment of Object.values(order.stageSupplierAssignments)) {
-      const selection = state.dockSelections.get(
-        dockSelectionKey(order.planId, order.orderId, assignment.targetStageId)
-      );
-      if (selection && selection.patchNonce === assignment.patchNonce) {
-        assignment.dockId = selection.dockId;
-      }
       assignSupplierAccount(state.suppliers, assignment, assignment.supplierId);
     }
     for (const task of Object.values(order.tasks)) {

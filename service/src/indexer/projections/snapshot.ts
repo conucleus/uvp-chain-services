@@ -7,10 +7,6 @@ import type {
   StateMachineOrderProjection
 } from "./order.js";
 import type { MutableStateMachinePlanProjection, StateMachinePlanProjection } from "./plan.js";
-import type {
-  StateMachineDockBindingProjection,
-  StateMachineDockProjection
-} from "./dock.js";
 import type { StateMachineTaskProjection } from "./task.js";
 import type { StateMachineSupplierProjection } from "./supplier.js";
 
@@ -60,14 +56,11 @@ export interface ProjectionSnapshot {
   readonly contractGovernance: Readonly<Record<string, ContractGovernanceProjection>>;
   readonly stateMachinePlans: Readonly<Record<string, StateMachinePlanProjection>>;
   readonly stateMachineOrders: Readonly<Record<string, StateMachineOrderProjection>>;
-  readonly stateMachineDocks: Readonly<Record<string, StateMachineDockProjection>>;
-  readonly stateMachineDockBindings: Readonly<Record<string, StateMachineDockBindingProjection>>;
   readonly stateMachineTasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly stateMachineSuppliers: Readonly<Record<string, StateMachineSupplierProjection>>;
   readonly lastEvent?: ProjectionProvenance;
   readonly unresolvedModuleOrderEventCount?: number;
   readonly capabilityEnrichmentMismatchCount?: number;
-  readonly dockEnrichmentMismatchCount?: number;
   readonly unknownEventCount?: number;
 }
 
@@ -80,7 +73,6 @@ export type MutableStateMachineDeploymentProjection = Writable<StateMachineDeplo
 export interface ProjectionReplayDiagnostics {
   unresolvedModuleOrderEventCount: number;
   capabilityEnrichmentMismatchCount: number;
-  dockEnrichmentMismatchCount: number;
   unknownEventCount: number;
 }
 
@@ -93,13 +85,10 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     contractGovernance: {},
     stateMachinePlans: {},
     stateMachineOrders: {},
-    stateMachineDocks: {},
-    stateMachineDockBindings: {},
     stateMachineTasks: {},
     stateMachineSuppliers: {},
     unresolvedModuleOrderEventCount: 0,
     capabilityEnrichmentMismatchCount: 0,
-    dockEnrichmentMismatchCount: 0,
     unknownEventCount: 0
   };
 }

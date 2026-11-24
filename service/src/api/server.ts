@@ -18,19 +18,14 @@ import {
   normalizeRequestId,
   normalizeRunId
 } from "./route-context.js";
-import { createDockBindingWindowReader } from "./dock-binding-windows.js";
-import { createDockArtifactResolver } from "../projection/dock-artifacts.js";
 import { createPlanArtifactResolvers } from "../projection/plan-artifacts.js";
 
 export interface StartApiServerOptions {
   readonly config?: ChainServicesConfig;
   readonly store?: ProjectionStore;
   readonly eventSource?: ChainEventSource | false;
-  readonly dockBindingWindowReader?: DockBindingWindowReader;
   readonly logger?: Logger;
 }
-
-type DockBindingWindowReader = ReturnType<typeof createDockBindingWindowReader>;
 
 export async function startApiServer(
   configOrOptions: ChainServicesConfig | StartApiServerOptions = {},
@@ -48,30 +43,18 @@ export async function startApiServer(
     store: stores.planArtifactStore,
     chainId: config.network.chainId
   });
-  const dockArtifacts = createDockArtifactResolver({
-    store: stores.dockArtifactStore,
-    chainId: config.network.chainId
-  });
   const logger = createRedactingLogger(options.logger ?? consoleLogger, config.security.logRedactionEnabled);
   const audit = createLoggerAuditSink(logger);
   const configDiagnostics = await runConfigPreflight(config);
   const eventSource = options.eventSource === undefined
     ? createChainEventSourceForTarget(config, { logger })
     : options.eventSource;
-  const stagePatchAddress = selectActiveStateMachineDeployment(config)?.modules?.stagePatch;
-  const dockBindingWindowReader = options.dockBindingWindowReader ?? (stagePatchAddress
-    ? createDockBindingWindowReader({
-      rpcUrl: config.network.rpcUrl,
-      stagePatchAddress
-    })
-    : undefined);
   const indexer = eventSource
     ? new IndexerService({
       config,
       eventSource,
       store,
       resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
-      resolveDockArtifact: dockArtifacts.resolveDockArtifact,
       logger
     })
     : undefined;
@@ -109,7 +92,6 @@ export async function startApiServer(
       chainId: config.network.chainId,
       store: stores.planArtifactStore
     },
-    ...(dockBindingWindowReader ? { dockBindingWindows: dockBindingWindowReader } : {}),
     ...(opsConsoleAdminIds.length > 0 ? { opsConsoleAdminIds } : {}),
     adminAuthPolicy: {
       runtimeEnvironment: config.security.environment,

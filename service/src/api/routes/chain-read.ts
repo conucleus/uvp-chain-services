@@ -16,10 +16,6 @@ import {
   type ChainTaskProjection,
 } from "@uvp-eth/chain-read-contract";
 import { ConfigError, normalizeBytes32, type Hex } from "@uvp-eth/service-runtime";
-import {
-  DockBindingWindowUnavailableError,
-  wireDockBindings
-} from "../dock-binding-windows.js";
 import { StorageUnavailableError } from "../../storage/errors.js";
 import { redactEndpointErrorMessage } from "../../shared/redaction.js";
 import {
@@ -66,16 +62,6 @@ export function createChainReadRouteModule(): RouteModule {
             body: {
               error: "chain_read_unavailable",
               message: "the chain projection store is unavailable",
-              retryable: true,
-            },
-          };
-        }
-        if (error instanceof DockBindingWindowUnavailableError) {
-          return {
-            status: 503,
-            body: {
-              error: "chain_read_unavailable",
-              message: redactEndpointErrorMessage(error),
               retryable: true,
             },
           };
@@ -144,8 +130,7 @@ async function handleRead(
       return unavailable;
     }
     const stored = await context.store.getOrderSnapshot();
-    const bindings = await wireDockBindings(stored, context.dockBindingWindows);
-    const snapshot = { ...toWire(stored), stateMachineDockBindings: bindings };
+    const snapshot = toWire(stored);
     return { status: 200, body: { snapshot } };
   }
 
