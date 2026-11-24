@@ -17,7 +17,7 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 - `indexer/service.ts`：扫描与索引入口（增量刷新、重组回滚、`--rebuild` 全量重建）；索引合约的日志解码失败时整批抛 `UndecodableChainLogError`，cursor 与投影不前进，不做跳过计数。
 - `cli/record-plan-artifact.ts`：`plan_artifacts` 的生产写入入口（校验产物身份后写入，不跑迁移；见下文「记录计划编译产物」）。
 - `cli/record-dock-artifact.ts`：`dock_artifacts` 的生产写入入口（校验 `uvp.dock.v1` 产物身份后写入，不跑迁移）。
-- `projection/plan-artifacts.ts`：计划编译产物表（`plan_artifacts`）的 Postgres store 与索引/语义 oracle 解析器；缺失产物抛 `PlanArtifactMissingError`。
+- `projection/plan-artifacts.ts`：计划编译产物表（`plan_artifacts`）的 Postgres store 与索引解析器；缺失产物抛 `PlanArtifactMissingError`。
 - `projection/dock-artifacts.ts`：Dock 文档产物表（`dock_artifacts`）的 Postgres store 与索引解析器；保存 `uvp.dock.v1`（validWhen AST/dependencies/atoms），是可从链上事件 + 记录产物重建的链下读投影，不是第二权威；表键 `dkid` 是链上 `bytes32(bytes16(docHash))`（`UVPDockRegistry` 的注册键），产物自带的 `zd-<docHash 前 32 hex>` 只做文档身份校验；索引 `DockRegistered` 时会校验链上 `fromPlanId`/`toPlanId`/`fromSourceId`/`toStageId`/`toSourceId`/`outputs` 顺序与产物一致，缺失或不一致时该 dock 降级为 `enrichment: "failed"`（fail-closed，不覆盖链上事实）。
 - 链读 snapshot 提供静态 Dock（`uvp.dock.v1`）与 DockBinding/per-output 投影（`uvp.dockBinding.v1`），没有 Link 行/状态。binding 身份、payload generation、emitted/emitted_by 来自链上事件，可从 `chain_event_log` 重建；A/B 窗口的当前 `satisfied`/相对 due 是 API 读时对 stage-patch `dockOutputWindow` view 的 live enrichment（不持久、不构成历史），无历史时 `opened_by`/`closed_by` 省略。chain-services 不实现第二套 Hook AST 求值器；view 读取按 binding+output 做短 TTL 缓存，view 不可用时 snapshot 读 fail-closed 503。一次 snapshot 读对 `dockOutputWindow` 的 RPC 扇出有全局并发上限（8），失败消息只暴露脱敏后的 URL/凭据。
 - `indexer/replay.ts`：统一事件顺序与重放编排。`rebuildOrderProjections` 是投影重建的单一入口，同时推进部署注册表事件族与显式诊断计数（幻影订单、激活缺补丁等不允许静默的计数）。

@@ -71,7 +71,6 @@ export async function startApiServer(
       eventSource,
       store,
       resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
-      resolveSemanticOraclePlan: planArtifacts.resolveSemanticOraclePlan,
       resolveDockArtifact: dockArtifacts.resolveDockArtifact,
       logger
     })

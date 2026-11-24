@@ -95,8 +95,7 @@ describe("ViemChainEventSource", () => {
     ]);
   });
 
-  it("decodes deployment registry and identity registry logs from configured contracts", async () => {
-    const deploymentLog = deploymentRegisteredLog();
+  it("decodes identity registry logs from configured contracts", async () => {
     const supplierLog = supplierCapabilityLog();
     const eventSource = new ViemChainEventSource({
       publicClient: {
@@ -104,7 +103,7 @@ describe("ViemChainEventSource", () => {
           return 0n;
         },
         async getLogs(input) {
-          return [deploymentLog, supplierLog].filter((log) => log.address === input.address);
+          return [supplierLog].filter((log) => log.address === input.address);
         }
       }
     });
@@ -118,16 +117,8 @@ describe("ViemChainEventSource", () => {
       registryConfig()
     );
 
-    expect(events).toHaveLength(2);
-    expect(events).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        contractAddress: deploymentRegistryAddress,
-        eventName: "DeploymentRegistered",
-        args: expect.objectContaining({
-          deploymentId: bytes32Hex("0a"),
-          metadataURI: "ipfs://deployment/registry"
-        })
-      }),
+    expect(events).toHaveLength(1);
+    expect(events).toEqual([
       expect.objectContaining({
         contractAddress: identityRegistryAddress,
         eventName: "SupplierRegistered",
@@ -136,7 +127,7 @@ describe("ViemChainEventSource", () => {
           account: "0x2222222222222222222222222222222222222222"
         }
       })
-    ]));
+    ]);
   });
 
   it("anchors the finalized bound on the finalized tag by default and on confirmations when overridden", async () => {
@@ -346,38 +337,6 @@ describe("ViemChainEventSource", () => {
     expect(() => JSON.stringify(proof.args)).not.toThrow();
     expect(() => JSON.stringify(toWire(proof))).not.toThrow();
   });
-
-  it("keeps 0x-prefixed string event args verbatim while lowercasing bytes args", async () => {
-    const eventSource = new ViemChainEventSource({
-      publicClient: {
-        async getBlockNumber() {
-          return 0n;
-        },
-        async getLogs(input) {
-          return [deploymentRegisteredLog({ metadataURI: "ipfs://Deployment-Registry/0XAb" })]
-            .filter((log) => log.address === input.address);
-        }
-      }
-    });
-
-    const events = await eventSource.readEvents(
-      {
-        chainId: 84532,
-        fromBlock: 100n,
-        toBlock: 100n
-      },
-      registryConfig()
-    );
-
-    expect(events).toEqual([
-      expect.objectContaining({
-        eventName: "DeploymentRegistered",
-        args: expect.objectContaining({
-          metadataURI: "ipfs://Deployment-Registry/0XAb"
-        })
-      })
-    ]);
-  });
 });
 
 async function captureRejection(run: Promise<unknown>): Promise<unknown> {
@@ -420,16 +379,11 @@ function compareEventShape(
 }
 
 const stateMachineAddress = "0x1111111111111111111111111111111111111111";
-const deploymentRegistryAddress = "0x4444444444444444444444444444444444444444";
 const identityRegistryAddress = "0x5555555555555555555555555555555555555555";
 const dockRegistryAddress = "0x6666666666666666666666666666666666666666";
 
 const stateMachineTestAbi = parseAbi([
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)"
-]);
-
-const deploymentRegistryTestAbi = parseAbi([
-  "event DeploymentRegistered(bytes32 indexed deploymentId,address indexed stateMachine,bytes32 artifactHash,bytes32 abiHash,uint64 deploymentBlock,string metadataURI)"
 ]);
 
 const identityRegistryTestAbi = parseAbi([
@@ -454,41 +408,6 @@ function planRegisteredLog(input: { readonly removed?: boolean } = {}): Log {
       abi: stateMachineTestAbi,
       eventName: "PlanRegistered",
       args: { planId }
-    }),
-    removed: input.removed === true
-  } as Log;
-}
-
-function deploymentRegisteredLog(
-  input: { readonly metadataURI?: string; readonly removed?: boolean } = {}
-): Log {
-  const deploymentId = bytes32Hex("0a");
-  const stateMachine = "0x3333333333333333333333333333333333333333";
-  return {
-    address: deploymentRegistryAddress,
-    blockNumber: 100n,
-    blockHash: bytes32Hex("ab"),
-    transactionHash: bytes32Hex("ce"),
-    transactionIndex: 0,
-    logIndex: 0,
-    data: encodeAbiParameters(
-      [
-        { type: "bytes32" },
-        { type: "bytes32" },
-        { type: "uint64" },
-        { type: "string" }
-      ],
-      [
-        bytes32Hex("0c"),
-        bytes32Hex("0d"),
-        1n,
-        input.metadataURI ?? "ipfs://deployment/registry"
-      ]
-    ),
-    topics: encodeEventTopics({
-      abi: deploymentRegistryTestAbi,
-      eventName: "DeploymentRegistered",
-      args: { deploymentId, stateMachine }
     }),
     removed: input.removed === true
   } as Log;
@@ -555,7 +474,6 @@ function registryConfig(): ChainServicesConfig {
       ...base.network,
       contracts: {
         ...base.network.contracts,
-        UVPDeploymentRegistry: deploymentRegistryAddress,
         UVPIdentityRegistry: identityRegistryAddress
       }
     }

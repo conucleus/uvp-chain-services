@@ -52,7 +52,6 @@ describe("record plan artifact identity", () => {
 
     expect(record.planId).toBe(onchainPlanId);
     expect(record.planHash).toBe(planHash);
-    expect(artifact.planId).not.toBe(onchainPlanId);
   });
 
   it("rejects an explicit plan id that disagrees with the publisher-derived on-chain id", () => {

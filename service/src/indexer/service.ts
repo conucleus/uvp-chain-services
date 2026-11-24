@@ -17,12 +17,6 @@ import {
 import type { ProjectionReplayOptions } from "./replay.js";
 import type { DockArtifact } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "./projections/plan.js";
-import {
-  emptySemanticOracleSummary,
-  runSemanticOracleReplay,
-  type SemanticOraclePlan,
-  type SemanticOracleSummary
-} from "./semantic-oracle.js";
 import { createEmptyIdentityProjectionSnapshot, rebuildIdentityProjections } from "./identity-projections.js";
 import { createChainServicesStores } from "../storage/factory.js";
 import { createDockArtifactResolver } from "../projection/dock-artifacts.js";
@@ -91,10 +85,6 @@ export interface IndexerServiceOptions {
     planId: Hex,
     planHash: Hex
   ) => Promise<PlanCapabilityTablesInput>;
-  readonly resolveSemanticOraclePlan?: (
-    planId: Hex,
-    planHash: Hex
-  ) => Promise<SemanticOraclePlan | undefined>;
   readonly resolveDockArtifact?: (
     dkid: Hex,
     docHash: Hex
@@ -129,15 +119,11 @@ export class IndexerService implements LifecycleService {
   #consecutiveCursorCasFailures = 0;
   #planCapabilityTablesCache = new Map<string, PlanCapabilityTablesInput>();
   #dockArtifactsCache = new Map<string, DockArtifact>();
-  #semanticOraclePlansCache = new Map<string, SemanticOraclePlan>();
   readonly #config: ChainServicesConfig;
   readonly #eventSource: ChainEventSource;
   readonly #store: ProjectionStore;
   readonly #resolvePlanCapabilityTables:
     | ((planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput>)
-    | undefined;
-  readonly #resolveSemanticOraclePlan:
-    | ((planId: Hex, planHash: Hex) => Promise<SemanticOraclePlan | undefined>)
     | undefined;
   readonly #resolveDockArtifact:
     | ((dkid: Hex, docHash: Hex) => Promise<DockArtifact>)
@@ -150,7 +136,6 @@ export class IndexerService implements LifecycleService {
     this.#eventSource = options.eventSource;
     this.#store = options.store;
     this.#resolvePlanCapabilityTables = options.resolvePlanCapabilityTables;
-    this.#resolveSemanticOraclePlan = options.resolveSemanticOraclePlan;
     this.#resolveDockArtifact = options.resolveDockArtifact;
     this.#logger = options.logger ?? noopLogger;
     this.#scope = defaultProjectionScope(options.config.network.chainId);
@@ -234,32 +219,6 @@ export class IndexerService implements LifecycleService {
     return anchors;
   }
 
-  async #semanticOraclePlansFor(
-    events: readonly ChainEvent[]
-  ): Promise<readonly SemanticOraclePlan[] | undefined> {
-    const resolver = this.#resolveSemanticOraclePlan;
-    if (!resolver) {
-      return undefined;
-    }
-    for (const anchor of this.#collectPlanAnchors(events).values()) {
-      if (this.#semanticOraclePlansCache.has(anchor.planId.toLowerCase())) {
-        continue;
-      }
-      try {
-        const plan = await resolver(anchor.planId, anchor.planHash);
-        if (plan) {
-          this.#semanticOraclePlansCache.set(anchor.planId.toLowerCase(), plan);
-        }
-      } catch (error) {
-        this.#logger.warn("semantic oracle plan artifact resolution failed; the plan is excluded from this round's semantic verification", {
-          planId: anchor.planId,
-          message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown resolution error"
-        });
-      }
-    }
-    return [...this.#semanticOraclePlansCache.values()];
-  }
-
   #collectPlanAnchors(events: readonly ChainEvent[]): Map<string, { readonly planId: Hex; readonly planHash: Hex }> {
     const anchors = new Map<string, { readonly planId: Hex; readonly planHash: Hex }>();
     for (const event of events) {
@@ -277,37 +236,6 @@ export class IndexerService implements LifecycleService {
       anchors.set(planId.toLowerCase(), { planId, planHash });
     }
     return anchors;
-  }
-
-  #runSemanticOracle(
-    events: readonly ChainEvent[],
-    plans: readonly SemanticOraclePlan[] | undefined
-  ): SemanticOracleSummary {
-    if (!plans || plans.length === 0 || events.length === 0) {
-      return emptySemanticOracleSummary();
-    }
-    return runSemanticOracleReplay(events, plans);
-  }
-
-  #reconcileSemanticOracle(semanticOracle: SemanticOracleSummary): void {
-    if (semanticOracle.semanticOracleMismatchCount > 0) {
-      this.#logger.warn(
-        "semantic replay oracle diverged from the indexed hook observations; the projection stays chain-authoritative and is NOT overwritten - inspect the on-chain events versus the store-domain plan artifacts for the checked plan subset",
-        {
-          semanticOracleMismatchCount: semanticOracle.semanticOracleMismatchCount,
-          semanticOracleCheckedPlanCount: semanticOracle.semanticOracleCheckedPlanCount
-        }
-      );
-    }
-    if (semanticOracle.semanticOracleErrorCount > 0) {
-      this.#logger.warn(
-        "semantic replay oracle could not verify the indexed hook observations (replay errored outside a chain mismatch); the projection stays chain-authoritative and the failure is counted separately from mismatches",
-        {
-          semanticOracleErrorCount: semanticOracle.semanticOracleErrorCount,
-          semanticOracleCheckedPlanCount: semanticOracle.semanticOracleCheckedPlanCount
-        }
-      );
-    }
   }
 
   #reconcileCapabilityEnrichmentMismatch(snapshot: ProjectionSnapshot): void {
@@ -512,7 +440,6 @@ export class IndexerService implements LifecycleService {
         ...(canonicalHeadHash ?? {})
       };
       const enrichmentOptions = await this.#projectionReplayOptionsFor(events);
-      const semanticOraclePlans = await this.#semanticOraclePlansFor(events);
       const snapshot = await this.#store.resetFromEvents({
         deploymentBlock,
         events,
@@ -530,10 +457,9 @@ export class IndexerService implements LifecycleService {
       });
       this.#cursor = nextCursor;
 
-      const semanticOracle = this.#runSemanticOracle(events, semanticOraclePlans);
       const syncState = await this.#store.saveSyncState({
         ...syncStateInput,
-        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot, semanticOracle)
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot)
       });
       const summary = summaryFromSnapshot({
         chainId: this.#config.network.chainId,
@@ -561,15 +487,10 @@ export class IndexerService implements LifecycleService {
         capabilityEnrichmentMismatchCount: snapshot.capabilityEnrichmentMismatchCount ?? 0,
         dockEnrichmentMismatchCount: snapshot.dockEnrichmentMismatchCount ?? 0,
         unknownEventCount: snapshot.unknownEventCount ?? 0,
-        semanticOracleMismatchCount: semanticOracle.semanticOracleMismatchCount,
-        semanticOracleCheckedPlanCount: semanticOracle.semanticOracleCheckedPlanCount,
-        semanticOracleErrorCount: semanticOracle.semanticOracleErrorCount,
-        semanticOracleExcludedPlanCount: semanticOracle.semanticOracleExcludedPlanCount,
         nextBlock: this.#cursor.nextBlock.toString(),
         syncStatus: summary.syncStatus
       });
       this.#reconcileCapabilityEnrichmentMismatch(snapshot);
-      this.#reconcileSemanticOracle(semanticOracle);
 
       return { snapshot, summary };
     } catch (error) {
@@ -705,10 +626,8 @@ export class IndexerService implements LifecycleService {
       ? [...(await durableStore.listEvents({ chainId: this.#scope.chainId })), ...events]
       : events;
     const enrichmentOptions = await this.#projectionReplayOptionsFor(enrichmentEvents);
-    const semanticOraclePlans = await this.#semanticOraclePlansFor(enrichmentEvents);
 
     let identitySnapshot: Awaited<ReturnType<typeof rebuildIdentityProjections>> | undefined;
-    let oracleResult: SemanticOracleSummary = emptySemanticOracleSummary();
     const result = await durableStore.withTransaction(async () => {
       await this.#sweepCommittedButUnadvancedEvents(durableStore, effectiveFromBlock);
       for (const event of events) {
@@ -722,8 +641,6 @@ export class IndexerService implements LifecycleService {
         ...(enrichmentOptions ?? {})
       });
       identitySnapshot = rebuildIdentityProjections(allEvents);
-      const semanticOracle = this.#runSemanticOracle(allEvents, semanticOraclePlans);
-      oracleResult = semanticOracle;
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
       const mismatchCount = countDuplicateActiveEventAnomalies(allEvents);
@@ -735,7 +652,7 @@ export class IndexerService implements LifecycleService {
         confirmationDepth: this.#config.network.finalityConfirmations,
         ...(lastEvent ? { lastEventName: lastEvent.eventName } : {}),
         eventCount: activeEvents.length,
-        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot, semanticOracle),
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot),
         rebuild: {
           status: "idle",
           deploymentBlock,
@@ -789,16 +706,11 @@ export class IndexerService implements LifecycleService {
       capabilityEnrichmentMismatchCount: result.snapshot.capabilityEnrichmentMismatchCount ?? 0,
       dockEnrichmentMismatchCount: result.snapshot.dockEnrichmentMismatchCount ?? 0,
       unknownEventCount: result.snapshot.unknownEventCount ?? 0,
-      semanticOracleMismatchCount: oracleResult.semanticOracleMismatchCount,
-      semanticOracleCheckedPlanCount: oracleResult.semanticOracleCheckedPlanCount,
-      semanticOracleErrorCount: oracleResult.semanticOracleErrorCount,
-      semanticOracleExcludedPlanCount: oracleResult.semanticOracleExcludedPlanCount,
       unresolvedIdentityRevokeEventCount: identitySnapshot?.unresolvedRevokeEventCount ?? 0,
       nextBlock: this.#cursor?.nextBlock.toString() ?? nextCursor.nextBlock.toString(),
       syncStatus: result.summary.syncStatus
     });
     this.#reconcileCapabilityEnrichmentMismatch(result.snapshot);
-    this.#reconcileSemanticOracle(oracleResult);
 
     return { snapshot: result.snapshot, summary: result.summary };
   }
@@ -1089,7 +1001,6 @@ export class IndexerService implements LifecycleService {
     const survivingEvents = (await durableStore.listEvents({ chainId: this.#scope.chainId }))
       .filter((event) => event.blockNumber <= ancestorBlock);
     const enrichmentOptions = await this.#projectionReplayOptionsFor(survivingEvents);
-    const semanticOraclePlans = await this.#semanticOraclePlansFor(survivingEvents);
     await durableStore.withTransaction(async () => {
       const deleted = await durableStore.deleteEventsAfterBlock(
         { chainId: this.#scope.chainId },
@@ -1100,8 +1011,6 @@ export class IndexerService implements LifecycleService {
         ...(enrichmentOptions ?? {})
       });
       this.#reconcileCapabilityEnrichmentMismatch(snapshot);
-      const semanticOracle = this.#runSemanticOracle(remainingEvents, semanticOraclePlans);
-      this.#reconcileSemanticOracle(semanticOracle);
       const identitySnapshot = rebuildIdentityProjections(remainingEvents);
       await durableStore.saveSnapshot(this.#scope, "order", snapshot);
       await durableStore.saveSnapshot(this.#scope, "identity", identitySnapshot);
@@ -1118,7 +1027,7 @@ export class IndexerService implements LifecycleService {
         confirmationDepth: this.#config.network.finalityConfirmations,
         ...(existing?.lastEventName ? { lastEventName: existing.lastEventName } : {}),
         eventCount: replaySummary.activeEventCount,
-        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot, semanticOracle),
+        projectionDiagnostics: projectionDiagnosticsFromSnapshots(snapshot, identitySnapshot),
         rebuild: {
           status: "idle",
           deploymentBlock,
@@ -1338,7 +1247,6 @@ async function main(): Promise<void> {
       eventSource,
       store: stores.projectionStore,
       resolvePlanCapabilityTables: planArtifacts.resolvePlanCapabilityTables,
-      resolveSemanticOraclePlan: planArtifacts.resolveSemanticOraclePlan,
       resolveDockArtifact: dockArtifacts.resolveDockArtifact,
       logger: consoleLogger
     });

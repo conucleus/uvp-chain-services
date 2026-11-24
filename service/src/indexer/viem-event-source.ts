@@ -48,19 +48,9 @@ const identityRegistryAbi: Abi = (IDENTITY_REGISTRY_ABI as Abi).filter(
   (entry) => entry.type === "event"
 );
 
-const deploymentRegistryAbi = parseAbi([
-  "event OwnershipTransferred(address indexed previousOwner,address indexed newOwner)",
-  "event DeploymentRegistered(bytes32 indexed deploymentId,address indexed stateMachine,bytes32 artifactHash,bytes32 abiHash,uint64 deploymentBlock,string metadataURI)",
-  "event DeploymentCanaryMarked(bytes32 indexed deploymentId,bytes32 evidenceHash,string evidenceURI)",
-  "event DeploymentActivated(bytes32 indexed previousDeploymentId,bytes32 indexed newDeploymentId,bytes32 evidenceHash,string evidenceURI)",
-  "event DeploymentDeprecated(bytes32 indexed deploymentId,bytes32 reasonHash,string reasonURI)",
-  "event DeploymentRetired(bytes32 indexed deploymentId,bytes32 reasonHash,string reasonURI)",
-]);
-
 export const INDEXER_EVENT_ABIS = {
   UVPStateMachine: stateMachineAbi,
   UVPIdentityRegistry: identityRegistryAbi,
-  UVPDeploymentRegistry: deploymentRegistryAbi,
   UVPStagePatchModule: stagePatchModuleAbi,
   UVPFileResourceModule: fileResourceModuleAbi,
   UVPDerivedSignalModule: derivedSignalModuleAbi,
@@ -75,7 +65,6 @@ const logReadRetryBaseDelayMs = 250;
 type IndexedContractName =
   | "UVPStateMachine"
   | "UVPIdentityRegistry"
-  | "UVPDeploymentRegistry"
   | "UVPStagePatchModule"
   | "UVPFileResourceModule"
   | "UVPDerivedSignalModule"
@@ -294,11 +283,6 @@ function indexedContracts(
       "UVPIdentityRegistry",
       config.network.contracts,
       identityRegistryAbi,
-    ),
-    indexedContract(
-      "UVPDeploymentRegistry",
-      config.network.contracts,
-      deploymentRegistryAbi,
     ),
     indexedContract(
       "UVPStagePatchModule",

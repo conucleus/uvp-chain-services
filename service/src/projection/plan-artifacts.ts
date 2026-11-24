@@ -7,7 +7,6 @@ import {
   type OnchainHookPlanArtifact
 } from "@uvp-eth/compiler";
 import type { PlanCapabilityTablesInput } from "../indexer/projections/plan.js";
-import type { SemanticOraclePlan } from "../indexer/semantic-oracle.js";
 import { normalizeBytes32, type Hex } from "@uvp-eth/service-runtime";
 import type { PostgresDatabase } from "../storage/postgres-client.js";
 import { rowObject, stringColumn } from "@uvp-eth/service-runtime";
@@ -106,7 +105,6 @@ export class PostgresPlanArtifactStore implements PlanArtifactStore {
 
 export interface PlanArtifactResolvers {
   readonly resolvePlanCapabilityTables: (planId: Hex, planHash: Hex) => Promise<PlanCapabilityTablesInput>;
-  readonly resolveSemanticOraclePlan: (planId: Hex, planHash: Hex) => Promise<SemanticOraclePlan>;
 }
 
 export function createPlanArtifactResolvers(options: {
@@ -143,35 +141,7 @@ export function createPlanArtifactResolvers(options: {
         supplierBindings,
         ...(dynamicSupplierStages.length > 0 ? { dynamicSupplierStages } : {})
       };
-    },
-    async resolveSemanticOraclePlan(planId, planHash) {
-      const record = await require(planId, planHash);
-      return semanticOraclePlanOf(record);
     }
-  };
-}
-
-function semanticOraclePlanOf(record: PlanArtifactRecord): SemanticOraclePlan {
-  const artifact = record.artifact;
-  return {
-    planId: record.planId,
-    zhixuId: artifact.zhixuId,
-    compiledHooks: artifact.compiledHooks.map((hook) => ({
-      hookId: hook.hookId,
-      stageId: hook.stageId,
-      stageIdentifier: hook.stageIdentifier,
-      hookName: hook.hookName,
-      orderTriggerKind: hook.orderTriggerKind,
-      emitReady: hook.emitReady,
-      instructions: hook.instructions as unknown as readonly Record<string, unknown>[]
-    })),
-    dependencyIndex: artifact.dependencyIndex,
-    admissions: artifact.admissions.map((admission) => ({
-      admissionId: admission.admissionId,
-      stageIdentifier: admission.stageIdentifier,
-      signalName: admission.signalName,
-      instructions: admission.instructions as unknown as readonly Record<string, unknown>[]
-    }))
   };
 }
 

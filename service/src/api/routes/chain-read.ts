@@ -127,7 +127,11 @@ async function handleRead(
           ...syncBase,
           projectionDiagnostics: {
             ...projectionDiagnostics,
-            unresolvedStageActivationEventCount: 0
+            unresolvedStageActivationEventCount: 0,
+            semanticOracleMismatchCount: 0,
+            semanticOracleCheckedPlanCount: 0,
+            semanticOracleErrorCount: 0,
+            semanticOracleExcludedPlanCount: 0
           }
         }
       : syncBase;

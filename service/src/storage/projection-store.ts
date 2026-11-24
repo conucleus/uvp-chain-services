@@ -51,32 +51,18 @@ export interface ProjectionSyncDiagnosticsCounts {
   readonly capabilityEnrichmentMismatchCount: number;
   readonly dockEnrichmentMismatchCount: number;
   readonly unknownEventCount: number;
-  readonly semanticOracleMismatchCount: number;
-  readonly semanticOracleCheckedPlanCount: number;
-  readonly semanticOracleErrorCount: number;
-  readonly semanticOracleExcludedPlanCount: number;
 }
 
 export function projectionDiagnosticsFromSnapshots(
   orderSnapshot: ProjectionSnapshot,
-  identitySnapshot: Pick<IdentityProjectionSnapshot, "unresolvedRevokeEventCount">,
-  semanticOracle?: {
-    readonly semanticOracleCheckedPlanCount: number;
-    readonly semanticOracleMismatchCount: number;
-    readonly semanticOracleErrorCount: number;
-    readonly semanticOracleExcludedPlanCount: number;
-  }
+  identitySnapshot: Pick<IdentityProjectionSnapshot, "unresolvedRevokeEventCount">
 ): ProjectionSyncDiagnosticsCounts {
   return {
     unresolvedModuleOrderEventCount: orderSnapshot.unresolvedModuleOrderEventCount ?? 0,
     unresolvedIdentityRevokeEventCount: identitySnapshot.unresolvedRevokeEventCount ?? 0,
     capabilityEnrichmentMismatchCount: orderSnapshot.capabilityEnrichmentMismatchCount ?? 0,
     dockEnrichmentMismatchCount: orderSnapshot.dockEnrichmentMismatchCount ?? 0,
-    unknownEventCount: orderSnapshot.unknownEventCount ?? 0,
-    semanticOracleMismatchCount: semanticOracle?.semanticOracleMismatchCount ?? 0,
-    semanticOracleCheckedPlanCount: semanticOracle?.semanticOracleCheckedPlanCount ?? 0,
-    semanticOracleErrorCount: semanticOracle?.semanticOracleErrorCount ?? 0,
-    semanticOracleExcludedPlanCount: semanticOracle?.semanticOracleExcludedPlanCount ?? 0
+    unknownEventCount: orderSnapshot.unknownEventCount ?? 0
   };
 }
 
@@ -90,9 +76,7 @@ export function hasProjectionDiagnosticsAnomalies(
     counts.unresolvedIdentityRevokeEventCount > 0 ||
     counts.capabilityEnrichmentMismatchCount > 0 ||
     counts.dockEnrichmentMismatchCount > 0 ||
-    counts.unknownEventCount > 0 ||
-    counts.semanticOracleMismatchCount > 0 ||
-    counts.semanticOracleErrorCount > 0;
+    counts.unknownEventCount > 0;
 }
 
 export interface ProjectionSyncState extends ProjectionScope {

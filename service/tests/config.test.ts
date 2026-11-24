@@ -110,10 +110,6 @@ describe("chain-services config", () => {
         }
       ],
       contracts: {
-        UVPDeploymentRegistry: {
-          address: "0x3333333333333333333333333333333333333333",
-          deployment: { blockNumber: 19 }
-        },
         UVPStateMachine: {
           address: stateMachine,
           deployment: { blockNumber: 20 }
@@ -129,7 +125,6 @@ describe("chain-services config", () => {
 
     expect(config.network.activeDeploymentId).toBe(deploymentId);
     expect(config.network.deploymentBlock).toBe(18n);
-    expect(config.network.contracts.UVPDeploymentRegistry).toBe("0x3333333333333333333333333333333333333333");
     expect(config.network.stateMachineDeployments).toEqual([
       {
         deploymentId,

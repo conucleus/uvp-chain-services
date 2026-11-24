@@ -87,12 +87,6 @@ describe("plan artifact projection seam", () => {
       }))
     );
     expect(tables.dynamicSupplierStages ?? []).toEqual([]);
-
-    const oraclePlan = await resolvers.resolveSemanticOraclePlan(planId, planHash);
-    expect(oraclePlan.zhixuId).toBe(artifact.zhixuId);
-    expect(oraclePlan.compiledHooks.map((hook) => hook.hookId)).toEqual(
-      artifact.compiledHooks.map((hook) => hook.hookId)
-    );
   });
 
   it("fails closed when the plan artifact is missing and refuses to record a foreign plan hash", async () => {
@@ -100,8 +94,6 @@ describe("plan artifact projection seam", () => {
     const unknownPlanHash = `0x${"ee".repeat(32)}` as Hex;
 
     await expect(resolvers.resolvePlanCapabilityTables(planId, unknownPlanHash))
-      .rejects.toBeInstanceOf(PlanArtifactMissingError);
-    await expect(resolvers.resolveSemanticOraclePlan(planId, unknownPlanHash))
       .rejects.toBeInstanceOf(PlanArtifactMissingError);
     await expect(stores.planArtifactStore.put({
       chainId,
