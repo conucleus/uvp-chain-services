@@ -81,13 +81,45 @@ function normalizeProofArg(value: unknown): string | number | boolean | null {
   if (typeof value === "string") {
     return value;
   }
-  if (typeof value === "number" || typeof value === "boolean" || value === null) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "boolean" || value === null || value === undefined) {
+    return value ?? null;
+  }
+  return JSON.stringify(jsonProofValue(value, new WeakSet()));
+}
+
+function jsonProofValue(
+  value: unknown,
+  seen: WeakSet<object>
+): string | number | boolean | null | readonly unknown[] | Record<string, unknown> {
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (typeof value === "string" || typeof value === "boolean") {
     return value;
   }
-  if (value === undefined) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (value === null || value === undefined) {
     return null;
   }
-  return JSON.stringify(value);
+  if (typeof value === "object") {
+    if (seen.has(value)) {
+      return "[circular]";
+    }
+    seen.add(value);
+    const normalized: readonly unknown[] | Record<string, unknown> = Array.isArray(value)
+      ? value.map((entry) => jsonProofValue(entry, seen))
+      : Object.fromEntries(
+        Object.entries(value).map(([key, entry]) => [key, jsonProofValue(entry, seen)])
+      );
+    seen.delete(value);
+    return normalized;
+  }
+  return String(value);
 }
 
 export function timelineOf(

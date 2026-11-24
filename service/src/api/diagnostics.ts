@@ -1,5 +1,6 @@
 import type { ChainServicesRuntimeEnv, ConfigDiagnostics } from "../config/index.js";
-import { redactErrorMessage, redactSecrets } from "@uvp-eth/service-runtime";
+import { redactSecrets } from "@uvp-eth/service-runtime";
+import { redactEndpointErrorMessage } from "../shared/redaction.js";
 import {
   hasProjectionDiagnosticsAnomalies,
   type ProjectionRebuildMetadata,
@@ -7,6 +8,11 @@ import {
   type ProjectionSyncDiagnosticsCounts,
   type ProjectionSyncState
 } from "../storage/projection-store.js";
+import {
+  indexerStaleAfterMs,
+  readProjectionState,
+  type ProjectionReadState
+} from "../storage/sync-state.js";
 
 type HealthStatus = "ok" | "degraded";
 type ReadinessStatus = "ready" | "not_ready";
@@ -34,8 +40,12 @@ export interface OperationalReadiness {
 export async function buildOperationalDiagnostics(
   options: BuildOperationalDiagnosticsOptions
 ): Promise<Record<string, unknown>> {
-  const generatedAt = (options.now ?? (() => new Date()))().toISOString();
-  const syncStateResult = await readSyncState(options.store);
+  const now = (options.now ?? (() => new Date()))();
+  const generatedAt = now.toISOString();
+  const syncStateResult = await readSyncState(options.store, {
+    now,
+    staleAfterMs: indexerStaleAfterMs(options.indexer)
+  });
   const runtimeEnvironment = options.configDiagnostics?.environment ?? options.runtimeEnvironment;
   const indexer = buildIndexerDiagnostics(syncStateResult, options.indexer);
 
@@ -116,7 +126,8 @@ export function buildOperatorOpsSummary(diagnostics: Record<string, unknown>): R
     health: status.health ?? {},
     readiness: status.readiness ?? {},
     sync: {
-      indexerStatus: indexer?.syncStatus ?? "unknown",
+      indexerStatus: indexer?.syncStatus ?? "not_started",
+      projectionStatus: indexer?.projectionStatus ?? "not_started",
       finalizedBlock: indexer?.finalizedBlock ?? null,
       latestIndexedBlock: indexer?.latestIndexedBlock ?? null,
       lagBlocks: indexer?.lagBlocks ?? null,
@@ -126,20 +137,23 @@ export function buildOperatorOpsSummary(diagnostics: Record<string, unknown>): R
   });
 }
 
-async function readSyncState(store: ProjectionStore): Promise<
-  | { readonly ok: true; readonly state: ProjectionSyncState | undefined }
+async function readSyncState(
+  store: ProjectionStore,
+  options: { readonly now: Date; readonly staleAfterMs?: number | undefined }
+): Promise<
+  | { readonly ok: true; readonly state: ProjectionReadState | undefined }
   | { readonly ok: false; readonly error: string }
 > {
   try {
-    return { ok: true, state: await store.getSyncState() };
+    return { ok: true, state: await readProjectionState(store, options) };
   } catch (error) {
-    return { ok: false, error: redactErrorMessage(error) };
+    return { ok: false, error: redactEndpointErrorMessage(error) };
   }
 }
 
 function buildIndexerDiagnostics(
   syncStateResult:
-    | { readonly ok: true; readonly state: ProjectionSyncState | undefined }
+    | { readonly ok: true; readonly state: ProjectionReadState | undefined }
     | { readonly ok: false; readonly error: string },
   runtime: IndexerRuntimeDiagnostics | undefined
 ): Record<string, unknown> {
@@ -148,6 +162,7 @@ function buildIndexerDiagnostics(
       configured: runtime?.configured ?? false,
       pollIntervalMs: runtime?.pollIntervalMs ?? null,
       syncStatus: "degraded",
+      projectionStatus: "degraded",
       latestIndexedBlock: null,
       finalizedBlock: null,
       lagBlocks: null,
@@ -156,11 +171,14 @@ function buildIndexerDiagnostics(
     };
   }
 
-  const state = syncStateResult.state;
+  const readState = syncStateResult.state;
+  const state = readState?.readable;
   return {
     configured: runtime?.configured ?? false,
     pollIntervalMs: runtime?.pollIntervalMs ?? null,
     syncStatus: state?.syncStatus ?? "not_started",
+    projectionStatus: readState?.status ?? "not_started",
+    storedSyncStatus: readState?.stored.syncStatus ?? "not_started",
     latestIndexedBlock: bigintToString(state?.latestIndexedBlock),
     finalizedBlock: bigintToString(state?.finalizedBlock),
     lagBlocks: lagBlocks(state),
@@ -170,7 +188,7 @@ function buildIndexerDiagnostics(
     updatedAt: state?.updatedAt ?? null,
     rebuild: formatRebuild(state?.rebuild),
     projectionDiagnostics: state?.projectionDiagnostics ?? null,
-    ...(state?.degradedReason ? { degradedReason: redactErrorMessage(state.degradedReason) } : {})
+    ...(state?.degradedReason ? { degradedReason: state.degradedReason } : {})
   };
 }
 
@@ -211,13 +229,33 @@ function operationalDegradedReasons(diagnostics: Record<string, unknown>): reado
 function operationalNotReadyReasons(diagnostics: Record<string, unknown>): readonly string[] {
   const reasons: string[] = [];
   const preflight = (diagnostics.preflight ?? {}) as { readonly status?: string };
-  const indexer = (diagnostics.indexer ?? {}) as { readonly syncStatus?: string };
+  const indexer = (diagnostics.indexer ?? {}) as {
+    readonly syncStatus?: string;
+    readonly projectionStatus?: string;
+  };
 
   if (preflight.status === "failed") {
     reasons.push("preflight_failed");
   }
-  if (indexer.syncStatus === "degraded") {
-    reasons.push("indexer_degraded");
+  switch (indexer.projectionStatus ?? indexer.syncStatus ?? "not_started") {
+    case "current":
+    case "indexed":
+      break;
+    case "degraded":
+      reasons.push("indexer_degraded");
+      break;
+    case "rebuilding":
+      reasons.push("indexer_rebuilding");
+      break;
+    case "syncing":
+      reasons.push("indexer_syncing");
+      break;
+    case "stale":
+      reasons.push("indexer_stale");
+      break;
+    default:
+      reasons.push("indexer_not_started");
+      break;
   }
   return reasons;
 }

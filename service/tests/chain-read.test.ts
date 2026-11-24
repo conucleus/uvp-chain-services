@@ -20,6 +20,7 @@ import type {
   ProjectionSyncState,
 } from "../src/storage/projection-store.js";
 import { StorageUnavailableError } from "../src/storage/errors.js";
+import { DockBindingWindowUnavailableError } from "../src/api/dock-binding-windows.js";
 
 const CHAIN_ID = 31337;
 const STATE_MACHINE = "0x1111111111111111111111111111111111111111" as const;
@@ -231,17 +232,54 @@ function projectionSnapshot(): ProjectionSnapshot {
   };
 }
 
-function contextWithStore(
-  store: Pick<
-    ProjectionStore,
-    | "listStateMachineOrders"
-    | "findStateMachineOrdersByOrderId"
-    | "listStateMachineTasks"
-    | "getStateMachineTask"
-    | "getSyncState"
-  >,
-): ApiRouteContext {
-  return { store } as unknown as ApiRouteContext;
+const READ_NOW = new Date("2026-10-27T00:01:00.000Z");
+
+const INDEXED_SYNC_STATE: ProjectionSyncState = {
+  chainId: CHAIN_ID,
+  contractAddress: STATE_MACHINE,
+  syncStatus: "indexed",
+  latestIndexedBlock: 42n,
+  finalizedBlock: 42n,
+  confirmationDepth: 2,
+  eventCount: 7,
+  rebuild: {
+    status: "completed",
+    fromBlock: 0n,
+    toBlock: 42n,
+    eventCount: 7,
+    projectionRebuilt: true,
+  },
+  updatedAt: READ_NOW.toISOString(),
+};
+
+type ReadStore = Pick<
+  ProjectionStore,
+  | "listStateMachineOrders"
+  | "findStateMachineOrdersByOrderId"
+  | "listStateMachineTasks"
+  | "getStateMachineTask"
+  | "getSyncState"
+  | "hasProjectionSnapshot"
+> & {
+  getOrderSnapshot?: ProjectionStore["getOrderSnapshot"];
+  getCursor?: ProjectionStore["getCursor"];
+};
+
+function contextWithStore(store: ReadStore): ApiRouteContext {
+  return { store, now: () => READ_NOW } as unknown as ApiRouteContext;
+}
+
+function currentStore(overrides: Partial<ReadStore> = {}): ReadStore {
+  return {
+    listStateMachineOrders: async () => [],
+    findStateMachineOrdersByOrderId: async () => [],
+    listStateMachineTasks: async () => [],
+    getStateMachineTask: async () => undefined,
+    getSyncState: async () => INDEXED_SYNC_STATE,
+    hasProjectionSnapshot: async () => true,
+    getCursor: async () => ({ nextBlock: 43n, finalizedBlock: 42n }),
+    ...overrides,
+  } as ReadStore;
 }
 
 async function get(
@@ -258,13 +296,9 @@ async function get(
 
 describe("generic chain read routes", () => {
   it("passes order projection fields through and serializes block numbers as decimal strings", async () => {
-    const context = contextWithStore({
+    const context = contextWithStore(currentStore({
       listStateMachineOrders: async () => [order()],
-      findStateMachineOrdersByOrderId: async () => [],
-      listStateMachineTasks: async () => [],
-      getStateMachineTask: async () => undefined,
-      getSyncState: async () => undefined,
-    });
+    }));
 
     const response = await get(context, "/chain/orders");
 
@@ -323,14 +357,8 @@ describe("generic chain read routes", () => {
     });
   });
 
-  it("returns 404 for unknown order and task ids", async () => {
-    const context = contextWithStore({
-      listStateMachineOrders: async () => [],
-      findStateMachineOrdersByOrderId: async () => [],
-      listStateMachineTasks: async () => [],
-      getStateMachineTask: async () => undefined,
-      getSyncState: async () => undefined,
-    });
+  it("returns 404 for unknown order and task ids when the current projection proves the absence", async () => {
+    const context = contextWithStore(currentStore());
 
     await expect(get(context, `/chain/orders/${ORDER_ID}`)).resolves.toEqual({
       status: 404,
@@ -347,27 +375,17 @@ describe("generic chain read routes", () => {
   });
 
   it("maps malformed path parameters to 400 and storage outages to 503", async () => {
-    const healthy = contextWithStore({
-      listStateMachineOrders: async () => [],
-      findStateMachineOrdersByOrderId: async () => [],
-      listStateMachineTasks: async () => [],
-      getStateMachineTask: async () => undefined,
-      getSyncState: async () => undefined,
-    });
+    const healthy = contextWithStore(currentStore());
     await expect(get(healthy, "/chain/orders/%ZZ")).resolves.toMatchObject({
       status: 400,
       body: { error: "invalid_path_parameter" },
     });
 
-    const unavailable = contextWithStore({
+    const unavailable = contextWithStore(currentStore({
       listStateMachineOrders: async () => {
         throw new StorageUnavailableError("projection store is unavailable");
       },
-      findStateMachineOrdersByOrderId: async () => [],
-      listStateMachineTasks: async () => [],
-      getStateMachineTask: async () => undefined,
-      getSyncState: async () => undefined,
-    });
+    }));
     await expect(get(unavailable, "/chain/orders")).resolves.toMatchObject({
       status: 503,
       body: { error: "chain_read_unavailable", retryable: true },
@@ -375,16 +393,12 @@ describe("generic chain read routes", () => {
   });
 
   it("returns every plan projection for an order id that exists on multiple plans", async () => {
-    const context = contextWithStore({
-      listStateMachineOrders: async () => [],
+    const context = contextWithStore(currentStore({
       findStateMachineOrdersByOrderId: async () => [
         order({ planId: PLAN_A }),
         order({ planId: PLAN_B }),
       ],
-      listStateMachineTasks: async () => [],
-      getStateMachineTask: async () => undefined,
-      getSyncState: async () => undefined,
-    });
+    }));
 
     const response = await get(context, `/chain/orders/${ORDER_ID}`);
 
@@ -401,14 +415,12 @@ describe("generic chain read routes", () => {
       orderId: `0x${"9".repeat(64)}`,
       hookId: HOOK_B,
     });
-    const context = contextWithStore({
-      listStateMachineOrders: async () => [],
+    const context = contextWithStore(currentStore({
       findStateMachineOrdersByOrderId: async () => [order()],
       listStateMachineTasks: async () => [taskA, taskB],
       getStateMachineTask: async (taskId) =>
         taskId === taskA.taskId ? taskA : undefined,
-      getSyncState: async () => undefined,
-    });
+    }));
 
     const orderTasks = await get(context, `/chain/orders/${ORDER_ID}/tasks`);
     expect(orderTasks.status).toBe(200);
@@ -419,7 +431,7 @@ describe("generic chain read routes", () => {
     expect(singleTask.body).toEqual({ task: taskJson(taskA) });
   });
 
-  it("passes the projection sync state through and 404s when it is absent", async () => {
+  it("passes the projection sync state through and reports an unbuilt projection as retryable 503", async () => {
     const syncState: ProjectionSyncState = {
       chainId: CHAIN_ID,
       contractAddress: STATE_MACHINE,
@@ -439,13 +451,9 @@ describe("generic chain read routes", () => {
       degradedReason: "rpc lag",
       updatedAt: "2026-10-27T00:00:00.000Z",
     };
-    const present = contextWithStore({
-      listStateMachineOrders: async () => [],
-      findStateMachineOrdersByOrderId: async () => [],
-      listStateMachineTasks: async () => [],
-      getStateMachineTask: async () => undefined,
+    const present = contextWithStore(currentStore({
       getSyncState: async () => syncState,
-    });
+    }));
     await expect(get(present, "/chain/sync-state")).resolves.toEqual({
       status: 200,
       body: {
@@ -458,16 +466,17 @@ describe("generic chain read routes", () => {
       },
     });
 
-    const absent = contextWithStore({
-      listStateMachineOrders: async () => [],
-      findStateMachineOrdersByOrderId: async () => [],
-      listStateMachineTasks: async () => [],
-      getStateMachineTask: async () => undefined,
+    const absent = contextWithStore(currentStore({
       getSyncState: async () => undefined,
-    });
-    await expect(get(absent, "/chain/sync-state")).resolves.toEqual({
-      status: 404,
-      body: { error: "chain_sync_state_not_found" },
+      hasProjectionSnapshot: async () => false,
+    }));
+    await expect(get(absent, "/chain/sync-state")).resolves.toMatchObject({
+      status: 503,
+      body: {
+        error: "chain_projection_unavailable",
+        retryable: true,
+        syncStatus: "not_started",
+      },
     });
   });
 
@@ -516,31 +525,14 @@ describe("generic chain read routes", () => {
     });
   });
 
-  it("serves the whole projection snapshot with recursive bigint serialization in a single store read", async () => {
+  it("serves the whole projection snapshot from one snapshot read with recursive bigint serialization", async () => {
     let snapshotReads = 0;
-    const context = {
-      store: {
-        getOrderSnapshot: async () => {
-          snapshotReads += 1;
-          return projectionSnapshot();
-        },
-        listStateMachineOrders: async () => {
-          throw new Error("snapshot read must not list orders");
-        },
-        findStateMachineOrdersByOrderId: async () => {
-          throw new Error("snapshot read must not look up a single order");
-        },
-        listStateMachineTasks: async () => {
-          throw new Error("snapshot read must not list tasks");
-        },
-        getStateMachineTask: async () => {
-          throw new Error("snapshot read must not look up a single task");
-        },
-        getSyncState: async () => {
-          throw new Error("snapshot read must not read the sync state");
-        },
+    const context = contextWithStore(currentStore({
+      getOrderSnapshot: async () => {
+        snapshotReads += 1;
+        return projectionSnapshot();
       },
-    } as unknown as ApiRouteContext;
+    }));
 
     const response = await get(context, "/chain/snapshot");
 
@@ -587,6 +579,137 @@ describe("generic chain read routes", () => {
     expect(snapshot["lastEvent"]).toMatchObject({ blockNumber: "15" });
     expect(findBigints(response.body)).toEqual([]);
   });
+
+  it("marks absence unknown while the projection is rebuilding, stale, or never built", async () => {
+    const rebuilding: ProjectionSyncState = {
+      ...INDEXED_SYNC_STATE,
+      syncStatus: "rebuilding",
+      rebuild: { status: "running", fromBlock: 0n, toBlock: 42n },
+    };
+    const rebuildingContext = contextWithStore(currentStore({
+      getSyncState: async () => rebuilding,
+    }));
+    for (const pathname of [
+      `/chain/orders/${ORDER_ID}`,
+      `/chain/orders/${ORDER_ID}/tasks`,
+      `/chain/tasks/${HOOK_A}`,
+    ]) {
+      await expect(get(rebuildingContext, pathname)).resolves.toMatchObject({
+        status: 503,
+        body: {
+          error: "chain_projection_stale",
+          retryable: true,
+          syncStatus: "rebuilding",
+        },
+      });
+    }
+    await expect(get(rebuildingContext, "/chain/snapshot")).resolves.toMatchObject({
+      status: 503,
+      body: { error: "chain_projection_stale", syncStatus: "rebuilding" },
+    });
+
+    const staleContext = {
+      ...contextWithStore(currentStore({
+        getSyncState: async () => ({
+          ...INDEXED_SYNC_STATE,
+          updatedAt: "2026-10-27T00:00:00.000Z",
+        }),
+      })),
+      indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 },
+    } as unknown as ApiRouteContext;
+    await expect(get(staleContext, `/chain/orders/${ORDER_ID}`)).resolves.toMatchObject({
+      status: 503,
+      body: { error: "chain_projection_stale", syncStatus: "stale" },
+    });
+
+    const neverBuilt = contextWithStore(currentStore({
+      getSyncState: async () => undefined,
+      hasProjectionSnapshot: async () => false,
+    }));
+    for (const pathname of [
+      "/chain/orders",
+      "/chain/tasks",
+      "/chain/snapshot",
+      `/chain/orders/${ORDER_ID}`,
+    ]) {
+      await expect(get(neverBuilt, pathname)).resolves.toMatchObject({
+        status: 503,
+        body: {
+          error: "chain_projection_unavailable",
+          retryable: true,
+          syncStatus: "not_started",
+        },
+      });
+    }
+
+    const snapshotMissing = contextWithStore(currentStore({
+      hasProjectionSnapshot: async () => false,
+    }));
+    for (const pathname of ["/chain/snapshot", `/chain/orders/${ORDER_ID}`]) {
+      await expect(get(snapshotMissing, pathname)).resolves.toMatchObject({
+        status: 503,
+        body: {
+          error: "chain_projection_unavailable",
+          retryable: true,
+          syncStatus: "current",
+        },
+      });
+    }
+  });
+
+  it("serves a valid empty projection as 200 only when the snapshot was materialized", async () => {
+    const context = contextWithStore(currentStore());
+
+    await expect(get(context, "/chain/orders")).resolves.toEqual({
+      status: 200,
+      body: { orders: [] },
+    });
+    await expect(get(context, "/chain/tasks")).resolves.toEqual({
+      status: 200,
+      body: { tasks: [] },
+    });
+  });
+
+  it("redacts endpoint credentials from the sync-state and dock window 503 bodies", async () => {
+    const degraded = contextWithStore(currentStore({
+      getSyncState: async () => ({
+        ...INDEXED_SYNC_STATE,
+        syncStatus: "degraded",
+        degradedReason:
+          "RPC failed at https://base-mainnet.g.alchemy.com/v2/secret-rpc-key and https://user:pass@rpc.example/v3/other-key",
+      }),
+    }));
+    const syncStateResponse = await get(degraded, "/chain/sync-state");
+    expect(syncStateResponse.status).toBe(200);
+    const serializedSyncState = JSON.stringify(syncStateResponse.body);
+    expect(serializedSyncState).not.toContain("secret-rpc-key");
+    expect(serializedSyncState).not.toContain("other-key");
+    expect(serializedSyncState).not.toContain("user:pass");
+    expect(serializedSyncState).toContain("[redacted:url]");
+
+    const dockContext = {
+      ...contextWithStore(currentStore({
+        getOrderSnapshot: async () => dockBindingSnapshot(),
+      })),
+      dockBindingWindows: {
+        async readWindow() {
+          throw new DockBindingWindowUnavailableError(
+            "dock binding window view failed: HTTP request failed. URL: https://base-mainnet.g.alchemy.com/v2/secret-rpc-key",
+          );
+        },
+      },
+    } as unknown as ApiRouteContext;
+    const dockResponse = await get(dockContext, "/chain/snapshot");
+    expect(dockResponse.status).toBe(503);
+    expect(dockResponse.body).toMatchObject({
+      error: "chain_read_unavailable",
+      retryable: true,
+    });
+    const serializedDockBody = JSON.stringify(dockResponse.body);
+    expect(serializedDockBody).not.toContain("secret-rpc-key");
+    expect(serializedDockBody).toContain("[redacted:url]");
+  });
+
 });
 
 function taskJson(task: StateMachineTaskProjection): Record<string, unknown> {
@@ -652,4 +775,60 @@ function findBigints(value: unknown): bigint[] {
     return Object.values(value).flatMap((entry) => findBigints(entry));
   }
   return [];
+}
+
+const DOCK_BINDING_ID = `0x${"d".repeat(64)}` as const;
+const DOCK_FROM_ORDER_ID = `0x${"e".repeat(64)}` as const;
+
+function dockBindingSnapshot(): ProjectionSnapshot {
+  const snapshot = projectionSnapshot();
+  return {
+    ...snapshot,
+    stateMachineDockBindings: {
+      [DOCK_BINDING_ID]: {
+        bindingId: DOCK_BINDING_ID,
+        dkid: `zd-${"a".repeat(32)}`,
+        planId: PLAN_A,
+        orderId: ORDER_ID,
+        targetStageId: STAGE_ID,
+        fromZhixuId: `zx-${"b".repeat(32)}`,
+        fromSource: "buyer",
+        fromOrderId: DOCK_FROM_ORDER_ID,
+        toZhixuId: `zx-${"c".repeat(32)}`,
+        toStageIdentifier: "intake",
+        pokedAt: provenance(15n),
+        outputs: [
+          {
+            signal: "picked",
+            signalId: SIGNAL_ID,
+            outputIndex: 0,
+            emitted: false,
+          },
+        ],
+        proof: proof(15n, {}),
+      },
+    },
+    stateMachineOrders: {
+      [ORDER_ID]: {
+        ...snapshot.stateMachineOrders[ORDER_ID]!,
+        stageFiles: {
+          [STAGE_ID]: {
+            planId: PLAN_A,
+            orderId: ORDER_ID,
+            targetStageId: STAGE_ID,
+            files: {
+              dock_link: {
+                key: "dock_link",
+                payload: `0x${"9".repeat(64)}`,
+                updatedAt: provenance(14n),
+                proof: proof(14n, {}),
+              },
+            },
+            updatedAt: provenance(14n),
+            proof: proof(14n, {}),
+          },
+        },
+      },
+    },
+  };
 }

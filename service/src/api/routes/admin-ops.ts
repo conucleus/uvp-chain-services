@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { adminPrincipalFromHeaders } from "../../security/admin-auth.js";
 import type { AuditSink } from "../../security/audit.js";
-import { redactErrorMessage, redactSecrets } from "@uvp-eth/service-runtime";
+import { redactSecrets } from "@uvp-eth/service-runtime";
+import { redactEndpointErrorMessage } from "../../shared/redaction.js";
 import {
   buildOperatorOpsStatus,
   buildOperatorOpsSummary
@@ -67,11 +68,12 @@ async function handleAdminOpsRequest(
 
   if (request.method === "GET" && request.pathname === "/admin/ops/status") {
     const diagnostics = await context.buildDiagnostics();
+    const status = buildOperatorOpsStatus(diagnostics);
     return {
       status: 200,
       body: {
-        ok: true,
-        ...buildOperatorOpsStatus(diagnostics)
+        ok: healthIsOk(diagnostics),
+        ...status
       }
     };
   }
@@ -82,7 +84,7 @@ async function handleAdminOpsRequest(
     return {
       status: 200,
       body: {
-        ok: true,
+        ok: healthIsOk(diagnostics),
         filename: `uvp-ops-diagnostics-${summaryTimestamp(context.now())}.json`,
         mimeType: "application/json",
         summary
@@ -213,7 +215,7 @@ async function runAdminOpsAction(
       })
     };
   } catch (error) {
-    await recordAudit("failed", "ops_action_failed", redactErrorMessage(error));
+    await recordAudit("failed", "ops_action_failed", redactEndpointErrorMessage(error));
     return {
       status: 500,
       body: redactSecrets({
@@ -224,7 +226,7 @@ async function runAdminOpsAction(
         ...(input.targetId ? { targetId: input.targetId } : {}),
         status: "failed",
         error: "ops_action_failed",
-        message: redactErrorMessage(error),
+        message: redactEndpointErrorMessage(error),
         sourceOfTruth: "contracts-and-chain-events"
       })
     };
@@ -267,6 +269,14 @@ function actionIdFor(action: AdminOpsActionName, requestId: string, targetId: st
     .digest("hex")
     .slice(0, 20);
   return `ops_${digest}`;
+}
+
+function healthIsOk(diagnostics: Record<string, unknown>): boolean {
+  const health = diagnostics.health;
+  if (!health || typeof health !== "object" || Array.isArray(health)) {
+    return false;
+  }
+  return (health as Record<string, unknown>).status === "ok";
 }
 
 function preflightStatus(diagnostics: Record<string, unknown>): string | undefined {

@@ -3,6 +3,7 @@
 import type { Address, Hex } from "@uvp-eth/service-runtime";
 import {
   compareProofEvents,
+  provenanceOf,
   type ProjectionProvenance,
   type StateMachineProofProjection
 } from "./proof.js";
@@ -127,7 +128,7 @@ export function markTaskSubmitted(
     return false;
   }
   task.status = "submitted";
-  task.updatedAt = proof;
+  task.updatedAt = provenanceOf(proof);
   task.proof = proof;
   return true;
 }
@@ -142,7 +143,7 @@ export function cancelTask(
     return;
   }
   task.status = "cancelled";
-  task.updatedAt = proof;
+  task.updatedAt = provenanceOf(proof);
   task.proof = proof;
 }
 

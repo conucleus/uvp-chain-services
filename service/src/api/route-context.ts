@@ -110,10 +110,16 @@ export function readApiHeader(headers: ApiRequest["headers"], name: string): str
     .find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
 }
 
+const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
 export function normalizeRequestId(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
-  if (!trimmed || !/^[A-Za-z0-9._:-]{1,128}$/.test(trimmed)) {
+  if (!trimmed || !CORRELATION_ID_PATTERN.test(trimmed)) {
     return undefined;
   }
   return trimmed;
+}
+
+export function normalizeRunId(value: string | undefined): string | undefined {
+  return normalizeRequestId(value);
 }

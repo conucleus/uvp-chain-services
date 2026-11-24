@@ -163,12 +163,16 @@ export interface StoredProjectionSnapshot<TSnapshot> extends ProjectionScope {
 export interface ProjectionStore {
   resetFromEvents(input: ProjectionRebuildInput): Promise<ProjectionSnapshot>;
   getOrderSnapshot(): Promise<ProjectionSnapshot>;
+  hasProjectionSnapshot(kind: ProjectionSnapshotKind): Promise<boolean>;
   saveSyncState(
     state: Omit<ProjectionSyncState, "updatedAt">,
   ): Promise<ProjectionSyncState>;
   getSyncState(
     scope?: Partial<ProjectionScope>,
   ): Promise<ProjectionSyncState | undefined>;
+  getCursor?(
+    scope: ProjectionScope,
+  ): Promise<StoredProjectionCursor | undefined>;
   listStateMachineOrders(): Promise<readonly StateMachineOrderProjection[]>;
   getStateMachineOrder(
     orderId: string,

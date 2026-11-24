@@ -474,12 +474,20 @@ function normalizeEventArg(value: unknown, abiType: string | undefined): unknown
   if (abiType === "string") {
     return value;
   }
-  if (typeof value === "string" && value.startsWith("0x")) {
-    return value.toLowerCase();
+  if (typeof value === "string") {
+    return value.startsWith("0x") ? value.toLowerCase() : value;
   }
   if (Array.isArray(value)) {
     const itemType = arrayItemType(abiType);
     return value.map((item) => normalizeEventArg(item, itemType));
+  }
+  if (value !== null && typeof value === "object" && !(value instanceof Date)) {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        normalizeEventArg(item, undefined),
+      ]),
+    );
   }
   return value;
 }

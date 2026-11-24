@@ -1,8 +1,12 @@
 // Chain identity projection read: `GET /identity/bindings` is the only
 // governance-adjacent endpoint kept on chain-services. It reads indexer
-// projections only (no reviews, descriptors, or tx signing).
+// projections only (no reviews, descriptors, or tx signing) and reports storage
+// unavailability or an unbuilt identity projection as a retryable 503 instead
+// of an empty list or an internal server error.
 import type { IdentityBindingQuery } from "../../indexer/identity-projections.js";
 import { ConfigError, normalizeAddress, normalizeBytes32 } from "@uvp-eth/service-runtime";
+import { StorageUnavailableError } from "../../storage/errors.js";
+import { requireMaterializedProjection } from "../projection-read.js";
 import { cleanQuery, type ApiRequest, type ApiResponse } from "../route-context.js";
 import type { RouteModule } from "../route-module.js";
 
@@ -20,12 +24,30 @@ export function createIdentityBindingsRouteModule(): RouteModule {
       if (!parsedQuery.ok) {
         return parsedQuery.response;
       }
-      return {
-        status: 200,
-        body: {
-          bindings: await context.store.listIdentityBindings(parsedQuery.query)
+      try {
+        const unavailable = await requireMaterializedProjection(context, "identity");
+        if (unavailable) {
+          return unavailable;
         }
-      };
+        return {
+          status: 200,
+          body: {
+            bindings: await context.store.listIdentityBindings(parsedQuery.query)
+          }
+        };
+      } catch (error) {
+        if (error instanceof StorageUnavailableError) {
+          return {
+            status: 503,
+            body: {
+              error: "identity_read_unavailable",
+              message: "the identity projection store is unavailable",
+              retryable: true
+            }
+          };
+        }
+        throw error;
+      }
     }
   };
 }

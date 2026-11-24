@@ -1,16 +1,67 @@
 // Projection sync-state read model: a stored "indexed" status is only current
-// while the indexer heartbeat and scan cursor actually cover the finalized bound;
-// otherwise readers are told the projection is stale instead of treating it as fresh.
+// while the indexer heartbeat and scan cursor actually cover the finalized
+// bound; readers are told the projection is stale, rebuilding, or never built
+// instead of treating it as fresh or as a valid empty projection.
 
-import type { ProjectionSyncState, StoredProjectionCursor } from "./projection-store.js";
+import { redactEndpointErrorMessage } from "../shared/redaction.js";
+import type {
+  ProjectionStore,
+  ProjectionSyncState,
+  StoredProjectionCursor,
+} from "./projection-store.js";
 
 export const DEFAULT_SYNC_STALE_AFTER_MS = 60_000;
 export const MIN_SYNC_STALE_AFTER_MS = 30_000;
+
+export type ProjectionReadStatus =
+  | "current"
+  | "not_started"
+  | "syncing"
+  | "rebuilding"
+  | "stale"
+  | "degraded";
+
+export interface ProjectionReadState {
+  readonly stored: ProjectionSyncState;
+  readonly readable: ProjectionSyncState;
+  readonly status: ProjectionReadStatus;
+}
 
 export interface ReadableSyncStateOptions {
   readonly now: Date;
   readonly staleAfterMs?: number | undefined;
   readonly cursor?: Pick<StoredProjectionCursor, "nextBlock" | "finalizedBlock"> | undefined;
+}
+
+export interface ReadProjectionStateOptions {
+  readonly now: Date;
+  readonly staleAfterMs?: number | undefined;
+}
+
+export async function readProjectionState(
+  store: ProjectionStore,
+  options: ReadProjectionStateOptions,
+): Promise<ProjectionReadState | undefined> {
+  const stored = await store.getSyncState();
+  if (!stored) {
+    return undefined;
+  }
+  const cursor = await store.getCursor?.({
+    chainId: stored.chainId,
+    contractAddress: stored.contractAddress,
+  });
+  const readable = readableSyncState(stored, {
+    now: options.now,
+    ...(options.staleAfterMs !== undefined ? { staleAfterMs: options.staleAfterMs } : {}),
+    ...(cursor !== undefined ? { cursor } : {}),
+  });
+  return {
+    stored,
+    readable: readable.degradedReason === undefined
+      ? readable
+      : { ...readable, degradedReason: redactEndpointErrorMessage(readable.degradedReason) },
+    status: projectionReadStatus(stored, readable),
+  };
 }
 
 export function readableSyncState(
@@ -37,6 +88,32 @@ export function syncStaleAfterMs(pollIntervalMs: number | undefined): number | u
     return undefined;
   }
   return Math.max(pollIntervalMs * 3, MIN_SYNC_STALE_AFTER_MS);
+}
+
+export function indexerStaleAfterMs(
+  indexer: { readonly configured: boolean; readonly pollIntervalMs?: number } | undefined,
+): number | undefined {
+  if (!indexer) {
+    return undefined;
+  }
+  return syncStaleAfterMs(indexer.pollIntervalMs) ??
+    (indexer.configured ? DEFAULT_SYNC_STALE_AFTER_MS : undefined);
+}
+
+function projectionReadStatus(
+  stored: ProjectionSyncState,
+  readable: ProjectionSyncState,
+): ProjectionReadStatus {
+  if (stored.syncStatus === "degraded") {
+    return "degraded";
+  }
+  if (stored.syncStatus === "rebuilding" || stored.rebuild?.status === "running") {
+    return "rebuilding";
+  }
+  if (stored.syncStatus === "syncing") {
+    return readable.syncStatus === "stale" ? "stale" : "syncing";
+  }
+  return readable.syncStatus === "indexed" ? "current" : "stale";
 }
 
 function isScanBehindFinalized(

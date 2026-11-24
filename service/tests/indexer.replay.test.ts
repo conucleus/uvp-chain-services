@@ -244,8 +244,18 @@ describe("indexer projection replay", () => {
       proof: expect.objectContaining({
         eventName: "SignalSubmitted",
         transactionHash: chainEvent(5n, 0, "SignalSubmitted", {}).transactionHash
-      })
+      }),
+      updatedAt: {
+        chainId: 31337,
+        contractAddress,
+        blockNumber: 5n,
+        transactionHash: chainEvent(5n, 0, "SignalSubmitted", {}).transactionHash,
+        logIndex: 0
+      }
     });
+    expect(task?.updatedAt).not.toHaveProperty("args");
+    expect(task?.updatedAt).not.toHaveProperty("eventName");
+    expect(task?.proof).not.toEqual(task?.updatedAt);
   });
 
   it("backfills submitted status when a matching signal is projected before HookReady creates the task", () => {
@@ -651,6 +661,13 @@ describe("indexer projection replay", () => {
     const taskKey = `${contractAddress}:${stateMachineOrderId}:${hookId}`;
     expect(order?.hooks[hookId]?.status).toBe("cancelled");
     expect(order?.tasks[taskKey]?.status).toBe("cancelled");
+    expect(order?.tasks[taskKey]?.updatedAt).toEqual({
+      chainId: 31337,
+      contractAddress,
+      blockNumber: 4n,
+      transactionHash: chainEvent(4n, 0, "HookStatusChanged", {}).transactionHash,
+      logIndex: 0
+    });
   });
 
   it("projects registry deployments and scopes identical order ids by state machine", async () => {
@@ -3129,6 +3146,220 @@ describe("indexer projection replay", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+  it("rebuilds a missing projection snapshot on a zero-new-events round instead of reporting it current", async () => {
+    const store = stores.projectionStore;
+    const planEvents: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 0n }),
+      chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId })
+    ];
+    const eventSource: ChainEventSource = {
+      async getFinalizedBlock() {
+        return 2n;
+      },
+      async readEvents(range) {
+        return planEvents.filter(
+          (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+        );
+      }
+    };
+    const indexer = new IndexerService({
+      config: testConfig(),
+      eventSource,
+      store
+    });
+
+    await indexer.rebuildFromDeploymentBlockWithSummary();
+    await cleanupDatabase.query("DELETE FROM chain_projection_snapshot WHERE chain_id = 31337");
+    await expect(store.hasProjectionSnapshot("order")).resolves.toBe(false);
+    eventSource.getFinalizedBlock = async () => 3n;
+    eventSource.readEvents = async () => [];
+
+    const result = await indexer.refreshFromCursorWithSummary();
+
+    await expect(store.hasProjectionSnapshot("order")).resolves.toBe(true);
+    expect(result.summary.syncStatus).toBe("indexed");
+    expect(result.snapshot.stateMachineOrders[
+      stateMachineScopedKey(31337, contractAddress, planId, stateMachineOrderId)
+    ]).toMatchObject({ orderId: stateMachineOrderId, planId });
+  });
+
+  it("treats DockOutputDeferred as a known dock event instead of an unknown event", () => {
+    const snapshot = rebuildOrderProjections([
+      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 0n }),
+      chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
+      chainEvent(3n, 0, "DockOutputDeferred", {
+        planId,
+        orderId: stateMachineOrderId,
+        bindingId: bytes32Hex("0b01"),
+        outputIndex: 0n,
+        signalId,
+        verdict: 1,
+        dueAt: 1_700_000_000n
+      })
+    ]);
+
+    expect(snapshot.unknownEventCount).toBe(0);
+    expect(snapshot.eventCount).toBe(3);
+  });
+
+  it("replays the canonical chain from the deployment block when a reorg hits a cursor with no stored live events", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-empty-history-reorg-"));
+    const store = new PostgresProjectionStore({
+      databaseUrl: projectionDatabaseUrl,
+      chainId: 31337
+    });
+    try {
+      await store.saveCursor({
+        chainId: 31337,
+        contractAddress: "0x0000000000000000000000000000000000000000",
+        deploymentBlock: 0n,
+        nextBlock: 3n,
+        finalizedBlock: 2n,
+        blockHash: blockHashHex("block-2-stale")
+      });
+      const forkedEvent = {
+        ...chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
+        blockHash: blockHashHex("block-2-fork")
+      };
+      const ranges: Array<{ readonly fromBlock: bigint; readonly toBlock: bigint }> = [];
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 2n;
+        },
+        async readEvents(range) {
+          ranges.push({ fromBlock: range.fromBlock, toBlock: range.toBlock });
+          return [forkedEvent].filter(
+            (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+          );
+        },
+        async getBlockHash(blockNumber) {
+          return blockNumber === 2n ? blockHashHex("block-2-fork") : zeroBlockHash();
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store
+      });
+
+      const result = await indexer.refreshFromCursorWithSummary();
+
+      expect(ranges).toEqual([{ fromBlock: 0n, toBlock: 2n }]);
+      expect(result.summary).toMatchObject({
+        fromBlock: "0",
+        toBlock: "2",
+        syncStatus: "indexed",
+        finalizedBlock: "2"
+      });
+      await expect(store.getStateMachineOrder(stateMachineOrderId, planId)).resolves.toMatchObject({
+        orderId: stateMachineOrderId,
+        planId
+      });
+      await expect(
+        store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" })
+      ).resolves.toMatchObject({
+        nextBlock: 3n,
+        finalizedBlock: 2n,
+        blockHash: blockHashHex("block-2-fork")
+      });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("pins the full-rebuild cursor hash before reading events so a reorg inside that window stays detectable", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "uvp-indexer-rebuild-toctou-"));
+    const store = new PostgresProjectionStore({
+      databaseUrl: projectionDatabaseUrl,
+      chainId: 31337
+    });
+    try {
+      const calls: string[] = [];
+      const eventSource: ChainEventSource = {
+        async getFinalizedBlock() {
+          return 3n;
+        },
+        async getBlockHash(blockNumber) {
+          calls.push(`hash:${blockNumber}`);
+          return blockHashHex("block-3-before-read");
+        },
+        async readEvents() {
+          calls.push("read");
+          return [{
+            ...chainEvent(3n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId }),
+            blockHash: blockHashHex("block-3-after-read")
+          }];
+        }
+      };
+      const indexer = new IndexerService({
+        config: testConfig(),
+        eventSource,
+        store
+      });
+
+      await indexer.rebuildFromDeploymentBlockWithSummary();
+
+      expect(calls).toEqual(["hash:3", "read"]);
+      await expect(
+        store.getCursor({ chainId: 31337, contractAddress: "0x0000000000000000000000000000000000000000" })
+      ).resolves.toMatchObject({
+        nextBlock: 4n,
+        finalizedBlock: 3n,
+        blockHash: blockHashHex("block-3-before-read")
+      });
+    } finally {
+      await store.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a degraded sync state degraded on a no-new-events round instead of laundering it into indexed", async () => {
+    const store = stores.projectionStore;
+    const planEvents: readonly ChainEvent[] = [
+      chainEvent(1n, 0, "PlanRegistered", { planId, planHash, hookCount: 0n }),
+      chainEvent(2n, 0, "OrderRegistered", { orderId: stateMachineOrderId, planId })
+    ];
+    const eventSource: ChainEventSource = {
+      async getFinalizedBlock() {
+        return 2n;
+      },
+      async readEvents(range) {
+        return planEvents.filter(
+          (event) => event.blockNumber >= range.fromBlock && event.blockNumber <= range.toBlock
+        );
+      }
+    };
+    const indexer = new IndexerService({
+      config: testConfig(),
+      eventSource,
+      store
+    });
+
+    await indexer.rebuildFromDeploymentBlockWithSummary();
+    await store.saveSyncState({
+      chainId: 31337,
+      contractAddress: "0x0000000000000000000000000000000000000000",
+      syncStatus: "degraded",
+      finalizedBlock: 2n,
+      confirmationDepth: 2,
+      eventCount: 2,
+      rebuild: { status: "failed", toBlock: 2n, mismatchCount: 0 },
+      degradedReason: "RPC failed at https://rpc.example/v2/secret-key"
+    });
+    eventSource.readEvents = async () => [];
+
+    const result = await indexer.refreshFromCursorWithSummary();
+
+    expect(result.summary.syncStatus).toBe("degraded");
+    const syncState = await store.getSyncState();
+    expect(syncState).toMatchObject({
+      syncStatus: "degraded"
+    });
+    expect(syncState?.degradedReason).toContain("RPC failed");
+    expect((await store.getOrderSnapshot()).rebuildable).toBe(true);
+  });
+
   it("resolves state-machine orders by the (planId, orderId) composite key and fails closed on bare-id ambiguity", async () => {
     const otherPlanId = bytes32Hex("8101");
     const store = stores.projectionStore;

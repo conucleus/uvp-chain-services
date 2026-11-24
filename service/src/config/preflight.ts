@@ -1,7 +1,7 @@
 import { createPublicClient, http, parseAbi, type Address as ViemAddress } from "viem";
 import { listContractJsonOverrides, type ChainServicesConfig } from "./env.js";
 import { ConfigError, normalizeAddress, type Address, type Hex } from "@uvp-eth/service-runtime";
-import { redactErrorMessage } from "@uvp-eth/service-runtime";
+import { redactEndpointErrorMessage } from "../shared/redaction.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -100,7 +100,7 @@ export async function runConfigPreflight(
   });
 
   if (errors.length > 0) {
-    throw new ConfigError(`chain-services config preflight failed: ${errors.map((message) => redactErrorMessage(message)).join("; ")}`);
+    throw new ConfigError(`chain-services config preflight failed: ${errors.map((message) => redactEndpointErrorMessage(message)).join("; ")}`);
   }
 
   return diagnostics;
@@ -437,7 +437,7 @@ async function checkStateMachineModules(input: {
     }
     pass(input.checks, "contracts.state_machine_modules");
   } catch (error) {
-    fail(input.checks, input.errors, "contracts.state_machine_modules", redactErrorMessage(error));
+    fail(input.checks, input.errors, "contracts.state_machine_modules", redactEndpointErrorMessage(error));
   }
 }
 
@@ -456,7 +456,7 @@ async function checkChainId(input: {
     }
     pass(input.checks, input.name);
   } catch (error) {
-    fail(input.checks, input.errors, input.name, redactErrorMessage(error));
+    fail(input.checks, input.errors, input.name, redactEndpointErrorMessage(error));
   }
 }
 
@@ -489,7 +489,7 @@ async function checkContractCode(input: {
     }
     pass(input.checks, input.name);
   } catch (error) {
-    fail(input.checks, input.errors, input.name, redactErrorMessage(error));
+    fail(input.checks, input.errors, input.name, redactEndpointErrorMessage(error));
   }
 }
 

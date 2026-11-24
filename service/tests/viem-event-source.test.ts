@@ -4,6 +4,10 @@ import { ViemChainEventSource } from "../src/indexer/viem-event-source.js";
 import { createChainEventSourceForTarget } from "../src/chain-adapters/events.js";
 import type { ChainServicesConfig } from "../src/config/index.js";
 import { UnsupportedChainTargetError } from "@uvp-eth/service-runtime";
+import { toWire } from "@uvp-eth/chain-read-contract";
+import { proofOf } from "../src/indexer/projections/proof.js";
+import { keccak256Hex } from "@uvp-eth/compiler";
+import { dockRegisteredLog } from "./dock-fixtures.js";
 
 describe("ViemChainEventSource", () => {
   it("routes the default chain event source through the EVM adapter boundary", () => {
@@ -302,6 +306,47 @@ describe("ViemChainEventSource", () => {
     )).rejects.toThrow(/20-byte EVM address/);
   });
 
+  it("decodes DockRegistered nested uint64 tuple args into a JSON-serializable proof", async () => {
+    const docHash = keccak256Hex("dock-document-tuple");
+    const log = dockRegisteredLog({ address: dockRegistryAddress, docHash });
+    const eventSource = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 0n;
+        },
+        async getLogs(input) {
+          return input.address === dockRegistryAddress ? [log] : [];
+        }
+      }
+    });
+
+    const events = await eventSource.readEvents(
+      {
+        chainId: 84532,
+        fromBlock: 100n,
+        toBlock: 100n
+      },
+      dockRegistryConfig()
+    );
+
+    expect(events).toHaveLength(1);
+    const event = events[0]!;
+    expect(event.eventName).toBe("DockRegistered");
+    const outputs = event.args.outputs as readonly {
+      readonly signalId: string;
+      readonly atoms: readonly { readonly stageId: string }[];
+      readonly window: readonly { readonly delaySeconds: bigint }[];
+    }[];
+    expect(outputs[0]?.signalId).toBe(`0x${outputs[0]?.signalId.slice(2).toLowerCase()}`);
+    expect(outputs[0]?.window[0]?.delaySeconds).toBe(15n);
+
+    const proof = proofOf(event);
+    expect(typeof proof.args.outputs).toBe("string");
+    expect(proof.args.outputs).toContain('"delaySeconds":"15"');
+    expect(() => JSON.stringify(proof.args)).not.toThrow();
+    expect(() => JSON.stringify(toWire(proof))).not.toThrow();
+  });
+
   it("keeps 0x-prefixed string event args verbatim while lowercasing bytes args", async () => {
     const eventSource = new ViemChainEventSource({
       publicClient: {
@@ -377,6 +422,7 @@ function compareEventShape(
 const stateMachineAddress = "0x1111111111111111111111111111111111111111";
 const deploymentRegistryAddress = "0x4444444444444444444444444444444444444444";
 const identityRegistryAddress = "0x5555555555555555555555555555555555555555";
+const dockRegistryAddress = "0x6666666666666666666666666666666666666666";
 
 const stateMachineTestAbi = parseAbi([
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)"
@@ -482,6 +528,20 @@ function chainServicesConfig(): ChainServicesConfig {
       finalityConfirmations: 2,
       contracts: {
         UVPStateMachine: stateMachineAddress
+      }
+    }
+  } as unknown as ChainServicesConfig;
+}
+
+function dockRegistryConfig(): ChainServicesConfig {
+  const base = chainServicesConfig();
+  return {
+    ...base,
+    network: {
+      ...base.network,
+      contracts: {
+        ...base.network.contracts,
+        UVPDockRegistry: dockRegistryAddress
       }
     }
   } as unknown as ChainServicesConfig;

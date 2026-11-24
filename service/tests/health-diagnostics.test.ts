@@ -6,7 +6,10 @@ import type { ChainEventSource } from "../src/indexer/service.js";
 import { buildConfigDiagnostics, loadConfigFromEnv } from "../src/config/index.js";
 import { createApiRouter } from "../src/api/routes.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
-import { projectionScopeContractAddress } from "../src/storage/projection-store.js";
+import {
+  projectionScopeContractAddress,
+  type DurableProjectionStore
+} from "../src/storage/projection-store.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 import { redactSecrets } from "../src/security/index.js";
 import type { Address } from "@uvp-eth/service-runtime";
@@ -36,7 +39,7 @@ const adminHeaders = {
 
 describe("ops health diagnostics", () => {
   it("exposes safe runtime, indexer, and preflight summaries without retired business blocks", async () => {
-    const projectionStore = stores.projectionStore;
+    const projectionStore = stores.projectionStore as DurableProjectionStore;
     await projectionStore.saveSyncState({
       chainId: 31337,
       contractAddress: projectionScopeContractAddress,
@@ -55,6 +58,13 @@ describe("ops health diagnostics", () => {
         eventCount: 4,
         mismatchCount: 0
       }
+    });
+    await projectionStore.saveCursor({
+      chainId: 31337,
+      contractAddress: projectionScopeContractAddress,
+      deploymentBlock: 0n,
+      nextBlock: 13n,
+      finalizedBlock: 12n
     });
 
     const router = createApiRouter(projectionStore, {
@@ -232,7 +242,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("exposes admin operator status and redacted downloadable summary fields", async () => {
-    const projectionStore = stores.projectionStore;
+    const projectionStore = stores.projectionStore as DurableProjectionStore;
     await projectionStore.saveSyncState({
       chainId: 31337,
       contractAddress: projectionScopeContractAddress,
@@ -242,6 +252,13 @@ describe("ops health diagnostics", () => {
       confirmationDepth: 2,
       eventCount: 4,
       rebuild: { status: "completed", toBlock: 12n, eventCount: 4 }
+    });
+    await projectionStore.saveCursor({
+      chainId: 31337,
+      contractAddress: projectionScopeContractAddress,
+      deploymentBlock: 0n,
+      nextBlock: 13n,
+      finalizedBlock: 12n
     });
     const router = createApiRouter(projectionStore, {
       runtimeEnvironment: "local",
@@ -443,7 +460,7 @@ describe("ops health diagnostics", () => {
   });
 
   it("returns not ready when the indexer projection is degraded", async () => {
-    const projectionStore = stores.projectionStore;
+    const projectionStore = stores.projectionStore as DurableProjectionStore;
     await projectionStore.saveSyncState({
       chainId: 31337,
       contractAddress: projectionScopeContractAddress,
@@ -481,6 +498,155 @@ describe("ops health diagnostics", () => {
         }
       }
     });
+  });
+
+  it("reports a stale heartbeat as not ok and not ready on every health surface", async () => {
+    const projectionStore = stores.projectionStore as DurableProjectionStore;
+    await projectionStore.saveSyncState({
+      chainId: 31337,
+      contractAddress: projectionScopeContractAddress,
+      syncStatus: "indexed",
+      latestIndexedBlock: 30n,
+      finalizedBlock: 30n,
+      confirmationDepth: 2,
+      eventCount: 4,
+      rebuild: { status: "completed", toBlock: 30n, eventCount: 4 }
+    });
+    await projectionStore.saveCursor({
+      chainId: 31337,
+      contractAddress: projectionScopeContractAddress,
+      deploymentBlock: 0n,
+      nextBlock: 31n,
+      finalizedBlock: 30n
+    });
+    const staleNow = () => new Date(Date.now() + 10 * 60_000);
+    const router = createApiRouter(projectionStore, {
+      runtimeEnvironment: "local",
+      configDiagnostics: buildConfigDiagnostics(testConfig()),
+      indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 },
+      now: staleNow
+    });
+
+    const health = await router.handle({ method: "GET", pathname: "/healthz" });
+    expect(health.status).toBe(503);
+    expect(health.body).toMatchObject({
+      ok: false,
+      status: "degraded",
+      reasons: ["indexer_stale"]
+    });
+
+    const ready = await router.handle({ method: "GET", pathname: "/readyz" });
+    expect(ready.status).toBe(503);
+    expect(ready.body).toMatchObject({
+      ready: false,
+      status: "not_ready",
+      reasons: ["indexer_stale"]
+    });
+
+    const diagnostics = await router.handle({
+      method: "GET",
+      pathname: "/admin/diagnostics",
+      headers: adminHeaders
+    });
+    expect(diagnostics.status).toBe(200);
+    expect(diagnostics.body).toMatchObject({
+      ok: false,
+      diagnostics: {
+        health: { status: "degraded", degradedReasons: ["indexer_stale"] },
+        indexer: { syncStatus: "stale", projectionStatus: "stale" }
+      }
+    });
+
+    const status = await router.handle({
+      method: "GET",
+      pathname: "/admin/ops/status",
+      headers: adminHeaders
+    });
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({
+      ok: false,
+      readiness: { status: "not_ready", reasons: ["indexer_stale"] },
+      indexer: { syncStatus: "stale", projectionStatus: "stale" }
+    });
+
+    const summary = await router.handle({
+      method: "GET",
+      pathname: "/admin/ops/summary",
+      headers: adminHeaders
+    });
+    expect(summary.status).toBe(200);
+    expect(summary.body).toMatchObject({
+      ok: false,
+      summary: { sync: { indexerStatus: "stale", projectionStatus: "stale" } }
+    });
+  });
+
+  it("reports a running rebuild as not ok instead of serving the stored indexed status", async () => {
+    const projectionStore = stores.projectionStore as DurableProjectionStore;
+    await projectionStore.saveSyncState({
+      chainId: 31337,
+      contractAddress: projectionScopeContractAddress,
+      syncStatus: "rebuilding",
+      latestIndexedBlock: 30n,
+      finalizedBlock: 30n,
+      confirmationDepth: 2,
+      eventCount: 4,
+      rebuild: { status: "running", fromBlock: 0n, toBlock: 30n }
+    });
+
+    const router = createApiRouter(projectionStore, {
+      runtimeEnvironment: "local",
+      indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 }
+    });
+
+    await expect(router.handle({ method: "GET", pathname: "/healthz" })).resolves.toMatchObject({
+      status: 503,
+      body: { ok: false, reasons: ["indexer_rebuilding"] }
+    });
+    await expect(router.handle({ method: "GET", pathname: "/readyz" })).resolves.toMatchObject({
+      status: 503,
+      body: { ready: false, reasons: ["indexer_rebuilding"] }
+    });
+    await expect(router.handle({ method: "GET", pathname: "/chain/sync-state" })).resolves.toMatchObject({
+      status: 200,
+      body: { syncState: { syncStatus: "stale" } }
+    });
+  });
+
+  it("reports a never-built projection as not ready instead of ready", async () => {
+    const emptyChain = createChainServicesStores({
+      database: { url: databaseUrl, migrationsAutoRun: true },
+      chainId: 424_242
+    });
+    try {
+      const router = createApiRouter(emptyChain.projectionStore, {
+        runtimeEnvironment: "local",
+        indexerDiagnostics: { configured: true, pollIntervalMs: 5_000 }
+      });
+
+      await expect(router.handle({ method: "GET", pathname: "/healthz" })).resolves.toMatchObject({
+        status: 503,
+        body: { ok: false, reasons: ["indexer_not_started"] }
+      });
+      await expect(router.handle({ method: "GET", pathname: "/readyz" })).resolves.toMatchObject({
+        status: 503,
+        body: { ready: false, status: "not_ready", reasons: ["indexer_not_started"] }
+      });
+      await expect(router.handle({
+        method: "GET",
+        pathname: "/admin/ops/status",
+        headers: adminHeaders
+      })).resolves.toMatchObject({
+        status: 200,
+        body: {
+          ok: false,
+          readiness: { status: "not_ready", reasons: ["indexer_not_started"] },
+          indexer: { syncStatus: "not_started", projectionStatus: "not_started" }
+        }
+      });
+    } finally {
+      await emptyChain.close();
+    }
   });
 
   it("redacts private keys, full signatures, RPC tokens, presigned URLs, and evidence plaintext", () => {

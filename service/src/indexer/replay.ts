@@ -300,6 +300,8 @@ function applyStateMachineEvent(
     case "DockOutputSubmitted":
       applyDockOutputSubmitted(state, event);
       return;
+    case "DockOutputDeferred":
+      return;
     case "DerivedSignalSubmitted":
       applyDerivedSignalSubmitted(state, event);
       return;

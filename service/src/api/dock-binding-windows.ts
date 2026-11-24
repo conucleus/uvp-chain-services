@@ -15,6 +15,9 @@ import {
 } from "viem";
 import type { StateMachineDockBindingProjection } from "../indexer/projections/dock.js";
 import type { ProjectionProvenance, ProjectionSnapshot } from "../indexer/projections/index.js";
+import { redactEndpointErrorMessage } from "../shared/redaction.js";
+
+const DOCK_WINDOW_READ_CONCURRENCY = 8;
 
 export interface DockOutputWindowRequest {
   readonly planId: Hex;
@@ -88,7 +91,7 @@ export function createDockBindingWindowReader(options: {
           };
         } catch (error) {
           throw new DockBindingWindowUnavailableError(
-            `dock binding window view failed: ${error instanceof Error ? error.message : String(error)}`
+            `dock binding window view failed: ${redactEndpointErrorMessage(error)}`
           );
         }
       })();
@@ -105,7 +108,8 @@ export function createDockBindingWindowReader(options: {
 
 export async function wireDockBindings(
   snapshot: ProjectionSnapshot,
-  reader: DockBindingWindowReader | undefined
+  reader: DockBindingWindowReader | undefined,
+  options: { readonly concurrency?: number } = {}
 ): Promise<Readonly<Record<string, ChainDockBinding>>> {
   const rows = Object.values(snapshot.stateMachineDockBindings);
   if (rows.length === 0) {
@@ -117,12 +121,51 @@ export async function wireDockBindings(
     );
   }
   const latestByStage = latestBindingByStage(rows);
+  const limit = createReadLimiter(options.concurrency ?? DOCK_WINDOW_READ_CONCURRENCY);
   const wired = await Promise.all(
-    rows.map(async (row) => [row, await wireBinding(snapshot, row, reader, latestByStage)] as const)
+    rows.map(async (row) => [
+      row,
+      await wireBinding(
+        snapshot,
+        row,
+        { readWindow: (request) => limit(() => reader.readWindow(request)) },
+        latestByStage
+      )
+    ] as const)
   );
   return Object.fromEntries(
     wired.map(([row, binding]) => [row.bindingId.toLowerCase(), binding])
   );
+}
+
+function createReadLimiter(limit: number): <T>(task: () => Promise<T>) => Promise<T> {
+  const queue: Array<() => void> = [];
+  let active = 0;
+  const acquire = async (): Promise<void> => {
+    if (active < limit && queue.length === 0) {
+      active += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      queue.push(resolve);
+    });
+  };
+  const release = (): void => {
+    active -= 1;
+    const next = queue.shift();
+    if (next) {
+      active += 1;
+      next();
+    }
+  };
+  return async (task) => {
+    await acquire();
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  };
 }
 
 function latestBindingByStage(

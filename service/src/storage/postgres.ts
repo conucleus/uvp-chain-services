@@ -168,6 +168,19 @@ export class PostgresProjectionStore implements DurableProjectionStore {
     return this.#currentOrderSnapshot();
   }
 
+  async hasProjectionSnapshot(kind: ProjectionSnapshotKind): Promise<boolean> {
+    const result = await this.#database.query(
+      `SELECT 1 FROM chain_projection_snapshot
+       WHERE chain_id = $1 AND contract_address = $2 AND snapshot_kind = $3`,
+      [
+        this.#snapshotScope.chainId,
+        normalizeAddress(this.#snapshotScope.contractAddress, "snapshot.contractAddress"),
+        kind,
+      ],
+    );
+    return result.rows.length > 0;
+  }
+
   async saveSyncState(
     state: Omit<ProjectionSyncState, "updatedAt">,
   ): Promise<ProjectionSyncState> {

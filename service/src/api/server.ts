@@ -7,11 +7,17 @@ import { createChainEventSourceForTarget } from "../chain-adapters/events.js";
 import { createChainServicesStores } from "../storage/factory.js";
 import type { ProjectionStore } from "../storage/projection-store.js";
 import { createLoggerAuditSink } from "../security/audit.js";
-import { createRedactingLogger, redactErrorMessage, redactSecrets } from "@uvp-eth/service-runtime";
+import { createRedactingLogger, redactSecrets } from "@uvp-eth/service-runtime";
+import { redactEndpointErrorMessage } from "../shared/redaction.js";
 import { isDirectRun } from "../shared/runtime.js";
 import { consoleLogger, type Logger } from "@uvp-eth/service-runtime";
 import { createApiRouter } from "./routes.js";
-import { InvalidPathParameterError, invalidPathParameterResponse, normalizeRequestId } from "./route-context.js";
+import {
+  InvalidPathParameterError,
+  invalidPathParameterResponse,
+  normalizeRequestId,
+  normalizeRunId
+} from "./route-context.js";
 import { createDockBindingWindowReader } from "./dock-binding-windows.js";
 import { createDockArtifactResolver } from "../projection/dock-artifacts.js";
 import { createPlanArtifactResolvers } from "../projection/plan-artifacts.js";
@@ -74,7 +80,7 @@ export async function startApiServer(
   const initialProjectionRebuild = indexer
     ? indexer.rebuildFromDeploymentBlock().catch((error: unknown) => {
         logger.error("api server background projection rebuild failed", {
-          message: error instanceof Error ? redactErrorMessage(error) : "unknown rebuild error"
+          message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown rebuild error"
         });
       })
     : undefined;
@@ -155,7 +161,7 @@ export async function startApiServer(
         response.setHeader("content-type", "application/json; charset=utf-8");
         const body = withErrorMetadata({
           error: "invalid_json_body",
-          message: error instanceof Error ? redactErrorMessage(error) : "request body must be valid JSON"
+          message: error instanceof Error ? redactEndpointErrorMessage(error) : "request body must be valid JSON"
         }, requestId, runId);
         logger.warn("api request rejected", {
           requestId,
@@ -212,7 +218,7 @@ export async function startApiServer(
       response.setHeader("content-type", "application/json; charset=utf-8");
       const body = withErrorMetadata({
         error: "internal_server_error",
-        message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+        message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown error"
       }, requestId, runId);
       logger.error("api request failed", {
         requestId,
@@ -221,7 +227,7 @@ export async function startApiServer(
         pathname: request.url ?? "/",
         status: 500,
         errorCode: "internal_server_error",
-        message: error instanceof Error ? redactErrorMessage(error) : "unknown error"
+        message: error instanceof Error ? redactEndpointErrorMessage(error) : "unknown error"
       });
       response.end(
         JSON.stringify(body)
@@ -303,7 +309,7 @@ function setCorsHeaders(response: ServerResponse, request?: IncomingMessage): vo
   response.setHeader("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
-    "content-type, x-request-id, x-uvp-request-id, x-uvp-run-id, x-uvp-admin-id, x-uvp-admin-role, x-uvp-admin-token, x-uvp-wallet-address"
+    "content-type, x-request-id, x-uvp-request-id, x-run-id, x-uvp-run-id, x-uvp-admin-id, x-uvp-admin-role, x-uvp-admin-token, x-uvp-wallet-address"
   );
   response.setHeader("access-control-max-age", "86400");
   const origin = request?.headers.origin?.trim() ?? "";
@@ -332,8 +338,7 @@ function requestIdFromHeaders(request: IncomingMessage): string {
 function runIdFromHeaders(request: IncomingMessage): string | undefined {
   const header = request.headers["x-uvp-run-id"] ?? request.headers["x-run-id"];
   const value = Array.isArray(header) ? header[0] : header;
-  const runId = value && value.trim().length > 0 ? value.trim() : process.env.UVP_RUN_ID?.trim();
-  return runId && runId.length > 0 ? runId : undefined;
+  return normalizeRunId(value) ?? normalizeRunId(process.env.UVP_RUN_ID);
 }
 
 function clientAddressFromSocket(request: IncomingMessage): string | undefined {
@@ -348,7 +353,7 @@ function withErrorMetadata(body: unknown, requestId: string, runId: string | und
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return {
       error: "request_failed",
-      message: redactErrorMessage(body),
+      message: redactEndpointErrorMessage(body),
       requestId,
       ...(runId ? { runId } : {})
     };

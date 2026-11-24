@@ -3,6 +3,8 @@ import { createApiRouter } from "../src/api/routes.js";
 import type { ChainEvent } from "../src/indexer/events.js";
 import { rebuildIdentityProjections } from "../src/indexer/identity-projections.js";
 import { createChainServicesStores, type ChainServicesStores } from "../src/storage/factory.js";
+import type { ProjectionStore } from "../src/storage/projection-store.js";
+import { StorageUnavailableError } from "../src/storage/errors.js";
 import { createPostgresTestDatabase } from "./postgres.js";
 
 let stores: ChainServicesStores;
@@ -103,6 +105,52 @@ describe("identity registry projection", () => {
     });
     expect(response).toMatchObject({ status: 200 });
     expect((response.body as { bindings: unknown[] }).bindings).toHaveLength(1);
+  });
+
+  it("returns a retryable 503 without PG internals when projection storage is unavailable", async () => {
+    const failingStore = {
+      hasProjectionSnapshot: async () => true,
+      getSyncState: async () => undefined,
+      listIdentityBindings: async () => {
+        throw new StorageUnavailableError(
+          "connect ECONNREFUSED tcp://db.internal:5432/uvp_projection"
+        );
+      }
+    } as unknown as ProjectionStore;
+    const response = await createApiRouter(failingStore, { runtimeEnvironment: "local" }).handle({
+      method: "GET",
+      pathname: "/identity/bindings",
+      query: { account }
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({
+      error: "identity_read_unavailable",
+      retryable: true
+    });
+    const serialized = JSON.stringify(response.body);
+    expect(serialized).not.toContain("db.internal");
+    expect(serialized).not.toContain("ECONNREFUSED");
+  });
+
+  it("does not serve an unbuilt identity projection as an empty binding list", async () => {
+    const unbuiltStore = {
+      hasProjectionSnapshot: async () => false,
+      getSyncState: async () => undefined,
+      listIdentityBindings: async () => []
+    } as unknown as ProjectionStore;
+    const response = await createApiRouter(unbuiltStore, { runtimeEnvironment: "local" }).handle({
+      method: "GET",
+      pathname: "/identity/bindings",
+      query: { account }
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({
+      error: "chain_projection_unavailable",
+      retryable: true,
+      syncStatus: "not_started"
+    });
   });
 
   it("parses activeOnly=false as boolean false so revoked records stay visible", async () => {

@@ -2,7 +2,7 @@
 // （uvp.dock.v1 / uvp.dockBinding.v1）；事件族写入见 indexer/replay.ts。
 import type { DockArtifact } from "@uvp-eth/compiler";
 import { ProjectionError, type Hex } from "@uvp-eth/service-runtime";
-import { DockArtifactMissingError } from "../../projection/dock-artifacts.js";
+import { DockArtifactMissingError, dockArtifactDkidOf } from "../../projection/dock-artifacts.js";
 import type { ChainEvent } from "../events.js";
 import {
   proofOf,
@@ -109,7 +109,7 @@ export function applyDockRegistered(
   if (!artifact) {
     throw new DockArtifactMissingError({ chainId: event.chainId, dkid, docHash });
   }
-  const expectedDkid = `zd-${docHash.slice(2, 34).toLowerCase()}`;
+  const expectedDkid = dockArtifactDkidOf(docHash);
   if (artifact.dkid !== expectedDkid || dkid.slice(2, 34).toLowerCase() !== docHash.slice(2, 34).toLowerCase()) {
     throw new ProjectionError(
       `${event.eventName} dkid ${dkid} does not match recorded artifact ${artifact.dkid} for docHash ${docHash}`

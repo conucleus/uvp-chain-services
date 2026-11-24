@@ -25,13 +25,14 @@ export function createApiRouter(store: ProjectionStore, options: CreateApiRouter
   if (!runtimeEnvironment) {
     throw new Error("runtimeEnvironment is required to create the API router");
   }
+  const now = options.now ?? (() => new Date());
   const buildDiagnostics = () => buildOperationalDiagnostics({
     store,
     ...(options.configDiagnostics ? { configDiagnostics: options.configDiagnostics } : {}),
     runtimeEnvironment: runtimeEnvironment,
-    ...(options.indexerDiagnostics ? { indexer: options.indexerDiagnostics } : {})
+    ...(options.indexerDiagnostics ? { indexer: options.indexerDiagnostics } : {}),
+    now
   });
-  const now = options.now ?? (() => new Date());
   const adminAuthPolicy: AdminAuthPolicy = options.adminAuthPolicy ?? {
     runtimeEnvironment: runtimeEnvironment,
     allowedAdminIds: options.opsConsoleAdminIds ?? []

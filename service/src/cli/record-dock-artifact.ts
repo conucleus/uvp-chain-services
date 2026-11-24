@@ -1,11 +1,14 @@
 // dock_artifacts production write path: validate one uvp-core analyzeDock
-// uvp.dock.v1 artifact and record it under its own content identity
-// (chain_id, dkid, doc_hash) without running migrations.
+// uvp.dock.v1 artifact and record it under the chain-native identity
+// (chain_id, dkid=bytes32(bytes16(docHash)), doc_hash) without running
+// migrations; the stored dkid is the same key UVPDockRegistry emits, so the
+// indexer resolves a recorded artifact for every DockRegistered event.
 import { readFile } from "node:fs/promises";
 import { redactErrorMessage, normalizeBytes32, type Hex } from "@uvp-eth/service-runtime";
 import {
   PostgresDockArtifactStore,
   assertDockArtifactRecord,
+  canonicalDockIdOf,
   type DockArtifactRecord
 } from "../projection/dock-artifacts.js";
 import { PostgresDatabase } from "../storage/postgres-client.js";
@@ -102,7 +105,6 @@ export function buildDockArtifactRecord(
   const validated = assertDockArtifactRecord(artifact);
   return {
     chainId,
-    dkid: validated.dkid,
     docHash: requireBytes32(validated.docHash, "docHash"),
     artifact: validated
   };
@@ -125,12 +127,13 @@ async function main(): Promise<void> {
 
     databaseUrl = requireDatabaseUrl(process.env);
     const database = new PostgresDatabase({ databaseUrl });
+    let recorded: boolean;
     try {
-      await new PostgresDockArtifactStore({ database }).put(record);
+      recorded = await new PostgresDockArtifactStore({ database }).put(record);
     } finally {
       await database.close();
     }
-    process.stdout.write(successLine(record, true));
+    process.stdout.write(successLine(record, recorded));
   } catch (error) {
     process.stderr.write(
       `record-dock-artifact failed: ${describeFailure(error, databaseUrl)}\n`
@@ -145,7 +148,8 @@ async function main(): Promise<void> {
 function successLine(record: DockArtifactRecord, recorded: boolean): string {
   return `${JSON.stringify({
     chainId: record.chainId,
-    dkid: record.dkid,
+    dkid: canonicalDockIdOf(record.docHash),
+    dockDocumentId: record.artifact.dkid,
     docHash: record.docHash,
     recorded
   })}\n`;

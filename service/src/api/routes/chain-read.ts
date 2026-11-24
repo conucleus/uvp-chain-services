@@ -2,7 +2,9 @@
 // and plan artifact admissions/trigger enumeration straight from
 // ProjectionStore / plan_artifacts, with no session, business rows, or
 // participant clipping. Order ids are plan-scoped, so the item read always
-// returns `{ orders }` (one or many) and 404s only when no projection exists.
+// returns `{ orders }` (one or many); absence is only a 404 when the projection
+// is current, while a missing, rebuilding, or stale projection is a retryable
+// 503 because it cannot prove absence.
 
 import {
   toWire,
@@ -19,15 +21,13 @@ import {
   wireDockBindings
 } from "../dock-binding-windows.js";
 import { StorageUnavailableError } from "../../storage/errors.js";
+import { redactEndpointErrorMessage } from "../../shared/redaction.js";
 import {
-  DEFAULT_SYNC_STALE_AFTER_MS,
-  readableSyncState,
-  syncStaleAfterMs
-} from "../../storage/sync-state.js";
-import type {
-  ProjectionSyncState,
-  StoredProjectionCursor,
-} from "../../storage/projection-store.js";
+  requireCurrentProjection,
+  requireMaterializedProjection,
+  readProjectionStateForRead,
+  projectionUnavailableResponse,
+} from "../projection-read.js";
 import {
   decodePathParameter,
   InvalidPathParameterError,
@@ -65,7 +65,7 @@ export function createChainReadRouteModule(): RouteModule {
             status: 503,
             body: {
               error: "chain_read_unavailable",
-              message: error.message,
+              message: "the chain projection store is unavailable",
               retryable: true,
             },
           };
@@ -75,7 +75,7 @@ export function createChainReadRouteModule(): RouteModule {
             status: 503,
             body: {
               error: "chain_read_unavailable",
-              message: error.message,
+              message: redactEndpointErrorMessage(error),
               retryable: true,
             },
           };
@@ -94,6 +94,12 @@ async function handleRead(
     const orders: readonly ChainOrderProjection[] = toWire(
       await context.store.listStateMachineOrders(),
     );
+    if (orders.length === 0) {
+      const unavailable = await requireMaterializedProjection(context, "order");
+      if (unavailable) {
+        return unavailable;
+      }
+    }
     return { status: 200, body: { orders } };
   }
 
@@ -101,19 +107,29 @@ async function handleRead(
     const tasks: readonly ChainTaskProjection[] = toWire(
       await context.store.listStateMachineTasks(),
     );
+    if (tasks.length === 0) {
+      const unavailable = await requireMaterializedProjection(context, "order");
+      if (unavailable) {
+        return unavailable;
+      }
+    }
     return { status: 200, body: { tasks } };
   }
 
   if (request.pathname === SYNC_STATE_PATH) {
-    const current = await context.store.getSyncState();
+    const current = await readProjectionStateForRead(context);
     if (!current) {
-      return { status: 404, body: { error: "chain_sync_state_not_found" } };
+      return projectionUnavailableResponse("not_started");
     }
-    const syncState: ChainSyncState = toWire(await syncStateForRead(context, current));
+    const syncState: ChainSyncState = toWire(current.readable);
     return { status: 200, body: { syncState } };
   }
 
   if (request.pathname === SNAPSHOT_PATH) {
+    const unavailable = await requireCurrentProjection(context);
+    if (unavailable) {
+      return unavailable;
+    }
     const stored = await context.store.getOrderSnapshot();
     const bindings = await wireDockBindings(stored, context.dockBindingWindows);
     const snapshot = { ...toWire(stored), stateMachineDockBindings: bindings };
@@ -143,7 +159,7 @@ async function handleRead(
     const orderId = decodePathParameter(orderTasksMatch[1] ?? "");
     const orders = await context.store.findStateMachineOrdersByOrderId(orderId);
     if (orders.length === 0) {
-      return orderNotFound();
+      return orderNotFound(context);
     }
     const tasks = await context.store.listStateMachineTasks();
     const orderTasks: readonly ChainTaskProjection[] = toWire(
@@ -160,7 +176,7 @@ async function handleRead(
     const orderId = decodePathParameter(orderMatch[1] ?? "");
     const orders = await context.store.findStateMachineOrdersByOrderId(orderId);
     if (orders.length === 0) {
-      return orderNotFound();
+      return orderNotFound(context);
     }
     const projections: readonly ChainOrderProjection[] = toWire(orders);
     return { status: 200, body: { orders: projections } };
@@ -171,7 +187,8 @@ async function handleRead(
     const taskId = decodePathParameter(taskMatch[1] ?? "");
     const task = await context.store.getStateMachineTask(taskId);
     if (!task) {
-      return { status: 404, body: { error: "chain_task_not_found" } };
+      const unavailable = await requireCurrentProjection(context);
+      return unavailable ?? { status: 404, body: { error: "chain_task_not_found" } };
     }
     const projection: ChainTaskProjection = toWire(task);
     return { status: 200, body: { task: projection } };
@@ -180,41 +197,9 @@ async function handleRead(
   return undefined;
 }
 
-function orderNotFound(): ApiResponse {
-  return { status: 404, body: { error: "chain_order_not_found" } };
-}
-
-async function syncStateForRead(
-  context: ApiRouteContext,
-  state: ProjectionSyncState,
-): Promise<ProjectionSyncState> {
-  const cursor = await readCursor(context.store, state);
-  const staleAfterMs = context.indexerDiagnostics?.configured
-    ? syncStaleAfterMs(context.indexerDiagnostics.pollIntervalMs) ?? DEFAULT_SYNC_STALE_AFTER_MS
-    : undefined;
-  return readableSyncState(state, {
-    now: context.now?.() ?? new Date(),
-    ...(staleAfterMs !== undefined ? { staleAfterMs } : {}),
-    ...(cursor !== undefined ? { cursor } : {}),
-  });
-}
-
-async function readCursor(
-  store: ApiRouteContext["store"],
-  state: ProjectionSyncState,
-): Promise<StoredProjectionCursor | undefined> {
-  const getCursor = (store as {
-    readonly getCursor?: (
-      scope: { readonly chainId: number; readonly contractAddress: ProjectionSyncState["contractAddress"] },
-    ) => Promise<StoredProjectionCursor | undefined>;
-  }).getCursor;
-  if (typeof getCursor !== "function") {
-    return undefined;
-  }
-  return getCursor.call(store, {
-    chainId: state.chainId,
-    contractAddress: state.contractAddress,
-  });
+async function orderNotFound(context: ApiRouteContext): Promise<ApiResponse> {
+  const unavailable = await requireCurrentProjection(context);
+  return unavailable ?? { status: 404, body: { error: "chain_order_not_found" } };
 }
 
 async function planAdmissionsRead(

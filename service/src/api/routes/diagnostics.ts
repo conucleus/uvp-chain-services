@@ -2,18 +2,39 @@ import { adminPrincipalFromHeaders } from "../../security/admin-auth.js";
 import { operationalReadiness } from "../diagnostics.js";
 import type { RouteModule } from "../route-module.js";
 
+interface HealthReport {
+  readonly status: string;
+  readonly degradedReasons: readonly string[];
+}
+
+function readHealth(diagnostics: Record<string, unknown>): HealthReport {
+  const health = diagnostics.health;
+  if (!health || typeof health !== "object" || Array.isArray(health)) {
+    return { status: "degraded", degradedReasons: [] };
+  }
+  const record = health as Record<string, unknown>;
+  return {
+    status: typeof record.status === "string" ? record.status : "degraded",
+    degradedReasons: Array.isArray(record.degradedReasons)
+      ? record.degradedReasons.map((reason) => String(reason))
+      : []
+  };
+}
+
 export function createDiagnosticsRouteModule(): RouteModule {
   return {
     async handle(request, context) {
       if (request.method === "GET" && request.pathname === "/healthz") {
         const diagnostics = await context.buildDiagnostics();
-        const health = diagnostics.health as { readonly status?: string } | undefined;
+        const health = readHealth(diagnostics);
+        const ok = health.status !== "degraded";
         return {
-          status: 200,
+          status: ok ? 200 : 503,
           body: {
-            ok: health?.status !== "degraded",
-            status: health?.status ?? "ok",
-            sourceOfTruth: "contracts-and-chain-events"
+            ok,
+            status: health.status,
+            sourceOfTruth: "contracts-and-chain-events",
+            reasons: health.degradedReasons
           }
         };
       }
@@ -45,7 +66,7 @@ export function createDiagnosticsRouteModule(): RouteModule {
         return {
           status: 200,
           body: {
-            ok: true,
+            ok: readHealth(diagnostics).status !== "degraded",
             sourceOfTruth: "contracts-and-chain-events",
             diagnostics
           }

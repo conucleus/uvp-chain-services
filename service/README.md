@@ -18,8 +18,8 @@ Chain Services 把 UVP 链上事实投影成通用链读和运维接口，并负
 - `cli/record-plan-artifact.ts`：`plan_artifacts` 的生产写入入口（校验产物身份后写入，不跑迁移；见下文「记录计划编译产物」）。
 - `cli/record-dock-artifact.ts`：`dock_artifacts` 的生产写入入口（校验 `uvp.dock.v1` 产物身份后写入，不跑迁移）。
 - `projection/plan-artifacts.ts`：计划编译产物表（`plan_artifacts`）的 Postgres store 与索引/语义 oracle 解析器；缺失产物抛 `PlanArtifactMissingError`。
-- `projection/dock-artifacts.ts`：Dock 文档产物表（`dock_artifacts`）的 Postgres store 与索引解析器；保存 `uvp.dock.v1`（validWhen AST/dependencies/atoms），是可从链上事件 + 记录产物重建的链下读投影，不是第二权威；缺失或身份不一致抛 `DockArtifactMissingError`/`DockArtifactIdentityError`，重建 fail-closed。
-- 链读 snapshot 提供静态 Dock（`uvp.dock.v1`）与 DockBinding/per-output 投影（`uvp.dockBinding.v1`），没有 Link 行/状态。binding 身份、payload generation、emitted/emitted_by 来自链上事件，可从 `chain_event_log` 重建；A/B 窗口的当前 `satisfied`/相对 due 是 API 读时对 stage-patch `dockOutputWindow` view 的 live enrichment（不持久、不构成历史），无历史时 `opened_by`/`closed_by` 省略。chain-services 不实现第二套 Hook AST 求值器；view 读取按 binding+output 做短 TTL 缓存，view 不可用时 snapshot 读 fail-closed 503。
+- `projection/dock-artifacts.ts`：Dock 文档产物表（`dock_artifacts`）的 Postgres store 与索引解析器；保存 `uvp.dock.v1`（validWhen AST/dependencies/atoms），是可从链上事件 + 记录产物重建的链下读投影，不是第二权威；表键 `dkid` 是链上 `bytes32(bytes16(docHash))`（`UVPDockRegistry` 的注册键），产物自带的 `zd-<docHash 前 32 hex>` 只做文档身份校验；缺失或身份不一致抛 `DockArtifactMissingError`/`DockArtifactIdentityError`，重建 fail-closed。
+- 链读 snapshot 提供静态 Dock（`uvp.dock.v1`）与 DockBinding/per-output 投影（`uvp.dockBinding.v1`），没有 Link 行/状态。binding 身份、payload generation、emitted/emitted_by 来自链上事件，可从 `chain_event_log` 重建；A/B 窗口的当前 `satisfied`/相对 due 是 API 读时对 stage-patch `dockOutputWindow` view 的 live enrichment（不持久、不构成历史），无历史时 `opened_by`/`closed_by` 省略。chain-services 不实现第二套 Hook AST 求值器；view 读取按 binding+output 做短 TTL 缓存，view 不可用时 snapshot 读 fail-closed 503。一次 snapshot 读对 `dockOutputWindow` 的 RPC 扇出有全局并发上限（8），失败消息只暴露脱敏后的 URL/凭据。
 - `indexer/replay.ts`：统一事件顺序与重放编排。`rebuildOrderProjections` 是投影重建的单一入口，同时推进部署注册表事件族与显式诊断计数（幻影订单、激活缺补丁等不允许静默的计数）。
 - `indexer/projections/`：按事件族与投影对象分文件——`proof`（事件参数解码与证明/时间线原语）、`snapshot`（重放快照形状与部署注册表读取）、`order`（订单事件与订单桶/复合键，含模块→状态机地址归一化）、`plan`（计划发布与元数据模块事件，含 `supplierBindingsRoot`/`supplierBindings`）、`signal`（SignalSubmitted/DerivedSignalSubmitted 与 relayer 字段）、`stage`（stage supplier 指派补丁/active supplier 与 hook 生命周期）、`stage-files`（`StageFileWritten` 的不透明 key→payload 重放）、`supplier`（`UVPIdentityRegistry` 供应商命名空间的 SID↔account 永久绑定与状态事件重放，及 assigned supplier account 解析）、`task`（任务投影与提交信号推进）；`index.ts` 保持原 `projections.ts` 的对外导出面。
 - 其余：`api/`（链读/运维路由与边界）、`storage/`（projection store）、`config/`（链/索引/运维 env）、`security/`、`chain-adapters/`、`proof-verifier/`、`shared/`（链常量与运行时工具）。
@@ -69,7 +69,15 @@ projection rebuild；不得为了兼容旧 UI 在本服务补死路由或 submis
 
 链读的 `syncStatus` 在投影重建中（`syncStatus=rebuilding` 或 `rebuild.status=running`）、
 durable cursor 未追到 finalized bound、或 indexer heartbeat 超过 3 个 poll interval
-时返回 `stale`；`degraded` 保持原样，不被降级成 `stale`。
+（未配置 poll interval 时 60s）返回 `stale`；`degraded` 保持原样，不被降级成 `stale`。
+
+`/healthz`、`/readyz`、`/admin/diagnostics`、`/admin/ops/status|summary` 都读同一
+`readableSyncState` 归一化结果：`degraded`、`stale`、`syncing`、`rebuilding` 与
+从未构建（`not_started`）都算 `not_ok`，`/healthz` 与 `/readyz` 返回 503。
+`/chain/orders/:id`、`/chain/orders/:id/tasks`、`/chain/tasks/:id` 的缺失只有在投影
+`current`（已物化且非 stale/rebuilding）时才返回 404；否则返回
+503 `chain_projection_stale`/`chain_projection_unavailable` 并带 `syncStatus`，
+让客户端知道「缺失」未被证明。空列表/空 snapshot 也只在投影已物化后返回 200。
 
 非本地环境应使用持久数据库并通过安全预检。demo/fixture/mock 运行路径仅存在于 local 档，非 local 环境不含。
 
@@ -83,7 +91,7 @@ CHAIN_SERVICES_DATABASE_URL=postgres://... \
   --file <dock-artifact.json> --chain-id <n> [--dry-run] [--verbose]
 ```
 
-CLI 校验产物封闭字段集、`dkid = zd-<docHash 前 32 hex>`、各 id/validWhen AST/dependencies/atoms 形状后写入 `(chain_id, dkid, doc_hash)`；缺失或身份不一致时索引重建 fail-closed，不返回空 Dock。`--dry-run` 只校验并打印身份；CLI 不跑迁移。
+CLI 校验产物封闭字段集、`dkid = zd-<docHash 前 32 hex>`、各 id/validWhen AST/dependencies/atoms 形状后，按链上键 `(chain_id, dkid = bytes32(bytes16(docHash)), doc_hash)` 写入；重复记录幂等，`recorded` 反映本次是否真的插入。缺失或身份不一致时索引重建 fail-closed，不返回空 Dock。`--dry-run` 只校验并打印身份；CLI 不跑迁移。
 
 ## 存储与测试（PG-only）
 

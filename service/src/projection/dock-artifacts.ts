@@ -1,14 +1,15 @@
 // dock_artifacts 是 uvp.dock.v1 Dock 文档的可重建链下读投影：按 (chain_id,
 // dkid, doc_hash) 内容寻址保存 uvp-core analyzeDock 产物；索引 DockRegistered
 // 时按链上身份取用，缺失或身份不一致即 fail-closed。链上 UVPDockRegistry 仍是
-// Dock 存在性的权威。
+// Dock 存在性的权威，其 dkid 是 bytes32(bytes16(docHash))：本表以该链上
+// bytes32 作为 dkid 键，uvp.dock.v1 的 `zd-<docHash 前 32 hex>` 只作为产物
+// 文档身份校验。
 import { assertDockArtifact, type DockArtifact } from "@uvp-eth/compiler";
 import { normalizeBytes32, rowObject, stringColumn, type Hex } from "@uvp-eth/service-runtime";
 import type { PostgresDatabase } from "../storage/postgres-client.js";
 
 export interface DockArtifactRecord {
   readonly chainId: number;
-  readonly dkid: string;
   readonly docHash: Hex;
   readonly artifact: DockArtifact;
 }
@@ -20,7 +21,7 @@ export interface DockArtifactQuery {
 }
 
 export interface DockArtifactStore {
-  put(record: DockArtifactRecord): Promise<void>;
+  put(record: DockArtifactRecord): Promise<boolean>;
   get(query: DockArtifactQuery): Promise<DockArtifactRecord | undefined>;
 }
 
@@ -70,6 +71,14 @@ export function assertDockArtifactRecord(artifact: unknown): DockArtifact {
   return artifact;
 }
 
+export function dockArtifactDkidOf(docHash: Hex): string {
+  return `zd-${docHash.slice(2, 34).toLowerCase()}`;
+}
+
+export function canonicalDockIdOf(docHash: Hex): Hex {
+  return `0x${docHash.slice(2, 34).toLowerCase()}${"0".repeat(32)}` as Hex;
+}
+
 export class PostgresDockArtifactStore implements DockArtifactStore {
   readonly #database: PostgresDatabase;
 
@@ -77,33 +86,35 @@ export class PostgresDockArtifactStore implements DockArtifactStore {
     this.#database = options.database;
   }
 
-  async put(record: DockArtifactRecord): Promise<void> {
+  async put(record: DockArtifactRecord): Promise<boolean> {
     const docHash = normalizeBytes32(record.docHash, "dockArtifact.docHash");
     const artifact = assertDockArtifactRecord(record.artifact);
-    if (artifact.docHash.toLowerCase() !== docHash.toLowerCase()) {
+    if (artifact.docHash.toLowerCase() !== docHash) {
       throw new DockArtifactIdentityError(docHash, artifact.docHash as Hex);
     }
-    await this.#database.query(
+    const result = await this.#database.query(
       `INSERT INTO dock_artifacts (chain_id, dkid, doc_hash, artifact_json, recorded_at)
        VALUES ($1, $2, $3, $4::jsonb, $5)
        ON CONFLICT (chain_id, dkid, doc_hash) DO NOTHING`,
       [
         record.chainId,
-        artifact.dkid,
+        canonicalDockIdOf(docHash),
         docHash,
         JSON.stringify(artifact),
         new Date().toISOString()
       ]
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async get(query: DockArtifactQuery): Promise<DockArtifactRecord | undefined> {
     const dkid = normalizeBytes32(query.dkid, "dockArtifact.dkid");
+    const docHash = normalizeBytes32(query.docHash, "dockArtifact.docHash");
     const result = await this.#database.query(
       `SELECT artifact_json::text AS artifact_json
        FROM dock_artifacts
        WHERE chain_id = $1 AND dkid = $2 AND doc_hash = $3`,
-      [query.chainId, dkid, normalizeBytes32(query.docHash, "dockArtifact.docHash")]
+      [query.chainId, dkid, docHash]
     );
     const row = result.rows[0];
     if (!row) {
@@ -114,8 +125,7 @@ export class PostgresDockArtifactStore implements DockArtifactStore {
     ) as DockArtifact;
     return {
       chainId: query.chainId,
-      dkid: artifact.dkid,
-      docHash: normalizeBytes32(query.docHash, "dockArtifact.docHash"),
+      docHash,
       artifact
     };
   }
