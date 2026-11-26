@@ -295,6 +295,67 @@ describe("ViemChainEventSource", () => {
       chainServicesConfig()
     )).rejects.toThrow(/20-byte EVM address/);
   });
+
+  it("decodes UVPDockController logs only when dockControllerAddress is configured", async () => {
+    const queriedAddresses: string[] = [];
+    const dockLogs = [dockLinkBoundLog(), dockOutputSubmittedLog()];
+    const eventSource = new ViemChainEventSource({
+      publicClient: {
+        async getBlockNumber() {
+          return 0n;
+        },
+        async getLogs(input) {
+          queriedAddresses.push(input.address.toLowerCase());
+          return dockLogs.filter((log) => log.address.toLowerCase() === input.address.toLowerCase());
+        }
+      }
+    });
+
+    const withoutDock = await eventSource.readEvents(
+      { chainId: 84532, fromBlock: 100n, toBlock: 100n },
+      chainServicesConfig()
+    );
+    expect(withoutDock).toEqual([]);
+    expect(queriedAddresses).toEqual([stateMachineAddress]);
+
+    queriedAddresses.length = 0;
+    const withDock = await eventSource.readEvents(
+      { chainId: 84532, fromBlock: 100n, toBlock: 100n },
+      dockControllerConfig()
+    );
+    expect(queriedAddresses).toEqual([stateMachineAddress, dockControllerAddress]);
+    expect(withDock).toEqual([
+      expect.objectContaining({
+        contractAddress: dockControllerAddress,
+        eventName: "DockLinkBound",
+        args: expect.objectContaining({
+          linkId: bytes32Hex("e1"),
+          dkid: bytes32Hex("d1"),
+          fromOrderId: bytes32Hex("a1"),
+          fromPlanId: bytes32Hex("11"),
+          toPlanId: bytes32Hex("22"),
+          toOrderId: bytes32Hex("b1"),
+          toStageId: bytes32Hex("33"),
+          toConsentStageId: bytes32Hex("44"),
+          toConsent: "0x2222222222222222222222222222222222222222"
+        })
+      }),
+      expect.objectContaining({
+        contractAddress: dockControllerAddress,
+        eventName: "DockOutputSubmitted",
+        args: expect.objectContaining({
+          linkId: bytes32Hex("e1"),
+          outputIndex: 0n,
+          toOrderId: bytes32Hex("b1"),
+          toPlanId: bytes32Hex("22"),
+          toSourceId: bytes32Hex("55"),
+          signalId: bytes32Hex("66"),
+          payloadHash: bytes32Hex("77"),
+          idempotencyKey: bytes32Hex("88")
+        })
+      })
+    ]);
+  });
 });
 
 async function captureRejection(run: Promise<unknown>): Promise<unknown> {
@@ -338,7 +399,7 @@ function compareEventShape(
 
 const stateMachineAddress = "0x1111111111111111111111111111111111111111";
 const identityRegistryAddress = "0x5555555555555555555555555555555555555555";
-const dockRegistryAddress = "0x6666666666666666666666666666666666666666";
+const dockControllerAddress = "0x7777777777777777777777777777777777777777";
 
 const stateMachineTestAbi = parseAbi([
   "event PlanRegistered(bytes32 indexed planId,bytes32 planHash,uint256 hookCount)"
@@ -346,6 +407,11 @@ const stateMachineTestAbi = parseAbi([
 
 const identityRegistryTestAbi = parseAbi([
   "event SupplierRegistered(bytes32 indexed supplierId,address indexed account)"
+]);
+
+const dockControllerTestAbi = parseAbi([
+  "event DockLinkBound(bytes32 indexed linkId,bytes32 indexed dkid,bytes32 indexed fromOrderId,bytes32 fromPlanId,bytes32 toPlanId,bytes32 toOrderId,bytes32 toStageId,bytes32 toConsentStageId,address toConsent)",
+  "event DockOutputSubmitted(bytes32 indexed linkId,uint256 indexed outputIndex,bytes32 indexed toOrderId,bytes32 toPlanId,bytes32 toSourceId,bytes32 signalId,bytes32 payloadHash,bytes32 idempotencyKey)"
 ]);
 
 function planRegisteredLog(input: { readonly removed?: boolean } = {}): Log {
@@ -422,4 +488,91 @@ function registryConfig(): ChainServicesConfig {
       }
     }
   } as unknown as ChainServicesConfig;
+}
+
+function dockControllerConfig(): ChainServicesConfig {
+  const base = chainServicesConfig();
+  return {
+    ...base,
+    network: {
+      ...base.network,
+      dockControllerAddress
+    }
+  } as unknown as ChainServicesConfig;
+}
+
+function dockLinkBoundLog(): Log {
+  return {
+    address: dockControllerAddress,
+    blockNumber: 100n,
+    blockHash: bytes32Hex("ab"),
+    transactionHash: bytes32Hex("d0"),
+    transactionIndex: 0,
+    logIndex: 0,
+    data: encodeAbiParameters(
+      [
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "address" }
+      ],
+      [
+        bytes32Hex("11"),
+        bytes32Hex("22"),
+        bytes32Hex("b1"),
+        bytes32Hex("33"),
+        bytes32Hex("44"),
+        "0x2222222222222222222222222222222222222222"
+      ]
+    ),
+    topics: encodeEventTopics({
+      abi: dockControllerTestAbi,
+      eventName: "DockLinkBound",
+      args: {
+        linkId: bytes32Hex("e1"),
+        dkid: bytes32Hex("d1"),
+        fromOrderId: bytes32Hex("a1")
+      }
+    }),
+    removed: false
+  } as Log;
+}
+
+function dockOutputSubmittedLog(): Log {
+  return {
+    address: dockControllerAddress,
+    blockNumber: 100n,
+    blockHash: bytes32Hex("ab"),
+    transactionHash: bytes32Hex("d0"),
+    transactionIndex: 0,
+    logIndex: 1,
+    data: encodeAbiParameters(
+      [
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "bytes32" },
+        { type: "bytes32" }
+      ],
+      [
+        bytes32Hex("22"),
+        bytes32Hex("55"),
+        bytes32Hex("66"),
+        bytes32Hex("77"),
+        bytes32Hex("88")
+      ]
+    ),
+    topics: encodeEventTopics({
+      abi: dockControllerTestAbi,
+      eventName: "DockOutputSubmitted",
+      args: {
+        linkId: bytes32Hex("e1"),
+        outputIndex: 0n,
+        toOrderId: bytes32Hex("b1")
+      }
+    }),
+    removed: false
+  } as Log;
 }

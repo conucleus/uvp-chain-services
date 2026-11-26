@@ -48,6 +48,15 @@ export type {
   StateMachineSupplierStatus
 } from "./supplier.js";
 export type {
+  DockSpecOutputProjection,
+  DockSpecProjection,
+  DockLinkWindowProjection,
+  OrderDockLinkProjection,
+  OrderDockLinksProjection,
+  DockLinkSubmittedOutputProjection,
+  DockLinkProjection
+} from "./dock.js";
+export type {
   StateMachineDeploymentStatus,
   StateMachineDeploymentProjection,
   ContractGovernanceProjection,

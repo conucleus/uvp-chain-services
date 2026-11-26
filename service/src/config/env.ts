@@ -18,6 +18,7 @@ export interface NetworkConfig {
   readonly finalityAnchor: FinalityAnchor;
   readonly finalityConfirmations: number;
   readonly contracts: Readonly<Record<string, Address>>;
+  readonly dockControllerAddress?: Address;
   readonly stateMachineDeployments?: readonly StateMachineDeploymentConfig[];
   readonly activeDeploymentId?: Hex;
 }
@@ -101,6 +102,9 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
     ...manifest.contracts,
     ...parseContracts(env),
   };
+  const dockControllerAddress =
+    parseOptionalAddress(env, "UVP_DOCK_CONTROLLER_ADDRESS") ??
+    nonZeroAddress(contracts.UVPDockController);
   const chainId = parseInteger(env, "UVP_CHAIN_ID", manifest.chainId ?? 31337);
   const environment = parseRuntimeEnv(env);
   const rpcUrl = resolveRpcUrl(env, manifest.rpcUrlEnv, environment);
@@ -119,6 +123,7 @@ export function loadConfigFromEnv(env: Env = process.env): ChainServicesConfig {
       finalityAnchor: parseFinalityAnchor(env),
       finalityConfirmations: parseInteger(env, "UVP_FINALITY_CONFIRMATIONS", 1),
       contracts,
+      ...(dockControllerAddress ? { dockControllerAddress } : {}),
       stateMachineDeployments: manifest.stateMachineDeployments,
       ...(manifest.activeDeploymentId
         ? { activeDeploymentId: manifest.activeDeploymentId }
@@ -394,6 +399,18 @@ export function listContractJsonOverrides(env: Env): readonly string[] {
 
 
 const zeroAddress = "0x0000000000000000000000000000000000000000";
+
+function parseOptionalAddress(env: Env, name: string): Address | undefined {
+  const rawValue = optionalEnv(env, name);
+  if (!rawValue) {
+    return undefined;
+  }
+  return nonZeroAddress(normalizeAddress(rawValue, name));
+}
+
+function nonZeroAddress(address: Address | undefined): Address | undefined {
+  return address && address !== zeroAddress ? address : undefined;
+}
 
 function parseAddressManifest(env: Env): ParsedAddressManifest {
   const manifestPath = optionalEnv(env, "UVP_ADDRESS_MANIFEST");

@@ -9,6 +9,7 @@ import type {
 import type { MutableStateMachinePlanProjection, StateMachinePlanProjection } from "./plan.js";
 import type { StateMachineTaskProjection } from "./task.js";
 import type { StateMachineSupplierProjection } from "./supplier.js";
+import type { DockLinkProjection, DockSpecProjection } from "./dock.js";
 
 export type StateMachineDeploymentStatus =
   | "candidate"
@@ -58,6 +59,8 @@ export interface ProjectionSnapshot {
   readonly stateMachineOrders: Readonly<Record<string, StateMachineOrderProjection>>;
   readonly stateMachineTasks: Readonly<Record<string, StateMachineTaskProjection>>;
   readonly stateMachineSuppliers: Readonly<Record<string, StateMachineSupplierProjection>>;
+  readonly dockSpecs?: Readonly<Record<string, DockSpecProjection>>;
+  readonly dockLinks?: Readonly<Record<string, DockLinkProjection>>;
   readonly lastEvent?: ProjectionProvenance;
   readonly unresolvedModuleOrderEventCount?: number;
   readonly capabilityEnrichmentMismatchCount?: number;
@@ -87,6 +90,8 @@ export function createEmptyProjectionSnapshot(): ProjectionSnapshot {
     stateMachineOrders: {},
     stateMachineTasks: {},
     stateMachineSuppliers: {},
+    dockSpecs: {},
+    dockLinks: {},
     unresolvedModuleOrderEventCount: 0,
     capabilityEnrichmentMismatchCount: 0,
     unknownEventCount: 0

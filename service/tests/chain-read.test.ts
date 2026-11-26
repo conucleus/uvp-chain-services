@@ -2,6 +2,10 @@
 // facts, collapsing plan-scoped duplicate order ids, or returning another
 // order's tasks. Uses an in-memory ProjectionStore only (no Postgres).
 import { describe, expect, it } from "vitest";
+import {
+  decodeOrderDockLinkWire,
+  decodeOrderWire,
+} from "@uvp-eth/chain-read-contract";
 import type {
   ApiRequest,
   ApiResponse,
@@ -251,6 +255,7 @@ const INDEXED_SYNC_STATE: ProjectionSyncState = {
 type ReadStore = Pick<
   ProjectionStore,
   | "listStateMachineOrders"
+  | "getStateMachineOrder"
   | "findStateMachineOrdersByOrderId"
   | "listStateMachineTasks"
   | "getStateMachineTask"
@@ -268,6 +273,7 @@ function contextWithStore(store: ReadStore): ApiRouteContext {
 function currentStore(overrides: Partial<ReadStore> = {}): ReadStore {
   return {
     listStateMachineOrders: async () => [],
+    getStateMachineOrder: async () => undefined,
     findStateMachineOrdersByOrderId: async () => [],
     listStateMachineTasks: async () => [],
     getStateMachineTask: async () => undefined,
@@ -682,6 +688,88 @@ describe("generic chain read routes", () => {
     expect(serializedSyncState).not.toContain("other-key");
     expect(serializedSyncState).not.toContain("user:pass");
     expect(serializedSyncState).toContain("[redacted:url]");
+  });
+
+  it("serves GET /chain/orders/:planId/:orderId with dockLinks and GET /chain/dock-links/:linkId conforming to chain-read-contract decoders", async () => {
+    const linkId = `0x${"9".repeat(64)}` as const;
+    const peerOrderId = `0x${"a".repeat(62)}02` as const;
+    const dockLink = {
+      linkId,
+      dkid: DOCK_ID,
+      fromPlanId: PLAN_B,
+      fromOrderId: peerOrderId,
+      toPlanId: PLAN_A,
+      toOrderId: ORDER_ID,
+      toStageId: STAGE_ID,
+      toConsentStageId: STAGE_ID,
+      toConsent: ACTOR,
+      linkedAt: provenance(30n),
+      proof: proof(30n, { linkId }, "DockLinkBound"),
+      submittedOutputs: [
+        {
+          linkId,
+          outputIndex: 0,
+          toPlanId: PLAN_A,
+          toOrderId: ORDER_ID,
+          toSourceId: SOURCE_ID,
+          signalId: SIGNAL_ID,
+          payloadHash: PAYLOAD_HASH,
+          idempotencyKey: `0x${"c".repeat(64)}` as const,
+          submittedAt: provenance(31n),
+          proof: proof(31n, { linkId, outputIndex: "0" }, "DockOutputSubmitted"),
+        },
+      ],
+    };
+    const linkedOrder: StateMachineOrderProjection = {
+      ...order(),
+      dockLinks: {
+        incoming: [
+          {
+            linkId: dockLink.linkId,
+            dkid: dockLink.dkid,
+            fromPlanId: dockLink.fromPlanId,
+            fromOrderId: dockLink.fromOrderId,
+            toPlanId: dockLink.toPlanId,
+            toOrderId: dockLink.toOrderId,
+            toStageId: dockLink.toStageId,
+            toConsentStageId: dockLink.toConsentStageId,
+            toConsent: dockLink.toConsent,
+            linkedAt: dockLink.linkedAt,
+            proof: dockLink.proof,
+          },
+        ],
+        outgoing: [],
+      },
+    };
+    const context = contextWithStore(currentStore({
+      getStateMachineOrder: async (orderId, planId) =>
+        orderId === ORDER_ID && planId === PLAN_A ? linkedOrder : undefined,
+      getOrderSnapshot: async () => ({
+        ...projectionSnapshot(),
+        dockLinks: { [linkId]: dockLink },
+      }),
+    }));
+
+    const orderRes = await get(context, `/chain/orders/${PLAN_A}/${ORDER_ID}`);
+    expect(orderRes.status).toBe(200);
+    const decodedOrder = decodeOrderWire(record(orderRes.body)["order"]);
+    expect(decodedOrder.dockLinks?.incoming).toHaveLength(1);
+    expect(decodedOrder.dockLinks?.incoming[0]?.fromOrderId).toBe(peerOrderId);
+    expect(decodedOrder.dockLinks?.outgoing).toEqual([]);
+    expect(findBigints(orderRes.body)).toEqual([]);
+
+    const linkRes = await get(context, `/chain/dock-links/${linkId}`);
+    expect(linkRes.status).toBe(200);
+    const decodedLink = decodeOrderDockLinkWire(record(linkRes.body)["dockLink"]);
+    expect(decodedLink.linkId).toBe(linkId);
+    expect(decodedLink.fromOrderId).toBe(peerOrderId);
+    expect(findBigints(linkRes.body)).toEqual([]);
+
+    const missingOrder = await get(context, `/chain/orders/${PLAN_B}/${ORDER_ID}`);
+    expect(missingOrder).toEqual({ status: 404, body: { error: "chain_order_not_found" } });
+
+    const missingLink = await get(context, `/chain/dock-links/0x${"0".repeat(64)}`);
+    expect(missingLink).toEqual({ status: 404, body: { error: "chain_dock_link_not_found" } });
   });
 
 });

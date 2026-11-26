@@ -72,7 +72,6 @@ export function hasProjectionDiagnosticsAnomalies(
   return counts.unresolvedModuleOrderEventCount > 0 ||
     counts.unresolvedIdentityRevokeEventCount > 0 ||
     counts.capabilityEnrichmentMismatchCount > 0 ||
-    counts.dockEnrichmentMismatchCount > 0 ||
     counts.unknownEventCount > 0;
 }
 

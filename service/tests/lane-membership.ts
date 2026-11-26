@@ -7,6 +7,7 @@ export const UNIT_TEST_FILES = [
   "bytes32-display.test.ts",
   "chain-read.test.ts",
   "config.test.ts",
+  "dock-projection.test.ts",
   "indexer.reorg-determinism.test.ts",
   "plan-artifact-cli.test.ts",
   "stage-files.test.ts",

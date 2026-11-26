@@ -52,6 +52,11 @@ import {
   resolveStageSupplierAssignments,
   type MutableStateMachineSupplierProjection
 } from "./projections/supplier.js";
+import {
+  applyDockControllerEvent,
+  createMutableDockControllerReplayState,
+  finalizeDockControllerProjections
+} from "./projections/dock.js";
 import type { MutableStateMachinePlanProjection } from "./projections/plan.js";
 import type { StateMachineTaskProjection } from "./projections/task.js";
 import {
@@ -98,6 +103,7 @@ export function rebuildOrderProjections(
   const stateMachinePlans = new Map<string, MutableStateMachinePlanProjection>();
   const stateMachineOrders = new Map<string, MutableStateMachineOrderProjection>();
   const stateMachineSuppliers = new Map<string, MutableStateMachineSupplierProjection>();
+  const dockController = createMutableDockControllerReplayState();
   const diagnostics: ProjectionReplayDiagnostics = {
     unresolvedModuleOrderEventCount: 0,
     capabilityEnrichmentMismatchCount: 0,
@@ -114,6 +120,11 @@ export function rebuildOrderProjections(
   for (const event of filterActiveChainEvents(events)) {
     activeStateMachineDeploymentId = applyDeploymentRegistryEvent(stateMachineDeployments, activeStateMachineDeploymentId, event);
     if (applySupplierCapabilityEvent(stateMachineSuppliers, event)) {
+      eventCount += 1;
+      lastEvent = provenanceOf(event);
+      continue;
+    }
+    if (applyDockControllerEvent(dockController, event)) {
       eventCount += 1;
       lastEvent = provenanceOf(event);
       continue;
@@ -135,6 +146,10 @@ export function rebuildOrderProjections(
     plans: stateMachinePlans,
     orders: stateMachineOrders
   });
+  const { dockSpecs, dockLinks } = finalizeDockControllerProjections(
+    dockController,
+    stateMachineOrders
+  );
 
   const stateMachineOrderRecord: Record<string, StateMachineOrderProjection> = {};
   const stateMachineTaskRecord: Record<string, StateMachineTaskProjection> = {};
@@ -168,6 +183,14 @@ export function rebuildOrderProjections(
       ),
       hooks: Object.fromEntries(Object.entries(order.hooks).map(([hookId, hook]) => [hookId, { ...hook }])),
       tasks: readonlyTasks,
+      ...(order.dockLinks
+        ? {
+            dockLinks: {
+              incoming: [...order.dockLinks.incoming],
+              outgoing: [...order.dockLinks.outgoing]
+            }
+          }
+        : {}),
       timeline: [...order.timeline].sort(compareTimelineEvents),
       proof: [...order.proof].sort(compareProofEvents)
     };
@@ -185,6 +208,8 @@ export function rebuildOrderProjections(
     stateMachineOrders: stateMachineOrderRecord,
     stateMachineTasks: stateMachineTaskRecord,
     stateMachineSuppliers: Object.fromEntries(stateMachineSuppliers),
+    dockSpecs,
+    dockLinks,
     unresolvedModuleOrderEventCount: diagnostics.unresolvedModuleOrderEventCount,
     capabilityEnrichmentMismatchCount: diagnostics.capabilityEnrichmentMismatchCount,
     unknownEventCount: diagnostics.unknownEventCount,

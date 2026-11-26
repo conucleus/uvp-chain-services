@@ -31,6 +31,7 @@ import type {
   StateMachineStageSupplierAssignmentProjection
 } from "./stage.js";
 import type { StateMachineStageFileMapProjection } from "./stage-files.js";
+import type { OrderDockLinksProjection } from "./dock.js";
 import type { MutableStateMachineTaskProjection, StateMachineTaskProjection } from "./task.js";
 
 export type StateMachineOrderStatus = "registered" | "unknown";
@@ -52,6 +53,7 @@ export interface StateMachineOrderProjection {
   readonly stageFiles: Readonly<Record<string, StateMachineStageFileMapProjection>>;
   readonly hooks: Readonly<Record<string, StateMachineHookProjection>>;
   readonly tasks: Readonly<Record<string, StateMachineTaskProjection>>;
+  readonly dockLinks?: OrderDockLinksProjection;
   readonly timeline: readonly StateMachineTimelineEventProjection[];
   readonly proof: readonly StateMachineProofProjection[];
   readonly registeredAt?: ProjectionProvenance;

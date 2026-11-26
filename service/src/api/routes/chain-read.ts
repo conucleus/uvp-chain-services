@@ -37,6 +37,8 @@ import type { RouteModule } from "../route-module.js";
 const ORDERS_PATH = "/chain/orders";
 const ORDER_PATH = /^\/chain\/orders\/([^/]+)$/;
 const ORDER_TASKS_PATH = /^\/chain\/orders\/([^/]+)\/tasks$/;
+const ORDER_BY_PLAN_PATH = /^\/chain\/orders\/([^/]+)\/([^/]+)$/;
+const DOCK_LINK_PATH = /^\/chain\/dock-links\/([^/]+)$/;
 const TASKS_PATH = "/chain/tasks";
 const TASK_PATH = /^\/chain\/tasks\/([^/]+)$/;
 const SYNC_STATE_PATH = "/chain/sync-state";
@@ -167,6 +169,31 @@ async function handleRead(
       status: 200,
       body: { tasks: orderTasks },
     };
+  }
+
+  const orderByPlanMatch = ORDER_BY_PLAN_PATH.exec(request.pathname);
+  if (orderByPlanMatch) {
+    const planId = decodePathParameter(orderByPlanMatch[1] ?? "");
+    const orderId = decodePathParameter(orderByPlanMatch[2] ?? "");
+    const found = await context.store.getStateMachineOrder(orderId, planId);
+    if (!found) {
+      return orderNotFound(context);
+    }
+    const order: ChainOrderProjection = toWire(found);
+    return { status: 200, body: { order } };
+  }
+
+  const dockLinkMatch = DOCK_LINK_PATH.exec(request.pathname);
+  if (dockLinkMatch) {
+    const linkId = decodePathParameter(dockLinkMatch[1] ?? "");
+    const snapshot = await context.store.getOrderSnapshot();
+    const dockLinks = snapshot.dockLinks ?? {};
+    const found = dockLinks[linkId.toLowerCase()] ?? dockLinks[linkId];
+    if (!found) {
+      const unavailable = await requireCurrentProjection(context);
+      return unavailable ?? { status: 404, body: { error: "chain_dock_link_not_found" } };
+    }
+    return { status: 200, body: { dockLink: toWire(found) } };
   }
 
   const orderMatch = ORDER_PATH.exec(request.pathname);
